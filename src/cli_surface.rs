@@ -2,10 +2,10 @@ use clap::{Command, CommandFactory, Parser, Subcommand};
 use std::path::PathBuf;
 
 use crate::commands::{
-    api, audit, auth, bench, build, changelog, changes, ci, cleanup, component, config, daemon, db,
-    deploy, deps, doctor, extension, file, fleet, git, http, issues, lint, logs, observe, project,
-    refactor, refs, release, report, review, rig, runner, runs, self_cmd, server, ssh, stack,
-    status, test, trace, triage, tunnel, undo, upgrade, version,
+    agent_task, api, audit, auth, bench, build, changelog, changes, ci, cleanup, component, config,
+    daemon, db, deploy, deps, doctor, extension, file, fleet, git, http, issues, lint, logs,
+    observe, project, refactor, refs, release, report, review, rig, runner, runs, self_cmd, server,
+    ssh, stack, status, test, trace, triage, tunnel, undo, upgrade, version,
 };
 
 mod lab_contract;
@@ -45,6 +45,9 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
+    /// Run generic agent task plans
+    #[command(name = "agent-task")]
+    AgentTask(agent_task::AgentTaskArgs),
     /// Manage project configuration
     Project(project::ProjectArgs),
     /// SSH into a project server or configured server
@@ -331,7 +334,8 @@ impl Commands {
                 output_file_mode,
                 CommandOutputContractKind::JsonEnvelope,
             ),
-            Commands::Project(_)
+            Commands::AgentTask(_)
+            | Commands::Project(_)
             | Commands::Component(_)
             | Commands::Config(_)
             | Commands::Extension(_)

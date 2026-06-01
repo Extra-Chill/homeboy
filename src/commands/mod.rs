@@ -165,6 +165,7 @@ pub fn finalize_set_spec(
     Ok((json_string, replace_fields))
 }
 
+pub mod agent_task;
 pub mod api;
 pub mod audit;
 pub mod auth;
