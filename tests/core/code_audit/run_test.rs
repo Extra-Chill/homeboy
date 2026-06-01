@@ -86,6 +86,7 @@ fn make_args(include_fixability: bool) -> AuditRunWorkflowArgs {
     AuditRunWorkflowArgs {
         component_id: "test".to_string(),
         source_path: "/tmp/test".to_string(),
+        reference_paths: vec![],
         conventions: false,
         only_kinds: vec![],
         exclude_kinds: vec![],
