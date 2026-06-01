@@ -42,7 +42,7 @@ impl ExtensionProviderAgentTaskExecutor {
     }
 
     #[cfg(test)]
-    pub fn with_providers(providers: Vec<AgentTaskExecutorProvider>) -> Self {
+    fn with_providers(providers: Vec<AgentTaskExecutorProvider>) -> Self {
         Self { providers }
     }
 
@@ -97,7 +97,7 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
     }
 }
 
-pub fn discover_agent_task_executor_providers() -> Vec<AgentTaskExecutorProvider> {
+fn discover_agent_task_executor_providers() -> Vec<AgentTaskExecutorProvider> {
     let mut providers = Vec::new();
     for manifest in load_all_extensions().unwrap_or_default() {
         let Some(value) = manifest.extra.get("agent_task_executors") else {
