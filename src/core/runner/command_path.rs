@@ -26,6 +26,21 @@ pub(crate) fn remote_shell_path_preamble() -> &'static str {
     "export PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:$HOME/.kimaki/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}\"; for d in \"$HOME\"/.local/opt/node-*/bin \"$HOME\"/.nvm/versions/node/*/bin; do [ -d \"$d\" ] && PATH=\"$d:$PATH\"; done; export PATH"
 }
 
+pub(crate) fn quote_runner_env_value(key: &str, value: &str) -> String {
+    if key == "PATH" {
+        return format!("\"{}\"", escape_double_quoted_env_value(value));
+    }
+
+    crate::core::engine::shell::quote_arg(value)
+}
+
+fn escape_double_quoted_env_value(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('`', "\\`")
+}
+
 fn local_runner_command_path() -> Option<OsString> {
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let existing_path = std::env::var_os("PATH");
@@ -149,5 +164,21 @@ mod tests {
         assert!(preamble.contains("$HOME/.local/bin"));
         assert!(preamble.contains("$HOME\"/.local/opt/node-*/bin"));
         assert!(preamble.contains("$HOME\"/.nvm/versions/node/*/bin"));
+    }
+
+    #[test]
+    fn path_env_value_allows_existing_path_expansion() {
+        assert_eq!(
+            quote_runner_env_value("PATH", "$PATH:/custom/bin"),
+            "\"$PATH:/custom/bin\""
+        );
+    }
+
+    #[test]
+    fn non_path_env_value_uses_shell_quoting() {
+        assert_eq!(
+            quote_runner_env_value("TOKEN", "hello world"),
+            "'hello world'"
+        );
     }
 }
