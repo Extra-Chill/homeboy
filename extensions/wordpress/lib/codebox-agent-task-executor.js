@@ -110,6 +110,22 @@ function failureClassificationForStatus(status) {
   return undefined;
 }
 
+function sanitizePublicMetadata(value) {
+  if (Array.isArray(value)) {
+    return value.map(sanitizePublicMetadata);
+  }
+  if (!value || typeof value !== 'object') {
+    return value;
+  }
+
+  return Object.fromEntries(Object.entries(value).map(([key, entry]) => {
+    if (/^(secret_env_values|secretEnvValues|secrets)$/i.test(key)) {
+      return [key, '[redacted]'];
+    }
+    return [key, sanitizePublicMetadata(entry)];
+  }));
+}
+
 function artifactFromCodeboxArtifact(artifact, index) {
   const id = artifact.id || artifact.sha256 || artifact.path || artifact.url || `codebox-artifact-${index + 1}`;
   return {
@@ -122,7 +138,7 @@ function artifactFromCodeboxArtifact(artifact, index) {
     mime: artifact.mime,
     size_bytes: artifact.size_bytes,
     sha256: artifact.sha256,
-    metadata: artifact.metadata || {},
+    metadata: sanitizePublicMetadata(artifact.metadata || {}),
   };
 }
 
@@ -160,7 +176,7 @@ function agentTaskOutcomeFromCodeboxResult(request, result = {}, options = {}) {
     })),
     metadata: {
       provider: 'wordpress.codebox-agent-task-executor',
-      codebox: result.metadata || result,
+      codebox: sanitizePublicMetadata(result.metadata || result),
       upstream_dependency: 'https://github.com/chubes4/wp-codebox/issues/392',
     },
   };

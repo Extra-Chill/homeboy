@@ -51,6 +51,9 @@ try {
   const providerPluginPath = path.join(root, 'example-provider@feature-branch');
   fs.mkdirSync(providerPluginPath, { recursive: true });
   fs.writeFileSync(path.join(providerPluginPath, 'provider-main.php'), '<?php\n/**\n * Plugin Name: Example Provider\n */');
+  const codexProviderPluginPath = path.join(root, 'ai-provider-for-openai');
+  fs.mkdirSync(codexProviderPluginPath, { recursive: true });
+  fs.writeFileSync(path.join(codexProviderPluginPath, 'ai-provider-for-openai.php'), '<?php\n/**\n * Plugin Name: AI Provider for OpenAI\n */');
   const request = {
     schema: 'homeboy/wp-codebox-task-request/v1',
     sandbox_session_id: 'homeboy-audit-fixture-session',
@@ -171,6 +174,56 @@ try {
   assert.equal(task.orchestrator.issue_url, 'https://github.com/Extra-Chill/homeboy-extensions/issues/775');
   assert.equal(task.audit_findings[0].id, 'finding-1');
   assert.match(task.task.prompt, /`agents-api`, `homeboy`, `homeboy-extensions`/);
+
+  const codexCapturePath = path.join(root, 'capture-codex.json');
+  const codexSecretEnv = [
+    'AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN',
+    'AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN',
+    'AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT',
+    'AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID',
+    'AI_PROVIDER_OPENAI_CODEX_FEDRAMP',
+  ];
+  const codexResult = spawnSync(process.execPath, [
+    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-wp-codebox-task-runner.cjs'),
+    '--wp-codebox-bin',
+    fixtureWpCodebox,
+    '--agents-api',
+    '/components/agents-api',
+    '--data-machine',
+    '/components/data-machine',
+    '--data-machine-code',
+    '/components/data-machine-code',
+  ], {
+    encoding: 'utf8',
+    input: JSON.stringify({
+      ...request,
+      provider: 'codex',
+      model: 'gpt-5.5',
+      provider_plugin_paths: [codexProviderPluginPath],
+      secret_env: codexSecretEnv,
+    }),
+    env: {
+      ...process.env,
+      FIXTURE_WP_CODEBOX_CAPTURE: codexCapturePath,
+      AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN: 'access-token-value',
+      AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN: 'refresh-token-value',
+      AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT: '4102444800',
+      AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID: 'account-id-value',
+      AI_PROVIDER_OPENAI_CODEX_FEDRAMP: '0',
+    },
+  });
+  assert.equal(codexResult.status, 0, codexResult.stderr || codexResult.stdout);
+  const codexRecipe = readJson(codexCapturePath).recipe;
+  assert.deepEqual(codexRecipe.inputs.secretEnv, codexSecretEnv);
+  assert.equal(codexRecipe.inputs.extraPlugins[3].slug, 'ai-provider-for-openai');
+  assert.equal(codexRecipe.inputs.extraPlugins[3].pluginFile, 'ai-provider-for-openai/ai-provider-for-openai.php');
+  assert.equal(codexRecipe.workflow.steps[0].args.includes('provider=codex'), true);
+  assert.equal(codexRecipe.workflow.steps[0].args.includes('model=gpt-5.5'), true);
+  assert.equal(codexRecipe.workflow.steps[0].args.includes('provider-plugin-slugs=ai-provider-for-openai'), true);
+  const serializedCodexRecipe = JSON.stringify(codexRecipe);
+  assert(!serializedCodexRecipe.includes('access-token-value'));
+  assert(!serializedCodexRecipe.includes('refresh-token-value'));
+  assert(!serializedCodexRecipe.includes('wp-ai-gateway'));
 
   const nonExecutableCapturePath = path.join(root, 'capture-non-executable.json');
   const nonExecutableFixture = createFixtureWpCodebox(root, 0o644);
