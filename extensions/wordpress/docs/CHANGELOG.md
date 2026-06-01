@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.110.8] - 2026-06-01
+
+### Fixed
+- mount rig bench workloads in Codebox
+
 ## [2.110.7] - 2026-06-01
 
 ### Fixed
