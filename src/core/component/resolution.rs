@@ -60,6 +60,37 @@ pub struct ResolvedTarget {
     pub synthetic: bool,
 }
 
+fn resolved_target_from_component(mut component: Component, synthetic: bool) -> ResolvedTarget {
+    let source_path = PathBuf::from(shellexpand::tilde(&component.local_path).into_owned());
+    let git_root = detect_git_root(&source_path);
+    component.resolve_remote_path();
+
+    ResolvedTarget {
+        component_id: component.id.clone(),
+        component,
+        source_path,
+        git_root,
+        extension_id: None,
+        synthetic,
+    }
+}
+
+/// Resolve target path details from an already-authoritative component.
+///
+/// This preserves caller-supplied in-memory component fields while sharing the
+/// same path expansion, git-root detection, and remote-path normalization used
+/// by [`resolve_target`].
+pub fn resolve_target_from_component(
+    mut component: Component,
+    path_override: Option<&str>,
+) -> ResolvedTarget {
+    if let Some(path) = path_override {
+        component.local_path = path.to_string();
+    }
+
+    resolved_target_from_component(component, false)
+}
+
 pub fn resolve_artifact(component: &Component) -> Option<String> {
     if let Some(ref artifact) = component.build_artifact {
         return Some(artifact.clone());
@@ -319,7 +350,7 @@ pub fn resolve_target(spec: TargetSpec<'_>) -> Result<ResolvedTarget> {
         ));
     }
 
-    let mut component = resolve_effective_inner(
+    let component = resolve_effective_inner(
         spec.component_id,
         spec.path_override,
         spec.project,
@@ -344,24 +375,15 @@ pub fn resolve_target(spec: TargetSpec<'_>) -> Result<ResolvedTarget> {
         ));
     }
 
-    let source_path = PathBuf::from(shellexpand::tilde(&component.local_path).into_owned());
-    let git_root = detect_git_root(&source_path);
     let extension_id = if let Some(capability) = spec.capability {
         Some(extension::resolve_execution_context(&component, capability)?.extension_id)
     } else {
         None
     };
 
-    component.resolve_remote_path();
-
-    Ok(ResolvedTarget {
-        component_id: component.id.clone(),
-        component,
-        source_path,
-        git_root,
-        extension_id,
-        synthetic,
-    })
+    let mut target = resolved_target_from_component(component, synthetic);
+    target.extension_id = extension_id;
+    Ok(target)
 }
 
 /// Find the git root directory for a given path.
