@@ -340,9 +340,26 @@ function apply_ignores_to_file( string $filepath, array $messages, array $sniff_
 		} else {
 			// Multi-line block OR inside a string: wrap with phpcs:disable/enable.
 			// Find the statement boundaries (the $wpdb-> call and its closing ;).
-			$stmt_start = find_statement_start( $lines, $start_idx );
-			$end_idx    = $block['end'] - 1;
-			$stmt_end   = find_statement_end( $lines, $end_idx );
+			//
+			// Token-aware boundary detection: when the violation line sits inside a
+			// multi-line string literal (e.g. a SQL string in $wpdb->prepare()), the
+			// real statement terminator is the closing `);` of the whole call — NOT
+			// the first interior line that happens to end in `;`/`);`. We tokenize
+			// the file and walk paren depth back to zero, skipping the contents of
+			// string-literal tokens entirely, so the phpcs:enable marker can never
+			// land inside a string literal (issue #981).
+			$boundaries = find_statement_boundaries_tokenized( $lines, $start_idx, $block['end'] - 1 );
+
+			if ( null !== $boundaries ) {
+				$stmt_start = $boundaries['start'];
+				$stmt_end   = $boundaries['end'];
+			} else {
+				// Fallback to legacy line-based heuristics for cases the tokenizer
+				// could not resolve (preserves prior behavior for non-string cases).
+				$stmt_start = find_statement_start( $lines, $start_idx );
+				$end_idx    = $block['end'] - 1;
+				$stmt_end   = find_statement_end( $lines, $end_idx );
+			}
 
 			preg_match( '/^(\s*)/', $lines[ $stmt_start ], $m );
 			$indent = $m[1] ?? '';
@@ -409,6 +426,174 @@ function is_inside_multiline_string( array $lines, int $idx ): bool {
 	}
 
 	return false;
+}
+
+/**
+ * Find the real statement boundaries containing a violation, using the PHP
+ * token stream so string-literal contents are never mistaken for code.
+ *
+ * This is the string-literal-aware replacement for the legacy line-based
+ * find_statement_start()/find_statement_end() heuristics. It exists to fix
+ * issue #981: a multi-line SQL string in $wpdb->prepare()/$wpdb->query() has
+ * no real statement terminator until the closing `);` of the whole call, but
+ * the regex heuristics matched an interior line ending in `;`/`);` and spliced
+ * the `// phpcs:enable` marker INSIDE the string literal — producing invalid
+ * runtime SQL (MariaDB 1064).
+ *
+ * Approach:
+ *   1. token_get_all() the whole file.
+ *   2. Find the statement that contains the violation line. The statement
+ *      "anchor" is the last `;`, `{`, `}` (or file start) token at depth 0
+ *      before the first non-whitespace token on/after the violation line.
+ *   3. From the statement anchor, the statement START line is the first line
+ *      bearing real code (skipping leading phpcs comments handled by caller).
+ *   4. The statement END is the line of the `;` token that terminates the
+ *      statement at paren/brace depth 0. String tokens
+ *      (T_CONSTANT_ENCAPSED_STRING, heredoc, and double-quote-delimited
+ *      interpolated strings) are atomic — their internal newlines never count
+ *      as statement boundaries and their `;`/`)` characters are never code.
+ *
+ * Returns array{ start:int, end:int } as 0-based line indices, or null if the
+ * statement could not be resolved (caller falls back to legacy heuristics).
+ *
+ * @param array $lines        File lines (each retaining its trailing newline).
+ * @param int   $start_idx    0-based index of the first violation line in block.
+ * @param int   $end_idx      0-based index of the last violation line in block.
+ * @return array{start:int,end:int}|null
+ */
+function find_statement_boundaries_tokenized( array $lines, int $start_idx, int $end_idx ): ?array {
+	$source = implode( '', $lines );
+
+	// token_get_all needs a leading <?php to tokenize as PHP. The fixer always
+	// runs on real PHP files that already begin with an open tag, so tokenize
+	// directly and bail to the legacy path if anything looks off.
+	$tokens = @token_get_all( $source );
+	if ( empty( $tokens ) ) {
+		return null;
+	}
+
+	// Violation lines are 1-based in token line numbers.
+	$violation_line_start = $start_idx + 1;
+	$violation_line_end   = $end_idx + 1;
+
+	// Normalize tokens into a uniform shape with line numbers. Single-character
+	// tokens (e.g. ';', '(', ')', '{', '}') are strings without a line number,
+	// so we track line numbers by accumulating from typed tokens. token_get_all
+	// already gives typed tokens their starting line; single-char tokens inherit
+	// the line of the preceding content, which we recompute precisely below.
+	$norm = array();
+	$line = 1;
+	foreach ( $tokens as $tok ) {
+		if ( is_array( $tok ) ) {
+			$norm[] = array(
+				'id'   => $tok[0],
+				'text' => $tok[1],
+				'line' => $tok[2],
+			);
+			// Advance the running line by the newlines this token spans.
+			$line = $tok[2] + substr_count( $tok[1], "\n" );
+		} else {
+			$norm[] = array(
+				'id'   => null,
+				'text' => $tok,
+				'line' => $line,
+			);
+			$line += substr_count( $tok, "\n" );
+		}
+	}
+
+	$count = count( $norm );
+
+	// Find the index of the first token whose line is >= the violation start.
+	// That token is somewhere inside (or just before) the statement of interest.
+	$anchor_idx = null;
+	for ( $i = 0; $i < $count; $i++ ) {
+		if ( $norm[ $i ]['line'] >= $violation_line_start ) {
+			$anchor_idx = $i;
+			break;
+		}
+	}
+	if ( null === $anchor_idx ) {
+		return null;
+	}
+
+	// Walk BACKWARD from the anchor to the statement start. A statement begins
+	// after the previous `;`, `{`, `}`, or `(` at depth 0 — i.e. the previous
+	// statement/block boundary. We only count structural single-char tokens;
+	// string tokens are atomic so their text is never inspected.
+	$depth     = 0;
+	$start_tok = 0;
+	for ( $i = $anchor_idx; $i >= 0; $i-- ) {
+		$t = $norm[ $i ];
+		if ( null === $t['id'] ) {
+			if ( ')' === $t['text'] || ']' === $t['text'] ) {
+				$depth++;
+			} elseif ( '(' === $t['text'] || '[' === $t['text'] ) {
+				if ( $depth > 0 ) {
+					$depth--;
+				}
+			} elseif ( 0 === $depth && ( ';' === $t['text'] || '{' === $t['text'] || '}' === $t['text'] ) ) {
+				$start_tok = $i + 1;
+				break;
+			}
+		}
+	}
+
+	// Skip leading whitespace tokens to the first real token of the statement.
+	while ( $start_tok < $count
+		&& T_WHITESPACE === $norm[ $start_tok ]['id'] ) {
+		$start_tok++;
+	}
+	if ( $start_tok >= $count ) {
+		return null;
+	}
+
+	// Walk FORWARD from the statement start to the terminating `;` at depth 0.
+	// Paren/bracket depth is tracked on structural single-char tokens only;
+	// string tokens are atomic and skipped, so a `;` or `)` that is part of SQL
+	// text inside a string literal can never be mistaken for a terminator.
+	$depth   = 0;
+	$end_tok = null;
+	for ( $i = $start_tok; $i < $count; $i++ ) {
+		$t = $norm[ $i ];
+		if ( null !== $t['id'] ) {
+			continue; // Typed tokens (incl. all string literals) are atomic.
+		}
+		if ( '(' === $t['text'] || '[' === $t['text'] ) {
+			$depth++;
+		} elseif ( ')' === $t['text'] || ']' === $t['text'] ) {
+			if ( $depth > 0 ) {
+				$depth--;
+			}
+		} elseif ( ';' === $t['text'] && 0 === $depth ) {
+			$end_tok = $i;
+			break;
+		}
+	}
+
+	if ( null === $end_tok ) {
+		return null;
+	}
+
+	$stmt_start_line = $norm[ $start_tok ]['line'];
+	$stmt_end_line   = $norm[ $end_tok ]['line'];
+
+	// Sanity: the statement must actually span the violation lines.
+	if ( $stmt_start_line > $violation_line_start || $stmt_end_line < $violation_line_end ) {
+		return null;
+	}
+
+	$start_index = $stmt_start_line - 1;
+	$end_index   = $stmt_end_line - 1;
+
+	if ( ! isset( $lines[ $start_index ] ) || ! isset( $lines[ $end_index ] ) ) {
+		return null;
+	}
+
+	return array(
+		'start' => $start_index,
+		'end'   => $end_index,
+	);
 }
 
 /**
