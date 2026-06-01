@@ -318,7 +318,7 @@ fn deploy_archive_core_stays_free_of_wordpress_header_semantics() {
     let scanned_roots = ["src/core/deploy", "tests/commands/deploy_test.rs"];
 
     for relative_path in scanned_roots {
-        scan_files_for_forbidden_literals(
+        validate_files_for_forbidden_literals(
             root,
             &root.join(relative_path),
             &forbidden,
@@ -333,7 +333,7 @@ fn deploy_archive_core_stays_free_of_wordpress_header_semantics() {
     );
 }
 
-fn scan_files_for_forbidden_literals(
+fn validate_files_for_forbidden_literals(
     root: &std::path::Path,
     path: &std::path::Path,
     forbidden: &[&str],
@@ -342,7 +342,7 @@ fn scan_files_for_forbidden_literals(
     if path.is_dir() {
         for entry in std::fs::read_dir(path).expect("read source directory") {
             let entry = entry.expect("read source entry");
-            scan_files_for_forbidden_literals(root, &entry.path(), forbidden, violations);
+            validate_files_for_forbidden_literals(root, &entry.path(), forbidden, violations);
         }
         return;
     }
