@@ -90,6 +90,39 @@ assert.equal(codeboxRequest.task.expected_artifacts[0], 'screenshot');
 assert.equal(codeboxRequest.orchestrator.agent_task_id, 'task-123');
 assert.equal(codeboxRequest.audit_findings[0].id, 'finding-1');
 
+const codexAgentRequest = {
+  ...request,
+  task_id: 'codex-task-123',
+  executor: {
+    backend: 'codebox',
+    model: 'gpt-5.5',
+    config: {
+      provider: 'codex',
+      provider_plugin_paths: ['/components/ai-provider-for-openai'],
+      secret_env: [
+        'AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN',
+        'AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN',
+        'AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT',
+        'AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID',
+        'AI_PROVIDER_OPENAI_CODEX_FEDRAMP',
+      ],
+      max_turns: 8,
+    },
+  },
+};
+const codexRequest = codeboxTaskRequestFromAgentTaskRequest(codexAgentRequest);
+assert.equal(codexRequest.provider, 'codex');
+assert.equal(codexRequest.model, 'gpt-5.5');
+assert.deepEqual(codexRequest.provider_plugin_paths, ['/components/ai-provider-for-openai']);
+assert.deepEqual(codexRequest.secret_env, [
+  'AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN',
+  'AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN',
+  'AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT',
+  'AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID',
+  'AI_PROVIDER_OPENAI_CODEX_FEDRAMP',
+]);
+assert(!JSON.stringify(codexRequest).includes('wp-ai-gateway'));
+
 const outcome = agentTaskOutcomeFromCodeboxResult(request, {
   success: false,
   provider_error: true,
@@ -102,6 +135,42 @@ assert.equal(outcome.status, 'provider_error');
 assert.equal(outcome.failure_classification, 'provider');
 assert.equal(outcome.artifacts[0].id, 'bundle-1');
 assert.equal(outcome.artifacts[0].path, '/tmp/artifacts');
+
+const codexOutcome = agentTaskOutcomeFromCodeboxResult(request, {
+  success: true,
+  summary: 'Codex task completed.',
+  artifacts: [{
+    id: 'codex-artifact-1',
+    metadata: {
+      secretEnvValues: {
+        AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN: 'artifact-access-token-value',
+      },
+    },
+  }],
+  metadata: {
+    provider: 'codex',
+    secret_env: ['AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN'],
+    secret_env_values: {
+      AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN: 'codex-access-token-value',
+      AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN: 'codex-refresh-token-value',
+    },
+  },
+  diagnostics: [{
+    class: 'codex',
+    message: 'Codex token diagnostics.',
+    data: {
+      secretEnvValues: {
+        AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN: 'diagnostic-access-token-value',
+      },
+    },
+  }],
+});
+const serializedCodexOutcome = JSON.stringify(codexOutcome);
+assert(serializedCodexOutcome.includes('AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN'));
+assert(!serializedCodexOutcome.includes('codex-access-token-value'));
+assert(!serializedCodexOutcome.includes('codex-refresh-token-value'));
+assert(!serializedCodexOutcome.includes('artifact-access-token-value'));
+assert(!serializedCodexOutcome.includes('diagnostic-access-token-value'));
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-codebox-agent-task-executor-'));
 try {
@@ -129,6 +198,31 @@ try {
   const captured = JSON.parse(fs.readFileSync(capture, 'utf8'));
   assert.equal(captured.request.schema, 'homeboy/wp-codebox-task-request/v1');
   assert.equal(captured.request.orchestrator.agent_task_id, 'task-123');
+
+  const codexResult = spawnSync(process.execPath, [
+    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs'),
+    '--task-runner',
+    fixture,
+  ], {
+    encoding: 'utf8',
+    input: JSON.stringify({
+      ...codexAgentRequest,
+      task_id: 'codex-cli-task-123',
+    }),
+  });
+  assert.equal(codexResult.status, 0, codexResult.stderr || codexResult.stdout);
+  const capturedCodex = JSON.parse(fs.readFileSync(capture, 'utf8'));
+  assert.equal(capturedCodex.request.provider, 'codex');
+  assert.equal(capturedCodex.request.model, 'gpt-5.5');
+  assert.deepEqual(capturedCodex.request.provider_plugin_paths, ['/components/ai-provider-for-openai']);
+  assert.deepEqual(capturedCodex.request.secret_env, [
+    'AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN',
+    'AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN',
+    'AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT',
+    'AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID',
+    'AI_PROVIDER_OPENAI_CODEX_FEDRAMP',
+  ]);
+  assert(!JSON.stringify(capturedCodex).includes('wp-ai-gateway'));
 
   const contractResult = spawnSync(process.execPath, [
     path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs'),

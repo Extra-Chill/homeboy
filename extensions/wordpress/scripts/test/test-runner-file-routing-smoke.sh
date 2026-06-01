@@ -27,7 +27,7 @@ assert_not_contains() {
 }
 
 component="${TMPDIR}/component"
-mkdir -p "${component}/tests/Unit" "${TMPDIR}/stubs"
+mkdir -p "${component}/tests/Unit" "${component}/wordpress/tests" "${TMPDIR}/stubs"
 
 cat > "${component}/tests/import-agent-ability-smoke.php" <<'PHP'
 <?php
@@ -38,6 +38,14 @@ cat > "${component}/tests/queue-routing-smoke.php" <<'PHP'
 <?php
 fwrite( STDOUT, "queue routing smoke ran\n" );
 PHP
+
+cat > "${component}/tests/codebox-agent-task-matrix-smoke.js" <<'JS'
+console.log('codebox agent task matrix smoke ran');
+JS
+
+cat > "${component}/wordpress/tests/codebox-agent-task-matrix-smoke.js" <<'JS'
+console.log('prefixed codebox agent task matrix smoke ran');
+JS
 
 cat > "${component}/tests/Unit/ImportAgentAbilityTest.php" <<'PHP'
 <?php
@@ -127,6 +135,44 @@ assert_contains "${TMPDIR}/changed-smoke-files.out" "HOST_SMOKE_BEGIN:tests/impo
 assert_contains "${TMPDIR}/changed-smoke-files.out" "HOST_SMOKE_BEGIN:tests/queue-routing-smoke.php"
 assert_contains "${TMPDIR}/changed-smoke-files.out" "HOST_SMOKE_SUMMARY:passed=2 failed=0"
 assert_not_contains "${TMPDIR}/changed-smoke-files.out" "WP_CODEBOX_STUB"
+
+HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
+HOMEBOY_COMPONENT_ID="component" \
+HOMEBOY_COMPONENT_PATH="$component" \
+HOMEBOY_COMPONENT_SHAPE="plugin" \
+HOMEBOY_RUNTIME_TEST_RUNNER_WP_CODEBOX="${TMPDIR}/stubs/wp-codebox.sh" \
+HOMEBOY_CHANGED_TEST_FILES='tests/codebox-agent-task-matrix-smoke.js' \
+    bash "${EXTENSION_PATH}/scripts/test/test-runner.sh" > "${TMPDIR}/changed-js-smoke-files.out"
+
+assert_contains "${TMPDIR}/changed-js-smoke-files.out" "JS_SMOKE_BEGIN:tests/codebox-agent-task-matrix-smoke.js"
+assert_contains "${TMPDIR}/changed-js-smoke-files.out" "codebox agent task matrix smoke ran"
+assert_contains "${TMPDIR}/changed-js-smoke-files.out" "JS_SMOKE_SUMMARY:passed=1 failed=0"
+assert_not_contains "${TMPDIR}/changed-js-smoke-files.out" "WP_CODEBOX_STUB"
+
+HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
+HOMEBOY_COMPONENT_ID="component" \
+HOMEBOY_COMPONENT_PATH="$component" \
+HOMEBOY_COMPONENT_SHAPE="plugin" \
+HOMEBOY_RUNTIME_TEST_RUNNER_WP_CODEBOX="${TMPDIR}/stubs/wp-codebox.sh" \
+HOMEBOY_CHANGED_TEST_FILES='wordpress/tests/codebox-agent-task-matrix-smoke.js' \
+    bash "${EXTENSION_PATH}/scripts/test/test-runner.sh" > "${TMPDIR}/changed-prefixed-js-smoke-files.out"
+
+assert_contains "${TMPDIR}/changed-prefixed-js-smoke-files.out" "JS_SMOKE_BEGIN:wordpress/tests/codebox-agent-task-matrix-smoke.js"
+assert_contains "${TMPDIR}/changed-prefixed-js-smoke-files.out" "prefixed codebox agent task matrix smoke ran"
+assert_contains "${TMPDIR}/changed-prefixed-js-smoke-files.out" "JS_SMOKE_SUMMARY:passed=1 failed=0"
+assert_not_contains "${TMPDIR}/changed-prefixed-js-smoke-files.out" "WP_CODEBOX_STUB"
+
+HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
+HOMEBOY_COMPONENT_ID="component" \
+HOMEBOY_COMPONENT_PATH="$component" \
+HOMEBOY_COMPONENT_SHAPE="plugin" \
+HOMEBOY_RUNTIME_TEST_RUNNER_WP_CODEBOX="${TMPDIR}/stubs/wp-codebox.sh" \
+    bash "${EXTENSION_PATH}/scripts/test/test-runner.sh" --file tests/codebox-agent-task-matrix-smoke.js > "${TMPDIR}/js-smoke-file.out"
+
+assert_contains "${TMPDIR}/js-smoke-file.out" "JS_SMOKE_BEGIN:tests/codebox-agent-task-matrix-smoke.js"
+assert_contains "${TMPDIR}/js-smoke-file.out" "codebox agent task matrix smoke ran"
+assert_contains "${TMPDIR}/js-smoke-file.out" "JS_SMOKE_SUMMARY:passed=1 failed=0"
+assert_not_contains "${TMPDIR}/js-smoke-file.out" "WP_CODEBOX_STUB"
 
 HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
 HOMEBOY_COMPONENT_ID="component" \

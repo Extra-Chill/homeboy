@@ -2,6 +2,22 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.110.4] - 2026-06-01
+
+### Changed
+- harden Codebox Codex secret redaction
+- prove Codebox Codex task requests
+
+## [2.110.3] - 2026-06-01
+
+### Fixed
+- route WordPress JS smoke test selections
+
+## [2.110.2] - 2026-06-01
+
+### Fixed
+- pin eslint config resolution in worktrees
+
 ## [2.110.1] - 2026-06-01
 
 ### Changed
