@@ -7,6 +7,7 @@
  * External dependencies
  */
 const fs = require('node:fs');
+const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
 /**
@@ -51,9 +52,146 @@ function requestTimeoutMs(request) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
 }
 
+function readJsonIfAvailable(filePath) {
+  try {
+    return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function directorySizeBytes(directory) {
+  try {
+    return fs.readdirSync(directory, { withFileTypes: true }).reduce((total, entry) => {
+      const entryPath = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        return total + directorySizeBytes(entryPath);
+      }
+      return total + fs.statSync(entryPath).size;
+    }, 0);
+  } catch {
+    return undefined;
+  }
+}
+
+function fileArtifactKind(filePath) {
+  const fileName = path.basename(filePath).toLowerCase();
+  if (fileName === 'manifest.json') {
+    return 'codebox-artifact-manifest';
+  }
+  if (fileName === 'runtime-reference-manifest.json') {
+    return 'codebox-runtime-reference-manifest';
+  }
+  const relative = filePath.replace(/\\/g, '/');
+  if (/transcript|conversation|messages/.test(relative)) {
+    return 'codebox-transcript';
+  }
+  if (/command|stdout|stderr|console|log/.test(relative)) {
+    return 'codebox-command-log';
+  }
+  if (/heartbeat|status/.test(relative)) {
+    return 'codebox-heartbeat';
+  }
+  if (/phase/.test(relative)) {
+    return 'codebox-phase';
+  }
+  return '';
+}
+
+function discoverTimeoutArtifactRefs(artifactsRoot) {
+  if (!artifactsRoot || !fs.existsSync(artifactsRoot)) {
+    return { artifacts: [], evidenceRefs: [], lastKnownPhase: '', lastHeartbeat: null };
+  }
+
+  const discovered = [];
+  const queue = [{ filePath: artifactsRoot, depth: 0 }];
+  let lastKnownPhase = '';
+  let lastHeartbeat = null;
+  let runtimeId = '';
+
+  while (queue.length > 0 && discovered.length < 200) {
+    const { filePath, depth } = queue.shift();
+    let stat;
+    try {
+      stat = fs.statSync(filePath);
+    } catch {
+      continue;
+    }
+
+    if (stat.isDirectory()) {
+      const manifestPath = path.join(filePath, 'manifest.json');
+      if (filePath !== artifactsRoot && fs.existsSync(manifestPath)) {
+        const manifest = readJsonIfAvailable(manifestPath);
+        if (!runtimeId && manifest && typeof manifest === 'object') {
+          runtimeId = manifest.runtime_id || manifest.runtimeId || manifest.runtime?.id || '';
+        }
+        discovered.push({
+          id: manifest?.id || manifest?.artifact_id || `codebox-artifact-bundle-${discovered.length + 1}`,
+          kind: 'codebox-artifact-bundle',
+          path: filePath,
+          size_bytes: directorySizeBytes(filePath),
+          metadata: manifest && typeof manifest === 'object' ? {
+            schema: manifest.schema,
+            phase: manifest.phase || manifest.last_phase || manifest.current_phase,
+            runtime_id: manifest.runtime_id || manifest.runtimeId || manifest.runtime?.id,
+          } : {},
+        });
+      }
+      if (depth < 4) {
+        for (const entry of fs.readdirSync(filePath).sort()) {
+          queue.push({ filePath: path.join(filePath, entry), depth: depth + 1 });
+        }
+      }
+      continue;
+    }
+
+    if (!stat.isFile()) {
+      continue;
+    }
+
+    const kind = fileArtifactKind(path.relative(artifactsRoot, filePath));
+    if (!kind) {
+      continue;
+    }
+    const payload = filePath.endsWith('.json') ? readJsonIfAvailable(filePath) : null;
+    if (!lastKnownPhase && payload && typeof payload === 'object') {
+      lastKnownPhase = payload.phase || payload.last_phase || payload.lastKnownPhase || payload.current_phase || '';
+    }
+    if (!runtimeId && payload && typeof payload === 'object') {
+      runtimeId = payload.runtime_id || payload.runtimeId || payload.runtime?.id || '';
+    }
+    if (!lastHeartbeat && payload && typeof payload === 'object' && /heartbeat|status/i.test(filePath)) {
+      lastHeartbeat = payload.heartbeat || payload.last_heartbeat || payload;
+    }
+    discovered.push({
+      id: `${kind}-${discovered.length + 1}`,
+      kind,
+      path: filePath,
+      size_bytes: stat.size,
+      metadata: payload && typeof payload === 'object' ? {
+        schema: payload.schema,
+        phase: payload.phase || payload.last_phase || payload.current_phase,
+      } : {},
+    });
+  }
+
+  return {
+    artifacts: discovered,
+    evidenceRefs: discovered.map((artifact) => ({
+      kind: artifact.kind,
+      uri: artifact.path,
+      label: artifact.kind.replace(/^codebox-/, 'WP Codebox ').replace(/-/g, ' '),
+    })),
+    runtimeId,
+    lastKnownPhase,
+    lastHeartbeat,
+  };
+}
+
 function timeoutPayload(timeoutMs) {
   const artifacts = argValue('--artifacts');
   const evidencePath = artifacts ? `${artifacts}/homeboy-codebox-task-runner.json` : '';
+  const discovered = discoverTimeoutArtifactRefs(artifacts);
   const knownArtifacts = [];
   if (artifacts) {
     knownArtifacts.push({
@@ -71,23 +209,53 @@ function timeoutPayload(timeoutMs) {
       metadata: { artifacts },
     });
   }
+  for (const artifact of discovered.artifacts) {
+    if (!knownArtifacts.some((knownArtifact) => knownArtifact.path === artifact.path)) {
+      knownArtifacts.push(artifact);
+    }
+  }
+
+  const evidenceRefs = evidencePath && fs.existsSync(evidencePath) ? [{
+    kind: 'codebox-task-runner-preflight',
+    uri: evidencePath,
+    label: 'WP Codebox task runner preflight evidence',
+  }] : [];
+  for (const ref of discovered.evidenceRefs) {
+    if (!evidenceRefs.some((knownRef) => knownRef.uri === ref.uri)) {
+      evidenceRefs.push(ref);
+    }
+  }
 
   return {
     success: false,
     timeout: true,
     summary: `WP Codebox agent task timed out after ${timeoutMs}ms.`,
     artifacts: knownArtifacts,
-    evidence_refs: evidencePath && fs.existsSync(evidencePath) ? [{
-      kind: 'codebox-task-runner-preflight',
-      uri: evidencePath,
-      label: 'WP Codebox task runner preflight evidence',
-    }] : [],
+    evidence_refs: evidenceRefs,
     diagnostics: [{
       class: 'codebox.timeout',
       message: 'Task runner exceeded the AgentTaskRequest timeout.',
-      data: { timeout_ms: timeoutMs, artifacts, evidence_path: evidencePath },
+      data: {
+        timeout_ms: timeoutMs,
+        classification: 'provider_timeout',
+        artifacts,
+        evidence_path: evidencePath,
+        artifact_ref_count: knownArtifacts.length,
+        runtime_id: discovered.runtimeId,
+        last_known_phase: discovered.lastKnownPhase,
+        last_heartbeat: discovered.lastHeartbeat,
+      },
     }],
-    metadata: { timeout_ms: timeoutMs, artifacts, evidence_path: evidencePath },
+    metadata: {
+      timeout_ms: timeoutMs,
+      timeout_classification: 'provider_timeout',
+      artifacts,
+      evidence_path: evidencePath,
+      artifact_ref_count: knownArtifacts.length,
+      runtime_id: discovered.runtimeId,
+      last_known_phase: discovered.lastKnownPhase,
+      last_heartbeat: discovered.lastHeartbeat,
+    },
   };
 }
 

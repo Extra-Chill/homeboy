@@ -282,6 +282,23 @@ try {
   assert.equal(JSON.parse(contractResult.stdout).id, 'wordpress.codebox-agent-task-executor');
 
   const artifactRoot = path.join(root, 'timeout-artifacts');
+  const bundleRoot = path.join(artifactRoot, 'artifact-task-timeout');
+  const filesRoot = path.join(bundleRoot, 'files');
+  fs.mkdirSync(filesRoot, { recursive: true });
+  fs.writeFileSync(path.join(bundleRoot, 'manifest.json'), JSON.stringify({
+    schema: 'wp-codebox/artifact-manifest/v1',
+    phase: 'agent.inspecting-runtime',
+  }));
+  fs.writeFileSync(path.join(filesRoot, 'runtime-reference-manifest.json'), JSON.stringify({
+    schema: 'wp-codebox/runtime-reference-manifest/v1',
+    runtime: { id: 'runtime-task-timeout' },
+  }));
+  fs.writeFileSync(path.join(filesRoot, 'command.log'), 'ran wp-codebox.agent-sandbox-run\n');
+  fs.writeFileSync(path.join(filesRoot, 'agent-transcript.jsonl'), '{"role":"assistant","content":"partial transcript"}\n');
+  fs.writeFileSync(path.join(filesRoot, 'heartbeat.json'), JSON.stringify({
+    phase: 'agent.inspecting-runtime',
+    heartbeat: { at: '2026-06-01T00:00:00.000Z', turn: 3 },
+  }));
   const hangingRequest = {
     ...request,
     task_id: 'task-timeout',
@@ -306,6 +323,15 @@ try {
   assert.equal(timeoutOutcome.diagnostics[0].data.timeout_ms, 1000);
   assert.equal(timeoutOutcome.artifacts[0].path, artifactRoot);
   assert.equal(timeoutOutcome.metadata.codebox.evidence_path, path.join(artifactRoot, 'homeboy-codebox-task-runner.json'));
+  assert.equal(timeoutOutcome.metadata.codebox.timeout_classification, 'provider_timeout');
+  assert.equal(timeoutOutcome.metadata.codebox.runtime_id, 'runtime-task-timeout');
+  assert.equal(timeoutOutcome.metadata.codebox.last_known_phase, 'agent.inspecting-runtime');
+  assert.equal(timeoutOutcome.metadata.codebox.last_heartbeat.turn, 3);
+  assert.equal(timeoutOutcome.artifacts.some((artifact) => artifact.kind === 'codebox-artifact-bundle' && artifact.path === bundleRoot), true);
+  assert.equal(timeoutOutcome.artifacts.some((artifact) => artifact.kind === 'codebox-runtime-reference-manifest'), true);
+  assert.equal(timeoutOutcome.artifacts.some((artifact) => artifact.kind === 'codebox-command-log'), true);
+  assert.equal(timeoutOutcome.artifacts.some((artifact) => artifact.kind === 'codebox-transcript'), true);
+  assert.equal(timeoutOutcome.evidence_refs.some((ref) => ref.kind === 'codebox-transcript'), true);
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
 }
