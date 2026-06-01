@@ -280,7 +280,6 @@ fn archive_install_override(policy: &DeployArchiveInstallPolicy) -> DeployOverri
 
 fn archive_install_verification(policy: &DeployArchiveInstallPolicy) -> Option<DeployVerification> {
     let header = policy.required_header.as_ref()?;
-    let contains = shell::quote_arg(&header.contains);
     let selector = if let Some(file) = header.file.as_deref() {
         format!(
             "candidate=$(printf '%s\\n' \"$entries\" | awk -v required={} '{{ slash = index($0, \"/\"); rel = slash ? substr($0, slash + 1) : $0; if (rel == required) {{ print $0; exit }} }}')",
@@ -289,9 +288,8 @@ fn archive_install_verification(policy: &DeployArchiveInstallPolicy) -> Option<D
     } else if let Some(file_glob) = header.file_glob.as_deref() {
         let file_regex = glob_to_awk_regex(file_glob);
         format!(
-            "candidate=$(printf '%s\\n' \"$entries\" | awk -v pattern={} '{{ slash = index($0, \"/\"); rel = slash ? substr($0, slash + 1) : $0; count = split(rel, parts, \"/\"); base = parts[count]; if (base ~ pattern) {{ print $0 }} }}' | while IFS= read -r entry; do unzip -p \"{{{{stagingArtifact}}}}\" \"$entry\" 2>/dev/null | grep -F -q {} && {{ printf '%s\\n' \"$entry\"; break; }}; done)",
-            shell::quote_arg(&file_regex),
-            contains
+            "candidate=$(printf '%s\\n' \"$entries\" | awk -v pattern={} '{{ slash = index($0, \"/\"); rel = slash ? substr($0, slash + 1) : $0; count = split(rel, parts, \"/\"); base = parts[count]; if (base ~ pattern) {{ print $0; exit }} }}')",
+            shell::quote_arg(&file_regex)
         )
     } else {
         return None;
@@ -302,6 +300,8 @@ fn archive_install_verification(policy: &DeployArchiveInstallPolicy) -> Option<D
     } else {
         ""
     };
+    let contains = shell::quote_arg(&header.contains);
+
     Some(DeployVerification {
         path_pattern: policy.path_pattern.clone(),
         verify_command: Some(format!(
@@ -483,6 +483,11 @@ fn deploy_override_template_vars(
         .rsplit_once('/')
         .map(|(parent, _)| parent)
         .unwrap_or("");
+    let target_basename = target_dir
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or("");
     let target_adjacent_temp_pattern = if target_parent_dir.is_empty() {
         String::new()
     } else {
@@ -493,6 +498,10 @@ fn deploy_override_template_vars(
         ("artifact".to_string(), artifact_filename.to_string()),
         ("stagingArtifact".to_string(), staging_artifact.to_string()),
         (TemplateVars::TARGET_DIR.to_string(), target_dir.to_string()),
+        (
+            TemplateVars::TARGET_BASENAME.to_string(),
+            target_basename.to_string(),
+        ),
         (
             TemplateVars::TARGET_PARENT_DIR.to_string(),
             target_parent_dir.to_string(),
@@ -619,8 +628,8 @@ mod tests {
             staging_path,
             root_must_match_target_basename: true,
             required_header: Some(DeployRequiredHeader {
-                file: None,
-                file_glob: Some("*.php".to_string()),
+                file: Some("{{targetBasename}}.php".to_string()),
+                file_glob: None,
                 contains: "Plugin Name:".to_string(),
             }),
             skip_permissions_fix: true,
@@ -688,7 +697,7 @@ mod tests {
                     pattern: Some(r#""version":\s*"([0-9.]+)""#.to_string()),
                 },
                 VersionTarget {
-                    file: "packages/wordpress-plugin/fixture.php".to_string(),
+                    file: "packages/component/fixture.php".to_string(),
                     pattern: Some(r"Version:\s*([0-9.]+)".to_string()),
                 },
             ]),
@@ -970,6 +979,10 @@ Plugin Name: Fixture
             vars.get(TemplateVars::TARGET_ADJACENT_TEMP_PATTERN)
                 .map(String::as_str),
             Some("/srv/htdocs/wp-content/plugins/.homeboy-install.XXXXXX")
+        );
+        assert_eq!(
+            vars.get(TemplateVars::TARGET_BASENAME).map(String::as_str),
+            Some("wp-codebox")
         );
         assert_eq!(
             render_map(
