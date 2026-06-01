@@ -294,7 +294,7 @@ pub(super) fn deploy_artifact(
 }
 
 fn render_extract_command(template: &str, vars: &HashMap<String, String>) -> String {
-    let mut result = template.to_string();
+    let mut result = render_map(template, vars);
     for (key, value) in vars {
         result = result.replace(&format!("{{{}}}", key), value);
     }
@@ -340,6 +340,25 @@ mod tests {
         assert_eq!(
             render_extract_command("unzip {archive} -d {target}", &vars),
             "unzip artifact.zip -d /srv/site/plugin"
+        );
+    }
+
+    #[test]
+    fn test_deploy_artifact_extract_command_template_replaces_double_brace_vars() {
+        let vars = std::collections::HashMap::from([
+            (
+                "artifact".to_string(),
+                ".homeboy-data-machine-events.zip".to_string(),
+            ),
+            (
+                "targetDir".to_string(),
+                "/srv/site/wp-content/plugins/data-machine-events".to_string(),
+            ),
+        ]);
+
+        assert_eq!(
+            render_extract_command("unzip -o {{artifact}} && rm {{artifact}}", &vars),
+            "unzip -o .homeboy-data-machine-events.zip && rm .homeboy-data-machine-events.zip"
         );
     }
 
