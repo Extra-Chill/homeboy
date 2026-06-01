@@ -105,9 +105,94 @@ homeboy_wordpress_rel_test_file() {
     esac
 }
 
+homeboy_wordpress_run_js_smoke_files() {
+    local smoke_files_raw="$1"
+    local node_bin="${HOMEBOY_NODE_BIN:-node}"
+    local smoke_files=()
+    local smoke_file
+    local smoke_abs
+    local rel_path
+    local passed=0
+
+    while IFS= read -r smoke_file; do
+        [ -n "$smoke_file" ] || continue
+        if ! smoke_abs="$(homeboy_wordpress_rel_test_file "$smoke_file")"; then
+            echo "ERROR: requested JS smoke file not found or outside the component: ${smoke_file}" >&2
+            exit 2
+        fi
+        smoke_files+=("${PLUGIN_PATH}/${smoke_abs}")
+    done <<< "$smoke_files_raw"
+
+    if [ "${#smoke_files[@]}" -eq 0 ]; then
+        echo "ERROR: no JS smoke files were selected" >&2
+        exit 2
+    fi
+
+    echo "Running host JS smoke tests..."
+    echo "  Component: ${HOMEBOY_COMPONENT_ID:-$(basename "$PLUGIN_PATH")} (${PLUGIN_PATH})"
+    echo "  Backend: host-js-smoke"
+    echo "  Files: ${#smoke_files[@]}"
+    echo ""
+
+    for smoke_file in "${smoke_files[@]}"; do
+        rel_path="${smoke_file#"${PLUGIN_PATH}/"}"
+        echo "JS_SMOKE_BEGIN:${rel_path}"
+        if "$node_bin" "$smoke_file"; then
+            echo "JS_SMOKE_OK:${rel_path}"
+            passed=$((passed + 1))
+        else
+            exit_code=$?
+            echo "JS_SMOKE_FAIL:${rel_path}:exit=${exit_code}"
+            echo ""
+            echo "JS smoke test failed: ${rel_path}"
+            exit "$exit_code"
+        fi
+    done
+
+    echo ""
+    echo "JS_SMOKE_SUMMARY:passed=${passed} failed=0"
+    echo "Host JS smoke test run complete."
+}
+
+homeboy_wordpress_is_js_smoke_file() {
+    case "$1" in
+        tests/*-smoke.js|tests/*/*-smoke.js|tests/*/*/*-smoke.js|tests/*/*/*/*-smoke.js|wordpress/tests/*-smoke.js|wordpress/tests/*/*-smoke.js|wordpress/tests/*/*/*-smoke.js|wordpress/tests/*/*/*/*-smoke.js)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 if [ -z "$TARGET_FILE" ] && [ "${HOMEBOY_TEST_SCOPE_KIND:-}" = "exclusive_env" ]; then
     if [ "${HOMEBOY_TEST_SCOPE_ENV_NAME:-}" = "HOMEBOY_WORDPRESS_HOST_SMOKE_FILES" ] && [ -n "${HOMEBOY_TEST_SCOPE_ENV_VALUE:-}" ]; then
         HOMEBOY_WORDPRESS_HOST_SMOKE_FILES="$HOMEBOY_TEST_SCOPE_ENV_VALUE" exec bash "$HOST_SMOKE_RUNNER" "${PASSTHROUGH_ARGS[@]}"
+    fi
+fi
+
+if [ -z "$TARGET_FILE" ] && [ -n "${HOMEBOY_CHANGED_TEST_FILES:-}" ]; then
+    changed_js_smoke_files=""
+    changed_non_js_smoke_files=0
+    while IFS= read -r changed_test_file; do
+        [ -n "$changed_test_file" ] || continue
+        if ! changed_test_rel="$(homeboy_wordpress_rel_test_file "$changed_test_file")"; then
+            changed_non_js_smoke_files=1
+            continue
+        fi
+        if homeboy_wordpress_is_js_smoke_file "$changed_test_rel"; then
+            if [ -n "$changed_js_smoke_files" ]; then
+                changed_js_smoke_files+=$'\n'
+            fi
+            changed_js_smoke_files+="$changed_test_rel"
+        else
+            changed_non_js_smoke_files=1
+        fi
+    done <<< "$HOMEBOY_CHANGED_TEST_FILES"
+
+    if [ -n "$changed_js_smoke_files" ] && [ "$changed_non_js_smoke_files" -eq 0 ]; then
+        homeboy_wordpress_run_js_smoke_files "$changed_js_smoke_files"
+        exit 0
     fi
 fi
 
@@ -134,6 +219,11 @@ if [ -n "$TARGET_FILE" ]; then
     esac
 
     target_base="$(basename "$target_rel")"
+    if homeboy_wordpress_is_js_smoke_file "$target_rel"; then
+        homeboy_wordpress_run_js_smoke_files "$target_rel"
+        exit 0
+    fi
+
     case "$target_rel" in
         tests/*.php|tests/*/*.php|tests/*/*/*.php|tests/*/*/*/*.php)
             case "$target_base" in
