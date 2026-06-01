@@ -51,6 +51,10 @@ pub struct AgentTaskScheduleOptions {
     pub max_queue_depth: Option<usize>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub per_executor_concurrency: HashMap<String, usize>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub per_model_concurrency: HashMap<String, usize>,
+    #[serde(default)]
+    pub resource_budget: AgentTaskResourceBudget,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
     #[serde(default)]
@@ -64,8 +68,33 @@ impl Default for AgentTaskScheduleOptions {
             max_tasks: None,
             max_queue_depth: None,
             per_executor_concurrency: HashMap::new(),
+            per_model_concurrency: HashMap::new(),
+            resource_budget: AgentTaskResourceBudget::default(),
             timeout_ms: None,
             retry: AgentTaskRetryPolicy::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskResourceBudget {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_active_units: Option<u32>,
+    #[serde(default = "default_task_resource_units")]
+    pub default_task_units: u32,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub per_executor_task_units: HashMap<String, u32>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub per_model_task_units: HashMap<String, u32>,
+}
+
+impl Default for AgentTaskResourceBudget {
+    fn default() -> Self {
+        Self {
+            max_active_units: None,
+            default_task_units: default_task_resource_units(),
+            per_executor_task_units: HashMap::new(),
+            per_model_task_units: HashMap::new(),
         }
     }
 }
@@ -150,6 +179,10 @@ pub struct AgentTaskQueueStatus {
     pub completed: usize,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub per_executor_concurrency: HashMap<String, usize>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub per_model_concurrency: HashMap<String, usize>,
+    #[serde(default)]
+    pub resource_budget: AgentTaskResourceBudgetStatus,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub backpressure: Vec<AgentTaskBackpressureStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -162,6 +195,18 @@ pub struct AgentTaskBackpressureStatus {
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskResourceBudgetStatus {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_active_units: Option<u32>,
+    pub default_task_units: u32,
+    pub active_units: u32,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub per_executor_task_units: HashMap<String, u32>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub per_model_task_units: HashMap<String, u32>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -301,13 +346,51 @@ where
                     &queued,
                     &running,
                     &plan.options.per_executor_concurrency,
+                    &plan.options.per_model_concurrency,
+                    &plan.options.resource_budget,
                 ) else {
                     if running.is_empty() {
+                        if let Some(task) = queued.pop_front() {
+                            let task_units =
+                                task_resource_units(&task.request, &plan.options.resource_budget);
+                            let max_active_units = plan
+                                .options
+                                .resource_budget
+                                .max_active_units
+                                .unwrap_or_default();
+                            let message = format!(
+                                "task requires resource_units={task_units} over max_active_units={max_active_units}"
+                            );
+                            backpressure.push(AgentTaskBackpressureStatus {
+                                kind: "resource_budget".to_string(),
+                                message: message.clone(),
+                                task_id: Some(task.request.task_id.clone()),
+                            });
+                            events.push(event(
+                                &task.request.task_id,
+                                AgentTaskState::Blocked,
+                                task.attempt,
+                                Some(message.clone()),
+                            ));
+                            outcomes.push(AgentTaskScheduleSupport::blocked_outcome(
+                                task.request.task_id,
+                                message,
+                            ));
+                            blocked_count += 1;
+                            continue;
+                        }
                         break;
                     }
                     backpressure.push(AgentTaskBackpressureStatus {
-                        kind: "per_executor_concurrency".to_string(),
-                        message: "queued tasks are waiting for executor capacity".to_string(),
+                        kind: AgentTaskScheduleSupport::backpressure_kind(
+                            &queued,
+                            &running,
+                            &plan.options.per_executor_concurrency,
+                            &plan.options.per_model_concurrency,
+                            &plan.options.resource_budget,
+                        )
+                        .to_string(),
+                        message: "queued tasks are waiting for scheduler capacity".to_string(),
                         task_id: queued.front().map(|task| task.request.task_id.clone()),
                     });
                     break;
@@ -332,6 +415,8 @@ where
                     task_id: task_id.clone(),
                     request: request.clone(),
                     executor_key,
+                    model_key: model_key(&request),
+                    resource_units: task_resource_units(&request, &plan.options.resource_budget),
                     attempt,
                     started_at: Instant::now(),
                     timeout_ms: task_timeout_ms,
@@ -426,6 +511,8 @@ where
                 blocked_count,
                 &outcomes,
                 &plan.options.per_executor_concurrency,
+                &plan.options.per_model_concurrency,
+                &plan.options.resource_budget,
                 &backpressure,
                 retry_budget_total.map(|budget| budget.saturating_sub(retry_budget_used)),
             ),
@@ -446,6 +533,8 @@ struct RunningTask {
     task_id: String,
     request: AgentTaskRequest,
     executor_key: String,
+    model_key: Option<String>,
+    resource_units: u32,
     attempt: u32,
     started_at: Instant,
     timeout_ms: Option<u64>,
@@ -464,6 +553,8 @@ impl AgentTaskScheduleSupport {
         queued: &VecDeque<ScheduledTask>,
         running: &[RunningTask],
         per_executor_concurrency: &HashMap<String, usize>,
+        per_model_concurrency: &HashMap<String, usize>,
+        resource_budget: &AgentTaskResourceBudget,
     ) -> Option<usize> {
         queued.iter().position(|task| {
             let executor_key = executor_key(&task.request);
@@ -477,8 +568,73 @@ impl AgentTaskScheduleSupport {
                 .filter(|running| running.executor_key == executor_key)
                 .count();
 
-            running_for_executor < limit
+            if running_for_executor >= limit {
+                return false;
+            }
+
+            if let Some(model_key) = model_key(&task.request) {
+                let model_limit = per_model_concurrency
+                    .get(&model_key)
+                    .copied()
+                    .unwrap_or(usize::MAX)
+                    .max(1);
+                let running_for_model = running
+                    .iter()
+                    .filter(|running| running.model_key.as_ref() == Some(&model_key))
+                    .count();
+                if running_for_model >= model_limit {
+                    return false;
+                }
+            }
+
+            resource_capacity_available(&task.request, running, resource_budget)
         })
+    }
+
+    fn backpressure_kind(
+        queued: &VecDeque<ScheduledTask>,
+        running: &[RunningTask],
+        per_executor_concurrency: &HashMap<String, usize>,
+        per_model_concurrency: &HashMap<String, usize>,
+        resource_budget: &AgentTaskResourceBudget,
+    ) -> &'static str {
+        let Some(task) = queued.front() else {
+            return "scheduler_capacity";
+        };
+        let executor_key = executor_key(&task.request);
+        let executor_limit = per_executor_concurrency
+            .get(&executor_key)
+            .copied()
+            .unwrap_or(usize::MAX)
+            .max(1);
+        let running_for_executor = running
+            .iter()
+            .filter(|running| running.executor_key == executor_key)
+            .count();
+        if running_for_executor >= executor_limit {
+            return "per_executor_concurrency";
+        }
+
+        if let Some(model_key) = model_key(&task.request) {
+            let model_limit = per_model_concurrency
+                .get(&model_key)
+                .copied()
+                .unwrap_or(usize::MAX)
+                .max(1);
+            let running_for_model = running
+                .iter()
+                .filter(|running| running.model_key.as_ref() == Some(&model_key))
+                .count();
+            if running_for_model >= model_limit {
+                return "per_model_concurrency";
+            }
+        }
+
+        if !resource_capacity_available(&task.request, running, resource_budget) {
+            return "resource_budget";
+        }
+
+        "scheduler_capacity"
     }
 
     fn cancel_queued(
@@ -675,12 +831,18 @@ impl AgentTaskScheduleSupport {
         blocked_count: usize,
         outcomes: &[AgentTaskOutcome],
         per_executor_concurrency: &HashMap<String, usize>,
+        per_model_concurrency: &HashMap<String, usize>,
+        resource_budget: &AgentTaskResourceBudget,
         backpressure: &[AgentTaskBackpressureStatus],
         retry_budget_remaining: Option<u32>,
     ) -> AgentTaskQueueStatus {
         let per_executor_concurrency = per_executor_concurrency
             .iter()
             .map(|(executor, max_concurrency)| (executor.clone(), (*max_concurrency).max(1)))
+            .collect();
+        let per_model_concurrency = per_model_concurrency
+            .iter()
+            .map(|(model, max_concurrency)| (model.clone(), (*max_concurrency).max(1)))
             .collect();
 
         AgentTaskQueueStatus {
@@ -692,6 +854,14 @@ impl AgentTaskScheduleSupport {
             blocked: blocked_count,
             completed: outcomes.len(),
             per_executor_concurrency,
+            per_model_concurrency,
+            resource_budget: AgentTaskResourceBudgetStatus {
+                max_active_units: resource_budget.max_active_units,
+                default_task_units: resource_budget.default_task_units.max(1),
+                active_units: 0,
+                per_executor_task_units: resource_budget.per_executor_task_units.clone(),
+                per_model_task_units: resource_budget.per_model_task_units.clone(),
+            },
             backpressure: backpressure.to_vec(),
             retry_budget_remaining,
         }
@@ -763,6 +933,49 @@ fn executor_key(request: &AgentTaskRequest) -> String {
     }
 }
 
+fn model_key(request: &AgentTaskRequest) -> Option<String> {
+    request
+        .executor
+        .model
+        .as_ref()
+        .map(|model| match &request.executor.selector {
+            Some(selector) => format!("{}:{selector}:{model}", request.executor.backend),
+            None => format!("{}:{model}", request.executor.backend),
+        })
+}
+
+fn task_resource_units(request: &AgentTaskRequest, budget: &AgentTaskResourceBudget) -> u32 {
+    model_key(request)
+        .and_then(|key| budget.per_model_task_units.get(&key).copied())
+        .or_else(|| {
+            budget
+                .per_executor_task_units
+                .get(&executor_key(request))
+                .copied()
+        })
+        .unwrap_or_else(|| budget.default_task_units.max(1))
+        .max(1)
+}
+
+fn active_resource_units(running: &[RunningTask]) -> u32 {
+    running
+        .iter()
+        .map(|task| task.resource_units)
+        .fold(0, u32::saturating_add)
+}
+
+fn resource_capacity_available(
+    request: &AgentTaskRequest,
+    running: &[RunningTask],
+    budget: &AgentTaskResourceBudget,
+) -> bool {
+    let Some(max_active_units) = budget.max_active_units else {
+        return true;
+    };
+    active_resource_units(running).saturating_add(task_resource_units(request, budget))
+        <= max_active_units
+}
+
 fn event(
     task_id: &str,
     state: AgentTaskState,
@@ -786,6 +999,10 @@ fn aggregate_schema() -> String {
 }
 
 fn default_max_concurrency() -> usize {
+    1
+}
+
+fn default_task_resource_units() -> u32 {
     1
 }
 
@@ -927,6 +1144,71 @@ mod tests {
         assert!(max_seen.load(Ordering::SeqCst) <= 1);
         assert_eq!(
             aggregate.queue.per_executor_concurrency.get("test"),
+            Some(&1)
+        );
+    }
+
+    #[test]
+    fn resource_budget_limits_concurrent_task_cost() {
+        let executor = RecordingExecutor::new(HashMap::new(), Duration::from_millis(25));
+        let max_seen = Arc::clone(&executor.max_seen);
+        let scheduler = AgentTaskScheduler::new(executor);
+        let mut plan = plan_with_tasks(4);
+        plan.options.max_concurrency = 4;
+        plan.options.resource_budget.max_active_units = Some(2);
+        plan.options.resource_budget.default_task_units = 1;
+
+        let aggregate = scheduler.run(plan);
+
+        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+        assert_eq!(aggregate.totals.succeeded, 4);
+        assert!(max_seen.load(Ordering::SeqCst) <= 2);
+        assert_eq!(aggregate.queue.resource_budget.max_active_units, Some(2));
+        assert_eq!(aggregate.queue.resource_budget.default_task_units, 1);
+    }
+
+    #[test]
+    fn resource_budget_blocks_task_that_cannot_fit() {
+        let scheduler = AgentTaskScheduler::new(RecordingExecutor::new(
+            HashMap::new(),
+            Duration::from_millis(0),
+        ));
+        let mut plan = plan_with_tasks(1);
+        plan.options.resource_budget.max_active_units = Some(2);
+        plan.options.resource_budget.default_task_units = 3;
+
+        let aggregate = scheduler.run(plan);
+
+        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Failed);
+        assert_eq!(aggregate.totals.blocked, 1);
+        assert_eq!(aggregate.queue.blocked, 1);
+        assert!(aggregate
+            .queue
+            .backpressure
+            .iter()
+            .any(|status| status.kind == "resource_budget"));
+    }
+
+    #[test]
+    fn applies_per_model_concurrency_below_global_limit() {
+        let executor = RecordingExecutor::new(HashMap::new(), Duration::from_millis(25));
+        let max_seen = Arc::clone(&executor.max_seen);
+        let scheduler = AgentTaskScheduler::new(executor);
+        let mut plan = plan_with_tasks(3);
+        for task in &mut plan.tasks {
+            task.executor.model = Some("model-a".to_string());
+        }
+        plan.options.max_concurrency = 3;
+        plan.options
+            .per_model_concurrency
+            .insert("test:model-a".to_string(), 1);
+
+        let aggregate = scheduler.run(plan);
+
+        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+        assert!(max_seen.load(Ordering::SeqCst) <= 1);
+        assert_eq!(
+            aggregate.queue.per_model_concurrency.get("test:model-a"),
             Some(&1)
         );
     }
