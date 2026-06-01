@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
-use crate::core::observation::LAB_OFFLOAD_METADATA_ENV;
+use crate::core::observation::{
+    LAB_OFFLOAD_METADATA_ENV, PREVIEW_METADATA_ENV, PREVIEW_PUBLIC_URL_ENV,
+};
 use crate::core::plan::{HomeboyPlan, PlanKind, PlanStep, PlanStepStatus, PlanValues};
 use crate::core::source_snapshot::SourceSnapshot;
 use crate::core::{Error, Result};
@@ -448,6 +450,8 @@ fn run_lab_offload_inner(
         LAB_OFFLOAD_METADATA_ENV.to_string(),
         serde_json::to_string(&lab_metadata).unwrap_or_default(),
     );
+    forward_env_if_present(&mut env, PREVIEW_METADATA_ENV);
+    forward_env_if_present(&mut env, PREVIEW_PUBLIC_URL_ENV);
     let (exec_output, exit_code) = exec(
         runner_id,
         RunnerExecOptions {
@@ -491,6 +495,14 @@ fn run_lab_offload_inner(
         stderr,
         exit_code,
     })
+}
+
+fn forward_env_if_present(env: &mut HashMap<String, String>, name: &str) {
+    if let Ok(value) = std::env::var(name) {
+        if !value.trim().is_empty() {
+            env.insert(name.to_string(), value);
+        }
+    }
 }
 
 fn base_lab_plan(command: Option<&LabOffloadCommand>) -> HomeboyPlan {
