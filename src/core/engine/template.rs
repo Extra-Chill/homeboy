@@ -14,6 +14,7 @@ impl TemplateVars {
     pub const QUERY: &'static str = "query";
     pub const FORMAT: &'static str = "format";
     pub const TARGET_DIR: &'static str = "targetDir";
+    pub const TARGET_BASENAME: &'static str = "targetBasename";
     pub const TARGET_PARENT_DIR: &'static str = "targetParentDir";
     pub const TARGET_ADJACENT_TEMP_PATTERN: &'static str = "targetAdjacentTempPattern";
     pub const DB_HOST: &'static str = "db_host";

@@ -18,6 +18,7 @@ use crate::core::observation::{
 use crate::core::{component, git, rig, stack};
 
 mod analysis_job_runner;
+mod sandbox_tools;
 
 pub use analysis_job_runner::{
     AnalysisJobRunOutput, AnalysisJobRunner, UnsupportedAnalysisJobRunner,
@@ -69,6 +70,9 @@ pub enum HttpEndpoint {
     JobEvents { id: String },
     JobCancel { id: String },
     JobReadyRun { kind: JobReadyRunKind },
+    SandboxTools,
+    SandboxTool { id: String },
+    SandboxToolRun { id: String },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -103,6 +107,8 @@ pub enum JobReadyRunKind {
     Lint,
     Test,
     Bench,
+    Build,
+    Review,
 }
 
 impl HttpEndpoint {
@@ -130,6 +136,9 @@ impl HttpEndpoint {
             Self::JobEvents { .. } => "jobs.events",
             Self::JobCancel { .. } => "jobs.cancel",
             Self::JobReadyRun { .. } => "jobs.required",
+            Self::SandboxTools => "tools.list",
+            Self::SandboxTool { .. } => "tools.show",
+            Self::SandboxToolRun { .. } => "tools.run",
         }
     }
 }
@@ -203,6 +212,13 @@ pub fn route(method: HttpMethod, path: &str) -> Result<HttpEndpoint> {
         (HttpMethod::Post, ["bench"]) => Ok(HttpEndpoint::JobReadyRun {
             kind: JobReadyRunKind::Bench,
         }),
+        (HttpMethod::Get, ["tools"]) => Ok(HttpEndpoint::SandboxTools),
+        (HttpMethod::Get, ["tools", id]) => Ok(HttpEndpoint::SandboxTool {
+            id: (*id).to_string(),
+        }),
+        (HttpMethod::Post, ["tools", id, "run"]) => Ok(HttpEndpoint::SandboxToolRun {
+            id: (*id).to_string(),
+        }),
         _ => Err(Error::validation_invalid_argument(
             "path",
             format!(
@@ -229,6 +245,9 @@ pub fn route(method: HttpMethod, path: &str) -> Result<HttpEndpoint> {
                 "GET /jobs/:id".to_string(),
                 "GET /jobs/:id/events".to_string(),
                 "POST /jobs/:id/cancel".to_string(),
+                "GET /tools".to_string(),
+                "GET /tools/:id".to_string(),
+                "POST /tools/:id/run".to_string(),
             ]),
         )),
     }
@@ -364,6 +383,17 @@ where
         HttpEndpoint::JobReadyRun { kind } => {
             enqueue_analysis_job(job_store, *kind, request.body, analysis_runner)?
         }
+        HttpEndpoint::SandboxTools => json!({
+            "command": "api.tools.list",
+            "tools": sandbox_tools::all(),
+        }),
+        HttpEndpoint::SandboxTool { id } => json!({
+            "command": "api.tools.show",
+            "tool": sandbox_tools::get(id)?,
+        }),
+        HttpEndpoint::SandboxToolRun { id } => {
+            enqueue_sandbox_tool_job(job_store, id, request.body, analysis_runner)?
+        }
     };
 
     Ok(HttpApiResponse {
@@ -371,6 +401,25 @@ where
         endpoint: endpoint.name().to_string(),
         body,
     })
+}
+
+fn enqueue_sandbox_tool_job(
+    job_store: &JobStore,
+    id: &str,
+    body: Option<Value>,
+    analysis_runner: impl AnalysisJobRunner,
+) -> Result<Value> {
+    let tool = sandbox_tools::get(id)?;
+    let kind = sandbox_tools::kind(tool.id)?;
+    let mut response = enqueue_analysis_job(job_store, kind, body, analysis_runner)?;
+    if let Value::Object(ref mut fields) = response {
+        fields.insert("command".to_string(), json!("api.tools.run.enqueue"));
+        fields.insert(
+            "tool".to_string(),
+            serde_json::to_value(tool).unwrap_or(Value::Null),
+        );
+    }
+    Ok(response)
 }
 
 fn artifact_content(run_id: &str, artifact_id: &str) -> Result<Value> {
@@ -545,12 +594,11 @@ impl AnalysisJobRequest {
         let mut parser = AnalysisBodyParser::new(body)?;
         let mut args = vec![job_ready_slug(kind).to_string()];
 
-        parser.push_optional_string("component", &mut args)?;
-        parser.push_optional_flag_value("path", "--path", &mut args)?;
-        parser.push_bool_flag("json_summary", "--json-summary", &mut args)?;
-
         match kind {
             JobReadyRunKind::Audit => {
+                parser.push_optional_string("component", &mut args)?;
+                parser.push_optional_flag_value("path", "--path", &mut args)?;
+                parser.push_bool_flag("json_summary", "--json-summary", &mut args)?;
                 parser.push_bool_flag("conventions", "--conventions", &mut args)?;
                 parser.push_string_array("only", "--only", &mut args)?;
                 parser.push_string_array("exclude", "--exclude", &mut args)?;
@@ -558,6 +606,9 @@ impl AnalysisJobRequest {
                 parser.push_bool_flag("fixability", "--fixability", &mut args)?;
             }
             JobReadyRunKind::Lint => {
+                parser.push_optional_string("component", &mut args)?;
+                parser.push_optional_flag_value("path", "--path", &mut args)?;
+                parser.push_bool_flag("json_summary", "--json-summary", &mut args)?;
                 parser.push_bool_flag("summary", "--summary", &mut args)?;
                 parser.push_optional_flag_value("file", "--file", &mut args)?;
                 parser.push_optional_flag_value("glob", "--glob", &mut args)?;
@@ -570,6 +621,9 @@ impl AnalysisJobRequest {
                 parser.reject_present("fix", "POST /lint jobs do not expose mutating --fix")?;
             }
             JobReadyRunKind::Test => {
+                parser.push_optional_string("component", &mut args)?;
+                parser.push_optional_flag_value("path", "--path", &mut args)?;
+                parser.push_bool_flag("json_summary", "--json-summary", &mut args)?;
                 parser.push_bool_flag("skip_lint", "--skip-lint", &mut args)?;
                 parser.push_bool_flag("coverage", "--coverage", &mut args)?;
                 parser.push_optional_number("coverage_min", "--coverage-min", &mut args)?;
@@ -581,6 +635,9 @@ impl AnalysisJobRequest {
                 parser.reject_present("write", "POST /test jobs do not expose mutating --write")?;
             }
             JobReadyRunKind::Bench => {
+                parser.push_optional_string("component", &mut args)?;
+                parser.push_optional_flag_value("path", "--path", &mut args)?;
+                parser.push_bool_flag("json_summary", "--json-summary", &mut args)?;
                 parser.push_optional_u64("iterations", "--iterations", &mut args)?;
                 parser.push_optional_u64("warmup", "--warmup", &mut args)?;
                 parser.push_optional_u64("runs", "--runs", &mut args)?;
@@ -599,6 +656,23 @@ impl AnalysisJobRequest {
                     &mut args,
                 )?;
                 parser.push_passthrough_args(&mut args)?;
+            }
+            JobReadyRunKind::Build => {
+                parser.push_optional_string("component", &mut args)?;
+                parser.push_string_array_values("component_ids", &mut args)?;
+                parser.push_optional_flag_value("path", "--path", &mut args)?;
+                parser.push_bool_flag("all", "--all", &mut args)?;
+                parser.reject_present("json", "sandbox build jobs do not expose --json")?;
+            }
+            JobReadyRunKind::Review => {
+                parser.push_optional_string("component", &mut args)?;
+                parser.push_optional_flag_value("path", "--path", &mut args)?;
+                parser.push_optional_flag_value("changed_since", "--changed-since", &mut args)?;
+                parser.push_bool_flag("changed_only", "--changed-only", &mut args)?;
+                parser.push_bool_flag("summary", "--summary", &mut args)?;
+                parser.push_optional_flag_value("ci_profile", "--ci-profile", &mut args)?;
+                parser.reject_present("report", "sandbox review jobs keep JSON output")?;
+                parser.reject_present("banner", "sandbox review jobs do not expose --banner")?;
             }
         }
 
@@ -707,6 +781,25 @@ impl AnalysisBodyParser {
                     args.push(flag.to_string());
                     args.push(value);
                 }
+                Value::Null => {}
+                other => return Err(invalid_body_type(key, "string or array of strings", &other)),
+            }
+        }
+        Ok(())
+    }
+
+    fn push_string_array_values(&mut self, key: &str, args: &mut Vec<String>) -> Result<()> {
+        if let Some(value) = self.take(key) {
+            match value {
+                Value::Array(values) => {
+                    for value in values {
+                        let Some(value) = value.as_str() else {
+                            return Err(invalid_body_type(key, "array of strings", &value));
+                        };
+                        args.push(value.to_string());
+                    }
+                }
+                Value::String(value) => args.push(value),
                 Value::Null => {}
                 other => return Err(invalid_body_type(key, "string or array of strings", &other)),
             }
@@ -882,6 +975,8 @@ fn job_ready_slug(kind: JobReadyRunKind) -> &'static str {
         JobReadyRunKind::Lint => "lint",
         JobReadyRunKind::Test => "test",
         JobReadyRunKind::Bench => "bench",
+        JobReadyRunKind::Build => "build",
+        JobReadyRunKind::Review => "review",
     }
 }
 
