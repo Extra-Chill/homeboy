@@ -134,17 +134,19 @@ findings = json.load(open(sys.argv[1], encoding="utf-8"))
 assert len(findings) == 1, findings
 finding = findings[0]
 expected = {
+    "tool": "phpcs",
     "file": "plugin.php",
     "line": 8,
     "column": 7,
     "severity": "warning",
-    "source": "phpcs",
     "code": "Generic.Formatting.MultipleStatementAlignment.NotSameWarning",
+    "rule": "Generic.Formatting.MultipleStatementAlignment.NotSameWarning",
     "category": "formatting",
     "fixable": True,
 }
 for key, value in expected.items():
     assert finding.get(key) == value, (key, finding)
+assert "source" not in finding, finding
 assert finding.get("fingerprint"), finding
 assert finding.get("excerpt") == "$beta = 2;", finding
 PY

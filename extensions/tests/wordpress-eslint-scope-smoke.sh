@@ -191,18 +191,20 @@ findings = json.load(open(sys.argv[1], encoding="utf-8"))
 assert len(findings) == 1, findings
 finding = findings[0]
 expected = {
+    "tool": "eslint",
     "file": "assets/bad.js",
     "line": 1,
     "column": 7,
     "severity": "error",
-    "source": "eslint",
     "code": "eslint.no-undef",
+    "rule": "eslint.no-undef",
     "category": "eslint",
     "fixable": True,
     "excerpt": "const bad = true;",
 }
 for key, value in expected.items():
     assert finding.get(key) == value, (key, finding)
+assert "source" not in finding, finding
 assert finding.get("fingerprint"), finding
 PY
 
