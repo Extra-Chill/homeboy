@@ -138,13 +138,13 @@ write_lint_producers_sidecar() {
         return 1
     fi
 
-    "$python_bin" - "$HOMEBOY_LINT_PRODUCERS_FILE" "${HOMEBOY_LINT_FINDINGS_FILE:-}" "$phpcs_passed" "$eslint_passed" "$phpstan_passed" <<'PYEOF'
+    "$python_bin" - "$HOMEBOY_LINT_PRODUCERS_FILE" "${HOMEBOY_LINT_FINDINGS_FILE:-}" "$phpcs_passed" "$eslint_passed" "$phpstan_passed" "${HOMEBOY_PHPSTAN_PRODUCER_METADATA_FILE:-}" <<'PYEOF'
 import json
 import os
 import sys
 import tempfile
 
-target, findings_path, phpcs_passed, eslint_passed, phpstan_passed = sys.argv[1:6]
+target, findings_path, phpcs_passed, eslint_passed, phpstan_passed, phpstan_metadata_path = sys.argv[1:7]
 counts = {"phpcs": 0, "eslint": 0, "phpstan": 0}
 if findings_path and os.path.exists(findings_path) and os.path.getsize(findings_path) > 0:
     with open(findings_path, "r", encoding="utf-8") as handle:
@@ -159,13 +159,19 @@ statuses = {
     "eslint": "passed" if eslint_passed == "1" else "failed",
     "phpstan": "passed" if phpstan_passed == "1" else "failed",
 }
+phpstan_metadata = {"source_sidecar": "lint-producers"}
+if phpstan_metadata_path and os.path.exists(phpstan_metadata_path) and os.path.getsize(phpstan_metadata_path) > 0:
+    with open(phpstan_metadata_path, "r", encoding="utf-8") as handle:
+        loaded = json.load(handle)
+    if isinstance(loaded, dict):
+        phpstan_metadata.update(loaded)
 producers = [
     {
         "tool": tool,
         "status": statuses[tool],
         "finding_count": counts[tool],
         "step": tool,
-        "metadata": {"source_sidecar": "lint-producers"},
+        "metadata": phpstan_metadata if tool == "phpstan" else {"source_sidecar": "lint-producers"},
     }
     for tool in ("phpcs", "eslint", "phpstan")
 ]
@@ -919,9 +925,13 @@ fi
 # writes its own parsed array, then the core sidecar helper owns final merging.
 _ESLINT_FINDINGS_TMPFILE=""
 _PHPSTAN_FINDINGS_TMPFILE=""
+HOMEBOY_PHPSTAN_PRODUCER_METADATA_FILE=""
 if [ -n "${HOMEBOY_LINT_FINDINGS_FILE:-}" ]; then
     _ESLINT_FINDINGS_TMPFILE=$(homeboy_mktemp 'eslint-findings.XXXXXX')
     _PHPSTAN_FINDINGS_TMPFILE=$(homeboy_mktemp 'phpstan-findings.XXXXXX')
+fi
+if [ -n "${HOMEBOY_LINT_PRODUCERS_FILE:-}" ]; then
+    HOMEBOY_PHPSTAN_PRODUCER_METADATA_FILE=$(homeboy_mktemp 'phpstan-producer.XXXXXX.json')
 fi
 
 # Summary mode: show summary header + top violations, skip full report
@@ -1014,6 +1024,7 @@ if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
         echo ""
         set +e
         _HOMEBOY_PHPSTAN_FINDINGS_FILE="${_PHPSTAN_FINDINGS_TMPFILE:-}" \
+            HOMEBOY_PHPSTAN_PRODUCER_METADATA_FILE="${HOMEBOY_PHPSTAN_PRODUCER_METADATA_FILE:-}" \
             HOMEBOY_SUMMARY_MODE=1 bash "$phpstan_runner"
         local phpstan_exit=$?
         set -e
@@ -1040,6 +1051,7 @@ if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
         rm -f "$_PHPSTAN_FINDINGS_TMPFILE"
     fi
     write_lint_producers_sidecar "$PHPCS_PASSED" "$ESLINT_PASSED" "$PHPSTAN_PASSED"
+    [ -n "${HOMEBOY_PHPSTAN_PRODUCER_METADATA_FILE:-}" ] && rm -f "$HOMEBOY_PHPSTAN_PRODUCER_METADATA_FILE"
 
     if [ "$PHPCS_PASSED" -eq 1 ] && [ "$ESLINT_PASSED" -eq 1 ] && [ "$PHPSTAN_PASSED" -eq 1 ]; then
         echo "Linting passed"
@@ -1106,6 +1118,7 @@ run_phpstan() {
     echo ""
     set +e
     _HOMEBOY_PHPSTAN_FINDINGS_FILE="${_PHPSTAN_FINDINGS_TMPFILE:-}" \
+        HOMEBOY_PHPSTAN_PRODUCER_METADATA_FILE="${HOMEBOY_PHPSTAN_PRODUCER_METADATA_FILE:-}" \
         HOMEBOY_SUMMARY_MODE=1 bash "$phpstan_runner"
     local phpstan_exit=$?
     set -e
@@ -1133,6 +1146,7 @@ if [ -n "${HOMEBOY_LINT_FINDINGS_FILE:-}" ] && [ -n "$_PHPSTAN_FINDINGS_TMPFILE"
     rm -f "$_PHPSTAN_FINDINGS_TMPFILE"
 fi
 write_lint_producers_sidecar "$PHPCS_PASSED" "$ESLINT_PASSED" "$PHPSTAN_PASSED"
+[ -n "${HOMEBOY_PHPSTAN_PRODUCER_METADATA_FILE:-}" ] && rm -f "$HOMEBOY_PHPSTAN_PRODUCER_METADATA_FILE"
 
 if [ "$PHPCS_PASSED" -eq 1 ] && [ "$ESLINT_PASSED" -eq 1 ] && [ "$PHPSTAN_PASSED" -eq 1 ]; then
     echo ""

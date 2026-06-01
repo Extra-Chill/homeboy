@@ -124,8 +124,11 @@ case "$WORDPRESS_LINT_ROLE" in
 esac
 
 PHPSTAN_BIN="${EXTENSION_PATH}/vendor/bin/phpstan"
-PHPSTAN_CONFIG="${EXTENSION_PATH}/phpstan.neon.dist"
-PHPSTAN_BASE_CONFIG="$PHPSTAN_CONFIG"
+PHPSTAN_DEFAULT_CONFIG="${EXTENSION_PATH}/phpstan.neon.dist"
+PHPSTAN_COMPONENT_CONFIG=""
+PHPSTAN_COMPONENT_CONFIG_SOURCE="extension-default"
+PHPSTAN_BASE_CONFIG="$PHPSTAN_DEFAULT_CONFIG"
+PHPSTAN_LEVEL_SOURCE="extension-default"
 COMPONENT_BASELINE="${PLUGIN_PATH}/phpstan-baseline.neon"
 COMPOSITE_AUTOLOAD=""
 DEPENDENCY_CONFIG=""
@@ -192,15 +195,38 @@ if [ ! -f "$PHPSTAN_BIN" ]; then
     exit 0
 fi
 
-if [ ! -f "$PHPSTAN_CONFIG" ]; then
-    echo "Warning: phpstan.neon.dist not found at $PHPSTAN_CONFIG, skipping static analysis"
+if [ ! -f "$PHPSTAN_DEFAULT_CONFIG" ]; then
+    echo "Warning: phpstan.neon.dist not found at $PHPSTAN_DEFAULT_CONFIG, skipping static analysis"
     exit 0
+fi
+
+resolve_component_phpstan_config() {
+    local candidate
+
+    for candidate in \
+        "${PLUGIN_PATH}/phpstan.neon" \
+        "${PLUGIN_PATH}/phpstan.neon.dist" \
+        "${PLUGIN_PATH}/phpstan.dist.neon"; do
+        if [ -f "$candidate" ]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+PHPSTAN_COMPONENT_CONFIG=$(resolve_component_phpstan_config || true)
+if [ -n "$PHPSTAN_COMPONENT_CONFIG" ]; then
+    PHPSTAN_COMPONENT_CONFIG_SOURCE="component-local"
+    PHPSTAN_BASE_CONFIG="$PHPSTAN_COMPONENT_CONFIG"
 fi
 
 generate_dependency_config() {
     local tmpfile
     local has_dependencies=0
     local has_baseline=0
+    local has_component_config=0
     local has_component_context=0
     local context_path
     local scan_file_count=0
@@ -209,7 +235,12 @@ generate_dependency_config() {
 
     {
         printf '%s\n' 'includes:'
-        printf '    - %s\n' "$PHPSTAN_CONFIG"
+        if [ -n "$PHPSTAN_COMPONENT_CONFIG" ]; then
+            printf '    - %s\n' "$PHPSTAN_COMPONENT_CONFIG"
+            has_component_config=1
+        else
+            printf '    - %s\n' "$PHPSTAN_DEFAULT_CONFIG"
+        fi
         # Component baseline: PHPStan 2.x removed the `--baseline` CLI flag, so
         # the baseline file must be pulled in via `includes:` in the neon. We
         # do this here (rather than via --baseline) so every invocation path
@@ -248,7 +279,7 @@ generate_dependency_config() {
         fi
     } > "$tmpfile"
 
-    if [ "$has_dependencies" -eq 1 ] || [ "$has_baseline" -eq 1 ] || [ "$has_component_context" -eq 1 ]; then
+    if [ "$has_dependencies" -eq 1 ] || [ "$has_baseline" -eq 1 ] || [ "$has_component_context" -eq 1 ] || [ "${has_component_config:-0}" -eq 1 ]; then
         printf '%s\n' "$tmpfile"
     else
         rm -f "$tmpfile"
@@ -492,7 +523,41 @@ phpstan_args+=(--configuration="$PHPSTAN_BASE_CONFIG")
 # must now track what the neon declares (level 7, set in homeboy-extensions#225).
 # Keep them in sync when bumping further.
 PHPSTAN_LEVEL="${HOMEBOY_PHPSTAN_LEVEL:-7}"
-phpstan_args+=(--level="$PHPSTAN_LEVEL")
+if [ -n "${HOMEBOY_PHPSTAN_LEVEL:-}" ]; then
+    PHPSTAN_LEVEL_SOURCE="env"
+    phpstan_args+=(--level="$PHPSTAN_LEVEL")
+elif [ -z "$PHPSTAN_COMPONENT_CONFIG" ]; then
+    phpstan_args+=(--level="$PHPSTAN_LEVEL")
+else
+    PHPSTAN_LEVEL="config"
+    PHPSTAN_LEVEL_SOURCE="component-local"
+fi
+
+write_phpstan_producer_metadata() {
+    local target="${HOMEBOY_PHPSTAN_PRODUCER_METADATA_FILE:-}"
+    [ -z "$target" ] && return 0
+
+    php -r '
+        $target = $argv[1] ?? "";
+        if ($target === "") {
+            exit;
+        }
+        $metadata = [
+            "phpstan_config" => $argv[2] ?? "",
+            "phpstan_config_source" => $argv[3] ?? "",
+            "phpstan_component_config" => ($argv[4] ?? "") !== "" ? $argv[4] : null,
+            "phpstan_level" => $argv[5] ?? "",
+            "phpstan_level_source" => $argv[6] ?? "",
+        ];
+        $dir = dirname($target);
+        if ($dir !== "" && $dir !== ".") {
+            @mkdir($dir, 0777, true);
+        }
+        file_put_contents($target, json_encode($metadata, JSON_UNESCAPED_SLASHES) . "\n");
+    ' "$target" "$PHPSTAN_BASE_CONFIG" "$PHPSTAN_COMPONENT_CONFIG_SOURCE" "$PHPSTAN_COMPONENT_CONFIG" "$PHPSTAN_LEVEL" "$PHPSTAN_LEVEL_SOURCE" 2>/dev/null || true
+}
+
+write_phpstan_producer_metadata
 
 # Memory limit (default: 2G)
 phpstan_args+=(--memory-limit=2G)
@@ -559,6 +624,9 @@ if [ -f "$COMPOSITE_AUTOLOAD" ]; then
     if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
         echo "DEBUG: Using composite autoloader: $COMPOSITE_AUTOLOAD"
         echo "DEBUG: Using PHPStan config: $PHPSTAN_BASE_CONFIG"
+        echo "DEBUG: PHPStan config source: $PHPSTAN_COMPONENT_CONFIG_SOURCE"
+        [ -n "$PHPSTAN_COMPONENT_CONFIG" ] && echo "DEBUG: Component PHPStan config: $PHPSTAN_COMPONENT_CONFIG"
+        echo "DEBUG: PHPStan level source: $PHPSTAN_LEVEL_SOURCE"
     fi
     phpstan_args+=(--autoload-file="$COMPOSITE_AUTOLOAD")
 fi
@@ -633,7 +701,9 @@ if [ -n "$PHPSTAN_MAX_PROCESSES" ] || [ -n "$PHPSTAN_PHP_VERSION" ]; then
     # Replace the --configuration arg with our temp config
     phpstan_args=(analyse)
     phpstan_args+=(--configuration="$PHPSTAN_TMPCONFIG")
-    phpstan_args+=(--level="$PHPSTAN_LEVEL")
+    if [ -n "${HOMEBOY_PHPSTAN_LEVEL:-}" ] || [ -z "$PHPSTAN_COMPONENT_CONFIG" ]; then
+        phpstan_args+=(--level="$PHPSTAN_LEVEL")
+    fi
     phpstan_args+=(--memory-limit=2G)
     # Baseline is pulled in via neon includes (PHPSTAN_TMPCONFIG includes
     # PHPSTAN_BASE_CONFIG which includes COMPONENT_BASELINE when present),
@@ -724,7 +794,10 @@ if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
     if [ "$json_exit" -ne 0 ] && is_parallel_worker_failure "$json_output"; then
         echo "Parallel worker failure detected, retrying single-process (--debug)..."
         prepare_phpstan_retry_config > /dev/null
-        retry_args=(analyse --configuration="$PHPSTAN_TMPCONFIG" --level="$PHPSTAN_LEVEL" --memory-limit=2G --no-progress --debug)
+        retry_args=(analyse --configuration="$PHPSTAN_TMPCONFIG" --memory-limit=2G --no-progress --debug)
+        if [ -n "${HOMEBOY_PHPSTAN_LEVEL:-}" ] || [ -z "$PHPSTAN_COMPONENT_CONFIG" ]; then
+            retry_args+=(--level="$PHPSTAN_LEVEL")
+        fi
         # Baseline is pulled in via PHPSTAN_TMPCONFIG → PHPSTAN_BASE_CONFIG
         # → COMPONENT_BASELINE include chain (no --baseline CLI flag in PHPStan 2.x).
         [ -f "$COMPOSITE_AUTOLOAD" ] && retry_args+=(--autoload-file="$COMPOSITE_AUTOLOAD")
@@ -1117,7 +1190,10 @@ if [ "$full_exit" -ne 0 ] && \
    { is_parallel_worker_failure_text "$stderr_output" || is_parallel_worker_failure_text "$stdout_output"; }; then
     echo "Parallel worker failure detected, retrying single-process (--debug)..."
     prepare_phpstan_retry_config > /dev/null
-    retry_args=(analyse --configuration="$PHPSTAN_TMPCONFIG" --level="$PHPSTAN_LEVEL" --memory-limit=2G --no-progress --debug)
+    retry_args=(analyse --configuration="$PHPSTAN_TMPCONFIG" --memory-limit=2G --no-progress --debug)
+    if [ -n "${HOMEBOY_PHPSTAN_LEVEL:-}" ] || [ -z "$PHPSTAN_COMPONENT_CONFIG" ]; then
+        retry_args+=(--level="$PHPSTAN_LEVEL")
+    fi
     # Baseline pulled in via PHPSTAN_TMPCONFIG include chain, same as summary-mode retry.
     [ -f "$COMPOSITE_AUTOLOAD" ] && retry_args+=(--autoload-file="$COMPOSITE_AUTOLOAD")
     add_phpstan_retry_targets
