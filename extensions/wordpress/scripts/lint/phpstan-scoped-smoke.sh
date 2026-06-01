@@ -23,6 +23,7 @@ CONFIG_CAPTURE="${TMPDIR}/phpstan-config-capture.neon"
 AUTOLOAD_CAPTURE="${TMPDIR}/phpstan-autoload-capture.php"
 OUTPUT_FILE="${TMPDIR}/phpstan-output.txt"
 FINDINGS_FILE="${TMPDIR}/phpstan-findings.json"
+PRODUCER_METADATA_FILE="${TMPDIR}/phpstan-producer-metadata.json"
 
 mkdir -p "${EXTENSION_DIR}/vendor/bin" "${COMPONENT_DIR}/tests" "${COMPONENT_DIR}/assets" "${COMPONENT_DIR}/includes" "${COMPONENT_DIR}/vendor_prefixed"
 touch "${EXTENSION_DIR}/phpstan.neon.dist"
@@ -144,8 +145,33 @@ assert_file_contains "$AUTOLOAD_CAPTURE" "${COMPONENT_DIR}/vendor_prefixed/autol
 run_phpstan
 assert_contains "--level=7" "full-component PHPStan run defaults to level 7"
 assert_not_contains "--baseline" "full-component PHPStan run avoids removed --baseline flag"
+assert_file_contains "$CONFIG_CAPTURE" "${EXTENSION_DIR}/phpstan.neon.dist" "full-component PHPStan config includes the extension default config"
 assert_file_contains "$CONFIG_CAPTURE" "${COMPONENT_DIR}/phpstan-baseline.neon" "full-component PHPStan config includes component baseline via neon"
 assert_file_not_contains "$OUTPUT_FILE" "ERRORS (raw)" "zero-error PHPStan JSON should not be printed as raw errors"
+
+printf '%s\n' 'parameters:' '    level: max' > "${COMPONENT_DIR}/phpstan.neon.dist"
+run_phpstan
+assert_not_contains "--level=7" "component PHPStan config controls level when env override is absent"
+assert_file_not_contains "$CONFIG_CAPTURE" "${EXTENSION_DIR}/phpstan.neon.dist" "component-config run does not duplicate the extension default config"
+assert_file_contains "$CONFIG_CAPTURE" "${COMPONENT_DIR}/phpstan.neon.dist" "component-config run includes the component config"
+
+HOMEBOY_PHPSTAN_LEVEL=5 run_phpstan
+assert_contains "--level=5" "HOMEBOY_PHPSTAN_LEVEL explicitly overrides component PHPStan config level"
+assert_file_contains "$CONFIG_CAPTURE" "${COMPONENT_DIR}/phpstan.neon.dist" "env override still uses component PHPStan config"
+
+HOMEBOY_PHPSTAN_PRODUCER_METADATA_FILE="$PRODUCER_METADATA_FILE" HOMEBOY_PHPSTAN_LEVEL=5 run_phpstan
+python3 - "$PRODUCER_METADATA_FILE" "$COMPONENT_DIR" <<'PY'
+import json
+import sys
+
+metadata = json.load(open(sys.argv[1], encoding="utf-8"))
+component_dir = sys.argv[2]
+assert metadata["phpstan_config_source"] == "component-local", metadata
+assert metadata["phpstan_component_config"] == f"{component_dir}/phpstan.neon.dist", metadata
+assert metadata["phpstan_level"] == "5", metadata
+assert metadata["phpstan_level_source"] == "env", metadata
+PY
+rm -f "${COMPONENT_DIR}/phpstan.neon.dist"
 
 HOMEBOY_LINT_GLOB='{main.php,assets/app.js,includes/extra.php}' run_phpstan
 assert_contains "${COMPONENT_DIR}/main.php" "glob scope includes matching PHP source file"
