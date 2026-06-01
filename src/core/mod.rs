@@ -4,6 +4,7 @@ pub mod config;
 pub mod agent_task;
 pub mod agent_task_aggregate;
 pub mod agent_task_provider;
+pub mod agent_task_schedule;
 pub mod agent_task_scheduler;
 pub mod api_jobs;
 pub mod artifact_manifest;
