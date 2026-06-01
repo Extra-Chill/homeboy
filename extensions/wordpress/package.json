@@ -38,6 +38,7 @@
     "test:audit-wp-codebox-execute": "node tests/audit-wp-codebox-fanout-smoke.js",
     "test:wp-codebox-task-runner": "node tests/wp-codebox-task-runner-smoke.js",
     "test:codebox-agent-task-executor": "node tests/codebox-agent-task-executor-smoke.js",
+    "test:codebox-agent-task-matrix": "node tests/codebox-agent-task-matrix-smoke.js",
     "test:refactor-source-wp-codebox": "node tests/refactor-source-wp-codebox-smoke.js"
   },
   "devDependencies": {
