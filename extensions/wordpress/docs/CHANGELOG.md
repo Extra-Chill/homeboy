@@ -2,6 +2,14 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.112.0] - 2026-06-01
+
+### Added
+- pass through Codebox runtime overlays
+
+### Fixed
+- exempt nonstandard PHP fixers from audit conventions
+
 ## [2.111.1] - 2026-06-01
 
 ### Fixed
