@@ -84,6 +84,50 @@ homeboy_wp_codebox_component_relative_path() {
     fi
 }
 
+homeboy_wp_codebox_mount_extra_bench_workloads() {
+    local workloads_value="${HOMEBOY_BENCH_EXTRA_WORKLOADS:-}"
+    [ -n "$workloads_value" ] || return 0
+
+    local workload_path
+    IFS=':' read -r -a workload_paths <<< "$workloads_value"
+    for workload_path in "${workload_paths[@]}"; do
+        [ -n "$workload_path" ] || continue
+        if [ ! -f "$workload_path" ]; then
+            echo "Error: extra bench workload not found: $workload_path" >&2
+            FAILED_STEP="WP Codebox bench workload setup"
+            exit 1
+        fi
+        MOUNTS_JSON=$(jq -nc \
+            --argjson mounts "$MOUNTS_JSON" \
+            --arg source "$(dirname "$workload_path")" \
+            --arg target "/wordpress/wp-content/plugins/${PLUGIN_SLUG}/tests/bench" \
+            '$mounts + [{source: $source, target: $target, mode: "readonly"}]')
+    done
+}
+
+homeboy_wp_codebox_extra_workload_scenarios_json() {
+    local workloads_value="${HOMEBOY_BENCH_EXTRA_WORKLOADS:-}"
+    local scenarios="[]"
+    [ -n "$workloads_value" ] || {
+        printf '%s\n' "$scenarios"
+        return 0
+    }
+
+    local workload_path workload_name scenario_id
+    IFS=':' read -r -a workload_paths <<< "$workloads_value"
+    for workload_path in "${workload_paths[@]}"; do
+        [ -n "$workload_path" ] || continue
+        workload_name="$(basename "$workload_path")"
+        scenario_id="${workload_name%.*}"
+        scenarios=$(jq -nc \
+            --argjson scenarios "$scenarios" \
+            --arg id "$scenario_id" \
+            --arg file "tests/bench/${workload_name}" \
+            '$scenarios + [{id: $id, file: $file, source: "rig", iterations: 0, metrics: {}}]')
+    done
+    printf '%s\n' "$scenarios"
+}
+
 homeboy_wp_codebox_find_plugin_file() {
     local plugin_dir="$1"
     local candidate
@@ -379,6 +423,8 @@ if printf '%s' "$WP_CODEBOX_FILE_MOUNTS_JSON" | jq -e 'type == "array" and lengt
     done < <(printf '%s' "$WP_CODEBOX_FILE_MOUNTS_JSON" | jq -c '.[]')
 fi
 
+homeboy_wp_codebox_mount_extra_bench_workloads
+
 SHARED_STATE_HOST="${HOMEBOY_BENCH_SHARED_STATE:-}"
 if [ -n "$SHARED_STATE_HOST" ]; then
     mkdir -p "$SHARED_STATE_HOST"
@@ -393,7 +439,19 @@ if ! homeboy_wordpress_emit_browser_target "$settings_json" "$SHARED_STATE_HOST"
 fi
 
 BENCH_DIR="${PLUGIN_PATH}/tests/bench"
-if [ ! -d "$BENCH_DIR" ] && ! printf '%s' "$WP_CODEBOX_WORKLOADS_JSON" | jq -e 'type == "array" and length > 0' >/dev/null 2>&1; then
+HAS_EXTRA_BENCH_WORKLOADS=0
+[ -n "${HOMEBOY_BENCH_EXTRA_WORKLOADS:-}" ] && HAS_EXTRA_BENCH_WORKLOADS=1
+
+if [ "${HOMEBOY_BENCH_LIST_ONLY:-}" = "1" ]; then
+    mkdir -p "$(dirname "$RESULTS_FILE")"
+    jq -n \
+        --arg component "$COMPONENT_ID" \
+        --argjson scenarios "$(homeboy_wp_codebox_extra_workload_scenarios_json)" \
+        '{component_id: $component, iterations: 0, scenarios: $scenarios}' > "$RESULTS_FILE"
+    exit 0
+fi
+
+if [ ! -d "$BENCH_DIR" ] && [ "$HAS_EXTRA_BENCH_WORKLOADS" -eq 0 ] && ! printf '%s' "$WP_CODEBOX_WORKLOADS_JSON" | jq -e 'type == "array" and length > 0' >/dev/null 2>&1; then
     echo "Warning: No bench workloads found for ${PLUGIN_PATH}" >&2
     if [ -n "${HOMEBOY_BENCH_RESULTS_FILE:-}" ]; then
         homeboy_write_empty_bench_results "$COMPONENT_ID" 0 "$RESULTS_FILE"
