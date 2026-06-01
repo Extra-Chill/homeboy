@@ -176,7 +176,7 @@
         "staging_path": "/tmp/homeboy-staging",
         "root_must_match_target_basename": true,
         "required_header": {
-          "file_glob": "*.php",
+          "file": "{{targetBasename}}.php",
           "contains": "Plugin Name:"
         }
       },
