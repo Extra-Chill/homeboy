@@ -155,6 +155,32 @@ result. The workflow passes the runner config to the WP Codebox CLI, mounts
 provider/runtime plugins, and reads back generated artifacts from the run
 workspace.
 
+## Agent-task executor provider
+
+The WordPress extension also exposes a Homeboy-native executor provider contract
+for generic agent tasks:
+
+```json
+{
+  "schema": "homeboy/agent-task-executor-provider/v1",
+  "id": "wordpress.codebox-agent-task-executor",
+  "backend": "codebox",
+  "request_schema": "homeboy/agent-task-request/v1",
+  "outcome_schema": "homeboy/agent-task-outcome/v1"
+}
+```
+
+`homeboy-codebox-agent-task-executor.cjs` is the provider entry point. It keeps
+Homeboy core Codebox-agnostic by translating the generic `AgentTaskRequest` into
+the extension-owned WP Codebox request shape, then translating Codebox output back
+to `AgentTaskOutcome` with Homeboy-native artifacts, evidence refs, diagnostics,
+and failure classifications.
+
+The provider is intentionally marked preparatory while Codebox's generic host-tool
+registry is still tracked in https://github.com/chubes4/wp-codebox/issues/392.
+Once that surface lands, the same provider contract can attach richer sandbox
+tools without moving Codebox-specific logic into Homeboy core.
+
 ## Runner config surface
 
 Most consumers should use `.github/workflows/datamachine-agent-ci.yml` rather than
