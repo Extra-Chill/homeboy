@@ -164,7 +164,7 @@ name: Data Machine Agent CI (reusable)
         type: boolean
         default: false
       allowed_repos:
-        description: JSON array of OWNER/REPO strings the injected GitHub profile may access. Defaults to [target_repo].
+        description: JSON array of OWNER/REPO strings the injected GitHub profile may access. Defaults to app_token_repos when provided, otherwise [target_repo].
         type: string
         default: "[]"
       engine_key:
@@ -665,6 +665,7 @@ jobs:
           DAILY_MEMORY_ENABLED: ${{ inputs.daily_memory_enabled }}
           DISABLE_DATAMACHINE_DIRECTIVES: ${{ inputs.disable_datamachine_directives }}
           EXTRA_REQUIRED_ABILITIES: ${{ inputs.extra_required_abilities }}
+          APP_TOKEN_REPOS: ${{ inputs.app_token_repos }}
           ALLOWED_REPOS: ${{ inputs.allowed_repos }}
           ENGINE_KEY: ${{ inputs.engine_key }}
           TOOL_RESULTS_KEY: ${{ inputs.tool_results_key }}
@@ -762,6 +763,8 @@ jobs:
           extra_required_abilities_json="$(validate_json_input extra_required_abilities array "$EXTRA_REQUIRED_ABILITIES")"
           success_completion_outcomes_json="$(validate_json_input success_completion_outcomes array "$SUCCESS_COMPLETION_OUTCOMES")"
           allowed_repos_json="$(validate_json_input allowed_repos array "$ALLOWED_REPOS")"
+          app_token_repos_json="$(jq -Rsc 'split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(. != ""))' <<< "${APP_TOKEN_REPOS:-$TARGET_REPO}")"
+          effective_allowed_repos_json="$(jq -c --arg target "$TARGET_REPO" --argjson allowed "$allowed_repos_json" --argjson appTokenRepos "$app_token_repos_json" 'if ($allowed | length) > 0 then $allowed elif ($appTokenRepos | length) > 0 then $appTokenRepos else [$target] end')"
           ability_tools_json="$(validate_json_input ability_tools array "$ABILITY_TOOLS")"
           tool_recorders_json="$(validate_json_input tool_recorders array "$TOOL_RECORDERS")"
           pipeline_step_patches_json="$(validate_json_input pipeline_step_patches array "$PIPELINE_STEP_PATCHES")"
@@ -832,7 +835,7 @@ jobs:
             --argjson dailyMemoryEnabled "$DAILY_MEMORY_ENABLED" \
             --argjson disableDatamachineDirectives "$DISABLE_DATAMACHINE_DIRECTIVES" \
             --argjson extraRequiredAbilities "$extra_required_abilities_json" \
-            --argjson allowedRepos "$allowed_repos_json" \
+            --argjson allowedRepos "$effective_allowed_repos_json" \
             --argjson abilityTools "$ability_tools_json" \
             --argjson toolRecorders "$tool_recorders_json" \
             --argjson enableTerminalActions "$ENABLE_TERMINAL_ACTIONS" \
