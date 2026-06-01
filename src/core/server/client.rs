@@ -9,6 +9,7 @@ use crate::core::engine::invocation;
 use crate::core::engine::resource::{ChildProcessIdentity, ExtensionChildResourceSummary};
 use crate::core::engine::shell;
 use crate::core::error::{Error, Result};
+use crate::core::runner::{quote_runner_env_value, remote_shell_path_preamble};
 use chrono::Utc;
 
 use super::{
@@ -310,17 +311,16 @@ impl SshClient {
         self.execute_with_stdin(&effective, None)
     }
 
-    /// Build an env preamble that sets configured variables via `export`.
-    /// Values are quoted but allow shell expansion (e.g. `$PATH`).
+    /// Build an env preamble that normalizes runner command lookup and sets
+    /// configured variables via `export`. PATH values allow shell expansion
+    /// so configs can append/prepend `$PATH`.
     fn prepend_env(&self, command: &str) -> String {
-        if self.env.is_empty() {
-            return command.to_string();
-        }
-        let exports: Vec<String> = self
-            .env
-            .iter()
-            .map(|(k, v)| format!("export {}={}", k, shell::quote_arg(v)))
-            .collect();
+        let mut exports = vec![remote_shell_path_preamble().to_string()];
+        exports.extend(
+            self.env
+                .iter()
+                .map(|(k, v)| format!("export {}={}", k, quote_runner_env_value(k, v))),
+        );
         format!("{} && {}", exports.join(" && "), command)
     }
 
