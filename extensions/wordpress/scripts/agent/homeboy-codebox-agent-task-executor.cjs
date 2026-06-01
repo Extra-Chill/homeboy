@@ -51,7 +51,7 @@ function requestTimeoutMs(request) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
 }
 
-function timeoutPayload(request, timeoutMs) {
+function timeoutPayload(timeoutMs) {
   const artifacts = argValue('--artifacts');
   const evidencePath = artifacts ? `${artifacts}/homeboy-codebox-task-runner.json` : '';
   const knownArtifacts = [];
@@ -121,7 +121,7 @@ function runTaskRunner(request) {
 
   let payload = {};
   if (result.error && result.error.code === 'ETIMEDOUT') {
-    payload = timeoutPayload(request, requestTimeoutMs(request));
+    payload = timeoutPayload(requestTimeoutMs(request));
     return agentTaskOutcomeFromCodeboxResult(request, payload, { exitStatus: 1 });
   }
   if (result.stdout.trim()) {
