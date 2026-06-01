@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.110.5] - 2026-06-01
+
+### Fixed
+- preserve Codebox timeout evidence
+- bound Codebox agent task execution
+
 ## [2.110.4] - 2026-06-01
 
 ### Changed
