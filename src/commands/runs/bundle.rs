@@ -36,9 +36,9 @@ pub(super) struct RunsImportArgs {
     /// using `--from-gh-actions`. Mutually exclusive with `--from-gh-actions`.
     pub input: Option<PathBuf>,
 
-    /// Ingest artifacts directly from a GitHub Actions workflow instead of
-    /// from a portable bundle directory. When set, all of `--component`,
-    /// `--repo`, `--workflow`, and `--artifact-glob` are required.
+    /// Ingest artifacts directly from GitHub Actions instead of from a
+    /// portable bundle directory. When set, `--component`, `--repo`,
+    /// `--artifact-glob`, and one of `--workflow` or `--run-id` are required.
     #[arg(long, default_value_t = false)]
     pub from_gh_actions: bool,
 
@@ -51,6 +51,9 @@ pub(super) struct RunsImportArgs {
     /// Workflow filename or display name (gh-actions mode).
     #[arg(long)]
     pub workflow: Option<String>,
+    /// Exact GitHub Actions run id (gh-actions mode).
+    #[arg(long = "run-id")]
+    pub run_id: Option<u64>,
     /// Glob filter for artifact names (gh-actions mode). Examples:
     /// `'design-distribution-*'`, `'*.json'`.
     #[arg(long = "artifact-glob")]
@@ -231,7 +234,12 @@ fn portable_artifact_label(path: &str, fallback: &str) -> String {
 fn import_via_gh_actions(args: RunsImportArgs) -> CmdResult<RunsOutput> {
     let component_id = require_gh_arg(args.component_id.clone(), "component")?;
     let repo = require_gh_arg(args.repo.clone(), "repo")?;
-    let workflow = require_gh_arg(args.workflow.clone(), "workflow")?;
+    let workflow = args.workflow.clone().filter(|v| !v.trim().is_empty());
+    if workflow.is_none() && args.run_id.is_none() {
+        return Err(Error::validation_missing_argument(vec![
+            "--workflow or --run-id".to_string(),
+        ]));
+    }
     let artifact_glob = require_gh_arg(args.artifact_glob.clone(), "artifact-glob")?;
     let since = args.since.clone().unwrap_or_else(|| "30d".to_string());
 
@@ -239,6 +247,7 @@ fn import_via_gh_actions(args: RunsImportArgs) -> CmdResult<RunsOutput> {
         component_id,
         repo,
         workflow,
+        run_id: args.run_id,
         artifact_glob,
         since,
         limit: args.limit,
