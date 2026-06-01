@@ -68,6 +68,13 @@ try {
       mode: 'readonly',
       metadata: { component: 'php-ai-client', ref: 'custom-provider-auth' },
     }],
+    runtime_overlays: [{
+      type: 'bundled-library',
+      library: 'php-ai-client',
+      source: '/components/php-ai-client',
+      target: '/wordpress/wp-includes/php-ai-client',
+      metadata: { component: 'php-ai-client', ref: 'custom-provider-auth' },
+    }],
     secret_env: ['OPENCODE_API_KEY'],
     orchestrator: {
       id: 'homeboy-extensions/audit-wp-codebox-fanout',
@@ -109,6 +116,12 @@ try {
     '/repo/plugin:/wordpress/wp-content/plugins/plugin:readwrite',
     '--runtime-stack-mount',
     '/components/wordpress-develop:/wordpress:readonly',
+    '--runtime-overlay-json',
+    JSON.stringify({
+      type: 'wordpress-scoped-bundle',
+      source: '/components/wordpress-scoped-bundle',
+      scope: 'runtime',
+    }),
     '--max-turns',
     '80',
     '--task-timeout-seconds',
@@ -166,6 +179,11 @@ try {
   assert.equal(recipe.runtime.stack.mounts[1].source, '/components/wordpress-develop');
   assert.equal(recipe.runtime.stack.mounts[1].target, '/wordpress');
   assert.equal(recipe.runtime.stack.mounts[1].metadata.kind, 'homeboy-runtime-stack');
+  assert.equal(recipe.runtime.overlays[0].type, 'bundled-library');
+  assert.equal(recipe.runtime.overlays[0].library, 'php-ai-client');
+  assert.equal(recipe.runtime.overlays[0].source, '/components/php-ai-client');
+  assert.equal(recipe.runtime.overlays[1].type, 'wordpress-scoped-bundle');
+  assert.equal(recipe.runtime.overlays[1].source, '/components/wordpress-scoped-bundle');
   assert.equal(recipe.inputs.extraPlugins[0].slug, 'agents-api');
   assert.equal(recipe.inputs.extraPlugins[1].slug, 'data-machine');
   assert.equal(recipe.inputs.extraPlugins[2].slug, 'data-machine-code');

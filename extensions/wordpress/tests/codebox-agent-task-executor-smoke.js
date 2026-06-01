@@ -59,6 +59,13 @@ const request = {
         mode: 'readonly',
         metadata: { component: 'php-ai-client', ref: 'custom-provider-auth' },
       }],
+      runtime_overlays: [{
+        type: 'bundled-library',
+        library: 'php-ai-client',
+        source: '/components/php-ai-client',
+        target: '/wordpress/wp-includes/php-ai-client',
+        metadata: { component: 'php-ai-client', ref: 'custom-provider-auth' },
+      }],
       secret_env: ['OPENAI_API_KEY'],
       max_turns: 8,
     },
@@ -94,6 +101,13 @@ assert.deepEqual(codeboxRequest.runtime_stack_mounts, [{
   source: '/components/php-ai-client',
   target: '/wordpress/wp-includes/php-ai-client',
   mode: 'readonly',
+  metadata: { component: 'php-ai-client', ref: 'custom-provider-auth' },
+}]);
+assert.deepEqual(codeboxRequest.runtime_overlays, [{
+  type: 'bundled-library',
+  library: 'php-ai-client',
+  source: '/components/php-ai-client',
+  target: '/wordpress/wp-includes/php-ai-client',
   metadata: { component: 'php-ai-client', ref: 'custom-provider-auth' },
 }]);
 assert.deepEqual(codeboxRequest.secret_env, ['OPENAI_API_KEY']);
@@ -228,6 +242,7 @@ try {
   const captured = JSON.parse(fs.readFileSync(capture, 'utf8'));
   assert.equal(captured.request.schema, 'homeboy/wp-codebox-task-request/v1');
   assert.equal(captured.request.orchestrator.agent_task_id, 'task-123');
+  assert.equal(captured.request.runtime_overlays[0].type, 'bundled-library');
 
   const codexResult = spawnSync(process.execPath, [
     path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs'),
