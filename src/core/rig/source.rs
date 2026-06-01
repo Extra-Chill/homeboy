@@ -212,6 +212,69 @@ pub fn update_all_sources() -> Result<RigSourceUpdateResult> {
     Ok(aggregate)
 }
 
+pub fn update_source(selector: Option<&str>) -> Result<RigSourceUpdateResult> {
+    let Some(selector) = selector else {
+        return update_all_sources();
+    };
+
+    let matches = list_sources()?
+        .sources
+        .into_iter()
+        .filter(|source| source_matches(source, selector))
+        .collect::<Vec<_>>();
+
+    if matches.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "source",
+            format!("No installed rig source matches '{}'", selector),
+            Some(selector.to_string()),
+            None,
+        ));
+    }
+    if matches.len() > 1 {
+        let tried = matches
+            .iter()
+            .map(|source| source.package_id.clone())
+            .collect::<Vec<_>>();
+        return Err(Error::validation_invalid_argument(
+            "source",
+            format!(
+                "Selector '{}' matches multiple rig sources; use the full source or package path",
+                selector
+            ),
+            Some(selector.to_string()),
+            Some(tried),
+        ));
+    }
+
+    let source = matches.into_iter().next().expect("checked non-empty");
+    if source.linked {
+        let mut skipped = Vec::new();
+        for rig in source.rigs {
+            skipped.push(SkippedRigSourceUpdate {
+                id: rig.id,
+                source: source.source.clone(),
+                reason: "linked local sources are updated in place outside homeboy".to_string(),
+            });
+        }
+        for stack in source.stacks {
+            skipped.push(SkippedRigSourceUpdate {
+                id: stack.id,
+                source: source.source.clone(),
+                reason: "linked local sources are updated in place outside homeboy".to_string(),
+            });
+        }
+        return Ok(RigSourceUpdateResult {
+            updated: Vec::new(),
+            updated_stacks: Vec::new(),
+            skipped,
+            failed: Vec::new(),
+        });
+    }
+
+    update_group(source)
+}
+
 fn update_group(source: RigSourceGroup) -> Result<RigSourceUpdateResult> {
     let package_path = PathBuf::from(&source.package_path);
     if !package_path.exists() {

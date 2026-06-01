@@ -155,6 +155,7 @@ pub struct RigSourcesOutput {
 pub enum RigSourcesReport {
     List(rig::RigSourceListResult),
     Remove(rig::RigSourceRemoveResult),
+    Refresh(rig::RigSourceUpdateResult),
 }
 
 #[derive(Serialize)]
