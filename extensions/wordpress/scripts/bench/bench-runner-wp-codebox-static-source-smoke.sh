@@ -7,9 +7,11 @@ TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/homeboy-wp-codebox-static-source-smoke.XX
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
 SOURCE_ROOT="${TMP_ROOT}/wp-site-generator"
+EXTRA_WORKLOAD="${TMP_ROOT}/rig-workload.php"
 mkdir -p "${SOURCE_ROOT}/static-sites/demo" "${SOURCE_ROOT}/.github/homeboy"
 printf '<!doctype html><title>Demo</title>\n' > "${SOURCE_ROOT}/static-sites/demo/index.html"
 printf '<?php return array();\n' > "${SOURCE_ROOT}/.github/homeboy/ssi-import-diagnostics.php"
+printf '<?php return function (): array { return array(); };\n' > "$EXTRA_WORKLOAD"
 
 RESOLVE_HELPER="${TMP_ROOT}/resolve-context.sh"
 cat > "$RESOLVE_HELPER" <<'STUB'
@@ -89,6 +91,7 @@ HOMEBOY_WORDPRESS_DEPENDENCY_HELPER="$DEPENDENCY_HELPER" \
 HOMEBOY_SMOKE_SOURCE_ROOT="$SOURCE_ROOT" \
 HOMEBOY_SMOKE_CAPTURE_FILE="$CAPTURE_FILE" \
 HOMEBOY_SETTINGS_JSON="$SETTINGS_JSON" \
+HOMEBOY_BENCH_EXTRA_WORKLOADS="$EXTRA_WORKLOAD" \
 HOMEBOY_WP_CODEBOX_BIN="$WP_CODEBOX_BIN" \
 HOMEBOY_BENCH_RESULTS_FILE="${TMP_ROOT}/bench-results.json" \
 HOMEBOY_WP_CODEBOX_ARTIFACTS_DIR="${TMP_ROOT}/artifacts" \
@@ -100,9 +103,28 @@ bash "$SCRIPT_DIR/bench-runner-wp-codebox.sh" >/dev/null
 jq -e --arg sourceRoot "$SOURCE_ROOT" '
     .recipe.inputs.extraPlugins == []
     and (.recipe.inputs.mounts[] | select(.source == $sourceRoot and .target == "/wordpress/wp-content/plugins/wp-site-generator" and .mode == "readonly"))
+    and (.recipe.inputs.mounts[] | select(.source == ($sourceRoot | sub("/wp-site-generator$"; ""))) | .target == "/wordpress/wp-content/plugins/wp-site-generator/tests/bench")
     and (.recipe.runtime.blueprint.steps[] | select(.step == "installPlugin" and .options.targetFolderName == "static-site-importer"))
     and (.recipe.workflow.steps[0].args[] | select(startswith("workloads-json=") and contains("static-site-importer import-theme")))
 ' "$CAPTURE_FILE" >/dev/null
+
+LIST_RESULTS_FILE="${TMP_ROOT}/bench-list-results.json"
+HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$RESOLVE_HELPER" \
+HOMEBOY_RUNTIME_BENCH_HELPER_SH="$BENCH_HELPER" \
+HOMEBOY_WORDPRESS_DEPENDENCY_HELPER="$DEPENDENCY_HELPER" \
+HOMEBOY_SMOKE_SOURCE_ROOT="$SOURCE_ROOT" \
+HOMEBOY_SETTINGS_JSON="$SETTINGS_JSON" \
+HOMEBOY_BENCH_EXTRA_WORKLOADS="$EXTRA_WORKLOAD" \
+HOMEBOY_BENCH_RESULTS_FILE="$LIST_RESULTS_FILE" \
+HOMEBOY_RUNTIME_FAILURE_TRAP="" \
+HOMEBOY_BENCH_LIST_ONLY=1 \
+bash "$SCRIPT_DIR/bench-runner-wp-codebox.sh" >/dev/null
+
+jq -e '
+    .component_id == "wp-site-generator"
+    and .iterations == 0
+    and (.scenarios[] | select(.id == "rig-workload" and .file == "tests/bench/rig-workload.php" and .source == "rig"))
+' "$LIST_RESULTS_FILE" >/dev/null
 
 PLUGIN_ROOT="${TMP_ROOT}/plugin-component"
 mkdir -p "$PLUGIN_ROOT"
