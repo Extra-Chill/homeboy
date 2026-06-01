@@ -31,7 +31,7 @@ function hasFlag(name) {
 }
 
 function usage() {
-  console.error('Usage: homeboy-wp-codebox-task-runner.cjs --agents-api <path> --data-machine <path> --data-machine-code <path> [--homeboy <path>] [--homeboy-extensions <path>] [--wp-codebox-bin <bin>] [--provider <id>] [--model <id>] [--max-turns <n>] [--task-timeout-seconds <n>] [--provider-plugin-path <path>] [--secret-env <ENV>] [--mount <host:vfs[:mode]>] [--runtime-stack-mount <host:vfs[:mode]>] [--artifacts <dir>]');
+  console.error('Usage: homeboy-wp-codebox-task-runner.cjs --agents-api <path> --data-machine <path> --data-machine-code <path> [--homeboy <path>] [--homeboy-extensions <path>] [--wp-codebox-bin <bin>] [--provider <id>] [--model <id>] [--max-turns <n>] [--task-timeout-seconds <n>] [--provider-plugin-path <path>] [--secret-env <ENV>] [--mount <host:vfs[:mode]>] [--runtime-stack-mount <host:vfs[:mode]>] [--runtime-overlay-json <json>] [--artifacts <dir>]');
   process.exit(1);
 }
 
@@ -136,6 +136,13 @@ function runtimeStackMountEntries(request) {
   ];
 }
 
+function runtimeOverlayEntries(request) {
+  return [
+    ...(request.runtime_overlays || []),
+    ...argValues('--runtime-overlay-json').map((value) => JSON.parse(value)),
+  ];
+}
+
 function realPathForContainment(filePath) {
   const resolved = path.resolve(filePath);
   if (fs.existsSync(resolved)) {
@@ -232,12 +239,16 @@ function recipeForRequest(request, options) {
   }
 
   const runtimeStackMounts = runtimeStackMountEntries(request);
+  const runtimeOverlays = runtimeOverlayEntries(request);
   const runtime = {
     wp: argValue('--wp') || 'latest',
     blueprint: { steps: [] },
   };
   if (runtimeStackMounts.length > 0) {
     runtime.stack = { mounts: runtimeStackMounts };
+  }
+  if (runtimeOverlays.length > 0) {
+    runtime.overlays = runtimeOverlays;
   }
 
   return {
