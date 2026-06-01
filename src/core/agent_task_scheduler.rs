@@ -437,6 +437,7 @@ impl AgentTaskScheduleSupport {
                 label: Some("scheduler cancellation".to_string()),
             }],
             diagnostics: Vec::new(),
+            workflow: None,
             follow_up: None,
             metadata: Value::Null,
         }
@@ -460,6 +461,7 @@ impl AgentTaskScheduleSupport {
                 message: format!("task exceeded timeout_ms={timeout_ms}"),
                 data: Value::Null,
             }],
+            workflow: None,
             follow_up: None,
             metadata: Value::Null,
         }
@@ -811,6 +813,7 @@ mod tests {
                 label: Some("task log".to_string()),
             }],
             diagnostics: Vec::new(),
+            workflow: None,
             follow_up: None,
             metadata: json!({}),
         }

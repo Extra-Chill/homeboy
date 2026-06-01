@@ -4,6 +4,12 @@ use serde_json::Value;
 #[cfg(test)]
 use crate::core::redaction::RedactionPolicy;
 
+pub use super::agent_task_aggregate::{
+    AgentTaskAggregateReport, AgentTaskAggregateSummary, AgentTaskArtifactInventoryItem,
+    AgentTaskDecisionRef, AgentTaskMatrixRow, AgentTaskReconciliationDecision,
+    AgentTaskReconciliationItem, AGENT_TASK_AGGREGATE_SCHEMA,
+};
+
 pub const AGENT_TASK_REQUEST_SCHEMA: &str = "homeboy/agent-task-request/v1";
 pub const AGENT_TASK_OUTCOME_SCHEMA: &str = "homeboy/agent-task-outcome/v1";
 pub const AGENT_TASK_ARTIFACT_SCHEMA: &str = "homeboy/agent-task-artifact/v1";
@@ -1062,6 +1068,7 @@ mod tests {
                     artifacts: Vec::new(),
                     evidence_refs: Vec::new(),
                     diagnostics: Vec::new(),
+                    workflow: None,
                     follow_up: None,
                     metadata: json!({}),
                 })
@@ -1100,6 +1107,7 @@ mod tests {
                     artifacts: Vec::new(),
                     evidence_refs: Vec::new(),
                     diagnostics: Vec::new(),
+                    workflow: None,
                     follow_up: None,
                     metadata: json!({}),
                 })
@@ -1217,6 +1225,7 @@ mod tests {
                     artifacts: Vec::new(),
                     evidence_refs: Vec::new(),
                     diagnostics: Vec::new(),
+                    workflow: None,
                     follow_up: None,
                     metadata: json!({}),
                 })
