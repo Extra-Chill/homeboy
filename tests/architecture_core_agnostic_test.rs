@@ -302,6 +302,67 @@ fn source_file(relative_path: &str) -> String {
 }
 
 #[test]
+fn deploy_archive_core_stays_free_of_wordpress_header_semantics() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut violations = Vec::new();
+    let forbidden = [
+        "Plugin Name",
+        "Theme Name",
+        "Text Domain",
+        "Requires at least",
+        "Requires PHP",
+        "Tested up to",
+        "Stable tag",
+        "style.css",
+    ];
+    let scanned_roots = ["src/core/deploy", "tests/commands/deploy_test.rs"];
+
+    for relative_path in scanned_roots {
+        validate_files_for_forbidden_literals(
+            root,
+            &root.join(relative_path),
+            &forbidden,
+            &mut violations,
+        );
+    }
+
+    assert!(
+        violations.is_empty(),
+        "core deploy/archive implementation and tests must not bake in WordPress plugin/theme header semantics. Keep domain-specific archive verification in extension-owned config. Violations:\n{}",
+        violations.join("\n")
+    );
+}
+
+fn validate_files_for_forbidden_literals(
+    root: &std::path::Path,
+    path: &std::path::Path,
+    forbidden: &[&str],
+    violations: &mut Vec<String>,
+) {
+    if path.is_dir() {
+        for entry in std::fs::read_dir(path).expect("read source directory") {
+            let entry = entry.expect("read source entry");
+            validate_files_for_forbidden_literals(root, &entry.path(), forbidden, violations);
+        }
+        return;
+    }
+
+    if path.extension().is_none_or(|extension| extension != "rs") {
+        return;
+    }
+
+    let relative = relative_source_path(root, path);
+    let content = std::fs::read_to_string(path).expect("read source file");
+    for (index, line) in content.lines().enumerate() {
+        for term in forbidden {
+            if line.contains(term) {
+                violations.push(format!("{relative}:{} contains `{term}`", index + 1));
+            }
+        }
+    }
+}
+
+#[test]
 fn core_source_does_not_depend_on_command_layer() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let core_root = root.join("src/core");
