@@ -90,6 +90,11 @@ assert.equal(codeboxRequest.task.expected_artifacts[0], 'screenshot');
 assert.equal(codeboxRequest.orchestrator.agent_task_id, 'task-123');
 assert.equal(codeboxRequest.audit_findings[0].id, 'finding-1');
 
+assert.equal(codeboxTaskRequestFromAgentTaskRequest({
+  ...request,
+  limits: { task_timeout_seconds: 7 },
+}).task_timeout_seconds, 7);
+
 const outcome = agentTaskOutcomeFromCodeboxResult(request, {
   success: false,
   provider_error: true,
@@ -137,25 +142,31 @@ try {
   assert.equal(contractResult.status, 0, contractResult.stderr || contractResult.stdout);
   assert.equal(JSON.parse(contractResult.stdout).id, 'wordpress.codebox-agent-task-executor');
 
+  const artifactRoot = path.join(root, 'timeout-artifacts');
   const hangingRequest = {
     ...request,
     task_id: 'task-timeout',
-    limits: { timeout_ms: 50 },
+    limits: { task_timeout_seconds: 1 },
   };
   const timeoutResult = spawnSync(process.execPath, [
     path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs'),
     '--task-runner',
     writeHangingTaskRunner(root),
+    '--artifacts',
+    artifactRoot,
   ], {
     encoding: 'utf8',
     input: JSON.stringify(hangingRequest),
-    timeout: 2000,
+    timeout: 3000,
   });
   assert.equal(timeoutResult.status, 1, timeoutResult.stderr || timeoutResult.stdout);
   const timeoutOutcome = JSON.parse(timeoutResult.stdout);
   assert.equal(timeoutOutcome.status, 'timeout');
   assert.equal(timeoutOutcome.failure_classification, 'timeout');
   assert.equal(timeoutOutcome.diagnostics[0].class, 'codebox.timeout');
+  assert.equal(timeoutOutcome.diagnostics[0].data.timeout_ms, 1000);
+  assert.equal(timeoutOutcome.artifacts[0].path, artifactRoot);
+  assert.equal(timeoutOutcome.metadata.codebox.evidence_path, path.join(artifactRoot, 'homeboy-codebox-task-runner.json'));
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
 }

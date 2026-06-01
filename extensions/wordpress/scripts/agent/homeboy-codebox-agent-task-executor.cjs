@@ -44,9 +44,51 @@ function readRequest() {
 }
 
 function requestTimeoutMs(request) {
-  const timeout = request?.limits?.timeout_ms || request?.limits?.max_runtime_ms;
+  const timeoutMs = request?.limits?.timeout_ms || request?.limits?.max_runtime_ms;
+  const timeoutSeconds = request?.limits?.task_timeout_seconds || request?.limits?.taskTimeoutSeconds;
+  const timeout = timeoutMs || (timeoutSeconds ? Number.parseInt(timeoutSeconds, 10) * 1000 : undefined);
   const parsed = Number.parseInt(timeout, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+function timeoutPayload(request, timeoutMs) {
+  const artifacts = argValue('--artifacts');
+  const evidencePath = artifacts ? `${artifacts}/homeboy-codebox-task-runner.json` : '';
+  const knownArtifacts = [];
+  if (artifacts) {
+    knownArtifacts.push({
+      id: 'homeboy-codebox-artifacts',
+      kind: 'codebox-artifact-directory',
+      path: artifacts,
+      metadata: { evidencePath },
+    });
+  }
+  if (evidencePath && fs.existsSync(evidencePath)) {
+    knownArtifacts.push({
+      id: 'homeboy-codebox-task-runner-preflight',
+      kind: 'codebox-task-runner-preflight',
+      path: evidencePath,
+      metadata: { artifacts },
+    });
+  }
+
+  return {
+    success: false,
+    timeout: true,
+    summary: `WP Codebox agent task timed out after ${timeoutMs}ms.`,
+    artifacts: knownArtifacts,
+    evidence_refs: evidencePath && fs.existsSync(evidencePath) ? [{
+      kind: 'codebox-task-runner-preflight',
+      uri: evidencePath,
+      label: 'WP Codebox task runner preflight evidence',
+    }] : [],
+    diagnostics: [{
+      class: 'codebox.timeout',
+      message: 'Task runner exceeded the AgentTaskRequest timeout.',
+      data: { timeout_ms: timeoutMs, artifacts, evidence_path: evidencePath },
+    }],
+    metadata: { timeout_ms: timeoutMs, artifacts, evidence_path: evidencePath },
+  };
 }
 
 function runTaskRunner(request) {
@@ -79,16 +121,7 @@ function runTaskRunner(request) {
 
   let payload = {};
   if (result.error && result.error.code === 'ETIMEDOUT') {
-    payload = {
-      success: false,
-      timeout: true,
-      summary: `WP Codebox agent task timed out after ${requestTimeoutMs(request)}ms.`,
-      diagnostics: [{
-        class: 'codebox.timeout',
-        message: 'Task runner exceeded the AgentTaskRequest timeout.',
-        data: { timeout_ms: requestTimeoutMs(request) },
-      }],
-    };
+    payload = timeoutPayload(request, requestTimeoutMs(request));
     return agentTaskOutcomeFromCodeboxResult(request, payload, { exitStatus: 1 });
   }
   if (result.stdout.trim()) {
