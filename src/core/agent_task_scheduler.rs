@@ -1,13 +1,17 @@
 use std::collections::{HashMap, VecDeque};
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::core::agent_task::{
-    AgentTaskDiagnostic, AgentTaskEvidenceRef, AgentTaskFailureClassification, AgentTaskOutcome,
-    AgentTaskOutcomeStatus, AgentTaskRequest, AGENT_TASK_OUTCOME_SCHEMA,
+    AgentTaskArtifact, AgentTaskDiagnostic, AgentTaskEvidenceRef, AgentTaskFailureClassification,
+    AgentTaskOutcome, AgentTaskOutcomeStatus, AgentTaskRequest, AGENT_TASK_ARTIFACT_SCHEMA,
+    AGENT_TASK_OUTCOME_SCHEMA,
 };
 pub use crate::core::agent_task_schedule::{
     AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
@@ -465,11 +469,15 @@ impl AgentTaskScheduleSupport {
 
             let task = running.remove(index);
             executor.cancel(&task.task_id);
-            let outcome =
-                Self::timeout_outcome(task.task_id.clone(), task.timeout_ms.unwrap_or_default());
+            let outcome = Self::timeout_outcome(
+                task.task_id.clone(),
+                task.timeout_ms.unwrap_or_default(),
+                Some(&task.request),
+                "scheduler_timeout",
+            );
             events.push(event(
                 &task.task_id,
-                AgentTaskState::TimedOut,
+                Self::state_for_outcome(&outcome),
                 task.attempt,
                 outcome.summary.clone(),
             ));
@@ -492,6 +500,14 @@ impl AgentTaskScheduleSupport {
                         data: Value::Null,
                     });
                 }
+            }
+
+            if outcome.status == AgentTaskOutcomeStatus::Timeout {
+                Self::reconcile_timeout_artifacts(
+                    &mut outcome,
+                    &running.request,
+                    "provider_timeout",
+                );
             }
         }
         outcome
@@ -517,8 +533,13 @@ impl AgentTaskScheduleSupport {
         }
     }
 
-    fn timeout_outcome(task_id: String, timeout_ms: u64) -> AgentTaskOutcome {
-        AgentTaskOutcome {
+    fn timeout_outcome(
+        task_id: String,
+        timeout_ms: u64,
+        request: Option<&AgentTaskRequest>,
+        timeout_kind: &str,
+    ) -> AgentTaskOutcome {
+        let mut outcome = AgentTaskOutcome {
             schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
             task_id,
             status: AgentTaskOutcomeStatus::Timeout,
@@ -538,7 +559,70 @@ impl AgentTaskScheduleSupport {
             workflow: None,
             follow_up: None,
             metadata: Value::Null,
+        };
+
+        if let Some(request) = request {
+            Self::reconcile_timeout_artifacts(&mut outcome, request, timeout_kind);
         }
+
+        outcome
+    }
+
+    fn reconcile_timeout_artifacts(
+        outcome: &mut AgentTaskOutcome,
+        request: &AgentTaskRequest,
+        timeout_kind: &str,
+    ) {
+        let discovery = TimeoutArtifactDiscovery::discover(request);
+        if discovery.artifacts.is_empty()
+            && discovery.evidence_refs.is_empty()
+            && discovery.outcome.is_none()
+        {
+            outcome.diagnostics.push(AgentTaskDiagnostic {
+                class: timeout_kind.to_string(),
+                message:
+                    "no completed runtime artifacts were discovered before timeout finalization"
+                        .to_string(),
+                data: Value::Null,
+            });
+            return;
+        }
+
+        if let Some(discovered) = discovery.outcome {
+            merge_timeout_outcome(outcome, discovered);
+        }
+
+        append_unique_artifacts(&mut outcome.artifacts, discovery.artifacts);
+        append_unique_evidence_refs(&mut outcome.evidence_refs, discovery.evidence_refs);
+
+        let actionable_patch = outcome.artifacts.iter().any(is_actionable_patch_artifact);
+        if actionable_patch {
+            outcome.status = AgentTaskOutcomeStatus::Succeeded;
+            outcome.failure_classification = None;
+            outcome.summary = Some(
+                "runtime completed with an actionable artifact before timeout finalization"
+                    .to_string(),
+            );
+        }
+
+        outcome.diagnostics.push(AgentTaskDiagnostic {
+            class: "completed_runtime_late_provider_race".to_string(),
+            message: if actionable_patch {
+                format!(
+                    "{timeout_kind} observed after runtime artifacts were already available; preserving actionable artifacts"
+                )
+            } else {
+                format!(
+                    "{timeout_kind} observed after runtime artifacts were already available; preserving discovered artifacts"
+                )
+            },
+            data: serde_json::json!({
+                "timeout_kind": timeout_kind,
+                "artifact_count": outcome.artifacts.len(),
+                "evidence_ref_count": outcome.evidence_refs.len(),
+                "actionable_patch": actionable_patch,
+            }),
+        });
     }
 
     fn blocked_outcome(task_id: String, summary: String) -> AgentTaskOutcome {
@@ -775,12 +859,300 @@ fn event(
     }
 }
 
+#[derive(Default)]
+struct TimeoutArtifactDiscovery {
+    artifacts: Vec<AgentTaskArtifact>,
+    evidence_refs: Vec<AgentTaskEvidenceRef>,
+    outcome: Option<AgentTaskOutcome>,
+}
+
+impl TimeoutArtifactDiscovery {
+    fn discover(request: &AgentTaskRequest) -> Self {
+        let mut discovery = Self::default();
+        for path in artifact_discovery_paths(request) {
+            discovery.scan_path(&path, request);
+        }
+        discovery
+    }
+
+    fn scan_path(&mut self, path: &Path, request: &AgentTaskRequest) {
+        let Ok(metadata) = fs::metadata(path) else {
+            return;
+        };
+
+        if metadata.is_file() {
+            self.record_file(path, request);
+            return;
+        }
+
+        if !metadata.is_dir() {
+            return;
+        }
+
+        self.record_directory(path);
+        self.scan_directory_files(path, request, 0, &mut 0);
+    }
+
+    fn record_directory(&mut self, path: &Path) {
+        let Some(id) = artifact_id_from_path(path) else {
+            return;
+        };
+        self.artifacts.push(AgentTaskArtifact {
+            schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+            id,
+            kind: "runtime_bundle".to_string(),
+            name: path
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string()),
+            path: Some(path.display().to_string()),
+            url: None,
+            mime: None,
+            size_bytes: None,
+            sha256: None,
+            metadata: serde_json::json!({ "discovered_from": "timeout_artifact_scan" }),
+        });
+    }
+
+    fn record_file(&mut self, path: &Path, request: &AgentTaskRequest) {
+        if let Some(outcome) = read_discovered_outcome(path, request) {
+            append_unique_artifacts(&mut self.artifacts, outcome.artifacts.clone());
+            append_unique_evidence_refs(&mut self.evidence_refs, outcome.evidence_refs.clone());
+            self.evidence_refs.push(AgentTaskEvidenceRef {
+                kind: "agent_result".to_string(),
+                uri: path.display().to_string(),
+                label: Some("discovered agent result".to_string()),
+            });
+            self.outcome = Some(outcome);
+            return;
+        }
+
+        let Some(kind) = artifact_kind_from_path(path) else {
+            return;
+        };
+        let Some(id) = artifact_id_from_path(path) else {
+            return;
+        };
+        let (size_bytes, sha256) = file_size_and_sha256(path);
+        self.artifacts.push(AgentTaskArtifact {
+            schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+            id,
+            kind,
+            name: path
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string()),
+            path: Some(path.display().to_string()),
+            url: None,
+            mime: mime_from_path(path),
+            size_bytes,
+            sha256,
+            metadata: serde_json::json!({ "discovered_from": "timeout_artifact_scan" }),
+        });
+    }
+
+    fn scan_directory_files(
+        &mut self,
+        path: &Path,
+        request: &AgentTaskRequest,
+        depth: usize,
+        visited: &mut usize,
+    ) {
+        if depth > 3 || *visited >= 500 {
+            return;
+        }
+
+        let Ok(entries) = fs::read_dir(path) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            if *visited >= 500 {
+                return;
+            }
+            *visited += 1;
+            let child = entry.path();
+            let Ok(child_metadata) = entry.metadata() else {
+                continue;
+            };
+            if child_metadata.is_file() {
+                self.record_file(&child, request);
+            } else if child_metadata.is_dir() {
+                self.scan_directory_files(&child, request, depth + 1, visited);
+            }
+        }
+    }
+}
+
+fn artifact_discovery_paths(request: &AgentTaskRequest) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    collect_artifact_paths_from_value(&request.metadata, &mut paths);
+    collect_artifact_paths_from_value(&request.executor.config, &mut paths);
+    for expected in &request.expected_artifacts {
+        paths.push(PathBuf::from(expected));
+    }
+    paths
+}
+
+fn collect_artifact_paths_from_value(value: &Value, paths: &mut Vec<PathBuf>) {
+    for key in [
+        "artifact_root",
+        "artifact_path",
+        "outcome_path",
+        "agent_result_path",
+    ] {
+        if let Some(path) = value.get(key).and_then(Value::as_str) {
+            paths.push(PathBuf::from(path));
+        }
+    }
+
+    for key in [
+        "artifact_roots",
+        "artifact_paths",
+        "outcome_paths",
+        "agent_result_paths",
+    ] {
+        if let Some(values) = value.get(key).and_then(Value::as_array) {
+            paths.extend(values.iter().filter_map(Value::as_str).map(PathBuf::from));
+        }
+    }
+}
+
+fn read_discovered_outcome(path: &Path, request: &AgentTaskRequest) -> Option<AgentTaskOutcome> {
+    if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+        return None;
+    }
+    let raw = fs::read_to_string(path).ok()?;
+    let mut outcome: AgentTaskOutcome = serde_json::from_str(&raw).ok()?;
+    if outcome.task_id != request.task_id {
+        return None;
+    }
+    if outcome.schema != AGENT_TASK_OUTCOME_SCHEMA {
+        outcome.schema = AGENT_TASK_OUTCOME_SCHEMA.to_string();
+    }
+    Some(outcome)
+}
+
+fn merge_timeout_outcome(base: &mut AgentTaskOutcome, discovered: AgentTaskOutcome) {
+    append_unique_artifacts(&mut base.artifacts, discovered.artifacts);
+    append_unique_evidence_refs(&mut base.evidence_refs, discovered.evidence_refs);
+    if matches!(
+        discovered.status,
+        AgentTaskOutcomeStatus::Succeeded | AgentTaskOutcomeStatus::NoOp
+    ) {
+        base.status = discovered.status;
+        base.failure_classification = discovered.failure_classification;
+        base.summary = discovered.summary.or_else(|| base.summary.clone());
+        base.workflow = discovered.workflow.or_else(|| base.workflow.clone());
+        base.follow_up = discovered.follow_up.or_else(|| base.follow_up.clone());
+        base.metadata = discovered.metadata;
+    }
+    base.diagnostics.extend(discovered.diagnostics);
+}
+
+fn append_unique_artifacts(target: &mut Vec<AgentTaskArtifact>, artifacts: Vec<AgentTaskArtifact>) {
+    for artifact in artifacts {
+        let duplicate = target.iter().any(|existing| {
+            existing.id == artifact.id
+                || (existing.path.is_some() && existing.path == artifact.path)
+                || (existing.url.is_some() && existing.url == artifact.url)
+        });
+        if !duplicate {
+            target.push(artifact);
+        }
+    }
+}
+
+fn append_unique_evidence_refs(
+    target: &mut Vec<AgentTaskEvidenceRef>,
+    evidence_refs: Vec<AgentTaskEvidenceRef>,
+) {
+    for evidence_ref in evidence_refs {
+        if !target
+            .iter()
+            .any(|existing| existing.kind == evidence_ref.kind && existing.uri == evidence_ref.uri)
+        {
+            target.push(evidence_ref);
+        }
+    }
+}
+
+fn artifact_kind_from_path(path: &Path) -> Option<String> {
+    let file_name = path.file_name()?.to_string_lossy().to_ascii_lowercase();
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    if matches!(extension.as_str(), "patch" | "diff") {
+        return Some("patch".to_string());
+    }
+    if matches!(extension.as_str(), "zip" | "tar" | "gz" | "tgz") {
+        return Some("runtime_bundle".to_string());
+    }
+    if file_name.contains("transcript") || matches!(extension.as_str(), "log" | "txt") {
+        return Some("transcript".to_string());
+    }
+    if file_name.contains("agent-result") || file_name.contains("agent_result") {
+        return Some("agent_result".to_string());
+    }
+
+    None
+}
+
+fn artifact_id_from_path(path: &Path) -> Option<String> {
+    Some(
+        path.file_stem()?
+            .to_string_lossy()
+            .chars()
+            .map(|character| {
+                if character.is_ascii_alphanumeric() || character == '-' || character == '_' {
+                    character
+                } else {
+                    '-'
+                }
+            })
+            .collect(),
+    )
+}
+
+fn mime_from_path(path: &Path) -> Option<String> {
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+    {
+        "patch" => Some("text/x-patch".to_string()),
+        "diff" => Some("text/x-diff".to_string()),
+        "json" => Some("application/json".to_string()),
+        "log" | "txt" => Some("text/plain".to_string()),
+        "zip" => Some("application/zip".to_string()),
+        _ => None,
+    }
+}
+
+fn file_size_and_sha256(path: &Path) -> (Option<u64>, Option<String>) {
+    let size_bytes = fs::metadata(path).ok().map(|metadata| metadata.len());
+    let sha256 = fs::read(path).ok().map(|bytes| {
+        let mut hasher = Sha256::new();
+        hasher.update(bytes);
+        format!("{:x}", hasher.finalize())
+    });
+    (size_bytes, sha256)
+}
+
+fn is_actionable_patch_artifact(artifact: &AgentTaskArtifact) -> bool {
+    artifact.kind == "patch"
+        || artifact.kind == "diff"
+        || artifact.mime.as_deref() == Some("text/x-patch")
+        || artifact.mime.as_deref() == Some("text/x-diff")
+        || artifact.metadata.get("role").and_then(Value::as_str) == Some("patch")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::agent_task::{
-        expand_agent_task_matrix, AgentTaskExecutor, AgentTaskLimits, AgentTaskMatrixAggregate,
-        AgentTaskMatrixAxis, AgentTaskPolicy, AgentTaskWorkspace,
+        expand_agent_task_matrix, AgentTaskArtifact, AgentTaskExecutor, AgentTaskLimits,
+        AgentTaskMatrixAggregate, AgentTaskMatrixAxis, AgentTaskPolicy, AgentTaskWorkspace,
     };
     use serde_json::json;
     use std::collections::HashMap;
@@ -849,6 +1221,93 @@ mod tests {
             aggregate.outcomes[0].failure_classification,
             Some(AgentTaskFailureClassification::Timeout)
         );
+    }
+
+    #[test]
+    fn timeout_with_completed_runtime_artifacts_is_discoverable_and_promotable() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let artifact_root = temp.path().join("task-1-artifacts");
+        fs::create_dir_all(&artifact_root).expect("artifact root");
+        let patch_path = artifact_root.join("fix.patch");
+        fs::write(&patch_path, "diff --git a/a.txt b/a.txt\n").expect("patch");
+        fs::write(artifact_root.join("transcript.log"), "runtime completed").expect("log");
+        let agent_result_path = artifact_root.join("agent-result.json");
+        fs::write(
+            &agent_result_path,
+            serde_json::to_string(&AgentTaskOutcome {
+                schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+                task_id: "task-1".to_string(),
+                status: AgentTaskOutcomeStatus::Succeeded,
+                summary: Some("patch ready".to_string()),
+                failure_classification: None,
+                artifacts: vec![AgentTaskArtifact {
+                    schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+                    id: "fix".to_string(),
+                    kind: "patch".to_string(),
+                    name: Some("fix.patch".to_string()),
+                    path: Some(patch_path.display().to_string()),
+                    url: None,
+                    mime: Some("text/x-patch".to_string()),
+                    size_bytes: None,
+                    sha256: None,
+                    metadata: json!({ "role": "patch" }),
+                }],
+                evidence_refs: vec![AgentTaskEvidenceRef {
+                    kind: "runtime_bundle".to_string(),
+                    uri: artifact_root.display().to_string(),
+                    label: Some("runtime bundle".to_string()),
+                }],
+                diagnostics: Vec::new(),
+                workflow: None,
+                follow_up: None,
+                metadata: json!({}),
+            })
+            .expect("agent result json"),
+        )
+        .expect("agent result");
+
+        let scheduler = AgentTaskScheduler::new(RecordingExecutor::new(
+            HashMap::new(),
+            Duration::from_millis(250),
+        ));
+        let mut plan = plan_with_tasks(1);
+        plan.tasks[0].limits.timeout_ms = Some(1);
+        plan.tasks[0].metadata = json!({ "artifact_root": artifact_root });
+
+        let aggregate = scheduler.run(plan);
+
+        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+        assert_eq!(aggregate.totals.succeeded, 1);
+        assert_eq!(aggregate.totals.timed_out, 0);
+        assert!(aggregate
+            .events
+            .iter()
+            .any(|event| event.task_id == "task-1" && event.state == AgentTaskState::Succeeded));
+        let outcome = &aggregate.outcomes[0];
+        assert_eq!(outcome.status, AgentTaskOutcomeStatus::Succeeded);
+        assert!(outcome.artifacts.iter().any(|artifact| {
+            artifact.kind == "patch"
+                && artifact.path.as_deref() == Some(&patch_path.to_string_lossy())
+        }));
+        assert!(outcome
+            .artifacts
+            .iter()
+            .any(|artifact| artifact.kind == "transcript"));
+        assert!(outcome
+            .evidence_refs
+            .iter()
+            .any(|evidence| evidence.kind == "agent_result"
+                && evidence.uri == agent_result_path.display().to_string()));
+        assert!(outcome.diagnostics.iter().any(|diagnostic| {
+            diagnostic.class == "completed_runtime_late_provider_race"
+                && diagnostic.data.get("timeout_kind").and_then(Value::as_str)
+                    == Some("scheduler_timeout")
+                && diagnostic
+                    .data
+                    .get("actionable_patch")
+                    .and_then(Value::as_bool)
+                    == Some(true)
+        }));
     }
 
     #[test]
