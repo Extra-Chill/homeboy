@@ -14,11 +14,11 @@ pub use super::manifest_action_config::{
 };
 pub use super::manifest_config::{
     AutofixVerifyConfig, BenchConfig, BuildConfig, CliAutoFlag, CliAutoFlagCondition, CliConfig,
-    CliHelpConfig, DatabaseCliConfig, DatabaseConfig, DeployOverride, DeployVerification,
-    DepsConfig, DiscoveryConfig, EnvProviderConfig, FileContainsCondition, LintChangedFileRoute,
-    LintConfig, RemotePathInferenceRule, RemotePathRootRule, RequirementsConfig, SinceTagConfig,
-    TestChangedFileExclusiveEnv, TestChangedFileRouting, TestChangedFileRoutingStrategy,
-    TestConfig, TraceConfig, VersionPatternConfig,
+    CliHelpConfig, DatabaseCliConfig, DatabaseConfig, DeployOverride, DeployOwnerHint,
+    DeployVerification, DepsConfig, DiscoveryConfig, EnvProviderConfig, FileContainsCondition,
+    LintChangedFileRoute, LintConfig, RemotePathInferenceRule, RemotePathRootRule,
+    RequirementsConfig, SinceTagConfig, TestChangedFileExclusiveEnv, TestChangedFileRouting,
+    TestChangedFileRoutingStrategy, TestConfig, TraceConfig, VersionPatternConfig,
 };
 pub use super::manifest_deploy_config::DeployArchiveInstallPolicy;
 pub use super::manifest_sidecar::{StructuredSidecarContract, StructuredSidecarDeclaration};
@@ -60,11 +60,16 @@ pub enum HttpMethod {
 
 /// Deploy lifecycle: verification rules, install overrides, version patterns, @since tags.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeployCapability {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub verifications: Vec<DeployVerification>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub overrides: Vec<DeployOverride>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub protected_path_suffixes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owner_hints: Vec<DeployOwnerHint>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub archive_install: Vec<DeployArchiveInstallPolicy>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

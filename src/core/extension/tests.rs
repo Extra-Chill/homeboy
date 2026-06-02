@@ -241,6 +241,115 @@ fn manifest_rejects_legacy_discovery_marker_alias() {
 }
 
 #[test]
+fn manifest_parses_archive_install_deploy_contract() {
+    let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
+        "name": "Example",
+        "version": "0.0.0",
+        "deploy": {
+            "protected_path_suffixes": ["/wp-content/plugins"],
+            "owner_hints": [
+                {
+                    "path_contains": "wp-content/",
+                    "suggested_owner": "www-data:www-data"
+                }
+            ],
+            "archive_install": [
+                {
+                    "path_pattern": "/wp-content/plugins/",
+                    "staging_path": "/tmp/homeboy-wordpress-plugin-staging",
+                    "root_must_match_target_basename": true,
+                    "required_header": {
+                        "file_glob": "*.php",
+                        "contains": "Plugin Name:"
+                    },
+                    "skip_permissions_fix": true
+                }
+            ]
+        }
+    }))
+    .expect("archive install deploy policy should parse");
+
+    let policy = manifest
+        .deploy_archive_installs()
+        .first()
+        .expect("archive install policy");
+    assert_eq!(policy.path_pattern, "/wp-content/plugins/");
+    assert_eq!(policy.staging_path, "/tmp/homeboy-wordpress-plugin-staging");
+    assert!(policy.root_must_match_target_basename);
+    assert!(policy.skip_permissions_fix);
+    assert_eq!(
+        policy
+            .required_header
+            .as_ref()
+            .and_then(|header| header.file_glob.as_deref()),
+        Some("*.php")
+    );
+
+    let deploy = manifest.deploy.as_ref().expect("deploy contract");
+    assert_eq!(deploy.protected_path_suffixes, ["/wp-content/plugins"]);
+    assert_eq!(deploy.owner_hints[0].path_contains, "wp-content/");
+    assert_eq!(deploy.owner_hints[0].suggested_owner, "www-data:www-data");
+}
+
+#[test]
+fn deploy_contract_rejects_unknown_active_policy_keys() {
+    let err = serde_json::from_value::<ExtensionManifest>(serde_json::json!({
+        "name": "Example",
+        "version": "0.0.0",
+        "deploy": {
+            "archiveInstall": []
+        }
+    }))
+    .expect_err("unsupported deploy keys should be rejected");
+
+    assert!(err.to_string().contains("archiveInstall"));
+}
+
+#[test]
+fn archive_install_required_header_rejects_ambiguous_selector() {
+    let err = serde_json::from_value::<ExtensionManifest>(serde_json::json!({
+        "name": "Example",
+        "version": "0.0.0",
+        "deploy": {
+            "archive_install": [
+                {
+                    "path_pattern": "/wp-content/plugins/",
+                    "required_header": {
+                        "file": "plugin.php",
+                        "file_glob": "*.php",
+                        "contains": "Plugin Name:"
+                    }
+                }
+            ]
+        }
+    }))
+    .expect_err("required_header must choose exactly one selector");
+
+    assert!(err.to_string().contains("exactly one of file or file_glob"));
+}
+
+#[test]
+fn archive_install_required_header_rejects_missing_selector() {
+    let err = serde_json::from_value::<ExtensionManifest>(serde_json::json!({
+        "name": "Example",
+        "version": "0.0.0",
+        "deploy": {
+            "archive_install": [
+                {
+                    "path_pattern": "/wp-content/plugins/",
+                    "required_header": {
+                        "contains": "Plugin Name:"
+                    }
+                }
+            ]
+        }
+    }))
+    .expect_err("required_header must declare a selector");
+
+    assert!(err.to_string().contains("exactly one of file or file_glob"));
+}
+
+#[test]
 fn runtime_requirements_reject_legacy_top_level_and_string_shapes() {
     let top_level = serde_json::from_value::<RuntimeRequirementsConfig>(serde_json::json!({
         "php": { "version": "8.2" },

@@ -85,6 +85,7 @@ pub struct DiscoveryConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeployVerification {
     pub path_pattern: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -98,6 +99,7 @@ fn default_staging_path() -> String {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeployOverride {
     pub path_pattern: String,
     #[serde(default = "default_staging_path")]
@@ -110,12 +112,21 @@ pub struct DeployOverride {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeployOwnerHint {
+    pub path_contains: String,
+    pub suggested_owner: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RemotePathInferenceRule {
     pub when_file_contains: FileContainsCondition,
     pub remote_path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RemotePathRootRule {
     pub path_prefix: String,
     pub root: String,
@@ -126,12 +137,14 @@ pub struct RemotePathRootRule {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FileContainsCondition {
     pub file: String,
     pub text: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct VersionPatternConfig {
     pub extension: String,
     pub pattern: String,
@@ -139,6 +152,7 @@ pub struct VersionPatternConfig {
 
 /// Configuration for replacing `@since` placeholder tags during version bump.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SinceTagConfig {
     /// File extensions to scan.
     pub extensions: Vec<String>,
