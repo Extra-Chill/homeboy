@@ -20,12 +20,12 @@ fn write_bench_extension(home: &TempDir) {
         .join(".config")
         .join("homeboy")
         .join("extensions")
-        .join("nodejs");
+        .join("fixture-bench");
     fs::create_dir_all(&extension_dir).expect("mkdir extension");
     fs::write(
-        extension_dir.join("nodejs.json"),
+        extension_dir.join("fixture-bench.json"),
         r#"{
-                "name": "Node.js",
+                "name": "Fixture Bench",
                 "version": "0.0.0",
                 "bench": { "extension_script": "bench-runner.sh" }
             }"#,
@@ -106,12 +106,12 @@ fn write_failing_bench_extension(home: &TempDir) {
         .join(".config")
         .join("homeboy")
         .join("extensions")
-        .join("nodejs");
+        .join("fixture-bench");
     fs::create_dir_all(&extension_dir).expect("mkdir extension");
     fs::write(
-        extension_dir.join("nodejs.json"),
+        extension_dir.join("fixture-bench.json"),
         r#"{
-                "name": "Node.js",
+                "name": "Fixture Bench",
                 "version": "0.0.0",
                 "bench": { "extension_script": "bench-runner.sh" }
             }"#,
@@ -170,7 +170,7 @@ fn write_registered_component(home: &TempDir, component_id: &str, path: &std::pa
         serde_json::json!({
             "id": component_id,
             "local_path": path,
-            "extensions": { "nodejs": {} }
+            "extensions": { "fixture-bench": {} }
         })
         .to_string(),
     )
@@ -197,11 +197,11 @@ fn write_rig_with_profiles(
                     "components": {{
                         "{component_id}": {{
                             "path": "{}",
-                            "extensions": {{ "nodejs": {{}} }}
+                            "extensions": {{ "fixture-bench": {{}} }}
                         }}
                     }},
                     "bench": {{ "default_component": "{component_id}" }},
-                    "bench_workloads": {{ "nodejs": [
+                    "bench_workloads": {{ "fixture-bench": [
                         {{ "path": "${{components.{component_id}.path}}/rig-extra.bench.js" }},
                         {{ "path": "${{components.{component_id}.path}}/rig-slow.bench.mjs" }}
                     ] }},

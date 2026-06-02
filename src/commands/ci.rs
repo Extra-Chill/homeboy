@@ -171,7 +171,7 @@ mod tests {
             "--path",
             "/tmp/repo",
             "--extension",
-            "nodejs",
+            "fixture-ci",
         ])
         .expect("parse cli");
 
@@ -183,7 +183,7 @@ mod tests {
         };
 
         assert_eq!(args.comp.path.as_deref(), Some("/tmp/repo"));
-        assert_eq!(args.extension_override.extensions, vec!["nodejs"]);
+        assert_eq!(args.extension_override.extensions, vec!["fixture-ci"]);
     }
 
     #[test]
@@ -195,7 +195,7 @@ mod tests {
             "--path",
             "/tmp/repo",
             "--extension",
-            "nodejs",
+            "fixture-ci",
             "--job",
             "lint",
         ])
@@ -209,7 +209,7 @@ mod tests {
         };
 
         assert_eq!(args.comp.path.as_deref(), Some("/tmp/repo"));
-        assert_eq!(args.extension_override.extensions, vec!["nodejs"]);
+        assert_eq!(args.extension_override.extensions, vec!["fixture-ci"]);
         assert_eq!(args.job.as_deref(), Some("lint"));
     }
 

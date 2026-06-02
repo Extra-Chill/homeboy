@@ -762,7 +762,7 @@ mod tests {
                     { "label": "health", "http": "http://127.0.0.1:3000/health" }
                 ],
                 "trace_workloads": {
-                    "nodejs": [
+                    "fixture-trace": [
                         {
                             "path": "trace/create-site.trace.mjs",
                             "trace_guardrails": [
@@ -788,7 +788,9 @@ mod tests {
             spec.trace_guardrails[0].check.http.as_deref(),
             Some("http://127.0.0.1:3000/health")
         );
-        let workload = spec.trace_workloads["nodejs"].first().expect("workload");
+        let workload = spec.trace_workloads["fixture-trace"]
+            .first()
+            .expect("workload");
         assert_eq!(
             workload.trace_guardrails()[0].check.command.as_deref(),
             Some("npm run smoke:list-sites")

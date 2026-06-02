@@ -185,6 +185,7 @@ fn git_output_bytes(path: &Path, args: &[&str]) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     #[test]
     fn test_default_sync_excludes() {
@@ -198,9 +199,28 @@ mod tests {
 
     #[test]
     fn test_collect_local() {
+        let tempdir = tempfile::tempdir().expect("creates temp source fixture");
+        let source_path = tempdir.path();
+        fs::write(source_path.join("homeboy.txt"), "source fixture")
+            .expect("writes source fixture file");
+        git_test_command(source_path, &["init"]);
+        git_test_command(source_path, &["add", "."]);
+        git_test_command(
+            source_path,
+            &[
+                "-c",
+                "user.name=Homeboy Test",
+                "-c",
+                "user.email=homeboy@example.test",
+                "commit",
+                "-m",
+                "Initial fixture",
+            ],
+        );
+
         let snapshot = SourceSnapshot::collect_local(
             "lab-local",
-            Path::new(env!("CARGO_MANIFEST_DIR")),
+            source_path,
             Some("/srv/homeboy/repo"),
             "snapshot",
         );
@@ -208,9 +228,45 @@ mod tests {
         assert_eq!(snapshot.runner_id, "lab-local");
         assert_eq!(snapshot.remote_path.as_deref(), Some("/srv/homeboy/repo"));
         assert_eq!(snapshot.sync_mode, "snapshot");
-        assert!(snapshot.local_path.is_some());
-        assert!(snapshot.workspace_root.is_some());
+        assert_eq!(
+            snapshot.local_path.as_deref(),
+            Some(source_path.to_str().unwrap())
+        );
+        let workspace_root = Path::new(
+            snapshot
+                .workspace_root
+                .as_deref()
+                .expect("git fixture reports workspace root"),
+        );
+        assert_eq!(
+            fs::canonicalize(workspace_root).expect("canonicalizes git workspace root"),
+            fs::canonicalize(source_path).expect("canonicalizes temp source path")
+        );
         assert!(snapshot.git_sha.is_some());
+        assert!(snapshot.snapshot_hash.starts_with("sha256:"));
+    }
+
+    #[test]
+    fn collect_local_allows_non_git_paths_without_workspace_root() {
+        let tempdir = tempfile::tempdir().expect("creates temp source fixture");
+        fs::write(tempdir.path().join("homeboy.txt"), "source fixture")
+            .expect("writes source fixture file");
+
+        let snapshot = SourceSnapshot::collect_local(
+            "lab-local",
+            tempdir.path(),
+            Some("/srv/homeboy/repo"),
+            "snapshot",
+        );
+
+        assert_eq!(
+            snapshot.local_path.as_deref(),
+            Some(tempdir.path().to_str().unwrap())
+        );
+        assert_eq!(snapshot.remote_path.as_deref(), Some("/srv/homeboy/repo"));
+        assert!(snapshot.workspace_root.is_none());
+        assert!(snapshot.git_sha.is_none());
+        assert!(!snapshot.dirty);
         assert!(snapshot.snapshot_hash.starts_with("sha256:"));
     }
 
@@ -226,5 +282,21 @@ mod tests {
         assert!(!snapshot.dirty);
         assert!(snapshot.snapshot_hash.starts_with("sha256:"));
         assert!(snapshot.sync_excludes.contains(&".git/".to_string()));
+    }
+
+    fn git_test_command(path: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("runs git fixture command");
+
+        if !output.status.success() {
+            std::io::stderr()
+                .write_all(&output.stderr)
+                .expect("writes git fixture stderr");
+            panic!("git fixture command failed: git {}", args.join(" "));
+        }
     }
 }

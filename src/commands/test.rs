@@ -594,13 +594,13 @@ mod tests {
             "--path",
             "/tmp/repo",
             "--extension",
-            "nodejs",
+            "fixture-test",
             "--changed-since",
             "origin/main",
         ])
         .expect("test should parse --extension override");
 
-        assert_eq!(cli.test.extension_override.extensions, vec!["nodejs"]);
+        assert_eq!(cli.test.extension_override.extensions, vec!["fixture-test"]);
         assert_eq!(cli.test.changed_since.as_deref(), Some("origin/main"));
     }
 
@@ -647,7 +647,7 @@ mod tests {
 
         let args = vec![
             "--extension".to_string(),
-            "nodejs".to_string(),
+            "fixture-test".to_string(),
             "--filter=SomeTest".to_string(),
         ];
         let result = filter_homeboy_flags(&args);

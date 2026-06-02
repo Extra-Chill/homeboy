@@ -359,7 +359,7 @@ fn flatten_double_nested_dir(
     let detect_cmd = format!(
         "test -d {nested} && \
          [ \"$(cd {target} && find . -mindepth 1 -maxdepth 1 | wc -l | tr -d '[:space:]')\" = \"1\" ] && \
-         [ \"$(cd {target} && ls -A)\" = {basename_arg} ] && echo NESTED || echo OK",
+         [ \"$(cd {target} && find . -mindepth 1 -maxdepth 1 -exec basename {{}} \\;)\" = {basename_arg} ] && echo NESTED || echo OK",
         nested = shell::quote_path(&nested_dir),
         target = shell::quote_path(normalized),
         basename_arg = shell::quote_arg(basename),
@@ -466,7 +466,10 @@ mod tests {
     use crate::core::extension::DeployVerification;
     use crate::core::server::SshClient;
     use std::collections::HashMap;
+    use std::collections::HashSet;
     use std::fs;
+    #[cfg(unix)]
+    use std::io::Write;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
@@ -622,34 +625,34 @@ mod tests {
         assert_eq!(remote_basename("/"), None);
     }
 
-    /// Build a zip whose sole top-level entry is a directory `<name>/` containing
-    /// the given relative files. Returns the path to the created archive.
     #[cfg(unix)]
-    fn make_zip_with_top_level_dir(
-        temp: &std::path::Path,
-        archive_name: &str,
-        top_dir: &str,
-        files: &[(&str, &str)],
-    ) -> std::path::PathBuf {
-        let staging = temp.join("zip-staging");
-        let root = staging.join(top_dir);
-        fs::create_dir_all(&root).expect("staging root");
-        for (rel, contents) in files {
-            let path = root.join(rel);
-            if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent).expect("file parent");
+    fn write_zip(path: &std::path::Path, files: &[(&str, &str)]) {
+        let file = fs::File::create(path).expect("zip file");
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::FileOptions::default();
+        let mut dirs = HashSet::new();
+
+        for (name, contents) in files {
+            let mut parts = name.rsplitn(2, '/');
+            let _file_name = parts.next();
+            if let Some(parent) = parts.next() {
+                let mut dir = String::new();
+                for segment in parent.split('/') {
+                    if !dir.is_empty() {
+                        dir.push('/');
+                    }
+                    dir.push_str(segment);
+                    if dirs.insert(dir.clone()) {
+                        zip.add_directory(format!("{dir}/"), options)
+                            .expect("zip directory");
+                    }
+                }
             }
-            fs::write(&path, contents).expect("staged file");
+            zip.start_file(*name, options).expect("zip entry");
+            zip.write_all(contents.as_bytes()).expect("zip contents");
         }
 
-        let archive = temp.join(archive_name);
-        let status = std::process::Command::new("zip")
-            .args(["-q", "-r", archive.to_str().expect("archive path"), top_dir])
-            .current_dir(&staging)
-            .status()
-            .expect("run zip");
-        assert!(status.success(), "zip command failed");
-        archive
+        zip.finish().expect("finish zip");
     }
 
     /// End-to-end: a build ZIP with a top-level dir equal to the target basename,
@@ -660,14 +663,16 @@ mod tests {
     fn test_deploy_artifact_flattens_double_nested_plugin_zip() {
         let temp = tempfile::tempdir().expect("temp dir");
         let plugin = "extrachill-users";
-        let archive = make_zip_with_top_level_dir(
-            temp.path(),
-            "build.zip",
-            plugin,
+        let archive = temp.path().join("build.zip");
+        write_zip(
+            &archive,
             &[
-                ("extrachill-users.php", "<?php // plugin main"),
-                ("src/loader.php", "<?php // loader"),
-                (".gitkeep", ""),
+                (
+                    "extrachill-users/extrachill-users.php",
+                    "<?php // plugin main",
+                ),
+                ("extrachill-users/src/loader.php", "<?php // loader"),
+                ("extrachill-users/.gitkeep", ""),
             ],
         );
 
@@ -707,18 +712,11 @@ mod tests {
     #[cfg(unix)]
     fn test_deploy_artifact_leaves_flat_archive_untouched() {
         let temp = tempfile::tempdir().expect("temp dir");
-        let staging = temp.path().join("flat-staging");
-        fs::create_dir_all(&staging).expect("flat staging");
-        fs::write(staging.join("plugin.php"), "<?php // main").expect("main file");
-        fs::write(staging.join("readme.txt"), "readme").expect("readme");
-
         let archive = temp.path().join("flat.zip");
-        let status = std::process::Command::new("zip")
-            .args(["-q", "-r", archive.to_str().expect("archive"), "."])
-            .current_dir(&staging)
-            .status()
-            .expect("run zip");
-        assert!(status.success());
+        write_zip(
+            &archive,
+            &[("plugin.php", "<?php // main"), ("readme.txt", "readme")],
+        );
 
         let target = temp.path().join("wp-content/plugins/flat-plugin");
         let result = deploy_artifact(
