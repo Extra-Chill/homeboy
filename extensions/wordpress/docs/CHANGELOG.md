@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.113.16] - 2026-06-02
+
+### Fixed
+- bundle wp-codebox recipe builders for wordpress
+
 ## [2.113.15] - 2026-06-02
 
 ### Fixed
