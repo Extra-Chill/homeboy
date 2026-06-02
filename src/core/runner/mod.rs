@@ -29,8 +29,8 @@ mod worker;
 mod workspace;
 
 pub use apply::{
-    apply_workspace_patch, RunnerWorkspaceApplyOptions, RunnerWorkspaceApplyOutput,
-    RunnerWorkspaceApplyStatus,
+    apply_change_artifact, apply_workspace_patch, RunnerWorkspaceApplyOptions,
+    RunnerWorkspaceApplyOutput, RunnerWorkspaceApplyStatus,
 };
 pub use capabilities::{
     evaluate_lab_runner_capabilities_for_runner, lab_runner_capability_plan,

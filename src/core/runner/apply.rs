@@ -48,7 +48,15 @@ pub fn apply_workspace_patch(
     options: RunnerWorkspaceApplyOptions,
 ) -> Result<(RunnerWorkspaceApplyOutput, i32)> {
     let input = read_apply_input(&options.input)?;
-    let artifact = input.artifact;
+    let output = apply_change_artifact(input.artifact, options.force)?;
+
+    Ok((output, 0))
+}
+
+pub fn apply_change_artifact(
+    artifact: ChangeArtifact,
+    force: bool,
+) -> Result<RunnerWorkspaceApplyOutput> {
     let local_path = local_source_path(&artifact.source_snapshot)?;
     let current = SourceSnapshot::collect_local(
         &artifact.source_snapshot.runner_id,
@@ -57,7 +65,7 @@ pub fn apply_workspace_patch(
         &artifact.source_snapshot.sync_mode,
     );
 
-    if current.snapshot_hash != artifact.source_snapshot.snapshot_hash && !options.force {
+    if current.snapshot_hash != artifact.source_snapshot.snapshot_hash && !force {
         return Err(Error::validation_invalid_argument(
             "source_snapshot",
             "local source worktree has drifted since the Lab snapshot; rerun the Lab job from a fresh snapshot or pass --force to apply explicitly",
@@ -92,20 +100,17 @@ pub fn apply_workspace_patch(
 
     let artifact_summary = artifact.summary();
 
-    Ok((
-        RunnerWorkspaceApplyOutput {
-            command: "runner.workspace.apply",
-            local_path: local_path.display().to_string(),
-            result: ChangeApplyResult::applied(
-                options.force,
-                artifact.source_snapshot.snapshot_hash,
-                current.snapshot_hash,
-                modified_files,
-                Some(artifact_summary),
-            ),
-        },
-        0,
-    ))
+    Ok(RunnerWorkspaceApplyOutput {
+        command: "runner.workspace.apply",
+        local_path: local_path.display().to_string(),
+        result: ChangeApplyResult::applied(
+            force,
+            artifact.source_snapshot.snapshot_hash,
+            current.snapshot_hash,
+            modified_files,
+            Some(artifact_summary),
+        ),
+    })
 }
 
 fn read_apply_input(path: &str) -> Result<LabPatchApplyInput> {
