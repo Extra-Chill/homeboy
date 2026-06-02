@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.113.17] - 2026-06-02
+
+### Fixed
+- update WP Codebox repository references
+- pass configured wp cli to codebox agent tasks
+
 ## [2.113.16] - 2026-06-02
 
 ### Fixed
