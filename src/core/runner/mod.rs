@@ -22,6 +22,7 @@ mod offload_metadata;
 mod resource_metrics;
 mod rig_materialization;
 mod session;
+mod validation_dependencies;
 mod worker;
 mod workspace;
 

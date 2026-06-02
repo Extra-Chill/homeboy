@@ -12,7 +12,7 @@ use crate::core::server::{self, Server, SshClient};
 
 use super::{load, Runner, RunnerKind};
 
-const DEFAULT_EXCLUDES: &[&str] = &[
+pub(super) const DEFAULT_EXCLUDES: &[&str] = &[
     ".git",
     ".git/**",
     "._*",
@@ -97,6 +97,11 @@ pub fn sync_workspace(
             let remote_path = deterministic_remote_path(workspace_root, &local_path, &snapshot);
             let stats = local_snapshot_stats(&local_path, DEFAULT_EXCLUDES)?;
             materialize_snapshot(&runner, &local_path, &remote_path, DEFAULT_EXCLUDES)?;
+            super::validation_dependencies::sync_validation_dependency_workspaces(
+                &runner,
+                &local_path,
+                &remote_path,
+            )?;
             Ok((
                 RunnerWorkspaceSyncOutput {
                     command: "runner.workspace.sync",
@@ -121,6 +126,11 @@ pub fn sync_workspace(
                 &git.remote_url,
                 &git.head,
                 git.changed_since_base.as_deref(),
+            )?;
+            super::validation_dependencies::sync_validation_dependency_workspaces(
+                &runner,
+                &local_path,
+                &remote_path,
             )?;
             Ok((
                 RunnerWorkspaceSyncOutput {
@@ -370,7 +380,7 @@ fn is_excluded(root: &Path, path: &Path, excludes: &[&str]) -> bool {
     })
 }
 
-fn materialize_snapshot(
+pub(super) fn materialize_snapshot(
     runner: &Runner,
     local_path: &Path,
     remote_path: &str,
@@ -549,14 +559,14 @@ fn ssh_args(client: &SshClient) -> String {
     args.join(" ")
 }
 
-fn parent_remote_path(path: &str) -> String {
+pub(super) fn parent_remote_path(path: &str) -> String {
     path.rsplit_once('/')
         .map(|(parent, _)| if parent.is_empty() { "/" } else { parent })
         .unwrap_or("/")
         .to_string()
 }
 
-fn sanitize_path_segment(value: &str) -> String {
+pub(super) fn sanitize_path_segment(value: &str) -> String {
     let segment = value
         .chars()
         .map(|ch| {
