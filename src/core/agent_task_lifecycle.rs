@@ -38,6 +38,55 @@ pub struct AgentTaskRunRecord {
     pub metadata: Value,
 }
 
+impl AgentTaskRunRecord {
+    fn record_runner_metadata(&mut self, reclaimed_stale: bool) {
+        let metadata = self.ensure_metadata_object();
+        metadata.insert("runner_pid".to_string(), json!(std::process::id()));
+        metadata.insert("runner_started_at".to_string(), json!(now_timestamp()));
+        if reclaimed_stale {
+            metadata.insert("reclaimed_stale_running".to_string(), json!(true));
+        } else {
+            metadata.remove("reclaimed_stale_running");
+        }
+        metadata.remove("stale_running");
+        metadata.remove("stale_running_reason");
+    }
+
+    fn annotate_stale_running(&mut self) {
+        if self.state != AgentTaskRunState::Running || self.owner_process_is_running() {
+            return;
+        }
+
+        let reason = if self.owner_pid().is_some() {
+            "owner_process_not_running"
+        } else {
+            "missing_runner_pid"
+        };
+        let metadata = self.ensure_metadata_object();
+        metadata.insert("stale_running".to_string(), json!(true));
+        metadata.insert("stale_running_reason".to_string(), json!(reason));
+    }
+
+    fn owner_process_is_running(&self) -> bool {
+        self.owner_pid()
+            .is_some_and(crate::core::process::pid_is_running)
+    }
+
+    fn owner_pid(&self) -> Option<u32> {
+        self.metadata
+            .get("runner_pid")
+            .and_then(Value::as_u64)
+            .and_then(|pid| u32::try_from(pid).ok())
+    }
+
+    fn ensure_metadata_object(&mut self) -> &mut serde_json::Map<String, Value> {
+        if !self.metadata.is_object() {
+            self.metadata = json!({});
+        }
+        self.metadata.as_object_mut().expect("metadata object")
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentTaskRunState {
@@ -133,13 +182,13 @@ pub fn load_plan(run_id: &str) -> Result<AgentTaskPlan> {
 
 pub fn mark_running(run_id: &str) -> Result<AgentTaskRunRecord> {
     let mut record = store::read_record(&sanitize_run_id(run_id))?;
-    if record.state == AgentTaskRunState::Running && owner_process_is_running(&record) {
+    if record.state == AgentTaskRunState::Running && record.owner_process_is_running() {
         return Err(Error::validation_invalid_argument(
             "run_id",
             format!(
                 "agent-task run '{}' is already running under pid {}",
                 record.run_id,
-                owner_pid(&record).unwrap_or_default()
+                record.owner_pid().unwrap_or_default()
             ),
             Some(record.run_id),
             None,
@@ -171,7 +220,7 @@ pub fn mark_running(run_id: &str) -> Result<AgentTaskRunRecord> {
             task.state = AgentTaskState::Running;
         }
     }
-    record_runner_metadata(&mut record, reclaimed_stale);
+    record.record_runner_metadata(reclaimed_stale);
     store::write_record(&record)?;
     Ok(record)
 }
@@ -202,7 +251,7 @@ fn record_aggregate(
 
 pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
     let mut record = store::read_record(&sanitize_run_id(run_id))?;
-    annotate_stale_running(&mut record);
+    record.annotate_stale_running();
     Ok(record)
 }
 
@@ -356,55 +405,6 @@ fn default_run_id() -> String {
 
 fn now_timestamp() -> String {
     Utc::now().to_rfc3339()
-}
-
-fn record_runner_metadata(record: &mut AgentTaskRunRecord, reclaimed_stale: bool) {
-    let metadata = ensure_metadata_object(record);
-    metadata.insert("runner_pid".to_string(), json!(std::process::id()));
-    metadata.insert("runner_started_at".to_string(), json!(now_timestamp()));
-    if reclaimed_stale {
-        metadata.insert("reclaimed_stale_running".to_string(), json!(true));
-    } else {
-        metadata.remove("reclaimed_stale_running");
-    }
-    metadata.remove("stale_running");
-    metadata.remove("stale_running_reason");
-}
-
-fn annotate_stale_running(record: &mut AgentTaskRunRecord) {
-    if record.state != AgentTaskRunState::Running || owner_process_is_running(record) {
-        return;
-    }
-
-    let reason = if owner_pid(record).is_some() {
-        "owner_process_not_running"
-    } else {
-        "missing_runner_pid"
-    };
-    let metadata = ensure_metadata_object(record);
-    metadata.insert("stale_running".to_string(), json!(true));
-    metadata.insert("stale_running_reason".to_string(), json!(reason));
-}
-
-fn owner_process_is_running(record: &AgentTaskRunRecord) -> bool {
-    owner_pid(record).is_some_and(crate::core::process::pid_is_running)
-}
-
-fn owner_pid(record: &AgentTaskRunRecord) -> Option<u32> {
-    record
-        .metadata
-        .get("runner_pid")
-        .and_then(Value::as_u64)
-        .and_then(|pid| u32::try_from(pid).ok())
-}
-
-fn ensure_metadata_object(
-    record: &mut AgentTaskRunRecord,
-) -> &mut serde_json::Map<String, Value> {
-    if !record.metadata.is_object() {
-        record.metadata = json!({});
-    }
-    record.metadata.as_object_mut().expect("metadata object")
 }
 
 fn sanitize_run_id(run_id: &str) -> String {
@@ -573,7 +573,10 @@ mod tests {
 
             assert_eq!(loaded.state, AgentTaskRunState::Running);
             assert_eq!(loaded.metadata["stale_running"], json!(true));
-            assert_eq!(loaded.metadata["stale_running_reason"], "missing_runner_pid");
+            assert_eq!(
+                loaded.metadata["stale_running_reason"],
+                "missing_runner_pid"
+            );
         });
     }
 
@@ -591,10 +594,7 @@ mod tests {
 
             assert_eq!(running.state, AgentTaskRunState::Running);
             assert_eq!(running.metadata["reclaimed_stale_running"], json!(true));
-            assert_eq!(
-                running.metadata["runner_pid"],
-                json!(std::process::id())
-            );
+            assert_eq!(running.metadata["runner_pid"], json!(std::process::id()));
         });
     }
 
