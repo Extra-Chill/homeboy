@@ -74,6 +74,45 @@ printf 'ARGS=%s\n' "$*"
 if [ -n "${WP_CODEBOX_ARGS_FILE:-}" ]; then
     printf '%s\n' "$@" > "${WP_CODEBOX_ARGS_FILE}"
 fi
+if [ "${1:-}" = "recipe" ] && [ "${2:-}" = "build" ] && [ "${3:-}" = "phpunit" ]; then
+    options_path=""
+    output_path=""
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --options)
+                shift
+                options_path="${1:-}"
+                ;;
+            --output)
+                shift
+                output_path="${1:-}"
+                ;;
+        esac
+        shift || true
+    done
+    node - "$options_path" "$output_path" <<'NODE'
+const fs = require('node:fs')
+const options = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'))
+const recipe = {
+  schema: 'wp-codebox/workspace-recipe/v1',
+  runtime: { wp: options.wordpressVersion, blueprint: { steps: [] } },
+  inputs: { mounts: options.mounts || [] },
+  workflow: { steps: [{ command: 'wordpress.phpunit', args: [
+    `plugin-slug=${options.pluginSlug}`,
+    `test-file=${options.selectedTestFile || ''}`,
+    `changed-tests-json=${JSON.stringify(options.changedTestFiles || [])}`,
+    `env-json=${JSON.stringify(options.env || {})}`,
+    `wp-config-defines-json=${JSON.stringify(options.wpConfigDefines || {})}`,
+    `autoload-file=${options.autoloadFile}`,
+    `tests-dir=${options.testsDir}`,
+    `dependency-mounts=${(options.dependencyMounts || []).filter(Boolean).join(',')}`,
+    `multisite=${options.multisite ? '1' : '0'}`,
+  ] }] },
+}
+fs.writeFileSync(process.argv[3], `${JSON.stringify(recipe, null, 2)}\n`)
+NODE
+    exit 0
+fi
 component_path=""
 recipe_path=""
 while [ "$#" -gt 0 ]; do
@@ -106,6 +145,7 @@ fi
 printf '{"success":true,"executions":[{"stdout":"OK (1 test, 1 assertion)\n","stderr":""}]}\n'
 SH
 chmod +x "${TMPDIR}/stubs/wp-codebox.sh"
+
 
 cat > "${TMPDIR}/stubs/composer" <<'SH'
 #!/usr/bin/env bash

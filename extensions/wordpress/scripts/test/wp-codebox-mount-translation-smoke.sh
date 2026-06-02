@@ -35,6 +35,33 @@ const path = require('node:path')
 const args = process.argv.slice(2)
 fs.writeFileSync(process.env.FAKE_WP_CODEBOX_ARGS_FILE, `${args.join('\n')}\n`)
 
+if (args[0] === 'recipe' && args[1] === 'build' && args[2] === 'phpunit') {
+  const options = JSON.parse(fs.readFileSync(argValue('--options'), 'utf8'))
+  const recipe = {
+    schema: 'wp-codebox/workspace-recipe/v1',
+    runtime: { wp: options.wordpressVersion, blueprint: { steps: [] } },
+    inputs: { mounts: options.mounts || [] },
+    workflow: {
+      steps: [{
+        command: 'wordpress.phpunit',
+        args: [
+          `plugin-slug=${options.pluginSlug}`,
+          `test-file=${options.selectedTestFile || ''}`,
+          `changed-tests-json=${JSON.stringify(options.changedTestFiles || [])}`,
+          `env-json=${JSON.stringify(options.env || {})}`,
+          `wp-config-defines-json=${JSON.stringify(options.wpConfigDefines || {})}`,
+          `autoload-file=${options.autoloadFile}`,
+          `tests-dir=${options.testsDir}`,
+          `dependency-mounts=${(options.dependencyMounts || []).filter(Boolean).join(',')}`,
+          `multisite=${options.multisite ? '1' : '0'}`,
+        ],
+      }],
+    },
+  }
+  fs.writeFileSync(argValue('--output'), `${JSON.stringify(recipe, null, 2)}\n`)
+  process.exit(0)
+}
+
 function requirePair(name, value) {
   for (let index = 0; index < args.length - 1; index += 1) {
     if (args[index] === name && args[index + 1] === value) {
@@ -128,6 +155,7 @@ process.stdout.write(JSON.stringify({
 }) + '\n')
 NODE
 chmod +x "$FAKE_WP_CODEBOX"
+
 
 SETTINGS_JSON=$(jq -nc \
     --argjson wpConfig '{"WP_DEBUG":true,"CUSTOM_NUMBER":7}' \

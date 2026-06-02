@@ -396,6 +396,7 @@ fi
 WP_CODEBOX_TMPFILE=$(mktemp)
 PHPUNIT_STDOUT_TMPFILE=$(mktemp)
 RECIPE_FILE=$(mktemp "${TMPDIR:-/tmp}/homeboy-wp-codebox-test-recipe.XXXXXX")
+RECIPE_OPTIONS_FILE=$(mktemp "${TMPDIR:-/tmp}/homeboy-wp-codebox-test-recipe-options.XXXXXX")
 wp_codebox_command=("$WP_CODEBOX_BIN")
 case "$WP_CODEBOX_BIN" in
     *.js)
@@ -408,27 +409,26 @@ jq -n \
     --argjson mounts "$MOUNTS_JSON" \
     --arg pluginSlug "$PLUGIN_SLUG" \
     --arg selectedTestFile "$SELECTED_TEST_FILE_REL" \
-    --arg changedTestsJson "$CHANGED_TEST_FILES_JSON" \
-    --arg envJson "$BENCH_ENV_JSON" \
-    --arg definesJson "$WP_CONFIG_DEFINES_JSON" \
+    --argjson changedTests "$CHANGED_TEST_FILES_JSON" \
+    --argjson env "$BENCH_ENV_JSON" \
+    --argjson defines "$WP_CONFIG_DEFINES_JSON" \
     --arg dependencyMounts "$WP_CODEBOX_DEP_MOUNTS" \
     --arg multisite "$WP_CODEBOX_MULTISITE" \
     '{
-        schema: "wp-codebox/workspace-recipe/v1",
-        runtime: {wp: $wp, blueprint: {steps: []}},
-        inputs: {mounts: $mounts},
-        workflow: {steps: [{command: "wordpress.phpunit", args: [
-            "plugin-slug=" + $pluginSlug,
-            "test-file=" + $selectedTestFile,
-            "changed-tests-json=" + $changedTestsJson,
-            "env-json=" + $envJson,
-            "wp-config-defines-json=" + $definesJson,
-            "autoload-file=/wp-codebox-vendor/autoload.php",
-            "tests-dir=/wp-codebox-vendor/wp-phpunit/wp-phpunit",
-            "dependency-mounts=" + ($dependencyMounts | split("\n") | map(select(. != "")) | join(",")),
-            "multisite=" + (if (($multisite | ascii_downcase) as $v | $v == "1" or $v == "true" or $v == "yes" or $v == "on") then "1" else "0" end)
-        ]}]}
-    }' > "$RECIPE_FILE"
+        wordpressVersion: $wp,
+        mounts: $mounts,
+        pluginSlug: $pluginSlug,
+        selectedTestFile: $selectedTestFile,
+        changedTestFiles: $changedTests,
+        env: $env,
+        wpConfigDefines: $defines,
+        autoloadFile: "/wp-codebox-vendor/autoload.php",
+        testsDir: "/wp-codebox-vendor/wp-phpunit/wp-phpunit",
+        dependencyMounts: ($dependencyMounts | split("\n") | map(select(. != ""))),
+        multisite: (if (($multisite | ascii_downcase) as $v | $v == "1" or $v == "true" or $v == "yes" or $v == "on") then true else false end)
+    }' > "$RECIPE_OPTIONS_FILE"
+
+"${wp_codebox_command[@]}" recipe build phpunit --options "$RECIPE_OPTIONS_FILE" --output "$RECIPE_FILE"
 
 set +e
 "${wp_codebox_command[@]}" recipe-run \
@@ -439,7 +439,7 @@ set +e
 wp_codebox_exit=$?
 set -e
 
-rm -f "$RECIPE_FILE"
+rm -f "$RECIPE_FILE" "$RECIPE_OPTIONS_FILE"
 
 WP_CODEBOX_OUTPUT=$(cat "$WP_CODEBOX_TMPFILE")
 PHPUNIT_OUTPUT=""
