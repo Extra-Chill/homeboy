@@ -377,6 +377,7 @@ pub fn list_runs(args: RunsListArgs, command: &'static str) -> CmdResult<RunsOut
 
 fn show_run(run_id: &str) -> CmdResult<RunsOutput> {
     let store = ObservationStore::open_initialized()?;
+    reconcile::reconcile_owned_stale_running_runs(&store, 1000)?;
     let run = require_run(&store, run_id)?;
     Ok((
         RunsOutput::Show(RunsShowOutput {
@@ -731,6 +732,44 @@ mod tests {
             );
             assert_eq!(output.run.artifacts.len(), 1);
             assert_eq!(output.run.artifacts[0].kind, "bench_results");
+        });
+    }
+
+    #[test]
+    fn run_show_reconciles_owned_dead_running_run_before_displaying() {
+        with_isolated_home(|_home| {
+            let _xdg = XdgGuard::unset();
+            let store = ObservationStore::open_initialized().expect("store");
+            store
+                .import_run(&RunRecord {
+                    id: "dead-owned-run".to_string(),
+                    kind: "bench".to_string(),
+                    component_id: Some("homeboy".to_string()),
+                    started_at: "2026-05-02T16:46:46Z".to_string(),
+                    finished_at: None,
+                    status: "running".to_string(),
+                    command: Some("homeboy bench".to_string()),
+                    cwd: Some("/tmp/homeboy-fixture".to_string()),
+                    homeboy_version: Some("test-version".to_string()),
+                    git_sha: Some("abc123".to_string()),
+                    rig_id: Some("studio".to_string()),
+                    metadata_json: serde_json::json!({
+                        "homeboy_run_owner": { "pid": u32::MAX }
+                    }),
+                })
+                .expect("import stale fixture");
+
+            let (output, _) = show_run("dead-owned-run").expect("show");
+            let RunsOutput::Show(output) = output else {
+                panic!("expected show output");
+            };
+
+            assert_eq!(output.run.summary.status, "stale");
+            assert!(output.run.summary.finished_at.is_some());
+            assert_eq!(
+                output.run.metadata["homeboy_reconciled"]["reason"],
+                "owner_process_not_running"
+            );
         });
     }
 
