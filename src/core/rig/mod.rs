@@ -92,6 +92,9 @@ pub(crate) fn files_match(left: &Path, right: &Path) -> bool {
 fn read_config(id: &str) -> Result<(RigSpec, Option<String>)> {
     let path = paths::rig_config(id)?;
     if !path.exists() {
+        if let Some(error) = stale_source_error(id, &path) {
+            return Err(error);
+        }
         let suggestions = list_ids().unwrap_or_default();
         return Err(Error::rig_not_found(id, suggestions));
     }
@@ -108,6 +111,47 @@ fn read_config(id: &str) -> Result<(RigSpec, Option<String>)> {
     let declared_id = (!spec.id.is_empty() && spec.id != id).then(|| spec.id.clone());
     spec.id = id.to_string();
     Ok((spec, declared_id))
+}
+
+fn stale_source_error(id: &str, config_path: &Path) -> Option<Error> {
+    let metadata = read_source_metadata(id)?;
+    let package_present = Path::new(&metadata.package_path).exists();
+    let rig_present = Path::new(&metadata.rig_path).is_file();
+    let config_entry_present = fs::symlink_metadata(config_path).is_ok();
+    if package_present && rig_present && !config_entry_present {
+        return None;
+    }
+
+    let problem = if metadata.linked && !package_present {
+        format!(
+            "Rig '{}' is installed from linked rig source '{}' but that source path is missing",
+            id, metadata.package_path
+        )
+    } else if !rig_present {
+        format!(
+            "Rig '{}' has installed source metadata but the recorded rig spec is missing: {}",
+            id, metadata.rig_path
+        )
+    } else {
+        format!(
+            "Rig '{}' has installed source metadata but its config path is missing: {}",
+            id,
+            config_path.display()
+        )
+    };
+
+    Some(
+        Error::validation_invalid_argument("rig_id", problem, Some(id.to_string()), None)
+            .with_hint("Run `homeboy rig sources list` to inspect installed rig sources")
+            .with_hint(format!(
+                "Restore the source path or remove the stale source: homeboy rig sources remove {}",
+                metadata.package_path
+            ))
+            .with_hint(format!(
+                "After removing it, reinstall the rig source: homeboy rig install {} --id {}",
+                metadata.source, id
+            )),
+    )
 }
 
 /// Load a rig spec by ID from `~/.config/homeboy/rigs/{id}.json`.
@@ -144,5 +188,11 @@ pub fn list_ids() -> Result<Vec<String>> {
     json_config::sorted_json_config_entries(&dir, "list rigs", "read rig entry", |e, context| {
         Error::internal_unexpected(format!("Failed to {}: {}", context, e))
     })
-    .map(|entries| entries.into_iter().map(|entry| entry.id).collect())
+    .map(|entries| {
+        entries
+            .into_iter()
+            .filter(|entry| entry.path.exists())
+            .map(|entry| entry.id)
+            .collect()
+    })
 }

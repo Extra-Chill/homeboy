@@ -10,11 +10,14 @@ pub struct RigSourceListResult {
 pub struct RigSourceGroup {
     pub source: String,
     pub package_path: String,
+    pub package_present: bool,
     pub discovery_path: String,
     pub package_id: String,
     pub linked: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stale_reason: Option<String>,
     pub rigs: Vec<RigSourceRig>,
     pub stacks: Vec<RigSourceStack>,
 }
@@ -23,18 +26,24 @@ pub struct RigSourceGroup {
 pub struct RigSourceRig {
     pub id: String,
     pub rig_path: String,
+    pub rig_present: bool,
     pub config_path: String,
     pub config_present: bool,
     pub config_owned: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stale_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RigSourceStack {
     pub id: String,
     pub stack_path: String,
+    pub stack_present: bool,
     pub config_path: String,
     pub config_present: bool,
     pub config_owned: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stale_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
