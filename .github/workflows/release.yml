@@ -144,11 +144,12 @@ jobs:
           path: target/release/homeboy
           retention-days: 1
 
-  # ── Step 3: Quality gate (read-only checks + auto-refactor) ──
-   # Unlike PR CI (scoped to changed files), release quality gate runs
+  # ── Step 3: Quality gate (parallel read-only checks + auto-refactor) ──
+  # Unlike PR CI (scoped to changed files), release quality gate runs
   # unscoped against the entire codebase.
-  # Serial pipeline: audit → lint → test → release.
-   # All quality gates are read-only (autofix: false). The dedicated
+  # Read-only gates run in parallel after the shared build, then release
+  # preparation waits for audit, lint, and test to finish.
+  # All quality gates are read-only (autofix: false). The dedicated
   # auto-refactor job at the end owns all code changes.
   gate-audit:
     name: Audit
@@ -190,7 +191,6 @@ jobs:
     needs:
       - check
       - gate-build
-      - gate-audit
     if: needs.check.outputs.should-release == 'true'
     runs-on: ubuntu-latest
     steps:
@@ -226,7 +226,6 @@ jobs:
     needs:
       - check
       - gate-build
-      - gate-lint
     if: needs.check.outputs.should-release == 'true'
     runs-on: ubuntu-latest
     steps:
