@@ -521,3 +521,44 @@ installWordPressRequestProfiler(sitePath, {
   priorityBandHooks: ['admin_init'],
 });
 ```
+
+## WordPress Helper Discovery For Node Workloads
+
+Node.js rigs and bench workloads should discover WordPress helper files through
+the helper manifest instead of hardcoding local checkout paths. The WordPress
+extension exports the manifest at `homeboy-extension-wordpress/helper-manifest`:
+
+```js
+const {
+	getWordPressHelperManifest,
+} = require('homeboy-extension-wordpress/helper-manifest');
+
+const manifest = getWordPressHelperManifest();
+const requestProfiler = require(manifest.helpers.requestProfiler);
+```
+
+The manifest contract is versioned and currently exposes absolute paths for:
+
+- `helpers.requestProfiler` — `wordpress/lib/request-profiler.js`
+- `helpers.timingCorrelator` — `wordpress/lib/timing-correlator.js`
+- `helpers.bootstrapTimeline` — `wordpress/lib/wordpress-bootstrap-timeline.js`
+
+When the Node.js bench runner is running from the standard Homeboy extensions
+checkout and the sibling WordPress extension is present, it also exports these
+stable environment variables for rig-owned extra workloads:
+
+- `HOMEBOY_WORDPRESS_HELPER_MANIFEST`
+- `HOMEBOY_WORDPRESS_REQUEST_PROFILER_HELPER`
+- `HOMEBOY_WORDPRESS_TIMING_CORRELATOR_HELPER`
+- `HOMEBOY_WORDPRESS_BOOTSTRAP_TIMELINE_HELPER`
+
+Example for a rig-owned Node benchmark workload:
+
+```js
+const manifestPath = process.env.HOMEBOY_WORDPRESS_HELPER_MANIFEST;
+const { getWordPressHelperManifest } = await import(manifestPath);
+
+const { installWordPressRequestProfiler } = await import(
+	getWordPressHelperManifest().helpers.requestProfiler
+);
+```
