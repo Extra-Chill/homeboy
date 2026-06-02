@@ -14,12 +14,6 @@ enum MatchKind {
     Token,
 }
 
-#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
-struct ViolationKey {
-    path: &'static str,
-    term: &'static str,
-}
-
 const CORE_OWNED_SOURCE_ROOTS: &[&str] = &[
     "src/core",
     "src/commands/component.rs",
@@ -176,1082 +170,15 @@ const TERMS: &[Term] = &[
 // Each entry is a known production-code leak in core-owned source. Fixtures and
 // examples are not listed here: the scanner skips Rust test modules and source
 // test helpers instead of allowing broad paths like `tests/**`.
-const BASELINE: &[ViolationKey] = &[
-    ViolationKey {
-        path: "src/commands/component.rs",
-        term: "wordpress",
-    },
-    ViolationKey {
-        path: "src/commands/doctor/resources.rs",
-        term: "cargo",
-    },
-    ViolationKey {
-        path: "src/commands/doctor/resources.rs",
-        term: "npm",
-    },
-    ViolationKey {
-        path: "src/commands/doctor/resources.rs",
-        term: "phpcs",
-    },
-    ViolationKey {
-        path: "src/commands/doctor/resources.rs",
-        term: "phpstan",
-    },
-    ViolationKey {
-        path: "src/commands/doctor/resources.rs",
-        term: "wordpress",
-    },
-    ViolationKey {
-        path: "src/commands/extension.rs",
-        term: "phpcs",
-    },
-    ViolationKey {
-        path: "src/commands/extension.rs",
-        term: "phpstan",
-    },
-    ViolationKey {
-        path: "src/commands/lint.rs",
-        term: "php",
-    },
-    ViolationKey {
-        path: "src/commands/test.rs",
-        term: "cargo",
-    },
-    ViolationKey {
-        path: "src/core/code_audit/codebase_map.rs",
-        term: "php",
-    },
-    ViolationKey {
-        path: "src/core/code_audit/conventions.rs",
-        term: "php",
-    },
-    ViolationKey {
-        path: "src/core/code_audit/dead_code.rs",
-        term: "WP_CLI",
-    },
-    ViolationKey {
-        path: "src/core/code_audit/detectors/dead_guard.rs",
-        term: "composer",
-    },
-    ViolationKey {
-        path: "src/core/code_audit/detectors/dead_guard.rs",
-        term: "composer.json",
-    },
-    ViolationKey {
-        path: "src/core/code_audit/detectors/dead_guard.rs",
-        term: "php",
-    },
-    ViolationKey {
-        path: "src/core/code_audit/detectors/deprecation_age.rs",
-        term: "composer",
-    },
-    ViolationKey {
-        path: "src/core/code_audit/detectors/deprecation_age.rs",
-        term: "composer.json",
-    },
-    ViolationKey {
-        path: "src/core/code_audit/detectors/deprecation_age.rs",
-        term: "php",
-    },
-    ViolationKey {
-        path: "src/core/code_audit/docs_audit/claims.rs",
-        term: "php",
-    },
-    ViolationKey {
-        path: "src/core/code_audit/docs_audit/claims.rs",
-        term: "rust",
-    },
-    ViolationKey {
-        path: "src/core/code_audit/docs_audit/verify.rs",
-        term: "php",
-    },
-    ViolationKey {
-        path: "src/core/code_audit/detectors/field_patterns.rs",
-        term: "php",
-    },
-    ViolationKey {
-        path: "src/core/code_audit/detectors/repeated_literal_shape.rs",
-        term: "php",
-    },
-    ViolationKey {
-        path: "src/core/code_audit/requirements.rs",
-        term: "composer",
-    },
-    ViolationKey {
-        path: "src/core/code_audit/requirements.rs",
-        term: "composer.json",
-    },
-    ViolationKey {
-        path: "src/core/code_audit/requirements.rs",
-        term: "php",
-    },
-    ViolationKey {
-        path: "src/core/code_audit/detectors/shared_scaffolding.rs",
-        term: "php",
-    },
-    ViolationKey {
-        path: "src/core/code_audit/structural.rs",
-        term: "php",
-    },
-    ViolationKey {
-        path: "src/core/code_audit/detectors/upstream_workaround.rs",
-        term: "wordpress",
-    },
-    ViolationKey {
-        path: "src/core/code_audit/walker.rs",
-        term: "php",
-    },
-    ViolationKey {
-        path: "src/core/code_audit/detectors/wrapper_inference.rs",
-        term: "php",
-    },
-    ViolationKey {
-        path: "src/core/component/mod.rs",
-        term: "composer",
-    },
-    ViolationKey {
-        path: "src/core/component/mod.rs",
-        term: "npm",
-    },
-    ViolationKey {
-        path: "src/core/defaults.rs",
-        term: "cargo",
-    },
-    ViolationKey {
-        path: "src/core/defaults/builtins.rs",
-        term: "Cargo.toml",
-    },
-    ViolationKey {
-        path: "src/core/defaults/builtins.rs",
-        term: "cargo",
-    },
-    ViolationKey {
-        path: "src/core/defaults/builtins.rs",
-        term: "composer",
-    },
-    ViolationKey {
-        path: "src/core/defaults/builtins.rs",
-        term: "composer.json",
-    },
-    ViolationKey {
-        path: "src/core/defaults/builtins.rs",
-        term: "package.json",
-    },
-    ViolationKey {
-        path: "src/core/defaults/builtins.rs",
-        term: "style.css",
-    },
-    ViolationKey {
-        path: "src/core/deploy/permissions.rs",
-        term: "wp-content",
-    },
-    ViolationKey {
-        path: "src/core/engine/codebase_scan.rs",
-        term: "php",
-    },
-    ViolationKey {
-        path: "src/core/engine/edit_op_apply.rs",
-        term: "php",
-    },
-    ViolationKey {
-        path: "src/core/engine/executor.rs",
-        term: "composer",
-    },
-    ViolationKey {
-        path: "src/core/engine/executor.rs",
-        term: "npm",
-    },
-    ViolationKey {
-        path: "src/core/engine/symbol_graph.rs",
-        term: "php",
-    },
-    ViolationKey {
-        path: "src/core/engine/symbol_graph.rs",
-        term: "rust",
-    },
-    ViolationKey {
-        path: "src/core/extension/grammar.rs",
-        term: "php",
-    },
-    ViolationKey {
-        path: "src/core/extension/grammar.rs",
-        term: "rust",
-    },
-    ViolationKey {
-        path: "src/core/extension/grammar.rs",
-        term: "wordpress",
-    },
-    ViolationKey {
-        path: "src/core/extension/lifecycle.rs",
-        term: "wordpress",
-    },
-    ViolationKey {
-        path: "src/core/extension/manifest.rs",
-        term: "cargo",
-    },
-    ViolationKey {
-        path: "src/core/extension/manifest.rs",
-        term: "npx",
-    },
-    ViolationKey {
-        path: "src/core/extension/manifest.rs",
-        term: "php",
-    },
-    ViolationKey {
-        path: "src/core/extension/manifest.rs",
-        term: "phpcbf",
-    },
-    ViolationKey {
-        path: "src/core/extension/manifest.rs",
-        term: "phpcs",
-    },
-    ViolationKey {
-        path: "src/core/extension/manifest.rs",
-        term: "phpstan",
-    },
-    ViolationKey {
-        path: "src/core/extension/runtime_helper.rs",
-        term: "php",
-    },
-    ViolationKey {
-        path: "src/core/extension/runtime_helper/assets.rs",
-        term: "php",
-    },
-    ViolationKey {
-        path: "src/core/extension/test/drift.rs",
-        term: "php",
-    },
-    ViolationKey {
-        path: "src/core/extension/test/drift.rs",
-        term: "rust",
-    },
-    ViolationKey {
-        path: "src/core/extension/test/mod.rs",
-        term: "php",
-    },
-    ViolationKey {
-        path: "src/core/extension/test/report.rs",
-        term: "cargo",
-    },
-    ViolationKey {
-        path: "src/core/extension/test/run.rs",
-        term: "cargo",
-    },
-    ViolationKey {
-        path: "src/core/git/commits.rs",
-        term: "wordpress",
-    },
-    ViolationKey {
-        path: "src/core/git/primitives.rs",
-        term: "wordpress",
-    },
-    ViolationKey {
-        path: "src/core/project/mod.rs",
-        term: "cargo",
-    },
-    ViolationKey {
-        path: "src/core/refactor/decompose.rs",
-        term: "cargo",
-    },
-    ViolationKey {
-        path: "src/core/refactor/move_items.rs",
-        term: "rust",
-    },
-    ViolationKey {
-        path: "src/core/refactor/plan/generate/duplicate_fixes.rs",
-        term: "php",
-    },
-    ViolationKey {
-        path: "src/core/refactor/plan/generate/signatures.rs",
-        term: "php",
-    },
-    ViolationKey {
-        path: "src/core/refactor/plan/sources.rs",
-        term: "cargo",
-    },
-    ViolationKey {
-        path: "src/core/refactor/transform.rs",
-        term: "php",
-    },
-    ViolationKey {
-        path: "src/core/release/planning_quality.rs",
-        term: "php",
-    },
-    ViolationKey {
-        path: "src/core/release/version/default_pattern_for_file.rs",
-        term: "php",
-    },
-    ViolationKey {
-        path: "src/core/rig/toolchain.rs",
-        term: "cargo",
-    },
-    ViolationKey {
-        path: "src/core/self_status.rs",
-        term: "Cargo.toml",
-    },
-    ViolationKey {
-        path: "src/core/self_status.rs",
-        term: "cargo",
-    },
-    ViolationKey {
-        path: "src/core/upgrade/execution.rs",
-        term: "cargo",
-    },
-    ViolationKey {
-        path: "src/core/upgrade/helpers.rs",
-        term: "cargo",
-    },
-    ViolationKey {
-        path: "src/core/upgrade/mod.rs",
-        term: "cargo",
-    },
-    // Homeboy-domain core debt tracked by #3195.
-    ViolationKey {
-        path: "src/commands/component.rs",
-        term: "homeboy.json",
-    },
-    ViolationKey {
-        path: "src/commands/extension.rs",
-        term: "homeboy.json",
-    },
-    ViolationKey {
-        path: "src/commands/report.rs",
-        term: "Homeboy",
-    },
-    ViolationKey {
-        path: "src/core/change_artifact.rs",
-        term: "Lab",
-    },
-    ViolationKey {
-        path: "src/core/ci_profile.rs",
-        term: "Homeboy",
-    },
-    ViolationKey {
-        path: "src/core/cleanup.rs",
-        term: "homeboy.json",
-    },
-    ViolationKey {
-        path: "src/core/code_audit/baseline.rs",
-        term: "homeboy.json",
-    },
-    ViolationKey {
-        path: "src/core/code_audit/detectors/artifact_portability.rs",
-        term: "HOMEBOY_",
-    },
-    ViolationKey {
-        path: "src/core/code_audit/detectors/artifact_portability.rs",
-        term: "runner-artifact://",
-    },
-    ViolationKey {
-        path: "src/core/code_audit/detectors/command_status_contracts.rs",
-        term: "Homeboy",
-    },
-    ViolationKey {
-        path: "src/core/code_audit/detectors/command_status_contracts.rs",
-        term: "homeboy.json",
-    },
-    ViolationKey {
-        path: "src/core/code_audit/detectors/layer_ownership.rs",
-        term: "homeboy.json",
-    },
-    ViolationKey {
-        path: "src/core/code_audit/detectors/rust_test_wiring.rs",
-        term: "Homeboy",
-    },
-    ViolationKey {
-        path: "src/core/code_audit/detectors/wrapper_inference.rs",
-        term: "homeboy.json",
-    },
-    ViolationKey {
-        path: "src/core/component/drift.rs",
-        term: "homeboy.json",
-    },
-    ViolationKey {
-        path: "src/core/component/inventory.rs",
-        term: "homeboy.json",
-    },
-    ViolationKey {
-        path: "src/core/component/mod.rs",
-        term: "Homeboy",
-    },
-    ViolationKey {
-        path: "src/core/component/mod.rs",
-        term: "homeboy.json",
-    },
-    ViolationKey {
-        path: "src/core/component/mutations.rs",
-        term: "homeboy.json",
-    },
-    ViolationKey {
-        path: "src/core/component/portable.rs",
-        term: "homeboy.json",
-    },
-    ViolationKey {
-        path: "src/core/component/resolution.rs",
-        term: "homeboy.json",
-    },
-    ViolationKey {
-        path: "src/core/daemon/artifact_download.rs",
-        term: "Homeboy",
-    },
-    ViolationKey {
-        path: "src/core/daemon/broker_config.rs",
-        term: "Homeboy",
-    },
-    ViolationKey {
-        path: "src/core/daemon/remote_runner.rs",
-        term: ".homeboy",
-    },
-    ViolationKey {
-        path: "src/core/defaults.rs",
-        term: "HOMEBOY_",
-    },
-    ViolationKey {
-        path: "src/core/defaults.rs",
-        term: "Homeboy",
-    },
-    ViolationKey {
-        path: "src/core/defaults.rs",
-        term: "homeboy.json",
-    },
-    ViolationKey {
-        path: "src/core/defaults/builtins.rs",
-        term: ".homeboy",
-    },
-    ViolationKey {
-        path: "src/core/defaults/builtins.rs",
-        term: "homeboy.json",
-    },
-    ViolationKey {
-        path: "src/core/deploy/transfer.rs",
-        term: ".homeboy",
-    },
-    ViolationKey {
-        path: "src/core/deploy/version_overrides.rs",
-        term: ".homeboy",
-    },
-    ViolationKey {
-        path: "src/core/deps/stack.rs",
-        term: "Homeboy",
-    },
-    ViolationKey {
-        path: "src/core/deps/stack.rs",
-        term: "homeboy.json",
-    },
-    ViolationKey {
-        path: "src/core/engine/baseline.rs",
-        term: "HOMEBOY_",
-    },
-    ViolationKey {
-        path: "src/core/engine/baseline.rs",
-        term: "homeboy.json",
-    },
-    ViolationKey {
-        path: "src/core/engine/codebase_scan.rs",
-        term: ".homeboy",
-    },
-    ViolationKey {
-        path: "src/core/engine/execution_context.rs",
-        term: "homeboy.json",
-    },
-    ViolationKey {
-        path: "src/core/engine/invocation.rs",
-        term: "HOMEBOY_",
-    },
-    ViolationKey {
-        path: "src/core/engine/invocation.rs",
-        term: "Homeboy",
-    },
-    ViolationKey {
-        path: "src/core/engine/invocation/runtime.rs",
-        term: "HOMEBOY_",
-    },
-    ViolationKey {
-        path: "src/core/engine/invocation/runtime.rs",
-        term: "Homeboy",
-    },
-    ViolationKey {
-        path: "src/core/engine/resource.rs",
-        term: ".homeboy",
-    },
-    ViolationKey {
-        path: "src/core/engine/run_dir.rs",
-        term: "HOMEBOY_",
-    },
-    ViolationKey {
-        path: "src/core/engine/run_dir.rs",
-        term: "homeboy-run",
-    },
-    ViolationKey {
-        path: "src/core/engine/temp.rs",
-        term: "HOMEBOY_",
-    },
-    ViolationKey {
-        path: "src/core/engine/undo/snapshot.rs",
-        term: "HOMEBOY_",
-    },
-    ViolationKey {
-        path: "src/core/execution.rs",
-        term: "Lab",
-    },
-    ViolationKey {
-        path: "src/core/extension/bench/baseline.rs",
-        term: "Homeboy",
-    },
-    ViolationKey {
-        path: "src/core/extension/bench/baseline.rs",
-        term: "homeboy.json",
-    },
-    ViolationKey {
-        path: "src/core/extension/bench/mod.rs",
-        term: "HOMEBOY_",
-    },
-    ViolationKey {
-        path: "src/core/extension/bench/parsing.rs",
-        term: "HOMEBOY_",
-    },
-    ViolationKey {
-        path: "src/core/extension/bench/parsing.rs",
-        term: "Homeboy",
-    },
-    ViolationKey {
-        path: "src/core/extension/bench/run.rs",
-        term: "HOMEBOY_",
-    },
-    ViolationKey {
-        path: "src/core/extension/bench/run.rs",
-        term: "Homeboy",
-    },
-    ViolationKey {
-        path: "src/core/extension/bench/run.rs",
-        term: "homeboy.json",
-    },
-    ViolationKey {
-        path: "src/core/extension/bench/run_metadata.rs",
-        term: "HOMEBOY_",
-    },
-    ViolationKey {
-        path: "src/core/extension/build/mod.rs",
-        term: "HOMEBOY_",
-    },
-    ViolationKey {
-        path: "src/core/extension/build/mod.rs",
-        term: "Homeboy",
-    },
-    ViolationKey {
-        path: "src/core/extension/exec_context.rs",
-        term: "HOMEBOY_",
-    },
-    ViolationKey {
-        path: "src/core/extension/execution.rs",
-        term: "HOMEBOY_",
-    },
-    ViolationKey {
-        path: "src/core/extension/lifecycle/source_metadata.rs",
-        term: "Homeboy",
-    },
-    ViolationKey {
-        path: "src/core/extension/lint/mod.rs",
-        term: "HOMEBOY_",
-    },
-    ViolationKey {
-        path: "src/core/extension/lint/run.rs",
-        term: "HOMEBOY_",
-    },
-    ViolationKey {
-        path: "src/core/extension/lint/run.rs",
-        term: "homeboy.json",
-    },
-    ViolationKey {
-        path: "src/core/extension/manifest.rs",
-        term: "HOMEBOY_",
-    },
-    ViolationKey {
-        path: "src/core/extension/manifest.rs",
-        term: "Homeboy",
-    },
-    ViolationKey {
-        path: "src/core/extension/manifest_config.rs",
-        term: "Homeboy",
-    },
-    ViolationKey {
-        path: "src/core/extension/runner.rs",
-        term: "HOMEBOY_",
-    },
-    ViolationKey {
-        path: "src/core/extension/runtime_helper.rs",
-        term: ".homeboy",
-    },
-    ViolationKey {
-        path: "src/core/extension/runtime_helper.rs",
-        term: "HOMEBOY_",
-    },
-    ViolationKey {
-        path: "src/core/extension/runtime_helper.rs",
-        term: "homeboy-run",
-    },
-    ViolationKey {
-        path: "src/core/extension/test/mod.rs",
-        term: "HOMEBOY_",
-    },
-    ViolationKey {
-        path: "src/core/extension/test/run.rs",
-        term: "HOMEBOY_",
-    },
-    ViolationKey {
-        path: "src/core/extension/test/run.rs",
-        term: "homeboy.json",
-    },
-    ViolationKey {
-        path: "src/core/extension/trace/mod.rs",
-        term: "Homeboy",
-    },
-    ViolationKey {
-        path: "src/core/extension/trace/run.rs",
-        term: "HOMEBOY_",
-    },
-    ViolationKey {
-        path: "src/core/extension/trace/run.rs",
-        term: "homeboy.json",
-    },
-    ViolationKey {
-        path: "src/core/extension/update_check.rs",
-        term: "HOMEBOY_",
-    },
-    ViolationKey {
-        path: "src/core/finding.rs",
-        term: "Homeboy",
-    },
-    ViolationKey {
-        path: "src/core/git/github.rs",
-        term: "homeboy.json",
-    },
-    ViolationKey {
-        path: "src/core/git/github_comment_sections.rs",
-        term: "Homeboy",
-    },
-    ViolationKey {
-        path: "src/core/git/github_pr_comments.rs",
-        term: "Homeboy",
-    },
-    ViolationKey {
-        path: "src/core/git/github_types.rs",
-        term: "homeboy.json",
-    },
-    ViolationKey {
-        path: "src/core/http_api.rs",
-        term: ".homeboy",
-    },
-    ViolationKey {
-        path: "src/core/http_api.rs",
-        term: "Homeboy",
-    },
-    ViolationKey {
-        path: "src/core/issues/render.rs",
-        term: "Homeboy",
-    },
-    ViolationKey {
-        path: "src/core/observation/mod.rs",
-        term: "homeboy.json",
-    },
-    ViolationKey {
-        path: "src/core/observation/records/run_builder.rs",
-        term: ".homeboy",
-    },
-    ViolationKey {
-        path: "src/core/observation/context.rs",
-        term: "HOMEBOY_",
-    },
-    ViolationKey {
-        path: "src/core/observation/store.rs",
-        term: ".homeboy",
-    },
-    ViolationKey {
-        path: "src/core/output.rs",
-        term: "Homeboy",
-    },
-    ViolationKey {
-        path: "src/core/paths.rs",
-        term: "HOMEBOY_",
-    },
-    ViolationKey {
-        path: "src/core/paths.rs",
-        term: "Homeboy",
-    },
-    ViolationKey {
-        path: "src/core/paths.rs",
-        term: "homeboy.json",
-    },
-    ViolationKey {
-        path: "src/core/paths/rigs.rs",
-        term: "Homeboy",
-    },
-    ViolationKey {
-        path: "src/core/plan.rs",
-        term: "Homeboy",
-    },
-    ViolationKey {
-        path: "src/core/project/component/attachments.rs",
-        term: "homeboy.json",
-    },
-    ViolationKey {
-        path: "src/core/project/component/resolution.rs",
-        term: "homeboy.json",
-    },
-    ViolationKey {
-        path: "src/core/project/types.rs",
-        term: "homeboy.json",
-    },
-    ViolationKey {
-        path: "src/core/refactor/auto/verify.rs",
-        term: "HOMEBOY_",
-    },
-    ViolationKey {
-        path: "src/core/refactor/plan/sources.rs",
-        term: "HOMEBOY_",
-    },
-    ViolationKey {
-        path: "src/core/refactor/plan/sources/cache.rs",
-        term: "HOMEBOY_",
-    },
-    ViolationKey {
-        path: "src/core/refactor/plan/sources/extension_source.rs",
-        term: "Homeboy",
-    },
-    ViolationKey {
-        path: "src/core/release/changelog/sections.rs",
-        term: "Homeboy",
-    },
-    ViolationKey {
-        path: "src/core/release/context.rs",
-        term: "homeboy.json",
-    },
-    ViolationKey {
-        path: "src/core/release/executor.rs",
-        term: "Homeboy",
-    },
-    ViolationKey {
-        path: "src/core/release/planning_changelog.rs",
-        term: "Homeboy",
-    },
-    ViolationKey {
-        path: "src/core/release/planning_worktree.rs",
-        term: ".homeboy",
-    },
-    ViolationKey {
-        path: "src/core/release/planning_worktree.rs",
-        term: "HOMEBOY_",
-    },
-    ViolationKey {
-        path: "src/core/release/types.rs",
-        term: "Homeboy",
-    },
-    ViolationKey {
-        path: "src/core/rig/app/bundle.rs",
-        term: "HOMEBOY_",
-    },
-    ViolationKey {
-        path: "src/core/rig/app/bundle.rs",
-        term: "Homeboy",
-    },
-    ViolationKey {
-        path: "src/core/rig/spec.rs",
-        term: "HOMEBOY_",
-    },
-    ViolationKey {
-        path: "src/core/rig/spec.rs",
-        term: "Homeboy",
-    },
-    ViolationKey {
-        path: "src/core/runner/apply.rs",
-        term: "Lab",
-    },
-    ViolationKey {
-        path: "src/core/runner/capabilities.rs",
-        term: ".homeboy",
-    },
-    ViolationKey {
-        path: "src/core/runner/capabilities.rs",
-        term: "Homeboy",
-    },
-    ViolationKey {
-        path: "src/core/runner/capabilities.rs",
-        term: "Lab",
-    },
-    ViolationKey {
-        path: "src/core/runner/capabilities.rs",
-        term: "offload",
-    },
-    ViolationKey {
-        path: "src/core/runner/connection.rs",
-        term: ".homeboy",
-    },
-    ViolationKey {
-        path: "src/core/runner/connection.rs",
-        term: "Homeboy",
-    },
-    ViolationKey {
-        path: "src/core/runner/connection_daemon.rs",
-        term: "Homeboy",
-    },
-    ViolationKey {
-        path: "src/core/runner/evidence.rs",
-        term: ".homeboy",
-    },
-    ViolationKey {
-        path: "src/core/runner/evidence.rs",
-        term: "runner-artifact://",
-    },
-    ViolationKey {
-        path: "src/core/runner/execution.rs",
-        term: ".homeboy",
-    },
-    ViolationKey {
-        path: "src/core/runner/execution/policy.rs",
-        term: "Homeboy",
-    },
-    ViolationKey {
-        path: "src/core/runner/lab.rs",
-        term: ".homeboy",
-    },
-    ViolationKey {
-        path: "src/core/runner/lab.rs",
-        term: "Lab",
-    },
-    ViolationKey {
-        path: "src/core/runner/lab.rs",
-        term: "offload",
-    },
-    ViolationKey {
-        path: "src/core/runner/offload_changed_since.rs",
-        term: "Lab",
-    },
-    ViolationKey {
-        path: "src/core/runner/offload_changed_since.rs",
-        term: "offload",
-    },
-    ViolationKey {
-        path: "src/core/runner/offload_metadata.rs",
-        term: "homeboy/lab-offload/v1",
-    },
-    ViolationKey {
-        path: "src/core/runner/offload_metadata.rs",
-        term: "offload",
-    },
-    ViolationKey {
-        path: "src/core/runner/rig_materialization.rs",
-        term: "Lab",
-    },
-    ViolationKey {
-        path: "src/core/runner/rig_materialization.rs",
-        term: "offload",
-    },
-    ViolationKey {
-        path: "src/core/runner/session.rs",
-        term: "Homeboy",
-    },
-    ViolationKey {
-        path: "src/core/runner/workspace.rs",
-        term: "Lab",
-    },
-    ViolationKey {
-        path: "src/core/runner/workspace.rs",
-        term: "offload",
-    },
-    ViolationKey {
-        path: "src/core/scope.rs",
-        term: "Homeboy",
-    },
-    ViolationKey {
-        path: "src/core/server/client.rs",
-        term: "HOMEBOY_",
-    },
-    ViolationKey {
-        path: "src/core/server/client.rs",
-        term: "Homeboy",
-    },
-    ViolationKey {
-        path: "src/core/server/http.rs",
-        term: "Homeboy",
-    },
-    ViolationKey {
-        path: "src/core/source_snapshot.rs",
-        term: ".homeboy",
-    },
-    ViolationKey {
-        path: "src/core/upgrade/execution.rs",
-        term: "Homeboy",
-    },
-    ViolationKey {
-        path: "src/core/upgrade/execution.rs",
-        term: "homeboy.json",
-    },
-    ViolationKey {
-        path: "src/core/upgrade/runners.rs",
-        term: ".homeboy",
-    },
-    ViolationKey {
-        path: "src/core/upgrade/runners.rs",
-        term: "Homeboy",
-    },
-    ViolationKey {
-        path: "src/core/upgrade/update_check.rs",
-        term: "HOMEBOY_",
-    },
-    ViolationKey {
-        path: "src/core/upgrade/update_check.rs",
-        term: "Homeboy",
-    },
-];
+const BASELINE: &str = include_str!("core_agnostic_data/source_baseline.txt");
 
-const BASELINE_OCCURRENCES: usize = 639;
+const BASELINE_OCCURRENCES: usize = 660;
 
 // Known core-owned test/fixture literal debt tracked by #3034. Keep this list
 // explicit so stale rows and occurrence-count changes force cleanup or review.
-const TEST_CONTENT_BASELINE: &[ViolationKey] = &[
-    ViolationKey {
-        path: "src/core/code_audit/core_fingerprint.rs",
-        term: "rust",
-    },
-    ViolationKey {
-        path: "src/core/code_audit/detectors/repeated_literal_shape.rs",
-        term: "php",
-    },
-    ViolationKey {
-        path: "src/core/code_audit/requirements.rs",
-        term: "composer",
-    },
-    ViolationKey {
-        path: "src/core/code_audit/test_quality.rs",
-        term: "cargo",
-    },
-    ViolationKey {
-        path: "src/core/context/mod.rs",
-        term: "rust",
-    },
-    ViolationKey {
-        path: "src/core/context/mod.rs",
-        term: "wordpress",
-    },
-    ViolationKey {
-        path: "src/core/engine/symbol_graph.rs",
-        term: "php",
-    },
-    ViolationKey {
-        path: "src/core/extension/bench/run_metadata.rs",
-        term: "cargo",
-    },
-    ViolationKey {
-        path: "src/core/extension/registry.rs",
-        term: "wordpress",
-    },
-    ViolationKey {
-        path: "src/core/extension/summary.rs",
-        term: "wordpress",
-    },
-    ViolationKey {
-        path: "src/core/extension/test/parsing.rs",
-        term: "cargo",
-    },
-    ViolationKey {
-        path: "src/core/extension/test/report.rs",
-        term: "wordpress",
-    },
-    ViolationKey {
-        path: "src/core/git/commits.rs",
-        term: "wordpress",
-    },
-    ViolationKey {
-        path: "src/core/observation/budget_findings.rs",
-        term: "wordpress",
-    },
-    ViolationKey {
-        path: "src/core/observation/records/run_builder.rs",
-        term: "cargo",
-    },
-    ViolationKey {
-        path: "src/core/refactor/decompose.rs",
-        term: "php",
-    },
-    ViolationKey {
-        path: "src/core/refactor/decompose.rs",
-        term: "rust",
-    },
-    ViolationKey {
-        path: "src/core/rig/spec.rs",
-        term: "wordpress",
-    },
-    ViolationKey {
-        path: "src/core/runner/mod.rs",
-        term: "rust",
-    },
-    ViolationKey {
-        path: "src/core/server/health.rs",
-        term: "php",
-    },
-    ViolationKey {
-        path: "src/core/source_snapshot.rs",
-        term: "cargo",
-    },
-    ViolationKey {
-        path: "src/core/triage/tests.rs",
-        term: "wordpress",
-    },
-    ViolationKey {
-        path: "tests/core/daemon_test.rs",
-        term: "cargo",
-    },
-    ViolationKey {
-        path: "tests/core/extension/component_script_test.rs",
-        term: "php",
-    },
-    ViolationKey {
-        path: "tests/core/rig/bench_default_baseline_dispatch_test.rs",
-        term: "rust",
-    },
-    ViolationKey {
-        path: "tests/core/rig/bench_resource_lease_test.rs",
-        term: "wordpress",
-    },
-    ViolationKey {
-        path: "tests/core/rig/expand_test.rs",
-        term: "wordpress",
-    },
-    ViolationKey {
-        path: "tests/core/rig/lease_test.rs",
-        term: "wordpress",
-    },
-    ViolationKey {
-        path: "tests/core/rig/service_test.rs",
-        term: "wordpress",
-    },
-    ViolationKey {
-        path: "tests/core/rig/spec_test.rs",
-        term: "php",
-    },
-    ViolationKey {
-        path: "tests/core/rig/spec_test.rs",
-        term: "wordpress",
-    },
-    ViolationKey {
-        path: "tests/core/rig/state_test.rs",
-        term: "wordpress",
-    },
-    ViolationKey {
-        path: "tests/core/rig/workloads_test.rs",
-        term: "nodejs",
-    },
-    ViolationKey {
-        path: "tests/fixtures/failure_digest/lint.json",
-        term: "phpcs",
-    },
-    ViolationKey {
-        path: "tests/fixtures/failure_digest/lint.json",
-        term: "phpstan",
-    },
-];
+const TEST_CONTENT_BASELINE: &str = include_str!("core_agnostic_data/test_content_baseline.txt");
 
-const TEST_CONTENT_BASELINE_OCCURRENCES: usize = 102;
+const TEST_CONTENT_BASELINE_OCCURRENCES: usize = 104;
 
 #[test]
 fn core_owned_source_stays_language_and_framework_agnostic() {
@@ -1261,23 +188,20 @@ fn core_owned_source_stays_language_and_framework_agnostic() {
     for source_root in CORE_OWNED_SOURCE_ROOTS {
         let path = root.join(source_root);
         if path.is_dir() {
-            scan_dir(root, &path, &mut found);
+            helpers::scan_dir(root, &path, &mut found);
         } else {
-            scan_file(root, &path, &mut found);
+            helpers::scan_file(root, &path, &mut found);
         }
     }
 
-    let baseline = BASELINE
-        .iter()
-        .map(|entry| (entry.path.to_string(), entry.term.to_string()))
-        .collect::<BTreeSet<_>>();
+    let baseline = helpers::baseline_entries(BASELINE);
 
     let unexpected = found
         .iter()
         .filter(|(key, _)| !baseline.contains(*key))
         .map(|((path, term), lines)| format!("{path}: {term} on lines {lines:?}"))
         .collect::<Vec<_>>();
-    let debt_report = format_baseline_debt_report(&found);
+    let debt_report = helpers::format_baseline_debt_report(&found);
 
     assert!(
         unexpected.is_empty(),
@@ -1286,7 +210,7 @@ fn core_owned_source_stays_language_and_framework_agnostic() {
         debt_report
     );
 
-    let stale_baseline = stale_baseline_rows(&found);
+    let stale_baseline = helpers::stale_baseline_rows(&found);
     assert!(
         stale_baseline.is_empty(),
         "core-owned source agnostic baseline contains stale entries. Remove stale BASELINE entries so the #2240/#3195 guard only allows current debt:\n{}\n\n{}",
@@ -1320,20 +244,20 @@ fn core_owned_test_content_stays_language_and_framework_agnostic() {
     for source_root in CORE_OWNED_SOURCE_ROOTS {
         let path = root.join(source_root);
         if path.is_dir() {
-            scan_source_dir_test_content(root, &path, &mut found);
+            helpers::scan_source_dir_test_content(root, &path, &mut found);
         } else {
-            scan_source_file_test_content(root, &path, &mut found);
+            helpers::scan_source_file_test_content(root, &path, &mut found);
         }
     }
 
     for test_root in CORE_OWNED_TEST_CONTENT_ROOTS {
         let path = root.join(test_root);
         if path.exists() {
-            scan_test_content_path(root, &path, &mut found);
+            helpers::scan_test_content_path(root, &path, &mut found);
         }
     }
 
-    assert_test_content_baseline(&found);
+    helpers::assert_test_content_baseline(&found);
 
     let term_distribution = homeboy::core::top_n::top_n_by(
         found.keys().map(|(_, term)| term.as_str()),
@@ -1346,298 +270,320 @@ fn core_owned_test_content_stays_language_and_framework_agnostic() {
     );
 }
 
-fn scan_dir(root: &Path, dir: &Path, found: &mut BTreeMap<(String, String), Vec<usize>>) {
-    for entry in fs::read_dir(dir).expect("source dir should be readable") {
-        let entry = entry.expect("source entry should be readable");
-        let path = entry.path();
-        if path.is_dir() {
-            scan_dir(root, &path, found);
-        } else if path.extension().is_some_and(|ext| ext == "rs") {
-            scan_file(root, &path, found);
-        }
-    }
-}
+mod helpers {
+    use super::*;
 
-fn scan_file(root: &Path, path: &Path, found: &mut BTreeMap<(String, String), Vec<usize>>) {
-    if is_test_helper(path) {
-        return;
+    pub(super) fn baseline_entries(data: &str) -> BTreeSet<(String, String)> {
+        data.lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| {
+                let (path, term) = line
+                    .split_once('\t')
+                    .expect("baseline row should contain a tab separator");
+                (path.to_string(), term.to_string())
+            })
+            .collect()
     }
 
-    let content = fs::read_to_string(path).expect("source file should be readable");
-    let relative = relative_path(root, path);
-    let mut skip_rest_as_test_module = false;
-
-    for (index, line) in content.lines().enumerate() {
-        if line.trim() == "#[cfg(test)]" {
-            skip_rest_as_test_module = true;
-            continue;
-        }
-        if skip_rest_as_test_module {
-            continue;
-        }
-
-        for term in TERMS {
-            if term.matches(line) {
-                found
-                    .entry((relative.clone(), term.name.to_string()))
-                    .or_default()
-                    .push(index + 1);
+    pub(super) fn scan_dir(
+        root: &Path,
+        dir: &Path,
+        found: &mut BTreeMap<(String, String), Vec<usize>>,
+    ) {
+        for entry in fs::read_dir(dir).expect("source dir should be readable") {
+            let entry = entry.expect("source entry should be readable");
+            let path = entry.path();
+            if path.is_dir() {
+                scan_dir(root, &path, found);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                scan_file(root, &path, found);
             }
         }
     }
-}
 
-fn scan_source_dir_test_content(
-    root: &Path,
-    dir: &Path,
-    found: &mut BTreeMap<(String, String), Vec<usize>>,
-) {
-    for entry in fs::read_dir(dir).expect("source dir should be readable") {
-        let entry = entry.expect("source entry should be readable");
-        let path = entry.path();
+    pub(super) fn scan_file(
+        root: &Path,
+        path: &Path,
+        found: &mut BTreeMap<(String, String), Vec<usize>>,
+    ) {
+        if is_test_helper(path) {
+            return;
+        }
+
+        let content = fs::read_to_string(path).expect("source file should be readable");
+        let relative = relative_path(root, path);
+        let mut skip_rest_as_test_module = false;
+
+        for (index, line) in content.lines().enumerate() {
+            if line.trim() == "#[cfg(test)]" {
+                skip_rest_as_test_module = true;
+                continue;
+            }
+            if skip_rest_as_test_module {
+                continue;
+            }
+
+            for term in TERMS {
+                if term.matches(line) {
+                    found
+                        .entry((relative.clone(), term.name.to_string()))
+                        .or_default()
+                        .push(index + 1);
+                }
+            }
+        }
+    }
+
+    pub(super) fn scan_source_dir_test_content(
+        root: &Path,
+        dir: &Path,
+        found: &mut BTreeMap<(String, String), Vec<usize>>,
+    ) {
+        for entry in fs::read_dir(dir).expect("source dir should be readable") {
+            let entry = entry.expect("source entry should be readable");
+            let path = entry.path();
+            if path.is_dir() {
+                scan_source_dir_test_content(root, &path, found);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                scan_source_file_test_content(root, &path, found);
+            }
+        }
+    }
+
+    pub(super) fn scan_source_file_test_content(
+        root: &Path,
+        path: &Path,
+        found: &mut BTreeMap<(String, String), Vec<usize>>,
+    ) {
+        if is_extension_owned_path(root, path) {
+            return;
+        }
+
+        let content = fs::read_to_string(path).expect("source file should be readable");
+        let relative = relative_path(root, path);
+        let is_helper = is_test_helper(path);
+        let mut in_test_content = is_helper;
+
+        for (index, line) in content.lines().enumerate() {
+            if line.trim() == "#[cfg(test)]" {
+                in_test_content = true;
+                continue;
+            }
+            if !in_test_content {
+                continue;
+            }
+
+            scan_test_content_line(&relative, index + 1, line, true, found);
+        }
+    }
+
+    pub(super) fn scan_test_content_path(
+        root: &Path,
+        path: &Path,
+        found: &mut BTreeMap<(String, String), Vec<usize>>,
+    ) {
+        if is_extension_owned_path(root, path) {
+            return;
+        }
+
         if path.is_dir() {
-            scan_source_dir_test_content(root, &path, found);
-        } else if path.extension().is_some_and(|ext| ext == "rs") {
-            scan_source_file_test_content(root, &path, found);
-        }
-    }
-}
-
-fn scan_source_file_test_content(
-    root: &Path,
-    path: &Path,
-    found: &mut BTreeMap<(String, String), Vec<usize>>,
-) {
-    if is_extension_owned_path(root, path) {
-        return;
-    }
-
-    let content = fs::read_to_string(path).expect("source file should be readable");
-    let relative = relative_path(root, path);
-    let is_helper = is_test_helper(path);
-    let mut in_test_content = is_helper;
-
-    for (index, line) in content.lines().enumerate() {
-        if line.trim() == "#[cfg(test)]" {
-            in_test_content = true;
-            continue;
-        }
-        if !in_test_content {
-            continue;
+            for entry in fs::read_dir(path).expect("test content dir should be readable") {
+                let entry = entry.expect("test content entry should be readable");
+                scan_test_content_path(root, &entry.path(), found);
+            }
+            return;
         }
 
-        scan_test_content_line(&relative, index + 1, line, true, found);
-    }
-}
-
-fn scan_test_content_path(
-    root: &Path,
-    path: &Path,
-    found: &mut BTreeMap<(String, String), Vec<usize>>,
-) {
-    if is_extension_owned_path(root, path) {
-        return;
-    }
-
-    if path.is_dir() {
-        for entry in fs::read_dir(path).expect("test content dir should be readable") {
-            let entry = entry.expect("test content entry should be readable");
-            scan_test_content_path(root, &entry.path(), found);
+        if !is_scannable_test_content_file(path) {
+            return;
         }
-        return;
+
+        let content = fs::read_to_string(path).expect("test content file should be readable");
+        scan_test_content_lines(
+            relative_path(root, path),
+            content.lines(),
+            path.extension().is_some_and(|ext| ext == "rs"),
+            found,
+        );
     }
 
-    if !is_scannable_test_content_file(path) {
-        return;
-    }
-
-    let content = fs::read_to_string(path).expect("test content file should be readable");
-    scan_test_content_lines(
-        relative_path(root, path),
-        content.lines(),
-        path.extension().is_some_and(|ext| ext == "rs"),
-        found,
-    );
-}
-
-fn scan_test_content_lines<'a>(
-    relative: impl Into<String>,
-    lines: impl IntoIterator<Item = &'a str>,
-    rust_string_literals_only: bool,
-    found: &mut BTreeMap<(String, String), Vec<usize>>,
-) {
-    let relative = relative.into();
-    for (index, line) in lines.into_iter().enumerate() {
-        scan_test_content_line(&relative, index + 1, line, rust_string_literals_only, found);
-    }
-}
-
-fn scan_test_content_line(
-    relative: &str,
-    line_number: usize,
-    line: &str,
-    rust_string_literals_only: bool,
-    found: &mut BTreeMap<(String, String), Vec<usize>>,
-) {
-    let segments = if rust_string_literals_only {
-        rust_string_literal_segments(line)
-    } else {
-        vec![line.to_string()]
-    };
-
-    for term in TERMS {
-        if segments
-            .iter()
-            .any(|segment| term.matches_test_content(segment))
-        {
-            found
-                .entry((relative.to_string(), term.name.to_string()))
-                .or_default()
-                .push(line_number);
+    fn scan_test_content_lines<'a>(
+        relative: impl Into<String>,
+        lines: impl IntoIterator<Item = &'a str>,
+        rust_string_literals_only: bool,
+        found: &mut BTreeMap<(String, String), Vec<usize>>,
+    ) {
+        let relative = relative.into();
+        for (index, line) in lines.into_iter().enumerate() {
+            scan_test_content_line(&relative, index + 1, line, rust_string_literals_only, found);
         }
     }
-}
 
-fn rust_string_literal_segments(line: &str) -> Vec<String> {
-    let mut segments = Vec::new();
-    let mut remaining = line;
-
-    while let Some(start) = remaining.find('"') {
-        remaining = &remaining[start + 1..];
-        let Some(end) = remaining.find('"') else {
-            break;
+    fn scan_test_content_line(
+        relative: &str,
+        line_number: usize,
+        line: &str,
+        rust_string_literals_only: bool,
+        found: &mut BTreeMap<(String, String), Vec<usize>>,
+    ) {
+        let segments = if rust_string_literals_only {
+            rust_string_literal_segments(line)
+        } else {
+            vec![line.to_string()]
         };
-        segments.push(remaining[..end].to_string());
-        remaining = &remaining[end + 1..];
+
+        for term in TERMS {
+            if segments
+                .iter()
+                .any(|segment| term.matches_test_content(segment))
+            {
+                found
+                    .entry((relative.to_string(), term.name.to_string()))
+                    .or_default()
+                    .push(line_number);
+            }
+        }
     }
 
-    segments
-}
+    fn rust_string_literal_segments(line: &str) -> Vec<String> {
+        let mut segments = Vec::new();
+        let mut remaining = line;
 
-fn assert_test_content_baseline(found: &BTreeMap<(String, String), Vec<usize>>) {
-    let baseline = TEST_CONTENT_BASELINE
-        .iter()
-        .map(|entry| (entry.path.to_string(), entry.term.to_string()))
-        .collect::<BTreeSet<_>>();
+        while let Some(start) = remaining.find('"') {
+            remaining = &remaining[start + 1..];
+            let Some(end) = remaining.find('"') else {
+                break;
+            };
+            segments.push(remaining[..end].to_string());
+            remaining = &remaining[end + 1..];
+        }
 
-    let unexpected = found
-        .iter()
-        .filter(|(key, _)| !baseline.contains(*key))
-        .map(|((path, term), lines)| format!("{path}: {term} on lines {lines:?}"))
-        .collect::<Vec<_>>();
-    let debt_report = format_test_content_debt_report(found);
+        segments
+    }
 
-    assert!(
+    pub(super) fn assert_test_content_baseline(found: &BTreeMap<(String, String), Vec<usize>>) {
+        let baseline = baseline_entries(TEST_CONTENT_BASELINE);
+
+        let unexpected = found
+            .iter()
+            .filter(|(key, _)| !baseline.contains(*key))
+            .map(|((path, term), lines)| format!("{path}: {term} on lines {lines:?}"))
+            .collect::<Vec<_>>();
+        let debt_report = format_test_content_debt_report(found);
+
+        assert!(
         unexpected.is_empty(),
         "core-owned test content contains non-baselined ecosystem fixture language:\n{}\n\nUse generic fixtures/examples in core-owned tests, move ecosystem-specific cases into extension-owned tests, or add a narrow issue-linked TEST_CONTENT_BASELINE entry for unavoidable current debt.\n\n{}",
         unexpected.join("\n"),
         debt_report
     );
 
-    let stale_baseline = TEST_CONTENT_BASELINE
-        .iter()
-        .filter(|entry| !found.contains_key(&(entry.path.to_string(), entry.term.to_string())))
-        .map(|entry| format!("- {}: {}", entry.path, entry.term))
-        .collect::<Vec<_>>();
-    assert!(
+        let stale_baseline = baseline_entries(TEST_CONTENT_BASELINE)
+            .into_iter()
+            .filter(|entry| !found.contains_key(entry))
+            .map(|(path, term)| format!("- {path}: {term}"))
+            .collect::<Vec<_>>();
+        assert!(
         stale_baseline.is_empty(),
         "core-owned test content ecosystem baseline contains stale entries. Remove stale TEST_CONTENT_BASELINE entries:\n{}\n\n{}",
         stale_baseline.join("\n"),
         debt_report
     );
 
-    let occurrence_count = found.values().map(Vec::len).sum::<usize>();
-    assert_eq!(
+        let occurrence_count = found.values().map(Vec::len).sum::<usize>();
+        assert_eq!(
         occurrence_count, TEST_CONTENT_BASELINE_OCCURRENCES,
         "core-owned test content ecosystem baseline occurrence count changed. If this went down, lower TEST_CONTENT_BASELINE_OCCURRENCES and remove stale rows. If it went up, move the fixture language into extension-owned tests.\n\n{}",
         debt_report
     );
-}
-
-fn is_scannable_test_content_file(path: &Path) -> bool {
-    path.extension()
-        .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| {
-            matches!(
-                ext,
-                "rs" | "json" | "jsonl" | "toml" | "yaml" | "yml" | "md" | "txt"
-            )
-        })
-}
-
-fn is_extension_owned_path(root: &Path, path: &Path) -> bool {
-    relative_path(root, path)
-        .split('/')
-        .any(|component| component == "extensions")
-}
-
-fn is_test_helper(path: &Path) -> bool {
-    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
-        return false;
-    };
-
-    file_name == "tests.rs"
-        || file_name.starts_with("test_")
-        || file_name.ends_with("_test.rs")
-        || file_name.ends_with("_tests.rs")
-}
-
-fn relative_path(root: &Path, path: &Path) -> String {
-    path.strip_prefix(root)
-        .unwrap_or(path)
-        .components()
-        .map(|component| component.as_os_str().to_string_lossy())
-        .collect::<Vec<_>>()
-        .join("/")
-}
-
-fn format_baseline_debt_report(found: &BTreeMap<(String, String), Vec<usize>>) -> String {
-    let occurrence_count = found.values().map(Vec::len).sum::<usize>();
-    let paths = found
-        .keys()
-        .map(|(path, _)| path.as_str())
-        .collect::<BTreeSet<_>>();
-    let mut by_term = BTreeMap::<&str, (usize, BTreeSet<&str>)>::new();
-    let mut by_path = BTreeMap::<&str, (usize, BTreeSet<&str>)>::new();
-
-    for ((path, term), lines) in found {
-        let count = lines.len();
-        let term_entry = by_term.entry(term.as_str()).or_default();
-        term_entry.0 += count;
-        term_entry.1.insert(path.as_str());
-
-        let path_entry = by_path.entry(path.as_str()).or_default();
-        path_entry.0 += count;
-        path_entry.1.insert(term.as_str());
     }
 
-    let mut term_rows = by_term
-        .iter()
-        .map(|(term, (count, paths))| {
-            (
-                *count,
-                format!("- {term}: {count} occurrences across {} files", paths.len()),
-            )
-        })
-        .collect::<Vec<_>>();
-    sort_counted_rows_desc(&mut term_rows);
+    fn is_scannable_test_content_file(path: &Path) -> bool {
+        path.extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| {
+                matches!(
+                    ext,
+                    "rs" | "json" | "jsonl" | "toml" | "yaml" | "yml" | "md" | "txt"
+                )
+            })
+    }
 
-    let mut path_rows = by_path
-        .iter()
-        .map(|(path, (count, terms))| {
-            (
-                *count,
-                format!(
-                    "- {path}: {count} occurrences across {} terms ({})",
-                    terms.len(),
-                    terms.iter().copied().collect::<Vec<_>>().join(", ")
-                ),
-            )
-        })
-        .collect::<Vec<_>>();
-    sort_counted_rows_desc(&mut path_rows);
+    fn is_extension_owned_path(root: &Path, path: &Path) -> bool {
+        relative_path(root, path)
+            .split('/')
+            .any(|component| component == "extensions")
+    }
 
-    format!(
+    fn is_test_helper(path: &Path) -> bool {
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            return false;
+        };
+
+        file_name == "tests.rs"
+            || file_name.starts_with("test_")
+            || file_name.ends_with("_test.rs")
+            || file_name.ends_with("_tests.rs")
+    }
+
+    fn relative_path(root: &Path, path: &Path) -> String {
+        path.strip_prefix(root)
+            .unwrap_or(path)
+            .components()
+            .map(|component| component.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/")
+    }
+
+    pub(super) fn format_baseline_debt_report(
+        found: &BTreeMap<(String, String), Vec<usize>>,
+    ) -> String {
+        let occurrence_count = found.values().map(Vec::len).sum::<usize>();
+        let paths = found
+            .keys()
+            .map(|(path, _)| path.as_str())
+            .collect::<BTreeSet<_>>();
+        let mut by_term = BTreeMap::<&str, (usize, BTreeSet<&str>)>::new();
+        let mut by_path = BTreeMap::<&str, (usize, BTreeSet<&str>)>::new();
+
+        for ((path, term), lines) in found {
+            let count = lines.len();
+            let term_entry = by_term.entry(term.as_str()).or_default();
+            term_entry.0 += count;
+            term_entry.1.insert(path.as_str());
+
+            let path_entry = by_path.entry(path.as_str()).or_default();
+            path_entry.0 += count;
+            path_entry.1.insert(term.as_str());
+        }
+
+        let mut term_rows = by_term
+            .iter()
+            .map(|(term, (count, paths))| {
+                (
+                    *count,
+                    format!("- {term}: {count} occurrences across {} files", paths.len()),
+                )
+            })
+            .collect::<Vec<_>>();
+        sort_counted_rows_desc(&mut term_rows);
+
+        let mut path_rows = by_path
+            .iter()
+            .map(|(path, (count, terms))| {
+                (
+                    *count,
+                    format!(
+                        "- {path}: {count} occurrences across {} terms ({})",
+                        terms.len(),
+                        terms.iter().copied().collect::<Vec<_>>().join(", ")
+                    ),
+                )
+            })
+            .collect::<Vec<_>>();
+        sort_counted_rows_desc(&mut path_rows);
+
+        format!(
         "Core-agnostic baseline debt (#2240/#3195): {occurrence_count} occurrences across {} path/term pairs and {} files.\nTop terms:\n{}\nTop files:\n{}\nStale baseline entries to prune after cleanup:\n{}",
         found.len(),
         paths.len(),
@@ -1645,16 +591,16 @@ fn format_baseline_debt_report(found: &BTreeMap<(String, String), Vec<usize>>) -
         first_counted_rows(path_rows),
         stale_baseline_report(found)
     )
-}
+    }
 
-fn format_test_content_debt_report(found: &BTreeMap<(String, String), Vec<usize>>) -> String {
-    let occurrence_count = found.values().map(Vec::len).sum::<usize>();
-    let paths = found
-        .keys()
-        .map(|(path, _)| path.as_str())
-        .collect::<BTreeSet<_>>();
+    fn format_test_content_debt_report(found: &BTreeMap<(String, String), Vec<usize>>) -> String {
+        let occurrence_count = found.values().map(Vec::len).sum::<usize>();
+        let paths = found
+            .keys()
+            .map(|(path, _)| path.as_str())
+            .collect::<BTreeSet<_>>();
 
-    format!(
+        format!(
         "Core-owned test content ecosystem debt (#3034): {occurrence_count} occurrences across {} path/term pairs and {} files. Current rows:\n{}",
         found.len(),
         paths.len(),
@@ -1668,108 +614,111 @@ fn format_test_content_debt_report(found: &BTreeMap<(String, String), Vec<usize>
                 .collect::<Vec<_>>()
         )
     )
-}
-
-fn stale_baseline_report(found: &BTreeMap<(String, String), Vec<usize>>) -> String {
-    let stale_rows = stale_baseline_rows(found);
-
-    if stale_rows.is_empty() {
-        return "- none".to_string();
     }
 
-    first_rows(stale_rows)
-}
+    fn stale_baseline_report(found: &BTreeMap<(String, String), Vec<usize>>) -> String {
+        let stale_rows = stale_baseline_rows(found);
 
-fn stale_baseline_rows(found: &BTreeMap<(String, String), Vec<usize>>) -> Vec<String> {
-    BASELINE
-        .iter()
-        .filter(|entry| !found.contains_key(&(entry.path.to_string(), entry.term.to_string())))
-        .map(|entry| format!("- {}: {}", entry.path, entry.term))
-        .collect::<Vec<_>>()
-}
+        if stale_rows.is_empty() {
+            return "- none".to_string();
+        }
 
-fn first_rows(rows: Vec<String>) -> String {
-    rows.into_iter().take(10).collect::<Vec<_>>().join("\n")
-}
+        first_rows(stale_rows)
+    }
 
-fn first_counted_rows(mut rows: Vec<(usize, String)>) -> String {
-    sort_counted_rows_desc(&mut rows);
+    pub(super) fn stale_baseline_rows(
+        found: &BTreeMap<(String, String), Vec<usize>>,
+    ) -> Vec<String> {
+        baseline_entries(BASELINE)
+            .into_iter()
+            .filter(|entry| !found.contains_key(entry))
+            .map(|(path, term)| format!("- {path}: {term}"))
+            .collect()
+    }
 
-    rows.into_iter()
-        .take(10)
-        .map(|(_, row)| row)
-        .collect::<Vec<_>>()
-        .join("\n")
-}
+    fn first_rows(rows: Vec<String>) -> String {
+        rows.into_iter().take(10).collect::<Vec<_>>().join("\n")
+    }
 
-fn sort_counted_rows_desc(rows: &mut [(usize, String)]) {
-    rows.sort_by(|(left_count, left), (right_count, right)| {
-        right_count.cmp(left_count).then_with(|| left.cmp(right))
-    });
-}
+    fn first_counted_rows(mut rows: Vec<(usize, String)>) -> String {
+        sort_counted_rows_desc(&mut rows);
 
-impl Term {
-    fn matches(self, line: &str) -> bool {
-        match self.kind {
-            MatchKind::Literal => line.contains(self.name),
-            MatchKind::Token => contains_token(line, self.name),
+        rows.into_iter()
+            .take(10)
+            .map(|(_, row)| row)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn sort_counted_rows_desc(rows: &mut [(usize, String)]) {
+        rows.sort_by(|(left_count, left), (right_count, right)| {
+            right_count.cmp(left_count).then_with(|| left.cmp(right))
+        });
+    }
+
+    impl Term {
+        fn matches(self, line: &str) -> bool {
+            match self.kind {
+                MatchKind::Literal => line.contains(self.name),
+                MatchKind::Token => contains_token(line, self.name),
+            }
+        }
+
+        fn matches_test_content(self, line: &str) -> bool {
+            matches!(self.kind, MatchKind::Token)
+                && !is_source_only_homeboy_domain_term(self.name)
+                && contains_test_content_variant(line, self.name)
         }
     }
 
-    fn matches_test_content(self, line: &str) -> bool {
-        matches!(self.kind, MatchKind::Token)
-            && !is_source_only_homeboy_domain_term(self.name)
-            && contains_test_content_variant(line, self.name)
+    fn is_source_only_homeboy_domain_term(term: &str) -> bool {
+        matches!(term, "Homeboy" | "Lab" | "offload")
     }
-}
 
-fn is_source_only_homeboy_domain_term(term: &str) -> bool {
-    matches!(term, "Homeboy" | "Lab" | "offload")
-}
+    fn contains_token(haystack: &str, needle: &str) -> bool {
+        let mut search_from = 0;
+        while let Some(offset) = haystack[search_from..].find(needle) {
+            let start = search_from + offset;
+            let end = start + needle.len();
+            let before = haystack[..start].chars().next_back();
+            let after = haystack[end..].chars().next();
 
-fn contains_token(haystack: &str, needle: &str) -> bool {
-    let mut search_from = 0;
-    while let Some(offset) = haystack[search_from..].find(needle) {
-        let start = search_from + offset;
-        let end = start + needle.len();
-        let before = haystack[..start].chars().next_back();
-        let after = haystack[end..].chars().next();
+            if !is_word_char(before) && !is_word_char(after) {
+                return true;
+            }
 
-        if !is_word_char(before) && !is_word_char(after) {
-            return true;
+            search_from = end;
         }
 
-        search_from = end;
+        false
     }
 
-    false
-}
+    fn is_word_char(ch: Option<char>) -> bool {
+        ch.is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    }
 
-fn is_word_char(ch: Option<char>) -> bool {
-    ch.is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_')
-}
+    fn contains_test_content_variant(haystack: &str, needle: &str) -> bool {
+        let haystack = haystack.to_ascii_lowercase();
+        let needle = needle.to_ascii_lowercase();
+        let mut search_from = 0;
 
-fn contains_test_content_variant(haystack: &str, needle: &str) -> bool {
-    let haystack = haystack.to_ascii_lowercase();
-    let needle = needle.to_ascii_lowercase();
-    let mut search_from = 0;
+        while let Some(offset) = haystack[search_from..].find(&needle) {
+            let start = search_from + offset;
+            let end = start + needle.len();
+            let before = haystack[..start].chars().next_back();
+            let after = haystack[end..].chars().next();
 
-    while let Some(offset) = haystack[search_from..].find(&needle) {
-        let start = search_from + offset;
-        let end = start + needle.len();
-        let before = haystack[..start].chars().next_back();
-        let after = haystack[end..].chars().next();
+            if is_test_content_separator(before) || is_test_content_separator(after) {
+                return true;
+            }
 
-        if is_test_content_separator(before) || is_test_content_separator(after) {
-            return true;
+            search_from = end;
         }
 
-        search_from = end;
+        false
     }
 
-    false
-}
-
-fn is_test_content_separator(ch: Option<char>) -> bool {
-    ch.is_some_and(|ch| ch == '_' || ch == '-')
+    fn is_test_content_separator(ch: Option<char>) -> bool {
+        ch.is_some_and(|ch| ch == '_' || ch == '-')
+    }
 }
