@@ -16,18 +16,19 @@ set -euo pipefail
 #   HOMEBOY_BENCH_LIST_ONLY      — when 1, emit scenario inventory only
 #   HOMEBOY_DEBUG                — verbose output
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BASH_PREFLIGHT_HELPER="${HOMEBOY_RUNTIME_BASH_PREFLIGHT:-${SCRIPT_DIR}/../lib/bash-preflight.sh}"
+BENCH_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$BENCH_SCRIPT_DIR"
+BASH_PREFLIGHT_HELPER="${HOMEBOY_RUNTIME_BASH_PREFLIGHT:-${BENCH_SCRIPT_DIR}/../lib/bash-preflight.sh}"
 # shellcheck source=/dev/null
 source "$BASH_PREFLIGHT_HELPER"
 homeboy_require_bash_version 4
 
-RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${SCRIPT_DIR}/../lib/resolve-context.sh}"
+RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${BENCH_SCRIPT_DIR}/../lib/resolve-context.sh}"
 # shellcheck source=/dev/null
 source "$RESOLVE_CONTEXT_HELPER"
 homeboy_resolve_context
 # shellcheck source=../lib/node-helpers.sh
-source "${SCRIPT_DIR}/../lib/node-helpers.sh"
+source "${BENCH_SCRIPT_DIR}/../lib/node-helpers.sh"
 homeboy_require_package_json
 
 FAILURE_TRAP_HELPER="${HOMEBOY_RUNTIME_FAILURE_TRAP:-}"
@@ -83,11 +84,18 @@ fi
 
 export HOMEBOY_BENCH_RESULTS_FILE="$RESULTS_FILE"
 export HOMEBOY_RUNTIME_BENCH_HELPER_JS="${HOMEBOY_RUNTIME_BENCH_HELPER_JS:-${HOME}/.homeboy/runtime/bench-helper.mjs}"
-export HOMEBOY_NODEJS_INVOCATION_RUNTIME_HELPER="${HOMEBOY_NODEJS_INVOCATION_RUNTIME_HELPER:-${SCRIPT_DIR}/../runtime/invocation-runtime.mjs}"
-export HOMEBOY_NODEJS_BROWSER_BENCH_HELPER="${HOMEBOY_NODEJS_BROWSER_BENCH_HELPER:-${SCRIPT_DIR}/browser-helper.mjs}"
-export HOMEBOY_NODEJS_BENCH_ARTIFACT_CONTEXT="${HOMEBOY_NODEJS_BENCH_ARTIFACT_CONTEXT:-${SCRIPT_DIR}/lib/artifact-context.mjs}"
-export HOMEBOY_NODEJS_BENCH_REDACTION="${HOMEBOY_NODEJS_BENCH_REDACTION:-${SCRIPT_DIR}/lib/redaction.mjs}"
-export HOMEBOY_NODEJS_WORKLOAD_UTILS="${HOMEBOY_NODEJS_WORKLOAD_UTILS:-${SCRIPT_DIR}/lib/workload-utils.mjs}"
+export HOMEBOY_NODEJS_INVOCATION_RUNTIME_HELPER="${HOMEBOY_NODEJS_INVOCATION_RUNTIME_HELPER:-${BENCH_SCRIPT_DIR}/../runtime/invocation-runtime.mjs}"
+export HOMEBOY_NODEJS_BROWSER_BENCH_HELPER="${HOMEBOY_NODEJS_BROWSER_BENCH_HELPER:-${BENCH_SCRIPT_DIR}/browser-helper.mjs}"
+export HOMEBOY_NODEJS_BENCH_ARTIFACT_CONTEXT="${HOMEBOY_NODEJS_BENCH_ARTIFACT_CONTEXT:-${BENCH_SCRIPT_DIR}/lib/artifact-context.mjs}"
+export HOMEBOY_NODEJS_BENCH_REDACTION="${HOMEBOY_NODEJS_BENCH_REDACTION:-${BENCH_SCRIPT_DIR}/lib/redaction.mjs}"
+export HOMEBOY_NODEJS_WORKLOAD_UTILS="${HOMEBOY_NODEJS_WORKLOAD_UTILS:-${BENCH_SCRIPT_DIR}/lib/workload-utils.mjs}"
+WORDPRESS_HELPER_MANIFEST="$(cd "${BENCH_SCRIPT_DIR}/../../.." && pwd)/wordpress/lib/helper-manifest.js"
+if [ -f "$WORDPRESS_HELPER_MANIFEST" ]; then
+    export HOMEBOY_WORDPRESS_HELPER_MANIFEST="${HOMEBOY_WORDPRESS_HELPER_MANIFEST:-$WORDPRESS_HELPER_MANIFEST}"
+    export HOMEBOY_WORDPRESS_REQUEST_PROFILER_HELPER="${HOMEBOY_WORDPRESS_REQUEST_PROFILER_HELPER:-$(dirname "$WORDPRESS_HELPER_MANIFEST")/request-profiler.js}"
+    export HOMEBOY_WORDPRESS_TIMING_CORRELATOR_HELPER="${HOMEBOY_WORDPRESS_TIMING_CORRELATOR_HELPER:-$(dirname "$WORDPRESS_HELPER_MANIFEST")/timing-correlator.js}"
+    export HOMEBOY_WORDPRESS_BOOTSTRAP_TIMELINE_HELPER="${HOMEBOY_WORDPRESS_BOOTSTRAP_TIMELINE_HELPER:-$(dirname "$WORDPRESS_HELPER_MANIFEST")/wordpress-bootstrap-timeline.js}"
+fi
 export HOMEBOY_BENCH_ARTIFACTS_DIR="${HOMEBOY_BENCH_ARTIFACTS_DIR:-$(dirname "$RESULTS_FILE")/artifacts}"
 export HOMEBOY_COMPONENT_ID="$COMPONENT_ID"
 export HOMEBOY_COMPONENT_PATH="$PROJECT_PATH"
@@ -103,7 +111,7 @@ cd "$PROJECT_PATH"
 
 set +e
 # shellcheck disable=SC2086 # word-splitting is intentional for npx --yes tsx
-$TSX_BIN "${SCRIPT_DIR}/bench-runner.mjs"
+$TSX_BIN "${BENCH_SCRIPT_DIR}/bench-runner.mjs"
 runner_exit=$?
 set -e
 

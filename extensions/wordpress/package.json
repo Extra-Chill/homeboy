@@ -10,6 +10,7 @@
     "./playground-readiness": "./lib/playground-readiness.js",
     "./wordpress-bootstrap-timeline": "./lib/wordpress-bootstrap-timeline.js",
     "./request-profiler": "./lib/request-profiler.js",
+    "./helper-manifest": "./lib/helper-manifest.js",
     "./agent-terminal-actions": "./lib/agent-terminal-actions.js",
     "./timing-correlator": "./lib/timing-correlator.js",
     "./codebox-memory-report": "./lib/codebox-memory-report.js",
