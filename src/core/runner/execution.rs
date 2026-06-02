@@ -952,7 +952,7 @@ mod tests {
             "lint".to_string(),
             "--extension".to_string(),
             "rust".to_string(),
-            "--extension=nodejs".to_string(),
+            "--extension=fixture-build".to_string(),
         ];
 
         assert_eq!(
@@ -960,7 +960,7 @@ mod tests {
             vec![
                 "wordpress".to_string(),
                 "rust".to_string(),
-                "nodejs".to_string(),
+                "fixture-build".to_string(),
             ]
         );
     }

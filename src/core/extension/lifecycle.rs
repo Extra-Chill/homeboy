@@ -1238,15 +1238,22 @@ exec '{}' "$@"
             let home = home.path();
             let source = home.join("source-repo");
             fs::create_dir_all(&source).expect("source repo");
-            let _remote = match prepare_git_extension_monorepo(&source, &["nodejs", "rust"]) {
+            let _remote = match prepare_git_extension_monorepo(&source, &["fixture-a", "fixture-b"])
+            {
                 Some(remote) => remote,
                 None => return,
             };
 
-            install(&source.join("nodejs").to_string_lossy(), Some("nodejs"))
-                .expect("install linked nodejs extension");
-            install(&source.join("rust").to_string_lossy(), Some("rust"))
-                .expect("install linked rust extension");
+            install(
+                &source.join("fixture-a").to_string_lossy(),
+                Some("fixture-a"),
+            )
+            .expect("install linked fixture-a extension");
+            install(
+                &source.join("fixture-b").to_string_lossy(),
+                Some("fixture-b"),
+            )
+            .expect("install linked fixture-b extension");
 
             let bin_dir = home.join("bin");
             let pull_count_file = home.join("pull-count");
@@ -1263,7 +1270,7 @@ exec '{}' "$@"
                 .iter()
                 .map(|entry| entry.extension_id.as_str())
                 .collect::<Vec<_>>();
-            assert_eq!(updated_ids, vec!["nodejs", "rust"]);
+            assert_eq!(updated_ids, vec!["fixture-a", "fixture-b"]);
             assert!(result.skipped.is_empty());
             assert_eq!(
                 fs::read_to_string(&pull_count_file)
@@ -1273,20 +1280,20 @@ exec '{}' "$@"
                 "linked extensions sharing one git root should run one git pull"
             );
             assert_eq!(
-                fs::read_to_string(source.join("nodejs/setup-count.txt"))
+                fs::read_to_string(source.join("fixture-a/setup-count.txt"))
                     .unwrap_or_default()
                     .matches("setup")
                     .count(),
                 1,
-                "nodejs setup should still run after the shared root update"
+                "fixture-a setup should still run after the shared root update"
             );
             assert_eq!(
-                fs::read_to_string(source.join("rust/setup-count.txt"))
+                fs::read_to_string(source.join("fixture-b/setup-count.txt"))
                     .unwrap_or_default()
                     .matches("setup")
                     .count(),
                 1,
-                "rust setup should still run after the shared root update"
+                "fixture-b setup should still run after the shared root update"
             );
         });
     }

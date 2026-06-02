@@ -626,7 +626,7 @@ mod tests {
         with_isolated_home(|home| {
             write_extension(
                 home,
-                "nodejs",
+                "fixture-a",
                 r#""lint": { "extension_script": "lint.sh" }"#,
             );
             let dir = TempDir::new().expect("component dir");
@@ -643,12 +643,12 @@ mod tests {
                 ExtensionCapability::Lint,
                 Vec::new(),
             );
-            options.extension_overrides = vec!["nodejs".to_string()];
+            options.extension_overrides = vec!["fixture-a".to_string()];
 
             let ctx = resolve_with_component(&options, Some(component.clone()))
                 .expect("one-shot extension should resolve");
 
-            assert_eq!(ctx.extension_id.as_deref(), Some("nodejs"));
+            assert_eq!(ctx.extension_id.as_deref(), Some("fixture-a"));
             assert!(
                 component.extensions.is_none(),
                 "source component is unchanged"
@@ -657,7 +657,7 @@ mod tests {
                 .component
                 .extensions
                 .as_ref()
-                .is_some_and(|extensions| extensions.contains_key("nodejs")));
+                .is_some_and(|extensions| extensions.contains_key("fixture-a")));
         });
     }
 
@@ -666,18 +666,18 @@ mod tests {
         with_isolated_home(|home| {
             write_extension(
                 home,
-                "wordpress",
+                "fixture-a",
                 r#""lint": { "extension_script": "lint.sh" }"#,
             );
             write_extension(
                 home,
-                "nodejs",
+                "fixture-b",
                 r#""lint": { "extension_script": "lint.sh" }"#,
             );
             let dir = TempDir::new().expect("component dir");
             let mut configured = HashMap::new();
             configured.insert(
-                "wordpress".to_string(),
+                "fixture-a".to_string(),
                 ScopedExtensionConfig {
                     settings: HashMap::from([(
                         "package_manager".to_string(),
@@ -687,7 +687,7 @@ mod tests {
                 },
             );
             configured.insert(
-                "nodejs".to_string(),
+                "fixture-b".to_string(),
                 ScopedExtensionConfig {
                     settings: HashMap::from([(
                         "package_manager".to_string(),
@@ -709,19 +709,19 @@ mod tests {
                 ExtensionCapability::Lint,
                 Vec::new(),
             );
-            options.extension_overrides = vec!["nodejs".to_string()];
+            options.extension_overrides = vec!["fixture-b".to_string()];
 
             let ctx = resolve_with_component(&options, Some(component.clone()))
-                .expect("override should select nodejs only");
+                .expect("override should select fixture-b only");
             let runtime_extensions = ctx
                 .component
                 .extensions
                 .as_ref()
                 .expect("runtime extensions");
 
-            assert_eq!(ctx.extension_id.as_deref(), Some("nodejs"));
-            assert!(runtime_extensions.contains_key("nodejs"));
-            assert!(!runtime_extensions.contains_key("wordpress"));
+            assert_eq!(ctx.extension_id.as_deref(), Some("fixture-b"));
+            assert!(runtime_extensions.contains_key("fixture-b"));
+            assert!(!runtime_extensions.contains_key("fixture-a"));
             assert!(ctx
                 .settings
                 .iter()
@@ -729,7 +729,7 @@ mod tests {
             assert!(component
                 .extensions
                 .as_ref()
-                .is_some_and(|extensions| extensions.contains_key("wordpress")));
+                .is_some_and(|extensions| extensions.contains_key("fixture-a")));
         });
     }
 

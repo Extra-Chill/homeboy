@@ -67,7 +67,7 @@ fn write_trace_rig_with_profile(
                     "components": {{
                         "{component_id}": {{ "path": "{}" }}
                     }},
-                    "trace_workloads": {{ "nodejs": [
+                    "trace_workloads": {{ "fixture-trace": [
                         {{ "path": "${{components.{component_id}.path}}/close-window-running-site.trace.mjs" }}
                     ] }},
                     "trace_profiles": {{
@@ -130,7 +130,7 @@ fn rig_component_for_trace_synthesizes_trace_workload_extensions() {
                     "studio": { "path": "/tmp/studio" }
                 },
                 "trace_workloads": {
-                    "nodejs": [{ "path": "/tmp/create-site.trace.mjs" }]
+                    "fixture-trace": [{ "path": "/tmp/create-site.trace.mjs" }]
                 }
             }"#,
     )
@@ -142,7 +142,7 @@ fn rig_component_for_trace_synthesizes_trace_workload_extensions() {
         .extensions
         .as_ref()
         .expect("extensions")
-        .contains_key("nodejs"));
+        .contains_key("fixture-trace"));
 }
 
 #[test]
@@ -356,7 +356,7 @@ fn rig_trace_list_uses_scoped_workload_preflight() {
                                 }}
                             ]
                         }},
-                        "trace_workloads": {{ "nodejs": [
+                        "trace_workloads": {{ "fixture-trace": [
                             {{
                                 "path": "${{components.studio.path}}/studio-app-create-site.trace.mjs",
                                 "check_groups": ["desktop-app"]

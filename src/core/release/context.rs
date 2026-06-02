@@ -43,7 +43,7 @@ mod tests {
                 "id": "fixture",
                 "components": {
                     "fixture": {
-                        "type": "nodejs",
+                        "type": "fixture-type",
                         "path": "."
                     }
                 }

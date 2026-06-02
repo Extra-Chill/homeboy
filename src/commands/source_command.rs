@@ -55,8 +55,8 @@ mod tests {
     #[test]
     fn component_extension_ids_are_sorted() {
         let mut extensions = HashMap::new();
-        extensions.insert("wordpress".to_string(), ScopedExtensionConfig::default());
-        extensions.insert("nodejs".to_string(), ScopedExtensionConfig::default());
+        extensions.insert("fixture-b".to_string(), ScopedExtensionConfig::default());
+        extensions.insert("fixture-a".to_string(), ScopedExtensionConfig::default());
         let mut component = Component::new(
             "demo".to_string(),
             "/tmp/demo".to_string(),
@@ -67,7 +67,7 @@ mod tests {
 
         assert_eq!(
             component_extension_ids(&component),
-            vec!["nodejs", "wordpress"]
+            vec!["fixture-a", "fixture-b"]
         );
     }
 }
