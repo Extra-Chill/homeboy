@@ -988,20 +988,20 @@ mod tests {
     fn run_package_collects_artifacts_from_multiple_package_providers() {
         crate::test_support::with_isolated_home(|_| {
             let component = tempfile::tempdir().expect("component tempdir");
-            let node = release_package_extension(
-                "nodejs",
-                "printf '[{\"path\":\"target/node.tgz\",\"type\":\"npm\"}]'",
+            let package_a = release_package_extension(
+                "package-a",
+                "printf '[{\"path\":\"target/package-a.tgz\",\"type\":\"archive\"}]'",
             );
-            let wordpress = release_package_extension(
-                "wordpress",
-                "printf '[{\"path\":\"target/plugin.zip\",\"type\":\"wordpress\"}]'",
+            let package_b = release_package_extension(
+                "package-b",
+                "printf '[{\"path\":\"target/package-b.zip\",\"type\":\"archive\"}]'",
             );
-            crate::core::extension::save_manifest(&node).expect("save node extension");
-            crate::core::extension::save_manifest(&wordpress).expect("save wordpress extension");
+            crate::core::extension::save_manifest(&package_a).expect("save package A extension");
+            crate::core::extension::save_manifest(&package_b).expect("save package B extension");
 
             let mut state = crate::core::release::types::ReleaseState::default();
             let result = run_package(
-                &[node, non_package_extension("docs"), wordpress],
+                &[package_a, non_package_extension("docs"), package_b],
                 &mut state,
                 "fixture",
                 &component.path().to_string_lossy(),
@@ -1010,12 +1010,12 @@ mod tests {
 
             assert_eq!(result.status, ReleaseStepStatus::Success);
             assert_eq!(state.artifacts.len(), 2);
-            assert_eq!(state.artifacts[0].path, "target/node.tgz");
-            assert_eq!(state.artifacts[1].path, "target/plugin.zip");
+            assert_eq!(state.artifacts[0].path, "target/package-a.tgz");
+            assert_eq!(state.artifacts[1].path, "target/package-b.zip");
             let data = result.data.expect("package data");
             assert_eq!(
                 data["extensions"],
-                serde_json::json!(["nodejs", "wordpress"])
+                serde_json::json!(["package-a", "package-b"])
             );
         });
     }
@@ -1024,16 +1024,20 @@ mod tests {
     fn run_package_failure_names_the_failing_package_provider() {
         crate::test_support::with_isolated_home(|_| {
             let component = tempfile::tempdir().expect("component tempdir");
-            let node =
-                release_package_extension("nodejs", "printf '[{\"path\":\"target/node.tgz\"}]'");
-            let wordpress =
-                release_package_extension("wordpress", "printf 'zip command failed' >&2; exit 7");
-            crate::core::extension::save_manifest(&node).expect("save node extension");
-            crate::core::extension::save_manifest(&wordpress).expect("save wordpress extension");
+            let package_a = release_package_extension(
+                "package-a",
+                "printf '[{\"path\":\"target/package-a.tgz\"}]'",
+            );
+            let package_b = release_package_extension(
+                "package-b",
+                "printf 'archive command failed' >&2; exit 7",
+            );
+            crate::core::extension::save_manifest(&package_a).expect("save package A extension");
+            crate::core::extension::save_manifest(&package_b).expect("save package B extension");
 
             let mut state = crate::core::release::types::ReleaseState::default();
             let err = run_package(
-                &[node, wordpress],
+                &[package_a, package_b],
                 &mut state,
                 "fixture",
                 &component.path().to_string_lossy(),
@@ -1042,10 +1046,10 @@ mod tests {
 
             assert!(err
                 .message
-                .contains("release.package failed for extension 'wordpress'"));
-            assert!(err.message.contains("zip command failed"));
+                .contains("release.package failed for extension 'package-b'"));
+            assert!(err.message.contains("archive command failed"));
             assert_eq!(state.artifacts.len(), 1);
-            assert_eq!(state.artifacts[0].path, "target/node.tgz");
+            assert_eq!(state.artifacts[0].path, "target/package-a.tgz");
         });
     }
 

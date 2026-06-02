@@ -189,6 +189,10 @@ const TERMS: &[Term] = &[
 // test helpers instead of allowing broad paths like `tests/**`.
 const BASELINE: &[ViolationKey] = &[
     ViolationKey {
+        path: "src/core/artifact_inputs.rs",
+        term: ".homeboy",
+    },
+    ViolationKey {
         path: "src/commands/component.rs",
         term: "wordpress",
     },
@@ -318,11 +322,27 @@ const BASELINE: &[ViolationKey] = &[
     },
     ViolationKey {
         path: "src/core/component/mod.rs",
+        term: "Lab",
+    },
+    ViolationKey {
+        path: "src/core/component/mod.rs",
+        term: "cargo",
+    },
+    ViolationKey {
+        path: "src/core/component/mod.rs",
         term: "composer",
     },
     ViolationKey {
         path: "src/core/component/mod.rs",
         term: "npm",
+    },
+    ViolationKey {
+        path: "src/core/component/mod.rs",
+        term: "offload",
+    },
+    ViolationKey {
+        path: "src/core/extension/execution/action.rs",
+        term: "wordpress",
     },
     ViolationKey {
         path: "src/core/defaults.rs",
@@ -835,6 +855,10 @@ const BASELINE: &[ViolationKey] = &[
     },
     ViolationKey {
         path: "src/core/git/github.rs",
+        term: "Homeboy",
+    },
+    ViolationKey {
+        path: "src/core/git/github.rs",
         term: "homeboy.json",
     },
     ViolationKey {
@@ -942,8 +966,16 @@ const BASELINE: &[ViolationKey] = &[
         term: "Homeboy",
     },
     ViolationKey {
+        path: "src/core/release/executor/publish.rs",
+        term: "npm",
+    },
+    ViolationKey {
         path: "src/core/release/planning_changelog.rs",
         term: "Homeboy",
+    },
+    ViolationKey {
+        path: "src/core/release/plan_steps.rs",
+        term: "wordpress",
     },
     ViolationKey {
         path: "src/core/release/planning_worktree.rs",
@@ -976,6 +1008,10 @@ const BASELINE: &[ViolationKey] = &[
     ViolationKey {
         path: "src/core/runner/apply.rs",
         term: "Lab",
+    },
+    ViolationKey {
+        path: "src/core/runner/capabilities.rs",
+        term: "cargo",
     },
     ViolationKey {
         path: "src/core/runner/capabilities.rs",
@@ -1032,6 +1068,14 @@ const BASELINE: &[ViolationKey] = &[
     ViolationKey {
         path: "src/core/runner/lab.rs",
         term: "offload",
+    },
+    ViolationKey {
+        path: "src/core/runner/lab_command.rs",
+        term: "Homeboy",
+    },
+    ViolationKey {
+        path: "src/core/runner/lab_command.rs",
+        term: "cargo",
     },
     ViolationKey {
         path: "src/core/runner/offload_changed_since.rs",
@@ -1115,7 +1159,7 @@ const BASELINE: &[ViolationKey] = &[
     },
 ];
 
-const BASELINE_OCCURRENCES: usize = 640;
+const BASELINE_OCCURRENCES: usize = 664;
 
 // Known core-owned test/fixture literal debt tracked by #3034. Keep this list
 // explicit so stale rows and occurrence-count changes force cleanup or review.
@@ -1189,6 +1233,10 @@ const TEST_CONTENT_BASELINE: &[ViolationKey] = &[
         term: "rust",
     },
     ViolationKey {
+        path: "src/core/release/plan_steps.rs",
+        term: "wordpress",
+    },
+    ViolationKey {
         path: "src/core/rig/spec.rs",
         term: "wordpress",
     },
@@ -1254,7 +1302,7 @@ const TEST_CONTENT_BASELINE: &[ViolationKey] = &[
     },
 ];
 
-const TEST_CONTENT_BASELINE_OCCURRENCES: usize = 99;
+const TEST_CONTENT_BASELINE_OCCURRENCES: usize = 100;
 
 #[test]
 fn core_owned_source_stays_language_and_framework_agnostic() {

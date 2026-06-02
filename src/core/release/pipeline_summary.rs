@@ -239,12 +239,12 @@ mod tests {
         let results = vec![
             step("github.release", ReleaseStepStatus::Success),
             ReleaseStepResult {
-                id: "publish.nodejs".to_string(),
-                step_type: "publish.nodejs".to_string(),
+                id: "publish.package-runtime".to_string(),
+                step_type: "publish.package-runtime".to_string(),
                 status: ReleaseStepStatus::Skipped,
                 missing: Vec::new(),
                 warnings: vec![
-                    "Publish to nodejs via nodejs requires authentication: npm authentication required (ENEEDAUTH)"
+                    "Publish to package-runtime via package-runtime requires authentication: npm authentication required (ENEEDAUTH)"
                         .to_string(),
                 ],
                 hints: Vec::new(),

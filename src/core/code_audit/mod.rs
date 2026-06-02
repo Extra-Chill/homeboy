@@ -1698,7 +1698,7 @@ mod tests {
                     "version": "0.0.0",
                     "audit": {
                         "detector_rules": {
-                            "convention_exception_globs": ["scripts/lint/php-fixers/fixer-helpers.php"]
+                            "convention_exception_globs": ["scripts/lint/fixer-helpers.fixture"]
                         }
                     }
                 }))
@@ -1715,7 +1715,7 @@ mod tests {
             assert!(
                 config
                     .convention_exception_globs
-                    .contains(&"scripts/lint/php-fixers/fixer-helpers.php".to_string()),
+                    .contains(&"scripts/lint/fixer-helpers.fixture".to_string()),
                 "explicit --extension audit rules should feed audit detector config"
             );
         });
