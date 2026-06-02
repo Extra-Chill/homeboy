@@ -47,7 +47,19 @@ pub(super) fn prepare_component_deploy(
     // This is the preferred path when the component has remote_url set.
     let release_artifact: Option<PathBuf> =
         if should_try_download_release_artifact(component, config, is_git_deploy, is_file_deploy) {
-            try_download_release_artifact(component)
+            match try_download_release_artifact(component) {
+                Ok(path) => path,
+                Err(error) => {
+                    return Err(failed_component_deploy_result(
+                        component,
+                        base_path,
+                        local_version,
+                        remote_version,
+                        None,
+                        error,
+                    ));
+                }
+            }
         } else {
             None
         };
@@ -890,14 +902,26 @@ fn cleanup_empty_artifact_dirs(local_path: &Path, start_dir: Option<&Path>) {
 
 /// Try to download a release artifact from GitHub for the component's latest tag.
 ///
-/// Returns `Some(path)` if successful, `None` if anything fails (falls back to local build).
-fn try_download_release_artifact(component: &Component) -> Option<PathBuf> {
-    let remote_url = component.remote_url.as_ref()?;
-    let github = release_download::parse_github_url(remote_url)?;
-    let artifact_name = release_download::resolve_artifact_name(component)?;
+/// Returns `Ok(Some(path))` if successful and `Ok(None)` for normal download misses
+/// that should fall back to local build. Validation failures are returned as deploy
+/// errors so invalid artifacts never reach remote install.
+fn try_download_release_artifact(
+    component: &Component,
+) -> std::result::Result<Option<PathBuf>, String> {
+    let Some(remote_url) = component.remote_url.as_ref() else {
+        return Ok(None);
+    };
+    let Some(github) = release_download::parse_github_url(remote_url) else {
+        return Ok(None);
+    };
+    let Some(artifact_name) = release_download::resolve_artifact_name(component) else {
+        return Ok(None);
+    };
 
     // Get the latest tag from the local clone (already synced by the pipeline)
-    let tag = git::get_latest_tag(&component.local_path).ok().flatten()?;
+    let Some(tag) = git::get_latest_tag(&component.local_path).ok().flatten() else {
+        return Ok(None);
+    };
 
     log_status!(
         "deploy",
@@ -907,15 +931,19 @@ fn try_download_release_artifact(component: &Component) -> Option<PathBuf> {
     );
 
     match release_download::download_release_artifact(&github, &tag, &artifact_name) {
-        Ok(path) => Some(path),
+        Ok(path) => Ok(Some(path)),
         Err(e) => {
+            if e.code == crate::core::error::ErrorCode::ValidationInvalidArgument {
+                return Err(e.to_string());
+            }
+
             log_status!(
                 "deploy",
                 "Release download failed for '{}': {} — falling back to local build",
                 component.id,
                 e
             );
-            None
+            Ok(None)
         }
     }
 }

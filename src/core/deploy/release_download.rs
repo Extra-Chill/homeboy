@@ -34,6 +34,8 @@ const MUTABLE_DEPENDENCY_PREFIXES: &[&str] = &[
     "http://github.com/",
 ];
 
+const ZIP_MAGIC_PREFIX: &[u8] = b"PK";
+
 /// Parsed GitHub owner/repo from a remote URL.
 #[derive(Debug, Clone)]
 pub struct GitHubRepo {
@@ -192,6 +194,8 @@ pub fn download_release_artifact(
         ));
     }
 
+    validate_downloaded_artifact(&dest_path, artifact_name, &url)?;
+
     log_status!(
         "deploy",
         "Downloaded {} ({} bytes)",
@@ -200,6 +204,44 @@ pub fn download_release_artifact(
     );
 
     Ok(dest_path)
+}
+
+fn validate_downloaded_artifact(path: &Path, artifact_name: &str, url: &str) -> Result<()> {
+    if !artifact_name.ends_with(".zip") {
+        return Ok(());
+    }
+
+    let bytes = std::fs::read(path).map_err(|e| {
+        Error::internal_io(
+            format!("Failed to read downloaded artifact for validation: {}", e),
+            Some(path.display().to_string()),
+        )
+    })?;
+
+    if bytes.starts_with(ZIP_MAGIC_PREFIX) {
+        return Ok(());
+    }
+
+    let preview = String::from_utf8_lossy(&bytes[..bytes.len().min(512)]);
+    let normalized_preview = preview.trim_start().to_ascii_lowercase();
+    let hint = if normalized_preview.starts_with("<!doctype html")
+        || normalized_preview.starts_with("<html")
+        || normalized_preview.contains("class=\"html-auth\"")
+    {
+        "downloaded bytes look like an HTML authentication page; check GitHub Enterprise authentication/proxy configuration"
+    } else {
+        "downloaded bytes do not start with a ZIP file signature"
+    };
+
+    Err(Error::validation_invalid_argument(
+        "releaseArtifact",
+        format!(
+            "Downloaded release artifact '{}' from {} is not a valid ZIP archive: {}",
+            artifact_name, url, hint
+        ),
+        Some(path.display().to_string()),
+        None,
+    ))
 }
 
 /// Check if a component supports release-based deployment.
@@ -421,6 +463,43 @@ mod tests {
         // No build_artifact → false
         comp.build_artifact = None;
         assert!(!supports_release_deploy(&comp));
+    }
+
+    #[test]
+    fn validate_downloaded_artifact_rejects_html_auth_page_as_zip() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let artifact = temp.path().join("theme.zip");
+        std::fs::write(
+            &artifact,
+            br#"<!DOCTYPE html><html lang="en" class="html-auth"><body>Sign in</body></html>"#,
+        )
+        .expect("write html artifact");
+
+        let error = validate_downloaded_artifact(
+            &artifact,
+            "theme.zip",
+            "https://github.a8c.com/Automattic/theme/releases/download/v1/theme.zip",
+        )
+        .expect_err("html auth page should be rejected");
+        let message = error.to_string();
+
+        assert!(message.contains("not a valid ZIP archive"));
+        assert!(message.contains("HTML authentication page"));
+        assert!(message.contains("GitHub Enterprise authentication/proxy"));
+    }
+
+    #[test]
+    fn validate_downloaded_artifact_accepts_zip_signature() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let artifact = temp.path().join("theme.zip");
+        std::fs::write(&artifact, b"PK\x03\x04fixture").expect("write zip artifact");
+
+        validate_downloaded_artifact(
+            &artifact,
+            "theme.zip",
+            "https://github.com/Extra-Chill/theme/releases/download/v1/theme.zip",
+        )
+        .expect("zip signature should be accepted");
     }
 
     #[test]
