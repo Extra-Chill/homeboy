@@ -504,6 +504,7 @@ mod tests {
                     backend: "test".to_string(),
                     selector: Some("fixture".to_string()),
                     required_capabilities: Vec::new(),
+                    secret_env: Vec::new(),
                     model: None,
                     config: Value::Null,
                 },

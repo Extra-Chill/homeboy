@@ -85,6 +85,43 @@ Retry policy stays executor-agnostic. `max_attempts` bounds per-task attempts,
 `retryable_failure_classifications` lets callers retry only normalized failure
 classes such as `Provider` or `ExecutionFailed`.
 
+## Secret environment
+
+Agent-task requests may declare required provider environment names in
+`executor.secret_env`. Homeboy core resolves those names before provider
+dispatch, validates that each name has a value, and injects the resolved values
+into the provider process environment. Secret values are not included in
+outcomes, diagnostics, aggregate JSON, or artifacts.
+
+Resolution order is:
+
+- The current process environment using the declared name.
+- `~/.config/homeboy/agent-task-secrets.json` entries.
+
+The optional local config file uses provider-agnostic sources:
+
+```json
+{
+  "secrets": {
+    "PROVIDER_TOKEN": {
+      "source": "env",
+      "env_var": "CI_PROVIDER_TOKEN"
+    },
+    "LOCAL_PROVIDER_TOKEN": {
+      "source": "keychain",
+      "scope": "agent-task",
+      "name": "LOCAL_PROVIDER_TOKEN"
+    }
+  }
+}
+```
+
+Use `source: "env"` in CI when a runner exposes a differently named variable.
+Use `source: "keychain"` for local operator machines that store secrets through
+Homeboy's OS keychain integration. Missing declared names produce a structured
+`agent_task.secret_env_missing` preflight outcome before the provider process is
+spawned.
+
 ## Provider payloads
 
 Provider payloads are intentionally opaque `serde_json::Value` objects until

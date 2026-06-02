@@ -1171,6 +1171,7 @@ mod tests {
                 backend: "test".to_string(),
                 selector: None,
                 required_capabilities: Vec::new(),
+                secret_env: Vec::new(),
                 model: None,
                 config: Value::Null,
             },

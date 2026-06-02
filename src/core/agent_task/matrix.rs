@@ -484,6 +484,7 @@ mod tests {
                 backend: "runner".to_string(),
                 selector: Some("homeboy-lab".to_string()),
                 required_capabilities: vec!["bench".to_string()],
+                secret_env: Vec::new(),
                 model: None,
                 config: json!({}),
             },
