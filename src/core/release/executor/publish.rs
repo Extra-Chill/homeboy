@@ -73,15 +73,7 @@ fn publish_step_result(
     expected_version: Option<&str>,
 ) -> ReleaseStepResult {
     if let Some(reason) = extension_auth_required_reason(response) {
-        return step_skipped(
-            step_id,
-            step_id,
-            data,
-            format!(
-                "Publish to {} via {} requires authentication: {}",
-                target, extension_id, reason
-            ),
-        );
+        return auth_required_skip_result(step_id, target, extension_id, data, reason);
     }
 
     if let Some(reason) = extension_blocking_publish_reason(response) {
@@ -103,15 +95,7 @@ fn publish_step_result(
         .unwrap_or(true)
     {
         if let Some(reason) = publish_output_auth_required_reason(response) {
-            return step_skipped(
-                step_id,
-                step_id,
-                data,
-                format!(
-                    "Publish to {} via {} requires authentication: {}",
-                    target, extension_id, reason
-                ),
-            );
+            return auth_required_skip_result(step_id, target, extension_id, data, reason);
         }
     }
 
@@ -145,6 +129,24 @@ fn publish_step_result(
         data,
         Some(publish_failure_message(target, response)),
         Vec::new(),
+    )
+}
+
+fn auth_required_skip_result(
+    step_id: &str,
+    target: &str,
+    extension_id: &str,
+    data: Option<serde_json::Value>,
+    reason: String,
+) -> ReleaseStepResult {
+    step_skipped(
+        step_id,
+        step_id,
+        data,
+        format!(
+            "Publish to {} via {} requires authentication: {}",
+            target, extension_id, reason
+        ),
     )
 }
 

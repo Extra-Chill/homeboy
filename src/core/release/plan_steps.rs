@@ -455,17 +455,15 @@ fn build_head_release_steps(
             string_config("dir", dir),
         ));
         artifact_need = "artifacts.inventory".to_string();
-    } else if !options.pipeline.skip_publish {
-        if has_package_capability(extensions) {
-            steps.push(ready_step(
-                "package",
-                "package",
-                "Package release artifacts",
-                vec![artifact_need.clone()],
-                StepConfig::new(),
-            ));
-            artifact_need = "package".to_string();
-        }
+    } else if !options.pipeline.skip_publish && has_package_capability(extensions) {
+        steps.push(ready_step(
+            "package",
+            "package",
+            "Package release artifacts",
+            vec![artifact_need.clone()],
+            StepConfig::new(),
+        ));
+        artifact_need = "package".to_string();
     }
 
     if options.pipeline.skip_publish && !publish_targets.is_empty() {
