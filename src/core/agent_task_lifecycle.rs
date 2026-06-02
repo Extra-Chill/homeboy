@@ -245,7 +245,7 @@ fn record_aggregate(
     record.aggregate_path = Some(aggregate_path.display().to_string());
     record.tasks = tasks_for_aggregate(plan, aggregate);
     record.artifact_refs = artifact_refs_for_outcomes(&aggregate.outcomes);
-    store::write_record(&record)?;
+    store::write_record(record)?;
     Ok(record.clone())
 }
 
