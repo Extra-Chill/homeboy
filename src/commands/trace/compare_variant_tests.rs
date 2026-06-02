@@ -325,7 +325,7 @@ fn write_multi_component_variant_rig(
                     "studio": {{ "path": "{}" }},
                     "wordpress": {{ "path": "{}" }}
                 }},
-                "trace_workloads": {{ "nodejs": [
+                "trace_workloads": {{ "fixture-trace": [
                     {{ "path": "${{components.studio.path}}/studio-app-create-site.trace.mjs" }}
                 ] }},
                 "trace_variants": {{

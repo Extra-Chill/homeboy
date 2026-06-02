@@ -817,7 +817,7 @@ mod tests {
     #[test]
     fn build_exec_env_includes_toolchain_path() {
         let env = build_exec_env(
-            "nodejs",
+            "fixture-extension",
             None,
             None,
             "{}",

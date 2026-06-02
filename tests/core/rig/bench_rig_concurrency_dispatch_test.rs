@@ -11,11 +11,11 @@ fn write_ordering_bench_extension(home: &TempDir) {
         .join(".config")
         .join("homeboy")
         .join("extensions")
-        .join("nodejs");
+        .join("fixture-bench");
     fs::create_dir_all(&extension_dir).expect("mkdir extension");
     fs::write(
-        extension_dir.join("nodejs.json"),
-        r#"{"name":"Node.js","version":"0.0.0","bench":{"extension_script":"bench-runner.sh"}}"#,
+        extension_dir.join("fixture-bench.json"),
+        r#"{"name":"Fixture Bench","version":"0.0.0","bench":{"extension_script":"bench-runner.sh"}}"#,
     )
     .expect("write extension manifest");
 

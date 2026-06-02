@@ -596,12 +596,12 @@ mod tests {
         let preflight = RunnerCapabilityPreflight {
             command: "test".to_string(),
             required_tools: vec![RunnerRequiredTool::Git, RunnerRequiredTool::Pnpm],
-            required_components: vec!["nodejs".to_string(), "wordpress".to_string()],
+            required_components: vec!["fixture-a".to_string(), "fixture-b".to_string()],
             required_env: vec!["HOMEBOY_TOKEN".to_string()],
         };
         let capabilities = RunnerCapabilitySnapshot {
             tools: [RunnerRequiredTool::Git].into_iter().collect(),
-            components: ["nodejs".to_string()].into_iter().collect(),
+            components: ["fixture-a".to_string()].into_iter().collect(),
         };
 
         let err =
@@ -610,7 +610,7 @@ mod tests {
 
         assert_eq!(err.code.as_str(), "validation.invalid_argument");
         assert!(err.message.contains(concat!("tools: p", "n", "pm")));
-        assert!(err.message.contains("components: wordpress"));
+        assert!(err.message.contains("components: fixture-b"));
         assert!(err.message.contains("environment: HOMEBOY_TOKEN"));
         let tried = err
             .details
@@ -627,14 +627,14 @@ mod tests {
         let preflight = RunnerCapabilityPreflight {
             command: "lint".to_string(),
             required_tools: vec![RunnerRequiredTool::Git, RunnerRequiredTool::Node],
-            required_components: vec!["nodejs".to_string()],
+            required_components: vec!["fixture-a".to_string()],
             required_env: vec!["HOMEBOY_TOKEN".to_string()],
         };
         let capabilities = RunnerCapabilitySnapshot {
             tools: [RunnerRequiredTool::Git, RunnerRequiredTool::Node]
                 .into_iter()
                 .collect(),
-            components: ["nodejs".to_string()].into_iter().collect(),
+            components: ["fixture-a".to_string()].into_iter().collect(),
         };
         let mut env = HashMap::new();
         env.insert("HOMEBOY_TOKEN".to_string(), "present".to_string());
@@ -648,22 +648,22 @@ mod tests {
         let mut runner = ssh_runner();
         runner.resources.insert(
             "components".to_string(),
-            serde_json::json!(["nodejs", { "id": "wordpress" }]),
+            serde_json::json!(["fixture-a", { "id": "fixture-b" }]),
         );
         assert_eq!(
             configured_runner_components(&runner),
-            ["nodejs".to_string(), "wordpress".to_string()]
+            ["fixture-a".to_string(), "fixture-b".to_string()]
                 .into_iter()
                 .collect()
         );
 
         runner.resources.insert(
             "components".to_string(),
-            serde_json::json!({ "rust": true, "php": true }),
+            serde_json::json!({ "fixture-c": true, "fixture-d": true }),
         );
         assert_eq!(
             configured_runner_components(&runner),
-            ["php".to_string(), "rust".to_string()]
+            ["fixture-c".to_string(), "fixture-d".to_string()]
                 .into_iter()
                 .collect()
         );

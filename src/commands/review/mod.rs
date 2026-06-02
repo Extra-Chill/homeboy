@@ -878,13 +878,16 @@ mod tests {
             "test",
             "my-comp",
             "--extension",
-            "nodejs",
+            "fixture-review",
             "--changed-since",
             "origin/main",
         ])
         .expect("review should parse --extension override");
 
-        assert_eq!(cli.review.extension_override.extensions, vec!["nodejs"]);
+        assert_eq!(
+            cli.review.extension_override.extensions,
+            vec!["fixture-review"]
+        );
         assert_eq!(cli.review.changed_since.as_deref(), Some("origin/main"));
     }
 

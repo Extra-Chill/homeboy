@@ -51,12 +51,12 @@ fn write_trace_experiment_extension(home: &tempfile::TempDir, fail: bool) {
         .join(".config")
         .join("homeboy")
         .join("extensions")
-        .join("nodejs");
+        .join("fixture-trace");
     fs::create_dir_all(&extension_dir).expect("mkdir extension");
     fs::write(
-        extension_dir.join("nodejs.json"),
+        extension_dir.join("fixture-trace.json"),
         r#"{
-                "name": "Node.js",
+                "name": "Fixture Trace",
                 "version": "0.0.0",
                 "trace": { "extension_script": "trace-runner.sh" }
             }"#,
@@ -111,7 +111,7 @@ fn write_trace_experiment_rig(home: &tempfile::TempDir, component_path: &std::pa
                 "components": {{
                     "studio": {{ "path": "{}" }}
                 }},
-                "trace_workloads": {{ "nodejs": [
+                "trace_workloads": {{ "fixture-trace": [
                     {{ "path": "${{components.studio.path}}/product-workflow.trace.mjs" }}
                 ] }},
                 "trace_experiments": {{
