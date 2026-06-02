@@ -21,6 +21,7 @@ mod utils;
 pub mod version;
 mod workflow;
 
+pub(crate) use executor::github_release::github_command_env;
 pub use pipeline::run;
 pub use planner::plan;
 pub use types::{

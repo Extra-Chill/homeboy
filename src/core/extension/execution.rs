@@ -572,7 +572,7 @@ pub(super) fn build_action_env(
     project_base_path: Option<&str>,
 ) -> Vec<(String, String)> {
     let settings_json = payload.to_string();
-    build_exec_env(
+    let mut env = build_exec_env(
         extension_id,
         project_id,
         None,
@@ -581,7 +581,42 @@ pub(super) fn build_action_env(
         project_base_path,
         None,
         None, // no path override in action context
-    )
+    );
+
+    env.extend(github_release_env_from_payload(payload));
+    env
+}
+
+fn github_release_env_from_payload(payload: &serde_json::Value) -> Vec<(String, String)> {
+    let Some(host) = payload
+        .get("release")
+        .and_then(|release| release.get("github"))
+        .and_then(|github| github.get("host"))
+        .and_then(|host| host.as_str())
+        .filter(|host| !host.trim().is_empty())
+    else {
+        return Vec::new();
+    };
+
+    let repo = crate::core::deploy::release_download::GitHubRepo {
+        host: host.to_string(),
+        owner: payload
+            .get("release")
+            .and_then(|release| release.get("github"))
+            .and_then(|github| github.get("owner"))
+            .and_then(|owner| owner.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        repo: payload
+            .get("release")
+            .and_then(|release| release.get("github"))
+            .and_then(|github| github.get("repo"))
+            .and_then(|repo| repo.as_str())
+            .unwrap_or_default()
+            .to_string(),
+    };
+
+    crate::core::release::github_command_env(&repo)
 }
 
 pub(super) fn execute_extension_command(
@@ -957,6 +992,28 @@ mod tests {
             .iter()
             .any(|(k, v)| k == "HOMEBOY_STEP" && v == "lint,test"));
         assert!(env.iter().any(|(k, v)| k == "HOMEBOY_SKIP" && v == "lint"));
+    }
+
+    #[test]
+    fn build_action_env_includes_release_github_host() {
+        let payload = serde_json::json!({
+            "release": {
+                "github": {
+                    "host": "github.a8c.com",
+                    "owner": "chubes4",
+                    "repo": "studio-web"
+                }
+            }
+        });
+
+        let env = build_action_env("wordpress", None, &payload, Some("/tmp/ext"), None);
+
+        assert!(env
+            .iter()
+            .any(|(key, value)| key == "GH_HOST" && value == "github.a8c.com"));
+        assert!(env
+            .iter()
+            .any(|(key, value)| key == "HTTPS_PROXY" && value == "socks5://127.0.0.1:8080"));
     }
 
     #[test]
