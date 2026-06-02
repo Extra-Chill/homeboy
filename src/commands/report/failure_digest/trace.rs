@@ -106,23 +106,20 @@ fn collect_trace_spans(
     data: &Map<String, Value>,
     results: &Map<String, Value>,
 ) -> Vec<TraceSpanRow> {
-    let summaries = super::array_value(data, "span_summaries");
-    if !summaries.is_empty() {
-        return summaries
-            .iter()
-            .filter_map(|value| trace_span_row(value.as_object()?))
-            .collect();
+    for summaries in [
+        super::array_value(data, "span_summaries"),
+        super::array_value(results, "span_summaries"),
+    ] {
+        if !summaries.is_empty() {
+            return trace_span_rows(summaries);
+        }
     }
 
-    let summaries = super::array_value(results, "span_summaries");
-    if !summaries.is_empty() {
-        return summaries
-            .iter()
-            .filter_map(|value| trace_span_row(value.as_object()?))
-            .collect();
-    }
+    trace_span_rows(super::array_value(results, "span_results"))
+}
 
-    super::array_value(results, "span_results")
+fn trace_span_rows(spans: Vec<&Value>) -> Vec<TraceSpanRow> {
+    spans
         .iter()
         .filter_map(|value| trace_span_row(value.as_object()?))
         .collect()
