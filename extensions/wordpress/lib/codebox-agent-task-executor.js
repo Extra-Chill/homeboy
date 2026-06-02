@@ -63,6 +63,7 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     data_machine_code: config.data_machine_code || options.dataMachineCode || '',
     homeboy: config.homeboy || options.homeboy || '',
     homeboy_extensions: config.homeboy_extensions || options.homeboyExtensions || '',
+    wp_cli_bin: config.wp_cli_bin || options.wpCliBin || '',
     wp_codebox_bin: config.wp_codebox_bin || options.wpCodeboxBin || '',
     artifacts: config.artifacts || options.artifacts || '',
     max_turns: config.max_turns || options.maxTurns,

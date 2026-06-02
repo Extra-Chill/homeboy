@@ -150,6 +150,7 @@ const codexAgentRequest = {
       data_machine_code: '/components/data-machine-code',
       homeboy: '/components/homeboy',
       homeboy_extensions: '/components/homeboy-extensions',
+      wp_cli_bin: '/bin/wp',
       wp_codebox_bin: '/bin/wp-codebox',
       max_turns: 8,
     },
@@ -164,6 +165,7 @@ assert.equal(codexRequest.data_machine, '/components/data-machine');
 assert.equal(codexRequest.data_machine_code, '/components/data-machine-code');
 assert.equal(codexRequest.homeboy, '/components/homeboy');
 assert.equal(codexRequest.homeboy_extensions, '/components/homeboy-extensions');
+assert.equal(codexRequest.wp_cli_bin, '/bin/wp');
 assert.equal(codexRequest.wp_codebox_bin, '/bin/wp-codebox');
 assert.deepEqual(codexRequest.secret_env, [
   'AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN',

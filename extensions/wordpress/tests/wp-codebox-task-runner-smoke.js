@@ -263,6 +263,27 @@ try {
   assert.equal(nonExecutableCapture.argv[0], 'codebox');
   assert.equal(pathInside(root, nonExecutableCapture.input.artifacts_path), false);
 
+  const requestConfiguredCapturePath = path.join(root, 'capture-request-configured.json');
+  const requestConfiguredFixture = createFixtureWpCli(root);
+  const requestConfiguredResult = spawnSync(process.execPath, [
+    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-wp-codebox-task-runner.cjs'),
+  ], {
+    encoding: 'utf8',
+    input: JSON.stringify({
+      ...request,
+      wp_cli_bin: requestConfiguredFixture,
+      secret_env: [],
+    }),
+    env: {
+      ...process.env,
+      FIXTURE_WP_CLI_CAPTURE: requestConfiguredCapturePath,
+    },
+  });
+  assert.equal(requestConfiguredResult.status, 0, requestConfiguredResult.stderr || requestConfiguredResult.stdout);
+  const requestConfiguredCapture = readJson(requestConfiguredCapturePath);
+  assert.equal(requestConfiguredCapture.argv[0], 'codebox');
+  assert.equal(requestConfiguredCapture.input.parent_request.wp_cli_bin, requestConfiguredFixture);
+
   const sourceRoot = path.join(root, 'source-plugin');
   fs.mkdirSync(sourceRoot, { recursive: true });
   const riskyArtifacts = path.join(sourceRoot, 'artifacts');
