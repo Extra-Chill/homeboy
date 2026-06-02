@@ -14,6 +14,7 @@ WRITE_TEST_RESULTS_HELPER="${HOMEBOY_RUNTIME_WRITE_TEST_RESULTS:-}"
 DEPENDENCY_HELPER="${HOMEBOY_WORDPRESS_DEPENDENCY_HELPER:-${SCRIPT_DIR}/../lib/validation-dependencies.sh}"
 PHP_PREFLIGHT_HELPER="${SCRIPT_DIR}/../lib/php-preflight.sh"
 WP_CODEBOX_PATHS_HELPER="${SCRIPT_DIR}/../lib/wp-codebox-paths.sh"
+PHPUNIT_RECIPE_BUILDER="${HOMEBOY_WP_CODEBOX_PHPUNIT_RECIPE_BUILDER:-${SCRIPT_DIR}/build-wp-codebox-phpunit-recipe.mjs}"
 
 # shellcheck source=/dev/null
 source "$RESOLVE_CONTEXT_HELPER"
@@ -428,7 +429,12 @@ jq -n \
         multisite: (if (($multisite | ascii_downcase) as $v | $v == "1" or $v == "true" or $v == "yes" or $v == "on") then true else false end)
     }' > "$RECIPE_OPTIONS_FILE"
 
-"${wp_codebox_command[@]}" recipe build phpunit --options "$RECIPE_OPTIONS_FILE" --output "$RECIPE_FILE"
+if [ ! -f "$PHPUNIT_RECIPE_BUILDER" ]; then
+    echo "Error: WP Codebox PHPUnit recipe builder not found: ${PHPUNIT_RECIPE_BUILDER}" >&2
+    FAILED_STEP="WP Codebox PHPUnit recipe setup"
+    exit 1
+fi
+node "$PHPUNIT_RECIPE_BUILDER" < "$RECIPE_OPTIONS_FILE" > "$RECIPE_FILE"
 
 set +e
 "${wp_codebox_command[@]}" recipe-run \
