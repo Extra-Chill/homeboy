@@ -17,6 +17,8 @@ mod connection;
 mod evidence;
 mod execution;
 mod lab;
+mod lab_env;
+mod lab_workspaces;
 mod offload_changed_since;
 mod offload_metadata;
 mod resource_metrics;

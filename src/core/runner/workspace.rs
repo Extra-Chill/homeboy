@@ -48,6 +48,15 @@ pub enum RunnerWorkspaceSyncMode {
     Git,
 }
 
+impl RunnerWorkspaceSyncMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Snapshot => "snapshot",
+            Self::Git => "git",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RunnerWorkspaceSyncOptions {
     pub path: String,
