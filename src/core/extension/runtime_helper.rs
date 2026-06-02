@@ -9,6 +9,7 @@ mod assets;
 
 pub const RUNNER_STEPS_ENV: &str = "HOMEBOY_RUNTIME_RUNNER_STEPS";
 pub const RUNNER_PRELUDE_ENV: &str = "HOMEBOY_RUNTIME_RUNNER_PRELUDE";
+pub const BASH_PREFLIGHT_ENV: &str = "HOMEBOY_RUNTIME_BASH_PREFLIGHT";
 pub const FAILURE_TRAP_ENV: &str = "HOMEBOY_RUNTIME_FAILURE_TRAP";
 pub const WRITE_TEST_RESULTS_ENV: &str = "HOMEBOY_RUNTIME_WRITE_TEST_RESULTS";
 pub const SIDECAR_WRITER_ENV: &str = "HOMEBOY_RUNTIME_SIDECAR_WRITER";
@@ -35,6 +36,12 @@ const HELPERS: &[RuntimeHelper] = &[
         filename: "runner-prelude.sh",
         content: assets::RUNNER_PRELUDE_SH,
         env_var: RUNNER_PRELUDE_ENV,
+        legacy_fallback: false,
+    },
+    RuntimeHelper {
+        filename: "bash-preflight.sh",
+        content: assets::BASH_PREFLIGHT_SH,
+        env_var: BASH_PREFLIGHT_ENV,
         legacy_fallback: false,
     },
     RuntimeHelper {

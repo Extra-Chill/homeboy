@@ -102,10 +102,21 @@ Trace runners also receive trace-specific variables when invoked by `homeboy tra
 
 ## Core-provided runtime helpers
 
-Core ships three shell helpers as embedded assets
+Core ships shell helpers as embedded assets
 (`src/core/extension/runtime/`) and injects their absolute paths via
 `HOMEBOY_RUNTIME_*` env vars. Extensions source them at the top of the
 runner script with a fallback to a bundled copy:
+
+### `runner-prelude.sh` (env: `HOMEBOY_RUNTIME_RUNNER_PRELUDE`)
+
+Provides `homeboy_runner_init`, `homeboy_source_runtime_helper`, and the
+shared bash-version guard for runners that want the standard context,
+step-filter, sidecar-writer, and failure-trap setup in one source call.
+
+### `bash-preflight.sh` (env: `HOMEBOY_RUNTIME_BASH_PREFLIGHT`)
+
+Provides `homeboy_require_bash_version <major>` for scripts that only need
+the bash-version guard and do not need the full runner prelude.
 
 ### `runner-steps.sh` (env: `HOMEBOY_RUNTIME_RUNNER_STEPS`)
 
