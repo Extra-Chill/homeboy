@@ -357,7 +357,8 @@ fn flatten_double_nested_dir(
     // `entries` counts the non-hidden + hidden top-level entries; we require it to be
     // exactly the nested directory and nothing else.
     let detect_cmd = format!(
-        "test -d {nested} && [ \"$(cd {target} && ls -A | wc -l)\" = \"1\" ] && \
+        "test -d {nested} && \
+         [ \"$(cd {target} && find . -mindepth 1 -maxdepth 1 | wc -l | tr -d '[:space:]')\" = \"1\" ] && \
          [ \"$(cd {target} && ls -A)\" = {basename_arg} ] && echo NESTED || echo OK",
         nested = shell::quote_path(&nested_dir),
         target = shell::quote_path(normalized),
@@ -385,11 +386,13 @@ fn flatten_double_nested_dir(
     // temp staging name avoids the "cannot move a directory into itself" problem
     // when the inner dir shares the basename with its parent.
     let staging = format!("{}/.artifact-flatten-staging", normalized);
+    let target_dir = format!("{}/", normalized);
     let flatten_cmd = format!(
         "cd {target} && rm -rf {staging} && mv {nested} {staging} && \
-         find {staging} -mindepth 1 -maxdepth 1 -exec mv -t {target} {{}} + && \
+         find {staging} -mindepth 1 -maxdepth 1 -exec mv {{}} {target_dir} \\; && \
          rmdir {staging}",
         target = shell::quote_path(normalized),
+        target_dir = shell::quote_path(&target_dir),
         nested = shell::quote_path(&nested_dir),
         staging = shell::quote_path(&staging),
     );
