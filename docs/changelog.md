@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.218.0] - 2026-06-02
+
+### Added
+- feat(agent-task): run submitted lifecycle records
+
+### Changed
+- refactor(agent-task): keep lifecycle store path generic
+- refactor(agent-task): split lifecycle persistence helpers
+
 ## [0.217.0] - 2026-06-02
 
 ### Added
