@@ -475,7 +475,7 @@ pub fn render_markdown(results: &TraceResults, overlays: &[TraceOverlay]) -> Str
                 .duration_ms
                 .map(|ms| format!("{}ms", ms))
                 .unwrap_or_else(|| "-".to_string());
-            let status = format_span_summary_status(&span);
+            let status = format_span_summary_status(span);
             let metadata = format_span_summary_metadata(span.metadata.as_ref());
             out.push_str(&format!(
                 "| `{}` | `{}` | `{}` | {} | {} | {} |\n",

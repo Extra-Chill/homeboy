@@ -321,16 +321,12 @@ impl Default for AgentTaskWorkspace {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum AgentTaskWorkspaceMode {
+    #[default]
     Ephemeral,
     Existing,
     Materialized,
-}
-
-impl Default for AgentTaskWorkspaceMode {
-    fn default() -> Self {
-        Self::Ephemeral
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
