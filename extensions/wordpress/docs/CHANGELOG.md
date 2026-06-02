@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.113.3] - 2026-06-02
+
+### Fixed
+- surface npm install failures in builds
+
 ## [2.113.2] - 2026-06-02
 
 ### Fixed
