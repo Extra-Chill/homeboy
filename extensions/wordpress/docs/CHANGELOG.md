@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.113.11] - 2026-06-02
+
+### Fixed
+- delegate codebox agent tasks to upstream runner
+
 ## [2.113.10] - 2026-06-02
 
 ### Fixed
