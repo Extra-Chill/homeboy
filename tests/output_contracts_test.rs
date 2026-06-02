@@ -358,6 +358,7 @@ fn extension_show_output_contracts_use_top_level_structured_sidecars() {
                 name: "findings".to_string(),
                 path: "findings.json".to_string(),
                 schema_version: Some("1".to_string()),
+                producer: Some("lint".to_string()),
             }],
             requires: None,
         },
@@ -365,7 +366,7 @@ fn extension_show_output_contracts_use_top_level_structured_sidecars() {
 
     assert_eq!(
         output["extension"]["structured_sidecars"],
-        json!([{ "name": "findings", "path": "findings.json", "schema_version": "1" }])
+        json!([{ "name": "findings", "path": "findings.json", "schema_version": "1", "producer": "lint" }])
     );
     assert_eq!(output["extension"].get("lint"), None);
 }
