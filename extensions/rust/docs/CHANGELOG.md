@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.20.6] - 2026-06-02
+
+### Fixed
+- consume core bash preflight helper
+
 ## [1.20.5] - 2026-05-30
 
 ### Fixed
