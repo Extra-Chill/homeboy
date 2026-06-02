@@ -61,6 +61,7 @@ fn string_config(key: &str, value: impl Into<String>) -> StepConfig {
 pub(super) fn build_preflight_steps(
     options: &ReleaseOptions,
     semver_recommendation: Option<&ReleaseSemverRecommendation>,
+    extensions: &[ExtensionManifest],
 ) -> Vec<PlanStep> {
     let default_branch_step = if options.pipeline.head {
         disabled_step(
@@ -108,6 +109,16 @@ pub(super) fn build_preflight_steps(
         build_bump_policy_step(options, semver_recommendation),
     ];
 
+    if has_wordpress_release_publish_target(extensions) {
+        steps.push(ready_step(
+            "preflight.wordpress_publish_token",
+            "preflight.wordpress_publish_token",
+            "Validate WordPress release publish token",
+            vec!["preflight.bump_policy".to_string()],
+            StepConfig::new(),
+        ));
+    }
+
     if let Some(identity) = options.git_identity.as_ref() {
         steps.insert(
             1,
@@ -144,6 +155,16 @@ pub(super) fn build_preflight_steps(
     }
 
     steps
+}
+
+fn has_wordpress_release_publish_target(extensions: &[ExtensionManifest]) -> bool {
+    extensions.iter().any(|extension| {
+        extension.id == "wordpress"
+            && extension
+                .actions
+                .iter()
+                .any(|action| action.id == "release.publish")
+    })
 }
 
 fn build_quality_steps(options: &ReleaseOptions) -> Vec<PlanStep> {
@@ -696,7 +717,7 @@ mod tests {
             ..Default::default()
         };
 
-        let steps = build_preflight_steps(&options, None);
+        let steps = build_preflight_steps(&options, None, &[]);
         let ids: Vec<&str> = steps.iter().map(|step| step.id.as_str()).collect();
 
         assert_eq!(
@@ -726,7 +747,7 @@ mod tests {
             ..Default::default()
         };
 
-        let steps = build_preflight_steps(&options, None);
+        let steps = build_preflight_steps(&options, None, &[]);
         let identity = steps
             .iter()
             .find(|step| step.id == "preflight.git_identity")
@@ -744,6 +765,37 @@ mod tests {
     }
 
     #[test]
+    fn release_plan_adds_wordpress_publish_token_preflight_for_wordpress_publish() {
+        let options = ReleaseOptions {
+            bump_type: "patch".to_string(),
+            ..Default::default()
+        };
+        let mut extension: ExtensionManifest = serde_json::from_value(serde_json::json!({
+            "name": "WordPress",
+            "version": "1.0.0",
+            "actions": [
+                {
+                    "id": "release.publish",
+                    "label": "Publish release",
+                    "type": "command",
+                    "command": "true"
+                }
+            ]
+        }))
+        .expect("extension manifest");
+        extension.id = "wordpress".to_string();
+
+        let steps = build_preflight_steps(&options, None, &[extension]);
+        let token = steps
+            .iter()
+            .find(|step| step.id == "preflight.wordpress_publish_token")
+            .expect("wordpress publish token preflight");
+
+        assert_eq!(token.status, PlanStepStatus::Ready);
+        assert_eq!(token.needs, vec!["preflight.bump_policy"]);
+    }
+
+    #[test]
     fn release_plan_marks_quality_preflights_disabled_when_checks_are_skipped() {
         let options = ReleaseOptions {
             bump_type: "patch".to_string(),
@@ -751,7 +803,7 @@ mod tests {
             ..Default::default()
         };
 
-        let steps = build_preflight_steps(&options, None);
+        let steps = build_preflight_steps(&options, None, &[]);
         for step_id in ["preflight.audit", "preflight.lint", "preflight.test"] {
             let quality = steps
                 .iter()
@@ -781,7 +833,7 @@ mod tests {
             ..Default::default()
         };
 
-        let steps = build_preflight_steps(&options, None);
+        let steps = build_preflight_steps(&options, None, &[]);
         let default_branch = steps
             .iter()
             .find(|step| step.id == "preflight.default_branch")
@@ -818,7 +870,7 @@ mod tests {
             ..Default::default()
         };
 
-        let steps = build_preflight_steps(&options, None);
+        let steps = build_preflight_steps(&options, None, &[]);
         let audit = steps
             .iter()
             .find(|step| step.id == "preflight.audit")
@@ -856,7 +908,7 @@ mod tests {
         };
         let recommendation = semver_recommendation("minor", "patch", true);
 
-        let steps = build_preflight_steps(&options, Some(&recommendation));
+        let steps = build_preflight_steps(&options, Some(&recommendation), &[]);
         let bump_policy = steps
             .iter()
             .find(|step| step.id == "preflight.bump_policy")
@@ -906,7 +958,7 @@ mod tests {
         };
         let recommendation = semver_recommendation("minor", "patch", true);
 
-        let steps = build_preflight_steps(&options, Some(&recommendation));
+        let steps = build_preflight_steps(&options, Some(&recommendation), &[]);
         let bump_policy = steps
             .iter()
             .find(|step| step.id == "preflight.bump_policy")
@@ -937,7 +989,7 @@ mod tests {
         };
         let recommendation = semver_recommendation("minor", "patch", true);
 
-        let steps = build_preflight_steps(&options, Some(&recommendation));
+        let steps = build_preflight_steps(&options, Some(&recommendation), &[]);
         let bump_policy = steps
             .iter()
             .find(|step| step.id == "preflight.bump_policy")
