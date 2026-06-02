@@ -30,11 +30,6 @@ function hasFlag(name) {
   return process.argv.includes(name);
 }
 
-function usage() {
-  console.error('Usage: homeboy-wp-codebox-task-runner.cjs --agents-api <path> --data-machine <path> --data-machine-code <path> [--homeboy <path>] [--homeboy-extensions <path>] [--wp-codebox-bin <bin>] [--provider <id>] [--model <id>] [--max-turns <n>] [--task-timeout-seconds <n>] [--provider-plugin-path <path>] [--secret-env <ENV>] [--mount <host:vfs[:mode]>] [--runtime-stack-mount <host:vfs[:mode]>] [--runtime-overlay-json <json>] [--artifacts <dir>]');
-  process.exit(1);
-}
-
 function readStdin() {
   try {
     return fs.readFileSync(0, 'utf8');
@@ -53,52 +48,6 @@ function readTaskRequest() {
     throw new Error('Task request must use schema homeboy/wp-codebox-task-request/v1.');
   }
   return request;
-}
-
-function requireValue(name, value) {
-  if (!value) {
-    throw new Error(`Required WP Codebox task runner option missing: ${name}`);
-  }
-  return value;
-}
-
-function pluginEntry(source, slug, activate = false) {
-  const pluginSlug = (slug || path.basename(source)).split('@')[0].replace(/[^a-zA-Z0-9_-]/g, '-');
-  const entry = { source, slug: pluginSlug, activate };
-  const pluginFile = detectPluginMainFile(source, pluginSlug);
-  if (pluginFile) {
-    entry.pluginFile = pluginFile;
-  }
-  return entry;
-}
-
-function detectPluginMainFile(source, pluginSlug) {
-  if (!fs.existsSync(source) || !fs.statSync(source).isDirectory()) {
-    return '';
-  }
-
-  const phpFiles = fs.readdirSync(source)
-    .filter((fileName) => fileName.endsWith('.php'))
-    .sort((left, right) => {
-      const preferred = [`${pluginSlug}.php`, 'plugin.php'];
-      const leftIndex = preferred.includes(left) ? preferred.indexOf(left) : preferred.length;
-      const rightIndex = preferred.includes(right) ? preferred.indexOf(right) : preferred.length;
-      return leftIndex - rightIndex || left.localeCompare(right);
-    });
-
-  for (const fileName of phpFiles) {
-    const header = fs.readFileSync(path.join(source, fileName), 'utf8').slice(0, 8192);
-    if (/Plugin Name\s*:/i.test(header)) {
-      return `${pluginSlug}/${fileName}`;
-    }
-  }
-
-  return '';
-}
-
-function providerPluginEntries(request) {
-  const paths = [...(request.provider_plugin_paths || []), ...argValues('--provider-plugin-path')];
-  return paths.map((source) => pluginEntry(source, path.basename(source), false));
 }
 
 function secretEnvNames(request) {
@@ -125,8 +74,11 @@ function mountEntryFromValue(value, metadata) {
   };
 }
 
-function mountEntries() {
-  return argValues('--mount').map((value) => mountEntryFromValue(value, { kind: 'homeboy-audit-fanout' }));
+function mountEntries(request) {
+  return [
+    ...(request.mounts || []),
+    ...argValues('--mount').map((value) => mountEntryFromValue(value, { kind: 'homeboy-audit-fanout' })),
+  ];
 }
 
 function runtimeStackMountEntries(request) {
@@ -162,127 +114,6 @@ function pathInside(parent, candidate) {
   }
 }
 
-function workspaceSlug(source) {
-  return path.basename(source).split('@')[0].replace(/[^a-zA-Z0-9_-]/g, '-');
-}
-
-function workspaceEntry(source) {
-  const slug = workspaceSlug(source);
-  return {
-    seed: {
-      type: 'directory',
-      source,
-      slug,
-      excludePaths: [
-        '.git',
-        '.homeboy',
-        '.homeboy-bin',
-        '.homeboy-build',
-        '.datamachine',
-        '.DS_Store',
-        '._*',
-        '.env*',
-        'node_modules',
-        'target',
-        'vendor',
-      ],
-    },
-    target: `/workspace/${slug}`,
-    mode: 'readwrite',
-    sourceMode: 'repo-backed',
-  };
-}
-
-function recipeWorkspaces(options) {
-  return [
-    options.agentsApi,
-    options.homeboy,
-    options.homeboyExtensions,
-  ].filter(Boolean).map(workspaceEntry);
-}
-
-function recipeForRequest(request, options) {
-  const provider = argValue('--provider') || request.provider || '';
-  const model = argValue('--model') || request.model || '';
-  const workspaceSlugs = recipeWorkspaces(options).map((workspace) => workspace.seed.slug);
-  const task = JSON.stringify({
-    schema: 'homeboy/wp-codebox-audit-task/v1',
-    sandbox_session_id: request.sandbox_session_id,
-    group_key: request.group_key,
-    orchestrator: request.orchestrator,
-    audit_findings: request.audit_findings,
-    task: {
-      ...(request.task || {}),
-      prompt: [
-        request.task?.prompt || '',
-        `Use Data Machine Code workspace repos ${workspaceSlugs.map((slug) => `\`${slug}\``).join(', ')} for workspace_* tool calls.`,
-      ].filter(Boolean).join('\n\n'),
-    },
-  });
-
-  const providerSlugs = providerPluginEntries(request).map((plugin) => plugin.slug).join(',');
-  const maxTurns = argValue('--max-turns') || request.max_turns || request.maxTurns || '';
-  const taskTimeoutSeconds = argValue('--task-timeout-seconds') || request.task_timeout_seconds || request.taskTimeoutSeconds || '';
-  const stepArgs = [
-    `task=${task}`,
-    'agent=sandbox-agent',
-    'mode=sandbox',
-    `provider=${provider}`,
-    `model=${model}`,
-    `provider-plugin-slugs=${providerSlugs}`,
-  ];
-  if (maxTurns) {
-    stepArgs.push(`max-turns=${maxTurns}`);
-  }
-  if (taskTimeoutSeconds) {
-    stepArgs.push(`timeout-seconds=${taskTimeoutSeconds}`);
-  }
-
-  const runtimeStackMounts = runtimeStackMountEntries(request);
-  const runtimeOverlays = runtimeOverlayEntries(request);
-  const runtime = {
-    wp: argValue('--wp') || 'latest',
-    blueprint: { steps: [] },
-  };
-  if (runtimeStackMounts.length > 0) {
-    runtime.stack = { mounts: runtimeStackMounts };
-  }
-  if (runtimeOverlays.length > 0) {
-    runtime.overlays = runtimeOverlays;
-  }
-
-  return {
-    schema: 'wp-codebox/workspace-recipe/v1',
-    runtime,
-    inputs: {
-      workspaces: recipeWorkspaces(options),
-      mounts: mountEntries(),
-      extraPlugins: [
-        pluginEntry(options.agentsApi, 'agents-api', false),
-        pluginEntry(options.dataMachine, 'data-machine', false),
-        pluginEntry(options.dataMachineCode, 'data-machine-code', false),
-        ...providerPluginEntries(request),
-      ],
-      secretEnv: secretEnvNames(request),
-    },
-    workflow: {
-      steps: [
-        {
-          command: 'wp-codebox.agent-sandbox-run',
-          args: stepArgs,
-        },
-      ],
-    },
-  };
-}
-
-function writeRecipe(recipe) {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-wp-codebox-recipe-'));
-  const recipePath = path.join(directory, 'recipe.json');
-  fs.writeFileSync(recipePath, `${JSON.stringify(recipe, null, 2)}\n`);
-  return recipePath;
-}
-
 function requestTimeoutMs(request) {
   const seconds = Number.parseInt(request.task_timeout_seconds || request.taskTimeoutSeconds || argValue('--task-timeout-seconds'), 10);
   return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : undefined;
@@ -298,10 +129,17 @@ function executable(filePath) {
 }
 
 function resolveCommand(command, args) {
-  if (path.extname(command) === '.js' && !executable(command)) {
+  if ((path.extname(command) === '.js' || path.extname(command) === '.cjs' || path.extname(command) === '.mjs') && !executable(command)) {
     return { command: process.execPath, args: [command, ...args] };
   }
   return { command, args };
+}
+
+function writeJsonFile(prefix, value) {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  const filePath = path.join(directory, 'input.json');
+  fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`);
+  return filePath;
 }
 
 function writePreflightEvidence(artifacts, evidence) {
@@ -315,17 +153,39 @@ function writePreflightEvidence(artifacts, evidence) {
   }
 }
 
-function timeoutPayload(timeoutMs, artifacts, evidencePath, recipePath, command, args) {
+function runnerInput(request, artifacts) {
+  return Object.fromEntries(Object.entries({
+    parent_request: request,
+    provider: argValue('--provider') || request.provider || '',
+    model: argValue('--model') || request.model || '',
+    provider_plugin_paths: [...(request.provider_plugin_paths || []), ...argValues('--provider-plugin-path')],
+    secret_env: secretEnvNames(request),
+    mounts: mountEntries(request),
+    runtime_stack_mounts: runtimeStackMountEntries(request),
+    runtime_overlays: runtimeOverlayEntries(request),
+    max_turns: Number.parseInt(argValue('--max-turns') || request.max_turns || request.maxTurns || 0, 10) || undefined,
+    task_timeout_seconds: Number.parseInt(argValue('--task-timeout-seconds') || request.task_timeout_seconds || request.taskTimeoutSeconds || 0, 10) || undefined,
+    sandbox_session_id: request.sandbox_session_id || '',
+    orchestrator: request.orchestrator || {},
+    artifacts_path: artifacts,
+    wp_codebox_bin: argValue('--wp-codebox-bin') || request.wp_codebox_bin || '',
+    agents_api_path: argValue('--agents-api') || request.agents_api || '',
+    data_machine_path: argValue('--data-machine') || request.data_machine || '',
+    data_machine_code_path: argValue('--data-machine-code') || request.data_machine_code || '',
+  }).filter(([, value]) => value !== '' && value !== undefined && !(Array.isArray(value) && value.length === 0)));
+}
+
+function timeoutPayload(timeoutMs, artifacts, evidencePath, inputPath, command, args) {
   const artifact = evidencePath ? [{
     id: 'homeboy-codebox-task-runner-preflight',
     kind: 'codebox-task-runner-preflight',
     path: evidencePath,
-    metadata: { recipePath, artifacts, command, args },
+    metadata: { inputPath, artifacts, command, args },
   }] : [];
   return {
     success: false,
     timeout: true,
-    summary: `WP Codebox recipe-run timed out after ${timeoutMs}ms.`,
+    summary: `WP Codebox run-agent-task timed out after ${timeoutMs}ms.`,
     artifacts: artifact,
     evidence_refs: evidencePath ? [{
       kind: 'codebox-task-runner-preflight',
@@ -333,42 +193,42 @@ function timeoutPayload(timeoutMs, artifacts, evidencePath, recipePath, command,
       label: 'WP Codebox task runner preflight evidence',
     }] : [],
     diagnostics: [{
-      class: 'codebox.recipe_run.timeout',
-      message: 'wp-codebox recipe-run exceeded the configured task timeout.',
-      data: { timeout_ms: timeoutMs, recipePath, artifacts },
+      class: 'codebox.run_agent_task.timeout',
+      message: 'wp codebox run-agent-task exceeded the configured task timeout.',
+      data: { timeout_ms: timeoutMs, inputPath, artifacts },
     }],
-    metadata: { timeout_ms: timeoutMs, recipePath, artifacts, command, args },
+    metadata: { timeout_ms: timeoutMs, inputPath, artifacts, command, args },
   };
 }
 
-function runWpCodebox(recipePath, request) {
-  const wpCodeboxBin = argValue('--wp-codebox-bin') || request.wp_codebox_bin || 'wp-codebox';
-  const args = ['recipe-run', '--recipe', recipePath, '--json'];
+function runWpCodeboxParentTask(request) {
   const explicitArtifacts = argValue('--artifacts') || request.artifacts || '';
   const artifacts = explicitArtifacts || fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-wp-codebox-artifacts-'));
-  args.push('--artifacts', artifacts);
   if (explicitArtifacts) {
-    const riskyMount = mountEntries().find((mount) => pathInside(mount.source, explicitArtifacts));
+    const riskyMount = mountEntries(request).find((mount) => pathInside(mount.source, explicitArtifacts));
     if (riskyMount) {
       console.error(`Warning: WP Codebox artifact directory is inside mounted source ${riskyMount.source} and may be captured recursively: ${explicitArtifacts}`);
     }
   }
-  if (argValue('--preview-hold')) {
-    args.push('--preview-hold', argValue('--preview-hold'));
+
+  const input = runnerInput(request, artifacts);
+  const inputPath = writeJsonFile('homeboy-wp-codebox-parent-task-', input);
+  const wpCliBin = argValue('--wp-cli-bin') || request.wp_cli_bin || 'wp';
+  const args = ['codebox', 'run-agent-task', '--input-file', inputPath, '--format=json'];
+  const previewHold = argValue('--preview-hold');
+  if (previewHold) {
+    args.push('--preview-hold-seconds', previewHold);
   }
-  if (argValue('--preview-public-url')) {
-    args.push('--preview-public-url', argValue('--preview-public-url'));
+  const previewPublicUrl = argValue('--preview-public-url');
+  if (previewPublicUrl) {
+    args.push('--preview-public-url', previewPublicUrl);
   }
 
-  if (hasFlag('--print-command')) {
-    console.error(JSON.stringify({ command: wpCodeboxBin, args }, null, 2));
-  }
-
-  const resolved = resolveCommand(wpCodeboxBin, args);
+  const resolved = resolveCommand(wpCliBin, args);
   const timeoutMs = requestTimeoutMs(request);
   const evidencePath = writePreflightEvidence(artifacts, {
     schema: 'homeboy/wp-codebox-task-runner-preflight/v1',
-    recipePath,
+    inputPath,
     artifacts,
     command: resolved.command,
     args: resolved.args,
@@ -376,6 +236,11 @@ function runWpCodebox(recipePath, request) {
     task_id: request.orchestrator?.agent_task_id,
     sandbox_session_id: request.sandbox_session_id,
   });
+
+  if (hasFlag('--print-command')) {
+    console.error(JSON.stringify({ command: resolved.command, args: resolved.args, input }, null, 2));
+  }
+
   const result = spawnSync(resolved.command, resolved.args, {
     encoding: 'utf8',
     env: process.env,
@@ -384,7 +249,7 @@ function runWpCodebox(recipePath, request) {
   });
 
   if (result.error && result.error.code === 'ETIMEDOUT') {
-    process.stdout.write(`${JSON.stringify(timeoutPayload(timeoutMs, artifacts, evidencePath, recipePath, resolved.command, resolved.args), null, 2)}\n`);
+    process.stdout.write(`${JSON.stringify(timeoutPayload(timeoutMs, artifacts, evidencePath, inputPath, resolved.command, resolved.args), null, 2)}\n`);
     return 1;
   }
 
@@ -403,21 +268,7 @@ function runWpCodebox(recipePath, request) {
 try {
   const request = readTaskRequest();
   assertRequiredSecretEnvAvailable(request);
-  const options = {
-    agentsApi: requireValue('--agents-api', argValue('--agents-api') || request.agents_api),
-    dataMachine: requireValue('--data-machine', argValue('--data-machine') || request.data_machine),
-    dataMachineCode: requireValue('--data-machine-code', argValue('--data-machine-code') || request.data_machine_code),
-    homeboy: argValue('--homeboy') || request.homeboy,
-    homeboyExtensions: argValue('--homeboy-extensions') || request.homeboy_extensions,
-  };
-  const recipe = recipeForRequest(request, options);
-  const recipePath = writeRecipe(recipe);
-
-  if (hasFlag('--print-recipe')) {
-    console.error(JSON.stringify({ recipePath, recipe }, null, 2));
-  }
-
-  process.exitCode = runWpCodebox(recipePath, request);
+  process.exitCode = runWpCodeboxParentTask(request);
 } catch (error) {
   console.error(error && error.message ? error.message : String(error));
   process.exitCode = 1;

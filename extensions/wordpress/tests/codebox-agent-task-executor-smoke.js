@@ -191,6 +191,25 @@ assert.equal(outcome.failure_classification, 'provider');
 assert.equal(outcome.artifacts[0].id, 'bundle-1');
 assert.equal(outcome.artifacts[0].path, '/tmp/artifacts');
 
+const upstreamRunnerOutcome = agentTaskOutcomeFromCodeboxResult(request, {
+  success: true,
+  schema: 'wp-codebox/agent-task-run/v1',
+  session: {
+    id: 'sandbox-session-1',
+    artifacts: {
+      bundle_id: 'artifact-bundle-1',
+      preview_url: 'https://preview.example.test/sandbox-session-1',
+    },
+  },
+  artifacts: '/tmp/wp-codebox-artifacts',
+});
+assert.equal(upstreamRunnerOutcome.status, 'succeeded');
+assert.equal(upstreamRunnerOutcome.artifacts[0].kind, 'codebox-artifact-directory');
+assert.equal(upstreamRunnerOutcome.artifacts[0].path, '/tmp/wp-codebox-artifacts');
+assert.equal(upstreamRunnerOutcome.artifacts[1].kind, 'codebox-session-artifacts');
+assert.equal(upstreamRunnerOutcome.evidence_refs[0].uri, 'https://preview.example.test/sandbox-session-1');
+assert.equal(upstreamRunnerOutcome.evidence_refs[1].uri, '/tmp/wp-codebox-artifacts');
+
 const codexOutcome = agentTaskOutcomeFromCodeboxResult(request, {
   success: true,
   summary: 'Codex task completed.',

@@ -153,6 +153,29 @@ function artifactFromCodeboxArtifact(artifact, index) {
 }
 
 function normalizeArtifacts(result) {
+  if (result?.schema === 'wp-codebox/agent-task-run/v1') {
+    const artifacts = [];
+    if (typeof result.artifacts === 'string' && result.artifacts) {
+      artifacts.push({
+        id: result.session?.artifacts?.bundle_id || 'wp-codebox-artifacts',
+        kind: 'codebox-artifact-directory',
+        path: result.artifacts,
+        metadata: {
+          session_id: result.session?.id,
+          preview_url: result.session?.artifacts?.preview_url,
+        },
+      });
+    }
+    if (result.session?.artifacts && typeof result.session.artifacts === 'object') {
+      artifacts.push({
+        id: result.session.artifacts.bundle_id || `wp-codebox-session-artifacts-${artifacts.length + 1}`,
+        kind: 'codebox-session-artifacts',
+        url: result.session.artifacts.preview_url,
+        metadata: result.session.artifacts,
+      });
+    }
+    return artifacts.map(artifactFromCodeboxArtifact);
+  }
   const artifacts = Array.isArray(result?.artifacts)
     ? result.artifacts
     : Object.values(result?.artifacts || {}).filter((value) => value && typeof value === 'object');
@@ -160,6 +183,20 @@ function normalizeArtifacts(result) {
 }
 
 function normalizeEvidenceRefs(result) {
+  if (result?.schema === 'wp-codebox/agent-task-run/v1') {
+    return [
+      result.session?.artifacts?.preview_url ? {
+        kind: 'codebox-preview',
+        uri: result.session.artifacts.preview_url,
+        label: 'WP Codebox preview',
+      } : null,
+      typeof result.artifacts === 'string' && result.artifacts ? {
+        kind: 'codebox-artifact-directory',
+        uri: result.artifacts,
+        label: 'WP Codebox artifacts',
+      } : null,
+    ].filter(Boolean);
+  }
   const evidenceRefs = result?.evidence_refs || result?.evidence || [];
   return evidenceRefs.map((ref) => ({
     kind: ref.kind || ref.type || 'codebox_evidence',
