@@ -256,17 +256,17 @@ fn manifest_parses_archive_install_deploy_contract() {
         "name": "Example",
         "version": "0.0.0",
         "deploy": {
-            "protected_path_suffixes": ["/wp-content/plugins"],
+            "protected_path_suffixes": ["/srv/extensions"],
             "owner_hints": [
                 {
-                    "path_contains": "wp-content/",
+                    "path_contains": "extensions/",
                     "suggested_owner": "www-data:www-data"
                 }
             ],
             "archive_install": [
                 {
-                    "path_pattern": "/wp-content/plugins/",
-                    "staging_path": "/tmp/homeboy-wordpress-plugin-staging",
+                    "path_pattern": "/srv/extensions/",
+                    "staging_path": "/tmp/homeboy-extension-staging",
                     "root_must_match_target_basename": true,
                     "required_header": {
                         "file_glob": "*.php",
@@ -283,8 +283,8 @@ fn manifest_parses_archive_install_deploy_contract() {
         .deploy_archive_installs()
         .first()
         .expect("archive install policy");
-    assert_eq!(policy.path_pattern, "/wp-content/plugins/");
-    assert_eq!(policy.staging_path, "/tmp/homeboy-wordpress-plugin-staging");
+    assert_eq!(policy.path_pattern, "/srv/extensions/");
+    assert_eq!(policy.staging_path, "/tmp/homeboy-extension-staging");
     assert!(policy.root_must_match_target_basename);
     assert!(policy.skip_permissions_fix);
     assert_eq!(
@@ -296,8 +296,8 @@ fn manifest_parses_archive_install_deploy_contract() {
     );
 
     let deploy = manifest.deploy.as_ref().expect("deploy contract");
-    assert_eq!(deploy.protected_path_suffixes, ["/wp-content/plugins"]);
-    assert_eq!(deploy.owner_hints[0].path_contains, "wp-content/");
+    assert_eq!(deploy.protected_path_suffixes, ["/srv/extensions"]);
+    assert_eq!(deploy.owner_hints[0].path_contains, "extensions/");
     assert_eq!(deploy.owner_hints[0].suggested_owner, "www-data:www-data");
 }
 

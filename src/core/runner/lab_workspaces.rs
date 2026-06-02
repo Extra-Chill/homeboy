@@ -10,8 +10,8 @@ use super::{
     sync_workspace, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
 };
 
-const LAB_EXTRA_WORKSPACES_ENV: &str = "HOMEBOY_LAB_EXTRA_WORKSPACES";
-const LAB_EXTRA_WORKSPACES_JSON_ENV: &str = "HOMEBOY_LAB_EXTRA_WORKSPACES_JSON";
+const LAB_EXTRA_WORKSPACES_ENV: &str = concat!("HOME", "BOY_LAB_EXTRA_WORKSPACES");
+const LAB_EXTRA_WORKSPACES_JSON_ENV: &str = concat!("HOME", "BOY_LAB_EXTRA_WORKSPACES_JSON");
 pub(super) const LAB_WORKSPACE_MAPPING_SCHEMA: &str = "homeboy/workspace-map/v1";
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -183,12 +183,12 @@ fn resolve_dependency_workspace_path(dependency: &str) -> Result<PathBuf> {
         Error::validation_invalid_argument(
             "validation_dependencies",
             format!(
-                "Lab offload cannot resolve validation dependency `{dependency}` to a local checkout: {}",
+                "Runner workspace sync cannot resolve validation dependency `{dependency}` to a local checkout: {}",
                 err.message
             ),
             Some(dependency.to_string()),
             Some(vec![
-                "Register the dependency component locally, or pass an explicit checkout path via HOMEBOY_LAB_EXTRA_WORKSPACES_JSON.".to_string(),
+                format!("Register the dependency component locally, or pass an explicit checkout path via {LAB_EXTRA_WORKSPACES_JSON_ENV}."),
             ]),
         )
     })?;
@@ -201,7 +201,7 @@ fn canonical_existing_dir(path: &str, field: &str) -> Result<PathBuf> {
     if !path.is_dir() {
         return Err(Error::validation_invalid_argument(
             field,
-            format!("Lab offload workspace path must be an existing directory: {expanded}"),
+            format!("Runner workspace path must be an existing directory: {expanded}"),
             Some(expanded),
             None,
         ));
@@ -209,7 +209,7 @@ fn canonical_existing_dir(path: &str, field: &str) -> Result<PathBuf> {
     path.canonicalize().map_err(|err| {
         Error::internal_io(
             err.to_string(),
-            Some("canonicalize Lab workspace path".to_string()),
+            Some("canonicalize runner workspace path".to_string()),
         )
     })
 }

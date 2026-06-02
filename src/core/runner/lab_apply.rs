@@ -32,11 +32,11 @@ pub(super) fn apply_lab_offload_patch(
             return Ok(None);
         }
         return Err(Error::internal_unexpected(
-            "Lab offload captured modified files but did not return a patch artifact path",
+            "Runner execution captured modified files but did not return a patch artifact path",
         ));
     };
     let source_snapshot = exec_output.source_snapshot.clone().ok_or_else(|| {
-        Error::internal_unexpected("Lab offload patch apply requires the source snapshot")
+        Error::internal_unexpected("Runner patch apply requires the source snapshot")
     })?;
     let patch_content = read_lab_patch_artifact(patch_path)?;
     if patch_content.trim().is_empty() {
@@ -67,7 +67,10 @@ fn read_lab_patch_artifact(path: &str) -> Result<String> {
     std::fs::read_to_string(&local_path).map_err(|err| {
         Error::internal_io(
             err.to_string(),
-            Some(format!("read Lab patch artifact {}", local_path.display())),
+            Some(format!(
+                "read runner patch artifact {}",
+                local_path.display()
+            )),
         )
     })
 }

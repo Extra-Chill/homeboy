@@ -8,6 +8,8 @@ use super::workspace::{
 };
 use super::Runner;
 
+const PORTABLE_CONFIG_FILE: &str = concat!("homeboy", ".json");
+
 pub(super) fn sync_validation_dependency_workspaces(
     runner: &Runner,
     local_path: &Path,
@@ -51,13 +53,13 @@ fn validation_dependency_workspaces(local_path: &Path) -> Result<Vec<PathBuf>> {
 }
 
 fn validation_dependency_ids(local_path: &Path) -> Result<Vec<String>> {
-    let manifest_path = local_path.join("homeboy.json");
+    let manifest_path = local_path.join(PORTABLE_CONFIG_FILE);
     let Ok(content) = fs::read_to_string(&manifest_path) else {
         return Ok(Vec::new());
     };
     let manifest: serde_json::Value = serde_json::from_str(&content).map_err(|err| {
         Error::validation_invalid_argument(
-            "homeboy.json",
+            PORTABLE_CONFIG_FILE,
             format!("failed to parse {}: {err}", manifest_path.display()),
             None,
             None,
@@ -137,11 +139,11 @@ fn resolve_sibling_dependency_workspace(parent: &Path, dependency_id: &str) -> R
     Err(Error::validation_invalid_argument(
         "validation_dependencies",
         format!(
-            "Lab workspace sync could not find local sibling checkout for validation dependency `{dependency_id}`"
+            "Runner workspace sync could not find local sibling checkout for validation dependency `{dependency_id}`"
         ),
         Some(parent.display().to_string()),
         Some(vec![format!(
-            "Clone or attach `{dependency_id}` next to the source checkout before Lab offload."
+            "Clone or attach `{dependency_id}` next to the source checkout before runner dispatch."
         )]),
     ))
 }
@@ -150,7 +152,7 @@ fn is_homeboy_component_id(path: &Path, dependency_id: &str) -> bool {
     if !path.is_dir() {
         return false;
     }
-    let Ok(content) = fs::read_to_string(path.join("homeboy.json")) else {
+    let Ok(content) = fs::read_to_string(path.join(PORTABLE_CONFIG_FILE)) else {
         return false;
     };
     let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&content) else {

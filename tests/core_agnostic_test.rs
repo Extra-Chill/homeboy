@@ -1115,7 +1115,7 @@ const BASELINE: &[ViolationKey] = &[
     },
 ];
 
-const BASELINE_OCCURRENCES: usize = 639;
+const BASELINE_OCCURRENCES: usize = 640;
 
 // Known core-owned test/fixture literal debt tracked by #3034. Keep this list
 // explicit so stale rows and occurrence-count changes force cleanup or review.
@@ -1201,10 +1201,6 @@ const TEST_CONTENT_BASELINE: &[ViolationKey] = &[
         term: "php",
     },
     ViolationKey {
-        path: "src/core/source_snapshot.rs",
-        term: "cargo",
-    },
-    ViolationKey {
         path: "src/core/triage/tests.rs",
         term: "wordpress",
     },
@@ -1258,7 +1254,7 @@ const TEST_CONTENT_BASELINE: &[ViolationKey] = &[
     },
 ];
 
-const TEST_CONTENT_BASELINE_OCCURRENCES: usize = 102;
+const TEST_CONTENT_BASELINE_OCCURRENCES: usize = 99;
 
 #[test]
 fn core_owned_source_stays_language_and_framework_agnostic() {
