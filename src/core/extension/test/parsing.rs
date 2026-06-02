@@ -109,6 +109,10 @@ pub fn parse_test_results_file(path: &std::path::Path) -> Option<TestCounts> {
     let content = local_files::read_file(path, "read test results file").ok()?;
     let data: serde_json::Value = serde_json::from_str(&content).ok()?;
 
+    if let Some(counts) = parse_wp_codebox_json_value(&data) {
+        return Some(counts);
+    }
+
     let total = data
         .get("total")
         .and_then(|value| value.as_u64())
@@ -140,6 +144,12 @@ pub fn parse_test_results_text(text: &str) -> Option<TestCounts> {
 }
 
 pub fn parse_test_results_text_with_spec(text: &str, spec: &ParseSpec) -> Option<TestCounts> {
+    for adapter in &spec.adapters {
+        if let Some(counts) = parse_test_results_text_with_adapter(text, adapter) {
+            return Some(counts);
+        }
+    }
+
     let parsed = spec.parse(text);
     let total = parsed.get("total").copied().unwrap_or(0.0).max(0.0) as u64;
     if total == 0 {
@@ -154,8 +164,87 @@ pub fn parse_test_results_text_with_spec(text: &str, spec: &ParseSpec) -> Option
     Some(TestCounts::new(total, passed, failed + errors, skipped))
 }
 
+fn parse_test_results_text_with_adapter(text: &str, adapter: &str) -> Option<TestCounts> {
+    match adapter {
+        "wp-codebox-json" => parse_wp_codebox_json_text(text),
+        "phpunit-testdox" => parse_phpunit_testdox_text(text),
+        _ => None,
+    }
+}
+
+fn parse_wp_codebox_json_text(text: &str) -> Option<TestCounts> {
+    if !text.contains("\"schema\"") || !text.contains("\"wp-codebox/test-results/v1\"") {
+        return None;
+    }
+
+    let data: serde_json::Value = serde_json::from_str(text).ok()?;
+    parse_wp_codebox_json_value(&data)
+}
+
+fn parse_wp_codebox_json_value(data: &serde_json::Value) -> Option<TestCounts> {
+    if data.get("schema").and_then(|value| value.as_str()) != Some("wp-codebox/test-results/v1") {
+        return None;
+    }
+
+    let summary = data.get("summary").and_then(|value| value.as_object());
+    let mut total = summary
+        .and_then(|summary| summary.get("total"))
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0);
+    let mut passed = summary
+        .and_then(|summary| summary.get("passed"))
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0);
+    let mut failed = summary
+        .and_then(|summary| summary.get("failed"))
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0);
+    let mut skipped = summary
+        .and_then(|summary| summary.get("skipped"))
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0);
+
+    if total == 0 {
+        if let Some(suites) = data.get("suites").and_then(|value| value.as_array()) {
+            for suite in suites.iter().filter_map(|value| value.as_object()) {
+                total += suite
+                    .get("tests")
+                    .or_else(|| suite.get("total"))
+                    .and_then(|value| value.as_u64())
+                    .unwrap_or(0);
+                passed += suite
+                    .get("passed")
+                    .and_then(|value| value.as_u64())
+                    .unwrap_or(0);
+                failed += suite
+                    .get("failed")
+                    .and_then(|value| value.as_u64())
+                    .unwrap_or(0);
+                skipped += suite
+                    .get("skipped")
+                    .and_then(|value| value.as_u64())
+                    .unwrap_or(0);
+            }
+        }
+    }
+
+    Some(TestCounts::new(total, passed, failed, skipped))
+}
+
+fn parse_phpunit_testdox_text(text: &str) -> Option<TestCounts> {
+    let passed = text.lines().filter(|line| line.starts_with(" ✔")).count() as u64;
+    let failed = text.lines().filter(|line| line.starts_with(" ✘")).count() as u64;
+
+    if passed == 0 && failed == 0 {
+        return None;
+    }
+
+    Some(TestCounts::new(passed + failed, passed, failed, 0))
+}
+
 fn default_test_result_parse_spec() -> ParseSpec {
     ParseSpec {
+        adapters: vec!["wp-codebox-json".to_string(), "phpunit-testdox".to_string()],
         rules: vec![
             ParseRule {
                 pattern: r"Tests:\s*(\d+)".to_string(),
@@ -177,7 +266,25 @@ fn default_test_result_parse_spec() -> ParseSpec {
             },
             ParseRule {
                 pattern: r"Skipped:\s*(\d+)".to_string(),
-                field: "skipped".to_string(),
+                field: "skipped_raw".to_string(),
+                group: 1,
+                aggregate: Aggregate::Last,
+            },
+            ParseRule {
+                pattern: r"Incomplete:\s*(\d+)".to_string(),
+                field: "incomplete".to_string(),
+                group: 1,
+                aggregate: Aggregate::Last,
+            },
+            ParseRule {
+                pattern: r"Risky:\s*(\d+)".to_string(),
+                field: "risky".to_string(),
+                group: 1,
+                aggregate: Aggregate::Last,
+            },
+            ParseRule {
+                pattern: r"Warnings:\s*(\d+)".to_string(),
+                field: "warnings".to_string(),
                 group: 1,
                 aggregate: Aggregate::Last,
             },
@@ -192,11 +299,21 @@ fn default_test_result_parse_spec() -> ParseSpec {
             ("failed".to_string(), 0.0),
             ("errors".to_string(), 0.0),
             ("skipped".to_string(), 0.0),
+            ("skipped_raw".to_string(), 0.0),
+            ("incomplete".to_string(), 0.0),
+            ("risky".to_string(), 0.0),
+            ("warnings".to_string(), 0.0),
         ]),
-        derive: vec![DeriveRule {
-            field: "passed".to_string(),
-            expr: "total - failed - errors - skipped".to_string(),
-        }],
+        derive: vec![
+            DeriveRule {
+                field: "skipped".to_string(),
+                expr: "skipped_raw + incomplete + risky + warnings".to_string(),
+            },
+            DeriveRule {
+                field: "passed".to_string(),
+                expr: "total - failed - errors - skipped".to_string(),
+            },
+        ],
     }
 }
 
@@ -313,5 +430,80 @@ mod tests {
         assert_eq!(counts.passed, 6);
         assert_eq!(counts.failed, 3);
         assert_eq!(counts.skipped, 3);
+    }
+
+    #[test]
+    fn default_parse_spec_counts_phpunit_non_passing_summary_buckets_as_skipped() {
+        let counts = parse_test_results_text(
+            "Tests: 20, Assertions: 40, Errors: 1, Failures: 2, Warnings: 3, Skipped: 4, Incomplete: 5, Risky: 1",
+        )
+        .expect("default PHPUnit-ish fallback should parse all summary buckets");
+
+        assert_eq!(counts.total, 20);
+        assert_eq!(counts.passed, 4);
+        assert_eq!(counts.failed, 3);
+        assert_eq!(counts.skipped, 13);
+    }
+
+    #[test]
+    fn core_adapter_parses_phpunit_testdox_fallback() {
+        let spec: ParseSpec = serde_json::from_value(serde_json::json!({
+            "adapters": ["phpunit-testdox"]
+        }))
+        .expect("parse spec should deserialize adapters");
+
+        let counts = parse_test_results_text_with_spec(
+            "Example Test\n ✔ passes one assertion\n ✘ fails one assertion\n ✔ passes another assertion",
+            &spec,
+        )
+        .expect("TestDox adapter should parse glyph output");
+
+        assert_eq!(counts.total, 3);
+        assert_eq!(counts.passed, 2);
+        assert_eq!(counts.failed, 1);
+        assert_eq!(counts.skipped, 0);
+    }
+
+    #[test]
+    fn core_adapter_parses_wp_codebox_json_summary() {
+        let spec: ParseSpec = serde_json::from_value(serde_json::json!({
+            "adapters": ["wp-codebox-json"]
+        }))
+        .expect("parse spec should deserialize adapters");
+
+        let counts = parse_test_results_text_with_spec(
+            r#"{
+                "schema": "wp-codebox/test-results/v1",
+                "status": "failed",
+                "summary": { "total": 5, "passed": 2, "failed": 1, "skipped": 2 }
+            }"#,
+            &spec,
+        )
+        .expect("WP Codebox adapter should parse summary JSON");
+
+        assert_eq!(counts.total, 5);
+        assert_eq!(counts.passed, 2);
+        assert_eq!(counts.failed, 1);
+        assert_eq!(counts.skipped, 2);
+    }
+
+    #[test]
+    fn core_adapter_parses_wp_codebox_json_suites_when_summary_is_empty() {
+        let counts = parse_test_results_text(
+            r#"{
+                "schema": "wp-codebox/test-results/v1",
+                "summary": { "total": 0 },
+                "suites": [
+                    { "tests": 3, "passed": 2, "failed": 1 },
+                    { "total": 2, "passed": 1, "skipped": 1 }
+                ]
+            }"#,
+        )
+        .expect("WP Codebox adapter should fall back to suite totals");
+
+        assert_eq!(counts.total, 5);
+        assert_eq!(counts.passed, 3);
+        assert_eq!(counts.failed, 1);
+        assert_eq!(counts.skipped, 1);
     }
 }
