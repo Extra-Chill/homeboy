@@ -19,6 +19,7 @@ use super::{
 };
 
 use super::lab_apply::apply_lab_offload_patch;
+use super::lab_command::lab_offload_command_prefix;
 use super::lab_env::{build_lab_offload_env, forward_env_if_present};
 use super::lab_workspaces::{
     lab_extra_workspaces, lab_workspace_mapping_metadata, sync_extra_lab_workspaces,
@@ -276,7 +277,10 @@ fn run_lab_offload_inner(
     })?;
 
     let source_path = lab_offload_source_path(request.normalized_args)?;
-    let capability_contract = lab_runner_capability_contract(&contract, &source_path);
+    let homeboy_path = runner.settings.homeboy_path.as_deref().unwrap_or("homeboy");
+    let command_prefix = lab_offload_command_prefix(&source_path, homeboy_path);
+    let capability_contract =
+        lab_runner_capability_contract(&contract, &source_path, &command_prefix.required_tools);
     let capability_plan = capability_contract.clone().map(lab_runner_capability_plan);
     if let Some(capability_plan) = &capability_plan {
         let decision = match evaluate_lab_runner_capabilities_for_runner(
@@ -414,7 +418,6 @@ fn run_lab_offload_inner(
         Some(&remote_cwd),
         "lab_offload",
     );
-    let homeboy_path = runner.settings.homeboy_path.as_deref().unwrap_or("homeboy");
     if contract.requires_extension_parity {
         plan = with_step(
             plan,
@@ -437,7 +440,7 @@ fn run_lab_offload_inner(
         );
     }
 
-    let mut command = vec![homeboy_path.to_string()];
+    let mut command = command_prefix.argv;
     command.extend(
         rewrite_lab_offload_args(&changed_since_preflight.args, &remote_cwd)
             .into_iter()
@@ -848,12 +851,17 @@ fn status_tunnel_mode(status: &RunnerStatusReport) -> RunnerTunnelMode {
 fn lab_runner_capability_contract(
     command: &LabOffloadCommand,
     source_path: &Path,
+    command_prefix_required_tools: &[RunnerRequiredTool],
 ) -> Option<LabRunnerCapabilityContract> {
     if !command.portable {
         return None;
     }
 
     let mut required_tools = Vec::new();
+
+    for tool in command_prefix_required_tools {
+        push_unique(&mut required_tools, *tool);
+    }
 
     if source_path.join(concat!("package", ".json")).is_file() {
         push_node_package_tool(&mut required_tools, RunnerRequiredTool::Npm);
@@ -1086,6 +1094,19 @@ mod tests {
                 "/home/chubes/Developer/project".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn command_prefix_tools_are_included_in_capability_contract() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let contract = lab_runner_capability_contract(
+            &portable_lab_command("lint"),
+            dir.path(),
+            &[RunnerRequiredTool::Cargo],
+        )
+        .expect("capability contract");
+
+        assert!(contract.required_tools.contains(&RunnerRequiredTool::Cargo));
     }
 
     #[test]
