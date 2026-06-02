@@ -76,6 +76,6 @@ JSON
         bash "${EXTENSION_DIR}/scripts/build/build.sh" >/dev/null
 )
 
-assert_contains "$npm_log" "install --silent --no-audit --no-fund --legacy-peer-deps"
+assert_contains "$npm_log" "install --no-audit --no-fund --legacy-peer-deps"
 
 echo "WordPress build helper smoke passed."
