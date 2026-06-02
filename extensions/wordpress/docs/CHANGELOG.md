@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.113.6] - 2026-06-02
+
+### Fixed
+- promote block quality probes
+
 ## [2.113.5] - 2026-06-02
 
 ### Fixed
