@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.114.0] - 2026-06-02
+
+### Added
+- include declared WordPress package artifacts
+
 ## [2.113.18] - 2026-06-02
 
 ### Fixed
