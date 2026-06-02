@@ -1,6 +1,7 @@
 use serde::Serialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+use crate::core::artifact_inputs::{self, ResolvedArtifactInput};
 use crate::core::component::{self, Component};
 use crate::core::config::{is_json_input, parse_bulk_ids};
 use crate::core::deploy::permissions;
@@ -152,6 +153,8 @@ pub struct BuildOutput {
     pub build_command: String,
     #[serde(flatten)]
     pub output: CapturedOutput,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_inputs: Vec<ResolvedArtifactInput>,
     pub success: bool,
 }
 
@@ -367,6 +370,7 @@ fn execute_build_component(comp: &Component) -> Result<(BuildOutput, i32)> {
                     component_id: comp.id.clone(),
                     build_command: build_cmd,
                     output: CapturedOutput::new(String::new(), stderr),
+                    artifact_inputs: Vec::new(),
                     success: false,
                 },
                 exit_code,
@@ -408,6 +412,11 @@ fn execute_build_component(comp: &Component) -> Result<(BuildOutput, i32)> {
     };
 
     let success = runner_output.success;
+    let artifact_inputs = if success {
+        apply_artifact_inputs(comp)?
+    } else {
+        Vec::new()
+    };
 
     Ok((
         BuildOutput {
@@ -415,10 +424,32 @@ fn execute_build_component(comp: &Component) -> Result<(BuildOutput, i32)> {
             component_id: comp.id.clone(),
             build_command: build_cmd,
             output: CapturedOutput::new(runner_output.stdout, runner_output.stderr),
+            artifact_inputs,
             success,
         },
         runner_output.exit_code,
     ))
+}
+
+fn apply_artifact_inputs(comp: &Component) -> Result<Vec<ResolvedArtifactInput>> {
+    if comp.artifact_inputs.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let artifact_pattern = component::resolve_artifact(comp).ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "build_artifact",
+            format!(
+                "Component '{}' declares artifact_inputs but has no build_artifact configured",
+                comp.id
+            ),
+            Some(comp.id.clone()),
+            None,
+        )
+    })?;
+    let artifact_path =
+        resolve_artifact_path_from_root(&artifact_pattern, Some(Path::new(&comp.local_path)))?;
+    artifact_inputs::apply_to_component_artifact(comp, &artifact_path)
 }
 
 /// Run pre-build scripts from all configured extensions.
