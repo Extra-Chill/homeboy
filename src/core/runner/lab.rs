@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
+use crate::core::error::ErrorCode;
 use crate::core::observation::{PREVIEW_METADATA_ENV, PREVIEW_PUBLIC_URL_ENV};
 use crate::core::plan::{HomeboyPlan, PlanKind, PlanStep, PlanStepStatus, PlanValues};
 use crate::core::source_snapshot::SourceSnapshot;
@@ -470,10 +471,10 @@ fn run_lab_offload_inner(
     let mut env = build_lab_offload_env(&lab_metadata);
     forward_env_if_present(&mut env, PREVIEW_METADATA_ENV);
     forward_env_if_present(&mut env, PREVIEW_PUBLIC_URL_ENV);
-    let (exec_output, exit_code) = exec(
+    let exec_result = exec(
         runner_id,
         RunnerExecOptions {
-            cwd: Some(remote_cwd),
+            cwd: Some(remote_cwd.clone()),
             project_id: None,
             allow_diagnostic_ssh: false,
             command,
@@ -484,7 +485,51 @@ fn run_lab_offload_inner(
             capability_preflight,
             required_extensions: contract.required_extensions,
         },
-    )?;
+    );
+    let (exec_output, exit_code) = match exec_result {
+        Ok(output) => output,
+        Err(err) => {
+            if let Some(reason) = runner_daemon_health_failure(&err) {
+                plan = with_step(
+                    plan,
+                    PlanStep::builder("lab.exec", "lab.exec", PlanStepStatus::Failed)
+                        .skip_reason(reason.clone())
+                        .build(),
+                );
+                return match selection.source {
+                    LabRunnerSelectionSource::Default => Ok(LabOffloadOutcome::RunLocal {
+                        metadata: Some(lab_offload_metadata_with_workspace_mapping(
+                            &plan,
+                            selection.source.metadata_value(),
+                            Some(runner_id),
+                            Some(status_tunnel_mode(&runner_status).metadata_value()),
+                            "fallback",
+                            Some(&remote_cwd),
+                            Some(&reason),
+                            Some(&workspace_mapping_metadata),
+                        )),
+                        plan,
+                        messages: vec![format!("Lab offload: {reason}; running locally.")],
+                    }),
+                    LabRunnerSelectionSource::Explicit => Err(Error::validation_invalid_argument(
+                        "runner",
+                        format!(
+                            "Lab offload runner `{runner_id}` is connected but its daemon did not respond: {}",
+                            err.message
+                        ),
+                        Some(runner_id.to_string()),
+                        Some(vec![
+                            format!("Reconnect runner `{runner_id}` before retrying Lab offload."),
+                            "Use --force-hot to run the command locally instead of offloading."
+                                .to_string(),
+                        ]),
+                    )),
+                };
+            }
+
+            return Err(err);
+        }
+    };
 
     let add_success_step = |plan, id| {
         with_step(
@@ -566,6 +611,26 @@ fn automatic_capability_fallback(
         )),
         plan,
         messages: vec![format!("Lab offload: {reason}; running locally.")],
+    }
+}
+
+fn runner_daemon_health_failure(err: &Error) -> Option<String> {
+    if !matches!(
+        err.code,
+        ErrorCode::InternalUnexpected | ErrorCode::InternalJsonError
+    ) {
+        return None;
+    }
+
+    let message = err.message.as_str();
+    let daemon_transport_failure = message.contains("query runner daemon")
+        || message.contains("submit runner daemon exec job")
+        || message.contains("parse daemon exec response")
+        || message.contains("daemon exec request failed");
+    if daemon_transport_failure {
+        Some(format!("runner daemon health check failed: {message}"))
+    } else {
+        None
     }
 }
 
@@ -1414,6 +1479,28 @@ mod tests {
         .expect_err("explicit runner should error");
 
         assert!(err.message.contains("could not connect runner"));
+    }
+
+    #[test]
+    fn lab_offload_classifies_stale_daemon_transport_failures() {
+        let err = Error::internal_unexpected(
+            "query runner daemon: error sending request for url (http://127.0.0.1:63534/jobs/id)",
+        );
+
+        assert_eq!(
+            runner_daemon_health_failure(&err),
+            Some(
+                "runner daemon health check failed: query runner daemon: error sending request for url (http://127.0.0.1:63534/jobs/id)"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn lab_offload_does_not_classify_unrelated_internal_errors_as_daemon_health() {
+        let err = Error::internal_unexpected("workspace sync failed unexpectedly");
+
+        assert_eq!(runner_daemon_health_failure(&err), None);
     }
 
     #[test]
