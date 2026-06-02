@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.113.8] - 2026-06-02
+
+### Fixed
+- expose WordPress quality helper paths
+
 ## [2.113.7] - 2026-06-02
 
 ### Fixed
