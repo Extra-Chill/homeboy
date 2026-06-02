@@ -1,20 +1,16 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use glob_match::glob_match;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use crate::core::engine::shell;
+use crate::core::engine::{shell, temp};
 use crate::core::error::{Error, Result};
 use crate::core::server::{self, Server, SshClient};
 
 use super::{load, Runner, RunnerKind};
-
-static SNAPSHOT_WORKSPACE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub(super) const DEFAULT_EXCLUDES: &[&str] = &[
     ".git",
@@ -107,7 +103,10 @@ pub fn sync_workspace(
     match options.mode {
         RunnerWorkspaceSyncMode::Snapshot => {
             let snapshot = snapshot_identity(&local_path)?;
-            let remote_path = unique_snapshot_remote_path(workspace_root, &local_path, &snapshot);
+            let remote_path = temp::unique_name(
+                &deterministic_remote_path(workspace_root, &local_path, &snapshot),
+                "",
+            );
             let stats = local_snapshot_stats(&local_path, DEFAULT_EXCLUDES)?;
             materialize_snapshot(&runner, &local_path, &remote_path, DEFAULT_EXCLUDES)?;
             super::validation_dependencies::sync_validation_dependency_workspaces(
@@ -217,23 +216,6 @@ fn deterministic_remote_path(workspace_root: &str, local_path: &Path, snapshot: 
         sanitize_path_segment(name),
         digest
     )
-}
-
-fn unique_snapshot_remote_path(workspace_root: &str, local_path: &Path, snapshot: &str) -> String {
-    format!(
-        "{}-{}",
-        deterministic_remote_path(workspace_root, local_path, snapshot),
-        unique_workspace_suffix()
-    )
-}
-
-fn unique_workspace_suffix() -> String {
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default();
-    let counter = SNAPSHOT_WORKSPACE_COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("{}-{timestamp}-{counter}", std::process::id())
 }
 
 fn snapshot_identity(local_path: &Path) -> Result<String> {
@@ -417,51 +399,60 @@ pub(super) fn materialize_snapshot(
     excludes: &[&str],
 ) -> Result<()> {
     match runner.kind {
-        RunnerKind::Local => materialize_snapshot_local(local_path, remote_path, excludes),
+        RunnerKind::Local => materialize_snapshot_piped(
+            local_path,
+            &format!(
+                "sh -c {}",
+                shell::quote_arg(&snapshot_install_command(remote_path))
+            ),
+            excludes,
+            "materialize local workspace snapshot",
+        ),
         RunnerKind::Ssh => {
-            let (server, client) = ssh_client_for_runner(runner)?;
+            let (_server, client) = ssh_client_for_runner(runner)?;
             if client.is_local {
-                materialize_snapshot_local(local_path, remote_path, excludes)
+                materialize_snapshot_piped(
+                    local_path,
+                    &format!(
+                        "sh -c {}",
+                        shell::quote_arg(&snapshot_install_command(remote_path))
+                    ),
+                    excludes,
+                    "materialize local workspace snapshot",
+                )
             } else {
-                materialize_snapshot_ssh(local_path, remote_path, excludes, &server, &client)
+                let remote = format!("{}@{}", client.user, client.host);
+                let remote_command = snapshot_install_command(remote_path);
+                let target = format!(
+                    "ssh {ssh_args} {remote} {remote_command}",
+                    ssh_args = ssh_args(&client),
+                    remote = shell::quote_arg(&remote),
+                    remote_command = shell::quote_arg(&remote_command),
+                );
+                materialize_snapshot_piped(
+                    local_path,
+                    &target,
+                    excludes,
+                    "materialize SSH workspace snapshot",
+                )
             }
         }
     }
 }
 
-fn materialize_snapshot_local(
+fn materialize_snapshot_piped(
     local_path: &Path,
-    remote_path: &str,
+    target_command: &str,
     excludes: &[&str],
+    action: &str,
 ) -> Result<()> {
-    let install_command = snapshot_install_command(remote_path);
     let command = format!(
-        "COPYFILE_DISABLE=1 tar -C {src} {exclude} -cf - . | sh -c {install_command}",
+        "COPYFILE_DISABLE=1 tar -C {src} {exclude} -cf - . | {target_command}",
         src = shell::quote_arg(&local_path.display().to_string()),
         exclude = tar_exclude_args(excludes),
-        install_command = shell::quote_arg(&install_command),
+        target_command = target_command,
     );
-    run_shell_command(&command, "materialize local workspace snapshot")
-}
-
-fn materialize_snapshot_ssh(
-    local_path: &Path,
-    remote_path: &str,
-    excludes: &[&str],
-    _server: &Server,
-    client: &SshClient,
-) -> Result<()> {
-    let remote = format!("{}@{}", client.user, client.host);
-    let remote_command = snapshot_install_command(remote_path);
-    let command = format!(
-        "COPYFILE_DISABLE=1 tar -C {src} {exclude} -cf - . | ssh {ssh_args} {remote} {remote_command}",
-        src = shell::quote_arg(&local_path.display().to_string()),
-        exclude = tar_exclude_args(excludes),
-        ssh_args = ssh_args(client),
-        remote = shell::quote_arg(&remote),
-        remote_command = shell::quote_arg(&remote_command),
-    );
-    run_shell_command(&command, "materialize SSH workspace snapshot")
+    run_shell_command(&command, action)
 }
 
 fn snapshot_install_command(remote_path: &str) -> String {
