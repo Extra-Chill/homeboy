@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.113.13] - 2026-06-02
+
+### Fixed
+- build WordPress bench recipes through WP Codebox
+
 ## [2.113.12] - 2026-06-02
 
 ### Fixed
