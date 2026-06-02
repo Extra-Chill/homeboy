@@ -435,10 +435,10 @@ runner request, invokes the Codebox recipe runner, and emits a
 `homeboy/agent-task-outcome/v1` outcome with normalized status, artifacts,
 evidence refs, diagnostics, and failure classification.
 
-The richer sandbox-agent host-tool registration surface is blocked on
-https://github.com/chubes4/wp-codebox/issues/392. Until that lands, this provider
-is a preparatory contract plus request/outcome adapter around the current
-`wp-codebox.agent-sandbox-run` command boundary.
+Removing the Homeboy-owned WP Codebox task runner is blocked on the upstream
+agent task runner API tracked in https://github.com/chubes4/wp-codebox/issues/480.
+Until that lands, this provider is a preparatory contract plus request/outcome
+adapter around the current `wp-codebox.agent-sandbox-run` command boundary.
 
 Approved artifact-map entries become `apply_back` records for the reviewed
 apply adapter. Rejected entries with `approved: false` become `issue_reports`
