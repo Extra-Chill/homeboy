@@ -17,6 +17,7 @@ pub mod parsing;
 pub mod probes;
 pub mod report;
 pub mod run;
+mod span_summary;
 pub mod spans;
 
 use crate::core::component::Component;
@@ -47,6 +48,7 @@ pub use run::{
     run_trace_list_workflow, run_trace_workflow, trace_is_unclaimed, TraceListWorkflowArgs,
 };
 pub use run::{TraceRunWorkflowArgs, TraceRunWorkflowResult, TraceRunnerInputs};
+pub use span_summary::{attach_span_summary_metadata, TraceSpanSummaryOutput};
 
 pub fn resolve_trace_command(
     component: &Component,

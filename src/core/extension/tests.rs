@@ -77,30 +77,40 @@ fn manifest_parses_declared_structured_sidecars() {
                 "schema_version": "1"
             },
             "producer.summary": {
-                "schema_version": "1"
+                "schema_version": "1",
+                "producer": "lint"
             },
             "lint.findings": true,
             "lint.producers": true,
             "trace.results": true,
+            "trace.artifacts": true,
             "test.coverage": false
         }
     }))
     .unwrap();
 
     let sidecars = manifest.structured_sidecars();
-    assert_eq!(sidecars.len(), 5);
+    assert_eq!(sidecars.len(), 6);
     assert_eq!(sidecars[0].name, "findings");
     assert_eq!(sidecars[0].path, "findings.json");
     assert_eq!(sidecars[0].schema_version.as_deref(), Some("1"));
+    assert_eq!(sidecars[0].producer, None);
     assert_eq!(sidecars[1].name, "lint.findings");
     assert_eq!(sidecars[1].path, "lint-findings.json");
     assert_eq!(sidecars[1].schema_version, None);
+    assert_eq!(sidecars[1].producer.as_deref(), Some("lint"));
     assert_eq!(sidecars[2].name, "lint.producers");
     assert_eq!(sidecars[2].path, "lint-producers.json");
+    assert_eq!(sidecars[2].producer.as_deref(), Some("lint"));
     assert_eq!(sidecars[3].name, "producer.summary");
     assert_eq!(sidecars[3].path, "producer-summary.json");
-    assert_eq!(sidecars[4].name, "trace.results");
-    assert_eq!(sidecars[4].path, "trace.json");
+    assert_eq!(sidecars[3].producer.as_deref(), Some("lint"));
+    assert_eq!(sidecars[4].name, "trace.artifacts");
+    assert_eq!(sidecars[4].path, "artifacts");
+    assert_eq!(sidecars[4].producer.as_deref(), Some("trace"));
+    assert_eq!(sidecars[5].name, "trace.results");
+    assert_eq!(sidecars[5].path, "trace.json");
+    assert_eq!(sidecars[5].producer.as_deref(), Some("trace"));
 }
 
 #[test]
@@ -238,6 +248,115 @@ fn manifest_rejects_legacy_discovery_marker_alias() {
     .expect_err("camelCase discovery marker alias should be rejected");
 
     assert!(err.to_string().contains("discoveryMarkers"));
+}
+
+#[test]
+fn manifest_parses_archive_install_deploy_contract() {
+    let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
+        "name": "Example",
+        "version": "0.0.0",
+        "deploy": {
+            "protected_path_suffixes": ["/srv/extensions"],
+            "owner_hints": [
+                {
+                    "path_contains": "extensions/",
+                    "suggested_owner": "www-data:www-data"
+                }
+            ],
+            "archive_install": [
+                {
+                    "path_pattern": "/srv/extensions/",
+                    "staging_path": "/tmp/homeboy-extension-staging",
+                    "root_must_match_target_basename": true,
+                    "required_header": {
+                        "file_glob": "*.php",
+                        "contains": "Plugin Name:"
+                    },
+                    "skip_permissions_fix": true
+                }
+            ]
+        }
+    }))
+    .expect("archive install deploy policy should parse");
+
+    let policy = manifest
+        .deploy_archive_installs()
+        .first()
+        .expect("archive install policy");
+    assert_eq!(policy.path_pattern, "/srv/extensions/");
+    assert_eq!(policy.staging_path, "/tmp/homeboy-extension-staging");
+    assert!(policy.root_must_match_target_basename);
+    assert!(policy.skip_permissions_fix);
+    assert_eq!(
+        policy
+            .required_header
+            .as_ref()
+            .and_then(|header| header.file_glob.as_deref()),
+        Some("*.php")
+    );
+
+    let deploy = manifest.deploy.as_ref().expect("deploy contract");
+    assert_eq!(deploy.protected_path_suffixes, ["/srv/extensions"]);
+    assert_eq!(deploy.owner_hints[0].path_contains, "extensions/");
+    assert_eq!(deploy.owner_hints[0].suggested_owner, "www-data:www-data");
+}
+
+#[test]
+fn deploy_contract_rejects_unknown_active_policy_keys() {
+    let err = serde_json::from_value::<ExtensionManifest>(serde_json::json!({
+        "name": "Example",
+        "version": "0.0.0",
+        "deploy": {
+            "archiveInstall": []
+        }
+    }))
+    .expect_err("unsupported deploy keys should be rejected");
+
+    assert!(err.to_string().contains("archiveInstall"));
+}
+
+#[test]
+fn archive_install_required_header_rejects_ambiguous_selector() {
+    let err = serde_json::from_value::<ExtensionManifest>(serde_json::json!({
+        "name": "Example",
+        "version": "0.0.0",
+        "deploy": {
+            "archive_install": [
+                {
+                    "path_pattern": "/wp-content/plugins/",
+                    "required_header": {
+                        "file": "plugin.php",
+                        "file_glob": "*.php",
+                        "contains": "Plugin Name:"
+                    }
+                }
+            ]
+        }
+    }))
+    .expect_err("required_header must choose exactly one selector");
+
+    assert!(err.to_string().contains("exactly one of file or file_glob"));
+}
+
+#[test]
+fn archive_install_required_header_rejects_missing_selector() {
+    let err = serde_json::from_value::<ExtensionManifest>(serde_json::json!({
+        "name": "Example",
+        "version": "0.0.0",
+        "deploy": {
+            "archive_install": [
+                {
+                    "path_pattern": "/wp-content/plugins/",
+                    "required_header": {
+                        "contains": "Plugin Name:"
+                    }
+                }
+            ]
+        }
+    }))
+    .expect_err("required_header must declare a selector");
+
+    assert!(err.to_string().contains("exactly one of file or file_glob"));
 }
 
 #[test]

@@ -7,6 +7,7 @@ deltas against a stored baseline.
 
 ```bash
 homeboy bench <component> [options] [-- <runner-args>]
+homeboy bench matrix [<component>] --setting-matrix <key=value[,value...]> [options] [-- <runner-args>]
 homeboy bench list <component> [options] [-- <runner-args>]
 homeboy bench history <component> [--scenario <id>] [--rig <id>] [--limit 20]
 homeboy bench distribution <component> --field <metadata.path> [--scenario <id>] [--rig <id>] [--status <status>] [--limit 20]
@@ -75,6 +76,10 @@ the other capabilities.
   multiple axes. When present, `homeboy bench` builds a generic
   `homeboy/agent-task-matrix-plan/v1`, dispatches cells through the generic
   scheduler, and returns both scheduler and matrix aggregate metadata.
+- `--setting-matrix <key=value[,value...]>`: For `homeboy bench matrix`, add a
+  local settings axis. The command expands the Cartesian product, runs one
+  normal child bench per cell, and aggregates child statuses, run IDs, and
+  numeric metric samples.
 - `--runner-pool <BACKEND>`: Executor backend string for matrix cells. Core keeps
   this as data so concrete backends such as Codebox remain extension-owned.
   Omit to use the local no-op executor for plan/scheduler smoke checks.
@@ -97,6 +102,28 @@ Arguments after `--` are passed verbatim to the extension's bench runner
 script.
 
 ## Matrix Fan-Out
+
+For local benchmark scale sweeps, `homeboy bench matrix` is the narrow reusable
+runner over existing bench execution. It supports zero or one rig, rejects
+baseline writes, and varies string settings via `--setting-matrix`:
+
+```bash
+homeboy bench matrix \
+  --rig gutenberg-rtc \
+  --scenario gutenberg-rtc-protocol-load \
+  --setting-matrix clients=10,100,500,1000 rounds=3 batch_size=1,10,25,100 \
+  --runs 3
+```
+
+The JSON output uses the `settings_matrix` bench variant and includes:
+
+- `cells`: one entry per expanded settings combination with status, exit code,
+  extracted child run ID, hints, and numeric metric samples.
+- `summary`: cell totals and collected child run IDs.
+- `follow_ups`: intentionally deferred pieces such as matrix-level observation
+  records, typed JSON axes, and cross-rig matrix aggregation.
+
+## Agent-Task Matrix Fan-Out
 
 Matrix fan-out is the operator-facing path over Homeboy's generic agent-task
 substrate. It is intentionally executor-neutral: the CLI turns product inputs

@@ -11,6 +11,29 @@ pub fn lab_offload_metadata(
     remote_workspace: Option<&str>,
     fallback_reason: Option<&str>,
 ) -> serde_json::Value {
+    lab_offload_metadata_with_workspace_mapping(
+        plan,
+        source,
+        runner_id,
+        runner_mode,
+        status,
+        remote_workspace,
+        fallback_reason,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn lab_offload_metadata_with_workspace_mapping(
+    plan: &HomeboyPlan,
+    source: &str,
+    runner_id: Option<&str>,
+    runner_mode: Option<&str>,
+    status: &str,
+    remote_workspace: Option<&str>,
+    fallback_reason: Option<&str>,
+    workspace_mapping: Option<&serde_json::Value>,
+) -> serde_json::Value {
     let sync_mode = plan_step_input_string(plan, "lab.sync_workspace", "mode");
     serde_json::json!({
         "schema": LAB_OFFLOAD_METADATA_SCHEMA,
@@ -25,6 +48,7 @@ pub fn lab_offload_metadata(
         "capability_preflight": plan_step_status(plan, "lab.capability_preflight"),
         "extension_parity": plan_step_status(plan, "lab.extension_parity"),
         "patch_captured": plan_has_step(plan, "lab.apply_patch"),
+        "workspace_mapping": workspace_mapping,
     })
 }
 
@@ -65,7 +89,10 @@ pub fn capture_lab_offload_subprocess_metadata(metadata: serde_json::Value) {
 
 #[cfg(test)]
 mod tests {
-    use super::{lab_offload_metadata, LAB_OFFLOAD_METADATA_SCHEMA};
+    use super::{
+        lab_offload_metadata, lab_offload_metadata_with_workspace_mapping,
+        LAB_OFFLOAD_METADATA_SCHEMA,
+    };
     use crate::core::plan::{HomeboyPlan, PlanKind, PlanStep, PlanStepStatus, PlanValues};
 
     fn lab_plan() -> HomeboyPlan {
@@ -121,6 +148,7 @@ mod tests {
         assert_eq!(explicit["capability_preflight"], "success");
         assert_eq!(explicit["extension_parity"], "ready");
         assert_eq!(explicit["patch_captured"], true);
+        assert!(explicit["workspace_mapping"].is_null());
         assert!(explicit["fallback_reason"].is_null());
 
         let fallback = lab_offload_metadata(
@@ -153,5 +181,35 @@ mod tests {
         assert_eq!(skipped["status"], "skipped");
         assert!(skipped["runner_id"].is_null());
         assert_eq!(skipped["fallback_reason"], "no_default_runner");
+    }
+
+    #[test]
+    fn lab_offload_metadata_records_workspace_mapping_when_supplied() {
+        let plan = lab_plan();
+        let mapping = serde_json::json!({
+            "schema": "homeboy/workspace-map/v1",
+            "workspaces": [
+                {
+                    "role": "primary",
+                    "local_path": "/Users/chubes/Developer/app",
+                    "remote_path": "/srv/homeboy/_lab_workspaces/app-abc",
+                    "sync_mode": "snapshot",
+                    "snapshot_identity": "snapshot:abc"
+                }
+            ]
+        });
+
+        let metadata = lab_offload_metadata_with_workspace_mapping(
+            &plan,
+            "explicit",
+            Some("lab"),
+            Some("direct_ssh"),
+            "offloaded",
+            Some("/srv/homeboy/_lab_workspaces/app-abc"),
+            None,
+            Some(&mapping),
+        );
+
+        assert_eq!(metadata["workspace_mapping"], mapping);
     }
 }

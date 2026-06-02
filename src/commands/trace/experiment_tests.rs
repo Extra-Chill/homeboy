@@ -5,6 +5,7 @@ use crate::test_support::with_isolated_home;
 
 use homeboy::core::extension::trace as extension_trace;
 
+use super::test_fixture::TRACE_FIXTURE_EXTENSION_ID;
 use super::{execute_trace_run, TraceArgs, TraceSchedule, TraceVariantMatrixMode};
 
 fn trace_args_for_rig(rig_id: &str, scenario: &str) -> TraceArgs {
@@ -51,12 +52,12 @@ fn write_trace_experiment_extension(home: &tempfile::TempDir, fail: bool) {
         .join(".config")
         .join("homeboy")
         .join("extensions")
-        .join("nodejs");
+        .join(TRACE_FIXTURE_EXTENSION_ID);
     fs::create_dir_all(&extension_dir).expect("mkdir extension");
     fs::write(
-        extension_dir.join("nodejs.json"),
+        extension_dir.join(format!("{TRACE_FIXTURE_EXTENSION_ID}.json")),
         r#"{
-                "name": "Node.js",
+                "name": "Fixture Trace",
                 "version": "0.0.0",
                 "trace": { "extension_script": "trace-runner.sh" }
             }"#,
@@ -111,7 +112,7 @@ fn write_trace_experiment_rig(home: &tempfile::TempDir, component_path: &std::pa
                 "components": {{
                     "studio": {{ "path": "{}" }}
                 }},
-                "trace_workloads": {{ "nodejs": [
+                "trace_workloads": {{ "{TRACE_FIXTURE_EXTENSION_ID}": [
                     {{ "path": "${{components.studio.path}}/product-workflow.trace.mjs" }}
                 ] }},
                 "trace_experiments": {{

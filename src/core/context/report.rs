@@ -14,7 +14,7 @@ use crate::core::server::{self, Server};
 use crate::core::{git, Result};
 use crate::{is_zero, is_zero_u32};
 
-use super::{build_component_info, path_is_parent_of, ComponentGap, ContextOutput};
+use super::{build_component_info, ComponentGap, ContextOutput};
 
 #[derive(Debug, Serialize)]
 pub struct GapSummary {
@@ -237,7 +237,7 @@ fn build_report_at(
         .map(|component| {
             let release_state = deploy::calculate_release_state(&component);
             let gaps = if let Some(ref cwd_path) = cwd {
-                if path_is_parent_of(cwd_path, &component.local_path) {
+                if component::resolution::component_is_contained_in_path(&component, cwd_path) {
                     build_component_info(&component).gaps
                 } else {
                     Vec::new()

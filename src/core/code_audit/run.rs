@@ -18,6 +18,7 @@ use super::report::{self, AuditCommandOutput};
 pub struct AuditRunWorkflowArgs {
     pub component_id: String,
     pub source_path: String,
+    pub reference_paths: Vec<String>,
     pub conventions: bool,
     pub only_kinds: Vec<code_audit::AuditFinding>,
     pub exclude_kinds: Vec<code_audit::AuditFinding>,
@@ -209,6 +210,7 @@ fn run_audit(args: &AuditRunWorkflowArgs) -> crate::core::Result<Option<AuditWit
             &changed,
             Some(git_ref),
             &plan,
+            &args.reference_paths,
             &args.extension_overrides,
         )?))
     } else {
@@ -216,6 +218,7 @@ fn run_audit(args: &AuditRunWorkflowArgs) -> crate::core::Result<Option<AuditWit
             &args.component_id,
             &args.source_path,
             &plan,
+            &args.reference_paths,
             &args.extension_overrides,
         )?))
     }
@@ -357,7 +360,16 @@ fn build_comparison_output(
             });
         retain_new_items_for_changed_files(&mut comparison, &changed);
     }
-    let exit_code = if comparison.drift_increased { 1 } else { 0 };
+    let drift_increased = if args.changed_since.is_none() && !uses_finding_filters(args) {
+        comparison
+            .new_items
+            .iter()
+            .any(|item| !is_structural_complexity_fingerprint(&item.fingerprint))
+    } else {
+        comparison.drift_increased
+    };
+    comparison.drift_increased = drift_increased;
+    let exit_code = if drift_increased { 1 } else { 0 };
     let changed_since_summary = args
         .changed_since
         .as_ref()
@@ -457,11 +469,34 @@ fn default_audit_exit_code(result: &CodeAuditResult, is_scoped: bool) -> i32 {
         } else {
             1
         }
-    } else if result.summary.outliers_found > 0 {
+    } else if result.findings.iter().any(is_blocking_full_audit_finding) {
         1
     } else {
         0
     }
+}
+
+fn is_blocking_full_audit_finding(finding: &code_audit::Finding) -> bool {
+    !matches!(
+        finding.kind,
+        code_audit::AuditFinding::GodFile
+            | code_audit::AuditFinding::HighItemCount
+            | code_audit::AuditFinding::DirectorySprawl
+    )
+}
+
+fn uses_finding_filters(args: &AuditRunWorkflowArgs) -> bool {
+    !args.only_kinds.is_empty()
+        || !args.exclude_kinds.is_empty()
+        || !args.only_labels.is_empty()
+        || !args.exclude_labels.is_empty()
+}
+
+fn is_structural_complexity_fingerprint(fingerprint: &str) -> bool {
+    fingerprint.starts_with("structural::")
+        && (fingerprint.ends_with("::GodFile")
+            || fingerprint.ends_with("::HighItemCount")
+            || fingerprint.ends_with("::DirectorySprawl"))
 }
 
 #[cfg(test)]

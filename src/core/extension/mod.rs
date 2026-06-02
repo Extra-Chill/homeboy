@@ -45,7 +45,7 @@ pub(crate) use compiler_warning_contract::{
     extensions_for_compiler_warning_contract, run_compiler_warning_contract_script,
     CompilerWarningContract,
 };
-pub(crate) use execution::execute_action;
+pub(crate) use execution::{execute_action, wordpress_release_publish_token_remediation};
 pub use execution::{
     extension_ready_status, is_extension_compatible, run_action, run_extension, run_setup,
     ExtensionExecutionMode, ExtensionReadyStatus, ExtensionRunResult, ExtensionSetupResult,
@@ -66,10 +66,10 @@ pub use manifest::{
     ActionConfig, ActionType, AuditCapability, AutofixVerifyConfig, BenchConfig, BuildConfig,
     CiCapability, CiJobFidelity, CiJobMapping, CiJobSpec, CiLocalContext, CiProfileSpec,
     CliAutoFlag, CliAutoFlagCondition, CliConfig, CliHelpConfig, ComponentEnvConfig,
-    DatabaseCliConfig, DatabaseConfig, DeployCapability, DeployOverride, DeployVerification,
-    DepsConfig, DiscoveryConfig, DiscoveryMarkerConfig, DocTarget, ExecutableCapability,
-    ExtensionManifest, FeatureContextRule, FileContainsCondition, HttpMethod, InputConfig,
-    LintChangedFileRoute, LintConfig, OutputConfig, OutputSchema, PlatformCapability,
+    DatabaseCliConfig, DatabaseConfig, DeployCapability, DeployOverride, DeployOwnerHint,
+    DeployVerification, DepsConfig, DiscoveryConfig, DiscoveryMarkerConfig, DocTarget,
+    ExecutableCapability, ExtensionManifest, FeatureContextRule, FileContainsCondition, HttpMethod,
+    InputConfig, LintChangedFileRoute, LintConfig, OutputConfig, OutputSchema, PlatformCapability,
     ProvidesConfig, RemotePathInferenceRule, RemotePathRootRule, RequirementsConfig, RuntimeConfig,
     RuntimeRequirementsConfig, ScriptsConfig, SelectOption, SettingConfig, SinceTagConfig,
     StructuredSidecarDeclaration, TestChangedFileExclusiveEnv, TestChangedFileRouting,
@@ -92,7 +92,7 @@ pub use runner_contract::{
     phase_failure_category_from_exit_code, phase_status_from_exit_code, PhaseFailure,
     PhaseFailureCategory, PhaseReport, PhaseStatus, RunnerStepFilter, VerificationPhase,
 };
-pub use runtime_helper::RUNNER_STEPS_ENV;
+pub use runtime_helper::{BASH_PREFLIGHT_ENV, RUNNER_PRELUDE_ENV, RUNNER_STEPS_ENV};
 pub use scope::ExtensionScope;
 pub use summary::{list_summaries, ActionSummary, ExtensionSummary};
 pub use update_output::{

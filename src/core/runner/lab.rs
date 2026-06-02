@@ -1,21 +1,30 @@
-use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
-use crate::core::observation::LAB_OFFLOAD_METADATA_ENV;
+use crate::core::observation::{PREVIEW_METADATA_ENV, PREVIEW_PUBLIC_URL_ENV};
 use crate::core::plan::{HomeboyPlan, PlanKind, PlanStep, PlanStepStatus, PlanValues};
 use crate::core::source_snapshot::SourceSnapshot;
 use crate::core::{Error, Result};
 
 use super::{
     evaluate_lab_runner_capabilities_for_runner, exec, lab_offload_changed_since_ref,
-    lab_offload_metadata, lab_runner_capability_plan, load, preflight_lab_offload_changed_since,
-    prepare_git_lab_offload_changed_since, rig_materialization, status, sync_workspace,
-    LabRunnerCapabilityContract, LabRunnerGateDecision, LabRunnerGateMode,
-    RunnerCapabilityPreflight, RunnerConnectReport, RunnerExecOptions, RunnerRequiredTool,
-    RunnerStatusReport, RunnerTunnelMode, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
+    lab_offload_metadata, lab_offload_metadata_with_workspace_mapping, lab_runner_capability_plan,
+    load, preflight_lab_offload_changed_since, prepare_git_lab_offload_changed_since,
+    rig_materialization, status, sync_workspace, LabRunnerCapabilityContract,
+    LabRunnerGateDecision, LabRunnerGateMode, RunnerCapabilityPreflight, RunnerConnectReport,
+    RunnerExecOptions, RunnerRequiredTool, RunnerStatusReport, RunnerTunnelMode,
+    RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
+};
+
+use super::daemon_health::runner_daemon_health_failure;
+use super::lab_apply::apply_lab_offload_patch;
+use super::lab_command::lab_offload_command_prefix;
+use super::lab_env::{build_lab_offload_env, forward_env_if_present};
+use super::lab_workspaces::{
+    lab_extra_workspaces, lab_workspace_mapping_metadata, sync_extra_lab_workspaces,
+    workspace_mapping_entry,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -269,7 +278,10 @@ fn run_lab_offload_inner(
     })?;
 
     let source_path = lab_offload_source_path(request.normalized_args)?;
-    let capability_contract = lab_runner_capability_contract(&contract, &source_path);
+    let homeboy_path = runner.settings.homeboy_path.as_deref().unwrap_or("homeboy");
+    let command_prefix = lab_offload_command_prefix(&source_path, homeboy_path);
+    let capability_contract =
+        lab_runner_capability_contract(&contract, &source_path, &command_prefix.required_tools);
     let capability_plan = capability_contract.clone().map(lab_runner_capability_plan);
     if let Some(capability_plan) = &capability_plan {
         let decision = match evaluate_lab_runner_capabilities_for_runner(
@@ -358,6 +370,7 @@ fn run_lab_offload_inner(
     } else {
         preflight_lab_offload_changed_since(request.normalized_args, sync_mode)?
     };
+    let extra_workspaces = lab_extra_workspaces(&source_path)?;
     let synced = sync_workspace(
         runner_id,
         RunnerWorkspaceSyncOptions {
@@ -367,7 +380,8 @@ fn run_lab_offload_inner(
         },
     )?
     .0;
-    let remote_cwd = synced.remote_path;
+    let remote_cwd = synced.remote_path.clone();
+    let mut workspace_mapping = vec![workspace_mapping_entry("primary", &synced)];
     plan = with_step(
         plan,
         PlanStep::ready("lab.sync_workspace", "lab.sync_workspace")
@@ -375,16 +389,29 @@ fn run_lab_offload_inner(
                 PlanValues::new()
                     .string("local_path", &synced.local_path)
                     .string("remote_path", &remote_cwd)
-                    .string(
-                        "mode",
-                        match sync_mode {
-                            RunnerWorkspaceSyncMode::Snapshot => "snapshot",
-                            RunnerWorkspaceSyncMode::Git => "git",
-                        },
-                    ),
+                    .string("mode", sync_mode.label()),
             )
             .build(),
     );
+
+    let synced_extra_workspaces = sync_extra_lab_workspaces(
+        runner_id,
+        &synced.local_path,
+        extra_workspaces,
+        &mut workspace_mapping,
+    )?;
+    if !synced_extra_workspaces.is_empty() {
+        plan = with_step(
+            plan,
+            PlanStep::ready("lab.sync_extra_workspaces", "lab.sync_extra_workspaces")
+                .inputs(
+                    PlanValues::new()
+                        .json("count", synced_extra_workspaces.len())
+                        .json("workspaces", &synced_extra_workspaces),
+                )
+                .build(),
+        );
+    }
 
     let source_snapshot = SourceSnapshot::collect_local(
         runner_id,
@@ -392,7 +419,6 @@ fn run_lab_offload_inner(
         Some(&remote_cwd),
         "lab_offload",
     );
-    let homeboy_path = runner.settings.homeboy_path.as_deref().unwrap_or("homeboy");
     if contract.requires_extension_parity {
         plan = with_step(
             plan,
@@ -415,7 +441,7 @@ fn run_lab_offload_inner(
         );
     }
 
-    let mut command = vec![homeboy_path.to_string()];
+    let mut command = command_prefix.argv;
     command.extend(
         rewrite_lab_offload_args(&changed_since_preflight.args, &remote_cwd)
             .into_iter()
@@ -434,7 +460,8 @@ fn run_lab_offload_inner(
         runner_id,
         remote_cwd
     );
-    let lab_metadata = lab_offload_metadata(
+    let workspace_mapping_metadata = lab_workspace_mapping_metadata(&workspace_mapping);
+    let lab_metadata = lab_offload_metadata_with_workspace_mapping(
         &plan,
         selection.source.metadata_value(),
         Some(runner_id),
@@ -442,16 +469,15 @@ fn run_lab_offload_inner(
         "offloaded",
         Some(&remote_cwd),
         None,
+        Some(&workspace_mapping_metadata),
     );
-    let mut env = HashMap::new();
-    env.insert(
-        LAB_OFFLOAD_METADATA_ENV.to_string(),
-        serde_json::to_string(&lab_metadata).unwrap_or_default(),
-    );
-    let (exec_output, exit_code) = exec(
+    let mut env = build_lab_offload_env(&lab_metadata);
+    forward_env_if_present(&mut env, PREVIEW_METADATA_ENV);
+    forward_env_if_present(&mut env, PREVIEW_PUBLIC_URL_ENV);
+    let exec_result = exec(
         runner_id,
         RunnerExecOptions {
-            cwd: Some(remote_cwd),
+            cwd: Some(remote_cwd.clone()),
             project_id: None,
             allow_diagnostic_ssh: false,
             command,
@@ -462,7 +488,51 @@ fn run_lab_offload_inner(
             capability_preflight,
             required_extensions: contract.required_extensions,
         },
-    )?;
+    );
+    let (exec_output, exit_code) = match exec_result {
+        Ok(output) => output,
+        Err(err) => {
+            if let Some(reason) = runner_daemon_health_failure(&err) {
+                plan = with_step(
+                    plan,
+                    PlanStep::builder("lab.exec", "lab.exec", PlanStepStatus::Failed)
+                        .skip_reason(reason.clone())
+                        .build(),
+                );
+                return match selection.source {
+                    LabRunnerSelectionSource::Default => Ok(LabOffloadOutcome::RunLocal {
+                        metadata: Some(lab_offload_metadata_with_workspace_mapping(
+                            &plan,
+                            selection.source.metadata_value(),
+                            Some(runner_id),
+                            Some(status_tunnel_mode(&runner_status).metadata_value()),
+                            "fallback",
+                            Some(&remote_cwd),
+                            Some(&reason),
+                            Some(&workspace_mapping_metadata),
+                        )),
+                        plan,
+                        messages: vec![format!("Lab offload: {reason}; running locally.")],
+                    }),
+                    LabRunnerSelectionSource::Explicit => Err(Error::validation_invalid_argument(
+                        "runner",
+                        format!(
+                            "Lab offload runner `{runner_id}` is connected but its daemon did not respond: {}",
+                            err.message
+                        ),
+                        Some(runner_id.to_string()),
+                        Some(vec![
+                            format!("Reconnect runner `{runner_id}` before retrying Lab offload."),
+                            "Use --force-hot to run the command locally instead of offloading."
+                                .to_string(),
+                        ]),
+                    )),
+                };
+            }
+
+            return Err(err);
+        }
+    };
 
     let add_success_step = |plan, id| {
         with_step(
@@ -474,8 +544,20 @@ fn run_lab_offload_inner(
     if exec_output.mirror_run_id.is_some() {
         plan = add_success_step(plan, "lab.mirror_evidence");
     }
-    if request.capture_patch {
-        plan = add_success_step(plan, "lab.apply_patch");
+    if request.capture_patch && exit_code == 0 {
+        let apply_output = apply_lab_offload_patch(&exec_output)?;
+        if let Some(apply_output) = apply_output {
+            plan = with_step(
+                plan,
+                PlanStep::builder(
+                    "lab.apply_patch",
+                    "lab.apply_patch",
+                    PlanStepStatus::Success,
+                )
+                .inputs(PlanValues::new().json("apply", &apply_output))
+                .build(),
+            );
+        }
     }
 
     let mut stderr = String::new();
@@ -814,12 +896,17 @@ fn status_tunnel_mode(status: &RunnerStatusReport) -> RunnerTunnelMode {
 fn lab_runner_capability_contract(
     command: &LabOffloadCommand,
     source_path: &Path,
+    command_prefix_required_tools: &[RunnerRequiredTool],
 ) -> Option<LabRunnerCapabilityContract> {
     if !command.portable {
         return None;
     }
 
     let mut required_tools = Vec::new();
+
+    for tool in command_prefix_required_tools {
+        push_unique(&mut required_tools, *tool);
+    }
 
     if source_path.join(concat!("package", ".json")).is_file() {
         push_node_package_tool(&mut required_tools, RunnerRequiredTool::Npm);
@@ -946,7 +1033,10 @@ fn has_docker_signal(source_path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::super::lab_workspaces::LAB_WORKSPACE_MAPPING_SCHEMA;
     use super::*;
+    use crate::core::observation::LAB_OFFLOAD_METADATA_ENV;
+    use crate::core::runner::RunnerWorkspaceSyncOutput;
 
     fn portable_lab_command(label: &'static str) -> LabOffloadCommand {
         LabOffloadCommand {
@@ -1052,6 +1142,19 @@ mod tests {
     }
 
     #[test]
+    fn command_prefix_tools_are_included_in_capability_contract() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let contract = lab_runner_capability_contract(
+            &portable_lab_command("lint"),
+            dir.path(),
+            &[RunnerRequiredTool::Cargo],
+        )
+        .expect("capability contract");
+
+        assert!(contract.required_tools.contains(&RunnerRequiredTool::Cargo));
+    }
+
+    #[test]
     fn detects_lab_offload_source_path_from_path_flag() {
         let args = vec![
             "homeboy".to_string(),
@@ -1064,6 +1167,72 @@ mod tests {
             lab_offload_source_path(&args).expect("path"),
             std::path::PathBuf::from("/Users/chubes/Developer/project")
         );
+    }
+
+    #[test]
+    fn lab_workspace_mapping_metadata_records_local_to_remote_paths() {
+        let snapshot = RunnerWorkspaceSyncOutput {
+            command: "runner.workspace.sync",
+            runner_id: "lab".to_string(),
+            local_path: "/Users/chubes/Developer/app".to_string(),
+            remote_path: "/srv/homeboy/_lab_workspaces/app-abc".to_string(),
+            sync_mode: RunnerWorkspaceSyncMode::Snapshot,
+            snapshot_identity: "snapshot:abc".to_string(),
+            files: 3,
+            bytes: 12,
+            excludes: Vec::new(),
+        };
+        let git = RunnerWorkspaceSyncOutput {
+            command: "runner.workspace.sync",
+            runner_id: "lab".to_string(),
+            local_path: "/Users/chubes/Developer/dep".to_string(),
+            remote_path: "/srv/homeboy/_lab_workspaces/dep-def".to_string(),
+            sync_mode: RunnerWorkspaceSyncMode::Git,
+            snapshot_identity: "abc123".to_string(),
+            files: 0,
+            bytes: 0,
+            excludes: Vec::new(),
+        };
+
+        let entries = vec![
+            workspace_mapping_entry("primary", &snapshot),
+            workspace_mapping_entry("dependency", &git),
+        ];
+        let metadata = lab_workspace_mapping_metadata(&entries);
+
+        assert_eq!(metadata["schema"], LAB_WORKSPACE_MAPPING_SCHEMA);
+        assert_eq!(metadata["workspaces"][0]["role"], "primary");
+        assert_eq!(metadata["workspaces"][0]["sync_mode"], "snapshot");
+        assert_eq!(metadata["workspaces"][1]["role"], "dependency");
+        assert_eq!(metadata["workspaces"][1]["sync_mode"], "git");
+        assert_eq!(
+            metadata["local_to_remote"]["/Users/chubes/Developer/dep"],
+            "/srv/homeboy/_lab_workspaces/dep-def"
+        );
+    }
+
+    #[test]
+    fn lab_offload_env_contains_workspace_mapping_metadata() {
+        let mapping = serde_json::json!({
+            "schema": LAB_WORKSPACE_MAPPING_SCHEMA,
+            "local_to_remote": {
+                "/Users/chubes/Developer/app": "/srv/homeboy/_lab_workspaces/app-abc"
+            },
+            "workspaces": []
+        });
+        let metadata = serde_json::json!({
+            "schema": "homeboy/lab-offload/v1",
+            "workspace_mapping": mapping,
+        });
+
+        let env = build_lab_offload_env(&metadata);
+        let parsed: serde_json::Value = serde_json::from_str(
+            env.get(LAB_OFFLOAD_METADATA_ENV)
+                .expect("lab offload env metadata"),
+        )
+        .expect("parse lab offload metadata");
+
+        assert_eq!(parsed["workspace_mapping"], mapping);
     }
 
     #[test]

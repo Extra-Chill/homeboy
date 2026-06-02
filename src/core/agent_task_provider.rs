@@ -9,6 +9,7 @@ use crate::core::agent_task::{
     AgentTaskOutcomeStatus, AgentTaskRequest, AGENT_TASK_OUTCOME_SCHEMA,
 };
 use crate::core::agent_task_scheduler::{AgentTaskExecutionContext, AgentTaskExecutorAdapter};
+use crate::core::agent_task_secrets::{resolve_secret_env, AgentTaskSecretResolutionError};
 use crate::core::extension::load_all_extensions;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -164,9 +165,26 @@ fn run_provider_command(
             )
         }
     };
+    let env = match provider_command_env(request, provider) {
+        Ok(env) => env,
+        Err(error) => {
+            return failure_outcome(
+                request,
+                AgentTaskOutcomeStatus::ProviderError,
+                AgentTaskFailureClassification::InvalidInput,
+                "agent_task.secret_env_missing",
+                error.message,
+                json!({ "provider": provider.id, "missing_secret_env": error.missing_secret_env }),
+            )
+        }
+    };
 
     let mut child = match Command::new(&program)
         .args(&args)
+        .envs(
+            env.iter()
+                .map(|(key, value)| (key.as_str(), value.as_str())),
+        )
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -277,6 +295,32 @@ fn provider_command_parts(command: &str) -> Option<(String, Vec<String>)> {
     Some((program, parts.collect()))
 }
 
+fn provider_command_env(
+    request: &AgentTaskRequest,
+    provider: &AgentTaskExecutorProvider,
+) -> Result<Vec<(String, String)>, AgentTaskSecretResolutionError> {
+    let mut env = vec![
+        (
+            "HOMEBOY_AGENT_TASK_PROVIDER_ID".to_string(),
+            provider.id.clone(),
+        ),
+        (
+            "HOMEBOY_AGENT_TASK_EXECUTOR_CONFIG_JSON".to_string(),
+            serde_json::to_string(&request.executor.config).unwrap_or_else(|_| "null".to_string()),
+        ),
+        (
+            "HOMEBOY_EXTENSION_ID".to_string(),
+            provider.extension_id.clone().unwrap_or_default(),
+        ),
+        (
+            "HOMEBOY_EXTENSION_PATH".to_string(),
+            provider.extension_path.clone().unwrap_or_default(),
+        ),
+    ];
+    env.extend(resolve_secret_env(&request.executor.secret_env)?);
+    Ok(env)
+}
+
 fn failure_outcome(
     request: &AgentTaskRequest,
     status: AgentTaskOutcomeStatus,
@@ -350,6 +394,7 @@ mod tests {
                 backend: "test".to_string(),
                 selector: None,
                 required_capabilities: Vec::new(),
+                secret_env: Vec::new(),
                 model: None,
                 config: Value::Null,
             },
@@ -402,6 +447,88 @@ mod tests {
         assert_eq!(
             aggregate.outcomes[0].failure_classification,
             Some(AgentTaskFailureClassification::Timeout)
+        );
+    }
+
+    #[test]
+    fn provider_command_receives_executor_config_env() {
+        let command = format!(
+            "node {}",
+            script("let fs=require('fs'); let req=JSON.parse(fs.readFileSync(0,'utf8')); let config=JSON.parse(process.env.HOMEBOY_AGENT_TASK_EXECUTOR_CONFIG_JSON); process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:config.marker==='configured'?'succeeded':'failed',summary:process.env.HOMEBOY_AGENT_TASK_PROVIDER_ID}));")
+        );
+        let (mut request, mut provider) = request("task-config", command);
+        request.executor.config = json!({ "marker": "configured" });
+        provider.extension_id = Some("wordpress".to_string());
+        provider.extension_path = Some("/tmp/homeboy-extension".to_string());
+        let scheduler =
+            AgentTaskScheduler::new(ExtensionProviderAgentTaskExecutor::with_providers(vec![
+                provider,
+            ]));
+
+        let aggregate = scheduler.run(AgentTaskPlan::new("plan-config", vec![request]));
+
+        assert_eq!(aggregate.totals.succeeded, 1);
+        assert_eq!(
+            aggregate.outcomes[0].summary.as_deref(),
+            Some("test.provider")
+        );
+    }
+
+    #[test]
+    fn provider_command_receives_declared_secret_env() {
+        let secret_name = format!("HOMEBOY_TEST_AGENT_TASK_SECRET_{}", std::process::id());
+        std::env::set_var(&secret_name, "hydrated-secret");
+        let command = format!(
+            "node {}",
+            script(&format!(
+                "let fs=require('fs'); let req=JSON.parse(fs.readFileSync(0,'utf8')); process.stdout.write(JSON.stringify({{schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:process.env.{secret_name}==='hydrated-secret'?'succeeded':'failed',summary:'checked'}}));"
+            ))
+        );
+        let (mut request, provider) = request("task-secret-env", command);
+        request.executor.secret_env = vec![secret_name.clone()];
+        let scheduler =
+            AgentTaskScheduler::new(ExtensionProviderAgentTaskExecutor::with_providers(vec![
+                provider,
+            ]));
+
+        let aggregate = scheduler.run(AgentTaskPlan::new("plan-secret-env", vec![request]));
+
+        assert_eq!(aggregate.totals.succeeded, 1);
+        std::env::remove_var(secret_name);
+    }
+
+    #[test]
+    fn missing_declared_secret_env_fails_before_provider_spawn() {
+        let secret_name = format!(
+            "HOMEBOY_TEST_MISSING_AGENT_TASK_SECRET_{}",
+            std::process::id()
+        );
+        std::env::remove_var(&secret_name);
+        let command = format!(
+            "node {}",
+            script("throw new Error('provider should not run');")
+        );
+        let (mut request, provider) = request("task-missing-secret-env", command);
+        request.executor.secret_env = vec![secret_name.clone()];
+        let scheduler =
+            AgentTaskScheduler::new(ExtensionProviderAgentTaskExecutor::with_providers(vec![
+                provider,
+            ]));
+
+        let aggregate = scheduler.run(AgentTaskPlan::new("plan-missing-secret-env", vec![request]));
+
+        assert_eq!(aggregate.totals.failed, 1);
+        assert_eq!(
+            aggregate.outcomes[0].failure_classification,
+            Some(AgentTaskFailureClassification::InvalidInput)
+        );
+        assert_eq!(
+            aggregate.outcomes[0].diagnostics[0].class,
+            "agent_task.secret_env_missing"
+        );
+        assert_eq!(
+            aggregate.outcomes[0].diagnostics[0].data["missing_secret_env"],
+            json!([secret_name])
         );
     }
 }

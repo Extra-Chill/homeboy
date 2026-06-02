@@ -258,6 +258,29 @@ pub(super) fn deploy_artifact(
                 ));
             }
 
+            // Step 2b: Flatten an accidental single top-level directory.
+            //
+            // Build archives commonly contain a single top-level directory named
+            // after the component. When the component's remote_path already points
+            // at that directory, extracting in place produces a double-nested layout
+            // (`.../component/component/...`) that runtimes cannot load. Detect that
+            // signature and lift the inner directory's contents up one level so the
+            // artifact lands flat.
+            if let Some(result) = flatten_double_nested_dir(ssh_client, remote_path)? {
+                return Ok(result);
+            }
+
+            // Step 2c: Fail loudly if the layout is still double-nested.
+            //
+            // This is independent of the optional user-configured `verification`
+            // step below. A false success on a broken layout is the worst symptom:
+            // it silently breaks the install while reporting `success: true`. If the
+            // double-nest directory still exists after the flatten attempt, refuse to
+            // report success.
+            if let Some(result) = ensure_not_double_nested(ssh_client, remote_path) {
+                return Ok(result);
+            }
+
             // Fix file permissions after extraction
             log_status!("deploy", "Fixing file permissions");
             permissions::fix_deployed_permissions(ssh_client, remote_path, remote_owner)?;
@@ -293,6 +316,139 @@ pub(super) fn deploy_artifact(
     Ok(DeployResult::success(0))
 }
 
+/// Return the final path segment of `remote_path` (its basename), if any.
+///
+/// For example, `/srv/app/components/example` -> `example`.
+fn remote_basename(remote_path: &str) -> Option<&str> {
+    remote_path
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .filter(|segment| !segment.is_empty())
+}
+
+/// Detect and repair the classic double-nested layout produced when a build ZIP
+/// has a single top-level directory equal to the deploy target's own basename.
+///
+/// The signature we repair is: after extraction, `remote_path` contains exactly
+/// one entry, and that entry is a directory whose name equals `basename(remote_path)`
+/// (e.g. `.../component/component/`). When that holds, the inner
+/// directory's contents (including dotfiles) are lifted up into `remote_path` and
+/// the now-empty inner directory is removed.
+///
+/// Returns `Ok(Some(failure))` only if the flatten was attempted but failed, so the
+/// caller can short-circuit and report failure. Returns `Ok(None)` when there was
+/// nothing to flatten or the flatten succeeded.
+fn flatten_double_nested_dir(
+    ssh_client: &SshClient,
+    remote_path: &str,
+) -> Result<Option<DeployResult>> {
+    let Some(basename) = remote_basename(remote_path) else {
+        return Ok(None);
+    };
+
+    let normalized = remote_path.trim_end_matches('/');
+    let nested_dir = format!("{}/{}", normalized, basename);
+
+    // Only flatten when the nested directory is the *sole* entry in remote_path.
+    // This avoids clobbering a legitimate same-named subdirectory that lives
+    // alongside other top-level files (which would not be a double-nest artifact).
+    //
+    // `entries` counts the non-hidden + hidden top-level entries; we require it to be
+    // exactly the nested directory and nothing else.
+    let detect_cmd = format!(
+        "test -d {nested} && \
+         [ \"$(cd {target} && find . -mindepth 1 -maxdepth 1 | wc -l | tr -d '[:space:]')\" = \"1\" ] && \
+         [ \"$(cd {target} && find . -mindepth 1 -maxdepth 1 -exec basename {{}} \\;)\" = {basename_arg} ] && echo NESTED || echo OK",
+        nested = shell::quote_path(&nested_dir),
+        target = shell::quote_path(normalized),
+        basename_arg = shell::quote_arg(basename),
+    );
+    let detect_output = ssh_client.execute(&detect_cmd);
+    if !detect_output.success {
+        // Detection is best-effort; if we cannot determine the layout, let the
+        // mandatory sanity check below decide.
+        return Ok(None);
+    }
+    if detect_output.stdout.trim() != "NESTED" {
+        return Ok(None);
+    }
+
+    log_status!(
+        "deploy",
+        "Detected double-nested directory '{}'; flattening into '{}'",
+        nested_dir,
+        normalized
+    );
+
+    // Move the inner directory aside, then lift its contents (including dotfiles)
+    // up into remote_path, then remove the now-empty staging directory. Using a
+    // temp staging name avoids the "cannot move a directory into itself" problem
+    // when the inner dir shares the basename with its parent.
+    let staging = format!("{}/.artifact-flatten-staging", normalized);
+    let target_dir = format!("{}/", normalized);
+    let flatten_cmd = format!(
+        "cd {target} && rm -rf {staging} && mv {nested} {staging} && \
+         find {staging} -mindepth 1 -maxdepth 1 -exec mv {{}} {target_dir} \\; && \
+         rmdir {staging}",
+        target = shell::quote_path(normalized),
+        target_dir = shell::quote_path(&target_dir),
+        nested = shell::quote_path(&nested_dir),
+        staging = shell::quote_path(&staging),
+    );
+    let flatten_output = ssh_client.execute(&flatten_cmd);
+    if !flatten_output.success {
+        let error_detail = if flatten_output.stderr.is_empty() {
+            flatten_output.stdout.clone()
+        } else {
+            flatten_output.stderr.clone()
+        };
+        return Ok(Some(DeployResult::failure(
+            flatten_output.exit_code,
+            format!(
+                "Failed to flatten double-nested directory '{}' (exit {}): {}",
+                nested_dir, flatten_output.exit_code, error_detail
+            ),
+        )));
+    }
+
+    Ok(None)
+}
+
+/// Mandatory post-extract sanity check: fail the deploy if the artifact landed
+/// double-nested (`remote_path/<basename(remote_path)>/` still exists).
+///
+/// This guards against silently reporting `success: true` while the install is
+/// broken on disk. Returns `Some(failure)` when the broken layout is detected.
+fn ensure_not_double_nested(ssh_client: &SshClient, remote_path: &str) -> Option<DeployResult> {
+    let basename = remote_basename(remote_path)?;
+    let normalized = remote_path.trim_end_matches('/');
+    let nested_dir = format!("{}/{}", normalized, basename);
+
+    let check_cmd = format!(
+        "test -d {} && echo NESTED || echo OK",
+        shell::quote_path(&nested_dir)
+    );
+    let check_output = ssh_client.execute(&check_cmd);
+    if check_output.stdout.trim() == "NESTED" {
+        return Some(DeployResult::failure(
+            1,
+            format!(
+                "Deploy produced a double-nested layout: '{nested}' exists, so the artifact \
+                 landed at '{nested}/...' instead of '{target}/...'. Runtimes generally cannot \
+                 load a component nested one level too deep. Refusing to \
+                 report success. Set the component's remote_path to the parent directory, or \
+                 adjust the build so the archive does not contain a redundant top-level '{base}/' \
+                 directory.",
+                nested = nested_dir,
+                target = normalized,
+                base = basename,
+            ),
+        ));
+    }
+    None
+}
+
 fn render_extract_command(template: &str, vars: &HashMap<String, String>) -> String {
     let mut result = render_map(template, vars);
     for (key, value) in vars {
@@ -303,11 +459,17 @@ fn render_extract_command(template: &str, vars: &HashMap<String, String>) -> Str
 
 #[cfg(test)]
 mod tests {
-    use super::{deploy_artifact, render_extract_command, DANGEROUS_PATH_SUFFIXES};
+    use super::{
+        deploy_artifact, ensure_not_double_nested, flatten_double_nested_dir, remote_basename,
+        render_extract_command, DANGEROUS_PATH_SUFFIXES,
+    };
     use crate::core::extension::DeployVerification;
     use crate::core::server::SshClient;
     use std::collections::HashMap;
+    use std::collections::HashSet;
     use std::fs;
+    #[cfg(unix)]
+    use std::io::Write;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
@@ -446,5 +608,204 @@ mod tests {
         assert!(error.contains("Failed to clean target directory before extraction"));
         assert!(error.contains("exit 42"));
         assert!(error.contains("cleanup denied"));
+    }
+
+    #[test]
+    fn test_remote_basename_extracts_final_segment() {
+        assert_eq!(
+            remote_basename("wp-content/plugins/extrachill-users"),
+            Some("extrachill-users")
+        );
+        assert_eq!(
+            remote_basename("wp-content/plugins/extrachill-users/"),
+            Some("extrachill-users")
+        );
+        assert_eq!(remote_basename("plugin"), Some("plugin"));
+        assert_eq!(remote_basename(""), None);
+        assert_eq!(remote_basename("/"), None);
+    }
+
+    #[cfg(unix)]
+    fn write_zip(path: &std::path::Path, files: &[(&str, &str)]) {
+        let file = fs::File::create(path).expect("zip file");
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::FileOptions::default();
+        let mut dirs = HashSet::new();
+
+        for (name, contents) in files {
+            let mut parts = name.rsplitn(2, '/');
+            let _file_name = parts.next();
+            if let Some(parent) = parts.next() {
+                let mut dir = String::new();
+                for segment in parent.split('/') {
+                    if !dir.is_empty() {
+                        dir.push('/');
+                    }
+                    dir.push_str(segment);
+                    if dirs.insert(dir.clone()) {
+                        zip.add_directory(format!("{dir}/"), options)
+                            .expect("zip directory");
+                    }
+                }
+            }
+            zip.start_file(*name, options).expect("zip entry");
+            zip.write_all(contents.as_bytes()).expect("zip contents");
+        }
+
+        zip.finish().expect("finish zip");
+    }
+
+    /// End-to-end: a build ZIP with a top-level dir equal to the target basename,
+    /// deployed with the real-world `unzip -o {artifact} && rm {artifact}` command,
+    /// must land FLAT (no double-nesting) and report success.
+    #[test]
+    #[cfg(unix)]
+    fn test_deploy_artifact_flattens_double_nested_plugin_zip() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let plugin = "extrachill-users";
+        let archive = temp.path().join("build.zip");
+        write_zip(
+            &archive,
+            &[
+                (
+                    "extrachill-users/extrachill-users.php",
+                    "<?php // plugin main",
+                ),
+                ("extrachill-users/src/loader.php", "<?php // loader"),
+                ("extrachill-users/.gitkeep", ""),
+            ],
+        );
+
+        // remote_path points AT the plugin dir (the prod misconfiguration that
+        // triggers double-nesting).
+        let target = temp.path().join("wp-content/plugins").join(plugin);
+
+        let result = deploy_artifact(
+            &local_client(),
+            &archive,
+            target.to_str().expect("target path"),
+            Some("unzip -o {artifact} && rm {artifact}"),
+            None,
+            None,
+        )
+        .expect("deploy result");
+
+        assert!(result.success, "deploy should succeed: {:?}", result.error);
+        // Flat layout: main file directly under remote_path.
+        assert!(
+            target.join("extrachill-users.php").is_file(),
+            "plugin main file must land flat at remote_path"
+        );
+        assert!(target.join("src/loader.php").is_file());
+        assert!(target.join(".gitkeep").is_file());
+        // No double-nesting.
+        assert!(
+            !target.join(plugin).exists(),
+            "double-nested directory must not exist after flatten"
+        );
+        // Extract artifact and flatten staging cleaned up.
+        assert!(!target.join(".artifact-flatten-staging").exists());
+    }
+
+    /// A normal (non-nested) archive must extract in place untouched.
+    #[test]
+    #[cfg(unix)]
+    fn test_deploy_artifact_leaves_flat_archive_untouched() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let archive = temp.path().join("flat.zip");
+        write_zip(
+            &archive,
+            &[("plugin.php", "<?php // main"), ("readme.txt", "readme")],
+        );
+
+        let target = temp.path().join("wp-content/plugins/flat-plugin");
+        let result = deploy_artifact(
+            &local_client(),
+            &archive,
+            target.to_str().expect("target path"),
+            Some("unzip -o {artifact} && rm {artifact}"),
+            None,
+            None,
+        )
+        .expect("deploy result");
+
+        assert!(result.success, "deploy should succeed: {:?}", result.error);
+        assert!(target.join("plugin.php").is_file());
+        assert!(target.join("readme.txt").is_file());
+        // No spurious nested dir matching the target basename.
+        assert!(!target.join("flat-plugin").exists());
+    }
+
+    /// The mandatory sanity check must report failure when a double-nested layout
+    /// remains (e.g. an extract path the flatten heuristic could not repair).
+    #[test]
+    #[cfg(unix)]
+    fn test_ensure_not_double_nested_detects_broken_layout() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let plugin = "extrachill-users";
+        let target = temp.path().join(plugin);
+        let nested = target.join(plugin);
+        fs::create_dir_all(&nested).expect("nested dir");
+        fs::write(nested.join("extrachill-users.php"), "<?php").expect("nested main");
+        // Also place a sibling file so the auto-flatten heuristic would NOT trigger
+        // (more than one top-level entry), but the broken layout still exists.
+        fs::write(target.join("stray.txt"), "stray").expect("stray");
+
+        let result = ensure_not_double_nested(&local_client(), target.to_str().expect("target"));
+        let result = result.expect("should detect broken layout");
+        assert!(!result.success);
+        let error = result.error.expect("error message");
+        assert!(error.contains("double-nested layout"));
+        assert!(error.contains(plugin));
+    }
+
+    /// The flatten helper is a no-op (returns Ok(None)) when there is nothing nested.
+    #[test]
+    #[cfg(unix)]
+    fn test_flatten_double_nested_dir_noop_when_flat() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let target = temp.path().join("flat-plugin");
+        fs::create_dir_all(&target).expect("target");
+        fs::write(target.join("plugin.php"), "<?php").expect("main");
+
+        let result = flatten_double_nested_dir(&local_client(), target.to_str().expect("target"))
+            .expect("ok");
+        assert!(
+            result.is_none(),
+            "flatten should be a no-op on a flat layout"
+        );
+        assert!(target.join("plugin.php").is_file());
+    }
+
+    /// The "requires an extractCommand" hint must use single-brace `{artifact}`
+    /// placeholders so a copy-paste of the JSON works (render_extract_command +
+    /// render_map both resolve `{artifact}` correctly).
+    #[test]
+    fn test_archive_without_extract_command_hint_uses_single_brace_placeholder() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let archive = temp.path().join("plugin.zip");
+        fs::write(&archive, "zip bytes").expect("archive");
+        let target = temp.path().join("wp-content/plugins/plugin");
+
+        let result = deploy_artifact(
+            &local_client(),
+            &archive,
+            target.to_str().expect("target"),
+            None,
+            None,
+            None,
+        )
+        .expect("deploy result");
+
+        assert!(!result.success);
+        let error = result.error.expect("hint error");
+        assert!(
+            error.contains("{artifact}"),
+            "hint must contain single-brace placeholder: {error}"
+        );
+        assert!(
+            !error.contains("{{artifact}}"),
+            "hint must NOT contain double-brace placeholder: {error}"
+        );
     }
 }

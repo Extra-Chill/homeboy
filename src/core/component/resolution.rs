@@ -60,6 +60,37 @@ pub struct ResolvedTarget {
     pub synthetic: bool,
 }
 
+fn resolved_target_from_component(mut component: Component, synthetic: bool) -> ResolvedTarget {
+    let source_path = PathBuf::from(shellexpand::tilde(&component.local_path).into_owned());
+    let git_root = detect_git_root(&source_path);
+    component.resolve_remote_path();
+
+    ResolvedTarget {
+        component_id: component.id.clone(),
+        component,
+        source_path,
+        git_root,
+        extension_id: None,
+        synthetic,
+    }
+}
+
+/// Resolve target path details from an already-authoritative component.
+///
+/// This preserves caller-supplied in-memory component fields while sharing the
+/// same path expansion, git-root detection, and remote-path normalization used
+/// by [`resolve_target`].
+pub fn resolve_target_from_component(
+    mut component: Component,
+    path_override: Option<&str>,
+) -> ResolvedTarget {
+    if let Some(path) = path_override {
+        component.local_path = path.to_string();
+    }
+
+    resolved_target_from_component(component, false)
+}
+
 pub fn resolve_artifact(component: &Component) -> Option<String> {
     if let Some(ref artifact) = component.build_artifact {
         return Some(artifact.clone());
@@ -319,7 +350,7 @@ pub fn resolve_target(spec: TargetSpec<'_>) -> Result<ResolvedTarget> {
         ));
     }
 
-    let mut component = resolve_effective_inner(
+    let component = resolve_effective_inner(
         spec.component_id,
         spec.path_override,
         spec.project,
@@ -344,24 +375,39 @@ pub fn resolve_target(spec: TargetSpec<'_>) -> Result<ResolvedTarget> {
         ));
     }
 
-    let source_path = PathBuf::from(shellexpand::tilde(&component.local_path).into_owned());
-    let git_root = detect_git_root(&source_path);
     let extension_id = if let Some(capability) = spec.capability {
         Some(extension::resolve_execution_context(&component, capability)?.extension_id)
     } else {
         None
     };
 
-    component.resolve_remote_path();
+    let mut target = resolved_target_from_component(component, synthetic);
+    target.extension_id = extension_id;
+    Ok(target)
+}
 
-    Ok(ResolvedTarget {
-        component_id: component.id.clone(),
-        component,
-        source_path,
-        git_root,
-        extension_id,
-        synthetic,
-    })
+pub(crate) fn component_contains_path(component: &Component, path: &Path) -> bool {
+    let expanded = shellexpand::tilde(&component.local_path);
+    path_is_at_or_inside(Path::new(expanded.as_ref()), path)
+}
+
+pub(crate) fn component_is_contained_in_path(component: &Component, path: &Path) -> bool {
+    let expanded = shellexpand::tilde(&component.local_path);
+    path_strictly_contains(path, Path::new(expanded.as_ref()))
+}
+
+fn path_is_at_or_inside(parent: &Path, path: &Path) -> bool {
+    match (parent.canonicalize().ok(), path.canonicalize().ok()) {
+        (Some(parent), Some(path)) => path == parent || path.starts_with(&parent),
+        _ => false,
+    }
+}
+
+fn path_strictly_contains(parent: &Path, child: &Path) -> bool {
+    match (parent.canonicalize().ok(), child.canonicalize().ok()) {
+        (Some(parent), Some(child)) => child.starts_with(&parent) && child != parent,
+        _ => false,
+    }
 }
 
 /// Find the git root directory for a given path.
@@ -676,7 +722,7 @@ mod tests {
         std::fs::create_dir_all(&repo).expect("create repo dir");
         std::fs::write(
             repo.join("homeboy.json"),
-            r#"{"id":"portable-id","extensions":{"nodejs":{}}}"#,
+            r#"{"id":"portable-id","extensions":{"fixture-extension":{}}}"#,
         )
         .expect("write portable config");
 
@@ -689,7 +735,7 @@ mod tests {
             .extensions
             .as_ref()
             .expect("extensions")
-            .contains_key("nodejs"));
+            .contains_key("fixture-extension"));
     }
 
     #[test]
@@ -697,8 +743,11 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let repo = dir.path().join("portable-repo");
         std::fs::create_dir_all(&repo).expect("create repo dir");
-        std::fs::write(repo.join("homeboy.json"), r#"{"extensions":{"nodejs":{}}}"#)
-            .expect("write portable config");
+        std::fs::write(
+            repo.join("homeboy.json"),
+            r#"{"extensions":{"fixture-extension":{}}}"#,
+        )
+        .expect("write portable config");
 
         let error = resolve_effective(None, repo.to_str(), None)
             .expect_err("path-only portable config without id should fail");

@@ -423,6 +423,7 @@ fn build_agent_task_matrix_summary(
                 backend: "homeboy.bench".to_string(),
                 selector: None,
                 required_capabilities: vec!["bench".to_string()],
+                secret_env: Vec::new(),
                 model: None,
                 config: Value::Null,
             },

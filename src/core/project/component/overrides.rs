@@ -32,6 +32,9 @@ fn apply_overrides_layer(
     if let Some(scopes) = &overrides.scopes {
         component.scopes = Some(scopes.clone());
     }
+    if !overrides.artifact_inputs.is_empty() {
+        component.artifact_inputs = overrides.artifact_inputs.clone();
+    }
     if let Some(cli_path) = &overrides.cli_path {
         component.cli_path = Some(cli_path.clone());
     }

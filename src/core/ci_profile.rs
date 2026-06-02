@@ -505,9 +505,9 @@ mod tests {
     #[test]
     fn list_from_manifest_returns_declared_profiles_and_jobs() {
         let tmp = TempDir::new().expect("temp dir");
-        let inventory = list_from_manifest(tmp.path(), "nodejs", &manifest_with_ci());
+        let inventory = list_from_manifest(tmp.path(), "fixture-ci", &manifest_with_ci());
 
-        assert_eq!(inventory.extension_id, "nodejs");
+        assert_eq!(inventory.extension_id, "fixture-ci");
         assert_eq!(inventory.profiles[0].id, "pr");
         assert_eq!(inventory.jobs[0].id, "lint");
         assert_eq!(
@@ -520,12 +520,12 @@ mod tests {
     fn test_list_for_extension() {
         crate::test_support::with_isolated_home(|home| {
             let mut extension = manifest_with_ci();
-            extension.id = "nodejs".to_string();
+            extension.id = "fixture-ci".to_string();
             crate::core::extension::save_manifest(&extension).expect("save extension");
 
-            let inventory = list_for_extension(home.path(), "nodejs").expect("list inventory");
+            let inventory = list_for_extension(home.path(), "fixture-ci").expect("list inventory");
 
-            assert_eq!(inventory.extension_id, "nodejs");
+            assert_eq!(inventory.extension_id, "fixture-ci");
             assert_eq!(inventory.profiles[0].id, "pr");
         });
     }
@@ -549,11 +549,11 @@ mod tests {
     #[test]
     fn select_extension_id_requires_one_extension() {
         assert_eq!(
-            select_extension_id(&["nodejs".to_string()]).unwrap(),
-            "nodejs"
+            select_extension_id(&["fixture-ci".to_string()]).unwrap(),
+            "fixture-ci"
         );
         assert!(select_extension_id(&[]).is_err());
-        assert!(select_extension_id(&["nodejs".to_string(), "rust".to_string()]).is_err());
+        assert!(select_extension_id(&["fixture-a".to_string(), "fixture-b".to_string()]).is_err());
     }
 
     #[test]

@@ -122,6 +122,43 @@ Scripts that implement extension capabilities. Each script path is relative to t
 - **`fingerprint`** (string): Script that extracts structural fingerprints from source files. Receives file content on stdin, outputs `FileFingerprint` JSON on stdout.
 - **`refactor`** (string): Script that applies refactoring edits to source files. Receives edit instructions on stdin, outputs transformed content on stdout.
 
+## Deploy Configuration
+
+Deploy configuration declares extension-owned deploy behavior. The `deploy` object is an explicit typed contract: unknown nested deploy keys are rejected instead of being preserved as passive metadata.
+
+```json
+{
+  "deploy": {
+    "archive_install": [
+      {
+        "path_pattern": "/wp-content/plugins/",
+        "staging_path": "/tmp/homeboy-wordpress-plugin-staging",
+        "root_must_match_target_basename": true,
+        "required_header": {
+          "file_glob": "*.php",
+          "contains": "Plugin Name:"
+        },
+        "skip_permissions_fix": true
+      }
+    ]
+  }
+}
+```
+
+### Archive Install Fields
+
+- **`deploy.archive_install[]`** (array): Core-backed archive install policies for deploy targets matched by `path_pattern`. Homeboy copies the artifact to `staging_path`, validates the archive root when requested, replaces the target directory, verifies the required header when configured, and removes the staged artifact after verification.
+- **`path_pattern`** (string): Substring matched against the resolved remote target path. The first matching policy becomes the deploy override and verification path for that target.
+- **`staging_path`** (string): Remote directory used for the staged archive artifact. Defaults to `/tmp/homeboy-staging`.
+- **`root_must_match_target_basename`** (boolean): When true, the first archive root directory must equal the target directory basename before the target is replaced.
+- **`required_header`** (object): Optional post-install verification for the installed header file. If present, it must declare exactly one selector: `file` or `file_glob`.
+- **`required_header.file`** (string): Exact header file path relative to the archive root. Supports normal deploy template variables such as `{{targetBasename}}`.
+- **`required_header.file_glob`** (string): Header file basename glob relative to the archive root, for example `*.php`.
+- **`required_header.contains`** (string): Literal text that must exist in the installed header file.
+- **`skip_permissions_fix`** (boolean): Skip the normal post-install permissions fix for this target.
+
+`deploy.overrides` remains the lower-level escape hatch for extensions that need a fully custom install command. Archive-shaped plugin or theme installs should prefer `deploy.archive_install` so target basename validation and header verification stay on the shared core path.
+
 ## Structured Sidecar Declarations
 
 Extensions can declare which structured run-directory sidecars they emit. `structured_sidecars` is the only manifest field that declares sidecar contracts. Declarations are explicit contracts: if an entry is missing or set to `false`, the extension has not declared that structured sidecar.

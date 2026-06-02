@@ -212,6 +212,69 @@ pub fn update_all_sources() -> Result<RigSourceUpdateResult> {
     Ok(aggregate)
 }
 
+pub fn update_source(selector: Option<&str>) -> Result<RigSourceUpdateResult> {
+    let Some(selector) = selector else {
+        return update_all_sources();
+    };
+
+    let matches = list_sources()?
+        .sources
+        .into_iter()
+        .filter(|source| source_matches(source, selector))
+        .collect::<Vec<_>>();
+
+    if matches.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "source",
+            format!("No installed rig source matches '{}'", selector),
+            Some(selector.to_string()),
+            None,
+        ));
+    }
+    if matches.len() > 1 {
+        let tried = matches
+            .iter()
+            .map(|source| source.package_id.clone())
+            .collect::<Vec<_>>();
+        return Err(Error::validation_invalid_argument(
+            "source",
+            format!(
+                "Selector '{}' matches multiple rig sources; use the full source or package path",
+                selector
+            ),
+            Some(selector.to_string()),
+            Some(tried),
+        ));
+    }
+
+    let source = matches.into_iter().next().expect("checked non-empty");
+    if source.linked {
+        let mut skipped = Vec::new();
+        for rig in source.rigs {
+            skipped.push(SkippedRigSourceUpdate {
+                id: rig.id,
+                source: source.source.clone(),
+                reason: "linked local sources are updated in place outside homeboy".to_string(),
+            });
+        }
+        for stack in source.stacks {
+            skipped.push(SkippedRigSourceUpdate {
+                id: stack.id,
+                source: source.source.clone(),
+                reason: "linked local sources are updated in place outside homeboy".to_string(),
+            });
+        }
+        return Ok(RigSourceUpdateResult {
+            updated: Vec::new(),
+            updated_stacks: Vec::new(),
+            skipped,
+            failed: Vec::new(),
+        });
+    }
+
+    update_group(source)
+}
+
 fn update_group(source: RigSourceGroup) -> Result<RigSourceUpdateResult> {
     let package_path = PathBuf::from(&source.package_path);
     if !package_path.exists() {
@@ -490,13 +553,16 @@ fn new_source_group(
     linked: bool,
     source_revision: Option<String>,
 ) -> RigSourceGroup {
+    let package_present = Path::new(package_path).exists();
     RigSourceGroup {
         source: source.to_string(),
         package_id: package_id_from_path(package_path),
         package_path: package_path.to_string(),
+        package_present,
         discovery_path,
         linked,
         source_revision,
+        stale_reason: stale_source_reason(linked, package_present),
         rigs: Vec::new(),
         stacks: Vec::new(),
     }
@@ -531,12 +597,15 @@ fn source_rig(
     config_present: bool,
     config_owned: bool,
 ) -> RigSourceRig {
+    let rig_present = Path::new(&entry.metadata.rig_path).is_file();
     RigSourceRig {
         id: entry.id,
         rig_path: entry.metadata.rig_path,
+        rig_present,
         config_path: source_config_path(config_path),
         config_present,
         config_owned,
+        stale_reason: stale_config_reason(rig_present, config_present),
     }
 }
 
@@ -546,12 +615,36 @@ fn source_stack(
     config_present: bool,
     config_owned: bool,
 ) -> RigSourceStack {
+    let stack_present = Path::new(&entry.metadata.stack_path).is_file();
     RigSourceStack {
         id: entry.id,
         stack_path: entry.metadata.stack_path,
+        stack_present,
         config_path: source_config_path(config_path),
         config_present,
         config_owned,
+        stale_reason: stale_config_reason(stack_present, config_present),
+    }
+}
+
+fn stale_source_reason(linked: bool, package_present: bool) -> Option<String> {
+    (linked && !package_present).then(|| {
+        "linked local rig source path is missing; restore it or run `homeboy rig sources remove <source>` and reinstall".to_string()
+    })
+}
+
+fn stale_config_reason(spec_present: bool, config_present: bool) -> Option<String> {
+    if !spec_present {
+        Some(
+            "recorded source spec path is missing; refresh/remove the rig source and reinstall"
+                .to_string(),
+        )
+    } else if !config_present {
+        Some(
+            "installed rig config is missing or points at a missing linked source path".to_string(),
+        )
+    } else {
+        None
     }
 }
 

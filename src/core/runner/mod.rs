@@ -12,26 +12,36 @@ use crate::core::server::{self, RunnerPolicy, RunnerSettings, ServerRunner};
 mod apply;
 mod broker_http;
 mod capabilities;
+mod command_path;
 mod connection;
+mod daemon_health;
 mod evidence;
 mod execution;
 mod lab;
+mod lab_apply;
+mod lab_command;
+mod lab_env;
+mod lab_workspaces;
 mod offload_changed_since;
 mod offload_metadata;
 mod resource_metrics;
 mod rig_materialization;
 mod session;
+mod validation_dependencies;
 mod worker;
 mod workspace;
 
 pub use apply::{
-    apply_workspace_patch, RunnerWorkspaceApplyOptions, RunnerWorkspaceApplyOutput,
-    RunnerWorkspaceApplyStatus,
+    apply_change_artifact, apply_workspace_patch, RunnerWorkspaceApplyOptions,
+    RunnerWorkspaceApplyOutput, RunnerWorkspaceApplyStatus,
 };
 pub use capabilities::{
     evaluate_lab_runner_capabilities_for_runner, lab_runner_capability_plan,
     lab_runner_capability_preflight, LabRunnerCapabilityContract, LabRunnerCapabilityPlan,
     LabRunnerGateDecision, LabRunnerGateMode, RunnerCapabilityPreflight, RunnerRequiredTool,
+};
+pub(crate) use command_path::{
+    normalize_runner_command_env, quote_runner_env_value, remote_shell_path_preamble,
 };
 pub use connection::{connect, connect_reverse, disconnect, status, statuses};
 pub use evidence::{
@@ -48,7 +58,10 @@ pub use offload_changed_since::{
     lab_offload_changed_since_ref, preflight_lab_offload_changed_since,
     prepare_git_lab_offload_changed_since,
 };
-pub use offload_metadata::{capture_lab_offload_subprocess_metadata, lab_offload_metadata};
+pub use offload_metadata::{
+    capture_lab_offload_subprocess_metadata, lab_offload_metadata,
+    lab_offload_metadata_with_workspace_mapping,
+};
 pub(crate) use resource_metrics::measured_command_output;
 pub use resource_metrics::RunnerResourceMetrics;
 pub use session::{

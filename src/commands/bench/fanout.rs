@@ -172,6 +172,7 @@ fn matrix_template_request(
             backend: executor_backend.to_string(),
             selector: None,
             required_capabilities: vec!["bench".to_string(), "matrix".to_string()],
+            secret_env: Vec::new(),
             model: None,
             config: serde_json::json!({}),
         },

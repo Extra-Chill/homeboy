@@ -159,8 +159,12 @@ pub fn run_main_lint_workflow(
 
     let mut hints = Vec::new();
 
-    let runner_exit_code =
-        normalize_empty_finding_exit_code(output.exit_code, output.success, &lint_findings);
+    let runner_exit_code = normalize_empty_finding_exit_code(
+        output.exit_code,
+        output.success,
+        &lint_findings,
+        &producer_summaries,
+    );
     let lint_exit_code = normalize_finding_exit_code(runner_exit_code, &lint_findings);
 
     // Baseline lifecycle
@@ -408,8 +412,15 @@ fn normalize_empty_finding_exit_code(
     exit_code: i32,
     success: bool,
     lint_findings: &[HomeboyFinding],
+    producer_summaries: &[FindingProducerSummary],
 ) -> i32 {
-    if lint_findings.is_empty() && !success && exit_code == 1 {
+    if lint_findings.is_empty()
+        && !success
+        && exit_code == 1
+        && !producer_summaries
+            .iter()
+            .any(|summary| summary.status != "passed")
+    {
         0
     } else {
         exit_code
@@ -1071,14 +1082,25 @@ mod tests {
 
     #[test]
     fn empty_filtered_findings_turn_lint_finding_exit_into_pass() {
-        let exit_code = normalize_empty_finding_exit_code(1, false, &[]);
+        let exit_code = normalize_empty_finding_exit_code(1, false, &[], &[]);
 
         assert_eq!(exit_code, 0);
     }
 
     #[test]
+    fn failed_zero_finding_producer_keeps_lint_failure() {
+        let producer_summaries = vec![
+            FindingProducerSummary::new("phpcs", "passed").finding_count(0),
+            FindingProducerSummary::new("phpstan", "failed").finding_count(0),
+        ];
+        let exit_code = normalize_empty_finding_exit_code(1, false, &[], &producer_summaries);
+
+        assert_eq!(exit_code, 1);
+    }
+
+    #[test]
     fn empty_filtered_findings_do_not_hide_infrastructure_errors() {
-        let exit_code = normalize_empty_finding_exit_code(2, false, &[]);
+        let exit_code = normalize_empty_finding_exit_code(2, false, &[], &[]);
 
         assert_eq!(exit_code, 2);
     }

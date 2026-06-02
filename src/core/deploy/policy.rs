@@ -1,27 +1,12 @@
 use std::collections::HashSet;
 
-use serde::Deserialize;
-
 use crate::core::component::Component;
 use crate::core::error::{Error, Result};
+use crate::core::extension::{DeployCapability, ExtensionManifest};
 
 /// Framework-neutral shared directory names that typically contain sibling components.
 const GENERIC_PROTECTED_PATH_SUFFIXES: &[&str] =
     &["/node_modules", "/vendor", "/packages", "/extensions"];
-
-#[derive(Debug, Clone, Deserialize, Default)]
-struct ExtensionDeployPolicy {
-    #[serde(default)]
-    protected_path_suffixes: Vec<String>,
-    #[serde(default)]
-    owner_hints: Vec<DeployOwnerHint>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct DeployOwnerHint {
-    path_contains: String,
-    suggested_owner: String,
-}
 
 pub(super) fn protected_path_suffixes(component: &Component) -> Vec<String> {
     let mut suffixes = HashSet::new();
@@ -86,7 +71,7 @@ pub(super) fn validate_deploy_target(
     Ok(())
 }
 
-fn component_extension_policies(component: &Component) -> Vec<ExtensionDeployPolicy> {
+fn component_extension_policies(component: &Component) -> Vec<DeployCapability> {
     component
         .extensions
         .as_ref()
@@ -96,11 +81,11 @@ fn component_extension_policies(component: &Component) -> Vec<ExtensionDeployPol
         .collect()
 }
 
-fn extension_deploy_policy(extension_id: &str) -> Option<ExtensionDeployPolicy> {
+fn extension_deploy_policy(extension_id: &str) -> Option<DeployCapability> {
     let path = crate::core::paths::extension_manifest(extension_id).ok()?;
     let raw = std::fs::read_to_string(path).ok()?;
-    let manifest: serde_json::Value = serde_json::from_str(&raw).ok()?;
-    serde_json::from_value(manifest.get("deploy")?.clone()).ok()
+    let manifest: ExtensionManifest = serde_json::from_str(&raw).ok()?;
+    manifest.deploy
 }
 
 #[cfg(test)]

@@ -1,7 +1,8 @@
 //! Rig source lifecycle tests. Covers `src/core/rig/source.rs`.
 
 use crate::core::rig::{
-    install, list_sources, remove_source, update_all_sources, update_source_for_rig,
+    install, list_ids, list_sources, load, remove_source, update_all_sources, update_source,
+    update_source_for_rig,
 };
 use crate::test_support::HomeGuard;
 use std::fs;
@@ -134,6 +135,28 @@ fn remove_source_preserves_replaced_config_but_drops_metadata() {
 }
 
 #[test]
+fn remove_source_preserves_replaced_stack_config_but_drops_metadata() {
+    let _home = HomeGuard::new();
+    let package = tempfile::tempdir().expect("package");
+    write_rig(package.path(), "alpha", &minimal_rig("alpha"));
+    write_stack(package.path(), "alpha-combined", "alpha");
+
+    install(package.path().to_str().unwrap(), None, false).expect("install");
+    let config = crate::core::paths::stack_config("alpha-combined").expect("stack config");
+    fs::remove_file(&config).expect("remove symlink");
+    fs::write(&config, minimal_stack("alpha-combined", "manual")).expect("replacement stack");
+
+    let result = remove_source(&package.path().to_string_lossy()).expect("remove source");
+
+    assert!(result.removed_stacks.is_empty());
+    assert_eq!(result.skipped_stacks.len(), 1);
+    assert!(config.exists());
+    assert!(!crate::core::paths::stack_source_metadata("alpha-combined")
+        .unwrap()
+        .exists());
+}
+
+#[test]
 fn remove_source_treats_copied_config_as_owned_when_contents_match() {
     let _home = HomeGuard::new();
     let package = tempfile::tempdir().expect("package");
@@ -184,6 +207,60 @@ fn sources_list_reports_corrupt_metadata_and_missing_configs() {
     assert_eq!(result.sources[0].rigs[0].id, "missing");
     assert!(!result.sources[0].rigs[0].config_present);
     assert!(!result.sources[0].rigs[0].config_owned);
+}
+
+#[test]
+fn sources_list_reports_missing_linked_source_paths() {
+    let _home = HomeGuard::new();
+    let package = tempfile::tempdir().expect("package");
+    write_rig(package.path(), "alpha", &minimal_rig("alpha"));
+
+    install(package.path().to_str().unwrap(), None, false).expect("install linked");
+    fs::remove_dir_all(package.path()).expect("remove linked source");
+
+    let result = list_sources().expect("sources");
+
+    assert_eq!(result.sources.len(), 1);
+    let source = &result.sources[0];
+    assert!(source.linked);
+    assert!(!source.package_present);
+    assert!(source
+        .stale_reason
+        .as_deref()
+        .unwrap_or_default()
+        .contains("linked local rig source path is missing"));
+    assert_eq!(source.rigs.len(), 1);
+    assert!(!source.rigs[0].rig_present);
+    assert!(!source.rigs[0].config_present);
+    assert!(source.rigs[0]
+        .stale_reason
+        .as_deref()
+        .unwrap_or_default()
+        .contains("recorded source spec path is missing"));
+}
+
+#[test]
+fn missing_linked_source_gets_rig_source_diagnostic_not_not_found_hint() {
+    let _home = HomeGuard::new();
+    let package = tempfile::tempdir().expect("package");
+    write_rig(package.path(), "alpha", &minimal_rig("alpha"));
+
+    install(package.path().to_str().unwrap(), None, false).expect("install linked");
+    fs::remove_dir_all(package.path()).expect("remove linked source");
+
+    let err = load("alpha").expect_err("stale source error");
+
+    assert!(err.message.contains("linked rig source"));
+    assert!(err.message.contains("source path is missing"));
+    assert!(err
+        .hints
+        .iter()
+        .any(|hint| hint.message.contains("homeboy rig sources list")));
+    assert!(err
+        .hints
+        .iter()
+        .any(|hint| hint.message.contains("homeboy rig sources remove")));
+    assert!(!list_ids().expect("list ids").contains(&"alpha".to_string()));
 }
 
 #[test]
@@ -339,6 +416,83 @@ fn update_all_reports_broken_sources_and_continues() {
     let installed = fs::read_to_string(crate::core::paths::rig_config("good").unwrap())
         .expect("installed good rig");
     assert!(installed.contains("good rig updated"));
+}
+
+#[test]
+fn refresh_source_selector_updates_recorded_package() {
+    let _home = HomeGuard::new();
+    let package = tempfile::tempdir().expect("package");
+    let source_rig = write_rig(package.path(), "alpha", &minimal_rig("alpha"));
+    let bare = create_bare_source(package.path());
+    let source = bare
+        .path()
+        .join("rig-package.git")
+        .to_string_lossy()
+        .to_string();
+
+    install(&source, None, false).expect("install");
+    let before = crate::core::rig::read_source_metadata("alpha")
+        .expect("metadata")
+        .source_revision;
+
+    fs::write(
+        &source_rig,
+        minimal_rig("alpha").replace("alpha rig", "alpha rig refreshed"),
+    )
+    .expect("update rig");
+    commit_package(package.path(), "refresh alpha");
+    run_git(package.path(), &["push", &source, "HEAD:main"]);
+
+    let package_id = list_sources().expect("sources").sources[0]
+        .package_id
+        .clone();
+    let result = update_source(Some(&package_id)).expect("refresh source");
+
+    assert_eq!(result.updated.len(), 1);
+    assert_eq!(result.updated[0].id, "alpha");
+    assert_eq!(result.updated[0].source, source);
+    assert_eq!(
+        result.updated[0].path,
+        crate::core::paths::rig_config("alpha")
+            .unwrap()
+            .to_string_lossy()
+    );
+    assert_eq!(result.updated[0].previous_revision, before);
+    assert_ne!(result.updated[0].source_revision, before);
+    assert!(
+        fs::read_to_string(crate::core::paths::rig_config("alpha").unwrap())
+            .expect("installed rig")
+            .contains("alpha rig refreshed")
+    );
+}
+
+#[test]
+fn refresh_without_selector_updates_all_sources() {
+    let _home = HomeGuard::new();
+    let package = tempfile::tempdir().expect("package");
+    let source_rig = write_rig(package.path(), "alpha", &minimal_rig("alpha"));
+    let bare = create_bare_source(package.path());
+    let source = bare
+        .path()
+        .join("rig-package.git")
+        .to_string_lossy()
+        .to_string();
+
+    install(&source, None, false).expect("install");
+    fs::write(
+        &source_rig,
+        minimal_rig("alpha").replace("alpha rig", "alpha rig refreshed"),
+    )
+    .expect("update rig");
+    commit_package(package.path(), "refresh alpha");
+    run_git(package.path(), &["push", &source, "HEAD:main"]);
+
+    let result = update_source(None).expect("refresh all sources");
+
+    assert_eq!(result.updated.len(), 1);
+    assert_eq!(result.updated[0].id, "alpha");
+    assert!(result.skipped.is_empty());
+    assert!(result.failed.is_empty());
 }
 
 #[test]

@@ -43,7 +43,7 @@ impl Commands {
             Commands::Audit(args) if args.changed_since.is_none() && !args.conventions => {
                 lab_portable_contract("audit", None, true, LAB_NO_EXTRA_TOOLS)
             }
-            Commands::Bench(args) if args.is_run_command() => lab_portable_contract(
+            Commands::Bench(args) if args.is_lab_offload_command() => lab_portable_contract(
                 "bench",
                 args.lab_offload_writes_local_state()
                     .then_some("--baseline/--ratchet"),

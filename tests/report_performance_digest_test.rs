@@ -130,6 +130,18 @@ fn renders_resource_summary_budget_findings_and_baseline_health() {
                 "mode": "remote",
                 "status": "completed",
                 "fallback_reason": ""
+            },
+            "preview": {
+                "schema": "homeboy/preview/v1",
+                "provider": "dummy",
+                "local_url": "http://127.0.0.1:8080",
+                "public_url": "https://preview.example.test/run-1",
+                "hold_seconds": 600,
+                "expires_at": "2026-06-01T22:00:00Z",
+                "status": "running",
+                "process_id": "pid-123",
+                "runtime_id": "runtime-abc",
+                "cleanup_status": "pending"
             }
         }"#,
     );
@@ -168,6 +180,10 @@ fn renders_resource_summary_budget_findings_and_baseline_health() {
         report.lab_offload.get("runner_id"),
         Some(&"lab-a".to_string())
     );
+    assert_eq!(
+        report.preview.get("public_url"),
+        Some(&"https://preview.example.test/run-1".to_string())
+    );
     assert!(report.markdown.contains("## Performance Digest"));
     assert!(report.markdown.contains("### Resource Summary"));
     assert!(report.markdown.contains("- Duration: **12345 ms**"));
@@ -181,6 +197,20 @@ fn renders_resource_summary_budget_findings_and_baseline_health() {
     assert!(report.markdown.contains("### Host Pressure"));
     assert!(report.markdown.contains("- Severity: **hot**"));
     assert!(report.markdown.contains("### Lab Offload"));
+    assert!(report.markdown.contains("### Preview"));
+    assert!(report
+        .markdown
+        .contains("- local_url: `http://127.0.0.1:8080`"));
+    assert!(report
+        .markdown
+        .contains("- public_url: `https://preview.example.test/run-1`"));
+    assert!(report.markdown.contains("- hold_seconds: `600`"));
+    assert!(report
+        .markdown
+        .contains("- expires_at: `2026-06-01T22:00:00Z`"));
+    assert!(report.markdown.contains("- process_id: `pid-123`"));
+    assert!(report.markdown.contains("- runtime_id: `runtime-abc`"));
+    assert!(report.markdown.contains("- cleanup_status: `pending`"));
 
     let _ = fs::remove_dir_all(&dir);
 }

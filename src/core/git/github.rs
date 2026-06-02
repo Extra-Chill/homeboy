@@ -630,6 +630,44 @@ pub fn gh_probe_succeeds(args: &[&str]) -> bool {
         .unwrap_or(false)
 }
 
+/// Resolve a GitHub token for scripts that require `GH_TOKEN` explicitly.
+///
+/// Prefer the caller's environment, then fall back to the authenticated GitHub
+/// CLI token so extension scripts do not fail late after Homeboy has already
+/// verified that `gh` is usable.
+pub fn github_token_from_env_or_gh() -> Option<String> {
+    select_github_token(
+        std::env::var("GH_TOKEN").ok(),
+        std::env::var("GITHUB_TOKEN").ok(),
+        gh_auth_token,
+    )
+}
+
+fn select_github_token(
+    gh_token: Option<String>,
+    github_token: Option<String>,
+    gh_auth_token: impl FnOnce() -> Option<String>,
+) -> Option<String> {
+    gh_token
+        .and_then(non_empty_token)
+        .or_else(|| github_token.and_then(non_empty_token))
+        .or_else(gh_auth_token)
+}
+
+fn non_empty_token(token: String) -> Option<String> {
+    let token = token.trim().to_string();
+    (!token.is_empty()).then_some(token)
+}
+
+fn gh_auth_token() -> Option<String> {
+    let output = Command::new("gh").args(["auth", "token"]).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    non_empty_token(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
 /// Error out if `gh` is missing or unauthenticated. Unlike `run_github_release`
 /// (which soft-fails because the tag is already pushed), primitive operations
 /// have no already-committed side effect to preserve — fail loudly.
@@ -764,6 +802,35 @@ fn parse_pr_list_json(raw: &str) -> Result<Vec<GithubFindItem>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn github_token_prefers_gh_token_env() {
+        let token = select_github_token(
+            Some(" env-gh-token \n".to_string()),
+            Some("github-token".to_string()),
+            || Some("cli-token".to_string()),
+        );
+
+        assert_eq!(token.as_deref(), Some("env-gh-token"));
+    }
+
+    #[test]
+    fn github_token_falls_back_to_github_token_env() {
+        let token = select_github_token(
+            Some("  ".to_string()),
+            Some("github-token".to_string()),
+            || Some("cli-token".to_string()),
+        );
+
+        assert_eq!(token.as_deref(), Some("github-token"));
+    }
+
+    #[test]
+    fn github_token_falls_back_to_gh_auth_token() {
+        let token = select_github_token(None, None, || Some("cli-token".to_string()));
+
+        assert_eq!(token.as_deref(), Some("cli-token"));
+    }
 
     #[test]
     fn parse_issue_number_from_issue_url() {

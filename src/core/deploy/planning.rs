@@ -6,6 +6,7 @@ use crate::core::component::{self, Component};
 use crate::core::error::{Error, Result};
 use crate::core::extension;
 use crate::core::git;
+use crate::core::plan::{HomeboyPlan, PlanKind, PlanStep, PlanStepStatus, PlanValues};
 use crate::core::project::{self, Project};
 use crate::core::release::version;
 use crate::core::server::SshClient;
@@ -67,37 +68,193 @@ pub(super) fn plan_components(
     base_path: &str,
     client: &SshClient,
 ) -> Result<Vec<Component>> {
+    let plan = plan_component_deploys(
+        config,
+        all_components,
+        skipped_component_ids,
+        project,
+        base_path,
+        client,
+    );
+    validate_deploy_plan(config, &plan)?;
+
+    Ok(plan.ready_components())
+}
+
+pub(super) struct DeployComponentPlan {
+    pub plan: HomeboyPlan,
+    components: HashMap<String, Component>,
+}
+
+impl DeployComponentPlan {
+    pub(super) fn ready_components(&self) -> Vec<Component> {
+        self.plan
+            .steps
+            .iter()
+            .filter(|step| step.status == PlanStepStatus::Ready)
+            .filter_map(|step| step.input_as::<String>("component_id"))
+            .filter_map(|component_id| self.components.get(&component_id).cloned())
+            .collect()
+    }
+}
+
+pub(super) fn plan_component_deploys(
+    config: &DeployConfig,
+    all_components: &[Component],
+    skipped_component_ids: &[String],
+    project: &Project,
+    base_path: &str,
+    client: &SshClient,
+) -> DeployComponentPlan {
+    let components = all_components
+        .iter()
+        .map(|component| (component.id.clone(), component.clone()))
+        .collect::<HashMap<_, _>>();
+    let mut steps = Vec::new();
+
     if !config.component_ids.is_empty() {
-        let selected: Vec<Component> = all_components
-            .iter()
-            .filter(|c| config.component_ids.contains(&c.id))
-            .cloned()
-            .collect();
-
-        let missing: Vec<String> = config
-            .component_ids
-            .iter()
-            .filter(|id| !selected.iter().any(|c| &c.id == *id))
-            .cloned()
-            .collect();
-
-        if !missing.is_empty() {
-            let non_deployable: Vec<String> = missing
-                .iter()
-                .filter(|id| skipped_component_ids.contains(*id))
-                .cloned()
-                .collect();
-
-            let unknown: Vec<String> = missing
-                .iter()
-                .filter(|id| !non_deployable.contains(*id))
-                .cloned()
-                .collect();
-
-            let mut details = Vec::new();
-            if !unknown.is_empty() {
-                details.extend(unknown);
+        for component_id in &config.component_ids {
+            if components.contains_key(component_id) {
+                steps.push(
+                    deploy_step(component_id, PlanStepStatus::Ready, "explicitly_selected").build(),
+                );
+            } else if skipped_component_ids.contains(component_id) {
+                steps.push(
+                    deploy_step(component_id, PlanStepStatus::Disabled, "non_deployable")
+                        .skip_reason("Non-deployable component (no artifact/deploy strategy)")
+                        .build(),
+                );
+            } else {
+                steps.push(
+                    deploy_step(component_id, PlanStepStatus::Missing, "missing")
+                        .missing(vec![component_id.clone()])
+                        .skip_reason("Unknown requested component")
+                        .build(),
+                );
             }
+        }
+
+        return DeployComponentPlan {
+            plan: deploy_plan("component_ids", config, steps),
+            components,
+        };
+    } else if config.check {
+        steps.extend(
+            all_components.iter().map(|component| {
+                deploy_step(&component.id, PlanStepStatus::Ready, "check").build()
+            }),
+        );
+    } else if config.all {
+        steps.extend(all_components.iter().map(|component| {
+            deploy_step(&component.id, PlanStepStatus::Ready, "all_selected").build()
+        }));
+    } else if config.outdated {
+        let remote_versions =
+            fetch_remote_versions_for_project(all_components, Some(project), base_path, client);
+        steps.extend(plan_outdated_steps(all_components, &remote_versions));
+    } else if config.behind_upstream {
+        for component in all_components {
+            let behind_upstream = component_is_behind_upstream(component);
+            let mut step = deploy_step(
+                &component.id,
+                if behind_upstream {
+                    PlanStepStatus::Ready
+                } else {
+                    PlanStepStatus::Skipped
+                },
+                "behind_upstream",
+            )
+            .output_value("behind_upstream", serde_json::json!(behind_upstream));
+            if !behind_upstream {
+                step = step.skip_reason("Component is not behind upstream");
+            }
+            steps.push(step.build());
+        }
+    } else {
+        steps.push(
+            PlanStep::builder(
+                "deploy.selection",
+                "deploy_selection",
+                PlanStepStatus::Missing,
+            )
+            .missing(vec![
+                "component IDs".to_string(),
+                "--all".to_string(),
+                "--outdated".to_string(),
+                "--behind-upstream".to_string(),
+                "--check".to_string(),
+            ])
+            .skip_reason("No deploy selection provided")
+            .build(),
+        );
+    }
+
+    DeployComponentPlan {
+        plan: deploy_plan(selection_mode(config), config, steps),
+        components,
+    }
+}
+
+fn plan_outdated_steps(
+    all_components: &[Component],
+    remote_versions: &HashMap<String, String>,
+) -> Vec<PlanStep> {
+    all_components
+        .iter()
+        .map(|component| {
+            let local_version = version::get_component_version(component);
+            let remote_version = remote_versions.get(&component.id).cloned();
+            let needs_update = match (&local_version, &remote_version) {
+                (Some(local), Some(remote)) => local != remote,
+                _ => true,
+            };
+            let status = if needs_update {
+                PlanStepStatus::Ready
+            } else {
+                PlanStepStatus::Skipped
+            };
+            let mut step = deploy_step(&component.id, status, "outdated").output_value(
+                "component_status",
+                serde_json::json!(if needs_update {
+                    "needs_update"
+                } else {
+                    "up_to_date"
+                }),
+            );
+            if let Some(version) = local_version {
+                step = step.output_value("local_version", serde_json::json!(version));
+            }
+            if let Some(version) = remote_version {
+                step = step.output_value("remote_version", serde_json::json!(version));
+            }
+            if !needs_update {
+                step = step.skip_reason("Component is up to date");
+            }
+            step.build()
+        })
+        .collect()
+}
+
+fn validate_deploy_plan(config: &DeployConfig, plan: &DeployComponentPlan) -> Result<()> {
+    if !config.component_ids.is_empty() {
+        let non_deployable = plan
+            .plan
+            .steps
+            .iter()
+            .filter(|step| step.status == PlanStepStatus::Disabled)
+            .filter_map(|step| step.input_as::<String>("component_id"))
+            .collect::<Vec<_>>();
+        let unknown = plan
+            .plan
+            .steps
+            .iter()
+            .filter(|step| step.status == PlanStepStatus::Missing)
+            .filter_map(|step| step.input_as::<String>("component_id"))
+            .collect::<Vec<_>>();
+
+        if !unknown.is_empty() || !non_deployable.is_empty() {
+            let mut details = Vec::new();
+            details.extend(unknown);
             if !non_deployable.is_empty() {
                 details.push(format!(
                     "Non-deployable components (no artifact/deploy strategy): {}",
@@ -113,78 +270,96 @@ pub(super) fn plan_components(
             ));
         }
 
-        if selected.is_empty() {
+        if plan.ready_components().is_empty() {
             return Err(empty_selection_error(
                 "componentIds",
                 "No components selected",
             ));
         }
 
-        return Ok(selected);
+        return Ok(());
     }
 
-    if config.check {
-        return Ok(all_components.to_vec());
+    if config.outdated && plan.ready_components().is_empty() {
+        return Err(empty_selection_error(
+            "outdated",
+            "No outdated components found",
+        ));
     }
 
-    if config.all {
-        return Ok(all_components.to_vec());
+    if config.behind_upstream && plan.ready_components().is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "behind_upstream",
+            "No components behind upstream found",
+            None,
+            None,
+        ));
     }
 
-    if config.outdated {
-        let remote_versions =
-            fetch_remote_versions_for_project(all_components, Some(project), base_path, client);
-
-        let selected: Vec<Component> = all_components
-            .iter()
-            .filter(|c| {
-                let Some(local_version) = version::get_component_version(c) else {
-                    return true;
-                };
-
-                let Some(remote_version) = remote_versions.get(&c.id) else {
-                    return true;
-                };
-
-                local_version != *remote_version
-            })
-            .cloned()
-            .collect();
-
-        if selected.is_empty() {
-            return Err(empty_selection_error(
-                "outdated",
-                "No outdated components found",
-            ));
-        }
-
-        return Ok(selected);
+    if plan
+        .plan
+        .steps
+        .iter()
+        .any(|step| step.kind == "deploy_selection" && step.status == PlanStepStatus::Missing)
+    {
+        return Err(Error::validation_missing_argument(vec![
+            "component IDs, --all, --outdated, --behind-upstream, or --check".to_string(),
+        ]));
     }
 
-    if config.behind_upstream {
-        let selected = select_behind_upstream_components(all_components);
+    Ok(())
+}
 
-        if selected.is_empty() {
-            return Err(Error::validation_invalid_argument(
-                "behind_upstream",
-                "No components behind upstream found",
-                None,
-                None,
-            ));
-        }
+fn deploy_plan(mode: &str, config: &DeployConfig, steps: Vec<PlanStep>) -> HomeboyPlan {
+    HomeboyPlan::builder_for_description(PlanKind::Deploy, mode)
+        .mode(mode)
+        .inputs(
+            PlanValues::new()
+                .json("component_ids", &config.component_ids)
+                .bool("all", config.all)
+                .bool("outdated", config.outdated)
+                .bool("behind_upstream", config.behind_upstream)
+                .bool("dry_run", config.dry_run)
+                .bool("check", config.check),
+        )
+        .steps(steps)
+        .summarize_disabled_as_skipped()
+        .build()
+}
 
-        return Ok(selected);
+fn deploy_step(
+    component_id: &str,
+    status: PlanStepStatus,
+    selection_reason: &str,
+) -> crate::core::plan::PlanStepBuilder {
+    PlanStep::builder(format!("deploy.{component_id}"), "deploy_component", status)
+        .label(format!("Deploy {component_id}"))
+        .scope(vec![component_id.to_string()])
+        .input_value("component_id", serde_json::json!(component_id))
+        .input_value("selection_reason", serde_json::json!(selection_reason))
+}
+
+fn selection_mode(config: &DeployConfig) -> &'static str {
+    if !config.component_ids.is_empty() {
+        "component_ids"
+    } else if config.check {
+        "check"
+    } else if config.all {
+        "all"
+    } else if config.outdated {
+        "outdated"
+    } else if config.behind_upstream {
+        "behind_upstream"
+    } else {
+        "missing_selection"
     }
-
-    Err(Error::validation_missing_argument(vec![
-        "component IDs, --all, --outdated, --behind-upstream, or --check".to_string(),
-    ]))
 }
 
 fn empty_selection_error(field: &str, message: &str) -> Error {
     Error::validation_invalid_argument(field, message, None, None)
 }
 
+#[cfg(test)]
 fn select_behind_upstream_components(all_components: &[Component]) -> Vec<Component> {
     all_components
         .iter()
@@ -467,6 +642,9 @@ pub(super) fn load_project_components(
 mod tests {
     use super::*;
     use crate::core::component::VersionTarget;
+    use crate::core::deploy::types::DeployConfig;
+    use crate::core::project::Project;
+    use crate::core::server::SshClient;
     use tempfile::TempDir;
 
     fn run_git(path: &Path, args: &[&str]) {
@@ -532,6 +710,203 @@ mod tests {
             pattern: Some(r"^(.+)$".to_string()),
         }]);
         component
+    }
+
+    fn deploy_config() -> DeployConfig {
+        DeployConfig {
+            component_ids: Vec::new(),
+            all: false,
+            outdated: false,
+            behind_upstream: false,
+            dry_run: false,
+            check: false,
+            force: false,
+            skip_build: false,
+            keep_deps: false,
+            expected_version: None,
+            no_pull: false,
+            head: false,
+            tagged: false,
+        }
+    }
+
+    fn project() -> Project {
+        Project {
+            id: "fixture".to_string(),
+            ..Project::default()
+        }
+    }
+
+    fn ssh_client() -> SshClient {
+        SshClient {
+            host: "localhost".to_string(),
+            user: std::env::var("USER").unwrap_or_else(|_| "test".to_string()),
+            port: 22,
+            identity_file: None,
+            auth: None,
+            is_local: true,
+            env: HashMap::new(),
+        }
+    }
+
+    fn step<'a>(plan: &'a DeployComponentPlan, component_id: &str) -> &'a PlanStep {
+        plan.plan
+            .steps
+            .iter()
+            .find(|step| step.input_as::<String>("component_id").as_deref() == Some(component_id))
+            .expect("component step")
+    }
+
+    #[test]
+    fn plan_component_deploys_marks_explicit_selection_ready() {
+        let temp = TempDir::new().expect("temp dir");
+        let selected = component("selected", temp.path());
+        let config = DeployConfig {
+            component_ids: vec!["selected".to_string()],
+            ..deploy_config()
+        };
+
+        let plan = plan_component_deploys(
+            &config,
+            std::slice::from_ref(&selected),
+            &[],
+            &project(),
+            "/var/www/example",
+            &ssh_client(),
+        );
+
+        assert_eq!(plan.plan.kind, PlanKind::Deploy);
+        assert_eq!(step(&plan, "selected").status, PlanStepStatus::Ready);
+        assert_eq!(plan.ready_components()[0].id, "selected");
+    }
+
+    #[test]
+    fn plan_component_deploys_marks_missing_requested_component() {
+        let config = DeployConfig {
+            component_ids: vec!["missing".to_string()],
+            ..deploy_config()
+        };
+
+        let plan = plan_component_deploys(
+            &config,
+            &[],
+            &[],
+            &project(),
+            "/var/www/example",
+            &ssh_client(),
+        );
+
+        let step = step(&plan, "missing");
+        assert_eq!(step.status, PlanStepStatus::Missing);
+        assert_eq!(step.missing, vec!["missing"]);
+        assert!(plan.ready_components().is_empty());
+    }
+
+    #[test]
+    fn plan_component_deploys_marks_non_deployable_requested_component_disabled() {
+        let config = DeployConfig {
+            component_ids: vec!["docs".to_string()],
+            ..deploy_config()
+        };
+
+        let plan = plan_component_deploys(
+            &config,
+            &[],
+            &["docs".to_string()],
+            &project(),
+            "/var/www/example",
+            &ssh_client(),
+        );
+
+        let step = step(&plan, "docs");
+        assert_eq!(step.status, PlanStepStatus::Disabled);
+        assert_eq!(
+            step.skip_reason.as_deref(),
+            Some("Non-deployable component (no artifact/deploy strategy)")
+        );
+        assert!(plan.ready_components().is_empty());
+    }
+
+    #[test]
+    fn plan_outdated_steps_mark_outdated_components_ready_and_current_skipped() {
+        let temp = TempDir::new().expect("temp dir");
+        let outdated_path = temp.path().join("outdated");
+        let current_path = temp.path().join("current");
+        std::fs::create_dir(&outdated_path).expect("outdated dir");
+        std::fs::create_dir(&current_path).expect("current dir");
+        let outdated = versioned_component("outdated", &outdated_path, "1.0.0");
+        let current = versioned_component("current", &current_path, "1.0.0");
+        let remote_versions = HashMap::from([
+            ("outdated".to_string(), "0.9.0".to_string()),
+            ("current".to_string(), "1.0.0".to_string()),
+        ]);
+
+        let steps = plan_outdated_steps(&[outdated, current], &remote_versions);
+
+        let outdated = steps
+            .iter()
+            .find(|step| step.input_as::<String>("component_id").as_deref() == Some("outdated"))
+            .expect("outdated step");
+        let current = steps
+            .iter()
+            .find(|step| step.input_as::<String>("component_id").as_deref() == Some("current"))
+            .expect("current step");
+        assert_eq!(outdated.status, PlanStepStatus::Ready);
+        assert_eq!(current.status, PlanStepStatus::Skipped);
+        assert_eq!(
+            current.skip_reason.as_deref(),
+            Some("Component is up to date")
+        );
+    }
+
+    #[test]
+    fn plan_component_deploys_marks_behind_upstream_ready_and_current_skipped() {
+        let temp = TempDir::new().expect("temp dir");
+        let source = temp.path().join("source");
+        let stale = temp.path().join("stale");
+        let current = temp.path().join("current");
+        std::fs::create_dir(&source).expect("source dir");
+
+        init_source_repo(&source);
+        clone_repo(&source, &stale);
+        commit_upstream_change(&source);
+        clone_repo(&source, &current);
+        let stale = component("stale", &stale);
+        let current = component("current", &current);
+        let config = DeployConfig {
+            behind_upstream: true,
+            ..deploy_config()
+        };
+
+        let plan = plan_component_deploys(
+            &config,
+            &[stale, current],
+            &[],
+            &project(),
+            "/var/www/example",
+            &ssh_client(),
+        );
+
+        assert_eq!(step(&plan, "stale").status, PlanStepStatus::Ready);
+        assert_eq!(step(&plan, "current").status, PlanStepStatus::Skipped);
+        assert_eq!(plan.ready_components().len(), 1);
+        assert_eq!(plan.ready_components()[0].id, "stale");
+    }
+
+    #[test]
+    fn plan_component_deploys_marks_empty_selection_missing() {
+        let plan = plan_component_deploys(
+            &deploy_config(),
+            &[],
+            &[],
+            &project(),
+            "/var/www/example",
+            &ssh_client(),
+        );
+
+        assert_eq!(plan.plan.steps[0].kind, "deploy_selection");
+        assert_eq!(plan.plan.steps[0].status, PlanStepStatus::Missing);
+        assert!(plan.ready_components().is_empty());
     }
 
     #[test]

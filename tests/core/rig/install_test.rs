@@ -201,6 +201,27 @@ fn install_refreshes_existing_matching_local_rig_without_metadata() {
 }
 
 #[test]
+#[cfg(unix)]
+fn install_refreshes_existing_broken_rig_symlink() {
+    let _home = HomeGuard::new();
+    let package = tempfile::tempdir().expect("package");
+    let refreshed = minimal_rig("alpha").replace("alpha rig", "alpha rig refreshed");
+    let source = write_rig(package.path(), "alpha", &refreshed);
+
+    fs::create_dir_all(crate::core::paths::rigs().expect("rigs dir")).expect("rigs dir");
+    let installed = crate::core::paths::rig_config("alpha").expect("alpha rig path");
+    std::os::unix::fs::symlink(package.path().join("missing-rig.json"), &installed)
+        .expect("broken rig symlink");
+
+    let result = install(package.path().to_str().unwrap(), None, false).expect("refresh");
+
+    assert_eq!(result.installed.len(), 1);
+    assert_eq!(fs::read_link(&installed).expect("updated symlink"), source);
+    let installed_content = fs::read_to_string(&installed).expect("installed rig");
+    assert!(installed_content.contains("alpha rig refreshed"));
+}
+
+#[test]
 fn install_rejects_existing_rig_with_different_declared_id() {
     let _home = HomeGuard::new();
     let package = tempfile::tempdir().expect("package");
@@ -245,16 +266,18 @@ fn install_rejects_existing_stack_with_different_content() {
     let package = tempfile::tempdir().expect("package");
     write_rig(package.path(), "studio", &minimal_rig("studio"));
     write_stack(package.path(), "studio-combined", "studio");
+    let manual_stack = minimal_stack("studio-combined", "other");
 
     fs::create_dir_all(crate::core::paths::stacks().expect("stacks dir")).expect("stacks dir");
-    fs::write(
-        crate::core::paths::stack_config("studio-combined").expect("stack path"),
-        minimal_stack("studio-combined", "other"),
-    )
-    .expect("conflicting stack");
+    let stack_config = crate::core::paths::stack_config("studio-combined").expect("stack path");
+    fs::write(&stack_config, &manual_stack).expect("conflicting stack");
 
     let err = install(package.path().to_str().unwrap(), None, false).expect_err("stack collision");
     assert!(err.message.contains("different content"));
+    assert_eq!(
+        fs::read_to_string(stack_config).expect("manual stack preserved"),
+        manual_stack
+    );
 }
 
 #[test]

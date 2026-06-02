@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+use crate::core::artifact_inputs::ResolvedArtifactInput;
 use crate::core::component::Component;
 use crate::core::config;
 use crate::core::error::Result;
@@ -194,6 +195,8 @@ pub struct ComponentDeployResult {
     pub warnings: Vec<String>,
     pub error: Option<String>,
     pub artifact_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_inputs: Vec<ResolvedArtifactInput>,
     pub remote_path: Option<String>,
     pub build_exit_code: Option<i32>,
     pub deploy_exit_code: Option<i32>,
@@ -223,6 +226,7 @@ impl ComponentDeployResult {
             warnings: Vec::new(),
             error: None,
             artifact_path: component.build_artifact.clone(),
+            artifact_inputs: Vec::new(),
             remote_path: base_path::join_remote_path(Some(base_path), &component.remote_path).ok(),
             build_exit_code: None,
             deploy_exit_code: None,
@@ -288,6 +292,11 @@ impl ComponentDeployResult {
 
     pub(super) fn with_remote_path(mut self, path: String) -> Self {
         self.remote_path = Some(path);
+        self
+    }
+
+    pub(super) fn with_artifact_inputs(mut self, inputs: Vec<ResolvedArtifactInput>) -> Self {
+        self.artifact_inputs = inputs;
         self
     }
 
@@ -435,6 +444,8 @@ mod tests {
             deploy: Some(DeployCapability {
                 verifications: Vec::new(),
                 overrides: Vec::new(),
+                protected_path_suffixes: Vec::new(),
+                owner_hints: Vec::new(),
                 archive_install: Vec::new(),
                 remote_path_inference: Vec::new(),
                 path_roots: vec![RemotePathRootRule {

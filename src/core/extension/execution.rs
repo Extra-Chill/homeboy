@@ -24,7 +24,7 @@ use super::runner_contract::RunnerStepFilter;
 use super::runtime_helper;
 use super::scope::ExtensionScope;
 
-pub(crate) use action::execute_action;
+pub(crate) use action::{execute_action, wordpress_release_publish_token_remediation};
 pub use readiness::{extension_ready_status, is_extension_compatible, ExtensionReadyStatus};
 
 /// Result of executing a extension.
@@ -794,24 +794,30 @@ mod tests {
     use crate::core::extension::extract_component_extension_settings;
 
     #[test]
-    fn build_exec_env_includes_runtime_runner_helper_path() {
+    fn build_exec_env_includes_runtime_runner_helper_paths() {
         crate::test_support::with_isolated_home(|_| {
             let env = build_exec_env("rust", None, None, "{}", Some("/tmp/ext"), None, None, None);
 
-            let helper = env
-                .iter()
-                .find(|(k, _)| k == runtime_helper::RUNNER_STEPS_ENV)
-                .map(|(_, v)| v.clone());
+            for (env_var, filename) in [
+                (runtime_helper::RUNNER_STEPS_ENV, "runner-steps.sh"),
+                (runtime_helper::RUNNER_PRELUDE_ENV, "runner-prelude.sh"),
+                (runtime_helper::BASH_PREFLIGHT_ENV, "bash-preflight.sh"),
+            ] {
+                let helper = env
+                    .iter()
+                    .find(|(k, _)| k == env_var)
+                    .map(|(_, v)| v.clone());
 
-            assert!(helper.is_some());
-            assert!(helper.unwrap().ends_with("runner-steps.sh"));
+                assert!(helper.is_some(), "expected env to include {env_var}");
+                assert!(helper.unwrap().ends_with(filename));
+            }
         });
     }
 
     #[test]
     fn build_exec_env_includes_toolchain_path() {
         let env = build_exec_env(
-            "nodejs",
+            "fixture-extension",
             None,
             None,
             "{}",

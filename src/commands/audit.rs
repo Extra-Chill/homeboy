@@ -4,13 +4,16 @@ use std::path::Path;
 use homeboy::core::code_audit::{
     self, report, run_main_audit_workflow, AuditCommandOutput, AuditRunWorkflowArgs,
 };
-use homeboy::core::component::{self, TargetSpec};
+use homeboy::core::engine::execution_context::ExecutionContext;
 use homeboy::core::git::short_head_revision_at;
 use homeboy::core::observation::{
     finding_records_from_audit, ActiveObservation, NewRunRecord, RunStatus,
 };
 
-use super::utils::args::{BaselineArgs, ExtensionOverrideArgs, PositionalComponentArgs};
+use super::source_command::resolve_source_context;
+use super::utils::args::{
+    BaselineArgs, ExtensionOverrideArgs, PositionalComponentArgs, SettingArgs,
+};
 use super::{CmdResult, GlobalArgs};
 
 #[derive(Args)]
@@ -69,24 +72,21 @@ pub fn run(args: AuditArgs, _global: &GlobalArgs) -> CmdResult<AuditCommandOutpu
     let only_kinds = parse_finding_kinds(&args.only, "only")?;
     let exclude_kinds = parse_finding_kinds(&args.exclude, "exclude")?;
 
-    // Run extension audit reference setup if configured.
-    // This resolves framework dependencies (e.g. WordPress core) so their
-    // fingerprints are included in cross-reference analysis (dead code detection).
-    if let Some(ref component_id) = args.comp.component {
-        run_audit_reference_setup(component_id);
-    }
-
-    let target = component::resolve_target(TargetSpec::new(
-        args.comp.component.as_deref(),
-        args.comp.path.as_deref(),
-    ))?;
-    let resolved_id = target.component_id;
-    let resolved_path = target.source_path.to_string_lossy().to_string();
+    let source_ctx = resolve_source_context(
+        &args.comp,
+        &SettingArgs::default(),
+        &args.extension_override,
+        None,
+    )?;
+    let reference_paths = resolve_audit_reference_paths(&source_ctx);
+    let resolved_id = source_ctx.component_id.clone();
+    let resolved_path = source_ctx.source_path.to_string_lossy().to_string();
 
     let observation = start_audit_observation(&resolved_id, &resolved_path, &args);
     let workflow = run_main_audit_workflow(AuditRunWorkflowArgs {
         component_id: resolved_id.clone(),
         source_path: resolved_path.clone(),
+        reference_paths,
         conventions: args.conventions,
         only_kinds,
         exclude_kinds,
@@ -291,28 +291,17 @@ fn code_audit_result_observation_summary(
     summary
 }
 
-/// Run the extension's audit reference setup script if configured.
+/// Run configured extension audit reference setup scripts for the resolved audit target.
 ///
-/// Looks up the component's extension, checks for `audit.setup_references`, and runs it.
-/// The script exports `HOMEBOY_AUDIT_REFERENCE_PATHS` which the audit core reads
-/// to include framework dependencies in cross-reference analysis.
-fn run_audit_reference_setup(component_id_or_path: &str) {
-    // Skip for bare directory paths — no extension to look up
-    if Path::new(component_id_or_path).is_dir() {
-        return;
-    }
-
-    // Load component to find its extensions
-    let comp = match homeboy::core::component::load(component_id_or_path) {
-        Ok(c) => c,
-        Err(_) => return,
-    };
-
-    let extensions = match &comp.extensions {
+/// Setup still speaks the legacy shell boundary (`--export` stdout), but the command
+/// converts that output into typed workflow input instead of process-global state.
+fn resolve_audit_reference_paths(source_ctx: &ExecutionContext) -> Vec<String> {
+    let extensions = match &source_ctx.component.extensions {
         Some(ext) => ext,
-        None => return,
+        None => return Vec::new(),
     };
 
+    let mut reference_paths = Vec::new();
     for ext_id in extensions.keys() {
         let ext_manifest = match homeboy::core::extension::load_extension(ext_id) {
             Ok(m) => m,
@@ -340,28 +329,17 @@ fn run_audit_reference_setup(component_id_or_path: &str) {
             script_path.display()
         );
 
-        // Run the script with --export flag and capture stdout
+        // Run the script with --export flag and capture stdout.
         let output = std::process::Command::new("bash")
             .arg(script_path.to_str().unwrap_or(""))
             .arg("--export")
-            .env("HOMEBOY_COMPONENT_PATH", &comp.local_path)
-            .current_dir(&comp.local_path)
+            .env("HOMEBOY_COMPONENT_PATH", &source_ctx.component.local_path)
+            .current_dir(&source_ctx.source_path)
             .output();
 
         if let Ok(output) = output {
             let stdout = String::from_utf8_lossy(&output.stdout);
-            // Parse the export line: export HOMEBOY_AUDIT_REFERENCE_PATHS='...'
-            for line in stdout.lines() {
-                if let Some(value) = line.strip_prefix("export HOMEBOY_AUDIT_REFERENCE_PATHS=") {
-                    // Remove shell quoting (the value may be $'...' or '...' quoted)
-                    let clean = value
-                        .trim_start_matches("$'")
-                        .trim_start_matches('\'')
-                        .trim_end_matches('\'');
-                    std::env::set_var("HOMEBOY_AUDIT_REFERENCE_PATHS", clean);
-                    break;
-                }
-            }
+            reference_paths.extend(parse_audit_reference_paths_export(&stdout));
 
             // Log stderr (the script's informational output)
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -372,6 +350,33 @@ fn run_audit_reference_setup(component_id_or_path: &str) {
             }
         }
     }
+
+    reference_paths.sort();
+    reference_paths.dedup();
+    reference_paths
+}
+
+fn parse_audit_reference_paths_export(stdout: &str) -> Vec<String> {
+    stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("export HOMEBOY_AUDIT_REFERENCE_PATHS="))
+        .map(normalize_shell_export_value)
+        .unwrap_or_default()
+        .lines()
+        .map(|path| path.trim().to_string())
+        .filter(|path| !path.is_empty() && Path::new(path).is_dir())
+        .collect()
+}
+
+fn normalize_shell_export_value(value: &str) -> String {
+    value
+        .trim()
+        .trim_start_matches("$'")
+        .trim_start_matches('\'')
+        .trim_start_matches('"')
+        .trim_end_matches('\'')
+        .trim_end_matches('"')
+        .replace("\\n", "\n")
 }
 
 // Core function tests (finding_fingerprint, score_delta, weighted_finding_score_with,
@@ -382,7 +387,7 @@ fn run_audit_reference_setup(component_id_or_path: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::utils::args::{BaselineArgs, ExtensionOverrideArgs};
+    use crate::commands::utils::args::{BaselineArgs, ExtensionOverrideArgs, SettingArgs};
     use crate::test_support::with_isolated_home;
     use clap::Parser;
     use homeboy::core::observation::ObservationStore;
@@ -446,6 +451,81 @@ mod tests {
         }
     }
 
+    fn write_reference_extension(
+        home: &std::path::Path,
+        id: &str,
+        reference_path: &std::path::Path,
+    ) {
+        let extension_dir = home.join(".config/homeboy/extensions").join(id);
+        fs::create_dir_all(&extension_dir).expect("extension dir");
+        fs::write(
+            extension_dir.join(format!("{id}.json")),
+            serde_json::json!({
+                "name": id,
+                "version": "0.0.0",
+                "audit": { "setup_references": "setup.sh" }
+            })
+            .to_string(),
+        )
+        .expect("extension manifest");
+        fs::write(
+            extension_dir.join("setup.sh"),
+            format!(
+                "printf '%s\\n' \"export HOMEBOY_AUDIT_REFERENCE_PATHS='{}'\"\n",
+                reference_path.display()
+            ),
+        )
+        .expect("setup script");
+    }
+
+    fn write_extension_without_reference_setup(home: &std::path::Path, id: &str) {
+        let extension_dir = home.join(".config/homeboy/extensions").join(id);
+        fs::create_dir_all(&extension_dir).expect("extension dir");
+        fs::write(
+            extension_dir.join(format!("{id}.json")),
+            serde_json::json!({
+                "name": id,
+                "version": "0.0.0",
+                "audit": {}
+            })
+            .to_string(),
+        )
+        .expect("extension manifest");
+    }
+
+    fn write_standalone_component(
+        home: &std::path::Path,
+        id: &str,
+        component_path: &std::path::Path,
+        extension_id: &str,
+    ) {
+        let component_dir = home.join(".config/homeboy/components");
+        fs::create_dir_all(&component_dir).expect("component dir");
+        fs::write(
+            component_dir.join(format!("{id}.json")),
+            serde_json::json!({
+                "local_path": component_path,
+                "extensions": { extension_id: {} }
+            })
+            .to_string(),
+        )
+        .expect("component config");
+    }
+
+    fn source_context_for(
+        component: Option<String>,
+        path: Option<String>,
+        extensions: Vec<String>,
+    ) -> ExecutionContext {
+        resolve_source_context(
+            &PositionalComponentArgs { component, path },
+            &SettingArgs::default(),
+            &ExtensionOverrideArgs { extensions },
+            None,
+        )
+        .expect("source context")
+    }
+
     #[derive(Parser)]
     struct TestCli {
         #[command(flatten)]
@@ -467,6 +547,127 @@ mod tests {
 
         assert_eq!(cli.audit.extension_override.extensions, vec!["rust"]);
         assert_eq!(cli.audit.changed_since.as_deref(), Some("origin/main"));
+    }
+
+    #[test]
+    fn audit_reference_setup_resolves_registered_component_context() {
+        with_isolated_home(|home| {
+            std::env::remove_var("HOMEBOY_AUDIT_REFERENCE_PATHS");
+            let component_dir = tmp_dir("registered-reference-component");
+            let reference_dir = tmp_dir("registered-reference-dependency");
+            fs::create_dir_all(&component_dir).expect("component dir");
+            fs::create_dir_all(&reference_dir).expect("reference dir");
+            write_reference_extension(home.path(), "fixture", &reference_dir);
+            write_standalone_component(home.path(), "demo", &component_dir, "fixture");
+
+            let source_ctx = source_context_for(Some("demo".to_string()), None, vec![]);
+            let reference_paths = resolve_audit_reference_paths(&source_ctx);
+
+            assert_eq!(
+                reference_paths,
+                vec![reference_dir.to_string_lossy().to_string()]
+            );
+            assert!(std::env::var("HOMEBOY_AUDIT_REFERENCE_PATHS").is_err());
+            let _ = fs::remove_dir_all(component_dir);
+            let _ = fs::remove_dir_all(reference_dir);
+        });
+    }
+
+    #[test]
+    fn audit_reference_setup_respects_path_portable_config() {
+        with_isolated_home(|home| {
+            let component_dir = tmp_dir("path-reference-component");
+            let reference_dir = tmp_dir("path-reference-dependency");
+            fs::create_dir_all(&component_dir).expect("component dir");
+            fs::create_dir_all(&reference_dir).expect("reference dir");
+            fs::write(
+                component_dir.join("homeboy.json"),
+                serde_json::json!({
+                    "id": "portable-demo",
+                    "extensions": { "fixture": {} }
+                })
+                .to_string(),
+            )
+            .expect("portable config");
+            write_reference_extension(home.path(), "fixture", &reference_dir);
+
+            let source_ctx = source_context_for(
+                None,
+                Some(component_dir.to_string_lossy().to_string()),
+                vec![],
+            );
+            let reference_paths = resolve_audit_reference_paths(&source_ctx);
+
+            assert_eq!(source_ctx.component_id, "portable-demo");
+            assert_eq!(
+                reference_paths,
+                vec![reference_dir.to_string_lossy().to_string()]
+            );
+            let _ = fs::remove_dir_all(component_dir);
+            let _ = fs::remove_dir_all(reference_dir);
+        });
+    }
+
+    #[test]
+    fn audit_reference_setup_respects_extension_override() {
+        with_isolated_home(|home| {
+            let component_dir = tmp_dir("override-reference-component");
+            let reference_dir = tmp_dir("override-reference-dependency");
+            fs::create_dir_all(&component_dir).expect("component dir");
+            fs::create_dir_all(&reference_dir).expect("reference dir");
+            fs::write(
+                component_dir.join("homeboy.json"),
+                serde_json::json!({
+                    "id": "override-demo",
+                    "extensions": { "unused": {} }
+                })
+                .to_string(),
+            )
+            .expect("portable config");
+            write_extension_without_reference_setup(home.path(), "unused");
+            write_reference_extension(home.path(), "override", &reference_dir);
+
+            let source_ctx = source_context_for(
+                None,
+                Some(component_dir.to_string_lossy().to_string()),
+                vec!["override".to_string()],
+            );
+            let reference_paths = resolve_audit_reference_paths(&source_ctx);
+
+            assert_eq!(
+                reference_paths,
+                vec![reference_dir.to_string_lossy().to_string()]
+            );
+            let _ = fs::remove_dir_all(component_dir);
+            let _ = fs::remove_dir_all(reference_dir);
+        });
+    }
+
+    #[test]
+    fn audit_reference_setup_returns_empty_without_setup_contract() {
+        with_isolated_home(|home| {
+            let component_dir = tmp_dir("no-reference-component");
+            fs::create_dir_all(&component_dir).expect("component dir");
+            fs::write(
+                component_dir.join("homeboy.json"),
+                serde_json::json!({
+                    "id": "no-reference-demo",
+                    "extensions": { "fixture": {} }
+                })
+                .to_string(),
+            )
+            .expect("portable config");
+            write_extension_without_reference_setup(home.path(), "fixture");
+
+            let source_ctx = source_context_for(
+                None,
+                Some(component_dir.to_string_lossy().to_string()),
+                vec![],
+            );
+
+            assert!(resolve_audit_reference_paths(&source_ctx).is_empty());
+            let _ = fs::remove_dir_all(component_dir);
+        });
     }
 
     #[test]

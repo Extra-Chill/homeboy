@@ -15,6 +15,7 @@ use crate::core::source_snapshot::SourceSnapshot;
 use super::broker_http;
 use super::capabilities::{runner_capability_snapshot, validate_runner_capability_preflight};
 use super::evidence::mirror_daemon_evidence;
+use super::normalize_runner_command_env;
 use super::resource_metrics::{measured_command_output, RunnerResourceMetrics};
 use super::{load, status, Runner, RunnerCapabilityPreflight, RunnerKind, RunnerTunnelMode};
 
@@ -104,6 +105,7 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
     let connected = status(runner_id)?;
     let mut request_env = runner.env.clone();
     request_env.extend(options.env.clone());
+    normalize_runner_command_env(&mut request_env);
     let required_extensions =
         required_extensions_for_command(&options.command, &options.required_extensions);
 
@@ -145,7 +147,7 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
     }
 
     match runner.kind {
-        RunnerKind::Local => exec_local(&runner, cwd, options.command, options.env),
+        RunnerKind::Local => exec_local(&runner, cwd, options.command, request_env),
         RunnerKind::Ssh if options.allow_diagnostic_ssh => {
             preflight_runner_capability_plan(
                 &runner,
@@ -950,7 +952,7 @@ mod tests {
             "lint".to_string(),
             "--extension".to_string(),
             "rust".to_string(),
-            "--extension=nodejs".to_string(),
+            "--extension=fixture-build".to_string(),
         ];
 
         assert_eq!(
@@ -958,7 +960,7 @@ mod tests {
             vec![
                 "wordpress".to_string(),
                 "rust".to_string(),
-                "nodejs".to_string(),
+                "fixture-build".to_string(),
             ]
         );
     }
@@ -1095,16 +1097,9 @@ mod tests {
         crate::test_support::with_isolated_home(|_| {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
             let addr = listener.local_addr().expect("addr");
-            drop(listener);
             std::thread::spawn(move || {
-                let _ = crate::core::daemon::serve(addr);
+                let _ = crate::core::daemon::serve_listener(listener);
             });
-            for _ in 0..100 {
-                if std::net::TcpStream::connect(addr).is_ok() {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(10));
-            }
             let broker_url = format!("http://{addr}");
             let worker_broker_url = broker_url.clone();
             let worker = std::thread::spawn(move || {

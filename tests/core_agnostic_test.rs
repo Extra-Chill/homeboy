@@ -33,6 +33,17 @@ const CORE_OWNED_SOURCE_ROOTS: &[&str] = &[
 
 const CORE_OWNED_TEST_CONTENT_ROOTS: &[&str] = &["tests/core", "tests/fixtures"];
 
+const CORE_EXTENSION_BOUNDARY_ROOTS: &[&str] =
+    &["src/core", "src/commands", "tests/core", "tests/fixtures"];
+
+// Concrete extension IDs belong in extension-owned fixtures/config, not in
+// Homeboy core or core-owned tests. Keep this list to IDs provided by external
+// extensions so the guard stays independent of any one regression site.
+const CONCRETE_EXTENSION_IDS: &[Term] = &[Term {
+    name: "nodejs",
+    kind: MatchKind::Token,
+}];
+
 const TERMS: &[Term] = &[
     Term {
         name: "wordpress",
@@ -1104,7 +1115,7 @@ const BASELINE: &[ViolationKey] = &[
     },
 ];
 
-const BASELINE_OCCURRENCES: usize = 637;
+const BASELINE_OCCURRENCES: usize = 640;
 
 // Known core-owned test/fixture literal debt tracked by #3034. Keep this list
 // explicit so stale rows and occurrence-count changes force cleanup or review.
@@ -1190,10 +1201,6 @@ const TEST_CONTENT_BASELINE: &[ViolationKey] = &[
         term: "php",
     },
     ViolationKey {
-        path: "src/core/source_snapshot.rs",
-        term: "cargo",
-    },
-    ViolationKey {
         path: "src/core/triage/tests.rs",
         term: "wordpress",
     },
@@ -1238,10 +1245,6 @@ const TEST_CONTENT_BASELINE: &[ViolationKey] = &[
         term: "wordpress",
     },
     ViolationKey {
-        path: "tests/core/rig/workloads_test.rs",
-        term: "nodejs",
-    },
-    ViolationKey {
         path: "tests/fixtures/failure_digest/lint.json",
         term: "phpcs",
     },
@@ -1251,7 +1254,7 @@ const TEST_CONTENT_BASELINE: &[ViolationKey] = &[
     },
 ];
 
-const TEST_CONTENT_BASELINE_OCCURRENCES: usize = 102;
+const TEST_CONTENT_BASELINE_OCCURRENCES: usize = 99;
 
 #[test]
 fn core_owned_source_stays_language_and_framework_agnostic() {
@@ -1343,6 +1346,30 @@ fn core_owned_test_content_stays_language_and_framework_agnostic() {
     assert!(
         !term_distribution.is_empty(),
         "test-content baseline should stay explicit until the #3034 cleanup removes existing core-owned fixture leaks"
+    );
+}
+
+#[test]
+fn core_content_stays_free_of_concrete_extension_ids() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut found = BTreeMap::<(String, String), Vec<usize>>::new();
+
+    for source_root in CORE_EXTENSION_BOUNDARY_ROOTS {
+        let path = root.join(source_root);
+        if path.exists() {
+            scan_concrete_extension_ids(root, &path, &mut found);
+        }
+    }
+
+    let unexpected = found
+        .iter()
+        .map(|((path, term), lines)| format!("{path}: `{term}` on lines {lines:?}"))
+        .collect::<Vec<_>>();
+
+    assert!(
+        unexpected.is_empty(),
+        "Homeboy core and core-owned tests must not reference concrete extension IDs. Use neutral fixture IDs in core tests and move real extension dependencies into extension-owned tests/config. Concrete extension references found:\n{}",
+        unexpected.join("\n")
     );
 }
 
@@ -1494,6 +1521,44 @@ fn scan_test_content_line(
                 .entry((relative.to_string(), term.name.to_string()))
                 .or_default()
                 .push(line_number);
+        }
+    }
+}
+
+fn scan_concrete_extension_ids(
+    root: &Path,
+    path: &Path,
+    found: &mut BTreeMap<(String, String), Vec<usize>>,
+) {
+    if path.is_dir() {
+        for entry in fs::read_dir(path).expect("boundary path should be readable") {
+            let entry = entry.expect("boundary entry should be readable");
+            scan_concrete_extension_ids(root, &entry.path(), found);
+        }
+        return;
+    }
+
+    if !is_scannable_test_content_file(path) {
+        return;
+    }
+
+    let content = fs::read_to_string(path).expect("boundary file should be readable");
+    let relative = relative_path(root, path);
+    let rust_string_literals_only = path.extension().is_some_and(|ext| ext == "rs");
+
+    for (index, line) in content.lines().enumerate() {
+        let segments = if rust_string_literals_only {
+            rust_string_literal_segments(line)
+        } else {
+            vec![line.to_string()]
+        };
+        for term in CONCRETE_EXTENSION_IDS {
+            if segments.iter().any(|segment| term.matches(segment)) {
+                found
+                    .entry((relative.clone(), term.name.to_string()))
+                    .or_default()
+                    .push(index + 1);
+            }
         }
     }
 }

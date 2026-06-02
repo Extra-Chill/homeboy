@@ -6,13 +6,13 @@ use glob_match::glob_match;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use crate::core::engine::shell;
+use crate::core::engine::{shell, temp};
 use crate::core::error::{Error, Result};
 use crate::core::server::{self, Server, SshClient};
 
 use super::{load, Runner, RunnerKind};
 
-const DEFAULT_EXCLUDES: &[&str] = &[
+pub(super) const DEFAULT_EXCLUDES: &[&str] = &[
     ".git",
     ".git/**",
     "._*",
@@ -46,6 +46,15 @@ const DEFAULT_EXCLUDES: &[&str] = &[
 pub enum RunnerWorkspaceSyncMode {
     Snapshot,
     Git,
+}
+
+impl RunnerWorkspaceSyncMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Snapshot => "snapshot",
+            Self::Git => "git",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -94,9 +103,17 @@ pub fn sync_workspace(
     match options.mode {
         RunnerWorkspaceSyncMode::Snapshot => {
             let snapshot = snapshot_identity(&local_path)?;
-            let remote_path = deterministic_remote_path(workspace_root, &local_path, &snapshot);
+            let remote_path = temp::unique_name(
+                &deterministic_remote_path(workspace_root, &local_path, &snapshot),
+                "",
+            );
             let stats = local_snapshot_stats(&local_path, DEFAULT_EXCLUDES)?;
             materialize_snapshot(&runner, &local_path, &remote_path, DEFAULT_EXCLUDES)?;
+            super::validation_dependencies::sync_validation_dependency_workspaces(
+                &runner,
+                &local_path,
+                &remote_path,
+            )?;
             Ok((
                 RunnerWorkspaceSyncOutput {
                     command: "runner.workspace.sync",
@@ -121,6 +138,11 @@ pub fn sync_workspace(
                 &git.remote_url,
                 &git.head,
                 git.changed_since_base.as_deref(),
+            )?;
+            super::validation_dependencies::sync_validation_dependency_workspaces(
+                &runner,
+                &local_path,
+                &remote_path,
             )?;
             Ok((
                 RunnerWorkspaceSyncOutput {
@@ -370,60 +392,75 @@ fn is_excluded(root: &Path, path: &Path, excludes: &[&str]) -> bool {
     })
 }
 
-fn materialize_snapshot(
+pub(super) fn materialize_snapshot(
     runner: &Runner,
     local_path: &Path,
     remote_path: &str,
     excludes: &[&str],
 ) -> Result<()> {
     match runner.kind {
-        RunnerKind::Local => materialize_snapshot_local(local_path, remote_path, excludes),
+        RunnerKind::Local => materialize_snapshot_piped(
+            local_path,
+            &format!(
+                "sh -c {}",
+                shell::quote_arg(&snapshot_install_command(remote_path))
+            ),
+            excludes,
+            "materialize local workspace snapshot",
+        ),
         RunnerKind::Ssh => {
-            let (server, client) = ssh_client_for_runner(runner)?;
+            let (_server, client) = ssh_client_for_runner(runner)?;
             if client.is_local {
-                materialize_snapshot_local(local_path, remote_path, excludes)
+                materialize_snapshot_piped(
+                    local_path,
+                    &format!(
+                        "sh -c {}",
+                        shell::quote_arg(&snapshot_install_command(remote_path))
+                    ),
+                    excludes,
+                    "materialize local workspace snapshot",
+                )
             } else {
-                materialize_snapshot_ssh(local_path, remote_path, excludes, &server, &client)
+                let remote = format!("{}@{}", client.user, client.host);
+                let remote_command = snapshot_install_command(remote_path);
+                let target = format!(
+                    "ssh {ssh_args} {remote} {remote_command}",
+                    ssh_args = ssh_args(&client),
+                    remote = shell::quote_arg(&remote),
+                    remote_command = shell::quote_arg(&remote_command),
+                );
+                materialize_snapshot_piped(
+                    local_path,
+                    &target,
+                    excludes,
+                    "materialize SSH workspace snapshot",
+                )
             }
         }
     }
 }
 
-fn materialize_snapshot_local(
+fn materialize_snapshot_piped(
     local_path: &Path,
-    remote_path: &str,
+    target_command: &str,
     excludes: &[&str],
+    action: &str,
 ) -> Result<()> {
     let command = format!(
-        "rm -rf {dest} && mkdir -p {dest} && COPYFILE_DISABLE=1 tar -C {src} {exclude} -cf - . | tar -C {dest} -xf -",
+        "COPYFILE_DISABLE=1 tar -C {src} {exclude} -cf - . | {target_command}",
         src = shell::quote_arg(&local_path.display().to_string()),
-        dest = shell::quote_arg(remote_path),
         exclude = tar_exclude_args(excludes),
+        target_command = target_command,
     );
-    run_shell_command(&command, "materialize local workspace snapshot")
+    run_shell_command(&command, action)
 }
 
-fn materialize_snapshot_ssh(
-    local_path: &Path,
-    remote_path: &str,
-    excludes: &[&str],
-    _server: &Server,
-    client: &SshClient,
-) -> Result<()> {
-    let remote = format!("{}@{}", client.user, client.host);
-    let remote_command = format!(
-        "rm -rf {dest} && mkdir -p {dest} && tar -C {dest} -xf -",
+fn snapshot_install_command(remote_path: &str) -> String {
+    format!(
+        "parent={parent}; dest={dest}; tmp=\"${{dest}}.tmp.$$\"; mkdir -p \"$parent\" && trap 'rm -rf \"$tmp\"' EXIT; rm -rf \"$tmp\" && mkdir -p \"$tmp\" && tar -C \"$tmp\" -xf - && rm -rf \"$dest\" && mv \"$tmp\" \"$dest\"",
+        parent = shell::quote_arg(parent_remote_path(remote_path).as_str()),
         dest = shell::quote_arg(remote_path),
-    );
-    let command = format!(
-        "COPYFILE_DISABLE=1 tar -C {src} {exclude} -cf - . | ssh {ssh_args} {remote} {remote_command}",
-        src = shell::quote_arg(&local_path.display().to_string()),
-        exclude = tar_exclude_args(excludes),
-        ssh_args = ssh_args(client),
-        remote = shell::quote_arg(&remote),
-        remote_command = shell::quote_arg(&remote_command),
-    );
-    run_shell_command(&command, "materialize SSH workspace snapshot")
+    )
 }
 
 fn materialize_git(
@@ -476,7 +513,7 @@ fn materialize_git_command(
         .unwrap_or_default();
 
     format!(
-        "mkdir -p {parent} && if [ -d {dest}/.git ]; then git -C {dest} fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'; else rm -rf {dest} && git clone {url} {dest} && git -C {dest} fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'; fi{fetch_changed_since} && git -C {dest} checkout --detach {head} && git -C {dest} clean -ffdqx",
+        "mkdir -p {parent} && if [ -d {dest}/.git ]; then git -C {dest} reset --hard && git -C {dest} clean -ffdqx && git -C {dest} fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'; else rm -rf {dest} && git clone {url} {dest} && git -C {dest} fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'; fi{fetch_changed_since} && git -C {dest} checkout --detach {head} && git -C {dest} reset --hard {head} && git -C {dest} clean -ffdqx",
         parent = shell::quote_arg(parent_remote_path(remote_path).as_str()),
         dest = dest,
         url = shell::quote_arg(remote_url),
@@ -549,14 +586,14 @@ fn ssh_args(client: &SshClient) -> String {
     args.join(" ")
 }
 
-fn parent_remote_path(path: &str) -> String {
+pub(super) fn parent_remote_path(path: &str) -> String {
     path.rsplit_once('/')
         .map(|(parent, _)| if parent.is_empty() { "/" } else { parent })
         .unwrap_or("/")
         .to_string()
 }
 
-fn sanitize_path_segment(value: &str) -> String {
+pub(super) fn sanitize_path_segment(value: &str) -> String {
     let segment = value
         .chars()
         .map(|ch| {
@@ -706,6 +743,44 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_sync_uses_unique_clean_workspace_for_same_snapshot() {
+        crate::test_support::with_isolated_home(|_| {
+            let source = tempfile::tempdir().expect("source tempdir");
+            let runner_root = tempfile::tempdir().expect("runner root tempdir");
+            fs::write(source.path().join("Cargo.toml"), "[package]\nname='app'\n")
+                .expect("manifest");
+
+            super::super::create(
+                &format!(
+                    r#"{{"id":"lab-local","kind":"local","workspace_root":"{}"}}"#,
+                    runner_root.path().display()
+                ),
+                false,
+            )
+            .expect("create runner");
+
+            let options = RunnerWorkspaceSyncOptions {
+                path: source.path().display().to_string(),
+                mode: RunnerWorkspaceSyncMode::Snapshot,
+                changed_since_base: None,
+            };
+            let (first, _) = sync_workspace("lab-local", options.clone()).expect("first sync");
+            let remote_path = Path::new(&first.remote_path);
+            assert!(remote_path.join("Cargo.toml").exists());
+
+            fs::write(remote_path.join("sentinel.txt"), "kept\n").expect("sentinel");
+
+            let (second, _) = sync_workspace("lab-local", options).expect("second sync");
+            let second_remote_path = Path::new(&second.remote_path);
+
+            assert_ne!(second.remote_path, first.remote_path);
+            assert!(second_remote_path.join("Cargo.toml").exists());
+            assert!(!second_remote_path.join("sentinel.txt").exists());
+            assert!(remote_path.join("sentinel.txt").exists());
+        });
+    }
+
+    #[test]
     fn git_materialization_fetches_changed_since_base_before_checkout() {
         let command = materialize_git_command(
             "/srv/homeboy/_lab_workspaces/homeboy-abc",
@@ -718,6 +793,8 @@ mod tests {
         assert!(command.contains("rev-parse --verify -q 'def456^{commit}'"));
         assert!(command.contains("fetch origin def456"));
         assert!(command.contains("checkout --detach abc123"));
+        assert!(command.contains("reset --hard"));
+        assert!(command.contains("reset --hard abc123"));
     }
 
     #[test]

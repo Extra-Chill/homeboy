@@ -5,10 +5,12 @@ use std::collections::BTreeMap;
 
 use super::baseline::TraceBaselineComparison;
 use super::overlay_lock::TraceOverlayLockRecord;
-use super::parsing::{
-    TraceArtifact, TraceAssertionStatus, TraceList, TraceResults, TraceSpanStatus,
-};
+use super::parsing::{TraceArtifact, TraceAssertionStatus, TraceList, TraceResults};
 use super::run::{TraceOverlay, TraceRunWorkflowResult};
+use super::span_summary::{
+    format_span_summary_metadata, format_span_summary_status, trace_span_summaries,
+    TraceSpanSummaryOutput,
+};
 use crate::core::engine::detail_output::{bounded_items, DEFAULT_DETAIL_ITEM_LIMIT};
 use crate::core::rig::RigStateSnapshot;
 use crate::core::runner::is_reportable_artifact_evidence_path;
@@ -35,6 +37,8 @@ pub struct TraceRunOutput {
     pub artifacts: Vec<TraceArtifact>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub results: Option<TraceResults>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub span_summaries: Vec<TraceSpanSummaryOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rig_state: Option<RigStateSnapshot>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -424,6 +428,11 @@ fn from_run_workflow_result(
         .as_ref()
         .map(|r| reportable_trace_artifacts(&r.artifacts))
         .unwrap_or_default();
+    let span_summaries = result
+        .results
+        .as_ref()
+        .map(|results| trace_span_summaries(results, &BTreeMap::new()))
+        .unwrap_or_default();
     TraceCommandOutput::Run(Box::new(TraceRunOutput {
         passed: result.exit_code == 0 && result.status == "pass",
         status: result.status,
@@ -431,6 +440,7 @@ fn from_run_workflow_result(
         exit_code: result.exit_code,
         artifacts,
         results: result.results,
+        span_summaries,
         rig_state,
         failure: result.failure,
         overlays: result.overlays,
@@ -456,24 +466,20 @@ pub fn render_markdown(results: &TraceResults, overlays: &[TraceOverlay]) -> Str
 
     if !results.span_results.is_empty() {
         out.push_str("\n## Spans\n\n");
-        out.push_str("| Span | From | To | Duration | Status |\n");
-        out.push_str("|---|---|---|---:|---|\n");
-        let (spans, metadata) = bounded_items(&results.span_results, DEFAULT_DETAIL_ITEM_LIMIT);
+        out.push_str("| Span | From | To | Duration | Status | Metadata |\n");
+        out.push_str("|---|---|---|---:|---|---|\n");
+        let summaries = trace_span_summaries(results, &BTreeMap::new());
+        let (spans, metadata) = bounded_items(&summaries, DEFAULT_DETAIL_ITEM_LIMIT);
         for span in spans {
             let duration = span
                 .duration_ms
                 .map(|ms| format!("{}ms", ms))
                 .unwrap_or_else(|| "-".to_string());
-            let status = match span.status {
-                TraceSpanStatus::Ok => "ok".to_string(),
-                TraceSpanStatus::Skipped => span
-                    .message
-                    .clone()
-                    .unwrap_or_else(|| "skipped".to_string()),
-            };
+            let status = format_span_summary_status(&span);
+            let metadata = format_span_summary_metadata(span.metadata.as_ref());
             out.push_str(&format!(
-                "| `{}` | `{}` | `{}` | {} | {} |\n",
-                span.id, span.from, span.to, duration, status
+                "| `{}` | `{}` | `{}` | {} | {} | {} |\n",
+                span.id, span.from, span.to, duration, status, metadata
             ));
         }
         push_omitted_detail_line(&mut out, "span(s)", &metadata);

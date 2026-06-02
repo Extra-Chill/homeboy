@@ -23,6 +23,7 @@ pub(super) fn derive_overall_status(results: &[ReleaseStepResult]) -> ReleaseSte
 }
 
 pub(super) fn build_summary(
+    component_id: &str,
     results: &[ReleaseStepResult],
     status: &ReleaseStepStatus,
 ) -> ReleaseRunSummary {
@@ -43,7 +44,7 @@ pub(super) fn build_summary(
         .filter(|r| matches!(r.status, ReleaseStepStatus::Missing))
         .count();
 
-    let next_actions = match status {
+    let mut next_actions = match status {
         ReleaseStepStatus::PartialSuccess | ReleaseStepStatus::Failed => vec![
             "Fix the issue and re-run (idempotent - completed steps will succeed again)"
                 .to_string(),
@@ -53,6 +54,17 @@ pub(super) fn build_summary(
         }
         _ => Vec::new(),
     };
+
+    if has_auth_required_publish_skip(results) {
+        next_actions.push(format!(
+            "To finish GitHub Release assets without retrying registry publish, run: homeboy release {} --head --skip-publish --from-artifacts <artifact-dir>",
+            component_id
+        ));
+        next_actions.push(format!(
+            "After registry authentication is fixed, retry registry publish with: homeboy release {} --head",
+            component_id
+        ));
+    }
 
     let success_summary = if matches!(status, ReleaseStepStatus::Success) {
         results.iter().filter_map(build_step_summary_line).collect()
@@ -69,6 +81,17 @@ pub(super) fn build_summary(
         next_actions,
         success_summary,
     }
+}
+
+fn has_auth_required_publish_skip(results: &[ReleaseStepResult]) -> bool {
+    results.iter().any(|result| {
+        result.step_type.starts_with("publish.")
+            && matches!(result.status, ReleaseStepStatus::Skipped)
+            && result.warnings.iter().any(|warning| {
+                let warning = warning.to_ascii_lowercase();
+                warning.contains("requires authentication") || warning.contains("eneedauth")
+            })
+    })
 }
 
 fn build_step_summary_line(result: &ReleaseStepResult) -> Option<String> {
@@ -202,12 +225,43 @@ mod tests {
         ];
 
         let status = derive_overall_status(&results);
-        let summary = build_summary(&results, &status);
+        let summary = build_summary("fixture", &results, &status);
 
         assert_eq!(summary.total_steps, 3);
         assert_eq!(summary.succeeded, 1);
         assert_eq!(summary.failed, 1);
         assert_eq!(summary.skipped, 1);
         assert_eq!(summary.next_actions.len(), 1);
+    }
+
+    #[test]
+    fn summary_adds_recovery_guidance_for_auth_required_publish_skip() {
+        let results = vec![
+            step("github.release", ReleaseStepStatus::Success),
+            ReleaseStepResult {
+                id: "publish.nodejs".to_string(),
+                step_type: "publish.nodejs".to_string(),
+                status: ReleaseStepStatus::Skipped,
+                missing: Vec::new(),
+                warnings: vec![
+                    "Publish to nodejs via nodejs requires authentication: npm authentication required (ENEEDAUTH)"
+                        .to_string(),
+                ],
+                hints: Vec::new(),
+                data: None,
+                error: None,
+            },
+        ];
+        let status = derive_overall_status(&results);
+        let summary = build_summary("wp-codebox", &results, &status);
+
+        assert_eq!(status, ReleaseStepStatus::Success);
+        assert!(summary.next_actions.iter().any(|action| action.contains(
+            "homeboy release wp-codebox --head --skip-publish --from-artifacts <artifact-dir>"
+        )));
+        assert!(summary
+            .next_actions
+            .iter()
+            .any(|action| action.contains("homeboy release wp-codebox --head")));
     }
 }

@@ -23,15 +23,16 @@ pub(crate) use commits::extract_version_from_tag;
 pub use commits::{
     categorize_commits, find_version_commit, find_version_release_commit, get_commits_since_tag,
     get_commits_since_tag_for_path, get_last_n_commits, get_latest_tag, get_latest_tag_with_prefix,
-    recommended_bump_from_commits, strip_conventional_prefix, CommitCategory, CommitCounts,
-    CommitInfo, MonorepoContext, SemverBump,
+    get_previous_tag_before_with_prefix, recommended_bump_from_commits, strip_conventional_prefix,
+    CommitCategory, CommitCounts, CommitInfo, MonorepoContext, SemverBump,
 };
 pub use github::{
-    gh_probe_succeeds, issue_close, issue_comment, issue_create, issue_edit, issue_find, pr_create,
-    pr_edit, pr_files, pr_find, pr_merge, pr_view, GithubFindItem, GithubFindOutput,
-    GithubIssueOutput, GithubPrOutput, GithubPrView, IssueCloseOptions, IssueCloseReason,
-    IssueCommentOptions, IssueCreateOptions, IssueEditOptions, IssueFindOptions, IssueState,
-    PrCreateOptions, PrEditOptions, PrFindOptions, PrMergeOptions, PrState,
+    gh_probe_succeeds, github_token_from_env_or_gh, issue_close, issue_comment, issue_create,
+    issue_edit, issue_find, pr_create, pr_edit, pr_files, pr_find, pr_merge, pr_view,
+    GithubFindItem, GithubFindOutput, GithubIssueOutput, GithubPrOutput, GithubPrView,
+    IssueCloseOptions, IssueCloseReason, IssueCommentOptions, IssueCreateOptions, IssueEditOptions,
+    IssueFindOptions, IssueState, PrCreateOptions, PrEditOptions, PrFindOptions, PrMergeOptions,
+    PrState,
 };
 pub use github_pr_comments::{pr_comment, PrCommentMode, PrCommentOptions};
 pub use operation_output::GitOutput;

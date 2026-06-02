@@ -4,6 +4,58 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.218.0] - 2026-06-02
+
+### Added
+- feat(agent-task): run submitted lifecycle records
+
+### Changed
+- refactor(agent-task): keep lifecycle store path generic
+- refactor(agent-task): split lifecycle persistence helpers
+
+## [0.217.0] - 2026-06-02
+
+### Added
+- feat(agent-task): add durable lifecycle surfaces
+- feat(agent-task): promote patch artifacts into worktrees
+- preserve generic preview metadata
+- feat(agent-task): add resource-aware fanout scheduling
+- add settings matrix runner
+
+### Changed
+- refactor(agent-task): split scheduler plan types
+
+### Fixed
+- fix(agent-task): simplify lifecycle artifact collection
+- keep command path fixtures core agnostic
+- keep command path toolchain agnostic
+- keep matrix args out of command root
+- keep PATH helpers out of ssh client
+- pass reference paths through workflow inputs
+- model component selection as a plan
+- reuse target resolution for local context
+- preserve execution component overrides
+- normalize lab command PATH
+- refresh installed sources by package
+- use GitHub generated release notes
+
+## [0.216.2] - 2026-06-01
+
+### Fixed
+- fail zero-finding producer errors
+
+## [0.216.1] - 2026-06-01
+
+### Changed
+- apply rustfmt
+
+### Fixed
+- keep structural complexity review-only
+- refresh broken installed symlinks
+- prevent plugin dir double-nesting + correct extract-command placeholder hint
+- pass agent task provider config env
+- route nested extension settings
+
 ## [0.216.0] - 2026-06-01
 
 ### Added

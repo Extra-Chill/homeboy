@@ -245,15 +245,15 @@ pub(crate) fn audit_path_with_id_with_plan_and_analysis(
     component_id: &str,
     source_path: &str,
     plan: &AuditExecutionPlan,
+    reference_paths: &[String],
     extension_overrides: &[String],
 ) -> Result<AuditWithAnalysis> {
-    let ref_paths = read_reference_paths_from_env();
     audit_internal(
         component_id,
         source_path,
         None,
         None,
-        &ref_paths,
+        reference_paths,
         plan,
         extension_overrides,
     )
@@ -294,15 +294,15 @@ pub(crate) fn audit_path_scoped_with_plan_and_analysis(
     file_filter: &[String],
     git_ref: Option<&str>,
     plan: &AuditExecutionPlan,
+    reference_paths: &[String],
     extension_overrides: &[String],
 ) -> Result<AuditWithAnalysis> {
-    let ref_paths = read_reference_paths_from_env();
     audit_internal(
         component_id,
         source_path,
         Some(file_filter),
         git_ref,
-        &ref_paths,
+        reference_paths,
         plan,
         extension_overrides,
     )
