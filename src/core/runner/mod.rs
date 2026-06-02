@@ -14,6 +14,7 @@ mod broker_http;
 mod capabilities;
 mod command_path;
 mod connection;
+mod daemon_health;
 mod evidence;
 mod execution;
 mod lab;

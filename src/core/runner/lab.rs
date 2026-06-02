@@ -3,7 +3,6 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
-use crate::core::error::ErrorCode;
 use crate::core::observation::{PREVIEW_METADATA_ENV, PREVIEW_PUBLIC_URL_ENV};
 use crate::core::plan::{HomeboyPlan, PlanKind, PlanStep, PlanStepStatus, PlanValues};
 use crate::core::source_snapshot::SourceSnapshot;
@@ -19,6 +18,7 @@ use super::{
     RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
 };
 
+use super::daemon_health::runner_daemon_health_failure;
 use super::lab_apply::apply_lab_offload_patch;
 use super::lab_env::{build_lab_offload_env, forward_env_if_present};
 use super::lab_workspaces::{
@@ -611,26 +611,6 @@ fn automatic_capability_fallback(
         )),
         plan,
         messages: vec![format!("Lab offload: {reason}; running locally.")],
-    }
-}
-
-fn runner_daemon_health_failure(err: &Error) -> Option<String> {
-    if !matches!(
-        err.code,
-        ErrorCode::InternalUnexpected | ErrorCode::InternalJsonError
-    ) {
-        return None;
-    }
-
-    let message = err.message.as_str();
-    let daemon_transport_failure = message.contains("query runner daemon")
-        || message.contains("submit runner daemon exec job")
-        || message.contains("parse daemon exec response")
-        || message.contains("daemon exec request failed");
-    if daemon_transport_failure {
-        Some(format!("runner daemon health check failed: {message}"))
-    } else {
-        None
     }
 }
 
@@ -1479,28 +1459,6 @@ mod tests {
         .expect_err("explicit runner should error");
 
         assert!(err.message.contains("could not connect runner"));
-    }
-
-    #[test]
-    fn lab_offload_classifies_stale_daemon_transport_failures() {
-        let err = Error::internal_unexpected(
-            "query runner daemon: error sending request for url (http://127.0.0.1:63534/jobs/id)",
-        );
-
-        assert_eq!(
-            runner_daemon_health_failure(&err),
-            Some(
-                "runner daemon health check failed: query runner daemon: error sending request for url (http://127.0.0.1:63534/jobs/id)"
-                    .to_string()
-            )
-        );
-    }
-
-    #[test]
-    fn lab_offload_does_not_classify_unrelated_internal_errors_as_daemon_health() {
-        let err = Error::internal_unexpected("workspace sync failed unexpectedly");
-
-        assert_eq!(runner_daemon_health_failure(&err), None);
     }
 
     #[test]
