@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.113.9] - 2026-06-02
+
+### Fixed
+- delegate WP Codebox doctor checks upstream
+- consume core bash preflight helper
+
 ## [2.113.8] - 2026-06-02
 
 ### Fixed
