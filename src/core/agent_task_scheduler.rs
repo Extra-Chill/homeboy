@@ -16,6 +16,7 @@ pub use crate::core::agent_task_schedule::{
     AgentTaskResourceBudgetStatus, AgentTaskRetryPolicy, AgentTaskScheduleOptions, AgentTaskState,
     AGENT_TASK_AGGREGATE_SCHEMA, AGENT_TASK_PLAN_SCHEMA,
 };
+use crate::core::agent_task_timeout::timeout_with_grace;
 use crate::core::agent_task_timeout_artifacts::{
     append_unique_artifacts, append_unique_evidence_refs, is_actionable_patch_artifact,
     merge_timeout_outcome, TimeoutArtifactDiscovery,
@@ -458,7 +459,7 @@ impl AgentTaskScheduleSupport {
             let timed_out = running[index]
                 .timeout_ms
                 .map(|timeout_ms| {
-                    running[index].started_at.elapsed() > Duration::from_millis(timeout_ms)
+                    running[index].started_at.elapsed() > timeout_with_grace(timeout_ms)
                 })
                 .unwrap_or(false);
 
