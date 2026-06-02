@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.113.10] - 2026-06-02
+
+### Fixed
+- use wp-codebox browser metrics CLI
+
 ## [2.113.9] - 2026-06-02
 
 ### Fixed
