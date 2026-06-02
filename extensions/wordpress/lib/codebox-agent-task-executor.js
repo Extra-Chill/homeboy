@@ -171,7 +171,7 @@ function normalizeEvidenceRefs(result) {
 function agentTaskOutcomeFromCodeboxResult(request, result = {}, options = {}) {
   assertAgentTaskRequest(request);
   const status = normalizeStatus(result, options.exitStatus ?? 0);
-  const failureClassification = failureClassificationForStatus(status);
+  const failureClassification = result.failure_classification || failureClassificationForStatus(status);
   const outcome = {
     schema: AGENT_TASK_OUTCOME_SCHEMA,
     task_id: request.task_id,
