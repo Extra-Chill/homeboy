@@ -134,6 +134,28 @@ fn remove_source_preserves_replaced_config_but_drops_metadata() {
 }
 
 #[test]
+fn remove_source_preserves_replaced_stack_config_but_drops_metadata() {
+    let _home = HomeGuard::new();
+    let package = tempfile::tempdir().expect("package");
+    write_rig(package.path(), "alpha", &minimal_rig("alpha"));
+    write_stack(package.path(), "alpha-combined", "alpha");
+
+    install(package.path().to_str().unwrap(), None, false).expect("install");
+    let config = crate::core::paths::stack_config("alpha-combined").expect("stack config");
+    fs::remove_file(&config).expect("remove symlink");
+    fs::write(&config, minimal_stack("alpha-combined", "manual")).expect("replacement stack");
+
+    let result = remove_source(&package.path().to_string_lossy()).expect("remove source");
+
+    assert!(result.removed_stacks.is_empty());
+    assert_eq!(result.skipped_stacks.len(), 1);
+    assert!(config.exists());
+    assert!(!crate::core::paths::stack_source_metadata("alpha-combined")
+        .unwrap()
+        .exists());
+}
+
+#[test]
 fn remove_source_treats_copied_config_as_owned_when_contents_match() {
     let _home = HomeGuard::new();
     let package = tempfile::tempdir().expect("package");
