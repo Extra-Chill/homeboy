@@ -488,11 +488,10 @@ wordpress/scripts/doctor/wp-codebox-doctor.sh doctor
 wordpress/scripts/doctor/wp-codebox-doctor.sh cleanup --stale-after-seconds 3600
 ```
 
-The doctor reports the configured `wp-codebox` binary/source SHA, Node/npm
-availability, stale `recipe-run` processes, and corrupt `.zip` files in known WP
-Codebox/WordPress Playground cache roots. `cleanup` sends `TERM` to stale
-recipe-run processes and removes corrupt archives so the next runner invocation
-rebuilds them.
+The script resolves `HOMEBOY_WP_CODEBOX_BIN` or `wp_codebox_bin` from Homeboy
+settings, then delegates to upstream `wp-codebox doctor` or `wp-codebox cleanup`.
+WP Codebox owns the health output, including JSON mode, binary/source checks,
+stale `recipe-run` process checks, and archive cache cleanup behavior.
 
 ## Environment variables
 
