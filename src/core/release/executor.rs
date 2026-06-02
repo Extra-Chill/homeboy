@@ -780,6 +780,43 @@ mod tests {
     }
 
     #[test]
+    fn github_release_notes_link_full_changelog_to_changelog_file() {
+        let notes = concat!(
+            "## What's Changed\n",
+            "* fix release notes by @chubes in https://github.com/Extra-Chill/homeboy/pull/1\n",
+            "\n",
+            "**Full Changelog**: https://github.com/Extra-Chill/homeboy/compare/v0.8.1...v0.9.0"
+        );
+
+        let rewritten = github_release::replace_full_changelog_footer(
+            notes,
+            "https://github.com/Extra-Chill/homeboy/blob/v0.9.0/CHANGELOG.md",
+        );
+
+        assert!(rewritten.contains(
+            "**Full Changelog**: https://github.com/Extra-Chill/homeboy/blob/v0.9.0/CHANGELOG.md"
+        ));
+        assert!(!rewritten.contains("/compare/v0.8.1...v0.9.0"));
+    }
+
+    #[test]
+    fn github_release_notes_append_changelog_link_when_footer_is_missing() {
+        let rewritten = github_release::replace_full_changelog_footer(
+            "## What's Changed\n* release note",
+            "https://github.com/Extra-Chill/homeboy/blob/v0.9.0/docs/CHANGELOG.md",
+        );
+
+        assert_eq!(
+            rewritten,
+            concat!(
+                "## What's Changed\n",
+                "* release note\n\n",
+                "**Full Changelog**: https://github.com/Extra-Chill/homeboy/blob/v0.9.0/docs/CHANGELOG.md"
+            )
+        );
+    }
+
+    #[test]
     fn git_push_step_fails_when_git_push_fails() {
         let temp = tempfile::tempdir().expect("tempdir");
         let init = Command::new("git")
