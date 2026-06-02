@@ -172,6 +172,45 @@ homeboy_wp_codebox_extra_workload_scenarios_json() {
     printf '%s\n' "$scenarios"
 }
 
+homeboy_wp_codebox_component_workload_scenarios_json() {
+    local bench_dir="${PLUGIN_PATH}/tests/bench"
+    local scenarios="[]"
+    [ -d "$bench_dir" ] || {
+        printf '%s\n' "$scenarios"
+        return 0
+    }
+
+    local workload_path workload_name scenario_id
+    for workload_path in "$bench_dir"/*.php; do
+        [ -f "$workload_path" ] || continue
+        workload_name="$(basename "$workload_path")"
+        scenario_id="${workload_name%.*}"
+        scenarios=$(jq -nc \
+            --argjson scenarios "$scenarios" \
+            --arg id "$scenario_id" \
+            --arg file "tests/bench/${workload_name}" \
+            '$scenarios + [{id: $id, file: $file, source: "component", iterations: 0, metrics: {}}]')
+    done
+    printf '%s\n' "$scenarios"
+}
+
+homeboy_wp_codebox_configured_workload_scenarios_json() {
+    local workloads_json="$1"
+    printf '%s' "$workloads_json" | jq -c '
+        if type == "array" then . else [] end
+        | map(select((.id? | type) == "string" and .id != ""))
+        | map(
+            {
+                id: .id,
+                source: (if ((.metadata? // {}) | has("scenario_manifest")) then "scenario-manifest" else "configured" end),
+                iterations: 0,
+                metrics: {}
+            }
+            + (if (.label? | type) == "string" and .label != "" then {label: .label} else {} end)
+        )
+    '
+}
+
 homeboy_wp_codebox_find_plugin_file() {
     local plugin_dir="$1"
     local candidate
@@ -491,8 +530,11 @@ if [ "${HOMEBOY_BENCH_LIST_ONLY:-}" = "1" ]; then
     mkdir -p "$(dirname "$RESULTS_FILE")"
     jq -n \
         --arg component "$COMPONENT_ID" \
-        --argjson scenarios "$(homeboy_wp_codebox_extra_workload_scenarios_json)" \
-        '{component_id: $component, iterations: 0, scenarios: $scenarios}' > "$RESULTS_FILE"
+        --argjson componentScenarios "$(homeboy_wp_codebox_component_workload_scenarios_json)" \
+        --argjson extraScenarios "$(homeboy_wp_codebox_extra_workload_scenarios_json)" \
+        --argjson configuredScenarios "$(homeboy_wp_codebox_configured_workload_scenarios_json "$WP_CODEBOX_WORKLOADS_JSON")" \
+        '$componentScenarios + $extraScenarios + $configuredScenarios as $scenarios |
+        {component_id: $component, iterations: 0, scenarios: $scenarios}' > "$RESULTS_FILE"
     exit 0
 fi
 

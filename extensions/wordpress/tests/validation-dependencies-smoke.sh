@@ -10,13 +10,14 @@ COMPONENT_DIR="${TMPDIR}/intelligence"
 DATA_MACHINE_DIR="${TMPDIR}/data-machine"
 CLONED_DATA_MACHINE_DIR="${TMPDIR}/cache/data-machine"
 AGENTS_API_DIR="${TMPDIR}/agents-api"
+REMOTE_AGENTS_API_DIR="${TMPDIR}/remote/agents-api"
 VENDORED_AGENTS_API_DIR="${COMPONENT_DIR}/vendor/automattic/agents-api"
 OPENAI_PROVIDER_DIR="${TMPDIR}/ai-provider-for-openai"
 BIN_DIR="${TMPDIR}/bin"
 CLONE_BIN_DIR="${TMPDIR}/clone-bin"
 FALLBACK_CACHE_DIR="${TMPDIR}/fallback-cache"
 
-mkdir -p "$COMPONENT_DIR" "$DATA_MACHINE_DIR" "$CLONED_DATA_MACHINE_DIR" "$AGENTS_API_DIR" "$VENDORED_AGENTS_API_DIR" "$OPENAI_PROVIDER_DIR" "$BIN_DIR" "$CLONE_BIN_DIR" "$FALLBACK_CACHE_DIR"
+mkdir -p "$COMPONENT_DIR" "$DATA_MACHINE_DIR" "$CLONED_DATA_MACHINE_DIR" "$AGENTS_API_DIR" "$REMOTE_AGENTS_API_DIR" "$VENDORED_AGENTS_API_DIR" "$OPENAI_PROVIDER_DIR" "$BIN_DIR" "$CLONE_BIN_DIR" "$FALLBACK_CACHE_DIR"
 
 cat > "${COMPONENT_DIR}/intelligence.php" <<'PHP'
 <?php
@@ -45,6 +46,13 @@ cat > "${AGENTS_API_DIR}/agents-api.php" <<'PHP'
 <?php
 /**
  * Plugin Name: Agents API
+ */
+PHP
+
+cat > "${REMOTE_AGENTS_API_DIR}/agents-api.php" <<'PHP'
+<?php
+/**
+ * Plugin Name: Agents API Remote Lab Copy
  */
 PHP
 
@@ -155,6 +163,25 @@ chmod +x "${CLONE_BIN_DIR}/composer"
 
 source "$HELPER"
 
+LAB_OFFLOAD_JSON=$(jq -nc \
+    --arg agentsLocal "$AGENTS_API_DIR" \
+    --arg agentsRemote "$REMOTE_AGENTS_API_DIR" \
+    '{workspace_mappings: [{local_path: $agentsLocal, remote_path: $agentsRemote}]}')
+
+translated=$(HOMEBOY_LAB_OFFLOAD_JSON="$LAB_OFFLOAD_JSON" homeboy_translate_lab_workspace_path "${AGENTS_API_DIR}/fixtures/example.php")
+if [ "$translated" != "${REMOTE_AGENTS_API_DIR}/fixtures/example.php" ]; then
+    echo "FAIL: Lab workspace mapping should translate nested local paths" >&2
+    printf 'translated: %s\n' "$translated" >&2
+    exit 1
+fi
+
+mapped_resolved=$(HOMEBOY_LAB_OFFLOAD_JSON="$LAB_OFFLOAD_JSON" PATH="${BIN_DIR}:$PATH" homeboy_resolve_validation_dependency_path agents-api)
+if [ "$mapped_resolved" != "$REMOTE_AGENTS_API_DIR" ]; then
+    echo "FAIL: Lab workspace mapping should resolve dependency slugs before local registry fallback" >&2
+    printf '%s\n' "$mapped_resolved" >&2
+    exit 1
+fi
+
 resolved=$(PATH="${BIN_DIR}:$PATH" homeboy_resolve_validation_dependency_paths "$COMPONENT_DIR")
 
 if ! grep -F -- "$DATA_MACHINE_DIR" <<< "$resolved" >/dev/null; then
@@ -258,6 +285,29 @@ fi
 if grep -F -- "Homeboy component registry" <<< "$export_output" >/dev/null; then
     echo "FAIL: exported dependency diagnostics should not report discarded resolver candidates" >&2
     printf '%s\n' "$export_output" >&2
+    exit 1
+fi
+
+mapped_export_log=$(mktemp)
+HOMEBOY_WORDPRESS_DEPENDENCY_PATHS="$AGENTS_API_DIR"
+HOMEBOY_LAB_OFFLOAD_JSON="$LAB_OFFLOAD_JSON"
+PATH="${BIN_DIR}:$PATH" homeboy_export_validation_dependency_paths "$COMPONENT_DIR" 2>"$mapped_export_log"
+mapped_export_output=$(cat "$mapped_export_log")
+if ! grep -F -- "$REMOTE_AGENTS_API_DIR" <<< "$HOMEBOY_WORDPRESS_DEPENDENCY_PATHS" >/dev/null; then
+    echo "FAIL: exported dependency paths should include Lab-shipped remote checkouts" >&2
+    printf '%s\n' "$HOMEBOY_WORDPRESS_DEPENDENCY_PATHS" >&2
+    exit 1
+fi
+
+if grep -F -- "$AGENTS_API_DIR" <<< "$HOMEBOY_WORDPRESS_DEPENDENCY_PATHS" >/dev/null; then
+    echo "FAIL: exported dependency paths should not retain mapped local checkouts" >&2
+    printf '%s\n' "$HOMEBOY_WORDPRESS_DEPENDENCY_PATHS" >&2
+    exit 1
+fi
+
+if ! grep -F -- "Resolved dependency 'agents-api' via final validation dependency path: ${REMOTE_AGENTS_API_DIR}" <<< "$mapped_export_output" >/dev/null; then
+    echo "FAIL: mapped export diagnostics should report the remote dependency path" >&2
+    printf '%s\n' "$mapped_export_output" >&2
     exit 1
 fi
 

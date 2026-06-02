@@ -124,6 +124,133 @@ _homeboy_is_plugin_shaped_path() {
     [ -n "$main_file" ]
 }
 
+_homeboy_lab_workspace_mappings_json() {
+    local raw="${HOMEBOY_LAB_WORKSPACE_MAPPINGS_JSON:-${HOMEBOY_LAB_WORKSPACE_MAP_JSON:-}}"
+
+    if [ -z "$raw" ] && [ -n "${HOMEBOY_LAB_OFFLOAD_JSON:-}" ]; then
+        raw="$HOMEBOY_LAB_OFFLOAD_JSON"
+    fi
+
+    [ -n "$raw" ] || return 1
+
+    printf '%s\n' "$raw"
+}
+
+_homeboy_emit_lab_workspace_mappings() {
+    command -v jq >/dev/null 2>&1 || return 0
+
+    local raw
+    raw=$(_homeboy_lab_workspace_mappings_json || true)
+    [ -n "$raw" ] || return 0
+
+    printf '%s' "$raw" | jq -r '
+        def mapping_stream:
+            if type == "array" then
+                .[]
+                | {
+                    local: (.local_path // .local // .source // .from // empty),
+                    remote: (.remote_path // .remote // .target // .to // empty)
+                }
+            elif type == "object" then
+                to_entries[]
+                | {
+                    local: .key,
+                    remote: (
+                        if (.value | type) == "object" then
+                            (.value.remote_path // .value.remote // .value.target // .value.to // empty)
+                        else
+                            .value
+                        end
+                    )
+                }
+            else
+                empty
+            end;
+
+        if type == "object" then
+            (.workspace_mappings // .workspace_mapping // .workspace_map // .workspaces // .dependency_workspaces // .dependencies // .)
+        else
+            .
+        end
+        | mapping_stream
+        | select(.local != "" and .remote != "")
+        | [.local, .remote]
+        | @tsv
+    ' 2>/dev/null || true
+}
+
+homeboy_translate_lab_workspace_path() {
+    local path_value="${1:-}"
+    [ -n "$path_value" ] || return 1
+
+    local best_local=""
+    local best_remote=""
+    local local_path remote_path local_len
+    while IFS=$'\t' read -r local_path remote_path; do
+        [ -n "$local_path" ] && [ -n "$remote_path" ] || continue
+        case "$path_value" in
+            "$local_path"|"$local_path"/*)
+                local_len=${#local_path}
+                if [ "$local_len" -gt "${#best_local}" ]; then
+                    best_local="$local_path"
+                    best_remote="$remote_path"
+                fi
+                ;;
+        esac
+    done < <(_homeboy_emit_lab_workspace_mappings)
+
+    if [ -n "$best_local" ]; then
+        printf '%s%s\n' "${best_remote%/}" "${path_value#"$best_local"}"
+        return 0
+    fi
+
+    printf '%s\n' "$path_value"
+}
+
+homeboy_translate_validation_dependency_paths() {
+    local dependency_paths="${1:-}"
+    local dependency_path translated_path
+
+    while IFS= read -r dependency_path; do
+        [ -n "$dependency_path" ] || continue
+        translated_path=$(homeboy_translate_lab_workspace_path "$dependency_path" || true)
+        [ -n "$translated_path" ] && printf '%s\n' "$translated_path"
+    done <<< "$dependency_paths"
+}
+
+_homeboy_resolve_lab_mapped_dependency_path() {
+    local dependency="${1:-}"
+    [ -n "$dependency" ] || return 1
+
+    local translated
+    translated=$(homeboy_translate_lab_workspace_path "$dependency" || true)
+    if [ -n "$translated" ] && [ "$translated" != "$dependency" ] && [ -d "$translated" ]; then
+        _homeboy_report_resolved_dependency "$dependency" "Lab workspace mapping" "$translated"
+        printf '%s\n' "$translated"
+        return 0
+    fi
+
+    [[ "$dependency" == */* ]] && return 1
+
+    local local_path remote_path remote_slug local_slug remote_basename local_basename
+    while IFS=$'\t' read -r local_path remote_path; do
+        [ -n "$remote_path" ] && [ -d "$remote_path" ] || continue
+
+        remote_slug=$(homeboy_get_validation_dependency_slug "$remote_path" || true)
+        remote_basename="$(basename "$remote_path")"
+        local_basename="$(basename "$local_path")"
+        local_slug="${local_basename%%@*}"
+
+        if [ "$dependency" = "$remote_slug" ] || [ "$dependency" = "$remote_basename" ] || [ "$dependency" = "$local_slug" ] || [ "$dependency" = "$local_basename" ]; then
+            _homeboy_report_resolved_dependency "$dependency" "Lab workspace mapping" "$remote_path"
+            printf '%s\n' "$remote_path"
+            return 0
+        fi
+    done < <(_homeboy_emit_lab_workspace_mappings)
+
+    return 1
+}
+
 _homeboy_resolve_composer_locked_dependency_path() {
     local dependency="${1:-}"
     local plugin_path="${2:-}"
@@ -344,6 +471,13 @@ homeboy_resolve_validation_dependency_path() {
     local dependency="${1:-}"
 
     [ -z "$dependency" ] && return 1
+
+    local lab_mapped
+    lab_mapped=$(_homeboy_resolve_lab_mapped_dependency_path "$dependency" || true)
+    if [ -n "$lab_mapped" ] && [ -d "$lab_mapped" ]; then
+        printf '%s\n' "$lab_mapped"
+        return 0
+    fi
 
     # 1. Direct path (absolute or relative directory)
     if [ -d "$dependency" ]; then
@@ -586,9 +720,11 @@ homeboy_merge_validation_dependency_paths() {
 
 homeboy_export_validation_dependency_paths() {
     local plugin_path="${1:-}"
-    local existing_paths="${HOMEBOY_WORDPRESS_DEPENDENCY_PATHS:-}"
+    local existing_paths
+    existing_paths=$(homeboy_translate_validation_dependency_paths "${HOMEBOY_WORDPRESS_DEPENDENCY_PATHS:-}")
     local resolved_paths
     resolved_paths=$(HOMEBOY_SUPPRESS_DEPENDENCY_RESOLUTION_LOG=1 homeboy_resolve_validation_dependency_paths "$plugin_path" || true)
+    resolved_paths=$(homeboy_translate_validation_dependency_paths "$resolved_paths")
 
     local merged_paths
     merged_paths="$(homeboy_merge_validation_dependency_paths "$existing_paths" "$resolved_paths")"

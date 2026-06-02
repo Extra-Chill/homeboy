@@ -43,6 +43,13 @@ cat > "${component}/tests/codebox-agent-task-matrix-smoke.js" <<'JS'
 console.log('codebox agent task matrix smoke ran');
 JS
 
+cat > "${component}/tests/shell-contract-smoke.sh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+echo "shell contract smoke ran"
+SH
+chmod +x "${component}/tests/shell-contract-smoke.sh"
+
 cat > "${component}/wordpress/tests/codebox-agent-task-matrix-smoke.js" <<'JS'
 console.log('prefixed codebox agent task matrix smoke ran');
 JS
@@ -167,12 +174,37 @@ HOMEBOY_COMPONENT_ID="component" \
 HOMEBOY_COMPONENT_PATH="$component" \
 HOMEBOY_COMPONENT_SHAPE="plugin" \
 HOMEBOY_RUNTIME_TEST_RUNNER_WP_CODEBOX="${TMPDIR}/stubs/wp-codebox.sh" \
+HOMEBOY_CHANGED_TEST_FILES='wordpress/tests/shell-contract-smoke.sh' \
+    bash "${EXTENSION_PATH}/scripts/test/test-runner.sh" > "${TMPDIR}/changed-prefixed-shell-smoke-files.out"
+
+assert_contains "${TMPDIR}/changed-prefixed-shell-smoke-files.out" "SHELL_SMOKE_BEGIN:tests/shell-contract-smoke.sh"
+assert_contains "${TMPDIR}/changed-prefixed-shell-smoke-files.out" "shell contract smoke ran"
+assert_contains "${TMPDIR}/changed-prefixed-shell-smoke-files.out" "SHELL_SMOKE_SUMMARY:passed=1 failed=0"
+assert_not_contains "${TMPDIR}/changed-prefixed-shell-smoke-files.out" "WP_CODEBOX_STUB"
+
+HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
+HOMEBOY_COMPONENT_ID="component" \
+HOMEBOY_COMPONENT_PATH="$component" \
+HOMEBOY_COMPONENT_SHAPE="plugin" \
+HOMEBOY_RUNTIME_TEST_RUNNER_WP_CODEBOX="${TMPDIR}/stubs/wp-codebox.sh" \
     bash "${EXTENSION_PATH}/scripts/test/test-runner.sh" --file tests/codebox-agent-task-matrix-smoke.js > "${TMPDIR}/js-smoke-file.out"
 
 assert_contains "${TMPDIR}/js-smoke-file.out" "JS_SMOKE_BEGIN:tests/codebox-agent-task-matrix-smoke.js"
 assert_contains "${TMPDIR}/js-smoke-file.out" "codebox agent task matrix smoke ran"
 assert_contains "${TMPDIR}/js-smoke-file.out" "JS_SMOKE_SUMMARY:passed=1 failed=0"
 assert_not_contains "${TMPDIR}/js-smoke-file.out" "WP_CODEBOX_STUB"
+
+HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
+HOMEBOY_COMPONENT_ID="component" \
+HOMEBOY_COMPONENT_PATH="$component" \
+HOMEBOY_COMPONENT_SHAPE="plugin" \
+HOMEBOY_RUNTIME_TEST_RUNNER_WP_CODEBOX="${TMPDIR}/stubs/wp-codebox.sh" \
+    bash "${EXTENSION_PATH}/scripts/test/test-runner.sh" --file wordpress/tests/shell-contract-smoke.sh > "${TMPDIR}/shell-smoke-file.out"
+
+assert_contains "${TMPDIR}/shell-smoke-file.out" "SHELL_SMOKE_BEGIN:tests/shell-contract-smoke.sh"
+assert_contains "${TMPDIR}/shell-smoke-file.out" "shell contract smoke ran"
+assert_contains "${TMPDIR}/shell-smoke-file.out" "SHELL_SMOKE_SUMMARY:passed=1 failed=0"
+assert_not_contains "${TMPDIR}/shell-smoke-file.out" "WP_CODEBOX_STUB"
 
 HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
 HOMEBOY_COMPONENT_ID="component" \

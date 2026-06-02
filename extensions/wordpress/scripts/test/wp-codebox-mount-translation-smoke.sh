@@ -9,10 +9,11 @@ trap 'rm -rf "$TMPDIR"' EXIT
 
 PLUGIN_PATH="${TMPDIR}/component"
 DEP_PATH="${TMPDIR}/dep-plugin@branch"
+REMOTE_DEP_PATH="${TMPDIR}/remote/dep-plugin"
 FAKE_WP_CODEBOX="${TMPDIR}/wp-codebox.js"
 ARGS_FILE="${TMPDIR}/wp-codebox-args.txt"
 ARTIFACTS_DIR="${TMPDIR}/artifacts"
-mkdir -p "${PLUGIN_PATH}/tests" "${PLUGIN_PATH}/config" "${DEP_PATH}/fixtures" "$ARTIFACTS_DIR"
+mkdir -p "${PLUGIN_PATH}/tests" "${PLUGIN_PATH}/config" "${DEP_PATH}/fixtures" "${REMOTE_DEP_PATH}/fixtures" "$ARTIFACTS_DIR"
 
 cat > "${PLUGIN_PATH}/tests/OnlyTest.php" <<'PHP'
 <?php
@@ -23,6 +24,8 @@ printf '<?php /*\nPlugin Name: Example\nNetwork: true\n*/\n' > "${PLUGIN_PATH}/e
 printf 'component-extra\n' > "${PLUGIN_PATH}/config/component-extra.php"
 printf '<?php /*\nPlugin Name: Dep Plugin\n*/\n' > "${DEP_PATH}/dep-plugin.php"
 printf 'dependency-extra\n' > "${DEP_PATH}/fixtures/dep-extra.php"
+printf '<?php /*\nPlugin Name: Dep Plugin Remote Lab Copy\n*/\n' > "${REMOTE_DEP_PATH}/dep-plugin.php"
+printf 'remote dependency-extra\n' > "${REMOTE_DEP_PATH}/fixtures/dep-extra.php"
 
 cat > "$FAKE_WP_CODEBOX" <<'NODE'
 #!/usr/bin/env node
@@ -141,14 +144,19 @@ SETTINGS_JSON=$(jq -nc \
 
 REQUIRED_MOUNTS_JSON=$(jq -nc \
     --arg component "${PLUGIN_PATH}:/wordpress/wp-content/plugins/example" \
-    --arg dep "${DEP_PATH}:/wordpress/wp-content/plugins/dep-plugin" \
+    --arg dep "${REMOTE_DEP_PATH}:/wordpress/wp-content/plugins/dep-plugin" \
     --arg dropin "${PLUGIN_PATH}/db.php:/wordpress/wp-content/db.php" \
     --arg componentExtra "${PLUGIN_PATH}/config/component-extra.php:/wordpress/wp-content/component-extra.php" \
-    --arg depExtra "${DEP_PATH}/fixtures/dep-extra.php:/wordpress/wp-content/dep-extra.php" \
+    --arg depExtra "${REMOTE_DEP_PATH}/fixtures/dep-extra.php:/wordpress/wp-content/dep-extra.php" \
     --arg vendor "${EXTENSION_PATH}/vendor:/wp-codebox-vendor:readonly" \
     --arg extension "${EXTENSION_PATH}:/homeboy-extension:readonly" \
     '[$component, $dep, $dropin, $componentExtra, $depExtra, $vendor, $extension]')
 export REQUIRED_MOUNTS_JSON
+
+LAB_OFFLOAD_JSON=$(jq -nc \
+    --arg depLocal "$DEP_PATH" \
+    --arg depRemote "$REMOTE_DEP_PATH" \
+    '{workspace_mappings: [{local_path: $depLocal, remote_path: $depRemote}]}')
 
 bash -n "$SCRIPT_DIR/test-runner-wp-codebox.sh"
 
@@ -158,6 +166,7 @@ output=$(FAKE_WP_CODEBOX_ARGS_FILE="$ARGS_FILE" \
     HOMEBOY_COMPONENT_PATH="$PLUGIN_PATH" \
     HOMEBOY_COMPONENT_ID="example" \
     HOMEBOY_WORDPRESS_DEPENDENCY_PATHS="$DEP_PATH" \
+    HOMEBOY_LAB_OFFLOAD_JSON="$LAB_OFFLOAD_JSON" \
     HOMEBOY_SETTINGS_JSON="$SETTINGS_JSON" \
     HOMEBOY_CHANGED_TEST_FILES="tests/OnlyTest.php" \
     HOMEBOY_WP_CODEBOX_ARTIFACTS_DIR="$ARTIFACTS_DIR" \

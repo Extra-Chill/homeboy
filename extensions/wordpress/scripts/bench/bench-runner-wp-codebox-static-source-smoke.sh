@@ -8,9 +8,10 @@ trap 'rm -rf "$TMP_ROOT"' EXIT
 
 SOURCE_ROOT="${TMP_ROOT}/wp-site-generator"
 EXTRA_WORKLOAD="${TMP_ROOT}/rig-workload.php"
-mkdir -p "${SOURCE_ROOT}/static-sites/demo" "${SOURCE_ROOT}/.github/homeboy"
+mkdir -p "${SOURCE_ROOT}/static-sites/demo" "${SOURCE_ROOT}/.github/homeboy" "${SOURCE_ROOT}/tests/bench"
 printf '<!doctype html><title>Demo</title>\n' > "${SOURCE_ROOT}/static-sites/demo/index.html"
 printf '<?php return array();\n' > "${SOURCE_ROOT}/.github/homeboy/ssi-import-diagnostics.php"
+printf '<?php return function (): array { return array(); };\n' > "${SOURCE_ROOT}/tests/bench/website-generation.php"
 printf '<?php return function (): array { return array(); };\n' > "$EXTRA_WORKLOAD"
 
 RESOLVE_HELPER="${TMP_ROOT}/resolve-context.sh"
@@ -123,7 +124,9 @@ bash "$SCRIPT_DIR/bench-runner-wp-codebox.sh" >/dev/null
 jq -e '
     .component_id == "wp-site-generator"
     and .iterations == 0
+    and (.scenarios[] | select(.id == "website-generation" and .file == "tests/bench/website-generation.php" and .source == "component"))
     and (.scenarios[] | select(.id == "rig-workload" and .file == "tests/bench/rig-workload.php" and .source == "rig"))
+    and (.scenarios[] | select(.id == "ssi-import" and .source == "configured"))
 ' "$LIST_RESULTS_FILE" >/dev/null
 
 PLUGIN_ROOT="${TMP_ROOT}/plugin-component"
