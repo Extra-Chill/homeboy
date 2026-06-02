@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.114.2] - 2026-06-02
+
+### Fixed
+- update wordpress eslint dependencies
+
 ## [2.114.1] - 2026-06-02
 
 ### Fixed
