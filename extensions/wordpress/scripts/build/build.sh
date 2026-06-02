@@ -551,6 +551,112 @@ EOF
     fi
 }
 
+resolve_package_artifacts() {
+    local manifest_file="$1"
+    local list_file="$2"
+
+    : > "$list_file"
+    printf '%s\n' '{"type":"wordpress.package_artifacts","artifacts":[]}' > "$manifest_file"
+
+    [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] || return 0
+    [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ] || return 0
+
+    HOMEBOY_WORDPRESS_PACKAGE_ARTIFACTS_MANIFEST="$manifest_file" \
+    HOMEBOY_WORDPRESS_PACKAGE_ARTIFACTS_LIST="$list_file" \
+    php <<'PHP'
+<?php
+$settings = json_decode( getenv( 'HOMEBOY_SETTINGS_JSON' ) ?: '{}', true );
+if ( ! is_array( $settings ) ) {
+	fwrite( STDERR, "Invalid HOMEBOY_SETTINGS_JSON; expected a JSON object.\n" );
+	exit( 1 );
+}
+
+$patterns = $settings['package_artifacts'] ?? [];
+if ( ! is_array( $patterns ) ) {
+	fwrite( STDERR, "extensions.wordpress.package_artifacts must be an array of component-relative glob patterns.\n" );
+	exit( 1 );
+}
+
+$artifacts = [];
+$seen      = [];
+$list      = '';
+
+foreach ( $patterns as $pattern ) {
+	if ( ! is_string( $pattern ) || '' === $pattern ) {
+		fwrite( STDERR, "extensions.wordpress.package_artifacts entries must be non-empty strings.\n" );
+		exit( 1 );
+	}
+
+	$normalized = str_replace( '\\', '/', $pattern );
+	if ( str_starts_with( $normalized, '/' ) || preg_match( '#(^|/)\.\.(/|$)#', $normalized ) ) {
+		fwrite( STDERR, "Package artifact patterns must be component-relative and cannot contain '..': {$pattern}\n" );
+		exit( 1 );
+	}
+
+	$matches = glob( $pattern, GLOB_BRACE ) ?: [];
+	$files   = [];
+	foreach ( $matches as $match ) {
+		if ( is_file( $match ) ) {
+			$relative = str_replace( '\\', '/', $match );
+			if ( str_starts_with( $relative, './' ) ) {
+				$relative = substr( $relative, 2 );
+			}
+			$files[]  = $relative;
+		}
+	}
+
+	if ( [] === $files ) {
+		fwrite( STDERR, "Declared WordPress package artifact pattern matched no files: {$pattern}\n" );
+		exit( 1 );
+	}
+
+	sort( $files );
+	foreach ( $files as $relative ) {
+		if ( isset( $seen[ $relative ] ) ) {
+			continue;
+		}
+		$seen[ $relative ] = true;
+		$sha256            = hash_file( 'sha256', $relative ) ?: '';
+		$artifacts[]       = [
+			'path'    => $relative,
+			'sha256'  => $sha256,
+			'pattern' => $pattern,
+		];
+		$list .= $relative . "\t" . $sha256 . "\n";
+	}
+}
+
+$manifest = [
+	'type'      => 'wordpress.package_artifacts',
+	'artifacts' => $artifacts,
+];
+
+file_put_contents( getenv( 'HOMEBOY_WORDPRESS_PACKAGE_ARTIFACTS_MANIFEST' ), json_encode( $manifest, JSON_UNESCAPED_SLASHES ) . "\n" );
+file_put_contents( getenv( 'HOMEBOY_WORDPRESS_PACKAGE_ARTIFACTS_LIST' ), $list );
+PHP
+}
+
+include_package_artifacts() {
+    local staging_dir="$1"
+    local manifest_file="/tmp/.wordpress-package-artifacts-$$.json"
+    local list_file="/tmp/.wordpress-package-artifacts-$$.tsv"
+
+    resolve_package_artifacts "$manifest_file" "$list_file"
+
+    if [ -s "$list_file" ]; then
+        while IFS=$'\t' read -r relative_path sha256; do
+            [ -n "$relative_path" ] || continue
+            mkdir -p "$staging_dir/$(dirname "$relative_path")"
+            cp "$relative_path" "$staging_dir/$relative_path"
+            print_status "Included package artifact: $relative_path (sha256: $sha256)"
+        done < "$list_file"
+
+        cat "$manifest_file"
+    fi
+
+    rm -f "$manifest_file" "$list_file"
+}
+
 # Copy files to staging directory
 copy_project_files() {
     print_status "Copying project files to staging directory..."
@@ -564,6 +670,8 @@ copy_project_files() {
 
     # Copy files using rsync with excludes
     rsync -av --exclude-from="$exclude_file" ./ "$staging_dir/" --quiet
+
+    include_package_artifacts "$staging_dir"
 
     # Clean up exclude file
     rm -f "$exclude_file"

@@ -42,6 +42,7 @@
     "test:wp-codebox-task-runner": "node tests/wp-codebox-task-runner-smoke.js",
     "test:wp-codebox-bench-recipe-builder": "node tests/wp-codebox-bench-recipe-builder-smoke.js",
     "test:wp-codebox-phpunit-recipe-builder": "node tests/wp-codebox-phpunit-recipe-builder-smoke.js",
+    "test:build-package-artifacts": "bash scripts/build/build-package-artifacts-smoke.sh",
     "test:codebox-agent-task-executor": "node tests/codebox-agent-task-executor-smoke.js",
     "test:codebox-agent-task-matrix": "node tests/codebox-agent-task-matrix-smoke.js",
     "test:refactor-source-wp-codebox": "node tests/refactor-source-wp-codebox-smoke.js"
