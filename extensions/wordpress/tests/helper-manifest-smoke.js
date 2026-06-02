@@ -32,5 +32,13 @@ assert.equal(
 	manifest.helpers.bootstrapTimeline,
 	path.resolve(__dirname, '..', 'lib', 'wordpress-bootstrap-timeline.js')
 );
+assert.equal(
+	manifest.helpers.blockQuality,
+	path.resolve(__dirname, '..', 'lib', 'block-quality.js')
+);
+assert.equal(
+	manifest.helpers.editorCanvasProbes,
+	path.resolve(__dirname, '..', 'lib', 'editor-canvas-probes.js')
+);
 
 console.log('helper manifest smoke passed');
