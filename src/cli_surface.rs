@@ -301,7 +301,7 @@ impl Commands {
             ),
             Commands::Bench(args) => quality_json_descriptor(
                 output_file_mode,
-                args.is_run_command(),
+                args.is_lab_offload_command(),
                 args.lab_offload_writes_local_state()
                     .then_some("--baseline/--ratchet"),
                 CommandOutputContractKind::JsonEnvelope,
@@ -1046,6 +1046,15 @@ mod tests {
         assert!(parsed_command(&["homeboy", "refactor", "--from", "audit"]).supports_lab_runner());
         assert!(parsed_command(&["homeboy", "refactor", "--all"]).supports_lab_runner());
         assert!(parsed_command(&["homeboy", "bench"]).supports_lab_runner());
+        assert!(parsed_command(&[
+            "homeboy",
+            "bench",
+            "matrix",
+            "--setting-matrix",
+            "clients=10,100"
+        ])
+        .supports_lab_runner());
+        assert!(parsed_command(&["homeboy", "bench", "history", "homeboy"]).supports_lab_runner());
         assert!(parsed_command(&["homeboy", "trace"]).supports_lab_runner());
         assert!(!parsed_command(&[
             "homeboy", "refactor", "rename", "--from", "old", "--to", "new",
@@ -1071,6 +1080,20 @@ mod tests {
             (parsed_command(&["homeboy", "test"]), "test"),
             (parsed_command(&["homeboy", "audit"]), "audit"),
             (parsed_command(&["homeboy", "bench"]), "bench"),
+            (
+                parsed_command(&[
+                    "homeboy",
+                    "bench",
+                    "matrix",
+                    "--setting-matrix",
+                    "clients=10,100",
+                ]),
+                "bench",
+            ),
+            (
+                parsed_command(&["homeboy", "bench", "history", "homeboy"]),
+                "bench",
+            ),
             (parsed_command(&["homeboy", "trace"]), "trace"),
             (
                 parsed_command(&["homeboy", "refactor", "--from", "audit"]),
