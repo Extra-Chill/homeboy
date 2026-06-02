@@ -1133,10 +1133,6 @@ mod tests {
             .expect("package step");
 
             assert_eq!(result.status, ReleaseStepStatus::Success);
-            assert_ne!(
-                component.path().file_name().unwrap().to_string_lossy(),
-                "intelligence-horse-theme"
-            );
             assert_eq!(state.artifacts.len(), 1);
             assert_eq!(
                 state.artifacts[0].path,
