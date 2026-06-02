@@ -12,6 +12,7 @@ BENCH_RESULTS_ARTIFACTS_HELPER="${SCRIPT_DIR}/bench-results-artifacts.sh"
 BENCH_BROWSER_METRICS_HELPER="${EXTENSION_DIR}/lib/wp-codebox-browser-metrics.js"
 DEPENDENCY_HELPER="${HOMEBOY_WORDPRESS_DEPENDENCY_HELPER:-${SCRIPT_DIR}/../lib/validation-dependencies.sh}"
 BENCH_BROWSER_TARGET_HELPER="${SCRIPT_DIR}/browser-target.sh"
+BENCH_RECIPE_BUILDER="${SCRIPT_DIR}/build-wp-codebox-bench-recipe.mjs"
 
 # shellcheck source=/dev/null
 source "$RESOLVE_CONTEXT_HELPER"
@@ -424,6 +425,10 @@ case "$WP_CODEBOX_BIN" in
         wp_codebox_command=(node "$WP_CODEBOX_BIN")
         ;;
 esac
+WP_CODEBOX_RESOLVED_BIN="$WP_CODEBOX_BIN"
+if resolved_wp_codebox_bin=$(command -v "$WP_CODEBOX_BIN" 2>/dev/null); then
+    WP_CODEBOX_RESOLVED_BIN="$resolved_wp_codebox_bin"
+fi
 
 if type homeboy_export_validation_dependency_paths &>/dev/null; then
     homeboy_export_validation_dependency_paths "$PLUGIN_PATH"
@@ -562,54 +567,45 @@ if [ "$settings_json" != "{}" ]; then
 fi
 RUNTIME_BLUEPRINT_JSON=$(jq -nc \
     --argjson base "$WP_CODEBOX_BLUEPRINT_JSON" \
-    --argjson scenario "$SCENARIO_MANIFEST_BLUEPRINT_JSON" \
-    --argjson defines "$WP_CONFIG_DEFINES_JSON" '
+    --argjson scenario "$SCENARIO_MANIFEST_BLUEPRINT_JSON" '
     ($base + $scenario) as $merged |
-    ($merged.steps // []) as $steps |
-    if ($defines | length) > 0 then
-        $merged + {steps: ($steps + [{step: "defineWpConfigConsts", consts: $defines}])}
-    else
-        $merged + {steps: $steps}
-    end
-')
-
-WORKFLOW_STEP_JSON=$(jq -nc \
-    --arg component "$COMPONENT_ID" \
-    --arg slug "$PLUGIN_SLUG" \
-    --arg iterations "$ITERATIONS" \
-    --arg warmup "$WARMUP_ITERATIONS" \
-    --arg dependencySlugs "$DEPENDENCY_SLUGS_CSV" \
-    --argjson env "$BENCH_ENV_JSON" \
-    --argjson bootstrapFiles "$WP_CODEBOX_BOOTSTRAP_FILES_JSON" \
-    --argjson workloads "$WP_CODEBOX_WORKLOADS_JSON" '
-    {
-        command: "wordpress.bench",
-        args: [
-            "component-id=" + $component,
-            "plugin-slug=" + $slug,
-            "iterations=" + $iterations,
-            "warmup=" + $warmup,
-            "dependency-slugs=" + $dependencySlugs,
-            "env-json=" + ($env | tostring),
-            "bootstrap-files-json=" + ($bootstrapFiles | tostring),
-            "workloads-json=" + ($workloads | tostring)
-        ]
-    }
+    $merged + {steps: ($merged.steps // [])}
 ')
 
 RECIPE_FILE=$(mktemp "${TMPDIR:-/tmp}/homeboy-wp-codebox-bench-recipe.XXXXXX")
 jq -n \
+    --arg wpCodeboxBin "$WP_CODEBOX_RESOLVED_BIN" \
     --arg wp "$WP_CODEBOX_WORDPRESS_VERSION" \
+    --arg component "$COMPONENT_ID" \
+    --arg slug "$PLUGIN_SLUG" \
+    --argjson iterations "$ITERATIONS" \
+    --argjson warmupIterations "$WARMUP_ITERATIONS" \
     --argjson blueprint "$RUNTIME_BLUEPRINT_JSON" \
     --argjson extraPlugins "$EXTRA_PLUGINS_JSON" \
     --argjson mounts "$MOUNTS_JSON" \
-    --argjson step "$WORKFLOW_STEP_JSON" \
+    --argjson env "$BENCH_ENV_JSON" \
+    --argjson wpConfigDefines "$WP_CONFIG_DEFINES_JSON" \
+    --argjson dependencySlugs "$(printf '%s\n' "$DEPENDENCY_SLUGS_CSV" | jq -R 'split(",") | map(select(. != ""))')" \
+    --argjson bootstrapFiles "$WP_CODEBOX_BOOTSTRAP_FILES_JSON" \
+    --argjson workloads "$WP_CODEBOX_WORKLOADS_JSON" \
     '{
-        schema: "wp-codebox/workspace-recipe/v1",
-        runtime: {wp: $wp, blueprint: $blueprint},
-        inputs: {extraPlugins: $extraPlugins, mounts: $mounts},
-        workflow: {steps: [$step]}
-    }' > "$RECIPE_FILE"
+        wpCodeboxBin: $wpCodeboxBin,
+        options: {
+            wordpressVersion: $wp,
+            blueprint: $blueprint,
+            mounts: $mounts,
+            extraPlugins: $extraPlugins,
+            componentId: $component,
+            pluginSlug: $slug,
+            iterations: $iterations,
+            warmupIterations: $warmupIterations,
+            dependencySlugs: $dependencySlugs,
+            env: $env,
+            wpConfigDefines: $wpConfigDefines,
+            bootstrapFiles: $bootstrapFiles,
+            workloads: $workloads
+        }
+    }' | node "$BENCH_RECIPE_BUILDER" > "$RECIPE_FILE"
 
 WP_CODEBOX_TMPFILE=$(mktemp)
 set +e

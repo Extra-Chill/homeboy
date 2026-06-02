@@ -8,10 +8,22 @@ trap 'rm -rf "$TMP_ROOT"' EXIT
 
 SOURCE_ROOT="${TMP_ROOT}/wp-site-generator"
 EXTRA_WORKLOAD="${TMP_ROOT}/rig-workload.php"
-mkdir -p "${SOURCE_ROOT}/static-sites/demo" "${SOURCE_ROOT}/.github/homeboy" "${SOURCE_ROOT}/tests/bench"
+mkdir -p "${SOURCE_ROOT}/static-sites/demo" "${SOURCE_ROOT}/.github/homeboy" "${SOURCE_ROOT}/tests/bench" "${SOURCE_ROOT}/scenarios"
 printf '<!doctype html><title>Demo</title>\n' > "${SOURCE_ROOT}/static-sites/demo/index.html"
 printf '<?php return array();\n' > "${SOURCE_ROOT}/.github/homeboy/ssi-import-diagnostics.php"
 printf '<?php return function (): array { return array(); };\n' > "${SOURCE_ROOT}/tests/bench/website-generation.php"
+printf '<?php update_option("homeboy_bootstrap_fixture", "loaded", false);\n' > "${SOURCE_ROOT}/bootstrap.php"
+printf '<?php return array("metrics" => array("scenario" => 1));\n' > "${SOURCE_ROOT}/scenarios/grader.php"
+cat > "${SOURCE_ROOT}/scenarios/manifest.json" <<'JSON'
+{
+  "id": "manifest-navigation",
+  "label": "Manifest navigation",
+  "prompt": "Build a navigation scenario fixture.",
+  "grader": "grader.php",
+  "tags": ["smoke"],
+  "metadata": {"fixture": "scenario-manifest"}
+}
+JSON
 printf '<?php return function (): array { return array(); };\n' > "$EXTRA_WORKLOAD"
 
 RESOLVE_HELPER="${TMP_ROOT}/resolve-context.sh"
@@ -49,6 +61,36 @@ STUB
 
 CAPTURE_FILE="${TMP_ROOT}/capture.json"
 WP_CODEBOX_BIN="${TMP_ROOT}/fixture-wp-codebox.js"
+WP_CODEBOX_CORE_MODULE="${TMP_ROOT}/wp-codebox-core.mjs"
+cat > "$WP_CODEBOX_CORE_MODULE" <<'STUB'
+export function buildWordPressBenchRecipe(options) {
+  const defines = options.wpConfigDefines || {};
+  const blueprint = options.blueprint && typeof options.blueprint === 'object' && !Array.isArray(options.blueprint)
+    ? {...options.blueprint, steps: [...(Array.isArray(options.blueprint.steps) ? options.blueprint.steps : [])]}
+    : {steps: []};
+  if (Object.keys(defines).length > 0) {
+    blueprint.steps.push({step: 'defineWpConfigConsts', consts: defines});
+  }
+  return {
+    schema: 'wp-codebox/workspace-recipe/v1',
+    runtime: {wp: options.wordpressVersion, blueprint},
+    inputs: {extraPlugins: options.extraPlugins || [], mounts: options.mounts || []},
+    workflow: {steps: [{
+      command: 'wordpress.bench',
+      args: [
+        `component-id=${options.componentId || options.pluginSlug}`,
+        `plugin-slug=${options.pluginSlug}`,
+        `iterations=${options.iterations || 3}`,
+        `warmup=${options.warmupIterations ?? 1}`,
+        `dependency-slugs=${(options.dependencySlugs || []).filter(Boolean).join(',')}`,
+        `env-json=${JSON.stringify(options.env || {})}`,
+        `bootstrap-files-json=${JSON.stringify(options.bootstrapFiles || [])}`,
+        `workloads-json=${JSON.stringify(options.workloads || [])}`,
+      ],
+    }]},
+  };
+}
+STUB
 cat > "$WP_CODEBOX_BIN" <<'STUB'
 #!/usr/bin/env node
 'use strict';
@@ -70,6 +112,10 @@ STUB
 chmod +x "$WP_CODEBOX_BIN"
 
 SETTINGS_JSON=$(jq -nc '{
+    wp_config_defines: {HOMEBOY_FIXTURE_DEFINE: "yes"},
+    bench_env: {HOMEBOY_FIXTURE_ENV: "yes"},
+    wp_codebox_bootstrap_files: ["bootstrap.php"],
+    wp_codebox_scenario_manifests: ["scenarios/manifest.json"],
     playground_blueprint: {
         steps: [
             {step: "installPlugin", pluginData: {resource: "git:directory", url: "https://github.com/chubes4/static-site-importer", ref: "main", refType: "branch"}, options: {activate: true, targetFolderName: "static-site-importer"}}
@@ -94,6 +140,7 @@ HOMEBOY_SMOKE_CAPTURE_FILE="$CAPTURE_FILE" \
 HOMEBOY_SETTINGS_JSON="$SETTINGS_JSON" \
 HOMEBOY_BENCH_EXTRA_WORKLOADS="$EXTRA_WORKLOAD" \
 HOMEBOY_WP_CODEBOX_BIN="$WP_CODEBOX_BIN" \
+HOMEBOY_WP_CODEBOX_CORE_MODULE="$WP_CODEBOX_CORE_MODULE" \
 HOMEBOY_BENCH_RESULTS_FILE="${TMP_ROOT}/bench-results.json" \
 HOMEBOY_WP_CODEBOX_ARTIFACTS_DIR="${TMP_ROOT}/artifacts" \
 HOMEBOY_RUNTIME_FAILURE_TRAP="" \
@@ -106,7 +153,11 @@ jq -e --arg sourceRoot "$SOURCE_ROOT" '
     and (.recipe.inputs.mounts[] | select(.source == $sourceRoot and .target == "/wordpress/wp-content/plugins/wp-site-generator" and .mode == "readonly"))
     and (.recipe.inputs.mounts[] | select(.source == ($sourceRoot | sub("/wp-site-generator$"; ""))) | .target == "/wordpress/wp-content/plugins/wp-site-generator/tests/bench")
     and (.recipe.runtime.blueprint.steps[] | select(.step == "installPlugin" and .options.targetFolderName == "static-site-importer"))
+    and (.recipe.runtime.blueprint.steps[] | select(.step == "defineWpConfigConsts" and .consts.HOMEBOY_FIXTURE_DEFINE == "yes"))
+    and (.recipe.workflow.steps[0].args[] | select(startswith("env-json=") and contains("HOMEBOY_FIXTURE_ENV")))
+    and (.recipe.workflow.steps[0].args[] | select(startswith("bootstrap-files-json=") and contains("bootstrap.php")))
     and (.recipe.workflow.steps[0].args[] | select(startswith("workloads-json=") and contains("static-site-importer import-theme")))
+    and (.recipe.workflow.steps[0].args[] | select(startswith("workloads-json=") and contains("manifest-navigation") and contains("scenario-manifest")))
 ' "$CAPTURE_FILE" >/dev/null
 
 LIST_RESULTS_FILE="${TMP_ROOT}/bench-list-results.json"
@@ -127,11 +178,24 @@ jq -e '
     and (.scenarios[] | select(.id == "website-generation" and .file == "tests/bench/website-generation.php" and .source == "component"))
     and (.scenarios[] | select(.id == "rig-workload" and .file == "tests/bench/rig-workload.php" and .source == "rig"))
     and (.scenarios[] | select(.id == "ssi-import" and .source == "configured"))
+    and (.scenarios[] | select(.id == "manifest-navigation" and .source == "scenario-manifest"))
 ' "$LIST_RESULTS_FILE" >/dev/null
 
 PLUGIN_ROOT="${TMP_ROOT}/plugin-component"
-mkdir -p "$PLUGIN_ROOT"
+mkdir -p "$PLUGIN_ROOT/scenarios"
 printf '<?php\n/**\n * Plugin Name: Fixture Component\n */\n' > "${PLUGIN_ROOT}/plugin-main.php"
+printf '<?php update_option("homeboy_bootstrap_fixture", "loaded", false);\n' > "${PLUGIN_ROOT}/bootstrap.php"
+printf '<?php return array("metrics" => array("scenario" => 1));\n' > "${PLUGIN_ROOT}/scenarios/grader.php"
+cat > "${PLUGIN_ROOT}/scenarios/manifest.json" <<'JSON'
+{
+  "id": "manifest-navigation",
+  "label": "Manifest navigation",
+  "prompt": "Build a navigation scenario fixture.",
+  "grader": "grader.php",
+  "tags": ["smoke"],
+  "metadata": {"fixture": "scenario-manifest"}
+}
+JSON
 PLUGIN_CAPTURE_FILE="${TMP_ROOT}/plugin-capture.json"
 
 HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$RESOLVE_HELPER" \
@@ -141,6 +205,7 @@ HOMEBOY_SMOKE_SOURCE_ROOT="$PLUGIN_ROOT" \
 HOMEBOY_SMOKE_CAPTURE_FILE="$PLUGIN_CAPTURE_FILE" \
 HOMEBOY_SETTINGS_JSON="$SETTINGS_JSON" \
 HOMEBOY_WP_CODEBOX_BIN="$WP_CODEBOX_BIN" \
+HOMEBOY_WP_CODEBOX_CORE_MODULE="$WP_CODEBOX_CORE_MODULE" \
 HOMEBOY_BENCH_RESULTS_FILE="${TMP_ROOT}/plugin-bench-results.json" \
 HOMEBOY_WP_CODEBOX_ARTIFACTS_DIR="${TMP_ROOT}/plugin-artifacts" \
 HOMEBOY_RUNTIME_FAILURE_TRAP="" \
