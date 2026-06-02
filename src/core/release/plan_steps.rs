@@ -1325,7 +1325,7 @@ mod tests {
             ]
         }))
         .expect("extension manifest");
-        extension.id = "nodejs".to_string();
+        extension.id = "package-runtime".to_string();
         let mut warnings = Vec::new();
         let mut hints = Vec::new();
         let options = ReleaseOptions {

@@ -92,6 +92,7 @@ pub fn run(args: AuditArgs, _global: &GlobalArgs) -> CmdResult<AuditCommandOutpu
         exclude_kinds,
         only_labels: args.only,
         exclude_labels: args.exclude,
+        extension_overrides: args.extension_override.extensions,
         baseline_flags: homeboy::core::engine::baseline::BaselineFlags {
             baseline: args.baseline_args.baseline,
             ignore_baseline: args.baseline_args.ignore_baseline,
