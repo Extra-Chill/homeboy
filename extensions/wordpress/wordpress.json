@@ -1028,6 +1028,13 @@
       "type": "string",
       "default": "",
       "description": "Optional PHP memory_limit for WP Codebox-backed wordpress.bench runs, expressed as a PHP shorthand size such as 512M or 1G. High-cardinality bench rigs can raise this per scenario or matrix cell."
+    },
+    {
+      "id": "package_artifacts",
+      "label": "WordPress package artifacts",
+      "type": "array",
+      "default": [],
+      "description": "Component-relative glob patterns for intentional package ZIP artifacts that should be included in the production build even though arbitrary *.zip files are excluded by default. Each declared pattern must match at least one file."
     }
   ],
   "actions": [

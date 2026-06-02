@@ -239,6 +239,27 @@ homeboy build <component>
 Pre-build validation runs `scripts/build/validate-build.sh`. PHP syntax
 errors and PSR-4 violations block the build; lint findings do not.
 
+Production builds exclude arbitrary nested `*.zip` files by default to avoid
+shipping stale release artifacts. Components that intentionally need ZIP package
+artifacts inside the deployed plugin or theme can declare explicit include globs:
+
+```json
+{
+	"extensions": {
+		"wordpress": {
+			"package_artifacts": [
+				"runtime/studio-web-sandbox/packages/*.zip"
+			]
+		}
+	}
+}
+```
+
+Each pattern is component-relative, must not contain `..`, and must match at
+least one file. Included package artifacts are copied into the staging directory
+after the default rsync excludes and reported with SHA-256 values in the build
+output.
+
 ## Bench runner
 
 Bench workloads run through WP Codebox. WP Codebox owns the disposable WordPress
