@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.113.5] - 2026-06-02
+
+### Fixed
+- expose helper discovery for Node workloads
+
 ## [2.113.4] - 2026-06-02
 
 ### Fixed
