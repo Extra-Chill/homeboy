@@ -4,291 +4,50 @@
  * External dependencies
  */
 const fs = require('node:fs');
-const path = require('node:path');
+const { spawnSync } = require('node:child_process');
 
-const ARTIFACTS = {
-  summary: { file: 'summary.json', key: 'browser_summary', kind: 'json' },
-  memory: { file: 'memory.json', key: 'browser_memory', kind: 'json' },
-  performance: { file: 'performance.json', key: 'browser_performance', kind: 'json' },
-  checkpoints: { file: 'checkpoints.jsonl', key: 'browser_checkpoints', kind: 'jsonl' },
+const ARTIFACT_KEYS = {
+  summary: 'browser_summary',
+  memory: 'browser_memory',
+  performance: 'browser_performance',
+  checkpoints: 'browser_checkpoints',
 };
 
-function readJsonIfPresent(filePath) {
-  if (!fs.existsSync(filePath) || fs.statSync(filePath).size === 0) {
-    return null;
+function runWpCodeboxBrowserMetrics(artifactsDirectory, wpCodeboxBin = 'wp-codebox') {
+  const wpCodeboxArgs = ['artifacts', 'browser-metrics', '--bundle', artifactsDirectory, '--json'];
+  const command = wpCodeboxBin.endsWith('.js') ? process.execPath : wpCodeboxBin;
+  const args = wpCodeboxBin.endsWith('.js') ? [wpCodeboxBin, ...wpCodeboxArgs] : wpCodeboxArgs;
+  const result = spawnSync(command, args, {
+    encoding: 'utf8',
+  });
+  if (result.error) {
+    throw result.error;
   }
-  return JSON.parse(fs.readFileSync(filePath, 'utf8'));
-}
-
-function readJsonlIfPresent(filePath) {
-  if (!fs.existsSync(filePath) || fs.statSync(filePath).size === 0) {
-    return [];
-  }
-  return fs.readFileSync(filePath, 'utf8')
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line) => JSON.parse(line));
-}
-
-function numberValue(value) {
-  if (typeof value === 'number' && Number.isFinite(value)) {
-    return value;
-  }
-  if (typeof value === 'string' && value.trim() !== '') {
-    const parsed = Number(value);
-    return Number.isFinite(parsed) ? parsed : null;
-  }
-  return null;
-}
-
-function valueAt(object, selector) {
-  if (!object || typeof object !== 'object') {
-    return undefined;
-  }
-  return selector.split('.').reduce((current, segment) => {
-    if (!current || typeof current !== 'object') {
-      return undefined;
-    }
-    return current[segment];
-  }, object);
-}
-
-function firstNumber(sources, selectors) {
-  for (const source of sources) {
-    for (const selector of selectors) {
-      const value = numberValue(valueAt(source, selector));
-      if (value !== null) {
-        return value;
-      }
-    }
-  }
-  return null;
-}
-
-function maxSampleNumber(samples, selectors) {
-  const values = samples.flatMap((sample) => selectors.map((selector) => numberValue(valueAt(sample, selector))))
-    .filter((value) => value !== null);
-  return values.length > 0 ? Math.max(...values) : null;
-}
-
-function lastSampleNumber(samples, selectors, labelPattern = null) {
-  const filtered = labelPattern
-    ? samples.filter((sample) => labelPattern.test(String(sample.label || sample.name || sample.checkpoint || sample.phase || '')))
-    : samples;
-  for (let index = filtered.length - 1; index >= 0; index -= 1) {
-    for (const selector of selectors) {
-      const value = numberValue(valueAt(filtered[index], selector));
-      if (value !== null) {
-        return value;
-      }
-    }
-  }
-  return null;
-}
-
-function sumArrayNumbers(items, selectors) {
-  const values = items.map((item) => firstNumber([item], selectors)).filter((value) => value !== null);
-  return values.length > 0 ? values.reduce((total, value) => total + value, 0) : null;
-}
-
-function listFrom(value, selectors) {
-  for (const selector of selectors) {
-    const candidate = selector ? valueAt(value, selector) : value;
-    if (Array.isArray(candidate)) {
-      return candidate;
-    }
-  }
-  return [];
-}
-
-function findBrowserDirectory(artifactsDirectory) {
-  if (!artifactsDirectory || !fs.existsSync(artifactsDirectory)) {
-    return null;
+  if (result.status !== 0) {
+    throw new Error(result.stderr || result.stdout || `wp-codebox artifacts browser-metrics exited with ${result.status}`);
   }
 
-  const directCandidates = [
-    path.join(artifactsDirectory, 'files', 'browser'),
-    path.join(artifactsDirectory, 'browser'),
-  ];
-  const direct = directCandidates.find((candidate) => fs.existsSync(candidate) && fs.statSync(candidate).isDirectory());
-  if (direct) {
-    return direct;
-  }
-
-  const queue = [artifactsDirectory];
-  while (queue.length > 0) {
-    const directory = queue.shift();
-    const entries = fs.readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name));
-    for (const entry of entries) {
-      if (!entry.isDirectory()) {
-        continue;
-      }
-      const child = path.join(directory, entry.name);
-      if (path.basename(child) === 'browser' && path.basename(path.dirname(child)) === 'files') {
-        return child;
-      }
-      queue.push(child);
-    }
-  }
-
-  return null;
-}
-
-function parseWpCodeboxBrowserArtifacts(artifactsDirectory) {
-  const browserDirectory = findBrowserDirectory(artifactsDirectory);
-  if (!browserDirectory) {
-    return { metrics: {}, artifacts: {} };
-  }
-
-  const paths = Object.fromEntries(
-    Object.entries(ARTIFACTS).map(([name, artifact]) => [name, path.join(browserDirectory, artifact.file)])
-  );
-  const summary = readJsonIfPresent(paths.summary) || {};
-  const memory = readJsonIfPresent(paths.memory) || {};
-  const performance = readJsonIfPresent(paths.performance) || {};
-  const checkpoints = readJsonlIfPresent(paths.checkpoints);
-  const memorySamples = [
-    ...listFrom(memory, ['samples', 'snapshots', 'measurements', 'checkpoints']),
-    ...checkpoints,
-  ];
-  const resources = listFrom(performance, ['resources', 'resourceTimings', 'entries.resources']);
-  const longTasks = listFrom(performance, ['longTasks', 'long_tasks', 'entries.longTasks']);
-  const sources = [summary, memory, performance, ...checkpoints];
-
-  const metrics = {};
-  const setMetric = (key, value) => {
-    if (value !== null && value !== undefined) {
-      metrics[key] = value;
-    }
-  };
-
-  setMetric('browser_peak_used_js_heap_bytes', firstNumber(sources, [
-    'browser_peak_used_js_heap_bytes',
-    'peak_used_js_heap_bytes',
-    'peakUsedJSHeapSize',
-    'summary.memory.usedJSHeapSize.peak',
-    'peak.usedJSHeapSize.peak',
-    'peak.performanceMemory.usedJSHeapSize.peak',
-    'peak.usedJSHeapSize',
-    'peak.used_js_heap_bytes',
-    'memory.peakUsedJSHeapSize',
-    'memory.peak.usedJSHeapSize',
-  ]) ?? maxSampleNumber(memorySamples, ['usedJSHeapSize', 'used_js_heap_bytes', 'memory.usedJSHeapSize']));
-  setMetric('browser_final_used_js_heap_bytes', firstNumber(sources, [
-    'browser_final_used_js_heap_bytes',
-    'final_used_js_heap_bytes',
-    'finalUsedJSHeapSize',
-    'summary.memory.usedJSHeapSize.final',
-    'final.performanceMemory.usedJSHeapSize',
-    'final.cdpHeap.usedSize',
-    'peak.usedJSHeapSize.final',
-    'final.usedJSHeapSize',
-    'final.used_js_heap_bytes',
-    'memory.finalUsedJSHeapSize',
-    'memory.final.usedJSHeapSize',
-  ]) ?? lastSampleNumber(memorySamples, ['usedJSHeapSize', 'used_js_heap_bytes', 'memory.usedJSHeapSize']));
-  setMetric('browser_post_idle_used_js_heap_bytes', firstNumber(sources, [
-    'browser_post_idle_used_js_heap_bytes',
-    'post_idle_used_js_heap_bytes',
-    'postIdleUsedJSHeapSize',
-    'postIdle.usedJSHeapSize',
-    'post_idle.used_js_heap_bytes',
-    'afterIdle.usedJSHeapSize',
-  ]) ?? lastSampleNumber(memorySamples, ['usedJSHeapSize', 'used_js_heap_bytes', 'memory.usedJSHeapSize'], /post[-_ ]?idle|after[-_ ]?idle/i));
-  setMetric('browser_generation_heap_delta_bytes', firstNumber(sources, [
-    'browser_generation_heap_delta_bytes',
-    'generation_heap_delta_bytes',
-    'generationHeapDeltaBytes',
-    'generation.heapDeltaBytes',
-    'generation.heap_delta_bytes',
-  ]));
-  if (!Object.hasOwn(metrics, 'browser_generation_heap_delta_bytes')) {
-    const before = firstNumber(sources, ['beforeGeneration.usedJSHeapSize', 'generation.before.usedJSHeapSize', 'initial.usedJSHeapSize']);
-    const after = firstNumber(sources, ['afterGeneration.usedJSHeapSize', 'generation.after.usedJSHeapSize', 'final.usedJSHeapSize']);
-    if (before !== null && after !== null) {
-      metrics.browser_generation_heap_delta_bytes = after - before;
-    }
-  }
-  setMetric('browser_dom_node_count', firstNumber(sources, [
-    'browser_dom_node_count',
-    'dom_node_count',
-    'domNodeCount',
-    'summary.performance.domNodes.final',
-    'summary.memory.domNodes.final',
-    'final.dom.nodes',
-    'final.domCounters.nodes',
-    'dom.nodeCount',
-    'counts.domNodes',
-    'memory.domNodeCount',
-  ]) ?? lastSampleNumber(memorySamples, ['domNodeCount', 'dom_node_count', 'dom.nodeCount']));
-  setMetric('browser_iframe_count', firstNumber(sources, [
-    'browser_iframe_count',
-    'iframe_count',
-    'iframeCount',
-    'final.dom.iframes',
-    'dom.iframeCount',
-    'counts.iframes',
-  ]));
-  setMetric('browser_resource_count', firstNumber(sources, [
-    'browser_resource_count',
-    'resource_count',
-    'resourceCount',
-    'summary.performance.resources',
-    'final.resources.count',
-    'peak.resources',
-    'resources.count',
-    'network.resourceCount',
-  ]) ?? (resources.length > 0 ? resources.length : null));
-  setMetric('browser_transfer_size_bytes', firstNumber(sources, [
-    'browser_transfer_size_bytes',
-    'transfer_size_bytes',
-    'transferSizeBytes',
-    'summary.performance.transferSizeBytes',
-    'final.resources.transferSizeBytes',
-    'peak.transferSizeBytes',
-    'resources.transferSizeBytes',
-    'network.transferSizeBytes',
-  ]) ?? sumArrayNumbers(resources, ['transferSize', 'transfer_size', 'transferSizeBytes']));
-  setMetric('browser_long_task_count', firstNumber(sources, [
-    'browser_long_task_count',
-    'long_task_count',
-    'longTaskCount',
-    'summary.performance.longTasks',
-    'final.longTasks.count',
-    'peak.longTasks',
-    'longTasks.count',
-  ]) ?? (longTasks.length > 0 ? longTasks.length : null));
-  setMetric('browser_long_task_total_ms', firstNumber(sources, [
-    'browser_long_task_total_ms',
-    'long_task_total_ms',
-    'longTaskTotalMs',
-    'summary.performance.longTaskDurationMs',
-    'final.longTasks.totalDurationMs',
-    'peak.longTaskDurationMs',
-    'longTasks.totalMs',
-  ]) ?? sumArrayNumbers(longTasks, ['duration', 'durationMs', 'duration_ms']));
-
+  const parsed = JSON.parse(result.stdout);
   const artifacts = {};
-  for (const [name, artifact] of Object.entries(ARTIFACTS)) {
-    if (!fs.existsSync(paths[name])) {
-      continue;
+  for (const [name, artifact] of Object.entries(parsed.artifacts || {})) {
+    const key = ARTIFACT_KEYS[name];
+    if (key) {
+      artifacts[key] = artifact;
     }
-    artifacts[artifact.key] = {
-      path: path.relative(artifactsDirectory, paths[name]),
-      kind: artifact.kind,
-    };
   }
 
-  return { metrics, artifacts };
+  return {
+    metrics: parsed.metrics || {},
+    artifacts,
+  };
 }
 
 function scenarioReceivesBrowserMetrics(scenario) {
   return scenario && scenario.id !== '__bootstrap';
 }
 
-function enrichBenchResultsWithBrowserMetrics(benchResults, artifactsDirectory) {
-  const parsed = parseWpCodeboxBrowserArtifacts(artifactsDirectory);
+function enrichBenchResultsWithBrowserMetrics(benchResults, artifactsDirectory, wpCodeboxBin = 'wp-codebox') {
+  const parsed = runWpCodeboxBrowserMetrics(artifactsDirectory, wpCodeboxBin);
   if (Object.keys(parsed.metrics).length === 0 && Object.keys(parsed.artifacts).length === 0) {
     return benchResults;
   }
@@ -310,12 +69,12 @@ function enrichBenchResultsWithBrowserMetrics(benchResults, artifactsDirectory) 
 }
 
 function cli(argv) {
-  const [benchResultsPath, artifactsDirectory] = argv;
+  const [benchResultsPath, artifactsDirectory, wpCodeboxBin = 'wp-codebox'] = argv;
   if (!benchResultsPath || !artifactsDirectory) {
-    throw new Error('Usage: node wp-codebox-browser-metrics.js <bench-results.json> <artifacts-directory>');
+    throw new Error('Usage: node wp-codebox-browser-metrics.js <bench-results.json> <artifacts-directory> [wp-codebox-bin]');
   }
   const benchResults = JSON.parse(fs.readFileSync(benchResultsPath, 'utf8'));
-  process.stdout.write(`${JSON.stringify(enrichBenchResultsWithBrowserMetrics(benchResults, artifactsDirectory), null, 2)}\n`);
+  process.stdout.write(`${JSON.stringify(enrichBenchResultsWithBrowserMetrics(benchResults, artifactsDirectory, wpCodeboxBin), null, 2)}\n`);
 }
 
 if (require.main === module) {
@@ -324,5 +83,5 @@ if (require.main === module) {
 
 module.exports = {
   enrichBenchResultsWithBrowserMetrics,
-  parseWpCodeboxBrowserArtifacts,
+  runWpCodeboxBrowserMetrics,
 };

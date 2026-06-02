@@ -638,7 +638,7 @@ jq '.benchResults | del(.warmup_iterations)' "$WP_CODEBOX_TMPFILE" > "$RESULTS_F
 
 if [ -f "$BENCH_BROWSER_METRICS_HELPER" ]; then
     ENRICHED_RESULTS_FILE=$(mktemp "${TMPDIR:-/tmp}/homeboy-wp-codebox-browser-metrics.XXXXXX")
-    if node "$BENCH_BROWSER_METRICS_HELPER" "$RESULTS_FILE" "$ARTIFACTS_DIR" > "$ENRICHED_RESULTS_FILE"; then
+    if node "$BENCH_BROWSER_METRICS_HELPER" "$RESULTS_FILE" "$ARTIFACTS_DIR" "$WP_CODEBOX_BIN" > "$ENRICHED_RESULTS_FILE"; then
         mv "$ENRICHED_RESULTS_FILE" "$RESULTS_FILE"
     else
         rm -f "$ENRICHED_RESULTS_FILE"

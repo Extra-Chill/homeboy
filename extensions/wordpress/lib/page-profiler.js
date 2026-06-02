@@ -11,7 +11,7 @@ const nodePath = require('node:path');
  */
 const { correlateBrowserAndWordPressTimings, normalizeUrl } = require('./timing-correlator');
 const { runWordPressFixtureSetup } = require('./fixture-setup');
-const { parseWpCodeboxBrowserArtifacts } = require('./wp-codebox-browser-metrics');
+const { runWpCodeboxBrowserMetrics } = require('./wp-codebox-browser-metrics');
 const {
 	WORDPRESS_RESOURCE_INCLUDE,
 	isPlainObject,
@@ -2105,7 +2105,7 @@ function resolveWpCodeboxArtifactDirectoryForSpec(input, spec) {
 	return input.wpCodeboxArtifactsDirectory || input.wpCodeboxArtifactDirectory || input.artifactsDirectory || input.artifactDirectory;
 }
 
-function readWpCodeboxBrowserProfileArtifacts(artifactsDirectory) {
+function readWpCodeboxBrowserProfileArtifacts(artifactsDirectory, wpCodeboxBin = process.env.HOMEBOY_WP_CODEBOX_BIN || 'wp-codebox') {
 	const browserDirectory = resolveWpCodeboxBrowserDirectory(artifactsDirectory);
 	if (!browserDirectory) {
 		throw new Error(`WP Codebox browser artifacts not found under ${artifactsDirectory}`);
@@ -2114,19 +2114,26 @@ function readWpCodeboxBrowserProfileArtifacts(artifactsDirectory) {
 	const actionSummary = readJsonFileIfPresent(nodePath.join(browserDirectory, 'action-summary.json')) || {};
 	const network = readJsonlFileIfPresent(nodePath.join(browserDirectory, 'network.jsonl'));
 	const actions = readJsonlFileIfPresent(nodePath.join(browserDirectory, 'actions.jsonl'));
+	let parsed = { metrics: {}, artifacts: {} };
+	try {
+		parsed = runWpCodeboxBrowserMetrics(artifactsDirectory, wpCodeboxBin);
+	} catch {
+		// Older local wp-codebox fixtures may not expose artifacts browser-metrics.
+	}
 	return {
 		browserDirectory,
 		summary,
 		actionSummary,
 		network,
 		actions,
-		parsed: parseWpCodeboxBrowserArtifacts(artifactsDirectory),
+		parsed,
 	};
 }
 
 function createWordPressPageProfileFromWpCodeboxArtifacts(input, spec) {
 	const artifactsDirectory = resolveWpCodeboxArtifactDirectoryForSpec(input, spec);
-	const artifactData = readWpCodeboxBrowserProfileArtifacts(artifactsDirectory);
+	const wpCodeboxBin = input.wpCodeboxBin || input.wp_codebox_bin || process.env.HOMEBOY_WP_CODEBOX_BIN || 'wp-codebox';
+	const artifactData = readWpCodeboxBrowserProfileArtifacts(artifactsDirectory, wpCodeboxBin);
 	const summary = artifactData.summary;
 	const actionSummary = artifactData.actionSummary;
 	const url = summary.finalUrl || summary.requestedUrl || actionSummary.finalUrl || actionSummary.requestedUrl || resolveWordPressUrl(input.baseUrl || summary.requestedUrl || 'http://example.test/', spec.url);

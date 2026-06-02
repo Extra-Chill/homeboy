@@ -637,6 +637,18 @@ async function main() {
 	const artifactRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-wp-codebox-browser-profile-'));
 	try {
 		const browserDirectory = path.join(artifactRoot, 'files', 'browser');
+		const fakeWpCodebox = path.join(artifactRoot, 'wp-codebox');
+		fs.writeFileSync(fakeWpCodebox, `#!/usr/bin/env node
+const output = {
+  schema: 'wp-codebox/browser-metrics/v1',
+  bundleDirectory: process.argv[process.argv.indexOf('--bundle') + 1],
+  hasBrowserMetrics: true,
+  metrics: { browser_resource_count: 3 },
+  artifacts: { performance: { path: 'files/browser/performance.json', kind: 'json' } },
+};
+process.stdout.write(JSON.stringify(output) + '\\n');
+`);
+		fs.chmodSync(fakeWpCodebox, 0o755);
 		writeJson(path.join(browserDirectory, 'summary.json'), {
 			schema: 'wp-codebox/browser-probe/v1',
 			requestedUrl: 'https://example.test/wp-admin/site-editor.php',
@@ -677,6 +689,7 @@ async function main() {
 			baseUrl: 'https://example.test',
 			spec: { id: 'site-editor-root', path: '/wp-admin/site-editor.php', ready: '.edit-site' },
 			wpCodeboxArtifactsDirectory: artifactRoot,
+			wpCodeboxBin: fakeWpCodebox,
 			wordpressProfilerRows: [
 				{ event: 'request.start', request_id: 'r2', method: 'GET', uri: '/wp-json/wp/v2/templates?context=edit', t_ms: 0 },
 				{ event: 'shutdown', request_id: 'r2', method: 'GET', uri: '/wp-json/wp/v2/templates?context=edit', t_ms: 45 },
