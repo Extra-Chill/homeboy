@@ -21,8 +21,6 @@ pub(crate) fn run_github_release(
             "github.release: tag state not set (git.tag must run first)".to_string(),
         )
     })?;
-    let notes = state.notes.clone().unwrap_or_default();
-
     let local_path = &component.local_path;
 
     let remote_url = component
@@ -169,11 +167,6 @@ pub(crate) fn run_github_release(
         return Ok(upload_success_result(&tag, &github, artifact_paths.len()));
     }
 
-    let notes_body = if notes.trim().is_empty() {
-        format!("Release {}", tag)
-    } else {
-        notes
-    };
     let notes_start_tag = github_generated_notes_start_tag(component, &tag)?;
 
     log_status!(
@@ -194,8 +187,6 @@ pub(crate) fn run_github_release(
         "--title",
         &tag,
         "--generate-notes",
-        "--notes",
-        &notes_body,
         "-R",
         &repo_flag,
     ];
@@ -344,8 +335,5 @@ pub(super) fn gh_release_exists(tag: &str, repo_flag: &str) -> bool {
 }
 
 pub(super) fn fallback_gh_command(tag: &str) -> String {
-    format!(
-        "gh release create {} --title {} --generate-notes --notes <release-notes>",
-        tag, tag
-    )
+    format!("gh release create {} --title {} --generate-notes", tag, tag)
 }

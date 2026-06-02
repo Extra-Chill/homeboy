@@ -776,6 +776,7 @@ mod tests {
         assert!(cmd.contains("gh release create v1.2.3"));
         assert!(cmd.contains("--title v1.2.3"));
         assert!(cmd.contains("--generate-notes"));
+        assert!(!cmd.contains("--notes <release-notes>"));
     }
 
     #[test]
