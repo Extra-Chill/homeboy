@@ -1021,6 +1021,13 @@
       "type": "string",
       "default": "",
       "description": "Optional WordPress core version passed to WP Codebox test and bench runners. Leave empty for the runner default. Use this when a component needs classes or behavior from a newer WordPress core build."
+    },
+    {
+      "id": "wp_codebox_php_memory_limit",
+      "label": "WP Codebox PHP memory limit",
+      "type": "string",
+      "default": "",
+      "description": "Optional PHP memory_limit for WP Codebox-backed wordpress.bench runs, expressed as a PHP shorthand size such as 512M or 1G. High-cardinality bench rigs can raise this per scenario or matrix cell."
     }
   ],
   "actions": [

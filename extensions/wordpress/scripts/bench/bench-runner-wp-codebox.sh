@@ -402,6 +402,17 @@ if [ "$settings_json" != "{}" ]; then
     [ -n "$extracted" ] && [ "$extracted" != "null" ] && WP_CODEBOX_WORDPRESS_VERSION="$extracted"
 fi
 
+WP_CODEBOX_PHP_MEMORY_LIMIT="${HOMEBOY_WP_CODEBOX_PHP_MEMORY_LIMIT:-}"
+if [ -z "$WP_CODEBOX_PHP_MEMORY_LIMIT" ] && [ "$settings_json" != "{}" ]; then
+    extracted=$(printf '%s' "$settings_json" | jq -r '.wp_codebox_php_memory_limit // .wp_codebox_memory_limit // empty' 2>/dev/null || true)
+    [ -n "$extracted" ] && [ "$extracted" != "null" ] && WP_CODEBOX_PHP_MEMORY_LIMIT="$extracted"
+fi
+if [ -n "$WP_CODEBOX_PHP_MEMORY_LIMIT" ] && ! printf '%s' "$WP_CODEBOX_PHP_MEMORY_LIMIT" | grep -Eq '^[0-9]+[KMG]?$'; then
+    echo "Error: wp_codebox_php_memory_limit must be a PHP shorthand size such as 512M." >&2
+    FAILED_STEP="WP Codebox PHP memory budget setup"
+    exit 1
+fi
+
 ITERATIONS="${HOMEBOY_BENCH_ITERATIONS:-3}"
 WARMUP_ITERATIONS="${HOMEBOY_BENCH_WARMUP_ITERATIONS:-}"
 if [ -z "$WARMUP_ITERATIONS" ] && [ "$settings_json" != "{}" ]; then
@@ -571,6 +582,78 @@ RUNTIME_BLUEPRINT_JSON=$(jq -nc \
     ($base + $scenario) as $merged |
     $merged + {steps: ($merged.steps // [])}
 ')
+WP_CODEBOX_PLUGIN_RUNTIME_JSON="{}"
+if [ -n "$WP_CODEBOX_PHP_MEMORY_LIMIT" ]; then
+    WP_CODEBOX_PLUGIN_RUNTIME_JSON=$(jq -nc --arg memoryLimit "$WP_CODEBOX_PHP_MEMORY_LIMIT" '{php: {memoryLimit: $memoryLimit}}')
+fi
+
+homeboy_wp_codebox_emit_memory_fatal_diagnostic() {
+    local output_file="$1"
+    local exit_code="$2"
+    local fatal_line="$3"
+    local diagnostics_file="${ARTIFACTS_DIR}/wp-codebox-bench-diagnostics.json"
+    local output_artifact="${ARTIFACTS_DIR}/wp-codebox-output.txt"
+    local exit_artifact="${ARTIFACTS_DIR}/wp-codebox-exit-code.txt"
+    local allowed_bytes=""
+    local attempted_bytes=""
+    local failing_file=""
+    local failing_line=""
+
+    mkdir -p "$ARTIFACTS_DIR"
+    cp "$output_file" "$output_artifact"
+    printf '%s\n' "$exit_code" > "$exit_artifact"
+
+    allowed_bytes=$(printf '%s\n' "$fatal_line" | sed -E 's/.*Allowed memory size of ([0-9]+) bytes exhausted.*/\1/' || true)
+    attempted_bytes=$(printf '%s\n' "$fatal_line" | sed -E 's/.*tried to allocate ([0-9]+) bytes.*/\1/' || true)
+    failing_file=$(printf '%s\n' "$fatal_line" | sed -E 's/.* in ([^ ]+) on line [0-9]+.*/\1/' || true)
+    failing_line=$(printf '%s\n' "$fatal_line" | sed -E 's/.* on line ([0-9]+).*/\1/' || true)
+    [ "$allowed_bytes" != "$fatal_line" ] || allowed_bytes=""
+    [ "$attempted_bytes" != "$fatal_line" ] || attempted_bytes=""
+    [ "$failing_file" != "$fatal_line" ] || failing_file=""
+    [ "$failing_line" != "$fatal_line" ] || failing_line=""
+
+    jq -n \
+        --arg schema "homeboy/wordpress-bench-diagnostic/v1" \
+        --arg code "wp-codebox-php-memory-exhausted" \
+        --arg message "WP Codebox wordpress.bench exhausted PHP memory before producing structured bench output." \
+        --argjson exitCode "$exit_code" \
+        --arg configuredMemoryLimit "$WP_CODEBOX_PHP_MEMORY_LIMIT" \
+        --arg allowedBytes "$allowed_bytes" \
+        --arg attemptedBytes "$attempted_bytes" \
+        --arg failingFile "$failing_file" \
+        --arg failingLine "$failing_line" \
+        --arg artifactsDir "$ARTIFACTS_DIR" \
+        --arg outputArtifact "$output_artifact" \
+        --arg exitArtifact "$exit_artifact" \
+        '{
+            schema: $schema,
+            diagnostics: [{
+                code: $code,
+                severity: "error",
+                message: $message,
+                exit_code: $exitCode,
+                php_memory_limit: (if $configuredMemoryLimit == "" then null else $configuredMemoryLimit end),
+                allowed_bytes: (if $allowedBytes == "" then null else ($allowedBytes | tonumber) end),
+                attempted_allocation_bytes: (if $attemptedBytes == "" then null else ($attemptedBytes | tonumber) end),
+                failing_file: (if $failingFile == "" then null else $failingFile end),
+                failing_line: (if $failingLine == "" then null else ($failingLine | tonumber) end),
+                artifacts: {
+                    directory: $artifactsDir,
+                    output: $outputArtifact,
+                    exit_code: $exitArtifact
+                }
+            }]
+        }' > "$diagnostics_file"
+
+    echo "WP Codebox wordpress.bench exhausted PHP memory before producing structured output." >&2
+    [ -z "$WP_CODEBOX_PHP_MEMORY_LIMIT" ] || echo "  Configured PHP memory limit: $WP_CODEBOX_PHP_MEMORY_LIMIT" >&2
+    [ -z "$allowed_bytes" ] || echo "  Allowed bytes: $allowed_bytes" >&2
+    [ -z "$failing_file" ] || echo "  Failing file: $failing_file" >&2
+    [ -z "$failing_line" ] || echo "  Failing line: $failing_line" >&2
+    echo "  Exit code: $exit_code" >&2
+    echo "  Diagnostics: $diagnostics_file" >&2
+    echo "  Raw output: $output_artifact" >&2
+}
 
 RECIPE_FILE=$(mktemp "${TMPDIR:-/tmp}/homeboy-wp-codebox-bench-recipe.XXXXXX")
 jq -n \
@@ -588,6 +671,7 @@ jq -n \
     --argjson dependencySlugs "$(printf '%s\n' "$DEPENDENCY_SLUGS_CSV" | jq -R 'split(",") | map(select(. != ""))')" \
     --argjson bootstrapFiles "$WP_CODEBOX_BOOTSTRAP_FILES_JSON" \
     --argjson workloads "$WP_CODEBOX_WORKLOADS_JSON" \
+    --argjson pluginRuntime "$WP_CODEBOX_PLUGIN_RUNTIME_JSON" \
     '{
         wpCodeboxBin: $wpCodeboxBin,
         options: {
@@ -602,6 +686,7 @@ jq -n \
             dependencySlugs: $dependencySlugs,
             env: $env,
             wpConfigDefines: $wpConfigDefines,
+            pluginRuntime: $pluginRuntime,
             bootstrapFiles: $bootstrapFiles,
             workloads: $workloads
         }
@@ -619,6 +704,9 @@ set -e
 
 if [ $wp_codebox_exit -ne 0 ]; then
     cat "$WP_CODEBOX_TMPFILE" >&2
+    if fatal_line=$(grep -E '^(PHP Fatal error: |Fatal error: )?Allowed memory size of [0-9]+ bytes exhausted|^(PHP Fatal error: |Fatal error: ).*Allowed memory size of [0-9]+ bytes exhausted' "$WP_CODEBOX_TMPFILE" | head -1); then
+        homeboy_wp_codebox_emit_memory_fatal_diagnostic "$WP_CODEBOX_TMPFILE" "$wp_codebox_exit" "$fatal_line"
+    fi
     FAILED_STEP="WP Codebox bench run"
     exit $wp_codebox_exit
 fi

@@ -11,7 +11,13 @@ if (typeof buildWordPressBenchRecipe !== 'function') {
 	throw new Error('WP Codebox core does not export buildWordPressBenchRecipe(). Update wp-codebox after chubes4/wp-codebox#487.');
 }
 
-process.stdout.write(`${JSON.stringify(buildWordPressBenchRecipe(input.options), null, 2)}\n`);
+const recipe = buildWordPressBenchRecipe(input.options);
+if (input.options?.pluginRuntime && typeof input.options.pluginRuntime === 'object' && !Array.isArray(input.options.pluginRuntime)) {
+	recipe.inputs = recipe.inputs ?? {};
+	recipe.inputs.pluginRuntime = input.options.pluginRuntime;
+}
+
+process.stdout.write(`${JSON.stringify(recipe, null, 2)}\n`);
 
 async function loadWpCodeboxCore(wpCodeboxBin) {
 	const candidates = [];
