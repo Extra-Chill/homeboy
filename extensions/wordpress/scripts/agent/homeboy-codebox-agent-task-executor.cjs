@@ -259,6 +259,57 @@ function timeoutPayload(timeoutMs) {
   };
 }
 
+function redactDiagnosticText(text) {
+  return String(text || '')
+    .replace(/((?:TOKEN|SECRET|PASSWORD|API[_-]?KEY|ACCESS[_-]?KEY|REFRESH[_-]?TOKEN)[A-Z0-9_-]*\s*=\s*)\S+/gi, '$1[redacted]')
+    .slice(0, 8000);
+}
+
+function missingSecretEnvNames(stderr) {
+  const match = String(stderr || '').match(/Required WP Codebox secret environment variable missing:\s*([^\n\r]+)/i);
+  if (!match) {
+    return [];
+  }
+  return match[1]
+    .split(',')
+    .map((name) => name.trim())
+    .filter((name) => /^[A-Z0-9_]+$/.test(name));
+}
+
+function stderrFailurePayload(result) {
+  const stderr = redactDiagnosticText(result.stderr || '');
+  const missingSecretEnv = missingSecretEnvNames(stderr);
+  const diagnosticClass = missingSecretEnv.length > 0
+    ? 'codebox.preflight.missing_secret_env'
+    : 'codebox.preflight.stderr';
+  const message = missingSecretEnv.length > 0
+    ? `WP Codebox task runner preflight is missing required secret environment variables: ${missingSecretEnv.join(', ')}.`
+    : 'WP Codebox task runner failed before returning a JSON outcome.';
+
+  return {
+    success: false,
+    status: 'failed',
+    failure_classification: 'provider',
+    summary: message,
+    diagnostics: [{
+      class: diagnosticClass,
+      message,
+      data: {
+        phase: 'codebox.preflight',
+        exit_status: result.status ?? 1,
+        missing_env: missingSecretEnv,
+        stderr,
+      },
+    }],
+    metadata: {
+      phase: 'codebox.preflight',
+      exit_status: result.status ?? 1,
+      missing_env: missingSecretEnv,
+      stderr,
+    },
+  };
+}
+
 function runTaskRunner(request) {
   const runner = argValue('--task-runner') || `${__dirname}/homeboy-wp-codebox-task-runner.cjs`;
   const config = request.executor?.config || {};
@@ -296,12 +347,29 @@ function runTaskRunner(request) {
     try {
       payload = JSON.parse(result.stdout);
     } catch {
-      payload = {
+      payload = missingSecretEnvNames(result.stderr).length > 0 ? stderrFailurePayload(result) : {
         success: result.status === 0,
         summary: result.stdout.trim(),
-        diagnostics: [{ class: 'codebox.stdout', message: 'WP Codebox returned non-JSON stdout.', data: {} }],
+        status: result.status === 0 ? 'succeeded' : 'failed',
+        failure_classification: result.status === 0 ? undefined : 'provider',
+        diagnostics: [{
+          class: 'codebox.stdout',
+          message: 'WP Codebox returned non-JSON stdout.',
+          data: {
+            phase: 'codebox.preflight',
+            exit_status: result.status ?? 1,
+            stderr: redactDiagnosticText(result.stderr || ''),
+          },
+        }],
+        metadata: {
+          phase: 'codebox.preflight',
+          exit_status: result.status ?? 1,
+          stderr: redactDiagnosticText(result.stderr || ''),
+        },
       };
     }
+  } else if ((result.status ?? 0) !== 0 || (result.stderr || '').trim()) {
+    payload = stderrFailurePayload(result);
   }
 
   return agentTaskOutcomeFromCodeboxResult(request, payload, { exitStatus: result.status ?? 1 });

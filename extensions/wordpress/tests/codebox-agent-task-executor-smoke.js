@@ -42,6 +42,17 @@ setInterval(() => {}, 1000);
   return fixture;
 }
 
+function writeMissingSecretTaskRunner(root) {
+  const fixture = path.join(root, 'missing-secret-task-runner.cjs');
+  fs.writeFileSync(fixture, `#!/usr/bin/env node
+'use strict';
+console.error('Required WP Codebox secret environment variable missing: AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN, AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN');
+process.exit(1);
+`);
+  fs.chmodSync(fixture, 0o755);
+  return fixture;
+}
+
 const request = {
   schema: 'homeboy/agent-task-request/v1',
   task_id: 'task-123',
@@ -332,6 +343,27 @@ try {
   assert.equal(timeoutOutcome.artifacts.some((artifact) => artifact.kind === 'codebox-command-log'), true);
   assert.equal(timeoutOutcome.artifacts.some((artifact) => artifact.kind === 'codebox-transcript'), true);
   assert.equal(timeoutOutcome.evidence_refs.some((ref) => ref.kind === 'codebox-transcript'), true);
+
+  const missingSecretResult = spawnSync(process.execPath, [
+    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs'),
+    '--task-runner',
+    writeMissingSecretTaskRunner(root),
+  ], {
+    encoding: 'utf8',
+    input: JSON.stringify(codexAgentRequest),
+  });
+  assert.equal(missingSecretResult.status, 1, missingSecretResult.stderr || missingSecretResult.stdout);
+  const missingSecretOutcome = JSON.parse(missingSecretResult.stdout);
+  assert.equal(missingSecretOutcome.status, 'failed');
+  assert.equal(missingSecretOutcome.failure_classification, 'provider');
+  assert.equal(missingSecretOutcome.diagnostics[0].class, 'codebox.preflight.missing_secret_env');
+  assert.deepEqual(missingSecretOutcome.diagnostics[0].data.missing_env, [
+    'AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN',
+    'AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN',
+  ]);
+  assert.equal(missingSecretOutcome.diagnostics[0].data.phase, 'codebox.preflight');
+  assert.equal(missingSecretOutcome.metadata.codebox.missing_env[0], 'AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN');
+  assert(!JSON.stringify(missingSecretOutcome).includes('codex-access-token-value'));
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
 }
