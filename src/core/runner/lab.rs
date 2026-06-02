@@ -1,3 +1,4 @@
+use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -437,7 +438,7 @@ fn run_lab_offload_inner(
         );
     }
 
-    let mut command = vec![homeboy_path.to_string()];
+    let mut command = lab_offload_homeboy_command_prefix(&source_path, homeboy_path);
     command.extend(
         rewrite_lab_offload_args(&changed_since_preflight.args, &remote_cwd)
             .into_iter()
@@ -855,6 +856,10 @@ fn lab_runner_capability_contract(
 
     let mut required_tools = Vec::new();
 
+    if is_homeboy_candidate_workspace(source_path) {
+        push_unique(&mut required_tools, RunnerRequiredTool::Cargo);
+    }
+
     if source_path.join(concat!("package", ".json")).is_file() {
         push_node_package_tool(&mut required_tools, RunnerRequiredTool::Npm);
     }
@@ -950,6 +955,40 @@ fn rewrite_lab_offload_args(args: &[String], remote_path: &str) -> Vec<String> {
         stripped.insert(1, "--force-hot".to_string());
     }
     stripped
+}
+
+fn lab_offload_homeboy_command_prefix(source_path: &Path, homeboy_path: &str) -> Vec<String> {
+    if is_homeboy_candidate_workspace(source_path) {
+        return vec![
+            "cargo".to_string(),
+            "run".to_string(),
+            "--quiet".to_string(),
+            "--bin".to_string(),
+            "homeboy".to_string(),
+            "--".to_string(),
+        ];
+    }
+
+    vec![homeboy_path.to_string()]
+}
+
+fn is_homeboy_candidate_workspace(source_path: &Path) -> bool {
+    if !source_path.join("Cargo.toml").is_file() || !source_path.join("src/main.rs").is_file() {
+        return false;
+    }
+
+    let Ok(contents) = fs::read_to_string(source_path.join("homeboy.json")) else {
+        return false;
+    };
+
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&contents) else {
+        return false;
+    };
+
+    value
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|id| id == "homeboy")
 }
 
 fn push_unique<T: PartialEq>(items: &mut Vec<T>, item: T) {
@@ -1086,6 +1125,65 @@ mod tests {
                 "/home/chubes/Developer/project".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn homeboy_candidate_workspace_uses_cargo_run_prefix() {
+        let dir = homeboy_candidate_workspace();
+
+        assert_eq!(
+            lab_offload_homeboy_command_prefix(dir.path(), "/usr/local/bin/homeboy"),
+            vec![
+                "cargo".to_string(),
+                "run".to_string(),
+                "--quiet".to_string(),
+                "--bin".to_string(),
+                "homeboy".to_string(),
+                "--".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn homeboy_candidate_workspace_requires_cargo_capability() {
+        let dir = homeboy_candidate_workspace();
+        let contract = lab_runner_capability_contract(&portable_lab_command("lint"), dir.path())
+            .expect("capability contract");
+
+        assert!(contract.required_tools.contains(&RunnerRequiredTool::Cargo));
+    }
+
+    #[test]
+    fn non_homeboy_workspace_uses_configured_homeboy_path() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"other\"\n",
+        )
+        .expect("write Cargo.toml");
+        fs::create_dir_all(dir.path().join("src")).expect("create src");
+        fs::write(dir.path().join("src/main.rs"), "fn main() {}\n").expect("write main");
+        fs::write(dir.path().join("homeboy.json"), r#"{"id":"other"}"#)
+            .expect("write homeboy.json");
+
+        assert_eq!(
+            lab_offload_homeboy_command_prefix(dir.path(), "/usr/local/bin/homeboy"),
+            vec!["/usr/local/bin/homeboy".to_string()]
+        );
+    }
+
+    fn homeboy_candidate_workspace() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("temp dir");
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"homeboy\"\n",
+        )
+        .expect("write Cargo.toml");
+        fs::create_dir_all(dir.path().join("src")).expect("create src");
+        fs::write(dir.path().join("src/main.rs"), "fn main() {}\n").expect("write main");
+        fs::write(dir.path().join("homeboy.json"), r#"{"id":"homeboy"}"#)
+            .expect("write homeboy.json");
+        dir
     }
 
     #[test]

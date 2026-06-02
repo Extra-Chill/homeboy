@@ -49,6 +49,7 @@ pub enum LabRunnerGateDecision {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum RunnerRequiredTool {
     Homeboy,
+    Cargo,
     Git,
     Node,
     Npm,
@@ -195,6 +196,7 @@ impl RunnerCapabilitySnapshot {
         let mut tools = BTreeSet::new();
         for tool in [
             RunnerRequiredTool::Homeboy,
+            RunnerRequiredTool::Cargo,
             RunnerRequiredTool::Git,
             RunnerRequiredTool::Node,
             RunnerRequiredTool::Npm,
@@ -224,6 +226,7 @@ impl RunnerCapabilitySnapshot {
             RunnerRequiredTool::Homeboy => {
                 runner.settings.homeboy_path.as_deref().unwrap_or("homeboy")
             }
+            RunnerRequiredTool::Cargo => "cargo",
             RunnerRequiredTool::Git => "git",
             RunnerRequiredTool::Node => "node",
             RunnerRequiredTool::Npm => concat!("n", "pm"),
@@ -373,6 +376,7 @@ impl RunnerRequiredTool {
     pub fn id(self) -> &'static str {
         match self {
             RunnerRequiredTool::Homeboy => "homeboy",
+            RunnerRequiredTool::Cargo => "cargo",
             RunnerRequiredTool::Git => "git",
             RunnerRequiredTool::Node => "node",
             RunnerRequiredTool::Npm => concat!("n", "pm"),
@@ -388,6 +392,9 @@ impl RunnerRequiredTool {
         match self {
             RunnerRequiredTool::Homeboy => {
                 "Install Homeboy on the runner and ensure the configured homeboy_path works."
+            }
+            RunnerRequiredTool::Cargo => {
+                "Install Rust/Cargo and ensure cargo is on the runner PATH."
             }
             RunnerRequiredTool::Git => "Install git and ensure it is on the runner PATH.",
             RunnerRequiredTool::Node => "Install Node.js and ensure node is on the runner PATH.",
