@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Smoke test: confirm the wordpress extension's .eslintrc.json exempts
+# Smoke test: confirm the wordpress extension's ESLint config exempts
 # `== null` / `!= null` from the eqeqeq rule while still catching loose
 # equality against non-null operands.
 #
@@ -13,7 +13,7 @@
 # `{ null: 'ignore' }` option for this exact case, but
 # `@wordpress/eslint-plugin`'s recommended preset does NOT enable it
 # (configs/es5.js sets `eqeqeq: 'error'` only). The extension's own
-# `.eslintrc.json` therefore overrides the rule explicitly. This smoke
+# `eslint.config.mjs` therefore overrides the rule explicitly. This smoke
 # guards against future config edits dropping the null exemption.
 #
 # Reference: https://eslint.org/docs/latest/rules/eqeqeq#allow-null
@@ -22,7 +22,7 @@ set -euo pipefail
 
 EXTENSION_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ESLINT_BIN="$EXTENSION_DIR/node_modules/.bin/eslint"
-ESLINT_CONFIG="$EXTENSION_DIR/.eslintrc.json"
+ESLINT_CONFIG="$EXTENSION_DIR/eslint.config.mjs"
 
 if [ ! -x "$ESLINT_BIN" ]; then
     echo "Skipping: $ESLINT_BIN not found (run \`npm ci\` in $EXTENSION_DIR)" >&2
@@ -34,7 +34,7 @@ if [ ! -f "$ESLINT_CONFIG" ]; then
     exit 1
 fi
 
-TMP_DIR="$(mktemp -d)"
+TMP_DIR="$(mktemp -d "${EXTENSION_DIR}/eslint-smoke.XXXXXX")"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
 SAMPLE="$TMP_DIR/sample.js"
@@ -58,9 +58,7 @@ OUTPUT="$TMP_DIR/eslint.out"
 set +e
 ( cd "$EXTENSION_DIR" && \
     "$ESLINT_BIN" \
-        --no-eslintrc \
         --config "$ESLINT_CONFIG" \
-        --resolve-plugins-relative-to "$EXTENSION_DIR" \
         --rule '{"import/no-unresolved": "off", "import/named": "off", "import/default": "off"}' \
         "$SAMPLE" \
 ) > "$OUTPUT" 2>&1

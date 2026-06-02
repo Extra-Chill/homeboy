@@ -22,7 +22,7 @@
     "./codebox-agent-task-executor": "./lib/codebox-agent-task-executor.js"
   },
   "scripts": {
-    "lint:js": "eslint --ext .js,.jsx,.ts,.tsx",
+    "lint:js": "eslint",
     "test:admin-page-scenarios": "node tests/admin-page-scenarios-smoke.js",
     "test:page-profiler": "node tests/page-profiler-smoke.js",
     "test:datamachine-agent-wp-codebox-runner": "bash scripts/agent/datamachine-agent-wp-codebox-runner-smoke.sh",
@@ -48,8 +48,8 @@
     "test:refactor-source-wp-codebox": "node tests/refactor-source-wp-codebox-smoke.js"
   },
   "devDependencies": {
-    "@wordpress/eslint-plugin": "^24.2.0",
-    "eslint": "^8.57.0"
+    "@wordpress/eslint-plugin": "^25.3.0",
+    "eslint": "^9.39.4"
   },
   "overrides": {
     "minimatch@>=9.0.0 <9.0.6": "^10.0.1"

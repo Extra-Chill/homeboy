@@ -131,7 +131,7 @@ ESLINT_BIN="${EXTENSION_PATH}/node_modules/.bin/eslint"
 if [ ! -f "$ESLINT_BIN" ]; then
     ESLINT_BIN="${EXTENSION_PATH}/node_extensions/.bin/eslint"
 fi
-ESLINT_CONFIG="${EXTENSION_PATH}/.eslintrc.json"
+ESLINT_CONFIG="${EXTENSION_PATH}/eslint.config.mjs"
 
 # Validate tools exist
 if [ ! -f "$ESLINT_BIN" ]; then
@@ -140,7 +140,7 @@ if [ ! -f "$ESLINT_BIN" ]; then
 fi
 
 if [ ! -f "$ESLINT_CONFIG" ]; then
-    echo "Warning: .eslintrc.json not found at $ESLINT_CONFIG, skipping JavaScript linting"
+    echo "Warning: eslint.config.mjs not found at $ESLINT_CONFIG, skipping JavaScript linting"
     exit 0
 fi
 
@@ -155,9 +155,9 @@ if [ -n "$TEXT_DOMAIN" ] && [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
     echo "DEBUG: Detected text domain: $TEXT_DOMAIN"
 fi
 
-# Build base ESLint arguments. Keep config and plugin resolution anchored to
-# this extension so worktree targets do not also load a primary-checkout config.
-eslint_base_args=(--no-eslintrc --config "$ESLINT_CONFIG" --resolve-plugins-relative-to "$EXTENSION_PATH" --ext .js,.jsx,.ts,.tsx)
+# Build base ESLint arguments. Keep config anchored to this extension so
+# worktree targets do not also load a primary-checkout config.
+eslint_base_args=(--config "$ESLINT_CONFIG")
 
 if [ -n "$TEXT_DOMAIN" ]; then
     eslint_base_args+=(--rule "@wordpress/i18n-text-domain: [error, { allowedTextDomain: \"$TEXT_DOMAIN\" }]")

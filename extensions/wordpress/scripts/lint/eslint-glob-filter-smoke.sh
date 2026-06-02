@@ -2,12 +2,13 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-EXTENSION_PATH="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+REAL_EXTENSION_PATH="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 HOMEBOY_CORE_DIR="${HOMEBOY_CORE_DIR:-$(cd "${ROOT_DIR}/.." && pwd)/homeboy}"
 SIDECAR_WRITER_HELPER="${HOMEBOY_RUNTIME_SIDECAR_WRITER:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/sidecar-writer.sh}"
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
+EXTENSION_PATH="${TMPDIR}/extension"
 
 if [ ! -f "$SIDECAR_WRITER_HELPER" ]; then
     echo "Missing sidecar writer helper: $SIDECAR_WRITER_HELPER" >&2
@@ -37,7 +38,7 @@ assert_not_contains() {
 component_dir="${TMPDIR}/component"
 findings_file="${TMPDIR}/eslint-findings.json"
 mkdir -p "${component_dir}/inc" "${component_dir}/assets" "${EXTENSION_PATH}/node_modules/.bin"
-touch "${EXTENSION_PATH}/.eslintrc.json"
+touch "${EXTENSION_PATH}/eslint.config.mjs"
 printf '%s\n' '<?php' > "${component_dir}/inc/Thing.php"
 printf '%s\n' 'const answer = 42;' > "${component_dir}/assets/app.js"
 
@@ -56,7 +57,7 @@ HOMEBOY_COMPONENT_TEXT_DOMAIN="component" \
 HOMEBOY_SUMMARY_MODE=1 \
 HOMEBOY_LINT_GLOB="{${component_dir}/inc/Thing.php}" \
 ESLINT_LOG="$eslint_log" \
-    bash "${EXTENSION_PATH}/scripts/lint/eslint-runner.sh" > "${TMPDIR}/php-only.out"
+    bash "${REAL_EXTENSION_PATH}/scripts/lint/eslint-runner.sh" > "${TMPDIR}/php-only.out"
 
 if [ -f "$eslint_log" ]; then
     echo "Expected ESLint not to run for PHP-only glob" >&2
@@ -72,7 +73,7 @@ HOMEBOY_LINT_GLOB="{${component_dir}/inc/Thing.php,${component_dir}/assets/app.j
 HOMEBOY_LINT_FINDINGS_FILE="$findings_file" \
 HOMEBOY_RUNTIME_SIDECAR_WRITER="$SIDECAR_WRITER_HELPER" \
 ESLINT_LOG="$eslint_log" \
-    bash "${EXTENSION_PATH}/scripts/lint/eslint-runner.sh" > "${TMPDIR}/mixed.out"
+    bash "${REAL_EXTENSION_PATH}/scripts/lint/eslint-runner.sh" > "${TMPDIR}/mixed.out"
 
 assert_contains "${TMPDIR}/mixed.out" "Linting 1 JS/TS files matching"
 assert_contains "$eslint_log" "${component_dir}/assets/app.js"
