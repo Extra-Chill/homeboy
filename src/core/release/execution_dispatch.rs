@@ -120,7 +120,7 @@ pub(super) fn execute_release_plan_step(
                 return Ok(None);
             }
             Ok(Some(
-                executor::run_cleanup(context.component)
+                executor::run_cleanup(context.component, &context.state)
                     .unwrap_or_else(|err| failed_result("cleanup", "cleanup", err)),
             ))
         }
@@ -135,6 +135,7 @@ pub(super) fn execute_release_plan_step(
             context.component_id,
             &context.component.local_path,
             context.state.version.as_deref(),
+            &context.state.artifacts,
         ))),
         step_kind if step_kind.starts_with("publish.") => {
             let target = step_kind.strip_prefix("publish.").unwrap_or_default();

@@ -544,29 +544,67 @@ pub(crate) fn run_package(
     Ok(step_success("package", "package", Some(data), Vec::new()))
 }
 
-/// Delete the packaging staging dir (`target/distrib`). Skipped when the
-/// caller chose `--deploy` so the deploy step can still find the artifact.
-pub(crate) fn run_cleanup(component: &Component) -> Result<ReleaseStepResult> {
-    let distrib_path = format!("{}/target/distrib", component.local_path);
+/// Delete release-generated artifact directories. Skipped when the caller chose
+/// `--deploy` so the deploy step can still find the artifact.
+pub(crate) fn run_cleanup(
+    component: &Component,
+    state: &ReleaseState,
+) -> Result<ReleaseStepResult> {
+    let cleanup_paths = release_cleanup_paths(&component.local_path, &state.artifacts);
+    let mut removed_paths = Vec::new();
 
-    let mut removed = false;
-    if std::path::Path::new(&distrib_path).exists() {
-        std::fs::remove_dir_all(&distrib_path).map_err(|e| {
+    for path in &cleanup_paths {
+        if !path.exists() {
+            continue;
+        }
+        std::fs::remove_dir_all(path).map_err(|e| {
             Error::internal_io(
-                format!("Failed to clean up {}: {}", distrib_path, e),
-                Some(distrib_path.clone()),
+                format!("Failed to clean up {}: {}", path.display(), e),
+                Some(path.display().to_string()),
             )
         })?;
-        removed = true;
+        removed_paths.push(path.display().to_string());
     }
 
+    let distrib_path = std::path::Path::new(&component.local_path).join("target/distrib");
     let data = serde_json::json!({
         "action": "cleanup",
-        "path": distrib_path,
-        "removed": removed,
+        "path": distrib_path.display().to_string(),
+        "paths": cleanup_paths
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>(),
+        "removed_paths": removed_paths,
+        "removed": !removed_paths.is_empty(),
     });
 
     Ok(step_success("cleanup", "cleanup", Some(data), Vec::new()))
+}
+
+pub(crate) fn release_cleanup_paths(
+    local_path: &str,
+    artifacts: &[ReleaseArtifact],
+) -> Vec<std::path::PathBuf> {
+    let component_path = std::path::Path::new(local_path);
+    let mut paths = vec![component_path.join("target/distrib")];
+
+    let build_path = component_path.join("build");
+    let has_build_artifact = artifacts.iter().any(|artifact| {
+        let artifact_path = std::path::Path::new(&artifact.path);
+        let artifact_path = if artifact_path.is_absolute() {
+            artifact_path.to_path_buf()
+        } else {
+            component_path.join(artifact_path)
+        };
+
+        artifact_path.starts_with(&build_path)
+    });
+
+    if has_build_artifact {
+        paths.push(build_path);
+    }
+
+    paths
 }
 
 /// Run the component's `post_release` hook commands. Failures are non-fatal —
@@ -751,9 +789,10 @@ fn store_artifacts_from_output(
 
 #[cfg(test)]
 mod tests {
-    use super::{github_release, run_git_push, store_artifacts_from_output};
+    use super::{github_release, run_cleanup, run_git_push, store_artifacts_from_output};
     use crate::core::component::Component;
-    use crate::core::release::ReleaseStepStatus;
+    use crate::core::release::types::ReleaseState;
+    use crate::core::release::{ReleaseArtifact, ReleaseStepStatus};
     use std::process::Command;
 
     fn git(path: &std::path::Path, args: &[&str]) {
@@ -814,6 +853,57 @@ mod tests {
                 "**Full Changelog**: https://github.com/Extra-Chill/homeboy/blob/v0.9.0/docs/CHANGELOG.md"
             )
         );
+    }
+
+    #[test]
+    fn cleanup_removes_build_dir_when_release_artifact_is_inside_build() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let build_dir = temp.path().join("build");
+        let distrib_dir = temp.path().join("target/distrib");
+        std::fs::create_dir_all(&build_dir).expect("build dir");
+        std::fs::create_dir_all(&distrib_dir).expect("distrib dir");
+        let artifact_path = build_dir.join("fixture.zip");
+        std::fs::write(&artifact_path, "artifact").expect("artifact");
+
+        let component = Component {
+            id: "fixture".to_string(),
+            local_path: temp.path().to_string_lossy().to_string(),
+            ..Component::default()
+        };
+        let state = ReleaseState {
+            artifacts: vec![ReleaseArtifact {
+                path: artifact_path.display().to_string(),
+                artifact_type: None,
+                platform: None,
+            }],
+            ..ReleaseState::default()
+        };
+
+        let result = run_cleanup(&component, &state).expect("cleanup");
+
+        assert_eq!(result.status, ReleaseStepStatus::Success);
+        assert!(!build_dir.exists());
+        assert!(!distrib_dir.exists());
+    }
+
+    #[test]
+    fn cleanup_leaves_build_dir_without_release_artifact() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let build_dir = temp.path().join("build");
+        std::fs::create_dir_all(&build_dir).expect("build dir");
+        std::fs::write(build_dir.join("bundle.js"), "source build").expect("build file");
+
+        let component = Component {
+            id: "fixture".to_string(),
+            local_path: temp.path().to_string_lossy().to_string(),
+            ..Component::default()
+        };
+        let state = ReleaseState::default();
+
+        let result = run_cleanup(&component, &state).expect("cleanup");
+
+        assert_eq!(result.status, ReleaseStepStatus::Success);
+        assert!(build_dir.exists());
     }
 
     #[test]
@@ -920,7 +1010,6 @@ mod tests {
         collect_head_version_mismatches, collect_version_target_mismatches,
     };
     use crate::core::component::VersionTarget;
-    use crate::core::release::types::ReleaseState;
 
     fn run_in(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
         let output = std::process::Command::new(args[0])

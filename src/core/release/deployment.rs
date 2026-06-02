@@ -1,8 +1,9 @@
 use crate::core::deploy::{self, DeployConfig};
 
+use super::executor::release_cleanup_paths;
 use super::types::{
-    ReleaseDeploymentResult, ReleaseDeploymentSummary, ReleaseProjectDeployResult, ReleaseRun,
-    ReleaseStepResult, ReleaseStepStatus,
+    ReleaseArtifact, ReleaseDeploymentResult, ReleaseDeploymentSummary, ReleaseProjectDeployResult,
+    ReleaseRun, ReleaseStepResult, ReleaseStepStatus,
 };
 
 pub(super) fn plan_deployment(component_id: &str) -> ReleaseDeploymentResult {
@@ -31,8 +32,9 @@ pub(super) fn run_deployment_step(
     component_id: &str,
     local_path: &str,
     expected_version: Option<&str>,
+    artifacts: &[ReleaseArtifact],
 ) -> ReleaseStepResult {
-    let deployment = execute_deployment(component_id, local_path, expected_version);
+    let deployment = execute_deployment(component_id, local_path, expected_version, artifacts);
     let deploy_failed = deployment.summary.failed > 0;
 
     ReleaseStepResult {
@@ -65,10 +67,12 @@ fn execute_deployment(
     component_id: &str,
     local_path: &str,
     expected_version: Option<&str>,
+    artifacts: &[ReleaseArtifact],
 ) -> ReleaseDeploymentResult {
     let projects = release_deploy_targets(component_id);
 
     if projects.is_empty() {
+        cleanup_release_artifacts(local_path, artifacts);
         return ReleaseDeploymentResult {
             projects: vec![],
             summary: ReleaseDeploymentSummary::default(),
@@ -125,7 +129,7 @@ fn execute_deployment(
         },
     };
 
-    cleanup_release_artifacts(local_path);
+    cleanup_release_artifacts(local_path, artifacts);
     deployment
 }
 
@@ -161,21 +165,22 @@ fn release_deploy_targets(component_id: &str) -> Vec<String> {
     }
 }
 
-fn cleanup_release_artifacts(local_path: &str) {
-    let distrib_path = format!("{}/target/distrib", local_path);
-    if !std::path::Path::new(&distrib_path).exists() {
-        return;
-    }
+fn cleanup_release_artifacts(local_path: &str, artifacts: &[ReleaseArtifact]) {
+    for path in release_cleanup_paths(local_path, artifacts) {
+        if !path.exists() {
+            continue;
+        }
 
-    if let Err(error) = std::fs::remove_dir_all(&distrib_path) {
-        log_status!(
-            "release",
-            "Warning: failed to clean up {}: {}",
-            distrib_path,
-            error
-        );
-    } else {
-        log_status!("release", "Cleaned up {}", distrib_path);
+        if let Err(error) = std::fs::remove_dir_all(&path) {
+            log_status!(
+                "release",
+                "Warning: failed to clean up {}: {}",
+                path.display(),
+                error
+            );
+        } else {
+            log_status!("release", "Cleaned up {}", path.display());
+        }
     }
 }
 
@@ -183,7 +188,7 @@ fn cleanup_release_artifacts(local_path: &str) {
 mod tests {
     use super::{extract_deployment_from_run, plan_deployment};
     use crate::core::release::types::{
-        ReleaseRun, ReleaseRunResult, ReleaseStepResult, ReleaseStepStatus,
+        ReleaseArtifact, ReleaseRun, ReleaseRunResult, ReleaseStepResult, ReleaseStepStatus,
     };
 
     #[test]
@@ -196,12 +201,37 @@ mod tests {
 
     #[test]
     fn test_run_deployment_step() {
-        let result = super::run_deployment_step("definitely-not-used-by-projects", "/tmp", None);
+        let result =
+            super::run_deployment_step("definitely-not-used-by-projects", "/tmp", None, &[]);
 
         assert_eq!(result.id, "deploy");
         assert_eq!(result.status, ReleaseStepStatus::Success);
         assert!(result.error.is_none());
         assert!(result.data.is_some());
+    }
+
+    #[test]
+    fn deployment_step_cleans_release_build_artifacts_without_deploy_targets() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let build_dir = temp.path().join("build");
+        std::fs::create_dir_all(&build_dir).expect("build dir");
+        let artifact_path = build_dir.join("fixture.zip");
+        std::fs::write(&artifact_path, "artifact").expect("artifact");
+        let artifacts = vec![ReleaseArtifact {
+            path: artifact_path.display().to_string(),
+            artifact_type: None,
+            platform: None,
+        }];
+
+        let result = super::run_deployment_step(
+            "definitely-not-used-by-projects",
+            &temp.path().to_string_lossy(),
+            None,
+            &artifacts,
+        );
+
+        assert_eq!(result.status, ReleaseStepStatus::Success);
+        assert!(!build_dir.exists());
     }
 
     #[test]
