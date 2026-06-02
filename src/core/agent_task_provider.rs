@@ -10,6 +10,7 @@ use crate::core::agent_task::{
 };
 use crate::core::agent_task_scheduler::{AgentTaskExecutionContext, AgentTaskExecutorAdapter};
 use crate::core::agent_task_secrets::{resolve_secret_env, AgentTaskSecretResolutionError};
+use crate::core::agent_task_timeout::timeout_with_grace;
 use crate::core::extension::load_all_extensions;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -151,7 +152,7 @@ fn run_provider_command(
         .limits
         .timeout_ms
         .or(request.limits.max_runtime_ms)
-        .map(Duration::from_millis);
+        .map(|timeout_ms| (timeout_ms, timeout_with_grace(timeout_ms)));
     let input = match serde_json::to_vec(request) {
         Ok(input) => input,
         Err(error) => {
@@ -207,12 +208,12 @@ fn run_provider_command(
         let _ = std::io::Write::write_all(&mut stdin, &input);
     }
 
-    let output = if let Some(timeout) = timeout {
+    let output = if let Some((requested_timeout_ms, process_timeout)) = timeout {
         let started = Instant::now();
         loop {
             match child.try_wait() {
                 Ok(Some(_status)) => break child.wait_with_output(),
-                Ok(None) if started.elapsed() >= timeout => {
+                Ok(None) if started.elapsed() >= process_timeout => {
                     let _ = child.kill();
                     let _ = child.wait();
                     return failure_outcome(
@@ -222,10 +223,9 @@ fn run_provider_command(
                         "agent_task.provider_timeout",
                         format!(
                             "provider '{}' exceeded timeout_ms={}",
-                            provider.id,
-                            timeout.as_millis()
+                            provider.id, requested_timeout_ms
                         ),
-                        json!({ "provider": provider.id, "command": command, "timeout_ms": timeout.as_millis() }),
+                        json!({ "provider": provider.id, "command": command, "timeout_ms": requested_timeout_ms, "process_timeout_ms": process_timeout.as_millis() }),
                     );
                 }
                 Ok(None) => std::thread::sleep(Duration::from_millis(10)),
@@ -448,6 +448,26 @@ mod tests {
             aggregate.outcomes[0].failure_classification,
             Some(AgentTaskFailureClassification::Timeout)
         );
+    }
+
+    #[test]
+    fn provider_can_return_timeout_payload_during_wrapper_grace() {
+        let command = format!(
+            "node {}",
+            script("let fs=require('fs'); let req=JSON.parse(fs.readFileSync(0,'utf8')); setTimeout(()=>process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'timeout',summary:'provider serialized timeout',failure_classification:'timeout',artifacts:[{schema:'homeboy/agent-task-artifact/v1',id:'timeout-evidence',kind:'codebox-task-runner-preflight',path:'/tmp/timeout-evidence.json'}]})), 75);")
+        );
+        let (mut request, provider) = request("task-timeout-payload", command);
+        request.limits.timeout_ms = Some(50);
+
+        let outcome = run_provider_command(&request, &provider);
+
+        assert_eq!(outcome.status, AgentTaskOutcomeStatus::Timeout);
+        assert_eq!(
+            outcome.summary.as_deref(),
+            Some("provider serialized timeout")
+        );
+        assert_eq!(outcome.artifacts.len(), 1);
+        assert_eq!(outcome.artifacts[0].id, "timeout-evidence");
     }
 
     #[test]

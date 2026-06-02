@@ -24,6 +24,7 @@ pub struct AuditRunWorkflowArgs {
     pub exclude_kinds: Vec<code_audit::AuditFinding>,
     pub only_labels: Vec<String>,
     pub exclude_labels: Vec<String>,
+    pub extension_overrides: Vec<String>,
     pub baseline_flags: crate::core::engine::baseline::BaselineFlags,
     pub changed_since: Option<String>,
     pub json_summary: bool,
@@ -210,6 +211,7 @@ fn run_audit(args: &AuditRunWorkflowArgs) -> crate::core::Result<Option<AuditWit
             Some(git_ref),
             &plan,
             &args.reference_paths,
+            &args.extension_overrides,
         )?))
     } else {
         Ok(Some(code_audit::audit_path_with_id_with_plan_and_analysis(
@@ -217,6 +219,7 @@ fn run_audit(args: &AuditRunWorkflowArgs) -> crate::core::Result<Option<AuditWit
             &args.source_path,
             &plan,
             &args.reference_paths,
+            &args.extension_overrides,
         )?))
     }
 }

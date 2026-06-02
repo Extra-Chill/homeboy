@@ -470,8 +470,14 @@ mod tests {
             "stderr": "npm ERR! code ENEEDAUTH\nnpm ERR! need auth This command requires you to be logged in to https://registry.npmjs.org/",
         });
 
-        let result =
-            publish_step_result("publish.nodejs", "nodejs", "nodejs", None, &response, None);
+        let result = publish_step_result(
+            "publish.package-runtime",
+            "package-runtime",
+            "package-runtime",
+            None,
+            &response,
+            None,
+        );
 
         assert_eq!(result.status, ReleaseStepStatus::Skipped);
         assert!(result.warnings.join("\n").contains("ENEEDAUTH"));

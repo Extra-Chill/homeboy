@@ -16,6 +16,11 @@ pub use crate::core::agent_task_schedule::{
     AgentTaskResourceBudgetStatus, AgentTaskRetryPolicy, AgentTaskScheduleOptions, AgentTaskState,
     AGENT_TASK_AGGREGATE_SCHEMA, AGENT_TASK_PLAN_SCHEMA,
 };
+use crate::core::agent_task_timeout::timeout_with_grace;
+use crate::core::agent_task_timeout_artifacts::{
+    append_unique_artifacts, append_unique_evidence_refs, is_actionable_patch_artifact,
+    merge_timeout_outcome, TimeoutArtifactDiscovery,
+};
 
 pub trait AgentTaskExecutorAdapter: Send + Sync + 'static {
     fn execute(
@@ -454,7 +459,7 @@ impl AgentTaskScheduleSupport {
             let timed_out = running[index]
                 .timeout_ms
                 .map(|timeout_ms| {
-                    running[index].started_at.elapsed() > Duration::from_millis(timeout_ms)
+                    running[index].started_at.elapsed() > timeout_with_grace(timeout_ms)
                 })
                 .unwrap_or(false);
 
@@ -465,11 +470,15 @@ impl AgentTaskScheduleSupport {
 
             let task = running.remove(index);
             executor.cancel(&task.task_id);
-            let outcome =
-                Self::timeout_outcome(task.task_id.clone(), task.timeout_ms.unwrap_or_default());
+            let outcome = Self::timeout_outcome(
+                task.task_id.clone(),
+                task.timeout_ms.unwrap_or_default(),
+                Some(&task.request),
+                "scheduler_timeout",
+            );
             events.push(event(
                 &task.task_id,
-                AgentTaskState::TimedOut,
+                Self::state_for_outcome(&outcome),
                 task.attempt,
                 outcome.summary.clone(),
             ));
@@ -492,6 +501,14 @@ impl AgentTaskScheduleSupport {
                         data: Value::Null,
                     });
                 }
+            }
+
+            if outcome.status == AgentTaskOutcomeStatus::Timeout {
+                Self::reconcile_timeout_artifacts(
+                    &mut outcome,
+                    &running.request,
+                    "provider_timeout",
+                );
             }
         }
         outcome
@@ -517,8 +534,13 @@ impl AgentTaskScheduleSupport {
         }
     }
 
-    fn timeout_outcome(task_id: String, timeout_ms: u64) -> AgentTaskOutcome {
-        AgentTaskOutcome {
+    fn timeout_outcome(
+        task_id: String,
+        timeout_ms: u64,
+        request: Option<&AgentTaskRequest>,
+        timeout_kind: &str,
+    ) -> AgentTaskOutcome {
+        let mut outcome = AgentTaskOutcome {
             schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
             task_id,
             status: AgentTaskOutcomeStatus::Timeout,
@@ -538,7 +560,70 @@ impl AgentTaskScheduleSupport {
             workflow: None,
             follow_up: None,
             metadata: Value::Null,
+        };
+
+        if let Some(request) = request {
+            Self::reconcile_timeout_artifacts(&mut outcome, request, timeout_kind);
         }
+
+        outcome
+    }
+
+    fn reconcile_timeout_artifacts(
+        outcome: &mut AgentTaskOutcome,
+        request: &AgentTaskRequest,
+        timeout_kind: &str,
+    ) {
+        let discovery = TimeoutArtifactDiscovery::discover(request);
+        if discovery.artifacts.is_empty()
+            && discovery.evidence_refs.is_empty()
+            && discovery.outcome.is_none()
+        {
+            outcome.diagnostics.push(AgentTaskDiagnostic {
+                class: timeout_kind.to_string(),
+                message:
+                    "no completed runtime artifacts were discovered before timeout finalization"
+                        .to_string(),
+                data: Value::Null,
+            });
+            return;
+        }
+
+        if let Some(discovered) = discovery.outcome {
+            merge_timeout_outcome(outcome, discovered);
+        }
+
+        append_unique_artifacts(&mut outcome.artifacts, discovery.artifacts);
+        append_unique_evidence_refs(&mut outcome.evidence_refs, discovery.evidence_refs);
+
+        let actionable_patch = outcome.artifacts.iter().any(is_actionable_patch_artifact);
+        if actionable_patch {
+            outcome.status = AgentTaskOutcomeStatus::Succeeded;
+            outcome.failure_classification = None;
+            outcome.summary = Some(
+                "runtime completed with an actionable artifact before timeout finalization"
+                    .to_string(),
+            );
+        }
+
+        outcome.diagnostics.push(AgentTaskDiagnostic {
+            class: "completed_runtime_late_provider_race".to_string(),
+            message: if actionable_patch {
+                format!(
+                    "{timeout_kind} observed after runtime artifacts were already available; preserving actionable artifacts"
+                )
+            } else {
+                format!(
+                    "{timeout_kind} observed after runtime artifacts were already available; preserving discovered artifacts"
+                )
+            },
+            data: serde_json::json!({
+                "timeout_kind": timeout_kind,
+                "artifact_count": outcome.artifacts.len(),
+                "evidence_ref_count": outcome.evidence_refs.len(),
+                "actionable_patch": actionable_patch,
+            }),
+        });
     }
 
     fn blocked_outcome(task_id: String, summary: String) -> AgentTaskOutcome {
@@ -779,11 +864,13 @@ fn event(
 mod tests {
     use super::*;
     use crate::core::agent_task::{
-        expand_agent_task_matrix, AgentTaskExecutor, AgentTaskLimits, AgentTaskMatrixAggregate,
-        AgentTaskMatrixAxis, AgentTaskPolicy, AgentTaskWorkspace,
+        expand_agent_task_matrix, AgentTaskArtifact, AgentTaskExecutor, AgentTaskLimits,
+        AgentTaskMatrixAggregate, AgentTaskMatrixAxis, AgentTaskPolicy, AgentTaskWorkspace,
+        AGENT_TASK_ARTIFACT_SCHEMA,
     };
     use serde_json::json;
     use std::collections::HashMap;
+    use std::fs;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
 
@@ -849,6 +936,93 @@ mod tests {
             aggregate.outcomes[0].failure_classification,
             Some(AgentTaskFailureClassification::Timeout)
         );
+    }
+
+    #[test]
+    fn timeout_with_completed_runtime_artifacts_is_discoverable_and_promotable() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let artifact_root = temp.path().join("task-1-artifacts");
+        fs::create_dir_all(&artifact_root).expect("artifact root");
+        let patch_path = artifact_root.join("fix.patch");
+        fs::write(&patch_path, "diff --git a/a.txt b/a.txt\n").expect("patch");
+        fs::write(artifact_root.join("transcript.log"), "runtime completed").expect("log");
+        let agent_result_path = artifact_root.join("agent-result.json");
+        fs::write(
+            &agent_result_path,
+            serde_json::to_string(&AgentTaskOutcome {
+                schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+                task_id: "task-1".to_string(),
+                status: AgentTaskOutcomeStatus::Succeeded,
+                summary: Some("patch ready".to_string()),
+                failure_classification: None,
+                artifacts: vec![AgentTaskArtifact {
+                    schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+                    id: "fix".to_string(),
+                    kind: "patch".to_string(),
+                    name: Some("fix.patch".to_string()),
+                    path: Some(patch_path.display().to_string()),
+                    url: None,
+                    mime: Some("text/x-patch".to_string()),
+                    size_bytes: None,
+                    sha256: None,
+                    metadata: json!({ "role": "patch" }),
+                }],
+                evidence_refs: vec![AgentTaskEvidenceRef {
+                    kind: "runtime_bundle".to_string(),
+                    uri: artifact_root.display().to_string(),
+                    label: Some("runtime bundle".to_string()),
+                }],
+                diagnostics: Vec::new(),
+                workflow: None,
+                follow_up: None,
+                metadata: json!({}),
+            })
+            .expect("agent result json"),
+        )
+        .expect("agent result");
+
+        let scheduler = AgentTaskScheduler::new(RecordingExecutor::new(
+            HashMap::new(),
+            Duration::from_millis(250),
+        ));
+        let mut plan = plan_with_tasks(1);
+        plan.tasks[0].limits.timeout_ms = Some(1);
+        plan.tasks[0].metadata = json!({ "artifact_root": artifact_root });
+
+        let aggregate = scheduler.run(plan);
+
+        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+        assert_eq!(aggregate.totals.succeeded, 1);
+        assert_eq!(aggregate.totals.timed_out, 0);
+        assert!(aggregate
+            .events
+            .iter()
+            .any(|event| event.task_id == "task-1" && event.state == AgentTaskState::Succeeded));
+        let outcome = &aggregate.outcomes[0];
+        assert_eq!(outcome.status, AgentTaskOutcomeStatus::Succeeded);
+        assert!(outcome.artifacts.iter().any(|artifact| {
+            artifact.kind == "patch"
+                && artifact.path.as_deref() == Some(&patch_path.to_string_lossy())
+        }));
+        assert!(outcome
+            .artifacts
+            .iter()
+            .any(|artifact| artifact.kind == "transcript"));
+        assert!(outcome
+            .evidence_refs
+            .iter()
+            .any(|evidence| evidence.kind == "agent_result"
+                && evidence.uri == agent_result_path.display().to_string()));
+        assert!(outcome.diagnostics.iter().any(|diagnostic| {
+            diagnostic.class == "completed_runtime_late_provider_race"
+                && diagnostic.data.get("timeout_kind").and_then(Value::as_str)
+                    == Some("scheduler_timeout")
+                && diagnostic
+                    .data
+                    .get("actionable_patch")
+                    .and_then(Value::as_bool)
+                    == Some(true)
+        }));
     }
 
     #[test]
