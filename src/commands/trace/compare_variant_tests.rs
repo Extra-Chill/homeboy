@@ -4,6 +4,8 @@ use crate::commands::utils::args::{BaselineArgs, PositionalComponentArgs, Settin
 use crate::commands::GlobalArgs;
 use crate::test_support::with_isolated_home;
 
+use super::test_fixture::TRACE_FIXTURE_EXTENSION_ID;
+
 use homeboy::core::extension::trace as extension_trace;
 use homeboy::core::extension::trace::TraceCommandOutput;
 
@@ -325,7 +327,7 @@ fn write_multi_component_variant_rig(
                     "studio": {{ "path": "{}" }},
                     "wordpress": {{ "path": "{}" }}
                 }},
-                "trace_workloads": {{ "fixture-trace": [
+                "trace_workloads": {{ "{TRACE_FIXTURE_EXTENSION_ID}": [
                     {{ "path": "${{components.studio.path}}/studio-app-create-site.trace.mjs" }}
                 ] }},
                 "trace_variants": {{

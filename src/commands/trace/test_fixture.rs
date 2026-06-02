@@ -1,16 +1,18 @@
 use std::fs;
 use std::process::Command;
 
+pub(super) const TRACE_FIXTURE_EXTENSION_ID: &str = "trace-fixture";
+
 pub(super) fn write_trace_extension(home: &tempfile::TempDir) {
     let extension_dir = home
         .path()
         .join(".config")
         .join("homeboy")
         .join("extensions")
-        .join("fixture-trace");
+        .join(TRACE_FIXTURE_EXTENSION_ID);
     fs::create_dir_all(&extension_dir).expect("mkdir extension");
     fs::write(
-        extension_dir.join("fixture-trace.json"),
+        extension_dir.join(format!("{TRACE_FIXTURE_EXTENSION_ID}.json")),
         r#"{
                 "name": "Fixture Trace",
                 "version": "0.0.0",
@@ -128,7 +130,7 @@ pub(super) fn write_trace_rig(
                     "components": {{
                         "{component_id}": {{ "path": "{}" }}
                     }},
-                    "trace_workloads": {{ "fixture-trace": [
+                    "trace_workloads": {{ "{TRACE_FIXTURE_EXTENSION_ID}": [
                         {{ "path": "${{components.{component_id}.path}}/studio-app-create-site.trace.mjs" }},
                         {{ "path": "${{components.{component_id}.path}}/studio-list-sites.trace.mjs" }}
                     ] }}
@@ -154,7 +156,7 @@ pub(super) fn write_trace_rig_with_phase_preset(
                     "components": {{
                         "{component_id}": {{ "path": "{}" }}
                     }},
-                    "trace_workloads": {{ "fixture-trace": [
+                    "trace_workloads": {{ "{TRACE_FIXTURE_EXTENSION_ID}": [
                         {{
                             "path": "${{components.{component_id}.path}}/studio-app-create-site.trace.mjs",
                             "check_groups": [],
@@ -186,7 +188,7 @@ pub(super) fn write_trace_rig_with_span_metadata(
                     "components": {{
                         "{component_id}": {{ "path": "{}" }}
                     }},
-                    "trace_workloads": {{ "fixture-trace": [
+                    "trace_workloads": {{ "{TRACE_FIXTURE_EXTENSION_ID}": [
                         {{
                             "path": "${{components.{component_id}.path}}/studio-app-create-site.trace.mjs",
                             "check_groups": [],
@@ -266,7 +268,7 @@ pub(super) fn write_trace_rig_with_variant(
                     "components": {{
                         "{component_id}": {{ "path": "{}" }}
                     }},
-                    "trace_workloads": {{ "fixture-trace": [
+                    "trace_workloads": {{ "{TRACE_FIXTURE_EXTENSION_ID}": [
                         {{ "path": "${{components.{component_id}.path}}/studio-app-create-site.trace.mjs" }}
                     ] }},
                     "trace_variants": {{

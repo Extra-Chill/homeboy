@@ -15,6 +15,7 @@ use crate::core::paths;
 use crate::core::process::pid_is_running;
 use crate::core::runner::{measured_command_output, normalize_runner_command_env};
 use crate::core::source_snapshot::SourceSnapshot;
+use crate::core::upgrade::VERSION;
 
 mod artifact_download;
 mod broker_config;
@@ -246,14 +247,14 @@ where
             status_code: 200,
             body: json!({
                 "status": "ok",
-                "version": env!("CARGO_PKG_VERSION"),
+                "version": VERSION,
             }),
             artifact: None,
         },
         ("GET", "/version") => HttpResponse {
             status_code: 200,
             body: json!({
-                "version": env!("CARGO_PKG_VERSION"),
+                "version": VERSION,
             }),
             artifact: None,
         },

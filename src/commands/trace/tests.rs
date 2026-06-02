@@ -10,7 +10,7 @@ use super::aggregate_test_support::aggregate_samples;
 use super::test_fixture::{
     init_overlay_component, write_trace_extension, write_trace_rig,
     write_trace_rig_with_phase_preset, write_trace_rig_with_span_metadata,
-    write_trace_rig_with_variant,
+    write_trace_rig_with_variant, TRACE_FIXTURE_EXTENSION_ID,
 };
 use super::*;
 
@@ -67,7 +67,7 @@ fn write_trace_rig_with_profile(
                     "components": {{
                         "{component_id}": {{ "path": "{}" }}
                     }},
-                    "trace_workloads": {{ "fixture-trace": [
+                    "trace_workloads": {{ "{TRACE_FIXTURE_EXTENSION_ID}": [
                         {{ "path": "${{components.{component_id}.path}}/close-window-running-site.trace.mjs" }}
                     ] }},
                     "trace_profiles": {{
@@ -130,7 +130,7 @@ fn rig_component_for_trace_synthesizes_trace_workload_extensions() {
                     "studio": { "path": "/tmp/studio" }
                 },
                 "trace_workloads": {
-                    "fixture-trace": [{ "path": "/tmp/create-site.trace.mjs" }]
+                    "trace-fixture": [{ "path": "/tmp/create-site.trace.mjs" }]
                 }
             }"#,
     )
@@ -142,72 +142,56 @@ fn rig_component_for_trace_synthesizes_trace_workload_extensions() {
         .extensions
         .as_ref()
         .expect("extensions")
-        .contains_key("fixture-trace"));
+        .contains_key(TRACE_FIXTURE_EXTENSION_ID));
 }
 
 #[test]
 fn rig_trace_list_uses_rig_default_component_and_workloads() {
-    with_isolated_home(|home| {
-        write_trace_extension(home);
-        let component_dir = tempfile::TempDir::new().expect("component dir");
-        write_trace_rig(home, "studio-rig", "studio", component_dir.path());
+    let component_dir = tempfile::TempDir::new().expect("component dir");
+    let rig_spec: RigSpec = serde_json::from_str(&format!(
+        r#"{{
+            "id": "studio-rig",
+            "components": {{
+                "studio": {{ "path": "{}" }}
+            }},
+            "trace_workloads": {{ "{TRACE_FIXTURE_EXTENSION_ID}": [
+                {{ "path": "${{components.studio.path}}/studio-app-create-site.trace.mjs" }},
+                {{ "path": "${{components.studio.path}}/studio-list-sites.trace.mjs" }}
+            ] }}
+        }}"#,
+        component_dir.path().display()
+    ))
+    .expect("parse rig");
 
-        let (output, exit_code) = run_list(TraceArgs {
-            comp: PositionalComponentArgs {
-                component: None,
-                path: None,
-            },
-            component_arg: None,
-            scenario: Some("list".to_string()),
-            scenario_arg: None,
-            compare_after: None,
-            rig: Some("studio-rig".to_string()),
-            profile: None,
-            profiles: false,
-            setting_args: SettingArgs::default(),
-            json_summary: false,
-            report: None,
-            experiment: None,
-            repeat: 1,
-            aggregate: None,
-            schedule: TraceSchedule::Grouped,
-            focus_spans: Vec::new(),
-            spans: Vec::new(),
-            phases: Vec::new(),
-            attachments: Vec::new(),
-            phase_preset: None,
-            baseline_args: BaselineArgs::default(),
-            regression_threshold: extension_trace::baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT,
-            regression_min_delta_ms: extension_trace::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
-            overlays: Vec::new(),
-            variants: Vec::new(),
-            matrix: TraceVariantMatrixMode::None,
-            output_dir: None,
-            keep_overlay: false,
-            stale: false,
-            force: false,
-        })
-        .expect("rig trace list should run");
+    let component_id = resolve_component_id(
+        &PositionalComponentArgs {
+            component: None,
+            path: None,
+        },
+        Some(&rig_spec),
+    )
+    .expect("default component");
+    let component = rig_component_for_trace(&rig_spec, &component_id).expect("component");
+    let workloads = rig::workloads_for_extension(
+        &rig_spec,
+        rig::RigWorkloadKind::Trace,
+        None,
+        TRACE_FIXTURE_EXTENSION_ID,
+    );
+    let scenarios = workloads
+        .iter()
+        .map(|path| trace_workload_scenario_id(&path.to_string_lossy()))
+        .collect::<Vec<_>>();
 
-        assert_eq!(exit_code, 0);
-        match output {
-            TraceCommandOutput::List(result) => {
-                assert_eq!(result.component, "studio");
-                assert_eq!(result.component_id, "studio");
-                assert_eq!(result.count, 2);
-                assert_eq!(result.scenarios[0].id, "studio-app-create-site");
-                let expected_source = format!(
-                    "{}/studio-app-create-site.trace.mjs",
-                    component_dir.path().display()
-                );
-                assert_eq!(
-                    result.scenarios[0].source.as_deref(),
-                    Some(expected_source.as_str())
-                );
-            }
-            _ => panic!("expected list output"),
-        }
-    });
+    assert_eq!(component_id, "studio");
+    assert_eq!(component.id, "studio");
+    assert_eq!(workloads.len(), 2);
+    assert_eq!(scenarios[0], "studio-app-create-site");
+    let expected_source = format!(
+        "{}/studio-app-create-site.trace.mjs",
+        component_dir.path().display()
+    );
+    assert_eq!(workloads[0].to_string_lossy(), expected_source);
 }
 
 #[test]
@@ -328,92 +312,46 @@ fn trace_list_profiles_lists_rig_profiles() {
 
 #[test]
 fn rig_trace_list_uses_scoped_workload_preflight() {
-    with_isolated_home(|home| {
-        write_trace_extension(home);
-        let component_dir = tempfile::TempDir::new().expect("component dir");
-        let rig_dir = home.path().join(".config").join("homeboy").join("rigs");
-        fs::create_dir_all(&rig_dir).expect("mkdir rigs");
-        fs::write(
-                rig_dir.join("studio-rig.json"),
-                format!(
-                    r#"{{
-                        "components": {{
-                            "studio": {{ "path": "{}" }}
-                        }},
-                        "pipeline": {{
-                            "check": [
-                                {{
-                                    "kind": "check",
-                                    "label": "desktop app packaged",
-                                    "groups": ["desktop-app"],
-                                    "command": "true"
-                                }},
-                                {{
-                                    "kind": "check",
-                                    "label": "unrelated cli symlink",
-                                    "groups": ["cli-dev-copy"],
-                                    "command": "false"
-                                }}
-                            ]
-                        }},
-                        "trace_workloads": {{ "fixture-trace": [
-                            {{
-                                "path": "${{components.studio.path}}/studio-app-create-site.trace.mjs",
-                                "check_groups": ["desktop-app"]
-                            }}
-                        ] }}
-                    }}"#,
-                    component_dir.path().display()
-                ),
-            )
-            .expect("write rig");
+    let spec: RigSpec = serde_json::from_str(&format!(
+        r#"{{
+            "id": "studio-rig",
+            "components": {{
+                "studio": {{ "path": "/tmp/studio" }}
+            }},
+            "pipeline": {{
+                "check": [
+                    {{
+                        "kind": "check",
+                        "label": "desktop app packaged",
+                        "groups": ["desktop-app"],
+                        "command": "true"
+                    }},
+                    {{
+                        "kind": "check",
+                        "label": "unrelated cli symlink",
+                        "groups": ["cli-dev-copy"],
+                        "command": "false"
+                    }}
+                ]
+            }},
+            "trace_workloads": {{ "{TRACE_FIXTURE_EXTENSION_ID}": [
+                {{
+                    "path": "${{components.studio.path}}/studio-app-create-site.trace.mjs",
+                    "check_groups": ["desktop-app"]
+                }}
+            ] }}
+        }}"#
+    ))
+    .expect("parse rig");
 
-        let (output, exit_code) = run_list(TraceArgs {
-            comp: PositionalComponentArgs {
-                component: None,
-                path: None,
-            },
-            component_arg: None,
-            scenario: Some("list".to_string()),
-            scenario_arg: None,
-            compare_after: None,
-            rig: Some("studio-rig".to_string()),
-            profile: None,
-            profiles: false,
-            setting_args: SettingArgs::default(),
-            json_summary: false,
-            report: None,
-            experiment: None,
-            repeat: 1,
-            aggregate: None,
-            schedule: TraceSchedule::Grouped,
-            focus_spans: Vec::new(),
-            spans: Vec::new(),
-            phases: Vec::new(),
-            attachments: Vec::new(),
-            phase_preset: None,
-            baseline_args: BaselineArgs::default(),
-            regression_threshold: extension_trace::baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT,
-            regression_min_delta_ms: extension_trace::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
-            overlays: Vec::new(),
-            variants: Vec::new(),
-            matrix: TraceVariantMatrixMode::None,
-            output_dir: None,
-            keep_overlay: false,
-            stale: false,
-            force: false,
-        })
-        .expect("scoped rig trace list should bypass unrelated failed check");
+    run_rig_workload_preflight(
+        &spec,
+        Some(TRACE_FIXTURE_EXTENSION_ID),
+        rig::RigWorkloadKind::Trace,
+    )
+    .expect("scoped workload preflight should bypass unrelated failed check");
 
-        assert_eq!(exit_code, 0);
-        match output {
-            TraceCommandOutput::List(result) => {
-                assert_eq!(result.count, 1);
-                assert_eq!(result.scenarios[0].id, "studio-app-create-site");
-            }
-            _ => panic!("expected list output"),
-        }
-    });
+    assert!(run_rig_workload_preflight(&spec, None, rig::RigWorkloadKind::Trace).is_err());
 }
 
 #[test]
