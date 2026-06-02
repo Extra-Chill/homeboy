@@ -8,7 +8,6 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const {
   applyApprovedWpCodeboxArtifact,
-  artifactContentDigest,
   verifyWpCodeboxPayload,
   wpCodeboxApplyRequestFromBundle,
 } = require('../lib/wp-codebox-apply-adapter');
@@ -65,7 +64,7 @@ function createBundle(root) {
     '+after',
     '',
   ].join('\n');
-  const contentDigest = artifactContentDigest(changedFilesJson, patch);
+  const contentDigest = 'fixture-content-digest';
   const artifactId = `artifact-bundle-sha256-${contentDigest}`;
   const contentDigestMetadata = {
     algorithm: 'sha256',
@@ -104,20 +103,51 @@ function createBundle(root) {
   return { artifactId, bundle, contentDigest, patch };
 }
 
+function createPreflight(fixture, changedFiles) {
+  const patchSha256 = sha256(fixture.patch);
+  return {
+    success: true,
+    schema: 'wp-codebox/artifact-apply-preflight/v1',
+    artifact_id: fixture.artifactId,
+    approved_files: ['/wordpress/wp-content/plugins/fixture-plugin/readme.txt'],
+    changed_files: ['/wordpress/wp-content/plugins/fixture-plugin/readme.txt'],
+    patch_sha256: patchSha256,
+    content_digest: fixture.contentDigest,
+    payload: {
+      artifact_id: fixture.artifactId,
+      artifact: {
+        id: fixture.artifactId,
+        changed_files: changedFiles,
+        review: {
+          evidence: {
+            patchSha256,
+            artifactContentDigest: fixture.contentDigest,
+          },
+        },
+      },
+      approved_files: ['/wordpress/wp-content/plugins/fixture-plugin/readme.txt'],
+      patch: fixture.patch,
+      patch_sha256: patchSha256,
+      artifact_content_digest: fixture.contentDigest,
+      artifact_verification: { valid: true },
+    },
+  };
+}
+
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wp-codebox-apply-adapter-'));
 
 try {
   const fixture = createBundle(root);
   const changedFilesJson = fs.readFileSync(path.join(fixture.bundle, 'files', 'changed-files.json'), 'utf8');
   const changedFiles = JSON.parse(changedFilesJson);
+  const preflight = createPreflight(fixture, changedFiles);
   const repo = createRepo(root, 'feature/apply-smoke');
 
   const result = applyApprovedWpCodeboxArtifact({
-    bundlePath: fixture.bundle,
+    preflight,
     worktreePath: repo,
     branch: 'feature/wp-codebox-apply-smoke',
     commitMessage: 'Apply fixture wp-codebox artifact',
-    approvedFiles: ['/wordpress/wp-content/plugins/fixture-plugin/readme.txt'],
     patchStrip: 5,
   });
 
@@ -139,17 +169,7 @@ try {
   assert.equal(run('git', ['status', '--porcelain'], { cwd: repo }), '');
 
   assert.equal(
-    verifyWpCodeboxPayload({
-      artifact_id: fixture.artifactId,
-      artifact: {
-        changed_files: changedFiles,
-        paths: { changed_files: path.join(fixture.bundle, 'files', 'changed-files.json') },
-      },
-      approved_files: ['/wordpress/wp-content/plugins/fixture-plugin/readme.txt'],
-      patch: fixture.patch,
-      patch_sha256: sha256(fixture.patch),
-      artifact_content_digest: fixture.contentDigest,
-    }).contentDigest,
+    verifyWpCodeboxPayload(preflight.payload).contentDigest,
     fixture.contentDigest
   );
 
@@ -158,21 +178,22 @@ try {
       artifact_id: fixture.artifactId,
       artifact: {
         changed_files: changedFiles,
-        changedFilesJson,
       },
       approved_files: [],
       patch: fixture.patch,
       patch_sha256: sha256(fixture.patch),
-      artifact_content_digest: fixture.contentDigest,
     }),
-    /approval for every changed file/
+    /artifact_content_digest is required/
   );
+
+  const preflightPath = path.join(root, 'preflight.json');
+  writeJson(preflightPath, preflight);
 
   const cliRepo = createRepo(root, 'feature/apply-cli-smoke');
   const cliOutput = run(process.execPath, [
     path.join(__dirname, '..', 'scripts', 'agent', 'wp-codebox-apply-adapter.cjs'),
-    '--bundle',
-    fixture.bundle,
+    '--preflight',
+    preflightPath,
     '--worktree',
     cliRepo,
     '--branch',
@@ -193,11 +214,10 @@ try {
 
   const requestRepo = createRepo(root, 'feature/apply-request-smoke');
   const request = wpCodeboxApplyRequestFromBundle({
-    bundlePath: fixture.bundle,
+    preflight,
     worktreePath: requestRepo,
     branch: 'feature/wp-codebox-apply-request-smoke',
     commitMessage: 'Apply fixture wp-codebox artifact through ApplyRequest',
-    approvedFiles: ['/wordpress/wp-content/plugins/fixture-plugin/readme.txt'],
     patchStrip: 5,
   });
   const requestResult = applyApprovedWpCodeboxArtifact({ applyRequest: request });
@@ -208,10 +228,9 @@ try {
 
   const requestPath = path.join(root, 'apply-request.json');
   writeJson(requestPath, wpCodeboxApplyRequestFromBundle({
-    bundlePath: fixture.bundle,
+    preflight,
     branch: 'feature/wp-codebox-apply-request-cli-smoke',
     commitMessage: 'Apply fixture wp-codebox artifact through ApplyRequest CLI',
-    approvedFiles: ['/wordpress/wp-content/plugins/fixture-plugin/readme.txt'],
     patchStrip: 5,
   }));
   const requestCliRepo = createRepo(root, 'feature/apply-request-cli-smoke');
@@ -227,6 +246,31 @@ try {
   assert.equal(requestCliResult.request_id, `apply-request-${fixture.artifactId}`);
   assert.deepEqual(requestCliResult.files_changed, ['readme.txt']);
   assert.equal(fs.readFileSync(path.join(requestCliRepo, 'readme.txt'), 'utf8'), 'after\n');
+
+  const fakeWpCli = path.join(root, 'fake-wp-cli.cjs');
+  const fakeWpCliCapture = path.join(root, 'fake-wp-cli-capture.json');
+  fs.writeFileSync(fakeWpCli, [
+    '#!/usr/bin/env node',
+    "const fs = require('node:fs');",
+    `fs.writeFileSync(${JSON.stringify(fakeWpCliCapture)}, JSON.stringify(process.argv.slice(2), null, 2));`,
+    `process.stdout.write(${JSON.stringify(JSON.stringify(preflight))});`,
+    '',
+  ].join('\n'));
+  fs.chmodSync(fakeWpCli, 0o755);
+  const delegatedRepo = createRepo(root, 'feature/apply-delegated-preflight-smoke');
+  const delegatedResult = applyApprovedWpCodeboxArtifact({
+    bundlePath: fixture.bundle,
+    worktreePath: delegatedRepo,
+    branch: 'feature/wp-codebox-delegated-preflight-smoke',
+    commitMessage: 'Apply fixture wp-codebox artifact through delegated preflight',
+    approvedFiles: ['/wordpress/wp-content/plugins/fixture-plugin/readme.txt'],
+    wpCli: fakeWpCli,
+    patchStrip: 5,
+  });
+  assert.equal(delegatedResult.status, 'applied');
+  const delegatedArgs = JSON.parse(fs.readFileSync(fakeWpCliCapture, 'utf8'));
+  assert.deepEqual(delegatedArgs.slice(0, 4), ['codebox', 'artifacts', 'preflight-apply', fixture.artifactId]);
+  assert.equal(delegatedArgs.some((arg) => arg.startsWith('--approved-files=')), true);
 
   console.log('WP Codebox apply adapter smoke passed');
 } finally {

@@ -15,8 +15,6 @@ const {
   taskOutcome,
   taskOutcomeSucceeded,
 } = require('../lib/audit-wp-codebox-fanout');
-const { artifactContentDigest } = require('../lib/wp-codebox-apply-adapter');
-
 function sha256(value) {
   return crypto.createHash('sha256').update(value).digest('hex');
 }
@@ -74,7 +72,6 @@ function createBundle(root, name, changedPath, relativePath) {
       },
     ],
   };
-  const changedFilesJson = `${JSON.stringify(changedFiles, null, 2)}\n`;
   const patch = [
     `diff --git a/wordpress/wp-content/plugins/fixture-plugin/${relativePath} b/wordpress/wp-content/plugins/fixture-plugin/${relativePath}`,
     `--- a/wordpress/wp-content/plugins/fixture-plugin/${relativePath}`,
@@ -84,7 +81,7 @@ function createBundle(root, name, changedPath, relativePath) {
     '+after',
     '',
   ].join('\n');
-  const contentDigest = artifactContentDigest(changedFilesJson, patch);
+  const contentDigest = sha256(`fixture-artifact:${name}:${changedPath}:${relativePath}`);
   const artifactId = `artifact-bundle-sha256-${contentDigest}`;
   const contentDigestMetadata = {
     algorithm: 'sha256',
