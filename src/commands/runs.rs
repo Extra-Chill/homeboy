@@ -1,5 +1,7 @@
 mod bench;
 mod bundle;
+#[cfg(test)]
+mod bundle_import_tests;
 mod common;
 mod compare;
 #[cfg(test)]
