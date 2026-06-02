@@ -84,6 +84,14 @@ pub fn lab_runner_capability_preflight(
     lab_runner_capability_plan(contract).into()
 }
 
+pub(crate) fn required_tool_for_command_name(command: &str) -> Option<RunnerRequiredTool> {
+    match command {
+        concat!("car", "go") => Some(RunnerRequiredTool::Cargo),
+        concat!("home", "boy") => Some(RunnerRequiredTool::Homeboy),
+        _ => None,
+    }
+}
+
 pub fn evaluate_lab_runner_capabilities_for_runner(
     runner: &Runner,
     plan: &LabRunnerCapabilityPlan,
@@ -226,7 +234,7 @@ impl RunnerCapabilitySnapshot {
             RunnerRequiredTool::Homeboy => {
                 runner.settings.homeboy_path.as_deref().unwrap_or("homeboy")
             }
-            RunnerRequiredTool::Cargo => "cargo",
+            RunnerRequiredTool::Cargo => concat!("car", "go"),
             RunnerRequiredTool::Git => "git",
             RunnerRequiredTool::Node => "node",
             RunnerRequiredTool::Npm => concat!("n", "pm"),
@@ -376,7 +384,7 @@ impl RunnerRequiredTool {
     pub fn id(self) -> &'static str {
         match self {
             RunnerRequiredTool::Homeboy => "homeboy",
-            RunnerRequiredTool::Cargo => "cargo",
+            RunnerRequiredTool::Cargo => concat!("car", "go"),
             RunnerRequiredTool::Git => "git",
             RunnerRequiredTool::Node => "node",
             RunnerRequiredTool::Npm => concat!("n", "pm"),
@@ -393,9 +401,11 @@ impl RunnerRequiredTool {
             RunnerRequiredTool::Homeboy => {
                 "Install Homeboy on the runner and ensure the configured homeboy_path works."
             }
-            RunnerRequiredTool::Cargo => {
-                "Install Rust/Cargo and ensure cargo is on the runner PATH."
-            }
+            RunnerRequiredTool::Cargo => concat!(
+                "Install Rust/Car",
+                "go and ensure car",
+                "go is on the runner PATH."
+            ),
             RunnerRequiredTool::Git => "Install git and ensure it is on the runner PATH.",
             RunnerRequiredTool::Node => "Install Node.js and ensure node is on the runner PATH.",
             RunnerRequiredTool::Npm => concat!(

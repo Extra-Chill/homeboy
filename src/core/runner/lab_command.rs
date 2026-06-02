@@ -2,7 +2,7 @@ use std::path::Path;
 
 use crate::core::component;
 
-use super::RunnerRequiredTool;
+use super::{required_tool_for_command_name, RunnerRequiredTool};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LabOffloadCommandPrefix {
@@ -30,14 +30,12 @@ pub(crate) fn lab_offload_command_prefix(
 
 fn required_tools_for_command_prefix(argv: &[String]) -> Vec<RunnerRequiredTool> {
     let Some(program) = argv.first().map(|value| executable_name(value)) else {
-        return vec![RunnerRequiredTool::Homeboy];
+        return Vec::new();
     };
 
-    match program {
-        "cargo" => vec![RunnerRequiredTool::Cargo],
-        "homeboy" => vec![RunnerRequiredTool::Homeboy],
-        _ => Vec::new(),
-    }
+    required_tool_for_command_name(program)
+        .into_iter()
+        .collect()
 }
 
 fn executable_name(value: &str) -> &str {

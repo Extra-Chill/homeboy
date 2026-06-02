@@ -172,11 +172,11 @@ pub struct DependencyStackEdge {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct ComponentLabConfig {
-    /// Repo-owned argv prefix used when Lab offload re-enters Homeboy from this checkout.
+    /// Repo-owned argv prefix used when remote execution re-enters this checkout.
     ///
-    /// By default Lab uses the runner's configured Homeboy binary. Repos that need to
-    /// verify the synced checkout itself can declare a prefix such as
-    /// `["cargo", "run", "--quiet", "--bin", "homeboy", "--"]`.
+    /// By default, remote execution uses the runner's configured command binary.
+    /// Repos that need to verify the synced checkout itself can declare an argv
+    /// prefix such as `["tool", "run", "--"]`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub self_command_prefix: Vec<String>,
 }
@@ -231,7 +231,7 @@ pub struct Component {
     pub scripts: Option<ComponentScriptsConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audit: Option<AuditConfig>,
-    /// Component-owned Lab runner behavior.
+    /// Component-owned remote runner behavior.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lab: Option<ComponentLabConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

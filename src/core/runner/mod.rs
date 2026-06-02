@@ -34,6 +34,7 @@ pub use apply::{
     apply_change_artifact, apply_workspace_patch, RunnerWorkspaceApplyOptions,
     RunnerWorkspaceApplyOutput, RunnerWorkspaceApplyStatus,
 };
+pub(crate) use capabilities::required_tool_for_command_name;
 pub use capabilities::{
     evaluate_lab_runner_capabilities_for_runner, lab_runner_capability_plan,
     lab_runner_capability_preflight, LabRunnerCapabilityContract, LabRunnerCapabilityPlan,
