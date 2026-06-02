@@ -170,6 +170,21 @@ where
 {
     let listener = TcpListener::bind(addr)
         .map_err(|e| Error::internal_io(e.to_string(), Some(format!("bind daemon to {}", addr))))?;
+    serve_listener_with_analysis_runner(listener, analysis_runner)
+}
+
+#[cfg(test)]
+pub(crate) fn serve_listener(listener: TcpListener) -> Result<DaemonState> {
+    serve_listener_with_analysis_runner(listener, UnsupportedAnalysisJobRunner)
+}
+
+fn serve_listener_with_analysis_runner<R>(
+    listener: TcpListener,
+    analysis_runner: R,
+) -> Result<DaemonState>
+where
+    R: AnalysisJobRunner,
+{
     let local_addr = listener.local_addr().map_err(|e| {
         Error::internal_io(e.to_string(), Some("read daemon local address".to_string()))
     })?;
