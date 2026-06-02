@@ -9,9 +9,10 @@ use crate::core::agent_task_scheduler::{
 };
 use crate::core::{paths, Result};
 
-mod agent_task_lifecycle_store;
+#[path = "lifecycle_store.rs"]
+mod lifecycle_store;
 
-use agent_task_lifecycle_store as store;
+use lifecycle_store as store;
 
 pub const AGENT_TASK_RUN_SCHEMA: &str = "homeboy/agent-task-run/v1";
 pub const AGENT_TASK_RUN_LOG_SCHEMA: &str = "homeboy/agent-task-run-log/v1";
