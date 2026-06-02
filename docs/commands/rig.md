@@ -131,7 +131,7 @@ homeboy rig install ./packages/studio
 homeboy rig install https://github.com/chubes4/homeboy-rigs.git//packages --all
 ```
 
-Installs rigs from a local directory or git-backed package. Package discovery accepts either a single `rig.json` or a package layout with `rigs/<id>/rig.json`. If the selected package also contains `stacks/*.json`, those stack specs are installed alongside the rig.
+Installs rigs from a local directory or git-backed package. Package discovery accepts either a single `rig.json` or a package layout with `rigs/<id>/rig.json`. If the selected package also contains `stacks/*.json`, those stack specs are installed alongside the rig. Existing stack specs with different content are treated as user-owned config and are left in place instead of being overwritten.
 
 Git sources may include a Terraform-style `repo.git//subpath` selector. Homeboy clones the package root, records source metadata, and discovers rigs from the selected subpath. Local package sources are linked in place and are updated outside Homeboy.
 

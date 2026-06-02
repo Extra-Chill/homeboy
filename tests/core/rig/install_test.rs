@@ -266,16 +266,18 @@ fn install_rejects_existing_stack_with_different_content() {
     let package = tempfile::tempdir().expect("package");
     write_rig(package.path(), "studio", &minimal_rig("studio"));
     write_stack(package.path(), "studio-combined", "studio");
+    let manual_stack = minimal_stack("studio-combined", "other");
 
     fs::create_dir_all(crate::core::paths::stacks().expect("stacks dir")).expect("stacks dir");
-    fs::write(
-        crate::core::paths::stack_config("studio-combined").expect("stack path"),
-        minimal_stack("studio-combined", "other"),
-    )
-    .expect("conflicting stack");
+    let stack_config = crate::core::paths::stack_config("studio-combined").expect("stack path");
+    fs::write(&stack_config, &manual_stack).expect("conflicting stack");
 
     let err = install(package.path().to_str().unwrap(), None, false).expect_err("stack collision");
     assert!(err.message.contains("different content"));
+    assert_eq!(
+        fs::read_to_string(stack_config).expect("manual stack preserved"),
+        manual_stack
+    );
 }
 
 #[test]
