@@ -129,8 +129,7 @@ pub(super) fn execute_release_plan_step(
             let result = executor::run_publish(
                 context.extensions,
                 &context.state,
-                context.component_id,
-                &context.component.local_path,
+                context.component,
                 target,
             )
             .unwrap_or_else(|err| {

@@ -24,7 +24,7 @@ use super::utils::{extract_latest_notes, parse_release_artifacts};
 
 pub(crate) mod artifacts;
 pub(crate) mod changelog;
-mod github_release;
+pub(crate) mod github_release;
 pub(crate) mod prepare;
 mod version_targets;
 
@@ -324,12 +324,19 @@ pub(crate) fn run_git_tag(
                 crate::core::deploy::release_download::parse_github_url(&remote_url)
             })
             .and_then(|github| {
-                if !github_release::gh_is_available() || !github_release::gh_is_authenticated() {
+                let github_env = github_release::github_command_env(&github);
+                if !github_release::gh_is_available(&github_env)
+                    || !github_release::gh_is_authenticated(&github.host, &github_env)
+                {
                     return None;
                 }
 
                 let repo_flag = format!("{}/{}", github.owner, github.repo);
-                Some(github_release::gh_release_exists(tag_name, &repo_flag))
+                Some(github_release::gh_release_exists(
+                    tag_name,
+                    &repo_flag,
+                    &github_env,
+                ))
             });
         let github_release_label = match github_release {
             Some(true) => "exists".to_string(),
@@ -544,8 +551,7 @@ pub(crate) fn run_package(
 pub(crate) fn run_publish(
     extensions: &[ExtensionManifest],
     state: &ReleaseState,
-    component_id: &str,
-    component_local_path: &str,
+    component: &Component,
     target: &str,
 ) -> Result<ReleaseStepResult> {
     let extension = extensions.iter().find(|m| m.id == target).ok_or_else(|| {
@@ -574,7 +580,14 @@ pub(crate) fn run_publish(
         ));
     }
 
-    let payload = build_release_payload(state, component_id, component_local_path, None);
+    let mut payload = build_release_payload(state, &component.id, &component.local_path, None);
+    if let Some(github) = release_github_repo(component) {
+        payload["release"]["github"] = serde_json::json!({
+            "host": github.host,
+            "owner": github.owner,
+            "repo": github.repo,
+        });
+    }
     let response = extension::execute_action(&extension.id, action_id, None, None, Some(&payload))?;
     let extension_data = serde_json::to_value(&response).map_err(|e| {
         Error::internal_json(e.to_string(), Some("extension action output".to_string()))
@@ -811,7 +824,9 @@ pub(crate) fn run_github_release(
             )
         })?;
 
-    if !github_release::gh_is_available() {
+    let github_env = github_release::github_command_env(&github);
+
+    if !github_release::gh_is_available(&github_env) {
         let fallback = github_release::fallback_gh_command(&tag);
         log_status!(
             "release",
@@ -826,7 +841,7 @@ pub(crate) fn run_github_release(
         ));
     }
 
-    if !github_release::gh_is_authenticated() {
+    if !github_release::gh_is_authenticated(&github.host, &github_env) {
         let fallback = github_release::fallback_gh_command(&tag);
         log_status!(
             "release",
@@ -865,7 +880,7 @@ pub(crate) fn run_github_release(
     let has_artifacts = !artifact_paths.is_empty();
 
     let repo_flag = format!("{}/{}", github.owner, github.repo);
-    if github_release::gh_release_exists(&tag, &repo_flag) {
+    if github_release::gh_release_exists(&tag, &repo_flag, &github_env) {
         // Release entry already exists (idempotent retry, or release
         // created out of band). When the release has no artifacts to
         // attach, skip — there is nothing to update. When artifacts are
@@ -902,6 +917,11 @@ pub(crate) fn run_github_release(
 
         let upload_output = std::process::Command::new("gh")
             .args(&upload_args)
+            .envs(
+                github_env
+                    .iter()
+                    .map(|(key, value)| (key.as_str(), value.as_str())),
+            )
             .output()
             .map_err(|e| {
                 Error::internal_io(
@@ -980,6 +1000,11 @@ pub(crate) fn run_github_release(
 
     let output = std::process::Command::new("gh")
         .args(&create_args)
+        .envs(
+            github_env
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.as_str())),
+        )
         .output()
         .map_err(|e| {
             Error::internal_io(
@@ -1027,6 +1052,20 @@ pub(crate) fn run_github_release(
         })),
         Vec::new(),
     ))
+}
+
+fn release_github_repo(
+    component: &Component,
+) -> Option<crate::core::deploy::release_download::GitHubRepo> {
+    component
+        .remote_url
+        .clone()
+        .or_else(|| {
+            crate::core::deploy::release_download::detect_remote_url(std::path::Path::new(
+                &component.local_path,
+            ))
+        })
+        .and_then(|remote_url| crate::core::deploy::release_download::parse_github_url(&remote_url))
 }
 
 // ---------------------------------------------------------------------------
@@ -1154,7 +1193,10 @@ fn store_artifacts_from_output(
 
 #[cfg(test)]
 mod tests {
-    use super::{github_release, publish_step_result, run_git_push, store_artifacts_from_output};
+    use super::{
+        github_release, publish_step_result, release_github_repo, run_git_push,
+        store_artifacts_from_output,
+    };
     use crate::core::component::Component;
     use crate::core::release::ReleaseStepStatus;
     use std::process::Command;
@@ -1203,6 +1245,22 @@ mod tests {
         assert!(cmd.contains("gh release create v1.2.3"));
         assert!(cmd.contains("--title v1.2.3"));
         assert!(cmd.contains("--notes-file"));
+    }
+
+    #[test]
+    fn release_github_repo_detects_ghe_remote() {
+        let component = Component {
+            id: "studio-web".to_string(),
+            local_path: "/tmp/studio-web".to_string(),
+            remote_url: Some("git@github.a8c.com:chubes4/studio-web.git".to_string()),
+            ..Default::default()
+        };
+
+        let github = release_github_repo(&component).expect("github repo");
+
+        assert_eq!(github.host, "github.a8c.com");
+        assert_eq!(github.owner, "chubes4");
+        assert_eq!(github.repo, "studio-web");
     }
 
     #[test]
