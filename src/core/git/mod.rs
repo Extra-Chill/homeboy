@@ -27,11 +27,12 @@ pub use commits::{
     CommitCategory, CommitCounts, CommitInfo, MonorepoContext, SemverBump,
 };
 pub use github::{
-    gh_probe_succeeds, issue_close, issue_comment, issue_create, issue_edit, issue_find, pr_create,
-    pr_edit, pr_files, pr_find, pr_merge, pr_view, GithubFindItem, GithubFindOutput,
-    GithubIssueOutput, GithubPrOutput, GithubPrView, IssueCloseOptions, IssueCloseReason,
-    IssueCommentOptions, IssueCreateOptions, IssueEditOptions, IssueFindOptions, IssueState,
-    PrCreateOptions, PrEditOptions, PrFindOptions, PrMergeOptions, PrState,
+    gh_probe_succeeds, github_token_from_env_or_gh, issue_close, issue_comment, issue_create,
+    issue_edit, issue_find, pr_create, pr_edit, pr_files, pr_find, pr_merge, pr_view,
+    GithubFindItem, GithubFindOutput, GithubIssueOutput, GithubPrOutput, GithubPrView,
+    IssueCloseOptions, IssueCloseReason, IssueCommentOptions, IssueCreateOptions, IssueEditOptions,
+    IssueFindOptions, IssueState, PrCreateOptions, PrEditOptions, PrFindOptions, PrMergeOptions,
+    PrState,
 };
 pub use github_pr_comments::{pr_comment, PrCommentMode, PrCommentOptions};
 pub use operation_output::GitOutput;

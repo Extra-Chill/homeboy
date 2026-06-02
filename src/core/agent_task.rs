@@ -283,6 +283,8 @@ pub struct AgentTaskExecutor {
     pub selector: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub required_capabilities: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secret_env: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Value::is_null")]
@@ -650,6 +652,7 @@ mod tests {
                 backend: "browser_sandbox".to_string(),
                 selector: Some("lab-a".to_string()),
                 required_capabilities: vec!["structured_output".to_string()],
+                secret_env: Vec::new(),
                 model: Some("quality-model".to_string()),
                 config: json!({ "account": "team-a" }),
             },
@@ -856,6 +859,7 @@ mod tests {
                 backend: "cli_agent".to_string(),
                 selector: None,
                 required_capabilities: Vec::new(),
+                secret_env: Vec::new(),
                 model: None,
                 config: json!({ "api_key": "secret-value" }),
             },
@@ -1133,6 +1137,7 @@ mod tests {
                 backend: "fake".to_string(),
                 selector: None,
                 required_capabilities: Vec::new(),
+                secret_env: Vec::new(),
                 model: None,
                 config: json!({}),
             },
@@ -1267,6 +1272,7 @@ mod tests {
                 backend: "fake".to_string(),
                 selector: None,
                 required_capabilities: Vec::new(),
+                secret_env: Vec::new(),
                 model: None,
                 config: json!({}),
             },

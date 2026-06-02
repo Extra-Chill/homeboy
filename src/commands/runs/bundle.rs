@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use clap::Args;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use homeboy::core::observation::{
     ArtifactRecord, FindingRecord, ObservationStore, RecordedHomeboyFinding, RunRecord,
@@ -174,10 +175,14 @@ pub(super) fn import_runs(args: RunsImportArgs) -> CmdResult<RunsOutput> {
             "<input> (bundle directory) or --from-gh-actions ...".to_string(),
         ])
     })?;
-    let bundle = read_bundle_dir(&input)?;
+    let mut bundle = read_bundle_dir(&input)?;
     let store = ObservationStore::open_initialized()?;
-    for run in &bundle.runs {
-        store.import_run(run)?;
+    for index in 0..bundle.runs.len() {
+        let original_run_id = bundle.runs[index].id.clone();
+        let imported_run_id = import_bundle_run(&store, &mut bundle.runs[index])?;
+        if imported_run_id != original_run_id {
+            rewrite_bundle_run_references(&mut bundle, &original_run_id, &imported_run_id);
+        }
     }
     let mut artifacts = 0usize;
     let mut artifact_metadata_only = 0usize;
@@ -212,6 +217,69 @@ pub(super) fn import_runs(args: RunsImportArgs) -> CmdResult<RunsOutput> {
         }),
         0,
     ))
+}
+
+fn import_bundle_run(
+    store: &ObservationStore,
+    run: &mut RunRecord,
+) -> homeboy::core::Result<String> {
+    if let Some(existing) = store.get_run(&run.id)? {
+        if existing == *run {
+            return Ok(run.id.clone());
+        }
+        if is_lab_bundle_run(run) {
+            run.id = remapped_lab_run_id(run)?;
+        }
+    }
+    store.import_run(run)?;
+    Ok(run.id.clone())
+}
+
+fn rewrite_bundle_run_references(bundle: &mut ObservationBundle, from: &str, to: &str) {
+    for artifact in &mut bundle.artifacts {
+        if artifact.run_id == from {
+            artifact.id = remapped_child_record_id(&artifact.id, to);
+            artifact.run_id = to.to_string();
+        }
+    }
+    for span in &mut bundle.trace_spans {
+        if span.run_id == from {
+            span.id = remapped_child_record_id(&span.id, to);
+            span.run_id = to.to_string();
+        }
+    }
+    for finding in bundle
+        .findings
+        .iter_mut()
+        .chain(bundle.test_failures.iter_mut())
+    {
+        if finding.run_id == from {
+            finding.id = remapped_child_record_id(&finding.id, to);
+            finding.run_id = to.to_string();
+        }
+    }
+}
+
+fn remapped_child_record_id(id: &str, run_id: &str) -> String {
+    let hash = Sha256::digest(format!("{run_id}\0{id}").as_bytes());
+    let hex = format!("{hash:x}");
+    format!("{id}-imported-{}", &hex[..16])
+}
+
+fn is_lab_bundle_run(run: &RunRecord) -> bool {
+    run.kind == "runner-exec" && run.metadata_json.get("lab").is_some()
+}
+
+fn remapped_lab_run_id(run: &RunRecord) -> homeboy::core::Result<String> {
+    let bytes = serde_json::to_vec(run).map_err(|error| {
+        Error::internal_unexpected(format!(
+            "Failed to fingerprint imported lab run {}: {}",
+            run.id, error
+        ))
+    })?;
+    let hash = Sha256::digest(bytes);
+    let hex = format!("{hash:x}");
+    Ok(format!("{}-imported-{}", run.id, &hex[..16]))
 }
 
 fn imported_artifact_record(artifact: &ArtifactRecord) -> ArtifactRecord {

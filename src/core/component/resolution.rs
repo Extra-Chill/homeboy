@@ -722,7 +722,7 @@ mod tests {
         std::fs::create_dir_all(&repo).expect("create repo dir");
         std::fs::write(
             repo.join("homeboy.json"),
-            r#"{"id":"portable-id","extensions":{"nodejs":{}}}"#,
+            r#"{"id":"portable-id","extensions":{"fixture-extension":{}}}"#,
         )
         .expect("write portable config");
 
@@ -735,7 +735,7 @@ mod tests {
             .extensions
             .as_ref()
             .expect("extensions")
-            .contains_key("nodejs"));
+            .contains_key("fixture-extension"));
     }
 
     #[test]
@@ -743,8 +743,11 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let repo = dir.path().join("portable-repo");
         std::fs::create_dir_all(&repo).expect("create repo dir");
-        std::fs::write(repo.join("homeboy.json"), r#"{"extensions":{"nodejs":{}}}"#)
-            .expect("write portable config");
+        std::fs::write(
+            repo.join("homeboy.json"),
+            r#"{"extensions":{"fixture-extension":{}}}"#,
+        )
+        .expect("write portable config");
 
         let error = resolve_effective(None, repo.to_str(), None)
             .expect_err("path-only portable config without id should fail");

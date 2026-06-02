@@ -3,6 +3,7 @@
 use crate::core::component::Component;
 use crate::core::deploy::release_download::GitHubRepo;
 use crate::core::error::{Error, Result};
+use crate::core::release::changelog;
 use crate::core::release::types::{ReleaseState, ReleaseStepResult};
 
 use super::step_success;
@@ -21,8 +22,6 @@ pub(crate) fn run_github_release(
             "github.release: tag state not set (git.tag must run first)".to_string(),
         )
     })?;
-    let notes = state.notes.clone().unwrap_or_default();
-
     let local_path = &component.local_path;
 
     let remote_url = component
@@ -169,12 +168,30 @@ pub(crate) fn run_github_release(
         return Ok(upload_success_result(&tag, &github, artifact_paths.len()));
     }
 
-    let notes_body = if notes.trim().is_empty() {
-        format!("Release {}", tag)
-    } else {
-        notes
-    };
     let notes_start_tag = github_generated_notes_start_tag(component, &tag)?;
+    let generated_notes = match github_generated_notes(&github, &tag, notes_start_tag.as_deref()) {
+        Ok(notes) => notes,
+        Err(err) => {
+            let fallback = fallback_gh_command(&tag);
+            log_status!(
+                "release",
+                "⚠ GitHub generated release notes failed: {}",
+                err
+            );
+            log_status!("release", "Manual fallback: {}", fallback);
+            return Ok(skipped_result(
+                &tag,
+                &github,
+                "generated-notes-failed",
+                Some(fallback),
+            ));
+        }
+    };
+    let changelog_url = github_changelog_url(component, &github, &tag);
+    let release_notes = changelog_url
+        .as_deref()
+        .map(|url| replace_full_changelog_footer(&generated_notes, url))
+        .unwrap_or(generated_notes);
 
     log_status!(
         "release",
@@ -193,9 +210,8 @@ pub(crate) fn run_github_release(
         &tag,
         "--title",
         &tag,
-        "--generate-notes",
         "--notes",
-        &notes_body,
+        &release_notes,
         "-R",
         &repo_flag,
     ];
@@ -253,10 +269,81 @@ pub(crate) fn run_github_release(
             "url": url,
             "artifact_count": artifact_paths.len(),
             "generated_notes": true,
+            "changelog_url": changelog_url,
             "notes_start_tag": notes_start_tag,
         })),
         Vec::new(),
     ))
+}
+
+fn github_generated_notes(
+    github: &GitHubRepo,
+    tag: &str,
+    previous_tag: Option<&str>,
+) -> Result<String> {
+    let endpoint = format!(
+        "repos/{}/{}/releases/generate-notes",
+        github.owner, github.repo
+    );
+    let tag_field = format!("tag_name={}", tag);
+    let mut args: Vec<&str> = vec!["api", &endpoint, "-f", &tag_field, "--jq", ".body"];
+    let previous_field;
+    if let Some(previous) = previous_tag {
+        previous_field = format!("previous_tag_name={}", previous);
+        args.extend_from_slice(&["-f", &previous_field]);
+    }
+
+    let output = std::process::Command::new("gh")
+        .args(&args)
+        .output()
+        .map_err(|e| {
+            Error::internal_io(
+                format!("Failed to invoke gh: {}", e),
+                Some("gh api releases/generate-notes".to_string()),
+            )
+        })?;
+
+    if !output.status.success() {
+        return Err(Error::internal_unexpected(format!(
+            "gh api releases/generate-notes failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn github_changelog_url(component: &Component, github: &GitHubRepo, tag: &str) -> Option<String> {
+    let changelog_path = changelog::resolve_changelog_path(component).ok()?;
+    let local_path = std::path::Path::new(&component.local_path);
+    let relative = changelog_path
+        .strip_prefix(local_path)
+        .unwrap_or(&changelog_path)
+        .to_string_lossy()
+        .replace('\\', "/");
+    Some(format!(
+        "https://github.com/{}/{}/blob/{}/{}",
+        github.owner, github.repo, tag, relative
+    ))
+}
+
+pub(super) fn replace_full_changelog_footer(notes: &str, changelog_url: &str) -> String {
+    let replacement = format!("**Full Changelog**: {}", changelog_url);
+    let mut lines: Vec<&str> = notes.lines().collect();
+
+    if let Some(index) = lines.iter().rposition(|line| {
+        line.trim_start()
+            .starts_with("**Full Changelog**: https://github.com/")
+    }) {
+        lines[index] = &replacement;
+        return lines.join("\n");
+    }
+
+    if notes.trim().is_empty() {
+        return replacement;
+    }
+
+    format!("{}\n\n{}", notes.trim_end(), replacement)
 }
 
 fn github_generated_notes_start_tag(component: &Component, tag: &str) -> Result<Option<String>> {
@@ -344,8 +431,5 @@ pub(super) fn gh_release_exists(tag: &str, repo_flag: &str) -> bool {
 }
 
 pub(super) fn fallback_gh_command(tag: &str) -> String {
-    format!(
-        "gh release create {} --title {} --generate-notes --notes <release-notes>",
-        tag, tag
-    )
+    format!("gh release create {} --title {} --generate-notes", tag, tag)
 }

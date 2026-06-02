@@ -137,7 +137,7 @@ pub fn plan(component_id: &str, options: &ReleaseOptions) -> Result<ReleasePlan>
     let mut hints = Vec::new();
     let changelog_plan = build_changelog_plan(&component, options, pending_entries)?;
 
-    let mut steps = build_preflight_steps(options, semver_recommendation.as_ref());
+    let mut steps = build_preflight_steps(options, semver_recommendation.as_ref(), &extensions);
     steps.extend(build_release_steps(
         &component,
         &extensions,

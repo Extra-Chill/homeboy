@@ -23,6 +23,9 @@ homeboy refactor homeboy --from all
 
 # Apply the merged plan
 homeboy refactor homeboy --from all --write
+
+# Use a one-shot extension for an unregistered checkout
+homeboy refactor --path . --from lint --extension wordpress --write
 ```
 
 Supported sources today:
@@ -35,6 +38,9 @@ Supported sources today:
 
 `--all` still works as a compatibility alias, but prefer `--from all` so source
 selection stays in one extensible input model.
+
+For unregistered checkouts, pass `--extension <ID>` to choose the extension for
+the current source run without writing component configuration.
 
 The refactor planner is source-driven and generic; CI is just one consumer of this interface.
 

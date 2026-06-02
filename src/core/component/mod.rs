@@ -170,6 +170,26 @@ pub struct DependencyStackEdge {
     pub test: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct ArtifactInput {
+    pub component: String,
+    pub artifact: String,
+    pub target: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct ComponentLabConfig {
+    /// Repo-owned argv prefix used when Lab offload re-enters Homeboy from this checkout.
+    ///
+    /// By default Lab uses the runner's configured Homeboy binary. Repos that need to
+    /// verify the synced checkout itself can declare a prefix such as
+    /// `["cargo", "run", "--quiet", "--bin", "homeboy", "--"]`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub self_command_prefix: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CleanupArtifactDeclaration {
     pub label: String,
@@ -220,8 +240,13 @@ pub struct Component {
     pub scripts: Option<ComponentScriptsConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audit: Option<AuditConfig>,
+    /// Component-owned Lab runner behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lab: Option<ComponentLabConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dependency_stack: Vec<DependencyStackEdge>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_inputs: Vec<ArtifactInput>,
     /// Override the CLI path used by extension deploy install steps.
     /// For example, Studio sites need "studio wp" instead of the default "wp".
     pub cli_path: Option<String>,
@@ -304,8 +329,12 @@ struct RawComponent {
     scripts: Option<ComponentScriptsConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     audit: Option<AuditConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    lab: Option<ComponentLabConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     dependency_stack: Vec<DependencyStackEdge>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    artifact_inputs: Vec<ArtifactInput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     cli_path: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -346,7 +375,9 @@ impl From<RawComponent> for Component {
             scopes: raw.scopes,
             scripts: raw.scripts,
             audit: raw.audit,
+            lab: raw.lab,
             dependency_stack: raw.dependency_stack,
+            artifact_inputs: raw.artifact_inputs,
             cli_path: raw.cli_path,
             extra_drift_files: raw.extra_drift_files,
             cleanup_artifacts: raw.cleanup_artifacts,
@@ -384,7 +415,9 @@ impl From<Component> for RawComponent {
             scopes: c.scopes,
             scripts: c.scripts,
             audit: c.audit,
+            lab: c.lab,
             dependency_stack: c.dependency_stack,
+            artifact_inputs: c.artifact_inputs,
             cli_path: c.cli_path,
             extra_drift_files: c.extra_drift_files,
             cleanup_artifacts: c.cleanup_artifacts,
@@ -465,7 +498,9 @@ impl Component {
             scopes: None,
             scripts: None,
             audit: None,
+            lab: None,
             dependency_stack: Vec::new(),
+            artifact_inputs: Vec::new(),
             cli_path: None,
             extra_drift_files: Vec::new(),
             cleanup_artifacts: Vec::new(),

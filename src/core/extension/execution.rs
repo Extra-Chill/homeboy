@@ -24,7 +24,7 @@ use super::runner_contract::RunnerStepFilter;
 use super::runtime_helper;
 use super::scope::ExtensionScope;
 
-pub(crate) use action::execute_action;
+pub(crate) use action::{execute_action, wordpress_release_publish_token_remediation};
 pub use readiness::{extension_ready_status, is_extension_compatible, ExtensionReadyStatus};
 
 /// Result of executing a extension.
@@ -817,7 +817,7 @@ mod tests {
     #[test]
     fn build_exec_env_includes_toolchain_path() {
         let env = build_exec_env(
-            "nodejs",
+            "fixture-extension",
             None,
             None,
             "{}",

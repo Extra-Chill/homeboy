@@ -184,6 +184,16 @@
   },
   "hooks": {},
   "id": "homeboy",
+  "lab": {
+    "self_command_prefix": [
+      "cargo",
+      "run",
+      "--quiet",
+      "--bin",
+      "homeboy",
+      "--"
+    ]
+  },
   "scripts": {
     "build": [
       "cargo build --release"

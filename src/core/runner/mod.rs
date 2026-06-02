@@ -14,9 +14,12 @@ mod broker_http;
 mod capabilities;
 mod command_path;
 mod connection;
+mod daemon_health;
 mod evidence;
 mod execution;
 mod lab;
+mod lab_apply;
+mod lab_command;
 mod lab_env;
 mod lab_workspaces;
 mod offload_changed_since;
@@ -29,8 +32,8 @@ mod worker;
 mod workspace;
 
 pub use apply::{
-    apply_workspace_patch, RunnerWorkspaceApplyOptions, RunnerWorkspaceApplyOutput,
-    RunnerWorkspaceApplyStatus,
+    apply_change_artifact, apply_workspace_patch, RunnerWorkspaceApplyOptions,
+    RunnerWorkspaceApplyOutput, RunnerWorkspaceApplyStatus,
 };
 pub use capabilities::{
     evaluate_lab_runner_capabilities_for_runner, lab_runner_capability_plan,

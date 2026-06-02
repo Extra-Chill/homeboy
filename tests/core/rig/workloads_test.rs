@@ -16,17 +16,17 @@ fn test_bench_workloads_for_extension_filters_and_expands_paths() {
                 "playground": { "path": "/tmp/playground" }
             },
             "bench_workloads": {
-                "wordpress": [
+                "extension-b": [
                     { "path": "${env.HOMEBOY_TEST_BENCH_ROOT}/cold-boot.php" },
                     { "path": "${components.playground.path}/fixtures/wc-loaded.php" }
                 ],
-                "nodejs": [{ "path": "/tmp/node-only.bench.ts" }]
+                "extension-a": [{ "path": "/tmp/node-only.bench.ts" }]
             }
         }"#,
     )
     .expect("parse rig spec");
 
-    let workloads = workloads_for_extension(&rig_spec, RigWorkloadKind::Bench, None, "wordpress");
+    let workloads = workloads_for_extension(&rig_spec, RigWorkloadKind::Bench, None, "extension-b");
 
     assert_eq!(
         workloads,
@@ -35,7 +35,9 @@ fn test_bench_workloads_for_extension_filters_and_expands_paths() {
             PathBuf::from("/tmp/playground/fixtures/wc-loaded.php"),
         ]
     );
-    assert!(workloads_for_extension(&rig_spec, RigWorkloadKind::Bench, None, "rust").is_empty());
+    assert!(
+        workloads_for_extension(&rig_spec, RigWorkloadKind::Bench, None, "extension-c").is_empty()
+    );
 }
 
 #[test]
@@ -44,7 +46,7 @@ fn test_workload_string_shorthand_is_rejected() {
         r#"{
             "id": "studio",
             "bench_workloads": {
-                "nodejs": ["/tmp/legacy.bench.mjs"]
+                "extension-a": ["/tmp/legacy.bench.mjs"]
             }
         }"#,
     )
@@ -63,7 +65,7 @@ fn test_invocation_requirements_for_extension_workloads() {
         r#"{
             "id": "playground-bench",
             "bench_workloads": {
-                "nodejs": [
+                "extension-a": [
                     {
                         "path": "/tmp/playground-server.bench.mjs",
                         "port_range_size": 8,
@@ -83,7 +85,7 @@ fn test_invocation_requirements_for_extension_workloads() {
     let requirements = crate::core::rig::invocation_requirements_for_extension_workloads(
         &rig_spec,
         crate::core::rig::RigWorkloadKind::Bench,
-        "nodejs",
+        "extension-a",
     );
 
     assert_eq!(requirements.port_range_size, Some(8));
@@ -103,17 +105,17 @@ fn test_trace_workloads_for_extension_filters_and_expands_paths() {
                 "studio": { "path": "/tmp/studio" }
             },
             "trace_workloads": {
-                "nodejs": [
+                "extension-a": [
                     { "path": "${env.HOMEBOY_TEST_TRACE_ROOT}/create-site.trace.mjs" },
                     { "path": "${components.studio.path}/bench/admin-load.trace.mjs" }
                 ],
-                "wordpress": [{ "path": "/tmp/wp.trace.php" }]
+                "extension-b": [{ "path": "/tmp/wp.trace.php" }]
             }
         }"#,
     )
     .expect("parse rig spec");
 
-    let workloads = workloads_for_extension(&rig_spec, RigWorkloadKind::Trace, None, "nodejs");
+    let workloads = workloads_for_extension(&rig_spec, RigWorkloadKind::Trace, None, "extension-a");
 
     assert_eq!(
         workloads,
@@ -122,7 +124,9 @@ fn test_trace_workloads_for_extension_filters_and_expands_paths() {
             PathBuf::from("/tmp/studio/bench/admin-load.trace.mjs"),
         ]
     );
-    assert!(workloads_for_extension(&rig_spec, RigWorkloadKind::Trace, None, "rust").is_empty());
+    assert!(
+        workloads_for_extension(&rig_spec, RigWorkloadKind::Trace, None, "extension-c").is_empty()
+    );
 }
 
 #[test]
@@ -131,10 +135,10 @@ fn test_extension_workloads_expand_package_root_when_available() {
         r#"{
             "id": "studio-agent-sdk",
             "bench_workloads": {
-                "nodejs": [{ "path": "${package.root}/bench/studio-agent-runtime.bench.mjs" }]
+                "extension-a": [{ "path": "${package.root}/bench/studio-agent-runtime.bench.mjs" }]
             },
             "trace_workloads": {
-                "nodejs": [{ "path": "${package.root}/bench/studio-app-create-site.trace.mjs" }]
+                "extension-a": [{ "path": "${package.root}/bench/studio-app-create-site.trace.mjs" }]
             }
         }"#,
     )
@@ -142,13 +146,23 @@ fn test_extension_workloads_expand_package_root_when_available() {
     let package = PathBuf::from("/tmp/homeboy-rigs/Automattic/studio");
 
     assert_eq!(
-        workloads_for_extension(&rig_spec, RigWorkloadKind::Bench, Some(&package), "nodejs"),
+        workloads_for_extension(
+            &rig_spec,
+            RigWorkloadKind::Bench,
+            Some(&package),
+            "extension-a"
+        ),
         vec![PathBuf::from(
             "/tmp/homeboy-rigs/Automattic/studio/bench/studio-agent-runtime.bench.mjs"
         )]
     );
     assert_eq!(
-        workloads_for_extension(&rig_spec, RigWorkloadKind::Trace, Some(&package), "nodejs"),
+        workloads_for_extension(
+            &rig_spec,
+            RigWorkloadKind::Trace,
+            Some(&package),
+            "extension-a"
+        ),
         vec![PathBuf::from(
             "/tmp/homeboy-rigs/Automattic/studio/bench/studio-app-create-site.trace.mjs"
         )]
@@ -161,21 +175,21 @@ fn test_extension_workloads_leave_package_root_unexpanded_without_metadata() {
         r#"{
             "id": "manual",
             "bench_workloads": {
-                "nodejs": [{ "path": "${package.root}/bench/manual.bench.mjs" }]
+                "extension-a": [{ "path": "${package.root}/bench/manual.bench.mjs" }]
             },
             "trace_workloads": {
-                "nodejs": [{ "path": "${package.root}/bench/manual.trace.mjs" }]
+                "extension-a": [{ "path": "${package.root}/bench/manual.trace.mjs" }]
             }
         }"#,
     )
     .expect("parse rig spec");
 
     assert_eq!(
-        workloads_for_extension(&rig_spec, RigWorkloadKind::Bench, None, "nodejs"),
+        workloads_for_extension(&rig_spec, RigWorkloadKind::Bench, None, "extension-a"),
         vec![PathBuf::from("${package.root}/bench/manual.bench.mjs")]
     );
     assert_eq!(
-        workloads_for_extension(&rig_spec, RigWorkloadKind::Trace, None, "nodejs"),
+        workloads_for_extension(&rig_spec, RigWorkloadKind::Trace, None, "extension-a"),
         vec![PathBuf::from("${package.root}/bench/manual.trace.mjs")]
     );
 }
@@ -189,10 +203,10 @@ fn test_check_groups_for_extension_workloads() {
                 "studio": { "path": "/tmp/studio" }
             },
             "trace_workloads": {
-                "nodejs": [
+                "extension-a": [
                     {
                         "path": "${components.studio.path}/bench/create-site.trace.mjs",
-                        "check_groups": ["desktop-app", "nodejs-trace"]
+                        "check_groups": ["desktop-app", "extension-a-trace"]
                     },
                     {
                         "path": "/tmp/other.trace.mjs",
@@ -205,16 +219,16 @@ fn test_check_groups_for_extension_workloads() {
     .expect("parse rig spec");
 
     assert_eq!(
-        workloads_for_extension(&rig_spec, RigWorkloadKind::Trace, None, "nodejs"),
+        workloads_for_extension(&rig_spec, RigWorkloadKind::Trace, None, "extension-a"),
         vec![
             PathBuf::from("/tmp/studio/bench/create-site.trace.mjs"),
             PathBuf::from("/tmp/other.trace.mjs"),
         ]
     );
     assert_eq!(
-        check_groups_for_extension_workloads(&rig_spec, RigWorkloadKind::Trace, "nodejs")
+        check_groups_for_extension_workloads(&rig_spec, RigWorkloadKind::Trace, "extension-a")
             .expect("scoped groups"),
-        vec!["desktop-app".to_string(), "nodejs-trace".to_string()]
+        vec!["desktop-app".to_string(), "extension-a-trace".to_string()]
     );
 }
 
@@ -224,14 +238,14 @@ fn test_workloads_without_check_groups_keep_full_check_contract() {
         r#"{
             "id": "studio",
             "trace_workloads": {
-                "nodejs": [{ "path": "/tmp/create-site.trace.mjs" }]
+                "extension-a": [{ "path": "/tmp/create-site.trace.mjs" }]
             }
         }"#,
     )
     .expect("parse rig spec");
 
     assert_eq!(
-        check_groups_for_extension_workloads(&rig_spec, RigWorkloadKind::Trace, "nodejs"),
+        check_groups_for_extension_workloads(&rig_spec, RigWorkloadKind::Trace, "extension-a"),
         None
     );
 }
@@ -242,12 +256,12 @@ fn test_extension_ids_for_workloads_are_sorted_by_kind() {
         r#"{
             "id": "studio",
             "bench_workloads": {
-                "wordpress": [{ "path": "/tmp/wp.bench.php" }],
-                "nodejs": [{ "path": "/tmp/node.bench.mjs" }]
+                "extension-b": [{ "path": "/tmp/wp.bench.php" }],
+                "extension-a": [{ "path": "/tmp/node.bench.mjs" }]
             },
             "trace_workloads": {
-                "rust": [{ "path": "/tmp/rust.trace.rs" }],
-                "nodejs": [{ "path": "/tmp/node.trace.mjs" }]
+                "extension-c": [{ "path": "/tmp/rust.trace.rs" }],
+                "extension-a": [{ "path": "/tmp/node.trace.mjs" }]
             }
         }"#,
     )
@@ -255,10 +269,10 @@ fn test_extension_ids_for_workloads_are_sorted_by_kind() {
 
     assert_eq!(
         extension_ids_for_workloads(&rig_spec, RigWorkloadKind::Bench),
-        vec!["nodejs".to_string(), "wordpress".to_string()]
+        vec!["extension-a".to_string(), "extension-b".to_string()]
     );
     assert_eq!(
         extension_ids_for_workloads(&rig_spec, RigWorkloadKind::Trace),
-        vec!["nodejs".to_string(), "rust".to_string()]
+        vec!["extension-a".to_string(), "extension-c".to_string()]
     );
 }

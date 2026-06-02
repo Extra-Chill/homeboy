@@ -1,8 +1,10 @@
 use std::path::{Path, PathBuf};
 
+use crate::core::artifact_inputs;
 use crate::core::build;
 use crate::core::component::Component;
 use crate::core::context::RemoteProjectContext;
+use crate::core::engine::command;
 use crate::core::error::Result;
 use crate::core::extension::build::resolve_artifact_path_from_root;
 use crate::core::git;
@@ -211,6 +213,7 @@ fn should_try_download_release_artifact(
         && !config.head
         && !config.tagged
         && !config.skip_build
+        && component.artifact_inputs.is_empty()
         && release_download::supports_release_deploy(component)
         && !release_download::has_mutable_package_dependencies(component)
 }
@@ -505,19 +508,32 @@ fn resolve_preflight_artifact_path(
         let artifact_pattern = match component.build_artifact.as_ref() {
             Some(pattern) => pattern,
             None => {
-                return Err(ComponentDeployResult::failed(
+                return Err(failed_preflight_artifact_result(
                     component,
                     base_path,
                     local_version,
                     remote_version,
+                    build_exit_code,
                     format!(
                         "Component '{}' has no build_artifact configured",
                         component.id
                     ),
-                )
-                .with_build_exit_code(build_exit_code));
+                ));
             }
         };
+
+        if should_create_missing_archive_artifact(component, config, artifact_pattern) {
+            if let Err(error) = create_archive_artifact_from_head(component, artifact_pattern) {
+                return Err(failed_preflight_artifact_result(
+                    component,
+                    base_path,
+                    local_version,
+                    remote_version,
+                    build_exit_code,
+                    error,
+                ));
+            }
+        }
 
         match resolve_artifact_path_from_root(
             artifact_pattern,
@@ -530,14 +546,14 @@ fn resolve_preflight_artifact_path(
                 } else {
                     format!("{}. Run build first: homeboy build {}", e, component.id)
                 };
-                return Err(ComponentDeployResult::failed(
+                return Err(failed_preflight_artifact_result(
                     component,
                     base_path,
                     local_version,
                     remote_version,
+                    build_exit_code,
                     error_msg,
-                )
-                .with_build_exit_code(build_exit_code));
+                ));
             }
         }
     };
@@ -561,21 +577,116 @@ fn resolve_preflight_artifact_path(
         component.extract_command.is_some(),
         has_deploy_override,
     ) {
-        return Err(ComponentDeployResult::failed(
+        return Err(failed_preflight_artifact_result(
             component,
             base_path,
             local_version,
             remote_version,
+            build_exit_code,
             format!(
                 "Archive artifact '{}' requires an extractCommand. \
                  Add one with: homeboy component set <id> --json '{{\"extract_command\": \"unzip -o {{artifact}} && rm {{artifact}}\"}}'",
                 artifact_path.display()
             ),
-        )
-        .with_build_exit_code(build_exit_code));
+        ));
     }
 
     Ok(artifact_path)
+}
+
+fn failed_preflight_artifact_result(
+    component: &Component,
+    base_path: &str,
+    local_version: Option<String>,
+    remote_version: Option<String>,
+    build_exit_code: Option<i32>,
+    error: String,
+) -> ComponentDeployResult {
+    ComponentDeployResult::failed(component, base_path, local_version, remote_version, error)
+        .with_build_exit_code(build_exit_code)
+}
+
+fn should_create_missing_archive_artifact(
+    component: &Component,
+    config: &DeployConfig,
+    artifact_pattern: &str,
+) -> bool {
+    !config.skip_build
+        && is_literal_zip_artifact_pattern(artifact_pattern)
+        && !resolved_literal_artifact_path(component, artifact_pattern).exists()
+}
+
+fn is_literal_zip_artifact_pattern(pattern: &str) -> bool {
+    !pattern.contains('*')
+        && !pattern.contains('?')
+        && !pattern.contains('[')
+        && !pattern.contains(']')
+        && Path::new(pattern)
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext == "zip")
+}
+
+fn resolved_literal_artifact_path(component: &Component, artifact_pattern: &str) -> PathBuf {
+    let artifact_path = PathBuf::from(artifact_pattern);
+    if artifact_path.is_absolute() {
+        artifact_path
+    } else {
+        Path::new(&component.local_path).join(artifact_path)
+    }
+}
+
+fn create_archive_artifact_from_head(
+    component: &Component,
+    artifact_pattern: &str,
+) -> std::result::Result<(), String> {
+    let artifact_path = resolved_literal_artifact_path(component, artifact_pattern);
+    let parent = artifact_path.parent().ok_or_else(|| {
+        format!(
+            "Build artifact path must include a parent directory: {}",
+            artifact_path.display()
+        )
+    })?;
+
+    if !parent.as_os_str().is_empty() {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "Failed to create build artifact directory '{}': {}",
+                parent.display(),
+                error
+            )
+        })?;
+    }
+
+    let artifact_output = artifact_path.to_string_lossy().to_string();
+    let prefix = format!("{}/", component.id);
+    log_status!(
+        "deploy",
+        "Creating deploy archive artifact: {}",
+        artifact_path.display()
+    );
+
+    command::run_in(
+        &component.local_path,
+        "git",
+        &[
+            "archive",
+            "--format=zip",
+            &format!("--prefix={prefix}"),
+            &format!("--output={artifact_output}"),
+            "HEAD",
+        ],
+        "create deploy archive artifact",
+    )
+    .map(|_| ())
+    .map_err(|error| {
+        format!(
+            "Failed to create deploy archive artifact '{}'. The component build completed, but the configured build_artifact was missing. Ensure '{}' is a git checkout with a valid HEAD, or make scripts.build create the artifact explicitly. Error: {}",
+            artifact_path.display(),
+            component.id,
+            error
+        )
+    })
 }
 
 fn artifact_requires_extract_command(path: &Path) -> bool {
@@ -617,6 +728,20 @@ fn execute_artifact_deploy(
             ),
         )
         .with_build_exit_code(prepared.build_exit_code);
+    };
+    let artifact_input_metadata = match artifact_inputs::resolve_metadata(component) {
+        Ok(inputs) => inputs,
+        Err(err) => {
+            return ComponentDeployResult::failed(
+                component,
+                base_path,
+                prepared.local_version.clone(),
+                prepared.remote_version.clone(),
+                err.to_string(),
+            )
+            .with_remote_path(install_dir.to_string())
+            .with_build_exit_code(prepared.build_exit_code);
+        }
     };
 
     // Look up verification from extensions
@@ -677,6 +802,7 @@ fn execute_artifact_deploy(
                     prepared.local_version.clone(),
                 )
                 .with_remote_path(install_dir.to_string())
+                .with_artifact_inputs(artifact_input_metadata)
                 .with_build_exit_code(prepared.build_exit_code)
                 .with_deploy_exit_code(Some(exit_code))
         }
@@ -896,10 +1022,12 @@ fn cleanup_build_dependencies(
 mod tests {
     use super::{
         artifact_requires_component_extract_command, cleanup_deploy_build_artifact,
-        failed_component_deploy_result, should_try_download_release_artifact,
+        failed_component_deploy_result, resolve_preflight_artifact_path,
+        should_try_download_release_artifact,
     };
-    use crate::core::component::Component;
+    use crate::core::component::{ArtifactInput, Component};
     use crate::core::deploy::types::DeployConfig;
+    use std::process::Command;
 
     #[test]
     fn test_execute_component_deploy_failure_helper_preserves_build_exit_code() {
@@ -1091,6 +1219,41 @@ mod tests {
     }
 
     #[test]
+    fn artifact_inputs_skip_release_artifact_download() {
+        let component = Component {
+            id: "example".to_string(),
+            remote_url: Some("https://github.com/example/example".to_string()),
+            build_artifact: Some("build/example.zip".to_string()),
+            artifact_inputs: vec![ArtifactInput {
+                component: "producer".to_string(),
+                artifact: "build/producer.zip".to_string(),
+                target: "runtime/packages/producer.zip".to_string(),
+                sha256: None,
+            }],
+            ..Component::default()
+        };
+        let config = DeployConfig {
+            component_ids: Vec::new(),
+            all: false,
+            outdated: false,
+            behind_upstream: false,
+            dry_run: false,
+            check: false,
+            force: false,
+            skip_build: false,
+            keep_deps: false,
+            expected_version: None,
+            no_pull: false,
+            head: false,
+            tagged: false,
+        };
+
+        assert!(!should_try_download_release_artifact(
+            &component, &config, false, false
+        ));
+    }
+
+    #[test]
     fn cleanup_deploy_build_artifact_removes_zip_and_empty_build_dir() {
         let temp = tempfile::tempdir().expect("tempdir");
         let build_dir = temp.path().join("build");
@@ -1107,6 +1270,85 @@ mod tests {
 
         assert!(!artifact.exists());
         assert!(!build_dir.exists());
+    }
+
+    #[test]
+    fn preflight_creates_missing_archive_artifact_from_tracked_head() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(temp.path().join("plugin.php"), "<?php\n").expect("write plugin");
+        std::fs::create_dir_all(temp.path().join("node_modules")).expect("mkdir node_modules");
+        std::fs::write(temp.path().join("node_modules/junk.js"), "junk\n")
+            .expect("write untracked dependency");
+        git(temp.path(), &["init"]);
+        git(temp.path(), &["add", "plugin.php"]);
+        git(
+            temp.path(),
+            &[
+                "-c",
+                "user.name=Homeboy Test",
+                "-c",
+                "user.email=homeboy@example.test",
+                "commit",
+                "-m",
+                "initial",
+            ],
+        );
+
+        let component = Component {
+            id: "demo-plugin".to_string(),
+            local_path: temp.path().to_string_lossy().to_string(),
+            build_artifact: Some("build/demo-plugin.zip".to_string()),
+            extract_command: Some("unzip -o {{artifact}} && rm {{artifact}}".to_string()),
+            ..Component::default()
+        };
+        let config = DeployConfig {
+            component_ids: Vec::new(),
+            all: false,
+            outdated: false,
+            behind_upstream: false,
+            dry_run: false,
+            check: false,
+            force: false,
+            skip_build: false,
+            keep_deps: false,
+            expected_version: None,
+            no_pull: false,
+            head: true,
+            tagged: false,
+        };
+
+        let artifact = resolve_preflight_artifact_path(
+            &component,
+            &config,
+            "/srv/site",
+            "/srv/site/wp-content/plugins/demo-plugin",
+            None,
+            None,
+            Some(0),
+            None,
+        )
+        .expect("archive artifact should resolve");
+
+        assert_eq!(artifact, temp.path().join("build/demo-plugin.zip"));
+        let file = std::fs::File::open(&artifact).expect("open zip");
+        let mut zip = zip::ZipArchive::new(file).expect("read zip");
+        assert!(zip.by_name("demo-plugin/plugin.php").is_ok());
+        assert!(zip.by_name("demo-plugin/node_modules/junk.js").is_err());
+    }
+
+    fn git(dir: &std::path::Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}{}",
+            args,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]

@@ -15,6 +15,7 @@ use crate::core::paths;
 use crate::core::process::pid_is_running;
 use crate::core::runner::{measured_command_output, normalize_runner_command_env};
 use crate::core::source_snapshot::SourceSnapshot;
+use crate::core::upgrade::VERSION;
 
 mod artifact_download;
 mod broker_config;
@@ -170,6 +171,21 @@ where
 {
     let listener = TcpListener::bind(addr)
         .map_err(|e| Error::internal_io(e.to_string(), Some(format!("bind daemon to {}", addr))))?;
+    serve_listener_with_analysis_runner(listener, analysis_runner)
+}
+
+#[cfg(test)]
+pub(crate) fn serve_listener(listener: TcpListener) -> Result<DaemonState> {
+    serve_listener_with_analysis_runner(listener, UnsupportedAnalysisJobRunner)
+}
+
+fn serve_listener_with_analysis_runner<R>(
+    listener: TcpListener,
+    analysis_runner: R,
+) -> Result<DaemonState>
+where
+    R: AnalysisJobRunner,
+{
     let local_addr = listener.local_addr().map_err(|e| {
         Error::internal_io(e.to_string(), Some("read daemon local address".to_string()))
     })?;
@@ -231,14 +247,14 @@ where
             status_code: 200,
             body: json!({
                 "status": "ok",
-                "version": env!("CARGO_PKG_VERSION"),
+                "version": VERSION,
             }),
             artifact: None,
         },
         ("GET", "/version") => HttpResponse {
             status_code: 200,
             body: json!({
-                "version": env!("CARGO_PKG_VERSION"),
+                "version": VERSION,
             }),
             artifact: None,
         },

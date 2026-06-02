@@ -67,6 +67,56 @@ fn trace_json(status: &str, summary: &str) -> String {
     )
 }
 
+fn trace_json_with_span_summaries() -> &'static str {
+    r#"{
+        "success": false,
+        "data": {
+            "passed": false,
+            "status": "fail",
+            "component": "studio",
+            "exit_code": 1,
+            "span_summaries": [
+                {
+                    "id": "phase.boot_to_ready",
+                    "from": "runner.boot",
+                    "to": "runner.ready",
+                    "status": "ok",
+                    "duration_ms": 125,
+                    "from_t_ms": 10,
+                    "to_t_ms": 135,
+                    "metadata": {
+                        "category": "startup",
+                        "critical": true,
+                        "blocking": true,
+                        "cacheable": true
+                    }
+                },
+                {
+                    "id": "phase.ready_to_open",
+                    "from": "runner.ready",
+                    "to": "app.opened",
+                    "status": "skipped",
+                    "missing": ["app.opened"],
+                    "message": "span endpoint missing from timeline",
+                    "metadata": {
+                        "category": "ui",
+                        "prewarmable": true
+                    }
+                }
+            ],
+            "results": {
+                "component_id": "studio",
+                "scenario_id": "close-window-running-site",
+                "status": "fail",
+                "summary": "Window reopened after close.",
+                "timeline": [],
+                "assertions": [],
+                "artifacts": []
+            }
+        }
+    }"#
+}
+
 fn bench_json() -> &'static str {
     r#"{
         "success": true,
@@ -366,6 +416,21 @@ fn renders_trace_fail_status_without_inlining_artifact_content() {
     assert!(markdown.contains("- Window reopened after close."));
     assert!(markdown.contains("- main log: artifacts/main.log"));
     assert!(!markdown.contains("raw log body that should never appear"));
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn renders_trace_span_summaries_with_metadata_and_missing_endpoints() {
+    let dir = tmp_dir("trace-span-summaries");
+    fs::create_dir_all(&dir).expect("temp dir should exist");
+    write_file(&dir, "trace.json", trace_json_with_span_summaries());
+
+    let markdown = render(&dir, r#"{"trace":"fail"}"#, false, false);
+
+    assert!(markdown.contains("**Spans**"));
+    assert!(markdown.contains("| `phase.boot_to_ready` | `runner.boot` | `runner.ready` | 125ms | ok | category=startup, critical, blocking, cacheable |"));
+    assert!(markdown.contains("| `phase.ready_to_open` | `runner.ready` | `app.opened` | - | skipped: missing `app.opened`: span endpoint missing from timeline | category=ui, prewarmable |"));
 
     let _ = fs::remove_dir_all(&dir);
 }

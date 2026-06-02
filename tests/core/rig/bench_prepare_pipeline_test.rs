@@ -11,11 +11,11 @@ fn write_logging_bench_extension(home: &TempDir, log_path: &std::path::Path) {
         .join(".config")
         .join("homeboy")
         .join("extensions")
-        .join("nodejs");
+        .join("fixture-bench");
     fs::create_dir_all(&extension_dir).expect("mkdir extension");
     fs::write(
-        extension_dir.join("nodejs.json"),
-        r#"{"name":"Node.js","version":"0.0.0","bench":{"extension_script":"bench-runner.sh"}}"#,
+        extension_dir.join("fixture-bench.json"),
+        r#"{"name":"Fixture Bench","version":"0.0.0","bench":{"extension_script":"bench-runner.sh"}}"#,
     )
     .expect("write extension manifest");
 
@@ -77,7 +77,7 @@ fn write_pipeline_rig(
         "components": {
             "studio": {
                 "path": component_path,
-                "extensions": { "nodejs": {} }
+                "extensions": { "fixture-bench": {} }
             }
         },
         "bench": { "default_component": "studio" },

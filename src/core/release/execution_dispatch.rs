@@ -31,6 +31,9 @@ pub(super) fn execute_release_plan_step(
         "preflight.working_tree" => Ok(Some(run_working_tree_preflight(step, context))),
         "preflight.remote_sync" => Ok(Some(run_remote_sync_preflight(step, context))),
         "preflight.bump_policy" => Ok(Some(run_bump_policy_preflight(step))),
+        "preflight.wordpress_publish_token" => {
+            Ok(Some(run_wordpress_publish_token_preflight(step)))
+        }
         "preflight.lint" => Ok(Some(run_lint_preflight(step, context))),
         "preflight.test" => Ok(Some(run_test_preflight(step, context))),
         "preflight.changelog_bootstrap" => {
@@ -167,12 +170,46 @@ fn release_step_is_plan_only(step: &PlanStep) -> bool {
         && step.kind != "preflight.working_tree"
         && step.kind != "preflight.remote_sync"
         && step.kind != "preflight.bump_policy"
+        && step.kind != "preflight.wordpress_publish_token"
         && step.kind != "preflight.lint"
         && step.kind != "preflight.test"
         && step.kind != "preflight.changelog_bootstrap"
         && step.kind != "preflight.package")
         || step.kind == "changelog.policy"
         || step.kind == "changelog.generate"
+}
+
+fn run_wordpress_publish_token_preflight(step: &PlanStep) -> ReleaseStepResult {
+    if crate::core::git::github_token_from_env_or_gh().is_some() {
+        return ReleaseStepResult {
+            id: step.id.clone(),
+            step_type: step.kind.clone(),
+            status: ReleaseStepStatus::Success,
+            missing: Vec::new(),
+            warnings: Vec::new(),
+            hints: Vec::new(),
+            data: Some(serde_json::json!({
+                "token_source": "env-or-gh-auth-token",
+            })),
+            error: None,
+        };
+    }
+
+    ReleaseStepResult {
+        id: step.id.clone(),
+        step_type: step.kind.clone(),
+        status: ReleaseStepStatus::Failed,
+        missing: Vec::new(),
+        warnings: Vec::new(),
+        hints: vec![crate::core::error::Hint {
+            message: "Run `gh auth login`, or export `GH_TOKEN=\"$(gh auth token)\"`, then rerun the release.".to_string(),
+        }],
+        data: Some(serde_json::json!({
+            "required_env": "GH_TOKEN",
+            "fallback": "gh auth token",
+        })),
+        error: Some(crate::core::extension::wordpress_release_publish_token_remediation().to_string()),
+    }
 }
 
 fn run_default_branch_preflight(

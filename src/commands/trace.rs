@@ -352,6 +352,7 @@ fn run_outputs(mut args: TraceArgs) -> CmdResult<(TraceCommandOutput, Option<Tra
 
     let summary_only = args.json_summary;
     let profile = resolved_profile_output_for_args(&args);
+    let span_metadata = trace_span_metadata_for_args(&args)?;
     let execution = execute_trace_run(args)?;
 
     let (mut stdout_output, mut artifact_output, exit_code) =
@@ -360,8 +361,10 @@ fn run_outputs(mut args: TraceArgs) -> CmdResult<(TraceCommandOutput, Option<Tra
             execution.rig_state,
             summary_only,
         );
+    extension_trace::attach_span_summary_metadata(&mut stdout_output, &span_metadata);
     attach_profile_output(&mut stdout_output, profile.clone());
     if let Some(output) = artifact_output.as_mut() {
+        extension_trace::attach_span_summary_metadata(output, &span_metadata);
         attach_profile_output(output, profile);
     }
     Ok(((stdout_output, artifact_output), exit_code))

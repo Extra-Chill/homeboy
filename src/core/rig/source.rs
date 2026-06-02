@@ -553,13 +553,16 @@ fn new_source_group(
     linked: bool,
     source_revision: Option<String>,
 ) -> RigSourceGroup {
+    let package_present = Path::new(package_path).exists();
     RigSourceGroup {
         source: source.to_string(),
         package_id: package_id_from_path(package_path),
         package_path: package_path.to_string(),
+        package_present,
         discovery_path,
         linked,
         source_revision,
+        stale_reason: stale_source_reason(linked, package_present),
         rigs: Vec::new(),
         stacks: Vec::new(),
     }
@@ -594,12 +597,15 @@ fn source_rig(
     config_present: bool,
     config_owned: bool,
 ) -> RigSourceRig {
+    let rig_present = Path::new(&entry.metadata.rig_path).is_file();
     RigSourceRig {
         id: entry.id,
         rig_path: entry.metadata.rig_path,
+        rig_present,
         config_path: source_config_path(config_path),
         config_present,
         config_owned,
+        stale_reason: stale_config_reason(rig_present, config_present),
     }
 }
 
@@ -609,12 +615,36 @@ fn source_stack(
     config_present: bool,
     config_owned: bool,
 ) -> RigSourceStack {
+    let stack_present = Path::new(&entry.metadata.stack_path).is_file();
     RigSourceStack {
         id: entry.id,
         stack_path: entry.metadata.stack_path,
+        stack_present,
         config_path: source_config_path(config_path),
         config_present,
         config_owned,
+        stale_reason: stale_config_reason(stack_present, config_present),
+    }
+}
+
+fn stale_source_reason(linked: bool, package_present: bool) -> Option<String> {
+    (linked && !package_present).then(|| {
+        "linked local rig source path is missing; restore it or run `homeboy rig sources remove <source>` and reinstall".to_string()
+    })
+}
+
+fn stale_config_reason(spec_present: bool, config_present: bool) -> Option<String> {
+    if !spec_present {
+        Some(
+            "recorded source spec path is missing; refresh/remove the rig source and reinstall"
+                .to_string(),
+        )
+    } else if !config_present {
+        Some(
+            "installed rig config is missing or points at a missing linked source path".to_string(),
+        )
+    } else {
+        None
     }
 }
 

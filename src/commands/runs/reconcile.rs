@@ -1,7 +1,9 @@
 use clap::Args;
 use serde::Serialize;
 use serde_json::Value;
+use std::path::{Path, PathBuf};
 
+use homeboy::core::engine::run_dir;
 use homeboy::core::observation::{
     run_owner_pid, ObservationStore, RunListFilter, RunRecord, RunStatus,
 };
@@ -96,11 +98,20 @@ where
         }
 
         let reason = "owner_process_not_running".to_string();
-        let artifact_count = store.list_artifacts(&run.id)?.len();
+        let artifact_count = if dry_run {
+            store.list_artifacts(&run.id)?.len()
+        } else {
+            reconcile_available_run_dir_artifacts(store, &run)?
+        };
         let finished = if dry_run {
             None
         } else {
-            let metadata = with_reconcile_metadata(&run, owner_pid, &reason);
+            let metadata = with_reconcile_metadata(
+                &run,
+                owner_pid,
+                &reason,
+                &reconcile_run_dir_metadata(&run),
+            );
             Some(store.finish_run(&run.id, RunStatus::Stale, Some(metadata))?)
         };
 
@@ -124,14 +135,26 @@ pub fn running_status_note(run: &RunRecord) -> Option<String> {
     homeboy::core::observation::running_status_note(run)
 }
 
-fn with_reconcile_metadata(run: &RunRecord, owner_pid: u32, reason: &str) -> Value {
+fn with_reconcile_metadata(
+    run: &RunRecord,
+    owner_pid: u32,
+    reason: &str,
+    run_dir_metadata: &Value,
+) -> Value {
     let mut metadata = run.metadata_json.clone();
-    let marker = serde_json::json!({
+    let mut marker = serde_json::json!({
         "status": RunStatus::Stale.as_str(),
         "reason": reason,
         "owner_pid": owner_pid,
         "reconciled_at": chrono::Utc::now().to_rfc3339(),
     });
+    if let (Some(marker), Some(run_dir_metadata)) =
+        (marker.as_object_mut(), run_dir_metadata.as_object())
+    {
+        for (key, value) in run_dir_metadata {
+            marker.insert(key.clone(), value.clone());
+        }
+    }
 
     if let Some(object) = metadata.as_object_mut() {
         object.insert("homeboy_reconciled".to_string(), marker);
@@ -142,6 +165,79 @@ fn with_reconcile_metadata(run: &RunRecord, owner_pid: u32, reason: &str) -> Val
         "homeboy_reconciled": marker,
         "homeboy_original_metadata": metadata,
     })
+}
+
+fn reconcile_available_run_dir_artifacts(
+    store: &ObservationStore,
+    run: &RunRecord,
+) -> homeboy::core::Result<usize> {
+    if let Some(path) = run_dir_path(run) {
+        let resource_summary = path.join(run_dir::files::RESOURCE_SUMMARY);
+        if resource_summary.is_file() {
+            let already_recorded = store
+                .list_artifacts(&run.id)?
+                .iter()
+                .any(|artifact| artifact.kind == "resource_summary");
+            if !already_recorded {
+                let _ = store.record_artifact(&run.id, "resource_summary", &resource_summary);
+            }
+        }
+    }
+
+    Ok(store.list_artifacts(&run.id)?.len())
+}
+
+fn reconcile_run_dir_metadata(run: &RunRecord) -> Value {
+    let Some(path) = run_dir_path(run) else {
+        return Value::Null;
+    };
+    let extension_children = read_extension_children(&path);
+    if extension_children.is_empty() {
+        return Value::Null;
+    }
+    serde_json::json!({
+        "run_dir": path.to_string_lossy().to_string(),
+        "extension_children": extension_children,
+    })
+}
+
+fn run_dir_path(run: &RunRecord) -> Option<PathBuf> {
+    run.metadata_json
+        .get("run_dir")
+        .and_then(Value::as_str)
+        .map(PathBuf::from)
+        .filter(|path| path.is_dir())
+}
+
+fn read_extension_children(run_dir_path: &Path) -> Vec<Value> {
+    let dir = run_dir_path.join(run_dir::files::EXTENSION_CHILDREN_DIR);
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut children = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        if let Ok(value) = serde_json::from_str::<Value>(&content) {
+            children.push(value);
+        }
+    }
+    children.sort_by(|a, b| {
+        a.get("started_at")
+            .and_then(Value::as_str)
+            .cmp(&b.get("started_at").and_then(Value::as_str))
+            .then(
+                a.get("root_pid")
+                    .and_then(Value::as_u64)
+                    .cmp(&b.get("root_pid").and_then(Value::as_u64)),
+            )
+    });
+    children
 }
 
 #[cfg(test)]
@@ -218,6 +314,58 @@ mod tests {
             assert_eq!(
                 updated.metadata_json["homeboy_reconciled"]["status"],
                 "stale"
+            );
+            assert_eq!(store.list_artifacts(&run.id).expect("artifacts").len(), 1);
+        });
+    }
+
+    #[test]
+    fn reconcile_preserves_run_dir_child_metadata_when_parent_was_killed() {
+        with_isolated_home(|home| {
+            let _xdg = XdgGuard::unset();
+            let store = ObservationStore::open_initialized().expect("store");
+            let run_dir = home.path().join("homeboy-run-fixture");
+            let children_dir = run_dir.join(run_dir::files::EXTENSION_CHILDREN_DIR);
+            std::fs::create_dir_all(&children_dir).expect("children dir");
+            std::fs::write(run_dir.join(run_dir::files::RESOURCE_SUMMARY), b"{}").expect("summary");
+            std::fs::write(
+                children_dir.join("123.json"),
+                serde_json::to_vec_pretty(&serde_json::json!({
+                    "root_pid": 123,
+                    "command_label": "bench-runner.sh",
+                    "started_at": "2026-06-02T02:48:48.860570691+00:00",
+                    "finished_at": "2026-06-02T02:48:48.966939782+00:00",
+                    "duration_ms": 106,
+                    "sampled_peak_rss_bytes": 2052096,
+                    "sampled_peak_cpu_percent": 0,
+                    "warnings": []
+                }))
+                .expect("serialize child"),
+            )
+            .expect("child summary");
+
+            let run = store
+                .start_run(sample_run(
+                    "bench",
+                    "homeboy",
+                    "studio",
+                    serde_json::json!({ "run_dir": run_dir }),
+                ))
+                .expect("run");
+
+            let reconciled =
+                reconcile_orphaned_running_runs(&store, 1000, false, |_| false).expect("reconcile");
+            let updated = store
+                .get_run(&run.id)
+                .expect("get run")
+                .expect("run exists");
+
+            assert_eq!(reconciled.len(), 1);
+            assert_eq!(reconciled[0].artifact_count, 1);
+            assert_eq!(updated.status, "stale");
+            assert_eq!(
+                updated.metadata_json["homeboy_reconciled"]["extension_children"][0]["root_pid"],
+                123
             );
             assert_eq!(store.list_artifacts(&run.id).expect("artifacts").len(), 1);
         });
