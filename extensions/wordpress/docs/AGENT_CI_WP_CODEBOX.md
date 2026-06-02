@@ -176,10 +176,10 @@ the extension-owned WP Codebox request shape, then translating Codebox output ba
 to `AgentTaskOutcome` with Homeboy-native artifacts, evidence refs, diagnostics,
 and failure classifications.
 
-The provider is intentionally marked preparatory while Codebox's generic host-tool
-registry is still tracked in https://github.com/chubes4/wp-codebox/issues/392.
-Once that surface lands, the same provider contract can attach richer sandbox
-tools without moving Codebox-specific logic into Homeboy core.
+The provider is intentionally marked preparatory while Codebox's upstream agent
+task runner API is still tracked in https://github.com/chubes4/wp-codebox/issues/480.
+Once that surface lands, the same provider contract can remove Homeboy-owned
+recipe synthesis without moving Codebox-specific logic into Homeboy core.
 
 ## Runner config surface
 
