@@ -368,7 +368,9 @@ fn publish_failure_message(target: &str, response: &serde_json::Value) -> String
 
 #[cfg(test)]
 mod tests {
-    use super::publish_step_result;
+    use super::{publish_step_result, run_publish};
+    use crate::core::extension::ExtensionManifest;
+    use crate::core::release::types::ReleaseState;
     use crate::core::release::ReleaseStepStatus;
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -406,6 +408,58 @@ mod tests {
             registry_url,
             handle,
         }
+    }
+
+    fn release_publish_extension(id: &str, command: &str) -> ExtensionManifest {
+        let mut manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
+            "name": id,
+            "version": "1.0.0",
+            "actions": [{
+                "id": "release.publish",
+                "label": "Publish release",
+                "type": "command",
+                "command": command,
+            }]
+        }))
+        .expect("manifest fixture");
+        manifest.id = id.to_string();
+        manifest
+    }
+
+    #[test]
+    fn run_publish_passes_component_id_from_release_payload_to_action_env() {
+        crate::test_support::with_isolated_home(|_| {
+            let component = tempfile::tempdir_in(std::env::temp_dir())
+                .expect("component tempdir with mismatched basename");
+            let publish = release_publish_extension(
+                "registry",
+                "printf '{\"component_id\":\"%s\",\"component_path\":\"%s\"}' \"$HOMEBOY_COMPONENT_ID\" \"$HOMEBOY_COMPONENT_PATH\"",
+            );
+            crate::core::extension::save_manifest(&publish).expect("save publish extension");
+
+            let result = run_publish(
+                &[publish],
+                &ReleaseState::default(),
+                "intelligence-horse-theme",
+                &component.path().to_string_lossy(),
+                "registry",
+            )
+            .expect("publish step");
+
+            assert_eq!(result.status, ReleaseStepStatus::Success);
+            assert_ne!(
+                component.path().file_name().unwrap().to_string_lossy(),
+                "intelligence-horse-theme"
+            );
+            let data = result.data.expect("publish data");
+            let stdout = data["response"]["stdout"].as_str().expect("stdout");
+            let env: serde_json::Value = serde_json::from_str(stdout).expect("env stdout json");
+            assert_eq!(env["component_id"], "intelligence-horse-theme");
+            assert_eq!(
+                env["component_path"].as_str().expect("component path"),
+                component.path().to_string_lossy()
+            );
+        });
     }
 
     #[test]
