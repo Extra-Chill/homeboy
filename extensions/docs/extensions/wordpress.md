@@ -232,6 +232,93 @@ The helper returns a `fixtureSetup` summary and writes
 steps throw errors that include the fixture label, command, exit code, stdout,
 and stderr.
 
+## Reusable Block Quality Probes
+
+WordPress workloads can collect product-neutral block quality counts without
+copying PHP probe strings into each rig. Import the helpers from `wordpress` or
+from `wordpress/lib/block-quality.js`:
+
+```js
+const {
+	probeWordPressBlockQuality,
+	probeWordPressPostBlockQuality,
+} = require('./wordpress');
+
+const siteQuality = await probeWordPressBlockQuality('/path/to/site', {
+	postTypes: ['page', 'post', 'wp_template', 'wp_template_part'],
+	postStatuses: ['any'],
+});
+
+const pageQuality = await probeWordPressPostBlockQuality('/path/to/site', 123);
+```
+
+The site probe reports stable WordPress counters:
+
+```json
+{
+	"posts_seen": 4,
+	"posts_with_content": 4,
+	"posts_with_blocks": 3,
+	"pages_seen": 1,
+	"templates_seen": 1,
+	"template_parts_seen": 1,
+	"raw_html_unconverted": 1,
+	"total_blocks": 18,
+	"core_html_blocks": 2,
+	"serialized_block_comments": 18,
+	"fallback_count": 0,
+	"core_html_without_fallback": 2,
+	"post_type_counts": { "page": 1, "post": 1, "wp_template": 1, "wp_template_part": 1 }
+}
+```
+
+The post-scoped probe includes the same counts plus `post_id`, `post_type`,
+`post_title`, `stored_content_hash`, `stored_content_bytes`, and
+`stored_content_preview`. Pass `contentPreviewBytes` to adjust the preview size.
+
+Fallback counts are opt-in and product-neutral. If a workload owns a fallback
+counter option, pass `fallbackOptionNames: ['example_fallback_count']`; the probe
+sums those options into `fallback_count` and subtracts it from
+`core_html_without_fallback`.
+
+## Reusable Editor Canvas Probes
+
+The WordPress extension also exports generic editor canvas helpers from
+`wordpress/lib/editor-canvas-probes.js`:
+
+```js
+const {
+	waitForWordPressEditorCanvas,
+	captureWordPressEditorCanvasScreenshot,
+	summarizeVisibleSelectors,
+} = require('./wordpress');
+
+await waitForWordPressEditorCanvas(page, {
+	url: `${baseUrl}/wp-admin/site-editor.php`,
+});
+
+await captureWordPressEditorCanvasScreenshot(
+	page,
+	'artifacts/editor-canvas.png',
+	{ url: `${baseUrl}/wp-admin/site-editor.php` }
+);
+
+const selectors = await summarizeVisibleSelectors(page, [
+	{ name: 'hero', selectors: ['.hero', '.wp-block-cover'] },
+	{ name: 'footer', selector: 'footer' },
+]);
+```
+
+`waitForWordPressEditorCanvas()` waits for `iframe[name="editor-canvas"]`, then
+waits inside the frame until `.block-editor-block-list__layout` has dimensions,
+is not visibly loading, and contains at least one editor block. It applies a
+small stabilizing stylesheet by default so screenshots are less noisy.
+
+`summarizeVisibleSelectors()` is intentionally generic: it returns per-selector
+match counts, visible counts, nonzero bounding-box counts, first-match text, and
+group/totals summaries. Product-specific visual parity gates should stay in the
+rig or workload that owns those expectations.
+
 ## Block Theme Quality Probe
 
 Playground scenario graders can call a generic PHP-first WordPress quality probe

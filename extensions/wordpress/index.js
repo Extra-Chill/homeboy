@@ -5,6 +5,8 @@ module.exports = {
 	...require('./lib/wordpress-bootstrap-timeline'),
 	...require('./lib/request-profiler'),
 	...require('./lib/page-profiler'),
+	...require('./lib/block-quality'),
+	...require('./lib/editor-canvas-probes'),
 	...require('./lib/timing-correlator'),
 	...require('./lib/codebox-memory-report'),
 	...require('./lib/agent-terminal-actions'),
