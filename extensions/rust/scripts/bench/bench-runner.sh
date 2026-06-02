@@ -50,7 +50,7 @@ set -euo pipefail
 #   HOMEBOY_DEBUG                — verbose output
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BASH_PREFLIGHT_HELPER="${HOMEBOY_RUNTIME_BASH_PREFLIGHT:-${SCRIPT_DIR}/../lib/bash-preflight.sh}"
+BASH_PREFLIGHT_HELPER="${HOMEBOY_RUNTIME_BASH_PREFLIGHT:?Homeboy core must provide HOMEBOY_RUNTIME_BASH_PREFLIGHT}"
 # shellcheck source=/dev/null
 source "$BASH_PREFLIGHT_HELPER"
 homeboy_require_bash_version 4
@@ -227,15 +227,6 @@ bench_bin_file() {
     printf 'null\n'
 }
 
-scenario_selected() {
-    local _scenario="$1"
-    [ -z "$SELECTED_SCENARIOS" ] && return 0
-    case ",${SELECTED_SCENARIOS}," in
-        *",${_scenario},"*) return 0 ;;
-        *) return 1 ;;
-    esac
-}
-
 truthy() {
     case "${1:-}" in
         1|true|TRUE|yes|YES|all|ALL) return 0 ;;
@@ -300,14 +291,14 @@ if [ "$LIST_ONLY" = "1" ]; then
     SCENARIO_ARGS=()
     for _bin in "${BENCH_BINS[@]}"; do
         _scenario_id="${_bin#bench-}"
-        scenario_selected "$_scenario_id" || continue
+        homeboy_bench_scenario_selected "$_scenario_id" || continue
         _scenario_file="$(bench_bin_file "$_bin")"
         SCENARIO_ARGS+=("${_scenario_id}=${_scenario_file}=bench-binary")
     done
 
     if profiles_requested; then
         for _profile_id in "${PROFILE_IDS[@]}"; do
-            scenario_selected "$_profile_id" || continue
+            homeboy_bench_scenario_selected "$_profile_id" || continue
             SCENARIO_ARGS+=("${_profile_id}=null=rust-profile")
         done
     fi
@@ -315,7 +306,7 @@ if [ "$LIST_ONLY" = "1" ]; then
     if criterion_requested; then
         for _criterion_bench in "${CRITERION_BENCHES[@]}"; do
             _scenario_id="criterion-${_criterion_bench}"
-            scenario_selected "$_scenario_id" || continue
+            homeboy_bench_scenario_selected "$_scenario_id" || continue
             SCENARIO_ARGS+=("${_scenario_id}=benches/${_criterion_bench}.rs=criterion")
         done
     fi
@@ -367,7 +358,7 @@ fi
 SELECTED_BENCH_BINS=()
 for _bin in "${BENCH_BINS[@]}"; do
     _scenario_id="${_bin#bench-}"
-    scenario_selected "$_scenario_id" && SELECTED_BENCH_BINS+=("$_bin")
+    homeboy_bench_scenario_selected "$_scenario_id" && SELECTED_BENCH_BINS+=("$_bin")
 done
 
 CARGO_TIMING_ENABLED=0
@@ -531,7 +522,7 @@ run_profile_scenario() {
     local _changed_abs=""
     local _backup_file=""
 
-    scenario_selected "$_scenario_id" || return 0
+    homeboy_bench_scenario_selected "$_scenario_id" || return 0
 
     echo ""
     echo "WORKLOAD_BEGIN: ${_scenario_id} (Rust profile)"
@@ -711,7 +702,7 @@ if criterion_requested; then
         while IFS= read -r _kv; do
             [ -n "$_kv" ] || continue
             _sid="${_kv%%=*}"
-            scenario_selected "$_sid" || [ -z "$SELECTED_SCENARIOS" ] || continue
+            homeboy_bench_scenario_selected "$_sid" || [ -z "$SELECTED_SCENARIOS" ] || continue
             SCENARIOS_PATHS+=("$_kv")
         done < <(normalize_criterion_reports "$_criterion_bench")
         echo "WORKLOAD_DONE:  ${_scenario_id} (Criterion reports normalized)"

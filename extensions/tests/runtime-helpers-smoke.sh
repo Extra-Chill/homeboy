@@ -12,11 +12,7 @@ FIX_RESULTS_HELPERS=(
     "${ROOT_DIR}/rust/scripts/lib/fix-results.sh"
     "${ROOT_DIR}/wordpress/scripts/lib/fix-results.sh"
 )
-BASH_PREFLIGHT_HELPERS=(
-    "${ROOT_DIR}/nodejs/scripts/lib/bash-preflight.sh"
-    "${ROOT_DIR}/rust/scripts/lib/bash-preflight.sh"
-    "${ROOT_DIR}/wordpress/scripts/lib/bash-preflight.sh"
-)
+BASH_PREFLIGHT_HELPER="${HOMEBOY_RUNTIME_BASH_PREFLIGHT:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/bash-preflight.sh}"
 SETTINGS_HELPERS=(
     "${ROOT_DIR}/scripts/lib/settings.sh"
     "${ROOT_DIR}/nodejs/scripts/lib/settings.sh"
@@ -62,16 +58,14 @@ assert_not_contains() {
 assert_file "$FAILURE_TRAP_HELPER"
 assert_file "$WRITE_TEST_RESULTS_HELPER"
 assert_file "$SIDECAR_WRITER_HELPER"
+assert_file "$BASH_PREFLIGHT_HELPER"
 assert_file "$PROJECT_SCRIPTS_HELPER"
 bash -c 'source "$1"; type homeboy_sidecar_emit >/dev/null; type homeboy_sidecar_write >/dev/null; type homeboy_sidecar_merge >/dev/null; type homeboy_merge_lint_findings >/dev/null; type homeboy_merge_test_failures >/dev/null; type homeboy_write_fix_results >/dev/null; type homeboy_merge_annotations >/dev/null' _ "$SIDECAR_WRITER_HELPER"
+bash -c 'source "$1"; homeboy_require_bash_version 4' _ "$BASH_PREFLIGHT_HELPER"
 bash -c 'source "$1"; type homeboy_project_init >/dev/null; type homeboy_project_has_script >/dev/null; type homeboy_project_run_script_command >/dev/null' _ "$PROJECT_SCRIPTS_HELPER"
 for fix_results_helper in "${FIX_RESULTS_HELPERS[@]}"; do
     assert_file "$fix_results_helper"
     bash -c 'source "$1"; type homeboy_fix_results_capture >/dev/null; type homeboy_fix_results_append_changed >/dev/null; type homeboy_fix_results_write >/dev/null' _ "$fix_results_helper"
-done
-for bash_preflight_helper in "${BASH_PREFLIGHT_HELPERS[@]}"; do
-    assert_file "$bash_preflight_helper"
-    bash -c 'source "$1"; homeboy_require_bash_version 4' _ "$bash_preflight_helper"
 done
 for settings_helper in "${SETTINGS_HELPERS[@]}"; do
     assert_file "$settings_helper"
@@ -81,12 +75,6 @@ for command_capture_helper in "${COMMAND_CAPTURE_HELPERS[@]}"; do
     assert_file "$command_capture_helper"
     bash -c 'source "$1"; type homeboy_run_step >/dev/null; type homeboy_run_step_capture >/dev/null; type homeboy_cleanup_step_capture >/dev/null' _ "$command_capture_helper"
 done
-
-if ! cmp -s "${BASH_PREFLIGHT_HELPERS[0]}" "${BASH_PREFLIGHT_HELPERS[1]}" \
-    || ! cmp -s "${BASH_PREFLIGHT_HELPERS[0]}" "${BASH_PREFLIGHT_HELPERS[2]}"; then
-    echo "Bash preflight helpers should stay identical across installed extension trees" >&2
-    exit 1
-fi
 
 if ! cmp -s "${SETTINGS_HELPERS[0]}" "${SETTINGS_HELPERS[1]}" \
     || ! cmp -s "${SETTINGS_HELPERS[0]}" "${SETTINGS_HELPERS[2]}" \
@@ -300,7 +288,7 @@ if grep "BASH_VERSINFO" \
     "$ROOT_DIR/wordpress/scripts/bench/bench-runner.sh" \
     "$ROOT_DIR/wordpress/scripts/lint/lint-runner.sh" \
     "$ROOT_DIR/wordpress/scripts/test/test-runner.sh" >/dev/null; then
-    echo "Runner scripts should use scripts/lib/bash-preflight.sh instead of local BASH_VERSINFO checks" >&2
+    echo "Runner scripts should use HOMEBOY_RUNTIME_BASH_PREFLIGHT instead of local BASH_VERSINFO checks" >&2
     exit 1
 fi
 

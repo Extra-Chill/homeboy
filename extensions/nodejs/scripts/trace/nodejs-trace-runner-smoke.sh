@@ -3,6 +3,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXTENSION_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+HOMEBOY_CORE_DIR="${HOMEBOY_CORE_DIR:-$(cd "${EXTENSION_DIR}/../.." && pwd)/homeboy}"
+BASH_PREFLIGHT_HELPER="${HOMEBOY_RUNTIME_BASH_PREFLIGHT:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/bash-preflight.sh}"
 MANIFEST="${EXTENSION_DIR}/nodejs.json"
 RUNNER="${SCRIPT_DIR}/trace-runner.sh"
 HELPER_FIXTURE="${SCRIPT_DIR}/fixtures/helper.trace.mjs"
@@ -37,6 +39,7 @@ run_trace() {
     HOMEBOY_TRACE_ARTIFACT_DIR="$artifact_dir" \
     HOMEBOY_TRACE_EXTRA_WORKLOADS="$extra_workloads" \
     HOMEBOY_RUN_DIR="$(dirname "$results_file")" \
+    HOMEBOY_RUNTIME_BASH_PREFLIGHT="$BASH_PREFLIGHT_HELPER" \
         bash "$RUNNER"
 }
 
@@ -75,6 +78,7 @@ HOMEBOY_COMPONENT_ID="node-trace-smoke" \
 HOMEBOY_TRACE_LIST_ONLY="1" \
 HOMEBOY_TRACE_RESULTS_FILE="$LIST_RESULTS" \
 HOMEBOY_TRACE_EXTRA_WORKLOADS="$EXTRA_TRACE_FILE" \
+HOMEBOY_RUNTIME_BASH_PREFLIGHT="$BASH_PREFLIGHT_HELPER" \
     bash "$RUNNER" >/dev/null
 assert_json "$LIST_RESULTS" '
 if (data.status !== "pass") throw new Error("list envelope did not pass");

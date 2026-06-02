@@ -24,6 +24,7 @@ const requiredKeys = [
 const expectedSupport = {
 	'wordpress/wordpress.json': {
 		'lint.findings': true,
+		'lint.producers': true,
 		'test.results': true,
 		'test.failures': true,
 		'test.coverage': false,
@@ -68,6 +69,7 @@ const expectedSupport = {
 const supportEvidence = {
 	'wordpress/wordpress.json': {
 		'lint.findings': ['wordpress/scripts/lint/lint-runner.sh', 'HOMEBOY_LINT_FINDINGS_FILE'],
+		'lint.producers': ['wordpress/scripts/lint/lint-runner.sh', 'HOMEBOY_LINT_PRODUCERS_FILE'],
 		'test.results': ['wordpress/scripts/test/test-runner-wp-codebox.sh', 'HOMEBOY_TEST_RESULTS_FILE'],
 		'test.failures': ['wordpress/scripts/test/test-runner-wp-codebox.sh', 'HOMEBOY_TEST_FAILURES_FILE'],
 		'bench.results': ['wordpress/scripts/bench/bench-runner-wp-codebox.sh', 'HOMEBOY_BENCH_RESULTS_FILE'],

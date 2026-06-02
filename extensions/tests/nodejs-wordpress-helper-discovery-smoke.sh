@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HOMEBOY_CORE_DIR="${HOMEBOY_CORE_DIR:-$(cd "${ROOT_DIR}/.." && pwd)/homeboy}"
 BENCH_HELPER="${HOMEBOY_RUNTIME_BENCH_HELPER_JS:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/bench-helper.mjs}"
+BASH_PREFLIGHT_HELPER="${HOMEBOY_RUNTIME_BASH_PREFLIGHT:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/bash-preflight.sh}"
 
 if [ ! -f "$BENCH_HELPER" ]; then
     echo "Missing required file: $BENCH_HELPER" >&2
@@ -64,6 +65,7 @@ HOMEBOY_COMPONENT_ID="nodejs-wordpress-helper-discovery-smoke" \
 HOMEBOY_BENCH_RESULTS_FILE="$RESULTS_FILE" \
 HOMEBOY_BENCH_ITERATIONS=1 \
 HOMEBOY_BENCH_WARMUP_ITERATIONS=0 \
+HOMEBOY_RUNTIME_BASH_PREFLIGHT="$BASH_PREFLIGHT_HELPER" \
     bash "$ROOT_DIR/nodejs/scripts/bench/bench-runner.sh" >/dev/null
 
 node --input-type=module - "$RESULTS_FILE" <<'NODE'
@@ -72,7 +74,7 @@ import { readFileSync } from 'node:fs';
 const results = JSON.parse(readFileSync(process.argv[2], 'utf8'));
 const scenario = results.scenarios?.[0];
 if (!scenario) throw new Error('missing scenario');
-if (scenario.metrics?.helper_count !== 3) {
+if (scenario.metrics?.helper_count !== 5) {
     throw new Error(`helper count metric regressed: ${JSON.stringify(scenario.metrics)}`);
 }
 if (!scenario.metadata?.wordpress_helper_manifest?.endsWith('/wordpress/lib/helper-manifest.js')) {

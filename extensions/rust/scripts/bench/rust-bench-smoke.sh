@@ -22,6 +22,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXTENSION_PATH="$(cd "$SCRIPT_DIR/../.." && pwd)"
+HOMEBOY_CORE_DIR="${HOMEBOY_CORE_DIR:-$(cd "${EXTENSION_PATH}/../.." && pwd)/homeboy}"
+BASH_PREFLIGHT_HELPER="${HOMEBOY_RUNTIME_BASH_PREFLIGHT:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/bash-preflight.sh}"
 FIXTURE_DIR="${EXTENSION_PATH}/tests/fixtures/bench-noop"
 CRITERION_FIXTURE_DIR="${EXTENSION_PATH}/tests/fixtures/bench-criterion"
 
@@ -65,6 +67,7 @@ HOMEBOY_COMPONENT_PATH="$FIXTURE_DIR" \
 HOMEBOY_COMPONENT_ID="bench-noop-fixture" \
 HOMEBOY_BENCH_ITERATIONS="$ITERATIONS" \
 HOMEBOY_BENCH_RESULTS_FILE="$RESULTS_TMPFILE" \
+HOMEBOY_RUNTIME_BASH_PREFLIGHT="$BASH_PREFLIGHT_HELPER" \
     bash "${SCRIPT_DIR}/bench-runner.sh"
 
 echo
@@ -145,6 +148,7 @@ HOMEBOY_COMPONENT_ID="bench-noop-fixture" \
 HOMEBOY_BENCH_ITERATIONS="$ITERATIONS" \
 HOMEBOY_BENCH_LIST_ONLY=1 \
 HOMEBOY_BENCH_RESULTS_FILE="$LIST_TMPFILE" \
+HOMEBOY_RUNTIME_BASH_PREFLIGHT="$BASH_PREFLIGHT_HELPER" \
     bash "${SCRIPT_DIR}/bench-runner.sh"
 
 assert "list iterations" "$(jq -r '.iterations' "$LIST_TMPFILE")" "0"
@@ -181,6 +185,7 @@ HOMEBOY_BENCH_ITERATIONS=1 \
 HOMEBOY_RUST_BENCH_CARGO_TIMINGS=1 \
 HOMEBOY_BENCH_RESULTS_ARTIFACT_DIR="$ARTIFACT_TMPDIR" \
 HOMEBOY_BENCH_RESULTS_FILE="$CARGO_TIMING_TMPFILE" \
+HOMEBOY_RUNTIME_BASH_PREFLIGHT="$BASH_PREFLIGHT_HELPER" \
     bash "${SCRIPT_DIR}/bench-runner.sh"
 
 CARGO_TIMING_STATUS="$(jq -r '.metadata.rust_runner.cargo_timing_status // "missing"' "$CARGO_TIMING_TMPFILE")"
@@ -231,6 +236,7 @@ HOMEBOY_BENCH_ITERATIONS=1 \
 HOMEBOY_RUST_BENCH_PROFILES=1 \
 HOMEBOY_BENCH_SCENARIOS="rust-clean-build,rust-warm-build,rust-changed-file-check" \
 HOMEBOY_BENCH_RESULTS_FILE="$PROFILES_TMPFILE" \
+HOMEBOY_RUNTIME_BASH_PREFLIGHT="$BASH_PREFLIGHT_HELPER" \
     bash "${SCRIPT_DIR}/bench-runner.sh"
 
 for _profile in rust-clean-build rust-warm-build rust-changed-file-check; do
@@ -252,6 +258,7 @@ if [ -d "$CRITERION_FIXTURE_DIR" ]; then
     HOMEBOY_BENCH_ITERATIONS=1 \
     HOMEBOY_RUST_BENCH_CRITERION=1 \
     HOMEBOY_BENCH_RESULTS_FILE="$CRITERION_TMPFILE" \
+    HOMEBOY_RUNTIME_BASH_PREFLIGHT="$BASH_PREFLIGHT_HELPER" \
         bash "${SCRIPT_DIR}/bench-runner.sh"
 
     CRITERION_COUNT="$(jq -r '[.scenarios[] | select(.source == "criterion")] | length' "$CRITERION_TMPFILE")"
