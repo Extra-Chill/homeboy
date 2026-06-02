@@ -1,6 +1,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use glob_match::glob_match;
 use serde::Serialize;
@@ -11,6 +13,8 @@ use crate::core::error::{Error, Result};
 use crate::core::server::{self, Server, SshClient};
 
 use super::{load, Runner, RunnerKind};
+
+static SNAPSHOT_WORKSPACE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub(super) const DEFAULT_EXCLUDES: &[&str] = &[
     ".git",
@@ -103,7 +107,7 @@ pub fn sync_workspace(
     match options.mode {
         RunnerWorkspaceSyncMode::Snapshot => {
             let snapshot = snapshot_identity(&local_path)?;
-            let remote_path = deterministic_remote_path(workspace_root, &local_path, &snapshot);
+            let remote_path = unique_snapshot_remote_path(workspace_root, &local_path, &snapshot);
             let stats = local_snapshot_stats(&local_path, DEFAULT_EXCLUDES)?;
             materialize_snapshot(&runner, &local_path, &remote_path, DEFAULT_EXCLUDES)?;
             super::validation_dependencies::sync_validation_dependency_workspaces(
@@ -213,6 +217,23 @@ fn deterministic_remote_path(workspace_root: &str, local_path: &Path, snapshot: 
         sanitize_path_segment(name),
         digest
     )
+}
+
+fn unique_snapshot_remote_path(workspace_root: &str, local_path: &Path, snapshot: &str) -> String {
+    format!(
+        "{}-{}",
+        deterministic_remote_path(workspace_root, local_path, snapshot),
+        unique_workspace_suffix()
+    )
+}
+
+fn unique_workspace_suffix() -> String {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let counter = SNAPSHOT_WORKSPACE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{}-{timestamp}-{counter}", std::process::id())
 }
 
 fn snapshot_identity(local_path: &Path) -> Result<String> {
@@ -413,11 +434,12 @@ fn materialize_snapshot_local(
     remote_path: &str,
     excludes: &[&str],
 ) -> Result<()> {
+    let install_command = snapshot_install_command(remote_path);
     let command = format!(
-        "rm -rf {dest} && mkdir -p {dest} && COPYFILE_DISABLE=1 tar -C {src} {exclude} -cf - . | tar -C {dest} -xf -",
+        "COPYFILE_DISABLE=1 tar -C {src} {exclude} -cf - . | sh -c {install_command}",
         src = shell::quote_arg(&local_path.display().to_string()),
-        dest = shell::quote_arg(remote_path),
         exclude = tar_exclude_args(excludes),
+        install_command = shell::quote_arg(&install_command),
     );
     run_shell_command(&command, "materialize local workspace snapshot")
 }
@@ -430,10 +452,7 @@ fn materialize_snapshot_ssh(
     client: &SshClient,
 ) -> Result<()> {
     let remote = format!("{}@{}", client.user, client.host);
-    let remote_command = format!(
-        "rm -rf {dest} && mkdir -p {dest} && tar -C {dest} -xf -",
-        dest = shell::quote_arg(remote_path),
-    );
+    let remote_command = snapshot_install_command(remote_path);
     let command = format!(
         "COPYFILE_DISABLE=1 tar -C {src} {exclude} -cf - . | ssh {ssh_args} {remote} {remote_command}",
         src = shell::quote_arg(&local_path.display().to_string()),
@@ -443,6 +462,14 @@ fn materialize_snapshot_ssh(
         remote_command = shell::quote_arg(&remote_command),
     );
     run_shell_command(&command, "materialize SSH workspace snapshot")
+}
+
+fn snapshot_install_command(remote_path: &str) -> String {
+    format!(
+        "parent={parent}; dest={dest}; tmp=\"${{dest}}.tmp.$$\"; mkdir -p \"$parent\" && trap 'rm -rf \"$tmp\"' EXIT; rm -rf \"$tmp\" && mkdir -p \"$tmp\" && tar -C \"$tmp\" -xf - && rm -rf \"$dest\" && mv \"$tmp\" \"$dest\"",
+        parent = shell::quote_arg(parent_remote_path(remote_path).as_str()),
+        dest = shell::quote_arg(remote_path),
+    )
 }
 
 fn materialize_git(
@@ -721,6 +748,44 @@ mod tests {
             assert!(!Path::new(&output.remote_path)
                 .join("target/debug/homeboy")
                 .exists());
+        });
+    }
+
+    #[test]
+    fn snapshot_sync_uses_unique_clean_workspace_for_same_snapshot() {
+        crate::test_support::with_isolated_home(|_| {
+            let source = tempfile::tempdir().expect("source tempdir");
+            let runner_root = tempfile::tempdir().expect("runner root tempdir");
+            fs::write(source.path().join("Cargo.toml"), "[package]\nname='app'\n")
+                .expect("manifest");
+
+            super::super::create(
+                &format!(
+                    r#"{{"id":"lab-local","kind":"local","workspace_root":"{}"}}"#,
+                    runner_root.path().display()
+                ),
+                false,
+            )
+            .expect("create runner");
+
+            let options = RunnerWorkspaceSyncOptions {
+                path: source.path().display().to_string(),
+                mode: RunnerWorkspaceSyncMode::Snapshot,
+                changed_since_base: None,
+            };
+            let (first, _) = sync_workspace("lab-local", options.clone()).expect("first sync");
+            let remote_path = Path::new(&first.remote_path);
+            assert!(remote_path.join("Cargo.toml").exists());
+
+            fs::write(remote_path.join("sentinel.txt"), "kept\n").expect("sentinel");
+
+            let (second, _) = sync_workspace("lab-local", options).expect("second sync");
+            let second_remote_path = Path::new(&second.remote_path);
+
+            assert_ne!(second.remote_path, first.remote_path);
+            assert!(second_remote_path.join("Cargo.toml").exists());
+            assert!(!second_remote_path.join("sentinel.txt").exists());
+            assert!(remote_path.join("sentinel.txt").exists());
         });
     }
 
