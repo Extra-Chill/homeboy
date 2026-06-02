@@ -10,6 +10,7 @@ pub mod agent_task_schedule;
 pub mod agent_task_scheduler;
 pub mod agent_task_secrets;
 pub mod api_jobs;
+pub mod artifact_inputs;
 pub mod artifact_manifest;
 pub(crate) mod artifact_metadata;
 pub mod change_artifact;

@@ -171,6 +171,15 @@ pub struct DependencyStackEdge {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct ArtifactInput {
+    pub component: String,
+    pub artifact: String,
+    pub target: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct ComponentLabConfig {
     /// Repo-owned argv prefix used when Lab offload re-enters Homeboy from this checkout.
     ///
@@ -236,6 +245,8 @@ pub struct Component {
     pub lab: Option<ComponentLabConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dependency_stack: Vec<DependencyStackEdge>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_inputs: Vec<ArtifactInput>,
     /// Override the CLI path used by extension deploy install steps.
     /// For example, Studio sites need "studio wp" instead of the default "wp".
     pub cli_path: Option<String>,
@@ -322,6 +333,8 @@ struct RawComponent {
     lab: Option<ComponentLabConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     dependency_stack: Vec<DependencyStackEdge>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    artifact_inputs: Vec<ArtifactInput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     cli_path: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -364,6 +377,7 @@ impl From<RawComponent> for Component {
             audit: raw.audit,
             lab: raw.lab,
             dependency_stack: raw.dependency_stack,
+            artifact_inputs: raw.artifact_inputs,
             cli_path: raw.cli_path,
             extra_drift_files: raw.extra_drift_files,
             cleanup_artifacts: raw.cleanup_artifacts,
@@ -403,6 +417,7 @@ impl From<Component> for RawComponent {
             audit: c.audit,
             lab: c.lab,
             dependency_stack: c.dependency_stack,
+            artifact_inputs: c.artifact_inputs,
             cli_path: c.cli_path,
             extra_drift_files: c.extra_drift_files,
             cleanup_artifacts: c.cleanup_artifacts,
@@ -485,6 +500,7 @@ impl Component {
             audit: None,
             lab: None,
             dependency_stack: Vec::new(),
+            artifact_inputs: Vec::new(),
             cli_path: None,
             extra_drift_files: Vec::new(),
             cleanup_artifacts: Vec::new(),
