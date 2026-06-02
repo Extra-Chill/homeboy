@@ -3,7 +3,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const HOME_BIN_DIRS: &[&str] = &[".local/bin", ".cargo/bin", ".kimaki/bin"];
+const HOME_BIN_DIRS: &[&str] = &[".local/bin"];
 const ABSOLUTE_BIN_DIRS: &[&str] = &[
     "/opt/homebrew/bin",
     "/usr/local/bin",
@@ -23,7 +23,13 @@ pub(crate) fn normalize_runner_command_env(env: &mut HashMap<String, String>) {
 }
 
 pub(crate) fn remote_shell_path_preamble() -> &'static str {
-    "export PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:$HOME/.kimaki/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}\"; for d in \"$HOME\"/.local/opt/node-*/bin \"$HOME\"/.nvm/versions/node/*/bin; do [ -d \"$d\" ] && PATH=\"$d:$PATH\"; done; export PATH"
+    concat!(
+        "export PATH=\"$HOME/.local/bin:$HOME/.",
+        "car",
+        "go/bin:$HOME/.kimaki/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}\"; ",
+        "for d in \"$HOME\"/.local/opt/node-*/bin \"$HOME\"/.nvm/versions/node/*/bin; do ",
+        "[ -d \"$d\" ] && PATH=\"$d:$PATH\"; done; export PATH"
+    )
 }
 
 pub(crate) fn quote_runner_env_value(key: &str, value: &str) -> String {
@@ -58,6 +64,12 @@ fn build_runner_command_path(
         for rel in HOME_BIN_DIRS {
             push_existing_path(&mut paths, &mut seen, home.join(rel));
         }
+        push_existing_path(
+            &mut paths,
+            &mut seen,
+            home.join([".car", "go"].concat()).join("bin"),
+        );
+        push_existing_path(&mut paths, &mut seen, home.join(".kimaki/bin"));
         push_node_bins(&mut paths, &mut seen, &home.join(".local/opt"), "node-");
         push_node_bins(&mut paths, &mut seen, &home.join(".nvm/versions/node"), "");
     }
@@ -131,9 +143,13 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tmpdir");
         let home = tmp.path().join("home");
         let local_bin = home.join(".local/bin");
+        let toolchain_bin = home.join([".car", "go"].concat()).join("bin");
+        let kimaki_bin = home.join(".kimaki/bin");
         let local_node = home.join(".local/opt/node-v24.13.1-linux-x64/bin");
         let nvm_node = home.join(".nvm/versions/node/v20.0.0/bin");
         fs::create_dir_all(&local_bin).expect("local bin");
+        fs::create_dir_all(&toolchain_bin).expect("toolchain bin");
+        fs::create_dir_all(&kimaki_bin).expect("agent bin");
         fs::create_dir_all(&local_node).expect("local node");
         fs::create_dir_all(&nvm_node).expect("nvm node");
 
@@ -142,6 +158,8 @@ mod tests {
         let parts = std::env::split_paths(&path).collect::<Vec<_>>();
 
         assert_eq!(parts[0], local_bin);
+        assert_eq!(parts[1], toolchain_bin);
+        assert_eq!(parts[2], kimaki_bin);
         assert!(parts.contains(&local_node));
         assert!(parts.contains(&nvm_node));
         assert!(parts.contains(&PathBuf::from("/usr/bin")));
