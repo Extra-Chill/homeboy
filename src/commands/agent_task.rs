@@ -2,6 +2,7 @@ use clap::{Args, Subcommand};
 use serde_json::Value;
 
 use homeboy::core::agent_task_lifecycle;
+use homeboy::core::agent_task_promotion::{promote, AgentTaskPromotionOptions};
 use homeboy::core::agent_task_provider::ExtensionProviderAgentTaskExecutor;
 use homeboy::core::agent_task_scheduler::{AgentTaskPlan, AgentTaskScheduler};
 use homeboy::core::config;
@@ -28,6 +29,8 @@ pub enum AgentTaskCommand {
     Logs(StatusArgs),
     /// List artifacts and evidence refs recorded for a completed run.
     Artifacts(StatusArgs),
+    /// Promote a completed generic patch artifact into a managed worktree.
+    Promote(PromoteArgs),
     /// List extension-declared agent-task executor providers.
     Providers,
 }
@@ -58,6 +61,33 @@ pub struct StatusArgs {
     pub run_id: String,
 }
 
+#[derive(Args, Debug)]
+pub struct PromoteArgs {
+    /// AgentTaskOutcome or AgentTaskAggregate JSON file, @file, or - for stdin.
+    #[arg(value_name = "SOURCE")]
+    pub source: String,
+
+    /// Managed DMC worktree handle to apply into, e.g. repo@branch-slug.
+    #[arg(long, value_name = "HANDLE")]
+    pub to_worktree: String,
+
+    /// Outcome task id to select when SOURCE is an aggregate.
+    #[arg(long, value_name = "TASK_ID")]
+    pub task_id: Option<String>,
+
+    /// Patch artifact id to select when the outcome contains multiple patches.
+    #[arg(long, value_name = "ARTIFACT_ID")]
+    pub artifact_id: Option<String>,
+
+    /// Validate and report the selected promotion without creating/applying.
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Verification command to run in the promoted worktree after apply.
+    #[arg(long = "verify", value_name = "COMMAND")]
+    pub verify: Vec<String>,
+}
+
 pub fn run(args: AgentTaskArgs, _global: &GlobalArgs) -> CmdResult<Value> {
     match args.command {
         AgentTaskCommand::RunPlan(run_args) => run_plan(run_args),
@@ -66,6 +96,7 @@ pub fn run(args: AgentTaskArgs, _global: &GlobalArgs) -> CmdResult<Value> {
         AgentTaskCommand::Status(status_args) => status(status_args),
         AgentTaskCommand::Logs(status_args) => logs(status_args),
         AgentTaskCommand::Artifacts(status_args) => artifacts(status_args),
+        AgentTaskCommand::Promote(promote_args) => promote_artifact(promote_args),
         AgentTaskCommand::Providers => providers(),
     }
 }
@@ -130,6 +161,32 @@ fn logs(args: StatusArgs) -> CmdResult<Value> {
 fn artifacts(args: StatusArgs) -> CmdResult<Value> {
     let artifacts = agent_task_lifecycle::artifacts(&args.run_id)?;
     Ok((serde_json::to_value(artifacts).unwrap_or(Value::Null), 0))
+}
+
+fn promote_artifact(args: PromoteArgs) -> CmdResult<Value> {
+    let raw = config::read_json_spec_to_string(&args.source)?;
+    let source_path = source_spec_path(&args.source);
+    let report = promote(AgentTaskPromotionOptions {
+        source: raw,
+        source_path,
+        to_worktree: args.to_worktree,
+        task_id: args.task_id,
+        artifact_id: args.artifact_id,
+        dry_run: args.dry_run,
+        verify: args.verify,
+    })?;
+
+    Ok((serde_json::to_value(report).unwrap_or(Value::Null), 0))
+}
+
+fn source_spec_path(spec: &str) -> Option<std::path::PathBuf> {
+    if spec == "-" {
+        return None;
+    }
+
+    Some(std::path::PathBuf::from(
+        spec.strip_prefix('@').unwrap_or(spec),
+    ))
 }
 
 fn providers() -> CmdResult<Value> {
