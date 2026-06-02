@@ -36,7 +36,7 @@ function providerContract(options = {}) {
     outcome_schema: AGENT_TASK_OUTCOME_SCHEMA,
     capabilities: PROVIDER_CAPABILITIES,
     status: 'preparatory',
-    upstream_dependency: 'https://github.com/chubes4/wp-codebox/issues/480',
+    upstream_dependency: 'https://github.com/Automattic/wp-codebox/issues/480',
   };
 }
 
@@ -225,7 +225,7 @@ function agentTaskOutcomeFromCodeboxResult(request, result = {}, options = {}) {
     metadata: {
       provider: 'wordpress.codebox-agent-task-executor',
       codebox: sanitizePublicMetadata(result.metadata || result),
-      upstream_dependency: 'https://github.com/chubes4/wp-codebox/issues/480',
+      upstream_dependency: 'https://github.com/Automattic/wp-codebox/issues/480',
     },
   };
   if (failureClassification) {

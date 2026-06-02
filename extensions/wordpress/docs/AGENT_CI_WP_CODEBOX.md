@@ -177,7 +177,7 @@ to `AgentTaskOutcome` with Homeboy-native artifacts, evidence refs, diagnostics,
 and failure classifications.
 
 The provider is intentionally marked preparatory while Codebox's upstream agent
-task runner API is still tracked in https://github.com/chubes4/wp-codebox/issues/480.
+task runner API is still tracked in https://github.com/Automattic/wp-codebox/issues/480.
 Once that surface lands, the same provider contract can remove Homeboy-owned
 recipe synthesis without moving Codebox-specific logic into Homeboy core.
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-DEFAULT_SOURCE="https://github.com/chubes4/wp-codebox.git"
+DEFAULT_SOURCE="https://github.com/Automattic/wp-codebox.git"
 TARGET=""
 SOURCE="$DEFAULT_SOURCE"
 REF=""
@@ -19,7 +19,7 @@ Options:
   --target <ssh-host>       SSH target such as homeboy-lab. Omit to run locally.
   --runner <ssh-host>       Alias for --target.
   --source <git-url>        WP Codebox repository URL.
-                           Default: https://github.com/chubes4/wp-codebox.git
+                           Default: https://github.com/Automattic/wp-codebox.git
   --ref <git-ref>           Branch, tag, or SHA to fetch/reset to. When omitted,
                            the source repository default branch is used.
   --cache-dir <path>        Runner-side checkout directory.
@@ -31,7 +31,7 @@ Options:
 Examples:
   scripts/update-wp-codebox-cache.sh --target homeboy-lab
   scripts/update-wp-codebox-cache.sh --runner homeboy-lab --ref main
-  scripts/update-wp-codebox-cache.sh --source git@github.com:chubes4/wp-codebox.git --ref afe6890
+  scripts/update-wp-codebox-cache.sh --source git@github.com:Automattic/wp-codebox.git --ref afe6890
 USAGE
 }
 

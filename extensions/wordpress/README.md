@@ -5,7 +5,7 @@ Homeboy extension that gives WordPress plugins and themes a complete
 configuration. PHPUnit and benchmark workloads run through [WP Codebox][wp-codebox]
 by default, so there is no host PHP, MySQL, or local WordPress install to manage.
 
-[wp-codebox]: https://github.com/chubes4/wp-codebox
+[wp-codebox]: https://github.com/Automattic/wp-codebox
 [playground]: https://playground.wordpress.net/
 
 ## What this extension provides
@@ -436,7 +436,7 @@ runner request, invokes the Codebox recipe runner, and emits a
 evidence refs, diagnostics, and failure classification.
 
 Removing the Homeboy-owned WP Codebox task runner is blocked on the upstream
-agent task runner API tracked in https://github.com/chubes4/wp-codebox/issues/480.
+agent task runner API tracked in https://github.com/Automattic/wp-codebox/issues/480.
 Until that lands, this provider is a preparatory contract plus request/outcome
 adapter around the current `wp-codebox.agent-sandbox-run` command boundary.
 

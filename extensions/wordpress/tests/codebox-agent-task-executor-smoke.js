@@ -98,7 +98,7 @@ const provider = providerContract();
 assert.equal(provider.backend, 'codebox');
 assert.equal(provider.request_schema, 'homeboy/agent-task-request/v1');
 assert.equal(provider.outcome_schema, 'homeboy/agent-task-outcome/v1');
-assert.equal(provider.upstream_dependency, 'https://github.com/chubes4/wp-codebox/issues/480');
+assert.equal(provider.upstream_dependency, 'https://github.com/Automattic/wp-codebox/issues/480');
 assert.equal(provider.capabilities.includes('browser_runtime'), true);
 
 const codeboxRequest = codeboxTaskRequestFromAgentTaskRequest(request);

@@ -6,7 +6,7 @@ execution, logs, and test artifacts. There is no host PHP, MySQL, or WordPress
 installation to configure. Components only need a `tests/` directory with
 PHPUnit test files.
 
-[wp-codebox]: https://github.com/chubes4/wp-codebox
+[wp-codebox]: https://github.com/Automattic/wp-codebox
 
 ## Running tests
 

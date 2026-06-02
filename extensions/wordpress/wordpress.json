@@ -35,7 +35,7 @@
         "structured_outcome"
       ],
       "status": "preparatory",
-      "upstream_dependency": "https://github.com/chubes4/wp-codebox/issues/480"
+      "upstream_dependency": "https://github.com/Automattic/wp-codebox/issues/480"
     }
   ],
   "scripts": {

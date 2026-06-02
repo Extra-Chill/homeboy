@@ -71,7 +71,7 @@ name: Data Machine Agent CI (reusable)
         type: boolean
         default: true
       wp_codebox_ref:
-        description: Ref for chubes4/wp-codebox. Agent CI always checks out and builds WP Codebox when run_agent is true.
+        description: Ref for Automattic/wp-codebox. Agent CI always checks out and builds WP Codebox when run_agent is true.
         type: string
         default: main
       agents_api_ref:
@@ -481,7 +481,7 @@ jobs:
           ')"
           provider_plugin_repo="$(jq -r '.repo // ""' <<< "$provider_plugin_json")"
           provider_plugin_ref="$(jq -r '.ref // ""' <<< "$provider_plugin_json")"
-          dependency_entries+=("chubes4/wp-codebox@${WP_CODEBOX_REF}")
+          dependency_entries+=("Automattic/wp-codebox@${WP_CODEBOX_REF}")
           if [ "$INCLUDE_AGENT_RUNTIME_DEPENDENCIES" = "true" ]; then
             dependency_entries+=("Automattic/agents-api@${AGENTS_API_REF}")
             dependency_entries+=("Extra-Chill/data-machine@${DATA_MACHINE_REF}")

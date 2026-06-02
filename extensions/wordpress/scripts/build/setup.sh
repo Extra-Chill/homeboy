@@ -46,7 +46,7 @@ install_wp_codebox() {
         esac
 
         artifact_name="wp-codebox-cli-${platform}-${arch}.tar.gz"
-        download_url="${HOMEBOY_WP_CODEBOX_DOWNLOAD_URL:-https://github.com/chubes4/wp-codebox/releases/latest/download/${artifact_name}}"
+        download_url="${HOMEBOY_WP_CODEBOX_DOWNLOAD_URL:-https://github.com/Automattic/wp-codebox/releases/latest/download/${artifact_name}}"
         artifact_path="${install_root}/${artifact_name}"
         extract_dir="${install_root}/release"
 
@@ -82,7 +82,7 @@ EOF
     fi
 
     local source ref repo_dir
-    source="${HOMEBOY_WP_CODEBOX_SOURCE:-https://github.com/chubes4/wp-codebox.git}"
+    source="${HOMEBOY_WP_CODEBOX_SOURCE:-https://github.com/Automattic/wp-codebox.git}"
     ref="${HOMEBOY_WP_CODEBOX_REF:-main}"
     repo_dir="${install_root}/source"
 
