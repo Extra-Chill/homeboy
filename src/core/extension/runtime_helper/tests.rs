@@ -472,6 +472,95 @@ fn bench_shell_helper_writes_scenario_inventory() {
 }
 
 #[test]
+fn bench_shell_helper_checks_selected_scenarios_and_artifact_refs() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let helper_path = dir.path().join("bench-helper.sh");
+    std::fs::write(&helper_path, assets::BENCH_HELPER_SH).expect("write helper");
+
+    let output = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(format!(
+            "source {}; HOMEBOY_BENCH_SCENARIOS=cold,warm; if homeboy_bench_scenario_selected cold && ! homeboy_bench_scenario_selected hot; then homeboy_bench_artifact_ref_json bench.log text 'Bench log'; fi",
+            helper_path.display()
+        ))
+        .output()
+        .expect("run bash");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert_eq!(value["path"], "bench.log");
+    assert_eq!(value["kind"], "text");
+    assert_eq!(value["label"], "Bench log");
+}
+
+#[test]
+fn bench_js_helper_writes_scenario_inventory_and_filters_selection() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let helper_path = dir.path().join("bench-helper.mjs");
+    let runner_path = dir.path().join("runner.mjs");
+    let results_path = dir.path().join("bench-results.json");
+    std::fs::write(&helper_path, assets::BENCH_HELPER_JS).expect("write helper");
+    std::fs::write(
+        &runner_path,
+        format!(
+            r#"import {{
+    homeboyBenchArtifactRef,
+    homeboyBenchScenarioInventoryEntry,
+    homeboyBenchScenarioSelected,
+    homeboyWriteBenchScenarioInventory,
+}} from './bench-helper.mjs';
+
+if (!homeboyBenchScenarioSelected('cold')) throw new Error('cold should be selected');
+if (homeboyBenchScenarioSelected('hot')) throw new Error('hot should not be selected');
+
+await homeboyWriteBenchScenarioInventory('{results}', 'demo', 9, [
+    homeboyBenchScenarioInventoryEntry({{
+        id: 'cold',
+        file: 'bench/cold.bench.js',
+        source: 'in_tree',
+        artifacts: {{ log: homeboyBenchArtifactRef('bench.log', {{ kind: 'text', label: 'Bench log' }}) }},
+    }}),
+]);
+"#,
+            results = results_path.display()
+        ),
+    )
+    .expect("write runner");
+
+    let output = std::process::Command::new("node")
+        .arg(&runner_path)
+        .env("HOMEBOY_BENCH_SCENARIOS", "cold,warm")
+        .output()
+        .expect("run node");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&results_path).expect("read results"))
+            .expect("json");
+    assert_eq!(value["component_id"], "demo");
+    assert_eq!(value["iterations"], 0);
+    assert_eq!(value["scenarios"][0]["id"], "cold");
+    assert_eq!(value["scenarios"][0]["iterations"], 0);
+    assert_eq!(value["scenarios"][0]["default_iterations"], 9);
+    assert_eq!(value["scenarios"][0]["artifacts"]["log"]["path"], "bench.log");
+}
+
+#[test]
+fn bench_php_helper_documents_inventory_selection_and_artifact_helpers() {
+    assert!(assets::BENCH_HELPER_PHP.contains("function homeboy_bench_scenario_selected"));
+    assert!(assets::BENCH_HELPER_PHP.contains("function homeboy_bench_scenario_inventory_envelope"));
+    assert!(assets::BENCH_HELPER_PHP.contains("function homeboy_bench_artifact_ref"));
+}
+
+#[test]
 fn bench_js_helper_emits_compact_progress_to_stderr() {
     let dir = tempfile::tempdir().expect("tempdir");
     let helper_path = dir.path().join("bench-helper.mjs");

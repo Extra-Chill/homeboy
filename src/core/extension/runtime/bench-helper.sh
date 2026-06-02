@@ -12,6 +12,50 @@ homeboy_bench_scenario_id() {
         | tr '[:upper:]' '[:lower:]'
 }
 
+homeboy_bench_scenario_selected() {
+    local scenario="${1:-}"
+    local selected="${2:-${HOMEBOY_BENCH_SCENARIOS:-}}"
+
+    [ -n "$scenario" ] || return 1
+    [ -z "$selected" ] && return 0
+    case ",${selected}," in
+        *",${scenario},"*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+homeboy_bench_artifact_ref_json() {
+    local path="${1:-}"
+    local kind="${2:-}"
+    local label="${3:-}"
+
+    if [ -z "$path" ]; then
+        echo "homeboy_bench_artifact_ref_json: path is required" >&2
+        return 2
+    fi
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "homeboy_bench_artifact_ref_json: python3 is required" >&2
+        return 2
+    fi
+
+    HOMEBOY_BENCH_ARTIFACT_PATH="$path" \
+    HOMEBOY_BENCH_ARTIFACT_KIND="$kind" \
+    HOMEBOY_BENCH_ARTIFACT_LABEL="$label" \
+    python3 - <<'PYTHON_BENCH_ARTIFACT_REF'
+import json
+import os
+
+ref = {'path': os.environ['HOMEBOY_BENCH_ARTIFACT_PATH']}
+kind = os.environ.get('HOMEBOY_BENCH_ARTIFACT_KIND') or ''
+label = os.environ.get('HOMEBOY_BENCH_ARTIFACT_LABEL') or ''
+if kind:
+    ref['kind'] = kind
+if label:
+    ref['label'] = label
+print(json.dumps(ref, separators=(',', ':')))
+PYTHON_BENCH_ARTIFACT_REF
+}
+
 homeboy_write_empty_bench_results() {
     local component_id="${1:-${HOMEBOY_COMPONENT_ID:-}}"
     local iterations="${2:-0}"
