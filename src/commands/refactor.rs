@@ -8,7 +8,9 @@ use homeboy::core::refactor::{
 use serde::Serialize;
 use std::collections::HashSet;
 
-use super::utils::args::{BaselineArgs, PositionalComponentArgs, SettingArgs, WriteModeArgs};
+use super::utils::args::{
+    BaselineArgs, ExtensionOverrideArgs, PositionalComponentArgs, SettingArgs, WriteModeArgs,
+};
 use crate::commands::CmdResult;
 
 mod autofix_commit;
@@ -20,6 +22,9 @@ mod transform_command;
 pub struct RefactorArgs {
     #[command(flatten)]
     comp: Option<PositionalComponentArgs>,
+
+    #[command(flatten)]
+    extension_override: ExtensionOverrideArgs,
 
     /// Target a component by ID (repeatable)
     #[arg(short, long = "component", value_name = "ID", action = clap::ArgAction::Append)]
@@ -272,6 +277,7 @@ pub fn run(args: RefactorArgs, _global: &crate::commands::GlobalArgs) -> CmdResu
             args.comp.as_ref(),
             &args.component_ids,
             &args.components,
+            &args.extension_override.extensions,
             &args.from,
             args.all,
             args.changed_since.as_deref(),
@@ -721,6 +727,7 @@ fn run_refactor_sources(
     comp: Option<&PositionalComponentArgs>,
     component_ids: &[String],
     components: &[String],
+    extension_overrides: &[String],
     from: &[String],
     all: bool,
     changed_since: Option<&str>,
@@ -738,6 +745,7 @@ fn run_refactor_sources(
         run_refactor_sources_single(
             component_id,
             path,
+            extension_overrides,
             &requested_sources,
             changed_since,
             only,
@@ -767,6 +775,7 @@ fn requested_refactor_sources(from: &[String], all: bool) -> Vec<String> {
 fn run_refactor_sources_single(
     component_id: Option<&str>,
     path: Option<&str>,
+    extension_overrides: &[String],
     from: &[String],
     changed_since: Option<&str>,
     only: &[String],
@@ -780,10 +789,9 @@ fn run_refactor_sources_single(
     let component_id = component_id.ok_or_else(|| {
         homeboy::core::Error::validation_missing_argument(vec!["component".to_string()])
     })?;
-    let ctx = execution_context::resolve(&ResolveOptions::source_only(
-        component_id,
-        path.map(str::to_string),
-    ))?;
+    let mut resolve_options = ResolveOptions::source_only(component_id, path.map(str::to_string));
+    resolve_options.extension_overrides = extension_overrides.to_vec();
+    let ctx = execution_context::resolve(&resolve_options)?;
     let requested_sources = from.to_vec();
     let only_findings = parse_audit_findings(only)?;
     let exclude_findings = parse_audit_findings(exclude)?;
@@ -1023,6 +1031,33 @@ fn parse_rename_variants(values: &[String]) -> homeboy::core::Result<Vec<(String
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct TestCli {
+        #[command(flatten)]
+        refactor: RefactorArgs,
+    }
+
+    #[test]
+    fn parses_one_shot_extension_override_for_source_refactor() {
+        let cli = TestCli::try_parse_from([
+            "refactor",
+            "--path",
+            "/tmp/repo",
+            "--from",
+            "lint",
+            "--extension",
+            "wordpress",
+        ])
+        .expect("refactor should parse --extension override");
+
+        assert_eq!(
+            cli.refactor.extension_override.extensions,
+            vec!["wordpress"]
+        );
+        assert_eq!(cli.refactor.from, vec!["lint"]);
+    }
 
     #[test]
     fn collect_component_ids_dedupes_and_trims() {
