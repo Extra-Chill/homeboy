@@ -506,30 +506,30 @@ fn resolve_preflight_artifact_path(
         let artifact_pattern = match component.build_artifact.as_ref() {
             Some(pattern) => pattern,
             None => {
-                return Err(ComponentDeployResult::failed(
+                return Err(failed_preflight_artifact_result(
                     component,
                     base_path,
                     local_version,
                     remote_version,
+                    build_exit_code,
                     format!(
                         "Component '{}' has no build_artifact configured",
                         component.id
                     ),
-                )
-                .with_build_exit_code(build_exit_code));
+                ));
             }
         };
 
         if should_create_missing_archive_artifact(component, config, artifact_pattern) {
             if let Err(error) = create_archive_artifact_from_head(component, artifact_pattern) {
-                return Err(ComponentDeployResult::failed(
+                return Err(failed_preflight_artifact_result(
                     component,
                     base_path,
                     local_version,
                     remote_version,
+                    build_exit_code,
                     error,
-                )
-                .with_build_exit_code(build_exit_code));
+                ));
             }
         }
 
@@ -544,14 +544,14 @@ fn resolve_preflight_artifact_path(
                 } else {
                     format!("{}. Run build first: homeboy build {}", e, component.id)
                 };
-                return Err(ComponentDeployResult::failed(
+                return Err(failed_preflight_artifact_result(
                     component,
                     base_path,
                     local_version,
                     remote_version,
+                    build_exit_code,
                     error_msg,
-                )
-                .with_build_exit_code(build_exit_code));
+                ));
             }
         }
     };
@@ -575,21 +575,33 @@ fn resolve_preflight_artifact_path(
         component.extract_command.is_some(),
         has_deploy_override,
     ) {
-        return Err(ComponentDeployResult::failed(
+        return Err(failed_preflight_artifact_result(
             component,
             base_path,
             local_version,
             remote_version,
+            build_exit_code,
             format!(
                 "Archive artifact '{}' requires an extractCommand. \
                  Add one with: homeboy component set <id> --json '{{\"extract_command\": \"unzip -o {{artifact}} && rm {{artifact}}\"}}'",
                 artifact_path.display()
             ),
-        )
-        .with_build_exit_code(build_exit_code));
+        ));
     }
 
     Ok(artifact_path)
+}
+
+fn failed_preflight_artifact_result(
+    component: &Component,
+    base_path: &str,
+    local_version: Option<String>,
+    remote_version: Option<String>,
+    build_exit_code: Option<i32>,
+    error: String,
+) -> ComponentDeployResult {
+    ComponentDeployResult::failed(component, base_path, local_version, remote_version, error)
+        .with_build_exit_code(build_exit_code)
 }
 
 fn should_create_missing_archive_artifact(
