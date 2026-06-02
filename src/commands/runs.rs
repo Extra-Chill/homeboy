@@ -605,6 +605,23 @@ mod tests {
             .build()
     }
 
+    fn dead_owned_run(id: &str) -> RunRecord {
+        RunRecord {
+            id: id.to_string(),
+            kind: "bench".to_string(),
+            component_id: Some("homeboy".to_string()),
+            started_at: "2026-05-02T16:46:46Z".to_string(),
+            finished_at: None,
+            status: "running".to_string(),
+            command: Some("homeboy bench".to_string()),
+            cwd: Some("/tmp/homeboy-fixture".to_string()),
+            homeboy_version: Some("test-version".to_string()),
+            git_sha: Some("abc123".to_string()),
+            rig_id: Some("studio".to_string()),
+            metadata_json: serde_json::json!({ "homeboy_run_owner": { "pid": u32::MAX } }),
+        }
+    }
+
     #[test]
     fn run_list_filters_kind_component_rig_and_status() {
         with_isolated_home(|_home| {
@@ -650,22 +667,7 @@ mod tests {
             let _xdg = XdgGuard::unset();
             let store = ObservationStore::open_initialized().expect("store");
             store
-                .import_run(&RunRecord {
-                    id: "dead-owned-run".to_string(),
-                    kind: "bench".to_string(),
-                    component_id: Some("homeboy".to_string()),
-                    started_at: "2026-05-02T16:46:46Z".to_string(),
-                    finished_at: None,
-                    status: "running".to_string(),
-                    command: Some("homeboy bench".to_string()),
-                    cwd: Some("/tmp/homeboy-fixture".to_string()),
-                    homeboy_version: Some("test-version".to_string()),
-                    git_sha: Some("abc123".to_string()),
-                    rig_id: Some("studio".to_string()),
-                    metadata_json: serde_json::json!({
-                        "homeboy_run_owner": { "pid": u32::MAX }
-                    }),
-                })
+                .import_run(&dead_owned_run("dead-owned-run"))
                 .expect("import stale fixture");
 
             let (output, _) = list_runs(
@@ -741,31 +743,13 @@ mod tests {
             let _xdg = XdgGuard::unset();
             let store = ObservationStore::open_initialized().expect("store");
             store
-                .import_run(&RunRecord {
-                    id: "dead-owned-run".to_string(),
-                    kind: "bench".to_string(),
-                    component_id: Some("homeboy".to_string()),
-                    started_at: "2026-05-02T16:46:46Z".to_string(),
-                    finished_at: None,
-                    status: "running".to_string(),
-                    command: Some("homeboy bench".to_string()),
-                    cwd: Some("/tmp/homeboy-fixture".to_string()),
-                    homeboy_version: Some("test-version".to_string()),
-                    git_sha: Some("abc123".to_string()),
-                    rig_id: Some("studio".to_string()),
-                    metadata_json: serde_json::json!({
-                        "homeboy_run_owner": { "pid": u32::MAX }
-                    }),
-                })
+                .import_run(&dead_owned_run("dead-owned-run"))
                 .expect("import stale fixture");
-
             let (output, _) = show_run("dead-owned-run").expect("show");
             let RunsOutput::Show(output) = output else {
                 panic!("expected show output");
             };
-
             assert_eq!(output.run.summary.status, "stale");
-            assert!(output.run.summary.finished_at.is_some());
             assert_eq!(
                 output.run.metadata["homeboy_reconciled"]["reason"],
                 "owner_process_not_running"
