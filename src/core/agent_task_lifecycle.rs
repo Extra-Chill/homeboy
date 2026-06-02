@@ -7,7 +7,7 @@ use crate::core::agent_task::{AgentTaskArtifact, AgentTaskEvidenceRef, AgentTask
 use crate::core::agent_task_scheduler::{
     AgentTaskAggregate, AgentTaskPlan, AgentTaskProgressEvent, AgentTaskState,
 };
-use crate::core::{paths, Result};
+use crate::core::{paths, Error, Result};
 
 #[path = "lifecycle_store.rs"]
 mod lifecycle_store;
@@ -36,6 +36,55 @@ pub struct AgentTaskRunRecord {
     pub artifact_refs: Vec<AgentTaskArtifactRef>,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub metadata: Value,
+}
+
+impl AgentTaskRunRecord {
+    fn record_runner_metadata(&mut self, reclaimed_stale: bool) {
+        let metadata = self.ensure_metadata_object();
+        metadata.insert("runner_pid".to_string(), json!(std::process::id()));
+        metadata.insert("runner_started_at".to_string(), json!(now_timestamp()));
+        if reclaimed_stale {
+            metadata.insert("reclaimed_stale_running".to_string(), json!(true));
+        } else {
+            metadata.remove("reclaimed_stale_running");
+        }
+        metadata.remove("stale_running");
+        metadata.remove("stale_running_reason");
+    }
+
+    fn annotate_stale_running(&mut self) {
+        if self.state != AgentTaskRunState::Running || self.owner_process_is_running() {
+            return;
+        }
+
+        let reason = if self.owner_pid().is_some() {
+            "owner_process_not_running"
+        } else {
+            "missing_runner_pid"
+        };
+        let metadata = self.ensure_metadata_object();
+        metadata.insert("stale_running".to_string(), json!(true));
+        metadata.insert("stale_running_reason".to_string(), json!(reason));
+    }
+
+    fn owner_process_is_running(&self) -> bool {
+        self.owner_pid()
+            .is_some_and(crate::core::process::pid_is_running)
+    }
+
+    fn owner_pid(&self) -> Option<u32> {
+        self.metadata
+            .get("runner_pid")
+            .and_then(Value::as_u64)
+            .and_then(|pid| u32::try_from(pid).ok())
+    }
+
+    fn ensure_metadata_object(&mut self) -> &mut serde_json::Map<String, Value> {
+        if !self.metadata.is_object() {
+            self.metadata = json!({});
+        }
+        self.metadata.as_object_mut().expect("metadata object")
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -133,6 +182,37 @@ pub fn load_plan(run_id: &str) -> Result<AgentTaskPlan> {
 
 pub fn mark_running(run_id: &str) -> Result<AgentTaskRunRecord> {
     let mut record = store::read_record(&sanitize_run_id(run_id))?;
+    if record.state == AgentTaskRunState::Running && record.owner_process_is_running() {
+        return Err(Error::validation_invalid_argument(
+            "run_id",
+            format!(
+                "agent-task run '{}' is already running under pid {}",
+                record.run_id,
+                record.owner_pid().unwrap_or_default()
+            ),
+            Some(record.run_id),
+            None,
+        ));
+    }
+    if matches!(
+        record.state,
+        AgentTaskRunState::Succeeded
+            | AgentTaskRunState::PartialFailure
+            | AgentTaskRunState::Failed
+            | AgentTaskRunState::Cancelled
+    ) {
+        return Err(Error::validation_invalid_argument(
+            "run_id",
+            format!(
+                "agent-task run '{}' is already terminal with state {:?}",
+                record.run_id, record.state
+            ),
+            Some(record.run_id),
+            None,
+        ));
+    }
+
+    let reclaimed_stale = record.state == AgentTaskRunState::Running;
     record.state = AgentTaskRunState::Running;
     record.updated_at = Some(now_timestamp());
     for task in &mut record.tasks {
@@ -140,6 +220,7 @@ pub fn mark_running(run_id: &str) -> Result<AgentTaskRunRecord> {
             task.state = AgentTaskState::Running;
         }
     }
+    record.record_runner_metadata(reclaimed_stale);
     store::write_record(&record)?;
     Ok(record)
 }
@@ -169,7 +250,9 @@ fn record_aggregate(
 }
 
 pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
-    store::read_record(&sanitize_run_id(run_id))
+    let mut record = store::read_record(&sanitize_run_id(run_id))?;
+    record.annotate_stale_running();
+    Ok(record)
 }
 
 pub fn logs(run_id: &str) -> Result<AgentTaskRunLog> {
@@ -474,6 +557,57 @@ mod tests {
             assert_eq!(completed.state, AgentTaskRunState::Succeeded);
             assert_eq!(completed.tasks[0].state, AgentTaskState::Succeeded);
             assert!(completed.aggregate_path.is_some());
+        });
+    }
+
+    #[test]
+    fn status_marks_running_run_without_owner_as_stale() {
+        with_temp_home(|| {
+            let plan = test_plan();
+            submit_plan(&plan, Some("run-stale-missing-owner")).expect("submitted");
+            let mut record = store::read_record("run-stale-missing-owner").expect("record");
+            record.state = AgentTaskRunState::Running;
+            store::write_record(&record).expect("stored running record");
+
+            let loaded = status("run-stale-missing-owner").expect("status loaded");
+
+            assert_eq!(loaded.state, AgentTaskRunState::Running);
+            assert_eq!(loaded.metadata["stale_running"], json!(true));
+            assert_eq!(
+                loaded.metadata["stale_running_reason"],
+                "missing_runner_pid"
+            );
+        });
+    }
+
+    #[test]
+    fn mark_running_reclaims_stale_running_record() {
+        with_temp_home(|| {
+            let plan = test_plan();
+            submit_plan(&plan, Some("run-stale-dead-owner")).expect("submitted");
+            let mut record = store::read_record("run-stale-dead-owner").expect("record");
+            record.state = AgentTaskRunState::Running;
+            record.metadata = json!({ "runner_pid": u32::MAX });
+            store::write_record(&record).expect("stored stale record");
+
+            let running = mark_running("run-stale-dead-owner").expect("reclaimed");
+
+            assert_eq!(running.state, AgentTaskRunState::Running);
+            assert_eq!(running.metadata["reclaimed_stale_running"], json!(true));
+            assert_eq!(running.metadata["runner_pid"], json!(std::process::id()));
+        });
+    }
+
+    #[test]
+    fn mark_running_rejects_live_running_record() {
+        with_temp_home(|| {
+            let plan = test_plan();
+            submit_plan(&plan, Some("run-live-owner")).expect("submitted");
+            mark_running("run-live-owner").expect("marked running");
+
+            let error = mark_running("run-live-owner").expect_err("live run rejected");
+
+            assert!(error.message.contains("already running"));
         });
     }
 

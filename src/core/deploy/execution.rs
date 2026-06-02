@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use crate::core::artifact_inputs;
 use crate::core::build;
 use crate::core::component::Component;
 use crate::core::context::RemoteProjectContext;
@@ -212,6 +213,7 @@ fn should_try_download_release_artifact(
         && !config.head
         && !config.tagged
         && !config.skip_build
+        && component.artifact_inputs.is_empty()
         && release_download::supports_release_deploy(component)
         && !release_download::has_mutable_package_dependencies(component)
 }
@@ -727,6 +729,20 @@ fn execute_artifact_deploy(
         )
         .with_build_exit_code(prepared.build_exit_code);
     };
+    let artifact_input_metadata = match artifact_inputs::resolve_metadata(component) {
+        Ok(inputs) => inputs,
+        Err(err) => {
+            return ComponentDeployResult::failed(
+                component,
+                base_path,
+                prepared.local_version.clone(),
+                prepared.remote_version.clone(),
+                err.to_string(),
+            )
+            .with_remote_path(install_dir.to_string())
+            .with_build_exit_code(prepared.build_exit_code);
+        }
+    };
 
     // Look up verification from extensions
     let verification = find_deploy_verification(install_dir);
@@ -786,6 +802,7 @@ fn execute_artifact_deploy(
                     prepared.local_version.clone(),
                 )
                 .with_remote_path(install_dir.to_string())
+                .with_artifact_inputs(artifact_input_metadata)
                 .with_build_exit_code(prepared.build_exit_code)
                 .with_deploy_exit_code(Some(exit_code))
         }
@@ -1008,7 +1025,7 @@ mod tests {
         failed_component_deploy_result, resolve_preflight_artifact_path,
         should_try_download_release_artifact,
     };
-    use crate::core::component::Component;
+    use crate::core::component::{ArtifactInput, Component};
     use crate::core::deploy::types::DeployConfig;
     use std::process::Command;
 
@@ -1197,6 +1214,41 @@ mod tests {
         };
 
         assert!(should_try_download_release_artifact(
+            &component, &config, false, false
+        ));
+    }
+
+    #[test]
+    fn artifact_inputs_skip_release_artifact_download() {
+        let component = Component {
+            id: "example".to_string(),
+            remote_url: Some("https://github.com/example/example".to_string()),
+            build_artifact: Some("build/example.zip".to_string()),
+            artifact_inputs: vec![ArtifactInput {
+                component: "producer".to_string(),
+                artifact: "build/producer.zip".to_string(),
+                target: "runtime/packages/producer.zip".to_string(),
+                sha256: None,
+            }],
+            ..Component::default()
+        };
+        let config = DeployConfig {
+            component_ids: Vec::new(),
+            all: false,
+            outdated: false,
+            behind_upstream: false,
+            dry_run: false,
+            check: false,
+            force: false,
+            skip_build: false,
+            keep_deps: false,
+            expected_version: None,
+            no_pull: false,
+            head: false,
+            tagged: false,
+        };
+
+        assert!(!should_try_download_release_artifact(
             &component, &config, false, false
         ));
     }

@@ -33,6 +33,8 @@ pub struct ProjectComponentOverrides {
     pub hooks: HashMap<String, Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scopes: Option<crate::core::component::ScopeConfig>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_inputs: Vec<crate::core::component::ArtifactInput>,
     /// Override the CLI path used by extension deploy install steps.
     /// For example, Studio sites need "studio wp" instead of the default "wp".
     #[serde(skip_serializing_if = "Option::is_none")]

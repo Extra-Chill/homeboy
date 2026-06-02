@@ -72,6 +72,10 @@ fn publish_step_result(
     response: &serde_json::Value,
     expected_version: Option<&str>,
 ) -> ReleaseStepResult {
+    if let Some(reason) = extension_auth_required_reason(response) {
+        return auth_required_skip_result(step_id, target, extension_id, data, reason);
+    }
+
     if let Some(reason) = extension_blocking_publish_reason(response) {
         return step_failed(
             step_id,
@@ -83,6 +87,16 @@ fn publish_step_result(
             )),
             Vec::new(),
         );
+    }
+
+    if !response
+        .get("success")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true)
+    {
+        if let Some(reason) = publish_output_auth_required_reason(response) {
+            return auth_required_skip_result(step_id, target, extension_id, data, reason);
+        }
     }
 
     if let Some(reason) = extension_skip_reason(response) {
@@ -118,9 +132,36 @@ fn publish_step_result(
     )
 }
 
+fn auth_required_skip_result(
+    step_id: &str,
+    target: &str,
+    extension_id: &str,
+    data: Option<serde_json::Value>,
+    reason: String,
+) -> ReleaseStepResult {
+    step_skipped(
+        step_id,
+        step_id,
+        data,
+        format!(
+            "Publish to {} via {} requires authentication: {}",
+            target, extension_id, reason
+        ),
+    )
+}
+
+fn extension_auth_required_reason(response: &serde_json::Value) -> Option<String> {
+    let status = response.get("status").and_then(|v| v.as_str())?;
+    if status != "auth_required" {
+        return None;
+    }
+
+    publish_response_reason(response).or_else(|| Some("authentication required".to_string()))
+}
+
 fn extension_blocking_publish_reason(response: &serde_json::Value) -> Option<String> {
     let status = response.get("status").and_then(|v| v.as_str())?;
-    if !matches!(status, "missing_secret" | "auth_required") {
+    if status != "missing_secret" {
         return None;
     }
 
@@ -149,6 +190,18 @@ fn publish_response_reason(response: &serde_json::Value) -> Option<String> {
             let detail = output.trim();
             (!detail.is_empty()).then(|| detail.to_string())
         })
+}
+
+fn publish_output_auth_required_reason(response: &serde_json::Value) -> Option<String> {
+    let output = publish_response_output(response);
+    if !output.contains("ENEEDAUTH") {
+        return None;
+    }
+
+    Some(
+        "npm authentication required (ENEEDAUTH). Run `npm login` for the target registry, then retry the registry publish."
+            .to_string(),
+    )
 }
 
 fn verify_publish_response(
@@ -384,7 +437,7 @@ mod tests {
     }
 
     #[test]
-    fn publish_step_fails_when_extension_reports_auth_required() {
+    fn publish_step_skips_when_extension_reports_auth_required() {
         let response = serde_json::json!({
             "success": false,
             "status": "auth_required",
@@ -400,11 +453,29 @@ mod tests {
             None,
         );
 
-        assert_eq!(result.status, ReleaseStepStatus::Failed);
+        assert_eq!(result.status, ReleaseStepStatus::Skipped);
         assert!(result
-            .error
-            .unwrap()
+            .warnings
+            .join("\n")
             .contains("run the extension login command"));
+        assert!(result.error.is_none());
+    }
+
+    #[test]
+    fn publish_step_skips_when_npm_output_reports_eneedauth() {
+        let response = serde_json::json!({
+            "success": false,
+            "exitCode": 1,
+            "stdout": "",
+            "stderr": "npm ERR! code ENEEDAUTH\nnpm ERR! need auth This command requires you to be logged in to https://registry.npmjs.org/",
+        });
+
+        let result =
+            publish_step_result("publish.nodejs", "nodejs", "nodejs", None, &response, None);
+
+        assert_eq!(result.status, ReleaseStepStatus::Skipped);
+        assert!(result.warnings.join("\n").contains("ENEEDAUTH"));
+        assert!(result.error.is_none());
     }
 
     #[test]

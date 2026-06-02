@@ -506,7 +506,7 @@ pub(crate) fn run_git_push(component: &Component, component_id: &str) -> Result<
     Ok(step_success("git.push", "git.push", Some(data), Vec::new()))
 }
 
-/// Invoke the `release.package` action on whichever extension provides it,
+/// Invoke the `release.package` action on every extension that provides it,
 /// parse the emitted artifacts, and stash them in [`ReleaseState::artifacts`]
 /// for downstream publish targets and for the GitHub Release step.
 pub(crate) fn run_package(
@@ -515,33 +515,71 @@ pub(crate) fn run_package(
     component_id: &str,
     component_local_path: &str,
 ) -> Result<ReleaseStepResult> {
-    let extension = extensions
+    let package_extensions: Vec<&ExtensionManifest> = extensions
         .iter()
-        .find(|m| m.actions.iter().any(|a| a.id == "release.package"))
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "release.package",
-                "No extension provides release.package action",
-                None,
-                Some(vec![
-                    "Add an extension with a release.package action to the component".to_string(),
-                ]),
-            )
-        })?;
+        .filter(|m| m.actions.iter().any(|a| a.id == "release.package"))
+        .collect();
 
-    let payload = build_release_payload(state, component_id, component_local_path, None);
-    let response =
-        extension::execute_action(&extension.id, "release.package", None, None, Some(&payload))?;
+    if package_extensions.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "release.package",
+            "No extension provides release.package action",
+            None,
+            Some(vec![
+                "Add an extension with a release.package action to the component".to_string(),
+            ]),
+        ));
+    }
 
-    store_artifacts_from_output(state, &response)?;
+    let mut responses = Vec::new();
+    for extension in package_extensions {
+        let payload = build_release_payload(state, component_id, component_local_path, None);
+        let response =
+            extension::execute_action(&extension.id, "release.package", None, None, Some(&payload))
+                .map_err(|err| package_provider_error(&extension.id, err))?;
 
-    let data = serde_json::json!({
-        "extension": extension.id,
-        "action": "release.package",
-        "response": response,
-    });
+        store_artifacts_from_output(state, &response)
+            .map_err(|err| package_provider_error(&extension.id, err))?;
+        responses.push(serde_json::json!({
+            "extension": extension.id,
+            "response": response,
+        }));
+    }
+
+    let data = if responses.len() == 1 {
+        let response = responses.pop().expect("single package response");
+        serde_json::json!({
+            "extension": response["extension"],
+            "action": "release.package",
+            "response": response["response"],
+        })
+    } else {
+        serde_json::json!({
+            "action": "release.package",
+            "extensions": responses.iter().map(|response| response["extension"].clone()).collect::<Vec<_>>(),
+            "responses": responses,
+        })
+    };
 
     Ok(step_success("package", "package", Some(data), Vec::new()))
+}
+
+fn package_provider_error(extension_id: &str, err: Error) -> Error {
+    let mut wrapped = Error::new(
+        err.code,
+        format!(
+            "release.package failed for extension '{}': {}",
+            extension_id, err.message
+        ),
+        serde_json::json!({
+            "extension": extension_id,
+            "action": "release.package",
+            "source": err.details,
+        }),
+    );
+    wrapped.hints = err.hints;
+    wrapped.retryable = err.retryable;
+    wrapped
 }
 
 /// Delete release-generated artifact directories. Skipped when the caller chose
@@ -789,8 +827,11 @@ fn store_artifacts_from_output(
 
 #[cfg(test)]
 mod tests {
-    use super::{github_release, run_cleanup, run_git_push, store_artifacts_from_output};
+    use super::{
+        github_release, run_cleanup, run_git_push, run_package, store_artifacts_from_output,
+    };
     use crate::core::component::Component;
+    use crate::core::extension::ExtensionManifest;
     use crate::core::release::types::ReleaseState;
     use crate::core::release::{ReleaseArtifact, ReleaseStepStatus};
     use std::process::Command;
@@ -1001,6 +1042,103 @@ mod tests {
 
         assert!(err.message.contains("required packaging tool"));
         assert!(!err.message.contains("example-package-manager"));
+    }
+
+    fn release_package_extension(id: &str, command: &str) -> ExtensionManifest {
+        let mut manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
+            "name": id,
+            "version": "1.0.0",
+            "actions": [{
+                "id": "release.package",
+                "label": "Package release",
+                "type": "command",
+                "command": command,
+            }]
+        }))
+        .expect("manifest fixture");
+        manifest.id = id.to_string();
+        manifest
+    }
+
+    fn non_package_extension(id: &str) -> ExtensionManifest {
+        let mut manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
+            "name": id,
+            "version": "1.0.0",
+            "actions": [{
+                "id": "release.prepare",
+                "label": "Prepare release",
+                "type": "command",
+                "command": "true",
+            }]
+        }))
+        .expect("manifest fixture");
+        manifest.id = id.to_string();
+        manifest
+    }
+
+    #[test]
+    fn run_package_collects_artifacts_from_multiple_package_providers() {
+        crate::test_support::with_isolated_home(|_| {
+            let component = tempfile::tempdir().expect("component tempdir");
+            let node = release_package_extension(
+                "nodejs",
+                "printf '[{\"path\":\"target/node.tgz\",\"type\":\"npm\"}]'",
+            );
+            let wordpress = release_package_extension(
+                "wordpress",
+                "printf '[{\"path\":\"target/plugin.zip\",\"type\":\"wordpress\"}]'",
+            );
+            crate::core::extension::save_manifest(&node).expect("save node extension");
+            crate::core::extension::save_manifest(&wordpress).expect("save wordpress extension");
+
+            let mut state = crate::core::release::types::ReleaseState::default();
+            let result = run_package(
+                &[node, non_package_extension("docs"), wordpress],
+                &mut state,
+                "fixture",
+                &component.path().to_string_lossy(),
+            )
+            .expect("package step");
+
+            assert_eq!(result.status, ReleaseStepStatus::Success);
+            assert_eq!(state.artifacts.len(), 2);
+            assert_eq!(state.artifacts[0].path, "target/node.tgz");
+            assert_eq!(state.artifacts[1].path, "target/plugin.zip");
+            let data = result.data.expect("package data");
+            assert_eq!(
+                data["extensions"],
+                serde_json::json!(["nodejs", "wordpress"])
+            );
+        });
+    }
+
+    #[test]
+    fn run_package_failure_names_the_failing_package_provider() {
+        crate::test_support::with_isolated_home(|_| {
+            let component = tempfile::tempdir().expect("component tempdir");
+            let node =
+                release_package_extension("nodejs", "printf '[{\"path\":\"target/node.tgz\"}]'");
+            let wordpress =
+                release_package_extension("wordpress", "printf 'zip command failed' >&2; exit 7");
+            crate::core::extension::save_manifest(&node).expect("save node extension");
+            crate::core::extension::save_manifest(&wordpress).expect("save wordpress extension");
+
+            let mut state = crate::core::release::types::ReleaseState::default();
+            let err = run_package(
+                &[node, wordpress],
+                &mut state,
+                "fixture",
+                &component.path().to_string_lossy(),
+            )
+            .expect_err("failing package provider should fail the step");
+
+            assert!(err
+                .message
+                .contains("release.package failed for extension 'wordpress'"));
+            assert!(err.message.contains("zip command failed"));
+            assert_eq!(state.artifacts.len(), 1);
+            assert_eq!(state.artifacts[0].path, "target/node.tgz");
+        });
     }
 
     // ----- Orphan-tag regression coverage (issue #2234) -----
