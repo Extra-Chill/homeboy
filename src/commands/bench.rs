@@ -36,16 +36,33 @@ pub struct BenchArgs {
 }
 
 impl BenchArgs {
-    pub fn is_run_command(&self) -> bool {
-        self.command.is_none()
+    pub fn is_lab_offload_command(&self) -> bool {
+        matches!(
+            self.command,
+            None | Some(BenchCommand::Matrix(_)) | Some(BenchCommand::History(_))
+        )
     }
 
     pub fn lab_offload_writes_local_state(&self) -> bool {
-        self.run.baseline_args.baseline || self.run.baseline_args.ratchet
+        self.run_args_for_lab_offload()
+            .is_some_and(|run| run.baseline_args.baseline || run.baseline_args.ratchet)
     }
 
     pub fn extension_override_ids(&self) -> &[String] {
-        &self.run.extension_override.extensions
+        self.run_args_for_lab_offload()
+            .map(|run| run.extension_override.extensions.as_slice())
+            .unwrap_or(&[])
+    }
+
+    fn run_args_for_lab_offload(&self) -> Option<&BenchRunArgs> {
+        match &self.command {
+            None => Some(&self.run),
+            Some(BenchCommand::Matrix(args)) => Some(args.run_args()),
+            Some(BenchCommand::History(_)) => None,
+            Some(BenchCommand::List(_))
+            | Some(BenchCommand::Distribution(_))
+            | Some(BenchCommand::Compare(_)) => None,
+        }
     }
 }
 
