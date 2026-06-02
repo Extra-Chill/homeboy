@@ -446,17 +446,17 @@ fn build_head_release_steps(
         );
     }
 
-    if !options.pipeline.skip_publish {
-        if let Some(dir) = options.pipeline.from_artifacts.as_ref() {
-            steps.push(ready_step(
-                "artifacts.inventory",
-                "artifacts.inventory",
-                "Inventory existing release artifacts",
-                vec![artifact_need.clone()],
-                string_config("dir", dir),
-            ));
-            artifact_need = "artifacts.inventory".to_string();
-        } else if has_package_capability(extensions) {
+    if let Some(dir) = options.pipeline.from_artifacts.as_ref() {
+        steps.push(ready_step(
+            "artifacts.inventory",
+            "artifacts.inventory",
+            "Inventory existing release artifacts",
+            vec![artifact_need.clone()],
+            string_config("dir", dir),
+        ));
+        artifact_need = "artifacts.inventory".to_string();
+    } else if !options.pipeline.skip_publish {
+        if has_package_capability(extensions) {
             steps.push(ready_step(
                 "package",
                 "package",
@@ -466,7 +466,9 @@ fn build_head_release_steps(
             ));
             artifact_need = "package".to_string();
         }
-    } else if options.pipeline.skip_publish && !publish_targets.is_empty() {
+    }
+
+    if options.pipeline.skip_publish && !publish_targets.is_empty() {
         log_status!("release", "Skipping publish/package steps (--skip-publish)");
     }
 
@@ -1306,6 +1308,55 @@ mod tests {
         );
         assert_eq!(steps[1].needs, vec!["artifacts.inventory"]);
         assert_eq!(steps[2].needs, vec!["artifacts.inventory"]);
+    }
+
+    #[test]
+    fn head_release_skip_publish_still_uploads_existing_artifacts() {
+        let mut component = fixture_component();
+        component.remote_url = Some("https://github.com/Extra-Chill/homeboy.git".to_string());
+        let mut extension: ExtensionManifest = serde_json::from_value(serde_json::json!({
+            "name": "Node.js",
+            "version": "1.0.0",
+            "actions": [
+                {
+                    "id": "release.publish",
+                    "label": "Publish release",
+                    "type": "command",
+                    "command": "true"
+                }
+            ]
+        }))
+        .expect("extension manifest");
+        extension.id = "nodejs".to_string();
+        let mut warnings = Vec::new();
+        let mut hints = Vec::new();
+        let options = ReleaseOptions {
+            bump_type: "head".to_string(),
+            pipeline: ReleasePipelineOptions {
+                head: true,
+                skip_publish: true,
+                from_artifacts: Some("artifacts".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let steps = build_release_steps(
+            &component,
+            &[extension],
+            "1.0.1",
+            "1.0.1",
+            &fixture_changelog_plan(),
+            &options,
+            None,
+            &mut warnings,
+            &mut hints,
+        )
+        .expect("steps");
+
+        let ids: Vec<&str> = steps.iter().map(|step| step.id.as_str()).collect();
+        assert_eq!(ids, vec!["artifacts.inventory", "github.release"]);
+        assert_eq!(steps[1].needs, vec!["artifacts.inventory"]);
     }
 
     #[test]

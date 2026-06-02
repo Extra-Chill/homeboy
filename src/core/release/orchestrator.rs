@@ -64,7 +64,7 @@ pub(crate) fn run_with_plan(
 /// status and a human-friendly summary.
 fn finalize(component_id: &str, results: Vec<ReleaseStepResult>) -> ReleaseRun {
     let status = derive_overall_status(&results);
-    let summary = build_summary(&results, &status);
+    let summary = build_summary(component_id, &results, &status);
 
     ReleaseRun {
         component_id: component_id.to_string(),
