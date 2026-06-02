@@ -35,6 +35,8 @@ pub struct TraceRunOutput {
     pub artifacts: Vec<TraceArtifact>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub results: Option<TraceResults>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub span_summaries: Vec<TraceSpanSummaryOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rig_state: Option<RigStateSnapshot>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -47,6 +49,26 @@ pub struct TraceRunOutput {
     pub hints: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub profile: Option<TraceResolvedProfileOutput>,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct TraceSpanSummaryOutput {
+    pub id: String,
+    pub from: String,
+    pub to: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from_t_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub to_t_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<TraceSpanMetadata>,
 }
 
 #[derive(Serialize)]
@@ -424,6 +446,11 @@ fn from_run_workflow_result(
         .as_ref()
         .map(|r| reportable_trace_artifacts(&r.artifacts))
         .unwrap_or_default();
+    let span_summaries = result
+        .results
+        .as_ref()
+        .map(|results| trace_span_summaries(results, &BTreeMap::new()))
+        .unwrap_or_default();
     TraceCommandOutput::Run(Box::new(TraceRunOutput {
         passed: result.exit_code == 0 && result.status == "pass",
         status: result.status,
@@ -431,6 +458,7 @@ fn from_run_workflow_result(
         exit_code: result.exit_code,
         artifacts,
         results: result.results,
+        span_summaries,
         rig_state,
         failure: result.failure,
         overlays: result.overlays,
@@ -438,6 +466,46 @@ fn from_run_workflow_result(
         hints: result.hints,
         profile: None,
     }))
+}
+
+pub fn trace_span_summaries(
+    results: &TraceResults,
+    metadata_by_span: &BTreeMap<String, TraceSpanMetadata>,
+) -> Vec<TraceSpanSummaryOutput> {
+    results
+        .span_results
+        .iter()
+        .map(|span| TraceSpanSummaryOutput {
+            id: span.id.clone(),
+            from: span.from.clone(),
+            to: span.to.clone(),
+            status: match span.status {
+                TraceSpanStatus::Ok => "ok".to_string(),
+                TraceSpanStatus::Skipped => "skipped".to_string(),
+            },
+            duration_ms: span.duration_ms,
+            from_t_ms: span.from_t_ms,
+            to_t_ms: span.to_t_ms,
+            missing: span.missing.clone(),
+            message: span.message.clone(),
+            metadata: metadata_by_span.get(&span.id).cloned(),
+        })
+        .collect()
+}
+
+pub fn attach_span_summary_metadata(
+    output: &mut TraceCommandOutput,
+    metadata_by_span: &BTreeMap<String, TraceSpanMetadata>,
+) {
+    if metadata_by_span.is_empty() {
+        return;
+    }
+    let TraceCommandOutput::Run(run) = output else {
+        return;
+    };
+    if let Some(results) = run.results.as_ref() {
+        run.span_summaries = trace_span_summaries(results, metadata_by_span);
+    }
 }
 
 pub fn render_markdown(results: &TraceResults, overlays: &[TraceOverlay]) -> String {
@@ -456,24 +524,20 @@ pub fn render_markdown(results: &TraceResults, overlays: &[TraceOverlay]) -> Str
 
     if !results.span_results.is_empty() {
         out.push_str("\n## Spans\n\n");
-        out.push_str("| Span | From | To | Duration | Status |\n");
-        out.push_str("|---|---|---|---:|---|\n");
-        let (spans, metadata) = bounded_items(&results.span_results, DEFAULT_DETAIL_ITEM_LIMIT);
+        out.push_str("| Span | From | To | Duration | Status | Metadata |\n");
+        out.push_str("|---|---|---|---:|---|---|\n");
+        let summaries = trace_span_summaries(results, &BTreeMap::new());
+        let (spans, metadata) = bounded_items(&summaries, DEFAULT_DETAIL_ITEM_LIMIT);
         for span in spans {
             let duration = span
                 .duration_ms
                 .map(|ms| format!("{}ms", ms))
                 .unwrap_or_else(|| "-".to_string());
-            let status = match span.status {
-                TraceSpanStatus::Ok => "ok".to_string(),
-                TraceSpanStatus::Skipped => span
-                    .message
-                    .clone()
-                    .unwrap_or_else(|| "skipped".to_string()),
-            };
+            let status = format_span_summary_status(&span);
+            let metadata = format_span_summary_metadata(span.metadata.as_ref());
             out.push_str(&format!(
-                "| `{}` | `{}` | `{}` | {} | {} |\n",
-                span.id, span.from, span.to, duration, status
+                "| `{}` | `{}` | `{}` | {} | {} | {} |\n",
+                span.id, span.from, span.to, duration, status, metadata
             ));
         }
         push_omitted_detail_line(&mut out, "span(s)", &metadata);
@@ -522,6 +586,50 @@ pub fn render_markdown(results: &TraceResults, overlays: &[TraceOverlay]) -> Str
     }
 
     out
+}
+
+fn format_span_summary_status(span: &TraceSpanSummaryOutput) -> String {
+    let mut parts = vec![span.status.clone()];
+    if !span.missing.is_empty() {
+        parts.push(format!("missing `{}`", span.missing.join("`, `")));
+    }
+    if let Some(message) = span.message.as_deref() {
+        parts.push(message.to_string());
+    }
+    parts.join(": ")
+}
+
+fn format_span_summary_metadata(metadata: Option<&TraceSpanMetadata>) -> String {
+    let Some(metadata) = metadata else {
+        return "-".to_string();
+    };
+    let mut parts = Vec::new();
+    if let Some(category) = metadata.category.as_deref() {
+        parts.push(format!("category={category}"));
+    }
+    if let Some(blocks) = metadata.blocks.as_deref() {
+        parts.push(format!("blocks={blocks}"));
+    }
+    if metadata.critical {
+        parts.push("critical".to_string());
+    }
+    if metadata.blocking {
+        parts.push("blocking".to_string());
+    }
+    if metadata.cacheable {
+        parts.push("cacheable".to_string());
+    }
+    if metadata.prewarmable {
+        parts.push("prewarmable".to_string());
+    }
+    if metadata.deferrable {
+        parts.push("deferrable".to_string());
+    }
+    if parts.is_empty() {
+        "-".to_string()
+    } else {
+        parts.join(", ")
+    }
 }
 
 fn reportable_trace_artifacts(artifacts: &[TraceArtifact]) -> Vec<TraceArtifact> {

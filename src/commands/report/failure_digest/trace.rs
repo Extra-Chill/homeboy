@@ -65,6 +65,127 @@ fn render_trace_summary(
         }
         out.push('\n');
     }
+
+    render_trace_spans(out, data, results);
+}
+
+fn render_trace_spans(out: &mut String, data: &Map<String, Value>, results: &Map<String, Value>) {
+    let spans = collect_trace_spans(data, results);
+    if spans.is_empty() {
+        return;
+    }
+
+    out.push_str("**Spans**\n");
+    out.push_str("| Span | From | To | Duration | Status | Metadata |\n");
+    out.push_str("|---|---|---|---:|---|---|\n");
+    for span in spans {
+        let duration = span
+            .duration_ms
+            .map(|ms| format!("{ms}ms"))
+            .unwrap_or_else(|| "-".to_string());
+        let _ = writeln!(
+            out,
+            "| `{}` | `{}` | `{}` | {} | {} | {} |",
+            span.id, span.from, span.to, duration, span.status, span.metadata
+        );
+    }
+    out.push('\n');
+}
+
+#[derive(Debug, PartialEq)]
+struct TraceSpanRow {
+    id: String,
+    from: String,
+    to: String,
+    duration_ms: Option<u64>,
+    status: String,
+    metadata: String,
+}
+
+fn collect_trace_spans(
+    data: &Map<String, Value>,
+    results: &Map<String, Value>,
+) -> Vec<TraceSpanRow> {
+    let summaries = super::array_value(data, "span_summaries");
+    if !summaries.is_empty() {
+        return summaries
+            .iter()
+            .filter_map(|value| trace_span_row(value.as_object()?))
+            .collect();
+    }
+
+    let summaries = super::array_value(results, "span_summaries");
+    if !summaries.is_empty() {
+        return summaries
+            .iter()
+            .filter_map(|value| trace_span_row(value.as_object()?))
+            .collect();
+    }
+
+    super::array_value(results, "span_results")
+        .iter()
+        .filter_map(|value| trace_span_row(value.as_object()?))
+        .collect()
+}
+
+fn trace_span_row(span: &Map<String, Value>) -> Option<TraceSpanRow> {
+    let id = string_value(span, "id")?;
+    let from = string_value(span, "from")?;
+    let to = string_value(span, "to")?;
+    let duration_ms = span.get("duration_ms").and_then(Value::as_u64);
+    let mut status_parts = vec![string_value(span, "status").unwrap_or_else(|| "unknown".into())];
+    let missing = span
+        .get("missing")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if !missing.is_empty() {
+        status_parts.push(format!("missing `{}`", missing.join("`, `")));
+    }
+    if let Some(message) = string_value(span, "message") {
+        status_parts.push(message);
+    }
+    Some(TraceSpanRow {
+        id,
+        from,
+        to,
+        duration_ms,
+        status: status_parts.join(": "),
+        metadata: span
+            .get("metadata")
+            .and_then(Value::as_object)
+            .map(trace_span_metadata_label)
+            .filter(|label| !label.is_empty())
+            .unwrap_or_else(|| "-".to_string()),
+    })
+}
+
+fn trace_span_metadata_label(metadata: &Map<String, Value>) -> String {
+    let mut parts = Vec::new();
+    if let Some(category) = string_value(metadata, "category") {
+        parts.push(format!("category={category}"));
+    }
+    if let Some(blocks) = string_value(metadata, "blocks") {
+        parts.push(format!("blocks={blocks}"));
+    }
+    for key in [
+        "critical",
+        "blocking",
+        "cacheable",
+        "prewarmable",
+        "deferrable",
+    ] {
+        if metadata.get(key).and_then(Value::as_bool) == Some(true) {
+            parts.push(key.to_string());
+        }
+    }
+    parts.join(", ")
 }
 
 fn render_trace_artifacts(
