@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.113.2] - 2026-06-02
+
+### Fixed
+- consume Lab mappings and list Codebox bench workloads
+
 ## [2.113.1] - 2026-06-01
 
 ### Fixed
