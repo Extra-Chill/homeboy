@@ -17,7 +17,7 @@ pub(super) fn build_initial_preflight_plan(
     component_id: &str,
     options: &ReleaseOptions,
 ) -> ReleasePlan {
-    let steps = build_preflight_steps(options, None)
+    let steps = build_preflight_steps(options, None, &[])
         .into_iter()
         .filter(|step| initial_executable_preflight_ids().contains(&step.id.as_str()))
         .collect();
