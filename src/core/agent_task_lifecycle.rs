@@ -1,6 +1,3 @@
-use std::fs;
-use std::path::PathBuf;
-
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -10,7 +7,11 @@ use crate::core::agent_task::{AgentTaskArtifact, AgentTaskEvidenceRef, AgentTask
 use crate::core::agent_task_scheduler::{
     AgentTaskAggregate, AgentTaskPlan, AgentTaskProgressEvent, AgentTaskState,
 };
-use crate::core::{paths, Error, Result};
+use crate::core::{paths, Result};
+
+mod agent_task_lifecycle_store;
+
+use agent_task_lifecycle_store as store;
 
 pub const AGENT_TASK_RUN_SCHEMA: &str = "homeboy/agent-task-run/v1";
 pub const AGENT_TASK_RUN_LOG_SCHEMA: &str = "homeboy/agent-task-run-log/v1";
@@ -91,13 +92,7 @@ pub fn submit_plan(
     let run_id = requested_run_id
         .map(sanitize_run_id)
         .unwrap_or_else(default_run_id);
-    let run_dir = run_dir(&run_id)?;
-    fs::create_dir_all(&run_dir).map_err(|error| {
-        Error::internal_io(error.to_string(), Some(run_dir.display().to_string()))
-    })?;
-
-    let plan_path = run_dir.join("plan.json");
-    write_json(&plan_path, plan)?;
+    let plan_path = store::write_plan(&run_id, plan)?;
 
     let record = AgentTaskRunRecord {
         schema: AGENT_TASK_RUN_SCHEMA.to_string(),
@@ -117,7 +112,7 @@ pub fn submit_plan(
             "note": "submitted tasks are durable; provider run ids are recorded after an executor returns them as generic artifacts or evidence refs"
         }),
     };
-    write_record(&record)?;
+    store::write_record(&record)?;
     Ok(record)
 }
 
@@ -131,12 +126,12 @@ pub fn record_completed_run(
 }
 
 pub fn load_plan(run_id: &str) -> Result<AgentTaskPlan> {
-    let record = read_record(&sanitize_run_id(run_id))?;
-    read_plan_path(&PathBuf::from(record.plan_path))
+    let record = store::read_record(&sanitize_run_id(run_id))?;
+    store::read_plan_path(&record.plan_path)
 }
 
 pub fn mark_running(run_id: &str) -> Result<AgentTaskRunRecord> {
-    let mut record = read_record(&sanitize_run_id(run_id))?;
+    let mut record = store::read_record(&sanitize_run_id(run_id))?;
     record.state = AgentTaskRunState::Running;
     record.updated_at = Some(now_timestamp());
     for task in &mut record.tasks {
@@ -144,7 +139,7 @@ pub fn mark_running(run_id: &str) -> Result<AgentTaskRunRecord> {
             task.state = AgentTaskState::Running;
         }
     }
-    write_record(&record)?;
+    store::write_record(&record)?;
     Ok(record)
 }
 
@@ -153,7 +148,7 @@ pub fn record_run_aggregate(
     plan: &AgentTaskPlan,
     aggregate: &AgentTaskAggregate,
 ) -> Result<AgentTaskRunRecord> {
-    let mut record = read_record(&sanitize_run_id(run_id))?;
+    let mut record = store::read_record(&sanitize_run_id(run_id))?;
     record_aggregate(&mut record, plan, aggregate)
 }
 
@@ -162,25 +157,24 @@ fn record_aggregate(
     plan: &AgentTaskPlan,
     aggregate: &AgentTaskAggregate,
 ) -> Result<AgentTaskRunRecord> {
-    let aggregate_path = run_dir(&record.run_id)?.join("aggregate.json");
-    write_json(&aggregate_path, aggregate)?;
+    let aggregate_path = store::write_aggregate(&record.run_id, aggregate)?;
     record.state = run_state_for_aggregate(aggregate);
     record.updated_at = Some(now_timestamp());
     record.aggregate_path = Some(aggregate_path.display().to_string());
     record.tasks = tasks_for_aggregate(plan, aggregate);
     record.artifact_refs = artifact_refs_for_outcomes(&aggregate.outcomes);
-    write_record(&record)?;
+    store::write_record(&record)?;
     Ok(record.clone())
 }
 
 pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
-    read_record(&sanitize_run_id(run_id))
+    store::read_record(&sanitize_run_id(run_id))
 }
 
 pub fn logs(run_id: &str) -> Result<AgentTaskRunLog> {
     let run_id = sanitize_run_id(run_id);
-    let record = read_record(&run_id)?;
-    let events = read_aggregate(&run_id)
+    let record = store::read_record(&run_id)?;
+    let events = store::read_aggregate(&run_id)
         .map(|aggregate| aggregate.events)
         .unwrap_or_else(|_| queued_events(&record.tasks));
     Ok(AgentTaskRunLog {
@@ -192,8 +186,8 @@ pub fn logs(run_id: &str) -> Result<AgentTaskRunLog> {
 
 pub fn artifacts(run_id: &str) -> Result<AgentTaskRunArtifacts> {
     let run_id = sanitize_run_id(run_id);
-    read_record(&run_id)?;
-    let aggregate = read_aggregate(&run_id).ok();
+    store::read_record(&run_id)?;
+    let aggregate = store::read_aggregate(&run_id).ok();
     Ok(AgentTaskRunArtifacts {
         schema: AGENT_TASK_RUN_ARTIFACTS_SCHEMA.to_string(),
         run_id,
@@ -319,61 +313,6 @@ fn run_state_for_aggregate(aggregate: &AgentTaskAggregate) -> AgentTaskRunState 
             AgentTaskRunState::Cancelled
         }
     }
-}
-
-fn write_record(record: &AgentTaskRunRecord) -> Result<()> {
-    write_json(&record_path(&record.run_id)?, record)
-}
-
-fn read_record(run_id: &str) -> Result<AgentTaskRunRecord> {
-    let path = record_path(run_id)?;
-    let raw = fs::read_to_string(&path)
-        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
-    serde_json::from_str(&raw)
-        .map_err(|error| Error::internal_json(error.to_string(), Some(path.display().to_string())))
-}
-
-fn read_aggregate(run_id: &str) -> Result<AgentTaskAggregate> {
-    let path = run_dir(run_id)?.join("aggregate.json");
-    read_aggregate_path(&path)
-}
-
-fn read_plan_path(path: &PathBuf) -> Result<AgentTaskPlan> {
-    let raw = fs::read_to_string(path)
-        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
-    serde_json::from_str(&raw)
-        .map_err(|error| Error::internal_json(error.to_string(), Some(path.display().to_string())))
-}
-
-fn read_aggregate_path(path: &PathBuf) -> Result<AgentTaskAggregate> {
-    let raw = fs::read_to_string(&path)
-        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
-    serde_json::from_str(&raw)
-        .map_err(|error| Error::internal_json(error.to_string(), Some(path.display().to_string())))
-}
-
-fn write_json<T: Serialize>(path: &PathBuf, value: &T) -> Result<()> {
-    let parent = path.parent().ok_or_else(|| {
-        Error::internal_unexpected(format!("path has no parent: {}", path.display()))
-    })?;
-    fs::create_dir_all(parent).map_err(|error| {
-        Error::internal_io(error.to_string(), Some(parent.display().to_string()))
-    })?;
-    let json = serde_json::to_string_pretty(value).map_err(|error| {
-        Error::internal_json(error.to_string(), Some(path.display().to_string()))
-    })?;
-    fs::write(path, format!("{json}\n"))
-        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))
-}
-
-fn record_path(run_id: &str) -> Result<PathBuf> {
-    Ok(run_dir(run_id)?.join("status.json"))
-}
-
-fn run_dir(run_id: &str) -> Result<PathBuf> {
-    Ok(paths::homeboy_data()?
-        .join("agent-task-runs")
-        .join(sanitize_run_id(run_id)))
 }
 
 fn default_run_id() -> String {
