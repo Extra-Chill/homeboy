@@ -495,7 +495,7 @@ fn materialize_git_command(
         .unwrap_or_default();
 
     format!(
-        "mkdir -p {parent} && if [ -d {dest}/.git ]; then git -C {dest} fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'; else rm -rf {dest} && git clone {url} {dest} && git -C {dest} fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'; fi{fetch_changed_since} && git -C {dest} checkout --detach {head} && git -C {dest} clean -ffdqx",
+        "mkdir -p {parent} && if [ -d {dest}/.git ]; then git -C {dest} reset --hard && git -C {dest} clean -ffdqx && git -C {dest} fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'; else rm -rf {dest} && git clone {url} {dest} && git -C {dest} fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'; fi{fetch_changed_since} && git -C {dest} checkout --detach {head} && git -C {dest} reset --hard {head} && git -C {dest} clean -ffdqx",
         parent = shell::quote_arg(parent_remote_path(remote_path).as_str()),
         dest = dest,
         url = shell::quote_arg(remote_url),
@@ -737,6 +737,8 @@ mod tests {
         assert!(command.contains("rev-parse --verify -q 'def456^{commit}'"));
         assert!(command.contains("fetch origin def456"));
         assert!(command.contains("checkout --detach abc123"));
+        assert!(command.contains("reset --hard"));
+        assert!(command.contains("reset --hard abc123"));
     }
 
     #[test]

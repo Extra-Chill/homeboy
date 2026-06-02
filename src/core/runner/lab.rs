@@ -18,6 +18,7 @@ use super::{
     RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
 };
 
+use super::lab_apply::apply_lab_offload_patch;
 use super::lab_env::{build_lab_offload_env, forward_env_if_present};
 use super::lab_workspaces::{
     lab_extra_workspaces, lab_workspace_mapping_metadata, sync_extra_lab_workspaces,
@@ -495,8 +496,20 @@ fn run_lab_offload_inner(
     if exec_output.mirror_run_id.is_some() {
         plan = add_success_step(plan, "lab.mirror_evidence");
     }
-    if request.capture_patch {
-        plan = add_success_step(plan, "lab.apply_patch");
+    if request.capture_patch && exit_code == 0 {
+        let apply_output = apply_lab_offload_patch(&exec_output)?;
+        if let Some(apply_output) = apply_output {
+            plan = with_step(
+                plan,
+                PlanStep::builder(
+                    "lab.apply_patch",
+                    "lab.apply_patch",
+                    PlanStepStatus::Success,
+                )
+                .inputs(PlanValues::new().json("apply", &apply_output))
+                .build(),
+            );
+        }
     }
 
     let mut stderr = String::new();
