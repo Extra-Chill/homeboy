@@ -19,6 +19,7 @@ concepts:
 - `resolvePath(value, options)` expands `~`, preserves absolute paths, and resolves relative paths from `options.baseDir`, `HOMEBOY_COMPONENT_PATH`, or the current working directory.
 - `metric(value, fallback)` coerces finite numeric values.
 - `runCommand(command, args, options)` runs a subprocess with redacted output by default.
+- `runPackageScriptBench(options)` runs a `package.json` script with optional spec args and returns the standard bench workload shape: `{ metrics, artifacts, metadata }`.
 - `writeJson(file, data)` and `writeText(file, data)` create parent directories and redact common secrets.
 - `runId(name)` creates a sanitized run identifier.
 - `artifactDir(name)` returns a directory under `HOMEBOY_BENCH_SHARED_STATE` or the OS temp directory.
@@ -32,3 +33,26 @@ Typed setting helpers use the same precedence as `setting()`: values in
 helper reads `HOMEBOY_SETTINGS_<KEY>`, or a custom `options.prefix` when one is
 provided. Invalid typed values return the helper fallback instead of throwing so
 workloads can keep a single defaulting path.
+
+## Package Script Bench Helper
+
+Use `runPackageScriptBench()` when a workload only needs to benchmark an existing
+package script or a subset of specs accepted by that script.
+
+```js
+const { runPackageScriptBench } = await import(process.env.HOMEBOY_NODEJS_WORKLOAD_UTILS);
+
+export default async function () {
+  return runPackageScriptBench({
+    script: 'test:e2e',
+    specs: ['specs/editor.spec.ts'],
+    timeoutMs: 120_000,
+  });
+}
+```
+
+The helper detects `pnpm`, `yarn`, or `npm` from the component root, validates
+that the script exists, forwards `args` followed by `specs`, writes a redacted
+JSON artifact with command output, and returns neutral metrics such as
+`package_script_elapsed_ms`, `package_script_exit_code`, and
+`package_script_spec_count`.

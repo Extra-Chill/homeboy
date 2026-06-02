@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { access, mkdir, readFile, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
@@ -179,6 +179,100 @@ export function runNode(args, options = {}) {
     return runCommand(options.nodeBinary || process.env.HOMEBOY_NODE_BINARY || 'node', args, options);
 }
 
+/**
+ * Run a package.json script as a benchmark workload and return the standard
+ * `{ metrics, artifacts, metadata }` shape consumed by bench-runner.mjs.
+ */
+export async function runPackageScriptBench(options = {}) {
+    if (!options || typeof options !== 'object' || Array.isArray(options)) {
+        throw new Error('runPackageScriptBench requires an options object.');
+    }
+    if (!options.script || typeof options.script !== 'string') {
+        throw new Error('runPackageScriptBench requires a package script name.');
+    }
+
+    const cwd = resolvePath(options.cwd || process.env.HOMEBOY_COMPONENT_PATH || process.cwd());
+    const packageJson = await readPackageJson(cwd, options.packageJsonPath);
+    if (!packageJson.scripts || typeof packageJson.scripts[options.script] !== 'string') {
+        throw new Error(`package script "${options.script}" is not defined in ${packageJson.path}`);
+    }
+
+    const packageManager = options.packageManager || await detectPackageManager(cwd);
+    const scriptArgs = normalizeStringList(options.args);
+    const specs = normalizeStringList(options.specs || options.specFiles);
+    const forwardedArgs = [...scriptArgs, ...specs];
+    const command = packageScriptCommand(packageManager, options.script, forwardedArgs);
+    const result = await runCommand(command.command, command.args, {
+        cwd,
+        env: options.env,
+        timeoutMs: options.timeoutMs,
+        allowFailure: options.allowFailure,
+        redaction: options.redaction,
+        redact: options.redact,
+    });
+
+    const context = options.artifactContext || createArtifactContext({
+        id: options.id || options.script,
+        sharedState: options.sharedState,
+        runId: options.runId,
+        artifactsDir: options.artifactsDir,
+    });
+    const artifactName = options.artifactName || 'package-script-result';
+    const artifact = await context.writeJson(artifactName, {
+        package_manager: packageManager,
+        script: options.script,
+        command: command.command,
+        args: command.args,
+        cwd,
+        specs,
+        code: result.code,
+        signal: result.signal,
+        elapsed_ms: result.elapsedMs,
+        stdout: result.stdout,
+        stderr: result.stderr,
+    }, { label: options.artifactLabel || `Package script ${options.script} result` });
+
+    return {
+        metrics: {
+            package_script_elapsed_ms: metric(result.elapsedMs),
+            package_script_exit_code: metric(result.code),
+            package_script_stdout_bytes: Buffer.byteLength(result.stdout || ''),
+            package_script_stderr_bytes: Buffer.byteLength(result.stderr || ''),
+            package_script_spec_count: specs.length,
+        },
+        artifacts: {
+            [artifactName]: artifact,
+        },
+        metadata: {
+            package_manager: packageManager,
+            package_script: options.script,
+            package_script_arg_count: forwardedArgs.length,
+            package_script_spec_count: specs.length,
+        },
+    };
+}
+
+export async function detectPackageManager(cwd = process.env.HOMEBOY_COMPONENT_PATH || process.cwd()) {
+    const root = resolvePath(cwd);
+    if (await fileExists(path.join(root, 'pnpm-lock.yaml'))) return 'pnpm';
+    if (await fileExists(path.join(root, 'yarn.lock'))) return 'yarn';
+    return 'npm';
+}
+
+export function packageScriptCommand(packageManager, script, args = []) {
+    const forwardedArgs = normalizeStringList(args);
+    switch (packageManager) {
+        case 'pnpm':
+            return { command: 'pnpm', args: ['run', script, ...scriptSeparator(forwardedArgs), ...forwardedArgs] };
+        case 'yarn':
+            return { command: 'yarn', args: [script, ...forwardedArgs] };
+        case 'npm':
+            return { command: 'npm', args: ['run', script, ...scriptSeparator(forwardedArgs), ...forwardedArgs] };
+        default:
+            throw new Error(`Unsupported package manager "${packageManager}".`);
+    }
+}
+
 export async function writeJson(file, data, options = {}) {
     await mkdir(path.dirname(file), { recursive: true });
     const value = options.redact === false
@@ -219,6 +313,38 @@ function sanitizeSegment(value) {
         .replace(/[^A-Za-z0-9._-]+/g, '-')
         .replace(/^-+|-+$/g, '');
     return segment || 'workload';
+}
+
+async function readPackageJson(cwd, packageJsonPath) {
+    const file = packageJsonPath ? resolvePath(packageJsonPath, { baseDir: cwd }) : path.join(cwd, 'package.json');
+    try {
+        const parsed = JSON.parse(await readFile(file, 'utf8'));
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+            throw new Error('package.json root must be an object');
+        }
+        return { ...parsed, path: file };
+    } catch (error) {
+        throw new Error(`Unable to read package.json at ${file}: ${error.message}`);
+    }
+}
+
+async function fileExists(file) {
+    try {
+        await access(file);
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+function normalizeStringList(value) {
+    if (value === undefined || value === null || value === '') return [];
+    const values = Array.isArray(value) ? value : [value];
+    return values.map((item) => String(item)).filter((item) => item !== '');
+}
+
+function scriptSeparator(args) {
+    return args.length > 0 ? ['--'] : [];
 }
 
 function settingValue(key, fallback = undefined, options = {}) {
