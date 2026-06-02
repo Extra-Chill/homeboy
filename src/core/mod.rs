@@ -6,6 +6,7 @@ pub mod agent_task_aggregate;
 pub mod agent_task_lifecycle;
 pub mod agent_task_promotion;
 pub mod agent_task_provider;
+pub mod agent_task_schedule;
 pub mod agent_task_scheduler;
 pub mod api_jobs;
 pub mod artifact_manifest;
