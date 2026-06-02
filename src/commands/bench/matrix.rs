@@ -856,7 +856,7 @@ mod tests {
                     "studio": {{
                         "path": "{}",
                         "extensions": {{
-                            "nodejs": {{
+                            "fixture-bench": {{
                                 "package_manager": "pnpm",
                                 "workspace": "apps/studio"
                             }}
@@ -874,17 +874,17 @@ mod tests {
 
         assert_eq!(component.id, "studio");
         assert_eq!(component.local_path, temp.path().to_string_lossy());
-        let nodejs = component
+        let fixture_bench = component
             .extensions
             .as_ref()
-            .and_then(|extensions| extensions.get("nodejs"))
-            .expect("nodejs config preserved");
+            .and_then(|extensions| extensions.get("fixture-bench"))
+            .expect("fixture-bench config preserved");
         assert_eq!(
-            nodejs.settings.get("package_manager"),
+            fixture_bench.settings.get("package_manager"),
             Some(&serde_json::json!("pnpm"))
         );
         assert_eq!(
-            nodejs.settings.get("workspace"),
+            fixture_bench.settings.get("workspace"),
             Some(&serde_json::json!("apps/studio"))
         );
     }
@@ -907,7 +907,7 @@ mod tests {
     #[test]
     fn rig_component_extension_config_resolves_bench_context() {
         with_isolated_home(|home| {
-            write_bench_extension(home, "nodejs");
+            write_bench_extension(home, "fixture-bench");
             let temp = tempfile::TempDir::new().expect("component dir");
             let rig_spec: RigSpec = serde_json::from_str(&format!(
                 r#"{{
@@ -916,7 +916,7 @@ mod tests {
                         "studio": {{
                             "path": "{}",
                             "extensions": {{
-                                "nodejs": {{ "package_manager": "pnpm" }}
+                                "fixture-bench": {{ "package_manager": "pnpm" }}
                             }}
                         }}
                     }},
@@ -940,7 +940,7 @@ mod tests {
             .expect("rig-owned extension config resolves bench context");
 
             assert_eq!(ctx.component_id, "studio");
-            assert_eq!(ctx.extension_id.as_deref(), Some("nodejs"));
+            assert_eq!(ctx.extension_id.as_deref(), Some("fixture-bench"));
             assert!(ctx
                 .settings
                 .iter()

@@ -557,7 +557,7 @@ mod extension_lifecycle {
 
         let mut extensions = HashMap::new();
         extensions.insert(
-            "nodejs".to_string(),
+            "fixture-build".to_string(),
             ScopedExtensionConfig {
                 version: None,
                 settings: component_settings,
@@ -601,13 +601,13 @@ mod extension_lifecycle {
         }
     }
 
-    fn write_nodejs_build_extension(home: &std::path::Path) {
-        let extension_dir = home.join(".config/homeboy/extensions/nodejs");
+    fn write_fixture_build_extension(home: &std::path::Path) {
+        let extension_dir = home.join(".config/homeboy/extensions/fixture-build");
         fs::create_dir_all(&extension_dir).expect("extension dir");
         fs::write(
-            extension_dir.join("nodejs.json"),
+            extension_dir.join("fixture-build.json"),
             r#"{
-                "name": "Node.js",
+                "name": "Fixture Build",
                 "version": "1.0.0",
                 "build": {
                     "extension_script": "build.sh",
@@ -627,7 +627,7 @@ mod extension_lifecycle {
     #[test]
     fn test_extension_build_uses_rig_component_path_and_extension_config() {
         test_support::with_isolated_home(|home| {
-            write_nodejs_build_extension(home.path());
+            write_fixture_build_extension(home.path());
             let component_dir = tempfile::tempdir().expect("component dir");
             let component_path = component_dir.path().to_string_lossy().to_string();
             let rig = rig_with_step(

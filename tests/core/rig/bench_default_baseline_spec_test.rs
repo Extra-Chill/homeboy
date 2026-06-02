@@ -79,35 +79,38 @@ fn test_rig_spec_deserializes_bench_workloads_by_extension() {
         r#"{
             "id": "studio",
             "bench_workloads": {
-                "wordpress": [
+                "extension-b": [
                     { "path": "/private/benches/cold-boot.php" },
                     { "path": "~/benches/wc-loaded.php" }
                 ],
-                "nodejs": [{ "path": "/private/benches/electron-startup.bench.ts" }]
+                "extension-a": [{ "path": "/private/benches/electron-startup.bench.ts" }]
             }
         }"#,
     )
     .expect("parse RigSpec");
 
-    let wordpress: Vec<&str> = spec
+    let extension_b: Vec<&str> = spec
         .bench_workloads
-        .get("wordpress")
-        .expect("wordpress workloads")
+        .get("extension-b")
+        .expect("extension-b workloads")
         .iter()
         .map(|workload| workload.path())
         .collect();
     assert_eq!(
-        wordpress,
+        extension_b,
         vec!["/private/benches/cold-boot.php", "~/benches/wc-loaded.php"]
     );
-    let nodejs: Vec<&str> = spec
+    let extension_a: Vec<&str> = spec
         .bench_workloads
-        .get("nodejs")
-        .expect("nodejs workloads")
+        .get("extension-a")
+        .expect("extension-a workloads")
         .iter()
         .map(|workload| workload.path())
         .collect();
-    assert_eq!(nodejs, vec!["/private/benches/electron-startup.bench.ts"]);
+    assert_eq!(
+        extension_a,
+        vec!["/private/benches/electron-startup.bench.ts"]
+    );
 }
 
 #[test]
@@ -116,38 +119,38 @@ fn test_rig_spec_deserializes_trace_workloads_by_extension() {
         r#"{
             "id": "studio",
             "trace_workloads": {
-                "nodejs": [
+                "extension-a": [
                     { "path": "${package.root}/bench/studio-app-create-site.trace.mjs" },
                     { "path": "~/traces/window-close.trace.mjs" }
                 ],
-                "wordpress": [{ "path": "/private/traces/wp-admin-load.trace.php" }]
+                "extension-b": [{ "path": "/private/traces/wp-admin-load.trace.php" }]
             }
         }"#,
     )
     .expect("parse RigSpec");
 
-    let nodejs: Vec<&str> = spec
+    let extension_a: Vec<&str> = spec
         .trace_workloads
-        .get("nodejs")
-        .expect("nodejs workloads")
+        .get("extension-a")
+        .expect("extension-a workloads")
         .iter()
         .map(|workload| workload.path())
         .collect();
     assert_eq!(
-        nodejs,
+        extension_a,
         vec![
             "${package.root}/bench/studio-app-create-site.trace.mjs",
             "~/traces/window-close.trace.mjs",
         ]
     );
-    let wordpress: Vec<&str> = spec
+    let extension_b: Vec<&str> = spec
         .trace_workloads
-        .get("wordpress")
-        .expect("wordpress workloads")
+        .get("extension-b")
+        .expect("extension-b workloads")
         .iter()
         .map(|workload| workload.path())
         .collect();
-    assert_eq!(wordpress, vec!["/private/traces/wp-admin-load.trace.php"]);
+    assert_eq!(extension_b, vec!["/private/traces/wp-admin-load.trace.php"]);
 }
 
 #[test]
@@ -156,7 +159,7 @@ fn test_trace_phase_preset() {
         r#"{
             "id": "studio",
             "trace_workloads": {
-                "nodejs": [
+                "extension-a": [
                     {
                         "path": "${package.root}/bench/studio.trace.mjs",
                         "trace_phase_presets": {
@@ -171,9 +174,9 @@ fn test_trace_phase_preset() {
 
     let workload = spec
         .trace_workloads
-        .get("nodejs")
+        .get("extension-a")
         .and_then(|workloads| workloads.first())
-        .expect("nodejs trace workload");
+        .expect("extension-a trace workload");
 
     assert_eq!(workload.trace_phase_preset("missing"), None);
     assert_eq!(
@@ -191,7 +194,7 @@ fn test_trace_default_phase_preset() {
         r#"{
             "id": "studio",
             "trace_workloads": {
-                "nodejs": [
+                "extension-a": [
                     {
                         "path": "${package.root}/bench/studio.trace.mjs",
                         "trace_default_phase_preset": "startup"
@@ -204,9 +207,9 @@ fn test_trace_default_phase_preset() {
 
     let workload = spec
         .trace_workloads
-        .get("nodejs")
+        .get("extension-a")
         .and_then(|workloads| workloads.first())
-        .expect("nodejs trace workload");
+        .expect("extension-a trace workload");
 
     assert_eq!(workload.trace_default_phase_preset(), Some("startup"));
     let workload_without_default: WorkloadSpec =
@@ -258,7 +261,7 @@ fn test_rig_component_deserializes_extension_config() {
                 "studio": {
                     "path": "~/Developer/studio",
                     "extensions": {
-                        "nodejs": {
+                        "extension-a": {
                             "package_manager": "pnpm",
                             "workspace": "apps/studio"
                         }
@@ -272,15 +275,15 @@ fn test_rig_component_deserializes_extension_config() {
 
     let component = spec.components.get("studio").expect("studio component");
     let extensions = component.extensions.as_ref().expect("extensions present");
-    let nodejs = extensions.get("nodejs").expect("nodejs extension config");
+    let extension_a = extensions.get("extension-a").expect("extension-a config");
 
     assert_eq!(component.path, "~/Developer/studio");
     assert_eq!(
-        nodejs.settings.get("package_manager"),
+        extension_a.settings.get("package_manager"),
         Some(&serde_json::json!("pnpm"))
     );
     assert_eq!(
-        nodejs.settings.get("workspace"),
+        extension_a.settings.get("workspace"),
         Some(&serde_json::json!("apps/studio"))
     );
 }
@@ -293,7 +296,7 @@ fn test_rig_component_extension_config_round_trips() {
             "studio": {
                 "path": "/tmp/studio",
                 "extensions": {
-                    "nodejs": { "package_manager": "pnpm" }
+                    "extension-a": { "package_manager": "pnpm" }
                 }
             }
         }
@@ -307,7 +310,7 @@ fn test_rig_component_extension_config_round_trips() {
         .get("studio")
         .and_then(|component| component.extensions.as_ref())
         .expect("extensions preserved");
-    assert!(extensions.contains_key("nodejs"));
+    assert!(extensions.contains_key("extension-a"));
     assert!(re_serialized.contains("extensions"));
 }
 

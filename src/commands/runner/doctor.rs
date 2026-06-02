@@ -1351,10 +1351,10 @@ mod tests {
             normalized_extension_ids(&[
                 " rust ".to_string(),
                 "".to_string(),
-                "nodejs".to_string(),
+                "fixture-a".to_string(),
                 "rust".to_string(),
             ]),
-            vec!["nodejs".to_string(), "rust".to_string()]
+            vec!["fixture-a".to_string(), "rust".to_string()]
         );
     }
 

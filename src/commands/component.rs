@@ -1220,12 +1220,12 @@ mod tests {
             .expect("runtime requirements");
         let mut runtimes = BTreeMap::new();
 
-        apply_extension_runtime_requirements("nodejs", &runtime, &mut runtimes);
+        apply_extension_runtime_requirements("fixture-runtime", &runtime, &mut runtimes);
 
         assert_eq!(runtimes["node"].version, "24");
-        assert_eq!(runtimes["node"].source, "extension:nodejs");
+        assert_eq!(runtimes["node"].source, "extension:fixture-runtime");
         assert_eq!(runtimes["php"].version, "8.3");
-        assert_eq!(runtimes["php"].source, "extension:nodejs");
+        assert_eq!(runtimes["php"].source, "extension:fixture-runtime");
     }
 
     #[test]
@@ -1350,7 +1350,7 @@ mod tests {
             ),
         ]);
 
-        apply_extension_runtime_requirements("nodejs", &runtime, &mut runtimes);
+        apply_extension_runtime_requirements("fixture-runtime", &runtime, &mut runtimes);
 
         assert_eq!(runtimes["node"].version, "22");
         assert_eq!(runtimes["node"].source, "component");

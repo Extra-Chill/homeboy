@@ -57,7 +57,7 @@ fn write_trace_experiment_extension(home: &tempfile::TempDir, fail: bool) {
     fs::write(
         extension_dir.join(format!("{TRACE_FIXTURE_EXTENSION_ID}.json")),
         r#"{
-                "name": "Trace Fixture",
+                "name": "Fixture Trace",
                 "version": "0.0.0",
                 "trace": { "extension_script": "trace-runner.sh" }
             }"#,

@@ -357,13 +357,13 @@ mod tests {
             "--path",
             "/tmp/repo",
             "--extension",
-            "nodejs",
+            "fixture-lint",
             "--changed-since",
             "origin/main",
         ])
         .expect("lint should parse --extension override");
 
-        assert_eq!(cli.lint.extension_override.extensions, vec!["nodejs"]);
+        assert_eq!(cli.lint.extension_override.extensions, vec!["fixture-lint"]);
         assert_eq!(cli.lint.changed_since.as_deref(), Some("origin/main"));
     }
 
