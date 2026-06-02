@@ -22,6 +22,10 @@ fn ensure_all_helpers_writes_all_files() {
             "runner prelude helper should be in pairs"
         );
         assert!(
+            pairs.iter().any(|(k, _)| k == BASH_PREFLIGHT_ENV),
+            "bash preflight helper should be in pairs"
+        );
+        assert!(
             pairs.iter().any(|(k, _)| k == WRITE_TEST_RESULTS_ENV),
             "write test results helper should be in pairs"
         );
@@ -234,7 +238,39 @@ fn ensure_all_helpers_writes_legacy_bench_fallbacks() {
                 .exists(),
             "legacy runtime dir should only carry bench fallbacks"
         );
+        assert!(
+            !home
+                .path()
+                .join(".homeboy")
+                .join("runtime")
+                .join("bash-preflight.sh")
+                .exists(),
+            "legacy runtime dir should not carry bash preflight"
+        );
     });
+}
+
+#[test]
+fn bash_preflight_helper_accepts_current_bash() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let helper_path = dir.path().join("bash-preflight.sh");
+    std::fs::write(&helper_path, assets::BASH_PREFLIGHT_SH).expect("write helper");
+
+    let output = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(format!(
+            "source {}; homeboy_require_bash_version 3; printf ok",
+            helper_path.display()
+        ))
+        .output()
+        .expect("run bash");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "ok");
 }
 
 #[test]
