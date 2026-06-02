@@ -175,6 +175,125 @@ function runnerInput(request, artifacts) {
   }).filter(([, value]) => value !== '' && value !== undefined && !(Array.isArray(value) && value.length === 0)));
 }
 
+function slugFromPath(filePath, fallback) {
+  const base = path.basename(String(filePath || '').replace(/\/$/, ''));
+  return (base.split('@')[0] || fallback).replace(/[^A-Za-z0-9_-]/g, '-');
+}
+
+function extraPlugin(source, slug, activate = true) {
+  if (!source) {
+    return null;
+  }
+  return { source, slug: slug || slugFromPath(source, 'plugin'), activate };
+}
+
+function workspaceMounts(request) {
+  const workspace = request.task?.workspace || {};
+  const root = workspace.root || workspace.source || '';
+  if (!root) {
+    return [];
+  }
+  const slug = workspace.slug || slugFromPath(root, 'workspace');
+  return [{
+    source: root,
+    target: `/workspace/${slug}`,
+    mode: workspace.mode === 'readonly' ? 'readonly' : 'readwrite',
+    metadata: { kind: 'homeboy-agent-task-workspace', slug },
+  }];
+}
+
+function providerPluginSpecs(input) {
+  return (input.provider_plugin_paths || []).map((source) => extraPlugin(source, slugFromPath(source, 'provider'), false)).filter(Boolean);
+}
+
+function buildRecipe(input) {
+  const providerPlugins = providerPluginSpecs(input);
+  const providerSlugs = providerPlugins.map((plugin) => plugin.slug);
+  const task = input.parent_request?.task || {};
+  const workflowArgs = [
+    `task=${task.prompt || ''}`,
+    `agent=${input.agent || 'wp-codebox-sandbox'}`,
+    `mode=${input.mode || 'default'}`,
+    `provider=${input.provider || ''}`,
+    `model=${input.model || ''}`,
+    `provider-plugin-slugs=${providerSlugs.join(',')}`,
+  ];
+  if (input.sandbox_session_id) {
+    workflowArgs.push(`session-id=${input.sandbox_session_id}`);
+  }
+  if (input.max_turns) {
+    workflowArgs.push(`max-turns=${input.max_turns}`);
+  }
+  if (input.task_timeout_seconds) {
+    workflowArgs.push(`timeout-seconds=${input.task_timeout_seconds}`);
+  }
+
+  return {
+    schema: 'wp-codebox/workspace-recipe/v1',
+    runtime: Object.fromEntries(Object.entries({
+      backend: 'wordpress-playground',
+      wp: input.wp_version || input.wp || undefined,
+      blueprint: { steps: [] },
+      stack: input.runtime_stack_mounts?.length ? { mounts: input.runtime_stack_mounts } : undefined,
+      overlays: input.runtime_overlays?.length ? input.runtime_overlays : undefined,
+    }).filter(([, value]) => value !== undefined)),
+    inputs: Object.fromEntries(Object.entries({
+      mounts: [...(input.mounts || []), ...workspaceMounts(input.parent_request || {})],
+      extraPlugins: [
+        extraPlugin(input.agents_api_path, 'agents-api'),
+        extraPlugin(input.data_machine_path, 'data-machine'),
+        extraPlugin(input.data_machine_code_path, 'data-machine-code'),
+        ...providerPlugins,
+      ].filter(Boolean),
+      secretEnv: input.secret_env || [],
+    }).filter(([, value]) => !(Array.isArray(value) && value.length === 0))),
+    workflow: {
+      steps: [{ command: 'wp-codebox.agent-sandbox-run', args: workflowArgs }],
+    },
+    artifacts: {
+      directory: input.artifacts_path,
+      verify: { enabled: true },
+    },
+  };
+}
+
+function agentTaskRunFromRecipeRun(input, result, artifacts) {
+  const execution = Array.isArray(result.executions) ? result.executions.find((item) => item?.recipeCommand === 'wp-codebox.agent-sandbox-run') || result.executions[0] : null;
+  const agentResult = result.run?.agentResult || result.artifacts?.agentResult || execution?.agentResult || {};
+  const previewUrl = result.runtime?.preview?.url || result.artifacts?.preview_url || result.artifacts?.previewUrl || '';
+  return {
+    success: Boolean(result.success),
+    schema: 'wp-codebox/agent-task-run/v1',
+    summary: result.success ? 'WP Codebox agent task succeeded.' : (result.error?.message || 'WP Codebox agent task failed.'),
+    session: {
+      schema: 'wp-codebox/sandbox-session/v1',
+      id: input.sandbox_session_id || input.orchestrator?.agent_task_id || '',
+      status: result.success ? 'completed' : 'failed',
+      artifacts: {
+        bundle_id: result.artifacts?.id || result.artifacts?.bundle_id || result.artifacts?.bundleId || '',
+        preview_url: previewUrl,
+      },
+      orchestrator: input.orchestrator || {},
+    },
+    task: input.parent_request?.task?.prompt || '',
+    task_input: {
+      schema: 'wp-codebox/task-input/v1',
+      version: 1,
+      goal: input.parent_request?.task?.prompt || '',
+      target: {},
+      allowed_tools: [],
+      expected_artifacts: input.parent_request?.task?.expected_artifacts || [],
+      policy: input.parent_request?.task?.policy || {},
+      context: input.parent_request?.task?.context || {},
+    },
+    artifacts,
+    exit_code: result.success ? 0 : 1,
+    run: { ...result.run, agentResult },
+    diagnostics: result.diagnostics || (result.error ? [{ class: result.error.code || 'wp-codebox.recipe-run', message: result.error.message || String(result.error), data: result.error }] : []),
+    metadata: { recipe_run: result },
+  };
+}
+
 function timeoutPayload(timeoutMs, artifacts, evidencePath, inputPath, command, args) {
   const artifact = evidencePath ? [{
     id: 'homeboy-codebox-task-runner-preflight',
@@ -212,9 +331,9 @@ function runWpCodeboxParentTask(request) {
   }
 
   const input = runnerInput(request, artifacts);
-  const inputPath = writeJsonFile('homeboy-wp-codebox-parent-task-', input);
-  const wpCliBin = argValue('--wp-cli-bin') || request.wp_cli_bin || 'wp';
-  const args = ['codebox', 'run-agent-task', '--input-file', inputPath, '--format=json'];
+  const recipePath = writeJsonFile('homeboy-wp-codebox-agent-task-recipe-', buildRecipe(input));
+  const wpCodeboxBin = argValue('--wp-codebox-bin') || request.wp_codebox_bin || process.env.HOMEBOY_WP_CODEBOX_BIN || 'wp-codebox';
+  const args = ['recipe-run', '--recipe', recipePath, '--json', '--artifacts', artifacts];
   const previewHold = argValue('--preview-hold');
   if (previewHold) {
     args.push('--preview-hold-seconds', previewHold);
@@ -224,11 +343,11 @@ function runWpCodeboxParentTask(request) {
     args.push('--preview-public-url', previewPublicUrl);
   }
 
-  const resolved = resolveCommand(wpCliBin, args);
+  const resolved = resolveCommand(wpCodeboxBin, args);
   const timeoutMs = requestTimeoutMs(request);
   const evidencePath = writePreflightEvidence(artifacts, {
     schema: 'homeboy/wp-codebox-task-runner-preflight/v1',
-    inputPath,
+    inputPath: recipePath,
     artifacts,
     command: resolved.command,
     args: resolved.args,
@@ -249,12 +368,16 @@ function runWpCodeboxParentTask(request) {
   });
 
   if (result.error && result.error.code === 'ETIMEDOUT') {
-    process.stdout.write(`${JSON.stringify(timeoutPayload(timeoutMs, artifacts, evidencePath, inputPath, resolved.command, resolved.args), null, 2)}\n`);
+    process.stdout.write(`${JSON.stringify(timeoutPayload(timeoutMs, artifacts, evidencePath, recipePath, resolved.command, resolved.args), null, 2)}\n`);
     return 1;
   }
 
   if (result.stdout) {
-    process.stdout.write(result.stdout);
+    try {
+      process.stdout.write(`${JSON.stringify(agentTaskRunFromRecipeRun(input, JSON.parse(result.stdout), artifacts), null, 2)}\n`);
+    } catch {
+      process.stdout.write(result.stdout);
+    }
   }
   if (result.stderr) {
     process.stderr.write(result.stderr);

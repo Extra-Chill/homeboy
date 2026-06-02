@@ -15,43 +15,27 @@ function pathInside(parent, candidate) {
   return relative === '' || (Boolean(relative) && !relative.startsWith('..') && !path.isAbsolute(relative));
 }
 
-function createFixtureWpCli(root, mode = 0o755) {
-  const binPath = path.join(root, 'fixture-wp-cli.js');
+function createFixtureWpCodebox(root, mode = 0o755) {
+  const binPath = path.join(root, 'fixture-wp-codebox.js');
   fs.writeFileSync(binPath, `#!/usr/bin/env node
 'use strict';
 const fs = require('node:fs');
-const path = require('node:path');
-const out = process.env.FIXTURE_WP_CLI_CAPTURE;
-const inputIndex = process.argv.indexOf('--input-file');
-const inputPath = inputIndex >= 0 ? process.argv[inputIndex + 1] : '';
-const input = inputPath ? JSON.parse(fs.readFileSync(inputPath, 'utf8')) : null;
-fs.writeFileSync(out, JSON.stringify({ argv: process.argv.slice(2), input }, null, 2));
+const out = process.env.FIXTURE_WP_CODEBOX_CAPTURE;
+const recipeIndex = process.argv.indexOf('--recipe');
+const recipePath = recipeIndex >= 0 ? process.argv[recipeIndex + 1] : '';
+const artifactsIndex = process.argv.indexOf('--artifacts');
+const artifacts = artifactsIndex >= 0 ? process.argv[artifactsIndex + 1] : '';
+const recipe = recipePath ? JSON.parse(fs.readFileSync(recipePath, 'utf8')) : null;
+const sessionArg = recipe.workflow.steps[0].args.find((arg) => arg.startsWith('session-id=')) || 'session-id=fixture-session';
+const sessionId = sessionArg.slice('session-id='.length);
+fs.writeFileSync(out, JSON.stringify({ argv: process.argv.slice(2), recipe }, null, 2));
 process.stdout.write(JSON.stringify({
   success: true,
-  schema: 'wp-codebox/agent-task-run/v1',
-  session: {
-    schema: 'wp-codebox/sandbox-session/v1',
-    id: input.sandbox_session_id,
-    status: 'completed',
-    artifacts: {
-      bundle_id: 'artifact-bundle-sha256-fixture',
-      preview_url: 'https://preview.example.test/' + input.sandbox_session_id,
-    },
-    orchestrator: input.orchestrator,
-  },
-  task: input.parent_request.task.prompt,
-  task_input: {
-    schema: 'wp-codebox/task-input/v1',
-    version: 1,
-    goal: input.parent_request.task.prompt,
-    target: {},
-    allowed_tools: [],
-    expected_artifacts: input.parent_request.task.expected_artifacts || [],
-    policy: input.parent_request.task.policy || {},
-    context: input.parent_request.task.context || {},
-  },
-  artifacts: input.artifacts_path,
-  exit_code: 0,
+  schema: 'wp-codebox/recipe-run/v1',
+  recipePath,
+  runtime: { preview: { url: 'https://preview.example.test/' + sessionId } },
+  executions: [{ recipeCommand: 'wp-codebox.agent-sandbox-run', exitCode: 0, stdout: JSON.stringify({ status: 'completed' }) }],
+  artifacts: { id: 'artifact-bundle-sha256-fixture', directory: artifacts },
   run: { agentResult: { status: 'completed' } },
 }));
 `);
@@ -63,9 +47,12 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-wp-codebox-task-runn
 
 try {
   const capturePath = path.join(root, 'capture.json');
-  const fixtureWpCli = createFixtureWpCli(root);
+  const fixtureWpCodebox = createFixtureWpCodebox(root);
   const providerPluginPath = path.join(root, 'example-provider@feature-branch');
+  const workspaceRoot = path.join(root, 'homeboy@fix-test');
   fs.mkdirSync(providerPluginPath, { recursive: true });
+  fs.mkdirSync(workspaceRoot, { recursive: true });
+
   const request = {
     schema: 'homeboy/wp-codebox-task-request/v1',
     sandbox_session_id: 'homeboy-audit-fixture-session',
@@ -81,10 +68,11 @@ try {
       metadata: { component: 'php-ai-client', ref: 'custom-provider-auth' },
     }],
     runtime_overlays: [{
-      type: 'bundled-library',
+      kind: 'bundled-library',
       library: 'php-ai-client',
       source: '/components/php-ai-client',
       target: '/wordpress/wp-includes/php-ai-client',
+      strategy: 'wordpress-scoped-bundle',
       metadata: { component: 'php-ai-client', ref: 'custom-provider-auth' },
     }],
     secret_env: ['OPENCODE_API_KEY'],
@@ -95,51 +83,38 @@ try {
       issue_url: 'https://github.com/Extra-Chill/homeboy-extensions/issues/775',
       agent_task_id: 'agent-task-123',
     },
-    audit_findings: [
-      {
-        id: 'finding-1',
-        kind: 'wordpress.phpcs.fixable',
-        file: 'src/Example.php',
-        line: 10,
-        message: 'Fix spacing.',
-        severity: 'warning',
-      },
-    ],
+    audit_findings: [{
+      id: 'finding-1',
+      kind: 'wordpress.phpcs.fixable',
+      file: 'src/Example.php',
+      line: 10,
+      message: 'Fix spacing.',
+      severity: 'warning',
+    }],
     task: {
       title: 'Fix Homeboy audit batch PHPCS Formatting/Auto Fix!',
       prompt: 'Fix the finding.',
       expected_artifacts: ['patch'],
       policy: { kind: 'audit-remediation' },
       context: { source: 'homeboy-smoke' },
+      workspace: { root: workspaceRoot, mode: 'readwrite' },
     },
   };
 
   const result = spawnSync(process.execPath, [
     path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-wp-codebox-task-runner.cjs'),
-    '--wp-cli-bin',
-    fixtureWpCli,
     '--wp-codebox-bin',
-    '/bin/wp-codebox',
+    fixtureWpCodebox,
     '--agents-api',
     '/components/agents-api',
     '--data-machine',
     '/components/data-machine',
     '--data-machine-code',
     '/components/data-machine-code',
-    '--homeboy',
-    '/components/homeboy',
-    '--homeboy-extensions',
-    '/components/homeboy-extensions',
     '--mount',
     '/repo/plugin:/wordpress/wp-content/plugins/plugin:readwrite',
     '--runtime-stack-mount',
     '/components/wordpress-develop:/wordpress:readonly',
-    '--runtime-overlay-json',
-    JSON.stringify({
-      type: 'wordpress-scoped-bundle',
-      source: '/components/wordpress-scoped-bundle',
-      scope: 'runtime',
-    }),
     '--max-turns',
     '80',
     '--task-timeout-seconds',
@@ -151,7 +126,7 @@ try {
     input: JSON.stringify(request),
     env: {
       ...process.env,
-      FIXTURE_WP_CLI_CAPTURE: capturePath,
+      FIXTURE_WP_CODEBOX_CAPTURE: capturePath,
       OPENCODE_API_KEY: 'redacted-test-key',
     },
   });
@@ -160,34 +135,34 @@ try {
   const output = JSON.parse(result.stdout);
   assert.equal(output.schema, 'wp-codebox/agent-task-run/v1');
   assert.equal(output.success, true);
+  assert.equal(output.session.id, 'homeboy-audit-fixture-session');
+  assert.equal(output.artifacts, path.join(root, 'artifacts'));
 
   const captured = readJson(capturePath);
-  assert.deepEqual(captured.argv.slice(0, 4), ['codebox', 'run-agent-task', '--input-file', captured.argv[3]]);
-  assert.equal(captured.argv.includes('--format=json'), true);
+  assert.deepEqual(captured.argv.slice(0, 4), ['recipe-run', '--recipe', captured.argv[2], '--json']);
+  assert.equal(captured.argv.includes('--artifacts'), true);
+  assert(!captured.argv.includes('codebox'));
+  assert(!captured.argv.includes('run-agent-task'));
 
-  const input = captured.input;
-  assert.equal(input.parent_request.schema, 'homeboy/wp-codebox-task-request/v1');
-  assert.equal(input.parent_request.orchestrator.issue_url, 'https://github.com/Extra-Chill/homeboy-extensions/issues/775');
-  assert.equal(input.parent_request.audit_findings[0].id, 'finding-1');
-  assert.equal(input.provider, 'opencode');
-  assert.equal(input.model, 'opencode-go/kimi-k2.6');
-  assert.equal(input.max_turns, 80);
-  assert.equal(input.task_timeout_seconds, 7200);
-  assert.equal(input.sandbox_session_id, 'homeboy-audit-fixture-session');
-  assert.equal(input.artifacts_path, path.join(root, 'artifacts'));
-  assert.equal(input.wp_codebox_bin, '/bin/wp-codebox');
-  assert.equal(input.agents_api_path, '/components/agents-api');
-  assert.equal(input.data_machine_path, '/components/data-machine');
-  assert.equal(input.data_machine_code_path, '/components/data-machine-code');
-  assert.deepEqual(input.secret_env, ['OPENCODE_API_KEY']);
-  assert.equal(input.mounts[0].source, '/repo/plugin');
-  assert.equal(input.runtime_stack_mounts[0].source, '/components/php-ai-client');
-  assert.equal(input.runtime_stack_mounts[1].source, '/components/wordpress-develop');
-  assert.equal(input.runtime_stack_mounts[1].metadata.kind, 'homeboy-runtime-stack');
-  assert.equal(input.runtime_overlays[0].type, 'bundled-library');
-  assert.equal(input.runtime_overlays[1].type, 'wordpress-scoped-bundle');
-  assert.equal(input.provider_plugin_paths[0], providerPluginPath);
-  assert(!JSON.stringify(input).includes('redacted-test-key'));
+  const recipe = captured.recipe;
+  assert.equal(recipe.schema, 'wp-codebox/workspace-recipe/v1');
+  assert.equal(recipe.workflow.steps[0].command, 'wp-codebox.agent-sandbox-run');
+  assert(recipe.workflow.steps[0].args.includes('provider=opencode'));
+  assert(recipe.workflow.steps[0].args.includes('model=opencode-go/kimi-k2.6'));
+  assert(recipe.workflow.steps[0].args.includes('max-turns=80'));
+  assert(recipe.workflow.steps[0].args.includes('timeout-seconds=7200'));
+  assert.equal(recipe.inputs.extraPlugins.find((plugin) => plugin.slug === 'agents-api').source, '/components/agents-api');
+  assert.equal(recipe.inputs.extraPlugins.find((plugin) => plugin.slug === 'data-machine').source, '/components/data-machine');
+  assert.equal(recipe.inputs.extraPlugins.find((plugin) => plugin.slug === 'data-machine-code').source, '/components/data-machine-code');
+  assert.equal(recipe.inputs.extraPlugins.find((plugin) => plugin.slug === 'example-provider').source, providerPluginPath);
+  assert.deepEqual(recipe.inputs.secretEnv, ['OPENCODE_API_KEY']);
+  assert.equal(recipe.inputs.mounts[0].source, '/repo/plugin');
+  assert.equal(recipe.inputs.mounts[1].source, workspaceRoot);
+  assert.equal(recipe.inputs.mounts[1].target, '/workspace/homeboy');
+  assert.equal(recipe.runtime.stack.mounts[0].source, '/components/php-ai-client');
+  assert.equal(recipe.runtime.stack.mounts[1].source, '/components/wordpress-develop');
+  assert.equal(recipe.runtime.overlays[0].kind, 'bundled-library');
+  assert(!JSON.stringify(recipe).includes('redacted-test-key'));
 
   const codexCapturePath = path.join(root, 'capture-codex.json');
   const codexSecretEnv = [
@@ -199,8 +174,8 @@ try {
   ];
   const codexResult = spawnSync(process.execPath, [
     path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-wp-codebox-task-runner.cjs'),
-    '--wp-cli-bin',
-    fixtureWpCli,
+    '--wp-codebox-bin',
+    fixtureWpCodebox,
     '--agents-api',
     '/components/agents-api',
     '--data-machine',
@@ -218,7 +193,7 @@ try {
     }),
     env: {
       ...process.env,
-      FIXTURE_WP_CLI_CAPTURE: codexCapturePath,
+      FIXTURE_WP_CODEBOX_CAPTURE: codexCapturePath,
       AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN: 'access-token-value',
       AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN: 'refresh-token-value',
       AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT: '4102444800',
@@ -227,21 +202,21 @@ try {
     },
   });
   assert.equal(codexResult.status, 0, codexResult.stderr || codexResult.stdout);
-  const codexInput = readJson(codexCapturePath).input;
-  assert.deepEqual(codexInput.secret_env, codexSecretEnv);
-  assert.equal(codexInput.provider, 'codex');
-  assert.equal(codexInput.model, 'gpt-5.5');
-  assert.equal(codexInput.provider_plugin_paths[0], '/components/ai-provider-for-openai');
-  const serializedCodexInput = JSON.stringify(codexInput);
-  assert(!serializedCodexInput.includes('access-token-value'));
-  assert(!serializedCodexInput.includes('refresh-token-value'));
-  assert(!serializedCodexInput.includes('wp-ai-gateway'));
+  const codexRecipe = readJson(codexCapturePath).recipe;
+  assert.deepEqual(codexRecipe.inputs.secretEnv, codexSecretEnv);
+  assert(codexRecipe.workflow.steps[0].args.includes('provider=codex'));
+  assert(codexRecipe.workflow.steps[0].args.includes('model=gpt-5.5'));
+  assert.equal(codexRecipe.inputs.extraPlugins.find((plugin) => plugin.slug === 'ai-provider-for-openai').source, '/components/ai-provider-for-openai');
+  const serializedCodexRecipe = JSON.stringify(codexRecipe);
+  assert(!serializedCodexRecipe.includes('access-token-value'));
+  assert(!serializedCodexRecipe.includes('refresh-token-value'));
+  assert(!serializedCodexRecipe.includes('wp-ai-gateway'));
 
   const nonExecutableCapturePath = path.join(root, 'capture-non-executable.json');
-  const nonExecutableFixture = createFixtureWpCli(root, 0o644);
+  const nonExecutableFixture = createFixtureWpCodebox(root, 0o644);
   const nonExecutableResult = spawnSync(process.execPath, [
     path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-wp-codebox-task-runner.cjs'),
-    '--wp-cli-bin',
+    '--wp-codebox-bin',
     nonExecutableFixture,
     '--agents-api',
     '/components/agents-api',
@@ -254,35 +229,14 @@ try {
     input: JSON.stringify(request),
     env: {
       ...process.env,
-      FIXTURE_WP_CLI_CAPTURE: nonExecutableCapturePath,
+      FIXTURE_WP_CODEBOX_CAPTURE: nonExecutableCapturePath,
       OPENCODE_API_KEY: 'redacted-test-key',
     },
   });
   assert.equal(nonExecutableResult.status, 0, nonExecutableResult.stderr || nonExecutableResult.stdout);
   const nonExecutableCapture = readJson(nonExecutableCapturePath);
-  assert.equal(nonExecutableCapture.argv[0], 'codebox');
-  assert.equal(pathInside(root, nonExecutableCapture.input.artifacts_path), false);
-
-  const requestConfiguredCapturePath = path.join(root, 'capture-request-configured.json');
-  const requestConfiguredFixture = createFixtureWpCli(root);
-  const requestConfiguredResult = spawnSync(process.execPath, [
-    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-wp-codebox-task-runner.cjs'),
-  ], {
-    encoding: 'utf8',
-    input: JSON.stringify({
-      ...request,
-      wp_cli_bin: requestConfiguredFixture,
-      secret_env: [],
-    }),
-    env: {
-      ...process.env,
-      FIXTURE_WP_CLI_CAPTURE: requestConfiguredCapturePath,
-    },
-  });
-  assert.equal(requestConfiguredResult.status, 0, requestConfiguredResult.stderr || requestConfiguredResult.stdout);
-  const requestConfiguredCapture = readJson(requestConfiguredCapturePath);
-  assert.equal(requestConfiguredCapture.argv[0], 'codebox');
-  assert.equal(requestConfiguredCapture.input.parent_request.wp_cli_bin, requestConfiguredFixture);
+  assert.equal(nonExecutableCapture.argv[0], 'recipe-run');
+  assert.equal(pathInside(root, nonExecutableCapture.argv[nonExecutableCapture.argv.indexOf('--artifacts') + 1]), false);
 
   const sourceRoot = path.join(root, 'source-plugin');
   fs.mkdirSync(sourceRoot, { recursive: true });
@@ -290,8 +244,8 @@ try {
   const riskyCapturePath = path.join(root, 'capture-risky-artifacts.json');
   const riskyResult = spawnSync(process.execPath, [
     path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-wp-codebox-task-runner.cjs'),
-    '--wp-cli-bin',
-    fixtureWpCli,
+    '--wp-codebox-bin',
+    fixtureWpCodebox,
     '--agents-api',
     '/components/agents-api',
     '--data-machine',
@@ -307,7 +261,7 @@ try {
     input: JSON.stringify(request),
     env: {
       ...process.env,
-      FIXTURE_WP_CLI_CAPTURE: riskyCapturePath,
+      FIXTURE_WP_CODEBOX_CAPTURE: riskyCapturePath,
       OPENCODE_API_KEY: 'redacted-test-key',
     },
   });
@@ -316,8 +270,8 @@ try {
 
   const missingSecretResult = spawnSync(process.execPath, [
     path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-wp-codebox-task-runner.cjs'),
-    '--wp-cli-bin',
-    fixtureWpCli,
+    '--wp-codebox-bin',
+    fixtureWpCodebox,
     '--agents-api',
     '/components/agents-api',
     '--data-machine',
@@ -329,7 +283,7 @@ try {
     input: JSON.stringify(request),
     env: {
       ...process.env,
-      FIXTURE_WP_CLI_CAPTURE: path.join(root, 'capture-missing-secret.json'),
+      FIXTURE_WP_CODEBOX_CAPTURE: path.join(root, 'capture-missing-secret.json'),
       OPENCODE_API_KEY: '',
     },
   });
