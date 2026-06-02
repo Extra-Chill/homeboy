@@ -26,12 +26,69 @@ export function homeboyBenchScenarioId(file, extensionPattern = /\.[^.]+$/) {
         .replace(/^-+|-+$/g, '');
 }
 
+export function homeboyBenchSelectedScenarios(value = process.env.HOMEBOY_BENCH_SCENARIOS || '') {
+    return String(value)
+        .split(',')
+        .map((scenario) => scenario.trim())
+        .filter(Boolean);
+}
+
+export function homeboyBenchScenarioSelected(scenario, selected = homeboyBenchSelectedScenarios()) {
+    if (!scenario) return false;
+    if (!selected || selected.length === 0) return true;
+    return selected.includes(scenario);
+}
+
+export function homeboyBenchArtifactRef(path, { kind, label } = {}) {
+    if (!path) throw new Error('homeboyBenchArtifactRef requires a path');
+    const ref = { path };
+    if (kind) ref.kind = kind;
+    if (label) ref.label = label;
+    return ref;
+}
+
 export function homeboyBenchResultsEnvelope(componentId, iterations, scenarios) {
     return {
         component_id: componentId,
         iterations,
         scenarios,
     };
+}
+
+export function homeboyBenchScenarioInventoryEntry({
+    id,
+    file,
+    source,
+    defaultIterations,
+    tags = [],
+    metrics = {},
+    metadata,
+    artifacts,
+}) {
+    const scenario = {
+        id,
+        iterations: 0,
+        tags,
+        metrics,
+    };
+    if (defaultIterations !== undefined) scenario.default_iterations = defaultIterations;
+    if (file) scenario.file = file;
+    if (source) scenario.source = source;
+    if (metadata && Object.keys(metadata).length > 0) scenario.metadata = metadata;
+    if (artifacts && Object.keys(artifacts).length > 0) scenario.artifacts = artifacts;
+    return scenario;
+}
+
+export function homeboyBenchScenarioInventoryEnvelope(componentId, defaultIterations, scenarios) {
+    return homeboyBenchResultsEnvelope(
+        componentId,
+        0,
+        scenarios.map((scenario) => ({
+            ...scenario,
+            iterations: 0,
+            default_iterations: scenario.default_iterations ?? defaultIterations,
+        }))
+    );
 }
 
 export async function homeboyWriteBenchResults(resultsFile, componentId, iterations, scenarios) {
@@ -44,6 +101,14 @@ export async function homeboyWriteBenchResults(resultsFile, componentId, iterati
 
 export async function homeboyWriteEmptyBenchResults(resultsFile, componentId, iterations = 0) {
     await homeboyWriteBenchResults(resultsFile, componentId, iterations, []);
+}
+
+export async function homeboyWriteBenchScenarioInventory(resultsFile, componentId, defaultIterations, scenarios) {
+    await mkdir(dirname(resultsFile), { recursive: true });
+    await writeFile(
+        resultsFile,
+        JSON.stringify(homeboyBenchScenarioInventoryEnvelope(componentId, defaultIterations, scenarios), null, 2)
+    );
 }
 
 export function homeboyBenchProgress(event = {}) {
