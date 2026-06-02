@@ -157,6 +157,8 @@ const codexAgentRequest = {
   },
 };
 const codexRequest = codeboxTaskRequestFromAgentTaskRequest(codexAgentRequest);
+assert.equal(codexRequest.agent, 'wp-codebox-sandbox');
+assert.equal(codexRequest.mode, 'sandbox');
 assert.equal(codexRequest.provider, 'codex');
 assert.equal(codexRequest.model, 'gpt-5.5');
 assert.deepEqual(codexRequest.provider_plugin_paths, ['/components/ai-provider-for-openai']);
@@ -175,6 +177,20 @@ assert.deepEqual(codexRequest.secret_env, [
   'AI_PROVIDER_OPENAI_CODEX_FEDRAMP',
 ]);
 assert(!JSON.stringify(codexRequest).includes('wp-ai-gateway'));
+assert.equal(codeboxTaskRequestFromAgentTaskRequest({
+  ...request,
+  executor: {
+    ...request.executor,
+    config: { ...request.executor.config, agent: 'custom-agent', mode: 'review' },
+  },
+}).agent, 'custom-agent');
+assert.equal(codeboxTaskRequestFromAgentTaskRequest({
+  ...request,
+  executor: {
+    ...request.executor,
+    config: { ...request.executor.config, agent: 'custom-agent', mode: 'review' },
+  },
+}).mode, 'review');
 assert.equal(codeboxTaskRequestFromAgentTaskRequest({
   ...request,
   limits: { task_timeout_seconds: 7 },

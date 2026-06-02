@@ -156,6 +156,8 @@ function writePreflightEvidence(artifacts, evidence) {
 function runnerInput(request, artifacts) {
   return Object.fromEntries(Object.entries({
     parent_request: request,
+    agent: argValue('--agent') || request.agent || 'wp-codebox-sandbox',
+    mode: argValue('--mode') || request.mode || 'sandbox',
     provider: argValue('--provider') || request.provider || '',
     model: argValue('--model') || request.model || '',
     provider_plugin_paths: [...(request.provider_plugin_paths || []), ...argValues('--provider-plugin-path')],
@@ -213,7 +215,7 @@ function buildRecipe(input) {
   const workflowArgs = [
     `task=${task.prompt || ''}`,
     `agent=${input.agent || 'wp-codebox-sandbox'}`,
-    `mode=${input.mode || 'default'}`,
+    `mode=${input.mode || 'sandbox'}`,
     `provider=${input.provider || ''}`,
     `model=${input.model || ''}`,
     `provider-plugin-slugs=${providerSlugs.join(',')}`,

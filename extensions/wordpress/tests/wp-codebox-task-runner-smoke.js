@@ -147,6 +147,8 @@ try {
   const recipe = captured.recipe;
   assert.equal(recipe.schema, 'wp-codebox/workspace-recipe/v1');
   assert.equal(recipe.workflow.steps[0].command, 'wp-codebox.agent-sandbox-run');
+  assert(recipe.workflow.steps[0].args.includes('agent=wp-codebox-sandbox'));
+  assert(recipe.workflow.steps[0].args.includes('mode=sandbox'));
   assert(recipe.workflow.steps[0].args.includes('provider=opencode'));
   assert(recipe.workflow.steps[0].args.includes('model=opencode-go/kimi-k2.6'));
   assert(recipe.workflow.steps[0].args.includes('max-turns=80'));

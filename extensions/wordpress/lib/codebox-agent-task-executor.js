@@ -52,6 +52,8 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     schema: WP_CODEBOX_TASK_REQUEST_SCHEMA,
     sandbox_session_id: config.sandbox_session_id || request.task_id,
     group_key: request.group_key,
+    agent: config.agent || options.agent || 'wp-codebox-sandbox',
+    mode: config.mode || options.mode || 'sandbox',
     provider: config.provider || options.provider || '',
     model: request.executor.model || config.model || options.model || '',
     provider_plugin_paths: config.provider_plugin_paths || options.providerPluginPaths || [],
