@@ -443,6 +443,7 @@ fn test_from_main_workflow() {
             output,
             exit_code: 3,
             findings: Vec::new(),
+            timing: crate::core::code_audit::AuditTiming::default(),
         });
 
     assert_eq!(exit_code, 3);

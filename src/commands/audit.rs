@@ -151,6 +151,7 @@ fn finish_audit_observation(
         "observation_status": if workflow.exit_code == 0 { "pass" } else { "fail" },
         "exit_code": workflow.exit_code,
         "summary": audit_observation_summary(&workflow.output),
+        "timing": audit_observation_timing(&workflow.timing),
     });
     let records = finding_records_from_audit(observation.0.run_id(), &workflow.findings);
     observation.0.record_findings(&records);
@@ -175,7 +176,14 @@ fn finish_audit_observation_error(
         .finish_error_with_merged_metadata(serde_json::json!({
             "observation_status": "error",
             "error": error.to_string(),
+            "timing": audit_observation_timing(&code_audit::AuditTiming::default()),
         }));
+}
+
+fn audit_observation_timing(timing: &code_audit::AuditTiming) -> serde_json::Value {
+    serde_json::json!({
+        "spans": timing.spans,
+    })
 }
 
 fn audit_observation_command(component_id: &str, args: &AuditArgs) -> String {
@@ -747,6 +755,13 @@ mod tests {
                 },
                 exit_code: 1,
                 findings: vec![finding],
+                timing: code_audit::AuditTiming {
+                    spans: vec![code_audit::AuditTimingSpan {
+                        id: "detector.structural".to_string(),
+                        status: "ok".to_string(),
+                        duration_ms: Some(1.0),
+                    }],
+                },
             };
 
             finish_audit_observation(Some(observation), &workflow);
@@ -754,7 +769,7 @@ mod tests {
             let store = ObservationStore::open_initialized().expect("store");
             let findings = store
                 .list_findings(homeboy::core::observation::FindingListFilter {
-                    run_id: Some(run_id),
+                    run_id: Some(run_id.clone()),
                     tool: Some("audit".to_string()),
                     ..homeboy::core::observation::FindingListFilter::default()
                 })
@@ -770,6 +785,16 @@ mod tests {
                 findings[0].metadata_json["source_sidecar"],
                 "audit-findings"
             );
+
+            let run = store
+                .get_run(&run_id)
+                .expect("read run")
+                .expect("run exists");
+            assert_eq!(
+                run.metadata_json["timing"]["spans"][0]["id"],
+                "detector.structural"
+            );
+            assert_eq!(run.metadata_json["timing"]["spans"][0]["status"], "ok");
         });
     }
 
