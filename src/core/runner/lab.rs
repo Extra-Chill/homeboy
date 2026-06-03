@@ -1037,6 +1037,10 @@ fn has_docker_signal(source_path: &Path) -> bool {
 }
 
 #[cfg(test)]
+#[path = "lab_arg_tests.rs"]
+mod lab_arg_tests;
+
+#[cfg(test)]
 mod tests {
     use super::super::lab_workspaces::LAB_WORKSPACE_MAPPING_SCHEMA;
     use super::*;
@@ -1068,114 +1072,6 @@ mod tests {
     }
 
     #[test]
-    fn rewrites_lab_offload_path_and_strips_runner_and_output_flags() {
-        let args = vec![
-            "homeboy".to_string(),
-            "audit".to_string(),
-            "--path".to_string(),
-            "/Users/chubes/Developer/project".to_string(),
-            "--runner".to_string(),
-            "lab".to_string(),
-            "--json-summary".to_string(),
-            "--output".to_string(),
-            "/tmp/local.json".to_string(),
-            "--runner=other".to_string(),
-        ];
-
-        assert_eq!(
-            rewrite_lab_offload_args(&args, "/home/chubes/Developer/project"),
-            vec![
-                "homeboy".to_string(),
-                "--force-hot".to_string(),
-                "audit".to_string(),
-                "--path".to_string(),
-                "/home/chubes/Developer/project".to_string(),
-                "--json-summary".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn leaves_passthrough_path_args_untouched() {
-        let args = vec![
-            "homeboy".to_string(),
-            "test".to_string(),
-            "--path=/Users/chubes/Developer/project".to_string(),
-            "--".to_string(),
-            EXPLICIT_PASSTHROUGH_SENTINEL.to_string(),
-            "--path".to_string(),
-            "test-fixture".to_string(),
-        ];
-
-        assert_eq!(
-            rewrite_lab_offload_args(&args, "/home/chubes/Developer/project"),
-            vec![
-                "homeboy".to_string(),
-                "--force-hot".to_string(),
-                "test".to_string(),
-                "--path=/home/chubes/Developer/project".to_string(),
-                "--".to_string(),
-                "--path".to_string(),
-                "test-fixture".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn strips_internal_passthrough_sentinel_from_lab_offload_command() {
-        let args = vec![
-            "homeboy".to_string(),
-            "test".to_string(),
-            "data-machine".to_string(),
-            "--path".to_string(),
-            "/Users/chubes/Developer/data-machine@fix".to_string(),
-            "--".to_string(),
-            EXPLICIT_PASSTHROUGH_SENTINEL.to_string(),
-            "--filter=ConversationStoreFactoryTest::test_canonical_conversation_session_abilities_route_through_swapped_store".to_string(),
-        ];
-
-        assert_eq!(
-            rewrite_lab_offload_args(&args, "/home/chubes/Developer/data-machine@fix"),
-            vec![
-                "homeboy".to_string(),
-                "--force-hot".to_string(),
-                "test".to_string(),
-                "data-machine".to_string(),
-                "--path".to_string(),
-                "/home/chubes/Developer/data-machine@fix".to_string(),
-                "--".to_string(),
-                "--filter=ConversationStoreFactoryTest::test_canonical_conversation_session_abilities_route_through_swapped_store".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn rewrite_lab_offload_args_does_not_duplicate_force_hot() {
-        let args = vec![
-            "homeboy".to_string(),
-            "--force-hot".to_string(),
-            "refactor".to_string(),
-            "--from".to_string(),
-            "audit".to_string(),
-            "--path".to_string(),
-            "/Users/chubes/Developer/project".to_string(),
-        ];
-
-        assert_eq!(
-            rewrite_lab_offload_args(&args, "/home/chubes/Developer/project"),
-            vec![
-                "homeboy".to_string(),
-                "--force-hot".to_string(),
-                "refactor".to_string(),
-                "--from".to_string(),
-                "audit".to_string(),
-                "--path".to_string(),
-                "/home/chubes/Developer/project".to_string(),
-            ]
-        );
-    }
-
-    #[test]
     fn command_prefix_tools_are_included_in_capability_contract() {
         let dir = tempfile::tempdir().expect("temp dir");
         let contract = lab_runner_capability_contract(
@@ -1186,21 +1082,6 @@ mod tests {
         .expect("capability contract");
 
         assert!(contract.required_tools.contains(&RunnerRequiredTool::Cargo));
-    }
-
-    #[test]
-    fn detects_lab_offload_source_path_from_path_flag() {
-        let args = vec![
-            "homeboy".to_string(),
-            "test".to_string(),
-            "--path".to_string(),
-            "/Users/chubes/Developer/project".to_string(),
-        ];
-
-        assert_eq!(
-            lab_offload_source_path(&args).expect("path"),
-            std::path::PathBuf::from("/Users/chubes/Developer/project")
-        );
     }
 
     #[test]
