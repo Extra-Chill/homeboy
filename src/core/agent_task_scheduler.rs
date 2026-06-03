@@ -597,7 +597,9 @@ impl AgentTaskScheduleSupport {
         append_unique_artifacts(&mut outcome.artifacts, discovery.artifacts);
         append_unique_evidence_refs(&mut outcome.evidence_refs, discovery.evidence_refs);
 
-        let actionable_patch = outcome.artifacts.iter().any(is_actionable_patch_artifact);
+        let actionable_patch = outcome.metadata.get("actionable").and_then(Value::as_bool)
+            != Some(false)
+            && outcome.artifacts.iter().any(is_actionable_patch_artifact);
         if actionable_patch {
             outcome.status = AgentTaskOutcomeStatus::Succeeded;
             outcome.failure_classification = None;
@@ -1080,6 +1082,89 @@ mod tests {
             .diagnostics
             .iter()
             .any(|diagnostic| diagnostic.class == "completed_runtime_late_provider_race"));
+    }
+
+    #[test]
+    fn timeout_with_empty_patch_artifacts_and_actionable_false_stays_timed_out() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let artifact_root = temp.path().join("task-1-artifacts");
+        fs::create_dir_all(&artifact_root).expect("artifact root");
+        let patch_path = artifact_root.join("patch.diff");
+        let mounted_patch_path = artifact_root.join("mount-5.patch");
+        fs::write(&patch_path, "").expect("patch diff");
+        fs::write(&mounted_patch_path, "").expect("mounted patch");
+        fs::write(artifact_root.join("transcript.log"), "runtime completed").expect("log");
+        fs::write(
+            artifact_root.join("agent-result.json"),
+            serde_json::to_string(&json!({
+                "schema": AGENT_TASK_OUTCOME_SCHEMA,
+                "task_id": "task-1",
+                "status": "succeeded",
+                "summary": "runtime produced no actionable patch",
+                "actionable": false,
+                "artifacts": [
+                    {
+                        "schema": AGENT_TASK_ARTIFACT_SCHEMA,
+                        "id": "patch",
+                        "kind": "patch",
+                        "name": "patch.diff",
+                        "path": patch_path.display().to_string(),
+                        "mime": "text/x-diff",
+                        "metadata": { "role": "patch" }
+                    },
+                    {
+                        "schema": AGENT_TASK_ARTIFACT_SCHEMA,
+                        "id": "mount-5",
+                        "kind": "patch",
+                        "name": "mount-5.patch",
+                        "path": mounted_patch_path.display().to_string(),
+                        "mime": "text/x-patch",
+                        "metadata": { "role": "patch" }
+                    }
+                ],
+                "evidence_refs": [],
+                "diagnostics": [],
+                "metadata": {}
+            }))
+            .expect("agent result json"),
+        )
+        .expect("agent result");
+
+        let scheduler = AgentTaskScheduler::new(RecordingExecutor::new(
+            HashMap::new(),
+            Duration::from_millis(250),
+        ));
+        let mut plan = plan_with_tasks(1);
+        plan.tasks[0].limits.timeout_ms = Some(1);
+        plan.tasks[0].metadata = json!({ "artifact_root": artifact_root });
+
+        let aggregate = scheduler.run(plan);
+
+        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Failed);
+        assert_eq!(aggregate.totals.succeeded, 0);
+        assert_eq!(aggregate.totals.timed_out, 1);
+        assert!(aggregate
+            .events
+            .iter()
+            .any(|event| event.task_id == "task-1" && event.state == AgentTaskState::TimedOut));
+        let outcome = &aggregate.outcomes[0];
+        assert_eq!(outcome.status, AgentTaskOutcomeStatus::Timeout);
+        assert_eq!(
+            outcome.failure_classification,
+            Some(AgentTaskFailureClassification::Timeout)
+        );
+        assert!(outcome.artifacts.iter().any(|artifact| {
+            artifact.kind == "patch"
+                && artifact.path.as_deref() == Some(&patch_path.to_string_lossy())
+        }));
+        assert!(outcome.diagnostics.iter().any(|diagnostic| {
+            diagnostic.class == "completed_runtime_late_provider_race"
+                && diagnostic
+                    .data
+                    .get("actionable_patch")
+                    .and_then(Value::as_bool)
+                    == Some(false)
+        }));
     }
 
     #[test]
