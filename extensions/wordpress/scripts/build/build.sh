@@ -549,6 +549,12 @@ package-lock.json
 webpack.config.js
 EOF
     fi
+
+    # Homeboy-managed staging must never be copied into itself. Keep this
+    # mandatory even when a project supplies a custom .buildignore.
+    cat >> "$exclude_file" << 'EOF'
+/.homeboy-build/
+EOF
 }
 
 resolve_package_artifacts() {
@@ -772,14 +778,42 @@ validate_php_syntax() {
     print_status "Running PHP syntax check on build..."
 
     local staging_dir="${STAGING_ROOT}/$PROJECT_NAME"
+    local staging_abs=""
+    local php_file_list="/tmp/.wordpress-php-syntax-files-$$.list"
     local php_errors=0
 
-    while IFS= read -r -d '' file; do
-        if ! php -l "$file" > /dev/null 2>&1; then
-            php -l "$file" 2>&1
+    if [ ! -d "$staging_dir" ]; then
+        print_error "Staging directory not found for PHP syntax validation: $staging_dir"
+        return 1
+    fi
+
+    staging_abs="$(cd "$staging_dir" && pwd)"
+
+    if ! find "$staging_abs" -type f -name "*.php" -print > "$php_file_list"; then
+        rm -f "$php_file_list"
+        print_error "Could not enumerate staged PHP files under: $staging_dir"
+        return 1
+    fi
+
+    LC_ALL=C sort -o "$php_file_list" "$php_file_list"
+
+    while IFS= read -r file; do
+        [ -n "$file" ] || continue
+
+        if [ ! -f "$file" ]; then
+            print_error "Staged PHP file disappeared during syntax validation: ${file#$staging_abs/}"
+            php_errors=1
+            continue
+        fi
+
+        local lint_output=""
+        if ! lint_output="$(php -l "$file" 2>&1)"; then
+            printf '%s\n' "$lint_output"
             php_errors=1
         fi
-    done < <(find "$staging_dir" -name "*.php" -print0)
+    done < "$php_file_list"
+
+    rm -f "$php_file_list"
 
     if [ $php_errors -eq 1 ]; then
         print_error "PHP syntax errors found. Build aborted."
