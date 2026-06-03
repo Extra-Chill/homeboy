@@ -21,6 +21,8 @@ homeboy agent-task submit \
 homeboy agent-task status "$run_id"
 homeboy agent-task logs "$run_id"
 homeboy agent-task run "$run_id"
+# Or let a generic worker claim the oldest queued durable run:
+# homeboy agent-task run-next
 homeboy agent-task status "$run_id"
 homeboy agent-task artifacts "$run_id"
 homeboy agent-task promote "$run_id" \
