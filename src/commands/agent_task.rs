@@ -4,7 +4,9 @@ use serde_json::Value;
 use homeboy::core::agent_task_lifecycle;
 use homeboy::core::agent_task_promotion::{promote, AgentTaskPromotionOptions};
 use homeboy::core::agent_task_provider::ExtensionProviderAgentTaskExecutor;
-use homeboy::core::agent_task_scheduler::{AgentTaskPlan, AgentTaskScheduler};
+use homeboy::core::agent_task_scheduler::{
+    AgentTaskExecutorAdapter, AgentTaskPlan, AgentTaskScheduler,
+};
 use homeboy::core::config;
 
 use super::{CmdResult, GlobalArgs};
@@ -103,10 +105,30 @@ pub fn run(args: AgentTaskArgs, _global: &GlobalArgs) -> CmdResult<Value> {
 
 fn run_plan(args: RunPlanArgs) -> CmdResult<Value> {
     let plan = read_plan(&args.plan)?;
-    let scheduler = AgentTaskScheduler::new(ExtensionProviderAgentTaskExecutor::discover());
+    run_loaded_plan(
+        plan,
+        args.record_run_id.as_deref(),
+        ExtensionProviderAgentTaskExecutor::discover(),
+    )
+}
+
+fn run_loaded_plan<E>(
+    plan: AgentTaskPlan,
+    record_run_id: Option<&str>,
+    executor: E,
+) -> CmdResult<Value>
+where
+    E: AgentTaskExecutorAdapter,
+{
+    if let Some(run_id) = record_run_id {
+        agent_task_lifecycle::submit_plan(&plan, Some(run_id))?;
+        agent_task_lifecycle::mark_running(run_id)?;
+    }
+
+    let scheduler = AgentTaskScheduler::new(executor);
     let aggregate = scheduler.run(plan.clone());
-    if let Some(run_id) = args.record_run_id.as_deref() {
-        agent_task_lifecycle::record_completed_run(&plan, &aggregate, Some(run_id))?;
+    if let Some(run_id) = record_run_id {
+        agent_task_lifecycle::record_run_aggregate(run_id, &plan, &aggregate)?;
     }
     let exit_code = if aggregate.totals.failed == 0
         && aggregate.totals.cancelled == 0
@@ -212,13 +234,16 @@ fn read_plan(spec: &str) -> homeboy::core::Result<AgentTaskPlan> {
 mod tests {
     use super::*;
     use homeboy::core::agent_task::{
-        AgentTaskExecutor, AgentTaskLimits, AgentTaskPolicy, AgentTaskRequest, AgentTaskWorkspace,
+        AgentTaskExecutor, AgentTaskLimits, AgentTaskOutcome, AgentTaskOutcomeStatus,
+        AgentTaskPolicy, AgentTaskRequest, AgentTaskWorkspace, AGENT_TASK_OUTCOME_SCHEMA,
         AGENT_TASK_REQUEST_SCHEMA,
     };
-    use homeboy::core::agent_task_lifecycle::{AgentTaskRunRecord, AgentTaskRunState};
-    use homeboy::core::agent_task_scheduler::AgentTaskState;
+    use homeboy::core::agent_task_lifecycle::{
+        status as lifecycle_status, AgentTaskRunRecord, AgentTaskRunState,
+    };
+    use homeboy::core::agent_task_scheduler::{AgentTaskExecutionContext, AgentTaskState};
     use serde_json::Value;
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::{Arc, Mutex, OnceLock};
 
     #[test]
     fn submit_run_status_reports_terminal_state() {
@@ -279,6 +304,71 @@ mod tests {
         });
     }
 
+    #[test]
+    fn run_plan_record_run_id_persists_running_status_before_executor_runs() {
+        with_temp_home(|| {
+            let run_id = "run-plan-durable";
+            let observed_status = Arc::new(Mutex::new(None));
+            let executor = InspectingExecutor {
+                run_id: run_id.to_string(),
+                observed_status: Arc::clone(&observed_status),
+            };
+
+            let (_value, exit_code) =
+                run_loaded_plan(test_plan(), Some(run_id), executor).expect("run-plan completed");
+
+            let observed = observed_status
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+                .expect("executor observed durable status");
+            assert_eq!(exit_code, 0);
+            assert_eq!(observed.state, AgentTaskRunState::Running);
+            assert_eq!(observed.tasks[0].state, AgentTaskState::Running);
+            assert_eq!(observed.metadata["runner_pid"], std::process::id());
+            assert!(observed.aggregate_path.is_none());
+
+            let completed = lifecycle_status(run_id).expect("completed status loaded");
+            assert_eq!(completed.state, AgentTaskRunState::Succeeded);
+            assert_eq!(completed.tasks[0].state, AgentTaskState::Succeeded);
+            assert!(completed.aggregate_path.is_some());
+        });
+    }
+
+    struct InspectingExecutor {
+        run_id: String,
+        observed_status: Arc<Mutex<Option<AgentTaskRunRecord>>>,
+    }
+
+    impl AgentTaskExecutorAdapter for InspectingExecutor {
+        fn execute(
+            &self,
+            request: AgentTaskRequest,
+            _context: AgentTaskExecutionContext,
+        ) -> AgentTaskOutcome {
+            let record =
+                lifecycle_status(&self.run_id).expect("status exists before executor runs");
+            *self
+                .observed_status
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(record);
+
+            AgentTaskOutcome {
+                schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+                task_id: request.task_id,
+                status: AgentTaskOutcomeStatus::Succeeded,
+                summary: Some("ok".to_string()),
+                failure_classification: None,
+                artifacts: Vec::new(),
+                evidence_refs: Vec::new(),
+                diagnostics: Vec::new(),
+                workflow: None,
+                follow_up: None,
+                metadata: Value::Null,
+            }
+        }
+    }
+
     fn with_temp_home(run: impl FnOnce()) {
         let lock = test_home_lock()
             .lock()
@@ -292,5 +382,33 @@ mod tests {
     fn test_home_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn test_plan() -> AgentTaskPlan {
+        AgentTaskPlan::new(
+            "plan-a",
+            vec![AgentTaskRequest {
+                schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
+                task_id: "task-a".to_string(),
+                group_key: None,
+                parent_plan_id: None,
+                executor: AgentTaskExecutor {
+                    backend: "test".to_string(),
+                    selector: Some("fixture".to_string()),
+                    required_capabilities: Vec::new(),
+                    secret_env: Vec::new(),
+                    model: None,
+                    config: Value::Null,
+                },
+                instructions: "run".to_string(),
+                inputs: Value::Null,
+                source_refs: Vec::new(),
+                workspace: AgentTaskWorkspace::default(),
+                policy: AgentTaskPolicy::default(),
+                limits: AgentTaskLimits::default(),
+                expected_artifacts: Vec::new(),
+                metadata: Value::Null,
+            }],
+        )
     }
 }

@@ -269,36 +269,28 @@ fn apply_aggregate_to_record(
 
 pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
     let mut record = store::read_record(&sanitize_run_id(run_id))?;
-    reconcile_record_from_aggregate(&mut record);
+    if let (Ok(aggregate), Ok(plan)) = (
+        store::read_aggregate(&record.run_id),
+        store::read_plan_path(&record.plan_path),
+    ) {
+        let aggregate_path = store::aggregate_path(&record.run_id)
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|_| "aggregate.json".to_string());
+        let mut reconciled = record.clone();
+        apply_aggregate_to_record(&mut reconciled, &plan, &aggregate, aggregate_path);
+
+        if reconciled != record {
+            if let Err(error) = store::write_record(&reconciled) {
+                reconciled
+                    .ensure_metadata_object()
+                    .insert("finalization_error".to_string(), json!(error.message));
+            }
+
+            record = reconciled;
+        }
+    }
     record.annotate_stale_running();
     Ok(record)
-}
-
-fn reconcile_record_from_aggregate(record: &mut AgentTaskRunRecord) {
-    let Ok(aggregate) = store::read_aggregate(&record.run_id) else {
-        return;
-    };
-    let Ok(plan) = store::read_plan_path(&record.plan_path) else {
-        return;
-    };
-
-    let aggregate_path = store::aggregate_path(&record.run_id)
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|_| "aggregate.json".to_string());
-    let mut reconciled = record.clone();
-    apply_aggregate_to_record(&mut reconciled, &plan, &aggregate, aggregate_path);
-
-    if &reconciled == record {
-        return;
-    }
-
-    if let Err(error) = store::write_record(&reconciled) {
-        reconciled
-            .ensure_metadata_object()
-            .insert("finalization_error".to_string(), json!(error.message));
-    }
-
-    *record = reconciled;
 }
 
 pub fn logs(run_id: &str) -> Result<AgentTaskRunLog> {
