@@ -162,6 +162,9 @@ impl RemoteExecutionSafetyConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct ArtifactPortabilityConfig {
+    /// Number of recent observation runs to scan for persisted artifact path portability.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation_run_window: Option<usize>,
     /// Path prefixes that identify local/runtime-only locations in stored artifacts.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub non_portable_path_prefixes: Vec<String>,
@@ -172,7 +175,9 @@ pub struct ArtifactPortabilityConfig {
 
 impl ArtifactPortabilityConfig {
     pub fn is_empty(&self) -> bool {
-        self.non_portable_path_prefixes.is_empty() && self.non_portable_path_contains.is_empty()
+        self.observation_run_window.is_none()
+            && self.non_portable_path_prefixes.is_empty()
+            && self.non_portable_path_contains.is_empty()
     }
 
     pub fn with_generic_defaults(&self) -> Self {
@@ -189,6 +194,9 @@ impl ArtifactPortabilityConfig {
     }
 
     fn merge(&mut self, other: &ArtifactPortabilityConfig) {
+        if other.observation_run_window.is_some() {
+            self.observation_run_window = other.observation_run_window;
+        }
         extend_unique(
             &mut self.non_portable_path_prefixes,
             &other.non_portable_path_prefixes,

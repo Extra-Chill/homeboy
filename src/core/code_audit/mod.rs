@@ -1016,15 +1016,29 @@ fn audit_internal(
         all_findings.extend(public_registry_findings);
     }
 
-    let artifact_portability_findings = if plan.run_artifact_portability() {
+    let artifact_portability_report = if plan.run_artifact_portability() {
         if audit_config.artifact_portability.is_empty() {
-            artifact_portability::run(component_id)
+            artifact_portability::run_report(component_id)
         } else {
-            artifact_portability::run_with_config(component_id, &audit_config.artifact_portability)
+            artifact_portability::run_report_with_config(
+                component_id,
+                &audit_config.artifact_portability,
+            )
         }
     } else {
-        Vec::new()
+        Default::default()
     };
+    if plan.run_artifact_portability() {
+        log_status!(
+            "audit",
+            "Artifact portability: scanned {} recent run(s), {} artifact row(s), {} metadata string field(s) (window: {})",
+            artifact_portability_report.runs_scanned,
+            artifact_portability_report.artifacts_scanned,
+            artifact_portability_report.metadata_fields_scanned,
+            artifact_portability_report.run_window
+        );
+    }
+    let artifact_portability_findings = artifact_portability_report.findings;
     if !artifact_portability_findings.is_empty() {
         log_status!(
             "audit",
@@ -1288,11 +1302,23 @@ fn audit_root_only(
     }
 
     if plan.run_artifact_portability() {
-        let artifact_portability_findings = if audit_config.artifact_portability.is_empty() {
-            artifact_portability::run(component_id)
+        let artifact_portability_report = if audit_config.artifact_portability.is_empty() {
+            artifact_portability::run_report(component_id)
         } else {
-            artifact_portability::run_with_config(component_id, &audit_config.artifact_portability)
+            artifact_portability::run_report_with_config(
+                component_id,
+                &audit_config.artifact_portability,
+            )
         };
+        log_status!(
+            "audit",
+            "Artifact portability: scanned {} recent run(s), {} artifact row(s), {} metadata string field(s) (window: {})",
+            artifact_portability_report.runs_scanned,
+            artifact_portability_report.artifacts_scanned,
+            artifact_portability_report.metadata_fields_scanned,
+            artifact_portability_report.run_window
+        );
+        let artifact_portability_findings = artifact_portability_report.findings;
         if !artifact_portability_findings.is_empty() {
             log_status!(
                 "audit",

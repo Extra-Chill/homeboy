@@ -6,34 +6,67 @@ use crate::core::component::ArtifactPortabilityConfig;
 use crate::core::observation::{ArtifactRecord, ObservationStore, RunListFilter, RunRecord};
 use serde_json::Value;
 
+pub(crate) const DEFAULT_OBSERVATION_RUN_WINDOW: usize = 1000;
+
+#[derive(Debug, Default)]
+pub(crate) struct ArtifactPortabilityReport {
+    pub(crate) findings: Vec<Finding>,
+    pub(crate) runs_scanned: usize,
+    pub(crate) artifacts_scanned: usize,
+    pub(crate) metadata_fields_scanned: usize,
+    pub(crate) run_window: usize,
+}
+
+#[cfg(test)]
 pub(crate) fn run(component_id: &str) -> Vec<Finding> {
     run_with_config(component_id, &ArtifactPortabilityConfig::default())
 }
 
+#[cfg(test)]
 pub(crate) fn run_with_config(
     component_id: &str,
     config: &ArtifactPortabilityConfig,
 ) -> Vec<Finding> {
+    run_report_with_config(component_id, config).findings
+}
+
+pub(crate) fn run_report(component_id: &str) -> ArtifactPortabilityReport {
+    run_report_with_config(component_id, &ArtifactPortabilityConfig::default())
+}
+
+pub(crate) fn run_report_with_config(
+    component_id: &str,
+    config: &ArtifactPortabilityConfig,
+) -> ArtifactPortabilityReport {
+    let run_window = config
+        .observation_run_window
+        .unwrap_or(DEFAULT_OBSERVATION_RUN_WINDOW)
+        .clamp(1, 1000);
+    let mut report = ArtifactPortabilityReport {
+        run_window,
+        ..Default::default()
+    };
     let Ok(store) = ObservationStore::open_initialized() else {
-        return Vec::new();
+        return report;
     };
     let Ok(runs) = store.list_runs(RunListFilter {
         kind: None,
         component_id: Some(component_id.to_string()),
         status: None,
         rig_id: None,
-        limit: Some(1000),
+        limit: Some(run_window as i64),
     }) else {
-        return Vec::new();
+        return report;
     };
     let artifact_root = crate::core::artifact_root().ok();
     let path_policy = config.with_generic_defaults();
-    let mut findings = Vec::new();
 
     for run in runs {
+        report.runs_scanned += 1;
         let Ok(artifacts) = store.list_artifacts(&run.id) else {
             continue;
         };
+        report.artifacts_scanned += artifacts.len();
         let artifact_paths: Vec<String> = artifacts
             .iter()
             .map(|artifact| artifact.path.clone())
@@ -45,18 +78,22 @@ pub(crate) fn run_with_config(
             if artifact_path_is_portable(&artifact.path, artifact_root.as_deref(), &path_policy) {
                 continue;
             }
-            findings.push(artifact_path_finding(&run, &artifact));
+            report.findings.push(artifact_path_finding(&run, &artifact));
         }
-        findings.extend(metadata_path_findings(
+        let metadata_scan = metadata_path_findings(
             &run,
             &artifact_paths,
             artifact_root.as_deref(),
             &path_policy,
-        ));
+        );
+        report.metadata_fields_scanned += metadata_scan.fields_scanned;
+        report.findings.extend(metadata_scan.findings);
     }
 
-    findings.sort_by(|a, b| a.file.cmp(&b.file).then(a.description.cmp(&b.description)));
-    findings
+    report
+        .findings
+        .sort_by(|a, b| a.file.cmp(&b.file).then(a.description.cmp(&b.description)));
+    report
 }
 
 fn artifact_path_is_portable(
@@ -94,14 +131,15 @@ fn metadata_path_findings(
     artifact_paths: &[String],
     artifact_root: Option<&Path>,
     config: &ArtifactPortabilityConfig,
-) -> Vec<Finding> {
+) -> MetadataPathScan {
     let cleanup_promised = metadata_promises_cleanup(&run.metadata_json);
-    let mut findings = Vec::new();
+    let mut scan = MetadataPathScan::default();
     for field in metadata_string_fields(&run.metadata_json) {
+        scan.fields_scanned += 1;
         if is_runner_artifact_ref(field.value)
             && !artifact_paths.iter().any(|path| path == field.value)
         {
-            findings.push(portability_finding(
+            scan.findings.push(portability_finding(
                 run,
                 &field.path,
                 field.value,
@@ -128,7 +166,7 @@ fn metadata_path_findings(
         if cleanup_promised && Path::new(field.value).exists() {
             description.push_str(" that still exists after cleanup metadata promised cleanup");
         }
-        findings.push(portability_finding(
+        scan.findings.push(portability_finding(
             run,
             &field.path,
             field.value,
@@ -136,7 +174,13 @@ fn metadata_path_findings(
             "Store the artifact under the configured artifact root and persist that path, or persist a runner-artifact:// token with a mirrored artifact row",
         ));
     }
-    findings
+    scan
+}
+
+#[derive(Default)]
+struct MetadataPathScan {
+    findings: Vec<Finding>,
+    fields_scanned: usize,
 }
 
 fn portability_finding(
@@ -499,6 +543,96 @@ mod tests {
                 Some(&artifact_root),
                 &ArtifactPortabilityConfig::default().with_generic_defaults()
             ));
+        });
+    }
+
+    #[test]
+    fn default_window_preserves_existing_thousand_run_coverage() {
+        with_isolated_home(|_| {
+            let store = ObservationStore::open_initialized().expect("store");
+            let cwd = std::env::current_dir().expect("cwd");
+            for index in 0..60 {
+                let run_record = store
+                    .start_run(
+                        NewRunRecord::builder("observe")
+                            .component_id("demo")
+                            .command(format!("homeboy observe demo --run {index}"))
+                            .cwd_path(&cwd)
+                            .metadata(serde_json::json!({
+                                "evidence": {
+                                    "output_path": format!("/tmp/homeboy-run-{index}/trace.json")
+                                }
+                            }))
+                            .build(),
+                    )
+                    .expect("run");
+                store
+                    .finish_run(
+                        &run_record.id,
+                        crate::core::observation::RunStatus::Pass,
+                        None,
+                    )
+                    .expect("finish");
+            }
+
+            let report = super::run_report("demo");
+
+            assert_eq!(report.run_window, DEFAULT_OBSERVATION_RUN_WINDOW);
+            assert_eq!(report.runs_scanned, 60);
+            assert_eq!(report.metadata_fields_scanned, 120);
+            assert_eq!(report.findings.len(), 60);
+            assert!(report
+                .findings
+                .iter()
+                .any(|finding| finding.description.contains("homeboy-run-0")));
+        });
+    }
+
+    #[test]
+    fn explicit_run_window_bounds_scan_and_reports_counts() {
+        with_isolated_home(|_| {
+            let store = ObservationStore::open_initialized().expect("store");
+            let cwd = std::env::current_dir().expect("cwd");
+            for index in 0..5 {
+                let run_record = store
+                    .start_run(
+                        NewRunRecord::builder("observe")
+                            .component_id("demo")
+                            .command(format!("homeboy observe demo --run {index}"))
+                            .cwd_path(&cwd)
+                            .metadata(serde_json::json!({
+                                "evidence": {
+                                    "output_path": format!("/tmp/homeboy-run-{index}/trace.json")
+                                }
+                            }))
+                            .build(),
+                    )
+                    .expect("run");
+                store
+                    .finish_run(
+                        &run_record.id,
+                        crate::core::observation::RunStatus::Pass,
+                        None,
+                    )
+                    .expect("finish");
+            }
+
+            let report = super::run_report_with_config(
+                "demo",
+                &ArtifactPortabilityConfig {
+                    observation_run_window: Some(2),
+                    ..Default::default()
+                },
+            );
+
+            assert_eq!(report.run_window, 2);
+            assert_eq!(report.runs_scanned, 2);
+            assert_eq!(report.metadata_fields_scanned, 4);
+            assert_eq!(report.findings.len(), 2);
+            assert!(!report
+                .findings
+                .iter()
+                .any(|finding| finding.description.contains("homeboy-run-0")));
         });
     }
 
