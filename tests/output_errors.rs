@@ -59,6 +59,80 @@ fn unsupported_runner_validation_error_writes_json_output_file() {
     assert!(file_json.get("data").is_none());
 }
 
+#[test]
+fn output_json_is_rejected_as_format_footgun() {
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    let output = Command::new(homeboy_bin())
+        .args(["--runner", "lab", "--output", "json", "status"])
+        .current_dir(dir.path())
+        .env("HOME", dir.path())
+        .output()
+        .expect("run homeboy");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        !dir.path().join("json").exists(),
+        "bare --output json should not create a literal json file"
+    );
+
+    let stdout_json: Value = serde_json::from_slice(&output.stdout).expect("stdout json");
+    assert_eq!(stdout_json["success"], false);
+    assert_eq!(stdout_json["error"]["code"], "validation.invalid_argument");
+    assert!(stdout_json["error"]["message"]
+        .as_str()
+        .expect("message")
+        .contains("looks like an output format"));
+}
+
+#[test]
+fn output_equals_json_is_rejected_as_format_footgun() {
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    let output = Command::new(homeboy_bin())
+        .args(["--runner", "lab", "--output=json", "status"])
+        .current_dir(dir.path())
+        .env("HOME", dir.path())
+        .output()
+        .expect("run homeboy");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        !dir.path().join("json").exists(),
+        "bare --output=json should not create a literal json file"
+    );
+
+    let stdout_json: Value = serde_json::from_slice(&output.stdout).expect("stdout json");
+    assert_eq!(stdout_json["error"]["code"], "validation.invalid_argument");
+}
+
+#[test]
+fn explicit_json_path_is_allowed() {
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    let output = Command::new(homeboy_bin())
+        .args(["--runner", "lab", "--output", "./json", "status"])
+        .current_dir(dir.path())
+        .env("HOME", dir.path())
+        .output()
+        .expect("run homeboy");
+
+    assert_eq!(output.status.code(), Some(2));
+
+    let output_path = dir.path().join("json");
+    assert!(
+        output_path.exists(),
+        "explicit relative path should still be accepted; stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let file_json: Value =
+        serde_json::from_str(&std::fs::read_to_string(output_path).expect("read output file"))
+            .expect("output file json");
+    assert_eq!(file_json["error"]["code"], "validation.invalid_argument");
+}
+
 fn homeboy_bin() -> PathBuf {
     PathBuf::from(std::env::var_os("CARGO_BIN_EXE_homeboy").expect("CARGO_BIN_EXE_homeboy"))
 }
