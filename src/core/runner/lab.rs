@@ -571,17 +571,16 @@ fn automatic_capability_fallback(
 mod lab_arg_tests;
 
 #[cfg(test)]
+mod preparation_tests;
+
+#[cfg(test)]
 mod tests {
-    use super::super::lab_selection::{
-        prepare_lab_runner_for_offload_with, resolve_lab_runner_selection_from_default,
-    };
+    use super::super::lab_selection::resolve_lab_runner_selection_from_default;
     use super::super::lab_workspaces::LAB_WORKSPACE_MAPPING_SCHEMA;
     use super::*;
     use crate::core::observation::LAB_OFFLOAD_METADATA_ENV;
     use crate::core::plan::PlanKind;
-    use crate::core::runner::{
-        RunnerConnectReport, RunnerRequiredTool, RunnerTunnelMode, RunnerWorkspaceSyncOutput,
-    };
+    use crate::core::runner::{RunnerRequiredTool, RunnerWorkspaceSyncOutput};
 
     fn portable_lab_command(label: &'static str) -> LabOffloadCommand {
         LabOffloadCommand {
@@ -755,182 +754,6 @@ mod tests {
 
         assert_eq!(err.code.as_str(), "validation.invalid_argument");
         assert!(err.message.contains("single-workspace Lab snapshot"));
-    }
-
-    #[test]
-    fn lab_runner_preparation_falls_back_for_unreachable_default_runner() {
-        let selection = LabRunnerSelection {
-            runner_id: "lab".to_string(),
-            source: LabRunnerSelectionSource::Default,
-            mode: RunnerTunnelMode::DirectSsh,
-        };
-
-        let prepared = prepare_lab_runner_for_offload_with(
-            &selection,
-            |runner_id| {
-                Ok(RunnerStatusReport {
-                    runner_id: runner_id.to_string(),
-                    connected: false,
-                    state: super::super::RunnerSessionState::Disconnected,
-                    session: None,
-                    stale_daemon: None,
-                    session_path: "/tmp/lab.json".to_string(),
-                })
-            },
-            |runner_id| {
-                Ok((
-                    RunnerConnectReport {
-                        runner_id: runner_id.to_string(),
-                        mode: None,
-                        role: None,
-                        connected: false,
-                        recorded: None,
-                        local_url: None,
-                        broker_url: None,
-                        controller_id: None,
-                        remote_daemon_address: None,
-                        tunnel_pid: None,
-                        remote_daemon_pid: None,
-                        homeboy_version: None,
-                        session_path: Some("/tmp/lab.json".to_string()),
-                        failure_kind: Some(super::super::RunnerFailureKind::SshFailure),
-                        failure_message: Some("SSH connectivity check failed".to_string()),
-                    },
-                    20,
-                ))
-            },
-        )
-        .expect("prepared");
-
-        assert_eq!(
-            prepared,
-            LabRunnerPreparation::FallBackLocal {
-                reason: "SSH connectivity check failed".to_string()
-            }
-        );
-    }
-
-    #[test]
-    fn lab_runner_preparation_uses_already_connected_runner() {
-        let selection = LabRunnerSelection {
-            runner_id: "lab".to_string(),
-            source: LabRunnerSelectionSource::Default,
-            mode: RunnerTunnelMode::DirectSsh,
-        };
-
-        let prepared = prepare_lab_runner_for_offload_with(
-            &selection,
-            |runner_id| {
-                Ok(RunnerStatusReport {
-                    runner_id: runner_id.to_string(),
-                    connected: true,
-                    state: super::super::RunnerSessionState::Connected,
-                    session: None,
-                    stale_daemon: None,
-                    session_path: "/tmp/lab.json".to_string(),
-                })
-            },
-            |_| panic!("connected runner should not reconnect"),
-        )
-        .expect("prepared");
-
-        assert_eq!(prepared, LabRunnerPreparation::Ready);
-    }
-
-    #[test]
-    fn lab_runner_preparation_connects_disconnected_runner() {
-        let selection = LabRunnerSelection {
-            runner_id: "lab".to_string(),
-            source: LabRunnerSelectionSource::Default,
-            mode: RunnerTunnelMode::DirectSsh,
-        };
-
-        let prepared = prepare_lab_runner_for_offload_with(
-            &selection,
-            |runner_id| {
-                Ok(RunnerStatusReport {
-                    runner_id: runner_id.to_string(),
-                    connected: false,
-                    state: super::super::RunnerSessionState::Disconnected,
-                    session: None,
-                    stale_daemon: None,
-                    session_path: "/tmp/lab.json".to_string(),
-                })
-            },
-            |runner_id| {
-                Ok((
-                    RunnerConnectReport {
-                        runner_id: runner_id.to_string(),
-                        mode: Some(RunnerTunnelMode::DirectSsh),
-                        role: Some(super::super::RunnerSessionRole::Controller),
-                        connected: true,
-                        recorded: None,
-                        local_url: Some("http://127.0.0.1:1234".to_string()),
-                        broker_url: None,
-                        controller_id: None,
-                        remote_daemon_address: Some("127.0.0.1:5678".to_string()),
-                        tunnel_pid: None,
-                        remote_daemon_pid: Some(42),
-                        homeboy_version: Some("homeboy 0.0.0".to_string()),
-                        session_path: Some("/tmp/lab.json".to_string()),
-                        failure_kind: None,
-                        failure_message: None,
-                    },
-                    0,
-                ))
-            },
-        )
-        .expect("prepared");
-
-        assert_eq!(prepared, LabRunnerPreparation::Ready);
-    }
-
-    #[test]
-    fn lab_runner_preparation_errors_for_unreachable_explicit_runner() {
-        let selection = LabRunnerSelection {
-            runner_id: "lab".to_string(),
-            source: LabRunnerSelectionSource::Explicit,
-            mode: RunnerTunnelMode::DirectSsh,
-        };
-
-        let err = prepare_lab_runner_for_offload_with(
-            &selection,
-            |runner_id| {
-                Ok(RunnerStatusReport {
-                    runner_id: runner_id.to_string(),
-                    connected: false,
-                    state: super::super::RunnerSessionState::Disconnected,
-                    session: None,
-                    stale_daemon: None,
-                    session_path: "/tmp/lab.json".to_string(),
-                })
-            },
-            |runner_id| {
-                Ok((
-                    RunnerConnectReport {
-                        runner_id: runner_id.to_string(),
-                        mode: None,
-                        role: None,
-                        connected: false,
-                        recorded: None,
-                        local_url: None,
-                        broker_url: None,
-                        controller_id: None,
-                        remote_daemon_address: None,
-                        tunnel_pid: None,
-                        remote_daemon_pid: None,
-                        homeboy_version: None,
-                        session_path: Some("/tmp/lab.json".to_string()),
-                        failure_kind: Some(super::super::RunnerFailureKind::SshFailure),
-                        failure_message: Some("SSH connectivity check failed".to_string()),
-                    },
-                    20,
-                ))
-            },
-        )
-        .expect_err("explicit runner should error");
-
-        assert!(err.message.contains("could not connect runner"));
     }
 
     #[test]
