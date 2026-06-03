@@ -479,9 +479,6 @@ fn audit_internal(
         .iter()
         .flat_map(|(_, _, fps)| fps.iter())
         .collect();
-    let analysis = AuditAnalysisContext {
-        fingerprints: all_fingerprints.iter().map(|fp| (*fp).clone()).collect(),
-    };
 
     // Build convention method set ONCE — used by duplication, near-duplicate, and parallel detectors.
     // Convention-expected methods are excluded from duplication/parallel findings because identical
@@ -1188,6 +1185,15 @@ fn audit_internal(
             total_dir_outliers
         );
     }
+
+    drop(all_fingerprints);
+    let analysis = AuditAnalysisContext {
+        fingerprints: discovery
+            .groups
+            .into_iter()
+            .flat_map(|(_, _, fingerprints)| fingerprints)
+            .collect(),
+    };
 
     Ok(AuditWithAnalysis {
         result: CodeAuditResult {

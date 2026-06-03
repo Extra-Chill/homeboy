@@ -353,6 +353,15 @@ fn test_compute_fixability_with_analysis() {
         !audit.analysis.fingerprints.is_empty(),
         "audit analysis should retain fingerprints for fixability planning"
     );
+    assert!(
+        audit
+            .analysis
+            .fingerprints
+            .iter()
+            .any(|fp| fp.relative_path == "commands/good_one.rs"
+                && fp.content.contains("pub fn helper")),
+        "audit analysis should retain source content for downstream fix planning"
+    );
 
     let from_context = compute_fixability_with_analysis(&audit.result, &audit.analysis);
     let from_wrapper = compute_fixability(&audit.result);
