@@ -8,6 +8,7 @@ use crate::core::agent_task::{
     AgentTaskArtifact, AgentTaskOutcome, AgentTaskOutcomeStatus, AGENT_TASK_OUTCOME_SCHEMA,
 };
 use crate::core::agent_task_scheduler::{AgentTaskAggregate, AGENT_TASK_AGGREGATE_SCHEMA};
+use crate::core::agent_task_timeout_artifacts::is_actionable_patch_artifact;
 use crate::core::{Error, Result};
 
 pub const AGENT_TASK_PROMOTION_REPORT_SCHEMA: &str = "homeboy/agent-task-promotion-report/v1";
@@ -226,7 +227,7 @@ fn select_patch_artifact(
         .artifacts
         .iter()
         .filter(|artifact| artifact_id.is_none_or(|expected| artifact.id == expected))
-        .filter(|artifact| is_patch_artifact(artifact))
+        .filter(|artifact| is_actionable_patch_artifact(artifact))
         .cloned()
         .collect();
 
@@ -234,7 +235,7 @@ fn select_patch_artifact(
         1 => Ok(artifacts.into_iter().next().unwrap()),
         0 => Err(Error::validation_invalid_argument(
             "artifact_id",
-            "no matching patch artifact was found",
+            "no matching non-empty patch artifact was found; inspect the agent result or transcript for diagnosis",
             None,
             None,
         )),
@@ -245,14 +246,6 @@ fn select_patch_artifact(
             None,
         )),
     }
-}
-
-fn is_patch_artifact(artifact: &AgentTaskArtifact) -> bool {
-    artifact.kind == "patch"
-        || artifact.kind == "diff"
-        || artifact.mime.as_deref() == Some("text/x-patch")
-        || artifact.mime.as_deref() == Some("text/x-diff")
-        || artifact.metadata.get("role").and_then(Value::as_str) == Some("patch")
 }
 
 fn resolve_artifact_path(
@@ -507,6 +500,41 @@ mod tests {
         let err = validate_patch("\n\t").expect_err("empty patch rejected");
 
         assert!(err.message.contains("empty patch"));
+    }
+
+    #[test]
+    fn select_patch_artifact_rejects_empty_patch_metadata() {
+        let outcome = AgentTaskOutcome {
+            schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+            task_id: "task-1".to_string(),
+            status: AgentTaskOutcomeStatus::Succeeded,
+            summary: None,
+            failure_classification: None,
+            artifacts: vec![AgentTaskArtifact {
+                schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+                id: "patch".to_string(),
+                kind: "patch".to_string(),
+                name: Some("patch.diff".to_string()),
+                path: Some("patch.diff".to_string()),
+                url: None,
+                mime: Some("text/x-patch".to_string()),
+                size_bytes: Some(0),
+                sha256: Some(
+                    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string(),
+                ),
+                metadata: serde_json::json!({ "role": "patch" }),
+            }],
+            evidence_refs: Vec::new(),
+            diagnostics: Vec::new(),
+            workflow: None,
+            follow_up: None,
+            metadata: Value::Null,
+        };
+
+        let err = select_patch_artifact(&outcome, None).expect_err("empty patch rejected");
+
+        assert!(err.message.contains("non-empty patch artifact"));
+        assert!(err.message.contains("agent result or transcript"));
     }
 
     #[test]

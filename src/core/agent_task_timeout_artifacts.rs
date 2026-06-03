@@ -9,6 +9,8 @@ use crate::core::agent_task::{
     AgentTaskRequest, AGENT_TASK_ARTIFACT_SCHEMA, AGENT_TASK_OUTCOME_SCHEMA,
 };
 
+const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
 #[derive(Default)]
 pub(crate) struct TimeoutArtifactDiscovery {
     pub(crate) artifacts: Vec<AgentTaskArtifact>,
@@ -179,6 +181,17 @@ pub(crate) fn append_unique_evidence_refs(
 }
 
 pub(crate) fn is_actionable_patch_artifact(artifact: &AgentTaskArtifact) -> bool {
+    is_patch_artifact(artifact) && !is_empty_patch_artifact(artifact)
+}
+
+pub(crate) fn is_empty_patch_artifact(artifact: &AgentTaskArtifact) -> bool {
+    is_patch_artifact(artifact)
+        && (artifact.size_bytes == Some(0)
+            || artifact.sha256.as_deref() == Some(EMPTY_SHA256)
+            || artifact.sha256.as_deref() == Some(""))
+}
+
+fn is_patch_artifact(artifact: &AgentTaskArtifact) -> bool {
     artifact.kind == "patch"
         || artifact.kind == "diff"
         || artifact.mime.as_deref() == Some("text/x-patch")

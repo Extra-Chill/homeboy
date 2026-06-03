@@ -19,7 +19,7 @@ pub use crate::core::agent_task_schedule::{
 use crate::core::agent_task_timeout::timeout_with_grace;
 use crate::core::agent_task_timeout_artifacts::{
     append_unique_artifacts, append_unique_evidence_refs, is_actionable_patch_artifact,
-    merge_timeout_outcome, TimeoutArtifactDiscovery,
+    is_empty_patch_artifact, merge_timeout_outcome, TimeoutArtifactDiscovery,
 };
 
 pub trait AgentTaskExecutorAdapter: Send + Sync + 'static {
@@ -604,6 +604,15 @@ impl AgentTaskScheduleSupport {
                 "runtime completed with an actionable artifact before timeout finalization"
                     .to_string(),
             );
+        } else if outcome.status == AgentTaskOutcomeStatus::Succeeded
+            && outcome.artifacts.iter().any(is_empty_patch_artifact)
+        {
+            outcome.status = AgentTaskOutcomeStatus::NoOp;
+            outcome.failure_classification = None;
+            outcome.summary = Some(
+                "runtime completed with an empty patch artifact before timeout finalization"
+                    .to_string(),
+            );
         }
 
         outcome.diagnostics.push(AgentTaskDiagnostic {
@@ -1022,6 +1031,77 @@ mod tests {
                     .get("actionable_patch")
                     .and_then(Value::as_bool)
                     == Some(true)
+        }));
+    }
+
+    #[test]
+    fn timeout_with_empty_patch_artifact_is_not_actionable() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let artifact_root = temp.path().join("task-1-artifacts");
+        fs::create_dir_all(&artifact_root).expect("artifact root");
+        let patch_path = artifact_root.join("patch.diff");
+        fs::write(&patch_path, "").expect("empty patch");
+        fs::write(artifact_root.join("transcript.log"), "runtime completed").expect("log");
+        fs::write(
+            artifact_root.join("agent-result.json"),
+            serde_json::to_string(&AgentTaskOutcome {
+                schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+                task_id: "task-1".to_string(),
+                status: AgentTaskOutcomeStatus::Succeeded,
+                summary: Some("patch ready".to_string()),
+                failure_classification: None,
+                artifacts: vec![AgentTaskArtifact {
+                    schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+                    id: "patch".to_string(),
+                    kind: "patch".to_string(),
+                    name: Some("patch.diff".to_string()),
+                    path: Some(patch_path.display().to_string()),
+                    url: None,
+                    mime: Some("text/x-patch".to_string()),
+                    size_bytes: Some(0),
+                    sha256: Some(
+                        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                            .to_string(),
+                    ),
+                    metadata: json!({ "role": "patch" }),
+                }],
+                evidence_refs: vec![AgentTaskEvidenceRef {
+                    kind: "runtime_bundle".to_string(),
+                    uri: artifact_root.display().to_string(),
+                    label: Some("runtime bundle".to_string()),
+                }],
+                diagnostics: Vec::new(),
+                workflow: None,
+                follow_up: None,
+                metadata: json!({}),
+            })
+            .expect("agent result json"),
+        )
+        .expect("agent result");
+
+        let scheduler = AgentTaskScheduler::new(RecordingExecutor::new(
+            HashMap::new(),
+            Duration::from_millis(250),
+        ));
+        let mut plan = plan_with_tasks(1);
+        plan.tasks[0].limits.timeout_ms = Some(1);
+        plan.tasks[0].metadata = json!({ "artifact_root": artifact_root });
+
+        let aggregate = scheduler.run(plan);
+
+        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+        assert_eq!(aggregate.totals.succeeded, 1);
+        assert_eq!(aggregate.totals.timed_out, 0);
+        let outcome = &aggregate.outcomes[0];
+        assert_eq!(outcome.status, AgentTaskOutcomeStatus::NoOp);
+        assert!(outcome.summary.as_deref().unwrap().contains("empty patch"));
+        assert!(outcome.diagnostics.iter().any(|diagnostic| {
+            diagnostic.class == "completed_runtime_late_provider_race"
+                && diagnostic
+                    .data
+                    .get("actionable_patch")
+                    .and_then(Value::as_bool)
+                    == Some(false)
         }));
     }
 
