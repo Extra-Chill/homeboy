@@ -27,6 +27,30 @@
       "command": "node {{extension_path}}/scripts/agent/homeboy-codebox-agent-task-executor.cjs",
       "request_schema": "homeboy/agent-task-request/v1",
       "outcome_schema": "homeboy/agent-task-outcome/v1",
+      "request_required_fields": [
+        "schema",
+        "task_id",
+        "executor.backend",
+        "instructions"
+      ],
+      "outcome_statuses": [
+        "succeeded",
+        "failed",
+        "no_op",
+        "unable_to_remediate",
+        "timeout",
+        "provider_error"
+      ],
+      "failure_classifications": [
+        "provider",
+        "timeout",
+        "execution_failed"
+      ],
+      "redacted_metadata_keys": [
+        "secret_env_values",
+        "secretEnvValues",
+        "secrets"
+      ],
       "capabilities": [
         "browser_runtime",
         "wordpress_sandbox",

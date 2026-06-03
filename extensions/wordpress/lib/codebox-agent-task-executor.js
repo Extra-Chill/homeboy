@@ -26,6 +26,27 @@ const WP_CODEBOX_RUNTIME_GAP_TRACKERS = [
   'https://github.com/Automattic/wp-codebox/issues/532',
 ];
 
+const AGENT_TASK_OUTCOME_STATUSES = [
+  'succeeded',
+  'failed',
+  'no_op',
+  'unable_to_remediate',
+  'timeout',
+  'provider_error',
+];
+
+const AGENT_TASK_FAILURE_CLASSIFICATIONS = [
+  'provider',
+  'timeout',
+  'execution_failed',
+];
+
+const AGENT_TASK_REDACTED_METADATA_KEYS = [
+  'secret_env_values',
+  'secretEnvValues',
+  'secrets',
+];
+
 function assertAgentTaskRequest(request) {
   if (!request || request.schema !== AGENT_TASK_REQUEST_SCHEMA) {
     throw new Error(`Agent task request must use schema ${AGENT_TASK_REQUEST_SCHEMA}.`);
@@ -47,6 +68,10 @@ function providerContract(options = {}) {
     command: options.command || 'node {{extension_path}}/scripts/agent/homeboy-codebox-agent-task-executor.cjs',
     request_schema: AGENT_TASK_REQUEST_SCHEMA,
     outcome_schema: AGENT_TASK_OUTCOME_SCHEMA,
+    request_required_fields: ['schema', 'task_id', 'executor.backend', 'instructions'],
+    outcome_statuses: AGENT_TASK_OUTCOME_STATUSES,
+    failure_classifications: AGENT_TASK_FAILURE_CLASSIFICATIONS,
+    redacted_metadata_keys: AGENT_TASK_REDACTED_METADATA_KEYS,
     capabilities: PROVIDER_CAPABILITIES,
     status: 'preparatory',
     upstream_dependency: 'https://github.com/Automattic/wp-codebox/issues/480',
@@ -249,7 +274,7 @@ function sanitizePublicMetadata(value) {
   }
 
   return Object.fromEntries(Object.entries(value).map(([key, entry]) => {
-    if (/^(secret_env_values|secretEnvValues|secrets)$/i.test(key)) {
+    if (AGENT_TASK_REDACTED_METADATA_KEYS.some((redactedKey) => redactedKey.toLowerCase() === key.toLowerCase())) {
       return [key, '[redacted]'];
     }
     return [key, sanitizePublicMetadata(entry)];
@@ -396,6 +421,9 @@ module.exports = {
   AGENT_TASK_OUTCOME_SCHEMA,
   WP_CODEBOX_TASK_REQUEST_SCHEMA,
   PROVIDER_CAPABILITIES,
+  AGENT_TASK_OUTCOME_STATUSES,
+  AGENT_TASK_FAILURE_CLASSIFICATIONS,
+  AGENT_TASK_REDACTED_METADATA_KEYS,
   providerContract,
   codeboxTaskRequestFromAgentTaskRequest,
   agentTaskOutcomeFromCodeboxResult,
