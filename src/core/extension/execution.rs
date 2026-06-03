@@ -582,15 +582,20 @@ pub(super) fn build_action_env(
     project_base_path: Option<&str>,
 ) -> Vec<(String, String)> {
     let settings_json = payload.to_string();
+    let component_id =
+        crate::core::engine::text::json_path_str(payload, &["release", "component_id"]);
+    let component_path =
+        crate::core::engine::text::json_path_str(payload, &["release", "local_path"]);
+
     build_exec_env(
         extension_id,
         project_id,
-        None,
+        component_id,
         &settings_json,
         extension_path,
         project_base_path,
         None,
-        None, // no path override in action context
+        component_path,
     )
 }
 

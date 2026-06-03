@@ -1113,6 +1113,35 @@ mod tests {
     }
 
     #[test]
+    fn run_package_passes_component_id_from_release_payload_to_action_env() {
+        crate::test_support::with_isolated_home(|_| {
+            let component = tempfile::tempdir_in(std::env::temp_dir())
+                .expect("component tempdir with mismatched basename");
+            let package = release_package_extension(
+                "wordpress",
+                "printf '[{\"path\":\"build/%s.zip\",\"type\":\"wordpress\"}]' \"$HOMEBOY_COMPONENT_ID\"",
+            );
+            crate::core::extension::save_manifest(&package).expect("save package extension");
+
+            let mut state = crate::core::release::types::ReleaseState::default();
+            let result = run_package(
+                &[package],
+                &mut state,
+                "intelligence-horse-theme",
+                &component.path().to_string_lossy(),
+            )
+            .expect("package step");
+
+            assert_eq!(result.status, ReleaseStepStatus::Success);
+            assert_eq!(state.artifacts.len(), 1);
+            assert_eq!(
+                state.artifacts[0].path,
+                "build/intelligence-horse-theme.zip"
+            );
+        });
+    }
+
+    #[test]
     fn run_package_failure_names_the_failing_package_provider() {
         crate::test_support::with_isolated_home(|_| {
             let component = tempfile::tempdir().expect("component tempdir");
