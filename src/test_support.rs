@@ -172,19 +172,16 @@ pub(crate) fn write_source_extension(home: &std::path::Path, id: &str, file_exte
     .expect("fingerprint script");
 
     if matches!(file_extension, "rs" | "fixture") {
-        std::fs::write(
-            extension_dir.join("grammar.toml"),
-            minimal_source_grammar(file_extension),
-        )
-        .expect("source grammar");
+        std::fs::write(extension_dir.join("grammar.toml"), minimal_source_grammar())
+            .expect("source grammar");
     }
 }
 
-fn minimal_source_grammar(file_extension: &str) -> String {
+fn minimal_source_grammar() -> &'static str {
     r#"
 [language]
 id = "source"
-extensions = ["__FILE_EXTENSION__"]
+extensions = ["rs", "fixture"]
 
 [comments]
 line = ["//"]
@@ -255,7 +252,6 @@ context = "any"
 regex = '#\[cfg\(test\)\]'
 context = "any"
 "#
-    .replace("__FILE_EXTENSION__", file_extension)
 }
 
 pub(crate) fn home_env_guard() -> MutexGuard<'static, ()> {
