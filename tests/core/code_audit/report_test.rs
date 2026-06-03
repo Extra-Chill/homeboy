@@ -323,59 +323,61 @@ fn test_compute_fixability_counts_fixes_from_real_audit() {
 fn test_compute_fixability_with_analysis() {
     use std::fs;
 
-    let _audit_guard = crate::test_support::AuditGuard::new();
-    let dir = tempfile::tempdir().expect("temp dir");
-    let root = dir.path();
+    crate::test_support::with_isolated_audit_home(|home| {
+        crate::test_support::write_source_extension(home.path(), "source-fixture", "fixture");
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = dir.path();
 
-    fs::create_dir_all(root.join("commands")).unwrap();
-    fs::write(
-        root.join("commands/good_one.rs"),
-        "pub fn run() {}\npub fn helper() {}\n",
-    )
-    .unwrap();
-    fs::write(
-        root.join("commands/good_two.rs"),
-        "pub fn run() {}\npub fn helper() {}\n",
-    )
-    .unwrap();
-    fs::write(root.join("commands/bad.rs"), "pub fn run() {}\n").unwrap();
+        fs::create_dir_all(root.join("commands")).unwrap();
+        fs::write(
+            root.join("commands/good_one.fixture"),
+            "pub fn run() {}\npub fn helper() {}\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("commands/good_two.fixture"),
+            "pub fn run() {}\npub fn helper() {}\n",
+        )
+        .unwrap();
+        fs::write(root.join("commands/bad.fixture"), "pub fn run() {}\n").unwrap();
 
-    let audit = crate::core::code_audit::audit_path_with_id_with_plan_and_analysis(
-        "fixability-context-test",
-        &root.to_string_lossy(),
-        &crate::core::code_audit::AuditExecutionPlan::full(),
-        &[],
-        &[],
-    )
-    .expect("audit should run with analysis");
+        let audit = crate::core::code_audit::audit_path_with_id_with_plan_and_analysis(
+            "fixability-context-test",
+            &root.to_string_lossy(),
+            &crate::core::code_audit::AuditExecutionPlan::full(),
+            &[],
+            &["source-fixture".to_string()],
+        )
+        .expect("audit should run with analysis");
 
-    assert!(
-        !audit.analysis.fingerprints.is_empty(),
-        "audit analysis should retain fingerprints for fixability planning"
-    );
-    assert!(
-        audit
-            .analysis
-            .fingerprints
-            .iter()
-            .any(|fp| fp.relative_path == "commands/good_one.rs"
-                && fp.content.contains("pub fn helper")),
-        "audit analysis should retain source content for downstream fix planning"
-    );
-
-    let from_context = compute_fixability_with_analysis(&audit.result, &audit.analysis);
-    let from_wrapper = compute_fixability(&audit.result);
-
-    assert_eq!(from_context.is_some(), from_wrapper.is_some());
-    if let (Some(context), Some(wrapper)) = (from_context, from_wrapper) {
-        assert_eq!(context.fixable_count, wrapper.fixable_count);
-        assert_eq!(context.automated_count, wrapper.automated_count);
-        assert_eq!(context.manual_only_count, wrapper.manual_only_count);
-        assert_eq!(
-            serde_json::to_value(&context.by_kind).unwrap(),
-            serde_json::to_value(&wrapper.by_kind).unwrap()
+        assert!(
+            !audit.analysis.fingerprints.is_empty(),
+            "audit analysis should retain fingerprints for fixability planning"
         );
-    }
+        assert!(
+            audit
+                .analysis
+                .fingerprints
+                .iter()
+                .any(|fp| fp.relative_path == "commands/good_one.fixture"
+                    && fp.content.contains("pub fn helper")),
+            "audit analysis should retain source content for downstream fix planning"
+        );
+
+        let from_context = compute_fixability_with_analysis(&audit.result, &audit.analysis);
+        let from_wrapper = compute_fixability(&audit.result);
+
+        assert_eq!(from_context.is_some(), from_wrapper.is_some());
+        if let (Some(context), Some(wrapper)) = (from_context, from_wrapper) {
+            assert_eq!(context.fixable_count, wrapper.fixable_count);
+            assert_eq!(context.automated_count, wrapper.automated_count);
+            assert_eq!(context.manual_only_count, wrapper.manual_only_count);
+            assert_eq!(
+                serde_json::to_value(&context.by_kind).unwrap(),
+                serde_json::to_value(&wrapper.by_kind).unwrap()
+            );
+        }
+    });
 }
 
 #[test]

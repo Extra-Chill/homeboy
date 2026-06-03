@@ -396,7 +396,9 @@ fn normalize_shell_export_value(value: &str) -> String {
 mod tests {
     use super::*;
     use crate::commands::utils::args::{BaselineArgs, ExtensionOverrideArgs, SettingArgs};
-    use crate::test_support::with_isolated_home;
+    use crate::test_support::{
+        with_isolated_audit_home, with_isolated_home, write_source_extension,
+    };
     use clap::Parser;
     use homeboy::core::observation::ObservationStore;
     use std::fs;
@@ -814,60 +816,65 @@ mod tests {
     /// Fixes are now owned by `homeboy refactor --from audit --write`.
     #[test]
     fn audit_detects_outliers_in_convention_group() {
-        let _audit_guard = crate::test_support::AuditGuard::new();
-        let root = tmp_dir("audit-read-only");
-        fs::create_dir_all(root.join("commands")).unwrap();
+        with_isolated_audit_home(|home| {
+            write_source_extension(home.path(), "source-fixture", "rs");
+            let root = tmp_dir("audit-read-only");
+            fs::create_dir_all(root.join("commands")).unwrap();
 
-        fs::write(
-            root.join("commands/good_one.rs"),
-            "pub fn run() {}\npub fn execute() {}\n",
-        )
-        .unwrap();
-        fs::write(
-            root.join("commands/good_two.rs"),
-            "pub fn run() {}\npub fn execute() {}\n",
-        )
-        .unwrap();
-        fs::write(
-            root.join("commands/good_three.rs"),
-            "pub fn run() {}\npub fn execute() {}\n",
-        )
-        .unwrap();
-        fs::write(root.join("commands/bad.rs"), "pub fn run() {}\n").unwrap();
+            fs::write(
+                root.join("commands/good_one.rs"),
+                "pub fn run() {}\npub fn execute() {}\n",
+            )
+            .unwrap();
+            fs::write(
+                root.join("commands/good_two.rs"),
+                "pub fn run() {}\npub fn execute() {}\n",
+            )
+            .unwrap();
+            fs::write(
+                root.join("commands/good_three.rs"),
+                "pub fn run() {}\npub fn execute() {}\n",
+            )
+            .unwrap();
+            fs::write(root.join("commands/bad.rs"), "pub fn run() {}\n").unwrap();
 
-        let args = AuditArgs {
-            comp: PositionalComponentArgs {
-                component: Some(root.to_string_lossy().to_string()),
-                path: None,
-            },
-            extension_override: ExtensionOverrideArgs::default(),
-            conventions: false,
-            only: vec![],
-            exclude: vec![],
-            baseline_args: BaselineArgs {
-                baseline: false,
-                ignore_baseline: true,
-                ratchet: false,
-            },
-            changed_since: None,
-            json_summary: false,
-            fixability: false,
-        };
+            let args = AuditArgs {
+                comp: PositionalComponentArgs {
+                    component: Some(root.to_string_lossy().to_string()),
+                    path: None,
+                },
+                extension_override: ExtensionOverrideArgs {
+                    extensions: vec!["source-fixture".to_string()],
+                },
+                conventions: false,
+                only: vec![],
+                exclude: vec![],
+                baseline_args: BaselineArgs {
+                    baseline: false,
+                    ignore_baseline: true,
+                    ratchet: false,
+                },
+                changed_since: None,
+                json_summary: false,
+                fixability: false,
+            };
 
-        let (output, code) = run(args, &crate::commands::GlobalArgs {}).expect("audit should run");
+            let (output, code) =
+                run(args, &crate::commands::GlobalArgs {}).expect("audit should run");
 
-        // Audit should detect the outlier and return findings
-        // Summary or other modes are also valid.
-        if let AuditCommandOutput::Full { result, .. } = output {
-            assert!(
-                !result.findings.is_empty(),
-                "expected findings for the outlier file"
-            );
-        }
+            // Audit should detect the outlier and return findings
+            // Summary or other modes are also valid.
+            if let AuditCommandOutput::Full { result, .. } = output {
+                assert!(
+                    !result.findings.is_empty(),
+                    "expected findings for the outlier file"
+                );
+            }
 
-        // Non-zero exit expected when outliers are found
-        assert!(code >= 0, "audit should complete without error");
+            // Non-zero exit expected when outliers are found
+            assert!(code >= 0, "audit should complete without error");
 
-        let _ = fs::remove_dir_all(root);
+            let _ = fs::remove_dir_all(root);
+        });
     }
 }
