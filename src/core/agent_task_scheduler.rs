@@ -575,10 +575,11 @@ impl AgentTaskScheduleSupport {
         timeout_kind: &str,
     ) {
         let discovery = TimeoutArtifactDiscovery::discover(request);
-        if discovery.artifacts.is_empty()
-            && discovery.evidence_refs.is_empty()
-            && discovery.outcome.is_none()
-        {
+        let has_runtime_evidence = discovery.has_runtime_evidence();
+        outcome.diagnostics.extend(discovery.diagnostics);
+        if !has_runtime_evidence {
+            append_unique_artifacts(&mut outcome.artifacts, discovery.artifacts);
+            append_unique_evidence_refs(&mut outcome.evidence_refs, discovery.evidence_refs);
             outcome.diagnostics.push(AgentTaskDiagnostic {
                 class: timeout_kind.to_string(),
                 message:
