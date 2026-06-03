@@ -132,6 +132,7 @@ pub fn save<M: Serialize + for<'de> Deserialize<'de>>(
 ) -> Result<PathBuf> {
     let mut known_fingerprints: Vec<String> = items.iter().map(|item| item.fingerprint()).collect();
     known_fingerprints.sort();
+    known_fingerprints.dedup();
     let metadata_value = serde_json::to_value(&metadata).map_err(|error| {
         Error::internal_io(
             format!("Failed to serialize baseline metadata: {}", error),
@@ -158,7 +159,7 @@ pub fn save<M: Serialize + for<'de> Deserialize<'de>>(
     let baseline = Baseline {
         created_at: utc_now_iso8601(),
         context_id: context_id.to_string(),
-        item_count: items.len(),
+        item_count: known_fingerprints.len(),
         known_fingerprints,
         metadata,
     };
@@ -323,12 +324,13 @@ pub fn compare<T: Fingerprintable, M: Serialize>(
         .map(|item| item.fingerprint())
         .collect();
     let current_set: HashSet<&String> = current_fingerprints.iter().collect();
+    let mut seen_new = HashSet::new();
 
     let new_items = current_items
         .iter()
         .filter(|item| {
             let fingerprint = item.fingerprint();
-            !baseline_set.contains(&fingerprint)
+            !baseline_set.contains(&fingerprint) && seen_new.insert(fingerprint)
         })
         .map(|item| NewItem {
             fingerprint: item.fingerprint(),
@@ -344,7 +346,7 @@ pub fn compare<T: Fingerprintable, M: Serialize>(
         .cloned()
         .collect::<Vec<_>>();
 
-    let delta = current_items.len() as i64 - baseline.item_count as i64;
+    let delta = current_set.len() as i64 - baseline.item_count as i64;
 
     Comparison {
         drift_increased: !new_items.is_empty(),
