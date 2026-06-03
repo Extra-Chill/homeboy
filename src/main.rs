@@ -171,50 +171,9 @@ fn main() -> std::process::ExitCode {
         Err(e) => e.exit(),
     };
 
-    let lab_command = match lab_offload_command(&cli.command) {
-        Ok(command) => command,
-        Err(err) => {
-            emit_json_result(Err(err), output_file.as_deref(), 2);
-            return std::process::ExitCode::from(exit_code_to_u8(2));
-        }
-    };
-    match homeboy::core::runner::execute_lab_offload(homeboy::core::runner::LabOffloadRequest {
-        command: lab_command,
-        normalized_args: &normalized,
-        explicit_runner: cli.runner.as_deref(),
-        force_hot: cli.force_hot,
-        capture_patch: cli.command.lab_offload_mutation_flag().is_some(),
-    }) {
-        Ok(homeboy::core::runner::LabOffloadOutcome::RunLocal {
-            metadata, messages, ..
-        }) => {
-            if let Some(metadata) = metadata {
-                homeboy::core::runner::capture_lab_offload_subprocess_metadata(metadata);
-            }
-            for message in messages {
-                eprintln!("{message}");
-            }
-        }
-        Ok(homeboy::core::runner::LabOffloadOutcome::Offloaded {
-            stdout,
-            stderr,
-            exit_code,
-            ..
-        }) => {
-            if !stderr.is_empty() {
-                eprint!("{stderr}");
-            }
-            if let Some(path) = output_file.as_deref() {
-                if let Err(err) = std::fs::write(path, &stdout) {
-                    let err = homeboy::core::Error::internal_io(
-                        err.to_string(),
-                        Some(format!("write {path}")),
-                    );
-                    emit_json_result(Err(err), output_file.as_deref(), 2);
-                    return std::process::ExitCode::from(exit_code_to_u8(2));
-                }
-            }
-            print!("{stdout}");
+    match homeboy::commands::route::route_after_parse(&cli, &normalized, output_file.as_deref()) {
+        Ok(homeboy::commands::route::CommandRouteOutcome::ContinueLocal) => {}
+        Ok(homeboy::commands::route::CommandRouteOutcome::Exited(exit_code)) => {
             return std::process::ExitCode::from(exit_code_to_u8(exit_code));
         }
         Err(err) => {
@@ -330,99 +289,6 @@ fn validate_output_file_path(path: &str) -> Option<homeboy::core::Error> {
                 .to_string(),
         ]),
     ))
-}
-
-fn lab_offload_command(
-    command: &Commands,
-) -> homeboy::core::Result<Option<homeboy::core::runner::LabOffloadCommand>> {
-    let Some(contract) = command.lab_contract() else {
-        return Ok(None);
-    };
-    let required_extensions = if contract.requires_extension_parity {
-        lab_required_extensions(command)?
-    } else {
-        Vec::new()
-    };
-    Ok(Some(homeboy::core::runner::LabOffloadCommand {
-        hot_label: contract.hot_label,
-        portable: matches!(
-            contract.portability,
-            homeboy::cli_surface::LabCommandPortability::Portable
-        ),
-        unsupported_reason: match contract.portability {
-            homeboy::cli_surface::LabCommandPortability::Portable => None,
-            homeboy::cli_surface::LabCommandPortability::LocalOnly(reason) => Some(reason),
-        },
-        workspace_mode_policy: match contract.workspace_mode_policy {
-            homeboy::cli_surface::LabWorkspaceModePolicy::ChangedSinceGitElseSnapshot => {
-                homeboy::core::runner::LabOffloadWorkspaceModePolicy::ChangedSinceGitElseSnapshot
-            }
-        },
-        requires_extension_parity: contract.requires_extension_parity,
-        required_extensions,
-        requires_playwright: contract.extra_required_tools.iter().any(|tool| {
-            matches!(
-                tool,
-                homeboy::cli_surface::LabCommandRequiredTool::Playwright
-            )
-        }),
-    }))
-}
-
-fn lab_required_extensions(command: &Commands) -> homeboy::core::Result<Vec<String>> {
-    let mut extension_ids = std::collections::BTreeSet::new();
-
-    match command {
-        Commands::Audit(args) => extension_ids.extend(args.extension_override.extensions.clone()),
-        Commands::Bench(args) => {
-            extension_ids.extend(args.extension_override_ids().iter().cloned())
-        }
-        Commands::Lint(args) => extension_ids.extend(args.extension_override.extensions.clone()),
-        Commands::Test(args) => {
-            extension_ids.extend(args.extension_override.extensions.clone());
-            extension_ids.extend(test_lab_extension_ids(args)?);
-        }
-        _ => {}
-    }
-
-    Ok(extension_ids.into_iter().collect())
-}
-
-fn test_lab_extension_ids(
-    args: &homeboy::commands::test::TestArgs,
-) -> homeboy::core::Result<Vec<String>> {
-    let source_context = homeboy::core::engine::execution_context::resolve(
-        &homeboy::core::engine::execution_context::ResolveOptions {
-            component_id: args.comp.component.clone(),
-            path_override: args.comp.path.clone(),
-            capability: None,
-            settings_overrides: args.setting_args.setting.clone(),
-            settings_json_overrides: args.setting_args.setting_json.clone(),
-            extension_overrides: args.extension_override.extensions.clone(),
-        },
-    )?;
-
-    if !args.drift
-        && args.ci_job.is_none()
-        && source_context
-            .component
-            .has_script(homeboy::core::extension::ExtensionCapability::Test)
-    {
-        return Ok(Vec::new());
-    }
-
-    let context = homeboy::core::engine::execution_context::resolve(
-        &homeboy::core::engine::execution_context::ResolveOptions {
-            component_id: args.comp.component.clone(),
-            path_override: args.comp.path.clone(),
-            capability: Some(homeboy::core::extension::ExtensionCapability::Test),
-            settings_overrides: args.setting_args.setting.clone(),
-            settings_json_overrides: args.setting_args.setting_json.clone(),
-            extension_overrides: args.extension_override.extensions.clone(),
-        },
-    )?;
-
-    Ok(context.extension_id.into_iter().collect())
 }
 
 /// Attempt to augment a clap error with entity suggestions.
