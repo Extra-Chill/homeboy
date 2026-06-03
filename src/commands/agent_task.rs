@@ -203,8 +203,8 @@ fn promote_artifact(args: PromoteArgs) -> CmdResult<Value> {
 fn read_promotion_source(
     spec: &str,
 ) -> homeboy::core::Result<(String, Option<std::path::PathBuf>)> {
-    if let Ok(source) = agent_task_lifecycle::aggregate_source(spec) {
-        return Ok((source.raw, Some(source.path)));
+    if let Ok((raw, path)) = agent_task_lifecycle::aggregate_source(spec) {
+        return Ok((raw, Some(path)));
     }
 
     Ok((

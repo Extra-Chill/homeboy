@@ -136,12 +136,6 @@ pub struct AgentTaskRunArtifacts {
     pub evidence_refs: Vec<AgentTaskEvidenceRef>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AgentTaskRunAggregateSource {
-    pub raw: String,
-    pub path: PathBuf,
-}
-
 pub fn submit_plan(
     plan: &AgentTaskPlan,
     requested_run_id: Option<&str>,
@@ -287,7 +281,7 @@ pub fn artifacts(run_id: &str) -> Result<AgentTaskRunArtifacts> {
     })
 }
 
-pub fn aggregate_source(run_id: &str) -> Result<AgentTaskRunAggregateSource> {
+pub fn aggregate_source(run_id: &str) -> Result<(String, PathBuf)> {
     let record = store::read_record(&sanitize_run_id(run_id))?;
     let path = record.aggregate_path.ok_or_else(|| {
         Error::validation_invalid_argument(
@@ -303,7 +297,7 @@ pub fn aggregate_source(run_id: &str) -> Result<AgentTaskRunAggregateSource> {
     let path = PathBuf::from(path);
     let raw = std::fs::read_to_string(&path)
         .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
-    Ok(AgentTaskRunAggregateSource { raw, path })
+    Ok((raw, path))
 }
 
 fn aggregate_artifacts(aggregate: Option<&AgentTaskAggregate>) -> Vec<AgentTaskArtifact> {
@@ -637,10 +631,10 @@ mod tests {
             };
             record_completed_run(&plan, &aggregate, Some("run-source")).expect("recorded");
 
-            let source = aggregate_source("run-source").expect("aggregate source");
+            let (raw, path) = aggregate_source("run-source").expect("aggregate source");
 
-            assert!(source.path.ends_with("aggregate.json"));
-            assert!(source.raw.contains("task-a"));
+            assert!(path.ends_with("aggregate.json"));
+            assert!(raw.contains("task-a"));
         });
     }
 
