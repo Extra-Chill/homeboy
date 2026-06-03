@@ -163,6 +163,10 @@ pub(super) fn default_artifact_prefix() -> String {
     ".homeboy-".to_string()
 }
 
+pub(crate) fn deploy_generated_build_dir() -> String {
+    format!("{}build", default_artifact_prefix())
+}
+
 pub(super) fn default_ssh_port() -> u16 {
     22
 }
