@@ -457,7 +457,8 @@ fn audit_internal(
 
     // Phase 4b: Structural complexity analysis (god files, high item counts)
     let structural_findings = if plan.run_structural() {
-        structural::analyze_structure(root)
+        let snapshot = structural::build_snapshot(root);
+        structural::analyze_snapshot(root, &snapshot)
     } else {
         Vec::new()
     };
