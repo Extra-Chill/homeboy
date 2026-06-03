@@ -19,7 +19,7 @@ pub use crate::core::agent_task_schedule::{
 use crate::core::agent_task_timeout::timeout_with_grace;
 use crate::core::agent_task_timeout_artifacts::{
     append_unique_artifacts, append_unique_evidence_refs, is_actionable_patch_artifact,
-    merge_timeout_outcome, TimeoutArtifactDiscovery,
+    is_empty_patch_artifact, merge_timeout_outcome, TimeoutArtifactDiscovery,
 };
 
 pub trait AgentTaskExecutorAdapter: Send + Sync + 'static {
@@ -604,6 +604,15 @@ impl AgentTaskScheduleSupport {
             outcome.failure_classification = None;
             outcome.summary = Some(
                 "runtime completed with an actionable artifact before timeout finalization"
+                    .to_string(),
+            );
+        } else if outcome.status == AgentTaskOutcomeStatus::Succeeded
+            && outcome.artifacts.iter().any(is_empty_patch_artifact)
+        {
+            outcome.status = AgentTaskOutcomeStatus::NoOp;
+            outcome.failure_classification = None;
+            outcome.summary = Some(
+                "runtime completed with an empty patch artifact before timeout finalization"
                     .to_string(),
             );
         }

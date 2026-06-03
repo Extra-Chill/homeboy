@@ -9,6 +9,8 @@ use crate::core::agent_task::{
     AgentTaskRequest, AGENT_TASK_ARTIFACT_SCHEMA, AGENT_TASK_OUTCOME_SCHEMA,
 };
 
+const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
 #[derive(Default)]
 pub(crate) struct TimeoutArtifactDiscovery {
     pub(crate) artifacts: Vec<AgentTaskArtifact>,
@@ -187,7 +189,13 @@ pub(crate) fn append_unique_evidence_refs(
 pub(crate) fn is_actionable_patch_artifact(artifact: &AgentTaskArtifact) -> bool {
     artifact_has_patch_shape(artifact)
         && artifact_has_content(artifact)
+        && !artifact_has_empty_sha(artifact)
         && artifact.metadata.get("actionable").and_then(Value::as_bool) != Some(false)
+}
+
+pub(crate) fn is_empty_patch_artifact(artifact: &AgentTaskArtifact) -> bool {
+    artifact_has_patch_shape(artifact)
+        && (!artifact_has_content(artifact) || artifact_has_empty_sha(artifact))
 }
 
 fn artifact_has_patch_shape(artifact: &AgentTaskArtifact) -> bool {
@@ -196,6 +204,10 @@ fn artifact_has_patch_shape(artifact: &AgentTaskArtifact) -> bool {
         || artifact.mime.as_deref() == Some("text/x-patch")
         || artifact.mime.as_deref() == Some("text/x-diff")
         || artifact.metadata.get("role").and_then(Value::as_str) == Some("patch")
+}
+
+fn artifact_has_empty_sha(artifact: &AgentTaskArtifact) -> bool {
+    artifact.sha256.as_deref() == Some(EMPTY_SHA256) || artifact.sha256.as_deref() == Some("")
 }
 
 fn artifact_has_content(artifact: &AgentTaskArtifact) -> bool {
