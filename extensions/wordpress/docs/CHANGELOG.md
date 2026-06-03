@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.115.0] - 2026-06-03
+
+### Added
+- add Data Machine bundle agent tasks
+
 ## [2.114.7] - 2026-06-03
 
 ### Fixed
