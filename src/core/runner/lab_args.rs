@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use crate::core::{Error, Result};
 
+pub(super) const EXPLICIT_PASSTHROUGH_SENTINEL: &str = "__homeboy_explicit_passthrough__";
+
 pub(super) fn lab_offload_source_path(args: &[String]) -> Result<PathBuf> {
     let mut iter = args.iter().skip(1).peekable();
     while let Some(arg) = iter.next() {
@@ -34,6 +36,9 @@ pub(super) fn rewrite_lab_offload_args(args: &[String], remote_path: &str) -> Ve
     let mut passthrough = false;
     let has_force_hot = args.iter().any(|arg| arg == "--force-hot");
     while let Some(arg) = iter.next() {
+        if arg == EXPLICIT_PASSTHROUGH_SENTINEL {
+            continue;
+        }
         if passthrough {
             stripped.push(arg.clone());
             continue;
