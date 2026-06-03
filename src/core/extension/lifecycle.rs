@@ -269,6 +269,8 @@ pub(crate) fn resolve_cloned_extension(
         let content = local_files::local().read(&manifest_in_subdir)?;
         let _manifest: ExtensionManifest = from_str(&content)?;
 
+        install_monorepo_shared_scripts(temp_dir, extension_dir)?;
+
         // Move just the subdirectory to the final extension location.
         rename_dir(&subdir, extension_dir)?;
         return Ok(extension_id.to_string());
@@ -303,6 +305,28 @@ pub(crate) fn resolve_cloned_extension(
         "Install a specific extension with: homeboy extension install <url> --id <extension>\nAvailable: {}",
         list
     )))
+}
+
+fn install_monorepo_shared_scripts(repo_dir: &Path, extension_dir: &Path) -> Result<()> {
+    let shared_scripts = repo_dir.join("scripts");
+    if !shared_scripts.is_dir() {
+        return Ok(());
+    }
+
+    let Some(extensions_dir) = extension_dir.parent() else {
+        return Ok(());
+    };
+
+    let target = extensions_dir.join("scripts");
+    if target.exists() {
+        std::fs::remove_dir_all(&target).map_err(|e| {
+            Error::internal_io(
+                e.to_string(),
+                Some("replace shared extension scripts".to_string()),
+            )
+        })?;
+    }
+    copy_dir_recursive(&shared_scripts, &target)
 }
 
 /// Scan a cloned repo for subdirectories that contain a matching manifest file.
@@ -1124,6 +1148,38 @@ exec '{}' "$@"
                 result.source_revision,
                 "monorepo installs keep the stored source revision after .git is discarded"
             );
+        });
+    }
+
+    #[test]
+    fn cloned_monorepo_install_materializes_shared_scripts() {
+        with_isolated_home(|home| {
+            let home = home.path();
+            let source = home.join("source-repo");
+            fs::create_dir_all(&source).expect("source repo");
+            write_extension_fixture(&source, "rust");
+            let shared_helper = source.join("scripts/lib/test-result-adapters.sh");
+            fs::create_dir_all(shared_helper.parent().expect("helper parent"))
+                .expect("shared scripts dir");
+            fs::write(
+                &shared_helper,
+                "homeboy_parse_test_results_with_adapters() { :; }\n",
+            )
+            .expect("shared helper");
+            let remote = match prepare_git_repo(&source) {
+                Some(remote) => remote,
+                None => return,
+            };
+            let remote_url = remote.path().join("extension.git");
+
+            install(&remote_url.to_string_lossy(), Some("rust")).expect("install cloned extension");
+
+            assert!(home
+                .join(".config/homeboy/extensions/rust/rust.json")
+                .exists());
+            assert!(home
+                .join(".config/homeboy/extensions/scripts/lib/test-result-adapters.sh")
+                .exists());
         });
     }
 
