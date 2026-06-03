@@ -47,6 +47,7 @@ pub(crate) mod walker;
 pub(crate) mod test_helpers;
 
 use std::path::Path;
+use std::time::Duration;
 
 use self::detectors::layer_ownership::run as run_layer_ownership;
 use self::detectors::{
@@ -120,6 +121,55 @@ pub(crate) struct AuditAnalysisContext {
 pub(crate) struct AuditWithAnalysis {
     pub(crate) result: CodeAuditResult,
     pub(crate) analysis: AuditAnalysisContext,
+    pub timing: AuditTiming,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct AuditTiming {
+    pub spans: Vec<AuditTimingSpan>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct AuditTimingSpan {
+    pub id: String,
+    pub status: String,
+    pub duration_ms: Option<f64>,
+}
+
+impl AuditTiming {
+    fn push_ok(&mut self, id: impl Into<String>, duration: Duration) {
+        self.spans.push(AuditTimingSpan {
+            id: id.into(),
+            status: "ok".to_string(),
+            duration_ms: Some(duration.as_secs_f64() * 1000.0),
+        });
+    }
+
+    fn push_skipped(&mut self, id: impl Into<String>) {
+        self.spans.push(AuditTimingSpan {
+            id: id.into(),
+            status: "skipped".to_string(),
+            duration_ms: None,
+        });
+    }
+}
+
+fn time_audit_detector<T>(
+    timing: &mut AuditTiming,
+    id: &'static str,
+    enabled: bool,
+    run: impl FnOnce() -> T,
+    skipped: impl FnOnce() -> T,
+) -> T {
+    if enabled {
+        let started = std::time::Instant::now();
+        let value = run();
+        timing.push_ok(id, started.elapsed());
+        value
+    } else {
+        timing.push_skipped(id);
+        skipped()
+    }
 }
 
 /// A cross-directory convention: a pattern that sibling subdirectories share.
@@ -360,6 +410,7 @@ fn audit_internal(
 ) -> Result<AuditWithAnalysis> {
     let root = Path::new(source_path);
     let audit_config = audit_config_for(component_id, root, extension_overrides);
+    let mut timing = AuditTiming::default();
 
     if let Some(filter) = file_filter {
         log_status!(
@@ -373,13 +424,25 @@ fn audit_internal(
     }
 
     if !plan.requires_discovery() {
+        let detector_started = std::time::Instant::now();
+        let result = audit_root_only(
+            component_id,
+            source_path,
+            root,
+            plan,
+            extension_overrides,
+            &mut timing,
+        );
+        timing.push_ok("detectors", detector_started.elapsed());
         return Ok(AuditWithAnalysis {
-            result: audit_root_only(component_id, source_path, root, plan, extension_overrides),
+            result,
             analysis: AuditAnalysisContext::default(),
+            timing,
         });
     }
 
     // Phase 1: Auto-discover file groups (always full codebase for convention detection)
+    let discovery_started = std::time::Instant::now();
     let source_snapshot =
         walker::walk_shared_audit_files_snapshot(root, structural::source_extensions());
     let discovery =
@@ -415,6 +478,7 @@ fn audit_internal(
         } else {
             log_status!("audit", "No source files found");
         }
+        timing.push_ok("discovery_fingerprinting", discovery_started.elapsed());
         return Ok(AuditWithAnalysis {
             result: CodeAuditResult {
                 component_id: component_id.to_string(),
@@ -433,6 +497,7 @@ fn audit_internal(
                 duplicate_groups: vec![],
             },
             analysis: AuditAnalysisContext::default(),
+            timing,
         });
     }
 
@@ -454,16 +519,20 @@ fn audit_internal(
 
     // Phase 3: Check all conventions
     let check_results = checks::check_conventions(&discovered_conventions);
+    timing.push_ok("discovery_fingerprinting", discovery_started.elapsed());
 
     // Phase 4: Build findings
     let mut all_findings = findings::build_findings(&check_results);
+    let detectors_started = std::time::Instant::now();
 
     // Phase 4b: Structural complexity analysis (god files, high item counts)
-    let structural_findings = if plan.run_structural() {
-        structural::analyze_snapshot(root, &source_snapshot)
-    } else {
-        Vec::new()
-    };
+    let structural_findings = time_audit_detector(
+        &mut timing,
+        "detector.structural",
+        plan.run_structural(),
+        || structural::analyze_snapshot(root, &source_snapshot),
+        Vec::new,
+    );
     if !structural_findings.is_empty() {
         log_status!(
             "audit",
@@ -486,16 +555,20 @@ fn audit_internal(
     let convention_methods =
         build_convention_method_set(&discovered_conventions, &all_fingerprints);
 
-    let duplication_findings = if plan.run_duplication() {
-        duplication::detect_duplicates(&all_fingerprints, &convention_methods)
-    } else {
-        Vec::new()
-    };
-    let duplicate_groups = if plan.run_duplication() {
-        duplication::detect_duplicate_groups(&all_fingerprints)
-    } else {
-        Vec::new()
-    };
+    let duplication_findings = time_audit_detector(
+        &mut timing,
+        "detector.duplication.exact",
+        plan.run_duplication(),
+        || duplication::detect_duplicates(&all_fingerprints, &convention_methods),
+        Vec::new,
+    );
+    let duplicate_groups = time_audit_detector(
+        &mut timing,
+        "detector.duplication.groups",
+        plan.run_duplication(),
+        || duplication::detect_duplicate_groups(&all_fingerprints),
+        Vec::new,
+    );
     if !duplication_findings.is_empty() {
         log_status!(
             "audit",
@@ -507,11 +580,13 @@ fn audit_internal(
     }
 
     // Phase 4c2: Intra-method duplication (duplicated blocks within a single method)
-    let intra_dup_findings = if plan.run_duplication() {
-        duplication::detect_intra_method_duplicates(&all_fingerprints)
-    } else {
-        Vec::new()
-    };
+    let intra_dup_findings = time_audit_detector(
+        &mut timing,
+        "detector.duplication.intra_method",
+        plan.run_duplication(),
+        || duplication::detect_intra_method_duplicates(&all_fingerprints),
+        Vec::new,
+    );
     if !intra_dup_findings.is_empty() {
         log_status!(
             "audit",
@@ -522,11 +597,13 @@ fn audit_internal(
     }
 
     // Phase 4d: Near-duplicate detection (structural similarity)
-    let near_dup_findings = if plan.run_duplication() {
-        duplication::detect_near_duplicates(&all_fingerprints)
-    } else {
-        Vec::new()
-    };
+    let near_dup_findings = time_audit_detector(
+        &mut timing,
+        "detector.duplication.near_duplicate",
+        plan.run_duplication(),
+        || duplication::detect_near_duplicates(&all_fingerprints),
+        Vec::new,
+    );
     if !near_dup_findings.is_empty() {
         log_status!(
             "audit",
@@ -537,15 +614,19 @@ fn audit_internal(
     }
 
     // Phase 4d2: Parallel implementation detection (similar call patterns across files)
-    let parallel_findings = if plan.run_duplication() {
-        duplication::detect_parallel_implementations(
-            &all_fingerprints,
-            &convention_methods,
-            &audit_config.duplication_detector,
-        )
-    } else {
-        Vec::new()
-    };
+    let parallel_findings = time_audit_detector(
+        &mut timing,
+        "detector.duplication.parallel_implementation",
+        plan.run_duplication(),
+        || {
+            duplication::detect_parallel_implementations(
+                &all_fingerprints,
+                &convention_methods,
+                &audit_config.duplication_detector,
+            )
+        },
+        Vec::new,
+    );
     if !parallel_findings.is_empty() {
         log_status!(
             "audit",
@@ -574,11 +655,13 @@ fn audit_internal(
         .iter()
         .chain(component_ref_fingerprints.iter())
         .collect();
-    let dead_code_findings = if plan.run_dead_code() {
-        dead_code::analyze_dead_code_with_config(&all_fingerprints, &ref_fp_refs, &audit_config)
-    } else {
-        Vec::new()
-    };
+    let dead_code_findings = time_audit_detector(
+        &mut timing,
+        "detector.dead_code",
+        plan.run_dead_code(),
+        || dead_code::analyze_dead_code_with_config(&all_fingerprints, &ref_fp_refs, &audit_config),
+        Vec::new,
+    );
     if !dead_code_findings.is_empty() {
         log_status!(
             "audit",
@@ -589,11 +672,13 @@ fn audit_internal(
     }
 
     // Phase 4f: Comment hygiene detection (TODO/FIXME/HACK + stale phrasing)
-    let comment_findings = if plan.run_comment_hygiene() {
-        comment_hygiene::run(&all_fingerprints)
-    } else {
-        Vec::new()
-    };
+    let comment_findings = time_audit_detector(
+        &mut timing,
+        "detector.comment_hygiene",
+        plan.run_comment_hygiene(),
+        || comment_hygiene::run(&all_fingerprints),
+        Vec::new,
+    );
     if !comment_findings.is_empty() {
         log_status!(
             "audit",
@@ -606,6 +691,7 @@ fn audit_internal(
     // Phase 4g: Structural test coverage gap detection
     // Look up the extension's test mapping config for the component.
     if plan.run_test_coverage() {
+        let detector_started = std::time::Instant::now();
         if let Ok(comp) = component::load(component_id) {
             if let Some(extensions) = &comp.extensions {
                 for ext_id in extensions.keys() {
@@ -627,14 +713,19 @@ fn audit_internal(
                 }
             }
         }
+        timing.push_ok("detector.test_coverage", detector_started.elapsed());
+    } else {
+        timing.push_skipped("detector.test_coverage");
     }
 
     // Phase 4h: Architecture/layer ownership rule checks (optional config)
-    let layer_findings = if plan.run_layer_ownership() {
-        run_layer_ownership(root)
-    } else {
-        Vec::new()
-    };
+    let layer_findings = time_audit_detector(
+        &mut timing,
+        "detector.layer_ownership",
+        plan.run_layer_ownership(),
+        || run_layer_ownership(root),
+        Vec::new,
+    );
     if !layer_findings.is_empty() {
         log_status!(
             "audit",
@@ -645,11 +736,13 @@ fn audit_internal(
     }
 
     // Phase 4i: Test topology checks (extension-driven classification + central policy)
-    let topology_findings = if plan.run_test_topology() {
-        test_topology::run(root)
-    } else {
-        Vec::new()
-    };
+    let topology_findings = time_audit_detector(
+        &mut timing,
+        "detector.test_topology",
+        plan.run_test_topology(),
+        || test_topology::run(root),
+        Vec::new,
+    );
     if !topology_findings.is_empty() {
         log_status!(
             "audit",
@@ -662,11 +755,13 @@ fn audit_internal(
     // Phase 4i2: Rust nested test harness wiring checks. Cargo only
     // auto-discovers direct `tests/*.rs` integration tests; nested tests need
     // explicit `#[path = "..."]` wiring from a source module.
-    let rust_test_wiring_findings = if plan.run_rust_test_wiring() {
-        rust_test_wiring::run(root)
-    } else {
-        Vec::new()
-    };
+    let rust_test_wiring_findings = time_audit_detector(
+        &mut timing,
+        "detector.test_wiring",
+        plan.run_rust_test_wiring(),
+        || rust_test_wiring::run(root),
+        Vec::new,
+    );
     if !rust_test_wiring_findings.is_empty() {
         log_status!(
             "audit",
@@ -677,11 +772,13 @@ fn audit_internal(
     }
 
     // Phase 4j: Documentation drift detection (broken/stale references in markdown)
-    let doc_findings = if plan.run_docs() {
-        detect_doc_drift(root, component_id)
-    } else {
-        Vec::new()
-    };
+    let doc_findings = time_audit_detector(
+        &mut timing,
+        "detector.docs",
+        plan.run_docs(),
+        || detect_doc_drift(root, component_id),
+        Vec::new,
+    );
     if !doc_findings.is_empty() {
         log_status!(
             "audit",
@@ -693,11 +790,13 @@ fn audit_internal(
 
     // Phase 4l: Compiler warnings (dead code, unused imports, unused variables)
     // Runs extension-owned warning scripts and maps their output to findings.
-    let compiler_findings = if plan.run_compiler_warnings() {
-        compiler_warnings::run(root)
-    } else {
-        Vec::new()
-    };
+    let compiler_findings = time_audit_detector(
+        &mut timing,
+        "detector.compiler_warnings",
+        plan.run_compiler_warnings(),
+        || compiler_warnings::run(root),
+        Vec::new,
+    );
     if !compiler_findings.is_empty() {
         log_status!(
             "audit",
@@ -710,11 +809,13 @@ fn audit_internal(
     // Phase 4m: Wrapper-to-implementation inference
     // Detects wrapper files missing explicit declarations of what they wrap.
     // Uses configurable call pattern tracing to infer the implementation target.
-    let wrapper_findings = if plan.run_wrapper_inference() {
-        wrapper_inference::run(&all_fingerprints, root)
-    } else {
-        Vec::new()
-    };
+    let wrapper_findings = time_audit_detector(
+        &mut timing,
+        "detector.wrapper_inference",
+        plan.run_wrapper_inference(),
+        || wrapper_inference::run(&all_fingerprints, root),
+        Vec::new,
+    );
     if !wrapper_findings.is_empty() {
         log_status!(
             "audit",
@@ -725,11 +826,13 @@ fn audit_internal(
     }
 
     // Phase 4n: Shadow module detection — directories that are near-copies.
-    let shadow_findings = if plan.run_shadow_modules() {
-        shadow_modules::run(&all_fingerprints)
-    } else {
-        Vec::new()
-    };
+    let shadow_findings = time_audit_detector(
+        &mut timing,
+        "detector.shadow_modules",
+        plan.run_shadow_modules(),
+        || shadow_modules::run(&all_fingerprints),
+        Vec::new,
+    );
     if !shadow_findings.is_empty() {
         log_status!(
             "audit",
@@ -740,11 +843,13 @@ fn audit_internal(
     }
 
     // Phase 4o: Repeated struct field pattern detection.
-    let field_pattern_findings = if plan.run_field_patterns() {
-        field_patterns::run(root)
-    } else {
-        Vec::new()
-    };
+    let field_pattern_findings = time_audit_detector(
+        &mut timing,
+        "detector.field_patterns",
+        plan.run_field_patterns(),
+        || field_patterns::run(root),
+        Vec::new,
+    );
     if !field_pattern_findings.is_empty() {
         log_status!(
             "audit",
@@ -756,11 +861,13 @@ fn audit_internal(
 
     // Phase 4t: Facade-passthrough detection — classes whose public methods
     // mostly delegate to an inner member without adding behavior.
-    let facade_findings = if plan.run_facade_passthrough() {
-        facade_passthrough::run(&all_fingerprints)
-    } else {
-        Vec::new()
-    };
+    let facade_findings = time_audit_detector(
+        &mut timing,
+        "detector.facade_passthrough",
+        plan.run_facade_passthrough(),
+        || facade_passthrough::run(&all_fingerprints),
+        Vec::new,
+    );
     if !facade_findings.is_empty() {
         log_status!(
             "audit",
@@ -771,11 +878,13 @@ fn audit_internal(
     }
 
     // Phase 4u: Repeated inline array literal shape detection.
-    let literal_shape_findings = if plan.run_literal_shapes() {
-        repeated_literal_shape::run(&all_fingerprints)
-    } else {
-        Vec::new()
-    };
+    let literal_shape_findings = time_audit_detector(
+        &mut timing,
+        "detector.literal_shapes",
+        plan.run_literal_shapes(),
+        || repeated_literal_shape::run(&all_fingerprints),
+        Vec::new,
+    );
     if !literal_shape_findings.is_empty() {
         log_status!(
             "audit",
@@ -786,11 +895,13 @@ fn audit_internal(
     }
 
     // Phase 4r: Deprecation age detection
-    let deprecation_findings = if plan.run_deprecation_age() {
-        deprecation_age::run(&all_fingerprints, root)
-    } else {
-        Vec::new()
-    };
+    let deprecation_findings = time_audit_detector(
+        &mut timing,
+        "detector.deprecation_age",
+        plan.run_deprecation_age(),
+        || deprecation_age::run(&all_fingerprints, root),
+        Vec::new,
+    );
     if !deprecation_findings.is_empty() {
         log_status!(
             "audit",
@@ -803,11 +914,13 @@ fn audit_internal(
     // Phase 4q: Dead guard detection — flag function_exists/class_exists/defined
     // guards on symbols guaranteed to exist given plugin requirements, composer
     // dependencies, and bootstrap requires.
-    let dead_guard_findings = if plan.run_dead_guard() {
-        dead_guard::run(&all_fingerprints, root, &audit_config)
-    } else {
-        Vec::new()
-    };
+    let dead_guard_findings = time_audit_detector(
+        &mut timing,
+        "detector.dead_guard",
+        plan.run_dead_guard(),
+        || dead_guard::run(&all_fingerprints, root, &audit_config),
+        Vec::new,
+    );
     if !dead_guard_findings.is_empty() {
         log_status!(
             "audit",
@@ -818,11 +931,13 @@ fn audit_internal(
     }
 
     // Phase 4t: Extension-owned requested detector rule packs.
-    let requested_findings = if plan.run_requested_detectors() {
-        requested_detectors::run(&all_fingerprints, &audit_config)
-    } else {
-        Vec::new()
-    };
+    let requested_findings = time_audit_detector(
+        &mut timing,
+        "detector.requested_detectors",
+        plan.run_requested_detectors(),
+        || requested_detectors::run(&all_fingerprints, &audit_config),
+        Vec::new,
+    );
     if !requested_findings.is_empty() {
         log_status!(
             "audit",
@@ -833,11 +948,13 @@ fn audit_internal(
     }
 
     // Phase 4t1: Component-owned config-key write/accessor/read correlation.
-    let config_key_findings = if plan.run_config_key_usage() {
-        config_key_usage::run(&all_fingerprints, &audit_config.config_key_usage.rules)
-    } else {
-        Vec::new()
-    };
+    let config_key_findings = time_audit_detector(
+        &mut timing,
+        "detector.config_key_usage",
+        plan.run_config_key_usage(),
+        || config_key_usage::run(&all_fingerprints, &audit_config.config_key_usage.rules),
+        Vec::new,
+    );
     if !config_key_findings.is_empty() {
         log_status!(
             "audit",
@@ -848,11 +965,13 @@ fn audit_internal(
     }
 
     // Phase 4t1b: Generic command-output capture hygiene.
-    let output_capture_findings = if plan.run_output_capture() {
-        unbounded_output_capture::run(&all_fingerprints)
-    } else {
-        Vec::new()
-    };
+    let output_capture_findings = time_audit_detector(
+        &mut timing,
+        "detector.output_capture",
+        plan.run_output_capture(),
+        || unbounded_output_capture::run(&all_fingerprints),
+        Vec::new,
+    );
     if !output_capture_findings.is_empty() {
         log_status!(
             "audit",
@@ -863,11 +982,13 @@ fn audit_internal(
     }
 
     // Phase 4t2: Configured core-boundary ecosystem leak detection.
-    let core_boundary_findings = if plan.run_core_boundary_leaks() {
-        core_boundary_leak::run(&all_fingerprints, &audit_config.core_boundary_leaks)
-    } else {
-        Vec::new()
-    };
+    let core_boundary_findings = time_audit_detector(
+        &mut timing,
+        "detector.core_boundary_leaks",
+        plan.run_core_boundary_leaks(),
+        || core_boundary_leak::run(&all_fingerprints, &audit_config.core_boundary_leaks),
+        Vec::new,
+    );
     if !core_boundary_findings.is_empty() {
         log_status!(
             "audit",
@@ -878,11 +999,13 @@ fn audit_internal(
     }
 
     // Phase 4t3: Configured mutating handler/resource access detection.
-    let mutating_access_findings = if plan.run_mutating_resource_access() {
-        mutating_resource_access::run(&all_fingerprints, &audit_config.mutating_resource_access)
-    } else {
-        Vec::new()
-    };
+    let mutating_access_findings = time_audit_detector(
+        &mut timing,
+        "detector.mutating_resource_access",
+        plan.run_mutating_resource_access(),
+        || mutating_resource_access::run(&all_fingerprints, &audit_config.mutating_resource_access),
+        Vec::new,
+    );
     if !mutating_access_findings.is_empty() {
         log_status!(
             "audit",
@@ -893,11 +1016,13 @@ fn audit_internal(
     }
 
     // Phase 4t4: Configured redirect-destination dominance checks.
-    let redirect_validation_findings = if plan.run_redirect_validation() {
-        redirect_validation::run(&all_fingerprints, &audit_config.redirect_validation)
-    } else {
-        Vec::new()
-    };
+    let redirect_validation_findings = time_audit_detector(
+        &mut timing,
+        "detector.redirect_validation",
+        plan.run_redirect_validation(),
+        || redirect_validation::run(&all_fingerprints, &audit_config.redirect_validation),
+        Vec::new,
+    );
     if !redirect_validation_findings.is_empty() {
         log_status!(
             "audit",
@@ -908,11 +1033,13 @@ fn audit_internal(
     }
 
     // Phase 4v: Process-global environment mutation guard consistency in tests.
-    let env_guard_findings = if plan.run_global_env_guard() {
-        global_env_guard::run(&all_fingerprints)
-    } else {
-        Vec::new()
-    };
+    let env_guard_findings = time_audit_detector(
+        &mut timing,
+        "detector.global_env_guard",
+        plan.run_global_env_guard(),
+        || global_env_guard::run(&all_fingerprints),
+        Vec::new,
+    );
     if !env_guard_findings.is_empty() {
         log_status!(
             "audit",
@@ -924,11 +1051,13 @@ fn audit_internal(
 
     // Phase 4s: Shared scaffolding detection — groups of classes sharing the
     // same method-shape AND high body similarity, candidates for a shared base.
-    let scaffolding_findings = if plan.run_shared_scaffolding() {
-        shared_scaffolding::run(&all_fingerprints)
-    } else {
-        Vec::new()
-    };
+    let scaffolding_findings = time_audit_detector(
+        &mut timing,
+        "detector.shared_scaffolding",
+        plan.run_shared_scaffolding(),
+        || shared_scaffolding::run(&all_fingerprints),
+        Vec::new,
+    );
     if !scaffolding_findings.is_empty() {
         log_status!(
             "audit",
@@ -940,11 +1069,13 @@ fn audit_internal(
 
     // Phase 4w: Parallel runner setup detection — command-family files that
     // assemble the same generic execution contract independently.
-    let parallel_runner_findings = if plan.run_parallel_runner_setup() {
-        parallel_runner_setup::run(&all_fingerprints)
-    } else {
-        Vec::new()
-    };
+    let parallel_runner_findings = time_audit_detector(
+        &mut timing,
+        "detector.parallel_runner_setup",
+        plan.run_parallel_runner_setup(),
+        || parallel_runner_setup::run(&all_fingerprints),
+        Vec::new,
+    );
     if !parallel_runner_findings.is_empty() {
         log_status!(
             "audit",
@@ -956,11 +1087,13 @@ fn audit_internal(
 
     // Phase 4w1: Runner/offload preflight detection — remote dispatch sites
     // that do not prove path/artifact parity before runner execution.
-    let runner_offload_findings = if plan.run_runner_offload_preflight() {
-        runner_offload_preflight::run(&all_fingerprints, &audit_config.remote_execution_safety)
-    } else {
-        Vec::new()
-    };
+    let runner_offload_findings = time_audit_detector(
+        &mut timing,
+        "detector.runner_offload_preflight",
+        plan.run_runner_offload_preflight(),
+        || runner_offload_preflight::run(&all_fingerprints, &audit_config.remote_execution_safety),
+        Vec::new,
+    );
     if !runner_offload_findings.is_empty() {
         log_status!(
             "audit",
@@ -971,11 +1104,13 @@ fn audit_internal(
     }
 
     // Phase 4w: Repeated enum-dispatch contract detection.
-    let enum_dispatch_findings = if plan.run_enum_dispatch_contracts() {
-        enum_dispatch_contracts::run(root)
-    } else {
-        Vec::new()
-    };
+    let enum_dispatch_findings = time_audit_detector(
+        &mut timing,
+        "detector.enum_dispatch_contracts",
+        plan.run_enum_dispatch_contracts(),
+        || enum_dispatch_contracts::run(root),
+        Vec::new,
+    );
     if !enum_dispatch_findings.is_empty() {
         log_status!(
             "audit",
@@ -986,11 +1121,13 @@ fn audit_internal(
     }
 
     // Phase 4x: Direct aggregate construction despite canonical construction seams.
-    let aggregate_construction_findings = if plan.run_aggregate_construction() {
-        aggregate_construction::run(&all_fingerprints)
-    } else {
-        Vec::new()
-    };
+    let aggregate_construction_findings = time_audit_detector(
+        &mut timing,
+        "detector.aggregate_construction",
+        plan.run_aggregate_construction(),
+        || aggregate_construction::run(&all_fingerprints),
+        Vec::new,
+    );
     if !aggregate_construction_findings.is_empty() {
         log_status!(
             "audit",
@@ -1002,11 +1139,13 @@ fn audit_internal(
 
     // Phase 4y: Public metadata routes returning raw registry/config getters
     // while a permission-aware resolver/helper exists in the same area.
-    let public_registry_findings = if plan.run_public_registry_exposure() {
-        public_registry_exposure::run(&all_fingerprints, &audit_config.public_registry_exposure)
-    } else {
-        Vec::new()
-    };
+    let public_registry_findings = time_audit_detector(
+        &mut timing,
+        "detector.public_registry_exposure",
+        plan.run_public_registry_exposure(),
+        || public_registry_exposure::run(&all_fingerprints, &audit_config.public_registry_exposure),
+        Vec::new,
+    );
     if !public_registry_findings.is_empty() {
         log_status!(
             "audit",
@@ -1016,18 +1155,22 @@ fn audit_internal(
         all_findings.extend(public_registry_findings);
     }
 
-    let artifact_portability_report = if plan.run_artifact_portability() {
-        if audit_config.artifact_portability.is_empty() {
-            artifact_portability::run_report(component_id)
-        } else {
-            artifact_portability::run_report_with_config(
-                component_id,
-                &audit_config.artifact_portability,
-            )
-        }
-    } else {
-        Default::default()
-    };
+    let artifact_portability_report = time_audit_detector(
+        &mut timing,
+        "detector.artifact_portability",
+        plan.run_artifact_portability(),
+        || {
+            if audit_config.artifact_portability.is_empty() {
+                artifact_portability::run_report(component_id)
+            } else {
+                artifact_portability::run_report_with_config(
+                    component_id,
+                    &audit_config.artifact_portability,
+                )
+            }
+        },
+        Default::default,
+    );
     if plan.run_artifact_portability() {
         log_status!(
             "audit",
@@ -1049,11 +1192,13 @@ fn audit_internal(
     }
 
     // Phase 4z: Declared command status scenario fixtures.
-    let command_status_findings = if plan.run_command_status_contracts() {
-        command_status_contracts::run(root, &audit_config.command_status_contracts)
-    } else {
-        Vec::new()
-    };
+    let command_status_findings = time_audit_detector(
+        &mut timing,
+        "detector.command_status_contracts",
+        plan.run_command_status_contracts(),
+        || command_status_contracts::run(root, &audit_config.command_status_contracts),
+        Vec::new,
+    );
     if !command_status_findings.is_empty() {
         log_status!(
             "audit",
@@ -1062,6 +1207,7 @@ fn audit_internal(
         );
         all_findings.extend(command_status_findings);
     }
+    timing.push_ok("detectors", detectors_started.elapsed());
 
     // Phase 4p: Impact-scoped filtering — when auditing changed files only,
     // expand scope to include call sites affected by symbol changes, then
@@ -1119,6 +1265,7 @@ fn audit_internal(
     }
 
     // Phase 5: Build report
+    let report_started = std::time::Instant::now();
     let total_outliers: usize = discovered_conventions
         .iter()
         .map(|c| c.outliers.len())
@@ -1185,6 +1332,7 @@ fn audit_internal(
             total_dir_outliers
         );
     }
+    timing.push_ok("report", report_started.elapsed());
 
     drop(all_fingerprints);
     let analysis = AuditAnalysisContext {
@@ -1213,6 +1361,7 @@ fn audit_internal(
             duplicate_groups,
         },
         analysis,
+        timing,
     })
 }
 
@@ -1222,103 +1371,140 @@ fn audit_root_only(
     root: &Path,
     plan: &AuditExecutionPlan,
     extension_overrides: &[String],
+    timing: &mut AuditTiming,
 ) -> CodeAuditResult {
     let audit_config = audit_config_for(component_id, root, extension_overrides);
     let mut findings = Vec::new();
 
-    if plan.run_structural() {
-        let structural_findings = structural::analyze_structure(root);
-        if !structural_findings.is_empty() {
-            log_status!(
-                "audit",
-                "Structural: {} finding(s) (god files, high item counts)",
-                structural_findings.len()
-            );
-            findings.extend(structural_findings);
-        }
+    let structural_findings = time_audit_detector(
+        timing,
+        "detector.structural",
+        plan.run_structural(),
+        || structural::analyze_structure(root),
+        Vec::new,
+    );
+    if !structural_findings.is_empty() {
+        log_status!(
+            "audit",
+            "Structural: {} finding(s) (god files, high item counts)",
+            structural_findings.len()
+        );
+        findings.extend(structural_findings);
     }
 
-    if plan.run_layer_ownership() {
-        let layer_findings = run_layer_ownership(root);
-        if !layer_findings.is_empty() {
-            log_status!(
-                "audit",
-                "Layer ownership: {} finding(s) (architecture ownership violations)",
-                layer_findings.len()
-            );
-            findings.extend(layer_findings);
-        }
+    let layer_findings = time_audit_detector(
+        timing,
+        "detector.layer_ownership",
+        plan.run_layer_ownership(),
+        || run_layer_ownership(root),
+        Vec::new,
+    );
+    if !layer_findings.is_empty() {
+        log_status!(
+            "audit",
+            "Layer ownership: {} finding(s) (architecture ownership violations)",
+            layer_findings.len()
+        );
+        findings.extend(layer_findings);
     }
 
-    if plan.run_test_topology() {
-        let topology_findings = test_topology::run(root);
-        if !topology_findings.is_empty() {
-            log_status!(
-                "audit",
-                "Test topology: {} finding(s) (inline/scattered test placement)",
-                topology_findings.len()
-            );
-            findings.extend(topology_findings);
-        }
+    let topology_findings = time_audit_detector(
+        timing,
+        "detector.test_topology",
+        plan.run_test_topology(),
+        || test_topology::run(root),
+        Vec::new,
+    );
+    if !topology_findings.is_empty() {
+        log_status!(
+            "audit",
+            "Test topology: {} finding(s) (inline/scattered test placement)",
+            topology_findings.len()
+        );
+        findings.extend(topology_findings);
     }
 
-    if plan.run_rust_test_wiring() {
-        let rust_test_wiring_findings = rust_test_wiring::run(root);
-        if !rust_test_wiring_findings.is_empty() {
-            log_status!(
-                "audit",
-                "Rust test wiring: {} finding(s) (nested tests not wired into Cargo)",
-                rust_test_wiring_findings.len()
-            );
-            findings.extend(rust_test_wiring_findings);
-        }
+    let rust_test_wiring_findings = time_audit_detector(
+        timing,
+        "detector.test_wiring",
+        plan.run_rust_test_wiring(),
+        || rust_test_wiring::run(root),
+        Vec::new,
+    );
+    if !rust_test_wiring_findings.is_empty() {
+        log_status!(
+            "audit",
+            "Rust test wiring: {} finding(s) (nested tests not wired into Cargo)",
+            rust_test_wiring_findings.len()
+        );
+        findings.extend(rust_test_wiring_findings);
     }
 
-    if plan.run_docs() {
-        let doc_findings = detect_doc_drift(root, component_id);
-        if !doc_findings.is_empty() {
-            log_status!(
-                "audit",
-                "Docs: {} finding(s) (broken references, stale paths)",
-                doc_findings.len()
-            );
-            findings.extend(doc_findings);
-        }
+    let doc_findings = time_audit_detector(
+        timing,
+        "detector.docs",
+        plan.run_docs(),
+        || detect_doc_drift(root, component_id),
+        Vec::new,
+    );
+    if !doc_findings.is_empty() {
+        log_status!(
+            "audit",
+            "Docs: {} finding(s) (broken references, stale paths)",
+            doc_findings.len()
+        );
+        findings.extend(doc_findings);
     }
 
-    if plan.run_compiler_warnings() {
-        let compiler_findings = compiler_warnings::run(root);
-        if !compiler_findings.is_empty() {
-            log_status!(
-                "audit",
-                "Compiler warnings: {} finding(s) (dead code, unused imports, unused variables)",
-                compiler_findings.len()
-            );
-            findings.extend(compiler_findings);
-        }
+    let compiler_findings = time_audit_detector(
+        timing,
+        "detector.compiler_warnings",
+        plan.run_compiler_warnings(),
+        || compiler_warnings::run(root),
+        Vec::new,
+    );
+    if !compiler_findings.is_empty() {
+        log_status!(
+            "audit",
+            "Compiler warnings: {} finding(s) (dead code, unused imports, unused variables)",
+            compiler_findings.len()
+        );
+        findings.extend(compiler_findings);
     }
 
-    if plan.run_field_patterns() {
-        let field_pattern_findings = field_patterns::run(root);
-        if !field_pattern_findings.is_empty() {
-            log_status!(
-                "audit",
-                "Field patterns: {} finding(s) (repeated struct fields)",
-                field_pattern_findings.len()
-            );
-            findings.extend(field_pattern_findings);
-        }
+    let field_pattern_findings = time_audit_detector(
+        timing,
+        "detector.field_patterns",
+        plan.run_field_patterns(),
+        || field_patterns::run(root),
+        Vec::new,
+    );
+    if !field_pattern_findings.is_empty() {
+        log_status!(
+            "audit",
+            "Field patterns: {} finding(s) (repeated struct fields)",
+            field_pattern_findings.len()
+        );
+        findings.extend(field_pattern_findings);
     }
 
+    let artifact_portability_report = time_audit_detector(
+        timing,
+        "detector.artifact_portability",
+        plan.run_artifact_portability(),
+        || {
+            if audit_config.artifact_portability.is_empty() {
+                artifact_portability::run_report(component_id)
+            } else {
+                artifact_portability::run_report_with_config(
+                    component_id,
+                    &audit_config.artifact_portability,
+                )
+            }
+        },
+        Default::default,
+    );
     if plan.run_artifact_portability() {
-        let artifact_portability_report = if audit_config.artifact_portability.is_empty() {
-            artifact_portability::run_report(component_id)
-        } else {
-            artifact_portability::run_report_with_config(
-                component_id,
-                &audit_config.artifact_portability,
-            )
-        };
         log_status!(
             "audit",
             "Artifact portability: scanned {} recent run(s), {} artifact row(s), {} metadata string field(s) (window: {})",
@@ -1327,15 +1513,15 @@ fn audit_root_only(
             artifact_portability_report.metadata_fields_scanned,
             artifact_portability_report.run_window
         );
-        let artifact_portability_findings = artifact_portability_report.findings;
-        if !artifact_portability_findings.is_empty() {
-            log_status!(
-                "audit",
-                "Artifact portability: {} finding(s) (non-portable artifact evidence paths)",
-                artifact_portability_findings.len()
-            );
-            findings.extend(artifact_portability_findings);
-        }
+    }
+    let artifact_portability_findings = artifact_portability_report.findings;
+    if !artifact_portability_findings.is_empty() {
+        log_status!(
+            "audit",
+            "Artifact portability: {} finding(s) (non-portable artifact evidence paths)",
+            artifact_portability_findings.len()
+        );
+        findings.extend(artifact_portability_findings);
     }
 
     let outliers_found = findings.len();
@@ -1722,6 +1908,36 @@ mod tests {
             plan.run_test_topology(),
             "test topology/test quality detector emits standalone vacuous_test findings"
         );
+    }
+
+    #[test]
+    fn detector_timing_records_successful_span() {
+        let mut timing = AuditTiming::default();
+        let value = time_audit_detector(&mut timing, "detector.structural", true, || 42, || 0);
+
+        assert_eq!(value, 42);
+        assert_eq!(timing.spans.len(), 1);
+        assert_eq!(timing.spans[0].id, "detector.structural");
+        assert_eq!(timing.spans[0].status, "ok");
+        assert!(timing.spans[0].duration_ms.is_some());
+    }
+
+    #[test]
+    fn detector_timing_records_disabled_span_as_skipped() {
+        let mut timing = AuditTiming::default();
+        let value = time_audit_detector(
+            &mut timing,
+            "detector.duplication.exact",
+            false,
+            || 42,
+            || 0,
+        );
+
+        assert_eq!(value, 0);
+        assert_eq!(timing.spans.len(), 1);
+        assert_eq!(timing.spans[0].id, "detector.duplication.exact");
+        assert_eq!(timing.spans[0].status, "skipped");
+        assert!(timing.spans[0].duration_ms.is_none());
     }
 
     #[test]
