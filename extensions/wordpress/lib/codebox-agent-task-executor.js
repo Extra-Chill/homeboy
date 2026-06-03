@@ -17,6 +17,51 @@ const PROVIDER_CAPABILITIES = [
   'cleanup_observability',
   'screenshots',
   'structured_outcome',
+  'datamachine_bundle_execution',
+];
+
+const DATAMACHINE_BUNDLE_CONFIG_FIELDS = [
+  'bundle_path',
+  'bundle_host_path',
+  'bundle_repo',
+  'bundle_ref',
+  'bundle_path_in_repo',
+  'agent_slug',
+  'pipeline_slug',
+  'flow_slug',
+  'target_repo',
+  'component_path',
+  'component_id',
+  'provider',
+  'model',
+  'prompt',
+  'success_requires_pr',
+  'success_completion_outcomes',
+  'pipeline_step_patches',
+  'flow_step_patches',
+  'tool_recorders',
+  'ability_tools',
+  'engine_data_outputs',
+  'engine_key',
+  'tool_results_key',
+  'artifact_export_config',
+  'transcript_artifact_name',
+  'replay_bundle_artifact_name',
+  'replay_bundle_dir',
+  'runner_workspace',
+  'fallback_pull_request',
+  'extra_required_abilities',
+  'enable_terminal_actions',
+  'enable_wp_cli_tool',
+  'wp_cli_tool_name',
+  'workload_run_before',
+  'workload_run_after',
+  'wp_codebox_mounts',
+  'extra_wp_config_defines',
+  'provider_plugin',
+  'provider_plugin_paths',
+  'step_budget',
+  'time_budget_ms',
 ];
 
 const WP_CODEBOX_RUNTIME_GAP_TRACKERS = [
@@ -83,6 +128,8 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
   assertAgentTaskRequest(request);
   const config = request.executor.config || {};
   const inputs = request.inputs || {};
+  const executionKind = config.execution_kind || config.executionKind || config.kind || options.executionKind || 'sandbox';
+  const datamachineBundle = datamachineBundleConfigFromAgentTaskRequest(request, config, inputs);
   const timeoutSeconds = request.limits?.task_timeout_seconds || request.limits?.taskTimeoutSeconds;
   const timeoutMs = request.limits?.timeout_ms || request.limits?.max_runtime_ms;
   const timeoutFromMs = timeoutMs ? Math.ceil(timeoutMs / 1000) : undefined;
@@ -91,6 +138,7 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     schema: WP_CODEBOX_TASK_REQUEST_SCHEMA,
     sandbox_session_id: config.sandbox_session_id || request.task_id,
     group_key: request.group_key,
+    execution_kind: executionKind,
     agent: config.agent || options.agent || 'wp-codebox-sandbox',
     mode: config.mode || options.mode || 'sandbox',
     provider: config.provider || options.provider || '',
@@ -106,9 +154,11 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     homeboy_extensions: config.homeboy_extensions || options.homeboyExtensions || '',
     wp_cli_bin: config.wp_cli_bin || options.wpCliBin || '',
     wp_codebox_bin: config.wp_codebox_bin || options.wpCodeboxBin || '',
+    wp_codebox_wordpress_version: config.wp_codebox_wordpress_version || config.wpCodeboxWordpressVersion || options.wpCodeboxWordpressVersion || '',
     artifacts: config.artifacts || options.artifacts || '',
     max_turns: config.max_turns || options.maxTurns,
     task_timeout_seconds: config.task_timeout_seconds || timeoutSeconds || timeoutFromMs || options.taskTimeoutSeconds,
+    datamachine_bundle: datamachineBundle,
     orchestrator: {
       ...(inputs.orchestrator || {}),
       agent_task_id: request.task_id,
@@ -125,6 +175,33 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
       inputs,
     },
   };
+}
+
+function datamachineBundleConfigFromAgentTaskRequest(request, config, inputs) {
+  const candidateSources = [
+    inputs.datamachine_bundle,
+    inputs.datamachineBundle,
+    inputs,
+    config.datamachine_bundle,
+    config.datamachineBundle,
+    config,
+  ].filter((value) => value && typeof value === 'object');
+  const bundleConfig = {};
+  for (const field of DATAMACHINE_BUNDLE_CONFIG_FIELDS) {
+    for (const source of candidateSources) {
+      if (source[field] !== undefined) {
+        bundleConfig[field] = source[field];
+        break;
+      }
+    }
+  }
+  bundleConfig.prompt = bundleConfig.prompt || request.instructions;
+  bundleConfig.provider = bundleConfig.provider || config.provider || '';
+  bundleConfig.model = bundleConfig.model || request.executor?.model || config.model || '';
+  if (!bundleConfig.provider_plugin_paths && config.provider_plugin_paths) {
+    bundleConfig.provider_plugin_paths = config.provider_plugin_paths;
+  }
+  return Object.fromEntries(Object.entries(bundleConfig).filter(([, value]) => value !== undefined && value !== ''));
 }
 
 function normalizeStatus(result, exitStatus = 0) {
@@ -322,6 +399,9 @@ function normalizeArtifacts(result) {
     for (const artifact of codeboxBundleArtifacts(result)) {
       appendUniqueArtifact(artifacts, artifact);
     }
+    for (const artifact of datamachineBundleArtifacts(result)) {
+      appendUniqueArtifact(artifacts, artifact);
+    }
     return artifacts.map(artifactFromCodeboxArtifact);
   }
   const artifacts = Array.isArray(result?.artifacts)
@@ -351,6 +431,13 @@ function normalizeEvidenceRefs(result) {
         label: artifact.kind.replace(/^codebox-/, 'WP Codebox ').replace(/-/g, ' '),
       });
     }
+    for (const artifact of datamachineBundleArtifacts(result)) {
+      appendUniqueEvidenceRef(refs, {
+        kind: artifact.kind,
+        uri: artifact.path || artifact.url,
+        label: artifact.kind.replace(/^datamachine-/, 'Data Machine ').replace(/-/g, ' '),
+      });
+    }
     return refs;
   }
   const evidenceRefs = result?.evidence_refs || result?.evidence || [];
@@ -359,6 +446,53 @@ function normalizeEvidenceRefs(result) {
     uri: ref.uri || ref.url || ref.path,
     label: ref.label || ref.name,
   })).filter((ref) => ref.uri);
+}
+
+function datamachineBundleArtifacts(result) {
+  const artifacts = [];
+  const workload = result.metadata?.datamachine?.workload || result.run?.agentResult || result.agentResult || {};
+  const scenarios = Array.isArray(workload.scenarios) ? workload.scenarios : [];
+  for (const scenario of scenarios) {
+    const metadata = scenario?.metadata || {};
+    const transcript = metadata.transcript_artifacts || {};
+    appendUniqueArtifact(artifacts, {
+      id: transcript.json ? 'datamachine-transcript-json' : '',
+      kind: 'datamachine-transcript',
+      path: transcript.json,
+      metadata: { scenario_id: scenario.id, format: 'json' },
+    });
+    appendUniqueArtifact(artifacts, {
+      id: transcript.summary ? 'datamachine-transcript-summary' : '',
+      kind: 'datamachine-transcript-summary',
+      path: transcript.summary,
+      metadata: { scenario_id: scenario.id, format: 'markdown' },
+    });
+    const replayBundlePath = metadata.replay_bundle_path || metadata.replay_bundle?.path;
+    appendUniqueArtifact(artifacts, {
+      id: replayBundlePath ? 'datamachine-replay-bundle' : '',
+      kind: 'datamachine-replay-bundle',
+      path: replayBundlePath,
+      metadata: { scenario_id: scenario.id },
+    });
+    const exports = Array.isArray(metadata.job_artifact_exports) ? metadata.job_artifact_exports : [];
+    for (const [index, exported] of exports.entries()) {
+      appendUniqueArtifact(artifacts, {
+        id: exported.id || exported.path || `datamachine-job-artifact-${index + 1}`,
+        kind: exported.kind || 'datamachine-job-artifact',
+        path: exported.path,
+        url: exported.url,
+        metadata: { ...exported, scenario_id: scenario.id },
+      });
+    }
+    const pullRequestUrl = metadata.fallback_pull_request?.url || metadata.engine_data?.pull_request?.url || metadata.engine_data?.static_site_agent?.pr_url;
+    appendUniqueArtifact(artifacts, {
+      id: pullRequestUrl ? 'datamachine-pull-request' : '',
+      kind: 'datamachine-pull-request',
+      url: pullRequestUrl,
+      metadata: { scenario_id: scenario.id },
+    });
+  }
+  return artifacts;
 }
 
 function codeboxDecisionEvidence(result) {

@@ -179,7 +179,7 @@ Provider discovery uses `homeboy/agent-task-executor-provider/v1`:
   "outcome_statuses": ["succeeded", "failed", "no_op", "unable_to_remediate", "timeout", "provider_error"],
   "failure_classifications": ["provider", "timeout", "execution_failed"],
   "redacted_metadata_keys": ["secret_env_values", "secretEnvValues", "secrets"],
-  "capabilities": ["browser_runtime", "wordpress_sandbox", "workspace_mounts", "workspace_tools", "artifact_materialization", "patch_artifacts", "verification_artifacts", "run_registry", "cleanup_observability", "screenshots", "structured_outcome"],
+  "capabilities": ["browser_runtime", "wordpress_sandbox", "workspace_mounts", "workspace_tools", "artifact_materialization", "patch_artifacts", "verification_artifacts", "run_registry", "cleanup_observability", "screenshots", "structured_outcome", "datamachine_bundle_execution"],
   "status": "preparatory",
   "upstream_dependency": "https://github.com/Automattic/wp-codebox/issues/480"
 }
@@ -279,6 +279,13 @@ select this provider through discovery, but should keep planning, scheduling,
 retry, and dashboard logic tied to the `homeboy/agent-task-request/v1` and
 `homeboy/agent-task-outcome/v1` schemas rather than Codebox recipe fields.
 
+Set `executor.config.execution_kind` to `datamachine_bundle` when the task should
+run the Data Machine workload path instead of the generic sandbox prompt path.
+The provider still emits the same `homeboy/agent-task-outcome/v1` shape, but the
+WP Codebox recipe mounts the Homeboy WordPress extension, exports
+`HOMEBOY_DATAMACHINE_AGENT_CONFIG`, and runs
+`datamachine-agent-workload.php` through the workload wrapper.
+
 The provider is intentionally marked preparatory while Codebox's upstream agent
 task runner API is still tracked in https://github.com/Automattic/wp-codebox/issues/480.
 Once that surface lands, the same provider contract can remove Homeboy-owned
@@ -334,6 +341,83 @@ with:
   model: gpt-5.5
 secrets: inherit
 ```
+
+## Agent-task plan example
+
+The same Data Machine bundle run can be expressed as a Homeboy agent-task plan,
+which lets `homeboy agent-task run-plan --plan ...` replace a bespoke workflow
+wrapper such as `wp-site-generator`'s site-generation loop:
+
+```json
+{
+  "schema": "homeboy/agent-task-plan/v1",
+  "plan_id": "site-generation-loop",
+  "tasks": [
+    {
+      "schema": "homeboy/agent-task-request/v1",
+      "task_id": "site-generation-loop/static-site-agent",
+      "group_key": "site-generation-loop",
+      "executor": {
+        "backend": "codebox",
+        "model": "gpt-5.5",
+        "config": {
+          "execution_kind": "datamachine_bundle",
+          "provider": "openai",
+          "provider_plugin_paths": ["/components/ai-provider-for-openai"],
+          "agents_api": "/components/agents-api",
+          "data_machine": "/components/data-machine",
+          "data_machine_code": "/components/data-machine-code",
+          "homeboy_extensions": "/components/homeboy-extensions/wordpress",
+          "wp_codebox_bin": "/components/wp-codebox/packages/wp-codebox/dist/cli.js",
+          "bundle_path": "bundles/static-site-agent",
+          "agent_slug": "static-site-agent",
+          "pipeline_slug": "static-site-pipeline",
+          "flow_slug": "static-site-manual-flow",
+          "target_repo": "chubes4/wp-site-generator",
+          "success_requires_pr": true,
+          "engine_data_outputs": {
+            "static_site_pr_url": "metadata.engine_data.static_site_agent.pr_url"
+          },
+          "tool_recorders": [
+            {
+              "tool": "github/create-pull-request",
+              "engine_data_path": "static_site_agent.pr_url"
+            }
+          ],
+          "pipeline_step_patches": [],
+          "flow_step_patches": [],
+          "transcript_artifact_name": "static-site-agent-transcript",
+          "replay_bundle_artifact_name": "static-site-agent-replay"
+        }
+      },
+      "instructions": "Generate the requested WordPress site and open or reuse a pull request with the materialized source.",
+      "inputs": {
+        "title": "Run static site agent"
+      },
+      "limits": {
+        "task_timeout_seconds": 1800
+      },
+      "expected_artifacts": [
+        "datamachine-transcript",
+        "datamachine-replay-bundle",
+        "datamachine-pull-request"
+      ]
+    }
+  ]
+}
+```
+
+Run it with:
+
+```bash
+homeboy agent-task run-plan --plan .homeboy/plans/site-generation-loop.json
+```
+
+For bundle repositories outside the target checkout, use `bundle_repo`,
+`bundle_ref`, and `bundle_path_in_repo` instead of a local `bundle_path`. Runtime
+stack mounts, overlays, provider plugins, tool recorders, engine-data outputs,
+artifact exports, transcript settings, and flow/pipeline step patches all remain
+provider config so Homeboy core does not need GitHub Actions-specific wiring.
 
 Generic providers should provide a full plugin object and map Data Machine option
 names to generic provider secret env names:
