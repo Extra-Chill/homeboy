@@ -10,7 +10,7 @@ use crate::core::release::version;
 use super::execution::{
     execute_preflighted_component_deploy, prepare_component_deploy, PreparedComponentDeploy,
 };
-use super::generated_artifacts::unexpected_uncommitted_files_excluding_homeboy_build;
+use super::generated_artifacts::unexpected_uncommitted_files_excluding_generated_build;
 use super::path_roots::{project_with_detected_path_roots, resolve_effective_remote_path};
 use super::planning::{
     calculate_component_status, calculate_release_state, load_project_components, plan_components,
@@ -447,7 +447,7 @@ fn check_uncommitted_changes(components: &[Component]) -> Result<()> {
             non_git.push(component);
             continue;
         }
-        match unexpected_uncommitted_files_excluding_homeboy_build(&component.local_path) {
+        match unexpected_uncommitted_files_excluding_generated_build(&component.local_path) {
             Ok(unexpected) if unexpected.is_empty() => {}
             Ok(_) | Err(_) => dirty.push(component.id.as_str()),
         }

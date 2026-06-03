@@ -7,6 +7,8 @@ use crate::core::paths;
 #[path = "defaults/builtins.rs"]
 mod builtins;
 
+pub(crate) use builtins::deploy_generated_build_dir;
+
 /// Root configuration structure for homeboy.json
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HomeboyConfig {

@@ -1,15 +1,15 @@
 use std::path::Path;
 
+use crate::core::defaults::deploy_generated_build_dir;
 use crate::core::error::Result;
 use crate::core::git;
 
-const HOMEBOY_BUILD_DIR: &str = ".homeboy-build";
-
-pub(super) fn is_homeboy_generated_build_path(rel_path: &str) -> bool {
-    rel_path == HOMEBOY_BUILD_DIR || rel_path.starts_with(&format!("{HOMEBOY_BUILD_DIR}/"))
+pub(super) fn is_generated_build_path(rel_path: &str) -> bool {
+    let build_dir = deploy_generated_build_dir();
+    rel_path == build_dir || rel_path.starts_with(&format!("{build_dir}/"))
 }
 
-pub(super) fn unexpected_uncommitted_files_excluding_homeboy_build(
+pub(super) fn unexpected_uncommitted_files_excluding_generated_build(
     local_path: &str,
 ) -> Result<Vec<String>> {
     let uncommitted = git::get_uncommitted_changes(local_path)?;
@@ -22,13 +22,13 @@ pub(super) fn unexpected_uncommitted_files_excluding_homeboy_build(
         .iter()
         .chain(uncommitted.unstaged.iter())
         .chain(uncommitted.untracked.iter())
-        .filter(|path| !is_homeboy_generated_build_path(path))
+        .filter(|path| !is_generated_build_path(path))
         .cloned()
         .collect())
 }
 
-pub(super) fn cleanup_homeboy_generated_build_artifacts(local_path: &Path) {
-    let build_dir = local_path.join(HOMEBOY_BUILD_DIR);
+pub(super) fn cleanup_generated_build_artifacts(local_path: &Path) {
+    let build_dir = local_path.join(deploy_generated_build_dir());
     if !build_dir.exists() {
         return;
     }
@@ -70,7 +70,7 @@ impl<'a> GeneratedBuildArtifactCleanupGuard<'a> {
 impl Drop for GeneratedBuildArtifactCleanupGuard<'_> {
     fn drop(&mut self) {
         if self.enabled {
-            cleanup_homeboy_generated_build_artifacts(self.local_path);
+            cleanup_generated_build_artifacts(self.local_path);
         }
     }
 }
@@ -78,8 +78,8 @@ impl Drop for GeneratedBuildArtifactCleanupGuard<'_> {
 #[cfg(test)]
 mod tests {
     use super::{
-        cleanup_homeboy_generated_build_artifacts, is_homeboy_generated_build_path,
-        unexpected_uncommitted_files_excluding_homeboy_build,
+        cleanup_generated_build_artifacts, is_generated_build_path,
+        unexpected_uncommitted_files_excluding_generated_build,
     };
 
     fn run_git(dir: &std::path::Path, args: &[&str]) {
@@ -111,12 +111,10 @@ mod tests {
 
     #[test]
     fn root_homeboy_build_paths_are_generated() {
-        assert!(is_homeboy_generated_build_path(".homeboy-build"));
-        assert!(is_homeboy_generated_build_path(".homeboy-build/plugin.zip"));
-        assert!(!is_homeboy_generated_build_path(
-            "src/.homeboy-build/plugin.zip"
-        ));
-        assert!(!is_homeboy_generated_build_path("src/lib.rs"));
+        assert!(is_generated_build_path(".homeboy-build"));
+        assert!(is_generated_build_path(".homeboy-build/plugin.zip"));
+        assert!(!is_generated_build_path("src/.homeboy-build/plugin.zip"));
+        assert!(!is_generated_build_path("src/lib.rs"));
     }
 
     #[test]
@@ -128,7 +126,7 @@ mod tests {
         std::fs::write(dir.join("src.rs"), "source\n").expect("source");
 
         let unexpected =
-            unexpected_uncommitted_files_excluding_homeboy_build(&dir.to_string_lossy())
+            unexpected_uncommitted_files_excluding_generated_build(&dir.to_string_lossy())
                 .expect("status");
 
         assert_eq!(unexpected, vec!["src.rs"]);
@@ -141,7 +139,7 @@ mod tests {
         std::fs::create_dir_all(&build_dir).expect("build dir");
         std::fs::write(build_dir.join("plugin.zip"), "artifact").expect("artifact");
 
-        cleanup_homeboy_generated_build_artifacts(temp.path());
+        cleanup_generated_build_artifacts(temp.path());
 
         assert!(!build_dir.exists());
     }
