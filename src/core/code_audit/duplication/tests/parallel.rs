@@ -271,30 +271,156 @@ fn no_parallel_for_generic_names() {
 }
 
 #[test]
-fn jaccard_identical_sets() {
-    let a = vec!["foo".to_string(), "bar".to_string()];
-    assert!((jaccard_similarity(&a, &a) - 1.0).abs() < f64::EPSILON);
+fn jaccard_floor_preserves_parallel_detection_behavior() {
+    let weak_overlap_a = make_fingerprint_with_content(
+            "src/weak_a.rs",
+            &["deploy_weak_overlap"],
+            "fn deploy_weak_overlap() {\n    for host in hosts {\n        validate_component();\n        build_artifact();\n        upload_to_host();\n        deploy_only_one();\n        deploy_only_two();\n        deploy_only_three();\n        deploy_only_four();\n    }\n}",
+        );
+    let weak_overlap_b = make_fingerprint_with_content(
+            "src/weak_b.rs",
+            &["upgrade_weak_overlap"],
+            "fn upgrade_weak_overlap() {\n    for host in hosts {\n        validate_component();\n        build_artifact();\n        upload_to_host();\n        upgrade_only_one();\n        upgrade_only_two();\n        upgrade_only_three();\n        upgrade_only_four();\n    }\n}",
+        );
+
+    let weak_findings = detect_parallel_implementations(
+        &[&weak_overlap_a, &weak_overlap_b],
+        &std::collections::HashSet::new(),
+        &DuplicationDetectorConfig::default(),
+    );
+    assert!(
+        weak_findings.is_empty(),
+        "Pairs with enough shared calls but weak Jaccard overlap must stay suppressed, got: {:?}",
+        weak_findings
+            .iter()
+            .map(|f| &f.description)
+            .collect::<Vec<_>>()
+    );
+
+    let strong_overlap_a = make_fingerprint_with_content(
+            "src/strong_a.rs",
+            &["deploy_strong_overlap"],
+            "fn deploy_strong_overlap() {\n    for host in hosts {\n        validate_component();\n        build_artifact();\n        upload_to_host();\n        run_post_hooks();\n        deploy_only();\n    }\n}",
+        );
+    let strong_overlap_b = make_fingerprint_with_content(
+            "src/strong_b.rs",
+            &["upgrade_strong_overlap"],
+            "fn upgrade_strong_overlap() {\n    for host in hosts {\n        validate_component();\n        build_artifact();\n        upload_to_host();\n        run_post_hooks();\n        upgrade_only();\n    }\n}",
+        );
+
+    let strong_findings = detect_parallel_implementations(
+        &[&strong_overlap_a, &strong_overlap_b],
+        &std::collections::HashSet::new(),
+        &DuplicationDetectorConfig::default(),
+    );
+    assert_eq!(
+        strong_findings.len(),
+        2,
+        "Pairs above the Jaccard floor must still produce parallel implementation findings"
+    );
 }
 
 #[test]
-fn jaccard_disjoint_sets() {
-    let a = vec!["foo".to_string()];
-    let b = vec!["bar".to_string()];
-    assert!((jaccard_similarity(&a, &b)).abs() < f64::EPSILON);
+fn shared_call_floor_preserves_parallel_detection_behavior() {
+    let below_floor_a = make_fingerprint_with_content(
+            "src/below_a.rs",
+            &["deploy_below_floor"],
+            "fn deploy_below_floor() {\n    for host in hosts {\n        validate_component();\n        build_artifact();\n        prepare_deploy_only();\n        notify_deploy_only();\n    }\n}",
+        );
+    let below_floor_b = make_fingerprint_with_content(
+            "src/below_b.rs",
+            &["upgrade_below_floor"],
+            "fn upgrade_below_floor() {\n    for host in hosts {\n        validate_component();\n        build_artifact();\n        prepare_upgrade_only();\n        notify_upgrade_only();\n    }\n}",
+        );
+
+    let below_floor_findings = detect_parallel_implementations(
+        &[&below_floor_a, &below_floor_b],
+        &std::collections::HashSet::new(),
+        &DuplicationDetectorConfig::default(),
+    );
+    assert!(
+        below_floor_findings.is_empty(),
+        "Pairs below the shared-call floor must stay suppressed, got: {:?}",
+        below_floor_findings
+            .iter()
+            .map(|f| &f.description)
+            .collect::<Vec<_>>()
+    );
+
+    let at_floor_a = make_fingerprint_with_content(
+            "src/at_floor_a.rs",
+            &["deploy_at_floor"],
+            "fn deploy_at_floor() {\n    for host in hosts {\n        validate_component();\n        build_artifact();\n        upload_to_host();\n        notify_deploy_only();\n    }\n}",
+        );
+    let at_floor_b = make_fingerprint_with_content(
+            "src/at_floor_b.rs",
+            &["upgrade_at_floor"],
+            "fn upgrade_at_floor() {\n    for host in hosts {\n        validate_component();\n        build_artifact();\n        upload_to_host();\n        notify_upgrade_only();\n    }\n}",
+        );
+
+    let at_floor_findings = detect_parallel_implementations(
+        &[&at_floor_a, &at_floor_b],
+        &std::collections::HashSet::new(),
+        &DuplicationDetectorConfig::default(),
+    );
+    assert_eq!(
+        at_floor_findings.len(),
+        2,
+        "Pairs at the shared-call floor must still produce parallel implementation findings"
+    );
+    assert!(at_floor_findings
+        .iter()
+        .all(|finding| finding.kind == AuditFinding::ParallelImplementation));
 }
 
 #[test]
-fn lcs_identical_sequences() {
-    let a = vec!["a".to_string(), "b".to_string(), "c".to_string()];
-    assert_eq!(lcs_length(&a, &a), 3);
-    assert!((lcs_ratio(&a, &a) - 1.0).abs() < f64::EPSILON);
-}
+fn sequence_order_gate_preserves_parallel_detection_behavior() {
+    let reversed_a = make_fingerprint_with_content(
+            "src/reversed_a.rs",
+            &["deploy_reversed_order"],
+            "fn deploy_reversed_order() {\n    for host in hosts {\n        validate_component();\n        build_artifact();\n        upload_to_host();\n        run_post_hooks();\n    }\n}",
+        );
+    let reversed_b = make_fingerprint_with_content(
+            "src/reversed_b.rs",
+            &["upgrade_reversed_order"],
+            "fn upgrade_reversed_order() {\n    for host in hosts {\n        run_post_hooks();\n        upload_to_host();\n        build_artifact();\n        validate_component();\n    }\n}",
+        );
 
-#[test]
-fn lcs_partial_overlap() {
-    let a = vec!["a".to_string(), "b".to_string(), "c".to_string()];
-    let b = vec!["a".to_string(), "x".to_string(), "c".to_string()];
-    assert_eq!(lcs_length(&a, &b), 2); // a, c
+    let reversed_findings = detect_parallel_implementations(
+        &[&reversed_a, &reversed_b],
+        &std::collections::HashSet::new(),
+        &DuplicationDetectorConfig::default(),
+    );
+    assert!(
+        reversed_findings.is_empty(),
+        "Pairs with the same calls in incompatible order must stay suppressed, got: {:?}",
+        reversed_findings
+            .iter()
+            .map(|f| &f.description)
+            .collect::<Vec<_>>()
+    );
+
+    let ordered_a = make_fingerprint_with_content(
+            "src/ordered_a.rs",
+            &["deploy_ordered"],
+            "fn deploy_ordered() {\n    for host in hosts {\n        validate_component();\n        build_artifact();\n        upload_to_host();\n        run_post_hooks();\n    }\n}",
+        );
+    let ordered_b = make_fingerprint_with_content(
+            "src/ordered_b.rs",
+            &["upgrade_ordered"],
+            "fn upgrade_ordered() {\n    for host in hosts {\n        validate_component();\n        build_artifact();\n        upload_to_host();\n        run_post_hooks();\n    }\n}",
+        );
+
+    let ordered_findings = detect_parallel_implementations(
+        &[&ordered_a, &ordered_b],
+        &std::collections::HashSet::new(),
+        &DuplicationDetectorConfig::default(),
+    );
+    assert_eq!(
+        ordered_findings.len(),
+        2,
+        "Pairs with strong call-set and sequence overlap must still produce parallel implementation findings"
+    );
 }
 
 #[test]
