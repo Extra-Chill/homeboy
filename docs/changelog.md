@@ -4,6 +4,70 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.219.0] - 2026-06-03
+
+### Added
+- support build artifact inputs
+- summarize named spans in reports
+
+### Changed
+- trim release package component env assertion
+- parallelize release quality gates
+- refresh agnostic release baselines
+- refactor(agent-task): extract timeout artifact discovery
+- split daemon health classifier
+- move lab bundle regression out of command file
+- make deploy artifact zip fixtures hermetic
+- keep reconciliation coverage compact
+- isolate lab patch apply
+- expand shared runtime helpers
+- cover packaged stack preservation
+- isolate lab validation dependency sync
+
+### Fixed
+- reject invalid release zip downloads
+- fix release action component env
+- fix(agent-task): let providers serialize timeout artifacts
+- dedupe auth publish skip
+- recover publish auth gaps
+- fix(agent-task): satisfy lifecycle audit gates
+- collect package artifacts from all providers
+- fix(agent-task): recover stale submitted runs
+- clean generated build artifacts
+- derive github token for wordpress publish
+- deduplicate artifact preflight failures
+- create missing zip artifacts
+- keep agnostic guard fixtures neutral
+- reuse temp names for snapshots
+- make self command prefix repo-owned
+- decouple tests from node fixture
+- guard concrete extension ids
+- isolate lab snapshot workspaces
+- flatten nested artifacts portably
+- make source snapshot tests deterministic
+- remove reverse broker listener startup race
+- run Homeboy self PRs with candidate binary
+- link generated notes to changelog
+- fall back from stale lab daemon
+- remap conflicting lab bundle run ids
+- accept extension override for source runs
+- stop duplicating generated release notes
+- fix(agent-task): preserve timeout artifacts
+- diagnose stale linked rig sources
+- reconcile interrupted run metadata
+- fix(agent-task): resolve declared secret env before dispatch
+- avoid report audit drift
+- apply lab write refactor patches
+- type archive install manifest policy
+- export bash preflight runtime helper
+- declare structured sidecar producers
+- add core test result adapters
+- centralize lab workspace labels
+- offload settings matrix runs to lab
+- sync lab validation dependencies
+- ship lab dependency workspaces
+- merge explicit audit extension rules
+
 ## [0.218.0] - 2026-06-02
 
 ### Added
