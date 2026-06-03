@@ -156,6 +156,7 @@ function writePreflightEvidence(artifacts, evidence) {
 function runnerInput(request, artifacts) {
   return Object.fromEntries(Object.entries({
     parent_request: request,
+    execution_kind: request.execution_kind || 'sandbox',
     agent: argValue('--agent') || request.agent || 'wp-codebox-sandbox',
     mode: argValue('--mode') || request.mode || 'sandbox',
     provider: argValue('--provider') || request.provider || '',
@@ -174,6 +175,10 @@ function runnerInput(request, artifacts) {
     agents_api_path: argValue('--agents-api') || request.agents_api || '',
     data_machine_path: argValue('--data-machine') || request.data_machine || '',
     data_machine_code_path: argValue('--data-machine-code') || request.data_machine_code || '',
+    homeboy_path: argValue('--homeboy') || request.homeboy || '',
+    homeboy_extensions_path: argValue('--homeboy-extensions') || request.homeboy_extensions || path.resolve(__dirname, '..', '..'),
+    wp_version: request.wp_codebox_wordpress_version || request.wp_version || request.wp || undefined,
+    datamachine_bundle: request.datamachine_bundle || {},
   }).filter(([, value]) => value !== '' && value !== undefined && !(Array.isArray(value) && value.length === 0)));
 }
 
@@ -206,6 +211,43 @@ function workspaceMounts(request) {
   }];
 }
 
+function datamachineBundleMount(input) {
+  const bundle = input.datamachine_bundle || {};
+  const source = bundle.bundle_host_path || bundle.bundle_path || '';
+  if (!source || !fs.existsSync(source)) {
+    return { mounts: [], config: bundle };
+  }
+  const slug = slugFromPath(source, 'datamachine-bundle');
+  const target = bundle.bundle_path && !fs.existsSync(bundle.bundle_path)
+    ? bundle.bundle_path
+    : `/wordpress/wp-content/plugins/${slug}`;
+  return {
+    mounts: [{
+      source,
+      target,
+      mode: 'readonly',
+      metadata: { kind: 'homeboy-datamachine-bundle', slug },
+    }],
+    config: {
+      ...bundle,
+      bundle_path: target,
+      bundle_host_path: source,
+    },
+  };
+}
+
+function homeboyExtensionMount(input) {
+  if (!input.homeboy_extensions_path) {
+    return [];
+  }
+  return [{
+    source: input.homeboy_extensions_path,
+    target: '/homeboy-extension',
+    mode: 'readonly',
+    metadata: { kind: 'homeboy-extension-runtime' },
+  }];
+}
+
 function providerPluginSpecs(input) {
   return (input.provider_plugin_paths || []).map((source) => extraPlugin(source, slugFromPath(source, 'provider'), false)).filter(Boolean);
 }
@@ -213,15 +255,21 @@ function providerPluginSpecs(input) {
 function buildRecipe(input) {
   const providerPlugins = providerPluginSpecs(input);
   const providerSlugs = providerPlugins.map((plugin) => plugin.slug);
+  const isDatamachineBundle = input.execution_kind === 'datamachine_bundle' || input.execution_kind === 'datamachine-bundle';
+  const bundleMount = datamachineBundleMount(input);
+  const datamachineConfig = datamachineBundleConfig(input, bundleMount.config);
   const task = input.parent_request?.task || {};
   const workflowArgs = [
-    `task=${task.prompt || ''}`,
+    `task=${isDatamachineBundle ? (datamachineConfig.workload_label || task.title || 'Run Data Machine agent bundle') : (task.prompt || '')}`,
     `agent=${input.agent || 'wp-codebox-sandbox'}`,
     `mode=${input.mode || 'sandbox'}`,
     `provider=${input.provider || ''}`,
     `model=${input.model || ''}`,
     `provider-plugin-slugs=${providerSlugs.join(',')}`,
   ];
+  if (isDatamachineBundle) {
+    workflowArgs.push('code-file=/homeboy-extension/scripts/agent/homeboy-datamachine-agent-workload-wrapper.php');
+  }
   if (input.sandbox_session_id) {
     workflowArgs.push(`session-id=${input.sandbox_session_id}`);
   }
@@ -242,11 +290,17 @@ function buildRecipe(input) {
       overlays: input.runtime_overlays?.length ? input.runtime_overlays : undefined,
     }).filter(([, value]) => value !== undefined)),
     inputs: Object.fromEntries(Object.entries({
-      mounts: [...(input.mounts || []), ...workspaceMounts(input.parent_request || {})],
+      mounts: [
+        ...(input.mounts || []),
+        ...workspaceMounts(input.parent_request || {}),
+        ...(isDatamachineBundle ? homeboyExtensionMount(input) : []),
+        ...(isDatamachineBundle ? bundleMount.mounts : []),
+      ],
       extraPlugins: [
         extraPlugin(input.agents_api_path, 'agents-api'),
         extraPlugin(input.data_machine_path, 'data-machine'),
         extraPlugin(input.data_machine_code_path, 'data-machine-code'),
+        extraPlugin(input.homeboy_path, 'homeboy'),
         ...providerPlugins,
       ].filter(Boolean),
       secretEnv: input.secret_env || [],
@@ -258,12 +312,32 @@ function buildRecipe(input) {
       directory: input.artifacts_path,
       verify: { enabled: true },
     },
+    metadata: isDatamachineBundle ? { datamachine_bundle: datamachineConfig } : undefined,
   };
+}
+
+function datamachineBundleConfig(input, bundleConfig = {}) {
+  return Object.fromEntries(Object.entries({
+    ...bundleConfig,
+    prompt: bundleConfig.prompt || input.parent_request?.task?.prompt || '',
+    provider: bundleConfig.provider || input.provider || '',
+    model: bundleConfig.model || input.model || '',
+    provider_plugin_paths: bundleConfig.provider_plugin_paths || input.provider_plugin_paths || [],
+    wp_codebox_artifacts_dir: input.artifacts_path,
+    wp_codebox_components: {
+      agents_api: input.agents_api_path,
+      data_machine: input.data_machine_path,
+      data_machine_code: input.data_machine_code_path,
+    },
+  }).filter(([, value]) => value !== '' && value !== undefined && !(Array.isArray(value) && value.length === 0)));
 }
 
 function agentTaskRunFromRecipeRun(input, result, artifacts) {
   const execution = Array.isArray(result.executions) ? result.executions.find((item) => item?.recipeCommand === 'wp-codebox.agent-sandbox-run') || result.executions[0] : null;
   const agentResult = result.agentResult || result.run?.agentResult || result.artifacts?.agentResult || execution?.agentResult || {};
+  const datamachineConfig = input.execution_kind === 'datamachine_bundle' || input.execution_kind === 'datamachine-bundle'
+    ? datamachineBundleConfig(input, datamachineBundleMount(input).config)
+    : null;
   const previewUrl = result.runtime?.preview?.url || result.artifacts?.preview_url || result.artifacts?.previewUrl || '';
   return {
     success: Boolean(result.success),
@@ -293,9 +367,24 @@ function agentTaskRunFromRecipeRun(input, result, artifacts) {
     artifacts,
     exit_code: result.success ? 0 : 1,
     run: { ...result.run, agentResult },
-    diagnostics: result.diagnostics || (result.error ? [{ class: result.error.code || 'wp-codebox.recipe-run', message: result.error.message || String(result.error), data: result.error }] : []),
-    metadata: { recipe_run: result },
+    diagnostics: result.diagnostics || datamachineDiagnostics(agentResult) || (result.error ? [{ class: result.error.code || 'wp-codebox.recipe-run', message: result.error.message || String(result.error), data: result.error }] : []),
+    metadata: {
+      recipe_run: result,
+      ...(datamachineConfig ? { datamachine: { bundle: datamachineConfig, workload: agentResult } } : {}),
+    },
   };
+}
+
+function datamachineDiagnostics(workload) {
+  const scenarios = Array.isArray(workload?.scenarios) ? workload.scenarios : [];
+  const diagnostics = scenarios
+    .filter((scenario) => scenario?.metadata?.error || scenario?.metadata?.error_message)
+    .map((scenario) => ({
+      class: 'datamachine.workload',
+      message: scenario.metadata.error || scenario.metadata.error_message,
+      data: { scenario_id: scenario.id, metadata: scenario.metadata },
+    }));
+  return diagnostics.length > 0 ? diagnostics : null;
 }
 
 function timeoutPayload(timeoutMs, artifacts, evidencePath, inputPath, command, args) {
@@ -366,7 +455,12 @@ function runWpCodeboxParentTask(request) {
 
   const result = spawnSync(resolved.command, resolved.args, {
     encoding: 'utf8',
-    env: process.env,
+    env: {
+      ...process.env,
+      ...(input.execution_kind === 'datamachine_bundle' || input.execution_kind === 'datamachine-bundle'
+        ? { HOMEBOY_DATAMACHINE_AGENT_CONFIG: JSON.stringify(datamachineBundleConfig(input, datamachineBundleMount(input).config)) }
+        : {}),
+    },
     maxBuffer: 1024 * 1024 * 20,
     timeout: timeoutMs,
   });
