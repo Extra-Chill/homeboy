@@ -27,6 +27,8 @@ use super::lab_workspaces::{
     workspace_mapping_entry,
 };
 
+const EXPLICIT_PASSTHROUGH_SENTINEL: &str = "__homeboy_explicit_passthrough__";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LabRunnerSelectionSource {
     Explicit,
@@ -964,6 +966,9 @@ fn rewrite_lab_offload_args(args: &[String], remote_path: &str) -> Vec<String> {
     let mut passthrough = false;
     let has_force_hot = args.iter().any(|arg| arg == "--force-hot");
     while let Some(arg) = iter.next() {
+        if arg == EXPLICIT_PASSTHROUGH_SENTINEL {
+            continue;
+        }
         if passthrough {
             stripped.push(arg.clone());
             continue;
@@ -1097,6 +1102,7 @@ mod tests {
             "test".to_string(),
             "--path=/Users/chubes/Developer/project".to_string(),
             "--".to_string(),
+            EXPLICIT_PASSTHROUGH_SENTINEL.to_string(),
             "--path".to_string(),
             "test-fixture".to_string(),
         ];
@@ -1111,6 +1117,34 @@ mod tests {
                 "--".to_string(),
                 "--path".to_string(),
                 "test-fixture".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn strips_internal_passthrough_sentinel_from_lab_offload_command() {
+        let args = vec![
+            "homeboy".to_string(),
+            "test".to_string(),
+            "data-machine".to_string(),
+            "--path".to_string(),
+            "/Users/chubes/Developer/data-machine@fix".to_string(),
+            "--".to_string(),
+            EXPLICIT_PASSTHROUGH_SENTINEL.to_string(),
+            "--filter=ConversationStoreFactoryTest::test_canonical_conversation_session_abilities_route_through_swapped_store".to_string(),
+        ];
+
+        assert_eq!(
+            rewrite_lab_offload_args(&args, "/home/chubes/Developer/data-machine@fix"),
+            vec![
+                "homeboy".to_string(),
+                "--force-hot".to_string(),
+                "test".to_string(),
+                "data-machine".to_string(),
+                "--path".to_string(),
+                "/home/chubes/Developer/data-machine@fix".to_string(),
+                "--".to_string(),
+                "--filter=ConversationStoreFactoryTest::test_canonical_conversation_session_abilities_route_through_swapped_store".to_string(),
             ]
         );
     }
