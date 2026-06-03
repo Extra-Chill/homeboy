@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.114.6] - 2026-06-03
+
+### Fixed
+- preserve codebox config artifacts on timeout
+
 ## [2.114.5] - 2026-06-03
 
 ### Fixed
