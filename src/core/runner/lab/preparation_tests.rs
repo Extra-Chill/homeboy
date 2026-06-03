@@ -4,6 +4,8 @@ use super::super::lab_selection::{
 use super::*;
 use crate::core::runner::{RunnerConnectReport, RunnerStatusReport, RunnerTunnelMode};
 
+use super::super::session::RunnerStaleDaemonWarning;
+
 #[test]
 fn lab_runner_preparation_falls_back_for_unreachable_default_runner() {
     let selection = LabRunnerSelection {
@@ -85,6 +87,83 @@ fn lab_runner_preparation_uses_already_connected_runner() {
     .expect("prepared");
 
     assert_eq!(prepared, LabRunnerPreparation::Ready);
+}
+
+#[test]
+fn lab_runner_preparation_falls_back_for_stale_default_daemon_version() {
+    let selection = LabRunnerSelection {
+        runner_id: "lab".to_string(),
+        source: LabRunnerSelectionSource::Default,
+        mode: RunnerTunnelMode::DirectSsh,
+    };
+
+    let prepared = prepare_lab_runner_for_offload_with(
+        &selection,
+        |runner_id| {
+            Ok(RunnerStatusReport {
+                runner_id: runner_id.to_string(),
+                connected: true,
+                state: super::super::RunnerSessionState::Connected,
+                session: Some(connected_direct_session(
+                    runner_id,
+                    Some("http://127.0.0.1:1234"),
+                )),
+                stale_daemon: Some(stale_daemon_warning(runner_id)),
+                session_path: "/tmp/lab.json".to_string(),
+            })
+        },
+        |_| panic!("stale connected daemon should not dispatch or reconnect automatically"),
+    )
+    .expect("prepared");
+
+    assert_eq!(
+        prepared,
+        LabRunnerPreparation::FallBackLocal {
+            reason: "connected runner `lab` daemon is stale: connected daemon reports homeboy 0.218.0, but the configured runner executable reports homeboy 0.219.0; refresh the session with `homeboy runner connect lab`".to_string()
+        }
+    );
+}
+
+#[test]
+fn lab_runner_preparation_errors_for_explicit_stale_daemon_version() {
+    let selection = LabRunnerSelection {
+        runner_id: "lab".to_string(),
+        source: LabRunnerSelectionSource::Explicit,
+        mode: RunnerTunnelMode::DirectSsh,
+    };
+
+    let err = prepare_lab_runner_for_offload_with(
+        &selection,
+        |runner_id| {
+            Ok(RunnerStatusReport {
+                runner_id: runner_id.to_string(),
+                connected: true,
+                state: super::super::RunnerSessionState::Connected,
+                session: Some(connected_direct_session(
+                    runner_id,
+                    Some("http://127.0.0.1:1234"),
+                )),
+                stale_daemon: Some(stale_daemon_warning(runner_id)),
+                session_path: "/tmp/lab.json".to_string(),
+            })
+        },
+        |_| panic!("explicit stale connected daemon should fail before reconnect"),
+    )
+    .expect_err("explicit stale daemon should error");
+
+    assert!(err.message.contains("connected but is not ready"));
+    assert!(err.message.contains("daemon is stale"));
+    assert!(err.message.contains("homeboy 0.218.0"));
+    assert!(err.message.contains("homeboy 0.219.0"));
+    assert!(err
+        .details
+        .get("tried")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|suggestion| suggestion
+            .as_str()
+            .is_some_and(|value| value.contains("homeboy runner connect lab"))));
 }
 
 #[test]
@@ -271,4 +350,12 @@ fn connected_direct_session(
         homeboy_version: "homeboy 0.0.0".to_string(),
         connected_at: "2026-06-03T00:00:00Z".to_string(),
     }
+}
+
+fn stale_daemon_warning(runner_id: &str) -> RunnerStaleDaemonWarning {
+    RunnerStaleDaemonWarning::new(
+        runner_id,
+        "homeboy 0.218.0".to_string(),
+        "homeboy 0.219.0".to_string(),
+    )
 }

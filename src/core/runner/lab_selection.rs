@@ -279,6 +279,18 @@ fn connected_runner_not_ready_reason(
     runner_id: &str,
     status: &RunnerStatusReport,
 ) -> Option<String> {
+    if let Some(warning) = status.stale_daemon.as_ref() {
+        let reconnect = warning
+            .recovery_commands
+            .first()
+            .cloned()
+            .unwrap_or_else(|| format!("homeboy runner connect {runner_id}"));
+        return Some(format!(
+            "connected runner `{runner_id}` daemon is stale: connected daemon reports {}, but the configured runner executable reports {}; refresh the session with `{reconnect}`",
+            warning.session_homeboy_version, warning.current_homeboy_version
+        ));
+    }
+
     let session = status.session.as_ref()?;
     match session.mode {
         RunnerTunnelMode::DirectSsh if session.local_url.as_deref().unwrap_or("").is_empty() => {
