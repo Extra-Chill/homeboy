@@ -262,13 +262,27 @@ pub(super) fn build_release_steps(
         "preflight.changelog_bootstrap",
     );
 
+    let tag_name = match monorepo {
+        Some(ctx) => ctx.format_tag(new_version),
+        None => format!("v{}", new_version),
+    };
+
+    let tag_preflight_needs = package_preflight_step_id
+        .as_deref()
+        .unwrap_or("preflight.changelog_bootstrap");
+    steps.push(ready_step(
+        "preflight.tag_availability",
+        "preflight.tag_availability",
+        format!("Check release tag {} is available", tag_name),
+        vec![tag_preflight_needs.to_string()],
+        string_config("name", tag_name.clone()),
+    ));
+
     steps.extend(build_changelog_steps(
         changelog_plan,
         current_version,
         new_version,
-        package_preflight_step_id
-            .as_deref()
-            .unwrap_or("preflight.changelog_bootstrap"),
+        "preflight.tag_availability",
     ));
 
     let version_config = StepConfig::new()
@@ -320,10 +334,6 @@ pub(super) fn build_release_steps(
         vec!["git.commit".to_string()]
     };
 
-    let tag_name = match monorepo {
-        Some(ctx) => ctx.format_tag(new_version),
-        None => format!("v{}", new_version),
-    };
     steps.push(ready_step(
         "git.tag",
         "git.tag",
@@ -1112,13 +1122,17 @@ mod tests {
 
         let ids: Vec<&str> = steps.iter().map(|step| step.id.as_str()).collect();
         let package_preflight_index = step_index(&ids, "preflight.package");
+        let tag_preflight_index = step_index(&ids, "preflight.tag_availability");
         let changelog_finalize_index = step_index(&ids, "changelog.finalize");
         let version_index = step_index(&ids, "version");
         let commit_index = step_index(&ids, "git.commit");
 
         assert!(package_preflight_index < changelog_finalize_index);
+        assert!(tag_preflight_index < changelog_finalize_index);
         assert!(package_preflight_index < version_index);
+        assert!(tag_preflight_index < version_index);
         assert!(package_preflight_index < commit_index);
+        assert!(tag_preflight_index < commit_index);
 
         let package_preflight = &steps[package_preflight_index];
         assert_eq!(
@@ -1130,7 +1144,17 @@ mod tests {
             .iter()
             .find(|step| step.id == "changelog.policy")
             .expect("changelog policy step");
-        assert_eq!(changelog_policy.needs, vec!["preflight.package"]);
+        assert_eq!(changelog_policy.needs, vec!["preflight.tag_availability"]);
+
+        let tag_preflight = &steps[tag_preflight_index];
+        assert_eq!(tag_preflight.needs, vec!["preflight.package"]);
+        assert_eq!(
+            tag_preflight
+                .inputs
+                .get("name")
+                .and_then(|value| value.as_str()),
+            Some("v1.0.1")
+        );
     }
 
     #[test]
