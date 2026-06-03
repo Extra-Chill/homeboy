@@ -8,6 +8,7 @@ use std::path::Path;
 
 use crate::core::engine::baseline::{self as generic, BaselineConfig, Fingerprintable};
 
+use super::conventions::AuditFinding as AuditFindingKind;
 use super::findings::Finding;
 use super::CodeAuditResult;
 
@@ -48,7 +49,12 @@ struct AuditFinding<'a>(&'a Finding);
 
 impl Fingerprintable for AuditFinding<'_> {
     fn fingerprint(&self) -> String {
-        format!("{}::{}::{:?}", self.0.convention, self.0.file, self.0.kind)
+        let file = if self.0.kind == AuditFindingKind::NonPortableArtifactPath {
+            artifact_portability_baseline_file(self.0)
+        } else {
+            self.0.file.clone()
+        };
+        format!("{}::{}::{:?}", self.0.convention, file, self.0.kind)
     }
 
     fn description(&self) -> String {
@@ -58,6 +64,36 @@ impl Fingerprintable for AuditFinding<'_> {
     fn context_label(&self) -> String {
         self.0.convention.clone()
     }
+}
+
+fn artifact_portability_baseline_file(finding: &Finding) -> String {
+    let issue = if finding
+        .description
+        .contains("without a mirrored artifact record")
+    {
+        "missing_mirrored_artifact"
+    } else if finding.description.starts_with("Artifact ") {
+        "artifact_path"
+    } else if finding
+        .description
+        .contains("records local-only artifact path")
+    {
+        "local_artifact_path"
+    } else {
+        "non_portable_artifact_path"
+    };
+    let field = extract_backtick_value_after(&finding.description, "field `")
+        .unwrap_or("unknown_field")
+        .replace("::", ":");
+
+    format!("artifact_portability/{issue}/{field}")
+}
+
+fn extract_backtick_value_after<'a>(value: &'a str, marker: &str) -> Option<&'a str> {
+    let start = value.find(marker)? + marker.len();
+    let rest = &value[start..];
+    let end = rest.find('`')?;
+    Some(&rest[..end])
 }
 
 // ============================================================================
@@ -194,6 +230,22 @@ mod tests {
             description: description.to_string(),
             suggestion: String::new(),
             kind: AuditFinding::MissingMethod,
+        }
+    }
+
+    fn make_finding_with_kind(
+        convention: &str,
+        file: &str,
+        description: &str,
+        kind: AuditFinding,
+    ) -> Finding {
+        Finding {
+            convention: convention.to_string(),
+            severity: Severity::Warning,
+            file: file.to_string(),
+            description: description.to_string(),
+            suggestion: String::new(),
+            kind,
         }
     }
 
@@ -482,6 +534,52 @@ mod tests {
             AuditFinding(&f1).fingerprint(),
             AuditFinding(&f2).fingerprint(),
             "fingerprint should not change when line count changes"
+        );
+    }
+
+    #[test]
+    fn artifact_portability_fingerprint_ignores_observation_run_and_path() {
+        let f1 = make_finding_with_kind(
+            "artifact_portability",
+            "observation:run-a",
+            "Run metadata field $.run_dir records local-only artifact path /tmp/homeboy-run-a; command `homeboy test`; field `$.run_dir`",
+            AuditFinding::NonPortableArtifactPath,
+        );
+        let f2 = make_finding_with_kind(
+            "artifact_portability",
+            "observation:run-b",
+            "Run metadata field $.run_dir records local-only artifact path /Users/chris/.config/homeboy/runtime/tmp/homeboy-run-b; command `homeboy lint`; field `$.run_dir`",
+            AuditFinding::NonPortableArtifactPath,
+        );
+
+        assert_eq!(
+            AuditFinding(&f1).fingerprint(),
+            AuditFinding(&f2).fingerprint()
+        );
+        assert_eq!(
+            AuditFinding(&f1).fingerprint(),
+            "artifact_portability::artifact_portability/local_artifact_path/$.run_dir::NonPortableArtifactPath"
+        );
+    }
+
+    #[test]
+    fn artifact_portability_fingerprint_distinguishes_violation_shape() {
+        let local_path = make_finding_with_kind(
+            "artifact_portability",
+            "observation:run-a",
+            "Run metadata field $.patch_artifact_path records local-only artifact path /tmp/homeboy-run-a/patch.diff; command `homeboy test`; field `$.patch_artifact_path`",
+            AuditFinding::NonPortableArtifactPath,
+        );
+        let missing_mirror = make_finding_with_kind(
+            "artifact_portability",
+            "observation:run-b",
+            "Run metadata field $.patch_artifact_path records remote artifact ref runner-artifact://lab/run/patch without a mirrored artifact record; command `homeboy test`; field `$.patch_artifact_path`",
+            AuditFinding::NonPortableArtifactPath,
+        );
+
+        assert_ne!(
+            AuditFinding(&local_path).fingerprint(),
+            AuditFinding(&missing_mirror).fingerprint()
         );
     }
 
