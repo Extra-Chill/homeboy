@@ -49,7 +49,7 @@ try {
   const capturePath = path.join(root, 'capture.json');
   const fixtureWpCodebox = createFixtureWpCodebox(root);
   const providerPluginPath = path.join(root, 'example-provider@feature-branch');
-  const workspaceRoot = path.join(root, 'homeboy@fix-test');
+  const workspaceRoot = path.join(root, 'wp-coding-agents@proof-homeboy-fanout-a');
   fs.mkdirSync(providerPluginPath, { recursive: true });
   fs.mkdirSync(workspaceRoot, { recursive: true });
 
@@ -160,7 +160,13 @@ try {
   assert.deepEqual(recipe.inputs.secretEnv, ['OPENCODE_API_KEY']);
   assert.equal(recipe.inputs.mounts[0].source, '/repo/plugin');
   assert.equal(recipe.inputs.mounts[1].source, workspaceRoot);
-  assert.equal(recipe.inputs.mounts[1].target, '/workspace/homeboy');
+  assert.equal(recipe.inputs.mounts[1].target, '/workspace/wp-coding-agents');
+  assert.deepEqual(recipe.inputs.mounts[1].metadata, {
+    kind: 'homeboy-agent-task-workspace',
+    slug: 'wp-coding-agents',
+    workspaceRef: 'wp-coding-agents@proof-homeboy-fanout-a',
+    repo: 'wp-coding-agents',
+  });
   assert.equal(recipe.runtime.stack.mounts[0].source, '/components/php-ai-client');
   assert.equal(recipe.runtime.stack.mounts[1].source, '/components/wordpress-develop');
   assert.equal(recipe.runtime.overlays[0].kind, 'bundled-library');
