@@ -4,6 +4,18 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.220.1] - 2026-06-03
+
+### Changed
+- add agent-task queued run worker
+- add component task worktrees
+- support resolved component worktree agent tasks
+
+### Fixed
+- fix worktree audit findings
+- fix agent-task promote source resolution
+- fix relative deploy path roots
+
 ## [0.220.0] - 2026-06-03
 
 ### Added
