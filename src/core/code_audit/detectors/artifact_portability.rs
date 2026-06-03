@@ -135,10 +135,10 @@ fn metadata_path_findings(
     let cleanup_promised = metadata_promises_cleanup(&run.metadata_json);
     let mut scan = MetadataPathScan::default();
     for field in metadata_string_fields(&run.metadata_json) {
-        scan.fields_scanned += 1;
         if is_runner_artifact_ref(field.value)
             && !artifact_paths.iter().any(|path| path == field.value)
         {
+            scan.fields_scanned += 1;
             scan.findings.push(portability_finding(
                 run,
                 &field.path,
@@ -155,6 +155,7 @@ fn metadata_path_findings(
         if !field_expects_portable_artifact_ref(&field.path) {
             continue;
         }
+        scan.fields_scanned += 1;
         if !looks_like_local_absolute_path(field.value, artifact_root, config) {
             continue;
         }
@@ -579,7 +580,7 @@ mod tests {
 
             assert_eq!(report.run_window, DEFAULT_OBSERVATION_RUN_WINDOW);
             assert_eq!(report.runs_scanned, 60);
-            assert_eq!(report.metadata_fields_scanned, 120);
+            assert_eq!(report.metadata_fields_scanned, 60);
             assert_eq!(report.findings.len(), 60);
             assert!(report
                 .findings
@@ -627,7 +628,7 @@ mod tests {
 
             assert_eq!(report.run_window, 2);
             assert_eq!(report.runs_scanned, 2);
-            assert_eq!(report.metadata_fields_scanned, 4);
+            assert_eq!(report.metadata_fields_scanned, 2);
             assert_eq!(report.findings.len(), 2);
             assert!(!report
                 .findings
