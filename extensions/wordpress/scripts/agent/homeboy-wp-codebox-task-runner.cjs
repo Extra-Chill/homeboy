@@ -195,12 +195,14 @@ function workspaceMounts(request) {
   if (!root) {
     return [];
   }
-  const slug = workspace.slug || slugFromPath(root, 'workspace');
+  const workspaceRef = workspace.ref || workspace.handle || path.basename(String(root).replace(/\/$/, ''));
+  const repo = workspace.repo || String(workspaceRef).split('@')[0] || slugFromPath(root, 'workspace');
+  const slug = workspace.slug || repo.replace(/[^A-Za-z0-9_-]/g, '-');
   return [{
     source: root,
     target: `/workspace/${slug}`,
     mode: workspace.mode === 'readonly' ? 'readonly' : 'readwrite',
-    metadata: { kind: 'homeboy-agent-task-workspace', slug },
+    metadata: { kind: 'homeboy-agent-task-workspace', slug, workspaceRef, repo },
   }];
 }
 
