@@ -15,6 +15,8 @@ use super::{
 
 use super::daemon_health::runner_daemon_health_failure;
 use super::lab_apply::apply_lab_offload_patch;
+#[cfg(test)]
+use super::lab_args::EXPLICIT_PASSTHROUGH_SENTINEL;
 use super::lab_args::{lab_offload_source_path, rewrite_lab_offload_args};
 use super::lab_capabilities::lab_runner_capability_contract;
 use super::lab_command::lab_offload_command_prefix;
