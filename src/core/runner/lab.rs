@@ -10,7 +10,8 @@ use super::{
     lab_offload_metadata, lab_offload_metadata_with_workspace_mapping, lab_runner_capability_plan,
     load, preflight_lab_offload_changed_since, prepare_git_lab_offload_changed_since,
     rig_materialization, status, sync_workspace, LabRunnerGateDecision, RunnerCapabilityPreflight,
-    RunnerExecOptions, RunnerStatusReport, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
+    RunnerExecOptions, RunnerStatusReport, RunnerTunnelMode, RunnerWorkspaceSyncMode,
+    RunnerWorkspaceSyncOptions,
 };
 
 use super::daemon_health::runner_daemon_health_failure;
@@ -234,6 +235,22 @@ fn run_lab_offload_inner(
                 "Connect runner `{runner_id}` before using --runner."
             )]),
         ));
+    }
+
+    if request.capture_patch && status_tunnel_mode(&runner_status) == RunnerTunnelMode::Reverse {
+        let reason =
+            "Lab offload cannot yet return source-tree mutations from reverse runners".to_string();
+        plan = with_step(
+            plan,
+            PlanStep::builder(
+                "lab.mutation_return",
+                "lab.mutation_return",
+                PlanStepStatus::Missing,
+            )
+            .skip_reason(reason.clone())
+            .build(),
+        );
+        return mutation_return_unavailable_outcome(plan, &selection, &runner_status, reason);
     }
 
     runner.workspace_root.as_deref().ok_or_else(|| {
@@ -527,6 +544,10 @@ fn run_lab_offload_inner(
                 .inputs(PlanValues::new().json("apply", &apply_output))
                 .build(),
             );
+        } else {
+            return Err(Error::internal_unexpected(
+                "Lab offload command required source-tree mutation return, but the runner returned no patch to apply",
+            ));
         }
     }
 
@@ -566,6 +587,31 @@ fn automatic_capability_fallback(
     }
 }
 
+fn mutation_return_unavailable_outcome(
+    plan: HomeboyPlan,
+    selection: &LabRunnerSelection,
+    runner_status: &RunnerStatusReport,
+    reason: String,
+) -> Result<LabOffloadOutcome> {
+    match selection.source {
+        LabRunnerSelectionSource::Default => Ok(automatic_capability_fallback(
+            plan,
+            &selection.runner_id,
+            runner_status,
+            reason,
+        )),
+        LabRunnerSelectionSource::Explicit => Err(Error::validation_invalid_argument(
+            "runner",
+            reason,
+            Some(selection.runner_id.clone()),
+            Some(vec![
+                "Use --force-hot to run the command locally until reverse Lab mutation return is supported."
+                    .to_string(),
+            ]),
+        )),
+    }
+}
+
 #[cfg(test)]
 #[path = "lab_arg_tests.rs"]
 mod lab_arg_tests;
@@ -580,7 +626,10 @@ mod tests {
     use super::*;
     use crate::core::observation::LAB_OFFLOAD_METADATA_ENV;
     use crate::core::plan::PlanKind;
-    use crate::core::runner::{RunnerRequiredTool, RunnerWorkspaceSyncOutput};
+    use crate::core::runner::{
+        RunnerRequiredTool, RunnerSession, RunnerSessionState, RunnerTunnelMode,
+        RunnerWorkspaceSyncOutput,
+    };
 
     fn portable_lab_command(label: &'static str) -> LabOffloadCommand {
         LabOffloadCommand {
@@ -603,6 +652,31 @@ mod tests {
             requires_extension_parity: false,
             required_extensions: Vec::new(),
             requires_playwright: false,
+        }
+    }
+
+    fn reverse_status(runner_id: &str) -> RunnerStatusReport {
+        RunnerStatusReport {
+            runner_id: runner_id.to_string(),
+            connected: true,
+            state: RunnerSessionState::Connected,
+            session: Some(RunnerSession {
+                runner_id: runner_id.to_string(),
+                mode: RunnerTunnelMode::Reverse,
+                role: super::super::RunnerSessionRole::Controller,
+                server_id: None,
+                controller_id: Some("controller".to_string()),
+                broker_url: Some("http://127.0.0.1:9876".to_string()),
+                remote_daemon_address: None,
+                local_port: None,
+                local_url: None,
+                tunnel_pid: None,
+                remote_daemon_pid: None,
+                homeboy_version: "homeboy 0.0.0".to_string(),
+                connected_at: "2026-06-03T00:00:00Z".to_string(),
+            }),
+            stale_daemon: None,
+            session_path: "/tmp/lab.json".to_string(),
         }
     }
 
@@ -754,6 +828,61 @@ mod tests {
 
         assert_eq!(err.code.as_str(), "validation.invalid_argument");
         assert!(err.message.contains("single-workspace Lab snapshot"));
+    }
+
+    #[test]
+    fn mutation_return_gap_falls_back_for_default_reverse_runner() {
+        let plan = base_lab_plan(Some(&portable_lab_command("audit")));
+        let selection = LabRunnerSelection {
+            runner_id: "lab".to_string(),
+            source: LabRunnerSelectionSource::Default,
+            mode: RunnerTunnelMode::Reverse,
+        };
+        let status = reverse_status("lab");
+
+        let outcome = mutation_return_unavailable_outcome(
+            plan,
+            &selection,
+            &status,
+            "Lab offload cannot yet return source-tree mutations from reverse runners".to_string(),
+        )
+        .expect("default runner falls back");
+
+        let LabOffloadOutcome::RunLocal {
+            messages, metadata, ..
+        } = outcome
+        else {
+            panic!("expected local fallback");
+        };
+        assert!(messages[0].contains("running locally"));
+        assert_eq!(metadata.expect("metadata")["status"], "fallback");
+    }
+
+    #[test]
+    fn mutation_return_gap_rejects_explicit_reverse_runner() {
+        let plan = base_lab_plan(Some(&portable_lab_command("audit")));
+        let selection = LabRunnerSelection {
+            runner_id: "lab".to_string(),
+            source: LabRunnerSelectionSource::Explicit,
+            mode: RunnerTunnelMode::Reverse,
+        };
+        let status = reverse_status("lab");
+
+        let result = mutation_return_unavailable_outcome(
+            plan,
+            &selection,
+            &status,
+            "Lab offload cannot yet return source-tree mutations from reverse runners".to_string(),
+        );
+        let Err(err) = result else {
+            panic!("expected explicit runner rejection");
+        };
+
+        assert_eq!(err.code.as_str(), "validation.invalid_argument");
+        assert!(err
+            .message
+            .contains("cannot yet return source-tree mutations"));
+        assert_eq!(err.details["id"], "lab");
     }
 
     #[test]
