@@ -272,15 +272,40 @@ fn no_parallel_for_generic_names() {
 
 #[test]
 fn jaccard_identical_sets() {
-    let a = vec!["foo".to_string(), "bar".to_string()];
-    assert!((jaccard_similarity(&a, &a) - 1.0).abs() < f64::EPSILON);
+    let a = std::collections::HashSet::from(["foo".to_string(), "bar".to_string()]);
+    assert!((jaccard_similarity(&a, &a, a.len()) - 1.0).abs() < f64::EPSILON);
 }
 
 #[test]
 fn jaccard_disjoint_sets() {
-    let a = vec!["foo".to_string()];
-    let b = vec!["bar".to_string()];
-    assert!((jaccard_similarity(&a, &b)).abs() < f64::EPSILON);
+    let a = std::collections::HashSet::from(["foo".to_string()]);
+    let b = std::collections::HashSet::from(["bar".to_string()]);
+    assert!((jaccard_similarity(&a, &b, 0)).abs() < f64::EPSILON);
+}
+
+#[test]
+fn shared_signal_call_count_counts_unique_overlap() {
+    let a = std::collections::HashSet::from([
+        "shared_one".to_string(),
+        "shared_two".to_string(),
+        "shared_three".to_string(),
+        "unique_a".to_string(),
+    ]);
+    let b = std::collections::HashSet::from([
+        "shared_one".to_string(),
+        "shared_two".to_string(),
+        "shared_three".to_string(),
+        "unique_b".to_string(),
+    ]);
+    let c = std::collections::HashSet::from([
+        "shared_one".to_string(),
+        "shared_two".to_string(),
+        "unique_c".to_string(),
+        "another_c".to_string(),
+    ]);
+
+    assert_eq!(shared_signal_call_count(&a, &b), MIN_SHARED_CALLS);
+    assert_eq!(shared_signal_call_count(&a, &c), MIN_SHARED_CALLS - 1);
 }
 
 #[test]
