@@ -204,6 +204,23 @@ JSON
 LINT_FIX_REPORT="$(extract_fix_report_from_output "${LINT_FIX_OUTPUT_DIR}")"
 assert_contains "${LINT_FIX_REPORT}" $'source_change	1	inc/wiki/class-intelligence-wiki-brain-coverage-planner.php' "lint --fix report classifies autofix changed files"
 
+STAGE_REPO="${TMP_DIR}/stage-source-fallback"
+mkdir -p "${STAGE_REPO}/src/Runtime"
+git -C "${STAGE_REPO}" init -q
+git -C "${STAGE_REPO}" config user.name "Test User"
+git -C "${STAGE_REPO}" config user.email "test@example.com"
+printf '{"component":"agents-api"}\n' > "${STAGE_REPO}/homeboy.json"
+printf '<?php\nclass WP_Agent_Conversation_Loop {}\n' > "${STAGE_REPO}/src/Runtime/class-wp-agent-conversation-loop.php"
+git -C "${STAGE_REPO}" add .
+git -C "${STAGE_REPO}" commit -q -m "initial"
+printf '{"component":"agents-api","baseline":true}\n' > "${STAGE_REPO}/homeboy.json"
+printf '<?php\nclass WP_Agent_Conversation_Loop { }\n' > "${STAGE_REPO}/src/Runtime/class-wp-agent-conversation-loop.php"
+
+export AUTOFIX_REPORT=""
+STAGE_SOURCE_FILES="$(cd "${STAGE_REPO}" && autofix_stage_source_files "${STAGE_REPO}")"
+assert_contains "${STAGE_SOURCE_FILES}" "src/Runtime/class-wp-agent-conversation-loop.php" "empty report falls back to changed source files"
+assert_not_contains "${STAGE_SOURCE_FILES}" "homeboy.json" "empty report fallback excludes drift files"
+
 BODY_CAPTURE="${TMP_DIR}/synthesized-create.md"
 export BODY_CAPTURE
 export AUTOFIX_FILE_COUNT="1"

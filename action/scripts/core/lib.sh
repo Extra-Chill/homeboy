@@ -325,6 +325,22 @@ autofix_review_files() {
   done <<< "${changed}"
 }
 
+autofix_stage_source_files() {
+  local workspace="${1:-$(resolve_workspace)}"
+  local reported previous_changed
+
+  reported="$(autofix_source_files_from_report)"
+  if [ -n "${reported}" ]; then
+    printf '%s\n' "${reported}"
+    return 0
+  fi
+
+  previous_changed="${AUTOFIX_CHANGED_FILES-}"
+  AUTOFIX_CHANGED_FILES="$(git_changed_files)"
+  autofix_review_files "${workspace}"
+  AUTOFIX_CHANGED_FILES="${previous_changed}"
+}
+
 autofix_unreported_review_files() {
   local workspace="${1:-$(resolve_workspace)}"
   local other drift_files file

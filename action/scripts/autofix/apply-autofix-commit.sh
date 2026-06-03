@@ -160,7 +160,7 @@ stage_autofix_changes() {
       git add -- "${file}"
       staged_any=true
     fi
-  done < <(autofix_source_files_from_report)
+  done < <(autofix_stage_source_files "${WORKSPACE}")
 
   if [ "${staged_any}" != "true" ]; then
     echo "Skipping autofix commit: no reported source files to stage"
