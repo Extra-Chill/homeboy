@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -5,8 +6,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::core::agent_task::{
-    AgentTaskDiagnostic, AgentTaskEvidenceRef, AgentTaskFailureClassification, AgentTaskOutcome,
-    AgentTaskOutcomeStatus, AgentTaskRequest, AGENT_TASK_OUTCOME_SCHEMA,
+    AgentTaskArtifact, AgentTaskDiagnostic, AgentTaskEvidenceRef, AgentTaskFailureClassification,
+    AgentTaskOutcome, AgentTaskOutcomeStatus, AgentTaskRequest, AGENT_TASK_ARTIFACT_SCHEMA,
+    AGENT_TASK_OUTCOME_SCHEMA,
 };
 use crate::core::agent_task_scheduler::{AgentTaskExecutionContext, AgentTaskExecutorAdapter};
 use crate::core::agent_task_secrets::{resolve_secret_env, AgentTaskSecretResolutionError};
@@ -59,6 +61,10 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
         request: AgentTaskRequest,
         _context: AgentTaskExecutionContext,
     ) -> AgentTaskOutcome {
+        if request.executor.backend == "fixture" {
+            return run_fixture_provider(&request);
+        }
+
         let Some(provider) = select_provider(&self.providers, &request) else {
             return failure_outcome(
                 &request,
@@ -96,6 +102,174 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
         }
 
         run_provider_command(&request, provider)
+    }
+}
+
+fn run_fixture_provider(request: &AgentTaskRequest) -> AgentTaskOutcome {
+    let mode = request
+        .executor
+        .config
+        .get("mode")
+        .and_then(Value::as_str)
+        .unwrap_or("success");
+    let artifact_root = fixture_artifact_root(request);
+    if let Err(error) = std::fs::create_dir_all(&artifact_root) {
+        return failure_outcome(
+            request,
+            AgentTaskOutcomeStatus::ProviderError,
+            AgentTaskFailureClassification::Provider,
+            "agent_task.fixture_artifact_root_failed",
+            error.to_string(),
+            json!({ "artifact_root": artifact_root.display().to_string() }),
+        );
+    }
+
+    match mode {
+        "empty_patch" => fixture_empty_patch_outcome(request, &artifact_root),
+        "empty_runtime_bundle" => fixture_empty_runtime_bundle_outcome(request, &artifact_root),
+        _ => fixture_success_outcome(request, &artifact_root),
+    }
+}
+
+fn fixture_artifact_root(request: &AgentTaskRequest) -> PathBuf {
+    request
+        .executor
+        .config
+        .get("artifact_root")
+        .and_then(Value::as_str)
+        .map(|path| {
+            let path = PathBuf::from(path);
+            if path.is_absolute() {
+                path
+            } else {
+                std::env::current_dir()
+                    .unwrap_or_else(|_| PathBuf::from("."))
+                    .join(path)
+            }
+        })
+        .unwrap_or_else(|| {
+            std::env::temp_dir().join(format!("homeboy-agent-task-fixture-{}", request.task_id))
+        })
+}
+
+fn fixture_success_outcome(
+    request: &AgentTaskRequest,
+    artifact_root: &PathBuf,
+) -> AgentTaskOutcome {
+    let changed_file = request
+        .executor
+        .config
+        .get("changed_file")
+        .and_then(Value::as_str)
+        .unwrap_or("docs/agent-task-smoke.md");
+    let patch_path = artifact_root.join("changes.patch");
+    let transcript_path = artifact_root.join("transcript.log");
+    let result_path = artifact_root.join("agent-result.json");
+    let patch = format!(
+        "diff --git a/{changed_file} b/{changed_file}\n--- a/{changed_file}\n+++ b/{changed_file}\n@@ -1 +1 @@\n-before\n+after\n"
+    );
+    let _ = std::fs::write(&patch_path, patch);
+    let _ = std::fs::write(
+        &transcript_path,
+        "fixture provider completed successfully\n",
+    );
+
+    let mut outcome = AgentTaskOutcome {
+        schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+        task_id: request.task_id.clone(),
+        status: AgentTaskOutcomeStatus::Succeeded,
+        summary: Some("fixture provider wrote deterministic smoke artifacts".to_string()),
+        failure_classification: None,
+        artifacts: vec![
+            fixture_artifact("patch", "patch", &patch_path, Some("text/x-patch")),
+            fixture_artifact(
+                "agent-result",
+                "agent_result",
+                &result_path,
+                Some("application/json"),
+            ),
+        ],
+        evidence_refs: vec![AgentTaskEvidenceRef {
+            kind: "transcript".to_string(),
+            uri: transcript_path.display().to_string(),
+            label: Some("fixture transcript".to_string()),
+        }],
+        diagnostics: vec![AgentTaskDiagnostic {
+            class: "agent_task.fixture_success".to_string(),
+            message: "fixture provider generated patch, transcript, and result artifacts"
+                .to_string(),
+            data: json!({ "artifact_root": artifact_root.display().to_string() }),
+        }],
+        workflow: None,
+        follow_up: None,
+        metadata: json!({ "fixture_mode": "success" }),
+    };
+    let _ = std::fs::write(
+        &result_path,
+        serde_json::to_string_pretty(&outcome).unwrap_or_else(|_| "{}".to_string()),
+    );
+    outcome.artifacts[1] = fixture_artifact(
+        "agent-result",
+        "agent_result",
+        &result_path,
+        Some("application/json"),
+    );
+    outcome
+}
+
+fn fixture_empty_patch_outcome(
+    request: &AgentTaskRequest,
+    artifact_root: &PathBuf,
+) -> AgentTaskOutcome {
+    let patch_path = artifact_root.join("empty.patch");
+    let _ = std::fs::write(&patch_path, "");
+    failure_outcome(
+        request,
+        AgentTaskOutcomeStatus::NoOp,
+        AgentTaskFailureClassification::InvalidInput,
+        "agent_task.fixture_empty_patch",
+        "fixture produced an empty patch; promotion should reject it".to_string(),
+        json!({ "patch_path": patch_path.display().to_string() }),
+    )
+}
+
+fn fixture_empty_runtime_bundle_outcome(
+    request: &AgentTaskRequest,
+    artifact_root: &PathBuf,
+) -> AgentTaskOutcome {
+    let bundle_path = artifact_root.join("runtime-bundle");
+    let _ = std::fs::create_dir_all(&bundle_path);
+    let mut outcome = failure_outcome(
+        request,
+        AgentTaskOutcomeStatus::ProviderError,
+        AgentTaskFailureClassification::Provider,
+        "agent_task.fixture_empty_runtime_bundle",
+        "fixture produced an empty runtime bundle".to_string(),
+        json!({ "bundle_path": bundle_path.display().to_string() }),
+    );
+    outcome.artifacts.push(fixture_artifact(
+        "runtime-bundle",
+        "runtime_bundle",
+        &bundle_path,
+        None,
+    ));
+    outcome
+}
+
+fn fixture_artifact(id: &str, kind: &str, path: &PathBuf, mime: Option<&str>) -> AgentTaskArtifact {
+    AgentTaskArtifact {
+        schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+        id: id.to_string(),
+        kind: kind.to_string(),
+        name: path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string()),
+        path: Some(path.display().to_string()),
+        url: None,
+        mime: mime.map(str::to_string),
+        size_bytes: std::fs::metadata(path).ok().map(|metadata| metadata.len()),
+        sha256: None,
+        metadata: json!({ "fixture": true }),
     }
 }
 
@@ -550,5 +724,58 @@ mod tests {
             aggregate.outcomes[0].diagnostics[0].data["missing_secret_env"],
             json!([secret_name])
         );
+    }
+
+    #[test]
+    fn fixture_backend_produces_deterministic_smoke_artifacts() {
+        let artifact_root = tempfile::tempdir().expect("artifact root");
+        let (mut request, _provider) = request("task-fixture", "unused".to_string());
+        request.executor.backend = "fixture".to_string();
+        request.executor.config = json!({
+            "artifact_root": artifact_root.path().display().to_string(),
+            "changed_file": "docs/smoke.md"
+        });
+        let scheduler = AgentTaskScheduler::new(ExtensionProviderAgentTaskExecutor::default());
+
+        let aggregate = scheduler.run(AgentTaskPlan::new("plan-fixture", vec![request]));
+
+        assert_eq!(aggregate.totals.succeeded, 1);
+        let outcome = &aggregate.outcomes[0];
+        assert_eq!(outcome.status, AgentTaskOutcomeStatus::Succeeded);
+        assert!(outcome.artifacts.iter().any(
+            |artifact| artifact.kind == "patch" && artifact.size_bytes.unwrap_or_default() > 0
+        ));
+        assert!(outcome
+            .artifacts
+            .iter()
+            .any(|artifact| artifact.kind == "agent_result"));
+        assert!(outcome
+            .evidence_refs
+            .iter()
+            .any(|evidence| evidence.kind == "transcript"));
+    }
+
+    #[test]
+    fn fixture_backend_classifies_empty_runtime_bundle() {
+        let artifact_root = tempfile::tempdir().expect("artifact root");
+        let (mut request, _provider) = request("task-empty-runtime", "unused".to_string());
+        request.executor.backend = "fixture".to_string();
+        request.executor.config = json!({
+            "artifact_root": artifact_root.path().display().to_string(),
+            "mode": "empty_runtime_bundle"
+        });
+        let scheduler = AgentTaskScheduler::new(ExtensionProviderAgentTaskExecutor::default());
+
+        let aggregate = scheduler.run(AgentTaskPlan::new("plan-empty-runtime", vec![request]));
+
+        assert_eq!(aggregate.totals.failed, 1);
+        assert_eq!(
+            aggregate.outcomes[0].diagnostics[0].class,
+            "agent_task.fixture_empty_runtime_bundle"
+        );
+        assert!(aggregate.outcomes[0]
+            .artifacts
+            .iter()
+            .any(|artifact| artifact.kind == "runtime_bundle"));
     }
 }

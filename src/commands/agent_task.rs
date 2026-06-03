@@ -164,8 +164,7 @@ fn artifacts(args: StatusArgs) -> CmdResult<Value> {
 }
 
 fn promote_artifact(args: PromoteArgs) -> CmdResult<Value> {
-    let raw = config::read_json_spec_to_string(&args.source)?;
-    let source_path = source_spec_path(&args.source);
+    let (raw, source_path) = read_promotion_source(&args.source)?;
     let report = promote(AgentTaskPromotionOptions {
         source: raw,
         source_path,
@@ -177,6 +176,19 @@ fn promote_artifact(args: PromoteArgs) -> CmdResult<Value> {
     })?;
 
     Ok((serde_json::to_value(report).unwrap_or(Value::Null), 0))
+}
+
+fn read_promotion_source(
+    spec: &str,
+) -> homeboy::core::Result<(String, Option<std::path::PathBuf>)> {
+    if let Ok(source) = agent_task_lifecycle::aggregate_source(spec) {
+        return Ok((source.raw, Some(source.path)));
+    }
+
+    Ok((
+        config::read_json_spec_to_string(spec)?,
+        source_spec_path(spec),
+    ))
 }
 
 fn source_spec_path(spec: &str) -> Option<std::path::PathBuf> {

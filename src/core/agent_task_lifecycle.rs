@@ -1,6 +1,7 @@
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::path::PathBuf;
 use uuid::Uuid;
 
 use crate::core::agent_task::{AgentTaskArtifact, AgentTaskEvidenceRef, AgentTaskOutcome};
@@ -133,6 +134,12 @@ pub struct AgentTaskRunArtifacts {
     pub run_id: String,
     pub artifacts: Vec<AgentTaskArtifact>,
     pub evidence_refs: Vec<AgentTaskEvidenceRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentTaskRunAggregateSource {
+    pub raw: String,
+    pub path: PathBuf,
 }
 
 pub fn submit_plan(
@@ -278,6 +285,25 @@ pub fn artifacts(run_id: &str) -> Result<AgentTaskRunArtifacts> {
         artifacts: aggregate_artifacts(aggregate.as_ref()),
         evidence_refs: aggregate_evidence_refs(aggregate.as_ref()),
     })
+}
+
+pub fn aggregate_source(run_id: &str) -> Result<AgentTaskRunAggregateSource> {
+    let record = store::read_record(&sanitize_run_id(run_id))?;
+    let path = record.aggregate_path.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "run_id",
+            format!(
+                "agent-task run '{}' has no aggregate artifact yet",
+                record.run_id
+            ),
+            Some(record.run_id),
+            None,
+        )
+    })?;
+    let path = PathBuf::from(path);
+    let raw = std::fs::read_to_string(&path)
+        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
+    Ok(AgentTaskRunAggregateSource { raw, path })
 }
 
 fn aggregate_artifacts(aggregate: Option<&AgentTaskAggregate>) -> Vec<AgentTaskArtifact> {
@@ -577,6 +603,44 @@ mod tests {
                 loaded.metadata["stale_running_reason"],
                 "missing_runner_pid"
             );
+        });
+    }
+
+    #[test]
+    fn aggregate_source_loads_completed_run_without_path_spelunking() {
+        with_temp_home(|| {
+            let plan = test_plan();
+            let aggregate = AgentTaskAggregate {
+                schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
+                plan_id: plan.plan_id.clone(),
+                status: AgentTaskAggregateStatus::Succeeded,
+                totals: AgentTaskAggregateTotals {
+                    queued: 1,
+                    succeeded: 1,
+                    ..AgentTaskAggregateTotals::default()
+                },
+                outcomes: vec![AgentTaskOutcome {
+                    schema: crate::core::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+                    task_id: "task-a".to_string(),
+                    status: crate::core::agent_task::AgentTaskOutcomeStatus::Succeeded,
+                    summary: Some("ok".to_string()),
+                    failure_classification: None,
+                    artifacts: Vec::new(),
+                    evidence_refs: Vec::new(),
+                    diagnostics: Vec::new(),
+                    workflow: None,
+                    follow_up: None,
+                    metadata: Value::Null,
+                }],
+                events: Vec::new(),
+                queue: Default::default(),
+            };
+            record_completed_run(&plan, &aggregate, Some("run-source")).expect("recorded");
+
+            let source = aggregate_source("run-source").expect("aggregate source");
+
+            assert!(source.path.ends_with("aggregate.json"));
+            assert!(source.raw.contains("task-a"));
         });
     }
 
