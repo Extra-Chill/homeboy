@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::core::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
+use crate::core::engine::codebase_scan::{CodebaseSnapshot, ExtensionFilter, ScanConfig};
 
 use super::conventions::AuditFinding;
 use super::findings::{Finding, Severity};
@@ -23,35 +23,46 @@ const SOURCE_EXTENSIONS: &[&str] = &[
     "cpp", "h",
 ];
 
-/// Run structural analysis on all source files under a root directory.
-///
-/// Returns findings for files that exceed structural thresholds.
-pub(crate) fn analyze_structure(root: &Path) -> Vec<Finding> {
+pub(crate) fn source_extensions() -> &'static [&'static str] {
+    SOURCE_EXTENSIONS
+}
+
+pub(crate) fn build_snapshot(root: &Path) -> CodebaseSnapshot {
     let config = ScanConfig {
         extensions: ExtensionFilter::Only(
             SOURCE_EXTENSIONS.iter().map(|e| e.to_string()).collect(),
         ),
         ..Default::default()
     };
-    let files = codebase_scan::walk_files(root, &config);
 
+    CodebaseSnapshot::build(root, &config)
+}
+
+/// Run structural analysis on all source files under a root directory.
+///
+/// Returns findings for files that exceed structural thresholds.
+pub(crate) fn analyze_structure(root: &Path) -> Vec<Finding> {
+    let snapshot = build_snapshot(root);
+    analyze_snapshot(root, &snapshot)
+}
+
+/// Run structural analysis from an already-loaded codebase snapshot.
+pub(crate) fn analyze_snapshot(root: &Path, snapshot: &CodebaseSnapshot) -> Vec<Finding> {
     let mut findings = Vec::new();
     let mut dir_source_counts: HashMap<String, usize> = HashMap::new();
 
-    for path in files {
+    for (path, content) in snapshot.iter() {
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        if !SOURCE_EXTENSIONS.contains(&ext) {
+            continue;
+        }
+
         let parent_rel = path
             .parent()
             .and_then(|p| p.strip_prefix(root).ok())
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_default();
         *dir_source_counts.entry(parent_rel).or_insert(0) += 1;
-
-        let content = match std::fs::read_to_string(&path) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
         let relative = path
             .strip_prefix(root)
@@ -410,6 +421,34 @@ export default function main() {}
         assert_eq!(god_findings[0].file, "big.rs");
         assert!(god_findings[0].description.contains("1600 lines"));
         assert_eq!(god_findings[0].severity, Severity::Warning);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn snapshot_analysis_matches_root_analysis() {
+        let dir = std::env::temp_dir().join("homeboy_structural_snapshot_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::create_dir_all(&dir);
+
+        let mut content = String::new();
+        for i in 0..35 {
+            content.push_str(&format!("fn item_{}() {{}}\n", i));
+        }
+        std::fs::write(dir.join("many.rs"), &content).unwrap();
+        std::fs::write(dir.join("readme.md"), "# Not source\n").unwrap();
+
+        let snapshot = build_snapshot(&dir);
+        let broad_snapshot = CodebaseSnapshot::build(&dir, &ScanConfig::default());
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(
+            serde_json::to_value(analyze_snapshot(&dir, &snapshot)).unwrap(),
+            serde_json::to_value(analyze_structure(&dir)).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(analyze_snapshot(&dir, &broad_snapshot)).unwrap(),
+            serde_json::to_value(analyze_structure(&dir)).unwrap()
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

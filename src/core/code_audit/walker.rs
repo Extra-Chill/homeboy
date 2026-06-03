@@ -51,6 +51,38 @@ fn source_scan_config() -> ScanConfig {
     }
 }
 
+fn extension_matches(path: &Path, extensions: &[String]) -> bool {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    extensions.iter().any(|candidate| candidate == ext)
+}
+
+pub(crate) fn is_extension_provided_source_file(path: &Path, extensions: &[String]) -> bool {
+    extension_matches(path, extensions) && !is_index_file(path)
+}
+
+/// Build the shared audit source snapshot for full audit runs.
+///
+/// The snapshot includes extension-provided convention files plus detector-owned
+/// source extensions so downstream detectors can filter one shared walk/read
+/// without reducing their existing coverage.
+pub(crate) fn walk_shared_audit_files_snapshot(
+    root: &Path,
+    additional_extensions: &[&str],
+) -> CodebaseSnapshot {
+    let mut extensions = extension_provided_file_extensions();
+    extensions.extend(additional_extensions.iter().map(|ext| (*ext).to_string()));
+    extensions.sort();
+    extensions.dedup();
+
+    CodebaseSnapshot::build(
+        root,
+        &ScanConfig {
+            extensions: ExtensionFilter::Only(extensions),
+            ..Default::default()
+        },
+    )
+}
+
 /// Walk source files under a root, skipping common non-source directories
 /// and extension index files.
 ///

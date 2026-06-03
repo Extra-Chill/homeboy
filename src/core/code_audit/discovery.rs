@@ -5,8 +5,11 @@ use std::path::Path;
 
 use super::conventions::Language;
 use super::fingerprint::{fingerprint_content, normalize_convention_tags, FileFingerprint};
-use super::walker::{is_test_path, walk_source_files_snapshot};
+use super::walker::{
+    extension_provided_file_extensions, is_extension_provided_source_file, is_test_path,
+};
 use crate::core::component::AuditConfig;
+use crate::core::engine::codebase_scan::CodebaseSnapshot;
 
 type DiscoveryGroupKey = (String, Language, bool, Vec<String>);
 
@@ -25,11 +28,14 @@ pub struct DiscoveryResult {
 /// Returns groups of (group_name, glob_pattern, files) for directories that
 /// contain 2+ files of the same language, plus counts of walked vs fingerprinted files.
 ///
-/// Walks `root` once via [`walk_source_files_snapshot`] and reads each file
-/// exactly once. Fingerprinting goes through [`fingerprint_content`] so the
-/// snapshot's already-loaded content is reused — no second `read_to_string`.
-/// Slice 2 of #1492.
-pub(crate) fn auto_discover_groups(root: &Path, audit_config: &AuditConfig) -> DiscoveryResult {
+/// Consumes a caller-provided source snapshot. Fingerprinting goes through
+/// [`fingerprint_content`] so the snapshot's already-loaded content is reused —
+/// no second `read_to_string`.
+pub(crate) fn auto_discover_groups_from_snapshot(
+    root: &Path,
+    audit_config: &AuditConfig,
+    snapshot: &CodebaseSnapshot,
+) -> DiscoveryResult {
     // Walk directories, group files by (parent dir, language, is_test, opaque convention tags).
     // Test files are separated from production files so conventions from
     // production code don't get applied to test files and vice versa.
@@ -38,9 +44,12 @@ pub(crate) fn auto_discover_groups(root: &Path, audit_config: &AuditConfig) -> D
     let mut dir_files: HashMap<DiscoveryGroupKey, Vec<FileFingerprint>> = HashMap::new();
     let mut files_walked: usize = 0;
     let mut files_fingerprinted: usize = 0;
+    let source_extensions = extension_provided_file_extensions();
 
-    let snapshot = walk_source_files_snapshot(root);
     for (path, content) in snapshot.iter() {
+        if !is_extension_provided_source_file(path, &source_extensions) {
+            continue;
+        }
         files_walked += 1;
         if let Some(mut fp) = fingerprint_content(path, root, content) {
             files_fingerprinted += 1;
