@@ -6,6 +6,7 @@
 #   2. Version bump + changelog generation from conventional commits
 #   3. Cross-platform binary builds via cargo-dist
 #   4. Publish to GitHub Releases, crates.io, and Homebrew
+#   5. Auto-refactor direct commits (post-release, never opens PRs)
 #
 # No human input needed — version is computed from commit types:
 #   fix: → patch, feat: → minor, BREAKING CHANGE → major
@@ -143,13 +144,13 @@ jobs:
           path: target/release/homeboy
           retention-days: 1
 
-  # ── Step 3: Quality gate (parallel read-only checks) ──
+  # ── Step 3: Quality gate (parallel read-only checks + direct autofix) ──
   # Unlike PR CI (scoped to changed files), release quality gate runs
   # unscoped against the entire codebase.
   # Read-only gates run in parallel after the shared build, then release
-  # preparation waits for audit, lint, and test to finish. All quality gates
-  # are read-only (autofix: false); automated autofix PRs are disabled until
-  # they reliably produce green branches.
+  # preparation waits for audit, lint, and test to finish. Read-only gates use
+  # autofix: false. The dedicated auto-refactor job keeps direct-to-main
+  # baseline/autofix commits but disables automated PR creation.
   gate-audit:
     name: Audit
     needs:
@@ -254,6 +255,56 @@ jobs:
           expected-commands: audit,lint,test
           autofix: 'false'
           app-token: ${{ steps.app-token.outputs.token || '' }}
+
+  gate-refactor:
+    name: Auto-refactor
+    needs:
+      - check
+      - gate-build
+      - gate-audit
+      - gate-lint
+      - gate-test
+    if: ${{ always() && inputs.release_tag == '' && needs.check.outputs.should-release == 'true' && needs.gate-build.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
+          fetch-depth: 0
+
+      - name: Download homeboy binary
+        uses: actions/download-artifact@v4
+        with:
+          name: homeboy-binary
+          path: .homeboy-bin
+
+      - name: Prepare binary
+        run: chmod +x .homeboy-bin/homeboy
+
+      # Rust toolchain needed for cargo fmt (called by lint fixer in autofix)
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        continue-on-error: true
+        with:
+          app-id: ${{ secrets.HOMEBOY_APP_ID }}
+          private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
+
+      # Keep direct-to-main autofix/baseline updates, but do not open
+      # generated autofix PRs until that path reliably produces green branches.
+      - name: Run autofix via homeboy-action
+        uses: Extra-Chill/homeboy-action@v2
+        with:
+          binary-path: .homeboy-bin/homeboy
+          commands: audit,lint,test
+          expected-commands: audit,lint,test
+          autofix: 'true'
+          autofix-mode: always
+          autofix-open-pr: 'false'
+          app-token: ${{ steps.app-token.outputs.token }}
 
   # ── Step 4: Version bump + changelog + tag ──
   prepare:
