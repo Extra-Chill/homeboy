@@ -575,16 +575,12 @@ mod preparation_tests;
 
 #[cfg(test)]
 mod tests {
-    use super::super::lab_selection::{
-        prepare_lab_runner_for_offload_with, resolve_lab_runner_selection_from_default,
-    };
+    use super::super::lab_selection::resolve_lab_runner_selection_from_default;
     use super::super::lab_workspaces::LAB_WORKSPACE_MAPPING_SCHEMA;
     use super::*;
     use crate::core::observation::LAB_OFFLOAD_METADATA_ENV;
     use crate::core::plan::PlanKind;
-    use crate::core::runner::{
-        RunnerConnectReport, RunnerRequiredTool, RunnerTunnelMode, RunnerWorkspaceSyncOutput,
-    };
+    use crate::core::runner::{RunnerRequiredTool, RunnerWorkspaceSyncOutput};
 
     fn portable_lab_command(label: &'static str) -> LabOffloadCommand {
         LabOffloadCommand {

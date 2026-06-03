@@ -1,4 +1,8 @@
+use super::super::lab_selection::{
+    prepare_lab_runner_for_offload_with, LabRunnerPreparation, LabRunnerSelection,
+};
 use super::*;
+use crate::core::runner::{RunnerConnectReport, RunnerStatusReport, RunnerTunnelMode};
 
 #[test]
 fn lab_runner_preparation_falls_back_for_unreachable_default_runner() {

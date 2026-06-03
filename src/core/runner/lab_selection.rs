@@ -189,6 +189,20 @@ pub(super) fn prepare_lab_runner_for_offload_with(
 ) -> Result<LabRunnerPreparation> {
     let status = status_fn(&selection.runner_id)?;
     if status.connected {
+        if let Some(reason) = connected_runner_not_ready_reason(&selection.runner_id, &status) {
+            return automatic_fallback_or_explicit_error(
+                selection,
+                reason,
+                format!(
+                    "Lab offload runner `{}` is connected but is not ready for remote execution",
+                    selection.runner_id
+                ),
+                format!(
+                    "Run `homeboy runner connect {}` to refresh the runner daemon session.",
+                    selection.runner_id
+                ),
+            );
+        }
         eprintln!(
             "Lab offload: runner `{}` is connected via {} mode.",
             selection.runner_id,
@@ -202,22 +216,16 @@ pub(super) fn prepare_lab_runner_for_offload_with(
             "reverse-connected runner `{}` is not currently connected",
             selection.runner_id
         );
-        return match selection.source {
-            LabRunnerSelectionSource::Default => Ok(LabRunnerPreparation::FallBackLocal { reason }),
-            LabRunnerSelectionSource::Explicit => Err(Error::validation_invalid_argument(
-                "runner",
-                format!(
-                    "Lab offload requires reverse runner `{}` to have an active reverse session",
-                    selection.runner_id
-                ),
-                Some(selection.runner_id.clone()),
-                Some(vec![
-                    "Start the reverse runner session on the Lab machine before using --runner."
-                        .to_string(),
-                    "Use --force-hot to run the command locally instead of offloading.".to_string(),
-                ]),
-            )),
-        };
+        return automatic_fallback_or_explicit_error(
+            selection,
+            reason,
+            format!(
+                "Lab offload requires reverse runner `{}` to have an active reverse session",
+                selection.runner_id
+            ),
+            "Start the reverse runner session on the Lab machine before using --runner."
+                .to_string(),
+        );
     }
 
     eprintln!(
@@ -233,23 +241,57 @@ pub(super) fn prepare_lab_runner_for_offload_with(
         .failure_message
         .unwrap_or_else(|| "runner connection did not become ready".to_string());
 
+    automatic_fallback_or_explicit_error(
+        selection,
+        reason,
+        format!(
+            "Lab offload could not connect runner `{}` before execution",
+            selection.runner_id
+        ),
+        format!(
+            "Run `homeboy runner connect {}` for full diagnostics.",
+            selection.runner_id
+        ),
+    )
+}
+
+fn automatic_fallback_or_explicit_error(
+    selection: &LabRunnerSelection,
+    reason: String,
+    explicit_message: String,
+    remediation: String,
+) -> Result<LabRunnerPreparation> {
     match selection.source {
         LabRunnerSelectionSource::Default => Ok(LabRunnerPreparation::FallBackLocal { reason }),
         LabRunnerSelectionSource::Explicit => Err(Error::validation_invalid_argument(
             "runner",
-            format!(
-                "Lab offload could not connect runner `{}` before execution: {reason}",
-                selection.runner_id
-            ),
+            format!("{explicit_message}: {reason}"),
             Some(selection.runner_id.clone()),
             Some(vec![
-                format!(
-                    "Run `homeboy runner connect {}` for full diagnostics.",
-                    selection.runner_id
-                ),
+                remediation,
                 "Use --force-hot to run the command locally instead of offloading.".to_string(),
             ]),
         )),
+    }
+}
+
+fn connected_runner_not_ready_reason(
+    runner_id: &str,
+    status: &RunnerStatusReport,
+) -> Option<String> {
+    let session = status.session.as_ref()?;
+    match session.mode {
+        RunnerTunnelMode::DirectSsh if session.local_url.as_deref().unwrap_or("").is_empty() => {
+            Some(format!(
+                "direct SSH runner `{runner_id}` has no local daemon URL; reconnect it with `homeboy runner connect {runner_id}`"
+            ))
+        }
+        RunnerTunnelMode::Reverse if session.broker_url.as_deref().unwrap_or("").is_empty() => {
+            Some(format!(
+                "reverse-connected runner `{runner_id}` has no broker URL; restart the reverse runner session before retrying"
+            ))
+        }
+        _ => None,
     }
 }
 
