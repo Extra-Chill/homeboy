@@ -24,7 +24,7 @@ follow-up work:
 
 Until those issues land, use this guide as scaffolding for local/private smoke
 tests and operator preparation. Do not expose the broker publicly or rely on this
-path for production hot-command offload.
+path for production Lab offload of portable commands.
 
 ## Topology
 

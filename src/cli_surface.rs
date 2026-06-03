@@ -35,7 +35,7 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "DIR")]
     pub artifact_root: Option<PathBuf>,
 
-    /// Offload supported hot commands to a connected Homeboy Lab runner.
+    /// Route commands with portable Lab offload support to a connected runner.
     #[arg(long, global = true, value_name = "RUNNER_ID")]
     pub runner: Option<String>,
 

@@ -107,7 +107,7 @@ Supports:
 - Remote commands via SSH for configured projects and fleets
 - Extension runtime execution
 - Extension actions, release hooks, and CLI routing
-- Runner offload for supported hot commands
+- Lab offload for commands with portable runner contracts
 
 ### SSH Operations
 

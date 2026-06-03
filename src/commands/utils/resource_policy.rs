@@ -223,14 +223,14 @@ fn warning_message(
     let reason = primary_reason(resources);
     if command.lab_offload_supported {
         return format!(
-            "Resource policy warning: machine is {severity}; starting `{}` may skew results or add pressure. {reason} Connect a default Homeboy Lab runner or use --runner <id> to offload this hot command, or use --force-hot to run locally without this warning.",
+            "Resource policy warning: machine is {severity}; starting `{}` may skew results or add pressure. {reason} Connect a default Homeboy Lab runner or use --runner <id> to route this portable command through Lab offload, or use --force-hot to run locally without this warning.",
             command.label
         );
     }
 
-    let local_only_reason = command
-        .lab_offload_unsupported_reason
-        .unwrap_or("This hot command does not have a portable Lab offload contract yet.");
+    let local_only_reason = command.lab_offload_unsupported_reason.unwrap_or(
+        "This resource-pressure command does not have a portable Lab offload contract yet.",
+    );
     format!(
         "Resource policy warning: machine is {severity}; starting `{}` may skew results or add pressure. {reason} {local_only_reason} Use --force-hot to run locally without this warning.",
         command.label

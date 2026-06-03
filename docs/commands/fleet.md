@@ -143,7 +143,7 @@ Summary includes counts for quick overview.
 homeboy fleet exec <id> -- <command>
 ```
 
-Runs a command across projects in the fleet via each project's configured SSH connection. `fleet exec` participates in resource-policy warnings because it can create heavy remote work, but it intentionally stays local for Lab offload: the command depends on local fleet, project, and server configuration before opening those SSH sessions, and runner-side config parity is not guaranteed.
+Runs a command across projects in the fleet via each project's configured SSH connection. `fleet exec` participates in resource-policy warnings because it can create heavy remote work, but it is intentionally local-only for Lab offload: the command depends on local fleet, project, and server configuration before opening those SSH sessions, and runner-side config parity is not guaranteed.
 
 ## Fleet Deployment
 

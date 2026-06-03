@@ -21,7 +21,7 @@ These are provided by clap:
 - `--output <PATH>`: write the structured JSON envelope to a file in addition to stdout
 - `--force-hot`: suppress resource policy warnings for intentionally hot commands
 - `--artifact-root <DIR>`: copy persisted run artifacts to a specific directory
-- `--runner <RUNNER_ID>`: offload supported hot commands to a connected Homeboy Lab runner
+- `--runner <RUNNER_ID>`: route commands with portable Lab offload support to a connected Homeboy Lab runner
 
 `--output` is a global flag, so pass it before the subcommand:
 
@@ -34,6 +34,10 @@ to hot commands such as `bench`, `rig up`, `fleet exec`, and unscoped
 `audit` / `lint` / `test` runs when `homeboy doctor resources` sees a warm or
 hot machine. They do not block execution; pass `--force-hot` when the extra load
 is intentional.
+
+Not every hot command is offloadable. Lab offload only applies to commands with
+a portable runner contract; local-only hot commands keep running locally and
+explain why `--runner` is unavailable.
 
 
 ## Subcommands

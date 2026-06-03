@@ -45,7 +45,7 @@ homeboy runner connect <runner-id>
 
 After this, `<runner-id>` is both the server ID and the runner ID.
 
-Hot commands that support runner offload (`audit`, full `lint`, `test`, `bench run`, and `trace`) auto-select a default runner when `--runner` is omitted. Selection is conservative:
+Commands that are both resource-policy hot and portable for Lab offload (`audit`, full `lint`, `test`, `bench run`, and `trace`) auto-select a default runner when `--runner` is omitted. Selection is conservative:
 
 - `--runner <id>` always wins.
 - `--force-hot` keeps the command local.
@@ -69,7 +69,7 @@ Lab offload support is intentionally command-specific:
 | `rig up` | No | No | Stays local because rig pipelines manage local services, leases, ports, and declared filesystem paths that the current single-workspace snapshot cannot safely mirror. |
 | `fleet exec` | No | No | Stays local because fleet execution depends on local fleet/project/server config before opening SSH sessions to each project; runner-side config parity is not guaranteed. |
 
-Unsupported hot commands still get resource-policy warnings, but those warnings explain why Lab offload is unavailable instead of suggesting `--runner`.
+Local-only resource-pressure commands still get resource-policy warnings, but those warnings explain why Lab offload is unavailable instead of suggesting `--runner`.
 
 Configure a preferred runner with:
 
@@ -100,7 +100,7 @@ working directory when the extension should resolve from a specific component
 checkout. Missing extensions are reported as `extension.parity` errors with an
 install command such as `homeboy extension install <source> --id rust`.
 
-Hot-command Lab offload uses the same capability vocabulary before running on
+Lab offload for portable resource-pressure commands uses the same capability vocabulary before running on
 an explicit `--runner`. Homeboy currently gates `lint`, `test`, `audit`,
 `bench`, and `trace` against the source worktree's lightweight tool signals:
 
