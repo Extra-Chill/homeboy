@@ -698,6 +698,18 @@ struct MethodCallSequence {
     shape: BodyShape,
 }
 
+/// Per-method call sequence after detector-level signal filtering.
+#[derive(Debug)]
+struct ScoredCallSequence {
+    file: String,
+    method: String,
+    /// Ordered signal calls used for LCS scoring.
+    signal_calls: Vec<String>,
+    /// Unique signal calls used for Jaccard scoring and cheap prefilters.
+    signal_set: HashSet<String>,
+    shape: BodyShape,
+}
+
 /// Generic looping markers — substrings that indicate the body iterates over
 /// something. Covers control-flow keywords (`for`, `while`, `loop`,
 /// `foreach`) shared by most languages and common iterator-pipeline calls
@@ -867,6 +879,31 @@ fn signal_calls(
         .collect()
 }
 
+fn scored_call_sequences(
+    sequences: Vec<MethodCallSequence>,
+    extra_plumbing: &HashSet<&str>,
+    common_calls: &HashSet<String>,
+) -> Vec<ScoredCallSequence> {
+    sequences
+        .into_iter()
+        .filter_map(|sequence| {
+            let signal_calls = signal_calls(&sequence.calls, extra_plumbing, common_calls);
+            if signal_calls.len() < MIN_CALL_COUNT {
+                return None;
+            }
+
+            let signal_set = signal_calls.iter().cloned().collect();
+            Some(ScoredCallSequence {
+                file: sequence.file,
+                method: sequence.method,
+                signal_calls,
+                signal_set,
+                shape: sequence.shape,
+            })
+        })
+        .collect()
+}
+
 /// Check if a name is a language keyword (not a function call).
 fn is_keyword(name: &str) -> bool {
     matches!(
@@ -981,12 +1018,8 @@ fn extract_call_sequences(
 }
 
 /// Compute Jaccard similarity between two sets.
-fn jaccard_similarity(a: &[String], b: &[String]) -> f64 {
-    let set_a: std::collections::HashSet<&str> = a.iter().map(|s| s.as_str()).collect();
-    let set_b: std::collections::HashSet<&str> = b.iter().map(|s| s.as_str()).collect();
-
-    let intersection = set_a.intersection(&set_b).count();
-    let union = set_a.union(&set_b).count();
+fn jaccard_similarity(a: &HashSet<String>, b: &HashSet<String>, intersection: usize) -> f64 {
+    let union = a.len() + b.len() - intersection;
 
     if union == 0 {
         0.0
@@ -995,23 +1028,33 @@ fn jaccard_similarity(a: &[String], b: &[String]) -> f64 {
     }
 }
 
+fn shared_signal_call_count(a: &HashSet<String>, b: &HashSet<String>) -> usize {
+    if a.len() <= b.len() {
+        a.iter().filter(|call| b.contains(*call)).count()
+    } else {
+        b.iter().filter(|call| a.contains(*call)).count()
+    }
+}
+
 /// Compute longest common subsequence length between two sequences.
 fn lcs_length(a: &[String], b: &[String]) -> usize {
-    let m = a.len();
-    let n = b.len();
-    let mut dp = vec![vec![0usize; n + 1]; m + 1];
+    let (longer, shorter) = if a.len() >= b.len() { (a, b) } else { (b, a) };
+    let mut previous = vec![0usize; shorter.len() + 1];
+    let mut current = vec![0usize; shorter.len() + 1];
 
-    for i in 1..=m {
-        for j in 1..=n {
-            if a[i - 1] == b[j - 1] {
-                dp[i][j] = dp[i - 1][j - 1] + 1;
+    for longer_call in longer {
+        for j in 1..=shorter.len() {
+            if longer_call == &shorter[j - 1] {
+                current[j] = previous[j - 1] + 1;
             } else {
-                dp[i][j] = dp[i - 1][j].max(dp[i][j - 1]);
+                current[j] = previous[j].max(current[j - 1]);
             }
         }
+        std::mem::swap(&mut previous, &mut current);
+        current.fill(0);
     }
 
-    dp[m][n]
+    previous[shorter.len()]
 }
 
 /// Compute LCS ratio: 2 * LCS / (len(a) + len(b)).
@@ -1064,6 +1107,7 @@ pub(crate) fn detect_parallel_implementations(
 
     let sequences = extract_call_sequences(fingerprints, &extra_trivial);
     let common_calls = corpus_common_calls(&sequences);
+    let sequences = scored_call_sequences(sequences, &extra_plumbing, &common_calls);
 
     // Build sets of already-flagged pairs (exact + near duplicates) to avoid double-flagging
     let exact_groups = build_groups(fingerprints);
@@ -1074,9 +1118,6 @@ pub(crate) fn detect_parallel_implementations(
         .collect();
 
     let mut findings = Vec::new();
-    let mut reported_pairs: std::collections::HashSet<(String, String)> =
-        std::collections::HashSet::new();
-
     for i in 0..sequences.len() {
         for j in (i + 1)..sequences.len() {
             let a = &sequences[i];
@@ -1103,35 +1144,19 @@ pub(crate) fn detect_parallel_implementations(
                 continue;
             }
 
-            // Skip already-reported pairs (both directions)
-            let pair_key = if a.file < b.file || (a.file == b.file && a.method < b.method) {
-                (
-                    format!("{}::{}", a.file, a.method),
-                    format!("{}::{}", b.file, b.method),
-                )
-            } else {
-                (
-                    format!("{}::{}", b.file, b.method),
-                    format!("{}::{}", a.file, a.method),
-                )
-            };
-            if reported_pairs.contains(&pair_key) {
-                continue;
-            }
-
-            let a_signal = signal_calls(&a.calls, &extra_plumbing, &common_calls);
-            let b_signal = signal_calls(&b.calls, &extra_plumbing, &common_calls);
-
-            if a_signal.len() < MIN_CALL_COUNT || b_signal.len() < MIN_CALL_COUNT {
-                continue;
-            }
-
             // Body-shape gate (issue #2334): a parallel-implementation finding
             // must reflect a shared workflow, not just a shared call set. Two
             // bodies with incompatible shapes (e.g. a single-file copy helper
             // vs a recursive directory walk) are not the same workflow even
             // when they share `fs::copy` and `create_dir_all`.
             if !a.shape.compatible_with(b.shape) {
+                continue;
+            }
+
+            let shared_count = shared_signal_call_count(&a.signal_set, &b.signal_set);
+            // This is a conservative prefilter: the old path discarded these
+            // pairs after Jaccard/LCS, so skipping LCS here preserves findings.
+            if shared_count < MIN_SHARED_CALLS {
                 continue;
             }
 
@@ -1148,72 +1173,68 @@ pub(crate) fn detect_parallel_implementations(
                 MIN_JACCARD_SIMILARITY
             };
 
-            let jaccard = jaccard_similarity(&a_signal, &b_signal);
-            let lcs = lcs_ratio(&a_signal, &b_signal);
-
-            if jaccard >= jaccard_floor && lcs >= MIN_LCS_RATIO {
-                // Find the shared calls for the description
-                let set_a: std::collections::HashSet<&str> =
-                    a_signal.iter().map(|s| s.as_str()).collect();
-                let set_b: std::collections::HashSet<&str> =
-                    b_signal.iter().map(|s| s.as_str()).collect();
-                let mut shared: Vec<&&str> = set_a.intersection(&set_b).collect();
-
-                // Require a minimum absolute number of shared calls.
-                // Jaccard/LCS alone can trigger on tiny overlaps (2 shared out of 4 total).
-                if shared.len() < MIN_SHARED_CALLS {
-                    continue;
-                }
-
-                reported_pairs.insert(pair_key);
-                shared.sort();
-                let shared_preview: String = shared
-                    .iter()
-                    .take(5)
-                    .map(|s| format!("`{}`", s))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let extra = if shared.len() > 5 {
-                    format!(" (+{} more)", shared.len() - 5)
-                } else {
-                    String::new()
-                };
-
-                let suggestion = format!(
-                    "`{}` and `{}` follow the same call pattern (Jaccard: {:.0}%, sequence: {:.0}%). \
-                     Consider extracting the shared workflow into a parameterized function.",
-                    a.method,
-                    b.method,
-                    jaccard * 100.0,
-                    lcs * 100.0
-                );
-
-                // Emit finding for file A
-                findings.push(Finding {
-                    convention: "parallel-implementation".to_string(),
-                    severity: Severity::Info,
-                    file: a.file.clone(),
-                    description: format!(
-                        "Parallel implementation: `{}` has similar call pattern to `{}` in {} — shared calls: {}{}",
-                        a.method, b.method, b.file, shared_preview, extra
-                    ),
-                    suggestion: suggestion.clone(),
-                    kind: AuditFinding::ParallelImplementation,
-                });
-
-                // Emit finding for file B
-                findings.push(Finding {
-                    convention: "parallel-implementation".to_string(),
-                    severity: Severity::Info,
-                    file: b.file.clone(),
-                    description: format!(
-                        "Parallel implementation: `{}` has similar call pattern to `{}` in {} — shared calls: {}{}",
-                        b.method, a.method, a.file, shared_preview, extra
-                    ),
-                    suggestion,
-                    kind: AuditFinding::ParallelImplementation,
-                });
+            let jaccard = jaccard_similarity(&a.signal_set, &b.signal_set, shared_count);
+            if jaccard < jaccard_floor {
+                continue;
             }
+
+            let lcs = lcs_ratio(&a.signal_calls, &b.signal_calls);
+            if lcs < MIN_LCS_RATIO {
+                continue;
+            }
+
+            let mut shared: Vec<&str> = a
+                .signal_set
+                .intersection(&b.signal_set)
+                .map(|call| call.as_str())
+                .collect();
+            shared.sort_unstable();
+            let shared_preview: String = shared
+                .iter()
+                .take(5)
+                .map(|s| format!("`{}`", s))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let extra = if shared.len() > 5 {
+                format!(" (+{} more)", shared.len() - 5)
+            } else {
+                String::new()
+            };
+
+            let suggestion = format!(
+                "`{}` and `{}` follow the same call pattern (Jaccard: {:.0}%, sequence: {:.0}%). \
+                 Consider extracting the shared workflow into a parameterized function.",
+                a.method,
+                b.method,
+                jaccard * 100.0,
+                lcs * 100.0
+            );
+
+            // Emit finding for file A
+            findings.push(Finding {
+                convention: "parallel-implementation".to_string(),
+                severity: Severity::Info,
+                file: a.file.clone(),
+                description: format!(
+                    "Parallel implementation: `{}` has similar call pattern to `{}` in {} — shared calls: {}{}",
+                    a.method, b.method, b.file, shared_preview, extra
+                ),
+                suggestion: suggestion.clone(),
+                kind: AuditFinding::ParallelImplementation,
+            });
+
+            // Emit finding for file B
+            findings.push(Finding {
+                convention: "parallel-implementation".to_string(),
+                severity: Severity::Info,
+                file: b.file.clone(),
+                description: format!(
+                    "Parallel implementation: `{}` has similar call pattern to `{}` in {} — shared calls: {}{}",
+                    b.method, a.method, a.file, shared_preview, extra
+                ),
+                suggestion,
+                kind: AuditFinding::ParallelImplementation,
+            });
         }
     }
 

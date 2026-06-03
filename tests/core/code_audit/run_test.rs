@@ -50,6 +50,10 @@ fn make_analysis() -> AuditAnalysisContext {
     AuditAnalysisContext::default()
 }
 
+fn make_timing() -> crate::core::code_audit::AuditTiming {
+    crate::core::code_audit::AuditTiming::default()
+}
+
 fn make_convention_report(name: &str, outliers: Vec<Outlier>) -> ConventionReport {
     ConventionReport {
         name: name.to_string(),
@@ -254,9 +258,14 @@ mod full_audit_structural_complexity_tests {
         result.findings[0].convention = "structural".to_string();
         let baseline = make_baseline(vec![]);
 
-        let workflow =
-            build_comparison_output(result, &make_analysis(), baseline, &make_args(false))
-                .expect("comparison output builds");
+        let workflow = build_comparison_output(
+            result,
+            &make_analysis(),
+            baseline,
+            &make_args(false),
+            make_timing(),
+        )
+        .expect("comparison output builds");
 
         assert_eq!(workflow.exit_code, 0);
         match workflow.output {
@@ -332,6 +341,7 @@ fn changed_since_comparison_marks_existing_touched_findings_as_contextual() {
         &make_analysis(),
         baseline,
         &make_changed_since_args(),
+        make_timing(),
     )
     .expect("comparison output builds");
 
@@ -382,6 +392,7 @@ fn changed_since_comparison_counts_new_findings_as_introduced() {
         &make_analysis(),
         baseline,
         &make_changed_since_args(),
+        make_timing(),
     )
     .expect("comparison output builds");
 
@@ -419,8 +430,9 @@ fn json_summary_names_baseline_known_findings_separately_from_blocking_findings(
     let mut args = make_args(false);
     args.json_summary = true;
 
-    let workflow = build_comparison_output(result, &make_analysis(), baseline, &args)
-        .expect("comparison output builds");
+    let workflow =
+        build_comparison_output(result, &make_analysis(), baseline, &args, make_timing())
+            .expect("comparison output builds");
 
     assert_eq!(workflow.exit_code, 0);
     match workflow.output {
@@ -457,8 +469,9 @@ fn json_summary_for_targeted_detector_counts_current_and_unbaselined_findings() 
     args.only_kinds = vec![AuditFinding::GodFile];
     args.only_labels = vec!["god_file".to_string()];
 
-    let workflow = build_comparison_output(result, &make_analysis(), baseline, &args)
-        .expect("comparison output builds");
+    let workflow =
+        build_comparison_output(result, &make_analysis(), baseline, &args, make_timing())
+            .expect("comparison output builds");
 
     assert_eq!(workflow.exit_code, 1);
     match workflow.output {

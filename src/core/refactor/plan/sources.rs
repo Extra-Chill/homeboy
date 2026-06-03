@@ -24,8 +24,9 @@ use cache::{
 };
 use extension_source::{read_optional_json, try_extension_refactor_source_stage};
 use lint_scope::{
-    capture_release_owned_files, constrain_lint_fix_changes, lint_finding_scope_files,
-    lint_scope_glob, reject_unsafe_lint_autofix_changes, restore_release_owned_files,
+    capture_dirty_file_snapshot, capture_release_owned_files, constrain_lint_fix_changes,
+    lint_finding_scope_files, lint_scope_glob, reject_unsafe_lint_autofix_changes,
+    restore_release_owned_files,
 };
 use planning::{
     analyze_stage_overlaps, collect_collected_edits, collect_stage_changed_files,
@@ -736,6 +737,7 @@ fn run_lint_stage(
     };
     let (stage_changed_files, fix_results, stage_warnings) = if write && !lint_findings.is_empty() {
         let before_dirty = git::get_dirty_files(&root_str).unwrap_or_default();
+        let before_dirty_snapshot = capture_dirty_file_snapshot(root, &before_dirty);
 
         // Save undo snapshot before applying lint fixes.
         let mut snap = UndoSnapshot::new(root, "lint fix");
@@ -765,6 +767,7 @@ fn run_lint_stage(
             root,
             fix_scope_files,
             &before_dirty,
+            &before_dirty_snapshot,
             after_dirty,
             &release_owned,
         )?;
