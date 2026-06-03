@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.114.3] - 2026-06-03
+
+### Fixed
+- preserve codebox task workspace refs
+
 ## [2.114.2] - 2026-06-02
 
 ### Fixed
