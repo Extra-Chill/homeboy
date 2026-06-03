@@ -204,6 +204,7 @@ pub mod report;
 pub mod response;
 pub mod review;
 pub mod rig;
+pub mod route;
 pub mod runner;
 pub mod runs;
 pub mod self_cmd;
