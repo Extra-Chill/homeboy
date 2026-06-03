@@ -158,23 +158,126 @@ workspace.
 ## Agent-task executor provider
 
 The WordPress extension also exposes a Homeboy-native executor provider contract
-for generic agent tasks:
+for generic agent tasks. This is the stable boundary between Homeboy orchestration
+and extension-owned execution backends. Homeboy selects a provider, passes a
+generic request, and consumes a generic outcome; backend-specific transport,
+runtime boot, sandbox recipes, browser control, and cleanup stay inside the
+provider extension.
+
+Provider discovery uses `homeboy/agent-task-executor-provider/v1`:
 
 ```json
 {
   "schema": "homeboy/agent-task-executor-provider/v1",
   "id": "wordpress.codebox-agent-task-executor",
+  "label": "WP Codebox agent task executor",
   "backend": "codebox",
+  "command": "node {{extension_path}}/scripts/agent/homeboy-codebox-agent-task-executor.cjs",
   "request_schema": "homeboy/agent-task-request/v1",
-  "outcome_schema": "homeboy/agent-task-outcome/v1"
+  "outcome_schema": "homeboy/agent-task-outcome/v1",
+  "request_required_fields": ["schema", "task_id", "executor.backend", "instructions"],
+  "outcome_statuses": ["succeeded", "failed", "no_op", "unable_to_remediate", "timeout", "provider_error"],
+  "failure_classifications": ["provider", "timeout", "execution_failed"],
+  "redacted_metadata_keys": ["secret_env_values", "secretEnvValues", "secrets"],
+  "capabilities": ["browser_runtime", "wordpress_sandbox", "workspace_mounts", "workspace_tools", "artifact_materialization", "patch_artifacts", "verification_artifacts", "run_registry", "cleanup_observability", "screenshots", "structured_outcome"],
+  "status": "preparatory",
+  "upstream_dependency": "https://github.com/Automattic/wp-codebox/issues/480"
 }
 ```
+
+Discovery fields mean:
+
+- `id` is the stable provider identifier used in decision evidence and logs.
+- `backend` is a short selector for routing. It is not permission to put backend
+  imports or assumptions in Homeboy core.
+- `command` is the executable adapter entry point. Homeboy passes the generic
+  request on stdin or via `HOMEBOY_AGENT_TASK_REQUEST`.
+- `request_schema` and `outcome_schema` declare the wire schemas accepted and
+  emitted by the provider.
+- `request_required_fields` lists the minimum fields a scheduler must populate
+  before dispatch.
+- `capabilities` declares what orchestration may rely on when selecting a
+  provider. New providers should add capabilities only when they can produce the
+  corresponding outcome evidence.
+- `outcome_statuses`, `failure_classifications`, and `redacted_metadata_keys`
+  document the stable vocabulary consumers can use without knowing the backend.
+- `status` marks maturity. `preparatory` means the provider boundary is stable,
+  while this WP Codebox implementation still contains temporary adapter internals.
+- `upstream_dependency` links the blocker for removing those temporary internals.
+
+Generic `homeboy/agent-task-request/v1` requests are backend-neutral. Required
+fields are:
+
+- `schema`: exactly `homeboy/agent-task-request/v1`.
+- `task_id`: stable id echoed in the outcome and provider decision evidence.
+- `executor.backend`: the backend selector advertised by provider discovery.
+- `instructions`: the natural-language task prompt for the agent runtime.
+
+Optional request fields should stay generic:
+
+- `group_key` groups related tasks for matrix runs or dashboards.
+- `parent_plan_id` links the task to a higher-level Lab plan or issue.
+- `executor.model` selects the model; `executor.config` carries provider-owned
+  runtime details such as plugin paths, secret env names, runtime mounts, and
+  adapter binary paths.
+- `inputs` carries structured task context such as title, audit findings, or
+  orchestrator metadata.
+- `source_refs` carries issue, PR, rig, workload, or artifact references used to
+  trace why the task exists.
+- `workspace` describes the workspace policy; providers decide how that maps to
+  their runtime mounts or worktree tooling.
+- `policy` describes read/write/apply expectations in Homeboy terms.
+- `limits` carries generic limits such as `task_timeout_seconds` or `timeout_ms`.
+- `expected_artifacts` names the evidence the provider should try to return.
+
+Generic `homeboy/agent-task-outcome/v1` outcomes must include:
+
+- `schema`: exactly `homeboy/agent-task-outcome/v1`.
+- `task_id`: copied from the request.
+- `status`: one of `succeeded`, `failed`, `no_op`, `unable_to_remediate`,
+  `timeout`, or `provider_error`.
+- `summary`: a human-readable result summary.
+- `artifacts`: zero or more `homeboy/agent-task-artifact/v1` records.
+- `evidence_refs`: clickable or resolvable references to artifacts, previews,
+  logs, transcripts, issues, PRs, runs, or replay bundles.
+- `diagnostics`: structured diagnostics with `class`, `message`, and redacted
+  `data`.
+- `metadata`: public, redacted metadata for dashboards and decision evidence.
+
+Failure classification is separate from status so schedulers can decide whether
+to retry, escalate, or mark the task cooked:
+
+- `provider` means provider setup, credentials, dependency boot, or backend
+  service access failed before the task could be judged.
+- `timeout` means the provider exceeded the task or runner time budget.
+- `execution_failed` means the agent/runtime ran but failed, could not remediate,
+  or produced an unsuccessful task result.
+
+Provider metadata must be safe to surface in run summaries and PR comments.
+Backends may include secret env names for traceability, but values and secret
+bags must be redacted recursively. The current public redaction keys are
+`secret_env_values`, `secretEnvValues`, and `secrets`; adapters should extend the
+provider discovery list if they add another secret-bearing metadata key.
+
+Artifacts and evidence refs are Homeboy-owned shapes even when their content is
+backend-specific. Artifacts should include `kind`, and where available `id`,
+`path`, `url`, `sha256`, `size_bytes`, and redacted `metadata`. Evidence refs
+should include `kind`, `uri`, and an optional `label`. Local filesystem paths are
+acceptable for machine-run artifacts; reviewer-facing evidence should point to a
+reachable issue, PR, artifact bundle, replay, or committed report.
 
 `homeboy-codebox-agent-task-executor.cjs` is the provider entry point. It keeps
 Homeboy core Codebox-agnostic by translating the generic `AgentTaskRequest` into
 the extension-owned WP Codebox request shape, then translating Codebox output back
 to `AgentTaskOutcome` with Homeboy-native artifacts, evidence refs, diagnostics,
 and failure classifications.
+
+This provider currently maps the generic request onto the existing WP Codebox
+command/recipe transport. That transport is an implementation detail of the
+extension, not part of the generic boundary. Lab offload and runner transport can
+select this provider through discovery, but should keep planning, scheduling,
+retry, and dashboard logic tied to the `homeboy/agent-task-request/v1` and
+`homeboy/agent-task-outcome/v1` schemas rather than Codebox recipe fields.
 
 The provider is intentionally marked preparatory while Codebox's upstream agent
 task runner API is still tracked in https://github.com/Automattic/wp-codebox/issues/480.

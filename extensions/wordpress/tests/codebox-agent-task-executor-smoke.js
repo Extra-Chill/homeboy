@@ -119,6 +119,10 @@ const provider = providerContract();
 assert.equal(provider.backend, 'codebox');
 assert.equal(provider.request_schema, 'homeboy/agent-task-request/v1');
 assert.equal(provider.outcome_schema, 'homeboy/agent-task-outcome/v1');
+assert.deepEqual(provider.request_required_fields, ['schema', 'task_id', 'executor.backend', 'instructions']);
+assert.deepEqual(provider.outcome_statuses, ['succeeded', 'failed', 'no_op', 'unable_to_remediate', 'timeout', 'provider_error']);
+assert.deepEqual(provider.failure_classifications, ['provider', 'timeout', 'execution_failed']);
+assert.deepEqual(provider.redacted_metadata_keys, ['secret_env_values', 'secretEnvValues', 'secrets']);
 assert.equal(provider.upstream_dependency, 'https://github.com/Automattic/wp-codebox/issues/480');
 assert.equal(provider.capabilities.includes('browser_runtime'), true);
 assert.equal(provider.capabilities.includes('workspace_tools'), true);
@@ -418,7 +422,10 @@ try {
     '--print-contract',
   ], { encoding: 'utf8' });
   assert.equal(contractResult.status, 0, contractResult.stderr || contractResult.stdout);
-  assert.equal(JSON.parse(contractResult.stdout).id, 'wordpress.codebox-agent-task-executor');
+  const printedContract = JSON.parse(contractResult.stdout);
+  assert.equal(printedContract.id, 'wordpress.codebox-agent-task-executor');
+  assert.deepEqual(printedContract.outcome_statuses, provider.outcome_statuses);
+  assert.deepEqual(printedContract.failure_classifications, provider.failure_classifications);
 
   const artifactRoot = path.join(root, 'timeout-artifacts');
   const bundleRoot = writeTimeoutArtifacts(artifactRoot, 'task-timeout');

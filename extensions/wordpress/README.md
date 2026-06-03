@@ -456,6 +456,13 @@ runner request, invokes the Codebox recipe runner, and emits a
 `homeboy/agent-task-outcome/v1` outcome with normalized status, artifacts,
 evidence refs, diagnostics, and failure classification.
 
+The generic provider boundary is documented in
+[`docs/AGENT_CI_WP_CODEBOX.md`](docs/AGENT_CI_WP_CODEBOX.md#agent-task-executor-provider).
+Discovery exposes the required request fields, outcome status vocabulary,
+failure classifications, capability list, and metadata redaction keys so Lab
+offload and runner transport consumers can select providers without importing
+Codebox-specific request or recipe details.
+
 The outcome preserves the Homeboy decision evidence needed for Codebox worker
 canaries: why the Codebox executor was selected, which capabilities were used,
 the WP Codebox run/runtime IDs, cleanup status, heartbeat timestamp, changed-file
