@@ -263,7 +263,7 @@ function buildRecipe(input) {
 
 function agentTaskRunFromRecipeRun(input, result, artifacts) {
   const execution = Array.isArray(result.executions) ? result.executions.find((item) => item?.recipeCommand === 'wp-codebox.agent-sandbox-run') || result.executions[0] : null;
-  const agentResult = result.run?.agentResult || result.artifacts?.agentResult || execution?.agentResult || {};
+  const agentResult = result.agentResult || result.run?.agentResult || result.artifacts?.agentResult || execution?.agentResult || {};
   const previewUrl = result.runtime?.preview?.url || result.artifacts?.preview_url || result.artifacts?.previewUrl || '';
   return {
     success: Boolean(result.success),

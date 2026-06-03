@@ -30,12 +30,24 @@
       "capabilities": [
         "browser_runtime",
         "wordpress_sandbox",
+        "workspace_mounts",
+        "workspace_tools",
         "artifact_materialization",
+        "patch_artifacts",
+        "verification_artifacts",
+        "run_registry",
+        "cleanup_observability",
         "screenshots",
         "structured_outcome"
       ],
       "status": "preparatory",
-      "upstream_dependency": "https://github.com/Automattic/wp-codebox/issues/480"
+      "upstream_dependency": "https://github.com/Automattic/wp-codebox/issues/480",
+      "runtime_gap_trackers": [
+        "https://github.com/Automattic/wp-codebox/issues/529",
+        "https://github.com/Automattic/wp-codebox/issues/530",
+        "https://github.com/Automattic/wp-codebox/issues/531",
+        "https://github.com/Automattic/wp-codebox/issues/532"
+      ]
     }
   ],
   "scripts": {

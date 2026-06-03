@@ -36,7 +36,7 @@ process.stdout.write(JSON.stringify({
   runtime: { preview: { url: 'https://preview.example.test/' + sessionId } },
   executions: [{ recipeCommand: 'wp-codebox.agent-sandbox-run', exitCode: 0, stdout: JSON.stringify({ status: 'completed' }) }],
   artifacts: { id: 'artifact-bundle-sha256-fixture', directory: artifacts },
-  run: { agentResult: { status: 'completed' } },
+  agentResult: { status: 'completed' },
 }));
 `);
   fs.chmodSync(binPath, mode);
@@ -137,6 +137,7 @@ try {
   assert.equal(output.success, true);
   assert.equal(output.session.id, 'homeboy-audit-fixture-session');
   assert.equal(output.artifacts, path.join(root, 'artifacts'));
+  assert.equal(output.run.agentResult.status, 'completed');
 
   const captured = readJson(capturePath);
   assert.deepEqual(captured.argv.slice(0, 4), ['recipe-run', '--recipe', captured.argv[2], '--json']);

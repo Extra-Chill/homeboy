@@ -8,9 +8,22 @@ const WP_CODEBOX_TASK_REQUEST_SCHEMA = 'homeboy/wp-codebox-task-request/v1';
 const PROVIDER_CAPABILITIES = [
   'browser_runtime',
   'wordpress_sandbox',
+  'workspace_mounts',
+  'workspace_tools',
   'artifact_materialization',
+  'patch_artifacts',
+  'verification_artifacts',
+  'run_registry',
+  'cleanup_observability',
   'screenshots',
   'structured_outcome',
+];
+
+const WP_CODEBOX_RUNTIME_GAP_TRACKERS = [
+  'https://github.com/Automattic/wp-codebox/issues/529',
+  'https://github.com/Automattic/wp-codebox/issues/530',
+  'https://github.com/Automattic/wp-codebox/issues/531',
+  'https://github.com/Automattic/wp-codebox/issues/532',
 ];
 
 function assertAgentTaskRequest(request) {
@@ -37,6 +50,7 @@ function providerContract(options = {}) {
     capabilities: PROVIDER_CAPABILITIES,
     status: 'preparatory',
     upstream_dependency: 'https://github.com/Automattic/wp-codebox/issues/480',
+    runtime_gap_trackers: WP_CODEBOX_RUNTIME_GAP_TRACKERS,
   };
 }
 
@@ -92,6 +106,12 @@ function normalizeStatus(result, exitStatus = 0) {
   if (result?.status) {
     return result.status;
   }
+  const agentResult = result?.run?.agentResult || result?.agentResult || result?.metadata?.recipe_run?.agentResult || result?.metadata?.recipe_run?.run?.agentResult;
+  const changedFileCount = agentResult?.changedFiles?.count;
+  const patchBytes = agentResult?.patch?.bytes;
+  if (result?.success === true && agentResult?.noOpReason && changedFileCount === 0 && patchBytes === 0) {
+    return 'no_op';
+  }
   if (result?.outcome === 'no_op' || result?.no_op) {
     return 'no_op';
   }
@@ -105,6 +125,103 @@ function normalizeStatus(result, exitStatus = 0) {
     return 'provider_error';
   }
   return result?.success === true && exitStatus === 0 ? 'succeeded' : 'failed';
+}
+
+function appendUniqueArtifact(artifacts, artifact) {
+  if (!artifact || !artifact.kind) {
+    return;
+  }
+  const key = artifact.path || artifact.url || artifact.id;
+  if (key && artifacts.some((existing) => (existing.path || existing.url || existing.id) === key)) {
+    return;
+  }
+  artifacts.push(artifact);
+}
+
+function appendUniqueEvidenceRef(refs, ref) {
+  if (!ref || !ref.uri) {
+    return;
+  }
+  if (refs.some((existing) => existing.uri === ref.uri && existing.kind === ref.kind)) {
+    return;
+  }
+  refs.push(ref);
+}
+
+function artifactPath(root, relativePath) {
+  if (!root || !relativePath) {
+    return '';
+  }
+  return `${String(root).replace(/\/$/, '')}/${String(relativePath).replace(/^\//, '')}`;
+}
+
+function codeboxBundleArtifacts(result) {
+  const artifacts = [];
+  const artifactRefs = Array.isArray(result.run?.artifactRefs) ? result.run.artifactRefs : [];
+  for (const ref of artifactRefs) {
+    appendUniqueArtifact(artifacts, {
+      id: ref.id || ref.digest?.value,
+      kind: ref.kind || 'codebox-artifact-bundle',
+      path: ref.directory,
+      sha256: ref.digest?.value,
+      metadata: { digest: ref.digest },
+    });
+  }
+
+  const bundleDirectory = result.run?.agentResult?.artifacts?.directory || result.completionOutcome?.provenance?.artifactDirectory;
+  const artifactBundleId = result.completionOutcome?.provenance?.artifactBundleId || result.artifacts?.id;
+  appendUniqueArtifact(artifacts, {
+    id: artifactBundleId,
+    kind: 'codebox-artifact-bundle',
+    path: bundleDirectory,
+    metadata: {
+      runtime_id: result.run?.runtime?.id,
+      runtime_status: result.run?.runtime?.status,
+    },
+  });
+
+  const agentResult = result.run?.agentResult || result.agentResult || result.metadata?.recipe_run?.agentResult || {};
+  const changedFilesPath = artifactPath(bundleDirectory, agentResult.changedFiles?.artifact || '');
+  appendUniqueArtifact(artifacts, {
+    id: changedFilesPath ? 'codebox-changed-files' : '',
+    kind: 'codebox-changed-files',
+    path: changedFilesPath,
+    metadata: agentResult.changedFiles || {},
+  });
+
+  const patchPath = artifactPath(bundleDirectory, agentResult.patch?.artifact || '');
+  appendUniqueArtifact(artifacts, {
+    id: patchPath ? 'codebox-patch' : '',
+    kind: 'codebox-patch',
+    path: patchPath,
+    sha256: agentResult.patch?.sha256,
+    size_bytes: agentResult.patch?.bytes,
+    metadata: agentResult.patch || {},
+  });
+
+  const transcriptPath = artifactPath(bundleDirectory, agentResult.transcript?.artifact || '');
+  appendUniqueArtifact(artifacts, {
+    id: transcriptPath ? 'codebox-transcript' : '',
+    kind: 'codebox-transcript',
+    path: transcriptPath,
+    metadata: agentResult.transcript || {},
+  });
+
+  const runtimeLogPath = result.artifacts?.runtimeLogPath;
+  appendUniqueArtifact(artifacts, {
+    id: runtimeLogPath ? 'codebox-runtime-log' : '',
+    kind: 'codebox-runtime-log',
+    path: runtimeLogPath,
+  });
+
+  const commandsLogPath = result.artifacts?.commandsLogPath;
+  appendUniqueArtifact(artifacts, {
+    id: commandsLogPath ? 'codebox-command-log' : '',
+    kind: 'codebox-command-log',
+    path: commandsLogPath,
+  });
+
+  return artifacts;
 }
 
 function failureClassificationForStatus(status) {
@@ -177,6 +294,9 @@ function normalizeArtifacts(result) {
         metadata: result.session.artifacts,
       });
     }
+    for (const artifact of codeboxBundleArtifacts(result)) {
+      appendUniqueArtifact(artifacts, artifact);
+    }
     return artifacts.map(artifactFromCodeboxArtifact);
   }
   const artifacts = Array.isArray(result?.artifacts)
@@ -187,7 +307,7 @@ function normalizeArtifacts(result) {
 
 function normalizeEvidenceRefs(result) {
   if (result?.schema === 'wp-codebox/agent-task-run/v1') {
-    return [
+    const refs = [
       result.session?.artifacts?.preview_url ? {
         kind: 'codebox-preview',
         uri: result.session.artifacts.preview_url,
@@ -199,6 +319,14 @@ function normalizeEvidenceRefs(result) {
         label: 'WP Codebox artifacts',
       } : null,
     ].filter(Boolean);
+    for (const artifact of codeboxBundleArtifacts(result)) {
+      appendUniqueEvidenceRef(refs, {
+        kind: artifact.kind,
+        uri: artifact.path || artifact.url,
+        label: artifact.kind.replace(/^codebox-/, 'WP Codebox ').replace(/-/g, ' '),
+      });
+    }
+    return refs;
   }
   const evidenceRefs = result?.evidence_refs || result?.evidence || [];
   return evidenceRefs.map((ref) => ({
@@ -206,6 +334,32 @@ function normalizeEvidenceRefs(result) {
     uri: ref.uri || ref.url || ref.path,
     label: ref.label || ref.name,
   })).filter((ref) => ref.uri);
+}
+
+function codeboxDecisionEvidence(result) {
+  const agentResult = result.run?.agentResult || result.agentResult || result.metadata?.recipe_run?.agentResult || result.metadata?.recipe_run?.run?.agentResult || {};
+  const completionOutcome = result.completionOutcome || result.metadata?.recipe_run?.completionOutcome || {};
+  const runtime = result.run?.runtime || result.metadata?.recipe_run?.run?.runtime || {};
+  const run = result.run || result.metadata?.recipe_run?.run || {};
+  return Object.fromEntries(Object.entries({
+    selected_backend: 'codebox',
+    selected_executor: 'wordpress.codebox-agent-task-executor',
+    capabilities_used: PROVIDER_CAPABILITIES,
+    runtime_gap_trackers: WP_CODEBOX_RUNTIME_GAP_TRACKERS,
+    run_id: run.runId,
+    run_status: run.status,
+    runtime_id: runtime.id,
+    runtime_status: runtime.status,
+    heartbeat_at: run.heartbeatAt,
+    cleanup_observed: runtime.status === 'destroyed' ? 'runtime_destroyed' : '',
+    changed_files_count: agentResult.changedFiles?.count,
+    patch_bytes: agentResult.patch?.bytes,
+    patch_sha256: agentResult.patch?.sha256,
+    no_op_reason: agentResult.noOpReason,
+    completion_status: completionOutcome.status,
+    completion_next_action: completionOutcome.nextAction,
+    confidence: completionOutcome.confidence,
+  }).filter(([, value]) => value !== undefined && value !== ''));
 }
 
 function agentTaskOutcomeFromCodeboxResult(request, result = {}, options = {}) {
@@ -228,6 +382,7 @@ function agentTaskOutcomeFromCodeboxResult(request, result = {}, options = {}) {
       provider: 'wordpress.codebox-agent-task-executor',
       codebox: sanitizePublicMetadata(result.metadata || result),
       upstream_dependency: 'https://github.com/Automattic/wp-codebox/issues/480',
+      decision_evidence: sanitizePublicMetadata(codeboxDecisionEvidence(result)),
     },
   };
   if (failureClassification) {

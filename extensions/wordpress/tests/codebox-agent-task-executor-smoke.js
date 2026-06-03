@@ -121,6 +121,15 @@ assert.equal(provider.request_schema, 'homeboy/agent-task-request/v1');
 assert.equal(provider.outcome_schema, 'homeboy/agent-task-outcome/v1');
 assert.equal(provider.upstream_dependency, 'https://github.com/Automattic/wp-codebox/issues/480');
 assert.equal(provider.capabilities.includes('browser_runtime'), true);
+assert.equal(provider.capabilities.includes('workspace_tools'), true);
+assert.equal(provider.capabilities.includes('patch_artifacts'), true);
+assert.equal(provider.capabilities.includes('cleanup_observability'), true);
+assert.deepEqual(provider.runtime_gap_trackers, [
+  'https://github.com/Automattic/wp-codebox/issues/529',
+  'https://github.com/Automattic/wp-codebox/issues/530',
+  'https://github.com/Automattic/wp-codebox/issues/531',
+  'https://github.com/Automattic/wp-codebox/issues/532',
+]);
 
 const codeboxRequest = codeboxTaskRequestFromAgentTaskRequest(request);
 assert.equal(codeboxRequest.schema, 'homeboy/wp-codebox-task-request/v1');
@@ -248,6 +257,67 @@ assert.equal(upstreamRunnerOutcome.artifacts[0].path, '/tmp/wp-codebox-artifacts
 assert.equal(upstreamRunnerOutcome.artifacts[1].kind, 'codebox-session-artifacts');
 assert.equal(upstreamRunnerOutcome.evidence_refs[0].uri, 'https://preview.example.test/sandbox-session-1');
 assert.equal(upstreamRunnerOutcome.evidence_refs[1].uri, '/tmp/wp-codebox-artifacts');
+
+const canaryRunOutcome = agentTaskOutcomeFromCodeboxResult(request, {
+  success: true,
+  schema: 'wp-codebox/agent-task-run/v1',
+  session: {
+    id: 'homeboy-codebox-canary-1042',
+    artifacts: {
+      bundle_id: 'artifact-bundle-sha256-canary',
+      preview_url: '',
+    },
+  },
+  artifacts: {
+    id: 'artifact-bundle-sha256-canary',
+    runtimeLogPath: '/tmp/canary/runtime/logs/runtime.log',
+    commandsLogPath: '/tmp/canary/runtime/logs/commands.log',
+  },
+  run: {
+    runId: 'run-canary',
+    status: 'succeeded',
+    heartbeatAt: '2026-06-03T11:19:00.998Z',
+    runtime: { id: 'runtime-canary', status: 'destroyed' },
+    artifactRefs: [{
+      kind: 'artifact-bundle',
+      directory: '/tmp/canary/runtime',
+      id: 'artifact-bundle-sha256-canary',
+      digest: { algorithm: 'sha256', value: 'canary-digest' },
+    }],
+    agentResult: {
+      summary: 'Agent sandbox completed without actionable file changes.',
+      changedFiles: { count: 0, paths: [], artifact: 'files/changed-files.json' },
+      patch: { bytes: 0, sha256: 'empty-patch-sha', artifact: 'files/patch.diff' },
+      transcript: { artifact: 'files/transcript.json', executionCount: 1 },
+      artifacts: { directory: '/tmp/canary/runtime' },
+      noOpReason: 'no_file_changes',
+    },
+  },
+  completionOutcome: {
+    status: 'partial',
+    nextAction: 'review',
+    confidence: 'medium',
+    provenance: {
+      artifactBundleId: 'artifact-bundle-sha256-canary',
+      artifactDirectory: '/tmp/canary/runtime',
+    },
+  },
+});
+assert.equal(canaryRunOutcome.status, 'no_op');
+assert.equal(canaryRunOutcome.artifacts.some((artifact) => artifact.kind === 'artifact-bundle' && artifact.path === '/tmp/canary/runtime'), true);
+assert.equal(canaryRunOutcome.artifacts.some((artifact) => artifact.kind === 'codebox-changed-files' && artifact.path === '/tmp/canary/runtime/files/changed-files.json'), true);
+assert.equal(canaryRunOutcome.artifacts.some((artifact) => artifact.kind === 'codebox-patch' && artifact.path === '/tmp/canary/runtime/files/patch.diff'), true);
+assert.equal(canaryRunOutcome.artifacts.some((artifact) => artifact.kind === 'codebox-transcript' && artifact.path === '/tmp/canary/runtime/files/transcript.json'), true);
+assert.equal(canaryRunOutcome.artifacts.some((artifact) => artifact.kind === 'codebox-runtime-log'), true);
+assert.equal(canaryRunOutcome.artifacts.some((artifact) => artifact.kind === 'codebox-command-log'), true);
+assert.equal(canaryRunOutcome.evidence_refs.some((ref) => ref.uri === '/tmp/canary/runtime/files/patch.diff'), true);
+assert.equal(canaryRunOutcome.metadata.decision_evidence.selected_backend, 'codebox');
+assert.equal(canaryRunOutcome.metadata.decision_evidence.run_id, 'run-canary');
+assert.equal(canaryRunOutcome.metadata.decision_evidence.runtime_status, 'destroyed');
+assert.equal(canaryRunOutcome.metadata.decision_evidence.cleanup_observed, 'runtime_destroyed');
+assert.equal(canaryRunOutcome.metadata.decision_evidence.no_op_reason, 'no_file_changes');
+assert.equal(canaryRunOutcome.metadata.decision_evidence.patch_bytes, 0);
+assert.equal(canaryRunOutcome.metadata.decision_evidence.runtime_gap_trackers.includes('https://github.com/Automattic/wp-codebox/issues/529'), true);
 
 const codexOutcome = agentTaskOutcomeFromCodeboxResult(request, {
   success: true,

@@ -456,6 +456,18 @@ runner request, invokes the Codebox recipe runner, and emits a
 `homeboy/agent-task-outcome/v1` outcome with normalized status, artifacts,
 evidence refs, diagnostics, and failure classification.
 
+The outcome preserves the Homeboy decision evidence needed for Codebox worker
+canaries: why the Codebox executor was selected, which capabilities were used,
+the WP Codebox run/runtime IDs, cleanup status, heartbeat timestamp, changed-file
+count, patch digest/size, transcript/log artifact refs, and no-op reason when the
+sandbox completes without a promotable patch. Runtime gaps discovered during the
+worker-runtime canary are tracked upstream in:
+
+- https://github.com/Automattic/wp-codebox/issues/529
+- https://github.com/Automattic/wp-codebox/issues/530
+- https://github.com/Automattic/wp-codebox/issues/531
+- https://github.com/Automattic/wp-codebox/issues/532
+
 Removing the Homeboy-owned WP Codebox task runner is blocked on the upstream
 agent task runner API tracked in https://github.com/Automattic/wp-codebox/issues/480.
 Until that lands, this provider is a preparatory contract plus request/outcome
