@@ -4,6 +4,60 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.220.0] - 2026-06-03
+
+### Added
+- feat(agent-task): add deterministic smoke fixture
+
+### Changed
+- update audit baseline
+- refresh runner lab agnostic baseline
+- simplify lab route result
+- preserve lab runner preflight after split
+- simplify source grammar fixture
+- isolate audit fixtures from user home
+- refactor lab runner preparation tests
+- split lab argv rewrite coverage
+- keep timing spans core agnostic
+- allow contextual artifact metadata fields
+- drop fixed artifact portability baseline
+- split lab offload helpers into modules
+- refactor lab offload CLI routing
+- test audit scoring behavior
+- materialize linked shared scripts
+- preflight stale lab sessions
+- record detector timing spans
+- test audit shared call floor behavior
+- share source snapshot with structural detector
+- optimize parallel implementation scoring
+- move fingerprints into analysis context
+- expose artifact portability scan cost
+- run structural detector from snapshot
+- install monorepo shared scripts
+- isolate agent task command home
+- keep generated artifact cleanup core agnostic
+- agent-task: reject empty patch artifacts
+- agent-task: reject empty timeout patches
+- clean generated build artifacts
+
+### Fixed
+- reconcile core agnostic baseline count
+- fix audit baseline artifact fingerprints
+- keep Lab mutation offloads local without return support
+- fix lab offload passthrough sentinel after split
+- count artifact metadata candidates
+- fix route result naming
+- scope lab plan kind import to tests
+- fix lint refactor dirty-file reporting
+- fix lab offload passthrough sentinel
+- fix agent task lifecycle audit drift
+- fix output format footgun
+- fix main quality gate regressions
+- fix timeout artifact classification
+- fix(agent-task): reconcile terminal status
+- fix agent-task run-plan durable status
+- fix release tag preflight ordering
+
 ## [0.219.1] - 2026-06-03
 
 ### Changed
