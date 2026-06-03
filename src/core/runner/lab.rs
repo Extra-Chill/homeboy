@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use crate::core::observation::{PREVIEW_METADATA_ENV, PREVIEW_PUBLIC_URL_ENV};
-use crate::core::plan::{HomeboyPlan, PlanKind, PlanStep, PlanStepStatus, PlanValues};
+use crate::core::plan::{HomeboyPlan, PlanStep, PlanStepStatus, PlanValues};
 use crate::core::source_snapshot::SourceSnapshot;
 use crate::core::{Error, Result};
 
@@ -572,6 +572,7 @@ mod tests {
     use super::super::lab_workspaces::LAB_WORKSPACE_MAPPING_SCHEMA;
     use super::*;
     use crate::core::observation::LAB_OFFLOAD_METADATA_ENV;
+    use crate::core::plan::PlanKind;
     use crate::core::runner::{
         RunnerConnectReport, RunnerRequiredTool, RunnerTunnelMode, RunnerWorkspaceSyncOutput,
     };
