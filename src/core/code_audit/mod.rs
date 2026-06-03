@@ -380,7 +380,10 @@ fn audit_internal(
     }
 
     // Phase 1: Auto-discover file groups (always full codebase for convention detection)
-    let discovery = discovery::auto_discover_groups(root, &audit_config);
+    let source_snapshot =
+        walker::walk_shared_audit_files_snapshot(root, structural::source_extensions());
+    let discovery =
+        discovery::auto_discover_groups_from_snapshot(root, &audit_config, &source_snapshot);
     let files_skipped = discovery
         .files_walked
         .saturating_sub(discovery.files_fingerprinted);
@@ -457,8 +460,7 @@ fn audit_internal(
 
     // Phase 4b: Structural complexity analysis (god files, high item counts)
     let structural_findings = if plan.run_structural() {
-        let snapshot = structural::build_snapshot(root);
-        structural::analyze_snapshot(root, &snapshot)
+        structural::analyze_snapshot(root, &source_snapshot)
     } else {
         Vec::new()
     };

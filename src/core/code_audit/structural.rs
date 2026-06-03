@@ -23,6 +23,10 @@ const SOURCE_EXTENSIONS: &[&str] = &[
     "cpp", "h",
 ];
 
+pub(crate) fn source_extensions() -> &'static [&'static str] {
+    SOURCE_EXTENSIONS
+}
+
 pub(crate) fn build_snapshot(root: &Path) -> CodebaseSnapshot {
     let config = ScanConfig {
         extensions: ExtensionFilter::Only(
@@ -48,14 +52,17 @@ pub(crate) fn analyze_snapshot(root: &Path, snapshot: &CodebaseSnapshot) -> Vec<
     let mut dir_source_counts: HashMap<String, usize> = HashMap::new();
 
     for (path, content) in snapshot.iter() {
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        if !SOURCE_EXTENSIONS.contains(&ext) {
+            continue;
+        }
+
         let parent_rel = path
             .parent()
             .and_then(|p| p.strip_prefix(root).ok())
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_default();
         *dir_source_counts.entry(parent_rel).or_insert(0) += 1;
-
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
         let relative = path
             .strip_prefix(root)
@@ -429,11 +436,17 @@ export default function main() {}
             content.push_str(&format!("fn item_{}() {{}}\n", i));
         }
         std::fs::write(dir.join("many.rs"), &content).unwrap();
+        std::fs::write(dir.join("readme.md"), "# Not source\n").unwrap();
 
         let snapshot = build_snapshot(&dir);
+        let broad_snapshot = CodebaseSnapshot::build(&dir, &ScanConfig::default());
         assert_eq!(snapshot.len(), 1);
         assert_eq!(
             serde_json::to_value(analyze_snapshot(&dir, &snapshot)).unwrap(),
+            serde_json::to_value(analyze_structure(&dir)).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(analyze_snapshot(&dir, &broad_snapshot)).unwrap(),
             serde_json::to_value(analyze_structure(&dir)).unwrap()
         );
 
