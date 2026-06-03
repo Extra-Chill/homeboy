@@ -172,8 +172,8 @@ fn main() -> std::process::ExitCode {
     };
 
     match homeboy::commands::route::route_after_parse(&cli, &normalized, output_file.as_deref()) {
-        Ok(homeboy::commands::route::RouteResult::ContinueLocal) => {}
-        Ok(homeboy::commands::route::RouteResult::Exited(exit_code)) => {
+        Ok(None) => {}
+        Ok(Some(exit_code)) => {
             return std::process::ExitCode::from(exit_code_to_u8(exit_code));
         }
         Err(err) => {

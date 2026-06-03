@@ -1,16 +1,10 @@
 use homeboy::cli_surface::{Cli, Commands};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RouteResult {
-    ContinueLocal,
-    Exited(i32),
-}
-
 pub fn route_after_parse(
     cli: &Cli,
     normalized_args: &[String],
     output_file: Option<&str>,
-) -> homeboy::core::Result<RouteResult> {
+) -> homeboy::core::Result<Option<i32>> {
     let lab_command = lab_offload_command(&cli.command)?;
 
     match homeboy::core::runner::execute_lab_offload(homeboy::core::runner::LabOffloadRequest {
@@ -29,7 +23,7 @@ pub fn route_after_parse(
             for message in messages {
                 eprintln!("{message}");
             }
-            Ok(RouteResult::ContinueLocal)
+            Ok(None)
         }
         homeboy::core::runner::LabOffloadOutcome::Offloaded {
             stdout,
@@ -44,7 +38,7 @@ pub fn route_after_parse(
                 write_offloaded_stdout(path, &stdout)?;
             }
             print!("{stdout}");
-            Ok(RouteResult::Exited(exit_code))
+            Ok(Some(exit_code))
         }
     }
 }
@@ -160,7 +154,7 @@ mod tests {
 
         let outcome = route_after_parse(&cli, &["homeboy".into(), "status".into()], None).unwrap();
 
-        assert_eq!(outcome, RouteResult::ContinueLocal);
+        assert_eq!(outcome, None);
     }
 
     #[test]
