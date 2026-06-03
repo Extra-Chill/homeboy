@@ -3,7 +3,7 @@
 //! Mirrors `core/extension/lint/run.rs` and `core/extension/test/run.rs` — the command
 //! layer provides CLI args, this module owns all business logic and returns structured results.
 
-use crate::core::code_audit::{self, baseline, AuditWithAnalysis, CodeAuditResult};
+use crate::core::code_audit::{self, baseline, AuditTiming, AuditWithAnalysis, CodeAuditResult};
 use crate::core::git;
 use std::collections::HashSet;
 use std::path::Path;
@@ -36,6 +36,7 @@ pub struct AuditRunWorkflowResult {
     pub output: AuditCommandOutput,
     pub exit_code: i32,
     pub findings: Vec<code_audit::Finding>,
+    pub timing: AuditTiming,
 }
 
 /// Run the main audit workflow.
@@ -72,11 +73,13 @@ pub fn run_main_audit_workflow(
                 },
                 0,
                 Vec::new(),
+                AuditTiming::default(),
             ));
         }
     };
     let mut result = audit.result;
     let analysis = audit.analysis;
+    let timing = audit.timing;
 
     // --conventions: just show conventions
     if args.conventions {
@@ -89,6 +92,7 @@ pub fn run_main_audit_workflow(
             },
             0,
             findings,
+            timing,
         ));
     }
 
@@ -96,7 +100,7 @@ pub fn run_main_audit_workflow(
     // set so they remain a complete reference; --only / --exclude intentionally
     // do not narrow what gets persisted.
     if args.baseline_flags.baseline {
-        return run_baseline_save(result, &args);
+        return run_baseline_save(result, &args, timing);
     }
 
     // --only / --exclude: scope this run's findings before comparison and
@@ -111,18 +115,20 @@ pub fn run_main_audit_workflow(
     }
 
     // Default: compare against baseline or return full result
-    run_comparison_workflow(result, &analysis, &args)
+    run_comparison_workflow(result, &analysis, &args, timing)
 }
 
 fn audit_run_workflow_result(
     output: AuditCommandOutput,
     exit_code: i32,
     findings: Vec<code_audit::Finding>,
+    timing: AuditTiming,
 ) -> AuditRunWorkflowResult {
     AuditRunWorkflowResult {
         output,
         exit_code,
         findings,
+        timing,
     }
 }
 
@@ -228,6 +234,7 @@ fn run_audit(args: &AuditRunWorkflowArgs) -> crate::core::Result<Option<AuditWit
 fn run_baseline_save(
     result: CodeAuditResult,
     args: &AuditRunWorkflowArgs,
+    timing: AuditTiming,
 ) -> crate::core::Result<AuditRunWorkflowResult> {
     let findings = result.findings.clone();
     let saved = if let Some(ref git_ref) = args.changed_since {
@@ -281,6 +288,7 @@ fn run_baseline_save(
         },
         exit_code: 0,
         findings,
+        timing,
     })
 }
 
@@ -289,18 +297,19 @@ fn run_comparison_workflow(
     result: CodeAuditResult,
     analysis: &code_audit::AuditAnalysisContext,
     args: &AuditRunWorkflowArgs,
+    timing: AuditTiming,
 ) -> crate::core::Result<AuditRunWorkflowResult> {
     // Try file-based baseline
     if !args.baseline_flags.ignore_baseline {
         if let Some(existing_baseline) = baseline::load_baseline(Path::new(&result.source_path)) {
-            return build_comparison_output(result, analysis, existing_baseline, args);
+            return build_comparison_output(result, analysis, existing_baseline, args, timing);
         }
     }
 
     // Try git-ref differential
     if let Some(ref git_ref) = args.changed_since {
         if let Some(ref_baseline) = baseline::load_baseline_from_ref(&result.source_path, git_ref) {
-            return build_comparison_output(result, analysis, ref_baseline, args);
+            return build_comparison_output(result, analysis, ref_baseline, args, timing);
         }
     }
 
@@ -325,6 +334,7 @@ fn run_comparison_workflow(
             output: AuditCommandOutput::Summary(summary),
             exit_code,
             findings,
+            timing,
         })
     } else {
         let fixability = compute_fixability_if_requested(&result, analysis, args);
@@ -337,6 +347,7 @@ fn run_comparison_workflow(
             },
             exit_code,
             findings,
+            timing,
         })
     }
 }
@@ -347,6 +358,7 @@ fn build_comparison_output(
     analysis: &code_audit::AuditAnalysisContext,
     existing_baseline: baseline::AuditBaseline,
     args: &AuditRunWorkflowArgs,
+    timing: AuditTiming,
 ) -> crate::core::Result<AuditRunWorkflowResult> {
     let mut comparison = baseline::compare(&result, &existing_baseline);
     if let Some(ref git_ref) = args.changed_since {
@@ -418,6 +430,7 @@ fn build_comparison_output(
             output: AuditCommandOutput::Summary(summary),
             exit_code,
             findings,
+            timing,
         })
     } else {
         let fixability = compute_fixability_if_requested(&result, analysis, args);
@@ -434,6 +447,7 @@ fn build_comparison_output(
             },
             exit_code,
             findings,
+            timing,
         })
     }
 }
