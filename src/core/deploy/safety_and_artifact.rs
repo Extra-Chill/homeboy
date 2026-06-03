@@ -127,7 +127,7 @@ pub(super) fn deploy_artifact(
                 1,
                 format!(
                     "Archive artifact '{}' requires an extractCommand. \
-                     Add one with: homeboy component set <id> --json '{{\"extract_command\": \"unzip -o {{artifact}} && rm {{artifact}}\"}}'",
+                     Add one with: homeboy component set <id> --json '{{\"extract_command\": \"unzip -o {{{{artifact}}}} && rm {{{{artifact}}}}\"}}'",
                     local_path.display()
                 ),
             ));
@@ -385,16 +385,14 @@ fn flatten_double_nested_dir(
     // up into remote_path, then remove the now-empty staging directory. Using a
     // temp staging name avoids the "cannot move a directory into itself" problem
     // when the inner dir shares the basename with its parent.
-    let staging = format!("{}/.artifact-flatten-staging", normalized);
-    let target_dir = format!("{}/", normalized);
+    let staging = ".artifact-flatten-staging";
     let flatten_cmd = format!(
         "cd {target} && rm -rf {staging} && mv {nested} {staging} && \
-         find {staging} -mindepth 1 -maxdepth 1 -exec mv {{}} {target_dir} \\; && \
+         find {staging} -mindepth 1 -maxdepth 1 -exec mv {{}} . \\; && \
          rmdir {staging}",
         target = shell::quote_path(normalized),
-        target_dir = shell::quote_path(&target_dir),
-        nested = shell::quote_path(&nested_dir),
-        staging = shell::quote_path(&staging),
+        nested = shell::quote_path(basename),
+        staging = shell::quote_path(staging),
     );
     let flatten_output = ssh_client.execute(&flatten_cmd);
     if !flatten_output.success {
@@ -777,11 +775,10 @@ mod tests {
         assert!(target.join("plugin.php").is_file());
     }
 
-    /// The "requires an extractCommand" hint must use single-brace `{artifact}`
-    /// placeholders so a copy-paste of the JSON works (render_extract_command +
-    /// render_map both resolve `{artifact}` correctly).
+    /// The "requires an extractCommand" hint must use the canonical double-brace
+    /// `{{artifact}}` template syntax so copy-pasted JSON matches configured components.
     #[test]
-    fn test_archive_without_extract_command_hint_uses_single_brace_placeholder() {
+    fn test_archive_without_extract_command_hint_uses_double_brace_placeholder() {
         let temp = tempfile::tempdir().expect("temp dir");
         let archive = temp.path().join("plugin.zip");
         fs::write(&archive, "zip bytes").expect("archive");
@@ -800,12 +797,43 @@ mod tests {
         assert!(!result.success);
         let error = result.error.expect("hint error");
         assert!(
-            error.contains("{artifact}"),
-            "hint must contain single-brace placeholder: {error}"
+            error.contains("unzip -o {{artifact}} && rm {{artifact}}"),
+            "hint must contain double-brace placeholder: {error}"
         );
         assert!(
-            !error.contains("{{artifact}}"),
-            "hint must NOT contain double-brace placeholder: {error}"
+            !error.contains("unzip -o {artifact} && rm {artifact}"),
+            "hint must not suggest the single-brace placeholder form: {error}"
         );
+    }
+
+    /// Relative remote paths already run flatten from inside `remote_path`; the
+    /// inner directory must therefore be addressed by basename only, not by
+    /// prefixing `remote_path` a second time.
+    #[test]
+    #[cfg(unix)]
+    fn test_flatten_double_nested_dir_handles_relative_remote_path() {
+        let current_dir = std::env::current_dir().expect("current dir");
+        let temp = tempfile::Builder::new()
+            .prefix("homeboy-relative-flatten-")
+            .tempdir_in(&current_dir)
+            .expect("temp dir in cwd");
+        let plugin = "data-machine";
+        let target = temp.path().join("wp-content/plugins").join(plugin);
+        let nested = target.join(plugin);
+        fs::create_dir_all(&nested).expect("nested dir");
+        fs::write(nested.join("data-machine.php"), "<?php").expect("plugin main");
+
+        let relative_target = target
+            .strip_prefix(&current_dir)
+            .expect("target under cwd")
+            .to_str()
+            .expect("relative target");
+
+        let result = flatten_double_nested_dir(&local_client(), relative_target).expect("ok");
+
+        assert!(result.is_none(), "flatten should not fail");
+        assert!(target.join("data-machine.php").is_file());
+        assert!(!target.join(plugin).exists());
+        assert!(!target.join(".artifact-flatten-staging").exists());
     }
 }

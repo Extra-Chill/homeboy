@@ -609,7 +609,7 @@ fn resolve_preflight_artifact_path(
             build_exit_code,
             format!(
                 "Archive artifact '{}' requires an extractCommand. \
-                 Add one with: homeboy component set <id> --json '{{\"extract_command\": \"unzip -o {{artifact}} && rm {{artifact}}\"}}'",
+                 Add one with: homeboy component set <id> --json '{{\"extract_command\": \"unzip -o {{{{artifact}}}} && rm {{{{artifact}}}}\"}}'",
                 artifact_path.display()
             ),
         ));
@@ -1113,6 +1113,58 @@ mod tests {
             false,
             false,
         ));
+    }
+
+    #[test]
+    fn archive_artifact_preflight_hint_uses_double_brace_placeholder() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let artifact = temp.path().join("build/example.zip");
+        std::fs::create_dir_all(artifact.parent().expect("artifact parent")).expect("build dir");
+        std::fs::write(&artifact, "zip bytes").expect("artifact");
+        let component = Component {
+            id: "example".to_string(),
+            local_path: temp.path().to_string_lossy().to_string(),
+            build_artifact: Some("build/example.zip".to_string()),
+            extract_command: None,
+            ..Component::default()
+        };
+        let config = DeployConfig {
+            component_ids: Vec::new(),
+            all: false,
+            outdated: false,
+            behind_upstream: false,
+            dry_run: false,
+            check: false,
+            force: false,
+            skip_build: true,
+            keep_deps: false,
+            expected_version: None,
+            no_pull: false,
+            head: false,
+            tagged: false,
+        };
+
+        let result = resolve_preflight_artifact_path(
+            &component,
+            &config,
+            "/srv/site",
+            temp.path().to_str().expect("install dir"),
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect_err("archive without extract command should fail preflight");
+        let error = result.error.expect("preflight error");
+
+        assert!(
+            error.contains("unzip -o {{artifact}} && rm {{artifact}}"),
+            "hint must contain double-brace placeholder: {error}"
+        );
+        assert!(
+            !error.contains("unzip -o {artifact} && rm {artifact}"),
+            "hint must not suggest the single-brace placeholder form: {error}"
+        );
     }
 
     #[test]

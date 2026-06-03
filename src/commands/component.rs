@@ -47,7 +47,7 @@ enum ComponentCommand {
             conflicts_with = "version_targets"
         )]
         version_targets_json: Option<String>,
-        /// Extract command to run after upload (e.g., "unzip -o {artifact} && rm {artifact}")
+        /// Extract command to run after upload (e.g., "unzip -o {{artifact}} && rm {{artifact}}")
         #[arg(long)]
         extract_command: Option<String>,
         /// Path to changelog file relative to localPath
@@ -85,7 +85,7 @@ enum ComponentCommand {
         /// Build artifact path relative to localPath
         #[arg(long)]
         build_artifact: Option<String>,
-        /// Extract command to run after upload (e.g., "unzip -o {artifact} && rm {artifact}")
+        /// Extract command to run after upload (e.g., "unzip -o {{artifact}} && rm {{artifact}}")
         #[arg(long)]
         extract_command: Option<String>,
         /// Path to changelog file relative to localPath
@@ -1105,6 +1105,8 @@ fn shared(id: Option<&str>) -> CmdResult<ComponentOutput> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli_surface::Cli;
+    use clap::CommandFactory;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
 
@@ -1173,6 +1175,34 @@ mod tests {
 
         assert_eq!(obj["local_path"], serde_json::json!("/override"));
         assert_eq!(obj["remote_path"], serde_json::json!("/keep-this"));
+    }
+
+    #[test]
+    fn component_help_uses_double_brace_extract_command_placeholder() {
+        let mut command = Cli::command();
+        let component = command
+            .find_subcommand_mut("component")
+            .expect("component command");
+        let create_help = component
+            .find_subcommand_mut("create")
+            .expect("component create command")
+            .render_long_help()
+            .to_string();
+        let set_help = component
+            .find_subcommand_mut("set")
+            .expect("component set command")
+            .render_long_help()
+            .to_string();
+        let help = format!("{create_help}\n{set_help}");
+
+        assert!(
+            help.contains("unzip -o {{artifact}} && rm {{artifact}}"),
+            "component help should document double-brace placeholders: {help}"
+        );
+        assert!(
+            !help.contains("unzip -o {artifact} && rm {artifact}"),
+            "component help should not document single-brace placeholders: {help}"
+        );
     }
 
     #[test]
