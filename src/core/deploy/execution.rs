@@ -10,6 +10,7 @@ use crate::core::extension::build::resolve_artifact_path_from_root;
 use crate::core::git;
 use crate::core::project::Project;
 
+use super::generated_artifacts::GeneratedBuildArtifactCleanupGuard;
 use super::path_roots::{component_remote_path, resolve_effective_remote_path};
 use super::planning::{calculate_directory_size, format_bytes};
 use super::policy::{owner_hint_for_path, protected_path_suffixes, validate_deploy_target};
@@ -63,6 +64,15 @@ pub(super) fn prepare_component_deploy(
         } else {
             None
         };
+
+    let cleanup_generated_artifacts = !is_git_deploy
+        && !is_file_deploy
+        && !config.skip_build
+        && release_artifact.is_none()
+        && !is_self_deploy(component);
+    let local_path = Path::new(&component.local_path);
+    let mut generated_cleanup_guard =
+        GeneratedBuildArtifactCleanupGuard::new(local_path, cleanup_generated_artifacts);
 
     // Build (git-deploy, file-deploy, skip-build, and release-download skip this step)
     let (build_exit_code, build_error) =
@@ -160,6 +170,8 @@ pub(super) fn prepare_component_deploy(
             Err(result) => return Err(result),
         }
     };
+
+    generated_cleanup_guard.disarm();
 
     let cleanup_local_artifact = artifact_path.as_ref().is_some_and(|_| {
         release_artifact.is_none() && !config.skip_build && !is_self_deploy(component)
@@ -728,6 +740,10 @@ fn execute_artifact_deploy(
     let component = &prepared.component;
     let config = &prepared.config;
     let install_dir = prepared.install_dir.as_str();
+    let _generated_cleanup_guard = GeneratedBuildArtifactCleanupGuard::new(
+        Path::new(&component.local_path),
+        prepared.cleanup_local_artifact,
+    );
     let Some(artifact_path) = prepared.artifact_path.as_ref() else {
         return ComponentDeployResult::failed(
             component,

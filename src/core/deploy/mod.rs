@@ -1,4 +1,5 @@
 mod execution;
+mod generated_artifacts;
 mod orchestration;
 mod path_roots;
 pub(crate) mod permissions;
