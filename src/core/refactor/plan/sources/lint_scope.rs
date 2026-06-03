@@ -1,7 +1,7 @@
 use crate::core::component::Component;
 use crate::core::git;
 use crate::core::Error;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -15,6 +15,22 @@ pub(super) struct ReleaseOwnedFileSnapshot {
 pub(super) struct LintFixScopeOutcome {
     pub(super) changed_files: Vec<String>,
     pub(super) warnings: Vec<String>,
+}
+
+pub(super) type DirtyFileSnapshot = BTreeMap<String, Vec<u8>>;
+
+pub(super) fn capture_dirty_file_snapshot(
+    root: &Path,
+    dirty_files: &[String],
+) -> DirtyFileSnapshot {
+    dirty_files
+        .iter()
+        .filter_map(|file| {
+            fs::read(root.join(file))
+                .ok()
+                .map(|bytes| (file.clone(), bytes))
+        })
+        .collect()
 }
 
 pub(super) fn capture_release_owned_files(
@@ -85,24 +101,37 @@ pub(super) fn constrain_lint_fix_changes(
     root: &Path,
     selected_files: Option<&[String]>,
     before_dirty: &[String],
+    before_dirty_snapshot: &DirtyFileSnapshot,
     after_dirty: Vec<String>,
     release_owned: &[ReleaseOwnedFileSnapshot],
 ) -> crate::core::Result<LintFixScopeOutcome> {
     let before_set: HashSet<&str> = before_dirty.iter().map(|file| file.as_str()).collect();
+    let after_set: HashSet<String> = after_dirty.iter().cloned().collect();
     let release_owned_set: HashSet<&str> = release_owned
         .iter()
         .map(|snapshot| snapshot.relative.as_str())
         .collect();
-    let newly_changed: Vec<String> = after_dirty
-        .into_iter()
-        .filter(|file| {
-            !before_set.contains(file.as_str()) && !release_owned_set.contains(file.as_str())
-        })
-        .collect();
+    let mut changed = BTreeSet::new();
+    for file in after_dirty {
+        if release_owned_set.contains(file.as_str()) {
+            continue;
+        }
+
+        if !before_set.contains(file.as_str()) {
+            changed.insert(file);
+            continue;
+        }
+
+        if let Some(before_bytes) = before_dirty_snapshot.get(&file) {
+            if fs::read(root.join(&file)).is_ok_and(|after_bytes| after_bytes != *before_bytes) {
+                changed.insert(file);
+            }
+        }
+    }
 
     let Some(selected_files) = selected_files else {
         return Ok(LintFixScopeOutcome {
-            changed_files: newly_changed,
+            changed_files: changed.into_iter().collect(),
             warnings: Vec::new(),
         });
     };
@@ -111,9 +140,12 @@ pub(super) fn constrain_lint_fix_changes(
     let mut allowed = Vec::new();
     let mut out_of_scope = Vec::new();
 
-    for file in newly_changed {
+    let mut dirty_out_of_scope = Vec::new();
+    for file in changed {
         if selected_set.contains(file.as_str()) {
             allowed.push(file);
+        } else if before_set.contains(file.as_str()) || !after_set.contains(&file) {
+            dirty_out_of_scope.push(file);
         } else {
             out_of_scope.push(file);
         }
@@ -126,6 +158,13 @@ pub(super) fn constrain_lint_fix_changes(
             "Discarded {} lint autofix change(s) outside selected scope: {}",
             out_of_scope.len(),
             out_of_scope.join(", ")
+        ));
+    }
+    if !dirty_out_of_scope.is_empty() {
+        warnings.push(format!(
+            "Left {} pre-existing dirty lint autofix change(s) outside selected scope untouched: {}",
+            dirty_out_of_scope.len(),
+            dirty_out_of_scope.join(", ")
         ));
     }
 
@@ -439,9 +478,16 @@ mod tests {
 
         let after_dirty = git::get_dirty_files(&root.to_string_lossy()).unwrap();
         let selected_files = vec!["src/scoped.rs".to_string()];
-        let outcome =
-            constrain_lint_fix_changes(&root, Some(&selected_files), &[], after_dirty, &[])
-                .unwrap();
+        let before_dirty_snapshot = DirtyFileSnapshot::new();
+        let outcome = constrain_lint_fix_changes(
+            &root,
+            Some(&selected_files),
+            &[],
+            &before_dirty_snapshot,
+            after_dirty,
+            &[],
+        )
+        .unwrap();
 
         assert_eq!(outcome.changed_files, vec!["src/scoped.rs"]);
         assert_eq!(
@@ -457,6 +503,41 @@ mod tests {
             .warnings
             .iter()
             .any(|warning| warning.contains("outside selected scope")));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn lint_fix_scope_counts_selected_file_that_was_dirty_before_fix() {
+        let root = tmp_dir("lint-fix-dirty-selected");
+        fs::create_dir_all(root.join("src")).unwrap();
+        run_git(&root, &["init", "-q"]);
+        run_git(&root, &["config", "user.email", "test@example.com"]);
+        run_git(&root, &["config", "user.name", "test"]);
+
+        fs::write(root.join("src/scoped.php"), "<?php\nfunction bad(){\n}\n").unwrap();
+        run_git(&root, &["add", "."]);
+        run_git(&root, &["commit", "-q", "-m", "init"]);
+
+        fs::write(root.join("src/scoped.php"), "<?php\nfunction bad( ){\n}\n").unwrap();
+        let before_dirty = git::get_dirty_files(&root.to_string_lossy()).unwrap();
+        let before_dirty_snapshot = capture_dirty_file_snapshot(&root, &before_dirty);
+
+        fs::write(root.join("src/scoped.php"), "<?php\nfunction bad() {\n}\n").unwrap();
+        let after_dirty = git::get_dirty_files(&root.to_string_lossy()).unwrap();
+        let selected_files = vec!["src/scoped.php".to_string()];
+        let outcome = constrain_lint_fix_changes(
+            &root,
+            Some(&selected_files),
+            &before_dirty,
+            &before_dirty_snapshot,
+            after_dirty,
+            &[],
+        )
+        .unwrap();
+
+        assert_eq!(outcome.changed_files, vec!["src/scoped.php"]);
+        assert!(outcome.warnings.is_empty());
 
         let _ = fs::remove_dir_all(root);
     }
