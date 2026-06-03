@@ -1050,15 +1050,11 @@ const BASELINE: &[ViolationKey] = &[
         term: "Homeboy",
     },
     ViolationKey {
-        path: "src/core/runner/lab.rs",
-        term: ".homeboy",
-    },
-    ViolationKey {
-        path: "src/core/runner/lab.rs",
+        path: "src/core/runner/lab_args.rs",
         term: "Lab",
     },
     ViolationKey {
-        path: "src/core/runner/lab.rs",
+        path: "src/core/runner/lab_args.rs",
         term: "offload",
     },
     ViolationKey {
@@ -1068,6 +1064,18 @@ const BASELINE: &[ViolationKey] = &[
     ViolationKey {
         path: "src/core/runner/lab_command.rs",
         term: "cargo",
+    },
+    ViolationKey {
+        path: "src/core/runner/lab_selection.rs",
+        term: ".homeboy",
+    },
+    ViolationKey {
+        path: "src/core/runner/lab_selection.rs",
+        term: "Lab",
+    },
+    ViolationKey {
+        path: "src/core/runner/lab_selection.rs",
+        term: "offload",
     },
     ViolationKey {
         path: "src/core/runner/offload_changed_since.rs",
@@ -1151,7 +1159,7 @@ const BASELINE: &[ViolationKey] = &[
     },
 ];
 
-const BASELINE_OCCURRENCES: usize = 659;
+const BASELINE_OCCURRENCES: usize = 631;
 
 // Known core-owned test/fixture literal debt tracked by #3034. Keep this list
 // explicit so stale rows and occurrence-count changes force cleanup or review.
