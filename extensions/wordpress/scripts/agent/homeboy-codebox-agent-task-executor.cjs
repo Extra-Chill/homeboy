@@ -188,8 +188,8 @@ function discoverTimeoutArtifactRefs(artifactsRoot) {
   };
 }
 
-function timeoutPayload(timeoutMs) {
-  const artifacts = argValue('--artifacts');
+function timeoutPayload(timeoutMs, request = {}) {
+  const artifacts = argValue('--artifacts') || request.executor?.config?.artifacts || '';
   const evidencePath = artifacts ? `${artifacts}/homeboy-codebox-task-runner.json` : '';
   const discovered = discoverTimeoutArtifactRefs(artifacts);
   const knownArtifacts = [];
@@ -340,7 +340,7 @@ function runTaskRunner(request) {
 
   let payload = {};
   if (result.error && result.error.code === 'ETIMEDOUT') {
-    payload = timeoutPayload(requestTimeoutMs(request));
+    payload = timeoutPayload(requestTimeoutMs(request), request);
     return agentTaskOutcomeFromCodeboxResult(request, payload, { exitStatus: 1 });
   }
   if (result.stdout.trim()) {
