@@ -5,14 +5,26 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::core::agent_task::{
-    AgentTaskArtifact, AgentTaskEvidenceRef, AgentTaskOutcome, AgentTaskOutcomeStatus,
-    AgentTaskRequest, AGENT_TASK_ARTIFACT_SCHEMA, AGENT_TASK_OUTCOME_SCHEMA,
+    AgentTaskArtifact, AgentTaskDiagnostic, AgentTaskEvidenceRef, AgentTaskOutcome,
+    AgentTaskOutcomeStatus, AgentTaskRequest, AGENT_TASK_ARTIFACT_SCHEMA,
+    AGENT_TASK_OUTCOME_SCHEMA,
 };
+
+const EXPECTED_RUNTIME_EVIDENCE_FILES: &[&str] = &[
+    "transcript.json",
+    "agent-result.json",
+    "agent_result.json",
+    "patch.diff",
+    "patch.patch",
+    "*.log",
+    "*.txt",
+];
 
 #[derive(Default)]
 pub(crate) struct TimeoutArtifactDiscovery {
     pub(crate) artifacts: Vec<AgentTaskArtifact>,
     pub(crate) evidence_refs: Vec<AgentTaskEvidenceRef>,
+    pub(crate) diagnostics: Vec<AgentTaskDiagnostic>,
     pub(crate) outcome: Option<AgentTaskOutcome>,
 }
 
@@ -23,6 +35,10 @@ impl TimeoutArtifactDiscovery {
             discovery.scan_path(&path, request);
         }
         discovery
+    }
+
+    pub(crate) fn has_runtime_evidence(&self) -> bool {
+        self.runtime_evidence_count() > 0
     }
 
     fn scan_path(&mut self, path: &Path, request: &AgentTaskRequest) {
@@ -39,14 +55,32 @@ impl TimeoutArtifactDiscovery {
             return;
         }
 
-        self.record_directory(path);
+        let runtime_evidence_count_before = self.runtime_evidence_count();
         self.scan_directory_files(path, request, 0, &mut 0);
+        self.record_directory_if_useful(
+            path,
+            self.runtime_evidence_count() > runtime_evidence_count_before,
+        );
     }
 
-    fn record_directory(&mut self, path: &Path) {
+    fn runtime_evidence_count(&self) -> usize {
+        self.artifacts
+            .iter()
+            .filter(|artifact| artifact.kind != "preflight_evidence")
+            .count()
+            + self.evidence_refs.len()
+            + usize::from(self.outcome.is_some())
+    }
+
+    fn record_directory_if_useful(&mut self, path: &Path, has_runtime_evidence: bool) {
         let Some(id) = artifact_id_from_path(path) else {
             return;
         };
+        if !has_runtime_evidence {
+            self.record_empty_runtime_bundle(path);
+            return;
+        }
+
         self.artifacts.push(AgentTaskArtifact {
             schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
             id,
@@ -60,6 +94,20 @@ impl TimeoutArtifactDiscovery {
             size_bytes: None,
             sha256: None,
             metadata: serde_json::json!({ "discovered_from": "timeout_artifact_scan" }),
+        });
+    }
+
+    fn record_empty_runtime_bundle(&mut self, path: &Path) {
+        if !is_runtime_bundle_dir(path) {
+            return;
+        }
+        self.diagnostics.push(AgentTaskDiagnostic {
+            class: "empty_runtime_bundle".to_string(),
+            message: "timeout artifact scan found an empty runtime bundle directory".to_string(),
+            data: serde_json::json!({
+                "path": path.display().to_string(),
+                "missing_expected_files": EXPECTED_RUNTIME_EVIDENCE_FILES,
+            }),
         });
     }
 
@@ -125,7 +173,12 @@ impl TimeoutArtifactDiscovery {
             if child_metadata.is_file() {
                 self.record_file(&child, request);
             } else if child_metadata.is_dir() {
+                let runtime_evidence_count_before = self.runtime_evidence_count();
                 self.scan_directory_files(&child, request, depth + 1, visited);
+                self.record_directory_if_useful(
+                    &child,
+                    self.runtime_evidence_count() > runtime_evidence_count_before,
+                );
             }
         }
     }
@@ -255,6 +308,9 @@ fn artifact_kind_from_path(path: &Path) -> Option<String> {
     if file_name.contains("agent-result") || file_name.contains("agent_result") {
         return Some("agent_result".to_string());
     }
+    if file_name == "homeboy-codebox-task-runner.json" {
+        return Some("preflight_evidence".to_string());
+    }
 
     None
 }
@@ -273,6 +329,12 @@ fn artifact_id_from_path(path: &Path) -> Option<String> {
             })
             .collect(),
     )
+}
+
+fn is_runtime_bundle_dir(path: &Path) -> bool {
+    path.file_name()
+        .map(|name| name.to_string_lossy().to_ascii_lowercase())
+        .is_some_and(|name| name.starts_with("runtime-") || name.contains("runtime_bundle"))
 }
 
 fn mime_from_path(path: &Path) -> Option<String> {
