@@ -284,28 +284,56 @@ fn jaccard_disjoint_sets() {
 }
 
 #[test]
-fn shared_signal_call_count_counts_unique_overlap() {
-    let a = std::collections::HashSet::from([
-        "shared_one".to_string(),
-        "shared_two".to_string(),
-        "shared_three".to_string(),
-        "unique_a".to_string(),
-    ]);
-    let b = std::collections::HashSet::from([
-        "shared_one".to_string(),
-        "shared_two".to_string(),
-        "shared_three".to_string(),
-        "unique_b".to_string(),
-    ]);
-    let c = std::collections::HashSet::from([
-        "shared_one".to_string(),
-        "shared_two".to_string(),
-        "unique_c".to_string(),
-        "another_c".to_string(),
-    ]);
+fn shared_call_floor_preserves_parallel_detection_behavior() {
+    let below_floor_a = make_fingerprint_with_content(
+            "src/below_a.rs",
+            &["deploy_below_floor"],
+            "fn deploy_below_floor() {\n    for host in hosts {\n        validate_component();\n        build_artifact();\n        prepare_deploy_only();\n        notify_deploy_only();\n    }\n}",
+        );
+    let below_floor_b = make_fingerprint_with_content(
+            "src/below_b.rs",
+            &["upgrade_below_floor"],
+            "fn upgrade_below_floor() {\n    for host in hosts {\n        validate_component();\n        build_artifact();\n        prepare_upgrade_only();\n        notify_upgrade_only();\n    }\n}",
+        );
 
-    assert_eq!(shared_signal_call_count(&a, &b), MIN_SHARED_CALLS);
-    assert_eq!(shared_signal_call_count(&a, &c), MIN_SHARED_CALLS - 1);
+    let below_floor_findings = detect_parallel_implementations(
+        &[&below_floor_a, &below_floor_b],
+        &std::collections::HashSet::new(),
+        &DuplicationDetectorConfig::default(),
+    );
+    assert!(
+        below_floor_findings.is_empty(),
+        "Pairs below the shared-call floor must stay suppressed, got: {:?}",
+        below_floor_findings
+            .iter()
+            .map(|f| &f.description)
+            .collect::<Vec<_>>()
+    );
+
+    let at_floor_a = make_fingerprint_with_content(
+            "src/at_floor_a.rs",
+            &["deploy_at_floor"],
+            "fn deploy_at_floor() {\n    for host in hosts {\n        validate_component();\n        build_artifact();\n        upload_to_host();\n        notify_deploy_only();\n    }\n}",
+        );
+    let at_floor_b = make_fingerprint_with_content(
+            "src/at_floor_b.rs",
+            &["upgrade_at_floor"],
+            "fn upgrade_at_floor() {\n    for host in hosts {\n        validate_component();\n        build_artifact();\n        upload_to_host();\n        notify_upgrade_only();\n    }\n}",
+        );
+
+    let at_floor_findings = detect_parallel_implementations(
+        &[&at_floor_a, &at_floor_b],
+        &std::collections::HashSet::new(),
+        &DuplicationDetectorConfig::default(),
+    );
+    assert_eq!(
+        at_floor_findings.len(),
+        2,
+        "Pairs at the shared-call floor must still produce parallel implementation findings"
+    );
+    assert!(at_floor_findings
+        .iter()
+        .all(|finding| finding.kind == AuditFinding::ParallelImplementation));
 }
 
 #[test]
