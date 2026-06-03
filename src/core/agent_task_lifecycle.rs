@@ -15,9 +15,11 @@ mod lifecycle_store;
 
 use lifecycle_store as store;
 
-pub const AGENT_TASK_RUN_SCHEMA: &str = "homeboy/agent-task-run/v1";
-pub const AGENT_TASK_RUN_LOG_SCHEMA: &str = "homeboy/agent-task-run-log/v1";
-pub const AGENT_TASK_RUN_ARTIFACTS_SCHEMA: &str = "homeboy/agent-task-run-artifacts/v1";
+mod schemas {
+    pub(super) const RUN: &str = "homeboy/agent-task-run/v1";
+    pub(super) const RUN_LOG: &str = "homeboy/agent-task-run-log/v1";
+    pub(super) const RUN_ARTIFACTS: &str = "homeboy/agent-task-run-artifacts/v1";
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgentTaskRunRecord {
@@ -148,7 +150,7 @@ pub fn submit_plan(
     let plan_path = store::write_plan(&run_id, plan)?;
 
     let record = AgentTaskRunRecord {
-        schema: AGENT_TASK_RUN_SCHEMA.to_string(),
+        schema: schemas::RUN.to_string(),
         run_id,
         plan_id: plan.plan_id.clone(),
         state: AgentTaskRunState::Queued,
@@ -301,7 +303,7 @@ pub fn logs(run_id: &str) -> Result<AgentTaskRunLog> {
         .map(|aggregate| aggregate.events)
         .unwrap_or_else(|_| queued_events(&record.tasks));
     Ok(AgentTaskRunLog {
-        schema: AGENT_TASK_RUN_LOG_SCHEMA.to_string(),
+        schema: schemas::RUN_LOG.to_string(),
         run_id,
         events,
     })
@@ -312,7 +314,7 @@ pub fn artifacts(run_id: &str) -> Result<AgentTaskRunArtifacts> {
     store::read_record(&run_id)?;
     let aggregate = store::read_aggregate(&run_id).ok();
     Ok(AgentTaskRunArtifacts {
-        schema: AGENT_TASK_RUN_ARTIFACTS_SCHEMA.to_string(),
+        schema: schemas::RUN_ARTIFACTS.to_string(),
         run_id,
         artifacts: aggregate_artifacts(aggregate.as_ref()),
         evidence_refs: aggregate_evidence_refs(aggregate.as_ref()),
@@ -485,11 +487,11 @@ mod tests {
         AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
         AGENT_TASK_AGGREGATE_SCHEMA,
     };
-    use std::sync::{Mutex, OnceLock};
+    use crate::test_support::with_isolated_home;
 
     #[test]
     fn submit_plan_persists_queued_status() {
-        with_temp_home(|| {
+        with_isolated_home(|_| {
             let plan = test_plan();
 
             let record = submit_plan(&plan, Some("run/a")).expect("submitted");
@@ -507,7 +509,7 @@ mod tests {
 
     #[test]
     fn record_completed_run_exposes_logs_and_artifacts() {
-        with_temp_home(|| {
+        with_isolated_home(|_| {
             let plan = test_plan();
             let aggregate = AgentTaskAggregate {
                 schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
@@ -569,7 +571,7 @@ mod tests {
 
     #[test]
     fn submitted_run_can_be_loaded_marked_running_and_completed() {
-        with_temp_home(|| {
+        with_isolated_home(|_| {
             let plan = test_plan();
             submit_plan(&plan, Some("run-execute")).expect("submitted");
 
@@ -596,7 +598,7 @@ mod tests {
 
     #[test]
     fn status_recovers_terminal_state_from_durable_aggregate() {
-        with_temp_home(|| {
+        with_isolated_home(|_| {
             let plan = test_plan();
             submit_plan(&plan, Some("run-stale-status")).expect("submitted");
             mark_running("run-stale-status").expect("marked running");
@@ -617,7 +619,7 @@ mod tests {
 
     #[test]
     fn status_marks_running_run_without_owner_as_stale() {
-        with_temp_home(|| {
+        with_isolated_home(|_| {
             let plan = test_plan();
             submit_plan(&plan, Some("run-stale-missing-owner")).expect("submitted");
             let mut record = store::read_record("run-stale-missing-owner").expect("record");
@@ -637,7 +639,7 @@ mod tests {
 
     #[test]
     fn aggregate_source_loads_completed_run_without_path_spelunking() {
-        with_temp_home(|| {
+        with_isolated_home(|_| {
             let plan = test_plan();
             let aggregate = AgentTaskAggregate {
                 schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
@@ -675,7 +677,7 @@ mod tests {
 
     #[test]
     fn mark_running_reclaims_stale_running_record() {
-        with_temp_home(|| {
+        with_isolated_home(|_| {
             let plan = test_plan();
             submit_plan(&plan, Some("run-stale-dead-owner")).expect("submitted");
             let mut record = store::read_record("run-stale-dead-owner").expect("record");
@@ -693,7 +695,7 @@ mod tests {
 
     #[test]
     fn mark_running_rejects_live_running_record() {
-        with_temp_home(|| {
+        with_isolated_home(|_| {
             let plan = test_plan();
             submit_plan(&plan, Some("run-live-owner")).expect("submitted");
             mark_running("run-live-owner").expect("marked running");
@@ -702,21 +704,6 @@ mod tests {
 
             assert!(error.message.contains("already running"));
         });
-    }
-
-    fn with_temp_home(run: impl FnOnce()) {
-        let lock = test_home_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let home = tempfile::tempdir().expect("temp home");
-        std::env::set_var("HOME", home.path());
-        run();
-        drop(lock);
-    }
-
-    fn test_home_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
     }
 
     fn test_plan() -> AgentTaskPlan {
