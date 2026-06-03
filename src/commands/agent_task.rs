@@ -207,3 +207,90 @@ fn read_plan(spec: &str) -> homeboy::core::Result<AgentTaskPlan> {
         )
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use homeboy::core::agent_task::{
+        AgentTaskExecutor, AgentTaskLimits, AgentTaskPolicy, AgentTaskRequest, AgentTaskWorkspace,
+        AGENT_TASK_REQUEST_SCHEMA,
+    };
+    use homeboy::core::agent_task_lifecycle::{AgentTaskRunRecord, AgentTaskRunState};
+    use homeboy::core::agent_task_scheduler::AgentTaskState;
+    use serde_json::Value;
+    use std::sync::{Mutex, OnceLock};
+
+    #[test]
+    fn submit_run_status_reports_terminal_state() {
+        with_temp_home(|| {
+            let plan = AgentTaskPlan::new(
+                "plan-cli-terminal",
+                vec![AgentTaskRequest {
+                    schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
+                    task_id: "task-cli-terminal".to_string(),
+                    group_key: None,
+                    parent_plan_id: None,
+                    executor: AgentTaskExecutor {
+                        backend: "missing-provider-test".to_string(),
+                        selector: None,
+                        required_capabilities: Vec::new(),
+                        secret_env: Vec::new(),
+                        model: None,
+                        config: Value::Null,
+                    },
+                    instructions: "exercise durable terminal status".to_string(),
+                    inputs: Value::Null,
+                    source_refs: Vec::new(),
+                    workspace: AgentTaskWorkspace::default(),
+                    policy: AgentTaskPolicy::default(),
+                    limits: AgentTaskLimits::default(),
+                    expected_artifacts: Vec::new(),
+                    metadata: Value::Null,
+                }],
+            );
+            let plan_file = tempfile::NamedTempFile::new().expect("plan file");
+            std::fs::write(
+                plan_file.path(),
+                serde_json::to_string(&plan).expect("plan json"),
+            )
+            .expect("write plan");
+            let plan_path = format!("@{}", plan_file.path().display());
+
+            submit(SubmitArgs {
+                plan: plan_path,
+                run_id: Some("run-cli-terminal".to_string()),
+            })
+            .expect("submitted");
+            let (_, run_exit_code) = run_submitted(StatusArgs {
+                run_id: "run-cli-terminal".to_string(),
+            })
+            .expect("run completed");
+            let (status_json, status_exit_code) = status(StatusArgs {
+                run_id: "run-cli-terminal".to_string(),
+            })
+            .expect("status loaded");
+            let record: AgentTaskRunRecord = serde_json::from_value(status_json).expect("record");
+
+            assert_eq!(run_exit_code, 1);
+            assert_eq!(status_exit_code, 0);
+            assert_eq!(record.state, AgentTaskRunState::Failed);
+            assert_eq!(record.tasks[0].state, AgentTaskState::Failed);
+            assert_eq!(record.totals.expect("totals").failed, 1);
+        });
+    }
+
+    fn with_temp_home(run: impl FnOnce()) {
+        let lock = test_home_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let home = tempfile::tempdir().expect("temp home");
+        std::env::set_var("HOME", home.path());
+        run();
+        drop(lock);
+    }
+
+    fn test_home_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+}
