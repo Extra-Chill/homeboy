@@ -89,7 +89,7 @@ pub fn install_with_revision(
     if is_git_url(source) {
         install_from_url(source, id_override, revision)
     } else {
-        install_from_path(source, id_override)
+        install_from_path(source, id_override, None)
     }
 }
 
@@ -153,7 +153,11 @@ fn install_configured_extension(source: &str, extension_id: &str) -> Result<Inst
 
     if candidate.exists() {
         let extension_path = source_path.join(extension_id);
-        return install(&extension_path.to_string_lossy(), Some(extension_id));
+        return install_from_path(
+            &extension_path.to_string_lossy(),
+            Some(extension_id),
+            Some(source_path),
+        );
     }
 
     install(source, Some(extension_id))
@@ -269,7 +273,7 @@ pub(crate) fn resolve_cloned_extension(
         let content = local_files::local().read(&manifest_in_subdir)?;
         let _manifest: ExtensionManifest = from_str(&content)?;
 
-        install_monorepo_shared_scripts(temp_dir, extension_dir)?;
+        install_shared_scripts_from_root(temp_dir, extension_dir)?;
 
         // Move just the subdirectory to the final extension location.
         rename_dir(&subdir, extension_dir)?;
@@ -307,8 +311,8 @@ pub(crate) fn resolve_cloned_extension(
     )))
 }
 
-fn install_monorepo_shared_scripts(repo_dir: &Path, extension_dir: &Path) -> Result<()> {
-    let shared_scripts = repo_dir.join("scripts");
+fn install_shared_scripts_from_root(source_root: &Path, extension_dir: &Path) -> Result<()> {
+    let shared_scripts = source_root.join("scripts");
     if !shared_scripts.is_dir() {
         return Ok(());
     }
@@ -327,6 +331,21 @@ fn install_monorepo_shared_scripts(repo_dir: &Path, extension_dir: &Path) -> Res
         })?;
     }
     copy_dir_recursive(&shared_scripts, &target)
+}
+
+fn install_linked_shared_scripts(
+    source: &Path,
+    extension_dir: &Path,
+    source_root: Option<&Path>,
+) -> Result<()> {
+    if let Some(source_root) = source_root {
+        return install_shared_scripts_from_root(source_root, extension_dir);
+    }
+
+    if let Some(parent) = source.parent() {
+        install_shared_scripts_from_root(parent, extension_dir)?;
+    }
+    Ok(())
 }
 
 /// Scan a cloned repo for subdirectories that contain a matching manifest file.
@@ -382,7 +401,11 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
 }
 
 /// Install a extension by symlinking a local directory.
-fn install_from_path(source_path: &str, id_override: Option<&str>) -> Result<InstallResult> {
+fn install_from_path(
+    source_path: &str,
+    id_override: Option<&str>,
+    source_root: Option<&Path>,
+) -> Result<InstallResult> {
     let source = Path::new(source_path);
 
     // Resolve to absolute path
@@ -450,6 +473,8 @@ fn install_from_path(source_path: &str, id_override: Option<&str>) -> Result<Ins
     }
 
     local_files::ensure_app_dirs()?;
+
+    install_linked_shared_scripts(&source, &extension_dir, source_root)?;
 
     // Create symlink
     #[cfg(unix)]
@@ -1176,6 +1201,37 @@ exec '{}' "$@"
 
             assert!(home
                 .join(".config/homeboy/extensions/rust/rust.json")
+                .exists());
+            assert!(home
+                .join(".config/homeboy/extensions/scripts/lib/test-result-adapters.sh")
+                .exists());
+        });
+    }
+
+    #[test]
+    fn linked_monorepo_install_materializes_shared_scripts() {
+        with_isolated_home(|home| {
+            let home = home.path();
+            let source = home.join("source-repo");
+            fs::create_dir_all(&source).expect("source repo");
+            write_extension_fixture(&source, "wordpress");
+            let shared_helper = source.join("scripts/lib/test-result-adapters.sh");
+            fs::create_dir_all(shared_helper.parent().expect("helper parent"))
+                .expect("shared scripts dir");
+            fs::write(
+                &shared_helper,
+                "homeboy_parse_test_results_with_adapters() { :; }\n",
+            )
+            .expect("shared helper");
+
+            install(
+                &source.join("wordpress").to_string_lossy(),
+                Some("wordpress"),
+            )
+            .expect("install linked extension");
+
+            assert!(home
+                .join(".config/homeboy/extensions/wordpress/wordpress.json")
                 .exists());
             assert!(home
                 .join(".config/homeboy/extensions/scripts/lib/test-result-adapters.sh")
