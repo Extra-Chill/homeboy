@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::path::Path;
 
 use crate::core::component::Component;
 use crate::core::context::RemoteProjectContext;
@@ -11,6 +10,7 @@ use crate::core::release::version;
 use super::execution::{
     execute_preflighted_component_deploy, prepare_component_deploy, PreparedComponentDeploy,
 };
+use super::generated_artifacts::unexpected_uncommitted_files_excluding_homeboy_build;
 use super::path_roots::{project_with_detected_path_roots, resolve_effective_remote_path};
 use super::planning::{
     calculate_component_status, calculate_release_state, load_project_components, plan_components,
@@ -443,13 +443,13 @@ fn check_uncommitted_changes(components: &[Component]) -> Result<()> {
         if component.is_file_component() {
             continue;
         }
-        let path = Path::new(&component.local_path);
         if !git::is_git_repo(&component.local_path) {
             non_git.push(component);
             continue;
         }
-        if !git::is_workdir_clean(path) {
-            dirty.push(component.id.as_str());
+        match unexpected_uncommitted_files_excluding_homeboy_build(&component.local_path) {
+            Ok(unexpected) if unexpected.is_empty() => {}
+            Ok(_) | Err(_) => dirty.push(component.id.as_str()),
         }
     }
 
@@ -799,8 +799,10 @@ fn verify_expected_version(components: &[Component], expected: &str) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::component::ComponentScriptsConfig;
     use crate::core::project::ProjectComponentAttachment;
     use std::collections::HashMap;
+    use std::path::Path;
     use tempfile::TempDir;
 
     fn make_component(id: &str, local_path: &str) -> Component {
@@ -815,6 +817,18 @@ mod tests {
             Some(artifact.to_string()),
         );
         component.extract_command = Some("unzip -o {artifact}".to_string());
+        component
+    }
+
+    fn failing_build_artifact_component(id: &str, local_path: &str, artifact: &str) -> Component {
+        let mut component = artifact_component(id, local_path, artifact);
+        component.scripts = Some(ComponentScriptsConfig {
+            build: vec![
+                "mkdir -p .homeboy-build && printf artifact > .homeboy-build/plugin.zip && exit 42"
+                    .to_string(),
+            ],
+            ..ComponentScriptsConfig::default()
+        });
         component
     }
 
@@ -997,6 +1011,65 @@ mod tests {
     }
 
     #[test]
+    fn check_uncommitted_changes_ignores_homeboy_build_artifacts() {
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path();
+
+        let run = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(path)
+                .output()
+                .expect("git command")
+        };
+        assert!(run(&["init", "-q"]).status.success());
+        assert!(run(&["config", "user.email", "test@example.com"])
+            .status
+            .success());
+        assert!(run(&["config", "user.name", "Test"]).status.success());
+        assert!(run(&["commit", "--allow-empty", "-q", "-m", "init"])
+            .status
+            .success());
+        std::fs::create_dir_all(path.join(".homeboy-build")).expect("build dir");
+        std::fs::write(path.join(".homeboy-build/plugin.zip"), "artifact").expect("artifact");
+
+        let component = make_component("test", &path.to_string_lossy());
+        check_uncommitted_changes(&[component])
+            .expect("generated Homeboy deploy artifacts should not block deploy");
+    }
+
+    #[test]
+    fn check_uncommitted_changes_still_rejects_source_changes() {
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path();
+
+        let run = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(path)
+                .output()
+                .expect("git command")
+        };
+        assert!(run(&["init", "-q"]).status.success());
+        assert!(run(&["config", "user.email", "test@example.com"])
+            .status
+            .success());
+        assert!(run(&["config", "user.name", "Test"]).status.success());
+        assert!(run(&["commit", "--allow-empty", "-q", "-m", "init"])
+            .status
+            .success());
+        std::fs::create_dir_all(path.join(".homeboy-build")).expect("build dir");
+        std::fs::write(path.join(".homeboy-build/plugin.zip"), "artifact").expect("artifact");
+        std::fs::write(path.join("src.rs"), "source\n").expect("source");
+
+        let component = make_component("test", &path.to_string_lossy());
+        let err = check_uncommitted_changes(&[component])
+            .expect_err("source changes should still block deploy");
+
+        assert!(err.message.contains("uncommitted changes"));
+    }
+
+    #[test]
     fn tagged_deploy_allows_head_ahead_of_latest_tag() {
         let dir = TempDir::new().expect("temp dir");
         init_repo_with_tag_gap(dir.path());
@@ -1097,6 +1170,42 @@ mod tests {
                 .contains("missing.zip"),
             "unexpected error: {:?}",
             failures[0].error
+        );
+    }
+
+    #[test]
+    fn deploy_preflight_cleans_homeboy_build_dir_after_failed_build() {
+        let dir = TempDir::new().expect("temp dir");
+        let component = failing_build_artifact_component(
+            "failing",
+            &dir.path().to_string_lossy(),
+            ".homeboy-build/plugin.zip",
+        );
+        let project = Project {
+            id: "site".to_string(),
+            ..Project::default()
+        };
+        let mut config = base_deploy_config();
+        config.force = true;
+        config.head = true;
+
+        let failures = match prepare_component_deployments(
+            &[component],
+            &config,
+            &project,
+            "/srv/site",
+            &HashMap::new(),
+            &HashMap::new(),
+        ) {
+            Ok(_) => panic!("failed build should abort preflight"),
+            Err(failures) => failures,
+        };
+
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].build_exit_code, Some(42));
+        assert!(
+            !dir.path().join(".homeboy-build").exists(),
+            "deploy-context failed builds must clean Homeboy-generated build artifacts"
         );
     }
 }
