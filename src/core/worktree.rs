@@ -1,4 +1,3 @@
-use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -6,100 +5,110 @@ use crate::core::component::{self, TargetSpec};
 use crate::core::error::{Error, Result};
 use crate::core::{git, paths};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum TaskWorktreeState {
-    Active,
-    Removed,
-}
+mod types {
+    use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum CleanupPolicy {
-    RemoveWhenSafe,
-    PreserveOnFailure,
-}
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    #[serde(rename_all = "snake_case")]
+    pub enum TaskWorktreeState {
+        Active,
+        Removed,
+    }
 
-impl CleanupPolicy {
-    fn default_for_run(run_id: Option<&str>) -> Self {
-        if run_id.is_some() {
-            Self::PreserveOnFailure
-        } else {
-            Self::RemoveWhenSafe
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    #[serde(rename_all = "snake_case")]
+    pub enum CleanupPolicy {
+        RemoveWhenSafe,
+        PreserveOnFailure,
+    }
+
+    impl CleanupPolicy {
+        pub(super) fn default_for_run(run_id: Option<&str>) -> Self {
+            if run_id.is_some() {
+                Self::PreserveOnFailure
+            } else {
+                Self::RemoveWhenSafe
+            }
         }
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    pub struct TaskWorktreeRecord {
+        pub id: String,
+        pub component_id: String,
+        pub source_checkout: String,
+        pub worktree_path: String,
+        pub branch: String,
+        pub base_ref: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub task_url: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub run_id: Option<String>,
+        pub cleanup_policy: CleanupPolicy,
+        pub created_at: String,
+        pub state: TaskWorktreeState,
+    }
+
+    #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+    pub struct WorktreeSafetyReport {
+        pub dirty: bool,
+        pub unpushed_commits: u32,
+        pub primary_checkout: bool,
+        pub path_contained: bool,
+        pub safe: bool,
+        pub reasons: Vec<String>,
+    }
+
+    #[derive(Debug, Clone, Serialize)]
+    pub struct WorktreeCreateOutput {
+        pub record: TaskWorktreeRecord,
+    }
+
+    #[derive(Debug, Clone, Serialize)]
+    pub struct WorktreeListOutput {
+        pub worktrees: Vec<TaskWorktreeRecord>,
+    }
+
+    #[derive(Debug, Clone, Serialize)]
+    pub struct WorktreeStatusOutput {
+        pub record: TaskWorktreeRecord,
+        pub safety: WorktreeSafetyReport,
+    }
+
+    #[derive(Debug, Clone, Serialize)]
+    pub struct WorktreeRemoveOutput {
+        pub record: TaskWorktreeRecord,
+        pub safety: WorktreeSafetyReport,
+        pub removed: bool,
+    }
+
+    #[derive(Debug, Clone, Serialize)]
+    pub struct WorktreeCleanupOutput {
+        pub candidates: Vec<WorktreeRemoveOutput>,
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct WorktreeCreateOptions {
+        pub component_id: String,
+        pub branch: String,
+        pub from: Option<String>,
+        pub task_url: Option<String>,
+        pub run_id: Option<String>,
+        pub cleanup_policy: Option<CleanupPolicy>,
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct WorktreeRemoveOptions {
+        pub id: String,
+        pub force: bool,
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct TaskWorktreeRecord {
-    pub id: String,
-    pub component_id: String,
-    pub source_checkout: String,
-    pub worktree_path: String,
-    pub branch: String,
-    pub base_ref: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub task_url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub run_id: Option<String>,
-    pub cleanup_policy: CleanupPolicy,
-    pub created_at: String,
-    pub state: TaskWorktreeState,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct WorktreeSafetyReport {
-    pub dirty: bool,
-    pub unpushed_commits: u32,
-    pub primary_checkout: bool,
-    pub path_contained: bool,
-    pub safe: bool,
-    pub reasons: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct WorktreeCreateOutput {
-    pub record: TaskWorktreeRecord,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct WorktreeListOutput {
-    pub worktrees: Vec<TaskWorktreeRecord>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct WorktreeStatusOutput {
-    pub record: TaskWorktreeRecord,
-    pub safety: WorktreeSafetyReport,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct WorktreeRemoveOutput {
-    pub record: TaskWorktreeRecord,
-    pub safety: WorktreeSafetyReport,
-    pub removed: bool,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct WorktreeCleanupOutput {
-    pub candidates: Vec<WorktreeRemoveOutput>,
-}
-
-#[derive(Debug, Clone)]
-pub struct WorktreeCreateOptions {
-    pub component_id: String,
-    pub branch: String,
-    pub from: Option<String>,
-    pub task_url: Option<String>,
-    pub run_id: Option<String>,
-    pub cleanup_policy: Option<CleanupPolicy>,
-}
-
-#[derive(Debug, Clone)]
-pub struct WorktreeRemoveOptions {
-    pub id: String,
-    pub force: bool,
-}
+pub use types::{
+    CleanupPolicy, TaskWorktreeRecord, TaskWorktreeState, WorktreeCleanupOutput,
+    WorktreeCreateOptions, WorktreeCreateOutput, WorktreeListOutput, WorktreeRemoveOptions,
+    WorktreeRemoveOutput, WorktreeSafetyReport, WorktreeStatusOutput,
+};
 
 pub fn create(options: WorktreeCreateOptions) -> Result<WorktreeCreateOutput> {
     create_with_store(options, &metadata_dir()?)

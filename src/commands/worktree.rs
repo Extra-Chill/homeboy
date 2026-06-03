@@ -1,4 +1,5 @@
 use clap::{Args, Subcommand, ValueEnum};
+use serde::Serialize;
 
 use homeboy::core::worktree::{
     self, CleanupPolicy, WorktreeCleanupOutput, WorktreeCreateOptions, WorktreeCreateOutput,
@@ -73,7 +74,7 @@ impl From<CliCleanupPolicy> for CleanupPolicy {
     }
 }
 
-#[derive(serde::Serialize)]
+#[derive(Serialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum WorktreeOutput {
     Create(WorktreeCreateOutput),
