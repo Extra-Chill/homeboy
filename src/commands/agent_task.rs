@@ -206,6 +206,22 @@ fn promote_artifact(args: PromoteArgs) -> CmdResult<Value> {
 fn read_promotion_source(
     spec: &str,
 ) -> homeboy::core::Result<(String, Option<std::path::PathBuf>)> {
+    if spec != "-" {
+        let path = std::path::PathBuf::from(spec.strip_prefix('@').unwrap_or(spec));
+        if path.is_file() {
+            let raw = std::fs::read_to_string(&path).map_err(|error| {
+                homeboy::core::Error::internal_io(
+                    error.to_string(),
+                    Some(format!(
+                        "read agent-task promotion source {}",
+                        path.display()
+                    )),
+                )
+            })?;
+            return Ok((raw, Some(path)));
+        }
+    }
+
     if let Ok((raw, path)) = agent_task_lifecycle::aggregate_source(spec) {
         return Ok((raw, Some(path)));
     }
@@ -480,9 +496,54 @@ mod tests {
         assert!(message.contains("Extra-Chill/homeboy#3362"));
     }
 
+    #[test]
+    fn promotion_source_resolves_completed_run_id() {
+        with_temp_home(|| {
+            let run_id = "run-promotion-source";
+
+            run_loaded_plan(test_plan(), Some(run_id), InspectingExecutor::noop(run_id))
+                .expect("run completed");
+
+            let (raw, path) = read_promotion_source(run_id).expect("promotion source resolved");
+
+            assert!(raw.contains("homeboy/agent-task-aggregate/v1"));
+            assert_eq!(
+                path.as_ref()
+                    .and_then(|path| path.file_name())
+                    .and_then(|name| name.to_str()),
+                Some("aggregate.json")
+            );
+        });
+    }
+
+    #[test]
+    fn promotion_source_reads_bare_json_file_path() {
+        let file = tempfile::NamedTempFile::new().expect("source file");
+        std::fs::write(
+            file.path(),
+            r#"{"schema":"homeboy/agent-task-aggregate/v1"}"#,
+        )
+        .expect("write source");
+
+        let (raw, path) = read_promotion_source(&file.path().display().to_string())
+            .expect("promotion source file resolved");
+
+        assert!(raw.contains("homeboy/agent-task-aggregate/v1"));
+        assert_eq!(path.as_deref(), Some(file.path()));
+    }
+
     struct InspectingExecutor {
         run_id: String,
         observed_status: Arc<Mutex<Option<AgentTaskRunRecord>>>,
+    }
+
+    impl InspectingExecutor {
+        fn noop(run_id: &str) -> Self {
+            Self {
+                run_id: run_id.to_string(),
+                observed_status: Arc::new(Mutex::new(None)),
+            }
+        }
     }
 
     impl AgentTaskExecutorAdapter for InspectingExecutor {
