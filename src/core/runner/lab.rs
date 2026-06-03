@@ -760,6 +760,29 @@ fn prepare_lab_runner_for_offload_with(
 ) -> Result<LabRunnerPreparation> {
     let status = status_fn(&selection.runner_id)?;
     if status.connected {
+        if let Some(reason) = connected_runner_not_ready_reason(&selection.runner_id, &status) {
+            return match selection.source {
+                LabRunnerSelectionSource::Default => Ok(LabRunnerPreparation::FallBackLocal {
+                    reason,
+                }),
+                LabRunnerSelectionSource::Explicit => Err(Error::validation_invalid_argument(
+                    "runner",
+                    format!(
+                        "Lab offload runner `{}` is connected but is not ready for remote execution: {reason}",
+                        selection.runner_id
+                    ),
+                    Some(selection.runner_id.clone()),
+                    Some(vec![
+                        format!(
+                            "Run `homeboy runner connect {}` to refresh the runner daemon session.",
+                            selection.runner_id
+                        ),
+                        "Use --force-hot to run the command locally instead of offloading."
+                            .to_string(),
+                    ]),
+                )),
+            };
+        }
         eprintln!(
             "Lab offload: runner `{}` is connected via {} mode.",
             selection.runner_id,
@@ -821,6 +844,26 @@ fn prepare_lab_runner_for_offload_with(
                 "Use --force-hot to run the command locally instead of offloading.".to_string(),
             ]),
         )),
+    }
+}
+
+fn connected_runner_not_ready_reason(
+    runner_id: &str,
+    status: &RunnerStatusReport,
+) -> Option<String> {
+    let session = status.session.as_ref()?;
+    match session.mode {
+        RunnerTunnelMode::DirectSsh if session.local_url.as_deref().unwrap_or("").is_empty() => {
+            Some(format!(
+                "direct SSH runner `{runner_id}` has no local daemon URL; reconnect it with `homeboy runner connect {runner_id}`"
+            ))
+        }
+        RunnerTunnelMode::Reverse if session.broker_url.as_deref().unwrap_or("").is_empty() => {
+            Some(format!(
+                "reverse-connected runner `{runner_id}` has no broker URL; restart the reverse runner session before retrying"
+            ))
+        }
+        _ => None,
     }
 }
 
@@ -1374,7 +1417,10 @@ mod tests {
                     runner_id: runner_id.to_string(),
                     connected: true,
                     state: super::super::RunnerSessionState::Connected,
-                    session: None,
+                    session: Some(connected_direct_session(
+                        runner_id,
+                        Some("http://127.0.0.1:1234"),
+                    )),
                     stale_daemon: None,
                     session_path: "/tmp/lab.json".to_string(),
                 })
@@ -1384,6 +1430,75 @@ mod tests {
         .expect("prepared");
 
         assert_eq!(prepared, LabRunnerPreparation::Ready);
+    }
+
+    #[test]
+    fn lab_runner_preparation_falls_back_for_stale_default_direct_session_without_daemon_url() {
+        let selection = LabRunnerSelection {
+            runner_id: "lab".to_string(),
+            source: LabRunnerSelectionSource::Default,
+            mode: RunnerTunnelMode::DirectSsh,
+        };
+
+        let prepared = prepare_lab_runner_for_offload_with(
+            &selection,
+            |runner_id| {
+                Ok(RunnerStatusReport {
+                    runner_id: runner_id.to_string(),
+                    connected: true,
+                    state: super::super::RunnerSessionState::Connected,
+                    session: Some(connected_direct_session(runner_id, None)),
+                    stale_daemon: None,
+                    session_path: "/tmp/lab.json".to_string(),
+                })
+            },
+            |_| panic!("stale connected session should not reconnect during automatic preflight"),
+        )
+        .expect("prepared");
+
+        assert_eq!(
+            prepared,
+            LabRunnerPreparation::FallBackLocal {
+                reason: "direct SSH runner `lab` has no local daemon URL; reconnect it with `homeboy runner connect lab`".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn lab_runner_preparation_errors_for_explicit_direct_session_without_daemon_url() {
+        let selection = LabRunnerSelection {
+            runner_id: "lab".to_string(),
+            source: LabRunnerSelectionSource::Explicit,
+            mode: RunnerTunnelMode::DirectSsh,
+        };
+
+        let err = prepare_lab_runner_for_offload_with(
+            &selection,
+            |runner_id| {
+                Ok(RunnerStatusReport {
+                    runner_id: runner_id.to_string(),
+                    connected: true,
+                    state: super::super::RunnerSessionState::Connected,
+                    session: Some(connected_direct_session(runner_id, None)),
+                    stale_daemon: None,
+                    session_path: "/tmp/lab.json".to_string(),
+                })
+            },
+            |_| panic!("stale connected session should fail before reconnect"),
+        )
+        .expect_err("explicit stale session should error");
+
+        assert!(err.message.contains("connected but is not ready"));
+        assert!(err.message.contains("no local daemon URL"));
+        assert!(err
+            .details
+            .get("tried")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .any(|suggestion| suggestion
+                .as_str()
+                .is_some_and(|value| value.contains("homeboy runner connect lab"))));
     }
 
     #[test]
@@ -1500,5 +1615,26 @@ mod tests {
         assert_eq!(plan.steps[0].id, "lab.select_runner");
         assert_eq!(plan.steps[0].status, PlanStepStatus::Skipped);
         assert_eq!(metadata.expect("metadata")["status"], "skipped");
+    }
+
+    fn connected_direct_session(
+        runner_id: &str,
+        local_url: Option<&str>,
+    ) -> super::super::RunnerSession {
+        super::super::RunnerSession {
+            runner_id: runner_id.to_string(),
+            mode: RunnerTunnelMode::DirectSsh,
+            role: super::super::RunnerSessionRole::Controller,
+            server_id: Some(runner_id.to_string()),
+            controller_id: None,
+            broker_url: None,
+            remote_daemon_address: Some("127.0.0.1:5678".to_string()),
+            local_port: Some(1234),
+            local_url: local_url.map(str::to_string),
+            tunnel_pid: None,
+            remote_daemon_pid: Some(42),
+            homeboy_version: "homeboy 0.0.0".to_string(),
+            connected_at: "2026-06-03T00:00:00Z".to_string(),
+        }
     }
 }
