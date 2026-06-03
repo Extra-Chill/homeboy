@@ -28,7 +28,9 @@ pub(super) fn resolve_effective_remote_path(
         return base_path::join_remote_path(Some(fallback_base_path), &remote_path);
     }
 
-    if let Some(resolved) = resolve_with_project_root(project, component, &remote_path)? {
+    if let Some(resolved) =
+        resolve_with_project_root(project, component, fallback_base_path, &remote_path)?
+    {
         return Ok(resolved);
     }
 
@@ -80,6 +82,7 @@ pub(super) fn project_with_detected_path_roots(
 fn resolve_with_project_root(
     project: &Project,
     component: &Component,
+    fallback_base_path: &str,
     remote_path: &str,
 ) -> Result<Option<String>> {
     for rule in component_remote_path_root_rules(component) {
@@ -114,11 +117,13 @@ fn resolve_with_project_root(
             remote_path
         };
 
+        let resolved_root = base_path::join_remote_path(Some(fallback_base_path), root)?;
+
         if path.is_empty() {
-            return base_path::join_remote_path(None, root).map(Some);
+            return Ok(Some(resolved_root));
         }
 
-        return base_path::join_remote_path(Some(root), path).map(Some);
+        return base_path::join_remote_path(Some(&resolved_root), path).map(Some);
     }
 
     Ok(None)
@@ -263,6 +268,28 @@ mod tests {
             .expect("resolve path");
 
             assert_eq!(resolved, "/htdocs/wp-content/plugins/foo");
+        });
+    }
+
+    #[test]
+    fn resolves_relative_content_root_against_base_path() {
+        with_isolated_home(|_| {
+            install_extension();
+            let project = Project {
+                id: "site".to_string(),
+                base_path: Some("/srv/site".to_string()),
+                path_roots: HashMap::from([("wp_content".to_string(), "wp-content".to_string())]),
+                ..Project::default()
+            };
+
+            let resolved = resolve_effective_remote_path(
+                &project,
+                &component("wp-content/plugins/foo"),
+                "/srv/site",
+            )
+            .expect("resolve path");
+
+            assert_eq!(resolved, "/srv/site/wp-content/plugins/foo");
         });
     }
 

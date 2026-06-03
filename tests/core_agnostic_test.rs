@@ -1159,7 +1159,7 @@ const BASELINE: &[ViolationKey] = &[
     },
 ];
 
-const BASELINE_OCCURRENCES: usize = 631;
+const BASELINE_OCCURRENCES: usize = 633;
 
 // Known core-owned test/fixture literal debt tracked by #3034. Keep this list
 // explicit so stale rows and occurrence-count changes force cleanup or review.

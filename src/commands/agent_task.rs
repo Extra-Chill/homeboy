@@ -1,6 +1,7 @@
 use clap::{Args, Subcommand};
 use serde_json::Value;
 
+use homeboy::core::agent_task::AgentTaskRequest;
 use homeboy::core::agent_task_lifecycle;
 use homeboy::core::agent_task_promotion::{promote, AgentTaskPromotionOptions};
 use homeboy::core::agent_task_provider::ExtensionProviderAgentTaskExecutor;
@@ -116,13 +117,15 @@ fn run_plan(args: RunPlanArgs) -> CmdResult<Value> {
 }
 
 fn run_loaded_plan<E>(
-    plan: AgentTaskPlan,
+    mut plan: AgentTaskPlan,
     record_run_id: Option<&str>,
     executor: E,
 ) -> CmdResult<Value>
 where
     E: AgentTaskExecutorAdapter,
 {
+    normalize_plan_workspaces(&mut plan)?;
+
     if let Some(run_id) = record_run_id {
         agent_task_lifecycle::submit_plan(&plan, Some(run_id))?;
         agent_task_lifecycle::mark_running(run_id)?;
@@ -265,13 +268,82 @@ fn providers() -> CmdResult<Value> {
 
 fn read_plan(spec: &str) -> homeboy::core::Result<AgentTaskPlan> {
     let raw = config::read_json_spec_to_string(spec)?;
-    serde_json::from_str(&raw).map_err(|error| {
+    let mut plan: AgentTaskPlan = serde_json::from_str(&raw).map_err(|error| {
         homeboy::core::Error::validation_invalid_json(
             error,
             Some("agent-task plan".to_string()),
             Some(raw.clone()),
         )
-    })
+    })?;
+    normalize_plan_workspaces(&mut plan)?;
+    Ok(plan)
+}
+
+fn normalize_plan_workspaces(plan: &mut AgentTaskPlan) -> homeboy::core::Result<()> {
+    for request in &mut plan.tasks {
+        normalize_component_worktree_workspace(request)?;
+    }
+
+    Ok(())
+}
+
+fn normalize_component_worktree_workspace(
+    request: &mut AgentTaskRequest,
+) -> homeboy::core::Result<()> {
+    if request.workspace.kind.as_deref() != Some("component-worktree") {
+        return Ok(());
+    }
+
+    let Some(component_id) = request.workspace.component_id.clone() else {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "workspace.component_id",
+            format!(
+                "agent-task task '{}' component-worktree workspace requires component_id",
+                request.task_id
+            ),
+            None,
+            None,
+        ));
+    };
+
+    let resolved_root = request
+        .workspace
+        .root
+        .clone()
+        .or_else(|| materialization_string(&request.workspace.materialization, "root"))
+        .or_else(|| materialization_string(&request.workspace.materialization, "resolved_root"));
+
+    let Some(root) = resolved_root else {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "workspace.root",
+            format!(
+                "agent-task task '{}' requested component-worktree workspace for component '{}' but no resolved root was provided; creating component worktrees depends on the generic Homeboy worktree primitive tracked by Extra-Chill/homeboy#3362",
+                request.task_id, component_id
+            ),
+            None,
+            None,
+        ));
+    };
+
+    request.workspace.kind = None;
+    request.workspace.mode = homeboy::core::agent_task::AgentTaskWorkspaceMode::Existing;
+    request.workspace.root = Some(root);
+    request.workspace.slug = Some(component_id);
+    request.workspace.component_id = None;
+    request.workspace.branch = None;
+    request.workspace.base_ref = None;
+    request.workspace.task_url = None;
+    request.workspace.cleanup = None;
+    request.workspace.materialization = Value::Null;
+
+    Ok(())
+}
+
+fn materialization_string(materialization: &Value, key: &str) -> Option<String> {
+    materialization
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::to_string)
 }
 
 #[cfg(test)]
@@ -287,7 +359,7 @@ mod tests {
         status as lifecycle_status, AgentTaskRunRecord, AgentTaskRunState,
     };
     use homeboy::core::agent_task_scheduler::{AgentTaskExecutionContext, AgentTaskState};
-    use serde_json::Value;
+    use serde_json::{json, Value};
     use std::sync::{Arc, Mutex};
 
     #[test]
@@ -424,6 +496,66 @@ mod tests {
         });
     }
 
+    #[test]
+    fn run_plan_maps_resolved_component_worktree_before_provider_dispatch() {
+        let observed_request = Arc::new(Mutex::new(None));
+        let executor = CapturingExecutor {
+            observed_request: Arc::clone(&observed_request),
+        };
+        let mut plan = test_plan();
+        plan.tasks[0].workspace.kind = Some("component-worktree".to_string());
+        plan.tasks[0].workspace.component_id = Some("wp-coding-agents".to_string());
+        plan.tasks[0].workspace.branch = Some("fix/179-homeboy-codebox-guidance".to_string());
+        plan.tasks[0].workspace.base_ref = Some("origin/main".to_string());
+        plan.tasks[0].workspace.task_url =
+            Some("https://github.com/Extra-Chill/wp-coding-agents/issues/179".to_string());
+        plan.tasks[0].workspace.cleanup = Some("preserve".to_string());
+        plan.tasks[0].workspace.materialization = json!({
+            "root": "/tmp/homeboy-worktrees/wp-coding-agents@fix-179-homeboy-codebox-guidance"
+        });
+
+        let (_value, exit_code) =
+            run_loaded_plan(plan, None, executor).expect("run-plan completed");
+        let observed = observed_request
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .expect("provider saw request");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(
+            observed.workspace.mode,
+            homeboy::core::agent_task::AgentTaskWorkspaceMode::Existing
+        );
+        assert_eq!(
+            observed.workspace.root.as_deref(),
+            Some("/tmp/homeboy-worktrees/wp-coding-agents@fix-179-homeboy-codebox-guidance")
+        );
+        assert_eq!(observed.workspace.slug.as_deref(), Some("wp-coding-agents"));
+        assert!(observed.workspace.kind.is_none());
+        assert!(observed.workspace.component_id.is_none());
+        assert!(observed.workspace.branch.is_none());
+        assert!(observed.workspace.base_ref.is_none());
+        assert!(observed.workspace.task_url.is_none());
+        assert!(observed.workspace.cleanup.is_none());
+        assert!(observed.workspace.materialization.is_null());
+    }
+
+    #[test]
+    fn run_plan_rejects_unresolved_component_worktree_until_core_primitive_exists() {
+        let mut plan = test_plan();
+        plan.tasks[0].workspace.kind = Some("component-worktree".to_string());
+        plan.tasks[0].workspace.component_id = Some("wp-coding-agents".to_string());
+        plan.tasks[0].workspace.branch = Some("fix/179-homeboy-codebox-guidance".to_string());
+
+        let error = run_loaded_plan(plan, None, CapturingExecutor::default())
+            .expect_err("unresolved component worktree rejected");
+        let message = error.to_string();
+
+        assert!(message.contains("component-worktree workspace"));
+        assert!(message.contains("Extra-Chill/homeboy#3362"));
+    }
+
     struct InspectingExecutor {
         run_id: String,
         observed_status: Arc<Mutex<Option<AgentTaskRunRecord>>>,
@@ -441,6 +573,38 @@ mod tests {
                 .observed_status
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(record);
+
+            AgentTaskOutcome {
+                schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+                task_id: request.task_id,
+                status: AgentTaskOutcomeStatus::Succeeded,
+                summary: Some("ok".to_string()),
+                failure_classification: None,
+                artifacts: Vec::new(),
+                evidence_refs: Vec::new(),
+                diagnostics: Vec::new(),
+                workflow: None,
+                follow_up: None,
+                metadata: Value::Null,
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct CapturingExecutor {
+        observed_request: Arc<Mutex<Option<AgentTaskRequest>>>,
+    }
+
+    impl AgentTaskExecutorAdapter for CapturingExecutor {
+        fn execute(
+            &self,
+            request: AgentTaskRequest,
+            _context: AgentTaskExecutionContext,
+        ) -> AgentTaskOutcome {
+            *self
+                .observed_request
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(request.clone());
 
             AgentTaskOutcome {
                 schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),

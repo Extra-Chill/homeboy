@@ -301,10 +301,24 @@ pub struct AgentTaskSourceRef {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgentTaskWorkspace {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
     #[serde(default)]
     pub mode: AgentTaskWorkspaceMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slug: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub component_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleanup: Option<String>,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub materialization: Value,
 }
@@ -312,8 +326,15 @@ pub struct AgentTaskWorkspace {
 impl Default for AgentTaskWorkspace {
     fn default() -> Self {
         Self {
+            kind: None,
             mode: AgentTaskWorkspaceMode::Ephemeral,
             root: None,
+            slug: None,
+            component_id: None,
+            branch: None,
+            base_ref: None,
+            task_url: None,
+            cleanup: None,
             materialization: Value::Null,
         }
     }
@@ -660,8 +681,15 @@ mod tests {
                 revision: Some("abc123".to_string()),
             }],
             workspace: AgentTaskWorkspace {
+                kind: None,
                 mode: AgentTaskWorkspaceMode::Materialized,
                 root: Some("/workspace/repo".to_string()),
+                slug: Some("repo".to_string()),
+                component_id: None,
+                branch: None,
+                base_ref: None,
+                task_url: None,
+                cleanup: None,
                 materialization: json!({ "component": "repo" }),
             },
             policy: AgentTaskPolicy {
