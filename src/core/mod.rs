@@ -60,6 +60,7 @@ pub mod triage;
 pub mod tunnel;
 pub mod update_check_cache;
 pub mod upgrade;
+pub mod worktree;
 
 // Internal path resolution helpers.
 pub(crate) mod paths;

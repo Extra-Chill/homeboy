@@ -5,7 +5,7 @@ use crate::commands::{
     agent_task, api, audit, auth, bench, build, changelog, changes, ci, cleanup, component, config,
     daemon, db, deploy, deps, doctor, extension, file, fleet, git, http, issues, lint, logs,
     observe, project, refactor, refs, release, report, review, rig, runner, runs, self_cmd, server,
-    ssh, stack, status, test, trace, triage, tunnel, undo, upgrade, version,
+    ssh, stack, status, test, trace, triage, tunnel, undo, upgrade, version, worktree,
 };
 
 mod lab_contract;
@@ -124,6 +124,8 @@ pub enum Commands {
     Rig(rig::RigArgs),
     /// Manage local and SSH execution runners
     Runner(runner::RunnerArgs),
+    /// Manage component-backed task worktrees
+    Worktree(worktree::WorktreeArgs),
     /// Manage private service tunnel declarations
     Tunnel(tunnel::TunnelArgs),
     /// Inspect persisted observation runs and artifacts
@@ -347,6 +349,7 @@ impl Commands {
             | Commands::Release(_)
             | Commands::Report(_)
             | Commands::Runner(_)
+            | Commands::Worktree(_)
             | Commands::Tunnel(_)
             | Commands::Stack(_)
             | Commands::Undo(_) => CommandDescriptor {

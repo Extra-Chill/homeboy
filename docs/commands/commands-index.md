@@ -50,6 +50,7 @@
 - [undo](undo.md) — restore or manage write-operation snapshots
 - [upgrade](upgrade.md)
 - [version](version.md)
+- [worktree](worktree.md) — component-backed task worktree lifecycle
 - [wp](wp.md) — run WP-CLI commands via WordPress extension routing
 
 This list covers the top-level CLI commands currently surfaced by `homeboy --help` in this checkout.

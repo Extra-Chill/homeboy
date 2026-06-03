@@ -221,6 +221,7 @@ pub mod undo;
 pub mod upgrade;
 pub mod utils;
 pub mod version;
+pub mod worktree;
 
 #[cfg(test)]
 mod golden_contract_tests;
