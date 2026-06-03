@@ -757,7 +757,7 @@ fn audit_internal(
     // explicit `#[path = "..."]` wiring from a source module.
     let rust_test_wiring_findings = time_audit_detector(
         &mut timing,
-        "detector.rust_test_wiring",
+        "detector.test_wiring",
         plan.run_rust_test_wiring(),
         || rust_test_wiring::run(root),
         Vec::new,
@@ -1426,7 +1426,7 @@ fn audit_root_only(
 
     let rust_test_wiring_findings = time_audit_detector(
         timing,
-        "detector.rust_test_wiring",
+        "detector.test_wiring",
         plan.run_rust_test_wiring(),
         || rust_test_wiring::run(root),
         Vec::new,
