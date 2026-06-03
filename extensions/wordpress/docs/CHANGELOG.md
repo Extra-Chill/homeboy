@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.114.5] - 2026-06-03
+
+### Fixed
+- stabilize wordpress build syntax checks
+
 ## [2.114.3] - 2026-06-03
 
 ### Fixed
