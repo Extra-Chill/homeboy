@@ -134,10 +134,16 @@ impl TimeoutArtifactDiscovery {
 pub(crate) fn merge_timeout_outcome(base: &mut AgentTaskOutcome, discovered: AgentTaskOutcome) {
     append_unique_artifacts(&mut base.artifacts, discovered.artifacts);
     append_unique_evidence_refs(&mut base.evidence_refs, discovered.evidence_refs);
-    if matches!(
-        discovered.status,
-        AgentTaskOutcomeStatus::Succeeded | AgentTaskOutcomeStatus::NoOp
-    ) {
+    if discovered
+        .metadata
+        .get("actionable")
+        .and_then(Value::as_bool)
+        != Some(false)
+        && matches!(
+            discovered.status,
+            AgentTaskOutcomeStatus::Succeeded | AgentTaskOutcomeStatus::NoOp
+        )
+    {
         base.status = discovered.status;
         base.failure_classification = discovered.failure_classification;
         base.summary = discovered.summary.or_else(|| base.summary.clone());
@@ -179,11 +185,30 @@ pub(crate) fn append_unique_evidence_refs(
 }
 
 pub(crate) fn is_actionable_patch_artifact(artifact: &AgentTaskArtifact) -> bool {
+    artifact_has_patch_shape(artifact)
+        && artifact_has_content(artifact)
+        && artifact.metadata.get("actionable").and_then(Value::as_bool) != Some(false)
+}
+
+fn artifact_has_patch_shape(artifact: &AgentTaskArtifact) -> bool {
     artifact.kind == "patch"
         || artifact.kind == "diff"
         || artifact.mime.as_deref() == Some("text/x-patch")
         || artifact.mime.as_deref() == Some("text/x-diff")
         || artifact.metadata.get("role").and_then(Value::as_str) == Some("patch")
+}
+
+fn artifact_has_content(artifact: &AgentTaskArtifact) -> bool {
+    if artifact.size_bytes == Some(0) {
+        return false;
+    }
+
+    artifact
+        .path
+        .as_deref()
+        .and_then(|path| fs::metadata(path).ok())
+        .map(|metadata| metadata.len() > 0)
+        .unwrap_or(true)
 }
 
 fn artifact_discovery_paths(request: &AgentTaskRequest) -> Vec<PathBuf> {
@@ -225,6 +250,7 @@ fn read_discovered_outcome(path: &Path, request: &AgentTaskRequest) -> Option<Ag
         return None;
     }
     let raw = fs::read_to_string(path).ok()?;
+    let value: Value = serde_json::from_str(&raw).ok()?;
     let mut outcome: AgentTaskOutcome = serde_json::from_str(&raw).ok()?;
     if outcome.task_id != request.task_id {
         return None;
@@ -232,7 +258,22 @@ fn read_discovered_outcome(path: &Path, request: &AgentTaskRequest) -> Option<Ag
     if outcome.schema != AGENT_TASK_OUTCOME_SCHEMA {
         outcome.schema = AGENT_TASK_OUTCOME_SCHEMA.to_string();
     }
+    if outcome.metadata.get("actionable").is_none() {
+        if let Some(actionable) = value.get("actionable").and_then(Value::as_bool) {
+            outcome.metadata = merge_outcome_metadata_actionable(outcome.metadata, actionable);
+        }
+    }
     Some(outcome)
+}
+
+fn merge_outcome_metadata_actionable(metadata: Value, actionable: bool) -> Value {
+    match metadata {
+        Value::Object(mut object) => {
+            object.insert("actionable".to_string(), Value::Bool(actionable));
+            Value::Object(object)
+        }
+        _ => serde_json::json!({ "actionable": actionable }),
+    }
 }
 
 fn artifact_kind_from_path(path: &Path) -> Option<String> {
