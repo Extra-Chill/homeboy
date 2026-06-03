@@ -228,6 +228,38 @@ pub(crate) fn run_git_commit(
     }
 }
 
+pub(crate) fn run_tag_availability_preflight(
+    component: &Component,
+    component_id: &str,
+    tag_name: &str,
+) -> Result<ReleaseStepResult> {
+    let tag_state = inspect_release_tag_state(component, tag_name)?;
+
+    if tag_state.has_existing_release_surface() {
+        return Ok(build_existing_tag_failure(
+            "preflight.tag_availability",
+            "preflight.tag_availability",
+            component_id,
+            tag_name,
+            tag_state,
+        ));
+    }
+
+    Ok(step_success(
+        "preflight.tag_availability",
+        "preflight.tag_availability",
+        Some(serde_json::json!({
+            "component_id": component_id,
+            "tag": tag_name,
+            "head": tag_state.head_commit,
+            "local_tag": tag_state.local_tag_commit,
+            "remote_tag": tag_state.remote_tag_commit,
+            "github_release": tag_state.github_release,
+        })),
+        Vec::new(),
+    ))
+}
+
 /// Create (or reuse) the release tag. Idempotent when the tag already points
 /// to HEAD; errors when it exists but points elsewhere. Updates
 /// [`ReleaseState::tag`] to the final tag name (may have been overridden by
@@ -276,17 +308,10 @@ pub(crate) fn run_git_tag(
         }
     }
 
-    let head_commit = crate::core::git::get_head_commit(&component.local_path)?;
-    let local_tag_commit =
-        if crate::core::git::tag_exists_locally(&component.local_path, tag_name).unwrap_or(false) {
-            Some(crate::core::git::get_tag_commit(
-                &component.local_path,
-                tag_name,
-            )?)
-        } else {
-            None
-        };
-    let remote_tag_commit = crate::core::git::remote_tag_commit(&component.local_path, tag_name)?;
+    let tag_state = inspect_release_tag_state(component, tag_name)?;
+    let head_commit = tag_state.head_commit.clone();
+    let local_tag_commit = tag_state.local_tag_commit.clone();
+    let remote_tag_commit = tag_state.remote_tag_commit.clone();
 
     if local_tag_commit.as_deref() == Some(head_commit.as_str())
         || remote_tag_commit.as_deref() == Some(head_commit.as_str())
@@ -309,97 +334,13 @@ pub(crate) fn run_git_tag(
         ));
     }
 
-    if local_tag_commit.is_some() || remote_tag_commit.is_some() {
-        let short_sha = |commit: &str| commit[..8.min(commit.len())].to_string();
-        let tag_state = |commit: Option<&str>| {
-            commit
-                .map(&short_sha)
-                .unwrap_or_else(|| "absent".to_string())
-        };
-        let github_release = component
-            .remote_url
-            .clone()
-            .or_else(|| {
-                crate::core::deploy::release_download::detect_remote_url(std::path::Path::new(
-                    &component.local_path,
-                ))
-            })
-            .and_then(|remote_url| {
-                crate::core::deploy::release_download::parse_github_url(&remote_url)
-            })
-            .and_then(|github| {
-                if !github_release::gh_is_available() || !github_release::gh_is_authenticated() {
-                    return None;
-                }
-
-                let repo_flag = format!("{}/{}", github.owner, github.repo);
-                Some(github_release::gh_release_exists(tag_name, &repo_flag))
-            });
-        let github_release_label = match github_release {
-            Some(true) => "exists".to_string(),
-            Some(false) => "not found".to_string(),
-            None => "not checked".to_string(),
-        };
-        let mut hints = vec![crate::core::error::Hint {
-            message: format!(
-                "If {} is a previous successful release, bump the component version and rerun `homeboy release {}` so Homeboy creates the next tag.",
-                tag_name, component_id
-            ),
-        }];
-
-        if github_release == Some(true) {
-            hints.push(crate::core::error::Hint {
-                message: format!(
-                    "If {} is an abandoned pre-release tag with a GitHub Release, delete both deliberately: `gh release delete {} --cleanup-tag --yes`.",
-                    tag_name, tag_name
-                ),
-            });
-        } else if remote_tag_commit.is_some() {
-            hints.push(crate::core::error::Hint {
-                message: format!(
-                    "If {} is an abandoned pre-release tag without a GitHub Release, delete the remote tag deliberately: `git push origin :refs/tags/{}`.",
-                    tag_name, tag_name
-                ),
-            });
-        }
-
-        if local_tag_commit.is_some() {
-            hints.push(crate::core::error::Hint {
-                message: format!(
-                    "After confirming the remote state, remove the stale local tag with `git tag -d {}`.",
-                    tag_name
-                ),
-            });
-        }
-
-        hints.push(crate::core::error::Hint {
-            message: format!(
-                "Retry with `homeboy release {}` after cleanup.",
-                component_id
-            ),
-        });
-
-        return Ok(step_failed(
+    if tag_state.has_existing_release_surface() {
+        return Ok(build_existing_tag_failure(
             "git.tag",
             "git.tag",
-            Some(serde_json::json!({
-                "action": "tag",
-                "component_id": component_id,
-                "tag": tag_name,
-                "head": head_commit,
-                "local_tag": local_tag_commit,
-                "remote_tag": remote_tag_commit,
-                "github_release": github_release,
-            })),
-            Some(format!(
-                "Release tag {} already exists but does not point at HEAD ({}). Local tag: {}; origin tag: {}; GitHub Release: {}. Refusing to move or overwrite the tag.",
-                tag_name,
-                short_sha(&head_commit),
-                tag_state(local_tag_commit.as_deref()),
-                tag_state(remote_tag_commit.as_deref()),
-                github_release_label,
-            )),
-            hints,
+            component_id,
+            tag_name,
+            tag_state,
         ));
     }
 
@@ -452,6 +393,152 @@ pub(crate) fn run_git_tag(
 
     state.tag = Some(tag_name.to_string());
     Ok(step_success("git.tag", "git.tag", Some(data), Vec::new()))
+}
+
+#[derive(Debug, Clone)]
+struct ReleaseTagState {
+    head_commit: String,
+    local_tag_commit: Option<String>,
+    remote_tag_commit: Option<String>,
+    github_release: Option<bool>,
+}
+
+impl ReleaseTagState {
+    fn has_existing_release_surface(&self) -> bool {
+        self.local_tag_commit.is_some()
+            || self.remote_tag_commit.is_some()
+            || self.github_release == Some(true)
+    }
+}
+
+fn inspect_release_tag_state(component: &Component, tag_name: &str) -> Result<ReleaseTagState> {
+    let head_commit = crate::core::git::get_head_commit(&component.local_path)?;
+    let local_tag_commit =
+        if crate::core::git::tag_exists_locally(&component.local_path, tag_name).unwrap_or(false) {
+            Some(crate::core::git::get_tag_commit(
+                &component.local_path,
+                tag_name,
+            )?)
+        } else {
+            None
+        };
+    let remote_tag_commit = crate::core::git::remote_tag_commit(&component.local_path, tag_name)?;
+    let github_release = component
+        .remote_url
+        .clone()
+        .or_else(|| {
+            crate::core::deploy::release_download::detect_remote_url(std::path::Path::new(
+                &component.local_path,
+            ))
+        })
+        .and_then(|remote_url| crate::core::deploy::release_download::parse_github_url(&remote_url))
+        .and_then(|github| {
+            if !github_release::gh_is_available() || !github_release::gh_is_authenticated() {
+                return None;
+            }
+
+            let repo_flag = format!("{}/{}", github.owner, github.repo);
+            Some(github_release::gh_release_exists(tag_name, &repo_flag))
+        });
+
+    Ok(ReleaseTagState {
+        head_commit,
+        local_tag_commit,
+        remote_tag_commit,
+        github_release,
+    })
+}
+
+fn build_existing_tag_failure(
+    id: &str,
+    step_type: &str,
+    component_id: &str,
+    tag_name: &str,
+    tag_state: ReleaseTagState,
+) -> ReleaseStepResult {
+    let short_sha = |commit: &str| commit[..8.min(commit.len())].to_string();
+    let tag_commit_label = |commit: Option<&str>| {
+        commit
+            .map(&short_sha)
+            .unwrap_or_else(|| "absent".to_string())
+    };
+    let github_release_label = match tag_state.github_release {
+        Some(true) => "exists".to_string(),
+        Some(false) => "not found".to_string(),
+        None => "not checked".to_string(),
+    };
+    let error = if step_type == "preflight.tag_availability" {
+        format!(
+            "Release tag {} already exists before release mutation. Local tag: {}; origin tag: {}; GitHub Release: {}. Refusing to mutate changelog/version files or create a duplicate release commit.",
+            tag_name,
+            tag_commit_label(tag_state.local_tag_commit.as_deref()),
+            tag_commit_label(tag_state.remote_tag_commit.as_deref()),
+            github_release_label,
+        )
+    } else {
+        format!(
+            "Release tag {} already exists but does not point at HEAD ({}). Local tag: {}; origin tag: {}; GitHub Release: {}. Refusing to move or overwrite the tag.",
+            tag_name,
+            short_sha(&tag_state.head_commit),
+            tag_commit_label(tag_state.local_tag_commit.as_deref()),
+            tag_commit_label(tag_state.remote_tag_commit.as_deref()),
+            github_release_label,
+        )
+    };
+    let mut hints = vec![crate::core::error::Hint {
+        message: format!(
+            "If {} is a previous successful release, bump the component version and rerun `homeboy release {}` so Homeboy creates the next tag.",
+            tag_name, component_id
+        ),
+    }];
+
+    if tag_state.github_release == Some(true) {
+        hints.push(crate::core::error::Hint {
+            message: format!(
+                "If {} is an abandoned pre-release tag with a GitHub Release, delete both deliberately: `gh release delete {} --cleanup-tag --yes`.",
+                tag_name, tag_name
+            ),
+        });
+    } else if tag_state.remote_tag_commit.is_some() {
+        hints.push(crate::core::error::Hint {
+            message: format!(
+                "If {} is an abandoned pre-release tag without a GitHub Release, delete the remote tag deliberately: `git push origin :refs/tags/{}`.",
+                tag_name, tag_name
+            ),
+        });
+    }
+
+    if tag_state.local_tag_commit.is_some() {
+        hints.push(crate::core::error::Hint {
+            message: format!(
+                "After confirming the remote state, remove the stale local tag with `git tag -d {}`.",
+                tag_name
+            ),
+        });
+    }
+
+    hints.push(crate::core::error::Hint {
+        message: format!(
+            "Retry with `homeboy release {}` after cleanup.",
+            component_id
+        ),
+    });
+
+    step_failed(
+        id,
+        step_type,
+        Some(serde_json::json!({
+            "action": "tag",
+            "component_id": component_id,
+            "tag": tag_name,
+            "head": tag_state.head_commit,
+            "local_tag": tag_state.local_tag_commit,
+            "remote_tag": tag_state.remote_tag_commit,
+            "github_release": tag_state.github_release,
+        })),
+        Some(error),
+        hints,
+    )
 }
 
 /// Push commits (and tags) to the remote.
@@ -1176,10 +1263,10 @@ mod tests {
 
     // ----- Orphan-tag regression coverage (issue #2234) -----
 
-    use super::run_git_tag;
     use super::version_targets::{
         collect_head_version_mismatches, collect_version_target_mismatches,
     };
+    use super::{run_git_tag, run_tag_availability_preflight};
     use crate::core::component::VersionTarget;
 
     fn run_in(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
@@ -1477,6 +1564,72 @@ mod tests {
                 .iter()
                 .any(|hint| hint.message.contains("git push origin :refs/tags/v0.6.13")),
             "expected deliberate remote tag cleanup guidance"
+        );
+    }
+
+    #[test]
+    fn tag_availability_preflight_refuses_existing_release_tags_before_mutation() {
+        let (_temp, component) = plugin_repo_at("0.6.12");
+        let component_path = std::path::Path::new(&component.local_path);
+        run_in(component_path, &["git", "tag", "v0.6.13"]);
+
+        let result = run_tag_availability_preflight(&component, "fixture", "v0.6.13")
+            .expect("preflight should return a result, not propagate Err");
+
+        assert_eq!(result.status, ReleaseStepStatus::Failed);
+        assert_eq!(result.id, "preflight.tag_availability");
+        let err = result.error.expect("expected tag availability error");
+        assert!(
+            err.contains("Release tag v0.6.13 already exists"),
+            "expected existing tag message, got: {}",
+            err
+        );
+        assert!(err.contains("Local tag:"), "expected local tag state");
+        assert!(
+            result
+                .hints
+                .iter()
+                .any(|hint| hint.message.contains("git tag -d v0.6.13")),
+            "expected deliberate local tag cleanup guidance"
+        );
+
+        let (_temp, component) = plugin_repo_at("0.6.12");
+        let component_path = std::path::Path::new(&component.local_path);
+        let remote = tempfile::tempdir().expect("remote tempdir");
+        run_in(remote.path(), &["git", "init", "--bare", "-q"]);
+        run_in(
+            component_path,
+            &[
+                "git",
+                "remote",
+                "add",
+                "origin",
+                remote.path().to_str().expect("remote path"),
+            ],
+        );
+        run_in(component_path, &["git", "tag", "v0.6.13"]);
+        run_in(component_path, &["git", "push", "origin", "v0.6.13"]);
+        run_in(component_path, &["git", "tag", "-d", "v0.6.13"]);
+
+        let result = run_tag_availability_preflight(&component, "fixture", "v0.6.13")
+            .expect("remote-only existing tag should return a failed step");
+
+        assert_eq!(result.status, ReleaseStepStatus::Failed);
+        assert!(
+            result
+                .data
+                .as_ref()
+                .and_then(|data| data.get("remote_tag"))
+                .and_then(serde_json::Value::as_str)
+                .is_some(),
+            "expected origin tag commit in structured data"
+        );
+        assert!(
+            result
+                .hints
+                .iter()
+                .any(|hint| hint.message.contains("git push origin :refs/tags/v0.6.13")),
+            "expected deliberate origin tag cleanup guidance"
         );
     }
 

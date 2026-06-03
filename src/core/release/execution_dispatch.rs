@@ -47,6 +47,19 @@ pub(super) fn execute_release_plan_step(
             )
             .unwrap_or_else(|err| failed_result("preflight.package", "preflight.package", err)),
         )),
+        "preflight.tag_availability" => {
+            let tag_name = step
+                .inputs
+                .get("name")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default();
+            executor::run_tag_availability_preflight(
+                context.component,
+                context.component_id,
+                tag_name,
+            )
+            .map(Some)
+        }
         "changelog.finalize" => {
             executor::changelog::run_changelog_finalize(step, context.component, &mut context.state)
                 .map(Some)
@@ -175,7 +188,8 @@ fn release_step_is_plan_only(step: &PlanStep) -> bool {
         && step.kind != "preflight.lint"
         && step.kind != "preflight.test"
         && step.kind != "preflight.changelog_bootstrap"
-        && step.kind != "preflight.package")
+        && step.kind != "preflight.package"
+        && step.kind != "preflight.tag_availability")
         || step.kind == "changelog.policy"
         || step.kind == "changelog.generate"
 }
@@ -420,6 +434,7 @@ pub(super) fn release_step_is_show_stopper(result: &ReleaseStepResult) -> bool {
             | "preflight.test"
             | "preflight.changelog_bootstrap"
             | "preflight.package"
+            | "preflight.tag_availability"
             | "version"
             | "release.prepare"
             | "git.commit"
