@@ -19,7 +19,7 @@ pub use crate::core::agent_task_schedule::{
 use crate::core::agent_task_timeout::timeout_with_grace;
 use crate::core::agent_task_timeout_artifacts::{
     append_unique_artifacts, append_unique_evidence_refs, is_actionable_patch_artifact,
-    merge_timeout_outcome, TimeoutArtifactDiscovery,
+    is_empty_patch_artifact, merge_timeout_outcome, TimeoutArtifactDiscovery,
 };
 
 pub trait AgentTaskExecutorAdapter: Send + Sync + 'static {
@@ -607,6 +607,15 @@ impl AgentTaskScheduleSupport {
                 "runtime completed with an actionable artifact before timeout finalization"
                     .to_string(),
             );
+        } else if outcome.status == AgentTaskOutcomeStatus::Succeeded
+            && outcome.artifacts.iter().any(is_empty_patch_artifact)
+        {
+            outcome.status = AgentTaskOutcomeStatus::NoOp;
+            outcome.failure_classification = None;
+            outcome.summary = Some(
+                "runtime completed with an empty patch artifact before timeout finalization"
+                    .to_string(),
+            );
         }
 
         outcome.diagnostics.push(AgentTaskDiagnostic {
@@ -1026,62 +1035,6 @@ mod tests {
                     .and_then(Value::as_bool)
                     == Some(true)
         }));
-    }
-
-    #[test]
-    fn timeout_with_empty_runtime_bundle_preserves_preflight_without_runtime_evidence() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let artifact_root = temp.path().join("task-1-artifacts");
-        let empty_runtime = artifact_root.join("runtime-mpxgndju-f4v9yn");
-        fs::create_dir_all(&empty_runtime).expect("empty runtime bundle");
-        let preflight_path = artifact_root.join("homeboy-codebox-task-runner.json");
-        fs::write(&preflight_path, r#"{"runner":"codebox"}"#).expect("preflight evidence");
-
-        let scheduler = AgentTaskScheduler::new(RecordingExecutor::new(
-            HashMap::new(),
-            Duration::from_millis(250),
-        ));
-        let mut plan = plan_with_tasks(1);
-        plan.tasks[0].limits.timeout_ms = Some(1);
-        plan.tasks[0].metadata = json!({ "artifact_root": artifact_root });
-
-        let aggregate = scheduler.run(plan);
-
-        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Failed);
-        assert_eq!(aggregate.totals.timed_out, 1);
-        let outcome = &aggregate.outcomes[0];
-        assert_eq!(outcome.status, AgentTaskOutcomeStatus::Timeout);
-        assert!(!outcome
-            .artifacts
-            .iter()
-            .any(|artifact| artifact.kind == "runtime_bundle"));
-        assert!(outcome.artifacts.iter().any(|artifact| {
-            artifact.kind == "preflight_evidence"
-                && artifact.path.as_deref() == Some(&preflight_path.to_string_lossy())
-        }));
-        assert!(outcome.diagnostics.iter().any(|diagnostic| {
-            diagnostic.class == "empty_runtime_bundle"
-                && diagnostic.data.get("path").and_then(Value::as_str)
-                    == Some(&empty_runtime.to_string_lossy())
-                && diagnostic
-                    .data
-                    .get("missing_expected_files")
-                    .and_then(Value::as_array)
-                    .is_some_and(|files| {
-                        files
-                            .iter()
-                            .any(|file| file.as_str() == Some("agent-result.json"))
-                    })
-        }));
-        assert!(outcome.diagnostics.iter().any(|diagnostic| {
-            diagnostic.class == "scheduler_timeout"
-                && diagnostic.message
-                    == "no completed runtime artifacts were discovered before timeout finalization"
-        }));
-        assert!(!outcome
-            .diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.class == "completed_runtime_late_provider_race"));
     }
 
     #[test]

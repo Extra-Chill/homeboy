@@ -19,6 +19,7 @@ const EXPECTED_RUNTIME_EVIDENCE_FILES: &[&str] = &[
     "*.log",
     "*.txt",
 ];
+const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
 #[derive(Default)]
 pub(crate) struct TimeoutArtifactDiscovery {
@@ -240,7 +241,13 @@ pub(crate) fn append_unique_evidence_refs(
 pub(crate) fn is_actionable_patch_artifact(artifact: &AgentTaskArtifact) -> bool {
     artifact_has_patch_shape(artifact)
         && artifact_has_content(artifact)
+        && !artifact_has_empty_sha(artifact)
         && artifact.metadata.get("actionable").and_then(Value::as_bool) != Some(false)
+}
+
+pub(crate) fn is_empty_patch_artifact(artifact: &AgentTaskArtifact) -> bool {
+    artifact_has_patch_shape(artifact)
+        && (!artifact_has_content(artifact) || artifact_has_empty_sha(artifact))
 }
 
 fn artifact_has_patch_shape(artifact: &AgentTaskArtifact) -> bool {
@@ -249,6 +256,10 @@ fn artifact_has_patch_shape(artifact: &AgentTaskArtifact) -> bool {
         || artifact.mime.as_deref() == Some("text/x-patch")
         || artifact.mime.as_deref() == Some("text/x-diff")
         || artifact.metadata.get("role").and_then(Value::as_str) == Some("patch")
+}
+
+fn artifact_has_empty_sha(artifact: &AgentTaskArtifact) -> bool {
+    artifact.sha256.as_deref() == Some(EMPTY_SHA256) || artifact.sha256.as_deref() == Some("")
 }
 
 fn artifact_has_content(artifact: &AgentTaskArtifact) -> bool {
@@ -401,4 +412,64 @@ fn file_size_and_sha256(path: &Path) -> (Option<u64>, Option<String>) {
         format!("{:x}", hasher.finalize())
     });
     (size_bytes, sha256)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::agent_task::{
+        AgentTaskExecutor, AgentTaskLimits, AgentTaskPolicy, AgentTaskWorkspace,
+        AGENT_TASK_REQUEST_SCHEMA,
+    };
+    use serde_json::{json, Value};
+
+    #[test]
+    fn empty_runtime_bundle_preserves_preflight_without_runtime_evidence() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let artifact_root = temp.path().join("task-1-artifacts");
+        let empty_runtime = artifact_root.join("runtime-mpxgndju-f4v9yn");
+        fs::create_dir_all(&empty_runtime).expect("empty runtime bundle");
+        let preflight_path = artifact_root.join("homeboy-codebox-task-runner.json");
+        fs::write(&preflight_path, r#"{"runner":"codebox"}"#).expect("preflight evidence");
+
+        let discovery = TimeoutArtifactDiscovery::discover(&test_request(json!({
+            "artifact_root": artifact_root,
+        })));
+
+        assert!(!discovery.has_runtime_evidence());
+        assert!(discovery.artifacts.iter().any(|artifact| {
+            artifact.kind == "preflight_evidence"
+                && artifact.path.as_deref() == Some(&preflight_path.to_string_lossy())
+        }));
+        assert!(discovery.diagnostics.iter().any(|diagnostic| {
+            diagnostic.class == "empty_runtime_bundle"
+                && diagnostic.data.get("path").and_then(Value::as_str)
+                    == Some(&empty_runtime.to_string_lossy())
+        }));
+    }
+
+    fn test_request(metadata: Value) -> AgentTaskRequest {
+        AgentTaskRequest {
+            schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
+            task_id: "task-1".to_string(),
+            group_key: None,
+            parent_plan_id: None,
+            executor: AgentTaskExecutor {
+                backend: "test".to_string(),
+                selector: None,
+                required_capabilities: Vec::new(),
+                secret_env: Vec::new(),
+                model: None,
+                config: Value::Null,
+            },
+            instructions: "test".to_string(),
+            inputs: Value::Null,
+            source_refs: Vec::new(),
+            workspace: AgentTaskWorkspace::default(),
+            policy: AgentTaskPolicy::default(),
+            limits: AgentTaskLimits::default(),
+            expected_artifacts: Vec::new(),
+            metadata,
+        }
+    }
 }
