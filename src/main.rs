@@ -139,6 +139,13 @@ fn main() -> std::process::ExitCode {
         .flatten()
         .map(|path| path.to_string_lossy().to_string());
 
+    if let Some(path) = output_file.as_deref() {
+        if let Some(err) = validate_output_file_path(path) {
+            emit_json_result(Err(err), None, 2);
+            return std::process::ExitCode::from(exit_code_to_u8(2));
+        }
+    }
+
     let artifact_root_override = matches
         .try_get_one::<std::path::PathBuf>("artifact_root")
         .ok()
@@ -298,6 +305,31 @@ fn emit_json_result(
         output::write_json_to_file(&result, path, exit_code);
     }
     output::print_json_result(result, exit_code).ok();
+}
+
+fn validate_output_file_path(path: &str) -> Option<homeboy::core::Error> {
+    let value = path.trim();
+    let looks_like_format = matches!(
+        value.to_ascii_lowercase().as_str(),
+        "json" | "yaml" | "yml" | "table" | "csv" | "text" | "markdown" | "md"
+    );
+
+    if !looks_like_format {
+        return None;
+    }
+
+    Some(homeboy::core::Error::validation_invalid_argument(
+        "output",
+        format!(
+            "`--output {value}` looks like an output format, but --output writes to a file path"
+        ),
+        None,
+        Some(vec![
+            "Use an explicit file path, for example: --output ./homeboy-output.json".to_string(),
+            "Use command-specific --format flags where available, for example: --format=json"
+                .to_string(),
+        ]),
+    ))
 }
 
 fn lab_offload_command(
