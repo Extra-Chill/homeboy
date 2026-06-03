@@ -202,6 +202,59 @@ commit_autofix_changes() {
     git commit -m "${COMMIT_MSG}"
 }
 
+verify_autofix_quality_gates() {
+  local effective_commands ordered_commands has_lint output_dir cmd output_stem output_json full_cmd cmd_exit overall_exit
+
+  effective_commands="${COMMANDS:-audit,lint,test}"
+  if [ -z "${effective_commands}" ]; then
+    echo "No quality commands configured for autofix verification"
+    return 0
+  fi
+
+  ordered_commands="$(canonicalize_commands "${effective_commands}")"
+  IFS=',' read -ra VERIFY_CMD_ARRAY <<< "${ordered_commands}"
+  has_lint="$(has_lint_command "${effective_commands}")"
+  output_dir="$(mktemp -d)"
+  overall_exit=0
+
+  for cmd in "${VERIFY_CMD_ARRAY[@]}"; do
+    cmd=$(echo "${cmd}" | xargs)
+    [ -n "${cmd}" ] || continue
+
+    if [ "${cmd}" = "test" ] && [ "${has_lint}" = "true" ]; then
+      export HOMEBOY_SKIP_LINT=1
+    else
+      unset HOMEBOY_SKIP_LINT 2>/dev/null || true
+    fi
+
+    output_stem="$(command_output_stem "${cmd}")"
+    output_json="${output_dir}/${output_stem}.json"
+    full_cmd="$(build_run_command "${cmd}" "${COMP_ID}" "${WORKSPACE}" "${output_json}")"
+
+    echo "Verifying autofix: ${full_cmd}"
+    set +e
+    eval "${full_cmd}" 2>&1 | tee "${output_dir}/${output_stem}.log"
+    cmd_exit=${PIPESTATUS[0]}
+    set -e
+
+    if [ "${cmd_exit}" -ne 0 ]; then
+      echo "Autofix verification failed for ${cmd} (exit code ${cmd_exit})"
+      overall_exit=1
+    fi
+  done
+
+  unset HOMEBOY_SKIP_LINT 2>/dev/null || true
+
+  if [ "${overall_exit}" -ne 0 ]; then
+    echo "committed=false" >> "${GITHUB_OUTPUT}"
+    echo "status=skipped-verification-failed" >> "${GITHUB_OUTPUT}"
+    return 1
+  fi
+
+  echo "Autofix verification passed"
+  return 0
+}
+
 load_autofix_metadata() {
   AUTOFIX_DETAILS=""
   AUTOFIX_TOTAL_FIXES=""
@@ -287,11 +340,23 @@ fi
 maybe_update_baseline
 
 load_autofix_metadata
+autofix_prepare_pr_report "${WORKSPACE}"
 
 if ! stage_autofix_changes; then
   echo "No autofix changes detected"
   echo "status=no-changes" >> "${GITHUB_OUTPUT}"
   echo "committed=false" >> "${GITHUB_OUTPUT}"
+  exit 0
+fi
+
+if [ -z "${AUTOFIX_REPORT:-}" ]; then
+  echo "Skipping autofix commit: changed files are not covered by the autofix report"
+  echo "status=skipped-unreported-changes" >> "${GITHUB_OUTPUT}"
+  echo "committed=false" >> "${GITHUB_OUTPUT}"
+  exit 0
+fi
+
+if ! verify_autofix_quality_gates; then
   exit 0
 fi
 
