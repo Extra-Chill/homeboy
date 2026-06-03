@@ -60,7 +60,7 @@ pub fn pull_repo(repo_dir: &Path) -> Result<()> {
 /// Uses direct Command execution to properly handle empty output (clean repo).
 /// `run_in_optional` returns None for empty stdout, which would incorrectly
 /// indicate a dirty repo when used with `.unwrap_or(false)`.
-pub fn is_workdir_clean(path: &Path) -> bool {
+fn is_workdir_clean(path: &Path) -> bool {
     let output = Command::new("git")
         .args(["status", "--porcelain"])
         .current_dir(path)

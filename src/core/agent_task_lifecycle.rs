@@ -485,7 +485,7 @@ mod tests {
         AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
         AGENT_TASK_AGGREGATE_SCHEMA,
     };
-    use std::sync::{Mutex, OnceLock};
+    use crate::test_support::with_isolated_home;
 
     #[test]
     fn submit_plan_persists_queued_status() {
@@ -705,18 +705,7 @@ mod tests {
     }
 
     fn with_temp_home(run: impl FnOnce()) {
-        let lock = test_home_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let home = tempfile::tempdir().expect("temp home");
-        std::env::set_var("HOME", home.path());
-        run();
-        drop(lock);
-    }
-
-    fn test_home_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+        with_isolated_home(|_| run());
     }
 
     fn test_plan() -> AgentTaskPlan {
