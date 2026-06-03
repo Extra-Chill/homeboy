@@ -8,7 +8,7 @@ use crate::core::agent_task::{AgentTaskArtifact, AgentTaskEvidenceRef, AgentTask
 use crate::core::agent_task_scheduler::{
     AgentTaskAggregate, AgentTaskPlan, AgentTaskProgressEvent, AgentTaskState,
 };
-use crate::core::{paths, Error, Result};
+use crate::core::{paths, Error, ErrorCode, Result};
 
 #[path = "lifecycle_store.rs"]
 mod lifecycle_store;
@@ -229,6 +229,28 @@ pub fn mark_running(run_id: &str) -> Result<AgentTaskRunRecord> {
     record.record_runner_metadata(reclaimed_stale);
     store::write_record(&record)?;
     Ok(record)
+}
+
+pub fn claim_next_queued_run() -> Result<Option<AgentTaskRunRecord>> {
+    let mut queued: Vec<AgentTaskRunRecord> = store::read_records()?
+        .into_iter()
+        .filter(|record| record.state == AgentTaskRunState::Queued)
+        .collect();
+    queued.sort_by(|left, right| {
+        left.submitted_at
+            .cmp(&right.submitted_at)
+            .then_with(|| left.run_id.cmp(&right.run_id))
+    });
+
+    for record in queued {
+        match mark_running(&record.run_id) {
+            Ok(claimed) => return Ok(Some(claimed)),
+            Err(error) if error.code == ErrorCode::ValidationInvalidArgument => continue,
+            Err(error) => return Err(error),
+        }
+    }
+
+    Ok(None)
 }
 
 pub fn record_run_aggregate(

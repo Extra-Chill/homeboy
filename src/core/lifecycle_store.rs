@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::ErrorKind;
 use std::path::PathBuf;
 
 use serde::Serialize;
@@ -37,6 +38,34 @@ pub(super) fn write_record(record: &AgentTaskRunRecord) -> Result<()> {
 
 pub(super) fn read_record(run_id: &str) -> Result<AgentTaskRunRecord> {
     read_json(&record_path(run_id)?)
+}
+
+pub(super) fn read_records() -> Result<Vec<AgentTaskRunRecord>> {
+    let root = paths::homeboy_data()?.join("agent-task-runs");
+    let entries = match fs::read_dir(&root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(Error::internal_io(
+                error.to_string(),
+                Some(root.display().to_string()),
+            ));
+        }
+    };
+
+    let mut records = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            Error::internal_io(error.to_string(), Some(root.display().to_string()))
+        })?;
+        let path = entry.path().join("status.json");
+        if !path.exists() {
+            continue;
+        }
+        records.push(read_json(&path)?);
+    }
+
+    Ok(records)
 }
 
 fn read_json<T: serde::de::DeserializeOwned>(path: &PathBuf) -> Result<T> {

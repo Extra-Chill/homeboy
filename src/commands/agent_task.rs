@@ -23,6 +23,8 @@ pub enum AgentTaskCommand {
     RunPlan(RunPlanArgs),
     /// Execute a previously submitted durable agent-task run.
     Run(StatusArgs),
+    /// Claim and execute the oldest queued durable agent-task run.
+    RunNext,
     /// Persist an agent-task plan and return a durable run id without executing it.
     Submit(SubmitArgs),
     /// Read durable agent-task run status.
@@ -94,6 +96,7 @@ pub fn run(args: AgentTaskArgs, _global: &GlobalArgs) -> CmdResult<Value> {
     match args.command {
         AgentTaskCommand::RunPlan(run_args) => run_plan(run_args),
         AgentTaskCommand::Run(status_args) => run_submitted(status_args),
+        AgentTaskCommand::RunNext => run_next(),
         AgentTaskCommand::Submit(submit_args) => submit(submit_args),
         AgentTaskCommand::Status(status_args) => status(status_args),
         AgentTaskCommand::Logs(status_args) => logs(status_args),
@@ -145,11 +148,40 @@ where
 }
 
 fn run_submitted(args: StatusArgs) -> CmdResult<Value> {
-    let plan = agent_task_lifecycle::load_plan(&args.run_id)?;
-    agent_task_lifecycle::mark_running(&args.run_id)?;
-    let scheduler = AgentTaskScheduler::new(ExtensionProviderAgentTaskExecutor::discover());
+    run_submitted_with_executor(args.run_id, ExtensionProviderAgentTaskExecutor::discover())
+}
+
+fn run_submitted_with_executor<E>(run_id: String, executor: E) -> CmdResult<Value>
+where
+    E: AgentTaskExecutorAdapter,
+{
+    agent_task_lifecycle::mark_running(&run_id)?;
+    run_claimed(run_id, executor)
+}
+
+fn run_next() -> CmdResult<Value> {
+    run_next_with_executor(ExtensionProviderAgentTaskExecutor::discover())
+}
+
+fn run_next_with_executor<E>(executor: E) -> CmdResult<Value>
+where
+    E: AgentTaskExecutorAdapter,
+{
+    let Some(record) = agent_task_lifecycle::claim_next_queued_run()? else {
+        return Ok((serde_json::json!({ "claimed": false }), 0));
+    };
+
+    run_claimed(record.run_id, executor)
+}
+
+fn run_claimed<E>(run_id: String, executor: E) -> CmdResult<Value>
+where
+    E: AgentTaskExecutorAdapter,
+{
+    let plan = agent_task_lifecycle::load_plan(&run_id)?;
+    let scheduler = AgentTaskScheduler::new(executor);
     let aggregate = scheduler.run(plan.clone());
-    agent_task_lifecycle::record_run_aggregate(&args.run_id, &plan, &aggregate)?;
+    agent_task_lifecycle::record_run_aggregate(&run_id, &plan, &aggregate)?;
     let exit_code = if aggregate.totals.failed == 0
         && aggregate.totals.cancelled == 0
         && aggregate.totals.timed_out == 0
@@ -345,6 +377,50 @@ mod tests {
             assert_eq!(completed.state, AgentTaskRunState::Succeeded);
             assert_eq!(completed.tasks[0].state, AgentTaskState::Succeeded);
             assert!(completed.aggregate_path.is_some());
+        });
+    }
+
+    #[test]
+    fn run_next_claims_oldest_queued_run_and_leaves_later_runs_queued() {
+        with_temp_home(|| {
+            agent_task_lifecycle::submit_plan(&test_plan(), Some("run-next-a"))
+                .expect("first submitted");
+            agent_task_lifecycle::submit_plan(&test_plan(), Some("run-next-b"))
+                .expect("second submitted");
+            let observed_status = Arc::new(Mutex::new(None));
+
+            let (_value, exit_code) = run_next_with_executor(InspectingExecutor {
+                run_id: "run-next-a".to_string(),
+                observed_status: Arc::clone(&observed_status),
+            })
+            .expect("claimed run completed");
+
+            let observed = observed_status
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+                .expect("executor observed claimed status");
+            let first = lifecycle_status("run-next-a").expect("first status");
+            let second = lifecycle_status("run-next-b").expect("second status");
+
+            assert_eq!(exit_code, 0);
+            assert_eq!(observed.state, AgentTaskRunState::Running);
+            assert_eq!(first.state, AgentTaskRunState::Succeeded);
+            assert_eq!(second.state, AgentTaskRunState::Queued);
+        });
+    }
+
+    #[test]
+    fn run_next_returns_unclaimed_when_no_queued_runs_exist() {
+        with_temp_home(|| {
+            let (value, exit_code) = run_next_with_executor(InspectingExecutor {
+                run_id: "unused".to_string(),
+                observed_status: Arc::new(Mutex::new(None)),
+            })
+            .expect("run-next checked queue");
+
+            assert_eq!(exit_code, 0);
+            assert_eq!(value["claimed"], false);
         });
     }
 
