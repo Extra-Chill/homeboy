@@ -1,0 +1,40 @@
+{
+  "schema": "homeboy/agent-task-plan/v1",
+  "plan_id": "agent-task-smoke-fixture",
+  "tasks": [
+    {
+      "schema": "homeboy/agent-task-request/v1",
+      "task_id": "docs-smoke-cell-1",
+      "executor": {
+        "backend": "fixture",
+        "config": {
+          "artifact_root": "target/agent-task-smoke/docs-smoke-cell-1",
+          "changed_file": "docs/agent-task-smoke.md"
+        }
+      },
+      "instructions": "Generate a deterministic docs-only patch for the agent-task smoke gate.",
+      "workspace": {
+        "mode": "existing"
+      },
+      "policy": {
+        "read": "allow",
+        "write": "patch_only",
+        "apply": "dry_run_only"
+      },
+      "expected_artifacts": [
+        "target/agent-task-smoke/docs-smoke-cell-1"
+      ],
+      "metadata": {
+        "smoke": "submit-run-artifacts-promote",
+        "issue": "https://github.com/Extra-Chill/homeboy/issues/3392"
+      }
+    }
+  ],
+  "options": {
+    "max_concurrency": 1,
+    "max_queue_depth": 1
+  },
+  "metadata": {
+    "purpose": "deterministic agent-task submit/run/artifacts/promote smoke fixture"
+  }
+}
