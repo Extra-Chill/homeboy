@@ -24,7 +24,11 @@ pub(super) fn write_aggregate(run_id: &str, aggregate: &AgentTaskAggregate) -> R
 }
 
 pub(super) fn read_aggregate(run_id: &str) -> Result<AgentTaskAggregate> {
-    read_json(&run_dir(run_id)?.join("aggregate.json"))
+    read_json(&aggregate_path(run_id)?)
+}
+
+pub(super) fn aggregate_path(run_id: &str) -> Result<PathBuf> {
+    Ok(run_dir(run_id)?.join("aggregate.json"))
 }
 
 pub(super) fn write_record(record: &AgentTaskRunRecord) -> Result<()> {

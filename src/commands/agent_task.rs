@@ -238,10 +238,71 @@ mod tests {
         AgentTaskPolicy, AgentTaskRequest, AgentTaskWorkspace, AGENT_TASK_OUTCOME_SCHEMA,
         AGENT_TASK_REQUEST_SCHEMA,
     };
-    use homeboy::core::agent_task_lifecycle::{status, AgentTaskRunRecord, AgentTaskRunState};
+    use homeboy::core::agent_task_lifecycle::{
+        status as lifecycle_status, AgentTaskRunRecord, AgentTaskRunState,
+    };
     use homeboy::core::agent_task_scheduler::{AgentTaskExecutionContext, AgentTaskState};
     use serde_json::Value;
     use std::sync::{Arc, Mutex, OnceLock};
+
+    #[test]
+    fn submit_run_status_reports_terminal_state() {
+        with_temp_home(|| {
+            let plan = AgentTaskPlan::new(
+                "plan-cli-terminal",
+                vec![AgentTaskRequest {
+                    schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
+                    task_id: "task-cli-terminal".to_string(),
+                    group_key: None,
+                    parent_plan_id: None,
+                    executor: AgentTaskExecutor {
+                        backend: "missing-provider-test".to_string(),
+                        selector: None,
+                        required_capabilities: Vec::new(),
+                        secret_env: Vec::new(),
+                        model: None,
+                        config: Value::Null,
+                    },
+                    instructions: "exercise durable terminal status".to_string(),
+                    inputs: Value::Null,
+                    source_refs: Vec::new(),
+                    workspace: AgentTaskWorkspace::default(),
+                    policy: AgentTaskPolicy::default(),
+                    limits: AgentTaskLimits::default(),
+                    expected_artifacts: Vec::new(),
+                    metadata: Value::Null,
+                }],
+            );
+            let plan_file = tempfile::NamedTempFile::new().expect("plan file");
+            std::fs::write(
+                plan_file.path(),
+                serde_json::to_string(&plan).expect("plan json"),
+            )
+            .expect("write plan");
+            let plan_path = format!("@{}", plan_file.path().display());
+
+            submit(SubmitArgs {
+                plan: plan_path,
+                run_id: Some("run-cli-terminal".to_string()),
+            })
+            .expect("submitted");
+            let (_, run_exit_code) = run_submitted(StatusArgs {
+                run_id: "run-cli-terminal".to_string(),
+            })
+            .expect("run completed");
+            let (status_json, status_exit_code) = status(StatusArgs {
+                run_id: "run-cli-terminal".to_string(),
+            })
+            .expect("status loaded");
+            let record: AgentTaskRunRecord = serde_json::from_value(status_json).expect("record");
+
+            assert_eq!(run_exit_code, 1);
+            assert_eq!(status_exit_code, 0);
+            assert_eq!(record.state, AgentTaskRunState::Failed);
+            assert_eq!(record.tasks[0].state, AgentTaskState::Failed);
+            assert_eq!(record.totals.expect("totals").failed, 1);
+        });
+    }
 
     #[test]
     fn run_plan_record_run_id_persists_running_status_before_executor_runs() {
@@ -267,7 +328,7 @@ mod tests {
             assert_eq!(observed.metadata["runner_pid"], std::process::id());
             assert!(observed.aggregate_path.is_none());
 
-            let completed = status(run_id).expect("completed status loaded");
+            let completed = lifecycle_status(run_id).expect("completed status loaded");
             assert_eq!(completed.state, AgentTaskRunState::Succeeded);
             assert_eq!(completed.tasks[0].state, AgentTaskState::Succeeded);
             assert!(completed.aggregate_path.is_some());
@@ -285,7 +346,8 @@ mod tests {
             request: AgentTaskRequest,
             _context: AgentTaskExecutionContext,
         ) -> AgentTaskOutcome {
-            let record = status(&self.run_id).expect("status exists before executor runs");
+            let record =
+                lifecycle_status(&self.run_id).expect("status exists before executor runs");
             *self
                 .observed_status
                 .lock()

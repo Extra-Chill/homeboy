@@ -30,6 +30,8 @@ pub struct AgentTaskRunRecord {
     pub plan_path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub aggregate_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub totals: Option<crate::core::agent_task_scheduler::AgentTaskAggregateTotals>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tasks: Vec<AgentTaskRunTask>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -153,6 +155,7 @@ pub fn submit_plan(
         updated_at: None,
         plan_path: plan_path.display().to_string(),
         aggregate_path: None,
+        totals: None,
         tasks: plan.tasks.iter().map(queued_task).collect(),
         artifact_refs: Vec::new(),
         metadata: json!({
@@ -240,17 +243,52 @@ fn record_aggregate(
     aggregate: &AgentTaskAggregate,
 ) -> Result<AgentTaskRunRecord> {
     let aggregate_path = store::write_aggregate(&record.run_id, aggregate)?;
-    record.state = run_state_for_aggregate(aggregate);
-    record.updated_at = Some(now_timestamp());
-    record.aggregate_path = Some(aggregate_path.display().to_string());
-    record.tasks = tasks_for_aggregate(plan, aggregate);
-    record.artifact_refs = artifact_refs_for_outcomes(&aggregate.outcomes);
+    apply_aggregate_to_record(
+        record,
+        plan,
+        aggregate,
+        aggregate_path.display().to_string(),
+    );
     store::write_record(record)?;
     Ok(record.clone())
 }
 
+fn apply_aggregate_to_record(
+    record: &mut AgentTaskRunRecord,
+    plan: &AgentTaskPlan,
+    aggregate: &AgentTaskAggregate,
+    aggregate_path: String,
+) {
+    record.state = run_state_for_aggregate(aggregate);
+    record.updated_at = Some(now_timestamp());
+    record.aggregate_path = Some(aggregate_path);
+    record.totals = Some(aggregate.totals.clone());
+    record.tasks = tasks_for_aggregate(plan, aggregate);
+    record.artifact_refs = artifact_refs_for_outcomes(&aggregate.outcomes);
+}
+
 pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
     let mut record = store::read_record(&sanitize_run_id(run_id))?;
+    if let (Ok(aggregate), Ok(plan)) = (
+        store::read_aggregate(&record.run_id),
+        store::read_plan_path(&record.plan_path),
+    ) {
+        let aggregate_path = store::aggregate_path(&record.run_id)
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|_| "aggregate.json".to_string());
+        let mut reconciled = record.clone();
+        apply_aggregate_to_record(&mut reconciled, &plan, &aggregate, aggregate_path);
+
+        if reconciled != record {
+            if let Err(error) = store::write_record(&reconciled) {
+                reconciled
+                    .ensure_metadata_object()
+                    .insert("finalization_error".to_string(), json!(error.message));
+            }
+
+            record = reconciled;
+        }
+    }
     record.annotate_stale_running();
     Ok(record)
 }
@@ -517,46 +555,43 @@ mod tests {
 
             let loaded_plan = load_plan("run-execute").expect("plan loaded");
             let running = mark_running("run-execute").expect("marked running");
-            let aggregate = AgentTaskAggregate {
-                schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
-                plan_id: loaded_plan.plan_id.clone(),
-                status: AgentTaskAggregateStatus::Succeeded,
-                totals: AgentTaskAggregateTotals {
-                    queued: 1,
-                    succeeded: 1,
-                    ..AgentTaskAggregateTotals::default()
-                },
-                outcomes: vec![AgentTaskOutcome {
-                    schema: crate::core::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
-                    task_id: "task-a".to_string(),
-                    status: crate::core::agent_task::AgentTaskOutcomeStatus::Succeeded,
-                    summary: Some("ok".to_string()),
-                    failure_classification: None,
-                    artifacts: Vec::new(),
-                    evidence_refs: Vec::new(),
-                    diagnostics: Vec::new(),
-                    workflow: None,
-                    follow_up: None,
-                    metadata: Value::Null,
-                }],
-                events: vec![AgentTaskProgressEvent {
-                    task_id: "task-a".to_string(),
-                    state: AgentTaskState::Succeeded,
-                    attempt: 1,
-                    message: Some("ok".to_string()),
-                }],
-                queue: Default::default(),
-            };
+            let aggregate = succeeded_aggregate(&loaded_plan);
 
             let completed =
                 record_run_aggregate("run-execute", &loaded_plan, &aggregate).expect("completed");
+            let durable_status = status("run-execute").expect("status");
 
             assert_eq!(loaded_plan.plan_id, "plan-a");
             assert_eq!(running.state, AgentTaskRunState::Running);
             assert_eq!(running.tasks[0].state, AgentTaskState::Running);
             assert_eq!(completed.state, AgentTaskRunState::Succeeded);
             assert_eq!(completed.tasks[0].state, AgentTaskState::Succeeded);
+            assert_eq!(completed.totals, Some(aggregate.totals.clone()));
+            assert_eq!(durable_status.state, AgentTaskRunState::Succeeded);
+            assert_eq!(durable_status.tasks[0].state, AgentTaskState::Succeeded);
+            assert_eq!(durable_status.totals, Some(aggregate.totals.clone()));
             assert!(completed.aggregate_path.is_some());
+        });
+    }
+
+    #[test]
+    fn status_recovers_terminal_state_from_durable_aggregate() {
+        with_temp_home(|| {
+            let plan = test_plan();
+            submit_plan(&plan, Some("run-stale-status")).expect("submitted");
+            mark_running("run-stale-status").expect("marked running");
+            let aggregate = succeeded_aggregate(&plan);
+            store::write_aggregate("run-stale-status", &aggregate).expect("aggregate written");
+
+            let recovered = status("run-stale-status").expect("status recovered");
+            let persisted = store::read_record("run-stale-status").expect("record persisted");
+
+            assert_eq!(recovered.state, AgentTaskRunState::Succeeded);
+            assert_eq!(recovered.tasks[0].state, AgentTaskState::Succeeded);
+            assert_eq!(recovered.totals, Some(aggregate.totals.clone()));
+            assert_eq!(persisted.state, AgentTaskRunState::Succeeded);
+            assert_eq!(persisted.tasks[0].state, AgentTaskState::Succeeded);
+            assert_eq!(persisted.totals, Some(aggregate.totals.clone()));
         });
     }
 
@@ -652,5 +687,38 @@ mod tests {
                 metadata: Value::Null,
             }],
         )
+    }
+
+    fn succeeded_aggregate(plan: &AgentTaskPlan) -> AgentTaskAggregate {
+        AgentTaskAggregate {
+            schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
+            plan_id: plan.plan_id.clone(),
+            status: AgentTaskAggregateStatus::Succeeded,
+            totals: AgentTaskAggregateTotals {
+                queued: 1,
+                succeeded: 1,
+                ..AgentTaskAggregateTotals::default()
+            },
+            outcomes: vec![AgentTaskOutcome {
+                schema: crate::core::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+                task_id: "task-a".to_string(),
+                status: crate::core::agent_task::AgentTaskOutcomeStatus::Succeeded,
+                summary: Some("ok".to_string()),
+                failure_classification: None,
+                artifacts: Vec::new(),
+                evidence_refs: Vec::new(),
+                diagnostics: Vec::new(),
+                workflow: None,
+                follow_up: None,
+                metadata: Value::Null,
+            }],
+            events: vec![AgentTaskProgressEvent {
+                task_id: "task-a".to_string(),
+                state: AgentTaskState::Succeeded,
+                attempt: 1,
+                message: Some("ok".to_string()),
+            }],
+            queue: Default::default(),
+        }
     }
 }
