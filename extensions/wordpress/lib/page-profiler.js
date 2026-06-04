@@ -29,6 +29,28 @@ const DEFAULT_DIAGNOSIS_THRESHOLDS = {
 };
 
 const DEFAULT_REST_OBSERVATION_MS = 1000;
+const DEFAULT_THIRD_PARTY_WATERFALL_GROUPS = [
+	{
+		id: 'woocommerce-store-api',
+		label: 'WooCommerce Store API',
+		urlIncludes: ['/wp-json/wc/store/', 'rest_route=/wc/store/'],
+	},
+	{
+		id: 'wordpress-assets',
+		label: 'WordPress assets',
+		urlIncludes: ['/wp-admin/', '/wp-content/', '/wp-includes/', '/wp-json/'],
+	},
+	{
+		id: 'stripe',
+		label: 'Stripe',
+		domains: ['stripe.com', 'stripe.network'],
+	},
+	{
+		id: 'google',
+		label: 'Google',
+		domains: ['gstatic.com', 'googleapis.com', 'google.com'],
+	},
+];
 const DEFAULT_GATE_THRESHOLDS = {
 	readyMsRegression: 250,
 	networkIdleMsRegression: 500,
@@ -133,6 +155,217 @@ function classifyResourceUrl(url) {
 		return 'core-asset';
 	}
 	return 'other';
+}
+
+function safeUrl(value) {
+	try {
+		return new URL(value);
+	} catch {
+		return null;
+	}
+}
+
+function normalizeHostname(value) {
+	return String(value || '').trim().toLowerCase().replace(/^www\./, '');
+}
+
+function urlHostname(value) {
+	const parsed = safeUrl(value);
+	return parsed ? normalizeHostname(parsed.hostname) : '';
+}
+
+function hostnameMatches(hostname, domain) {
+	const normalizedHost = normalizeHostname(hostname);
+	const normalizedDomain = normalizeHostname(domain);
+	return normalizedHost === normalizedDomain || normalizedHost.endsWith(`.${normalizedDomain}`);
+}
+
+function groupIdForLabel(label) {
+	return browserMetricName(label || 'other');
+}
+
+function normalizeThirdPartyWaterfallGroups(groups) {
+	return (Array.isArray(groups) ? groups : DEFAULT_THIRD_PARTY_WATERFALL_GROUPS)
+		.filter((group) => isPlainObject(group) && (group.id || group.label))
+		.map((group) => ({
+			id: group.id || groupIdForLabel(group.label),
+			label: group.label || group.id,
+			domains: Array.isArray(group.domains) ? group.domains.map(normalizeHostname).filter(Boolean) : [],
+			urlIncludes: Array.isArray(group.urlIncludes) ? group.urlIncludes.map(String).filter(Boolean) : [],
+			resourceTypes: Array.isArray(group.resourceTypes) ? group.resourceTypes.map((type) => String(type).toLowerCase()).filter(Boolean) : [],
+		}));
+}
+
+function normalizeNetworkUrlPattern(url) {
+	const parsed = safeUrl(url);
+	if (!parsed) {
+		return normalizeUrl(url, { lowercasePath: false }).split('?', 1)[0] || 'unknown';
+	}
+	const pathname = parsed.pathname
+		.replace(/\b\d+\b/g, ':id')
+		.replace(/[a-f0-9]{16,}/gi, ':hash');
+	return `${normalizeHostname(parsed.hostname)}${pathname}` || 'unknown';
+}
+
+function transferSizeForNetworkRow(row) {
+	return round(row?.transferSize ?? row?.transfer_size ?? row?.encodedBodySize ?? row?.encoded_body_size ?? row?.responseBodyBytes ?? row?.response_body_bytes ?? row?.decodedBodySize ?? row?.decoded_body_size);
+}
+
+function responseSizeForNetworkRow(row) {
+	return round(row?.responseBodyBytes ?? row?.response_body_bytes ?? row?.decodedBodySize ?? row?.decoded_body_size ?? row?.encodedBodySize ?? row?.encoded_body_size ?? row?.transferSize ?? row?.transfer_size);
+}
+
+function isRequestNetworkRow(row) {
+	const type = String(row?.type || '').toLowerCase();
+	return type === 'request' || type === 'requestfailed' || (!type && !('status' in (row || {})));
+}
+
+function isResponseNetworkRow(row) {
+	const type = String(row?.type || '').toLowerCase();
+	return type === 'response' || type === 'requestfinished' || typeof row?.status === 'number';
+}
+
+function createThirdPartyWaterfallGroup(id, label, classification = 'configured') {
+	return {
+		id,
+		label,
+		classification,
+		requestCount: 0,
+		responseCount: 0,
+		totalCount: 0,
+		transferSizeBytes: 0,
+		responseBodyBytes: 0,
+		resourceTypes: {},
+		urlCounts: new Map(),
+		urlTransferSizeBytes: new Map(),
+		patternCounts: new Map(),
+	};
+}
+
+function matchThirdPartyWaterfallGroup(row, options, groups) {
+	const url = String(row?.url || row?.name || '').trim();
+	const normalizedUrl = normalizeUrl(url, { lowercasePath: false });
+	const hostname = urlHostname(url);
+	const resourceType = String(row?.resource_type || row?.resourceType || row?.initiatorType || 'other').toLowerCase();
+
+	for (const group of groups) {
+		const matchesDomain = group.domains.some((domain) => hostnameMatches(hostname, domain));
+		const matchesUrl = group.urlIncludes.some((needle) => normalizedUrl.includes(needle));
+		const matchesResourceType = group.resourceTypes.length > 0 && group.resourceTypes.includes(resourceType);
+		if (matchesDomain || matchesUrl || matchesResourceType) {
+			return { id: group.id, label: group.label, classification: 'configured' };
+		}
+	}
+
+	const sameOriginHost = urlHostname(options.baseUrl || options.origin || options.sameOrigin || '');
+	if (sameOriginHost && hostnameMatches(hostname, sameOriginHost)) {
+		return { id: 'same-origin', label: 'same-origin assets', classification: 'same-origin' };
+	}
+	if (hostname) {
+		return { id: `third-party:${hostname}`, label: hostname, classification: 'third-party' };
+	}
+	return { id: 'unknown', label: 'unknown', classification: 'unknown' };
+}
+
+function finalizeThirdPartyWaterfallGroup(group, topUrlLimit, duplicatePatternLimit) {
+	const topUrls = [...group.urlCounts.entries()]
+		.map(([url, count]) => ({
+			url,
+			count,
+			transferSizeBytes: group.urlTransferSizeBytes.get(url) || 0,
+		}))
+		.sort((a, b) => b.transferSizeBytes - a.transferSizeBytes || b.count - a.count || a.url.localeCompare(b.url))
+		.slice(0, topUrlLimit);
+	const duplicateUrlPatterns = [...group.patternCounts.entries()]
+		.filter(([, count]) => count > 1)
+		.map(([pattern, count]) => ({ pattern, count }))
+		.sort((a, b) => b.count - a.count || a.pattern.localeCompare(b.pattern))
+		.slice(0, duplicatePatternLimit);
+	return {
+		id: group.id,
+		label: group.label,
+		classification: group.classification,
+		requestCount: group.requestCount,
+		responseCount: group.responseCount,
+		totalCount: group.totalCount,
+		transferSizeBytes: group.transferSizeBytes,
+		responseBodyBytes: group.responseBodyBytes,
+		resourceTypes: group.resourceTypes,
+		topUrls,
+		duplicateUrlPatterns,
+	};
+}
+
+function flattenThirdPartyWaterfallMetrics(summary) {
+	const metrics = {
+		browser_network_group_count: summary.groups.length,
+		browser_network_third_party_group_count: summary.thirdPartyGroupCount,
+		browser_network_third_party_request_count: summary.thirdPartyRequestCount,
+		browser_network_third_party_response_count: summary.thirdPartyResponseCount,
+		browser_network_third_party_transfer_size_bytes: summary.thirdPartyTransferSizeBytes,
+	};
+	for (const group of summary.groups) {
+		const prefix = `browser_network_${browserMetricName(group.id.replace(/^third-party:/, 'third_party_'))}`;
+		metrics[`${prefix}_request_count`] = group.requestCount;
+		metrics[`${prefix}_response_count`] = group.responseCount;
+		metrics[`${prefix}_transfer_size_bytes`] = group.transferSizeBytes;
+	}
+	return metrics;
+}
+
+function summarizeThirdPartyWaterfall(rows, options = {}) {
+	const groups = normalizeThirdPartyWaterfallGroups(options.groups || options.vendorGroups || options.waterfallGroups);
+	const topUrlLimit = Number(options.topUrlLimit ?? 10);
+	const duplicatePatternLimit = Number(options.duplicatePatternLimit ?? 10);
+	const grouped = new Map();
+	const normalizedRows = Array.isArray(rows) ? rows : [];
+
+	for (const row of normalizedRows) {
+		const url = String(row?.url || row?.name || '').trim();
+		if (!url) {
+			continue;
+		}
+		const match = matchThirdPartyWaterfallGroup(row, options, groups);
+		if (!grouped.has(match.id)) {
+			grouped.set(match.id, createThirdPartyWaterfallGroup(match.id, match.label, match.classification));
+		}
+		const group = grouped.get(match.id);
+		const transferSizeBytes = transferSizeForNetworkRow(row);
+		const responseBodyBytes = responseSizeForNetworkRow(row);
+		const resourceType = String(row?.resource_type || row?.resourceType || row?.initiatorType || 'other').toLowerCase();
+
+		group.totalCount += 1;
+		group.requestCount += isRequestNetworkRow(row) ? 1 : 0;
+		group.responseCount += isResponseNetworkRow(row) ? 1 : 0;
+		group.transferSizeBytes += transferSizeBytes;
+		group.responseBodyBytes += responseBodyBytes;
+		group.resourceTypes[resourceType] = (group.resourceTypes[resourceType] || 0) + 1;
+		group.urlCounts.set(url, (group.urlCounts.get(url) || 0) + 1);
+		group.urlTransferSizeBytes.set(url, (group.urlTransferSizeBytes.get(url) || 0) + transferSizeBytes);
+		const pattern = normalizeNetworkUrlPattern(url);
+		group.patternCounts.set(pattern, (group.patternCounts.get(pattern) || 0) + 1);
+	}
+
+	const finalizedGroups = [...grouped.values()]
+		.map((group) => finalizeThirdPartyWaterfallGroup(group, topUrlLimit, duplicatePatternLimit))
+		.sort((a, b) => b.transferSizeBytes - a.transferSizeBytes || b.totalCount - a.totalCount || a.label.localeCompare(b.label));
+	const firstPartyGroupIds = new Set(['same-origin', 'wordpress-assets', 'woocommerce-store-api', 'unknown']);
+	const thirdPartyGroups = finalizedGroups.filter((group) => !firstPartyGroupIds.has(group.id));
+	const summary = {
+		schema: 'homeboy/third-party-waterfall/v1',
+		baseUrl: options.baseUrl || options.origin || options.sameOrigin || '',
+		requestCount: finalizedGroups.reduce((sum, group) => sum + group.requestCount, 0),
+		responseCount: finalizedGroups.reduce((sum, group) => sum + group.responseCount, 0),
+		totalCount: finalizedGroups.reduce((sum, group) => sum + group.totalCount, 0),
+		transferSizeBytes: finalizedGroups.reduce((sum, group) => sum + group.transferSizeBytes, 0),
+		thirdPartyGroupCount: thirdPartyGroups.length,
+		thirdPartyRequestCount: thirdPartyGroups.reduce((sum, group) => sum + group.requestCount, 0),
+		thirdPartyResponseCount: thirdPartyGroups.reduce((sum, group) => sum + group.responseCount, 0),
+		thirdPartyTransferSizeBytes: thirdPartyGroups.reduce((sum, group) => sum + group.transferSizeBytes, 0),
+		groups: finalizedGroups,
+	};
+	summary.metrics = flattenThirdPartyWaterfallMetrics(summary);
+	return summary;
 }
 
 function resourceFamily(url) {
@@ -2079,6 +2312,10 @@ function normalizeWpCodeboxNetworkRecord(row, summary = {}) {
 		initiatorType: row?.resourceType,
 		resourceType: row?.resourceType,
 		responseContentType: row?.contentType,
+		transferSize: transferSizeForNetworkRow(row),
+		encodedBodySize: row?.encodedBodySize || row?.encoded_body_size || 0,
+		decodedBodySize: row?.decodedBodySize || row?.decoded_body_size || 0,
+		responseBodyBytes: responseSizeForNetworkRow(row),
 		startTime: startMs,
 		responseEnd: startMs,
 		duration: 0,
@@ -2139,6 +2376,12 @@ function createWordPressPageProfileFromWpCodeboxArtifacts(input, spec) {
 	const url = summary.finalUrl || summary.requestedUrl || actionSummary.finalUrl || actionSummary.requestedUrl || resolveWordPressUrl(input.baseUrl || summary.requestedUrl || 'http://example.test/', spec.url);
 	const readyMs = round(summary.durationMs || elapsedMs(summary.startedAt, summary.finishedAt));
 	const networkRows = artifactData.network.map((row) => normalizeWpCodeboxNetworkRecord(row, summary));
+	const thirdPartyWaterfall = summarizeThirdPartyWaterfall(artifactData.network, {
+		baseUrl: input.baseUrl || summary.finalUrl || summary.requestedUrl || url,
+		groups: input.thirdPartyWaterfallGroups || input.vendorGroups || spec.thirdPartyWaterfallGroups || spec.vendorGroups,
+		topUrlLimit: input.thirdPartyWaterfallTopUrlLimit || spec.thirdPartyWaterfallTopUrlLimit,
+		duplicatePatternLimit: input.thirdPartyWaterfallDuplicatePatternLimit || spec.thirdPartyWaterfallDuplicatePatternLimit,
+	});
 	const resourceSummary = summarizeResourceTimings(networkRows);
 	const restPreloads = [
 		...normalizeRestPreloadList(input.preloadedRestPaths),
@@ -2186,8 +2429,19 @@ function createWordPressPageProfileFromWpCodeboxArtifacts(input, spec) {
 			...(spec.budgets || {}),
 		},
 		correlation,
-		browserMetrics: artifactData.parsed.metrics,
-		browserArtifacts: artifactData.parsed.artifacts,
+		browserMetrics: {
+			...(artifactData.parsed.metrics || {}),
+			...thirdPartyWaterfall.metrics,
+		},
+		browserArtifacts: {
+			...(artifactData.parsed.artifacts || {}),
+			thirdPartyWaterfall: {
+				schema: thirdPartyWaterfall.schema,
+				kind: 'json',
+				inline: thirdPartyWaterfall,
+			},
+		},
+		thirdPartyWaterfall,
 		wpCodebox: {
 			artifactBacked: true,
 			browserDirectory: artifactData.browserDirectory,
@@ -3146,6 +3400,7 @@ async function profileWordPressPages(input) {
 module.exports = {
 	DEFAULT_REST_OBSERVATION_MS,
 	WORDPRESS_RESOURCE_INCLUDE,
+	DEFAULT_THIRD_PARTY_WATERFALL_GROUPS,
 	classifyResourceUrl,
 	classifyWordPressRestPreloadOpportunities,
 	compareWordPressRestNetworkWaterfalls,
@@ -3178,6 +3433,7 @@ module.exports = {
 	resolveWordPressUrl,
 	runBrowserActions,
 	summarizeWordPressAdminPageProfile,
+	summarizeThirdPartyWaterfall,
 	summarizeWordPressRestNetworkRows,
 	summarizeWordPressRestWaterfall,
 	summarizeResourceTimings,

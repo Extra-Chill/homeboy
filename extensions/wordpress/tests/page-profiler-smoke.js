@@ -36,6 +36,7 @@ const {
 	resourceFamily,
 	resolveWordPressUrl,
 	runBrowserActions,
+	summarizeThirdPartyWaterfall,
 	summarizeWordPressAdminPageProfile,
 	summarizeWordPressRestNetworkRows,
 	summarizeWordPressRestWaterfall,
@@ -670,11 +671,28 @@ process.stdout.write(JSON.stringify(output) + '\\n');
 			},
 			peak: { resources: 3, transferSizeBytes: 4096, longTasks: 1, longTaskDurationMs: 55 },
 		});
-		writeJsonl(path.join(browserDirectory, 'network.jsonl'), [
-			{ type: 'response', url: 'https://example.test/wp-admin/site-editor.php', method: 'GET', resourceType: 'document', status: 200, timestamp: '2026-01-01T00:00:00.100Z' },
-			{ type: 'response', url: 'https://example.test/wp-json/wp/v2/templates?context=edit', method: 'GET', resourceType: 'fetch', status: 200, contentType: 'application/json', timestamp: '2026-01-01T00:00:00.650Z' },
-			{ type: 'response', url: 'https://example.test/wp-content/themes/theme/style.css', method: 'GET', resourceType: 'stylesheet', status: 200, timestamp: '2026-01-01T00:00:00.300Z' },
-		]);
+		const browserNetworkRows = [
+			{ type: 'response', url: 'https://example.test/wp-admin/site-editor.php', method: 'GET', resourceType: 'document', status: 200, transferSize: 800, timestamp: '2026-01-01T00:00:00.100Z' },
+			{ type: 'response', url: 'https://example.test/wp-json/wp/v2/templates?context=edit', method: 'GET', resourceType: 'fetch', status: 200, transferSize: 600, contentType: 'application/json', timestamp: '2026-01-01T00:00:00.650Z' },
+			{ type: 'response', url: 'https://example.test/wp-json/wc/store/cart', method: 'GET', resourceType: 'fetch', status: 200, transferSize: 1200, contentType: 'application/json', timestamp: '2026-01-01T00:00:00.700Z' },
+			{ type: 'response', url: 'https://example.test/wp-content/themes/theme/style.css', method: 'GET', resourceType: 'stylesheet', status: 200, transferSize: 300, timestamp: '2026-01-01T00:00:00.300Z' },
+			{ type: 'request', url: 'https://js.stripe.com/v3/', method: 'GET', resourceType: 'script', timestamp: '2026-01-01T00:00:00.350Z' },
+			{ type: 'response', url: 'https://js.stripe.com/v3/', method: 'GET', resourceType: 'script', status: 200, transferSize: 5000, timestamp: '2026-01-01T00:00:00.450Z' },
+			{ type: 'response', url: 'https://merchant-ui-api.stripe.com/elements/wallet-config', method: 'POST', resourceType: 'fetch', status: 200, transferSize: 2100, timestamp: '2026-01-01T00:00:00.500Z' },
+			{ type: 'response', url: 'https://r.stripe.com/b', method: 'POST', resourceType: 'fetch', status: 200, transferSize: 700, timestamp: '2026-01-01T00:00:00.550Z' },
+			{ type: 'response', url: 'https://fonts.gstatic.com/s/inter.woff2', method: 'GET', resourceType: 'font', status: 200, transferSize: 4000, timestamp: '2026-01-01T00:00:00.580Z' },
+			{ type: 'response', url: 'https://cdn.example-cdn.test/widget.js?id=1', method: 'GET', resourceType: 'script', status: 200, transferSize: 1100, timestamp: '2026-01-01T00:00:00.590Z' },
+			{ type: 'response', url: 'https://cdn.example-cdn.test/widget.js?id=2', method: 'GET', resourceType: 'script', status: 200, transferSize: 900, timestamp: '2026-01-01T00:00:00.595Z' },
+		];
+		writeJsonl(path.join(browserDirectory, 'network.jsonl'), browserNetworkRows);
+		const standaloneAttribution = summarizeThirdPartyWaterfall(browserNetworkRows, {
+			baseUrl: 'https://example.test',
+			groups: [
+				{ id: 'payments', label: 'Payments', domains: ['stripe.com', 'stripe.network'] },
+			],
+		});
+		assert.equal(standaloneAttribution.groups.find((group) => group.id === 'payments').responseCount, 3);
+		assert.equal(standaloneAttribution.groups.find((group) => group.id === 'same-origin').responseCount, 4);
 		writeJson(path.join(browserDirectory, 'action-summary.json'), {
 			schema: 'wp-codebox/browser-actions/v1',
 			startedAt: '2026-01-01T00:00:01.250Z',
@@ -698,10 +716,18 @@ process.stdout.write(JSON.stringify(output) + '\\n');
 		assert.equal(artifactProfile.wpCodebox.artifactBacked, true);
 		assert.equal(artifactProfile.status, 200);
 		assert.equal(artifactProfile.readyMs, 1250);
-		assert.equal(artifactProfile.resources.restCount, 1);
-		assert.equal(artifactProfile.restWaterfall.counts.network, 1);
+		assert.equal(artifactProfile.resources.restCount, 2);
+		assert.equal(artifactProfile.restWaterfall.counts.network, 2);
 		assert.equal(artifactProfile.interactions.actions[0].status, 'passed');
 		assert.equal(artifactProfile.browserMetrics.browser_resource_count, 3);
+		assert.equal(artifactProfile.thirdPartyWaterfall.groups.find((group) => group.id === 'stripe').responseCount, 3);
+		assert.equal(artifactProfile.thirdPartyWaterfall.groups.find((group) => group.id === 'stripe').requestCount, 1);
+		assert.equal(artifactProfile.thirdPartyWaterfall.groups.find((group) => group.id === 'stripe').transferSizeBytes, 7800);
+		assert.equal(artifactProfile.thirdPartyWaterfall.groups.find((group) => group.id === 'woocommerce-store-api').responseCount, 1);
+		assert.equal(artifactProfile.thirdPartyWaterfall.groups.find((group) => group.id === 'google').resourceTypes.font, 1);
+		assert.equal(artifactProfile.thirdPartyWaterfall.groups.find((group) => group.id === 'third-party:cdn.example-cdn.test').duplicateUrlPatterns[0].count, 2);
+		assert.equal(artifactProfile.browserMetrics.browser_network_stripe_transfer_size_bytes, 7800);
+		assert.equal(artifactProfile.browserArtifacts.thirdPartyWaterfall.inline.schema, 'homeboy/third-party-waterfall/v1');
 		assert.match(artifactProfile.wpCodebox.upstreamGaps[0], /network\.jsonl/);
 	} finally {
 		fs.rmSync(artifactRoot, { recursive: true, force: true });
