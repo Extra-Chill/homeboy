@@ -576,6 +576,8 @@ fn trace_run_evidence_report_includes_refs_assertions_and_safe_artifacts() {
                     path: "/Users/chubes/private/trace.zip".to_string(),
                 },
             ],
+            toolchain: None,
+            components: None,
         }),
         span_summaries: vec![extension_trace::TraceSpanSummaryOutput {
             id: "boot_to_ready".to_string(),
@@ -603,6 +605,8 @@ fn trace_run_evidence_report_includes_refs_assertions_and_safe_artifacts() {
         baseline_comparison: None,
         hints: None,
         profile: None,
+        toolchain: None,
+        components: None,
     };
 
     let report = render_trace_run_evidence_markdown(&run);
@@ -710,6 +714,16 @@ fn trace_compare_evidence_report_redacts_local_paths_and_reports_assertion_statu
         command: "trace.compare.spans",
         before_path: "/Users/chubes/private/before.json".to_string(),
         after_path: "artifacts/after.json".to_string(),
+        before_target: None,
+        after_target: None,
+        before_git_sha: None,
+        after_git_sha: None,
+        before_status: None,
+        after_status: None,
+        before_exit_code: None,
+        after_exit_code: None,
+        output_dir: None,
+        summary_path: None,
         before_component: Some("studio".to_string()),
         after_component: Some("studio".to_string()),
         before_scenario_id: Some("create-site".to_string()),

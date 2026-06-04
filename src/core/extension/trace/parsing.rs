@@ -1,5 +1,6 @@
 //! Trace runner JSON output parsing.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -65,6 +66,60 @@ pub struct TraceResults {
     pub temporal_assertions: Vec<TraceTemporalAssertionDefinition>,
     #[serde(default)]
     pub artifacts: Vec<TraceArtifact>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub toolchain: Option<TraceToolchainProvenance>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub components: Option<TraceComponentsProvenance>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TraceToolchainProvenance {
+    pub canonical: bool,
+    pub mode: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reasons: Vec<String>,
+    pub homeboy: TraceGitProvenance,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wp_codebox: Option<TraceGitProvenance>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub runtime_assets: BTreeMap<String, TraceRuntimeAssetProvenance>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TraceComponentsProvenance {
+    pub target: TraceGitProvenance,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependencies: Vec<TraceGitProvenance>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TraceGitProvenance {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dirty: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TraceRuntimeAssetProvenance {
+    pub present: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
