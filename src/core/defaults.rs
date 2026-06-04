@@ -9,7 +9,7 @@ mod builtins;
 
 pub(crate) use builtins::deploy_generated_build_dir;
 
-/// Root configuration structure for homeboy.json
+/// Root configuration structure for the product config file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HomeboyConfig {
     #[serde(default)]
@@ -23,9 +23,8 @@ pub struct HomeboyConfig {
 
     /// Directory where persisted run artifacts are copied.
     ///
-    /// Defaults to the machine-local Homeboy data directory under
-    /// `artifacts/`. Override with `homeboy --artifact-root <path>`,
-    /// `HOMEBOY_ARTIFACT_ROOT`, or `homeboy config set /artifact_root`.
+    /// Defaults to the machine-local product data directory under
+    /// `artifacts/`. Override with CLI, environment, or config.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact_root: Option<String>,
 
@@ -64,7 +63,7 @@ pub struct TriageConfig {
     pub priority_labels: Option<Vec<String>>,
 }
 
-/// All configurable defaults that can be overridden via homeboy.json
+/// All configurable defaults that can be overridden via the product config file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Defaults {
     #[serde(default = "builtins::default_install_methods")]
@@ -156,12 +155,12 @@ pub struct PermissionModes {
 // =============================================================================
 
 /// Load defaults, merging file config with built-in defaults.
-/// If homeboy.json is missing or invalid, silently returns built-in defaults.
+/// If the product config file is missing or invalid, silently returns built-in defaults.
 pub fn load_defaults() -> Defaults {
     load_config().defaults
 }
 
-/// Load the full homeboy.json config, falling back to defaults on any error.
+/// Load the full product config, falling back to defaults on any error.
 /// Warns to stderr if the file exists but fails to parse, so the user knows
 /// their config is being ignored rather than silently resetting to defaults.
 pub fn load_config() -> HomeboyConfig {
@@ -172,7 +171,8 @@ pub fn load_config() -> HomeboyConfig {
             if config_exists() {
                 log_status!(
                     "config",
-                    "Warning: failed to load homeboy.json ({}), using defaults",
+                    "Warning: failed to load {} ({}), using defaults",
+                    crate::core::product_identity::PRODUCT_IDENTITY.config_filename,
                     err.message
                 );
             }
@@ -181,13 +181,16 @@ pub fn load_config() -> HomeboyConfig {
     }
 }
 
-/// Attempt to load config from homeboy.json file.
+/// Attempt to load config from the product config file.
 fn load_config_from_file() -> crate::core::Result<HomeboyConfig> {
     let path = paths::homeboy_json()?;
 
     if !path.exists() {
         return Err(crate::core::Error::internal_io(
-            "homeboy.json not found",
+            format!(
+                "{} not found",
+                crate::core::product_identity::PRODUCT_IDENTITY.config_filename
+            ),
             Some(path.display().to_string()),
         ));
     }
@@ -197,7 +200,10 @@ fn load_config_from_file() -> crate::core::Result<HomeboyConfig> {
     let config: HomeboyConfig = serde_json::from_str(&content).map_err(|e| {
         crate::core::Error::validation_invalid_json(
             e,
-            Some("parse homeboy.json".to_string()),
+            Some(format!(
+                "parse {}",
+                crate::core::product_identity::PRODUCT_IDENTITY.config_filename
+            )),
             Some(content.chars().take(200).collect::<String>()),
         )
     })?;
@@ -205,7 +211,7 @@ fn load_config_from_file() -> crate::core::Result<HomeboyConfig> {
     Ok(config)
 }
 
-/// Save config to homeboy.json file (creates if missing).
+/// Save config to the product config file (creates if missing).
 pub fn save_config(config: &HomeboyConfig) -> crate::core::Result<()> {
     let path = paths::homeboy_json()?;
 
@@ -226,12 +232,12 @@ pub fn save_config(config: &HomeboyConfig) -> crate::core::Result<()> {
     Ok(())
 }
 
-/// Check if homeboy.json file exists
+/// Check if the product config file exists.
 pub fn config_exists() -> bool {
     paths::homeboy_json().map(|p| p.exists()).unwrap_or(false)
 }
 
-/// Delete homeboy.json file (reset to defaults)
+/// Delete the product config file (reset to defaults).
 pub fn reset_config() -> crate::core::Result<bool> {
     let path = paths::homeboy_json()?;
 
@@ -248,7 +254,7 @@ pub fn reset_config() -> crate::core::Result<bool> {
     }
 }
 
-/// Get the path to homeboy.json (for display purposes)
+/// Get the product config path (for display purposes).
 pub fn config_path() -> crate::core::Result<String> {
     Ok(paths::homeboy_json()?.display().to_string())
 }

@@ -7,14 +7,15 @@ use homeboy::core::extension::trace as extension_trace;
 use homeboy::core::extension::trace::TraceCommandOutput;
 use homeboy::core::rig;
 
+use super::aggregate::{aggregate_span, TraceAggregateSpanSample};
 use super::output::{
-    aggregate_span, classification_summaries, compare_trace_aggregates_with_focus,
-    TraceAggregateInput, TraceAggregateRunInput, TraceAggregateSpanInput, TraceAggregateSpanSample,
-    TraceOverlayInput,
+    classification_summaries, compare_trace_aggregates_with_focus, TraceAggregateInput,
+    TraceAggregateRunInput, TraceAggregateSpanInput, TraceOverlayInput,
 };
+use super::repeat::{focus_aggregate_spans, run_repeat};
 use super::{
-    apply_command_target_component, focus_aggregate_spans, plan_trace_run_order, run_repeat,
-    validate_trace_variants_for_args, TraceArgs, TraceRunPlanEntry, TraceSchedule,
+    apply_command_target_component, plan_trace_run_order, validate_trace_variants_for_args,
+    TraceArgs, TraceRunPlanEntry, TraceSchedule,
 };
 use crate::commands::CmdResult;
 
