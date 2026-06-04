@@ -59,20 +59,18 @@ try {
   assert.deepEqual(plan.task_requests[0].provider_plugin_paths, ['/plugins/ai-provider-for-opencode']);
   assert.deepEqual(plan.task_requests[0].secret_env, ['OPENCODE_API_KEY']);
 
-  const fixtureWpCodebox = path.join(root, 'fixture-wp-codebox.cjs');
-  fs.writeFileSync(fixtureWpCodebox, `#!/usr/bin/env node
+  const fixtureWpCli = path.join(root, 'fixture-wp-cli.cjs');
+  fs.writeFileSync(fixtureWpCli, `#!/usr/bin/env node
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const recipeIndex = process.argv.indexOf('--recipe');
-if (process.argv[2] !== 'recipe-run' || recipeIndex < 0) {
+const inputArg = process.argv.find((arg) => arg.startsWith('--input-file='));
+const inputPath = inputArg ? inputArg.slice('--input-file='.length) : '';
+if (process.argv[2] !== 'agent-task-run' || !inputPath) {
   process.exit(2);
 }
-const artifactsIndex = process.argv.indexOf('--artifacts');
-const artifactsRoot = artifactsIndex >= 0 ? process.argv[artifactsIndex + 1] : '';
-const recipe = JSON.parse(fs.readFileSync(process.argv[recipeIndex + 1], 'utf8'));
-const stepArgs = recipe.workflow.steps[0].args;
-const task = JSON.parse(stepArgs.find((arg) => arg.startsWith('task=')).slice('task='.length));
+const task = JSON.parse(fs.readFileSync(inputPath, 'utf8'));
+const artifactsRoot = task.artifacts_path || '';
 const sessionId = task.sandbox_session_id;
 if (process.env.FIXTURE_HANG_GROUP === task.group_key) {
   if (artifactsRoot) {
@@ -155,17 +153,21 @@ if (task.group_key === 'PHPCS Formatting/Auto Fix!') {
   ].join('\\n'));
 }
 process.stdout.write(JSON.stringify({
+  success: true,
+  schema: 'wp-codebox/agent-task-run/v1',
   session: { id: sessionId },
   artifacts: {
     id: 'artifact-' + sessionId,
-    directory: artifactDirectory
+    directory: artifactDirectory,
+    path: artifactDirectory
   },
+  agent_result: { status: 'completed' },
   outcome: {
     pr_url: 'https://github.com/Extra-Chill/homeboy-extensions/pull/' + (task.group_key === 'PHPCS Formatting/Auto Fix!' ? '777' : '778')
   }
 }));
 `);
-  fs.chmodSync(fixtureWpCodebox, 0o755);
+  fs.chmodSync(fixtureWpCli, 0o755);
 
   const writeOutputDir = path.join(root, 'fanout-write');
   const writeCommand = {
@@ -175,7 +177,7 @@ process.stdout.write(JSON.stringify({
     settings: {
       ...command.settings,
       wp_codebox_output_dir: writeOutputDir,
-      wp_codebox_bin: fixtureWpCodebox,
+      wp_codebox_bin: fixtureWpCli,
       wp_codebox_agents_api_path: path.join(root, 'agents-api'),
       wp_codebox_data_machine_path: path.join(root, 'data-machine'),
       wp_codebox_data_machine_code_path: path.join(root, 'data-machine-code'),

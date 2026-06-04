@@ -21,14 +21,14 @@ process.stdout.write(JSON.stringify({
     id: 'artifact-' + request.orchestrator.agent_task_id,
     kind: 'matrix-cell',
     path: '/artifacts/' + request.orchestrator.agent_task_id + '.json',
-    metadata: { matrix: request.task.inputs.matrix }
+    metadata: { matrix: request.context.matrix }
   }],
   evidence_refs: [{
     kind: 'matrix-cell',
     uri: 'homeboy://matrix/' + request.orchestrator.agent_task_id,
     label: 'Matrix cell evidence'
   }],
-  metadata: { matrix: request.task.inputs.matrix }
+  metadata: { matrix: request.context.matrix }
 }));
 `);
   fs.chmodSync(fixture, 0o755);
@@ -98,8 +98,8 @@ try {
 
   const captured = fs.readFileSync(capture, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
   assert.equal(captured.length, 4);
-  assert.equal(captured[0].schema, 'homeboy/wp-codebox-task-request/v1');
-  assert.deepEqual(captured[2].task.inputs.matrix, { model: 'claude', prompt: 'site-a' });
+  assert.equal(captured[0].schema, 'wp-codebox/task-input/v1');
+  assert.deepEqual(captured[2].context.matrix, { model: 'claude', prompt: 'site-a' });
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
 }

@@ -18,7 +18,7 @@ function writeFixtureTaskRunner(root) {
   fs.writeFileSync(fixture, `#!/usr/bin/env node
 'use strict';
 const fs = require('node:fs');
-const request = JSON.parse(fs.readFileSync(0, 'utf8'));
+  const request = JSON.parse(fs.readFileSync(0, 'utf8'));
 fs.writeFileSync(${JSON.stringify(capture)}, JSON.stringify({ argv: process.argv.slice(2), request }, null, 2));
 process.stdout.write(JSON.stringify({
   success: true,
@@ -54,36 +54,53 @@ process.exit(1);
 }
 
 function writeFakeWpCodebox(root) {
-  const fixture = path.join(root, 'fake-wp-codebox.cjs');
-  const capture = path.join(root, 'fake-wp-codebox-capture.json');
+  const fixture = path.join(root, 'fake-wp-cli.cjs');
+  const capture = path.join(root, 'fake-wp-cli-capture.json');
   fs.writeFileSync(fixture, `#!/usr/bin/env node
 'use strict';
 const fs = require('node:fs');
-const recipePath = process.argv[process.argv.indexOf('--recipe') + 1];
-const artifacts = process.argv[process.argv.indexOf('--artifacts') + 1];
-const recipe = JSON.parse(fs.readFileSync(recipePath, 'utf8'));
-const codeFileArg = recipe.workflow.steps[0].args.find((arg) => arg.startsWith('code-file=')) || '';
-const codeFilePath = codeFileArg.slice('code-file='.length);
-if (codeFilePath) {
-  fs.readFileSync(codeFilePath, 'utf8');
-}
+const inputArg = process.argv.find((arg) => arg.startsWith('--input-file='));
+const inputPath = inputArg ? inputArg.slice('--input-file='.length) : process.argv[process.argv.indexOf('--input-file') + 1];
+const input = JSON.parse(fs.readFileSync(inputPath, 'utf8'));
 const datamachineConfig = JSON.parse(process.env.HOMEBOY_DATAMACHINE_AGENT_CONFIG || '{}');
-const datamachineWorkload = {
-  metrics: { config_present: 1 },
-  metadata: {
-    transcript_artifacts: { json: artifacts + '/transcript.json' },
-    replay_bundle_path: artifacts + '/replay-bundle',
-    engine_data: { static_site_agent: { pr_url: 'https://github.com/chubes4/wp-site-generator/pull/123' } }
-  }
-};
-fs.writeFileSync(${JSON.stringify(capture)}, JSON.stringify({ argv: process.argv.slice(2), recipe, datamachineConfig }, null, 2));
+fs.writeFileSync(${JSON.stringify(capture)}, JSON.stringify({ argv: process.argv.slice(2), input, datamachineConfig }, null, 2));
 process.stdout.write(JSON.stringify({
-  success: false,
-  executions: [{
-    recipeCommand: 'wp-codebox.agent-sandbox-run',
-    stdout: JSON.stringify({ status: 'completed', output: JSON.stringify(datamachineWorkload) })
-  }],
-  artifacts: { id: 'fake-artifact-bundle', directory: artifacts }
+  success: true,
+  schema: 'wp-codebox/agent-task-run/v1',
+  session: {
+    schema: 'wp-codebox/sandbox-session/v1',
+    id: input.sandbox_session_id,
+    status: 'completed',
+    artifacts: { bundle_id: 'fake-artifact-bundle', path: input.artifacts_path, preview_url: 'https://preview.example.test/fake' },
+    orchestrator: input.orchestrator
+  },
+  task_input: input,
+  artifacts: input.artifacts_path,
+  agent_result: {
+    scenarios: [{
+      id: 'datamachine-agent',
+      metadata: {
+        transcript_artifacts: { json: input.artifacts_path + '/transcript.json' },
+        replay_bundle_path: input.artifacts_path + '/replay-bundle',
+        engine_data: { static_site_agent: { pr_url: 'https://github.com/chubes4/wp-site-generator/pull/123' } }
+      }
+    }]
+  },
+  metadata: {
+    datamachine: {
+      bundle: input.datamachine_bundle,
+      workload: {
+        scenarios: [{
+          id: 'datamachine-agent',
+          metadata: {
+            transcript_artifacts: { json: input.artifacts_path + '/transcript.json' },
+            replay_bundle_path: input.artifacts_path + '/replay-bundle',
+            engine_data: { static_site_agent: { pr_url: 'https://github.com/chubes4/wp-site-generator/pull/123' } }
+          }
+        }]
+      }
+    }
+  }
 }));
 `);
   fs.chmodSync(fixture, 0o755);
@@ -167,23 +184,19 @@ assert.deepEqual(provider.request_required_fields, ['schema', 'task_id', 'execut
 assert.deepEqual(provider.outcome_statuses, ['succeeded', 'failed', 'no_op', 'unable_to_remediate', 'timeout', 'provider_error']);
 assert.deepEqual(provider.failure_classifications, ['provider', 'timeout', 'execution_failed']);
 assert.deepEqual(provider.redacted_metadata_keys, ['secret_env_values', 'secretEnvValues', 'secrets']);
-assert.equal(provider.upstream_dependency, 'https://github.com/Automattic/wp-codebox/issues/480');
+assert.equal(provider.status, 'active');
+assert.equal(provider.integration_contract, 'wp-codebox-cli/agent-task-run');
 assert.equal(provider.capabilities.includes('browser_runtime'), true);
 assert.equal(provider.capabilities.includes('workspace_tools'), true);
 assert.equal(provider.capabilities.includes('patch_artifacts'), true);
 assert.equal(provider.capabilities.includes('cleanup_observability'), true);
 assert.equal(provider.capabilities.includes('datamachine_bundle_execution'), true);
-assert.deepEqual(provider.runtime_gap_trackers, [
-  'https://github.com/Automattic/wp-codebox/issues/529',
-  'https://github.com/Automattic/wp-codebox/issues/530',
-  'https://github.com/Automattic/wp-codebox/issues/531',
-  'https://github.com/Automattic/wp-codebox/issues/532',
-]);
+assert.deepEqual(provider.runtime_gap_trackers, []);
 
 const codeboxRequest = codeboxTaskRequestFromAgentTaskRequest(request);
-assert.equal(codeboxRequest.schema, 'homeboy/wp-codebox-task-request/v1');
+assert.equal(codeboxRequest.schema, 'wp-codebox/task-input/v1');
+assert.equal(codeboxRequest.goal, request.instructions);
 assert.equal(codeboxRequest.sandbox_session_id, 'task-123');
-assert.equal(codeboxRequest.execution_kind, 'sandbox');
 assert.equal(codeboxRequest.provider, 'openai');
 assert.equal(codeboxRequest.model, 'gpt-5.5');
 assert.deepEqual(codeboxRequest.provider_plugin_paths, ['/providers/openai']);
@@ -204,10 +217,9 @@ assert.deepEqual(codeboxRequest.runtime_overlays, [{
 assert.deepEqual(codeboxRequest.secret_env, ['OPENAI_API_KEY']);
 assert.equal(codeboxRequest.max_turns, 8);
 assert.equal(codeboxRequest.task_timeout_seconds, 120);
-assert.equal(codeboxRequest.task.prompt, request.instructions);
-assert.equal(codeboxRequest.task.expected_artifacts[0], 'screenshot');
+assert.equal(codeboxRequest.expected_artifacts[0], 'screenshot');
 assert.equal(codeboxRequest.orchestrator.agent_task_id, 'task-123');
-assert.equal(codeboxRequest.audit_findings[0].id, 'finding-1');
+assert.equal(codeboxRequest.context.audit_findings[0].id, 'finding-1');
 
 const codexAgentRequest = {
   ...request,
@@ -230,7 +242,6 @@ const codexAgentRequest = {
       data_machine_code: '/components/data-machine-code',
       homeboy: '/components/homeboy',
       homeboy_extensions: '/components/homeboy-extensions',
-      wp_cli_bin: '/bin/wp',
       wp_codebox_bin: '/bin/wp-codebox',
       max_turns: 8,
     },
@@ -242,12 +253,11 @@ assert.equal(codexRequest.mode, 'sandbox');
 assert.equal(codexRequest.provider, 'codex');
 assert.equal(codexRequest.model, 'gpt-5.5');
 assert.deepEqual(codexRequest.provider_plugin_paths, ['/components/ai-provider-for-openai']);
-assert.equal(codexRequest.agents_api, '/components/agents-api');
-assert.equal(codexRequest.data_machine, '/components/data-machine');
-assert.equal(codexRequest.data_machine_code, '/components/data-machine-code');
-assert.equal(codexRequest.homeboy, '/components/homeboy');
-assert.equal(codexRequest.homeboy_extensions, '/components/homeboy-extensions');
-assert.equal(codexRequest.wp_cli_bin, '/bin/wp');
+assert.equal(codexRequest.agents_api_path, '/components/agents-api');
+assert.equal(codexRequest.data_machine_path, '/components/data-machine');
+assert.equal(codexRequest.data_machine_code_path, '/components/data-machine-code');
+assert.equal(codexRequest.homeboy_path, '/components/homeboy');
+assert.equal(codexRequest.homeboy_extensions_path, '/components/homeboy-extensions');
 assert.equal(codexRequest.wp_codebox_bin, '/bin/wp-codebox');
 assert.deepEqual(codexRequest.secret_env, [
   'AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN',
@@ -305,7 +315,6 @@ const datamachineBundleRequest = codeboxTaskRequestFromAgentTaskRequest({
     },
   },
 });
-assert.equal(datamachineBundleRequest.execution_kind, 'datamachine_bundle');
 assert.equal(datamachineBundleRequest.datamachine_bundle.bundle_path, '/bundles/static-site-agent');
 assert.equal(datamachineBundleRequest.datamachine_bundle.agent_slug, 'static-site-agent');
 assert.equal(datamachineBundleRequest.datamachine_bundle.pipeline_slug, 'static-site-pipeline');
@@ -314,7 +323,7 @@ assert.deepEqual(datamachineBundleRequest.datamachine_bundle.pipeline_step_patch
 assert.deepEqual(datamachineBundleRequest.datamachine_bundle.flow_step_patches, [{ slug: 'run-pipeline', config: { step_budget: 12 } }]);
 assert.deepEqual(datamachineBundleRequest.datamachine_bundle.tool_recorders, [{ tool: 'github/create-pull-request', engine_data_path: 'static_site_agent.pr_url' }]);
 assert.deepEqual(datamachineBundleRequest.datamachine_bundle.engine_data_outputs, { static_site_pr_url: 'metadata.engine_data.static_site_agent.pr_url' });
-assert.equal(datamachineBundleRequest.homeboy_extensions, '/components/homeboy-extensions/wordpress');
+assert.equal(datamachineBundleRequest.homeboy_extensions_path, '/components/homeboy-extensions/wordpress');
 
 const outcome = agentTaskOutcomeFromCodeboxResult(request, {
   success: false,
@@ -437,7 +446,7 @@ assert.equal(canaryRunOutcome.metadata.decision_evidence.runtime_status, 'destro
 assert.equal(canaryRunOutcome.metadata.decision_evidence.cleanup_observed, 'runtime_destroyed');
 assert.equal(canaryRunOutcome.metadata.decision_evidence.no_op_reason, 'no_file_changes');
 assert.equal(canaryRunOutcome.metadata.decision_evidence.patch_bytes, 0);
-assert.equal(canaryRunOutcome.metadata.decision_evidence.runtime_gap_trackers.includes('https://github.com/Automattic/wp-codebox/issues/529'), true);
+assert.deepEqual(canaryRunOutcome.metadata.decision_evidence.runtime_gap_trackers, []);
 
 const codexOutcome = agentTaskOutcomeFromCodeboxResult(request, {
   success: true,
@@ -499,7 +508,7 @@ try {
   assert.equal(cliOutcome.evidence_refs[0].uri, 'https://example.test/preview');
 
   const captured = JSON.parse(fs.readFileSync(capture, 'utf8'));
-  assert.equal(captured.request.schema, 'homeboy/wp-codebox-task-request/v1');
+  assert.equal(captured.request.schema, 'wp-codebox/task-input/v1');
   assert.equal(captured.request.orchestrator.agent_task_id, 'task-123');
   assert.equal(captured.request.runtime_overlays[0].type, 'bundled-library');
 
@@ -519,11 +528,11 @@ try {
   assert.equal(capturedCodex.request.provider, 'codex');
   assert.equal(capturedCodex.request.model, 'gpt-5.5');
   assert.deepEqual(capturedCodex.request.provider_plugin_paths, ['/components/ai-provider-for-openai']);
-  assert.equal(capturedCodex.request.agents_api, '/components/agents-api');
-  assert.equal(capturedCodex.request.data_machine, '/components/data-machine');
-  assert.equal(capturedCodex.request.data_machine_code, '/components/data-machine-code');
-  assert.equal(capturedCodex.request.homeboy, '/components/homeboy');
-  assert.equal(capturedCodex.request.homeboy_extensions, '/components/homeboy-extensions');
+  assert.equal(capturedCodex.request.agents_api_path, '/components/agents-api');
+  assert.equal(capturedCodex.request.data_machine_path, '/components/data-machine');
+  assert.equal(capturedCodex.request.data_machine_code_path, '/components/data-machine-code');
+  assert.equal(capturedCodex.request.homeboy_path, '/components/homeboy');
+  assert.equal(capturedCodex.request.homeboy_extensions_path, '/components/homeboy-extensions');
   assert.deepEqual(capturedCodex.request.secret_env, [
     'AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN',
     'AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN',
@@ -543,7 +552,6 @@ try {
       backend: 'codebox',
       model: 'gpt-5.5',
       config: {
-        execution_kind: 'datamachine_bundle',
         provider: 'openai',
         provider_plugin_paths: ['/components/ai-provider-for-openai'],
         agents_api: '/components/agents-api',
@@ -572,15 +580,12 @@ try {
   assert.equal(datamachineCliOutcome.artifacts.some((artifact) => artifact.kind === 'datamachine-transcript'), true);
   assert.equal(datamachineCliOutcome.evidence_refs.some((ref) => ref.uri === 'https://github.com/chubes4/wp-site-generator/pull/123'), true);
   const capturedDatamachineRun = JSON.parse(fs.readFileSync(fakeWpCodeboxCapture, 'utf8'));
-  assert.equal(capturedDatamachineRun.recipe.workflow.steps[0].command, 'wp-codebox.agent-sandbox-run');
-  assert.equal(capturedDatamachineRun.recipe.workflow.steps[0].args.includes(`code-file=${path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-datamachine-agent-workload-wrapper.php')}`), true);
-  assert.equal(capturedDatamachineRun.recipe.inputs.mounts.some((mount) => mount.target === '/homeboy-extension'), true);
-  assert.equal(capturedDatamachineRun.recipe.inputs.mounts.some((mount) => mount.target === '/wordpress/wp-content/plugins/static-site-agent'), true);
-  assert.equal(capturedDatamachineRun.recipe.inputs.secretEnv.includes('HOMEBOY_DATAMACHINE_AGENT_CONFIG'), true);
-  assert.equal(capturedDatamachineRun.datamachineConfig.bundle_path, '/wordpress/wp-content/plugins/static-site-agent');
-  assert.equal(capturedDatamachineRun.datamachineConfig.agent_slug, 'static-site-agent');
-  assert.equal(capturedDatamachineRun.datamachineConfig.pipeline_slug, 'static-site-pipeline');
-  assert.deepEqual(capturedDatamachineRun.datamachineConfig.tool_recorders, [{ tool: 'github/create-pull-request', engine_data_path: 'static_site_agent.pr_url' }]);
+  assert.equal(capturedDatamachineRun.argv[0], 'agent-task-run');
+  assert.equal(capturedDatamachineRun.input.schema, 'wp-codebox/task-input/v1');
+  assert.equal(capturedDatamachineRun.input.datamachine_bundle.bundle_path, bundle);
+  assert.equal(capturedDatamachineRun.input.datamachine_bundle.agent_slug, 'static-site-agent');
+  assert.equal(capturedDatamachineRun.input.datamachine_bundle.pipeline_slug, 'static-site-pipeline');
+  assert.deepEqual(capturedDatamachineRun.input.datamachine_bundle.tool_recorders, [{ tool: 'github/create-pull-request', engine_data_path: 'static_site_agent.pr_url' }]);
 
   const contractResult = spawnSync(process.execPath, [
     path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs'),
