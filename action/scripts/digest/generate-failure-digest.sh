@@ -15,6 +15,43 @@ COMMANDS_CSV="${COMMANDS:-}"
 AUTOFIX_ENABLED="${AUTOFIX_ENABLED:-false}"
 AUTOFIX_ATTEMPTED="${AUTOFIX_ATTEMPTED:-false}"
 AUTOFIX_COMMANDS="${AUTOFIX_COMMANDS:-}"
+COMPONENT_NAME="${COMPONENT_NAME:-${HOMEBOY_COMPONENT_ID:-}}"
+
+append_local_reproduction_commands() {
+  local digest_file="$1"
+  local failed_commands
+  local command
+  local scope_args=""
+
+  failed_commands="$(jq -r '
+    to_entries[]
+    | select(.value == "fail" and (.key == "lint" or .key == "test"))
+    | .key
+  ' <<< "${RESULTS_JSON}" 2>/dev/null || true)"
+
+  [ -n "${failed_commands}" ] || return 0
+
+  if [ -z "${COMPONENT_NAME}" ]; then
+    return 0
+  fi
+
+  if [ "${SCOPE_MODE:-full}" = "changed" ] && [ -n "${SCOPE_BASE_REF:-}" ]; then
+    scope_args=" --changed-since ${SCOPE_BASE_REF}"
+  fi
+
+  {
+    printf '\n### Local reproduction\n'
+    printf -- '- Scope context: `%s`\n' "${SCOPE_CONTEXT:-unknown}"
+    printf -- '- Scope mode: `%s`\n' "${SCOPE_MODE:-full}"
+    printf -- '- Scope base ref: `%s`\n' "${SCOPE_BASE_REF:-none}"
+    printf '\n```bash\n'
+    while IFS= read -r command; do
+      [ -n "${command}" ] || continue
+      printf 'homeboy %s %s --path .%s\n' "${command}" "${COMPONENT_NAME}" "${scope_args}"
+    done <<< "${failed_commands}"
+    printf '```\n'
+  } >> "${digest_file}"
+}
 
 if [ -z "${OUTPUT_DIR}" ] || [ ! -d "${OUTPUT_DIR}" ]; then
   echo "No output directory available; skipping failure digest"
@@ -72,6 +109,8 @@ if [ ! -s "${DIGEST_FILE}" ]; then
   rm -f "${DIGEST_FILE}"
   exit 0
 fi
+
+append_local_reproduction_commands "${DIGEST_FILE}"
 
 if [ -n "${GITHUB_ENV:-}" ]; then
   echo "HOMEBOY_FAILURE_DIGEST_FILE=${DIGEST_FILE}" >> "${GITHUB_ENV}"

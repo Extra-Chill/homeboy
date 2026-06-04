@@ -636,6 +636,7 @@ runs:
         AUTOFIX_ENABLED: ${{ inputs.autofix == 'true' }}
         AUTOFIX_ATTEMPTED: ${{ steps.autofix-commit.outputs.committed == 'true' || steps.autofix-prepare-nonpr.outputs.committed == 'true' }}
         AUTOFIX_COMMANDS: ${{ inputs.autofix-commands }}
+        COMPONENT_NAME: ${{ inputs.component }}
       run: bash ${{ github.action_path }}/scripts/digest/generate-failure-digest.sh
 
     - name: Run release

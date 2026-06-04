@@ -28,7 +28,7 @@ chmod +x "${BIN_DIR}/homeboy"
 export PATH="${BIN_DIR}:${PATH}"
 export HOMEBOY_STUB_ARGS_FILE="${ARGS_FILE}"
 export HOMEBOY_OUTPUT_DIR="${OUTPUT_DIR}"
-export RESULTS='{"test":"fail"}'
+export RESULTS='{"lint":"fail","test":"fail"}'
 export GITHUB_SERVER_URL="https://github.com"
 export GITHUB_REPOSITORY="Extra-Chill/homeboy-action"
 export GITHUB_RUN_ID="12345"
@@ -38,10 +38,14 @@ export HOMEBOY_EXTENSION_SOURCE="https://github.com/Extra-Chill/homeboy-extensio
 export HOMEBOY_EXTENSION_REVISION="abc123"
 export HOMEBOY_ACTION_REPOSITORY="Extra-Chill/homeboy-action"
 export HOMEBOY_ACTION_REF="v2"
-export COMMANDS="test,audit"
+export COMMANDS="lint,test,audit"
 export AUTOFIX_ENABLED="true"
 export AUTOFIX_ATTEMPTED="true"
 export AUTOFIX_COMMANDS="test"
+export COMPONENT_NAME="wordpress"
+export SCOPE_CONTEXT="pr"
+export SCOPE_MODE="changed"
+export SCOPE_BASE_REF="abc123base"
 export GITHUB_ENV="${ENV_FILE}"
 export GITHUB_STEP_SUMMARY="${SUMMARY_FILE}"
 
@@ -57,6 +61,12 @@ fi
 
 grep -F "HOMEBOY_FAILURE_DIGEST_FILE=${DIGEST_FILE}" "${ENV_FILE}" >/dev/null
 grep -F "### Test Failure Digest" "${SUMMARY_FILE}" >/dev/null
+grep -F "### Local reproduction" "${DIGEST_FILE}" >/dev/null
+grep -F -- "- Scope context: \`pr\`" "${DIGEST_FILE}" >/dev/null
+grep -F -- "- Scope mode: \`changed\`" "${DIGEST_FILE}" >/dev/null
+grep -F -- "- Scope base ref: \`abc123base\`" "${DIGEST_FILE}" >/dev/null
+grep -F "homeboy lint wordpress --path . --changed-since abc123base" "${DIGEST_FILE}" >/dev/null
+grep -F "homeboy test wordpress --path . --changed-since abc123base" "${DIGEST_FILE}" >/dev/null
 
 grep -Fx -- "report" "${ARGS_FILE}" >/dev/null
 grep -Fx -- "failure-digest" "${ARGS_FILE}" >/dev/null
@@ -69,7 +79,7 @@ grep -Fx -- "https://github.com/Extra-Chill/homeboy-action/actions/runs/12345" "
 grep -Fx -- "--tooling-json" "${ARGS_FILE}" >/dev/null
 grep -Fx -- "${TOOLING_JSON}" "${ARGS_FILE}" >/dev/null
 grep -Fx -- "--commands" "${ARGS_FILE}" >/dev/null
-grep -Fx -- "test,audit" "${ARGS_FILE}" >/dev/null
+grep -Fx -- "lint,test,audit" "${ARGS_FILE}" >/dev/null
 grep -Fx -- "--autofix-commands" "${ARGS_FILE}" >/dev/null
 grep -Fx -- "test" "${ARGS_FILE}" >/dev/null
 grep -Fx -- "--autofix-enabled" "${ARGS_FILE}" >/dev/null
