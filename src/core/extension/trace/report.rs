@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+use super::aggregate_report::TraceAggregateSpanSampleOutput;
 use super::baseline::TraceBaselineComparison;
 use super::overlay_lock::TraceOverlayLockRecord;
 use super::parsing::{TraceArtifact, TraceAssertionStatus, TraceList, TraceResults};
@@ -194,6 +195,8 @@ pub struct TraceAggregateSpanOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub avg_ms: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub stddev_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub p75_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub p90_ms: Option<u64>,
@@ -206,6 +209,8 @@ pub struct TraceAggregateSpanOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_artifact_path: Option<String>,
     pub failures: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub samples: Vec<TraceAggregateSpanSampleOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<TraceSpanMetadata>,
 }
