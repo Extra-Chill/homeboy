@@ -374,13 +374,13 @@ function datamachineBundleConfig(input, bundleConfig = {}) {
 
 function agentTaskRunFromRecipeRun(input, result, artifacts) {
   const execution = Array.isArray(result.executions) ? result.executions.find((item) => item?.recipeCommand === 'wp-codebox.agent-sandbox-run') || result.executions[0] : null;
-  const agentResult = result.agentResult || result.run?.agentResult || result.artifacts?.agentResult || execution?.agentResult || {};
   const datamachineConfig = input.execution_kind === 'datamachine_bundle' || input.execution_kind === 'datamachine-bundle'
     ? datamachineBundleConfig(input, datamachineBundleMount(input).config)
     : null;
+  const agentResult = result.agentResult || result.run?.agentResult || result.artifacts?.agentResult || execution?.agentResult || (datamachineConfig ? datamachineWorkloadFromExecutionStdout(execution, datamachineConfig) : {}) || {};
   const previewUrl = result.runtime?.preview?.url || result.artifacts?.preview_url || result.artifacts?.previewUrl || '';
   const datamachineValidation = datamachineConfig ? validateDatamachineWorkload(agentResult, datamachineConfig) : null;
-  const success = Boolean(result.success) && !datamachineValidation;
+  const success = datamachineConfig ? !datamachineValidation : Boolean(result.success);
   return {
     success,
     schema: 'wp-codebox/agent-task-run/v1',
@@ -420,6 +420,39 @@ function agentTaskRunFromRecipeRun(input, result, artifacts) {
       ...(datamachineConfig ? { datamachine: { bundle: datamachineConfig, workload: agentResult } } : {}),
     },
   };
+}
+
+function parseJsonObject(value) {
+  if (!value || typeof value !== 'string') {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function datamachineWorkloadFromExecutionStdout(execution, config) {
+  const wrapper = parseJsonObject(execution?.stdout || '');
+  const workload = parseJsonObject(wrapper?.output || '') || parseJsonObject(execution?.stdout || '');
+  if (!workload) {
+    return {};
+  }
+  if (Array.isArray(workload.scenarios)) {
+    return workload;
+  }
+  if (workload.metadata || workload.metrics) {
+    return {
+      scenarios: [{
+        id: config.workload_id || config.agent_slug || config.flow_slug || 'datamachine-agent',
+        metrics: workload.metrics || {},
+        metadata: workload.metadata || {},
+      }],
+    };
+  }
+  return {};
 }
 
 function pathValue(source, dottedPath) {

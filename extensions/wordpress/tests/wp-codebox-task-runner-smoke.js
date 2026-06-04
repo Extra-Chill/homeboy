@@ -37,17 +37,17 @@ const isDatamachineBundle = Boolean(codeFilePath);
 const agentResult = isDatamachineBundle && process.env.FIXTURE_WP_CODEBOX_FAILED_DATAMACHINE
   ? { scenarios: [{ id: 'datamachine-agent', metadata: { error: 'Data Machine child job 456 did not reach a terminal state after drain; current status is pending.' } }] }
   : (isDatamachineBundle && !process.env.FIXTURE_WP_CODEBOX_INCOMPLETE_DATAMACHINE
-      ? { scenarios: [{ id: 'datamachine-agent', metadata: { engine_data: { store_idea_agent: { issue_number: 123 } } } }] }
+      ? { metrics: { config_present: 1 }, metadata: { engine_data: { store_idea_agent: { issue_number: 123 } } } }
       : { status: 'completed' });
 fs.writeFileSync(out, JSON.stringify({ argv: process.argv.slice(2), recipe, datamachineConfig: JSON.parse(process.env.HOMEBOY_DATAMACHINE_AGENT_CONFIG || '{}') }, null, 2));
 process.stdout.write(JSON.stringify({
-  success: true,
+  success: !isDatamachineBundle,
   schema: 'wp-codebox/recipe-run/v1',
   recipePath,
   runtime: { preview: { url: 'https://preview.example.test/' + sessionId } },
-  executions: [{ recipeCommand: 'wp-codebox.agent-sandbox-run', exitCode: 0, stdout: JSON.stringify({ status: 'completed' }) }],
+  executions: [{ recipeCommand: 'wp-codebox.agent-sandbox-run', exitCode: 0, stdout: JSON.stringify({ status: 'completed', output: JSON.stringify(agentResult) }) }],
   artifacts: { id: 'artifact-bundle-sha256-fixture', directory: artifacts },
-  agentResult,
+  ...(isDatamachineBundle ? {} : { agentResult }),
 }));
 `);
   fs.chmodSync(binPath, mode);
@@ -288,6 +288,9 @@ try {
   assert.match(fs.readFileSync(expectedCodeFile, 'utf8'), /\/homeboy-extension\/scripts\/agent\/datamachine-agent-workload\.php/);
   assert(composerRecipe.inputs.secretEnv.includes('HOMEBOY_DATAMACHINE_AGENT_CONFIG'));
   assert.equal(readJson(composerCapturePath).datamachineConfig.engine_data_outputs.issue_number, 'metadata.engine_data.store_idea_agent.issue_number');
+  const composerOutput = JSON.parse(composerResult.stdout);
+  assert.equal(composerOutput.success, true);
+  assert.equal(composerOutput.run.agentResult.scenarios[0].metadata.engine_data.store_idea_agent.issue_number, 123);
   const preparedDataMachine = composerRecipe.inputs.extraPlugins.find((plugin) => plugin.slug === 'data-machine');
   assert.notEqual(preparedDataMachine.source, composerPluginPath);
   assert(pathInside(path.join(root, 'composer-artifacts', 'prepared-plugins'), fs.realpathSync(preparedDataMachine.source)));

@@ -68,21 +68,20 @@ if (codeFilePath) {
   fs.readFileSync(codeFilePath, 'utf8');
 }
 const datamachineConfig = JSON.parse(process.env.HOMEBOY_DATAMACHINE_AGENT_CONFIG || '{}');
+const datamachineWorkload = {
+  metrics: { config_present: 1 },
+  metadata: {
+    transcript_artifacts: { json: artifacts + '/transcript.json' },
+    replay_bundle_path: artifacts + '/replay-bundle',
+    engine_data: { static_site_agent: { pr_url: 'https://github.com/chubes4/wp-site-generator/pull/123' } }
+  }
+};
 fs.writeFileSync(${JSON.stringify(capture)}, JSON.stringify({ argv: process.argv.slice(2), recipe, datamachineConfig }, null, 2));
 process.stdout.write(JSON.stringify({
-  success: true,
+  success: false,
   executions: [{
     recipeCommand: 'wp-codebox.agent-sandbox-run',
-    agentResult: {
-      scenarios: [{
-        id: 'datamachine-agent',
-        metadata: {
-          transcript_artifacts: { json: artifacts + '/transcript.json' },
-          replay_bundle_path: artifacts + '/replay-bundle',
-          engine_data: { static_site_agent: { pr_url: 'https://github.com/chubes4/wp-site-generator/pull/123' } }
-        }
-      }]
-    }
+    stdout: JSON.stringify({ status: 'completed', output: JSON.stringify(datamachineWorkload) })
   }],
   artifacts: { id: 'fake-artifact-bundle', directory: artifacts }
 }));

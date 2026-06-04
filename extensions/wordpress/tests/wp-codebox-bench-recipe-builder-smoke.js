@@ -15,7 +15,11 @@ const input = {
 		wpConfigDefines: { WP_DEBUG: true },
 		bootstrapFiles: ['/wordpress/wp-content/plugins/fixture-plugin/bootstrap.php'],
 		workloads: [{ id: 'fixture-workload', steps: [{ type: 'php', code: 'return [];' }] }],
-		pluginRuntime: { url: 'https://example.com/runtime.zip', sha256: 'abc123' },
+		pluginRuntime: {
+			url: 'https://example.com/runtime.zip',
+			sha256: 'abc123',
+			setup: [{ command: 'wordpress.wp-cli', args: ['command=option update fixture_bootstrap yes'] }],
+		},
 		mounts: [{ source: '/tmp/fixture-plugin', target: '/wordpress/wp-content/plugins/fixture-plugin' }],
 		extraPlugins: [{ source: '/tmp/extra-plugin.zip', slug: 'extra-plugin', activate: true }],
 	},
