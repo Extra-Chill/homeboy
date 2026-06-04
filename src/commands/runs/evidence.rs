@@ -148,7 +148,15 @@ fn evidence_metadata(metadata: &Value) -> RunsEvidenceMetadata {
         cost: pick_metadata(metadata, &["cost", "costs", "usage", "token_usage"]),
         timing: pick_metadata(
             metadata,
-            &["timing", "timings", "duration", "scenario_metrics"],
+            &[
+                "timing",
+                "timings",
+                "duration",
+                "scenario_metrics",
+                "phase_events",
+                "phase_summaries",
+                "failure_classification",
+            ],
         ),
         version: pick_metadata(metadata, &["version", "versions", "homeboy_version"]),
         host: pick_metadata(

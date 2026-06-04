@@ -54,8 +54,9 @@ pub use gate::{evaluate_gates, BenchGate, BenchGateOp, BenchGateResult};
 pub use metric_policy_preset::{BenchMetricPolicyPreset, BenchMetricPolicyPresetKind};
 pub use metrics::MetricDelta;
 pub use parsing::{
-    parse_bench_results_file, parse_bench_results_str, BenchMemory, BenchMetrics, BenchResults,
-    BenchRunExecution, BenchScenario,
+    parse_bench_results_file, parse_bench_results_str, BenchMemory, BenchMetrics, BenchPhaseEvent,
+    BenchPhaseFailureClassification, BenchPhaseSummary, BenchResults, BenchRunExecution,
+    BenchScenario,
 };
 pub use report::{
     aggregate_comparison, aggregate_comparison_with_axes, from_main_workflow,
