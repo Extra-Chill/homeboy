@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.115.6] - 2026-06-04
+
+### Fixed
+- add bench bootstrap setup seam
+
 ## [2.115.5] - 2026-06-04
 
 ### Fixed
