@@ -814,6 +814,12 @@ pub struct ComponentSpec {
     /// `${env.VAR}` expansion at use time.
     pub path: String,
 
+    /// Optional checkout root used when `path` points at a subdirectory inside
+    /// the repository. Lab runner materialization uses this root while rig
+    /// expansion keeps `path` as the component's effective path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkout_root: Option<String>,
+
     /// Optional source repository URL. When omitted, `homeboy triage rig`
     /// falls back to `git -C <path> remote get-url origin`.
     #[serde(default, skip_serializing_if = "Option::is_none")]

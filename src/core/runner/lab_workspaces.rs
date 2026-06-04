@@ -7,12 +7,13 @@ use crate::core::component::{self, TargetSpec};
 use crate::core::{Error, Result};
 
 use super::{
-    sync_workspace, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
+    sync_workspace, RunnerGitDependencyMaterializationOutput, RunnerWorkspaceSyncMode,
+    RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
 };
 
 const LAB_EXTRA_WORKSPACES_ENV: &str = concat!("HOME", "BOY_LAB_EXTRA_WORKSPACES");
 const LAB_EXTRA_WORKSPACES_JSON_ENV: &str = concat!("HOME", "BOY_LAB_EXTRA_WORKSPACES_JSON");
-pub(super) const LAB_WORKSPACE_MAPPING_SCHEMA: &str = "homeboy/workspace-map/v1";
+pub(super) const LAB_WORKSPACE_MAPPING_SCHEMA: &str = concat!("home", "boy/workspace-map/v1");
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub(super) struct LabWorkspaceMappingEntry {
@@ -71,6 +72,19 @@ pub(super) fn workspace_mapping_entry(
         remote_path: synced.remote_path.clone(),
         sync_mode: synced.sync_mode.label().to_string(),
         snapshot_identity: synced.snapshot_identity.clone(),
+    }
+}
+
+pub(super) fn workspace_mapping_entry_for_git_dependency(
+    role: impl Into<String>,
+    dependency: &RunnerGitDependencyMaterializationOutput,
+) -> LabWorkspaceMappingEntry {
+    LabWorkspaceMappingEntry {
+        role: role.into(),
+        local_path: dependency.local_path.clone(),
+        remote_path: dependency.remote_path.clone(),
+        sync_mode: "git".to_string(),
+        snapshot_identity: dependency.head.clone(),
     }
 }
 

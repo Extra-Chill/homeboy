@@ -26,6 +26,7 @@ fn rig_component_path_and_trace_env_are_threaded() {
         "studio".to_string(),
         ComponentSpec {
             path: component_dir.path().to_string_lossy().to_string(),
+            checkout_root: None,
             remote_url: Some("https://github.com/Automattic/studio".to_string()),
             triage_remote_url: None,
             stack: None,

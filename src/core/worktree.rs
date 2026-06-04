@@ -359,7 +359,15 @@ fn canonical_existing_path(path: &str) -> Result<PathBuf> {
 }
 
 fn metadata_dir() -> Result<PathBuf> {
-    Ok(paths::homeboy_data()?.join("task-worktrees"))
+    let observation_db = paths::observation_db()?;
+    let data_root = observation_db.parent().ok_or_else(|| {
+        Error::internal_unexpected(format!(
+            "observation database path `{}` has no parent directory",
+            observation_db.display()
+        ))
+    })?;
+
+    Ok(data_root.join("task-worktrees"))
 }
 
 fn record_path(store_dir: &Path, id: &str) -> PathBuf {

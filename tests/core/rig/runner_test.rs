@@ -699,6 +699,7 @@ fn test_snapshot_state() {
         "studio".to_string(),
         ComponentSpec {
             path: "/tmp/homeboy-snapshot-test-not-a-repo-z".to_string(),
+            checkout_root: None,
             remote_url: None,
             triage_remote_url: None,
             stack: None,
@@ -710,6 +711,7 @@ fn test_snapshot_state() {
         "playground".to_string(),
         ComponentSpec {
             path: "/tmp/homeboy-snapshot-test-not-a-repo-a".to_string(),
+            checkout_root: None,
             remote_url: None,
             triage_remote_url: None,
             stack: None,
