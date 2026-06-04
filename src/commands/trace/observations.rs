@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use homeboy::core::engine::run_dir::RunDir;
 use homeboy::core::extension::trace as extension_trace;
@@ -192,6 +192,8 @@ fn record_declared_artifact_finding(
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
     use homeboy::core::engine::run_dir::RunDir;
     use homeboy::core::extension::trace::parsing::{TraceArtifact, TraceResults, TraceStatus};
