@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.115.26] - 2026-06-04
+
+### Changed
+- Run agent bundles through Codebox runtime tasks
+
 ## [2.115.25] - 2026-06-04
 
 ### Fixed
