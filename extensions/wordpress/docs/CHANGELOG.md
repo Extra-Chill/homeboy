@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.115.30] - 2026-06-04
+
+### Fixed
+- forward runtime component paths to codebox
+
 ## [2.115.29] - 2026-06-04
 
 ### Fixed
