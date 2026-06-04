@@ -64,8 +64,6 @@ parameters:
         - vendor/php-stubs/wp-cli-stubs/wp-cli-i18n-stubs.php
         - vendor/php-stubs/woocommerce-stubs/woocommerce-stubs.php
         - vendor/php-stubs/woocommerce-stubs/woocommerce-packages-stubs.php
-
-    stubFiles:
         - stubs/wordpress-api-overrides.stub.php
 
     # Level 7 unlocks argument type flow analysis (union narrowing, false/null
