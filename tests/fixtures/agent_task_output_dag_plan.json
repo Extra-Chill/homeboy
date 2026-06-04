@@ -1,0 +1,57 @@
+{
+  "schema": "homeboy/agent-task-plan/v1",
+  "plan_id": "agent-task-output-dag-fixture",
+  "tasks": [
+    {
+      "schema": "homeboy/agent-task-request/v1",
+      "task_id": "idea",
+      "executor": {
+        "backend": "fixture",
+        "config": {
+          "artifact_root": "target/agent-task-output-dag/idea",
+          "changed_file": "docs/agent-task-output-dag-idea.md",
+          "metadata": {
+            "fixture_mode": "success",
+            "github": {
+              "issue_number": 3447
+            }
+          }
+        }
+      },
+      "instructions": "Produce the upstream idea outcome with GitHub issue metadata."
+    },
+    {
+      "schema": "homeboy/agent-task-request/v1",
+      "task_id": "design",
+      "executor": {
+        "backend": "fixture",
+        "config": {
+          "artifact_root": "target/agent-task-output-dag/design",
+          "changed_file": "docs/issue-{{outputs.issue_number}}-design.md",
+          "github_issue": "{{outputs.issue_number}}"
+        }
+      },
+      "instructions": "Produce the design artifact for GitHub issue #{{outputs.issue_number}}.",
+      "metadata": {
+        "issue": "{{outputs.issue_number}}"
+      }
+    }
+  ],
+  "output_dependencies": {
+    "design": {
+      "bindings": {
+        "issue_number": {
+          "task_id": "idea",
+          "path": "/metadata/github/issue_number",
+          "required": true
+        }
+      }
+    }
+  },
+  "options": {
+    "max_concurrency": 2
+  },
+  "metadata": {
+    "purpose": "documents output-driven DAG phase plan shape for Extra-Chill/homeboy#3447"
+  }
+}
