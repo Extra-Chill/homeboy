@@ -167,6 +167,9 @@
           "src/commands/review/mod.rs",
           "src/commands/test.rs"
         ],
+        "exclude_path_contains": [
+          "src/core/product_identity.rs"
+        ],
         "kind": "core_boundary_leak",
         "suggestion": "Move ecosystem-specific behavior into extension metadata/rules, or add an explicit audit allowlist for intentional examples.",
         "terms": [
