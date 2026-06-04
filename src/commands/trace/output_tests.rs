@@ -6,7 +6,9 @@ use homeboy::core::extension::trace as extension_trace;
 use super::bundle::{write_trace_experiment_bundle, TraceExperimentBundleRequest};
 use super::output::{
     compare_trace_aggregates, compare_trace_aggregates_with_focus, parse_trace_aggregate_input,
-    render_compare_markdown, run_compare, TraceAggregateInput, TraceAggregateSpanInput,
+    render_compare_markdown, render_trace_aggregate_evidence_markdown,
+    render_trace_compare_evidence_markdown, render_trace_run_evidence_markdown, run_compare,
+    TraceAggregateInput, TraceAggregateSpanInput,
 };
 use super::*;
 
@@ -508,6 +510,244 @@ fn trace_compare_markdown_and_experiment_bundle_render_artifacts() {
     assert!(report.contains("## Top Average Improvements"));
     assert!(report.contains("## Variant Failures and Outliers"));
     assert!(report.contains("/tmp/variant-1.json"));
+}
+
+#[test]
+fn trace_run_evidence_report_includes_refs_assertions_and_safe_artifacts() {
+    let run = extension_trace::report::TraceRunOutput {
+        passed: false,
+        status: "fail".to_string(),
+        component: "studio".to_string(),
+        exit_code: 1,
+        artifacts: vec![extension_trace::TraceArtifact {
+            label: "Main log".to_string(),
+            path: "artifacts/main.log".to_string(),
+        }],
+        results: Some(extension_trace::TraceResults {
+            component_id: "studio".to_string(),
+            scenario_id: "close-window-running-site".to_string(),
+            status: extension_trace::TraceStatus::Fail,
+            summary: Some("Window reopened after close.".to_string()),
+            failure: Some("assertion failed".to_string()),
+            rig: None,
+            timeline: Vec::new(),
+            span_definitions: Vec::new(),
+            span_results: Vec::new(),
+            assertions: vec![extension_trace::TraceAssertion {
+                id: "window-stays-closed".to_string(),
+                status: extension_trace::TraceAssertionStatus::Fail,
+                message: Some("Window reopened".to_string()),
+                details: None,
+            }],
+            temporal_assertions: Vec::new(),
+            artifacts: vec![
+                extension_trace::TraceArtifact {
+                    label: "Main log".to_string(),
+                    path: "artifacts/main.log".to_string(),
+                },
+                extension_trace::TraceArtifact {
+                    label: "Trace zip".to_string(),
+                    path: "/Users/chubes/private/trace.zip".to_string(),
+                },
+            ],
+        }),
+        span_summaries: vec![extension_trace::TraceSpanSummaryOutput {
+            id: "boot_to_ready".to_string(),
+            from: "runner.boot".to_string(),
+            to: "runner.ready".to_string(),
+            status: "ok".to_string(),
+            duration_ms: Some(125),
+            from_t_ms: Some(0),
+            to_t_ms: Some(125),
+            missing: Vec::new(),
+            message: None,
+            metadata: Some(extension_trace::TraceSpanMetadata {
+                critical: true,
+                blocking: true,
+                cacheable: false,
+                prewarmable: false,
+                deferrable: false,
+                blocks: None,
+                category: Some("startup".to_string()),
+            }),
+        }],
+        rig_state: Some(rig_state_snapshot()),
+        failure: None,
+        overlays: Vec::new(),
+        baseline_comparison: None,
+        hints: None,
+        profile: None,
+    };
+
+    let report = render_trace_run_evidence_markdown(&run);
+
+    assert!(report.contains("# Trace Evidence: `close-window-running-site`"));
+    assert!(report.contains("- **Command:** `homeboy trace`"));
+    assert!(report.contains("| `studio` | `main` | `abc123` | `[local path redacted: studio]` |"));
+    assert!(report.contains("| `boot_to_ready` | `runner.boot` | `runner.ready` | 125ms | ok | category=startup, critical, blocking |"));
+    assert!(report.contains("- `window-stays-closed`: **fail** - Window reopened"));
+    assert!(report.contains("- **Status:** `partial`"));
+    assert!(report.contains("- **Main log:** `artifacts/main.log`"));
+    assert!(report.contains("- **Trace zip:** `[local path redacted: trace.zip]`"));
+    assert!(!report.contains("/Users/chubes/private"));
+}
+
+#[test]
+fn trace_aggregate_evidence_report_summarizes_metrics_and_artifact_completeness() {
+    let aggregate = extension_trace::TraceAggregateOutput {
+        command: "trace.aggregate.spans",
+        passed: true,
+        status: "pass".to_string(),
+        component: "studio".to_string(),
+        scenario_id: "create-site".to_string(),
+        phase_preset: Some("startup".to_string()),
+        repeat: 2,
+        run_count: 2,
+        failure_count: 0,
+        exit_code: 0,
+        schedule: Some("interleaved".to_string()),
+        run_order: Vec::new(),
+        rig_state: Some(rig_state_snapshot()),
+        overlays: Vec::new(),
+        runs: vec![
+            extension_trace::TraceAggregateRunOutput {
+                index: 0,
+                passed: true,
+                status: "pass".to_string(),
+                exit_code: 0,
+                artifact_path: "/tmp/homeboy/run-0.json".to_string(),
+                scenario_id: Some("create-site".to_string()),
+                summary: None,
+                failure: None,
+            },
+            extension_trace::TraceAggregateRunOutput {
+                index: 1,
+                passed: true,
+                status: "pass".to_string(),
+                exit_code: 0,
+                artifact_path: "artifacts/run-1.json".to_string(),
+                scenario_id: Some("create-site".to_string()),
+                summary: None,
+                failure: None,
+            },
+        ],
+        spans: vec![extension_trace::TraceAggregateSpanOutput {
+            id: "boot".to_string(),
+            n: 2,
+            min_ms: Some(100),
+            median_ms: Some(125),
+            avg_ms: Some(130.0),
+            p75_ms: None,
+            p90_ms: None,
+            p95_ms: None,
+            max_ms: Some(150),
+            max_run_index: Some(1),
+            max_artifact_path: Some("artifacts/run-1.json".to_string()),
+            failures: 0,
+            metadata: None,
+        }],
+        guardrails: vec![extension_trace::TraceGuardrailOutput {
+            label: "startup guardrail".to_string(),
+            source: "rig".to_string(),
+            passed: true,
+            status: "pass".to_string(),
+            failure: None,
+        }],
+        guardrail_failure_count: 0,
+        focus_span_ids: Vec::new(),
+        focus_spans: Vec::new(),
+        classification_summaries: Vec::new(),
+        unmatched_span_metadata_ids: Vec::new(),
+        profile: None,
+    };
+
+    let report = render_trace_aggregate_evidence_markdown(&aggregate);
+
+    assert!(report.contains("# Trace Evidence: `create-site`"));
+    assert!(report.contains("- **Command:** `trace.aggregate.spans`"));
+    assert!(report.contains("## Metric Summary"));
+    assert!(report.contains("| `boot` | 2 | 100ms | 125ms | 130.0ms | - | - | - | 150ms | 0 |"));
+    assert!(report.contains("## Assertion Status"));
+    assert!(report.contains("startup guardrail"));
+    assert!(report.contains("- **Status:** `complete`"));
+    assert!(report.contains("- Run 0: `pass` `[local path redacted: run-0.json]`"));
+    assert!(report.contains("- Run 1: `pass` `artifacts/run-1.json`"));
+    assert!(!report.contains("/tmp/homeboy"));
+}
+
+#[test]
+fn trace_compare_evidence_report_redacts_local_paths_and_reports_assertion_status() {
+    let compare = extension_trace::TraceCompareOutput {
+        command: "trace.compare.spans",
+        before_path: "/Users/chubes/private/before.json".to_string(),
+        after_path: "artifacts/after.json".to_string(),
+        before_component: Some("studio".to_string()),
+        after_component: Some("studio".to_string()),
+        before_scenario_id: Some("create-site".to_string()),
+        after_scenario_id: Some("create-site".to_string()),
+        span_count: 1,
+        spans: vec![extension_trace::TraceCompareSpanOutput {
+            id: "boot".to_string(),
+            before_n: Some(2),
+            after_n: Some(2),
+            before_median_ms: Some(100),
+            after_median_ms: Some(140),
+            median_delta_ms: Some(40),
+            median_delta_percent: Some(40.0),
+            before_avg_ms: Some(100.0),
+            after_avg_ms: Some(140.0),
+            avg_delta_ms: Some(40.0),
+            avg_delta_percent: Some(40.0),
+            before_failures: Some(0),
+            after_failures: Some(1),
+        }],
+        focus_span_ids: vec!["boot".to_string()],
+        focus_spans: Vec::new(),
+        focus_regression_count: 1,
+        focus_failure_count: 1,
+        focus_status: Some("fail".to_string()),
+        before_guardrails: Vec::new(),
+        after_guardrails: vec![extension_trace::TraceGuardrailOutput {
+            label: "variant guardrail".to_string(),
+            source: "rig".to_string(),
+            passed: false,
+            status: "fail".to_string(),
+            failure: Some("behavior changed".to_string()),
+        }],
+        guardrail_failure_count: 1,
+        guardrail_status: Some("fail".to_string()),
+        classification_summaries: Vec::new(),
+    };
+
+    let report = render_trace_compare_evidence_markdown(&compare);
+
+    assert!(report.contains("# Trace Compare Evidence"));
+    assert!(report.contains("- **Before:** `[local path redacted: before.json]`"));
+    assert!(report.contains("- **After:** `artifacts/after.json`"));
+    assert!(report.contains("- **Focus assertion status:** `fail`"));
+    assert!(report.contains("| `boot` | 100ms | 140ms | **+40ms** | +40.0% | 100.0ms | 140.0ms | **+40.0ms** | +40.0% |"));
+    assert!(report.contains("- Focus regressions: `1`"));
+    assert!(report.contains("behavior changed"));
+    assert!(report.contains("- **Status:** `input-only`"));
+    assert!(!report.contains("/Users/chubes/private"));
+}
+
+fn rig_state_snapshot() -> homeboy::core::rig::RigStateSnapshot {
+    let mut components = std::collections::BTreeMap::new();
+    components.insert(
+        "studio".to_string(),
+        homeboy::core::rig::ComponentSnapshot {
+            path: "/Users/chubes/Developer/studio".to_string(),
+            declared_path: None,
+            sha: Some("abc123".to_string()),
+            branch: Some("main".to_string()),
+        },
+    );
+    homeboy::core::rig::RigStateSnapshot {
+        rig_id: "studio-rig".to_string(),
+        captured_at: "2026-06-04T00:00:00Z".to_string(),
+        components,
+    }
 }
 
 fn span_input(

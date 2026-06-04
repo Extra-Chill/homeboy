@@ -48,7 +48,10 @@ pub use run::{
     run_trace_list_workflow, run_trace_workflow, trace_is_unclaimed, TraceListWorkflowArgs,
 };
 pub use run::{TraceRunWorkflowArgs, TraceRunWorkflowResult, TraceRunnerInputs};
-pub use span_summary::{attach_span_summary_metadata, TraceSpanSummaryOutput};
+pub use span_summary::{
+    attach_span_summary_metadata, format_span_summary_metadata, format_span_summary_status,
+    TraceSpanSummaryOutput,
+};
 
 pub fn resolve_trace_command(
     component: &Component,

@@ -45,9 +45,12 @@ use metadata::trace_span_metadata_for_args;
 use observations::record_trace_artifacts;
 use overlay_locks::run_overlay_locks;
 
+#[cfg(test)]
+use output::render_aggregate_markdown;
 use output::{
-    aggregate_span, attach_span_metadata, classification_summaries, render_aggregate_markdown,
-    render_compare_markdown, render_matrix_markdown, run_compare, TraceAggregateSpanSample,
+    aggregate_span, attach_span_metadata, classification_summaries, render_matrix_markdown,
+    render_trace_aggregate_evidence_markdown, render_trace_compare_evidence_markdown,
+    render_trace_run_evidence_markdown, run_compare, TraceAggregateSpanSample,
 };
 use probes::trace_probes_for_args;
 pub(super) use schedule::{
@@ -210,20 +213,17 @@ pub fn run_markdown_with_json_artifact(
 
 fn render_markdown_output(output: &TraceCommandOutput) -> String {
     match output {
-        TraceCommandOutput::Run(run_output) => {
-            let Some(results) = run_output.results.as_ref() else {
-                return "# Trace\n\nNo trace results were produced.\n".to_string();
-            };
-            extension_trace::render_markdown(results, &run_output.overlays)
-        }
+        TraceCommandOutput::Run(run_output) => render_trace_run_evidence_markdown(run_output),
         TraceCommandOutput::Summary(summary) => {
             format!(
                 "# Trace Summary\n\n- **Component:** `{}`\n- **Status:** `{}`\n- **Exit code:** `{}`\n",
                 summary.component, summary.status, summary.exit_code
             )
         }
-        TraceCommandOutput::Aggregate(aggregate) => render_aggregate_markdown(aggregate),
-        TraceCommandOutput::Compare(compare) => render_compare_markdown(compare),
+        TraceCommandOutput::Aggregate(aggregate) => {
+            render_trace_aggregate_evidence_markdown(aggregate)
+        }
+        TraceCommandOutput::Compare(compare) => render_trace_compare_evidence_markdown(compare),
         TraceCommandOutput::Matrix(matrix) => render_matrix_markdown(matrix),
         TraceCommandOutput::List(list) => {
             if !list.profiles.is_empty() || list.command == "trace.list.profiles" {
