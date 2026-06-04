@@ -110,6 +110,8 @@ pub struct ProjectStatusRow {
 pub enum ProjectComponentDashboardStatus {
     /// Local and remote versions match, no unreleased commits
     Current,
+    /// Local and remote versions match, but a newer origin tag exists
+    PinnedCurrent,
     /// Local version differs from remote (needs deploy)
     Outdated,
     /// Releasable code commits since the current version baseline
@@ -138,6 +140,7 @@ pub struct ProjectDashboardOutput {
 #[derive(Debug, Serialize)]
 pub struct ProjectDashboardSummary {
     pub current: usize,
+    pub pinned_current: usize,
     pub outdated: usize,
     pub needs_release: usize,
     pub docs_only: usize,
@@ -329,6 +332,7 @@ fn run_project_dashboard(project_id: &str, args: &StatusArgs) -> CmdResult<Statu
     let mut rows: Vec<ProjectStatusRow> = Vec::new();
     let mut summary = ProjectDashboardSummary {
         current: 0,
+        pinned_current: 0,
         outdated: 0,
         needs_release: 0,
         docs_only: 0,
@@ -365,10 +369,14 @@ fn run_project_dashboard(project_id: &str, args: &StatusArgs) -> CmdResult<Statu
                     if d.is_behind() {
                         ProjectComponentDashboardStatus::BehindUpstream
                     } else {
-                        deployed_version_dashboard_status(&local_ver, &remote_ver)
+                        deployed_version_dashboard_status(
+                            &local_ver,
+                            &remote_ver,
+                            d.latest_origin_tag.as_deref(),
+                        )
                     }
                 } else {
-                    deployed_version_dashboard_status(&local_ver, &remote_ver)
+                    deployed_version_dashboard_status(&local_ver, &remote_ver, None)
                 }
             }
             ReleaseStateStatus::Unknown => ProjectComponentDashboardStatus::Unknown,
@@ -376,6 +384,7 @@ fn run_project_dashboard(project_id: &str, args: &StatusArgs) -> CmdResult<Statu
 
         match &dashboard_status {
             ProjectComponentDashboardStatus::Current => summary.current += 1,
+            ProjectComponentDashboardStatus::PinnedCurrent => summary.pinned_current += 1,
             ProjectComponentDashboardStatus::Outdated => summary.outdated += 1,
             ProjectComponentDashboardStatus::NeedsRelease => summary.needs_release += 1,
             ProjectComponentDashboardStatus::DocsOnly => summary.docs_only += 1,
@@ -398,7 +407,13 @@ fn run_project_dashboard(project_id: &str, args: &StatusArgs) -> CmdResult<Statu
 
     // Apply filters
     if args.outdated {
-        rows.retain(|r| matches!(r.status, ProjectComponentDashboardStatus::Outdated));
+        rows.retain(|r| {
+            matches!(
+                r.status,
+                ProjectComponentDashboardStatus::Outdated
+                    | ProjectComponentDashboardStatus::PinnedCurrent
+            )
+        });
     }
     if args.needs_release {
         rows.retain(|r| matches!(r.status, ProjectComponentDashboardStatus::NeedsRelease));
@@ -433,12 +448,34 @@ fn run_project_dashboard(project_id: &str, args: &StatusArgs) -> CmdResult<Statu
 fn deployed_version_dashboard_status(
     local_ver: &Option<String>,
     remote_ver: &Option<String>,
+    origin_tag: Option<&str>,
 ) -> ProjectComponentDashboardStatus {
     match (local_ver, remote_ver) {
         (Some(local), Some(remote)) if local != remote => ProjectComponentDashboardStatus::Outdated,
         (Some(_), None) => ProjectComponentDashboardStatus::Outdated,
+        (Some(local), Some(remote))
+            if local == remote && origin_tag_is_newer_than_local(origin_tag, local) =>
+        {
+            ProjectComponentDashboardStatus::PinnedCurrent
+        }
         _ => ProjectComponentDashboardStatus::Current,
     }
+}
+
+fn origin_tag_is_newer_than_local(origin_tag: Option<&str>, local: &str) -> bool {
+    let Some(origin) = origin_tag else {
+        return false;
+    };
+    let origin = origin.trim_start_matches('v');
+    let local = local.trim_start_matches('v');
+    if origin == local {
+        return false;
+    }
+
+    semver::Version::parse(origin)
+        .ok()
+        .zip(semver::Version::parse(local).ok())
+        .is_some_and(|(origin, local)| origin > local)
 }
 
 /// Fetch from origin and compute upstream drift for a component.
@@ -574,6 +611,7 @@ fn log_dashboard_table(rows: &[ProjectStatusRow]) {
         let upstream = format_upstream(&row.ahead_upstream, &row.behind_upstream);
         let status_icon = match &row.status {
             ProjectComponentDashboardStatus::Current => "✅ current",
+            ProjectComponentDashboardStatus::PinnedCurrent => "📌 pinned current",
             ProjectComponentDashboardStatus::Outdated => "⚠️  outdated",
             ProjectComponentDashboardStatus::NeedsRelease => "🔶 needs release",
             ProjectComponentDashboardStatus::DocsOnly => "📝 docs only",
@@ -686,6 +724,31 @@ mod tests {
             .status()
             .expect("git init");
         (dir, repo)
+    }
+
+    #[test]
+    fn deployed_version_status_marks_current_version_with_newer_origin_tag_as_pinned_current() {
+        let status = deployed_version_dashboard_status(
+            &Some("0.139.18".to_string()),
+            &Some("0.139.18".to_string()),
+            Some("v0.139.19"),
+        );
+
+        assert!(matches!(
+            status,
+            ProjectComponentDashboardStatus::PinnedCurrent
+        ));
+    }
+
+    #[test]
+    fn deployed_version_status_keeps_exact_origin_tag_current() {
+        let status = deployed_version_dashboard_status(
+            &Some("0.139.18".to_string()),
+            &Some("0.139.18".to_string()),
+            Some("v0.139.18"),
+        );
+
+        assert!(matches!(status, ProjectComponentDashboardStatus::Current));
     }
 
     #[test]
