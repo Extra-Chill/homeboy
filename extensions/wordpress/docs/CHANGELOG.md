@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.115.12] - 2026-06-04
+
+### Fixed
+- map Codebox completed status for Homeboy
+
 ## [2.115.11] - 2026-06-04
 
 ### Fixed
