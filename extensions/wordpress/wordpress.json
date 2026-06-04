@@ -1038,6 +1038,13 @@
       "description": "Component-relative bootstrap file fallbacks for WP Codebox bench workloads. The runner resolves the list against the mounted component and passes the first existing file to wordpress.bench so it loads before workloads execute."
     },
     {
+      "id": "wp_codebox_bootstrap_steps",
+      "label": "WP Codebox bench bootstrap steps",
+      "type": "array",
+      "default": [],
+      "description": "Generic WP Codebox recipe steps to run during pluginRuntime.setup after dependency activation and before measured bench workloads. Use this for dependency setup that must be prepared outside workload timing."
+    },
+    {
       "id": "wp_codebox_scenario_manifests",
       "label": "WP Codebox scenario manifests",
       "type": "array",
