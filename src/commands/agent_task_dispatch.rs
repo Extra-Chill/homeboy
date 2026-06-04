@@ -12,7 +12,7 @@ use homeboy::core::agent_task_scheduler::{
 };
 use homeboy::core::config;
 
-use super::CmdResult;
+use super::{CmdResult, GlobalArgs};
 
 #[derive(Args, Debug)]
 pub struct DispatchArgs {
@@ -89,7 +89,7 @@ pub struct DispatchArgs {
     pub queue_only: bool,
 }
 
-pub fn run(args: DispatchArgs) -> CmdResult<Value> {
+pub fn run(args: DispatchArgs, _global: &GlobalArgs) -> CmdResult<Value> {
     dispatch_with_executor(args, ExtensionProviderAgentTaskExecutor::discover())
 }
 

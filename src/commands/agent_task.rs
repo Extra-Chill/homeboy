@@ -96,9 +96,9 @@ pub struct PromoteArgs {
     pub verify: Vec<String>,
 }
 
-pub fn run(args: AgentTaskArgs, _global: &GlobalArgs) -> CmdResult<Value> {
+pub fn run(args: AgentTaskArgs, global: &GlobalArgs) -> CmdResult<Value> {
     match args.command {
-        AgentTaskCommand::Dispatch(dispatch_args) => dispatch(dispatch_args),
+        AgentTaskCommand::Dispatch(dispatch_args) => dispatch(dispatch_args, global),
         AgentTaskCommand::RunPlan(run_args) => run_plan(run_args),
         AgentTaskCommand::Run(status_args) => run_submitted(status_args),
         AgentTaskCommand::RunNext => run_next(),
