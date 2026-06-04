@@ -525,3 +525,194 @@ fn collect_numeric_object(
         metrics.insert((scenario_id.to_string(), metric), number);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use homeboy::core::observation::NewRunRecord;
+    use homeboy::test_support::with_isolated_home;
+
+    struct XdgGuard(Option<String>);
+
+    impl XdgGuard {
+        fn unset() -> Self {
+            let prior = std::env::var("XDG_DATA_HOME").ok();
+            std::env::remove_var("XDG_DATA_HOME");
+            Self(prior)
+        }
+    }
+
+    impl Drop for XdgGuard {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(value) => std::env::set_var("XDG_DATA_HOME", value),
+                None => std::env::remove_var("XDG_DATA_HOME"),
+            }
+        }
+    }
+
+    fn sample_run(kind: &str, component_id: &str, rig_id: &str, metadata: Value) -> NewRunRecord {
+        NewRunRecord::builder(kind)
+            .component_id(component_id)
+            .command(format!("homeboy {kind} {component_id}"))
+            .cwd_path(std::path::Path::new("/tmp/homeboy-fixture"))
+            .homeboy_version("test-version")
+            .git_sha(Some("abc123".to_string()))
+            .rig_id(rig_id)
+            .metadata(metadata)
+            .build()
+    }
+
+    #[test]
+    fn bench_compare_reports_deltas_and_missing_metrics() {
+        with_isolated_home(|_home| {
+            let _xdg = XdgGuard::unset();
+            let store = ObservationStore::open_initialized().expect("store");
+            let from = store
+                .start_run(sample_run(
+                    "bench",
+                    "homeboy",
+                    "studio",
+                    serde_json::json!({
+                        "settings": { "profile": "cold" },
+                        "run_metadata": {
+                            "selected_scenarios": ["cold"],
+                            "iterations": 3,
+                            "runs": 1,
+                            "concurrency": 1,
+                            "shared_state": "/tmp/homeboy-bench-compare",
+                            "workloads": [{ "id": "cold", "sha256": "abc" }]
+                        },
+                        "scenario_metrics": [{
+                            "scenario_id": "cold",
+                            "metrics": { "p95_ms": 100.0, "only_from": 1.0 },
+                            "metric_groups": { "warm": { "mean_ms": 50.0 } }
+                        }]
+                    }),
+                ))
+                .expect("from");
+            let to = store
+                .start_run(sample_run(
+                    "bench",
+                    "homeboy",
+                    "studio",
+                    serde_json::json!({
+                        "settings": { "profile": "cold" },
+                        "run_metadata": {
+                            "selected_scenarios": ["cold"],
+                            "iterations": 3,
+                            "runs": 1,
+                            "concurrency": 1,
+                            "shared_state": "/tmp/homeboy-bench-compare-candidate",
+                            "workloads": [{ "id": "cold", "sha256": "abc" }]
+                        },
+                        "scenario_metrics": [{
+                            "scenario_id": "cold",
+                            "metrics": { "p95_ms": 125.0, "only_to": 2.0 },
+                            "metric_groups": { "warm": { "mean_ms": 40.0 } }
+                        }]
+                    }),
+                ))
+                .expect("to");
+
+            let (output, _) = bench_compare(&from.id, &to.id, &[]).expect("compare");
+            let RunsOutput::BenchCompare(output) = output else {
+                panic!("expected compare output");
+            };
+            assert_eq!(output.baseline.run.id, from.id);
+            assert_eq!(output.candidate.run.id, to.id);
+            assert_eq!(output.shared.selected_scenarios, vec!["cold".to_string()]);
+            assert_eq!(output.shared.workloads[0].sha256.as_deref(), Some("abc"));
+            let p95 = output
+                .comparisons
+                .iter()
+                .find(|row| row.metric == "p95_ms")
+                .expect("p95 row");
+            assert_eq!(p95.delta, 25.0);
+            assert_eq!(p95.percent_change, Some(25.0));
+            assert!(output
+                .comparisons
+                .iter()
+                .any(|row| row.metric == "warm.mean_ms" && row.delta == -10.0));
+            assert!(output
+                .missing
+                .iter()
+                .any(|row| row.metric == "only_from" && row.missing_from == "to_run"));
+            assert!(output
+                .missing
+                .iter()
+                .any(|row| row.metric == "only_to" && row.missing_from == "from_run"));
+            assert!(output.reports.markdown.contains("# Bench Compare"));
+            assert!(output
+                .reports
+                .markdown
+                .contains("| cold | p95_ms | 100 | 125 | 25 | 25% |"));
+
+            let (filtered, _) =
+                bench_compare(&from.id, &to.id, &["p95_ms".to_string()]).expect("filtered compare");
+            let RunsOutput::BenchCompare(filtered) = filtered else {
+                panic!("expected filtered compare output");
+            };
+            assert_eq!(filtered.comparisons.len(), 1);
+            assert_eq!(filtered.comparisons[0].metric, "p95_ms");
+            assert!(filtered.missing.is_empty());
+        });
+    }
+
+    #[test]
+    fn bench_compare_rejects_mismatched_shared_context() {
+        with_isolated_home(|_home| {
+            let _xdg = XdgGuard::unset();
+            let store = ObservationStore::open_initialized().expect("store");
+            let from = store
+                .start_run(sample_run(
+                    "bench",
+                    "homeboy",
+                    "studio",
+                    serde_json::json!({
+                        "settings": { "profile": "cold" },
+                        "run_metadata": {
+                            "selected_scenarios": ["cold"],
+                            "iterations": 3,
+                            "runs": 1,
+                            "concurrency": 1,
+                            "workloads": [{ "id": "cold", "sha256": "abc" }]
+                        },
+                        "scenario_metrics": [{
+                            "scenario_id": "cold",
+                            "metrics": { "p95_ms": 100.0 }
+                        }]
+                    }),
+                ))
+                .expect("from");
+            let to = store
+                .start_run(sample_run(
+                    "bench",
+                    "homeboy",
+                    "studio",
+                    serde_json::json!({
+                        "settings": { "profile": "warm" },
+                        "run_metadata": {
+                            "selected_scenarios": ["cold"],
+                            "iterations": 3,
+                            "runs": 1,
+                            "concurrency": 1,
+                            "workloads": [{ "id": "cold", "sha256": "def" }]
+                        },
+                        "scenario_metrics": [{
+                            "scenario_id": "cold",
+                            "metrics": { "p95_ms": 125.0 }
+                        }]
+                    }),
+                ))
+                .expect("to");
+
+            let err = bench_compare(&from.id, &to.id, &[])
+                .err()
+                .expect("compare should reject mismatched context");
+            assert_eq!(err.code.as_str(), "validation.invalid_argument");
+            assert!(err.message.contains("settings"));
+            assert!(err.message.contains("workloads"));
+        });
+    }
+}
