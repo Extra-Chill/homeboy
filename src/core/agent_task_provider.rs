@@ -174,6 +174,12 @@ fn fixture_success_outcome(
         "fixture provider completed successfully\n",
     );
 
+    let metadata = request
+        .executor
+        .config
+        .get("metadata")
+        .cloned()
+        .unwrap_or_else(|| json!({ "fixture_mode": "success" }));
     let mut outcome = AgentTaskOutcome {
         schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
         task_id: request.task_id.clone(),
@@ -202,7 +208,7 @@ fn fixture_success_outcome(
         }],
         workflow: None,
         follow_up: None,
-        metadata: json!({ "fixture_mode": "success" }),
+        metadata,
     };
     let _ = std::fs::write(
         &result_path,

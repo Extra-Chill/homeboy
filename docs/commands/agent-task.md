@@ -53,7 +53,89 @@ Useful fixture `executor.config` fields:
 
 - `artifact_root`: directory where fixture artifacts are written.
 - `changed_file`: diff path recorded in the generated patch.
+- `metadata`: optional JSON object copied into the fixture outcome metadata.
 - `mode`: omit or set to `success`; set to `empty_patch` or `empty_runtime_bundle` for classification checks.
+
+## Output-Driven DAG Phases
+
+`agent-task run-plan` supports backend-neutral output dependencies with a
+plan-level `output_dependencies` map keyed by downstream task id. A task with
+bindings waits until every declared upstream task has a terminal outcome, selects
+values from prior `homeboy/agent-task-outcome/v1` payloads with JSON Pointer,
+renders `{{outputs.<name>}}` placeholders into the downstream request, then
+dispatches the generated task.
+
+Example:
+
+```json
+{
+  "schema": "homeboy/agent-task-plan/v1",
+  "plan_id": "site-generator-static-fanout",
+  "tasks": [
+    {
+      "schema": "homeboy/agent-task-request/v1",
+      "task_id": "idea",
+      "executor": { "backend": "codebox" },
+      "instructions": "Create the GitHub issue for this site idea."
+    },
+    {
+      "schema": "homeboy/agent-task-request/v1",
+      "task_id": "design",
+      "executor": {
+        "backend": "codebox",
+        "config": {
+          "github_issue": "{{outputs.issue_number}}"
+        }
+      },
+      "instructions": "Build the design for GitHub issue #{{outputs.issue_number}}."
+    }
+  ],
+  "output_dependencies": {
+    "design": {
+      "bindings": {
+        "issue_number": {
+          "task_id": "idea",
+          "path": "/metadata/github/issue_number",
+          "required": true
+        }
+      }
+    }
+  }
+}
+```
+
+Supported rendering targets:
+
+- `instructions`
+- `inputs`
+- `executor.config`
+- `workspace.materialization`
+- `metadata`
+- `expected_artifacts`
+
+If a field is exactly `{{outputs.<name>}}`, Homeboy preserves the selected JSON
+value type. Inline placeholders render as strings. If a required binding is
+missing, the downstream task is not sent to the provider; the aggregate records a
+`skipped` scheduler event, increments `totals.skipped`, and writes a no-op
+outcome with diagnostic class `output_dependency_missing`.
+
+Use `depends_on` for ordering-only edges that do not bind values:
+
+```json
+{
+  "output_dependencies": {
+    "static-build": {
+      "depends_on": ["design"],
+      "bindings": {
+        "issue_number": {
+          "task_id": "idea",
+          "path": "/metadata/github/issue_number"
+        }
+      }
+    }
+  }
+}
+```
 
 ## Failure Classifications
 

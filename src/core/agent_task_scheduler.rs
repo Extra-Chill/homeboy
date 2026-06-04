@@ -3,7 +3,7 @@ use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use crate::core::agent_task::{
     AgentTaskDiagnostic, AgentTaskEvidenceRef, AgentTaskFailureClassification, AgentTaskOutcome,
@@ -12,9 +12,10 @@ use crate::core::agent_task::{
 pub use crate::core::agent_task_schedule::{
     AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
     AgentTaskBackpressureStatus, AgentTaskCancellationToken, AgentTaskExecutionContext,
-    AgentTaskPlan, AgentTaskProgressEvent, AgentTaskQueueStatus, AgentTaskResourceBudget,
-    AgentTaskResourceBudgetStatus, AgentTaskRetryPolicy, AgentTaskScheduleOptions, AgentTaskState,
-    AGENT_TASK_AGGREGATE_SCHEMA, AGENT_TASK_PLAN_SCHEMA,
+    AgentTaskOutputBinding, AgentTaskOutputDependencies, AgentTaskPlan, AgentTaskProgressEvent,
+    AgentTaskQueueStatus, AgentTaskResourceBudget, AgentTaskResourceBudgetStatus,
+    AgentTaskRetryPolicy, AgentTaskScheduleOptions, AgentTaskState, AGENT_TASK_AGGREGATE_SCHEMA,
+    AGENT_TASK_PLAN_SCHEMA,
 };
 use crate::core::agent_task_timeout::timeout_with_grace;
 use crate::core::agent_task_timeout_artifacts::{
@@ -59,6 +60,7 @@ where
         let total_tasks = plan.tasks.len();
         let max_queue_depth = plan.options.max_queue_depth.or(plan.options.max_tasks);
         let retry_budget_total = plan.options.retry.max_retries_total;
+        let output_dependencies = plan.output_dependencies.clone();
         let mut retry_budget_used = 0;
         let mut backpressure = Vec::new();
         let mut blocked_count = 0;
@@ -80,6 +82,7 @@ where
             .collect();
         let mut running: Vec<RunningTask> = Vec::new();
         let mut outcomes = Vec::new();
+        let mut completed_by_task: HashMap<String, AgentTaskOutcome> = HashMap::new();
         let mut events = Vec::new();
         let mut cancellation_notified = false;
         let max_attempts = plan.options.retry.max_attempts.max(1);
@@ -135,12 +138,42 @@ where
                 let Some(next_index) = AgentTaskScheduleSupport::next_dispatchable_index(
                     &queued,
                     &running,
+                    &completed_by_task,
+                    &output_dependencies,
                     &plan.options.per_executor_concurrency,
                     &plan.options.per_model_concurrency,
                     &plan.options.resource_budget,
                 ) else {
                     if running.is_empty() {
                         if let Some(task) = queued.pop_front() {
+                            if let Some(message) =
+                                AgentTaskScheduleSupport::waiting_for_dependencies(
+                                    &task.request,
+                                    &completed_by_task,
+                                    &output_dependencies,
+                                )
+                            {
+                                backpressure.push(AgentTaskBackpressureStatus {
+                                    kind: "output_dependency".to_string(),
+                                    message: message.clone(),
+                                    task_id: Some(task.request.task_id.clone()),
+                                });
+                                events.push(event(
+                                    &task.request.task_id,
+                                    AgentTaskState::Blocked,
+                                    task.attempt,
+                                    Some(message.clone()),
+                                ));
+                                let outcome = AgentTaskScheduleSupport::blocked_outcome(
+                                    task.request.task_id,
+                                    message,
+                                );
+                                completed_by_task.insert(outcome.task_id.clone(), outcome.clone());
+                                outcomes.push(outcome);
+                                blocked_count += 1;
+                                continue;
+                            }
+
                             let task_units =
                                 task_resource_units(&task.request, &plan.options.resource_budget);
                             let max_active_units = plan
@@ -171,22 +204,50 @@ where
                         }
                         break;
                     }
-                    backpressure.push(AgentTaskBackpressureStatus {
-                        kind: AgentTaskScheduleSupport::backpressure_kind(
-                            &queued,
-                            &running,
-                            &plan.options.per_executor_concurrency,
-                            &plan.options.per_model_concurrency,
-                            &plan.options.resource_budget,
+                    let dependency_wait = queued.front().and_then(|task| {
+                        AgentTaskScheduleSupport::waiting_for_dependencies(
+                            &task.request,
+                            &completed_by_task,
+                            &output_dependencies,
                         )
-                        .to_string(),
-                        message: "queued tasks are waiting for scheduler capacity".to_string(),
+                    });
+                    backpressure.push(AgentTaskBackpressureStatus {
+                        kind: if dependency_wait.is_some() {
+                            "output_dependency".to_string()
+                        } else {
+                            AgentTaskScheduleSupport::backpressure_kind(
+                                &queued,
+                                &running,
+                                &plan.options.per_executor_concurrency,
+                                &plan.options.per_model_concurrency,
+                                &plan.options.resource_budget,
+                            )
+                            .to_string()
+                        },
+                        message: dependency_wait.unwrap_or_else(|| {
+                            "queued tasks are waiting for scheduler capacity".to_string()
+                        }),
                         task_id: queued.front().map(|task| task.request.task_id.clone()),
                     });
                     break;
                 };
                 let scheduled = queued.remove(next_index).expect("queued task");
-                let request = scheduled.request;
+                let mut request = scheduled.request;
+                if let Err(outcome) = AgentTaskScheduleSupport::render_output_dependencies(
+                    &mut request,
+                    &completed_by_task,
+                    &output_dependencies,
+                ) {
+                    events.push(event(
+                        &outcome.task_id,
+                        AgentTaskState::Skipped,
+                        scheduled.attempt,
+                        outcome.summary.clone(),
+                    ));
+                    completed_by_task.insert(outcome.task_id.clone(), outcome.clone());
+                    outcomes.push(outcome);
+                    continue;
+                }
                 let task_id = request.task_id.clone();
                 let executor_key = executor_key(&request);
                 let executor = Arc::clone(&self.executor);
@@ -282,6 +343,7 @@ where
                         });
                         continue;
                     }
+                    completed_by_task.insert(outcome.task_id.clone(), outcome.clone());
                     outcomes.push(outcome);
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -342,11 +404,18 @@ impl AgentTaskScheduleSupport {
     fn next_dispatchable_index(
         queued: &VecDeque<ScheduledTask>,
         running: &[RunningTask],
+        completed_by_task: &HashMap<String, AgentTaskOutcome>,
+        output_dependencies: &HashMap<String, AgentTaskOutputDependencies>,
         per_executor_concurrency: &HashMap<String, usize>,
         per_model_concurrency: &HashMap<String, usize>,
         resource_budget: &AgentTaskResourceBudget,
     ) -> Option<usize> {
         queued.iter().position(|task| {
+            if !Self::dependencies_satisfied(&task.request, completed_by_task, output_dependencies)
+            {
+                return false;
+            }
+
             let executor_key = executor_key(&task.request);
             let limit = per_executor_concurrency
                 .get(&executor_key)
@@ -379,6 +448,145 @@ impl AgentTaskScheduleSupport {
 
             resource_capacity_available(&task.request, running, resource_budget)
         })
+    }
+
+    fn dependencies_satisfied(
+        request: &AgentTaskRequest,
+        completed_by_task: &HashMap<String, AgentTaskOutcome>,
+        output_dependencies: &HashMap<String, AgentTaskOutputDependencies>,
+    ) -> bool {
+        Self::dependency_task_ids(request, output_dependencies)
+            .iter()
+            .all(|task_id| completed_by_task.contains_key(task_id))
+    }
+
+    fn waiting_for_dependencies(
+        request: &AgentTaskRequest,
+        completed_by_task: &HashMap<String, AgentTaskOutcome>,
+        output_dependencies: &HashMap<String, AgentTaskOutputDependencies>,
+    ) -> Option<String> {
+        let missing: Vec<String> = Self::dependency_task_ids(request, output_dependencies)
+            .into_iter()
+            .filter(|task_id| !completed_by_task.contains_key(task_id))
+            .collect();
+
+        (!missing.is_empty()).then(|| {
+            format!(
+                "task blocked waiting for output dependencies: {}",
+                missing.join(", ")
+            )
+        })
+    }
+
+    fn dependency_task_ids(
+        request: &AgentTaskRequest,
+        output_dependencies: &HashMap<String, AgentTaskOutputDependencies>,
+    ) -> Vec<String> {
+        let Some(dependencies) = output_dependencies.get(&request.task_id) else {
+            return Vec::new();
+        };
+        let mut task_ids = dependencies.depends_on.clone();
+        for binding in dependencies.bindings.values() {
+            if !task_ids.contains(&binding.task_id) {
+                task_ids.push(binding.task_id.clone());
+            }
+        }
+        task_ids
+    }
+
+    fn render_output_dependencies(
+        request: &mut AgentTaskRequest,
+        completed_by_task: &HashMap<String, AgentTaskOutcome>,
+        output_dependencies: &HashMap<String, AgentTaskOutputDependencies>,
+    ) -> Result<(), AgentTaskOutcome> {
+        let Some(dependencies) = output_dependencies.get(&request.task_id) else {
+            return Ok(());
+        };
+        let bindings = match Self::resolve_output_bindings(request, dependencies, completed_by_task)
+        {
+            Ok(bindings) => bindings,
+            Err(message) => return Err(Self::skipped_output_dependency_outcome(request, message)),
+        };
+
+        request.instructions = render_template_string(&request.instructions, &bindings);
+        render_value_templates(&mut request.inputs, &bindings);
+        render_value_templates(&mut request.executor.config, &bindings);
+        render_value_templates(&mut request.workspace.materialization, &bindings);
+        render_value_templates(&mut request.metadata, &bindings);
+        for artifact in &mut request.expected_artifacts {
+            *artifact = render_template_string(artifact, &bindings);
+        }
+        mark_generated_from_outputs(request, dependencies, &bindings);
+        Ok(())
+    }
+
+    fn resolve_output_bindings(
+        request: &AgentTaskRequest,
+        dependencies: &AgentTaskOutputDependencies,
+        completed_by_task: &HashMap<String, AgentTaskOutcome>,
+    ) -> Result<HashMap<String, Value>, String> {
+        let mut bindings = HashMap::new();
+        for (name, binding) in &dependencies.bindings {
+            let value = Self::select_bound_output(request, name, binding, completed_by_task)?;
+            bindings.insert(name.clone(), value);
+        }
+        Ok(bindings)
+    }
+
+    fn select_bound_output(
+        request: &AgentTaskRequest,
+        name: &str,
+        binding: &AgentTaskOutputBinding,
+        completed_by_task: &HashMap<String, AgentTaskOutcome>,
+    ) -> Result<Value, String> {
+        let Some(outcome) = completed_by_task.get(&binding.task_id) else {
+            return Err(format!(
+                "task '{}' skipped because output binding '{}' waited for missing task '{}'",
+                request.task_id, name, binding.task_id
+            ));
+        };
+
+        let outcome_value = serde_json::to_value(outcome).unwrap_or(Value::Null);
+        if let Some(value) = outcome_value.pointer(&binding.path) {
+            return Ok(value.clone());
+        }
+        if !binding.default.is_null() {
+            return Ok(binding.default.clone());
+        }
+        if binding.required {
+            return Err(format!(
+                "task '{}' skipped because required output binding '{}' was missing at '{}' from task '{}'",
+                request.task_id, name, binding.path, binding.task_id
+            ));
+        }
+        Ok(Value::String(String::new()))
+    }
+
+    fn skipped_output_dependency_outcome(
+        request: &AgentTaskRequest,
+        summary: String,
+    ) -> AgentTaskOutcome {
+        AgentTaskOutcome {
+            schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+            task_id: request.task_id.clone(),
+            status: AgentTaskOutcomeStatus::NoOp,
+            summary: Some(summary.clone()),
+            failure_classification: None,
+            artifacts: Vec::new(),
+            evidence_refs: vec![AgentTaskEvidenceRef {
+                kind: "scheduler".to_string(),
+                uri: "homeboy://agent-task/output-dependency-skipped".to_string(),
+                label: Some("scheduler output dependency skip".to_string()),
+            }],
+            diagnostics: vec![AgentTaskDiagnostic {
+                class: "output_dependency_missing".to_string(),
+                message: summary,
+                data: Value::Null,
+            }],
+            workflow: None,
+            follow_up: None,
+            metadata: serde_json::json!({ "skipped": true, "skip_reason": "output_dependency_missing" }),
+        }
     }
 
     fn backpressure_kind(
@@ -784,6 +992,15 @@ impl AgentTaskScheduleSupport {
         };
 
         for outcome in outcomes {
+            if outcome
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.class == "output_dependency_missing")
+            {
+                totals.skipped += 1;
+                continue;
+            }
+
             match outcome.status {
                 AgentTaskOutcomeStatus::Succeeded | AgentTaskOutcomeStatus::NoOp => {
                     totals.succeeded += 1
@@ -856,6 +1073,90 @@ fn resource_capacity_available(
     };
     active_resource_units(running).saturating_add(task_resource_units(request, budget))
         <= max_active_units
+}
+
+fn render_value_templates(value: &mut Value, bindings: &HashMap<String, Value>) {
+    match value {
+        Value::String(raw) => {
+            if let Some(rendered) = render_template_value(raw, bindings) {
+                *value = rendered;
+            } else {
+                *raw = render_template_string(raw, bindings);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                render_value_templates(item, bindings);
+            }
+        }
+        Value::Object(object) => {
+            for value in object.values_mut() {
+                render_value_templates(value, bindings);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn render_template_value(raw: &str, bindings: &HashMap<String, Value>) -> Option<Value> {
+    let trimmed = raw.trim();
+    let inner = trimmed.strip_prefix("{{")?.strip_suffix("}}")?.trim();
+    let name = inner.strip_prefix("outputs.")?.trim();
+    bindings.get(name).cloned()
+}
+
+fn render_template_string(raw: &str, bindings: &HashMap<String, Value>) -> String {
+    let mut rendered = raw.to_string();
+    for (name, value) in bindings {
+        let replacement = template_replacement(value);
+        let compact = format!("{{{{outputs.{name}}}}}");
+        let spaced = format!("{{{{ outputs.{name} }}}}");
+        rendered = rendered.replace(&compact, &replacement);
+        rendered = rendered.replace(&spaced, &replacement);
+    }
+    rendered
+}
+
+fn template_replacement(value: &Value) -> String {
+    match value {
+        Value::Null => String::new(),
+        Value::String(value) => value.clone(),
+        Value::Number(value) => value.to_string(),
+        Value::Bool(value) => value.to_string(),
+        Value::Array(_) | Value::Object(_) => value.to_string(),
+    }
+}
+
+fn mark_generated_from_outputs(
+    request: &mut AgentTaskRequest,
+    dependencies: &AgentTaskOutputDependencies,
+    bindings: &HashMap<String, Value>,
+) {
+    if !request.metadata.is_object() {
+        request.metadata = Value::Object(Map::new());
+    }
+    let metadata = request.metadata.as_object_mut().expect("metadata object");
+    metadata.insert("generated_from_outputs".to_string(), Value::Bool(true));
+    metadata.insert(
+        "depends_on".to_string(),
+        Value::Array(
+            dependencies
+                .depends_on
+                .iter()
+                .cloned()
+                .map(Value::String)
+                .collect(),
+        ),
+    );
+    metadata.insert(
+        "resolved_output_bindings".to_string(),
+        Value::Object(
+            bindings
+                .iter()
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect(),
+        ),
+    );
 }
 
 fn event(
@@ -1323,6 +1624,133 @@ mod tests {
     }
 
     #[test]
+    fn templates_prior_output_into_downstream_task_request() {
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let scheduler = AgentTaskScheduler::new(OutputTemplateExecutor {
+            observed: Arc::clone(&observed),
+            include_issue_number: true,
+        });
+        let mut plan =
+            AgentTaskPlan::new("plan-output-dag", vec![request("idea"), request("design")]);
+        plan.options.max_concurrency = 2;
+        plan.tasks[1].instructions = "Build design for issue #{{outputs.issue_number}}".to_string();
+        plan.tasks[1].executor.config = json!({
+            "github_issue": "{{outputs.issue_number}}",
+            "instructions": "Use issue {{ outputs.issue_number }}"
+        });
+        plan.output_dependencies.insert(
+            "design".to_string(),
+            AgentTaskOutputDependencies {
+                depends_on: Vec::new(),
+                bindings: HashMap::from([(
+                    "issue_number".to_string(),
+                    AgentTaskOutputBinding {
+                        task_id: "idea".to_string(),
+                        path: "/metadata/github/issue_number".to_string(),
+                        required: true,
+                        default: Value::Null,
+                    },
+                )]),
+            },
+        );
+
+        let aggregate = scheduler.run(plan);
+        let observed = observed.lock().expect("observed requests");
+        let design = observed
+            .iter()
+            .find(|request| request.task_id == "design")
+            .expect("design request dispatched");
+
+        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+        assert_eq!(aggregate.totals.succeeded, 2);
+        assert_eq!(design.instructions, "Build design for issue #3447");
+        assert_eq!(design.executor.config["github_issue"], json!(3447));
+        assert_eq!(design.executor.config["instructions"], "Use issue 3447");
+        assert_eq!(design.metadata["generated_from_outputs"], json!(true));
+        assert_eq!(
+            design.metadata["resolved_output_bindings"]["issue_number"],
+            json!(3447)
+        );
+        let idea_succeeded_index = aggregate
+            .events
+            .iter()
+            .position(|event| event.task_id == "idea" && event.state == AgentTaskState::Succeeded)
+            .expect("idea succeeded event");
+        let design_running_index = aggregate
+            .events
+            .iter()
+            .position(|event| event.task_id == "design" && event.state == AgentTaskState::Running)
+            .expect("design running event");
+        assert!(idea_succeeded_index < design_running_index);
+    }
+
+    #[test]
+    fn skips_downstream_task_when_required_output_is_missing() {
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let scheduler = AgentTaskScheduler::new(OutputTemplateExecutor {
+            observed: Arc::clone(&observed),
+            include_issue_number: false,
+        });
+        let mut plan =
+            AgentTaskPlan::new("plan-output-skip", vec![request("idea"), request("design")]);
+        plan.options.max_concurrency = 2;
+        plan.tasks[1].instructions = "Build design for issue #{{outputs.issue_number}}".to_string();
+        plan.output_dependencies.insert(
+            "design".to_string(),
+            AgentTaskOutputDependencies {
+                depends_on: Vec::new(),
+                bindings: HashMap::from([(
+                    "issue_number".to_string(),
+                    AgentTaskOutputBinding {
+                        task_id: "idea".to_string(),
+                        path: "/metadata/github/issue_number".to_string(),
+                        required: true,
+                        default: Value::Null,
+                    },
+                )]),
+            },
+        );
+
+        let aggregate = scheduler.run(plan);
+        let observed = observed.lock().expect("observed requests");
+
+        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+        assert_eq!(aggregate.totals.succeeded, 1);
+        assert_eq!(aggregate.totals.skipped, 1);
+        assert!(observed.iter().all(|request| request.task_id != "design"));
+        assert!(aggregate
+            .events
+            .iter()
+            .any(|event| { event.task_id == "design" && event.state == AgentTaskState::Skipped }));
+        let skipped = aggregate
+            .outcomes
+            .iter()
+            .find(|outcome| outcome.task_id == "design")
+            .expect("skipped outcome");
+        assert_eq!(skipped.status, AgentTaskOutcomeStatus::NoOp);
+        assert!(skipped.diagnostics.iter().any(|diagnostic| {
+            diagnostic.class == "output_dependency_missing"
+                && diagnostic.message.contains("required output binding")
+        }));
+    }
+
+    #[test]
+    fn static_batch_plans_remain_compatible_without_output_dependencies() {
+        let scheduler = AgentTaskScheduler::new(RecordingExecutor::new(
+            HashMap::new(),
+            Duration::from_millis(0),
+        ));
+        let plan_json = serde_json::to_string(&plan_with_tasks(2)).expect("plan json");
+        let plan: AgentTaskPlan = serde_json::from_str(&plan_json).expect("static plan decodes");
+
+        let aggregate = scheduler.run(plan);
+
+        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+        assert_eq!(aggregate.totals.succeeded, 2);
+        assert_eq!(aggregate.totals.skipped, 0);
+    }
+
+    #[test]
     fn cancellation_stops_queued_tasks_and_notifies_running_executor() {
         let executor = RecordingExecutor::new(HashMap::new(), Duration::from_millis(100));
         let cancel_calls = Arc::clone(&executor.cancel_calls);
@@ -1376,6 +1804,43 @@ mod tests {
         running: Arc<AtomicUsize>,
         max_seen: Arc<AtomicUsize>,
         cancel_calls: Arc<Mutex<Vec<String>>>,
+    }
+
+    struct OutputTemplateExecutor {
+        observed: Arc<Mutex<Vec<AgentTaskRequest>>>,
+        include_issue_number: bool,
+    }
+
+    impl AgentTaskExecutorAdapter for OutputTemplateExecutor {
+        fn execute(
+            &self,
+            request: AgentTaskRequest,
+            _context: AgentTaskExecutionContext,
+        ) -> AgentTaskOutcome {
+            self.observed
+                .lock()
+                .expect("observed requests")
+                .push(request.clone());
+            let metadata = if request.task_id == "idea" && self.include_issue_number {
+                json!({ "github": { "issue_number": 3447 } })
+            } else {
+                json!({})
+            };
+
+            AgentTaskOutcome {
+                schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+                task_id: request.task_id,
+                status: AgentTaskOutcomeStatus::Succeeded,
+                summary: Some("ok".to_string()),
+                failure_classification: None,
+                artifacts: Vec::new(),
+                evidence_refs: Vec::new(),
+                diagnostics: Vec::new(),
+                workflow: None,
+                follow_up: None,
+                metadata,
+            }
+        }
     }
 
     impl RecordingExecutor {

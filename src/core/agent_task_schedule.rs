@@ -17,6 +17,8 @@ pub struct AgentTaskPlan {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_key: Option<String>,
     pub tasks: Vec<AgentTaskRequest>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub output_dependencies: HashMap<String, AgentTaskOutputDependencies>,
     #[serde(default)]
     pub options: AgentTaskScheduleOptions,
     #[serde(default, skip_serializing_if = "Value::is_null")]
@@ -30,10 +32,30 @@ impl AgentTaskPlan {
             plan_id: plan_id.into(),
             group_key: None,
             tasks,
+            output_dependencies: HashMap::new(),
             options: AgentTaskScheduleOptions::default(),
             metadata: Value::Null,
         }
     }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct AgentTaskOutputDependencies {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub depends_on: Vec<String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub bindings: HashMap<String, AgentTaskOutputBinding>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentTaskOutputBinding {
+    pub task_id: String,
+    /// JSON Pointer into the prior `homeboy/agent-task-outcome/v1` object.
+    pub path: String,
+    #[serde(default = "default_required_output")]
+    pub required: bool,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub default: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -133,6 +155,7 @@ pub struct AgentTaskAggregateTotals {
     pub queued: usize,
     pub running: usize,
     pub blocked: usize,
+    pub skipped: usize,
     pub succeeded: usize,
     pub failed: usize,
     pub cancelled: usize,
@@ -154,6 +177,7 @@ pub struct AgentTaskProgressEvent {
 pub enum AgentTaskState {
     Queued,
     Blocked,
+    Skipped,
     Running,
     Succeeded,
     Failed,
@@ -241,4 +265,8 @@ fn default_max_concurrency() -> usize {
 
 fn default_task_resource_units() -> u32 {
     1
+}
+
+fn default_required_output() -> bool {
+    true
 }
