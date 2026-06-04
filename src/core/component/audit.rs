@@ -77,6 +77,87 @@ pub struct AuditConfig {
     /// Component-owned path policy for durable artifact portability checks.
     #[serde(default, skip_serializing_if = "ArtifactPortabilityConfig::is_empty")]
     pub artifact_portability: ArtifactPortabilityConfig,
+    /// Component-owned test wiring policies. Core evaluates path and marker
+    /// rules without knowing the language or test harness semantics.
+    #[serde(default, skip_serializing_if = "TestWiringConfig::is_empty")]
+    pub test_wiring: TestWiringConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct TestWiringConfig {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub policies: Vec<TestWiringPolicy>,
+}
+
+impl TestWiringConfig {
+    pub fn is_empty(&self) -> bool {
+        self.policies.is_empty()
+    }
+
+    fn merge(&mut self, other: &TestWiringConfig) {
+        for policy in &other.policies {
+            if !self
+                .policies
+                .iter()
+                .any(|existing| existing.id == policy.id)
+            {
+                self.policies.push(policy.clone());
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TestWiringPolicy {
+    /// Stable policy id used when merging extension and component config.
+    pub id: String,
+    /// Source files to scan for explicit wiring markers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_path_globs: Vec<String>,
+    /// Test files that need policy evaluation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub test_path_globs: Vec<String>,
+    /// Test files discovered by the native test runner without explicit wiring.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub auto_discovered_test_path_globs: Vec<String>,
+    /// Test support/helper files exempt from explicit wiring checks.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub support_test_path_globs: Vec<String>,
+    /// Whether matched, non-exempt test files must be referenced by source markers.
+    #[serde(default)]
+    pub require_explicit_wiring: bool,
+    /// Regex patterns proving source-to-test wiring. `{test_path}` is replaced
+    /// with a regex-escaped repository-relative test path before matching.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub explicit_wiring_marker_patterns: Vec<String>,
+    /// Report convention label.
+    #[serde(default = "default_test_wiring_convention")]
+    pub convention: String,
+    /// Finding severity: `warning` or `info`.
+    #[serde(default = "default_test_wiring_severity")]
+    pub severity: String,
+    /// Finding description template. Supports `{test_path}`.
+    #[serde(default = "default_test_wiring_description")]
+    pub description: String,
+    /// Finding suggestion template. Supports `{test_path}`.
+    #[serde(default = "default_test_wiring_suggestion")]
+    pub suggestion: String,
+}
+
+fn default_test_wiring_convention() -> String {
+    "test_wiring".to_string()
+}
+
+fn default_test_wiring_severity() -> String {
+    "warning".to_string()
+}
+
+fn default_test_wiring_description() -> String {
+    "Test file `{test_path}` is not wired into the configured test harness".to_string()
+}
+
+fn default_test_wiring_suggestion() -> String {
+    "Wire `{test_path}` using the configured explicit wiring convention".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -857,6 +938,7 @@ impl AuditConfig {
             && self.command_status_contracts.is_empty()
             && self.remote_execution_safety.is_empty()
             && self.artifact_portability.is_empty()
+            && self.test_wiring.is_empty()
     }
 
     pub fn merge(&mut self, other: &AuditConfig) {
@@ -893,6 +975,7 @@ impl AuditConfig {
         self.remote_execution_safety
             .merge(&other.remote_execution_safety);
         self.artifact_portability.merge(&other.artifact_portability);
+        self.test_wiring.merge(&other.test_wiring);
         for rule in &other.requested_detectors {
             if !self
                 .requested_detectors
@@ -985,6 +1068,18 @@ mod tests {
     }
 
     #[test]
+    fn test_wiring_config_marks_audit_config_non_empty() {
+        let config = AuditConfig {
+            test_wiring: TestWiringConfig {
+                policies: vec![test_wiring_policy("nested")],
+            },
+            ..Default::default()
+        };
+
+        assert!(!config.is_empty());
+    }
+
+    #[test]
     fn merge_dedupes_core_boundary_leak_config() {
         let mut config = AuditConfig {
             core_boundary_leaks: CoreBoundaryLeakConfig {
@@ -1049,5 +1144,42 @@ mod tests {
             config.remote_execution_safety.capability_preflight_markers,
             vec!["capability_plan", "evaluate_remote_capabilities"]
         );
+    }
+
+    #[test]
+    fn merge_dedupes_test_wiring_policies_by_id() {
+        let mut config = AuditConfig {
+            test_wiring: TestWiringConfig {
+                policies: vec![test_wiring_policy("nested")],
+            },
+            ..Default::default()
+        };
+
+        config.merge(&AuditConfig {
+            test_wiring: TestWiringConfig {
+                policies: vec![test_wiring_policy("nested"), test_wiring_policy("external")],
+            },
+            ..Default::default()
+        });
+
+        assert_eq!(config.test_wiring.policies.len(), 2);
+        assert_eq!(config.test_wiring.policies[0].id, "nested");
+        assert_eq!(config.test_wiring.policies[1].id, "external");
+    }
+
+    fn test_wiring_policy(id: &str) -> TestWiringPolicy {
+        TestWiringPolicy {
+            id: id.to_string(),
+            source_path_globs: vec!["source/**".to_string()],
+            test_path_globs: vec!["checks/**".to_string()],
+            auto_discovered_test_path_globs: Vec::new(),
+            support_test_path_globs: Vec::new(),
+            require_explicit_wiring: true,
+            explicit_wiring_marker_patterns: vec!["{test_path}".to_string()],
+            convention: "test_wiring".to_string(),
+            severity: "warning".to_string(),
+            description: "`{test_path}` needs wiring".to_string(),
+            suggestion: "Add wiring for `{test_path}`".to_string(),
+        }
     }
 }

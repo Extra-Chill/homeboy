@@ -154,7 +154,7 @@ const DETECTOR_DESCRIPTORS: &[DetectorDescriptor] = &[
         log_summary: "inline/scattered test placement",
     },
     DetectorDescriptor {
-        id: "rust_test_wiring",
+        id: "test_wiring",
         findings: &[AuditFinding::UnwiredNestedRustTest],
         access: DetectorAccess::RootOnly,
         runtime: DetectorRuntime::Manual,
@@ -457,8 +457,8 @@ impl AuditExecutionPlan {
         self.detector_enabled("test_topology")
     }
 
-    pub(crate) fn run_rust_test_wiring(&self) -> bool {
-        self.detector_enabled("rust_test_wiring")
+    pub(crate) fn run_test_wiring(&self) -> bool {
+        self.detector_enabled("test_wiring")
     }
 
     pub(crate) fn run_docs(&self) -> bool {

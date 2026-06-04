@@ -22,6 +22,7 @@ mod convention_membership;
 pub(crate) mod conventions;
 pub(crate) mod core_fingerprint;
 mod dead_code;
+mod descriptor_runtime;
 mod detectors;
 mod discovery;
 pub mod docs_audit;
@@ -51,13 +52,13 @@ use std::time::Duration;
 
 use self::detectors::layer_ownership::run as run_layer_ownership;
 use self::detectors::{
-    aggregate_construction, artifact_portability, command_status_contracts, config_key_usage,
-    core_boundary_leak, dead_guard, deprecation_age, enum_dispatch_contracts, facade_passthrough,
-    field_patterns, global_env_guard, mutating_resource_access, parallel_runner_setup,
-    public_registry_exposure, redirect_validation, repeated_literal_shape, requested_detectors,
-    runner_offload_preflight, rust_test_wiring, shared_scaffolding, test_coverage, test_topology,
+    artifact_portability, command_status_contracts, config_key_usage, core_boundary_leak,
+    dead_guard, deprecation_age, enum_dispatch_contracts, field_patterns, global_env_guard,
+    mutating_resource_access, parallel_runner_setup, public_registry_exposure, redirect_validation,
+    requested_detectors, runner_offload_preflight, test_coverage, test_topology, test_wiring,
     unbounded_output_capture, wrapper_inference,
 };
+use descriptor_runtime::{run_descriptor_detectors, DetectorRunContext};
 
 pub use checks::{CheckResult, CheckStatus};
 pub use compare::{
@@ -171,77 +172,6 @@ fn time_audit_detector<T>(
     } else {
         timing.push_skipped(id);
         skipped()
-    }
-}
-
-struct DetectorRunContext<'a> {
-    all_fingerprints: &'a [&'a fingerprint::FileFingerprint],
-}
-
-fn run_fingerprint_descriptor(
-    runner: FingerprintDetectorRunner,
-    context: &DetectorRunContext<'_>,
-) -> Vec<Finding> {
-    match runner {
-        FingerprintDetectorRunner::ShadowModules => shadow_modules::run(context.all_fingerprints),
-        FingerprintDetectorRunner::FacadePassthrough => {
-            facade_passthrough::run(context.all_fingerprints)
-        }
-        FingerprintDetectorRunner::LiteralShapes => {
-            repeated_literal_shape::run(context.all_fingerprints)
-        }
-        FingerprintDetectorRunner::SharedScaffolding => {
-            shared_scaffolding::run(context.all_fingerprints)
-        }
-        FingerprintDetectorRunner::AggregateConstruction => {
-            aggregate_construction::run(context.all_fingerprints)
-        }
-    }
-}
-
-fn extend_descriptor_findings(
-    all_findings: &mut Vec<Finding>,
-    descriptor: &DetectorDescriptor,
-    findings: Vec<Finding>,
-) {
-    if findings.is_empty() {
-        return;
-    }
-
-    log_status!(
-        "audit",
-        "{}: {} finding(s) ({})",
-        descriptor.log_label,
-        findings.len(),
-        descriptor.log_summary
-    );
-    all_findings.extend(findings);
-}
-
-fn run_descriptor_detectors(
-    plan: &AuditExecutionPlan,
-    timing: &mut AuditTiming,
-    all_findings: &mut Vec<Finding>,
-    context: &DetectorRunContext<'_>,
-    detector_ids: &[&str],
-) {
-    for descriptor in AuditExecutionPlan::descriptors() {
-        if !detector_ids.contains(&descriptor.id) {
-            continue;
-        }
-
-        let DetectorRuntime::Fingerprint(runner) = descriptor.runtime else {
-            continue;
-        };
-
-        let findings = time_audit_detector(
-            timing,
-            descriptor.timing_id,
-            plan.detector_enabled(descriptor.id),
-            || run_fingerprint_descriptor(runner, context),
-            Vec::new,
-        );
-        extend_descriptor_findings(all_findings, descriptor, findings);
     }
 }
 
@@ -828,23 +758,21 @@ fn audit_internal(
         all_findings.extend(topology_findings);
     }
 
-    // Phase 4i2: Rust nested test harness wiring checks. Cargo only
-    // auto-discovers direct `tests/*.rs` integration tests; nested tests need
-    // explicit `#[path = "..."]` wiring from a source module.
-    let rust_test_wiring_findings = time_audit_detector(
+    // Phase 4i2: Configured test harness wiring checks.
+    let test_wiring_findings = time_audit_detector(
         &mut timing,
         "detector.test_wiring",
-        plan.run_rust_test_wiring(),
-        || rust_test_wiring::run(root),
+        plan.run_test_wiring(),
+        || test_wiring::run(root, &audit_config),
         Vec::new,
     );
-    if !rust_test_wiring_findings.is_empty() {
+    if !test_wiring_findings.is_empty() {
         log_status!(
             "audit",
-            "Rust test wiring: {} finding(s) (nested tests not wired into Cargo)",
-            rust_test_wiring_findings.len()
+            "Test wiring: {} finding(s) (tests not wired into the configured harness)",
+            test_wiring_findings.len()
         );
-        all_findings.extend(rust_test_wiring_findings);
+        all_findings.extend(test_wiring_findings);
     }
 
     // Phase 4j: Documentation drift detection (broken/stale references in markdown)
@@ -1445,20 +1373,20 @@ fn audit_root_only(
         findings.extend(topology_findings);
     }
 
-    let rust_test_wiring_findings = time_audit_detector(
+    let test_wiring_findings = time_audit_detector(
         timing,
         "detector.test_wiring",
-        plan.run_rust_test_wiring(),
-        || rust_test_wiring::run(root),
+        plan.run_test_wiring(),
+        || test_wiring::run(root, &audit_config),
         Vec::new,
     );
-    if !rust_test_wiring_findings.is_empty() {
+    if !test_wiring_findings.is_empty() {
         log_status!(
             "audit",
-            "Rust test wiring: {} finding(s) (nested tests not wired into Cargo)",
-            rust_test_wiring_findings.len()
+            "Test wiring: {} finding(s) (tests not wired into the configured harness)",
+            test_wiring_findings.len()
         );
-        findings.extend(rust_test_wiring_findings);
+        findings.extend(test_wiring_findings);
     }
 
     let doc_findings = time_audit_detector(

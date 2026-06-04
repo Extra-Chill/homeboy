@@ -548,7 +548,7 @@ fn execution_plan_for_duplicate_only_skips_structural_detector_family() {
 }
 
 #[test]
-fn migrated_fingerprint_detector_descriptors_keep_plan_filtering() {
+fn migrated_fingerprint_detector_descriptors_keep_filtering() {
     let plan = AuditExecutionPlan::from_filters(&[AuditFinding::RepeatedLiteralShape], &[]);
     let descriptor = AuditExecutionPlan::descriptors()
         .iter()
@@ -567,14 +567,12 @@ fn migrated_fingerprint_detector_descriptors_keep_plan_filtering() {
         detector_step_status(&plan, "facade_passthrough"),
         &PlanStepStatus::Disabled
     );
-}
 
-#[test]
-fn migrated_fingerprint_detector_descriptors_keep_exclude_filtering() {
-    let plan = AuditExecutionPlan::from_filters(&[], &[AuditFinding::RepeatedLiteralShape]);
+    let excluded_plan =
+        AuditExecutionPlan::from_filters(&[], &[AuditFinding::RepeatedLiteralShape]);
 
     assert_eq!(
-        detector_step_status(&plan, "literal_shapes"),
+        detector_step_status(&excluded_plan, "literal_shapes"),
         &PlanStepStatus::Disabled
     );
 }
@@ -583,7 +581,7 @@ fn migrated_fingerprint_detector_descriptors_keep_exclude_filtering() {
 fn execution_plan_for_unwired_nested_rust_test_runs_wiring_detector() {
     let plan = AuditExecutionPlan::from_filters(&[AuditFinding::UnwiredNestedRustTest], &[]);
 
-    assert!(plan.run_rust_test_wiring());
+    assert!(plan.run_test_wiring());
     assert!(!plan.run_test_topology());
     assert_eq!(
         detector_step_status(&plan, "conventions"),
