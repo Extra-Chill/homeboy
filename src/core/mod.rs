@@ -44,6 +44,7 @@ pub mod observation;
 pub mod output;
 pub mod plan;
 pub mod process;
+pub mod product_identity;
 pub mod project;
 pub mod quality;
 pub mod redaction;
