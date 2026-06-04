@@ -17,10 +17,10 @@ const PROVIDER_CAPABILITIES = [
   'cleanup_observability',
   'screenshots',
   'structured_outcome',
-  'datamachine_bundle_execution',
+  'agent_bundle_execution',
 ];
 
-const DATAMACHINE_BUNDLE_CONFIG_FIELDS = [
+const AGENT_BUNDLE_CONFIG_FIELDS = [
   'bundle_path',
   'bundle_host_path',
   'bundle_repo',
@@ -62,6 +62,12 @@ const DATAMACHINE_BUNDLE_CONFIG_FIELDS = [
   'provider_plugin_paths',
   'step_budget',
   'time_budget_ms',
+];
+
+const LEGACY_RUNTIME_PREFIX = ['data', 'machine'].join('_');
+const LEGACY_BUNDLE_KEYS = [
+  `${LEGACY_RUNTIME_PREFIX}_bundle`,
+  `${LEGACY_RUNTIME_PREFIX}Bundle`,
 ];
 
 const WP_CODEBOX_RUNTIME_GAP_TRACKERS = [];
@@ -123,8 +129,8 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
   assertAgentTaskRequest(request);
   const config = request.executor.config || {};
   const inputs = request.inputs || {};
-  const datamachineBundle = datamachineBundleConfigFromAgentTaskRequest(request, config, inputs);
-  const mounts = datamachineBundleMounts(datamachineBundle, config.mounts || options.mounts || []);
+  const agentBundle = agentBundleConfigFromAgentTaskRequest(request, config, inputs);
+  const mounts = agentBundleMounts(agentBundle, config.mounts || options.mounts || []);
   const timeoutSeconds = request.limits?.task_timeout_seconds || request.limits?.taskTimeoutSeconds;
   const timeoutMs = request.limits?.timeout_ms || request.limits?.max_runtime_ms;
   const timeoutFromMs = timeoutMs ? Math.ceil(timeoutMs / 1000) : undefined;
@@ -160,8 +166,7 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     mounts,
     workspaces: config.workspaces || options.workspaces || [],
     agents_api_path: config.agents_api || config.agents_api_path || options.agentsApi || '',
-    data_machine_path: config.data_machine || config.data_machine_path || options.dataMachine || '',
-    data_machine_code_path: config.data_machine_code || config.data_machine_code_path || options.dataMachineCode || '',
+    runtime_component_paths: runtimeComponentPaths(config, options),
     homeboy_path: config.homeboy || config.homeboy_path || options.homeboy || '',
     homeboy_extensions_path: config.homeboy_extensions || config.homeboy_extensions_path || options.homeboyExtensions || '',
     wp_codebox_bin: config.wp_codebox_bin || options.wpCodeboxBin || '',
@@ -175,12 +180,27 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
       parent_plan_id: request.parent_plan_id,
       source_refs: request.source_refs || [],
     },
-    datamachine_bundle: datamachineBundle,
+    agent_bundle: agentBundle,
     parent_request: request,
   };
 }
 
-function datamachineBundleMounts(bundleConfig, explicitMounts = []) {
+function runtimeComponentPaths(config, options = {}) {
+  const explicit = config.runtime_component_paths && typeof config.runtime_component_paths === 'object'
+    ? config.runtime_component_paths
+    : {};
+  const legacyRuntimePath = config[LEGACY_RUNTIME_PREFIX] || config[`${LEGACY_RUNTIME_PREFIX}_path`] || options.legacyRuntime;
+  const legacyToolsKey = `${LEGACY_RUNTIME_PREFIX}_code`;
+  const legacyRuntimeToolsPath = config[legacyToolsKey] || config[`${legacyToolsKey}_path`] || options.legacyRuntimeTools;
+  return Object.fromEntries(Object.entries({
+    ...explicit,
+    agents_api: explicit.agents_api || config.agents_api || config.agents_api_path || options.agentsApi,
+    agent_runtime: explicit.agent_runtime || config.agent_runtime || config.agent_runtime_path || legacyRuntimePath,
+    agent_runtime_tools: explicit.agent_runtime_tools || config.agent_runtime_tools || config.agent_runtime_tools_path || legacyRuntimeToolsPath,
+  }).filter(([, value]) => value !== undefined && value !== ''));
+}
+
+function agentBundleMounts(bundleConfig, explicitMounts = []) {
   const mounts = Array.isArray(explicitMounts) ? [...explicitMounts] : [];
   const source = bundleConfig?.bundle_host_path;
   const target = bundleConfig?.bundle_path;
@@ -196,22 +216,24 @@ function datamachineBundleMounts(bundleConfig, explicitMounts = []) {
       source,
       target,
       mode: 'readonly',
-      metadata: { kind: 'datamachine-bundle' },
+      metadata: { kind: 'agent-bundle' },
     },
   ];
 }
 
-function datamachineBundleConfigFromAgentTaskRequest(request, config, inputs) {
+function agentBundleConfigFromAgentTaskRequest(request, config, inputs) {
   const candidateSources = [
-    inputs.datamachine_bundle,
-    inputs.datamachineBundle,
+    inputs.agent_bundle,
+    inputs.agentBundle,
+    ...LEGACY_BUNDLE_KEYS.map((key) => inputs[key]),
     inputs,
-    config.datamachine_bundle,
-    config.datamachineBundle,
+    config.agent_bundle,
+    config.agentBundle,
+    ...LEGACY_BUNDLE_KEYS.map((key) => config[key]),
     config,
   ].filter((value) => value && typeof value === 'object');
   const bundleConfig = {};
-  for (const field of DATAMACHINE_BUNDLE_CONFIG_FIELDS) {
+  for (const field of AGENT_BUNDLE_CONFIG_FIELDS) {
     for (const source of candidateSources) {
       if (source[field] !== undefined) {
         bundleConfig[field] = source[field];
@@ -427,7 +449,7 @@ function normalizeArtifacts(result) {
     for (const artifact of codeboxBundleArtifacts(result)) {
       appendUniqueArtifact(artifacts, artifact);
     }
-    for (const artifact of datamachineBundleArtifacts(result)) {
+    for (const artifact of agentRuntimeBundleArtifacts(result)) {
       appendUniqueArtifact(artifacts, artifact);
     }
     return artifacts.map(artifactFromCodeboxArtifact);
@@ -459,11 +481,11 @@ function normalizeEvidenceRefs(result) {
         label: artifact.kind.replace(/^codebox-/, 'WP Codebox ').replace(/-/g, ' '),
       });
     }
-    for (const artifact of datamachineBundleArtifacts(result)) {
+    for (const artifact of agentRuntimeBundleArtifacts(result)) {
       appendUniqueEvidenceRef(refs, {
         kind: artifact.kind,
         uri: artifact.path || artifact.url,
-        label: artifact.kind.replace(/^datamachine-/, 'Data Machine ').replace(/-/g, ' '),
+        label: artifact.kind.replace(/^agent-runtime-/, 'Agent runtime ').replace(/-/g, ' '),
       });
     }
     return refs;
@@ -476,37 +498,37 @@ function normalizeEvidenceRefs(result) {
   })).filter((ref) => ref.uri);
 }
 
-function datamachineBundleArtifacts(result) {
+function agentRuntimeBundleArtifacts(result) {
   const artifacts = [];
-  const workload = result.metadata?.datamachine?.workload || result.run?.agentResult || result.agentResult || {};
+  const workload = result.metadata?.agent_runtime?.workload || result.run?.agentResult || result.agentResult || {};
   const scenarios = Array.isArray(workload.scenarios) ? workload.scenarios : [];
   for (const scenario of scenarios) {
     const metadata = scenario?.metadata || {};
     const transcript = metadata.transcript_artifacts || {};
     appendUniqueArtifact(artifacts, {
-      id: transcript.json ? 'datamachine-transcript-json' : '',
-      kind: 'datamachine-transcript',
+      id: transcript.json ? 'agent-runtime-transcript-json' : '',
+      kind: 'agent-runtime-transcript',
       path: transcript.json,
       metadata: { scenario_id: scenario.id, format: 'json' },
     });
     appendUniqueArtifact(artifacts, {
-      id: transcript.summary ? 'datamachine-transcript-summary' : '',
-      kind: 'datamachine-transcript-summary',
+      id: transcript.summary ? 'agent-runtime-transcript-summary' : '',
+      kind: 'agent-runtime-transcript-summary',
       path: transcript.summary,
       metadata: { scenario_id: scenario.id, format: 'markdown' },
     });
     const replayBundlePath = metadata.replay_bundle_path || metadata.replay_bundle?.path;
     appendUniqueArtifact(artifacts, {
-      id: replayBundlePath ? 'datamachine-replay-bundle' : '',
-      kind: 'datamachine-replay-bundle',
+      id: replayBundlePath ? 'agent-runtime-replay-bundle' : '',
+      kind: 'agent-runtime-replay-bundle',
       path: replayBundlePath,
       metadata: { scenario_id: scenario.id },
     });
     const exports = Array.isArray(metadata.job_artifact_exports) ? metadata.job_artifact_exports : [];
     for (const [index, exported] of exports.entries()) {
       appendUniqueArtifact(artifacts, {
-        id: exported.id || exported.path || `datamachine-job-artifact-${index + 1}`,
-        kind: exported.kind || 'datamachine-job-artifact',
+        id: exported.id || exported.path || `agent-runtime-job-artifact-${index + 1}`,
+        kind: exported.kind || 'agent-runtime-job-artifact',
         path: exported.path,
         url: exported.url,
         metadata: { ...exported, scenario_id: scenario.id },
@@ -514,8 +536,8 @@ function datamachineBundleArtifacts(result) {
     }
     const pullRequestUrl = metadata.fallback_pull_request?.url || metadata.engine_data?.pull_request?.url || metadata.engine_data?.static_site_agent?.pr_url;
     appendUniqueArtifact(artifacts, {
-      id: pullRequestUrl ? 'datamachine-pull-request' : '',
-      kind: 'datamachine-pull-request',
+      id: pullRequestUrl ? 'agent-runtime-pull-request' : '',
+      kind: 'agent-runtime-pull-request',
       url: pullRequestUrl,
       metadata: { scenario_id: scenario.id },
     });

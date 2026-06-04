@@ -315,8 +315,6 @@ function runTaskRunner(request) {
   const config = request.executor?.config || {};
   const configArgs = [
     ['--agents-api', config.agents_api_path || config.agentsApiPath],
-    ['--data-machine', config.data_machine_path || config.dataMachinePath],
-    ['--data-machine-code', config.data_machine_code_path || config.dataMachineCodePath],
     ['--homeboy', config.homeboy_path || config.homeboyPath],
     ['--homeboy-extensions', config.homeboy_extensions_path || config.homeboyExtensionsPath],
   ].flatMap(([name, value]) => (value ? [name, value] : []));
