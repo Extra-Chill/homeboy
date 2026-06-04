@@ -40,5 +40,9 @@ assert.equal(
 	manifest.helpers.editorCanvasProbes,
 	path.resolve(__dirname, '..', 'lib', 'editor-canvas-probes.js')
 );
+assert.equal(
+	manifest.helpers.woocommerceExpensiveShipping,
+	path.resolve(__dirname, '..', 'scripts', 'bench', 'lib', 'woocommerce-expensive-shipping.php')
+);
 
 console.log('helper manifest smoke passed');
