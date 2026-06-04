@@ -34,7 +34,8 @@ pub use overlay_lock::{
 };
 pub use parsing::{parse_trace_list_str, parse_trace_results_file};
 pub use parsing::{
-    TraceArtifact, TraceAssertion, TraceEvent, TraceList, TraceScenario, TraceStatus,
+    TraceArtifact, TraceAssertion, TraceEvent, TraceEvidenceMetadata, TraceList, TraceScenario,
+    TraceStatus,
 };
 pub use parsing::{TraceAssertionStatus, TraceResults, TraceSpanDefinition, TraceSpanResult};
 pub use probes::{ActiveTraceProbes, TraceProbeConfig};

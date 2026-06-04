@@ -549,6 +549,12 @@ fn trace_run_evidence_report_includes_refs_assertions_and_safe_artifacts() {
         status: "fail".to_string(),
         component: "studio".to_string(),
         exit_code: 1,
+        evidence: extension_trace::TraceEvidenceMetadata {
+            canonical: true,
+            mode: "canonical".to_string(),
+            reasons: Vec::new(),
+            checks: Vec::new(),
+        },
         artifacts: vec![extension_trace::TraceArtifact {
             label: "Main log".to_string(),
             path: "artifacts/main.log".to_string(),
@@ -560,6 +566,7 @@ fn trace_run_evidence_report_includes_refs_assertions_and_safe_artifacts() {
             summary: Some("Window reopened after close.".to_string()),
             failure: Some("assertion failed".to_string()),
             rig: None,
+            evidence: None,
             timeline: Vec::new(),
             span_definitions: Vec::new(),
             span_results: Vec::new(),
