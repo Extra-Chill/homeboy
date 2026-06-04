@@ -254,7 +254,7 @@ try {
   assert.equal(agentBundleCapture.input.runtime_task.ability, 'datamachine/run-agent-bundle');
   assert.equal(agentBundleCapture.input.runtime_task.input.source, '/workspace/wp-site-generator/bundles/store-idea-agent');
   assert.equal(agentBundleCapture.input.runtime_task.input.wait_for_completion, true);
-  assert.equal(agentBundleCapture.input.runtime_task.input.runtime_bundles[0].source, '/workspace/wp-site-generator/bundles/store-idea-agent');
+  assert.equal(agentBundleCapture.input.runtime_task.input.runtime_bundles, undefined);
   const agentBundleOutput = JSON.parse(agentBundleResult.stdout);
   assert.equal(agentBundleOutput.success, true);
   assert.equal(agentBundleOutput.session.status, 'completed');

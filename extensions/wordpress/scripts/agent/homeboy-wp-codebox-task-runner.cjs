@@ -319,13 +319,14 @@ function agentBundleConfig(input, bundleConfig = {}) {
 function agentBundleRuntimeTask(input, bundleConfig = {}) {
   const config = agentBundleConfig(input, bundleConfig);
   const source = config.source || config.bundle_path || config.bundle_host_path || '';
+  const runtimeBundles = Array.isArray(config.runtime_bundles) ? config.runtime_bundles : [];
   return {
     ability: 'datamachine/run-agent-bundle',
     input: Object.fromEntries(Object.entries({
       ...config,
       source,
       wait_for_completion: config.wait_for_completion ?? true,
-      runtime_bundles: source ? [{ source, on_conflict: config.on_conflict || 'upgrade' }] : [],
+      runtime_bundles: runtimeBundles,
     }).filter(([, value]) => value !== '' && value !== undefined && !(Array.isArray(value) && value.length === 0))),
   };
 }
