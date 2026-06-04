@@ -485,8 +485,8 @@ fn trace_provenance(
     let canonical = reasons.is_empty();
     let mut runtime_assets = BTreeMap::new();
     runtime_assets.insert(
-        "php_wasm".to_string(),
-        php_wasm_asset_provenance(wp_codebox.as_ref()),
+        "browser_runtime".to_string(),
+        browser_runtime_asset_provenance(),
     );
 
     (
@@ -563,27 +563,12 @@ fn command_version(command: &str, args: &[&str]) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn php_wasm_asset_provenance(
-    wp_codebox: Option<&TraceGitProvenance>,
-) -> TraceRuntimeAssetProvenance {
-    let candidates = wp_codebox
-        .map(|provenance| Path::new(&provenance.path))
-        .into_iter()
-        .flat_map(|root| {
-            [
-                root.join("node_modules/@php-wasm/web"),
-                root.join("packages/php-wasm"),
-                root.join("packages/playground/wordpress-builds"),
-            ]
-        })
-        .collect::<Vec<_>>();
-    let present_path = candidates.into_iter().find(|path| path.exists());
-
+fn browser_runtime_asset_provenance() -> TraceRuntimeAssetProvenance {
     TraceRuntimeAssetProvenance {
-        present: present_path.is_some(),
+        present: false,
         mode: Some("jspi".to_string()),
         version: None,
-        path: present_path.map(|path| path.to_string_lossy().to_string()),
+        path: None,
     }
 }
 
