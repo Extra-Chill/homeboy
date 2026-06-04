@@ -447,7 +447,7 @@ fn check_uncommitted_changes(components: &[Component]) -> Result<()> {
             non_git.push(component);
             continue;
         }
-        match unexpected_uncommitted_files_excluding_generated_build(&component.local_path) {
+        match unexpected_uncommitted_files_excluding_generated_build(component) {
             Ok(unexpected) if unexpected.is_empty() => {}
             Ok(_) | Err(_) => dirty.push(component.id.as_str()),
         }
@@ -513,6 +513,8 @@ fn sync_components(components: &[Component]) -> Result<()> {
 
         let path = &component.local_path;
 
+        let version_before_pull = version::get_component_version(component);
+
         // Check if behind remote
         match git::fetch_and_get_behind_count(path) {
             Ok(Some(behind)) => {
@@ -530,6 +532,13 @@ fn sync_components(components: &[Component]) -> Result<()> {
                         pull_result.stderr.lines().next().unwrap_or("unknown error")
                     )));
                 }
+                if let Some(message) = auto_pull_version_drift_message(
+                    component,
+                    version_before_pull.as_deref(),
+                    version::get_component_version(component).as_deref(),
+                ) {
+                    log_status!("deploy", "{}", message);
+                }
                 log_status!("deploy", "'{}' is now up to date", component.id);
             }
             Ok(None) => {
@@ -546,6 +555,23 @@ fn sync_components(components: &[Component]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn auto_pull_version_drift_message(
+    component: &Component,
+    before: Option<&str>,
+    after: Option<&str>,
+) -> Option<String> {
+    if before == after {
+        return None;
+    }
+
+    Some(format!(
+        "Warning: auto-pull changed '{}' deploy version from {} to {}",
+        component.id,
+        before.unwrap_or("unknown"),
+        after.unwrap_or("unknown")
+    ))
 }
 
 /// Record of a tag checkout for later branch restoration.
@@ -872,6 +898,24 @@ mod tests {
             .success());
     }
 
+    fn init_clean_repo(path: &Path) {
+        let run = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(path)
+                .output()
+                .expect("git command")
+        };
+        assert!(run(&["init", "-q"]).status.success());
+        assert!(run(&["config", "user.email", "test@example.com"])
+            .status
+            .success());
+        assert!(run(&["config", "user.name", "Test"]).status.success());
+        assert!(run(&["commit", "--allow-empty", "-q", "-m", "init"])
+            .status
+            .success());
+    }
+
     #[test]
     fn check_uncommitted_changes_reports_non_git_local_path() {
         // A directory exists but is not a git repo — the error must say so clearly
@@ -1015,27 +1059,35 @@ mod tests {
         let dir = TempDir::new().expect("temp dir");
         let path = dir.path();
 
-        let run = |args: &[&str]| {
-            std::process::Command::new("git")
-                .args(args)
-                .current_dir(path)
-                .output()
-                .expect("git command")
-        };
-        assert!(run(&["init", "-q"]).status.success());
-        assert!(run(&["config", "user.email", "test@example.com"])
-            .status
-            .success());
-        assert!(run(&["config", "user.name", "Test"]).status.success());
-        assert!(run(&["commit", "--allow-empty", "-q", "-m", "init"])
-            .status
-            .success());
+        init_clean_repo(path);
         std::fs::create_dir_all(path.join(".homeboy-build")).expect("build dir");
         std::fs::write(path.join(".homeboy-build/plugin.zip"), "artifact").expect("artifact");
 
         let component = make_component("test", &path.to_string_lossy());
         check_uncommitted_changes(&[component])
             .expect("generated Homeboy deploy artifacts should not block deploy");
+    }
+
+    #[test]
+    fn check_uncommitted_changes_ignores_untracked_deploy_target_debris() {
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path();
+
+        init_clean_repo(path);
+        std::fs::create_dir_all(path.join("wp-content/plugins/data-machine/data-machine"))
+            .expect("deploy debris dir");
+        std::fs::write(
+            path.join("wp-content/plugins/data-machine/data-machine/plugin.php"),
+            "<?php",
+        )
+        .expect("deploy debris file");
+
+        let mut component = make_component("data-machine", &path.to_string_lossy());
+        component.remote_path = "wp-content/plugins/data-machine".to_string();
+        component.build_artifact = Some("dist/data-machine.zip".to_string());
+
+        check_uncommitted_changes(&[component])
+            .expect("untracked deploy-target debris should not block deploy");
     }
 
     #[test]
@@ -1067,6 +1119,29 @@ mod tests {
             .expect_err("source changes should still block deploy");
 
         assert!(err.message.contains("uncommitted changes"));
+    }
+
+    #[test]
+    fn auto_pull_version_drift_message_reports_changed_version() {
+        let component = make_component("data-machine", "/tmp/data-machine");
+
+        let message =
+            auto_pull_version_drift_message(&component, Some("0.139.12"), Some("0.139.13"))
+                .expect("version drift message");
+
+        assert!(message.contains("data-machine"));
+        assert!(message.contains("0.139.12"));
+        assert!(message.contains("0.139.13"));
+    }
+
+    #[test]
+    fn auto_pull_version_drift_message_skips_unchanged_version() {
+        let component = make_component("data-machine", "/tmp/data-machine");
+
+        assert!(
+            auto_pull_version_drift_message(&component, Some("0.139.12"), Some("0.139.12"))
+                .is_none()
+        );
     }
 
     #[test]
