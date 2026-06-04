@@ -18,6 +18,8 @@ fn trace_args_for_rig(rig_id: &str, scenario: &str) -> TraceArgs {
         scenario: Some(scenario.to_string()),
         scenario_arg: None,
         compare_after: None,
+        baseline_target: None,
+        candidate: None,
         rig: Some(rig_id.to_string()),
         profile: None,
         profiles: false,

@@ -80,6 +80,16 @@ fn trace_compare_reports_median_and_average_deltas() {
         .expect("before-only span");
     assert_eq!(before_only.after_n, None);
     assert_eq!(before_only.median_delta_ms, None);
+    assert_eq!(before_only.median_delta_percent, None);
+
+    let after_only = compare
+        .spans
+        .iter()
+        .find(|span| span.id == "after_only")
+        .expect("after-only span");
+    assert_eq!(after_only.before_n, None);
+    assert_eq!(after_only.median_delta_ms, None);
+    assert_eq!(after_only.median_delta_percent, None);
 }
 
 #[test]
@@ -288,6 +298,8 @@ fn trace_compare_exits_nonzero_for_guardrail_failures() {
         scenario: Some(before_path.to_string_lossy().to_string()),
         scenario_arg: None,
         compare_after: Some(after_path),
+        baseline_target: None,
+        candidate: None,
         rig: None,
         profile: None,
         profiles: false,
@@ -355,6 +367,16 @@ fn trace_compare_markdown_and_experiment_bundle_render_artifacts() {
         command: "trace.compare.spans",
         before_path: "before.json".to_string(),
         after_path: "after.json".to_string(),
+        before_target: Some("develop".to_string()),
+        after_target: Some("HEAD".to_string()),
+        before_git_sha: Some("abc123".to_string()),
+        after_git_sha: Some("def456".to_string()),
+        before_status: Some("pass".to_string()),
+        after_status: Some("pass".to_string()),
+        before_exit_code: Some(0),
+        after_exit_code: Some(0),
+        output_dir: Some(".homeboy/trace-compare/run".to_string()),
+        summary_path: Some(".homeboy/trace-compare/run/summary.md".to_string()),
         before_component: Some("studio".to_string()),
         after_component: Some("studio".to_string()),
         before_scenario_id: Some("create-site".to_string()),
@@ -390,6 +412,10 @@ fn trace_compare_markdown_and_experiment_bundle_render_artifacts() {
     let markdown = render_compare_markdown(&compare);
 
     assert!(markdown.contains("# Trace Compare"));
+    assert!(markdown.contains("- **Targets:** `develop` -> `HEAD`"));
+    assert!(markdown.contains("- **Git SHAs:** `abc123` -> `def456`"));
+    assert!(markdown.contains("- **Status:** `pass` -> `pass`"));
+    assert!(markdown.contains("- **Output dir:** `.homeboy/trace-compare/run`"));
     assert!(markdown.contains("| Span | before median | after median | median delta | median % | before avg | after avg | avg delta | avg % |"));
     assert!(markdown.contains(
         "| `boot_to_ready` | 100ms | 125ms | **+25ms** | +25.0% | 110.0ms | 121.0ms | **+11.0ms** | +10.0% |"
