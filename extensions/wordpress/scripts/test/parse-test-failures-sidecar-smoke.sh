@@ -59,3 +59,50 @@ assert failure.get("stderr_excerpt") == ""
 
 print("wordpress parse-test-failures sidecar smoke passed")
 PY
+
+HOST_SMOKE_OUTPUT="$TMP_DIR/host-smoke-output.txt"
+HOST_SMOKE_FAILURES_FILE="$TMP_DIR/host-smoke-failures.json"
+
+cat > "$HOST_SMOKE_OUTPUT" <<'EOF'
+Running host PHP smoke tests...
+  Component: intelligence (/tmp/plugin)
+  Backend: host-smoke
+  Files: 1
+
+HOST_SMOKE_BEGIN:tests/wiki/installed-brain-discovery-smoke.php
+Preparing registry
+[FAIL] packaged meetups brain surfaces in brains registry
+HOST_SMOKE_FAIL:tests/wiki/installed-brain-discovery-smoke.php:exit=1
+
+Host smoke test failed: tests/wiki/installed-brain-discovery-smoke.php
+EOF
+
+HOMEBOY_TEST_FAILURES_FILE="$HOST_SMOKE_FAILURES_FILE" \
+    bash "$SCRIPT_DIR/parse-test-failures.sh" "$HOST_SMOKE_OUTPUT" "/tmp/plugin"
+
+python3 - "$HOST_SMOKE_FAILURES_FILE" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    payload = json.load(handle)
+
+assert payload["total"] == 1, payload
+assert payload["passed"] == 0, payload
+failures = payload["failures"]
+assert len(failures) == 1, failures
+failure = failures[0]
+
+expected_file = "tests/wiki/installed-brain-discovery-smoke.php"
+assert failure["suite"] == "host-smoke", failure
+assert failure["file"] == expected_file, failure
+assert failure["test_file"] == expected_file, failure
+assert failure["source_file"] == expected_file, failure
+assert failure["message"] == "[FAIL] packaged meetups brain surfaces in brains registry", failure
+assert "HOST_SMOKE_FAIL:tests/wiki/installed-brain-discovery-smoke.php:exit=1" in failure["stdout_excerpt"], failure
+assert "[FAIL] packaged meetups brain surfaces in brains registry" in failure["stdout_excerpt"], failure
+assert failure["exit_code"] == 1, failure
+assert len(failure.get("fingerprint", "")) == 64
+
+print("wordpress host-smoke failure sidecar smoke passed")
+PY

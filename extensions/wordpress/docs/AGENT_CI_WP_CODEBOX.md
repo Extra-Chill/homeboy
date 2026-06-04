@@ -180,8 +180,9 @@ Provider discovery uses `homeboy/agent-task-executor-provider/v1`:
   "failure_classifications": ["provider", "timeout", "execution_failed"],
   "redacted_metadata_keys": ["secret_env_values", "secretEnvValues", "secrets"],
   "capabilities": ["browser_runtime", "wordpress_sandbox", "workspace_mounts", "workspace_tools", "artifact_materialization", "patch_artifacts", "verification_artifacts", "run_registry", "cleanup_observability", "screenshots", "structured_outcome", "datamachine_bundle_execution"],
-  "status": "preparatory",
-  "upstream_dependency": "https://github.com/Automattic/wp-codebox/issues/480"
+  "status": "active",
+  "integration_contract": "wp-codebox-cli/agent-task-run",
+  "runtime_gap_trackers": []
 }
 ```
 
@@ -201,9 +202,10 @@ Discovery fields mean:
   corresponding outcome evidence.
 - `outcome_statuses`, `failure_classifications`, and `redacted_metadata_keys`
   document the stable vocabulary consumers can use without knowing the backend.
-- `status` marks maturity. `preparatory` means the provider boundary is stable,
-  while this WP Codebox implementation still contains temporary adapter internals.
-- `upstream_dependency` links the blocker for removing those temporary internals.
+- `status` marks maturity. `active` means the provider uses the stable backend
+  contract advertised by `integration_contract`.
+- `runtime_gap_trackers` lists active upstream runtime blockers. Closed blockers
+  should be removed instead of kept as stale provider metadata.
 
 Generic `homeboy/agent-task-request/v1` requests are backend-neutral. Required
 fields are:
@@ -268,16 +270,15 @@ reachable issue, PR, artifact bundle, replay, or committed report.
 
 `homeboy-codebox-agent-task-executor.cjs` is the provider entry point. It keeps
 Homeboy core Codebox-agnostic by translating the generic `AgentTaskRequest` into
-the extension-owned WP Codebox request shape, then translating Codebox output back
-to `AgentTaskOutcome` with Homeboy-native artifacts, evidence refs, diagnostics,
-and failure classifications.
+the stable `wp-codebox/task-input/v1` shape accepted by `wp codebox
+agent-task-run`, then translating Codebox output back to `AgentTaskOutcome` with
+Homeboy-native artifacts, evidence refs, diagnostics, and failure classifications.
 
-This provider currently maps the generic request onto the existing WP Codebox
-command/recipe transport. That transport is an implementation detail of the
-extension, not part of the generic boundary. Lab offload and runner transport can
-select this provider through discovery, but should keep planning, scheduling,
-retry, and dashboard logic tied to the `homeboy/agent-task-request/v1` and
-`homeboy/agent-task-outcome/v1` schemas rather than Codebox recipe fields.
+This provider maps the generic request onto WP Codebox's parent runner contract,
+not low-level recipe fields. Lab offload and runner transport can select this
+provider through discovery, but should keep planning, scheduling, retry, and
+dashboard logic tied to the `homeboy/agent-task-request/v1` and
+`homeboy/agent-task-outcome/v1` schemas rather than Codebox-specific fields.
 
 Set `executor.config.execution_kind` to `datamachine_bundle` when the task should
 run the Data Machine workload path instead of the generic sandbox prompt path.
@@ -286,10 +287,10 @@ WP Codebox recipe mounts the Homeboy WordPress extension, exports
 `HOMEBOY_DATAMACHINE_AGENT_CONFIG`, and runs
 `datamachine-agent-workload.php` through the workload wrapper.
 
-The provider is intentionally marked preparatory while Codebox's upstream agent
-task runner API is still tracked in https://github.com/Automattic/wp-codebox/issues/480.
-Once that surface lands, the same provider contract can remove Homeboy-owned
-recipe synthesis without moving Codebox-specific logic into Homeboy core.
+The provider shells through `wp-codebox agent-task-run --input-file=<json>
+--json`. WP Codebox owns sandbox recipe synthesis, runtime lifecycle, and
+artifact capture behind that stable command; Homeboy keeps only request/outcome
+adaptation and redaction logic in this extension.
 
 ## Runner config surface
 

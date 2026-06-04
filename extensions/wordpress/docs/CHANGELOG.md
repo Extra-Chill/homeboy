@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.115.8] - 2026-06-04
+
+### Fixed
+- use WP Codebox agent task contract
+
 ## [2.115.7] - 2026-06-04
 
 ### Fixed
