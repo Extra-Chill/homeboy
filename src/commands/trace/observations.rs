@@ -4,6 +4,8 @@ use homeboy::core::engine::run_dir::RunDir;
 use homeboy::core::extension::trace as extension_trace;
 use homeboy::core::observation::{NewFindingRecord, ObservationStore};
 
+use extension_trace::resolve_declared_trace_artifact_path;
+
 #[derive(Debug, Default)]
 pub(super) struct TraceArtifactObservationResult {
     pub missing_declared_artifacts: usize,
@@ -15,8 +17,6 @@ impl TraceArtifactObservationResult {
         self.missing_declared_artifacts > 0 || self.invalid_declared_artifacts > 0
     }
 }
-
-use extension_trace::resolve_declared_trace_artifact_path;
 
 pub(super) fn record_trace_artifacts(
     store: &ObservationStore,
@@ -300,6 +300,7 @@ mod tests {
             artifacts,
             toolchain: None,
             components: None,
+            dependencies: Vec::new(),
         }
     }
 

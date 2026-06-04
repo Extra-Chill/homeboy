@@ -525,6 +525,7 @@ mod tests {
             artifacts: Vec::new(),
             toolchain: None,
             components: None,
+            dependencies: Vec::new(),
         };
 
         append_attach_observations(&mut results, &run_dir, &observations).unwrap();

@@ -11,13 +11,16 @@ use crate::core::engine::baseline::BaselineFlags;
 use crate::core::engine::run_dir::{self, RunDir};
 use crate::core::error::{Error, ErrorCode, Result};
 use crate::core::extension::trace::baseline::TraceBaselineComparison;
+use crate::core::extension::trace::preflight::{
+    preflight_trace_dependencies, preflight_trace_runner_capabilities,
+};
 use crate::core::extension::RunnerOutput;
 use crate::core::extension::{
     build_scenario_runner, path_list_env_value, resolve_execution_context, stderr_tail,
     ExtensionCapability, ExtensionExecutionContext, ScenarioRunnerOptions,
 };
 use crate::core::paths;
-use crate::core::rig::RigStateSnapshot;
+use crate::core::rig::{RigStateSnapshot, TraceDependencySpec};
 
 use super::attach::{append_attach_observations, observe_trace_attachments, TraceAttachment};
 use super::overlay::{
@@ -67,6 +70,8 @@ pub struct TraceRunnerInputs {
     pub workload_paths: Vec<PathBuf>,
     pub probes: Vec<TraceProbeConfig>,
     pub attachments: Vec<TraceAttachment>,
+    pub dependencies: Vec<TraceDependencySpec>,
+    pub runner_capabilities: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -146,6 +151,8 @@ fn run_trace_workflow_with_component_script(
         .path_override
         .as_deref()
         .unwrap_or(component.local_path.as_str());
+    let dependency_provenance = preflight_trace_dependencies(&args.runner_inputs.dependencies)?;
+    preflight_trace_runner_capabilities(None, &args.runner_inputs.runner_capabilities)?;
     let (mut toolchain, components) = trace_provenance(None, component_path);
     mark_non_canonical(
         &mut toolchain,
@@ -193,6 +200,7 @@ fn run_trace_workflow_with_component_script(
     if let Some(parsed) = results.as_mut() {
         parsed.toolchain = Some(toolchain.clone());
         parsed.components = Some(components.clone());
+        parsed.dependencies = dependency_provenance;
         super::spans::apply_span_definitions(parsed, &args.span_definitions);
         super::assertions::apply_temporal_assertions(parsed);
         persist_trace_results(&results_path, parsed)?;
@@ -263,6 +271,11 @@ fn run_trace_workflow_with_context(
         .path_override
         .as_deref()
         .unwrap_or(component.local_path.as_str());
+    let dependency_provenance = preflight_trace_dependencies(&args.runner_inputs.dependencies)?;
+    preflight_trace_runner_capabilities(
+        execution_context,
+        &args.runner_inputs.runner_capabilities,
+    )?;
     let (toolchain, components) = trace_provenance(execution_context, component_path);
     let _overlay_locks = if args.overlays.is_empty() {
         None
@@ -320,6 +333,7 @@ fn run_trace_workflow_with_context(
     if let Some(parsed) = results.as_mut() {
         parsed.toolchain = Some(toolchain.clone());
         parsed.components = Some(components.clone());
+        parsed.dependencies = dependency_provenance;
         parsed.timeline.extend(probe_events);
         parsed.timeline.sort_by_key(|event| event.t_ms);
         append_attach_observations(parsed, run_dir, &attach_observations)?;
@@ -791,8 +805,14 @@ pub(crate) fn build_trace_runner(
     })?;
 
     let Some(execution_context) = execution_context else {
+        preflight_trace_runner_capabilities(None, &args.runner_inputs.runner_capabilities)?;
         return run_generic_trace_runner(component, args, run_dir, &artifact_dir, list_only);
     };
+
+    preflight_trace_runner_capabilities(
+        Some(execution_context),
+        &args.runner_inputs.runner_capabilities,
+    )?;
 
     let mut runner = build_scenario_runner(ScenarioRunnerOptions {
         execution_context,
@@ -1093,6 +1113,20 @@ fn generic_trace_env(
             extra_workloads_env_value(workloads)?,
         ),
     ]);
+    if !args.runner_inputs.dependencies.is_empty() {
+        env.push((
+            "HOMEBOY_TRACE_DEPENDENCIES".to_string(),
+            serde_json::to_string(&preflight_trace_dependencies(
+                &args.runner_inputs.dependencies,
+            )?)
+            .map_err(|e| {
+                Error::internal_json(
+                    format!("Failed to serialize trace dependency provenance: {e}"),
+                    Some("trace.dependencies.serialize".to_string()),
+                )
+            })?,
+        ));
+    }
     if let Some(rig_id) = &args.rig_id {
         env.push(("HOMEBOY_TRACE_RIG_ID".to_string(), rig_id.clone()));
     }
@@ -1309,6 +1343,7 @@ mod tests {
             artifacts: Vec::new(),
             toolchain: None,
             components: None,
+            dependencies: Vec::new(),
         };
 
         let written = baseline::save_baseline(&baseline_root, "studio", &results, Some(&rig_id))

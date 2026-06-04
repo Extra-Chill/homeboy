@@ -82,6 +82,8 @@ JSON
                 workload_paths: vec![component_dir.join("trace-fixture.trace.mjs")],
                 probes: Vec::new(),
                 attachments: vec![TraceAttachment::parse("logfile:/tmp/homeboy-trace.log").unwrap()],
+                dependencies: Vec::new(),
+                runner_capabilities: Vec::new(),
             },
             scenario_id: "close-window".to_string(),
             json_summary: false,
@@ -418,6 +420,8 @@ JSON
                         log_path.display()
                     ))
                     .unwrap()],
+                    dependencies: Vec::new(),
+                    runner_capabilities: Vec::new(),
                 },
                 scenario_id: "attach".to_string(),
                 json_summary: false,

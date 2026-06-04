@@ -15,6 +15,7 @@ pub mod baseline;
 mod overlay;
 mod overlay_lock;
 pub mod parsing;
+mod preflight;
 pub mod probes;
 pub mod report;
 pub mod run;

@@ -66,10 +66,31 @@ pub struct TraceResults {
     pub temporal_assertions: Vec<TraceTemporalAssertionDefinition>,
     #[serde(default)]
     pub artifacts: Vec<TraceArtifact>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependencies: Vec<TraceDependencyProvenance>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub toolchain: Option<TraceToolchainProvenance>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub components: Option<TraceComponentsProvenance>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TraceDependencyProvenance {
+    pub id: String,
+    pub kind: String,
+    pub source: String,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub r#ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package_marker: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_file: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

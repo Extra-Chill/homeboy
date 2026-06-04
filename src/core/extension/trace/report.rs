@@ -802,6 +802,7 @@ mod tests {
                 }],
                 toolchain: None,
                 components: None,
+                dependencies: Vec::new(),
             }),
             failure: None,
             overlays: vec![TraceOverlay {
@@ -871,6 +872,7 @@ mod tests {
                 artifacts: Vec::new(),
                 toolchain: None,
                 components: None,
+                dependencies: Vec::new(),
             }),
             failure: None,
             overlays: Vec::new(),
@@ -979,6 +981,7 @@ mod tests {
                 },
                 dependencies: Vec::new(),
             }),
+            dependencies: Vec::new(),
         };
 
         let overlays = vec![TraceOverlay {
@@ -1031,6 +1034,7 @@ mod tests {
             ],
             toolchain: None,
             components: None,
+            dependencies: Vec::new(),
         };
 
         let markdown = render_markdown(&results, &[]);

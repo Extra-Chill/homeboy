@@ -2,7 +2,8 @@ use std::path::PathBuf;
 
 use crate::core::rig::spec::RigSpec;
 use crate::core::rig::{
-    check_groups_for_extension_workloads, extension_ids_for_workloads, workloads_for_extension,
+    check_groups_for_extension_workloads, extension_ids_for_workloads,
+    runner_capabilities_for_extension, trace_dependencies_for_extension, workloads_for_extension,
     RigWorkloadKind,
 };
 
@@ -274,5 +275,57 @@ fn test_extension_ids_for_workloads_are_sorted_by_kind() {
     assert_eq!(
         extension_ids_for_workloads(&rig_spec, RigWorkloadKind::Trace),
         vec!["extension-a".to_string(), "extension-c".to_string()]
+    );
+}
+
+#[test]
+fn test_trace_workload_dependencies_expand_paths_and_capabilities_dedupe() {
+    let rig_spec: RigSpec = serde_json::from_str(
+        r#"{
+            "id": "stripe-ece",
+            "components": {
+                "woocommerce": { "path": "/tmp/woocommerce-package" }
+            },
+            "trace_workloads": {
+                "extension-a": [
+                    {
+                        "path": "/tmp/ece.trace.mjs",
+                        "dependencies": [
+                            {
+                                "id": "sample-package",
+                                "kind": "package",
+                                "source": "release-package-or-build-artifact",
+                                "path": "${components.woocommerce.path}",
+                                "plugin_file": "package/entrypoint.txt",
+                                "requires_built_assets": true
+                            }
+                        ],
+                        "runner_capabilities": [
+                            "wp-codebox.recipe-run",
+                            "browser-probe.assertions"
+                        ]
+                    },
+                    {
+                        "path": "/tmp/ece-second.trace.mjs",
+                        "runner_capabilities": ["wp-codebox.recipe-run"]
+                    }
+                ]
+            }
+        }"#,
+    )
+    .expect("parse rig spec");
+
+    let dependencies = trace_dependencies_for_extension(&rig_spec, None, "extension-a");
+    assert_eq!(dependencies.len(), 1);
+    assert_eq!(
+        dependencies[0].path.as_deref(),
+        Some("/tmp/woocommerce-package")
+    );
+    assert_eq!(
+        runner_capabilities_for_extension(&rig_spec, "extension-a"),
+        vec![
+            "browser-probe.assertions".to_string(),
+            "wp-codebox.recipe-run".to_string()
+        ]
     );
 }

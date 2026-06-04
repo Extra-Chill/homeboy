@@ -138,6 +138,7 @@ mod tests {
             artifacts: Vec::new(),
             toolchain: None,
             components: None,
+            dependencies: Vec::new(),
         };
 
         apply_span_definitions(

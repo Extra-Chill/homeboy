@@ -571,6 +571,13 @@ impl ExtensionManifest {
             .and_then(|c| c.extension_script.as_deref())
     }
 
+    pub fn trace_runner_capabilities(&self) -> &[String] {
+        self.trace
+            .as_ref()
+            .map(|trace| trace.runner_capabilities.as_slice())
+            .unwrap_or(&[])
+    }
+
     pub fn env_provider_script(&self) -> Option<&str> {
         self.env_provider
             .as_ref()
