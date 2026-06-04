@@ -31,6 +31,8 @@ JSON
                 scenario: Some("smoke".to_string()),
                 scenario_arg: None,
                 compare_after: None,
+                baseline_target: None,
+                candidate: None,
                 rig: None,
                 profile: None,
                 profiles: false,
