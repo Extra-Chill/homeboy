@@ -308,7 +308,6 @@ fn rig_component_path_and_trace_env_are_threaded() {
         components,
         ..serde_json::from_str(r#"{"id":"studio-rig"}"#).unwrap()
     };
-
     let path = rig_component_path(&spec, "studio").expect("path resolves");
     assert_eq!(path, component_dir.path().to_string_lossy());
     let component = rig_component_for_trace(&spec, "studio").expect("component resolves");

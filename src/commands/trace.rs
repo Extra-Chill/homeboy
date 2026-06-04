@@ -40,6 +40,7 @@ pub(super) mod repeat;
 mod schedule;
 #[cfg(test)]
 mod test_fixture;
+mod workload;
 
 use compare_targets::run_compare_targets;
 use compare_variant::run_compare_variant;
@@ -66,6 +67,7 @@ use repeat::run_repeat;
 pub(super) use schedule::{
     plan_trace_run_order, TraceRunPlanEntry, TraceSchedule, TraceVariantMatrixMode,
 };
+use workload::trace_workload_scenario_id;
 
 #[cfg(test)]
 use matrix::{expand_variant_matrix, TraceVariantStackItem};
@@ -183,11 +185,8 @@ pub struct TraceArgs {
     #[arg(long)]
     pub keep_overlay: bool,
 
-    /// Require canonical proof inputs and refuse dirty, stale, or arbitrary local toolchain state.
     #[arg(long, alias = "proof")]
     pub canonical: bool,
-
-    /// Permit local toolchain overrides for development traces and mark evidence non-canonical.
     #[arg(long)]
     pub allow_local_toolchain: bool,
 
@@ -585,7 +584,10 @@ fn execute_trace_run(args: TraceArgs) -> homeboy::core::Result<TraceRunExecution
             },
             regression_threshold_percent: args.regression_threshold,
             regression_min_delta_ms: args.regression_min_delta_ms,
-            canonical_policy: trace_canonical_policy(&args),
+            canonical_policy: TraceCanonicalPolicy::from_flags(
+                args.canonical,
+                args.allow_local_toolchain,
+            ),
         },
         &run_dir,
         rig_state.clone(),
@@ -619,16 +621,6 @@ fn execute_trace_run(args: TraceArgs) -> homeboy::core::Result<TraceRunExecution
         run_dir,
         rig_state,
     })
-}
-
-fn trace_canonical_policy(args: &TraceArgs) -> TraceCanonicalPolicy {
-    if args.allow_local_toolchain {
-        TraceCanonicalPolicy::AllowLocalToolchain
-    } else if args.canonical {
-        TraceCanonicalPolicy::Canonical
-    } else {
-        TraceCanonicalPolicy::Development
-    }
 }
 
 fn trace_scenario(args: &TraceArgs) -> homeboy::core::Result<&str> {
@@ -769,21 +761,6 @@ fn trace_phase_preset_for_args(
             })
         })
         .collect()
-}
-
-fn trace_workload_scenario_id(path: &str) -> String {
-    let file_name = Path::new(path)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or(path);
-    if let Some((stem, _)) = file_name.split_once(".trace.") {
-        return stem.to_string();
-    }
-    Path::new(file_name)
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .unwrap_or(file_name)
-        .to_string()
 }
 
 fn run_list(args: TraceArgs) -> CmdResult<TraceCommandOutput> {

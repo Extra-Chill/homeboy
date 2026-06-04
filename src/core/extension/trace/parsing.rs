@@ -169,9 +169,9 @@ pub struct TraceCanonicalCheck {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ahead: Option<u32>,
+    pub commits_ahead: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub behind: Option<u32>,
+    pub commits_behind: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

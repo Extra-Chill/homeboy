@@ -3,7 +3,6 @@
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::Instant;
 
 use crate::core::component::Component;
@@ -16,8 +15,8 @@ use crate::core::extension::trace::preflight::{
 };
 use crate::core::extension::RunnerOutput;
 use crate::core::extension::{
-    build_scenario_runner, path_list_env_value, resolve_execution_context, stderr_tail,
-    ExtensionCapability, ExtensionExecutionContext, ScenarioRunnerOptions,
+    build_scenario_runner, resolve_execution_context, stderr_tail, ExtensionCapability,
+    ExtensionExecutionContext, ScenarioRunnerOptions,
 };
 use crate::core::paths;
 use crate::core::rig::{RigStateSnapshot, TraceDependencySpec};
@@ -28,11 +27,16 @@ use super::overlay::{
     cleanup_trace_overlays, TraceOverlayRequest,
 };
 
+use super::canonicality::{
+    evaluate_trace_canonicality, refused_trace_result, TraceCanonicalPolicy,
+};
+use super::generic_runner::run_generic_trace_runner;
+#[cfg(test)]
+use super::generic_runner::{discover_generic_trace_workloads, trace_workload_scenario_id};
 use super::parsing::{
     parse_trace_list_str, parse_trace_results_file, TraceAssertion, TraceAssertionStatus,
-    TraceCanonicalCheck, TraceComponentsProvenance, TraceEvidenceMetadata, TraceGitProvenance,
-    TraceList, TraceResults, TraceRuntimeAssetProvenance, TraceSpanDefinition, TraceStatus,
-    TraceToolchainProvenance,
+    TraceComponentsProvenance, TraceEvidenceMetadata, TraceGitProvenance, TraceList, TraceResults,
+    TraceRuntimeAssetProvenance, TraceSpanDefinition, TraceStatus, TraceToolchainProvenance,
 };
 use super::probes::{ActiveTraceProbes, TraceProbeConfig};
 
@@ -74,46 +78,6 @@ pub struct TraceRunnerInputs {
     pub attachments: Vec<TraceAttachment>,
     pub dependencies: Vec<TraceDependencySpec>,
     pub runner_capabilities: Vec<String>,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum TraceCanonicalPolicy {
-    #[default]
-    Development,
-    Canonical,
-    AllowLocalToolchain,
-}
-
-impl TraceCanonicalPolicy {
-    fn mode(self) -> &'static str {
-        match self {
-            Self::Development => "development",
-            Self::Canonical => "canonical",
-            Self::AllowLocalToolchain => "allow-local-toolchain",
-        }
-    }
-
-    fn refuses_non_canonical(self) -> bool {
-        self == Self::Canonical
-    }
-}
-
-#[derive(Debug, Clone)]
-struct TraceCanonicalityReport {
-    canonical: bool,
-    reasons: Vec<String>,
-    checks: Vec<TraceCanonicalCheck>,
-}
-
-impl TraceCanonicalityReport {
-    fn metadata(&self, policy: TraceCanonicalPolicy) -> TraceEvidenceMetadata {
-        TraceEvidenceMetadata {
-            canonical: self.canonical,
-            mode: policy.mode().to_string(),
-            reasons: self.reasons.clone(),
-            checks: self.checks.clone(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -197,7 +161,7 @@ fn run_trace_workflow_with_component_script(
     let dependency_provenance = preflight_trace_dependencies(&args.runner_inputs.dependencies)?;
     preflight_trace_runner_capabilities(None, &args.runner_inputs.runner_capabilities)?;
     let canonicality = evaluate_trace_canonicality(None, component, &args)?;
-    if args.canonical_policy.refuses_non_canonical() && !canonicality.canonical {
+    if args.canonical_policy.refuses_non_canonical() && !canonicality.is_canonical() {
         return Ok(refused_trace_result(
             args,
             canonicality.metadata(TraceCanonicalPolicy::Canonical),
@@ -329,7 +293,7 @@ fn run_trace_workflow_with_context(
         &args.runner_inputs.runner_capabilities,
     )?;
     let canonicality = evaluate_trace_canonicality(execution_context, component, &args)?;
-    if args.canonical_policy.refuses_non_canonical() && !canonicality.canonical {
+    if args.canonical_policy.refuses_non_canonical() && !canonicality.is_canonical() {
         return Ok(refused_trace_result(
             args,
             canonicality.metadata(TraceCanonicalPolicy::Canonical),
@@ -647,280 +611,6 @@ fn browser_runtime_asset_provenance() -> TraceRuntimeAssetProvenance {
     }
 }
 
-fn refused_trace_result(
-    args: TraceRunWorkflowArgs,
-    evidence: TraceEvidenceMetadata,
-) -> TraceRunWorkflowResult {
-    let failure = format!(
-        "canonical trace refused non-canonical toolchain: {}",
-        evidence.reasons.join("; ")
-    );
-    let results = TraceResults {
-        component_id: args.component_id.clone(),
-        scenario_id: args.scenario_id.clone(),
-        status: TraceStatus::Error,
-        summary: Some("Canonical trace preflight failed before workload execution.".to_string()),
-        failure: Some(failure.clone()),
-        rig: None,
-        evidence: Some(evidence.clone()),
-        timeline: Vec::new(),
-        span_definitions: args.span_definitions,
-        span_results: Vec::new(),
-        assertions: evidence
-            .reasons
-            .iter()
-            .enumerate()
-            .map(|(index, reason)| TraceAssertion {
-                id: format!("trace_canonicality:{}", index + 1),
-                status: TraceAssertionStatus::Error,
-                message: Some(reason.clone()),
-                details: None,
-            })
-            .collect(),
-        temporal_assertions: Vec::new(),
-        artifacts: Vec::new(),
-    };
-
-    TraceRunWorkflowResult {
-        status: "error".to_string(),
-        component: args.component_label,
-        exit_code: 1,
-        evidence,
-        results: Some(results),
-        failure: Some(TraceRunFailure {
-            component_id: args.component_id,
-            path_override: args.path_override,
-            scenario_id: args.scenario_id,
-            exit_code: 1,
-            stderr_excerpt: failure,
-        }),
-        overlays: Vec::new(),
-        baseline_comparison: None,
-        hints: Some(vec![
-            "Use --allow-local-toolchain for development-only trace runs; evidence will be marked non-canonical.".to_string(),
-        ]),
-        toolchain: None,
-        components: None,
-    }
-}
-
-const LOCAL_TOOLCHAIN_ENV_KEYS: &[&str] = &["HOMEBOY_WP_CODEBOX_BIN"];
-
-fn evaluate_trace_canonicality(
-    execution_context: Option<&ExtensionExecutionContext>,
-    component: &Component,
-    args: &TraceRunWorkflowArgs,
-) -> Result<TraceCanonicalityReport> {
-    let mut reasons = Vec::new();
-    let mut checks = Vec::new();
-    let component_path = args
-        .path_override
-        .as_deref()
-        .unwrap_or(component.local_path.as_str());
-
-    if let Some(path_override) = args.path_override.as_deref() {
-        if !canonical_paths_equal(path_override, &component.local_path) {
-            reasons.push(format!(
-                "component path resolved through local override `{}` instead of declared binding `{}`",
-                path_override, component.local_path
-            ));
-        }
-    }
-
-    checks.push(check_git_checkout(
-        "component",
-        Path::new(component_path),
-        &mut reasons,
-    ));
-    if let Some(artifact) = component.build_artifact.as_deref() {
-        let artifact_path = Path::new(component_path).join(artifact);
-        if !artifact_path.exists() {
-            reasons.push(format!(
-                "component build artifact is missing: {}",
-                artifact_path.display()
-            ));
-            checks.push(TraceCanonicalCheck {
-                target: "component.build_artifact".to_string(),
-                path: artifact_path.to_string_lossy().to_string(),
-                status: "missing".to_string(),
-                sha: None,
-                branch: None,
-                upstream: None,
-                ahead: None,
-                behind: None,
-            });
-        }
-    }
-
-    if let Some(context) = execution_context {
-        checks.push(check_git_checkout(
-            &format!("extension:{}", context.extension_id),
-            &context.extension_path,
-            &mut reasons,
-        ));
-    }
-
-    for key in LOCAL_TOOLCHAIN_ENV_KEYS {
-        let explicit = args.runner_inputs.env.iter().any(|(name, _)| name == key);
-        let inherited = std::env::var_os(key).is_some();
-        if explicit || inherited {
-            let source = if explicit {
-                "trace runner env"
-            } else {
-                "process env"
-            };
-            reasons.push(format!(
-                "arbitrary local toolchain override `{}` is set via {}",
-                key, source
-            ));
-        }
-    }
-
-    Ok(TraceCanonicalityReport {
-        canonical: reasons.is_empty(),
-        reasons,
-        checks,
-    })
-}
-
-fn canonical_paths_equal(left: &str, right: &str) -> bool {
-    let left = Path::new(left).canonicalize();
-    let right = Path::new(right).canonicalize();
-    matches!((left, right), (Ok(left), Ok(right)) if left == right)
-}
-
-fn check_git_checkout(target: &str, path: &Path, reasons: &mut Vec<String>) -> TraceCanonicalCheck {
-    let path_display = path.to_string_lossy().to_string();
-    if !path.exists() {
-        reasons.push(format!(
-            "{} checkout path is missing: {}",
-            target,
-            path.display()
-        ));
-        return TraceCanonicalCheck {
-            target: target.to_string(),
-            path: path_display,
-            status: "missing".to_string(),
-            sha: None,
-            branch: None,
-            upstream: None,
-            ahead: None,
-            behind: None,
-        };
-    }
-
-    if git_output(path, &["rev-parse", "--is-inside-work-tree"]).as_deref() != Some("true") {
-        reasons.push(format!(
-            "{} path is not a git checkout: {}",
-            target,
-            path.display()
-        ));
-        return TraceCanonicalCheck {
-            target: target.to_string(),
-            path: path_display,
-            status: "not-git".to_string(),
-            sha: None,
-            branch: None,
-            upstream: None,
-            ahead: None,
-            behind: None,
-        };
-    }
-
-    let sha = git_output(path, &["rev-parse", "HEAD"]);
-    let branch = git_output(path, &["rev-parse", "--abbrev-ref", "HEAD"]);
-    let upstream = git_output(path, &["rev-parse", "--abbrev-ref", "@{u}"]);
-    let dirty = git_output(path, &["status", "--porcelain=v1"])
-        .map(|status| !status.is_empty())
-        .unwrap_or(true);
-    let (ahead, behind) = upstream
-        .as_ref()
-        .and_then(|_| {
-            git_output(
-                path,
-                &["rev-list", "--left-right", "--count", "HEAD...@{u}"],
-            )
-        })
-        .and_then(|counts| parse_ahead_behind(&counts))
-        .unwrap_or((None, None));
-
-    if dirty {
-        reasons.push(format!("{} checkout is dirty: {}", target, path.display()));
-    }
-    if branch.as_deref() == Some("HEAD") {
-        reasons.push(format!(
-            "{} checkout is detached: {}",
-            target,
-            path.display()
-        ));
-    }
-    if upstream.is_none() {
-        reasons.push(format!(
-            "{} checkout has no upstream branch: {}",
-            target,
-            path.display()
-        ));
-    }
-    if behind.unwrap_or(0) > 0 {
-        reasons.push(format!(
-            "{} checkout is behind upstream by {} commit(s): {}",
-            target,
-            behind.unwrap_or(0),
-            path.display()
-        ));
-    }
-    if ahead.unwrap_or(0) > 0 {
-        reasons.push(format!(
-            "{} checkout is ahead of upstream by {} unmerged commit(s): {}",
-            target,
-            ahead.unwrap_or(0),
-            path.display()
-        ));
-    }
-
-    let status = if dirty
-        || branch.as_deref() == Some("HEAD")
-        || upstream.is_none()
-        || ahead.unwrap_or(0) > 0
-        || behind.unwrap_or(0) > 0
-    {
-        "non-canonical"
-    } else {
-        "ok"
-    };
-
-    TraceCanonicalCheck {
-        target: target.to_string(),
-        path: path_display,
-        status: status.to_string(),
-        sha,
-        branch,
-        upstream,
-        ahead,
-        behind,
-    }
-}
-
-fn git_output(path: &Path, args: &[&str]) -> Option<String> {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(path)
-        .stdin(std::process::Stdio::null())
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
-fn parse_ahead_behind(value: &str) -> Option<(Option<u32>, Option<u32>)> {
-    let mut parts = value.split_whitespace();
-    let ahead = parts.next()?.parse::<u32>().ok()?;
-    let behind = parts.next()?.parse::<u32>().ok()?;
-    Some((Some(ahead), Some(behind)))
-}
-
 fn validate_declared_trace_artifacts(
     results: &mut TraceResults,
     run_dir: &RunDir,
@@ -1226,267 +916,6 @@ fn trace_probes_with_fswatch_attachments(
     merged
 }
 
-fn run_generic_trace_runner(
-    component: &Component,
-    args: &TraceRunWorkflowArgs,
-    run_dir: &RunDir,
-    artifact_dir: &Path,
-    list_only: bool,
-) -> Result<RunnerOutput> {
-    let component_path = args
-        .path_override
-        .as_deref()
-        .unwrap_or(component.local_path.as_str());
-    let workloads =
-        discover_generic_trace_workloads(Path::new(component_path), &args.runner_inputs)?;
-
-    if list_only {
-        let scenarios = workloads
-            .iter()
-            .map(|path| {
-                serde_json::json!({
-                    "id": trace_workload_scenario_id(path),
-                    "source": path.to_string_lossy()
-                })
-            })
-            .collect::<Vec<_>>();
-        let stdout = serde_json::json!({
-            "component_id": args.component_id,
-            "scenarios": scenarios
-        })
-        .to_string();
-        return Ok(RunnerOutput {
-            exit_code: 0,
-            success: true,
-            stdout,
-            stderr: String::new(),
-        });
-    }
-
-    let Some(workload) = workloads
-        .iter()
-        .find(|path| trace_workload_scenario_id(path) == args.scenario_id)
-    else {
-        return Ok(RunnerOutput {
-            exit_code: 3,
-            success: false,
-            stdout: String::new(),
-            stderr: format!("unknown trace scenario {}", args.scenario_id),
-        });
-    };
-
-    let mut command = generic_trace_workload_command(workload);
-    command.current_dir(component_path);
-    command.envs(generic_trace_env(
-        component,
-        args,
-        run_dir,
-        artifact_dir,
-        &workloads,
-        list_only,
-    )?);
-    let output = command.output().map_err(|e| {
-        Error::internal_io(
-            format!(
-                "Failed to run generic trace workload {}: {}",
-                workload.display(),
-                e
-            ),
-            Some("trace.generic.run".to_string()),
-        )
-    })?;
-
-    Ok(RunnerOutput {
-        exit_code: output.status.code().unwrap_or(1),
-        success: output.status.success(),
-        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-    })
-}
-
-fn discover_generic_trace_workloads(
-    component_path: &Path,
-    runner_inputs: &TraceRunnerInputs,
-) -> Result<Vec<PathBuf>> {
-    let mut paths = Vec::new();
-    for dir in [
-        component_path.join("traces"),
-        component_path.join("scripts/trace"),
-    ] {
-        if !dir.is_dir() {
-            continue;
-        }
-        let entries = std::fs::read_dir(&dir).map_err(|e| {
-            Error::internal_io(
-                format!("Failed to read trace workload dir {}: {}", dir.display(), e),
-                Some("trace.generic.discover".to_string()),
-            )
-        })?;
-        for entry in entries {
-            let entry = entry.map_err(|e| {
-                Error::internal_io(
-                    format!(
-                        "Failed to read trace workload entry in {}: {}",
-                        dir.display(),
-                        e
-                    ),
-                    Some("trace.generic.discover".to_string()),
-                )
-            })?;
-            let path = entry.path();
-            if is_generic_trace_workload(&path) {
-                paths.push(path);
-            }
-        }
-    }
-
-    paths.extend(runner_inputs.workload_paths.iter().cloned());
-    if let Some(extra) = std::env::var_os("HOMEBOY_TRACE_EXTRA_WORKLOADS") {
-        paths.extend(std::env::split_paths(&extra));
-    }
-
-    paths.sort();
-    paths.dedup();
-    Ok(paths)
-}
-
-fn is_generic_trace_workload(path: &Path) -> bool {
-    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-        return false;
-    };
-    (name.ends_with(".trace.mjs") || name.ends_with(".trace.sh") || name.ends_with(".trace.py"))
-        || matches!(
-            path.extension().and_then(|ext| ext.to_str()),
-            Some("mjs" | "sh" | "py")
-        ) && path
-            .parent()
-            .and_then(|parent| parent.file_name())
-            .and_then(|name| name.to_str())
-            == Some("trace")
-}
-
-fn trace_workload_scenario_id(path: &Path) -> String {
-    let name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or_default();
-    for suffix in [".trace.mjs", ".trace.sh", ".trace.py", ".mjs", ".sh", ".py"] {
-        if let Some(stripped) = name.strip_suffix(suffix) {
-            return stripped.to_string();
-        }
-    }
-    name.to_string()
-}
-
-fn generic_trace_workload_command(workload: &Path) -> Command {
-    match workload.extension().and_then(|ext| ext.to_str()) {
-        Some("mjs") => {
-            let mut command = Command::new("node");
-            command.arg(workload);
-            command
-        }
-        Some("py") => {
-            let mut command = Command::new("python3");
-            command.arg(workload);
-            command
-        }
-        Some("sh") => {
-            let mut command = Command::new("sh");
-            command.arg(workload);
-            command
-        }
-        _ => Command::new(workload),
-    }
-}
-
-fn generic_trace_env(
-    component: &Component,
-    args: &TraceRunWorkflowArgs,
-    run_dir: &RunDir,
-    artifact_dir: &Path,
-    workloads: &[PathBuf],
-    list_only: bool,
-) -> Result<Vec<(String, String)>> {
-    let component_path = args
-        .path_override
-        .as_deref()
-        .unwrap_or(component.local_path.as_str());
-    let mut env = run_dir.legacy_env_vars();
-    env.extend([
-        (
-            "HOMEBOY_EXTENSION_ID".to_string(),
-            "generic-shell".to_string(),
-        ),
-        (
-            "HOMEBOY_COMPONENT_ID".to_string(),
-            args.component_id.clone(),
-        ),
-        (
-            "HOMEBOY_COMPONENT_PATH".to_string(),
-            component_path.to_string(),
-        ),
-        (
-            "HOMEBOY_TRACE_RESULTS_FILE".to_string(),
-            run_dir
-                .step_file(run_dir::files::TRACE_RESULTS)
-                .to_string_lossy()
-                .to_string(),
-        ),
-        (
-            "HOMEBOY_TRACE_SCENARIO".to_string(),
-            args.scenario_id.clone(),
-        ),
-        (
-            "HOMEBOY_TRACE_ARTIFACT_DIR".to_string(),
-            artifact_dir.to_string_lossy().to_string(),
-        ),
-        (
-            "HOMEBOY_TRACE_LIST_ONLY".to_string(),
-            if list_only { "1" } else { "0" }.to_string(),
-        ),
-        (
-            "HOMEBOY_TRACE_EXTRA_WORKLOADS".to_string(),
-            extra_workloads_env_value(workloads)?,
-        ),
-    ]);
-    if !args.runner_inputs.dependencies.is_empty() {
-        env.push((
-            "HOMEBOY_TRACE_DEPENDENCIES".to_string(),
-            serde_json::to_string(&preflight_trace_dependencies(
-                &args.runner_inputs.dependencies,
-            )?)
-            .map_err(|e| {
-                Error::internal_json(
-                    format!("Failed to serialize trace dependency provenance: {e}"),
-                    Some("trace.dependencies.serialize".to_string()),
-                )
-            })?,
-        ));
-    }
-    if let Some(rig_id) = &args.rig_id {
-        env.push(("HOMEBOY_TRACE_RIG_ID".to_string(), rig_id.clone()));
-    }
-    if !args.runner_inputs.attachments.is_empty() {
-        env.push((
-            "HOMEBOY_TRACE_ATTACHMENTS".to_string(),
-            serde_json::to_string(&args.runner_inputs.attachments).map_err(|e| {
-                Error::internal_json(
-                    format!("Failed to serialize trace attachments: {e}"),
-                    Some("trace.attach.serialize".to_string()),
-                )
-            })?,
-        ));
-    }
-    for (key, value) in &args.runner_inputs.env {
-        env.push((key.clone(), value.clone()));
-    }
-    Ok(env)
-}
-
-fn extra_workloads_env_value(paths: &[PathBuf]) -> Result<String> {
-    path_list_env_value("trace_workloads", paths)
-}
-
 /// Resolve the directory that holds the trace baseline `homeboy.json`.
 ///
 /// Non-rig traces keep the historical component-local behavior — the baseline
@@ -1585,147 +1014,6 @@ mod tests {
             run_trace_workflow(&component, test_run_args(temp.path()), &run_dir, None).unwrap();
         assert_eq!(result.status, "error");
         assert_eq!(result.exit_code, 3);
-        run_dir.cleanup();
-    }
-
-    #[test]
-    fn canonical_trace_refuses_dirty_checkout_before_workload_execution() {
-        let temp = tempfile::tempdir().unwrap();
-        init_git_repo(temp.path());
-        std::fs::write(temp.path().join("dirty.txt"), "dirty\n").unwrap();
-        let component = test_component(temp.path());
-        let run_dir = RunDir::create().unwrap();
-        let mut args = test_run_args(temp.path());
-        args.canonical_policy = TraceCanonicalPolicy::Canonical;
-
-        let result = run_trace_workflow(&component, args, &run_dir, None).unwrap();
-
-        assert_eq!(result.exit_code, 1);
-        assert!(!result.evidence.canonical);
-        assert!(result
-            .evidence
-            .reasons
-            .iter()
-            .any(|reason| reason.contains("checkout is dirty")));
-        assert_eq!(
-            result.results.as_ref().unwrap().summary.as_deref(),
-            Some("Canonical trace preflight failed before workload execution.")
-        );
-        run_dir.cleanup();
-    }
-
-    #[test]
-    fn canonical_trace_refuses_checkout_behind_upstream() {
-        let local = tempfile::tempdir().unwrap();
-        let remote = tempfile::tempdir().unwrap();
-        let writer = tempfile::tempdir().unwrap();
-        init_git_repo(local.path());
-        init_bare_repo(remote.path());
-        git(
-            local.path(),
-            &["remote", "add", "origin", remote.path().to_str().unwrap()],
-        );
-        git(local.path(), &["push", "-u", "origin", "main"]);
-        git(
-            writer.path(),
-            &["clone", remote.path().to_str().unwrap(), "."],
-        );
-        git(writer.path(), &["config", "user.email", "test@example.com"]);
-        git(writer.path(), &["config", "user.name", "Homeboy Test"]);
-        std::fs::write(writer.path().join("remote.txt"), "remote\n").unwrap();
-        git(writer.path(), &["add", "."]);
-        git(writer.path(), &["commit", "-m", "remote update"]);
-        git(writer.path(), &["push", "origin", "main"]);
-        git(local.path(), &["fetch", "origin"]);
-
-        let component = test_component(local.path());
-        let run_dir = RunDir::create().unwrap();
-        let mut args = test_run_args(local.path());
-        args.canonical_policy = TraceCanonicalPolicy::Canonical;
-
-        let result = run_trace_workflow(&component, args, &run_dir, None).unwrap();
-
-        assert_eq!(result.exit_code, 1);
-        assert!(result
-            .evidence
-            .reasons
-            .iter()
-            .any(|reason| reason.contains("behind upstream by 1 commit")));
-        run_dir.cleanup();
-    }
-
-    #[test]
-    fn canonical_trace_refuses_checkout_ahead_of_upstream() {
-        let local = tempfile::tempdir().unwrap();
-        let remote = tempfile::tempdir().unwrap();
-        init_git_repo(local.path());
-        init_bare_repo(remote.path());
-        git(
-            local.path(),
-            &["remote", "add", "origin", remote.path().to_str().unwrap()],
-        );
-        git(local.path(), &["push", "-u", "origin", "main"]);
-        std::fs::write(local.path().join("local.txt"), "local\n").unwrap();
-        git(local.path(), &["add", "."]);
-        git(local.path(), &["commit", "-m", "local update"]);
-
-        let component = test_component(local.path());
-        let run_dir = RunDir::create().unwrap();
-        let mut args = test_run_args(local.path());
-        args.canonical_policy = TraceCanonicalPolicy::Canonical;
-
-        let result = run_trace_workflow(&component, args, &run_dir, None).unwrap();
-
-        assert_eq!(result.exit_code, 1);
-        assert!(result
-            .evidence
-            .reasons
-            .iter()
-            .any(|reason| reason.contains("ahead of upstream by 1 unmerged commit")));
-        run_dir.cleanup();
-    }
-
-    #[test]
-    fn canonical_trace_refuses_arbitrary_local_runner_env() {
-        let temp = tempfile::tempdir().unwrap();
-        init_git_repo(temp.path());
-        let component = test_component(temp.path());
-        let run_dir = RunDir::create().unwrap();
-        let mut args = test_run_args(temp.path());
-        args.canonical_policy = TraceCanonicalPolicy::Canonical;
-        args.runner_inputs.env.push((
-            "HOMEBOY_WP_CODEBOX_BIN".to_string(),
-            "/tmp/other-wp-codebox".to_string(),
-        ));
-
-        let result = run_trace_workflow(&component, args, &run_dir, None).unwrap();
-
-        assert_eq!(result.exit_code, 1);
-        assert!(result.evidence.reasons.iter().any(|reason| {
-            reason.contains("arbitrary local toolchain override `HOMEBOY_WP_CODEBOX_BIN`")
-        }));
-        run_dir.cleanup();
-    }
-
-    #[test]
-    fn allow_local_toolchain_marks_result_non_canonical_without_refusing() {
-        let temp = tempfile::tempdir().unwrap();
-        init_git_repo(temp.path());
-        let component = test_component(temp.path());
-        let run_dir = RunDir::create().unwrap();
-        let mut args = test_run_args(temp.path());
-        args.canonical_policy = TraceCanonicalPolicy::AllowLocalToolchain;
-        args.runner_inputs.env.push((
-            "HOMEBOY_WP_CODEBOX_BIN".to_string(),
-            "/tmp/other-wp-codebox".to_string(),
-        ));
-
-        let result = run_trace_workflow(&component, args, &run_dir, None).unwrap();
-
-        assert_eq!(result.exit_code, 3);
-        assert!(!result.evidence.canonical);
-        assert_eq!(result.evidence.mode, "allow-local-toolchain");
-        assert!(result.results.is_none());
         run_dir.cleanup();
     }
 
@@ -1874,34 +1162,6 @@ mod tests {
             local_path: path.to_string_lossy().to_string(),
             ..Default::default()
         }
-    }
-
-    fn init_git_repo(path: &std::path::Path) {
-        git(path, &["init", "-b", "main"]);
-        git(path, &["config", "user.email", "test@example.com"]);
-        git(path, &["config", "user.name", "Homeboy Test"]);
-        std::fs::write(path.join("README.md"), "test\n").unwrap();
-        git(path, &["add", "."]);
-        git(path, &["commit", "-m", "initial"]);
-    }
-
-    fn init_bare_repo(path: &std::path::Path) {
-        git(path, &["init", "--bare", "-b", "main"]);
-    }
-
-    fn git(path: &std::path::Path, args: &[&str]) {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(path)
-            .output()
-            .unwrap_or_else(|err| panic!("git {:?} failed to start: {}", args, err));
-        assert!(
-            output.status.success(),
-            "git {:?} failed\nstdout: {}\nstderr: {}",
-            args,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
     }
 
     fn test_run_args(path: &std::path::Path) -> TraceRunWorkflowArgs {
