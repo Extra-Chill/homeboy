@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.115.22] - 2026-06-04
+
+### Fixed
+- stabilize WordPress PHPStan release preflight
+
 ## [2.115.21] - 2026-06-04
 
 ### Changed
