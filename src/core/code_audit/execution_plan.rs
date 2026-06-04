@@ -161,6 +161,11 @@ const DETECTOR_FAMILIES: &[DetectorFamily] = &[
         requires_discovery: true,
     },
     DetectorFamily {
+        id: "source_policy",
+        findings: &[AuditFinding::SourcePolicyViolation],
+        requires_discovery: true,
+    },
+    DetectorFamily {
         id: "mutating_resource_access",
         findings: &[AuditFinding::MutatingResourceAccess],
         requires_discovery: true,
@@ -340,6 +345,10 @@ impl AuditExecutionPlan {
 
     pub(crate) fn run_core_boundary_leaks(&self) -> bool {
         self.detector_enabled("core_boundary_leaks")
+    }
+
+    pub(crate) fn run_source_policy(&self) -> bool {
+        self.detector_enabled("source_policy")
     }
 
     pub(crate) fn run_mutating_resource_access(&self) -> bool {

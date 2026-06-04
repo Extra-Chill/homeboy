@@ -55,8 +55,8 @@ use self::detectors::{
     core_boundary_leak, dead_guard, deprecation_age, enum_dispatch_contracts, facade_passthrough,
     field_patterns, global_env_guard, mutating_resource_access, parallel_runner_setup,
     public_registry_exposure, redirect_validation, repeated_literal_shape, requested_detectors,
-    runner_offload_preflight, rust_test_wiring, shared_scaffolding, test_coverage, test_topology,
-    unbounded_output_capture, wrapper_inference,
+    runner_offload_preflight, rust_test_wiring, shared_scaffolding, source_policy, test_coverage,
+    test_topology, unbounded_output_capture, wrapper_inference,
 };
 
 pub use checks::{CheckResult, CheckStatus};
@@ -996,6 +996,23 @@ fn audit_internal(
             core_boundary_findings.len()
         );
         all_findings.extend(core_boundary_findings);
+    }
+
+    // Phase 4t2b: Generic component-owned source policy checks.
+    let source_policy_findings = time_audit_detector(
+        &mut timing,
+        "detector.source_policy",
+        plan.run_source_policy(),
+        || source_policy::run(&all_fingerprints, &audit_config.source_policies),
+        Vec::new,
+    );
+    if !source_policy_findings.is_empty() {
+        log_status!(
+            "audit",
+            "Source policy: {} finding(s) (configured source boundary rules)",
+            source_policy_findings.len()
+        );
+        all_findings.extend(source_policy_findings);
     }
 
     // Phase 4t3: Configured mutating handler/resource access detection.
