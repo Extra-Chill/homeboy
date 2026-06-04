@@ -55,6 +55,8 @@ JSON
                 overlays: Vec::new(),
                 variants: Vec::new(),
                 matrix: TraceVariantMatrixMode::None,
+                axes: Vec::new(),
+                matrix_env: Vec::new(),
                 output_dir: None,
                 keep_overlay: false,
                 stale: false,

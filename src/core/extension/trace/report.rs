@@ -24,6 +24,7 @@ pub enum TraceCommandOutput {
     Aggregate(TraceAggregateOutput),
     Compare(TraceCompareOutput),
     Matrix(TraceVariantMatrixOutput),
+    ScenarioMatrix(TraceScenarioMatrixOutput),
     List(TraceListOutput),
     OverlayLocks(TraceOverlayLocksOutput),
 }
@@ -350,6 +351,44 @@ pub struct TraceVariantMatrixRunOutput {
     pub status: String,
     pub exit_code: i32,
     pub span_count: usize,
+}
+
+#[derive(Serialize, Clone)]
+pub struct TraceScenarioMatrixOutput {
+    pub command: &'static str,
+    pub passed: bool,
+    pub status: String,
+    pub component: String,
+    pub scenario_id: String,
+    pub output_dir: String,
+    pub matrix_path: String,
+    pub summary_path: String,
+    pub axes: Vec<TraceScenarioMatrixAxisOutput>,
+    pub cell_count: usize,
+    pub failure_count: usize,
+    pub exit_code: i32,
+    pub cells: Vec<TraceScenarioMatrixCellOutput>,
+}
+
+#[derive(Serialize, Clone)]
+pub struct TraceScenarioMatrixAxisOutput {
+    pub name: String,
+    pub values: Vec<String>,
+}
+
+#[derive(Serialize, Clone)]
+pub struct TraceScenarioMatrixCellOutput {
+    pub index: usize,
+    pub label: String,
+    pub axes: BTreeMap<String, String>,
+    pub passed: bool,
+    pub status: String,
+    pub exit_code: i32,
+    pub artifact_path: String,
+    pub artifact_dir: String,
+    pub output_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure: Option<String>,
 }
 
 #[derive(Serialize, Clone)]
