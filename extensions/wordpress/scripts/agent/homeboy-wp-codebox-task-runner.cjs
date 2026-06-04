@@ -253,6 +253,7 @@ function stableTaskInput(input) {
     runtime_component_paths: input.runtime_component_paths || {},
     wp: input.wp_version,
     agent_bundle: isAgentBundle(input) ? agentBundleConfig(input, input.agent_bundle || {}) : {},
+    runtime_task: isAgentBundle(input) ? agentBundleRuntimeTask(input, input.agent_bundle || {}) : undefined,
     parent_request: input.parent_request,
   }).filter(([, value]) => value !== '' && value !== undefined && !(Array.isArray(value) && value.length === 0)));
 }
@@ -313,6 +314,20 @@ function agentBundleConfig(input, bundleConfig = {}) {
     wp_codebox_artifacts_dir: input.artifacts_path,
     wp_codebox_components: runtimeComponentPaths,
   }).filter(([, value]) => value !== '' && value !== undefined && !(Array.isArray(value) && value.length === 0)));
+}
+
+function agentBundleRuntimeTask(input, bundleConfig = {}) {
+  const config = agentBundleConfig(input, bundleConfig);
+  const source = config.source || config.bundle_path || config.bundle_host_path || '';
+  return {
+    ability: 'datamachine/run-agent-bundle',
+    input: Object.fromEntries(Object.entries({
+      ...config,
+      source,
+      wait_for_completion: config.wait_for_completion ?? true,
+      runtime_bundles: source ? [{ source, on_conflict: config.on_conflict || 'upgrade' }] : [],
+    }).filter(([, value]) => value !== '' && value !== undefined && !(Array.isArray(value) && value.length === 0))),
+  };
 }
 
 function resultExecutions(result) {
