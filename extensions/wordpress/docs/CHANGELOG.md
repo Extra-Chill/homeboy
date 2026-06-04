@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.115.9] - 2026-06-04
+
+### Fixed
+- surface host smoke failures in test summaries
+
 ## [2.115.8] - 2026-06-04
 
 ### Fixed
