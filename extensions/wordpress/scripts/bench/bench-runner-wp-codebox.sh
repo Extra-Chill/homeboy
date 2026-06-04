@@ -129,6 +129,80 @@ homeboy_wp_codebox_compile_bootstrap_files() {
     exit 1
 }
 
+homeboy_wp_codebox_compile_bootstrap_steps() {
+    local steps_json
+    steps_json=$(printf '%s' "$settings_json" | jq -c '
+        .wp_codebox_bootstrap_steps // .wp_codebox_setup_steps // .bench_bootstrap_steps // []
+        | if type == "array" then . else [] end
+    ' 2>/dev/null || echo '[]')
+
+    WP_CODEBOX_BOOTSTRAP_STEPS_JSON="[]"
+    if ! printf '%s' "$steps_json" | jq -e 'type == "array" and length > 0' >/dev/null 2>&1; then
+        return 0
+    fi
+
+    if ! printf '%s' "$steps_json" | jq -e '
+        all(.[];
+            type == "object"
+            and (.command | type == "string" and . != "")
+            and ((.args // []) | type == "array" and all(.[]; type == "string"))
+        )
+    ' >/dev/null 2>&1; then
+        echo "Error: wp_codebox_bootstrap_steps entries require command plus optional string args array." >&2
+        FAILED_STEP="WP Codebox bench bootstrap setup"
+        exit 1
+    fi
+
+    WP_CODEBOX_BOOTSTRAP_STEPS_JSON="$steps_json"
+}
+
+homeboy_wp_codebox_output_has_bootstrap_failure() {
+    local output_file="$1"
+
+    grep -Eq 'plugin-runtime\.setup|plugin runtime setup|Recipe plugin runtime setup\[[0-9]+\] failed|"phase"[[:space:]]*:[[:space:]]*"setup"' "$output_file"
+}
+
+homeboy_wp_codebox_emit_bootstrap_failure_diagnostic() {
+    local output_file="$1"
+    local exit_code="$2"
+    local diagnostics_file="${ARTIFACTS_DIR}/wp-codebox-bench-bootstrap-diagnostics.json"
+    local output_artifact="${ARTIFACTS_DIR}/wp-codebox-output.txt"
+    local exit_artifact="${ARTIFACTS_DIR}/wp-codebox-exit-code.txt"
+
+    mkdir -p "$ARTIFACTS_DIR"
+    cp "$output_file" "$output_artifact"
+    printf '%s\n' "$exit_code" > "$exit_artifact"
+
+    jq -n \
+        --arg schema "homeboy/wordpress-bench-diagnostic/v1" \
+        --arg code "wp-codebox-bench-bootstrap-failed" \
+        --arg message "WP Codebox bench bootstrap setup failed before measured workloads executed." \
+        --argjson exitCode "$exit_code" \
+        --arg artifactsDir "$ARTIFACTS_DIR" \
+        --arg outputArtifact "$output_artifact" \
+        --arg exitArtifact "$exit_artifact" \
+        '{
+            schema: $schema,
+            diagnostics: [{
+                code: $code,
+                severity: "error",
+                phase: "setup",
+                message: $message,
+                exit_code: $exitCode,
+                artifacts: {
+                    directory: $artifactsDir,
+                    output: $outputArtifact,
+                    exit_code: $exitArtifact
+                }
+            }]
+        }' > "$diagnostics_file"
+
+    echo "WP Codebox bench bootstrap setup failed before measured workloads executed." >&2
+    echo "  Exit code: $exit_code" >&2
+    echo "  Diagnostics: $diagnostics_file" >&2
+    echo "  Raw output: $output_artifact" >&2
+}
+
 homeboy_wp_codebox_mount_extra_bench_workloads() {
     local workloads_value="${HOMEBOY_BENCH_EXTRA_WORKLOADS:-}"
     [ -n "$workloads_value" ] || return 0
@@ -395,6 +469,7 @@ homeboy_wp_codebox_compile_scenario_manifests() {
 
 homeboy_wp_codebox_compile_scenario_manifests
 homeboy_wp_codebox_compile_bootstrap_files
+homeboy_wp_codebox_compile_bootstrap_steps
 
 WP_CODEBOX_WORDPRESS_VERSION="7.0"
 if [ "$settings_json" != "{}" ]; then
@@ -589,6 +664,9 @@ WP_CODEBOX_PLUGIN_RUNTIME_JSON="{}"
 if [ -n "$WP_CODEBOX_PHP_MEMORY_LIMIT" ]; then
     WP_CODEBOX_PLUGIN_RUNTIME_JSON=$(jq -nc --arg memoryLimit "$WP_CODEBOX_PHP_MEMORY_LIMIT" '{php: {memoryLimit: $memoryLimit}}')
 fi
+if printf '%s' "$WP_CODEBOX_BOOTSTRAP_STEPS_JSON" | jq -e 'type == "array" and length > 0' >/dev/null 2>&1; then
+    WP_CODEBOX_PLUGIN_RUNTIME_JSON=$(jq -nc --argjson runtime "$WP_CODEBOX_PLUGIN_RUNTIME_JSON" --argjson setup "$WP_CODEBOX_BOOTSTRAP_STEPS_JSON" '$runtime + {setup: $setup}')
+fi
 
 homeboy_wp_codebox_emit_memory_fatal_diagnostic() {
     local output_file="$1"
@@ -707,6 +785,11 @@ set -e
 
 if [ $wp_codebox_exit -ne 0 ]; then
     cat "$WP_CODEBOX_TMPFILE" >&2
+    if homeboy_wp_codebox_output_has_bootstrap_failure "$WP_CODEBOX_TMPFILE"; then
+        homeboy_wp_codebox_emit_bootstrap_failure_diagnostic "$WP_CODEBOX_TMPFILE" "$wp_codebox_exit"
+        FAILED_STEP="WP Codebox bench bootstrap setup"
+        exit $wp_codebox_exit
+    fi
     if fatal_line=$(grep -E '^(PHP Fatal error: |Fatal error: )?Allowed memory size of [0-9]+ bytes exhausted|^(PHP Fatal error: |Fatal error: ).*Allowed memory size of [0-9]+ bytes exhausted' "$WP_CODEBOX_TMPFILE" | head -1); then
         homeboy_wp_codebox_emit_memory_fatal_diagnostic "$WP_CODEBOX_TMPFILE" "$wp_codebox_exit" "$fatal_line"
     fi
@@ -722,6 +805,19 @@ fi
 
 mkdir -p "$(dirname "$RESULTS_FILE")"
 jq '.benchResults | del(.warmup_iterations)' "$WP_CODEBOX_TMPFILE" > "$RESULTS_FILE"
+
+PREPARED_DEPENDENCIES_METADATA_FILE="${ARTIFACTS_DIR%/}/prepared-bench-dependencies.json"
+if [ -f "$PREPARED_DEPENDENCIES_METADATA_FILE" ]; then
+    PREPARED_RESULTS_FILE=$(mktemp "${TMPDIR:-/tmp}/homeboy-wp-codebox-prepared-dependencies.XXXXXX")
+    if jq --slurpfile preparedDependencies "$PREPARED_DEPENDENCIES_METADATA_FILE" \
+        '. + {prepared_dependencies: ($preparedDependencies[0] // [])}' \
+        "$RESULTS_FILE" > "$PREPARED_RESULTS_FILE"; then
+        mv "$PREPARED_RESULTS_FILE" "$RESULTS_FILE"
+    else
+        rm -f "$PREPARED_RESULTS_FILE"
+        echo "Warning: failed to attach prepared dependency metadata to bench results." >&2
+    fi
+fi
 
 if [ -f "$BENCH_BROWSER_METRICS_HELPER" ]; then
     ENRICHED_RESULTS_FILE=$(mktemp "${TMPDIR:-/tmp}/homeboy-wp-codebox-browser-metrics.XXXXXX")

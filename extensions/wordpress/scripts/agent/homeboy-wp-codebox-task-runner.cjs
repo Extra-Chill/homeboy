@@ -182,6 +182,9 @@ function runnerInput(request, artifacts) {
 }
 
 function stableTaskInput(input) {
+  const secretEnv = isDatamachineBundle(input)
+    ? Array.from(new Set([...(input.secret_env || []), 'HOMEBOY_DATAMACHINE_AGENT_CONFIG']))
+    : input.secret_env || [];
   return Object.fromEntries(Object.entries({
     schema: 'wp-codebox/task-input/v1',
     goal: input.parent_request?.goal || input.parent_request?.task?.prompt || input.parent_request?.task?.goal || '',
@@ -193,7 +196,7 @@ function stableTaskInput(input) {
     provider: input.provider,
     model: input.model,
     provider_plugin_paths: input.provider_plugin_paths || [],
-    secret_env: input.secret_env || [],
+    secret_env: secretEnv,
     mounts: input.mounts || [],
     workspaces: input.parent_request?.workspaces || [],
     runtime_stack_mounts: input.runtime_stack_mounts || [],
@@ -211,9 +214,151 @@ function stableTaskInput(input) {
     data_machine_path: input.data_machine_path,
     data_machine_code_path: input.data_machine_code_path,
     wp: input.wp_version,
-    datamachine_bundle: input.datamachine_bundle || {},
+    datamachine_bundle: isDatamachineBundle(input) ? datamachineBundleConfig(input, input.datamachine_bundle || {}) : {},
     parent_request: input.parent_request,
   }).filter(([, value]) => value !== '' && value !== undefined && !(Array.isArray(value) && value.length === 0)));
+}
+
+function isDatamachineBundle(input) {
+  return Boolean(input.datamachine_bundle && Object.keys(input.datamachine_bundle).length > 0);
+}
+
+function datamachineBundleConfig(input, bundleConfig = {}) {
+  return Object.fromEntries(Object.entries({
+    ...bundleConfig,
+    prompt: bundleConfig.prompt || input.parent_request?.task?.prompt || input.parent_request?.goal || '',
+    provider: bundleConfig.provider || input.provider || '',
+    model: bundleConfig.model || input.model || '',
+    provider_plugin_paths: bundleConfig.provider_plugin_paths || input.provider_plugin_paths || [],
+    wp_codebox_artifacts_dir: input.artifacts_path,
+    wp_codebox_components: {
+      agents_api: input.agents_api_path,
+      data_machine: input.data_machine_path,
+      data_machine_code: input.data_machine_code_path,
+    },
+  }).filter(([, value]) => value !== '' && value !== undefined && !(Array.isArray(value) && value.length === 0)));
+}
+
+function normalizeAgentTaskRun(input, result) {
+  if (!isDatamachineBundle(input)) {
+    return result;
+  }
+
+  const execution = Array.isArray(result.executions) ? result.executions.find((item) => item?.recipeCommand === 'wp-codebox.agent-sandbox-run') || result.executions[0] : null;
+  const datamachineConfig = datamachineBundleConfig(input, input.datamachine_bundle || {});
+  const agentResult = result.run?.agentResult || result.agentResult || result.agent_result || result.metadata?.datamachine?.workload || execution?.agentResult || datamachineWorkloadFromExecutionStdout(execution, datamachineConfig) || {};
+  const datamachineValidation = validateDatamachineWorkload(agentResult, datamachineConfig);
+  const success = !datamachineValidation;
+  const diagnostics = [
+    ...(result.diagnostics || []),
+    ...(datamachineValidation ? [datamachineValidation] : []),
+    ...(datamachineDiagnostics(agentResult) || []),
+  ];
+
+  return {
+    ...result,
+    success,
+    summary: success ? 'WP Codebox agent task succeeded.' : (datamachineValidation?.message || result.summary || 'WP Codebox agent task failed.'),
+    session: result.session ? {
+      ...result.session,
+      status: success ? 'completed' : 'failed',
+    } : result.session,
+    run: {
+      ...(result.run || {}),
+      agentResult,
+    },
+    diagnostics,
+    metadata: {
+      ...(result.metadata || {}),
+      datamachine: {
+        ...(result.metadata?.datamachine || {}),
+        bundle: datamachineConfig,
+        workload: agentResult,
+      },
+    },
+  };
+}
+
+function parseJsonObject(value) {
+  if (!value || typeof value !== 'string') {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function datamachineWorkloadFromExecutionStdout(execution, config) {
+  const wrapper = parseJsonObject(execution?.stdout || '');
+  const workload = parseJsonObject(wrapper?.output || '') || parseJsonObject(execution?.stdout || '');
+  if (!workload) {
+    return {};
+  }
+  if (Array.isArray(workload.scenarios)) {
+    return workload;
+  }
+  if (workload.metadata || workload.metrics) {
+    return {
+      scenarios: [{
+        id: config.workload_id || config.agent_slug || config.flow_slug || 'datamachine-agent',
+        metrics: workload.metrics || {},
+        metadata: workload.metadata || {},
+      }],
+    };
+  }
+  return {};
+}
+
+function pathValue(source, dottedPath) {
+  return String(dottedPath || '').split('.').filter(Boolean).reduce((value, key) => (value && typeof value === 'object' ? value[key] : undefined), source);
+}
+
+function validateDatamachineWorkload(workload, config) {
+  const scenarios = Array.isArray(workload?.scenarios) ? workload.scenarios : [];
+  if (scenarios.length === 0) {
+    return {
+      class: 'datamachine.workload.incomplete',
+      message: 'Data Machine bundle workload did not return any scenarios.',
+      data: { reason: 'missing_scenarios' },
+    };
+  }
+
+  const outputs = config.engine_data_outputs && typeof config.engine_data_outputs === 'object' ? config.engine_data_outputs : {};
+  const missing = [];
+  for (const [name, outputPath] of Object.entries(outputs)) {
+    const present = scenarios.some((scenario) => {
+      const value = pathValue(scenario, outputPath);
+      return value !== undefined && value !== null && value !== '';
+    });
+    if (!present) {
+      missing.push({ name, path: outputPath });
+    }
+  }
+
+  if (missing.length > 0) {
+    return {
+      class: 'datamachine.workload.incomplete',
+      message: 'Data Machine bundle workload did not produce required engine data outputs.',
+      data: { reason: 'missing_engine_data_outputs', missing },
+    };
+  }
+
+  return null;
+}
+
+function datamachineDiagnostics(workload) {
+  const scenarios = Array.isArray(workload?.scenarios) ? workload.scenarios : [];
+  const diagnostics = scenarios
+    .filter((scenario) => scenario?.metadata?.error || scenario?.metadata?.error_message)
+    .map((scenario) => ({
+      class: 'datamachine.workload',
+      message: scenario.metadata.error || scenario.metadata.error_message,
+      data: { scenario_id: scenario.id, metadata: scenario.metadata },
+    }));
+  return diagnostics.length > 0 ? diagnostics : null;
 }
 
 function timeoutPayload(timeoutMs, artifacts, evidencePath, inputPath, command, args) {
@@ -284,7 +429,10 @@ function runWpCodeboxParentTask(request) {
 
   const result = spawnSync(resolved.command, resolved.args, {
     encoding: 'utf8',
-    env: process.env,
+    env: {
+      ...process.env,
+      ...(isDatamachineBundle(input) ? { HOMEBOY_DATAMACHINE_AGENT_CONFIG: JSON.stringify(datamachineBundleConfig(input, input.datamachine_bundle || {})) } : {}),
+    },
     maxBuffer: 1024 * 1024 * 20,
     timeout: timeoutMs,
   });
@@ -296,7 +444,9 @@ function runWpCodeboxParentTask(request) {
 
   if (result.stdout) {
     try {
-      process.stdout.write(`${JSON.stringify(JSON.parse(result.stdout), null, 2)}\n`);
+      const payload = normalizeAgentTaskRun(input, JSON.parse(result.stdout));
+      process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+      return payload.success === false ? 1 : (result.status ?? 0);
     } catch {
       process.stdout.write(result.stdout);
     }

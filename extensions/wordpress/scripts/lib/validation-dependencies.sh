@@ -753,6 +753,136 @@ _homeboy_copy_dependency_prepare_root() {
     fi
 }
 
+_homeboy_sha256_string() {
+    local value="${1:-}"
+
+    if [ -z "$value" ]; then
+        value=$(cat)
+    fi
+
+    printf '%s' "$value" | shasum -a 256 | awk '{print $1}'
+}
+
+_homeboy_sha256_file() {
+    local file_path="${1:-}"
+
+    if [ -n "$file_path" ] && [ -f "$file_path" ]; then
+        shasum -a 256 "$file_path" | awk '{print $1}'
+    else
+        printf '%s\n' 'missing'
+    fi
+}
+
+_homeboy_prepared_dependency_php_version() {
+    command -v php >/dev/null 2>&1 || return 0
+    php -r 'echo PHP_VERSION;' 2>/dev/null || true
+}
+
+_homeboy_prepared_dependency_git_state() {
+    local prepare_root="${1:-}"
+
+    [ -n "$prepare_root" ] && git -C "$prepare_root" rev-parse --is-inside-work-tree >/dev/null 2>&1 || {
+        printf '%s\n' 'none'
+        return 0
+    }
+
+    local head_sha dirty_hash
+    head_sha=$(git -C "$prepare_root" rev-parse HEAD 2>/dev/null || true)
+    dirty_hash=$({ git -C "$prepare_root" status --porcelain=v1 2>/dev/null; git -C "$prepare_root" diff --binary 2>/dev/null; git -C "$prepare_root" diff --cached --binary 2>/dev/null; } | shasum -a 256 | awk '{print $1}')
+    printf '%s:%s\n' "${head_sha:-unknown}" "${dirty_hash:-unknown}"
+}
+
+_homeboy_prepared_dependency_cache_dir() {
+    local artifacts_dir="${1:-}"
+    local base_dir="${HOMEBOY_WP_CODEBOX_PREPARED_DEPENDENCY_CACHE_DIR:-}"
+
+    if [ -z "$base_dir" ]; then
+        if [ -n "${HOMEBOY_CACHE_DIR:-}" ]; then
+            base_dir="${HOMEBOY_CACHE_DIR%/}/prepared-bench-dependencies"
+        elif [ -n "${HOME:-}" ]; then
+            base_dir="${HOME%/}/.homeboy/cache/prepared-bench-dependencies"
+        elif [ -n "$artifacts_dir" ]; then
+            base_dir="${artifacts_dir%/}/prepared-bench-dependencies-cache"
+        else
+            base_dir="${TMPDIR:-/tmp}/homeboy-prepared-bench-dependencies"
+        fi
+    fi
+
+    mkdir -p "$base_dir"
+    printf '%s\n' "$base_dir"
+}
+
+_homeboy_prepared_dependency_cache_metadata() {
+    local dependency_path="${1:-}"
+    local prepare_root="${2:-}"
+    local relative_plugin_path="${3:-}"
+    local dependency_slug="${4:-}"
+    local php_version source_realpath prepare_realpath git_state composer_json_hash composer_lock_hash
+
+    source_realpath=$(cd "$dependency_path" && pwd -P)
+    prepare_realpath=$(cd "$prepare_root" && pwd -P)
+    php_version=$(_homeboy_prepared_dependency_php_version)
+    git_state=$(_homeboy_prepared_dependency_git_state "$prepare_root")
+    composer_json_hash=$(_homeboy_sha256_file "${dependency_path}/composer.json")
+    composer_lock_hash=$(_homeboy_sha256_file "${dependency_path}/composer.lock")
+
+    jq -n \
+        --arg schema 'homeboy/prepared-wordpress-bench-dependency/v1' \
+        --arg slug "$dependency_slug" \
+        --arg source_path "$source_realpath" \
+        --arg prepare_root "$prepare_realpath" \
+        --arg relative_plugin_path "$relative_plugin_path" \
+        --arg git_state "$git_state" \
+        --arg composer_json_hash "$composer_json_hash" \
+        --arg composer_lock_hash "$composer_lock_hash" \
+        --arg php_version "$php_version" \
+        '{
+            schema: $schema,
+            slug: $slug,
+            source_path: $source_path,
+            prepare_root: $prepare_root,
+            relative_plugin_path: $relative_plugin_path,
+            git_state: $git_state,
+            composer_json_hash: $composer_json_hash,
+            composer_lock_hash: $composer_lock_hash,
+            php_version: $php_version
+        }'
+}
+
+_homeboy_prepared_dependency_cache_key() {
+    local metadata_json="${1:-}"
+
+    printf '%s' "$metadata_json" | jq -c '{source_path, prepare_root, relative_plugin_path, git_state, composer_json_hash, composer_lock_hash, php_version}' | _homeboy_sha256_string
+}
+
+_homeboy_record_prepared_dependency_metadata() {
+    local artifacts_dir="${1:-}"
+    local metadata_json="${2:-}"
+    local cache_key="${3:-}"
+    local prepared_path="${4:-}"
+    local cache_status="${5:-}"
+
+    [ -n "$artifacts_dir" ] && [ -n "$metadata_json" ] || return 0
+    command -v jq >/dev/null 2>&1 || return 0
+
+    local metadata_file tmp_file existing_json
+    metadata_file="${artifacts_dir%/}/prepared-bench-dependencies.json"
+    mkdir -p "$(dirname "$metadata_file")"
+    existing_json="[]"
+    if [ -f "$metadata_file" ]; then
+        existing_json=$(jq -c 'if type == "array" then . else [] end' "$metadata_file" 2>/dev/null || echo '[]')
+    fi
+    tmp_file=$(mktemp "${metadata_file}.XXXXXX")
+    jq -n \
+        --argjson existing "$existing_json" \
+        --argjson dependency "$metadata_json" \
+        --arg cache_key "$cache_key" \
+        --arg prepared_path "$prepared_path" \
+        --arg cache_status "$cache_status" \
+        '$existing + [($dependency + {cache_key: $cache_key, prepared_path: $prepared_path, cache_status: $cache_status})]' > "$tmp_file"
+    mv "$tmp_file" "$metadata_file"
+}
+
 homeboy_prepare_validation_dependency_for_wp_codebox_bench() {
     local dependency_path="${1:-}"
     local artifacts_dir="${2:-}"
@@ -793,30 +923,70 @@ homeboy_prepare_validation_dependency_for_wp_codebox_bench() {
             ;;
     esac
 
-    local prepared_root prepared_plugin_path
-    prepared_root="${artifacts_dir%/}/prepared-bench-dependencies/${dependency_slug}"
-    _homeboy_copy_dependency_prepare_root "$prepare_root" "$prepared_root"
+    local cache_metadata cache_key cache_dir cache_entry prepared_root prepared_plugin_path metadata_file
+    cache_metadata=$(_homeboy_prepared_dependency_cache_metadata "$dependency_path" "$prepare_root" "$relative_plugin_path" "$dependency_slug")
+    cache_key=$(_homeboy_prepared_dependency_cache_key "$cache_metadata")
+    cache_dir=$(_homeboy_prepared_dependency_cache_dir "$artifacts_dir")
+    cache_entry="${cache_dir%/}/${dependency_slug}-${cache_key}"
+    prepared_root="${cache_entry}/root"
+    metadata_file="${cache_entry}/metadata.json"
 
     prepared_plugin_path="$prepared_root"
     if [ -n "$relative_plugin_path" ]; then
         prepared_plugin_path="${prepared_root}/${relative_plugin_path}"
     fi
 
-    if [ ! -f "${prepared_plugin_path}/composer.json" ]; then
-        echo "Error: Prepared WordPress bench dependency '${dependency_path}' lost composer.json at '${prepared_plugin_path}'." >&2
+    if [ -f "$metadata_file" ] && [ -d "$prepared_plugin_path" ] && { [ -f "${prepared_plugin_path}/vendor/autoload.php" ] || [ -f "${prepared_plugin_path}/vendor/autoload_packages.php" ]; }; then
+        echo "Using cached WordPress bench dependency '${dependency_slug}' at ${prepared_plugin_path}" >&2
+        _homeboy_record_prepared_dependency_metadata "$artifacts_dir" "$cache_metadata" "$cache_key" "$prepared_plugin_path" "hit"
+        printf '%s\n' "$prepared_plugin_path"
+        return 0
+    fi
+
+    echo "Preparing WordPress bench dependency '${dependency_slug}' cache miss ${cache_key}" >&2
+
+    local tmp_entry tmp_prepared_root tmp_prepared_plugin_path
+    tmp_entry=$(mktemp -d "${cache_dir%/}/.${dependency_slug}-${cache_key}.XXXXXX")
+    tmp_prepared_root="${tmp_entry}/root"
+    _homeboy_copy_dependency_prepare_root "$prepare_root" "$tmp_prepared_root"
+
+    tmp_prepared_plugin_path="$tmp_prepared_root"
+    if [ -n "$relative_plugin_path" ]; then
+        tmp_prepared_plugin_path="${tmp_prepared_root}/${relative_plugin_path}"
+    fi
+
+    if [ ! -f "${tmp_prepared_plugin_path}/composer.json" ]; then
+        rm -rf "$tmp_entry"
+        echo "Error: Prepared WordPress bench dependency '${dependency_path}' lost composer.json at '${tmp_prepared_plugin_path}'." >&2
         return 1
     fi
 
-    echo "Preparing WordPress bench dependency '${dependency_slug}' with Composer at ${prepared_plugin_path}" >&2
-    if ! composer install --working-dir="$prepared_plugin_path" --no-dev --no-interaction --no-progress --prefer-dist; then
-        echo "Error: Could not prepare WordPress bench dependency '${dependency_slug}' with Composer at ${prepared_plugin_path}." >&2
+    echo "Preparing WordPress bench dependency '${dependency_slug}' with Composer at ${tmp_prepared_plugin_path}" >&2
+    if ! composer install --working-dir="$tmp_prepared_plugin_path" --no-dev --no-interaction --no-progress --prefer-dist; then
+        rm -rf "$tmp_entry"
+        echo "Error: Could not prepare WordPress bench dependency '${dependency_slug}' with Composer at ${tmp_prepared_plugin_path}." >&2
         return 1
     fi
 
-    if [ ! -f "${prepared_plugin_path}/vendor/autoload.php" ] && [ ! -f "${prepared_plugin_path}/vendor/autoload_packages.php" ]; then
-        echo "Error: Composer preparation for WordPress bench dependency '${dependency_slug}' did not create vendor autoload files at ${prepared_plugin_path}." >&2
+    if [ ! -f "${tmp_prepared_plugin_path}/vendor/autoload.php" ] && [ ! -f "${tmp_prepared_plugin_path}/vendor/autoload_packages.php" ]; then
+        rm -rf "$tmp_entry"
+        echo "Error: Composer preparation for WordPress bench dependency '${dependency_slug}' did not create vendor autoload files at ${tmp_prepared_plugin_path}." >&2
         return 1
     fi
+
+    if [ -f "$metadata_file" ] && [ -d "$prepared_plugin_path" ] && { [ -f "${prepared_plugin_path}/vendor/autoload.php" ] || [ -f "${prepared_plugin_path}/vendor/autoload_packages.php" ]; }; then
+        rm -rf "$tmp_entry"
+        echo "Using cached WordPress bench dependency '${dependency_slug}' at ${prepared_plugin_path}" >&2
+        _homeboy_record_prepared_dependency_metadata "$artifacts_dir" "$cache_metadata" "$cache_key" "$prepared_plugin_path" "hit"
+        printf '%s\n' "$prepared_plugin_path"
+        return 0
+    fi
+
+    printf '%s\n' "$cache_metadata" > "${tmp_entry}/metadata.json"
+    rm -rf "$cache_entry"
+    mv "$tmp_entry" "$cache_entry"
+
+    _homeboy_record_prepared_dependency_metadata "$artifacts_dir" "$cache_metadata" "$cache_key" "$prepared_plugin_path" "miss"
 
     printf '%s\n' "$prepared_plugin_path"
 }

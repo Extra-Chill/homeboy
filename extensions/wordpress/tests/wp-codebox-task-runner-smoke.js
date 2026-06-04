@@ -19,20 +19,25 @@ const out = process.env.FIXTURE_WP_CODEBOX_CAPTURE;
 const inputArg = process.argv.find((arg) => arg.startsWith('--input-file='));
 const inputPath = inputArg ? inputArg.slice('--input-file='.length) : '';
 const input = inputPath ? JSON.parse(fs.readFileSync(inputPath, 'utf8')) : null;
-fs.writeFileSync(out, JSON.stringify({ argv: process.argv.slice(2), input }, null, 2));
+const isDatamachineBundle = Boolean(input.datamachine_bundle && Object.keys(input.datamachine_bundle).length);
+const agentResult = isDatamachineBundle && !process.env.FIXTURE_WP_CODEBOX_INCOMPLETE_DATAMACHINE
+  ? { metrics: { config_present: 1 }, metadata: { engine_data: { store_idea_agent: { issue_number: 123 } } } }
+  : { status: 'completed' };
+fs.writeFileSync(out, JSON.stringify({ argv: process.argv.slice(2), input, datamachineConfig: JSON.parse(process.env.HOMEBOY_DATAMACHINE_AGENT_CONFIG || '{}') }, null, 2));
 process.stdout.write(JSON.stringify({
-  success: true,
+  success: !isDatamachineBundle,
   schema: 'wp-codebox/agent-task-run/v1',
   session: {
     schema: 'wp-codebox/sandbox-session/v1',
     id: input.sandbox_session_id,
-    status: 'completed',
+    status: isDatamachineBundle ? 'failed' : 'completed',
     artifacts: { bundle_id: 'artifact-bundle-sha256-fixture', path: input.artifacts_path, preview_url: 'https://preview.example.test/' + input.sandbox_session_id },
     orchestrator: input.orchestrator
   },
   task_input: input,
   artifacts: input.artifacts_path,
-  agent_result: { status: 'completed' }
+  run: isDatamachineBundle ? {} : { agentResult },
+  executions: [{ recipeCommand: 'wp-codebox.agent-sandbox-run', exitCode: 0, stdout: JSON.stringify({ status: 'completed', output: JSON.stringify(agentResult) }) }],
 }));
 `);
   fs.chmodSync(binPath, mode);
@@ -168,6 +173,71 @@ try {
   });
   assert.equal(riskyResult.status, 0, riskyResult.stderr || riskyResult.stdout);
   assert.match(riskyResult.stderr, /may be captured recursively/);
+
+  const datamachineCapturePath = path.join(root, 'capture-datamachine.json');
+  const datamachineResult = spawnSync(process.execPath, [
+    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-wp-codebox-task-runner.cjs'),
+    '--wp-codebox-bin',
+    fixtureWpCodebox,
+    '--artifacts',
+    path.join(root, 'datamachine-artifacts'),
+  ], {
+    encoding: 'utf8',
+    input: JSON.stringify({
+      ...request,
+      datamachine_bundle: {
+        bundle_path: '/workspace/wp-site-generator/bundles/store-idea-agent',
+        engine_data_outputs: { issue_number: 'metadata.engine_data.store_idea_agent.issue_number' },
+      },
+      provider_plugin_paths: [],
+    }),
+    env: {
+      ...process.env,
+      FIXTURE_WP_CODEBOX_CAPTURE: datamachineCapturePath,
+      OPENCODE_API_KEY: 'redacted-test-key',
+    },
+  });
+  assert.equal(datamachineResult.status, 0, datamachineResult.stderr || datamachineResult.stdout);
+  const datamachineCapture = readJson(datamachineCapturePath);
+  assert.equal(datamachineCapture.argv[0], 'agent-task-run');
+  assert(datamachineCapture.input.secret_env.includes('HOMEBOY_DATAMACHINE_AGENT_CONFIG'));
+  assert.equal(datamachineCapture.input.datamachine_bundle.engine_data_outputs.issue_number, 'metadata.engine_data.store_idea_agent.issue_number');
+  assert.equal(datamachineCapture.datamachineConfig.engine_data_outputs.issue_number, 'metadata.engine_data.store_idea_agent.issue_number');
+  const datamachineOutput = JSON.parse(datamachineResult.stdout);
+  assert.equal(datamachineOutput.success, true);
+  assert.equal(datamachineOutput.session.status, 'completed');
+  assert.equal(datamachineOutput.run.agentResult.scenarios[0].metadata.engine_data.store_idea_agent.issue_number, 123);
+
+  const incompleteDatamachineCapturePath = path.join(root, 'capture-incomplete-datamachine.json');
+  const incompleteDatamachineResult = spawnSync(process.execPath, [
+    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-wp-codebox-task-runner.cjs'),
+    '--wp-codebox-bin',
+    fixtureWpCodebox,
+    '--artifacts',
+    path.join(root, 'incomplete-datamachine-artifacts'),
+  ], {
+    encoding: 'utf8',
+    input: JSON.stringify({
+      ...request,
+      datamachine_bundle: {
+        bundle_path: '/workspace/wp-site-generator/bundles/store-idea-agent',
+        engine_data_outputs: { issue_number: 'metadata.engine_data.store_idea_agent.issue_number' },
+      },
+      provider_plugin_paths: [],
+    }),
+    env: {
+      ...process.env,
+      FIXTURE_WP_CODEBOX_CAPTURE: incompleteDatamachineCapturePath,
+      FIXTURE_WP_CODEBOX_INCOMPLETE_DATAMACHINE: '1',
+      OPENCODE_API_KEY: 'redacted-test-key',
+    },
+  });
+  assert.equal(incompleteDatamachineResult.status, 1, incompleteDatamachineResult.stderr || incompleteDatamachineResult.stdout);
+  const incompleteDatamachineOutput = JSON.parse(incompleteDatamachineResult.stdout);
+  assert.equal(incompleteDatamachineOutput.success, false);
+  assert.equal(incompleteDatamachineOutput.session.status, 'failed');
+  assert.equal(incompleteDatamachineOutput.diagnostics[0].class, 'datamachine.workload.incomplete');
+  assert.equal(incompleteDatamachineOutput.diagnostics[0].data.reason, 'missing_scenarios');
 
   const nonExecutableCapturePath = path.join(root, 'capture-non-executable.json');
   const nonExecutableFixture = createFixtureWpCodebox(root, 0o644);
