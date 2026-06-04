@@ -187,6 +187,7 @@ const TERMS: &[Term] = &[
 // Each entry is a known production-code leak in core-owned source. Fixtures and
 // examples are not listed here: the scanner skips Rust test modules and source
 // test helpers instead of allowing broad paths like `tests/**`.
+#[allow(dead_code)]
 const BASELINE: &[ViolationKey] = &[
     ViolationKey {
         path: "src/core/artifact_inputs.rs",
@@ -1159,6 +1160,7 @@ const BASELINE: &[ViolationKey] = &[
     },
 ];
 
+#[allow(dead_code)]
 const BASELINE_OCCURRENCES: usize = 633;
 
 // Known core-owned test/fixture literal debt tracked by #3034. Keep this list
@@ -1307,59 +1309,62 @@ const TEST_CONTENT_BASELINE_OCCURRENCES: usize = 100;
 #[test]
 fn core_owned_source_stays_language_and_framework_agnostic() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let mut found = BTreeMap::<(String, String), Vec<usize>>::new();
+    let findings = homeboy::core::code_audit::source_policy_findings_for_path(
+        "homeboy",
+        root.to_str().expect("manifest dir is UTF-8"),
+    )
+    .expect("source policy should run");
+    let baseline = homeboy::core::code_audit::baseline::load_baseline(root)
+        .expect("homeboy.json should contain an audit baseline");
 
-    for source_root in CORE_OWNED_SOURCE_ROOTS {
-        let path = root.join(source_root);
-        if path.is_dir() {
-            scan_dir(root, &path, &mut found);
-        } else {
-            scan_file(root, &path, &mut found);
-        }
-    }
-
-    let baseline = BASELINE
+    let policy = "core_boundary_leak:core-agnostic-source";
+    let current_policy_findings = findings
         .iter()
-        .map(|entry| (entry.path.to_string(), entry.term.to_string()))
+        .filter(|finding| finding.convention == policy)
+        .collect::<Vec<_>>();
+
+    let baseline_fingerprints = baseline
+        .known_fingerprints
+        .iter()
+        .map(|fingerprint| fingerprint.as_str())
+        .collect::<BTreeSet<_>>();
+    let current_policy_fingerprints = current_policy_findings
+        .iter()
+        .map(|finding| homeboy::core::code_audit::baseline::finding_baseline_fingerprint(finding))
         .collect::<BTreeSet<_>>();
 
-    let unexpected = found
+    let new_policy_findings = current_policy_findings
         .iter()
-        .filter(|(key, _)| !baseline.contains(*key))
-        .map(|((path, term), lines)| format!("{path}: {term} on lines {lines:?}"))
+        .filter_map(|finding| {
+            let fingerprint =
+                homeboy::core::code_audit::baseline::finding_baseline_fingerprint(finding);
+            (!baseline_fingerprints.contains(fingerprint.as_str()))
+                .then(|| format!("{}: {}", fingerprint, finding.description))
+        })
         .collect::<Vec<_>>();
-    let debt_report = format_baseline_debt_report(&found);
+    let stale_policy_findings = baseline
+        .known_fingerprints
+        .iter()
+        .filter(|fingerprint| {
+            fingerprint.starts_with(policy)
+                && !current_policy_fingerprints.contains(fingerprint.as_str())
+        })
+        .cloned()
+        .collect::<Vec<_>>();
 
     assert!(
-        unexpected.is_empty(),
-        "core-owned source contains non-baselined ecosystem or Homeboy-domain behavior:\n{}\n\nCore concepts are allowed when generic (command, artifact, capability, preflight, runner), but product/domain values must come from config, extension manifests, or typed extension contracts. Add extension-owned behavior instead, or update the narrow baseline only for known issue-linked cleanup violations (#2240 or #3195).\n\n{}",
-        unexpected.join("\n"),
-        debt_report
-    );
-
-    let stale_baseline = stale_baseline_rows(&found);
-    assert!(
-        stale_baseline.is_empty(),
-        "core-owned source agnostic baseline contains stale entries. Remove stale BASELINE entries so the #2240/#3195 guard only allows current debt:\n{}\n\n{}",
-        stale_baseline.join("\n"),
-        debt_report
-    );
-
-    let occurrence_count = found.values().map(Vec::len).sum::<usize>();
-    assert_eq!(
-        occurrence_count, BASELINE_OCCURRENCES,
-        "core-owned source agnostic baseline occurrence count changed. If this went down, lower BASELINE_OCCURRENCES and remove stale BASELINE entries. If it went up, move behavior into config, extension manifests, or typed extension contracts.\n\n{}",
-        debt_report
-    );
-
-    let term_distribution = homeboy::core::top_n::top_n_by(
-        found.keys().map(|(_, term)| term.as_str()),
-        |term| *term,
-        3,
+        !current_policy_findings.is_empty(),
+        "core-agnostic source policy should stay configured until #2240/#3195 debt is cleaned up"
     );
     assert!(
-        !term_distribution.is_empty(),
-        "baseline should stay explicit until the #2240/#3195 cleanup removes existing core leaks"
+        new_policy_findings.is_empty(),
+        "core-owned source contains non-baselined ecosystem or Homeboy-domain behavior. Core concepts are allowed when generic (command, artifact, capability, preflight, runner), but product/domain values must come from config, extension manifests, or typed extension contracts. New audit findings:\n{}",
+        new_policy_findings.join("\n")
+    );
+    assert!(
+        stale_policy_findings.is_empty(),
+        "core-owned source agnostic audit baseline contains stale entries. Ratchet baselines.audit after cleanup:\n{}",
+        stale_policy_findings.join("\n")
     );
 }
 
@@ -1421,6 +1426,7 @@ fn core_content_stays_free_of_concrete_extension_ids() {
     );
 }
 
+#[allow(dead_code)]
 fn scan_dir(root: &Path, dir: &Path, found: &mut BTreeMap<(String, String), Vec<usize>>) {
     for entry in fs::read_dir(dir).expect("source dir should be readable") {
         let entry = entry.expect("source entry should be readable");
@@ -1433,6 +1439,7 @@ fn scan_dir(root: &Path, dir: &Path, found: &mut BTreeMap<(String, String), Vec<
     }
 }
 
+#[allow(dead_code)]
 fn scan_file(root: &Path, path: &Path, found: &mut BTreeMap<(String, String), Vec<usize>>) {
     if is_test_helper(path) {
         return;
@@ -1704,6 +1711,7 @@ fn relative_path(root: &Path, path: &Path) -> String {
         .join("/")
 }
 
+#[allow(dead_code)]
 fn format_baseline_debt_report(found: &BTreeMap<(String, String), Vec<usize>>) -> String {
     let occurrence_count = found.values().map(Vec::len).sum::<usize>();
     let paths = found
@@ -1783,6 +1791,7 @@ fn format_test_content_debt_report(found: &BTreeMap<(String, String), Vec<usize>
     )
 }
 
+#[allow(dead_code)]
 fn stale_baseline_report(found: &BTreeMap<(String, String), Vec<usize>>) -> String {
     let stale_rows = stale_baseline_rows(found);
 
@@ -1793,6 +1802,7 @@ fn stale_baseline_report(found: &BTreeMap<(String, String), Vec<usize>>) -> Stri
     first_rows(stale_rows)
 }
 
+#[allow(dead_code)]
 fn stale_baseline_rows(found: &BTreeMap<(String, String), Vec<usize>>) -> Vec<String> {
     BASELINE
         .iter()
@@ -1801,6 +1811,7 @@ fn stale_baseline_rows(found: &BTreeMap<(String, String), Vec<usize>>) -> Vec<St
         .collect::<Vec<_>>()
 }
 
+#[allow(dead_code)]
 fn first_rows(rows: Vec<String>) -> String {
     rows.into_iter().take(10).collect::<Vec<_>>().join("\n")
 }

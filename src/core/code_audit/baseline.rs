@@ -41,10 +41,10 @@ pub struct AuditBaselineMetadata {
 /// Wrapper that implements [`Fingerprintable`] for audit findings.
 ///
 /// Uses `convention::file::kind` as the core identity. The description is
-/// excluded because structural findings embed volatile values (e.g. exact
-/// line counts) that change when a file grows by even one line. Including
-/// them would cause the same finding to appear as "resolved + new" on every
-/// minor change, defeating the baseline ratchet.
+/// excluded for most findings because structural findings embed volatile values
+/// (e.g. exact line counts) that change when a file grows by even one line.
+/// Core-boundary leaks include the configured policy, term, and line in their
+/// description so each configured source-policy finding can ratchet normally.
 struct AuditFinding<'a>(&'a Finding);
 
 impl Fingerprintable for AuditFinding<'_> {
@@ -54,6 +54,14 @@ impl Fingerprintable for AuditFinding<'_> {
         } else {
             self.0.file.clone()
         };
+
+        if self.0.kind == AuditFindingKind::CoreBoundaryLeak {
+            return format!(
+                "{}::{}::{}::{:?}",
+                self.0.convention, file, self.0.description, self.0.kind
+            );
+        }
+
         format!("{}::{}::{:?}", self.0.convention, file, self.0.kind)
     }
 
@@ -201,6 +209,11 @@ pub fn load_baseline(source_path: &Path) -> Option<AuditBaseline> {
 pub fn compare(result: &CodeAuditResult, baseline: &AuditBaseline) -> BaselineComparison {
     let items: Vec<AuditFinding> = result.findings.iter().map(AuditFinding).collect();
     generic::compare(&items, baseline)
+}
+
+/// Return the audit-baseline identity for one finding.
+pub fn finding_baseline_fingerprint(finding: &Finding) -> String {
+    AuditFinding(finding).fingerprint()
 }
 
 /// Load an audit baseline from a git ref (e.g., `origin/main`).

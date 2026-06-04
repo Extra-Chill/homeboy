@@ -291,6 +291,35 @@ pub fn audit_path_with_id(component_id: &str, source_path: &str) -> Result<CodeA
     .map(|audit| audit.result)
 }
 
+/// Run only configured source policies for a component path.
+pub fn source_policy_findings_for_path(
+    component_id: &str,
+    source_path: &str,
+) -> Result<Vec<Finding>> {
+    let root = Path::new(source_path);
+    if !root.is_dir() {
+        return Err(crate::core::Error::validation_invalid_argument(
+            "path",
+            format!("Not a directory: {source_path}"),
+            None,
+            None,
+        ));
+    }
+
+    let audit_config = audit_config_for(component_id, root, &[]);
+    let snapshot = walker::walk_all_source_files_snapshot(root);
+    let fingerprints = snapshot
+        .iter()
+        .filter_map(|(path, content)| fingerprint::fingerprint_content(path, root, content))
+        .collect::<Vec<_>>();
+    let fingerprint_refs = fingerprints.iter().collect::<Vec<_>>();
+
+    Ok(source_policy::run(
+        &fingerprint_refs,
+        &audit_config.source_policies,
+    ))
+}
+
 pub(crate) fn audit_path_with_id_with_plan_and_analysis(
     component_id: &str,
     source_path: &str,
