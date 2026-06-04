@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.115.11] - 2026-06-04
+
+### Fixed
+- provide WP Codebox sandbox tool policy
+
 ## [2.115.10] - 2026-06-04
 
 ### Fixed
