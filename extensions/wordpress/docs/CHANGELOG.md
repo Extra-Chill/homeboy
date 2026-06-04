@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.115.16] - 2026-06-04
+
+### Fixed
+- preflight WordPress dependency plugin packages
+- consume canonical Data Machine bundle results
+
 ## [2.115.15] - 2026-06-04
 
 ### Changed
