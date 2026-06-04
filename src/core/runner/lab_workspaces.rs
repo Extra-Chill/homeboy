@@ -7,7 +7,7 @@ use crate::core::component::{self, TargetSpec};
 use crate::core::{Error, Result};
 
 use super::{
-    sync_workspace, workspace::RunnerGitDependencyMaterializationOutput, RunnerWorkspaceSyncMode,
+    sync_workspace, RunnerGitDependencyMaterializationOutput, RunnerWorkspaceSyncMode,
     RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
 };
 

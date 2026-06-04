@@ -5,12 +5,9 @@ use crate::core::rig;
 use crate::core::{Error, Result};
 
 use super::{
-    exec, load, sync_workspace,
-    workspace::{
-        materialize_git_dependency, RunnerGitDependencyMaterializationOptions,
-        RunnerGitDependencyMaterializationOutput,
-    },
-    RunnerExecOptions, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
+    exec, load, materialize_git_dependency, sync_workspace, RunnerExecOptions,
+    RunnerGitDependencyMaterializationOptions, RunnerGitDependencyMaterializationOutput,
+    RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
