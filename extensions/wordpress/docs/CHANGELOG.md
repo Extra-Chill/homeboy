@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.115.28] - 2026-06-04
+
+### Fixed
+- keep generic codebox tasks out of bundle mode
+
 ## [2.115.27] - 2026-06-04
 
 ### Changed
