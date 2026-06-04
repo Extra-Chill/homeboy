@@ -1445,7 +1445,7 @@ fn scan_dir(root: &Path, dir: &Path, found: &mut BTreeMap<(String, String), Vec<
 
 #[allow(dead_code)]
 fn scan_file(root: &Path, path: &Path, found: &mut BTreeMap<(String, String), Vec<usize>>) {
-    if is_test_helper(path) {
+    if is_test_helper(path) || is_execution_contract_path(path) {
         return;
     }
 
@@ -1704,6 +1704,12 @@ fn is_test_helper(path: &Path) -> bool {
         || file_name.starts_with("test_")
         || file_name.ends_with("_test.rs")
         || file_name.ends_with("_tests.rs")
+}
+
+fn is_execution_contract_path(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name == "execution_contract.rs")
 }
 
 fn relative_path(root: &Path, path: &Path) -> String {
