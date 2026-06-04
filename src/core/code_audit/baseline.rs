@@ -140,7 +140,8 @@ pub fn save_baseline(result: &CodeAuditResult) -> Result<std::path::PathBuf, Str
         known_outliers,
     };
 
-    let items: Vec<AuditFinding> = result.findings.iter().map(AuditFinding).collect();
+    let findings = baseline_findings(result);
+    let items: Vec<AuditFinding> = findings.iter().map(AuditFinding).collect();
 
     generic::save(&config, &result.component_id, &items, metadata).map_err(|e| e.message)
 }
@@ -173,7 +174,8 @@ pub fn save_baseline_scoped(
         known_outliers,
     };
 
-    let items: Vec<AuditFinding> = result.findings.iter().map(AuditFinding).collect();
+    let findings = baseline_findings(result);
+    let items: Vec<AuditFinding> = findings.iter().map(AuditFinding).collect();
 
     generic::save_scoped(
         &config,
@@ -214,6 +216,16 @@ pub fn compare(result: &CodeAuditResult, baseline: &AuditBaseline) -> BaselineCo
 /// Return the audit-baseline identity for one finding.
 pub fn finding_baseline_fingerprint(finding: &Finding) -> String {
     AuditFinding(finding).fingerprint()
+}
+
+fn baseline_findings(result: &CodeAuditResult) -> Vec<Finding> {
+    let mut findings = result.findings.clone();
+    if let Ok(source_policy_findings) =
+        super::source_policy_findings_for_path(&result.component_id, &result.source_path)
+    {
+        findings.extend(source_policy_findings);
+    }
+    findings
 }
 
 /// Load an audit baseline from a git ref (e.g., `origin/main`).

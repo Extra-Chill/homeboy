@@ -5,31 +5,6 @@
         "/homeboy-run-"
       ]
     },
-    "test_wiring": {
-      "policies": [
-        {
-          "id": "nested-test-harness-wiring",
-          "source_path_globs": [
-            "src/**/*.rs"
-          ],
-          "test_path_globs": [
-            "tests/**/*_test.rs"
-          ],
-          "auto_discovered_test_path_globs": [
-            "tests/*_test.rs"
-          ],
-          "support_test_path_globs": [],
-          "require_explicit_wiring": true,
-          "explicit_wiring_marker_patterns": [
-            "{test_path}"
-          ],
-          "convention": "test_wiring",
-          "severity": "warning",
-          "description": "Nested test file `{test_path}` is not wired into the configured test harness",
-          "suggestion": "Wire `{test_path}` from the covered source module with an explicit path include, or move it to a top-level auto-discovered test path."
-        }
-      ]
-    },
     "command_status_contracts": {
       "required_commands": [
         "audit",
@@ -147,6 +122,7 @@
       "src/core/code_audit/detectors/test_vacuity.rs",
       "src/core/code_audit/detectors/upstream_workaround.rs"
     ],
+    "remote_execution_safety": {},
     "source_policies": [
       {
         "case_insensitive": true,
@@ -397,7 +373,31 @@
         "type": "forbidden_terms"
       }
     ],
-    "remote_execution_safety": {}
+    "test_wiring": {
+      "policies": [
+        {
+          "auto_discovered_test_path_globs": [
+            "tests/*_test.rs"
+          ],
+          "convention": "test_wiring",
+          "description": "Nested test file `{test_path}` is not wired into the configured test harness",
+          "explicit_wiring_marker_patterns": [
+            "{test_path}"
+          ],
+          "id": "nested-test-harness-wiring",
+          "require_explicit_wiring": true,
+          "severity": "warning",
+          "source_path_globs": [
+            "src/**/*.rs"
+          ],
+          "suggestion": "Wire `{test_path}` from the covered source module with an explicit path include, or move it to a top-level auto-discovered test path.",
+          "support_test_path_globs": [],
+          "test_path_globs": [
+            "tests/**/*_test.rs"
+          ]
+        }
+      ]
+    }
   },
   "auto_cleanup": false,
   "autofix_verify": {
@@ -411,8 +411,8 @@
   "baselines": {
     "audit": {
       "context_id": "homeboy",
-      "created_at": "2026-06-04T15:00:25Z",
-      "item_count": 2374,
+      "created_at": "2026-06-04T17:03:15Z",
+      "item_count": 2352,
       "known_fingerprints": [
         "artifact_portability::artifact_portability/local_artifact_path/$.lab.remote_artifact_manifest[0].path::NonPortableArtifactPath",
         "artifact_portability::artifact_portability/local_artifact_path/$.lab.remote_artifact_manifest[1].path::NonPortableArtifactPath",
@@ -650,9 +650,9 @@
         "core_boundary_leak:core-agnostic-source::src/core/cleanup.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `homeboy.json` appears at line 207 in behavioral context `artifact_declarations`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::src/core/cleanup.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `homeboy.json` appears at line 231 in behavioral context `artifact_declarations`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::src/core/code_audit/baseline.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `Homeboy` appears at line 19 in behavioral context `top-level`::CoreBoundaryLeak",
-        "core_boundary_leak:core-agnostic-source::src/core/code_audit/baseline.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `Homeboy` appears at line 221 in behavioral context `finding_baseline_fingerprint`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::src/core/code_audit/baseline.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `Homeboy` appears at line 233 in behavioral context `baseline_findings`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::src/core/code_audit/baseline.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `homeboy.json` appears at line 19 in behavioral context `top-level`::CoreBoundaryLeak",
-        "core_boundary_leak:core-agnostic-source::src/core/code_audit/baseline.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `homeboy.json` appears at line 221 in behavioral context `finding_baseline_fingerprint`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::src/core/code_audit/baseline.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `homeboy.json` appears at line 233 in behavioral context `baseline_findings`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::src/core/code_audit/codebase_map.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `WooCommerce` appears at line 78 in behavioral context `top-level`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::src/core/code_audit/codebase_map.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `php` appears at line 934 in behavioral context `default_source_extensions`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::src/core/code_audit/comment_blocks.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `php` appears at line 12 in behavioral context `top-level`::CoreBoundaryLeak",
@@ -2747,9 +2747,6 @@
         "core_boundary_leak:detector-agnostic-source::src/core/code_audit/detectors/wrapper_inference.rs::Core boundary leak (detector-agnostic-source) configured ecosystem term `php` appears at line 35 in behavioral context `top-level`::CoreBoundaryLeak",
         "core_boundary_leak:detector-agnostic-source::src/core/code_audit/detectors/wrapper_inference.rs::Core boundary leak (detector-agnostic-source) configured ecosystem term `rust` appears at line 161 in behavioral context `has_field`::CoreBoundaryLeak",
         "dead_code::tests/core_agnostic_test.rs::DeadCodeMarker",
-        "duplication::src/core/code_audit/detectors/core_boundary_leak.rs::DuplicateFunction",
-        "duplication::tests/core_agnostic_test.rs::DuplicateFunction",
-        "field_patterns::src/core/component/audit.rs::RepeatedFieldPattern",
         "intra-method-duplication::src/core/agent_task_scheduler.rs::IntraMethodDuplicate",
         "parallel-implementation::src/core/agent_task_scheduler.rs::ParallelImplementation",
         "parallel-implementation::src/core/config/json_pointer.rs::ParallelImplementation",
