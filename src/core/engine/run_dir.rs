@@ -3,7 +3,7 @@
 //! Each pipeline run gets a directory where steps write their outputs
 //! and read predecessor outputs. This replaces the ad-hoc pattern of
 //! creating random temp files and passing their paths via individual
-//! `HOMEBOY_*_FILE` environment variables.
+//! product-prefixed environment variables.
 //!
 //! ## Layout
 //!
@@ -19,10 +19,10 @@
 //!
 //! ## Backward compatibility
 //!
-//! During migration, homeboy sets both `HOMEBOY_RUN_DIR` and the legacy
-//! per-file env vars (e.g. `HOMEBOY_LINT_FINDINGS_FILE`). The legacy vars
+//! During migration, the CLI sets both the run-dir env var and the legacy
+//! per-file env vars. The legacy vars
 //! point into the run dir, so extension scripts that use the old vars
-//! continue working. New scripts can use `HOMEBOY_RUN_DIR` directly.
+//! continue working. New scripts can use the run-dir env var directly.
 
 use crate::core::error::{Error, Result};
 use std::path::{Path, PathBuf};
@@ -43,7 +43,9 @@ pub mod files {
 }
 
 /// Environment variable name for the run directory.
-pub const RUN_DIR_ENV: &str = "HOMEBOY_RUN_DIR";
+pub fn run_dir_env() -> String {
+    crate::core::product_identity::PRODUCT_IDENTITY.env_var("RUN_DIR")
+}
 
 /// A run directory for a single pipeline execution.
 ///
@@ -62,7 +64,9 @@ impl RunDir {
     /// drops or explicitly cleans it up — homeboy's temp pruner handles
     /// orphans from killed processes.
     pub fn create() -> Result<Self> {
-        let path = super::temp::runtime_temp_dir("homeboy-run")?;
+        let path = super::temp::runtime_temp_dir(
+            crate::core::product_identity::PRODUCT_IDENTITY.run_dir_prefix,
+        )?;
         // Create annotations subdirectory
         let annotations = path.join(files::ANNOTATIONS_DIR);
         std::fs::create_dir_all(&annotations).map_err(|e| {
@@ -71,7 +75,7 @@ impl RunDir {
         Ok(Self { path })
     }
 
-    /// Wrap an existing directory as a run dir (e.g. from `HOMEBOY_RUN_DIR` env var).
+    /// Wrap an existing directory as a run dir.
     pub fn from_existing(path: PathBuf) -> Result<Self> {
         if !path.is_dir() {
             return Err(Error::internal_io(
@@ -99,65 +103,63 @@ impl RunDir {
 
     /// Generate backward-compatible env var pairs for extension scripts.
     ///
-    /// Returns `(key, value)` pairs that map the legacy `HOMEBOY_*_FILE`
+    /// Returns `(key, value)` pairs that map the legacy product-prefixed
+    /// file environment variables
     /// env vars to files within this run directory. Extension scripts that
     /// still use the old vars will read/write the correct locations.
     pub fn legacy_env_vars(&self) -> Vec<(String, String)> {
         vec![
+            (run_dir_env(), self.path.to_string_lossy().to_string()),
             (
-                "HOMEBOY_RUN_DIR".to_string(),
-                self.path.to_string_lossy().to_string(),
-            ),
-            (
-                "HOMEBOY_LINT_FINDINGS_FILE".to_string(),
+                crate::core::product_identity::PRODUCT_IDENTITY.env_var("LINT_FINDINGS_FILE"),
                 self.step_file(files::LINT_FINDINGS)
                     .to_string_lossy()
                     .to_string(),
             ),
             (
-                "HOMEBOY_LINT_PRODUCERS_FILE".to_string(),
+                crate::core::product_identity::PRODUCT_IDENTITY.env_var("LINT_PRODUCERS_FILE"),
                 self.step_file(files::LINT_PRODUCERS)
                     .to_string_lossy()
                     .to_string(),
             ),
             (
-                "HOMEBOY_TEST_RESULTS_FILE".to_string(),
+                crate::core::product_identity::PRODUCT_IDENTITY.env_var("TEST_RESULTS_FILE"),
                 self.step_file(files::TEST_RESULTS)
                     .to_string_lossy()
                     .to_string(),
             ),
             (
-                "HOMEBOY_TEST_FAILURES_FILE".to_string(),
+                crate::core::product_identity::PRODUCT_IDENTITY.env_var("TEST_FAILURES_FILE"),
                 self.step_file(files::TEST_FAILURES)
                     .to_string_lossy()
                     .to_string(),
             ),
             (
-                "HOMEBOY_COVERAGE_FILE".to_string(),
+                crate::core::product_identity::PRODUCT_IDENTITY.env_var("COVERAGE_FILE"),
                 self.step_file(files::COVERAGE)
                     .to_string_lossy()
                     .to_string(),
             ),
             (
-                "HOMEBOY_FIX_RESULTS_FILE".to_string(),
+                crate::core::product_identity::PRODUCT_IDENTITY.env_var("FIX_RESULTS_FILE"),
                 self.step_file(files::FIX_RESULTS)
                     .to_string_lossy()
                     .to_string(),
             ),
             (
-                "HOMEBOY_BENCH_RESULTS_FILE".to_string(),
+                crate::core::product_identity::PRODUCT_IDENTITY.env_var("BENCH_RESULTS_FILE"),
                 self.step_file(files::BENCH_RESULTS)
                     .to_string_lossy()
                     .to_string(),
             ),
             (
-                "HOMEBOY_TRACE_RESULTS_FILE".to_string(),
+                crate::core::product_identity::PRODUCT_IDENTITY.env_var("TRACE_RESULTS_FILE"),
                 self.step_file(files::TRACE_RESULTS)
                     .to_string_lossy()
                     .to_string(),
             ),
             (
-                "HOMEBOY_ANNOTATIONS_DIR".to_string(),
+                crate::core::product_identity::PRODUCT_IDENTITY.env_var("ANNOTATIONS_DIR"),
                 self.annotations_dir().to_string_lossy().to_string(),
             ),
         ]

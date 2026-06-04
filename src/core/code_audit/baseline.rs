@@ -4,6 +4,7 @@
 //! plus backward-compatible wrappers (`save_baseline`, `load_baseline`, `compare`)
 //! that the audit command uses directly.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use crate::core::engine::baseline::{self as generic, BaselineConfig, Fingerprintable};
@@ -16,7 +17,7 @@ use super::CodeAuditResult;
 // Baseline key
 // ============================================================================
 
-/// Key used in `homeboy.json` → `baselines.audit`.
+/// Key used under `baselines.audit`.
 const BASELINE_KEY: &str = "audit";
 
 // ============================================================================
@@ -32,7 +33,43 @@ pub struct AuditBaselineMetadata {
     pub alignment_score: Option<f32>,
     /// Set of known outlier file paths (accepted drift).
     pub known_outliers: Vec<String>,
+    /// Scoped audit-policy sections for easier baseline review and ratcheting.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub policy_sections: Vec<AuditBaselinePolicySection>,
 }
+
+/// A scoped slice of audit baseline fingerprints.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct AuditBaselinePolicySection {
+    /// Stable section key, usually `<audit_policy>/<scope>`.
+    pub key: String,
+    /// Audit policy/convention label that owns these fingerprints.
+    pub audit_policy: String,
+    /// Optional policy scope within the audit policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    /// Optional issue URL or reference tracking this accepted debt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue: Option<String>,
+    /// Optional rationale for why this section is baselined.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rationale: Option<String>,
+    /// Known fingerprints for this policy/scope section.
+    pub known_fingerprints: Vec<String>,
+}
+
+/// Baseline mode for resolved/stale policy fingerprints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolicyBaselineMode {
+    /// Full-policy runs should fail on stale baseline rows so cleanup ratchets.
+    Full,
+    /// Changed-scope runs ignore stale rows outside the active scope.
+    ChangedScope,
+}
+
+/// Current source-policy/core-boundary section used by the core-agnostic tests.
+pub const SOURCE_POLICY_CORE_BOUNDARY_POLICY: &str = "core_boundary_leak:core-agnostic-source";
+pub const SOURCE_POLICY_CORE_BOUNDARY_SCOPE: &str = "core-boundary";
 
 // ============================================================================
 // Fingerprintable implementation for audit findings
@@ -134,13 +171,14 @@ pub fn save_baseline(result: &CodeAuditResult) -> Result<std::path::PathBuf, Str
         .flat_map(|c| c.outliers.iter().map(|o| o.file.clone()))
         .collect();
 
+    let items: Vec<AuditFinding> = result.findings.iter().map(AuditFinding).collect();
+    let known_fingerprints = fingerprints_for_items(&items);
     let metadata = AuditBaselineMetadata {
         outliers_count: known_outliers.len(),
         alignment_score: result.summary.alignment_score,
         known_outliers,
+        policy_sections: policy_sections_from_fingerprints(&known_fingerprints),
     };
-
-    let items: Vec<AuditFinding> = result.findings.iter().map(AuditFinding).collect();
 
     generic::save(&config, &result.component_id, &items, metadata).map_err(|e| e.message)
 }
@@ -167,13 +205,14 @@ pub fn save_baseline_scoped(
         .flat_map(|c| c.outliers.iter().map(|o| o.file.clone()))
         .collect();
 
+    let items: Vec<AuditFinding> = result.findings.iter().map(AuditFinding).collect();
+    let merged_fingerprints = scoped_policy_fingerprints(&config, &items, changed_files);
     let metadata = AuditBaselineMetadata {
         outliers_count: known_outliers.len(),
         alignment_score: result.summary.alignment_score,
         known_outliers,
+        policy_sections: policy_sections_from_fingerprints(&merged_fingerprints),
     };
-
-    let items: Vec<AuditFinding> = result.findings.iter().map(AuditFinding).collect();
 
     generic::save_scoped(
         &config,
@@ -203,6 +242,7 @@ pub fn load_baseline(source_path: &Path) -> Option<AuditBaseline> {
     generic::load::<AuditBaselineMetadata>(&config)
         .ok()
         .flatten()
+        .map(normalize_loaded_baseline)
 }
 
 /// Compare an audit result against a saved baseline.
@@ -218,10 +258,137 @@ pub fn finding_baseline_fingerprint(finding: &Finding) -> String {
 
 /// Load an audit baseline from a git ref (e.g., `origin/main`).
 ///
-/// Uses `git show <ref>:homeboy.json` to read the baseline without checkout.
+/// Uses `git show` to read the persisted baseline without checkout.
 /// Returns `None` if the ref doesn't have a baseline.
 pub fn load_baseline_from_ref(source_path: &str, git_ref: &str) -> Option<AuditBaseline> {
     generic::load_from_git_ref::<AuditBaselineMetadata>(source_path, git_ref, BASELINE_KEY)
+        .map(normalize_loaded_baseline)
+}
+
+/// Return known fingerprints for a scoped policy section, falling back to the legacy flat list.
+pub fn policy_baseline_fingerprints<'a>(
+    baseline: &'a AuditBaseline,
+    audit_policy: &str,
+    scope: Option<&str>,
+) -> BTreeSet<&'a str> {
+    if let Some(section) =
+        baseline.metadata.policy_sections.iter().find(|section| {
+            section.audit_policy == audit_policy && section.scope.as_deref() == scope
+        })
+    {
+        return section
+            .known_fingerprints
+            .iter()
+            .map(|fingerprint| fingerprint.as_str())
+            .collect();
+    }
+
+    baseline
+        .known_fingerprints
+        .iter()
+        .filter(|fingerprint| fingerprint.starts_with(audit_policy))
+        .map(|fingerprint| fingerprint.as_str())
+        .collect()
+}
+
+/// Return stale baseline rows for a policy section according to the requested baseline mode.
+pub fn stale_policy_baseline_fingerprints(
+    baseline: &AuditBaseline,
+    current_policy_fingerprints: &BTreeSet<String>,
+    audit_policy: &str,
+    scope: Option<&str>,
+    mode: PolicyBaselineMode,
+) -> Vec<String> {
+    if mode == PolicyBaselineMode::ChangedScope {
+        return Vec::new();
+    }
+
+    policy_baseline_fingerprints(baseline, audit_policy, scope)
+        .into_iter()
+        .filter(|fingerprint| !current_policy_fingerprints.contains(*fingerprint))
+        .map(str::to_string)
+        .collect()
+}
+
+fn fingerprints_for_items(items: &[AuditFinding]) -> Vec<String> {
+    let mut known_fingerprints = items
+        .iter()
+        .map(|item| item.fingerprint())
+        .collect::<Vec<_>>();
+    known_fingerprints.sort();
+    known_fingerprints.dedup();
+    known_fingerprints
+}
+
+fn scoped_policy_fingerprints(
+    config: &BaselineConfig,
+    items: &[AuditFinding],
+    changed_files: &[String],
+) -> Vec<String> {
+    let current = fingerprints_for_items(items);
+    let Ok(Some(existing)) = generic::load::<AuditBaselineMetadata>(config) else {
+        return current;
+    };
+
+    let changed = changed_files
+        .iter()
+        .map(|file| file.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut merged = existing
+        .known_fingerprints
+        .into_iter()
+        .filter(|fingerprint| {
+            file_from_audit_fingerprint(fingerprint)
+                .as_deref()
+                .is_none_or(|file| !changed.contains(file))
+        })
+        .collect::<Vec<_>>();
+    merged.extend(current);
+    merged.sort();
+    merged.dedup();
+    merged
+}
+
+fn normalize_loaded_baseline(mut baseline: AuditBaseline) -> AuditBaseline {
+    let section_fingerprints = baseline
+        .metadata
+        .policy_sections
+        .iter()
+        .flat_map(|section| section.known_fingerprints.iter().cloned())
+        .collect::<Vec<_>>();
+    if !section_fingerprints.is_empty() {
+        baseline.known_fingerprints.extend(section_fingerprints);
+        baseline.known_fingerprints.sort();
+        baseline.known_fingerprints.dedup();
+        baseline.item_count = baseline.known_fingerprints.len();
+    }
+    baseline
+}
+
+fn policy_sections_from_fingerprints(fingerprints: &[String]) -> Vec<AuditBaselinePolicySection> {
+    let core_boundary = fingerprints
+        .iter()
+        .filter(|fingerprint| fingerprint.starts_with(SOURCE_POLICY_CORE_BOUNDARY_POLICY))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    if core_boundary.is_empty() {
+        return Vec::new();
+    }
+
+    vec![AuditBaselinePolicySection {
+        key: format!(
+            "{}/{}",
+            SOURCE_POLICY_CORE_BOUNDARY_POLICY, SOURCE_POLICY_CORE_BOUNDARY_SCOPE
+        ),
+        audit_policy: SOURCE_POLICY_CORE_BOUNDARY_POLICY.to_string(),
+        scope: Some(SOURCE_POLICY_CORE_BOUNDARY_SCOPE.to_string()),
+        issue: Some("#3498".to_string()),
+        rationale: Some(
+            "Scoped source-policy/core-boundary debt baseline for reviewable ratchets.".to_string(),
+        ),
+        known_fingerprints: core_boundary,
+    }]
 }
 
 // ============================================================================
@@ -263,7 +430,7 @@ mod tests {
     }
 
     fn make_result(findings: Vec<Finding>, test_name: &str) -> CodeAuditResult {
-        let dir = std::env::temp_dir().join(format!("homeboy_baseline_{}", test_name));
+        let dir = std::env::temp_dir().join(format!("audit_baseline_{}", test_name));
         let _ = std::fs::remove_dir_all(&dir); // Clean slate
         let _ = std::fs::create_dir_all(&dir);
         CodeAuditResult {
@@ -509,6 +676,106 @@ mod tests {
     }
 
     #[test]
+    fn source_policy_core_boundary_baseline_section_roundtrips() {
+        let result = make_result(
+            vec![make_finding_with_kind(
+                SOURCE_POLICY_CORE_BOUNDARY_POLICY,
+                "src/core/example.rs",
+                "Core boundary leak (core-agnostic-source) configured ecosystem term `ProductName` appears at line 7 in behavioral context `top-level`",
+                AuditFinding::CoreBoundaryLeak,
+            )],
+            "policy_section_roundtrip",
+        );
+
+        let _ = save_baseline(&result).unwrap();
+        let loaded = load_baseline(Path::new(&result.source_path)).unwrap();
+
+        let fingerprints = policy_baseline_fingerprints(
+            &loaded,
+            SOURCE_POLICY_CORE_BOUNDARY_POLICY,
+            Some(SOURCE_POLICY_CORE_BOUNDARY_SCOPE),
+        );
+        assert_eq!(fingerprints.len(), 1);
+        assert_eq!(loaded.metadata.policy_sections.len(), 1);
+        assert!(loaded.metadata.policy_sections[0]
+            .issue
+            .as_deref()
+            .unwrap_or_default()
+            .ends_with("#3498"));
+
+        let _ = std::fs::remove_dir_all(Path::new(&result.source_path));
+    }
+
+    #[test]
+    fn policy_baseline_fingerprints_falls_back_to_legacy_flat_list() {
+        let fingerprint = format!(
+            "{}::src/core/example.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `ProductName` appears at line 7 in behavioral context `top-level`::CoreBoundaryLeak",
+            SOURCE_POLICY_CORE_BOUNDARY_POLICY
+        );
+        let baseline = AuditBaseline {
+            created_at: "2026-06-04T00:00:00Z".to_string(),
+            context_id: "test".to_string(),
+            item_count: 1,
+            known_fingerprints: vec![fingerprint.clone()],
+            metadata: AuditBaselineMetadata {
+                outliers_count: 1,
+                alignment_score: None,
+                known_outliers: vec![],
+                policy_sections: vec![],
+            },
+        };
+
+        let fingerprints = policy_baseline_fingerprints(
+            &baseline,
+            SOURCE_POLICY_CORE_BOUNDARY_POLICY,
+            Some(SOURCE_POLICY_CORE_BOUNDARY_SCOPE),
+        );
+        assert!(fingerprints.contains(fingerprint.as_str()));
+    }
+
+    #[test]
+    fn changed_scope_policy_mode_ignores_stale_section_rows() {
+        let fingerprint = format!(
+            "{}::src/core/example.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `ProductName` appears at line 7 in behavioral context `top-level`::CoreBoundaryLeak",
+            SOURCE_POLICY_CORE_BOUNDARY_POLICY
+        );
+        let baseline = AuditBaseline {
+            created_at: "2026-06-04T00:00:00Z".to_string(),
+            context_id: "test".to_string(),
+            item_count: 1,
+            known_fingerprints: vec![fingerprint.clone()],
+            metadata: AuditBaselineMetadata {
+                outliers_count: 1,
+                alignment_score: None,
+                known_outliers: vec![],
+                policy_sections: policy_sections_from_fingerprints(&[fingerprint.clone()]),
+            },
+        };
+        let current = BTreeSet::new();
+
+        assert_eq!(
+            stale_policy_baseline_fingerprints(
+                &baseline,
+                &current,
+                SOURCE_POLICY_CORE_BOUNDARY_POLICY,
+                Some(SOURCE_POLICY_CORE_BOUNDARY_SCOPE),
+                PolicyBaselineMode::ChangedScope,
+            ),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            stale_policy_baseline_fingerprints(
+                &baseline,
+                &current,
+                SOURCE_POLICY_CORE_BOUNDARY_POLICY,
+                Some(SOURCE_POLICY_CORE_BOUNDARY_SCOPE),
+                PolicyBaselineMode::Full,
+            ),
+            vec![fingerprint]
+        );
+    }
+
+    #[test]
     fn fingerprint_is_stable() {
         let f1 = make_finding("Flow", "a.php", "Missing method: execute");
         let f2 = make_finding("Flow", "a.php", "Missing method: execute");
@@ -555,13 +822,13 @@ mod tests {
         let f1 = make_finding_with_kind(
             "artifact_portability",
             "observation:run-a",
-            "Run metadata field $.run_dir records local-only artifact path /tmp/homeboy-run-a; command `homeboy test`; field `$.run_dir`",
+            "Run metadata field $.run_dir records local-only artifact path /tmp/run-a; command `tool test`; field `$.run_dir`",
             AuditFinding::NonPortableArtifactPath,
         );
         let f2 = make_finding_with_kind(
             "artifact_portability",
             "observation:run-b",
-            "Run metadata field $.run_dir records local-only artifact path /Users/chris/.config/homeboy/runtime/tmp/homeboy-run-b; command `homeboy lint`; field `$.run_dir`",
+            "Run metadata field $.run_dir records local-only artifact path /Users/chris/.config/tool/runtime/tmp/run-b; command `tool lint`; field `$.run_dir`",
             AuditFinding::NonPortableArtifactPath,
         );
 
@@ -580,13 +847,13 @@ mod tests {
         let local_path = make_finding_with_kind(
             "artifact_portability",
             "observation:run-a",
-            "Run metadata field $.patch_artifact_path records local-only artifact path /tmp/homeboy-run-a/patch.diff; command `homeboy test`; field `$.patch_artifact_path`",
+            "Run metadata field $.patch_artifact_path records local-only artifact path /tmp/run-a/patch.diff; command `tool test`; field `$.patch_artifact_path`",
             AuditFinding::NonPortableArtifactPath,
         );
         let missing_mirror = make_finding_with_kind(
             "artifact_portability",
             "observation:run-b",
-            "Run metadata field $.patch_artifact_path records remote artifact ref runner-artifact://lab/run/patch without a mirrored artifact record; command `homeboy test`; field `$.patch_artifact_path`",
+            "Run metadata field $.patch_artifact_path records remote artifact ref runner-artifact://lab/run/patch without a mirrored artifact record; command `tool test`; field `$.patch_artifact_path`",
             AuditFinding::NonPortableArtifactPath,
         );
 

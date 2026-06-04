@@ -24,6 +24,7 @@ impl DetectorAccess {
 pub(crate) enum DetectorRuntime {
     Manual,
     Fingerprint(FingerprintDetectorRunner),
+    Root(RootDetectorRunner),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,6 +34,12 @@ pub(crate) enum FingerprintDetectorRunner {
     LiteralShapes,
     SharedScaffolding,
     AggregateConstruction,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RootDetectorRunner {
+    TestTopology,
+    TestWiring,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -148,7 +155,7 @@ const DETECTOR_DESCRIPTORS: &[DetectorDescriptor] = &[
             AuditFinding::VacuousTest,
         ],
         access: DetectorAccess::RootOnly,
-        runtime: DetectorRuntime::Manual,
+        runtime: DetectorRuntime::Root(RootDetectorRunner::TestTopology),
         timing_id: "detector.test_topology",
         log_label: "Test topology",
         log_summary: "inline/scattered test placement",
@@ -157,7 +164,7 @@ const DETECTOR_DESCRIPTORS: &[DetectorDescriptor] = &[
         id: "test_wiring",
         findings: &[AuditFinding::UnwiredNestedRustTest],
         access: DetectorAccess::RootOnly,
-        runtime: DetectorRuntime::Manual,
+        runtime: DetectorRuntime::Root(RootDetectorRunner::TestWiring),
         timing_id: "detector.test_wiring",
         log_label: "Nested test wiring",
         log_summary: "nested tests not wired into the test runner",
@@ -462,14 +469,6 @@ impl AuditExecutionPlan {
         self.detector_enabled("layer_ownership")
     }
 
-    pub(crate) fn run_test_topology(&self) -> bool {
-        self.detector_enabled("test_topology")
-    }
-
-    pub(crate) fn run_test_wiring(&self) -> bool {
-        self.detector_enabled("test_wiring")
-    }
-
     pub(crate) fn run_docs(&self) -> bool {
         self.detector_enabled("docs")
     }
@@ -594,4 +593,26 @@ fn family_enabled(
     let fully_excluded = emitted.iter().all(|kind| exclude.contains(kind));
 
     requested && !fully_excluded
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_detector_cluster_uses_root_descriptor_runtime() {
+        let runtimes: Vec<_> = AuditExecutionPlan::descriptors()
+            .iter()
+            .filter(|descriptor| ["test_topology", "test_wiring"].contains(&descriptor.id))
+            .map(|descriptor| descriptor.runtime)
+            .collect();
+
+        assert_eq!(
+            runtimes,
+            vec![
+                DetectorRuntime::Root(RootDetectorRunner::TestTopology),
+                DetectorRuntime::Root(RootDetectorRunner::TestWiring),
+            ]
+        );
+    }
 }

@@ -3,6 +3,7 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 
 use chrono::{Duration, Utc};
+use homeboy::core::execution_contract::EXECUTION_CONTRACT;
 use homeboy::core::observation::{ArtifactCleanupFilter, ArtifactRecord, ObservationStore};
 use homeboy::core::runner;
 
@@ -155,7 +156,9 @@ fn classify_persisted_artifact(
     let mut size_bytes = 0;
     let (action, reason) = if artifact.artifact_type == "url"
         || runner::is_remote_runner_artifact_path(&artifact.path)
-        || artifact.path.starts_with("metadata-only:")
+        || EXECUTION_CONTRACT
+            .artifacts
+            .is_metadata_only_ref(&artifact.path)
     {
         ("skip", "artifact is not local persisted bytes")
     } else if let Some(metadata) = symlink_metadata_if_exists(&path)? {
