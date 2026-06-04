@@ -210,18 +210,6 @@ const DETECTOR_AGNOSTIC_BASELINE: &[DetectorAgnosticBaseline] = &[
         token: "php",
     },
     DetectorAgnosticBaseline {
-        path: "src/core/code_audit/detectors/rust_test_wiring.rs",
-        token: "Cargo",
-    },
-    DetectorAgnosticBaseline {
-        path: "src/core/code_audit/detectors/rust_test_wiring.rs",
-        token: "Homeboy",
-    },
-    DetectorAgnosticBaseline {
-        path: "src/core/code_audit/detectors/rust_test_wiring.rs",
-        token: "Rust",
-    },
-    DetectorAgnosticBaseline {
         path: "src/core/code_audit/detectors/shared_scaffolding.rs",
         token: "php",
     },
@@ -290,7 +278,7 @@ const DETECTOR_AGNOSTIC_BASELINE: &[DetectorAgnosticBaseline] = &[
         token: "php",
     },
 ];
-const DETECTOR_AGNOSTIC_BASELINE_OCCURRENCES: usize = 77;
+const DETECTOR_AGNOSTIC_BASELINE_OCCURRENCES: usize = 71;
 
 fn source_file(relative_path: &str) -> String {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(relative_path);

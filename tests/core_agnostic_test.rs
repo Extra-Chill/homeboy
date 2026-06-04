@@ -578,10 +578,6 @@ const BASELINE: &[ViolationKey] = &[
         term: "homeboy.json",
     },
     ViolationKey {
-        path: "src/core/code_audit/detectors/rust_test_wiring.rs",
-        term: "Homeboy",
-    },
-    ViolationKey {
         path: "src/core/code_audit/detectors/wrapper_inference.rs",
         term: "homeboy.json",
     },
@@ -1159,7 +1155,7 @@ const BASELINE: &[ViolationKey] = &[
     },
 ];
 
-const BASELINE_OCCURRENCES: usize = 633;
+const BASELINE_OCCURRENCES: usize = 632;
 
 // Known core-owned test/fixture literal debt tracked by #3034. Keep this list
 // explicit so stale rows and occurrence-count changes force cleanup or review.

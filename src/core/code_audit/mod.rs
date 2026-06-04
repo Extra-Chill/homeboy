@@ -55,7 +55,7 @@ use self::detectors::{
     core_boundary_leak, dead_guard, deprecation_age, enum_dispatch_contracts, facade_passthrough,
     field_patterns, global_env_guard, mutating_resource_access, parallel_runner_setup,
     public_registry_exposure, redirect_validation, repeated_literal_shape, requested_detectors,
-    runner_offload_preflight, rust_test_wiring, shared_scaffolding, test_coverage, test_topology,
+    runner_offload_preflight, shared_scaffolding, test_coverage, test_topology, test_wiring,
     unbounded_output_capture, wrapper_inference,
 };
 
@@ -752,23 +752,21 @@ fn audit_internal(
         all_findings.extend(topology_findings);
     }
 
-    // Phase 4i2: Rust nested test harness wiring checks. Cargo only
-    // auto-discovers direct `tests/*.rs` integration tests; nested tests need
-    // explicit `#[path = "..."]` wiring from a source module.
-    let rust_test_wiring_findings = time_audit_detector(
+    // Phase 4i2: Configured test harness wiring checks.
+    let test_wiring_findings = time_audit_detector(
         &mut timing,
         "detector.test_wiring",
-        plan.run_rust_test_wiring(),
-        || rust_test_wiring::run(root),
+        plan.run_test_wiring(),
+        || test_wiring::run(root, &audit_config),
         Vec::new,
     );
-    if !rust_test_wiring_findings.is_empty() {
+    if !test_wiring_findings.is_empty() {
         log_status!(
             "audit",
-            "Rust test wiring: {} finding(s) (nested tests not wired into Cargo)",
-            rust_test_wiring_findings.len()
+            "Test wiring: {} finding(s) (tests not wired into the configured harness)",
+            test_wiring_findings.len()
         );
-        all_findings.extend(rust_test_wiring_findings);
+        all_findings.extend(test_wiring_findings);
     }
 
     // Phase 4j: Documentation drift detection (broken/stale references in markdown)
@@ -1424,20 +1422,20 @@ fn audit_root_only(
         findings.extend(topology_findings);
     }
 
-    let rust_test_wiring_findings = time_audit_detector(
+    let test_wiring_findings = time_audit_detector(
         timing,
         "detector.test_wiring",
-        plan.run_rust_test_wiring(),
-        || rust_test_wiring::run(root),
+        plan.run_test_wiring(),
+        || test_wiring::run(root, &audit_config),
         Vec::new,
     );
-    if !rust_test_wiring_findings.is_empty() {
+    if !test_wiring_findings.is_empty() {
         log_status!(
             "audit",
-            "Rust test wiring: {} finding(s) (nested tests not wired into Cargo)",
-            rust_test_wiring_findings.len()
+            "Test wiring: {} finding(s) (tests not wired into the configured harness)",
+            test_wiring_findings.len()
         );
-        findings.extend(rust_test_wiring_findings);
+        findings.extend(test_wiring_findings);
     }
 
     let doc_findings = time_audit_detector(

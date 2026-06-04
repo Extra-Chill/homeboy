@@ -91,7 +91,7 @@ const DETECTOR_FAMILIES: &[DetectorFamily] = &[
         requires_discovery: false,
     },
     DetectorFamily {
-        id: "rust_test_wiring",
+        id: "test_wiring",
         findings: &[AuditFinding::UnwiredNestedRustTest],
         requires_discovery: false,
     },
@@ -294,8 +294,8 @@ impl AuditExecutionPlan {
         self.detector_enabled("test_topology")
     }
 
-    pub(crate) fn run_rust_test_wiring(&self) -> bool {
-        self.detector_enabled("rust_test_wiring")
+    pub(crate) fn run_test_wiring(&self) -> bool {
+        self.detector_enabled("test_wiring")
     }
 
     pub(crate) fn run_docs(&self) -> bool {
