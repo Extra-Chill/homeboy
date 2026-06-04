@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.115.3] - 2026-06-04
+
+### Fixed
+- prepare Composer bench dependencies
+
 ## [2.115.2] - 2026-06-04
 
 ### Fixed
