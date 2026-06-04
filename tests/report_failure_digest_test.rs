@@ -117,6 +117,39 @@ fn trace_json_with_span_summaries() -> &'static str {
     }"#
 }
 
+fn trace_json_with_toolchain() -> &'static str {
+    r#"{
+        "success": true,
+        "data": {
+            "passed": true,
+            "status": "pass",
+            "component": "studio",
+            "exit_code": 0,
+            "toolchain": {
+                "canonical": false,
+                "mode": "development",
+                "reasons": ["HOMEBOY_WP_CODEBOX_BIN selected a local WP Codebox runner path"],
+                "homeboy": {"path":"/repo/homeboy","sha":"abc123","branch":"main","dirty":false},
+                "wp_codebox": {"path":"/repo/wp-codebox","sha":"def456","branch":"main","dirty":true},
+                "node": "v24.0.0"
+            },
+            "components": {
+                "target": {"path":"/repo/studio","sha":"789abc","branch":"trunk","dirty":false},
+                "dependencies": []
+            },
+            "results": {
+                "component_id": "studio",
+                "scenario_id": "close-window-running-site",
+                "status": "pass",
+                "summary": "Window stayed closed.",
+                "timeline": [],
+                "assertions": [],
+                "artifacts": []
+            }
+        }
+    }"#
+}
+
 fn bench_json() -> &'static str {
     r#"{
         "success": true,
@@ -431,6 +464,29 @@ fn renders_trace_span_summaries_with_metadata_and_missing_endpoints() {
     assert!(markdown.contains("**Spans**"));
     assert!(markdown.contains("| `phase.boot_to_ready` | `runner.boot` | `runner.ready` | 125ms | ok | category=startup, critical, blocking, cacheable |"));
     assert!(markdown.contains("| `phase.ready_to_open` | `runner.ready` | `app.opened` | - | skipped: missing `app.opened`: span endpoint missing from timeline | category=ui, prewarmable |"));
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn renders_trace_toolchain_provenance() {
+    let dir = tmp_dir("trace-toolchain");
+    fs::create_dir_all(&dir).expect("temp dir should exist");
+    write_file(&dir, "trace.json", trace_json_with_toolchain());
+
+    let markdown = render(&dir, r#"{"trace":"pass"}"#, false, false);
+
+    assert!(markdown.contains("**Toolchain provenance**"));
+    assert!(markdown.contains("- Mode: `development`; canonical: **no**"));
+    assert!(
+        markdown.contains("- Homeboy: `/repo/homeboy` @ `abc123` (branch `main`, dirty `false`)")
+    );
+    assert!(markdown
+        .contains("- WP Codebox: `/repo/wp-codebox` @ `def456` (branch `main`, dirty `true`)"));
+    assert!(
+        markdown.contains("- Target: `/repo/studio` @ `789abc` (branch `trunk`, dirty `false`)")
+    );
+    assert!(markdown.contains("HOMEBOY_WP_CODEBOX_BIN selected a local WP Codebox runner path"));
 
     let _ = fs::remove_dir_all(&dir);
 }

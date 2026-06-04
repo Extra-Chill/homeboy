@@ -1,6 +1,7 @@
 //! Trace workflows: invoke extension runners, parse JSON, preserve artifacts.
 
 use serde::Serialize;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
@@ -29,7 +30,8 @@ use super::overlay::{
 
 use super::parsing::{
     parse_trace_list_str, parse_trace_results_file, TraceAssertion, TraceAssertionStatus,
-    TraceList, TraceResults, TraceSpanDefinition, TraceStatus,
+    TraceComponentsProvenance, TraceGitProvenance, TraceList, TraceResults,
+    TraceRuntimeAssetProvenance, TraceSpanDefinition, TraceStatus, TraceToolchainProvenance,
 };
 use super::probes::{ActiveTraceProbes, TraceProbeConfig};
 
@@ -87,6 +89,10 @@ pub struct TraceRunWorkflowResult {
     pub baseline_comparison: Option<TraceBaselineComparison>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hints: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub toolchain: Option<TraceToolchainProvenance>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub components: Option<TraceComponentsProvenance>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -147,6 +153,11 @@ fn run_trace_workflow_with_component_script(
         .unwrap_or(component.local_path.as_str());
     let dependency_provenance = preflight_trace_dependencies(&args.runner_inputs.dependencies)?;
     preflight_trace_runner_capabilities(None, &args.runner_inputs.runner_capabilities)?;
+    let (mut toolchain, components) = trace_provenance(None, component_path);
+    mark_non_canonical(
+        &mut toolchain,
+        "component script trace runs do not resolve an extension runner checkout",
+    );
     let source_path = Path::new(component_path);
     let _overlay_locks = if args.overlays.is_empty() {
         None
@@ -187,6 +198,8 @@ fn run_trace_workflow_with_component_script(
         None
     };
     if let Some(parsed) = results.as_mut() {
+        parsed.toolchain = Some(toolchain.clone());
+        parsed.components = Some(components.clone());
         parsed.dependencies = dependency_provenance;
         super::spans::apply_span_definitions(parsed, &args.span_definitions);
         super::assertions::apply_temporal_assertions(parsed);
@@ -242,6 +255,8 @@ fn run_trace_workflow_with_component_script(
             "Component scripts use the extension runner env contract without extension resolution."
                 .to_string(),
         ]),
+        toolchain: Some(toolchain),
+        components: Some(components),
     })
 }
 
@@ -261,6 +276,7 @@ fn run_trace_workflow_with_context(
         execution_context,
         &args.runner_inputs.runner_capabilities,
     )?;
+    let (toolchain, components) = trace_provenance(execution_context, component_path);
     let _overlay_locks = if args.overlays.is_empty() {
         None
     } else {
@@ -315,6 +331,8 @@ fn run_trace_workflow_with_context(
     };
     let failure = (!runner_output.success).then(|| failure_from_output(&args, &runner_output));
     if let Some(parsed) = results.as_mut() {
+        parsed.toolchain = Some(toolchain.clone());
+        parsed.components = Some(components.clone());
         parsed.dependencies = dependency_provenance;
         parsed.timeline.extend(probe_events);
         parsed.timeline.sort_by_key(|event| event.t_ms);
@@ -433,7 +451,139 @@ fn run_trace_workflow_with_context(
             .collect(),
         baseline_comparison,
         hints: if hints.is_empty() { None } else { Some(hints) },
+        toolchain: Some(toolchain),
+        components: Some(components),
     })
+}
+
+fn trace_provenance(
+    execution_context: Option<&ExtensionExecutionContext>,
+    component_path: &str,
+) -> (TraceToolchainProvenance, TraceComponentsProvenance) {
+    let homeboy = homeboy_git_provenance();
+    let target = git_provenance(Path::new(component_path), Some("target"));
+    let env_wp_codebox_bin = std::env::var("HOMEBOY_WP_CODEBOX_BIN").ok();
+    let wp_codebox_path = execution_context
+        .filter(|context| {
+            context.extension_id.contains("wp-codebox")
+                || context
+                    .extension_path
+                    .to_string_lossy()
+                    .contains("wp-codebox")
+        })
+        .map(|context| context.extension_path.as_path())
+        .or_else(|| env_wp_codebox_bin.as_deref().map(Path::new));
+    let mut reasons = Vec::new();
+    let mut wp_codebox = wp_codebox_path.map(|path| git_provenance(path, Some("wp_codebox")));
+
+    if env_wp_codebox_bin.is_some() {
+        reasons.push("HOMEBOY_WP_CODEBOX_BIN selected a local WP Codebox runner path".to_string());
+        if let Some(provenance) = wp_codebox.as_mut() {
+            provenance.source = Some("env:HOMEBOY_WP_CODEBOX_BIN".to_string());
+        }
+    }
+    if execution_context.is_none() {
+        reasons.push("trace runner used generic local workload discovery".to_string());
+    }
+    for (label, provenance) in [("homeboy", &homeboy), ("target", &target)] {
+        if provenance.sha.is_none() || provenance.dirty.is_none() {
+            reasons.push(format!(
+                "{label} checkout git provenance is incomplete for {}",
+                provenance.path
+            ));
+        }
+    }
+    if wp_codebox.is_none() {
+        reasons.push("WP Codebox checkout was not resolved for this trace run".to_string());
+    }
+    let canonical = reasons.is_empty();
+    let mut runtime_assets = BTreeMap::new();
+    runtime_assets.insert(
+        "browser_runtime".to_string(),
+        browser_runtime_asset_provenance(),
+    );
+
+    (
+        TraceToolchainProvenance {
+            canonical,
+            mode: if canonical {
+                "canonical"
+            } else {
+                "development"
+            }
+            .to_string(),
+            reasons,
+            homeboy,
+            wp_codebox,
+            node: command_version("node", &["--version"]),
+            runtime_assets,
+        },
+        TraceComponentsProvenance {
+            target,
+            dependencies: Vec::new(),
+        },
+    )
+}
+
+fn mark_non_canonical(toolchain: &mut TraceToolchainProvenance, reason: &str) {
+    toolchain.canonical = false;
+    toolchain.mode = "development".to_string();
+    if !toolchain.reasons.iter().any(|item| item == reason) {
+        toolchain.reasons.push(reason.to_string());
+    }
+}
+
+fn git_provenance(path: &Path, source: Option<&str>) -> TraceGitProvenance {
+    let git_root = crate::core::git::get_git_root(&path.to_string_lossy())
+        .ok()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| path.to_path_buf());
+    TraceGitProvenance {
+        path: git_root.to_string_lossy().to_string(),
+        sha: git_stdout(&git_root, &["rev-parse", "HEAD"]),
+        branch: crate::core::git::current_branch(&git_root),
+        dirty: git_stdout(&git_root, &["status", "--porcelain=v1"])
+            .map(|status| !status.trim().is_empty()),
+        source: source.map(ToString::to_string),
+    }
+}
+
+fn homeboy_git_provenance() -> TraceGitProvenance {
+    let exe_path = std::env::current_exe().ok();
+    let exe_parent = exe_path.as_deref().and_then(Path::parent);
+    let provenance = exe_parent
+        .map(|path| git_provenance(path, Some("homeboy")))
+        .filter(|provenance| provenance.sha.is_some());
+
+    provenance
+        .unwrap_or_else(|| git_provenance(Path::new(env!("CARGO_MANIFEST_DIR")), Some("homeboy")))
+}
+
+fn git_stdout(path: &Path, args: &[&str]) -> Option<String> {
+    crate::core::git::run_git(path, args, "trace provenance git probe")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn command_version(command: &str, args: &[&str]) -> Option<String> {
+    Command::new(command)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn browser_runtime_asset_provenance() -> TraceRuntimeAssetProvenance {
+    TraceRuntimeAssetProvenance {
+        present: false,
+        mode: Some("jspi".to_string()),
+        version: None,
+        path: None,
+    }
 }
 
 fn validate_declared_trace_artifacts(
@@ -1191,6 +1341,8 @@ mod tests {
             assertions: Vec::new(),
             temporal_assertions: Vec::new(),
             artifacts: Vec::new(),
+            toolchain: None,
+            components: None,
             dependencies: Vec::new(),
         };
 

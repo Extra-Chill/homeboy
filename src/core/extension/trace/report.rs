@@ -53,6 +53,10 @@ pub struct TraceRunOutput {
     pub hints: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub profile: Option<TraceResolvedProfileOutput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub toolchain: Option<super::parsing::TraceToolchainProvenance>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub components: Option<super::parsing::TraceComponentsProvenance>,
 }
 
 #[derive(Serialize)]
@@ -511,6 +515,8 @@ fn from_run_workflow_result(
         baseline_comparison: result.baseline_comparison,
         hints: result.hints,
         profile: None,
+        toolchain: result.toolchain,
+        components: result.components,
     }))
 }
 
@@ -525,6 +531,8 @@ pub fn render_markdown(results: &TraceResults, overlays: &[TraceOverlay]) -> Str
     if let Some(failure) = &results.failure {
         out.push_str(&format!("- **Failure:** {}\n", failure));
     }
+
+    push_toolchain_markdown(&mut out, results);
 
     push_overlay_markdown(&mut out, overlays);
 
@@ -592,6 +600,55 @@ pub fn render_markdown(results: &TraceResults, overlays: &[TraceOverlay]) -> Str
     }
 
     out
+}
+
+fn push_toolchain_markdown(out: &mut String, results: &TraceResults) {
+    let Some(toolchain) = &results.toolchain else {
+        return;
+    };
+
+    out.push_str("\n## Toolchain Provenance\n\n");
+    out.push_str(&format!(
+        "- **Mode:** `{}` ({})\n",
+        toolchain.mode,
+        if toolchain.canonical {
+            "canonical"
+        } else {
+            "non-canonical"
+        }
+    ));
+    if !toolchain.reasons.is_empty() {
+        out.push_str("- **Reason(s):** ");
+        out.push_str(&toolchain.reasons.join("; "));
+        out.push('\n');
+    }
+    push_git_provenance_line(out, "Homeboy", &toolchain.homeboy);
+    if let Some(wp_codebox) = &toolchain.wp_codebox {
+        push_git_provenance_line(out, "WP Codebox", wp_codebox);
+    }
+    if let Some(components) = &results.components {
+        push_git_provenance_line(out, "Target", &components.target);
+    }
+    if let Some(node) = &toolchain.node {
+        out.push_str(&format!("- **Node:** `{}`\n", node));
+    }
+}
+
+fn push_git_provenance_line(
+    out: &mut String,
+    label: &str,
+    provenance: &super::parsing::TraceGitProvenance,
+) {
+    let sha = provenance.sha.as_deref().unwrap_or("unknown");
+    let branch = provenance.branch.as_deref().unwrap_or("unknown");
+    let dirty = provenance
+        .dirty
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    out.push_str(&format!(
+        "- **{}:** `{}` @ `{}` (branch `{}`, dirty `{}`)\n",
+        label, provenance.path, sha, branch, dirty
+    ));
 }
 
 fn reportable_trace_artifacts(artifacts: &[TraceArtifact]) -> Vec<TraceArtifact> {
@@ -689,7 +746,10 @@ pub fn from_list_workflow(component: String, list: TraceList) -> (TraceCommandOu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::extension::trace::parsing::{TraceScenario, TraceStatus};
+    use crate::core::extension::trace::parsing::{
+        TraceComponentsProvenance, TraceGitProvenance, TraceScenario, TraceStatus,
+        TraceToolchainProvenance,
+    };
 
     #[test]
     fn test_from_list_workflow() {
@@ -740,6 +800,8 @@ mod tests {
                     label: "main log".to_string(),
                     path: "artifacts/main.log".to_string(),
                 }],
+                toolchain: None,
+                components: None,
                 dependencies: Vec::new(),
             }),
             failure: None,
@@ -753,6 +815,8 @@ mod tests {
             }],
             baseline_comparison: None,
             hints: None,
+            toolchain: None,
+            components: None,
         };
 
         let (output, exit_code) = from_main_workflow(result, None, true);
@@ -806,12 +870,16 @@ mod tests {
                 assertions: Vec::new(),
                 temporal_assertions: Vec::new(),
                 artifacts: Vec::new(),
+                toolchain: None,
+                components: None,
                 dependencies: Vec::new(),
             }),
             failure: None,
             overlays: Vec::new(),
             baseline_comparison: None,
             hints: None,
+            toolchain: None,
+            components: None,
         };
 
         let (stdout_output, artifact_output, exit_code) =
@@ -888,6 +956,31 @@ mod tests {
             assertions: Vec::new(),
             temporal_assertions: Vec::new(),
             artifacts: Vec::new(),
+            toolchain: Some(TraceToolchainProvenance {
+                canonical: true,
+                mode: "canonical".to_string(),
+                reasons: Vec::new(),
+                homeboy: TraceGitProvenance {
+                    path: "/repo/homeboy".to_string(),
+                    sha: Some("abc123".to_string()),
+                    branch: Some("main".to_string()),
+                    dirty: Some(false),
+                    source: None,
+                },
+                wp_codebox: None,
+                node: Some("v24.0.0".to_string()),
+                runtime_assets: Default::default(),
+            }),
+            components: Some(TraceComponentsProvenance {
+                target: TraceGitProvenance {
+                    path: "/repo/studio".to_string(),
+                    sha: Some("def456".to_string()),
+                    branch: Some("trunk".to_string()),
+                    dirty: Some(false),
+                    source: None,
+                },
+                dependencies: Vec::new(),
+            }),
             dependencies: Vec::new(),
         };
 
@@ -906,6 +999,12 @@ mod tests {
         assert!(markdown.contains("- **Patch:** `/tmp/overlay.patch` (`reverted`)"));
         assert!(markdown.contains("- Applied relative to: `/tmp/studio`"));
         assert!(markdown.contains("- `apps/studio/out/app.js`"));
+        assert!(markdown.contains("## Toolchain Provenance"));
+        assert!(markdown.contains("- **Mode:** `canonical` (canonical)"));
+        assert!(markdown
+            .contains("- **Homeboy:** `/repo/homeboy` @ `abc123` (branch `main`, dirty `false`)"));
+        assert!(markdown
+            .contains("- **Target:** `/repo/studio` @ `def456` (branch `trunk`, dirty `false`)"));
         assert!(markdown.contains("| `submit_to_cli` | `ui.submit` | `cli.start` | 42ms | ok |"));
     }
 
@@ -933,6 +1032,8 @@ mod tests {
                     path: "runner-artifact://lab/run-1/trace.zip".to_string(),
                 },
             ],
+            toolchain: None,
+            components: None,
             dependencies: Vec::new(),
         };
 

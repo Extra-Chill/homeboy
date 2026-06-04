@@ -292,17 +292,17 @@ fn test_trace_workload_dependencies_expand_paths_and_capabilities_dedupe() {
                         "path": "/tmp/ece.trace.mjs",
                         "dependencies": [
                             {
-                                "id": "woocommerce",
-                                "kind": "wordpress-plugin",
+                                "id": "sample-package",
+                                "kind": "package",
                                 "source": "release-package-or-build-artifact",
                                 "path": "${components.woocommerce.path}",
-                                "plugin_file": "woocommerce/woocommerce.php",
+                                "plugin_file": "package/entrypoint.txt",
                                 "requires_built_assets": true
                             }
                         ],
                         "runner_capabilities": [
                             "wp-codebox.recipe-run",
-                            "wordpress.browser-probe.assertions"
+                            "browser-probe.assertions"
                         ]
                     },
                     {
@@ -324,7 +324,7 @@ fn test_trace_workload_dependencies_expand_paths_and_capabilities_dedupe() {
     assert_eq!(
         runner_capabilities_for_extension(&rig_spec, "extension-a"),
         vec![
-            "wordpress.browser-probe.assertions".to_string(),
+            "browser-probe.assertions".to_string(),
             "wp-codebox.recipe-run".to_string()
         ]
     );

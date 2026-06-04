@@ -298,6 +298,8 @@ mod tests {
             assertions: Vec::new(),
             temporal_assertions: Vec::new(),
             artifacts,
+            toolchain: None,
+            components: None,
             dependencies: Vec::new(),
         }
     }

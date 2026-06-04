@@ -136,6 +136,8 @@ mod tests {
             assertions: Vec::<TraceAssertion>::new(),
             temporal_assertions: Vec::new(),
             artifacts: Vec::new(),
+            toolchain: None,
+            components: None,
             dependencies: Vec::new(),
         };
 

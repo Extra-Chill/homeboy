@@ -578,6 +578,8 @@ fn trace_run_evidence_report_includes_refs_assertions_and_safe_artifacts() {
                     path: "/Users/chubes/private/trace.zip".to_string(),
                 },
             ],
+            toolchain: None,
+            components: None,
             dependencies: Vec::new(),
         }),
         span_summaries: vec![extension_trace::TraceSpanSummaryOutput {
@@ -606,6 +608,8 @@ fn trace_run_evidence_report_includes_refs_assertions_and_safe_artifacts() {
         baseline_comparison: None,
         hints: None,
         profile: None,
+        toolchain: None,
+        components: None,
     };
 
     let report = render_trace_run_evidence_markdown(&run);
