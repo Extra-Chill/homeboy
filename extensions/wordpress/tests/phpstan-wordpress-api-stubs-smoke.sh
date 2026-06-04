@@ -14,14 +14,32 @@ mkdir -p "${COMPONENT_DIR}/inc"
 cat > "${COMPONENT_DIR}/inc/issue-375.php" <<'PHP'
 <?php
 
+if ( ! defined( 'ABSPATH' ) ) {
+	exit;
+}
+
 function homeboy_issue_375_filter_callback( $value, WP_Post $post ) {
 	return $value;
 }
 
+class Homeboy_Issue_Abspath_Guard {
+	private string $value;
+
+	public function __construct( string $value ) {
+		$this->value = $value;
+	}
+
+	public function value(): string {
+		return $this->value;
+	}
+}
+
 function homeboy_issue_375_action_callback( WP_Post $post, array $context ): void {
 	new WP_Post( (object) array( 'ID' => 123 ) );
+	$guard = new Homeboy_Issue_Abspath_Guard( 'loaded' );
 
 	WP_CLI::log( 'Inspecting ' . $post->post_type );
+	WP_CLI::log( 'Guard: ' . $guard->value() );
 	WP_CLI::success( 'Post excerpt: ' . $post->post_excerpt );
 	WP_CLI::warning( 'Modified at ' . $post->post_modified_gmt );
 
@@ -87,8 +105,50 @@ if [ "$exit_code" -ne 0 ]; then
 	exit 1
 fi
 
-if grep -E 'staticMethod\.resultUnused|arguments\.count|property\.notFound' "$OUTPUT_FILE" >/dev/null; then
+if grep -E 'staticMethod\.resultUnused|arguments\.count|property\.notFound|return\.missing|property\.unused|constructor\.unusedParameter' "$OUTPUT_FILE" >/dev/null; then
 	echo "FAIL: representative false-positive identifiers are still present" >&2
+	cat "$OUTPUT_FILE" >&2
+	exit 1
+fi
+
+cat > "${COMPONENT_DIR}/inc/abspath-body-analysis.php" <<'PHP'
+<?php
+
+if ( ! defined( 'ABSPATH' ) ) {
+	exit;
+}
+
+class Homeboy_Issue_Abspath_Body_Analysis {
+	public function length(): int {
+		return strlen( array( 'not-a-string' ) );
+	}
+}
+PHP
+
+set +e
+HOMEBOY_EXTENSION_PATH="$ROOT_DIR" \
+HOMEBOY_COMPONENT_PATH="$COMPONENT_DIR" \
+HOMEBOY_COMPONENT_ID="phpstan-wordpress-api-stubs" \
+HOMEBOY_SUMMARY_MODE=1 \
+HOMEBOY_PHPSTAN_THREADS=1 \
+"$PHPSTAN_RUNNER" >"$OUTPUT_FILE" 2>&1
+exit_code=$?
+set -e
+
+if [ "$exit_code" -eq 0 ]; then
+	echo "FAIL: ABSPATH-guarded method body should still be analyzed" >&2
+	cat "$OUTPUT_FILE" >&2
+	exit 1
+fi
+
+if ! grep -E 'abspath-body-analysis\.php:[0-9]+' "$OUTPUT_FILE" >/dev/null || ! grep -F 'argument.type' "$OUTPUT_FILE" >/dev/null; then
+	echo "FAIL: expected real method-body argument.type finding was not reported" >&2
+	cat "$OUTPUT_FILE" >&2
+	exit 1
+fi
+
+if grep -E 'return\.missing|property\.unused|constructor\.unusedParameter' "$OUTPUT_FILE" >/dev/null; then
+	echo "FAIL: ABSPATH guard still produces unreachable-body false positives" >&2
 	cat "$OUTPUT_FILE" >&2
 	exit 1
 fi

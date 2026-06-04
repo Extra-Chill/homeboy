@@ -6,6 +6,10 @@
  * changing runtime behaviour.
  */
 
+// WordPress plugins commonly start with an ABSPATH guard. Without this constant
+// in PHPStan's symbol graph, those files look like they unconditionally exit.
+define( 'ABSPATH', '/' );
+
 class WP_CLI {
 	/**
 	 * @param mixed $message
