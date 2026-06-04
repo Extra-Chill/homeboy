@@ -412,7 +412,7 @@
     "audit": {
       "context_id": "homeboy",
       "created_at": "2026-06-04T15:00:25Z",
-      "item_count": 2374,
+      "item_count": 2370,
       "known_fingerprints": [
         "artifact_portability::artifact_portability/local_artifact_path/$.lab.remote_artifact_manifest[0].path::NonPortableArtifactPath",
         "artifact_portability::artifact_portability/local_artifact_path/$.lab.remote_artifact_manifest[1].path::NonPortableArtifactPath",
@@ -649,10 +649,6 @@
         "core_boundary_leak:core-agnostic-source::src/core/cleanup.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `Homeboy` appears at line 231 in behavioral context `artifact_declarations`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::src/core/cleanup.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `homeboy.json` appears at line 207 in behavioral context `artifact_declarations`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::src/core/cleanup.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `homeboy.json` appears at line 231 in behavioral context `artifact_declarations`::CoreBoundaryLeak",
-        "core_boundary_leak:core-agnostic-source::src/core/code_audit/baseline.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `Homeboy` appears at line 19 in behavioral context `top-level`::CoreBoundaryLeak",
-        "core_boundary_leak:core-agnostic-source::src/core/code_audit/baseline.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `Homeboy` appears at line 221 in behavioral context `finding_baseline_fingerprint`::CoreBoundaryLeak",
-        "core_boundary_leak:core-agnostic-source::src/core/code_audit/baseline.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `homeboy.json` appears at line 19 in behavioral context `top-level`::CoreBoundaryLeak",
-        "core_boundary_leak:core-agnostic-source::src/core/code_audit/baseline.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `homeboy.json` appears at line 221 in behavioral context `finding_baseline_fingerprint`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::src/core/code_audit/codebase_map.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `WooCommerce` appears at line 78 in behavioral context `top-level`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::src/core/code_audit/codebase_map.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `php` appears at line 934 in behavioral context `default_source_extensions`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::src/core/code_audit/comment_blocks.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `php` appears at line 12 in behavioral context `top-level`::CoreBoundaryLeak",

@@ -136,6 +136,7 @@ fn make_baseline(
             outliers_count: 0,
             alignment_score: None,
             known_outliers: vec![],
+            policy_sections: vec![],
         },
     }
 }
@@ -333,6 +334,7 @@ fn changed_since_comparison_marks_existing_touched_findings_as_contextual() {
             outliers_count: 1,
             alignment_score: None,
             known_outliers: vec!["src/large.rs".to_string()],
+            policy_sections: vec![],
         },
     };
 
@@ -384,6 +386,7 @@ fn changed_since_comparison_counts_new_findings_as_introduced() {
             outliers_count: 1,
             alignment_score: None,
             known_outliers: vec!["src/large.rs".to_string()],
+            policy_sections: vec![],
         },
     };
 
