@@ -445,17 +445,7 @@ fn validate_declared_trace_artifacts(
         .artifacts
         .iter()
         .filter(|artifact| {
-            let relative = Path::new(&artifact.path);
-            if relative.is_absolute()
-                || relative
-                    .components()
-                    .any(|component| matches!(component, std::path::Component::ParentDir))
-            {
-                return true;
-            }
-            ![run_dir.path().join(relative), artifact_dir.join(relative)]
-                .into_iter()
-                .any(|candidate| candidate.exists())
+            resolve_declared_trace_artifact_path(&artifact.path, run_dir, artifact_dir).is_none()
         })
         .map(|artifact| artifact.path.clone())
         .collect::<Vec<_>>();
@@ -477,6 +467,27 @@ fn validate_declared_trace_artifacts(
             details: Some(serde_json::json!({ "path": path })),
         });
     }
+}
+
+pub fn resolve_declared_trace_artifact_path(
+    path: &str,
+    run_dir: &RunDir,
+    artifact_dir: &Path,
+) -> Option<PathBuf> {
+    let relative = Path::new(path);
+    if relative.is_absolute() {
+        return relative.exists().then(|| relative.to_path_buf());
+    }
+    if relative
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return None;
+    }
+
+    [run_dir.path().join(relative), artifact_dir.join(relative)]
+        .into_iter()
+        .find(|candidate| candidate.exists())
 }
 
 fn persist_trace_results(path: &Path, results: &TraceResults) -> Result<()> {

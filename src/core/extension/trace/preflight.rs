@@ -48,31 +48,17 @@ fn preflight_trace_dependency(
         ));
     }
 
-    if dependency.kind == "wordpress-plugin" {
-        let Some(plugin_file) = dependency
-            .plugin_file
-            .as_deref()
-            .filter(|plugin_file| !plugin_file.is_empty())
-        else {
-            return Err(trace_preflight_error(
-                "trace.dependencies",
-                format!(
-                    "wordpress plugin trace dependency '{}' must declare plugin_file",
-                    dependency.id
-                ),
-                serde_json::json!({
-                    "kind": "trace-dependency",
-                    "dependency_id": dependency.id,
-                    "failure": "missing_plugin_file"
-                }),
-            ));
-        };
+    if let Some(plugin_file) = dependency
+        .plugin_file
+        .as_deref()
+        .filter(|plugin_file| !plugin_file.is_empty())
+    {
         let plugin_path = root.join(plugin_file);
         if !plugin_path.is_file() {
             return Err(trace_preflight_error(
                 "trace.dependencies",
                 format!(
-                    "wordpress plugin trace dependency '{}' is missing plugin entrypoint {}",
+                    "trace dependency '{}' is missing declared entrypoint {}",
                     dependency.id, plugin_file
                 ),
                 serde_json::json!({
@@ -121,16 +107,7 @@ fn preflight_trace_dependency(
 }
 
 fn required_trace_dependency_paths(dependency: &TraceDependencySpec) -> Vec<String> {
-    let mut required = dependency.required_paths.clone();
-    if dependency.requires_built_assets
-        && dependency.kind == "wordpress-plugin"
-        && !required
-            .iter()
-            .any(|required_path| required_path == "vendor")
-    {
-        required.push("vendor".to_string());
-    }
-    required
+    dependency.required_paths.clone()
 }
 
 pub(super) fn preflight_trace_runner_capabilities(
@@ -204,22 +181,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn trace_dependency_preflight_accepts_packaged_wordpress_plugin() {
+    fn trace_dependency_preflight_accepts_packaged_dependency() {
         let temp = tempfile::tempdir().unwrap();
-        let plugin_root = temp.path().join("woocommerce-package");
-        std::fs::create_dir_all(plugin_root.join("woocommerce")).unwrap();
+        let plugin_root = temp.path().join("sample-package");
+        std::fs::create_dir_all(plugin_root.join("package")).unwrap();
         std::fs::create_dir_all(plugin_root.join("vendor")).unwrap();
-        std::fs::write(plugin_root.join("woocommerce/woocommerce.php"), "<?php").unwrap();
+        std::fs::write(plugin_root.join("package/entrypoint.txt"), "entry").unwrap();
 
         let provenance = preflight_trace_dependencies(&[TraceDependencySpec {
-            id: "woocommerce".to_string(),
-            kind: "wordpress-plugin".to_string(),
+            id: "sample".to_string(),
+            kind: "package".to_string(),
             source: "release-package-or-build-artifact".to_string(),
             path: Some(plugin_root.to_string_lossy().to_string()),
-            plugin_file: Some("woocommerce/woocommerce.php".to_string()),
+            plugin_file: Some("package/entrypoint.txt".to_string()),
             requires_built_assets: true,
-            required_paths: Vec::new(),
-            source_url: Some("https://downloads.wordpress.org/plugin/woocommerce.zip".to_string()),
+            required_paths: vec!["vendor".to_string()],
+            source_url: Some("https://example.com/sample.zip".to_string()),
             version: Some("10.0.0".to_string()),
             r#ref: Some("v10.0.0".to_string()),
             package_marker: Some("packaged-zip".to_string()),
@@ -227,10 +204,10 @@ mod tests {
         .expect("packaged plugin dependency should pass preflight");
 
         assert_eq!(provenance.len(), 1);
-        assert_eq!(provenance[0].id, "woocommerce");
+        assert_eq!(provenance[0].id, "sample");
         assert_eq!(
             provenance[0].plugin_file.as_deref(),
-            Some("woocommerce/woocommerce.php")
+            Some("package/entrypoint.txt")
         );
         assert_eq!(
             provenance[0].package_marker.as_deref(),
@@ -239,20 +216,20 @@ mod tests {
     }
 
     #[test]
-    fn trace_dependency_preflight_rejects_raw_wordpress_plugin_without_vendor() {
+    fn trace_dependency_preflight_rejects_raw_dependency_without_required_artifact() {
         let temp = tempfile::tempdir().unwrap();
-        let plugin_root = temp.path().join("woocommerce-source");
-        std::fs::create_dir_all(plugin_root.join("woocommerce")).unwrap();
-        std::fs::write(plugin_root.join("woocommerce/woocommerce.php"), "<?php").unwrap();
+        let plugin_root = temp.path().join("sample-source");
+        std::fs::create_dir_all(plugin_root.join("package")).unwrap();
+        std::fs::write(plugin_root.join("package/entrypoint.txt"), "entry").unwrap();
 
         let err = preflight_trace_dependencies(&[TraceDependencySpec {
-            id: "woocommerce".to_string(),
-            kind: "wordpress-plugin".to_string(),
+            id: "sample".to_string(),
+            kind: "package".to_string(),
             source: "release-package-or-build-artifact".to_string(),
             path: Some(plugin_root.to_string_lossy().to_string()),
-            plugin_file: Some("woocommerce/woocommerce.php".to_string()),
+            plugin_file: Some("package/entrypoint.txt".to_string()),
             requires_built_assets: true,
-            required_paths: Vec::new(),
+            required_paths: vec!["vendor".to_string()],
             source_url: None,
             version: None,
             r#ref: None,
@@ -277,16 +254,14 @@ mod tests {
             None,
             &[
                 "wp-codebox.recipe-run".to_string(),
-                "wordpress.browser-probe.capture.network".to_string(),
+                "browser-probe.capture.network".to_string(),
             ],
         )
         .expect_err("missing capabilities should fail preflight");
 
         assert_eq!(err.code, ErrorCode::ValidationInvalidArgument);
         assert_eq!(err.details["field"], "trace.runner_capabilities");
-        assert!(err
-            .message
-            .contains("wordpress.browser-probe.capture.network"));
+        assert!(err.message.contains("browser-probe.capture.network"));
         assert!(err.details["tried"][0]
             .as_str()
             .unwrap()
