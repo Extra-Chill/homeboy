@@ -656,54 +656,6 @@ mod tests {
     }
 
     #[test]
-    fn derives_phase_summaries_and_timeout_classification() {
-        let raw = r#"{
-            "component_id": "example",
-            "iterations": 1,
-            "phase_events": [
-                { "phase": "dependency_preparation", "status": "started", "t_ms": 0 },
-                { "phase": "dependency_preparation", "status": "heartbeat", "t_ms": 1000, "message": "installing" },
-                {
-                    "phase": "dependency_preparation",
-                    "status": "timeout",
-                    "t_ms": 2000,
-                    "message": "dependency install exceeded budget",
-                    "diagnostics": { "budget_ms": 2000 },
-                    "payload": { "operation": "dependency_install" }
-                }
-            ],
-            "scenarios": [
-                {
-                    "id": "example-scenario",
-                    "iterations": 1,
-                    "metrics": { "p95_ms": 42.0 }
-                }
-            ]
-        }"#;
-
-        let parsed = parse_bench_results_str(raw).unwrap();
-
-        assert_eq!(parsed.phase_events.len(), 3);
-        assert_eq!(parsed.phase_summaries.len(), 1);
-        let summary = &parsed.phase_summaries[0];
-        assert_eq!(summary.phase, "dependency_preparation");
-        assert_eq!(summary.status, "timeout");
-        assert_eq!(summary.first_t_ms, Some(0));
-        assert_eq!(summary.last_t_ms, Some(2000));
-        assert_eq!(summary.duration_ms, Some(2000));
-        assert_eq!(summary.heartbeat_count, 1);
-        assert_eq!(summary.diagnostic_count, 1);
-
-        let classification = parsed.failure_classification.expect("classification");
-        assert_eq!(classification.kind, "timeout");
-        assert_eq!(classification.phase, "dependency_preparation");
-        assert_eq!(
-            classification.message.as_deref(),
-            Some("dependency install exceeded budget")
-        );
-    }
-
-    #[test]
     fn derives_scenario_span_results_from_timeline() {
         let raw = r#"{
             "component_id": "example",

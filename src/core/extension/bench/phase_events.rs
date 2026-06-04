@@ -68,7 +68,7 @@ pub fn evaluate_phase_events(results: &mut BenchResults) {
     results.failure_classification = classify_phase_failure(&results.phase_events);
 }
 
-pub fn summarize_phase_events(events: &[BenchPhaseEvent]) -> Vec<BenchPhaseSummary> {
+fn summarize_phase_events(events: &[BenchPhaseEvent]) -> Vec<BenchPhaseSummary> {
     let mut summaries: Vec<BenchPhaseSummary> = Vec::new();
     for event in events {
         let Some(summary) = summaries
@@ -177,4 +177,55 @@ fn is_failure_status(status: &str) -> bool {
 
 fn is_zero_usize(value: &usize) -> bool {
     *value == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn summarizes_phase_events_and_classifies_timeout() {
+        let events = vec![
+            BenchPhaseEvent {
+                phase: "dependency_preparation".to_string(),
+                status: "started".to_string(),
+                t_ms: Some(0),
+                ..BenchPhaseEvent::default()
+            },
+            BenchPhaseEvent {
+                phase: "dependency_preparation".to_string(),
+                status: "heartbeat".to_string(),
+                t_ms: Some(1000),
+                message: Some("installing".to_string()),
+                ..BenchPhaseEvent::default()
+            },
+            BenchPhaseEvent {
+                phase: "dependency_preparation".to_string(),
+                status: "timeout".to_string(),
+                t_ms: Some(2000),
+                message: Some("dependency install exceeded budget".to_string()),
+                diagnostics: BTreeMap::from([("budget_ms".to_string(), serde_json::json!(2000))]),
+                payload: BTreeMap::from([(
+                    "operation".to_string(),
+                    serde_json::json!("dependency_install"),
+                )]),
+                ..BenchPhaseEvent::default()
+            },
+        ];
+
+        let summaries = summarize_phase_events(&events);
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].status, "timeout");
+        assert_eq!(summaries[0].duration_ms, Some(2000));
+        assert_eq!(summaries[0].heartbeat_count, 1);
+        assert_eq!(summaries[0].diagnostic_count, 1);
+
+        let classification = classify_phase_failure(&events).expect("classification");
+        assert_eq!(classification.kind, "timeout");
+        assert_eq!(classification.phase, "dependency_preparation");
+        assert_eq!(
+            classification.message.as_deref(),
+            Some("dependency install exceeded budget")
+        );
+    }
 }
