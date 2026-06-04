@@ -36,6 +36,9 @@ pub struct AuditConfig {
     /// Extension-owned text detector rules that emit audit findings.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub requested_detectors: Vec<RequestedDetectorRule>,
+    /// Component-owned source policy rules for generic architecture boundaries.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_policies: Vec<SourcePolicyRule>,
     /// Configurable ecosystem-term checks for core-owned source boundaries.
     #[serde(default, skip_serializing_if = "CoreBoundaryLeakConfig::is_empty")]
     pub core_boundary_leaks: CoreBoundaryLeakConfig,
@@ -619,6 +622,89 @@ pub struct CoreBoundaryLeakConfig {
     pub example_path_contains: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SourcePolicyRule {
+    /// Stable rule id shown in diagnostics and used for config merging.
+    pub id: String,
+    /// Audit finding kind in snake_case.
+    #[serde(default = "default_source_policy_kind")]
+    pub kind: String,
+    /// `warning` or `info`. Defaults to `warning`.
+    #[serde(default = "default_source_policy_severity")]
+    pub severity: String,
+    /// Report convention label. Defaults to `source_policy`.
+    #[serde(default = "default_source_policy_convention")]
+    pub convention: String,
+    /// Optional language filter using Homeboy's lowercase language names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    /// Optional path-extension filter, without leading dots.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub file_extensions: Vec<String>,
+    /// Path substrings that identify source to scan.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub include_path_contains: Vec<String>,
+    /// Path substrings that opt files out of this policy.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclude_path_contains: Vec<String>,
+    /// Line substrings that explicitly mark a local exception as allowed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow_line_contains: Vec<String>,
+    /// Trimmed line prefixes skipped before matching, such as comment prefixes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ignore_line_prefixes: Vec<String>,
+    /// Exact trimmed lines after which the rest of the file is ignored.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ignore_after_line_equals: Vec<String>,
+    /// Path substrings treated as example-only when not otherwise allowlisted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub example_path_contains: Vec<String>,
+    /// Optional classification used for example paths. Defaults to `example-only`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub example_classification: Option<String>,
+    /// Description template. Supports `{term}`, `{line}`, `{classification}`, and `{context}`.
+    pub description: String,
+    /// Suggested action template. Supports `{term}`, `{line}`, `{classification}`, and `{context}`.
+    pub suggestion: String,
+    /// Source policy body. Core owns execution; components own terms and labels.
+    #[serde(flatten)]
+    pub rule: SourcePolicyRuleBody,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SourcePolicyRuleBody {
+    /// Emit one finding for configured terms in scoped source lines.
+    ForbiddenTerms {
+        terms: Vec<SourcePolicyTerm>,
+        #[serde(default)]
+        default_match: SourcePolicyMatchMode,
+        #[serde(default = "default_source_policy_case_insensitive")]
+        case_insensitive: bool,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SourcePolicyTerm {
+    pub value: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub match_mode: Option<SourcePolicyMatchMode>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SourcePolicyMatchMode {
+    /// Match token-bounded identifiers.
+    #[default]
+    Token,
+    /// Match the escaped term literally.
+    Literal,
+    /// Treat the term value as a regex pattern.
+    Regex,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct MutatingResourceAccessConfig {
     /// Source markers that identify files containing runtime handler registrations.
@@ -700,6 +786,22 @@ impl CoreBoundaryLeakConfig {
             &other.example_path_contains,
         );
     }
+}
+
+fn default_source_policy_kind() -> String {
+    "source_policy_violation".to_string()
+}
+
+fn default_source_policy_severity() -> String {
+    "warning".to_string()
+}
+
+fn default_source_policy_convention() -> String {
+    "source_policy".to_string()
+}
+
+fn default_source_policy_case_insensitive() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -929,6 +1031,7 @@ impl AuditConfig {
             && self.convention_tag_globs.is_empty()
             && self.known_symbols.is_empty()
             && self.requested_detectors.is_empty()
+            && self.source_policies.is_empty()
             && self.core_boundary_leaks.is_empty()
             && self.mutating_resource_access.is_empty()
             && self.redirect_validation.is_empty()
@@ -975,6 +1078,15 @@ impl AuditConfig {
         self.remote_execution_safety
             .merge(&other.remote_execution_safety);
         self.artifact_portability.merge(&other.artifact_portability);
+        for rule in &other.source_policies {
+            if !self
+                .source_policies
+                .iter()
+                .any(|existing| existing.id == rule.id)
+            {
+                self.source_policies.push(rule.clone());
+            }
+        }
         self.test_wiring.merge(&other.test_wiring);
         for rule in &other.requested_detectors {
             if !self
@@ -1008,6 +1120,41 @@ mod tests {
                 scan_path_contains: vec!["src/core/".to_string()],
                 ..Default::default()
             },
+            ..Default::default()
+        };
+
+        assert!(!config.is_empty());
+    }
+
+    #[test]
+    fn source_policies_mark_audit_config_non_empty() {
+        let config = AuditConfig {
+            source_policies: vec![SourcePolicyRule {
+                id: "synthetic-boundary".to_string(),
+                kind: "source_policy_violation".to_string(),
+                severity: "warning".to_string(),
+                convention: "source_policy".to_string(),
+                language: None,
+                file_extensions: Vec::new(),
+                include_path_contains: vec!["src/core/".to_string()],
+                exclude_path_contains: Vec::new(),
+                allow_line_contains: Vec::new(),
+                ignore_line_prefixes: Vec::new(),
+                ignore_after_line_equals: Vec::new(),
+                example_path_contains: Vec::new(),
+                example_classification: None,
+                description: "Forbidden term `{term}` at line {line}".to_string(),
+                suggestion: "Move the term into component policy.".to_string(),
+                rule: SourcePolicyRuleBody::ForbiddenTerms {
+                    terms: vec![SourcePolicyTerm {
+                        value: "florpstack".to_string(),
+                        label: None,
+                        match_mode: None,
+                    }],
+                    default_match: SourcePolicyMatchMode::Token,
+                    case_insensitive: true,
+                },
+            }],
             ..Default::default()
         };
 
@@ -1117,6 +1264,55 @@ mod tests {
             config.core_boundary_leaks.allow_line_contains,
             vec!["allow-core-boundary-example"]
         );
+    }
+
+    #[test]
+    fn merge_dedupes_source_policy_rules_by_id() {
+        let mut config = AuditConfig {
+            source_policies: vec![source_policy_rule("synthetic-boundary", "florpstack")],
+            ..Default::default()
+        };
+
+        config.merge(&AuditConfig {
+            source_policies: vec![
+                source_policy_rule("synthetic-boundary", "widgetlang"),
+                source_policy_rule("second-boundary", "gadgetdb"),
+            ],
+            ..Default::default()
+        });
+
+        assert_eq!(config.source_policies.len(), 2);
+        assert_eq!(config.source_policies[0].id, "synthetic-boundary");
+        assert_eq!(config.source_policies[1].id, "second-boundary");
+    }
+
+    fn source_policy_rule(id: &str, term: &str) -> SourcePolicyRule {
+        SourcePolicyRule {
+            id: id.to_string(),
+            kind: "source_policy_violation".to_string(),
+            severity: "warning".to_string(),
+            convention: "source_policy".to_string(),
+            language: None,
+            file_extensions: Vec::new(),
+            include_path_contains: vec!["src/core/".to_string()],
+            exclude_path_contains: Vec::new(),
+            allow_line_contains: Vec::new(),
+            ignore_line_prefixes: Vec::new(),
+            ignore_after_line_equals: Vec::new(),
+            example_path_contains: Vec::new(),
+            example_classification: None,
+            description: "Forbidden term `{term}` at line {line}".to_string(),
+            suggestion: "Move the term into component policy.".to_string(),
+            rule: SourcePolicyRuleBody::ForbiddenTerms {
+                terms: vec![SourcePolicyTerm {
+                    value: term.to_string(),
+                    label: None,
+                    match_mode: None,
+                }],
+                default_match: SourcePolicyMatchMode::Token,
+                case_insensitive: true,
+            },
+        }
     }
 
     #[test]

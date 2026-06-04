@@ -1,12 +1,13 @@
-//! Configurable detector for ecosystem terms leaking into core-owned source.
+//! Compatibility wrapper for ecosystem terms leaking into core-owned source.
 
-use regex::Regex;
+use crate::core::component::{
+    CoreBoundaryLeakConfig, SourcePolicyMatchMode, SourcePolicyRule, SourcePolicyRuleBody,
+    SourcePolicyTerm,
+};
 
-use crate::core::component::CoreBoundaryLeakConfig;
-
-use super::conventions::AuditFinding;
-use super::findings::{Finding, Severity};
+use super::findings::Finding;
 use super::fingerprint::FileFingerprint;
+use super::source_policy;
 
 pub(in crate::core::code_audit) fn run(
     fingerprints: &[&FileFingerprint],
@@ -16,114 +17,62 @@ pub(in crate::core::code_audit) fn run(
         return Vec::new();
     }
 
-    let terms = config
-        .terms
-        .iter()
-        .filter_map(|term| TermMatcher::new(term))
-        .collect::<Vec<_>>();
-    if terms.is_empty() {
-        return Vec::new();
+    let rule = SourcePolicyRule {
+        id: "core-boundary-leak".to_string(),
+        kind: "core_boundary_leak".to_string(),
+        severity: "warning".to_string(),
+        convention: "core_boundary_leak".to_string(),
+        language: None,
+        file_extensions: Vec::new(),
+        include_path_contains: config.scan_path_contains.clone(),
+        exclude_path_contains: config.allow_path_contains.clone(),
+        allow_line_contains: config.allow_line_contains.clone(),
+        ignore_line_prefixes: Vec::new(),
+        ignore_after_line_equals: Vec::new(),
+        example_path_contains: config.example_path_contains.clone(),
+        example_classification: None,
+        description:
+            "Core boundary leak: configured ecosystem term `{term}` appears at line {line} in {classification} context `{context}`"
+                .to_string(),
+        suggestion: "Move ecosystem-specific behavior into extension metadata/rules, or add an explicit audit allowlist for intentional examples.".to_string(),
+        rule: SourcePolicyRuleBody::ForbiddenTerms {
+            terms: config
+                .terms
+                .iter()
+                .filter_map(|term| source_policy_term(term))
+                .collect(),
+            default_match: SourcePolicyMatchMode::Literal,
+            case_insensitive: true,
+        },
+    };
+
+    source_policy::run(fingerprints, &[rule])
+}
+
+fn source_policy_term(term: &str) -> Option<SourcePolicyTerm> {
+    let value = term.trim();
+    if value.is_empty() {
+        return None;
     }
-
-    let mut findings = Vec::new();
-    for fp in fingerprints {
-        if !path_matches(&fp.relative_path, &config.scan_path_contains)
-            || path_matches(&fp.relative_path, &config.allow_path_contains)
-        {
-            continue;
-        }
-
-        for (index, line) in fp.content.lines().enumerate() {
-            if line_matches(line, &config.allow_line_contains) {
-                continue;
-            }
-
-            for term in &terms {
-                if term.matches(line) {
-                    let line_number = index + 1;
-                    let classification =
-                        if path_matches(&fp.relative_path, &config.example_path_contains) {
-                            "example-only"
-                        } else {
-                            "behavioral"
-                        };
-                    let context = enclosing_context(&fp.content, index).unwrap_or("top-level");
-                    findings.push(Finding {
-                        convention: "core_boundary_leak".to_string(),
-                        severity: Severity::Warning,
-                        file: fp.relative_path.clone(),
-                        description: format!(
-                            "Core boundary leak: configured ecosystem term `{}` appears at line {} in {} context `{}`",
-                            term.label, line_number, classification, context
-                        ),
-                        suggestion: "Move ecosystem-specific behavior into extension metadata/rules, or add an explicit audit allowlist for intentional examples.".to_string(),
-                        kind: AuditFinding::CoreBoundaryLeak,
-                    });
-                }
-            }
-        }
-    }
-
-    findings.sort_by(|a, b| a.file.cmp(&b.file).then(a.description.cmp(&b.description)));
-    findings
-}
-
-struct TermMatcher {
-    label: String,
-    regex: Regex,
-}
-
-impl TermMatcher {
-    fn new(term: &str) -> Option<Self> {
-        let label = term.trim();
-        if label.is_empty() {
-            return None;
-        }
-
-        let pattern = if label
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
-        {
-            format!(
-                r"(?i)(^|[^A-Za-z0-9_]){}([^A-Za-z0-9_]|$)",
-                regex::escape(label)
-            )
-        } else {
-            format!(r"(?i){}", regex::escape(label))
-        };
-
-        Regex::new(&pattern).ok().map(|regex| Self {
-            label: label.to_string(),
-            regex,
-        })
-    }
-
-    fn matches(&self, line: &str) -> bool {
-        self.regex.is_match(line)
-    }
-}
-
-fn path_matches(path: &str, needles: &[String]) -> bool {
-    needles.iter().any(|needle| path.contains(needle))
-}
-
-fn line_matches(line: &str, needles: &[String]) -> bool {
-    needles.iter().any(|needle| line.contains(needle))
-}
-
-fn enclosing_context(content: &str, line_index: usize) -> Option<&str> {
-    let fn_regex = Regex::new(r"\bfn\s+([A-Za-z_][A-Za-z0-9_]*)").expect("fn regex compiles");
-    let lines = content.lines().take(line_index + 1).collect::<Vec<_>>();
-    lines
-        .into_iter()
-        .rev()
-        .filter_map(|line| fn_regex.captures(line))
-        .find_map(|captures| captures.get(1).map(|name| name.as_str()))
+    let match_mode = if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    {
+        SourcePolicyMatchMode::Token
+    } else {
+        SourcePolicyMatchMode::Literal
+    };
+    Some(SourcePolicyTerm {
+        value: value.to_string(),
+        label: None,
+        match_mode: Some(match_mode),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::code_audit::AuditFinding;
     use crate::core::code_audit::Language;
 
     fn rust_fp(path: &str, content: &str) -> FileFingerprint {

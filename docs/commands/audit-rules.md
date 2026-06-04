@@ -123,6 +123,60 @@ helpers from function names.
 without baking ecosystem terms into Homeboy core. Core owns the matching primitive;
 the component supplies the sink, scope, and allowlist markers.
 
+# Source Policy Rules
+
+`audit.source_policies` lets a component or extension define generic source
+boundary rules without baking domain terms into Homeboy core. The first source
+policy primitive is `type: "forbidden_terms"`, which scans shared audit
+fingerprints for configured token, literal, or regex terms inside configured path
+scopes.
+
+Use source policies for architecture boundaries such as core-layer purity,
+detector implementation neutrality, or product/domain terms that belong in
+component-owned config rather than generic core code.
+
+Example:
+
+```json
+{
+  "audit": {
+    "source_policies": [
+      {
+        "id": "core-layer-boundary",
+        "kind": "source_policy_violation",
+        "severity": "warning",
+        "convention": "source_policy",
+        "language": "rust",
+        "file_extensions": ["rs"],
+        "include_path_contains": ["src/core/"],
+        "exclude_path_contains": ["src/core/fixtures/allowed"],
+        "allow_line_contains": ["homeboy-audit: allow-source-policy"],
+        "ignore_line_prefixes": ["//", "///", "//!"],
+        "ignore_after_line_equals": ["#[cfg(test)]"],
+        "example_path_contains": ["/fixtures/", "/examples/"],
+        "type": "forbidden_terms",
+        "terms": [
+          {
+            "value": "crate::commands::",
+            "label": "command-layer dependency",
+            "match_mode": "literal"
+          }
+        ],
+        "default_match": "literal",
+        "case_insensitive": false,
+        "description": "Source policy term `{term}` appears at line {line} in {classification} context `{context}`",
+        "suggestion": "Move `{term}` behind an injected adapter owned outside the scanned source scope."
+      }
+    ]
+  }
+}
+```
+
+Supported match modes are `token`, `literal`, and `regex`. Templates support
+`{term}`, `{line}`, `{classification}`, and `{context}`. Existing
+`audit.core_boundary_leaks` behavior remains available and is implemented as a
+compatibility wrapper over this source-policy primitive.
+
 ### Scoped Proxy Drift
 
 Use `type: "scoped_proxy"` when docs/schema describe a helper as scoped to an

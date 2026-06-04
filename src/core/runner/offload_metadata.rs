@@ -1,6 +1,7 @@
+use crate::core::execution_contract::EXECUTION_CONTRACT;
 use crate::core::plan::{HomeboyPlan, PlanStepStatus};
 
-pub const LAB_OFFLOAD_METADATA_SCHEMA: &str = "homeboy/lab-offload/v1";
+pub const LAB_OFFLOAD_METADATA_SCHEMA: &str = EXECUTION_CONTRACT.lab_offload.metadata_schema;
 
 pub fn lab_offload_metadata(
     plan: &HomeboyPlan,

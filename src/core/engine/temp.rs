@@ -6,10 +6,8 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-const HOMEBOY_RUNTIME_TMPDIR_ENV: &str = "HOMEBOY_RUNTIME_TMPDIR";
-
 fn runtime_root() -> Result<PathBuf> {
-    if let Ok(override_dir) = env::var(HOMEBOY_RUNTIME_TMPDIR_ENV) {
+    if let Ok(override_dir) = env::var(runtime_tmpdir_env()) {
         let trimmed = override_dir.trim();
         if !trimmed.is_empty() {
             return Ok(PathBuf::from(trimmed));
@@ -17,6 +15,10 @@ fn runtime_root() -> Result<PathBuf> {
     }
 
     Ok(paths::homeboy()?.join("runtime").join("tmp"))
+}
+
+fn runtime_tmpdir_env() -> String {
+    crate::core::product_identity::PRODUCT_IDENTITY.env_var("RUNTIME_TMPDIR")
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -225,13 +227,13 @@ mod tests {
     fn runtime_temp_dir_honors_override() {
         let _guard = home_env_guard();
         let dir = tempfile::tempdir().expect("tempdir");
-        env::set_var(HOMEBOY_RUNTIME_TMPDIR_ENV, dir.path());
+        env::set_var(runtime_tmpdir_env(), dir.path());
 
         let path = runtime_temp_dir("homeboy-test-dir").expect("temp dir path");
         assert!(path.starts_with(dir.path()));
         assert!(path.is_dir());
 
-        env::remove_var(HOMEBOY_RUNTIME_TMPDIR_ENV);
+        env::remove_var(runtime_tmpdir_env());
     }
 
     #[test]
@@ -249,7 +251,7 @@ mod tests {
     fn cleanup_runtime_tmp_plans_and_removes_old_entries() {
         let _guard = home_env_guard();
         let dir = tempfile::tempdir().expect("tempdir");
-        env::set_var(HOMEBOY_RUNTIME_TMPDIR_ENV, dir.path());
+        env::set_var(runtime_tmpdir_env(), dir.path());
         let prefix = "homeboy-cleanup-test";
         let stale = runtime_temp_dir(prefix).expect("temp dir");
         fs::write(stale.join("trace.json"), b"trace").expect("write trace");
@@ -264,6 +266,6 @@ mod tests {
         assert_eq!(applied.removed_count, 1);
         assert!(!stale.exists());
 
-        env::remove_var(HOMEBOY_RUNTIME_TMPDIR_ENV);
+        env::remove_var(runtime_tmpdir_env());
     }
 }
