@@ -64,6 +64,13 @@ const AGENT_BUNDLE_CONFIG_FIELDS = [
   'time_budget_ms',
 ];
 
+const AGENT_BUNDLE_TRIGGER_FIELDS = AGENT_BUNDLE_CONFIG_FIELDS.filter((field) => ![
+  'provider',
+  'model',
+  'prompt',
+  'provider_plugin_paths',
+].includes(field));
+
 const LEGACY_RUNTIME_PREFIX = ['data', 'machine'].join('_');
 const LEGACY_BUNDLE_KEYS = [
   `${LEGACY_RUNTIME_PREFIX}_bundle`,
@@ -222,14 +229,26 @@ function agentBundleMounts(bundleConfig, explicitMounts = []) {
 }
 
 function agentBundleConfigFromAgentTaskRequest(request, config, inputs) {
-  const candidateSources = [
+  const explicitBundleSources = [
     inputs.agent_bundle,
     inputs.agentBundle,
     ...LEGACY_BUNDLE_KEYS.map((key) => inputs[key]),
-    inputs,
     config.agent_bundle,
     config.agentBundle,
     ...LEGACY_BUNDLE_KEYS.map((key) => config[key]),
+  ].filter((value) => value && typeof value === 'object');
+  const requestedBundle = config.execution_kind === 'agent_bundle'
+    || inputs.execution_kind === 'agent_bundle'
+    || explicitBundleSources.length > 0
+    || AGENT_BUNDLE_TRIGGER_FIELDS.some((field) => inputs[field] !== undefined || config[field] !== undefined);
+
+  if (!requestedBundle) {
+    return {};
+  }
+
+  const candidateSources = [
+    ...explicitBundleSources,
+    inputs,
     config,
   ].filter((value) => value && typeof value === 'object');
   const bundleConfig = {};
