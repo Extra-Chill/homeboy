@@ -29,12 +29,13 @@ pub(super) fn record_trace_artifacts(
         run_dir.step_file(homeboy::core::engine::run_dir::files::TRACE_RESULTS);
     record_artifact_if_file(store, run_id, "trace-results", &trace_results_path);
     let artifact_dir = run_dir.path().join("artifacts");
-    record_artifact_dir_if_non_empty(store, run_id, "trace-artifacts", &artifact_dir);
+    let mut recorded_declared_directory = false;
     if let Some(results) = results {
         for artifact in &results.artifacts {
             if let Some(resolved) =
-                resolve_declared_trace_artifact_path(&artifact.path, run_dir, &artifact_dir)
+                declared_trace_artifact_candidate(artifact, run_dir, &artifact_dir)
             {
+                let is_declared_directory = resolved.is_dir();
                 record_declared_artifact(
                     store,
                     run_id,
@@ -43,6 +44,7 @@ pub(super) fn record_trace_artifacts(
                     &resolved,
                     &mut observation_result,
                 );
+                recorded_declared_directory |= is_declared_directory;
             } else {
                 record_unresolved_declared_artifact(
                     store,
@@ -54,7 +56,32 @@ pub(super) fn record_trace_artifacts(
             }
         }
     }
+    if !recorded_declared_directory {
+        record_artifact_dir_if_non_empty(store, run_id, "trace-artifacts", &artifact_dir);
+    }
     observation_result
+}
+
+fn declared_trace_artifact_candidate(
+    artifact: &extension_trace::TraceArtifact,
+    run_dir: &RunDir,
+    artifact_dir: &Path,
+) -> Option<std::path::PathBuf> {
+    if let Some(path) = resolve_declared_trace_artifact_path(&artifact.path, run_dir, artifact_dir)
+    {
+        return Some(path);
+    }
+
+    let relative = Path::new(&artifact.path);
+    if relative.is_absolute()
+        || relative
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return None;
+    }
+
+    Some(run_dir.path().join(relative))
 }
 
 fn record_artifact_if_file(store: &ObservationStore, run_id: &str, kind: &str, path: &Path) {
@@ -271,6 +298,8 @@ mod tests {
             assertions: Vec::new(),
             temporal_assertions: Vec::new(),
             artifacts,
+            toolchain: None,
+            components: None,
         }
     }
 
