@@ -46,9 +46,19 @@ const agentResult = isAgentBundle && process.env.FIXTURE_WP_CODEBOX_FAILED_AGENT
             result: bundleRun,
           },
         }
+  : (isAgentBundle && process.env.FIXTURE_WP_CODEBOX_SINGLE_RESULT
+      ? {
+          success: true,
+          summary: 'Created issue 123.',
+          outputs: {
+            issue_number: 123,
+            issue_url: 'https://github.com/chubes4/wp-site-generator/issues/123'
+          },
+          diagnostics: [{ class: 'agent_runtime.output', message: 'Semantic outputs captured.' }]
+        }
   : (isAgentBundle && !process.env.FIXTURE_WP_CODEBOX_INCOMPLETE_AGENT_BUNDLE
       ? { metrics: { config_present: 1 }, metadata: { engine_data: { store_idea_agent: { issue_number: 123 } } } }
-      : { status: 'completed' }));
+      : { status: 'completed' })));
 fs.writeFileSync(out, JSON.stringify({ argv: process.argv.slice(2), input }, null, 2));
 const execution = { recipeCommand: 'wp-codebox.agent-sandbox-run', exitCode: 0, stdout: JSON.stringify({ status: 'completed', output: JSON.stringify(agentResult) }) };
 const executions = [execution];
@@ -246,6 +256,42 @@ try {
   assert.equal(agentBundleOutput.session.status, 'completed');
   assert.equal(agentBundleOutput.run.agentResult.scenarios[0].metadata.engine_data.store_idea_agent.issue_number, 123);
 
+  const singleResultCapturePath = path.join(root, 'capture-single-result-datamachine.json');
+  const singleResult = spawnSync(process.execPath, [
+    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-wp-codebox-task-runner.cjs'),
+    '--wp-codebox-bin',
+    fixtureWpCodebox,
+    '--artifacts',
+    path.join(root, 'single-result-datamachine-artifacts'),
+  ], {
+    encoding: 'utf8',
+    input: JSON.stringify({
+      ...request,
+      agent_bundle: {
+        bundle_path: '/workspace/wp-site-generator/bundles/store-idea-agent',
+        engine_data_outputs: {
+          issue_number: 'metadata.engine_data.store_idea_agent.issue_number',
+          issue_url: 'metadata.engine_data.store_idea_agent.issue_url',
+        },
+      },
+      provider_plugin_paths: [],
+    }),
+    env: {
+      ...process.env,
+      FIXTURE_WP_CODEBOX_CAPTURE: singleResultCapturePath,
+      FIXTURE_WP_CODEBOX_SINGLE_RESULT: '1',
+      OPENCODE_API_KEY: 'redacted-test-key',
+    },
+  });
+  assert.equal(singleResult.status, 0, singleResult.stderr || singleResult.stdout);
+  const singleResultOutput = JSON.parse(singleResult.stdout);
+  assert.equal(singleResultOutput.success, true);
+  assert.equal(singleResultOutput.session.status, 'completed');
+  assert.equal(singleResultOutput.run.agentResult.outputs.issue_number, 123);
+  assert.equal(singleResultOutput.run.agentResult.outputs.issue_url, 'https://github.com/chubes4/wp-site-generator/issues/123');
+  assert.equal(Array.isArray(singleResultOutput.run.agentResult.scenarios), false);
+  assert.equal(singleResultOutput.diagnostics.some((diagnostic) => diagnostic.class === 'agent_runtime.output'), true);
+
   const canonicalBundleRunCapturePath = path.join(root, 'capture-canonical-datamachine-bundle-run.json');
   const canonicalBundleRunResult = spawnSync(process.execPath, [
     path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-wp-codebox-task-runner.cjs'),
@@ -310,7 +356,8 @@ try {
   assert.equal(incompleteDatamachineOutput.success, false);
   assert.equal(incompleteDatamachineOutput.session.status, 'failed');
   assert.equal(incompleteDatamachineOutput.diagnostics[0].class, 'agent_runtime.workload.incomplete');
-  assert.equal(incompleteDatamachineOutput.diagnostics[0].data.reason, 'missing_scenarios');
+  assert.equal(incompleteDatamachineOutput.diagnostics[0].data.reason, 'missing_engine_data_outputs');
+  assert.match(incompleteDatamachineOutput.diagnostics[0].message, /issue_number/);
 
   const failedDatamachineCapturePath = path.join(root, 'capture-failed-datamachine.json');
   const failedDatamachineResult = spawnSync(process.execPath, [

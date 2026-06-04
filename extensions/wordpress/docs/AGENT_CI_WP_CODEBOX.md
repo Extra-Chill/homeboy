@@ -240,6 +240,9 @@ Generic `homeboy/agent-task-outcome/v1` outcomes must include:
 - `artifacts`: zero or more `homeboy/agent-task-artifact/v1` records.
 - `evidence_refs`: clickable or resolvable references to artifacts, previews,
   logs, transcripts, issues, PRs, runs, or replay bundles.
+- `outputs`: semantic task outputs such as `issue_number`, `issue_url`, or
+  `pull_request_url` that consumers can read without backend-specific path
+  knowledge.
 - `diagnostics`: structured diagnostics with `class`, `message`, and redacted
   `data`.
 - `metadata`: public, redacted metadata for dashboards and decision evidence.

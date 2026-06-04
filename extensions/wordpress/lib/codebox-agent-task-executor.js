@@ -424,6 +424,42 @@ function artifactFromCodeboxArtifact(artifact, index) {
   };
 }
 
+function pathValue(source, dottedPath) {
+  return String(dottedPath || '').split('.').filter(Boolean).reduce((value, key) => (value && typeof value === 'object' ? value[key] : undefined), source);
+}
+
+function normalizeOutputs(result) {
+  const workload = result.metadata?.agent_runtime?.workload || result.run?.agentResult || result.agentResult || result.agent_result || {};
+  if (workload.outputs && typeof workload.outputs === 'object' && !Array.isArray(workload.outputs)) {
+    return sanitizePublicMetadata(workload.outputs);
+  }
+
+  const bundle = result.metadata?.agent_runtime?.bundle || result.task_input?.agent_bundle || {};
+  const configuredOutputs = bundle.engine_data_outputs && typeof bundle.engine_data_outputs === 'object' ? bundle.engine_data_outputs : {};
+  const scenarios = Array.isArray(workload.scenarios) ? workload.scenarios : [];
+  const outputs = {};
+  for (const [name, outputPath] of Object.entries(configuredOutputs)) {
+    for (const scenario of scenarios) {
+      const value = pathValue(scenario, outputPath);
+      if (value !== undefined && value !== null && value !== '') {
+        outputs[name] = value;
+        break;
+      }
+    }
+  }
+  return sanitizePublicMetadata(outputs);
+}
+
+function outputEvidenceRefs(outputs) {
+  return Object.entries(outputs || {})
+    .filter(([name, value]) => /(?:^|_)url$/i.test(name) && typeof value === 'string' && /^https?:\/\//i.test(value))
+    .map(([name, value]) => ({
+      kind: `agent-output-${name.replace(/_/g, '-')}`,
+      uri: value,
+      label: name.replace(/_/g, ' '),
+    }));
+}
+
 function normalizeArtifacts(result) {
   if (result?.schema === 'wp-codebox/agent-task-run/v1') {
     const artifacts = [];
@@ -487,6 +523,9 @@ function normalizeEvidenceRefs(result) {
         uri: artifact.path || artifact.url,
         label: artifact.kind.replace(/^agent-runtime-/, 'Agent runtime ').replace(/-/g, ' '),
       });
+    }
+    for (const ref of outputEvidenceRefs(normalizeOutputs(result))) {
+      appendUniqueEvidenceRef(refs, ref);
     }
     return refs;
   }
@@ -575,6 +614,7 @@ function agentTaskOutcomeFromCodeboxResult(request, result = {}, options = {}) {
   assertAgentTaskRequest(request);
   const status = normalizeStatus(result, options.exitStatus ?? 0);
   const failureClassification = result.failure_classification || failureClassificationForStatus(status);
+  const outputs = normalizeOutputs(result);
   const outcome = {
     schema: AGENT_TASK_OUTCOME_SCHEMA,
     task_id: request.task_id,
@@ -582,6 +622,7 @@ function agentTaskOutcomeFromCodeboxResult(request, result = {}, options = {}) {
     summary: result.summary || result.message || (status === 'succeeded' ? 'WP Codebox agent task succeeded.' : 'WP Codebox agent task failed.'),
     artifacts: normalizeArtifacts(result),
     evidence_refs: normalizeEvidenceRefs(result),
+    outputs,
     diagnostics: (result.diagnostics || []).map((diagnostic) => ({
       class: diagnostic.class || diagnostic.kind || 'codebox',
       message: diagnostic.message || String(diagnostic),
