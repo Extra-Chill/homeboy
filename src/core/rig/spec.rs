@@ -296,7 +296,6 @@ impl BenchMetricGateCondition {
     }
 }
 
-/// Rig-owned extension workload declaration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkloadSpec {
     pub path: String,
@@ -304,14 +303,9 @@ pub struct WorkloadSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub check_groups: Option<Vec<String>>,
 
-    /// Number of contiguous local ports this workload needs for one child
-    /// invocation. Homeboy allocates non-overlapping ranges and exposes them as
-    /// HOMEBOY_INVOCATION_PORT_BASE/MAX.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port_range_size: Option<u16>,
 
-    /// Logical machine-local resources this workload requires exclusively while
-    /// its child process is running.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub named_leases: Vec<String>,
 

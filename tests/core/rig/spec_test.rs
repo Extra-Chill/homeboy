@@ -382,38 +382,7 @@ fn test_trace_variants() {
         serde_json::from_str(r#"{ "path": "/tmp/no-variants.trace.mjs" }"#)
             .expect("parse workload");
     assert!(workload_without_variants.trace_variants().is_empty());
-}
 
-fn workload_with_trace_metadata() -> WorkloadSpec {
-    WorkloadSpec {
-        path: "/tmp/scoped.trace.mjs".to_string(),
-        check_groups: Some(vec!["desktop-app".to_string()]),
-        port_range_size: None,
-        named_leases: Vec::new(),
-        trace_phase_presets: std::collections::HashMap::from([(
-            "startup".to_string(),
-            vec!["boot:runner.boot".to_string()],
-        )]),
-        trace_span_metadata: std::collections::HashMap::new(),
-        trace_default_phase_preset: Some("startup".to_string()),
-        trace_variants: std::collections::HashMap::from([(
-            "fresh-install-mode".to_string(),
-            TraceVariantSpec {
-                component: Some("studio".to_string()),
-                overlay: Some("overlays/fresh-install-mode.patch".to_string()),
-                overlays: Vec::new(),
-                trace_guardrails: Vec::new(),
-            },
-        )]),
-        trace_guardrails: Vec::new(),
-        trace_probes: Vec::new(),
-        dependencies: Vec::new(),
-        runner_capabilities: Vec::new(),
-    }
-}
-
-#[test]
-fn test_trace_dependency_and_runner_capability_contract_parse() {
     let workload: WorkloadSpec = serde_json::from_str(
         r#"{
             "path": "/tmp/ece.trace.mjs",
@@ -457,6 +426,34 @@ fn test_trace_dependency_and_runner_capability_contract_parse() {
             "wordpress.browser-probe.capture.network".to_string()
         ]
     );
+}
+
+fn workload_with_trace_metadata() -> WorkloadSpec {
+    WorkloadSpec {
+        path: "/tmp/scoped.trace.mjs".to_string(),
+        check_groups: Some(vec!["desktop-app".to_string()]),
+        port_range_size: None,
+        named_leases: Vec::new(),
+        trace_phase_presets: std::collections::HashMap::from([(
+            "startup".to_string(),
+            vec!["boot:runner.boot".to_string()],
+        )]),
+        trace_span_metadata: std::collections::HashMap::new(),
+        trace_default_phase_preset: Some("startup".to_string()),
+        trace_variants: std::collections::HashMap::from([(
+            "fresh-install-mode".to_string(),
+            TraceVariantSpec {
+                component: Some("studio".to_string()),
+                overlay: Some("overlays/fresh-install-mode.patch".to_string()),
+                overlays: Vec::new(),
+                trace_guardrails: Vec::new(),
+            },
+        )]),
+        trace_guardrails: Vec::new(),
+        trace_probes: Vec::new(),
+        dependencies: Vec::new(),
+        runner_capabilities: Vec::new(),
+    }
 }
 
 #[test]

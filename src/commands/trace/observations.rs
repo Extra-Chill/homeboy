@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use homeboy::core::engine::run_dir::RunDir;
 use homeboy::core::extension::trace as extension_trace;
@@ -16,8 +16,6 @@ impl TraceArtifactObservationResult {
     }
 }
 
-use extension_trace::resolve_declared_trace_artifact_path;
-
 pub(super) fn record_trace_artifacts(
     store: &ObservationStore,
     run_id: &str,
@@ -33,7 +31,7 @@ pub(super) fn record_trace_artifacts(
     if let Some(results) = results {
         for artifact in &results.artifacts {
             if let Some(resolved) =
-                resolve_declared_trace_artifact_path(&artifact.path, run_dir, &artifact_dir)
+                declared_trace_artifact_path(&artifact.path, run_dir, &artifact_dir)
             {
                 record_declared_artifact(
                     store,
@@ -47,6 +45,33 @@ pub(super) fn record_trace_artifacts(
         }
     }
     observation_result
+}
+
+fn declared_trace_artifact_path(
+    path: &str,
+    run_dir: &RunDir,
+    artifact_dir: &Path,
+) -> Option<PathBuf> {
+    let relative = Path::new(path);
+    if relative.is_absolute()
+        || relative
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return None;
+    }
+
+    let run_relative = run_dir.path().join(relative);
+    if run_relative.exists() {
+        return Some(run_relative);
+    }
+
+    let artifact_relative = artifact_dir.join(relative);
+    if artifact_relative.exists() {
+        return Some(artifact_relative);
+    }
+
+    Some(run_relative)
 }
 
 fn record_artifact_if_file(store: &ObservationStore, run_id: &str, kind: &str, path: &Path) {
@@ -246,9 +271,12 @@ mod tests {
             let artifacts = store.list_artifacts(&run.id).expect("artifacts");
 
             assert!(!outcome.has_declared_artifact_failures());
-            assert_eq!(artifacts.len(), 1);
-            assert_eq!(artifacts[0].artifact_type, "directory");
-            let persisted = PathBuf::from(&artifacts[0].path);
+            let artifact = artifacts
+                .iter()
+                .find(|artifact| artifact.kind == "trace-artifact")
+                .expect("declared browser artifact");
+            assert_eq!(artifact.artifact_type, "directory");
+            let persisted = PathBuf::from(&artifact.path);
             assert_eq!(
                 std::fs::read_to_string(persisted.join("network.jsonl")).expect("network"),
                 "{\"url\":\"/\"}\n"

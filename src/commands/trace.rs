@@ -494,39 +494,8 @@ fn execute_trace_run(args: TraceArgs) -> homeboy::core::Result<TraceRunExecution
                 scenario_id: scenario_id.clone(),
             })
     });
-    let extra_workloads = rig_context
-        .as_ref()
-        .and_then(|context| {
-            ctx.extension_id.as_deref().map(|id| {
-                rig::workloads_for_extension(
-                    &context.rig_spec,
-                    rig::RigWorkloadKind::Trace,
-                    context.rig_package_root.as_deref(),
-                    id,
-                )
-            })
-        })
-        .unwrap_or_default();
-    let trace_dependencies = rig_context
-        .as_ref()
-        .and_then(|context| {
-            ctx.extension_id.as_deref().map(|id| {
-                rig::trace_dependencies_for_extension(
-                    &context.rig_spec,
-                    context.rig_package_root.as_deref(),
-                    id,
-                )
-            })
-        })
-        .unwrap_or_default();
-    let runner_capabilities = rig_context
-        .as_ref()
-        .and_then(|context| {
-            ctx.extension_id
-                .as_deref()
-                .map(|id| rig::runner_capabilities_for_extension(&context.rig_spec, id))
-        })
-        .unwrap_or_default();
+    let (extra_workloads, trace_dependencies, runner_capabilities) =
+        trace_workload_inputs(rig_context.as_ref(), ctx.extension_id.as_deref());
     let experiment_settings = trace_experiment_settings(experiment_plan.as_ref())?;
     let experiment_env = trace_experiment_env(experiment_plan.as_ref())?;
     let trace_probes =
@@ -788,39 +757,8 @@ fn run_list(args: TraceArgs) -> CmdResult<TraceCommandOutput> {
     }
 
     let run_dir = RunDir::create()?;
-    let extra_workloads = rig_context
-        .as_ref()
-        .and_then(|context| {
-            ctx.extension_id.as_deref().map(|id| {
-                rig::workloads_for_extension(
-                    &context.rig_spec,
-                    rig::RigWorkloadKind::Trace,
-                    context.rig_package_root.as_deref(),
-                    id,
-                )
-            })
-        })
-        .unwrap_or_default();
-    let trace_dependencies = rig_context
-        .as_ref()
-        .and_then(|context| {
-            ctx.extension_id.as_deref().map(|id| {
-                rig::trace_dependencies_for_extension(
-                    &context.rig_spec,
-                    context.rig_package_root.as_deref(),
-                    id,
-                )
-            })
-        })
-        .unwrap_or_default();
-    let runner_capabilities = rig_context
-        .as_ref()
-        .and_then(|context| {
-            ctx.extension_id
-                .as_deref()
-                .map(|id| rig::runner_capabilities_for_extension(&context.rig_spec, id))
-        })
-        .unwrap_or_default();
+    let (extra_workloads, trace_dependencies, runner_capabilities) =
+        trace_workload_inputs(rig_context.as_ref(), ctx.extension_id.as_deref());
     let list = extension_trace::run_trace_list_workflow(
         &ctx.component,
         TraceListWorkflowArgs {
@@ -849,6 +787,30 @@ struct TraceRigContext {
     rig_spec: RigSpec,
     rig_package_root: Option<PathBuf>,
     rig_config_root: Option<PathBuf>,
+}
+
+fn trace_workload_inputs(
+    rig_context: Option<&TraceRigContext>,
+    extension_id: Option<&str>,
+) -> (Vec<PathBuf>, Vec<rig::TraceDependencySpec>, Vec<String>) {
+    let Some((context, id)) = rig_context.zip(extension_id) else {
+        return (Vec::new(), Vec::new(), Vec::new());
+    };
+
+    (
+        rig::workloads_for_extension(
+            &context.rig_spec,
+            rig::RigWorkloadKind::Trace,
+            context.rig_package_root.as_deref(),
+            id,
+        ),
+        rig::trace_dependencies_for_extension(
+            &context.rig_spec,
+            context.rig_package_root.as_deref(),
+            id,
+        ),
+        rig::runner_capabilities_for_extension(&context.rig_spec, id),
+    )
 }
 
 #[derive(Clone)]
