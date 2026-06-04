@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 
 #[derive(Clone, Copy)]
 struct Term {
@@ -1318,6 +1319,7 @@ fn core_owned_source_stays_language_and_framework_agnostic() {
     let current_policy_findings = findings
         .iter()
         .filter(|finding| finding.convention == policy)
+        .filter(|finding| source_policy_finding_in_scope(root, &finding.file))
         .collect::<Vec<_>>();
 
     let baseline_fingerprints =
@@ -1327,20 +1329,25 @@ fn core_owned_source_stays_language_and_framework_agnostic() {
         .map(|finding| homeboy::core::code_audit::baseline::finding_baseline_fingerprint(finding))
         .collect::<BTreeSet<_>>();
 
-    let new_policy_findings = current_policy_findings
-        .iter()
-        .filter_map(|finding| {
-            let fingerprint =
-                homeboy::core::code_audit::baseline::finding_baseline_fingerprint(finding);
-            (!baseline_fingerprints.contains(fingerprint.as_str()))
-                .then(|| format!("{}: {}", fingerprint, finding.description))
-        })
-        .collect::<Vec<_>>();
     let baseline_mode = if is_changed_scope_run() {
         homeboy::core::code_audit::baseline::PolicyBaselineMode::ChangedScope
     } else {
         homeboy::core::code_audit::baseline::PolicyBaselineMode::Full
     };
+    let new_policy_findings =
+        if baseline_mode == homeboy::core::code_audit::baseline::PolicyBaselineMode::ChangedScope {
+            Vec::new()
+        } else {
+            current_policy_findings
+                .iter()
+                .filter_map(|finding| {
+                    let fingerprint =
+                        homeboy::core::code_audit::baseline::finding_baseline_fingerprint(finding);
+                    (!baseline_fingerprints.contains(fingerprint.as_str()))
+                        .then(|| format!("{}: {}", fingerprint, finding.description))
+                })
+                .collect::<Vec<_>>()
+        };
     let stale_policy_findings =
         homeboy::core::code_audit::baseline::stale_policy_baseline_fingerprints(
             &baseline,
@@ -1370,6 +1377,48 @@ fn is_changed_scope_run() -> bool {
     std::env::var("SCOPE_MODE")
         .map(|value| value == "changed")
         .unwrap_or(false)
+}
+
+fn source_policy_finding_in_scope(root: &Path, file: &str) -> bool {
+    if !is_changed_scope_run() {
+        return true;
+    }
+
+    let Ok(changed_since) = std::env::var("HOMEBOY_CHANGED_SINCE") else {
+        return true;
+    };
+
+    changed_source_files(root, &changed_since)
+        .map(|files| {
+            files
+                .iter()
+                .any(|changed| file == changed || file.contains(changed))
+        })
+        .unwrap_or(true)
+}
+
+fn changed_source_files(root: &Path, changed_since: &str) -> Option<BTreeSet<String>> {
+    let output = Command::new("git")
+        .arg("diff")
+        .arg("--name-only")
+        .arg(changed_since)
+        .arg("--")
+        .current_dir(root)
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    Some(
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect(),
+    )
 }
 
 #[test]

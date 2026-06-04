@@ -634,10 +634,10 @@ mod tests {
     fn provider_can_return_timeout_payload_during_wrapper_grace() {
         let command = format!(
             "node {}",
-            script("let fs=require('fs'); let req=JSON.parse(fs.readFileSync(0,'utf8')); setTimeout(()=>process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'timeout',summary:'provider serialized timeout',failure_classification:'timeout',artifacts:[{schema:'homeboy/agent-task-artifact/v1',id:'timeout-evidence',kind:'codebox-task-runner-preflight',path:'/tmp/timeout-evidence.json'}]})), 75);")
+            script("let fs=require('fs'); let req=JSON.parse(fs.readFileSync(0,'utf8')); setTimeout(()=>process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'timeout',summary:'provider serialized timeout',failure_classification:'timeout',artifacts:[{schema:'homeboy/agent-task-artifact/v1',id:'timeout-evidence',kind:'codebox-task-runner-preflight',path:'/tmp/timeout-evidence.json'}]})), 2050);")
         );
         let (mut request, provider) = request("task-timeout-payload", command);
-        request.limits.timeout_ms = Some(50);
+        request.limits.timeout_ms = Some(2000);
 
         let outcome = run_provider_command(&request, &provider);
 

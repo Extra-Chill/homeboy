@@ -271,24 +271,27 @@ pub fn policy_baseline_fingerprints<'a>(
     audit_policy: &str,
     scope: Option<&str>,
 ) -> BTreeSet<&'a str> {
+    let mut fingerprints = baseline
+        .known_fingerprints
+        .iter()
+        .filter(|fingerprint| fingerprint.starts_with(audit_policy))
+        .map(|fingerprint| fingerprint.as_str())
+        .collect::<BTreeSet<_>>();
+
     if let Some(section) =
         baseline.metadata.policy_sections.iter().find(|section| {
             section.audit_policy == audit_policy && section.scope.as_deref() == scope
         })
     {
-        return section
-            .known_fingerprints
-            .iter()
-            .map(|fingerprint| fingerprint.as_str())
-            .collect();
+        fingerprints.extend(
+            section
+                .known_fingerprints
+                .iter()
+                .map(|fingerprint| fingerprint.as_str()),
+        );
     }
 
-    baseline
-        .known_fingerprints
-        .iter()
-        .filter(|fingerprint| fingerprint.starts_with(audit_policy))
-        .map(|fingerprint| fingerprint.as_str())
-        .collect()
+    fingerprints
 }
 
 /// Return stale baseline rows for a policy section according to the requested baseline mode.
