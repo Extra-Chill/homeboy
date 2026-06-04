@@ -270,6 +270,7 @@ try {
   const composerRecipe = readJson(composerCapturePath).recipe;
   const codeFileArg = composerRecipe.workflow.steps[0].args.find((arg) => arg.startsWith('code-file='));
   assert.equal(codeFileArg, `code-file=${path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-datamachine-agent-workload-wrapper.php')}`);
+  assert.match(fs.readFileSync(codeFileArg.slice('code-file='.length), 'utf8'), /\/homeboy-extension\/scripts\/agent\/datamachine-agent-workload\.php/);
   const preparedDataMachine = composerRecipe.inputs.extraPlugins.find((plugin) => plugin.slug === 'data-machine');
   assert.notEqual(preparedDataMachine.source, composerPluginPath);
   assert(pathInside(path.join(root, 'composer-artifacts', 'prepared-plugins'), fs.realpathSync(preparedDataMachine.source)));
