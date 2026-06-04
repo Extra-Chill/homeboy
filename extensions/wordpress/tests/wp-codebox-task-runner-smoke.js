@@ -251,6 +251,10 @@ try {
   assert.equal(agentBundleCapture.input.sandbox_tool_policy.tools[0].id, 'homeboy/no-runtime-tools');
   assert.equal(agentBundleCapture.input.sandbox_tool_policy.tools[0].allowed, false);
   assert.equal(agentBundleCapture.input.agent_bundle.engine_data_outputs.issue_number, 'metadata.engine_data.store_idea_agent.issue_number');
+  assert.equal(agentBundleCapture.input.runtime_task.ability, 'datamachine/run-agent-bundle');
+  assert.equal(agentBundleCapture.input.runtime_task.input.source, '/workspace/wp-site-generator/bundles/store-idea-agent');
+  assert.equal(agentBundleCapture.input.runtime_task.input.wait_for_completion, true);
+  assert.equal(agentBundleCapture.input.runtime_task.input.runtime_bundles[0].source, '/workspace/wp-site-generator/bundles/store-idea-agent');
   const agentBundleOutput = JSON.parse(agentBundleResult.stdout);
   assert.equal(agentBundleOutput.success, true);
   assert.equal(agentBundleOutput.session.status, 'completed');
