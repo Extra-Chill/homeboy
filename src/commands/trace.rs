@@ -24,6 +24,7 @@ mod aggregate;
 #[cfg(test)]
 mod aggregate_tests;
 mod bundle;
+mod compare_targets;
 mod compare_variant;
 mod experiment;
 mod guardrails;
@@ -40,6 +41,7 @@ mod schedule;
 #[cfg(test)]
 mod test_fixture;
 
+use compare_targets::run_compare_targets;
 use compare_variant::run_compare_variant;
 use experiment::{
     collect_trace_experiment_artifacts_for_plan, run_trace_experiment_setup_for_plan,
@@ -82,6 +84,12 @@ pub struct TraceArgs {
     /// After aggregate JSON when running `homeboy trace compare before.json after.json`.
     #[arg(value_name = "AFTER_JSON")]
     pub compare_after: Option<PathBuf>,
+    /// Baseline path or git ref for `homeboy trace compare COMPONENT SCENARIO`.
+    #[arg(long = "baseline-target", value_name = "PATH_OR_REF")]
+    pub baseline_target: Option<String>,
+    /// Candidate path or git ref for `homeboy trace compare COMPONENT SCENARIO`.
+    #[arg(long, value_name = "PATH_OR_REF")]
+    pub candidate: Option<String>,
     /// Run trace against a rig-pinned component path after `rig check` passes.
     #[arg(long, value_name = "RIG_ID")]
     pub rig: Option<String>,
@@ -325,6 +333,10 @@ fn run_outputs(mut args: TraceArgs) -> CmdResult<(TraceCommandOutput, Option<Tra
     }
 
     if args.comp.component.as_deref() == Some("compare") {
+        if args.baseline_target.is_some() || args.candidate.is_some() {
+            let (output, exit_code) = run_compare_targets(args)?;
+            return Ok(((output, None), exit_code));
+        }
         let (output, exit_code) = run_compare(args)?;
         return Ok(((output, None), exit_code));
     }

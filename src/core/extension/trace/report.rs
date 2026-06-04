@@ -260,6 +260,26 @@ pub struct TraceCompareOutput {
     pub before_path: String,
     pub after_path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub before_target: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub after_target: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub before_git_sha: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub after_git_sha: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub before_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub after_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub before_exit_code: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub after_exit_code: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_dir: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub before_component: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub after_component: Option<String>,

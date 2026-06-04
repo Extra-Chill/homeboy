@@ -17,6 +17,7 @@ homeboy trace matrix <component> <scenario> --axis viewport=desktop,mobile --axi
 homeboy trace <component> <scenario> --runs 5 --aggregate spans --schedule interleaved
 homeboy trace <component> <scenario> --attach logfile:/tmp/service.log --attach pid:1234
 homeboy trace compare before.json after.json --focus-span phase.wp_boot_start_to_wp_boot_ready
+homeboy trace compare <component> <scenario> --baseline-target develop --candidate HEAD --runs 5 --report markdown
 homeboy trace compare-variant --rig studio --scenario studio-app-create-site --runs 5 --overlay overlays/change.patch --output-dir .homeboy/experiments/change
 homeboy trace <component> <scenario> --report=markdown
 homeboy trace <component> <scenario> --baseline
@@ -62,6 +63,22 @@ homeboy trace list --profiles --rig studio
 ```
 
 JSON run, summary, and aggregate outputs include a `profile` object with the resolved profile id, rig id, component, scenario, overlays, variants, and settings used for the invocation.
+
+## Baseline/Candidate Compare
+
+`homeboy trace compare <component> <scenario>` can run the same trace scenario against two local paths or git refs, aggregate the span timings, write JSON artifacts, and render a Markdown summary.
+
+```sh
+homeboy trace compare woocommerce-gateway-stripe ece-product-page-waterfall \
+  --baseline-target develop \
+  --candidate HEAD \
+  --runs 5 \
+  --report markdown
+```
+
+`--baseline-target` accepts an existing path or a git ref in the resolved component checkout. The flag is intentionally named `--baseline-target` because `--baseline` already saves a trace baseline for the baseline engine. `--candidate` accepts the same path-or-ref shape. Ref targets are checked out into temporary detached git worktrees for the run and removed afterward.
+
+The compare command writes `baseline.aggregate.json`, `candidate.aggregate.json`, `compare.json`, and `summary.md` under `.homeboy/trace-compare/<scenario>-<timestamp>` unless `--output-dir` is provided. The JSON comparison includes target labels, git SHAs when available, pass/fail status for both sides, artifact paths, span deltas, percentage deltas, focus-span status, guardrail status, and missing metrics as `null`/omitted values rather than invented numbers.
 
 ## Repeated Runs
 

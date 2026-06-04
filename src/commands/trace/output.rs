@@ -271,6 +271,16 @@ pub(super) fn compare_trace_aggregates_with_focus(
         command: "trace.compare.spans",
         before_path: before_path.display().to_string(),
         after_path: after_path.display().to_string(),
+        before_target: None,
+        after_target: None,
+        before_git_sha: None,
+        after_git_sha: None,
+        before_status: None,
+        after_status: None,
+        before_exit_code: None,
+        after_exit_code: None,
+        output_dir: None,
+        summary_path: None,
         before_component: before.component,
         after_component: after.component,
         before_scenario_id: before.scenario_id,
@@ -1044,6 +1054,21 @@ pub(super) fn render_compare_markdown(compare: &extension_trace::TraceCompareOut
     out.push_str("# Trace Compare\n\n");
     out.push_str(&format!("- **Before:** `{}`\n", compare.before_path));
     out.push_str(&format!("- **After:** `{}`\n", compare.after_path));
+    if let (Some(before), Some(after)) = (&compare.before_target, &compare.after_target) {
+        out.push_str(&format!("- **Targets:** `{}` -> `{}`\n", before, after));
+    }
+    if let (Some(before), Some(after)) = (&compare.before_git_sha, &compare.after_git_sha) {
+        out.push_str(&format!("- **Git SHAs:** `{}` -> `{}`\n", before, after));
+    }
+    if let (Some(before), Some(after)) = (&compare.before_status, &compare.after_status) {
+        out.push_str(&format!("- **Status:** `{}` -> `{}`\n", before, after));
+    }
+    if let Some(output_dir) = compare.output_dir.as_deref() {
+        out.push_str(&format!("- **Output dir:** `{}`\n", output_dir));
+    }
+    if let Some(summary_path) = compare.summary_path.as_deref() {
+        out.push_str(&format!("- **Summary:** `{}`\n", summary_path));
+    }
     if let (Some(before), Some(after)) = (&compare.before_scenario_id, &compare.after_scenario_id) {
         out.push_str(&format!("- **Scenario:** `{}` -> `{}`\n", before, after));
     }

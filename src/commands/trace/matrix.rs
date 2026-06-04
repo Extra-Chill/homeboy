@@ -557,7 +557,7 @@ fn variant_combination_slug(label: &str) -> String {
         .to_string()
 }
 
-fn aggregate_to_compare_input(
+pub(super) fn aggregate_to_compare_input(
     aggregate: &extension_trace::TraceAggregateOutput,
 ) -> TraceAggregateInput {
     TraceAggregateInput {
@@ -591,7 +591,10 @@ fn aggregate_to_compare_input(
     }
 }
 
-fn write_json_artifact<T: serde::Serialize>(path: &Path, value: &T) -> homeboy::core::Result<()> {
+pub(super) fn write_json_artifact<T: serde::Serialize>(
+    path: &Path,
+    value: &T,
+) -> homeboy::core::Result<()> {
     let content = serde_json::to_string_pretty(value).map_err(|err| {
         homeboy::core::Error::internal_json(err.to_string(), Some("trace.variant.json".to_string()))
     })?;
