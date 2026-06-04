@@ -42,8 +42,9 @@ pub use report::{
     TraceAggregateRunOutput, TraceAggregateSpanOutput, TraceClassificationSummaryOutput,
     TraceCommandOutput, TraceCompareClassificationSummaryOutput, TraceCompareOutput,
     TraceCompareSpanOutput, TraceGuardrailOutput, TraceListOutput, TraceOverlayLocksOutput,
-    TraceProfileListItem, TraceResolvedProfileOutput, TraceRunOrderEntryOutput, TraceSpanMetadata,
-    TraceVariantMatrixOutput, TraceVariantMatrixRunOutput,
+    TraceProfileListItem, TraceResolvedProfileOutput, TraceRunOrderEntryOutput,
+    TraceScenarioMatrixAxisOutput, TraceScenarioMatrixCellOutput, TraceScenarioMatrixOutput,
+    TraceSpanMetadata, TraceVariantMatrixOutput, TraceVariantMatrixRunOutput,
 };
 pub use report::{push_overlay_markdown, render_markdown};
 pub use run::{
@@ -51,7 +52,10 @@ pub use run::{
     trace_is_unclaimed, TraceListWorkflowArgs,
 };
 pub use run::{TraceRunWorkflowArgs, TraceRunWorkflowResult, TraceRunnerInputs};
-pub use span_summary::{attach_span_summary_metadata, TraceSpanSummaryOutput};
+pub use span_summary::{
+    attach_span_summary_metadata, format_span_summary_metadata, format_span_summary_status,
+    TraceSpanSummaryOutput,
+};
 
 pub fn resolve_trace_command(
     component: &Component,

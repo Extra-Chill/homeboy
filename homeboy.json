@@ -259,35 +259,6 @@
             "value": "Action Scheduler"
           },
           {
-            "value": "Homeboy"
-          },
-          {
-            "match_mode": "literal",
-            "value": "homeboy.json"
-          },
-          {
-            "match_mode": "literal",
-            "value": ".homeboy"
-          },
-          {
-            "match_mode": "literal",
-            "value": "HOMEBOY_"
-          },
-          {
-            "match_mode": "literal",
-            "value": "homeboy/lab-offload/v1"
-          },
-          {
-            "value": "Lab"
-          },
-          {
-            "value": "offload"
-          },
-          {
-            "match_mode": "literal",
-            "value": "homeboy-run"
-          },
-          {
             "match_mode": "literal",
             "value": "runner-artifact://"
           }
@@ -1081,7 +1052,7 @@
         "core_boundary_leak:core-agnostic-source::src/core/defaults.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `Homeboy` appears at line 67 in behavioral context `default_true`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::src/core/defaults.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `Lab` appears at line 19 in behavioral context `top-level`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::src/core/defaults.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `Lab` appears at line 43 in behavioral context `default`::CoreBoundaryLeak",
-        "core_boundary_leak:core-agnostic-source::src/core/defaults.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `cargo` appears at line 101 in behavioral context `default`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::src/core/defaults.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `cargo` appears at line 100 in behavioral context `default`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::src/core/defaults.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `homeboy.json` appears at line 12 in behavioral context `top-level`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::src/core/defaults.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `homeboy.json` appears at line 159 in behavioral context `default`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::src/core/defaults.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `homeboy.json` appears at line 164 in behavioral context `load_defaults`::CoreBoundaryLeak",
@@ -1429,24 +1400,6 @@
         "core_boundary_leak:core-agnostic-source::src/core/extension/fingerprint.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `rust` appears at line 101 in behavioral context `run_fingerprint_script`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::src/core/extension/fingerprint.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `wordpress` appears at line 203 in behavioral context `run_fingerprint_script`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::src/core/extension/fingerprint.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `wordpress` appears at line 214 in behavioral context `run_fingerprint_script`::CoreBoundaryLeak",
-        "core_boundary_leak:core-agnostic-source::src/core/extension/grammar.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `php` appears at line 204 in behavioral context `default_namespace_separator`::CoreBoundaryLeak",
-        "core_boundary_leak:core-agnostic-source::src/core/extension/grammar.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `php` appears at line 210 in behavioral context `default_namespace_separator`::CoreBoundaryLeak",
-        "core_boundary_leak:core-agnostic-source::src/core/extension/grammar.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `php` appears at line 260 in behavioral context `default_namespace_separator`::CoreBoundaryLeak",
-        "core_boundary_leak:core-agnostic-source::src/core/extension/grammar.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `php` appears at line 272 in behavioral context `default_namespace_separator`::CoreBoundaryLeak",
-        "core_boundary_leak:core-agnostic-source::src/core/extension/grammar.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `php` appears at line 287 in behavioral context `default_namespace_separator`::CoreBoundaryLeak",
-        "core_boundary_leak:core-agnostic-source::src/core/extension/grammar.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `php` appears at line 295 in behavioral context `default_namespace_separator`::CoreBoundaryLeak",
-        "core_boundary_leak:core-agnostic-source::src/core/extension/grammar.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `php` appears at line 352 in behavioral context `default_group_2`::CoreBoundaryLeak",
-        "core_boundary_leak:core-agnostic-source::src/core/extension/grammar.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `php` appears at line 361 in behavioral context `default_group_2`::CoreBoundaryLeak",
-        "core_boundary_leak:core-agnostic-source::src/core/extension/grammar.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `rust` appears at line 189 in behavioral context `default_namespace_separator`::CoreBoundaryLeak",
-        "core_boundary_leak:core-agnostic-source::src/core/extension/grammar.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `rust` appears at line 204 in behavioral context `default_namespace_separator`::CoreBoundaryLeak",
-        "core_boundary_leak:core-agnostic-source::src/core/extension/grammar.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `rust` appears at line 209 in behavioral context `default_namespace_separator`::CoreBoundaryLeak",
-        "core_boundary_leak:core-agnostic-source::src/core/extension/grammar.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `rust` appears at line 226 in behavioral context `default_namespace_separator`::CoreBoundaryLeak",
-        "core_boundary_leak:core-agnostic-source::src/core/extension/grammar.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `rust` appears at line 260 in behavioral context `default_namespace_separator`::CoreBoundaryLeak",
-        "core_boundary_leak:core-agnostic-source::src/core/extension/grammar.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `rust` appears at line 271 in behavioral context `default_namespace_separator`::CoreBoundaryLeak",
-        "core_boundary_leak:core-agnostic-source::src/core/extension/grammar.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `rust` appears at line 287 in behavioral context `default_namespace_separator`::CoreBoundaryLeak",
-        "core_boundary_leak:core-agnostic-source::src/core/extension/grammar.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `rust` appears at line 294 in behavioral context `default_namespace_separator`::CoreBoundaryLeak",
-        "core_boundary_leak:core-agnostic-source::src/core/extension/grammar.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `rust` appears at line 352 in behavioral context `default_group_2`::CoreBoundaryLeak",
-        "core_boundary_leak:core-agnostic-source::src/core/extension/grammar.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `wordpress` appears at line 360 in behavioral context `default_group_2`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::src/core/extension/grammar_strings.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `rust` appears at line 3 in behavioral context `top-level`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::src/core/extension/lifecycle.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `Homeboy` appears at line 309 in behavioral context `resolve_cloned_extension`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::src/core/extension/lifecycle.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `Homeboy` appears at line 507 in behavioral context `update`::CoreBoundaryLeak",
@@ -2738,6 +2691,7 @@
         "intra-method-duplication::src/core/agent_task_scheduler.rs::IntraMethodDuplicate",
         "parallel-implementation::src/core/agent_task_scheduler.rs::ParallelImplementation",
         "parallel-implementation::src/core/config/json_pointer.rs::ParallelImplementation",
+        "enum_dispatch_contracts::src/commands/trace/output.rs::RepeatedEnumDispatchContract",
         "structural::src/commands/bench/tests.rs::HighItemCount",
         "structural::src/commands/runs/gh_actions.rs::HighItemCount",
         "structural::src/commands/trace.rs::GodFile",
@@ -2749,6 +2703,7 @@
         "structural::src/core/code_audit/mod.rs::GodFile",
         "structural::src/core/extension/grammar.rs::GodFile",
         "structural::src/core/extension/lifecycle.rs::GodFile",
+        "structural::src/core/extension/trace/report.rs::HighItemCount",
         "structural::src/core/extension/trace/run.rs::HighItemCount",
         "structural::src/core/refactor/rename/mod.rs::GodFile",
         "structural::src/core/release/executor.rs::GodFile",

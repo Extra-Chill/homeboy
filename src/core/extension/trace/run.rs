@@ -147,6 +147,14 @@ fn run_trace_workflow_with_component_script(
         Some(acquire_trace_overlay_locks(&args.overlays, run_dir)?)
     };
     let applied_overlays = apply_trace_overlays(&args.overlays, args.keep_overlay)?;
+    let mut script_env = vec![
+        (
+            "HOMEBOY_TRACE_SCENARIO".to_string(),
+            args.scenario_id.clone(),
+        ),
+        ("HOMEBOY_TRACE_LIST_ONLY".to_string(), "0".to_string()),
+    ];
+    script_env.extend(args.runner_inputs.env.clone());
     let script_output =
         crate::core::extension::component_script::run_component_scripts_with_run_dir(
             component,
@@ -154,13 +162,7 @@ fn run_trace_workflow_with_component_script(
             source_path,
             run_dir,
             true,
-            &[
-                (
-                    "HOMEBOY_TRACE_SCENARIO".to_string(),
-                    args.scenario_id.clone(),
-                ),
-                ("HOMEBOY_TRACE_LIST_ONLY".to_string(), "0".to_string()),
-            ],
+            &script_env,
             &[],
         );
     if !args.keep_overlay {
