@@ -723,6 +723,19 @@ fi
 mkdir -p "$(dirname "$RESULTS_FILE")"
 jq '.benchResults | del(.warmup_iterations)' "$WP_CODEBOX_TMPFILE" > "$RESULTS_FILE"
 
+PREPARED_DEPENDENCIES_METADATA_FILE="${ARTIFACTS_DIR%/}/prepared-bench-dependencies.json"
+if [ -f "$PREPARED_DEPENDENCIES_METADATA_FILE" ]; then
+    PREPARED_RESULTS_FILE=$(mktemp "${TMPDIR:-/tmp}/homeboy-wp-codebox-prepared-dependencies.XXXXXX")
+    if jq --slurpfile preparedDependencies "$PREPARED_DEPENDENCIES_METADATA_FILE" \
+        '. + {prepared_dependencies: ($preparedDependencies[0] // [])}' \
+        "$RESULTS_FILE" > "$PREPARED_RESULTS_FILE"; then
+        mv "$PREPARED_RESULTS_FILE" "$RESULTS_FILE"
+    else
+        rm -f "$PREPARED_RESULTS_FILE"
+        echo "Warning: failed to attach prepared dependency metadata to bench results." >&2
+    fi
+fi
+
 if [ -f "$BENCH_BROWSER_METRICS_HELPER" ]; then
     ENRICHED_RESULTS_FILE=$(mktemp "${TMPDIR:-/tmp}/homeboy-wp-codebox-browser-metrics.XXXXXX")
     if node "$BENCH_BROWSER_METRICS_HELPER" "$RESULTS_FILE" "$ARTIFACTS_DIR" "$WP_CODEBOX_BIN" > "$ENRICHED_RESULTS_FILE"; then
