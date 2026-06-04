@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.115.24] - 2026-06-04
+
+### Fixed
+- normalize agent task semantic outputs
+
 ## [2.115.23] - 2026-06-04
 
 ### Fixed
