@@ -1041,6 +1041,13 @@
       "description": "Generic WP Codebox recipe steps to run during pluginRuntime.setup after dependency activation and before measured bench workloads. Use this for dependency setup that must be prepared outside workload timing."
     },
     {
+      "id": "wp_codebox_prepare_steps",
+      "label": "WP Codebox bench prepare steps",
+      "type": "array",
+      "default": [],
+      "description": "Explicit host-side commands to run before WP Codebox mounts and loads the plugin for wordpress.bench. Each step is an object with command, optional string args, and optional component-relative cwd. Use this for bounded source-checkout generation such as WooCommerce feature config files; no package scripts run implicitly."
+    },
+    {
       "id": "wp_codebox_scenario_manifests",
       "label": "WP Codebox scenario manifests",
       "type": "array",
