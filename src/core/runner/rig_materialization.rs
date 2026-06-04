@@ -25,7 +25,7 @@ pub(super) struct RigComponentDependency {
 
 pub(super) fn sync_lab_offload_rigs(
     runner_id: &str,
-    homeboy_path: &str,
+    command_path: &str,
     remote_cwd: &str,
     args: &[String],
 ) -> Result<usize> {
@@ -39,12 +39,12 @@ pub(super) fn sync_lab_offload_rigs(
             Error::validation_invalid_argument(
                 "rig",
                 format!(
-                    "Lab offload cannot materialize rig `{rig_id}` on the runner because it has no installed source metadata"
+                    "runner dispatch cannot materialize rig `{rig_id}` because it has no installed source metadata"
                 ),
                 Some(rig_id.clone()),
                 Some(vec![
                     format!("Reinstall rig `{rig_id}` from a rig package before using --runner."),
-                    "Run `homeboy rig sources` to inspect installed rig sources.".to_string(),
+                    "Run the rig sources command to inspect installed rig sources.".to_string(),
                 ]),
             )
         })?;
@@ -66,7 +66,7 @@ pub(super) fn sync_lab_offload_rigs(
                 project_id: None,
                 allow_diagnostic_ssh: false,
                 command: vec![
-                    homeboy_path.to_string(),
+                    command_path.to_string(),
                     "rig".to_string(),
                     "install".to_string(),
                     synced.remote_path,
@@ -85,7 +85,7 @@ pub(super) fn sync_lab_offload_rigs(
         if exit_code != 0 {
             return Err(Error::validation_invalid_argument(
                 "rig",
-                format!("Lab offload could not install rig `{rig_id}` on runner `{runner_id}`"),
+                format!("runner dispatch could not install rig `{rig_id}` on runner `{runner_id}`"),
                 Some(rig_id.clone()),
                 Some(vec![
                     output.stderr.trim().to_string(),

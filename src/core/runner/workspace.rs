@@ -106,7 +106,7 @@ pub fn sync_workspace(
             "runner workspace sync requires workspace_root",
             Some(runner.id.clone()),
             Some(vec![
-                "Set runner.workspace_root to the remote Lab workspace directory.".to_string(),
+                "Set runner.workspace_root to the remote workspace directory.".to_string(),
             ]),
         )
     })?;
@@ -259,14 +259,14 @@ fn git_snapshot(local_path: &Path, changed_since_base: Option<&str>) -> Result<G
         if changed_since_base.is_some() {
             return Err(Error::validation_invalid_argument(
                 "mode",
-                "git workspace sync requires a clean working tree for changed-since Lab offload; snapshot sync cannot honor --changed-since because it excludes .git metadata",
+                "git workspace sync requires a clean working tree for changed-since remote execution; snapshot sync cannot honor --changed-since because it excludes .git metadata",
                 Some("git".to_string()),
                 Some(vec![
-                    "Commit or stash local changes before offloading a --changed-since command."
+                    "Commit or stash local changes before remote execution of a --changed-since command."
                         .to_string(),
                     "Run with --force-hot to execute the changed-since command locally."
                         .to_string(),
-                    "Omit --changed-since to use snapshot Lab offload for dirty local changes."
+                    "Omit --changed-since to use snapshot remote execution for dirty local changes."
                         .to_string(),
                 ]),
             ));
@@ -325,7 +325,7 @@ pub(super) fn materialize_git_dependency(
     if remote_url.trim().is_empty() {
         return Err(Error::validation_invalid_argument(
             "remote_url",
-            "Lab rig dependency materialization requires a git remote URL",
+            "rig dependency materialization requires a git remote URL",
             Some(local_path.display().to_string()),
             Some(vec![
                 "Set components.<id>.remote_url in the rig spec or configure remote.origin.url on the local checkout.".to_string(),
@@ -349,7 +349,7 @@ pub(super) fn materialize_git_dependency(
             if !output.success {
                 return Err(Error::validation_invalid_argument(
                     "rig_component_dependency",
-                    "Lab offload could not safely materialize a rig component dependency on the runner",
+                    "runner dispatch could not safely materialize a rig component dependency",
                     Some(options.remote_path.clone()),
                     Some(vec![output.stderr.trim().to_string()]),
                 ));
@@ -587,7 +587,7 @@ fn materialize_git(
             } else {
                 Err(Error::validation_invalid_argument(
                     "changed_since",
-                    "Lab offload could not make the requested --changed-since base reachable in the runner workspace before dispatch",
+                    "runner dispatch could not make the requested --changed-since base reachable in the runner workspace before dispatch",
                     changed_since_base.map(str::to_string),
                     Some(vec![
                         "Verify the branch and base commit are pushed to origin.".to_string(),
