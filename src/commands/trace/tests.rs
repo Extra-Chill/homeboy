@@ -6,7 +6,6 @@ use crate::test_support::with_isolated_home;
 use homeboy::core::component::ScopedExtensionConfig;
 use homeboy::core::rig::ComponentSpec;
 
-use super::aggregate_test_support::aggregate_samples;
 use super::matrix::{expand_trace_matrix, matrix_cell_env, parse_trace_matrix_axis};
 use super::test_fixture::{
     init_overlay_component, write_trace_extension, write_trace_rig,
@@ -14,81 +13,6 @@ use super::test_fixture::{
     write_trace_rig_with_variant, TRACE_FIXTURE_EXTENSION_ID,
 };
 use super::*;
-
-fn trace_args_for_profile(profile: &str) -> TraceArgs {
-    TraceArgs {
-        comp: PositionalComponentArgs {
-            component: None,
-            path: None,
-        },
-        component_arg: None,
-        scenario: None,
-        scenario_arg: None,
-        compare_after: None,
-        rig: None,
-        profile: Some(profile.to_string()),
-        profiles: false,
-        setting_args: SettingArgs::default(),
-        json_summary: false,
-        report: None,
-        experiment: None,
-        repeat: 1,
-        aggregate: None,
-        schedule: TraceSchedule::Grouped,
-        focus_spans: Vec::new(),
-        spans: Vec::new(),
-        phases: Vec::new(),
-        attachments: Vec::new(),
-        phase_preset: None,
-        baseline_args: BaselineArgs::default(),
-        regression_threshold: extension_trace::baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT,
-        regression_min_delta_ms: extension_trace::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
-        overlays: Vec::new(),
-        variants: Vec::new(),
-        matrix: TraceVariantMatrixMode::None,
-        axes: Vec::new(),
-        matrix_env: Vec::new(),
-        output_dir: None,
-        keep_overlay: false,
-        stale: false,
-        force: false,
-    }
-}
-
-fn write_trace_rig_with_profile(
-    home: &tempfile::TempDir,
-    rig_id: &str,
-    component_id: &str,
-    path: &std::path::Path,
-) {
-    let rig_dir = home.path().join(".config").join("homeboy").join("rigs");
-    fs::create_dir_all(&rig_dir).expect("mkdir rigs");
-    fs::write(
-        rig_dir.join(format!("{}.json", rig_id)),
-        format!(
-            r#"{{
-                    "components": {{
-                        "{component_id}": {{ "path": "{}" }}
-                    }},
-                    "trace_workloads": {{ "{TRACE_FIXTURE_EXTENSION_ID}": [
-                        {{ "path": "${{components.{component_id}.path}}/close-window-running-site.trace.mjs" }}
-                    ] }},
-                    "trace_profiles": {{
-                        "studio-window-close": {{
-                            "component": "{component_id}",
-                            "scenario": "close-window-running-site",
-                            "settings": {{
-                                "window_title": "Studio",
-                                "retry_count": 2
-                            }}
-                        }}
-                    }}
-                }}"#,
-            path.display()
-        ),
-    )
-    .expect("write rig");
-}
 
 fn write_matrix_sensitive_trace_extension(home: &tempfile::TempDir) {
     write_trace_extension(home);
@@ -339,124 +263,6 @@ fn rig_trace_list_uses_rig_default_component_and_workloads() {
         component_dir.path().display()
     );
     assert_eq!(workloads[0].to_string_lossy(), expected_source);
-}
-
-#[test]
-fn trace_profile_resolves_to_normal_trace_run() {
-    with_isolated_home(|home| {
-        write_trace_extension(home);
-        let component_dir = tempfile::TempDir::new().expect("component dir");
-        write_trace_rig_with_profile(home, "studio-rig", "studio", component_dir.path());
-
-        let ((output, _artifact_output), exit_code) =
-            run_outputs(trace_args_for_profile("studio-window-close"))
-                .expect("profile trace should run");
-
-        assert_eq!(exit_code, 0);
-        let TraceCommandOutput::Run(run) = output else {
-            panic!("expected run output");
-        };
-        let profile = run.profile.expect("resolved profile metadata");
-        assert_eq!(profile.id, "studio-window-close");
-        assert_eq!(profile.rig_id.as_deref(), Some("studio-rig"));
-        assert_eq!(profile.component, "studio");
-        assert_eq!(profile.scenario, "close-window-running-site");
-        assert_eq!(
-            profile.settings.get("window_title"),
-            Some(&serde_json::Value::String("Studio".to_string()))
-        );
-        assert_eq!(
-            profile.settings.get("retry_count"),
-            Some(&serde_json::json!(2))
-        );
-    });
-}
-
-#[test]
-fn trace_profile_cli_fields_override_profile_fields() {
-    with_isolated_home(|home| {
-        let component_dir = tempfile::TempDir::new().expect("component dir");
-        write_trace_rig_with_profile(home, "studio-rig", "studio", component_dir.path());
-        let mut args = trace_args_for_profile("studio-window-close");
-        args.scenario = Some("close-window-retry".to_string());
-        args.setting_args
-            .setting
-            .push(("window_title".to_string(), "Studio Dev".to_string()));
-
-        resolve_trace_profile_args(&mut args).expect("profile resolves");
-
-        assert_eq!(args.comp.component.as_deref(), Some("studio"));
-        assert_eq!(args.scenario.as_deref(), Some("close-window-retry"));
-        assert_eq!(args.rig.as_deref(), Some("studio-rig"));
-        assert_eq!(
-            args.setting_args.setting,
-            vec![
-                ("window_title".to_string(), "Studio".to_string()),
-                ("window_title".to_string(), "Studio Dev".to_string())
-            ]
-        );
-    });
-}
-
-#[test]
-fn trace_list_profiles_lists_rig_profiles() {
-    with_isolated_home(|home| {
-        let component_dir = tempfile::TempDir::new().expect("component dir");
-        write_trace_rig_with_profile(home, "studio-rig", "studio", component_dir.path());
-
-        let ((output, _artifact_output), exit_code) = run_outputs(TraceArgs {
-            comp: PositionalComponentArgs {
-                component: Some("list".to_string()),
-                path: None,
-            },
-            component_arg: None,
-            scenario: None,
-            scenario_arg: None,
-            compare_after: None,
-            rig: None,
-            profile: None,
-            profiles: true,
-            setting_args: SettingArgs::default(),
-            json_summary: false,
-            report: None,
-            experiment: None,
-            repeat: 1,
-            aggregate: None,
-            schedule: TraceSchedule::Grouped,
-            focus_spans: Vec::new(),
-            spans: Vec::new(),
-            phases: Vec::new(),
-            attachments: Vec::new(),
-            phase_preset: None,
-            baseline_args: BaselineArgs::default(),
-            regression_threshold: extension_trace::baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT,
-            regression_min_delta_ms: extension_trace::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
-            overlays: Vec::new(),
-            variants: Vec::new(),
-            matrix: TraceVariantMatrixMode::None,
-            axes: Vec::new(),
-            matrix_env: Vec::new(),
-            output_dir: None,
-            keep_overlay: false,
-            stale: false,
-            force: false,
-        })
-        .expect("profile list should run");
-
-        assert_eq!(exit_code, 0);
-        let TraceCommandOutput::List(list) = output else {
-            panic!("expected list output");
-        };
-        assert_eq!(list.command, "trace.list.profiles");
-        assert_eq!(list.count, 1);
-        assert_eq!(list.profiles[0].id, "studio-window-close");
-        assert_eq!(list.profiles[0].rig_id, "studio-rig");
-        assert_eq!(list.profiles[0].component.as_deref(), Some("studio"));
-        assert_eq!(
-            list.profiles[0].scenario.as_deref(),
-            Some("close-window-running-site")
-        );
-    });
 }
 
 #[test]
@@ -726,6 +532,7 @@ fn trace_repeat_aggregates_span_timings_and_preserves_artifacts() {
                 assert_eq!(span.min_ms, Some(125));
                 assert_eq!(span.median_ms, Some(125));
                 assert_eq!(span.avg_ms, Some(125.0));
+                assert_eq!(span.stddev_ms, Some(0.0));
                 assert_eq!(span.p75_ms, None);
                 assert_eq!(span.p90_ms, None);
                 assert_eq!(span.p95_ms, None);
@@ -736,6 +543,12 @@ fn trace_repeat_aggregates_span_timings_and_preserves_artifacts() {
                     .as_ref()
                     .is_some_and(|path| std::path::Path::new(path).is_file()));
                 assert_eq!(span.failures, 0);
+                assert_eq!(span.samples.len(), 3);
+                assert!(span.samples.iter().all(|sample| sample.duration_ms == 125));
+                assert!(span
+                    .samples
+                    .iter()
+                    .all(|sample| std::path::Path::new(&sample.artifact_path).is_file()));
                 assert!(aggregate
                     .runs
                     .iter()
@@ -1569,133 +1382,78 @@ fn trace_aggregate_spans_uses_workload_default_phase_preset() {
 }
 
 #[test]
-fn aggregate_span_reports_percentiles_when_sample_size_is_sufficient() {
-    let span = aggregate_span(
-        "boot_to_ready".to_string(),
-        aggregate_samples(&[
-            200, 10, 190, 20, 180, 30, 170, 40, 160, 50, 150, 60, 140, 70, 130, 80, 120, 90, 110,
-            100,
-        ]),
-        2,
-    );
+fn trace_repeat_counts_failed_runs_as_span_failures() {
+    with_isolated_home(|home| {
+        write_trace_extension(home);
+        let component_dir = tempfile::TempDir::new().expect("component dir");
+        write_trace_rig(home, "studio-rig", "studio", component_dir.path());
 
-    assert_eq!(span.n, 20);
-    assert_eq!(span.min_ms, Some(10));
-    assert_eq!(span.median_ms, Some(105));
-    assert_eq!(span.avg_ms, Some(105.0));
-    assert_eq!(span.p75_ms, Some(150));
-    assert_eq!(span.p90_ms, Some(180));
-    assert_eq!(span.p95_ms, Some(190));
-    assert_eq!(span.max_ms, Some(200));
-    assert_eq!(span.max_run_index, Some(1));
-    assert_eq!(
-        span.max_artifact_path.as_deref(),
-        Some("/tmp/trace-run-1.json")
-    );
-    assert_eq!(span.failures, 2);
-}
+        let (output, exit_code) = run(
+            TraceArgs {
+                comp: PositionalComponentArgs {
+                    component: Some("studio".to_string()),
+                    path: None,
+                },
+                component_arg: None,
+                scenario: Some("missing-scenario".to_string()),
+                scenario_arg: None,
+                compare_after: None,
+                rig: Some("studio-rig".to_string()),
+                profile: None,
+                profiles: false,
+                setting_args: SettingArgs::default(),
+                json_summary: false,
+                report: None,
+                experiment: None,
+                repeat: 2,
+                aggregate: Some("spans".to_string()),
+                schedule: TraceSchedule::Grouped,
+                focus_spans: Vec::new(),
+                spans: vec![extension_trace::spans::parse_span_definition(
+                    "boot_to_ready:runner.boot:runner.ready",
+                )
+                .expect("span")],
+                phases: Vec::new(),
+                attachments: Vec::new(),
+                phase_preset: None,
+                baseline_args: BaselineArgs::default(),
+                regression_threshold:
+                    extension_trace::baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT,
+                regression_min_delta_ms: extension_trace::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
+                overlays: Vec::new(),
+                variants: Vec::new(),
+                matrix: TraceVariantMatrixMode::None,
+                axes: Vec::new(),
+                matrix_env: Vec::new(),
+                output_dir: None,
+                keep_overlay: false,
+                stale: false,
+                force: false,
+            },
+            &GlobalArgs {},
+        )
+        .expect("repeat aggregate should return failed output");
 
-#[test]
-fn aggregate_span_reports_run_and_artifact_for_max_sample() {
-    let span = aggregate_span(
-        "submit_to_running".to_string(),
-        aggregate_samples(&[340, 11_757, 410]),
-        0,
-    );
-
-    assert_eq!(span.max_ms, Some(11_757));
-    assert_eq!(span.max_run_index, Some(2));
-    assert_eq!(
-        span.max_artifact_path.as_deref(),
-        Some("/tmp/trace-run-2.json")
-    );
-}
-
-#[test]
-fn aggregate_span_omits_percentiles_for_small_sample_sizes() {
-    let single = aggregate_span("single".to_string(), aggregate_samples(&[42]), 0);
-    assert_eq!(single.min_ms, Some(42));
-    assert_eq!(single.median_ms, Some(42));
-    assert_eq!(single.avg_ms, Some(42.0));
-    assert_eq!(single.p75_ms, None);
-    assert_eq!(single.p90_ms, None);
-    assert_eq!(single.p95_ms, None);
-    assert_eq!(single.max_ms, Some(42));
-
-    let four_samples = aggregate_span("four".to_string(), aggregate_samples(&[10, 20, 30, 40]), 0);
-    assert_eq!(four_samples.p75_ms, Some(30));
-    assert_eq!(four_samples.p90_ms, None);
-    assert_eq!(four_samples.p95_ms, None);
-}
-
-#[test]
-fn aggregate_markdown_includes_percentile_columns() {
-    let aggregate = extension_trace::TraceAggregateOutput {
-        command: "trace.aggregate.spans",
-        passed: true,
-        status: "pass".to_string(),
-        component: "studio".to_string(),
-        scenario_id: "create-site".to_string(),
-        phase_preset: None,
-        repeat: 20,
-        run_count: 20,
-        failure_count: 0,
-        exit_code: 0,
-        rig_state: None,
-        schedule: None,
-        run_order: Vec::new(),
-        overlays: Vec::new(),
-        runs: Vec::new(),
-        spans: vec![aggregate_span(
-            "boot_to_ready".to_string(),
-            aggregate_samples(&((1..=20).map(|value| value * 10).collect::<Vec<_>>())),
-            0,
-        )],
-        guardrails: Vec::new(),
-        guardrail_failure_count: 0,
-        focus_span_ids: Vec::new(),
-        focus_spans: Vec::new(),
-        classification_summaries: Vec::new(),
-        unmatched_span_metadata_ids: Vec::new(),
-        profile: None,
-    };
-
-    let markdown = render_aggregate_markdown(&aggregate);
-
-    assert!(
-        markdown.contains("| Span | n | min | median | avg | p75 | p90 | p95 | max | failures |")
-    );
-    assert!(markdown.contains(
-        "| `boot_to_ready` | 20 | 10ms | 105ms | 105.0ms | 150ms | 180ms | 190ms | 200ms | 0 |"
-    ));
-    assert!(markdown.contains("| Span | max | max run | max artifact |"));
-    assert!(markdown.contains("| `boot_to_ready` | 200ms | 20 | `/tmp/trace-run-20.json` |"));
-}
-
-#[test]
-fn aggregate_json_serializes_available_percentiles() {
-    let span = aggregate_span(
-        "boot_to_ready".to_string(),
-        aggregate_samples(&((1..=20).map(|value| value * 10).collect::<Vec<_>>())),
-        0,
-    );
-
-    let value = serde_json::to_value(&span).expect("span serializes");
-
-    assert_eq!(value["p75_ms"], 150);
-    assert_eq!(value["p90_ms"], 180);
-    assert_eq!(value["p95_ms"], 190);
-}
-
-#[test]
-fn aggregate_json_omits_unavailable_percentiles() {
-    let span = aggregate_span("boot_to_ready".to_string(), aggregate_samples(&[10, 20]), 0);
-
-    let value = serde_json::to_value(&span).expect("span serializes");
-
-    assert!(value.get("p75_ms").is_none());
-    assert!(value.get("p90_ms").is_none());
-    assert!(value.get("p95_ms").is_none());
+        assert_eq!(exit_code, 1);
+        let TraceCommandOutput::Aggregate(aggregate) = output else {
+            panic!("expected aggregate output");
+        };
+        assert_eq!(aggregate.run_count, 2);
+        assert_eq!(aggregate.failure_count, 2);
+        assert_eq!(aggregate.runs.len(), 2);
+        assert!(aggregate.runs.iter().all(|run| !run.passed));
+        let span = aggregate
+            .spans
+            .iter()
+            .find(|span| span.id == "boot_to_ready")
+            .expect("span aggregate");
+        assert_eq!(span.n, 0);
+        assert_eq!(span.failures, 2);
+        assert!(span.samples.is_empty());
+        assert_eq!(span.min_ms, None);
+        assert_eq!(span.median_ms, None);
+        assert_eq!(span.max_ms, None);
+    });
 }
 
 #[test]

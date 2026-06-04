@@ -13,11 +13,11 @@ homeboy trace <component> <scenario> --span submit_to_cli:ui.submit:cli.start
 homeboy trace <component> <scenario> --span running:renderer.site_event_received[data.running=true]:renderer.dom_status_running_seen
 homeboy trace <component> <scenario> --phase submit:ui.submit --phase cli:cli.start --phase ready:server.ready
 homeboy trace <component> <scenario> --rig <rig-id> --phase-preset create-site
-homeboy trace <component> <scenario> --repeat 5 --aggregate spans --schedule interleaved
 homeboy trace matrix <component> <scenario> --axis viewport=desktop,mobile --axis ece_locations=product,none
+homeboy trace <component> <scenario> --runs 5 --aggregate spans --schedule interleaved
 homeboy trace <component> <scenario> --attach logfile:/tmp/service.log --attach pid:1234
 homeboy trace compare before.json after.json --focus-span phase.wp_boot_start_to_wp_boot_ready
-homeboy trace compare-variant --rig studio --scenario studio-app-create-site --repeat 5 --overlay overlays/change.patch --output-dir .homeboy/experiments/change
+homeboy trace compare-variant --rig studio --scenario studio-app-create-site --runs 5 --overlay overlays/change.patch --output-dir .homeboy/experiments/change
 homeboy trace <component> <scenario> --report=markdown
 homeboy trace <component> <scenario> --baseline
 homeboy trace <component> <scenario> --ratchet
@@ -62,6 +62,45 @@ homeboy trace list --profiles --rig studio
 ```
 
 JSON run, summary, and aggregate outputs include a `profile` object with the resolved profile id, rig id, component, scenario, overlays, variants, and settings used for the invocation.
+
+## Repeated Runs
+
+Use `--runs N` to execute the same trace scenario multiple times and aggregate timing spans. `--repeat N` remains accepted as the same option.
+
+```sh
+homeboy trace woocommerce-gateway-stripe ece-product-page-waterfall --runs 5 --aggregate spans
+```
+
+Aggregate JSON preserves each run's trace artifact path in `runs[].artifact_path` and keeps raw timing samples under each span:
+
+```json
+{
+  "command": "trace.aggregate.spans",
+  "repeat": 5,
+  "run_count": 5,
+  "failure_count": 0,
+  "runs": [
+    { "index": 1, "status": "pass", "artifact_path": "/path/to/run-1/trace-results.json" }
+  ],
+  "spans": [
+    {
+      "id": "boot_to_ready",
+      "n": 5,
+      "min_ms": 94,
+      "median_ms": 101,
+      "avg_ms": 103.2,
+      "stddev_ms": 8.1,
+      "max_ms": 118,
+      "samples": [
+        { "run_index": 1, "duration_ms": 101, "artifact_path": "/path/to/run-1/trace-results.json" }
+      ],
+      "failures": 0
+    }
+  ]
+}
+```
+
+Failed runs remain in `runs` with their status, exit code, and failure message. Spans that were requested but could not be measured count those runs in `failures` while successful runs still contribute their raw samples and min/median/max/average/stddev summary.
 
 ## Extension Manifest
 

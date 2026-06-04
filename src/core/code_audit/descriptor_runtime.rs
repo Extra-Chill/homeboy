@@ -1,12 +1,17 @@
 use super::detectors::{
     aggregate_construction, facade_passthrough, repeated_literal_shape, shared_scaffolding,
+    test_topology, test_wiring,
 };
 use super::{
     fingerprint, shadow_modules, time_audit_detector, AuditExecutionPlan, AuditTiming,
-    DetectorDescriptor, DetectorRuntime, Finding, FingerprintDetectorRunner,
+    DetectorDescriptor, DetectorRuntime, Finding, FingerprintDetectorRunner, RootDetectorRunner,
 };
+use crate::core::component::AuditConfig;
+use std::path::Path;
 
 pub(super) struct DetectorRunContext<'a> {
+    pub(super) root: &'a Path,
+    pub(super) audit_config: &'a AuditConfig,
     pub(super) all_fingerprints: &'a [&'a fingerprint::FileFingerprint],
 }
 
@@ -28,6 +33,16 @@ fn run_fingerprint_descriptor(
         FingerprintDetectorRunner::AggregateConstruction => {
             aggregate_construction::run(context.all_fingerprints)
         }
+    }
+}
+
+fn run_root_descriptor(
+    runner: RootDetectorRunner,
+    context: &DetectorRunContext<'_>,
+) -> Vec<Finding> {
+    match runner {
+        RootDetectorRunner::TestTopology => test_topology::run(context.root),
+        RootDetectorRunner::TestWiring => test_wiring::run(context.root, context.audit_config),
     }
 }
 
@@ -62,17 +77,23 @@ pub(super) fn run_descriptor_detectors(
             continue;
         }
 
-        let DetectorRuntime::Fingerprint(runner) = descriptor.runtime else {
-            continue;
+        let findings = match descriptor.runtime {
+            DetectorRuntime::Fingerprint(runner) => time_audit_detector(
+                timing,
+                descriptor.timing_id,
+                plan.detector_enabled(descriptor.id),
+                || run_fingerprint_descriptor(runner, context),
+                Vec::new,
+            ),
+            DetectorRuntime::Root(runner) => time_audit_detector(
+                timing,
+                descriptor.timing_id,
+                plan.detector_enabled(descriptor.id),
+                || run_root_descriptor(runner, context),
+                Vec::new,
+            ),
+            DetectorRuntime::Manual => continue,
         };
-
-        let findings = time_audit_detector(
-            timing,
-            descriptor.timing_id,
-            plan.detector_enabled(descriptor.id),
-            || run_fingerprint_descriptor(runner, context),
-            Vec::new,
-        );
         extend_descriptor_findings(all_findings, descriptor, findings);
     }
 }

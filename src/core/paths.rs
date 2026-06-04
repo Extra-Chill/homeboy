@@ -23,7 +23,7 @@ pub fn set_artifact_root_override(path: Option<PathBuf>) {
     *guard = path;
 }
 
-/// Base homeboy config directory (universal ~/.config/homeboy/ on all platforms)
+/// Base product config directory (universal ~/.config/homeboy/ on all platforms)
 pub fn homeboy() -> Result<PathBuf> {
     #[cfg(windows)]
     {
@@ -32,7 +32,8 @@ pub fn homeboy() -> Result<PathBuf> {
                 "APPDATA environment variable not set on Windows".to_string(),
             )
         })?;
-        Ok(PathBuf::from(appdata).join("homeboy"))
+        Ok(PathBuf::from(appdata)
+            .join(crate::core::product_identity::PRODUCT_IDENTITY.config_dirname))
     }
 
     #[cfg(not(windows))]
@@ -42,13 +43,15 @@ pub fn homeboy() -> Result<PathBuf> {
                 "HOME environment variable not set on Unix-like system".to_string(),
             )
         })?;
-        Ok(PathBuf::from(home).join(".config").join("homeboy"))
+        Ok(PathBuf::from(home)
+            .join(".config")
+            .join(crate::core::product_identity::PRODUCT_IDENTITY.config_dirname))
     }
 }
 
-/// Global homeboy.json config file path
+/// Global product config file path
 pub fn homeboy_json() -> Result<PathBuf> {
-    Ok(homeboy()?.join("homeboy.json"))
+    Ok(crate::core::product_identity::PRODUCT_IDENTITY.config_file(homeboy()?))
 }
 
 /// Base Homeboy data directory for local observed state.
@@ -65,14 +68,15 @@ pub fn homeboy_data() -> Result<PathBuf> {
                     "LOCALAPPDATA or APPDATA environment variable not set on Windows".to_string(),
                 )
             })?;
-        Ok(PathBuf::from(base).join("homeboy"))
+        Ok(PathBuf::from(base).join(crate::core::product_identity::PRODUCT_IDENTITY.data_dirname))
     }
 
     #[cfg(not(windows))]
     {
         if let Ok(xdg_data_home) = env::var("XDG_DATA_HOME") {
             if !xdg_data_home.trim().is_empty() {
-                return Ok(PathBuf::from(xdg_data_home).join("homeboy"));
+                return Ok(PathBuf::from(xdg_data_home)
+                    .join(crate::core::product_identity::PRODUCT_IDENTITY.data_dirname));
             }
         }
 
@@ -84,7 +88,7 @@ pub fn homeboy_data() -> Result<PathBuf> {
         Ok(PathBuf::from(home)
             .join(".local")
             .join("share")
-            .join("homeboy"))
+            .join(crate::core::product_identity::PRODUCT_IDENTITY.data_dirname))
     }
 }
 
