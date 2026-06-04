@@ -207,8 +207,11 @@ function datamachineBundleConfigFromAgentTaskRequest(request, config, inputs) {
 }
 
 function normalizeStatus(result, exitStatus = 0) {
-  if (result?.status) {
+  if (AGENT_TASK_OUTCOME_STATUSES.includes(result?.status)) {
     return result.status;
+  }
+  if (result?.status === 'completed') {
+    return result?.success === true && exitStatus === 0 ? 'succeeded' : 'failed';
   }
   const agentResult = result?.run?.agentResult || result?.agentResult || result?.agent_result || result?.metadata?.recipe_run?.agentResult || result?.metadata?.recipe_run?.run?.agentResult;
   const changedFileCount = agentResult?.changedFiles?.count;

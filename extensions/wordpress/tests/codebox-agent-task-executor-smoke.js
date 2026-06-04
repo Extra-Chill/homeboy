@@ -341,6 +341,7 @@ assert.equal(outcome.artifacts[0].path, '/tmp/artifacts');
 const upstreamRunnerOutcome = agentTaskOutcomeFromCodeboxResult(request, {
   success: true,
   schema: 'wp-codebox/agent-task-run/v1',
+  status: 'completed',
   session: {
     id: 'sandbox-session-1',
     artifacts: {
@@ -353,6 +354,15 @@ const upstreamRunnerOutcome = agentTaskOutcomeFromCodeboxResult(request, {
 assert.equal(upstreamRunnerOutcome.status, 'succeeded');
 assert.equal(upstreamRunnerOutcome.artifacts[0].kind, 'codebox-artifact-directory');
 assert.equal(upstreamRunnerOutcome.artifacts[0].path, '/tmp/wp-codebox-artifacts');
+
+const completedFailureOutcome = agentTaskOutcomeFromCodeboxResult(request, {
+  success: false,
+  schema: 'wp-codebox/agent-task-run/v1',
+  status: 'completed',
+  summary: 'Data Machine bundle workload did not return any scenarios.',
+});
+assert.equal(completedFailureOutcome.status, 'failed');
+assert.equal(completedFailureOutcome.failure_classification, 'execution_failed');
 
 const datamachineOutcome = agentTaskOutcomeFromCodeboxResult({
   ...request,
