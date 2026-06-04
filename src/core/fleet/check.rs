@@ -1,5 +1,6 @@
 use crate::core::deploy::{self, DeployConfig};
 use crate::core::project;
+use crate::core::release::version;
 use serde::Serialize;
 
 #[derive(Debug, Default, Clone, Serialize)]
@@ -107,9 +108,28 @@ pub fn collect_check(
                 });
             }
             Err(e) => {
-                summary.projects_failed += 1;
+                if only_outdated && project::load(project_id).is_ok() {
+                    summary.projects_checked += 1;
+                    continue;
+                }
 
                 if !only_outdated {
+                    if let Ok(proj) = project::load(project_id) {
+                        let components = cached_project_component_checks(&proj, &mut summary);
+                        summary.projects_checked += 1;
+                        project_checks.push(FleetProjectCheck {
+                            project_id: project_id.clone(),
+                            server_id: proj.server_id,
+                            status: "checked_cached".to_string(),
+                            error: Some(format!(
+                                "live check failed; using cached local versions: {e}"
+                            )),
+                            components,
+                        });
+                        continue;
+                    }
+
+                    summary.projects_failed += 1;
                     project_checks.push(FleetProjectCheck {
                         project_id: project_id.clone(),
                         server_id: None,
@@ -124,4 +144,93 @@ pub fn collect_check(
 
     let exit_code = if summary.projects_failed > 0 { 1 } else { 0 };
     Ok((project_checks, summary, exit_code))
+}
+
+fn cached_project_component_checks(
+    proj: &project::Project,
+    summary: &mut FleetCheckSummary,
+) -> Vec<FleetComponentCheck> {
+    project::project_component_ids(proj)
+        .into_iter()
+        .map(|component_id| {
+            let local_version = project::resolve_project_component(proj, &component_id)
+                .ok()
+                .and_then(|comp| version::get_component_version(&comp));
+
+            summary.components_unknown += 1;
+
+            FleetComponentCheck {
+                component_id,
+                local_version,
+                remote_version: None,
+                status: "unknown".to_string(),
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::component::{self, Component};
+    use crate::core::fleet::{self, Fleet};
+    use crate::core::project::{self, Project, ProjectComponentAttachment};
+    use crate::test_support::with_isolated_home;
+
+    #[test]
+    fn fleet_check_falls_back_to_cached_components_when_live_check_fails() {
+        with_isolated_home(|home| {
+            let component_dir = home.path().join("tooling-component");
+            std::fs::create_dir_all(&component_dir).expect("component dir");
+
+            let component = Component {
+                id: "tooling-component".to_string(),
+                local_path: component_dir.to_string_lossy().to_string(),
+                remote_path: String::new(),
+                ..Default::default()
+            };
+            component::write_standalone_component_config(&component).expect("component config");
+
+            let mut project = Project {
+                id: "local-site".to_string(),
+                domain: Some("local-site.test".to_string()),
+                server_id: None,
+                base_path: Some(home.path().join("site").to_string_lossy().to_string()),
+                ..Default::default()
+            };
+            project.components.push(ProjectComponentAttachment {
+                id: "tooling-component".to_string(),
+                local_path: component_dir.to_string_lossy().to_string(),
+                remote_path: None,
+            });
+            project::save(&project).expect("project config");
+
+            fleet::save(&Fleet::new(
+                "local-fleet".to_string(),
+                vec!["local-site".to_string()],
+            ))
+            .expect("fleet config");
+
+            let (checks, summary, exit_code) =
+                collect_check("local-fleet", false).expect("fleet check");
+
+            assert_eq!(exit_code, 0);
+            assert_eq!(summary.projects_checked, 1);
+            assert_eq!(summary.projects_failed, 0);
+            assert_eq!(summary.components_unknown, 1);
+            assert_eq!(checks.len(), 1);
+            assert_eq!(checks[0].status, "checked_cached");
+            assert_eq!(checks[0].components.len(), 1);
+            assert_eq!(checks[0].components[0].component_id, "tooling-component");
+            assert_eq!(checks[0].components[0].status, "unknown");
+
+            let (outdated_checks, outdated_summary, outdated_exit_code) =
+                collect_check("local-fleet", true).expect("outdated fleet check");
+
+            assert_eq!(outdated_exit_code, 0);
+            assert_eq!(outdated_summary.projects_checked, 1);
+            assert_eq!(outdated_summary.projects_failed, 0);
+            assert!(outdated_checks.is_empty());
+        });
+    }
 }
