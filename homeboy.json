@@ -5,6 +5,31 @@
         "/homeboy-run-"
       ]
     },
+    "test_wiring": {
+      "policies": [
+        {
+          "id": "nested-test-harness-wiring",
+          "source_path_globs": [
+            "src/**/*.rs"
+          ],
+          "test_path_globs": [
+            "tests/**/*_test.rs"
+          ],
+          "auto_discovered_test_path_globs": [
+            "tests/*_test.rs"
+          ],
+          "support_test_path_globs": [],
+          "require_explicit_wiring": true,
+          "explicit_wiring_marker_patterns": [
+            "{test_path}"
+          ],
+          "convention": "test_wiring",
+          "severity": "warning",
+          "description": "Nested test file `{test_path}` is not wired into the configured test harness",
+          "suggestion": "Wire `{test_path}` from the covered source module with an explicit path include, or move it to a top-level auto-discovered test path."
+        }
+      ]
+    },
     "command_status_contracts": {
       "required_commands": [
         "audit",
