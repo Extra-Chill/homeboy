@@ -43,6 +43,14 @@ pub(super) fn record_trace_artifacts(
                     &resolved,
                     &mut observation_result,
                 );
+            } else {
+                record_unresolved_declared_artifact(
+                    store,
+                    run_id,
+                    run_dir.path(),
+                    artifact,
+                    &mut observation_result,
+                );
             }
         }
     }
@@ -157,6 +165,56 @@ fn record_declared_artifact(
     }
 }
 
+fn record_unresolved_declared_artifact(
+    store: &ObservationStore,
+    run_id: &str,
+    run_root: &Path,
+    artifact: &extension_trace::TraceArtifact,
+    result: &mut TraceArtifactObservationResult,
+) {
+    let declared_path = Path::new(&artifact.path);
+    if declared_path
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        result.invalid_declared_artifacts += 1;
+        record_declared_artifact_finding(
+            store,
+            run_id,
+            "trace.artifact.invalid_path",
+            "error",
+            format!(
+                "trace result declared artifact '{}' at '{}' is outside the trace run directory",
+                artifact.label, artifact.path
+            ),
+            artifact,
+            run_root,
+            declared_path,
+        );
+        return;
+    }
+
+    result.missing_declared_artifacts += 1;
+    let resolved = if declared_path.is_absolute() {
+        declared_path.to_path_buf()
+    } else {
+        run_root.join(declared_path)
+    };
+    record_declared_artifact_finding(
+        store,
+        run_id,
+        "trace.artifact.missing",
+        "error",
+        format!(
+            "trace result declared artifact '{}' at '{}', but the path does not exist",
+            artifact.label, artifact.path
+        ),
+        artifact,
+        run_root,
+        &resolved,
+    );
+}
+
 fn record_declared_artifact_finding(
     store: &ObservationStore,
     run_id: &str,
@@ -243,11 +301,15 @@ mod tests {
 
             let outcome = record_trace_artifacts(&store, &run.id, &run_dir, Some(&results));
             let artifacts = store.list_artifacts(&run.id).expect("artifacts");
+            let declared_artifact = artifacts
+                .iter()
+                .find(|artifact| {
+                    artifact.kind == "trace-artifact" && artifact.artifact_type == "directory"
+                })
+                .expect("declared trace artifact");
 
             assert!(!outcome.has_declared_artifact_failures());
-            assert_eq!(artifacts.len(), 1);
-            assert_eq!(artifacts[0].artifact_type, "directory");
-            let persisted = PathBuf::from(&artifacts[0].path);
+            let persisted = PathBuf::from(&declared_artifact.path);
             assert_eq!(
                 std::fs::read_to_string(persisted.join("network.jsonl")).expect("network"),
                 "{\"url\":\"/\"}\n"
@@ -280,19 +342,21 @@ mod tests {
 
             let outcome = record_trace_artifacts(&store, &run.id, &run_dir, Some(&results));
             let findings = store.list_findings_for_run(&run.id).expect("findings");
+            let missing_finding = findings
+                .iter()
+                .find(|finding| finding.rule.as_deref() == Some("trace.artifact.missing"))
+                .expect("missing artifact finding");
 
             assert!(outcome.has_declared_artifact_failures());
             assert_eq!(outcome.missing_declared_artifacts, 1);
-            assert_eq!(findings.len(), 1);
-            assert_eq!(findings[0].tool, "trace");
-            assert_eq!(findings[0].rule.as_deref(), Some("trace.artifact.missing"));
-            assert_eq!(findings[0].severity.as_deref(), Some("error"));
+            assert_eq!(missing_finding.tool, "trace");
+            assert_eq!(missing_finding.severity.as_deref(), Some("error"));
             assert_eq!(
-                findings[0].metadata_json["declared_artifact"]["label"],
+                missing_finding.metadata_json["declared_artifact"]["label"],
                 "network log"
             );
             assert_eq!(
-                findings[0].metadata_json["declared_artifact"]["path"],
+                missing_finding.metadata_json["declared_artifact"]["path"],
                 "artifacts/wp-codebox-artifacts/runtime-missing/files/browser/network.jsonl"
             );
             run_dir.cleanup();
