@@ -22,6 +22,7 @@ mod convention_membership;
 pub(crate) mod conventions;
 pub(crate) mod core_fingerprint;
 mod dead_code;
+mod descriptor_runtime;
 mod detectors;
 mod discovery;
 pub mod docs_audit;
@@ -51,13 +52,13 @@ use std::time::Duration;
 
 use self::detectors::layer_ownership::run as run_layer_ownership;
 use self::detectors::{
-    aggregate_construction, artifact_portability, command_status_contracts, config_key_usage,
-    core_boundary_leak, dead_guard, deprecation_age, enum_dispatch_contracts, facade_passthrough,
-    field_patterns, global_env_guard, mutating_resource_access, parallel_runner_setup,
-    public_registry_exposure, redirect_validation, repeated_literal_shape, requested_detectors,
-    runner_offload_preflight, shared_scaffolding, test_coverage, test_topology, test_wiring,
+    artifact_portability, command_status_contracts, config_key_usage, core_boundary_leak,
+    dead_guard, deprecation_age, enum_dispatch_contracts, field_patterns, global_env_guard,
+    mutating_resource_access, parallel_runner_setup, public_registry_exposure, redirect_validation,
+    requested_detectors, runner_offload_preflight, test_coverage, test_topology, test_wiring,
     unbounded_output_capture, wrapper_inference,
 };
+use descriptor_runtime::{run_descriptor_detectors, DetectorRunContext};
 
 pub use checks::{CheckResult, CheckStatus};
 pub use compare::{
@@ -65,7 +66,9 @@ pub use compare::{
 };
 pub use conventions::{AuditFinding, Convention, Deviation, Language, Outlier};
 pub use duplication::DuplicateGroup;
-pub(crate) use execution_plan::AuditExecutionPlan;
+pub(crate) use execution_plan::{
+    AuditExecutionPlan, DetectorDescriptor, DetectorRuntime, FingerprintDetectorRunner,
+};
 pub use findings::{homeboy_finding_from_audit, Finding, FindingConfidence, Severity};
 pub use fingerprint::FileFingerprint;
 pub use report::AuditCommandOutput;
@@ -554,6 +557,9 @@ fn audit_internal(
     // or similar implementations across convention-following files are correct behavior.
     let convention_methods =
         build_convention_method_set(&discovered_conventions, &all_fingerprints);
+    let detector_context = DetectorRunContext {
+        all_fingerprints: &all_fingerprints,
+    };
 
     let duplication_findings = time_audit_detector(
         &mut timing,
@@ -823,22 +829,13 @@ fn audit_internal(
         all_findings.extend(wrapper_findings);
     }
 
-    // Phase 4n: Shadow module detection — directories that are near-copies.
-    let shadow_findings = time_audit_detector(
+    run_descriptor_detectors(
+        plan,
         &mut timing,
-        "detector.shadow_modules",
-        plan.run_shadow_modules(),
-        || shadow_modules::run(&all_fingerprints),
-        Vec::new,
+        &mut all_findings,
+        &detector_context,
+        &["shadow_modules"],
     );
-    if !shadow_findings.is_empty() {
-        log_status!(
-            "audit",
-            "Shadow modules: {} finding(s) (duplicate directory structures)",
-            shadow_findings.len()
-        );
-        all_findings.extend(shadow_findings);
-    }
 
     // Phase 4o: Repeated struct field pattern detection.
     let field_pattern_findings = time_audit_detector(
@@ -857,40 +854,13 @@ fn audit_internal(
         all_findings.extend(field_pattern_findings);
     }
 
-    // Phase 4t: Facade-passthrough detection — classes whose public methods
-    // mostly delegate to an inner member without adding behavior.
-    let facade_findings = time_audit_detector(
+    run_descriptor_detectors(
+        plan,
         &mut timing,
-        "detector.facade_passthrough",
-        plan.run_facade_passthrough(),
-        || facade_passthrough::run(&all_fingerprints),
-        Vec::new,
+        &mut all_findings,
+        &detector_context,
+        &["facade_passthrough", "literal_shapes"],
     );
-    if !facade_findings.is_empty() {
-        log_status!(
-            "audit",
-            "Facade passthrough: {} finding(s) (thin wrapper classes)",
-            facade_findings.len()
-        );
-        all_findings.extend(facade_findings);
-    }
-
-    // Phase 4u: Repeated inline array literal shape detection.
-    let literal_shape_findings = time_audit_detector(
-        &mut timing,
-        "detector.literal_shapes",
-        plan.run_literal_shapes(),
-        || repeated_literal_shape::run(&all_fingerprints),
-        Vec::new,
-    );
-    if !literal_shape_findings.is_empty() {
-        log_status!(
-            "audit",
-            "Literal shapes: {} finding(s) (repeated inline array literals)",
-            literal_shape_findings.len()
-        );
-        all_findings.extend(literal_shape_findings);
-    }
 
     // Phase 4r: Deprecation age detection
     let deprecation_findings = time_audit_detector(
@@ -1047,23 +1017,13 @@ fn audit_internal(
         all_findings.extend(env_guard_findings);
     }
 
-    // Phase 4s: Shared scaffolding detection — groups of classes sharing the
-    // same method-shape AND high body similarity, candidates for a shared base.
-    let scaffolding_findings = time_audit_detector(
+    run_descriptor_detectors(
+        plan,
         &mut timing,
-        "detector.shared_scaffolding",
-        plan.run_shared_scaffolding(),
-        || shared_scaffolding::run(&all_fingerprints),
-        Vec::new,
+        &mut all_findings,
+        &detector_context,
+        &["shared_scaffolding"],
     );
-    if !scaffolding_findings.is_empty() {
-        log_status!(
-            "audit",
-            "Shared scaffolding: {} finding(s) (candidate base class groups)",
-            scaffolding_findings.len()
-        );
-        all_findings.extend(scaffolding_findings);
-    }
 
     // Phase 4w: Parallel runner setup detection — command-family files that
     // assemble the same generic execution contract independently.
@@ -1118,22 +1078,13 @@ fn audit_internal(
         all_findings.extend(enum_dispatch_findings);
     }
 
-    // Phase 4x: Direct aggregate construction despite canonical construction seams.
-    let aggregate_construction_findings = time_audit_detector(
+    run_descriptor_detectors(
+        plan,
         &mut timing,
-        "detector.aggregate_construction",
-        plan.run_aggregate_construction(),
-        || aggregate_construction::run(&all_fingerprints),
-        Vec::new,
+        &mut all_findings,
+        &detector_context,
+        &["aggregate_construction"],
     );
-    if !aggregate_construction_findings.is_empty() {
-        log_status!(
-            "audit",
-            "Aggregate construction: {} finding(s) (direct literals bypass construction seams)",
-            aggregate_construction_findings.len()
-        );
-        all_findings.extend(aggregate_construction_findings);
-    }
 
     // Phase 4y: Public metadata routes returning raw registry/config getters
     // while a permission-aware resolver/helper exists in the same area.

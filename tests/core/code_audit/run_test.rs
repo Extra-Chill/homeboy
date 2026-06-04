@@ -11,7 +11,7 @@ use crate::core::code_audit::conventions::{Deviation, Outlier};
 use crate::core::code_audit::findings::{Finding, Severity};
 use crate::core::code_audit::{
     AuditAnalysisContext, AuditExecutionPlan, AuditFinding, AuditSummary, CodeAuditResult,
-    ConventionReport,
+    ConventionReport, DetectorRuntime,
 };
 use crate::core::plan::PlanStepStatus;
 
@@ -543,6 +543,36 @@ fn execution_plan_for_duplicate_only_skips_structural_detector_family() {
     assert!(!plan.run_structural());
     assert_eq!(
         detector_step_status(&plan, "conventions"),
+        &PlanStepStatus::Disabled
+    );
+}
+
+#[test]
+fn migrated_fingerprint_detector_descriptors_keep_filtering() {
+    let plan = AuditExecutionPlan::from_filters(&[AuditFinding::RepeatedLiteralShape], &[]);
+    let descriptor = AuditExecutionPlan::descriptors()
+        .iter()
+        .find(|descriptor| descriptor.id == "literal_shapes")
+        .expect("literal shape descriptor is registered");
+
+    assert!(matches!(
+        descriptor.runtime,
+        DetectorRuntime::Fingerprint(_)
+    ));
+    assert_eq!(
+        detector_step_status(&plan, "literal_shapes"),
+        &PlanStepStatus::Ready
+    );
+    assert_eq!(
+        detector_step_status(&plan, "facade_passthrough"),
+        &PlanStepStatus::Disabled
+    );
+
+    let excluded_plan =
+        AuditExecutionPlan::from_filters(&[], &[AuditFinding::RepeatedLiteralShape]);
+
+    assert_eq!(
+        detector_step_status(&excluded_plan, "literal_shapes"),
         &PlanStepStatus::Disabled
     );
 }
