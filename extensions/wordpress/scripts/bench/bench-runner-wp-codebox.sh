@@ -159,7 +159,7 @@ homeboy_wp_codebox_compile_bootstrap_steps() {
 homeboy_wp_codebox_compile_prepare_steps() {
     local steps_json
     steps_json=$(printf '%s' "$settings_json" | jq -c '
-        .wp_codebox_prepare_steps // .plugin_prepare // .bench_prepare // []
+        .wp_codebox_prepare_steps // []
         | if type == "array" then . else [] end
     ' 2>/dev/null || echo '[]')
 
