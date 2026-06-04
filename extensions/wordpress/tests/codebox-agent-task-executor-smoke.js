@@ -62,6 +62,11 @@ const fs = require('node:fs');
 const recipePath = process.argv[process.argv.indexOf('--recipe') + 1];
 const artifacts = process.argv[process.argv.indexOf('--artifacts') + 1];
 const recipe = JSON.parse(fs.readFileSync(recipePath, 'utf8'));
+const codeFileArg = recipe.workflow.steps[0].args.find((arg) => arg.startsWith('code-file=')) || '';
+const codeFilePath = codeFileArg.slice('code-file='.length);
+if (codeFilePath) {
+  fs.readFileSync(codeFilePath, 'utf8');
+}
 const datamachineConfig = JSON.parse(process.env.HOMEBOY_DATAMACHINE_AGENT_CONFIG || '{}');
 fs.writeFileSync(${JSON.stringify(capture)}, JSON.stringify({ argv: process.argv.slice(2), recipe, datamachineConfig }, null, 2));
 process.stdout.write(JSON.stringify({
@@ -569,7 +574,7 @@ try {
   assert.equal(datamachineCliOutcome.evidence_refs.some((ref) => ref.uri === 'https://github.com/chubes4/wp-site-generator/pull/123'), true);
   const capturedDatamachineRun = JSON.parse(fs.readFileSync(fakeWpCodeboxCapture, 'utf8'));
   assert.equal(capturedDatamachineRun.recipe.workflow.steps[0].command, 'wp-codebox.agent-sandbox-run');
-  assert.equal(capturedDatamachineRun.recipe.workflow.steps[0].args.includes('code-file=/homeboy-extension/scripts/agent/homeboy-datamachine-agent-workload-wrapper.php'), true);
+  assert.equal(capturedDatamachineRun.recipe.workflow.steps[0].args.includes(`code-file=${path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-datamachine-agent-workload-wrapper.php')}`), true);
   assert.equal(capturedDatamachineRun.recipe.inputs.mounts.some((mount) => mount.target === '/homeboy-extension'), true);
   assert.equal(capturedDatamachineRun.recipe.inputs.mounts.some((mount) => mount.target === '/wordpress/wp-content/plugins/static-site-agent'), true);
   assert.equal(capturedDatamachineRun.recipe.inputs.secretEnv.includes('HOMEBOY_DATAMACHINE_AGENT_CONFIG'), true);
