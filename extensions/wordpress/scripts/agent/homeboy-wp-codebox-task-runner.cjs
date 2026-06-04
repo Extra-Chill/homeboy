@@ -436,6 +436,15 @@ function validateDatamachineWorkload(workload, config) {
     };
   }
 
+  const failedScenario = scenarios.find((scenario) => scenario?.metadata?.error || scenario?.metadata?.error_message);
+  if (failedScenario) {
+    return {
+      class: 'datamachine.workload.failed',
+      message: failedScenario.metadata.error || failedScenario.metadata.error_message,
+      data: { reason: 'scenario_error', scenario_id: failedScenario.id, metadata: failedScenario.metadata },
+    };
+  }
+
   const outputs = config.engine_data_outputs && typeof config.engine_data_outputs === 'object' ? config.engine_data_outputs : {};
   const missing = [];
   for (const [name, outputPath] of Object.entries(outputs)) {

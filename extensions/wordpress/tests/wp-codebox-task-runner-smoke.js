@@ -34,9 +34,11 @@ if (codeFilePath) {
   fs.readFileSync(codeFilePath, 'utf8');
 }
 const isDatamachineBundle = Boolean(codeFilePath);
-const agentResult = isDatamachineBundle && !process.env.FIXTURE_WP_CODEBOX_INCOMPLETE_DATAMACHINE
-  ? { scenarios: [{ id: 'datamachine-agent', metadata: { engine_data: { store_idea_agent: { issue_number: 123 } } } }] }
-  : { status: 'completed' };
+const agentResult = isDatamachineBundle && process.env.FIXTURE_WP_CODEBOX_FAILED_DATAMACHINE
+  ? { scenarios: [{ id: 'datamachine-agent', metadata: { error: 'Data Machine child job 456 did not reach a terminal state after drain; current status is pending.' } }] }
+  : (isDatamachineBundle && !process.env.FIXTURE_WP_CODEBOX_INCOMPLETE_DATAMACHINE
+      ? { scenarios: [{ id: 'datamachine-agent', metadata: { engine_data: { store_idea_agent: { issue_number: 123 } } } }] }
+      : { status: 'completed' });
 fs.writeFileSync(out, JSON.stringify({ argv: process.argv.slice(2), recipe, datamachineConfig: JSON.parse(process.env.HOMEBOY_DATAMACHINE_AGENT_CONFIG || '{}') }, null, 2));
 process.stdout.write(JSON.stringify({
   success: true,
@@ -324,6 +326,39 @@ try {
   assert.equal(incompleteDatamachineOutput.session.status, 'failed');
   assert.equal(incompleteDatamachineOutput.diagnostics[0].class, 'datamachine.workload.incomplete');
   assert.equal(incompleteDatamachineOutput.diagnostics[0].data.reason, 'missing_scenarios');
+
+  const failedDatamachineCapturePath = path.join(root, 'capture-failed-datamachine.json');
+  const failedDatamachineResult = spawnSync(process.execPath, [
+    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-wp-codebox-task-runner.cjs'),
+    '--wp-codebox-bin',
+    fixtureWpCodebox,
+    '--artifacts',
+    path.join(root, 'failed-datamachine-artifacts'),
+  ], {
+    encoding: 'utf8',
+    input: JSON.stringify({
+      ...request,
+      execution_kind: 'datamachine_bundle',
+      homeboy_extensions: path.join(__dirname, '..'),
+      datamachine_bundle: {
+        bundle_path: '/workspace/wp-site-generator/bundles/store-idea-agent',
+        engine_data_outputs: { issue_number: 'metadata.engine_data.store_idea_agent.issue_number' },
+      },
+      provider_plugin_paths: [],
+    }),
+    env: {
+      ...process.env,
+      FIXTURE_WP_CODEBOX_CAPTURE: failedDatamachineCapturePath,
+      FIXTURE_WP_CODEBOX_FAILED_DATAMACHINE: '1',
+      OPENCODE_API_KEY: 'redacted-test-key',
+    },
+  });
+  assert.equal(failedDatamachineResult.status, 1, failedDatamachineResult.stderr || failedDatamachineResult.stdout);
+  const failedDatamachineOutput = JSON.parse(failedDatamachineResult.stdout);
+  assert.equal(failedDatamachineOutput.success, false);
+  assert.equal(failedDatamachineOutput.diagnostics[0].class, 'datamachine.workload.failed');
+  assert.equal(failedDatamachineOutput.diagnostics[0].data.reason, 'scenario_error');
+  assert.match(failedDatamachineOutput.summary, /did not reach a terminal state/);
 
   const nonExecutableCapturePath = path.join(root, 'capture-non-executable.json');
   const nonExecutableFixture = createFixtureWpCodebox(root, 0o644);
