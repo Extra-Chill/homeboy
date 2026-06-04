@@ -445,6 +445,9 @@ if type homeboy_export_validation_dependency_paths &>/dev/null; then
     homeboy_export_validation_dependency_paths "$PLUGIN_PATH"
 fi
 DEPENDENCY_PATHS="${HOMEBOY_WORDPRESS_DEPENDENCY_PATHS:-}"
+if [ -n "$DEPENDENCY_PATHS" ] && type homeboy_prepare_validation_dependency_paths_for_wp_codebox_bench &>/dev/null; then
+    DEPENDENCY_PATHS=$(homeboy_prepare_validation_dependency_paths_for_wp_codebox_bench "$DEPENDENCY_PATHS" "$ARTIFACTS_DIR")
+fi
 
 WP_CONFIG_DEFINES_JSON="{}"
 BENCH_ENV_JSON="{}"

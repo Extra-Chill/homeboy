@@ -13,11 +13,13 @@ AGENTS_API_DIR="${TMPDIR}/agents-api"
 REMOTE_AGENTS_API_DIR="${TMPDIR}/remote/agents-api"
 VENDORED_AGENTS_API_DIR="${COMPONENT_DIR}/vendor/automattic/agents-api"
 OPENAI_PROVIDER_DIR="${TMPDIR}/ai-provider-for-openai"
+COMPOSER_PLUGIN_DIR="${TMPDIR}/composer-plugin"
+COMPOSER_ARTIFACTS_DIR="${TMPDIR}/composer-artifacts"
 BIN_DIR="${TMPDIR}/bin"
 CLONE_BIN_DIR="${TMPDIR}/clone-bin"
 FALLBACK_CACHE_DIR="${TMPDIR}/fallback-cache"
 
-mkdir -p "$COMPONENT_DIR" "$DATA_MACHINE_DIR" "$CLONED_DATA_MACHINE_DIR" "$AGENTS_API_DIR" "$REMOTE_AGENTS_API_DIR" "$VENDORED_AGENTS_API_DIR" "$OPENAI_PROVIDER_DIR" "$BIN_DIR" "$CLONE_BIN_DIR" "$FALLBACK_CACHE_DIR"
+mkdir -p "$COMPONENT_DIR" "$DATA_MACHINE_DIR" "$CLONED_DATA_MACHINE_DIR" "$AGENTS_API_DIR" "$REMOTE_AGENTS_API_DIR" "$VENDORED_AGENTS_API_DIR" "$OPENAI_PROVIDER_DIR" "$COMPOSER_PLUGIN_DIR" "$COMPOSER_ARTIFACTS_DIR" "$BIN_DIR" "$CLONE_BIN_DIR" "$FALLBACK_CACHE_DIR"
 
 cat > "${COMPONENT_DIR}/intelligence.php" <<'PHP'
 <?php
@@ -79,6 +81,17 @@ cat > "${OPENAI_PROVIDER_DIR}/ai-provider-for-openai.php" <<'PHP'
  * Plugin Name: AI Provider for OpenAI
  */
 PHP
+
+cat > "${COMPOSER_PLUGIN_DIR}/composer-plugin.php" <<'PHP'
+<?php
+/**
+ * Plugin Name: Composer Plugin
+ */
+PHP
+
+cat > "${COMPOSER_PLUGIN_DIR}/composer.json" <<'JSON'
+{"name":"example/composer-plugin"}
+JSON
 
 cat > "${BIN_DIR}/homeboy" <<SH
 #!/usr/bin/env bash
@@ -153,6 +166,15 @@ cat > "${CLONE_BIN_DIR}/composer" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 if [ "${1:-}" = "install" ]; then
+    working_dir="$PWD"
+    for arg in "$@"; do
+        case "$arg" in
+            --working-dir=*)
+                working_dir="${arg#--working-dir=}"
+                ;;
+        esac
+    done
+    cd "$working_dir"
     mkdir -p vendor
     : > vendor/autoload.php
     exit 0
@@ -308,6 +330,27 @@ fi
 if ! grep -F -- "Resolved dependency 'agents-api' via final validation dependency path: ${REMOTE_AGENTS_API_DIR}" <<< "$mapped_export_output" >/dev/null; then
     echo "FAIL: mapped export diagnostics should report the remote dependency path" >&2
     printf '%s\n' "$mapped_export_output" >&2
+    exit 1
+fi
+
+prepared_composer_plugin=$(
+    PATH="${CLONE_BIN_DIR}:$PATH" \
+    homeboy_prepare_validation_dependency_for_wp_codebox_bench "$COMPOSER_PLUGIN_DIR" "$COMPOSER_ARTIFACTS_DIR"
+)
+expected_prepared_composer_plugin="${COMPOSER_ARTIFACTS_DIR}/prepared-bench-dependencies/composer-plugin"
+if [ "$prepared_composer_plugin" != "$expected_prepared_composer_plugin" ]; then
+    echo "FAIL: Composer dependency should be prepared under bench artifacts" >&2
+    printf 'prepared: %s\nexpected: %s\n' "$prepared_composer_plugin" "$expected_prepared_composer_plugin" >&2
+    exit 1
+fi
+
+if [ ! -f "${prepared_composer_plugin}/vendor/autoload.php" ]; then
+    echo "FAIL: prepared Composer dependency should include Composer autoload files" >&2
+    exit 1
+fi
+
+if [ -f "${COMPOSER_PLUGIN_DIR}/vendor/autoload.php" ]; then
+    echo "FAIL: Composer dependency preparation should not mutate the source dependency" >&2
     exit 1
 fi
 
