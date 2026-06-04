@@ -46,6 +46,7 @@ fn test_expand_vars_component_path() {
         "studio".to_string(),
         ComponentSpec {
             path: "/tmp/studio".to_string(),
+            checkout_root: None,
             remote_url: None,
             triage_remote_url: None,
             stack: None,
@@ -92,6 +93,7 @@ fn test_expand_resources_expands_string_entries() {
             "studio".to_string(),
             ComponentSpec {
                 path: "~/Developer/studio".to_string(),
+                checkout_root: None,
                 remote_url: None,
                 triage_remote_url: None,
                 stack: None,

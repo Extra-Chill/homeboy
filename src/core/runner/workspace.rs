@@ -89,7 +89,7 @@ pub fn sync_workspace(
             "runner workspace sync requires workspace_root",
             Some(runner.id.clone()),
             Some(vec![
-                "Set runner.workspace_root to the remote Lab workspace directory.".to_string(),
+                "Set runner.workspace_root to the remote workspace directory.".to_string(),
             ]),
         )
     })?;
@@ -173,7 +173,7 @@ struct GitSnapshot {
     changed_since_base: Option<String>,
 }
 
-fn canonical_workspace_path(path: &str) -> Result<PathBuf> {
+pub(super) fn canonical_workspace_path(path: &str) -> Result<PathBuf> {
     let expanded = shellexpand::tilde(path).to_string();
     let path = Path::new(&expanded);
     if !path.is_dir() {
@@ -242,14 +242,14 @@ fn git_snapshot(local_path: &Path, changed_since_base: Option<&str>) -> Result<G
         if changed_since_base.is_some() {
             return Err(Error::validation_invalid_argument(
                 "mode",
-                "git workspace sync requires a clean working tree for changed-since Lab offload; snapshot sync cannot honor --changed-since because it excludes .git metadata",
+                "git workspace sync requires a clean working tree for changed-since remote execution; snapshot sync cannot honor --changed-since because it excludes .git metadata",
                 Some("git".to_string()),
                 Some(vec![
-                    "Commit or stash local changes before offloading a --changed-since command."
+                    "Commit or stash local changes before remote execution of a --changed-since command."
                         .to_string(),
                     "Run with --force-hot to execute the changed-since command locally."
                         .to_string(),
-                    "Omit --changed-since to use snapshot Lab offload for dirty local changes."
+                    "Omit --changed-since to use snapshot remote execution for dirty local changes."
                         .to_string(),
                 ]),
             ));
@@ -279,7 +279,7 @@ fn git_snapshot(local_path: &Path, changed_since_base: Option<&str>) -> Result<G
     })
 }
 
-fn git_output(local_path: &Path, args: &[&str]) -> Result<String> {
+pub(super) fn git_output(local_path: &Path, args: &[&str]) -> Result<String> {
     let output = Command::new("git")
         .args(args)
         .current_dir(local_path)
@@ -481,7 +481,7 @@ fn materialize_git(
             } else {
                 Err(Error::validation_invalid_argument(
                     "changed_since",
-                    "Lab offload could not make the requested --changed-since base reachable in the runner workspace before dispatch",
+                    "runner dispatch could not make the requested --changed-since base reachable in the runner workspace before dispatch",
                     changed_since_base.map(str::to_string),
                     Some(vec![
                         "Verify the branch and base commit are pushed to origin.".to_string(),
@@ -522,7 +522,7 @@ fn materialize_git_command(
     )
 }
 
-fn ssh_client_for_runner(runner: &Runner) -> Result<(Server, SshClient)> {
+pub(super) fn ssh_client_for_runner(runner: &Runner) -> Result<(Server, SshClient)> {
     let server_id = runner.server_id.as_deref().ok_or_else(|| {
         Error::validation_invalid_argument(
             "server_id",
