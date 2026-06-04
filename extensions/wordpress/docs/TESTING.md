@@ -99,6 +99,17 @@ If your plugin depends on other local plugins at runtime, declare them:
 Dependencies are mounted alongside the plugin under test and their entry
 files are loaded during the `load_deps` bootstrap stage.
 
+Bench and trace scenarios preflight dependency plugin packages before WP
+Codebox dispatch. The dependency path must be the runnable WordPress plugin
+package root with a root `Plugin Name:` main file. Monorepo source checkouts,
+such as a WooCommerce repository root where the plugin lives under
+`plugins/woocommerce/woocommerce.php`, may need a packaged plugin build before
+they can be used as WordPress runtime evidence. Preflight failures write
+structured diagnostics to
+`wordpress-dependency-plugin-preflight-diagnostics.json` in the run artifact
+directory and distinguish missing paths, missing plugin main files, and plugin
+load fatals caused by missing generated build artifacts.
+
 ## Drop-ins (`db.php`)
 
 Plugins that ship a `db.php` drop-in are supported automatically. The

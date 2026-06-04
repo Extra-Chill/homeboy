@@ -114,6 +114,297 @@ homeboy_get_validation_dependency_slug() {
     printf '%s\n' "$dir_slug"
 }
 
+homeboy_find_validation_dependency_plugin_main_file() {
+    local plugin_path="${1:-}"
+
+    [ -n "$plugin_path" ] && [ -d "$plugin_path" ] || return 1
+
+    local candidate
+    for candidate in "${plugin_path}/$(basename "$plugin_path").php" "${plugin_path}/plugin.php"; do
+        [ -f "$candidate" ] || continue
+        if grep -q 'Plugin Name:' "$candidate"; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+
+    for candidate in "$plugin_path"/*.php; do
+        [ -f "$candidate" ] || continue
+        if grep -q 'Plugin Name:' "$candidate"; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+_homeboy_wordpress_dependency_preflight_diagnostics_file() {
+    local artifacts_dir="${1:-}"
+
+    [ -n "$artifacts_dir" ] || return 1
+    printf '%s\n' "${artifacts_dir%/}/wordpress-dependency-plugin-preflight-diagnostics.json"
+}
+
+_homeboy_wordpress_dependency_preflight_append_diagnostic() {
+    local artifacts_dir="${1:-}"
+    local code="${2:-wordpress-dependency-plugin-preflight-failed}"
+    local message="${3:-WordPress dependency plugin preflight failed.}"
+    local context="${4:-wordpress}"
+    local slug="${5:-}"
+    local dependency_path="${6:-}"
+    local expected_plugin_file="${7:-}"
+    local plugin_file="${8:-}"
+    local missing_include="${9:-}"
+    local exit_code="${10:-}"
+    local output="${11:-}"
+    local package_required="${12:-false}"
+    local source_checkout_plugin_file="${13:-}"
+
+    [ -n "$artifacts_dir" ] || return 0
+    command -v jq >/dev/null 2>&1 || return 0
+
+    local diagnostics_file existing_json tmp_file
+    diagnostics_file=$(_homeboy_wordpress_dependency_preflight_diagnostics_file "$artifacts_dir")
+    mkdir -p "$(dirname "$diagnostics_file")"
+    existing_json='{"schema":"homeboy/wordpress-dependency-plugin-preflight/v1","diagnostics":[]}'
+    if [ -f "$diagnostics_file" ]; then
+        existing_json=$(jq -c 'if type == "object" and (.diagnostics | type) == "array" then . else {schema:"homeboy/wordpress-dependency-plugin-preflight/v1", diagnostics:[]} end' "$diagnostics_file" 2>/dev/null || printf '%s\n' "$existing_json")
+    fi
+
+    tmp_file=$(mktemp "${diagnostics_file}.XXXXXX")
+    jq -n \
+        --argjson existing "$existing_json" \
+        --arg schema 'homeboy/wordpress-dependency-plugin-preflight/v1' \
+        --arg code "$code" \
+        --arg message "$message" \
+        --arg context "$context" \
+        --arg slug "$slug" \
+        --arg dependencyPath "$dependency_path" \
+        --arg expectedPluginFile "$expected_plugin_file" \
+        --arg pluginFile "$plugin_file" \
+        --arg missingInclude "$missing_include" \
+        --arg exitCode "$exit_code" \
+        --arg output "$output" \
+        --argjson packageRequired "$package_required" \
+        --arg sourceCheckoutPluginFile "$source_checkout_plugin_file" \
+        '$existing + {schema: $schema} | .diagnostics += [{
+            code: $code,
+            severity: "error",
+            phase: "dependency-preflight",
+            context: $context,
+            message: $message,
+            dependency_slug: (if $slug == "" then null else $slug end),
+            dependency_path: (if $dependencyPath == "" then null else $dependencyPath end),
+            expected_plugin_file: (if $expectedPluginFile == "" then null else $expectedPluginFile end),
+            plugin_file: (if $pluginFile == "" then null else $pluginFile end),
+            missing_include: (if $missingInclude == "" then null else $missingInclude end),
+            package_required: $packageRequired,
+            source_checkout_plugin_file: (if $sourceCheckoutPluginFile == "" then null else $sourceCheckoutPluginFile end),
+            exit_code: (if $exitCode == "" then null else ($exitCode | tonumber) end),
+            output: (if $output == "" then null else $output end)
+        }]' > "$tmp_file"
+    mv "$tmp_file" "$diagnostics_file"
+}
+
+_homeboy_wordpress_dependency_preflight_source_checkout_plugin_file() {
+    local dependency_path="${1:-}"
+    local dependency_slug="${2:-}"
+    local candidate
+
+    [ -n "$dependency_path" ] && [ -d "$dependency_path" ] || return 1
+
+    for candidate in \
+        "${dependency_path}/plugins/${dependency_slug}/${dependency_slug}.php" \
+        "${dependency_path}/plugins/${dependency_slug}/plugin.php"; do
+        [ -f "$candidate" ] || continue
+        if grep -q 'Plugin Name:' "$candidate"; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+_homeboy_wordpress_dependency_preflight_extract_missing_include() {
+    local output="${1:-}"
+    local missing=""
+
+    missing=$(printf '%s\n' "$output" | sed -n -E "s/.*Failed opening required '([^']+)'.*/\1/p; s/.*Failed opening '([^']+)'.*/\1/p" | head -1)
+    if [ -n "$missing" ]; then
+        printf '%s\n' "$missing"
+        return 0
+    fi
+
+    missing=$(printf '%s\n' "$output" | sed -n -E 's/.*(require_once|require|include_once|include)\(([^)]+)\): Failed to open stream.*/\2/p' | head -1)
+    [ -n "$missing" ] && printf '%s\n' "$missing"
+}
+
+_homeboy_wordpress_dependency_preflight_php_load() {
+    local plugin_file="${1:-}"
+    local tmp_file output exit_code
+
+    [ -n "$plugin_file" ] && [ -f "$plugin_file" ] || return 1
+
+    tmp_file=$(mktemp "${TMPDIR:-/tmp}/homeboy-wp-dependency-preflight.XXXXXX.php")
+    cat > "$tmp_file" <<'PHP'
+<?php
+error_reporting(E_ALL);
+ini_set('display_errors', '1');
+define('ABSPATH', sys_get_temp_dir() . '/homeboy-wordpress-preflight/');
+define('WPINC', 'wp-includes');
+foreach (array(
+    'add_action', 'add_filter', 'remove_action', 'remove_filter', 'do_action', 'do_action_ref_array',
+    'register_activation_hook', 'register_deactivation_hook', 'register_uninstall_hook',
+    'wp_register_script', 'wp_enqueue_script', 'wp_register_style', 'wp_enqueue_style',
+) as $function) {
+    if (!function_exists($function)) {
+        eval('function ' . $function . '(...$args) { return true; }');
+    }
+}
+if (!function_exists('apply_filters')) { function apply_filters($hook, $value = null, ...$args) { return $value; } }
+if (!function_exists('apply_filters_ref_array')) { function apply_filters_ref_array($hook, $args) { return $args[0] ?? null; } }
+if (!function_exists('plugin_dir_path')) { function plugin_dir_path($file) { return rtrim(dirname($file), '/\\') . '/'; } }
+if (!function_exists('plugin_dir_url')) { function plugin_dir_url($file) { return ''; } }
+if (!function_exists('plugin_basename')) { function plugin_basename($file) { return basename(dirname($file)) . '/' . basename($file); } }
+if (!function_exists('trailingslashit')) { function trailingslashit($string) { return rtrim($string, '/\\') . '/'; } }
+if (!function_exists('wp_normalize_path')) { function wp_normalize_path($path) { return str_replace('\\', '/', $path); } }
+if (!function_exists('wp_die')) { function wp_die($message = '', $title = '', $args = array()) { fwrite(STDERR, (string) $message); exit(1); } }
+if (!function_exists('__')) { function __($text, $domain = 'default') { return $text; } }
+if (!function_exists('_e')) { function _e($text, $domain = 'default') { echo $text; } }
+if (!function_exists('esc_html__')) { function esc_html__($text, $domain = 'default') { return $text; } }
+if (!function_exists('esc_attr__')) { function esc_attr__($text, $domain = 'default') { return $text; } }
+if (!function_exists('esc_html')) { function esc_html($text) { return $text; } }
+if (!function_exists('esc_attr')) { function esc_attr($text) { return $text; } }
+if (!function_exists('esc_url')) { function esc_url($url) { return $url; } }
+if (!function_exists('is_admin')) { function is_admin() { return false; } }
+if (!function_exists('is_multisite')) { function is_multisite() { return false; } }
+if (!function_exists('get_option')) { function get_option($option, $default = false) { return $default; } }
+if (!function_exists('get_site_option')) { function get_site_option($option, $default = false) { return $default; } }
+if (!function_exists('current_user_can')) { function current_user_can($capability, ...$args) { return false; } }
+require_once $argv[1];
+PHP
+
+    set +e
+    output=$(php "$tmp_file" "$plugin_file" 2>&1)
+    exit_code=$?
+    set -e
+    rm -f "$tmp_file"
+
+    if [ "$exit_code" -ne 0 ]; then
+        printf '%s\n' "$exit_code"
+        printf '%s\n' "$output"
+        return 1
+    fi
+
+    return 0
+}
+
+homeboy_preflight_declared_validation_dependency_paths() {
+    local artifacts_dir="${1:-}"
+    local context="${2:-wordpress}"
+    local raw configured dependency
+    local failed=0
+
+    raw="${HOMEBOY_WORDPRESS_DEPENDENCY_PATHS:-}"
+    configured=$(homeboy_normalize_validation_dependencies "$(homeboy_get_validation_dependencies_raw || true)" || true)
+    if [ -n "$configured" ]; then
+        raw="${raw}"$'\n'"${configured}"
+    fi
+
+    while IFS= read -r dependency; do
+        [ -n "$dependency" ] || continue
+        case "$dependency" in
+            /*|./*|../*|*/*)
+                if [ ! -d "$dependency" ]; then
+                    _homeboy_wordpress_dependency_preflight_append_diagnostic \
+                        "$artifacts_dir" \
+                        'wordpress-dependency-path-missing' \
+                        "WordPress dependency plugin path does not exist: ${dependency}" \
+                        "$context" \
+                        "$(basename "$dependency")" \
+                        "$dependency" \
+                        "$dependency" \
+                        '' \
+                        '' \
+                        '' \
+                        '' \
+                        false \
+                        ''
+                    echo "Error: WordPress dependency plugin path does not exist: ${dependency}" >&2
+                    failed=1
+                fi
+                ;;
+        esac
+    done <<< "$raw"
+
+    [ "$failed" -eq 0 ]
+}
+
+homeboy_preflight_wordpress_dependency_plugins() {
+    local dependency_paths="${1:-}"
+    local artifacts_dir="${2:-}"
+    local context="${3:-wordpress}"
+    local dependency_path dependency_slug expected_plugin_file plugin_file nested_plugin_file load_result load_exit load_output missing_include
+    local failed=0
+
+    while IFS= read -r dependency_path; do
+        [ -n "$dependency_path" ] || continue
+
+        dependency_slug=$(homeboy_get_validation_dependency_slug "$dependency_path" || basename "$dependency_path")
+        expected_plugin_file="${dependency_path%/}/${dependency_slug}.php"
+
+        if [ ! -d "$dependency_path" ]; then
+            _homeboy_wordpress_dependency_preflight_append_diagnostic \
+                "$artifacts_dir" \
+                'wordpress-dependency-path-missing' \
+                "WordPress dependency plugin path does not exist: ${dependency_path}" \
+                "$context" "$dependency_slug" "$dependency_path" "$expected_plugin_file" '' '' '' '' false ''
+            echo "Error: WordPress dependency plugin '${dependency_slug}' path does not exist: ${dependency_path}" >&2
+            failed=1
+            continue
+        fi
+
+        plugin_file=$(homeboy_find_validation_dependency_plugin_main_file "$dependency_path" || true)
+        if [ -z "$plugin_file" ]; then
+            nested_plugin_file=$(_homeboy_wordpress_dependency_preflight_source_checkout_plugin_file "$dependency_path" "$dependency_slug" || true)
+            _homeboy_wordpress_dependency_preflight_append_diagnostic \
+                "$artifacts_dir" \
+                'wordpress-dependency-plugin-main-file-missing' \
+                "WordPress dependency plugin '${dependency_slug}' is not a runnable plugin package; no plugin main file was found at the dependency root." \
+                "$context" "$dependency_slug" "$dependency_path" "$expected_plugin_file" '' '' '' '' true "$nested_plugin_file"
+            echo "Error: WordPress dependency plugin '${dependency_slug}' is not a runnable plugin package: ${dependency_path}" >&2
+            echo "  Expected plugin main file: ${expected_plugin_file}" >&2
+            if [ -n "$nested_plugin_file" ]; then
+                echo "  Found source-checkout plugin file: ${nested_plugin_file}" >&2
+            fi
+            echo "  Use a packaged plugin build for WordPress runtime bench/trace evidence." >&2
+            failed=1
+            continue
+        fi
+
+        load_result=$(_homeboy_wordpress_dependency_preflight_php_load "$plugin_file" || true)
+        if [ -n "$load_result" ]; then
+            load_exit=$(printf '%s\n' "$load_result" | head -1)
+            load_output=$(printf '%s\n' "$load_result" | tail -n +2 | head -c 4000)
+            missing_include=$(_homeboy_wordpress_dependency_preflight_extract_missing_include "$load_output" || true)
+            _homeboy_wordpress_dependency_preflight_append_diagnostic \
+                "$artifacts_dir" \
+                'wordpress-dependency-plugin-load-fatal' \
+                "WordPress dependency plugin '${dependency_slug}' failed a lightweight PHP load preflight before WP Codebox dispatch." \
+                "$context" "$dependency_slug" "$dependency_path" "$expected_plugin_file" "$plugin_file" "$missing_include" "$load_exit" "$load_output" true ''
+            echo "Error: WordPress dependency plugin '${dependency_slug}' failed PHP load preflight before WP Codebox dispatch." >&2
+            echo "  Plugin file: ${plugin_file}" >&2
+            [ -z "$missing_include" ] || echo "  Missing include/build artifact: ${missing_include}" >&2
+            echo "  Use a packaged plugin build if this checkout needs generated runtime artifacts." >&2
+            failed=1
+        fi
+    done <<< "$dependency_paths"
+
+    [ "$failed" -eq 0 ]
+}
+
 _homeboy_is_plugin_shaped_path() {
     local plugin_path="${1:-}"
 

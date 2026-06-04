@@ -505,6 +505,13 @@ if [ -z "$ARTIFACTS_DIR" ]; then
     ARTIFACTS_DIR=$(mktemp -d "${TMPDIR:-/tmp}/homeboy-wp-codebox-bench-artifacts.XXXXXX")
 fi
 
+if type homeboy_preflight_declared_validation_dependency_paths &>/dev/null; then
+    if ! homeboy_preflight_declared_validation_dependency_paths "$ARTIFACTS_DIR" "bench"; then
+        FAILED_STEP="WordPress dependency plugin preflight"
+        exit 1
+    fi
+fi
+
 wp_codebox_command=("$WP_CODEBOX_BIN")
 case "$WP_CODEBOX_BIN" in
     *.js)
@@ -522,6 +529,12 @@ fi
 DEPENDENCY_PATHS="${HOMEBOY_WORDPRESS_DEPENDENCY_PATHS:-}"
 if [ -n "$DEPENDENCY_PATHS" ] && type homeboy_prepare_validation_dependency_paths_for_wp_codebox_bench &>/dev/null; then
     DEPENDENCY_PATHS=$(homeboy_prepare_validation_dependency_paths_for_wp_codebox_bench "$DEPENDENCY_PATHS" "$ARTIFACTS_DIR")
+fi
+if [ -n "$DEPENDENCY_PATHS" ] && type homeboy_preflight_wordpress_dependency_plugins &>/dev/null; then
+    if ! homeboy_preflight_wordpress_dependency_plugins "$DEPENDENCY_PATHS" "$ARTIFACTS_DIR" "bench"; then
+        FAILED_STEP="WordPress dependency plugin preflight"
+        exit 1
+    fi
 fi
 
 WP_CONFIG_DEFINES_JSON="{}"

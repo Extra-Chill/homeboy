@@ -18,6 +18,11 @@ homeboy_resolve_context --component-alias PLUGIN_PATH
 WP_CODEBOX_PATHS_HELPER="${SCRIPT_DIR}/../lib/wp-codebox-paths.sh"
 # shellcheck source=../lib/wp-codebox-paths.sh
 source "$WP_CODEBOX_PATHS_HELPER"
+DEPENDENCY_HELPER="${HOMEBOY_WORDPRESS_DEPENDENCY_HELPER:-${SCRIPT_DIR}/../lib/validation-dependencies.sh}"
+# shellcheck source=../lib/validation-dependencies.sh
+if [ -f "$DEPENDENCY_HELPER" ]; then
+    source "$DEPENDENCY_HELPER"
+fi
 
 export HOMEBOY_COMPONENT_PATH="${HOMEBOY_COMPONENT_PATH:-$COMPONENT_PATH}"
 export HOMEBOY_TRACE_COMPONENT_PATH="${HOMEBOY_TRACE_COMPONENT_PATH:-$HOMEBOY_COMPONENT_PATH}"
@@ -341,6 +346,22 @@ export HOMEBOY_TRACE_RESULTS_FILE="${HOMEBOY_TRACE_RESULTS_FILE:-${HOMEBOY_RUN_D
 
 mkdir -p "$HOMEBOY_TRACE_ARTIFACT_DIR" "$(dirname "$HOMEBOY_TRACE_RESULTS_FILE")"
 homeboy_wordpress_export_context
+
+if type homeboy_preflight_declared_validation_dependency_paths &>/dev/null; then
+    if ! homeboy_preflight_declared_validation_dependency_paths "$HOMEBOY_TRACE_ARTIFACT_DIR" "trace"; then
+        homeboy_trace_write_failure "fail" "WordPress dependency plugin preflight failed before WP Codebox dispatch"
+        exit 1
+    fi
+fi
+if type homeboy_export_validation_dependency_paths &>/dev/null; then
+    homeboy_export_validation_dependency_paths "$HOMEBOY_COMPONENT_PATH"
+fi
+if [ -n "${HOMEBOY_WORDPRESS_DEPENDENCY_PATHS:-}" ] && type homeboy_preflight_wordpress_dependency_plugins &>/dev/null; then
+    if ! homeboy_preflight_wordpress_dependency_plugins "$HOMEBOY_WORDPRESS_DEPENDENCY_PATHS" "$HOMEBOY_TRACE_ARTIFACT_DIR" "trace"; then
+        homeboy_trace_write_failure "fail" "WordPress dependency plugin preflight failed before WP Codebox dispatch"
+        exit 1
+    fi
+fi
 
 stdout_file="${HOMEBOY_TRACE_ARTIFACT_DIR}/${HOMEBOY_TRACE_SCENARIO}.stdout.txt"
 stderr_file="${HOMEBOY_TRACE_ARTIFACT_DIR}/${HOMEBOY_TRACE_SCENARIO}.stderr.txt"
