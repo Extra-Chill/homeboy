@@ -109,6 +109,23 @@ def parse_phpunit_testdox():
     return True
 
 
+def parse_host_smoke():
+    summary_match = re.search(r"^HOST_SMOKE_SUMMARY:passed=(\d+) failed=(\d+)\b", text, flags=re.MULTILINE)
+    if summary_match:
+        passed = int(summary_match.group(1))
+        failed = int(summary_match.group(2))
+        emit(passed + failed, passed, failed, 0)
+        return True
+
+    failed = len(re.findall(r"^HOST_SMOKE_FAIL:.+:exit=\d+", text, flags=re.MULTILINE))
+    if failed == 0:
+        return False
+
+    passed = len(re.findall(r"^HOST_SMOKE_OK:", text, flags=re.MULTILINE))
+    emit(passed + failed, passed, failed, 0, "host-smoke-failure")
+    return True
+
+
 def parse_cargo_test():
     passed = failed = skipped = 0
     matched = False
@@ -127,6 +144,7 @@ def parse_cargo_test():
 
 adapter_functions = {
     "wp-codebox-json": parse_wp_codebox_json,
+    "host-smoke": parse_host_smoke,
     "phpunit": parse_phpunit,
     "phpunit-testdox": parse_phpunit_testdox,
     "cargo-test": parse_cargo_test,

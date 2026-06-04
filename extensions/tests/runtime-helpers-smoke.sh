@@ -198,6 +198,24 @@ assert_contains "$WORDPRESS_PARTIAL_RESULTS" '"passed": 2'
 assert_contains "$WORDPRESS_PARTIAL_RESULTS" '"failed": 1'
 assert_contains "$WORDPRESS_PARTIAL_RESULTS" '"partial": "testdox-fallback"'
 
+WORDPRESS_HOST_SMOKE_OUTPUT="$TMP_DIR/host-smoke.txt"
+WORDPRESS_HOST_SMOKE_RESULTS="$TMP_DIR/host-smoke-results.json"
+cat > "$WORDPRESS_HOST_SMOKE_OUTPUT" <<'EOF'
+HOST_SMOKE_BEGIN:tests/wiki/installed-brain-discovery-smoke.php
+[FAIL] packaged meetups brain surfaces in brains registry
+HOST_SMOKE_FAIL:tests/wiki/installed-brain-discovery-smoke.php:exit=1
+
+Host smoke test failed: tests/wiki/installed-brain-discovery-smoke.php
+EOF
+
+HOMEBOY_RUNTIME_WRITE_TEST_RESULTS="$WRITE_TEST_RESULTS_HELPER" \
+HOMEBOY_TEST_RESULTS_FILE="$WORDPRESS_HOST_SMOKE_RESULTS" \
+    bash "$ROOT_DIR/wordpress/scripts/test/parse-test-results.sh" "$WORDPRESS_HOST_SMOKE_OUTPUT" >/dev/null
+assert_contains "$WORDPRESS_HOST_SMOKE_RESULTS" '"total": 1'
+assert_contains "$WORDPRESS_HOST_SMOKE_RESULTS" '"passed": 0'
+assert_contains "$WORDPRESS_HOST_SMOKE_RESULTS" '"failed": 1'
+assert_contains "$WORDPRESS_HOST_SMOKE_RESULTS" '"partial": "host-smoke-failure"'
+
 RUST_OUTPUT="$TMP_DIR/cargo-test.txt"
 RUST_RESULTS="$TMP_DIR/rust-results.json"
 cat > "$RUST_OUTPUT" <<'EOF'

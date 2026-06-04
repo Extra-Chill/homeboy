@@ -55,6 +55,14 @@ if ( is_array( $wp_codebox_payload ) && ( $wp_codebox_payload['schema'] ?? '' ) 
 	exit( 0 );
 }
 
+if ( preg_match( '/^HOST_SMOKE_FAIL:/m', $raw ) ) {
+	echo json_encode(
+		parse_host_smoke_test_results( $raw ),
+		JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES
+	) . "\n";
+	exit( 0 );
+}
+
 // ============================================================================
 // Phase 1: Extract test counts from summary line
 // ============================================================================
@@ -217,6 +225,95 @@ function make_output_excerpt( array $lines ): string {
 	}
 
 	return $excerpt;
+}
+
+/**
+ * Normalize host-smoke runner markers into Homeboy's failure sidecar shape.
+ */
+function parse_host_smoke_test_results( string $raw ): array {
+	$lines    = explode( "\n", $raw );
+	$passed   = preg_match_all( '/^HOST_SMOKE_OK:/m', $raw );
+	$failures = [];
+
+	foreach ( $lines as $index => $line ) {
+		if ( ! preg_match( '/^HOST_SMOKE_FAIL:(.+):exit=(\d+)$/', $line, $match ) ) {
+			continue;
+		}
+
+		$file       = $match[1];
+		$exit_code  = (int) $match[2];
+		$context    = host_smoke_failure_context_lines( $lines, $index );
+		$message    = host_smoke_failure_message( $context, $file, $exit_code );
+		$test_name  = 'Host smoke failed: ' . $file;
+		$error_type = 'HostSmokeFailure';
+
+		$failures[] = [
+			'test_name'      => $test_name,
+			'test_file'      => $file,
+			'error_type'     => $error_type,
+			'message'        => $message,
+			'source_file'    => $file,
+			'source_line'    => 0,
+			'test_id'        => $test_name,
+			'suite'          => 'host-smoke',
+			'file'           => $file,
+			'line'           => 0,
+			'failure_type'   => $error_type,
+			'fingerprint'    => make_failure_fingerprint( $test_name, $file, 0, $error_type, $message ),
+			'stdout_excerpt' => make_output_excerpt( $context ),
+			'stderr_excerpt' => '',
+			'exit_code'      => $exit_code,
+		];
+	}
+
+	return [
+		'failures' => $failures,
+		'total'    => $passed + count( $failures ),
+		'passed'   => $passed,
+	];
+}
+
+/**
+ * Keep the failed script output and runner marker together for PR comments.
+ *
+ * @param array<int,string> $lines Raw runner output lines.
+ * @return array<int,string>
+ */
+function host_smoke_failure_context_lines( array $lines, int $marker_index ): array {
+	$start = max( 0, $marker_index - 12 );
+	for ( $i = $marker_index - 1; $i >= 0; $i-- ) {
+		if ( strpos( $lines[ $i ], 'HOST_SMOKE_BEGIN:' ) === 0 ) {
+			$start = $i;
+			break;
+		}
+	}
+
+	$end = min( count( $lines ) - 1, $marker_index + 4 );
+
+	return array_slice( $lines, $start, $end - $start + 1 );
+}
+
+/**
+ * Prefer assertion text from the smoke script over the runner marker.
+ *
+ * @param array<int,string> $context Failure-context lines from one smoke file.
+ */
+function host_smoke_failure_message( array $context, string $file, int $exit_code ): string {
+	foreach ( $context as $line ) {
+		$trimmed = trim( $line );
+		if ( preg_match( '/^\[(FAIL|ERROR)\]\s+(.+)$/', $trimmed ) ) {
+			return $trimmed;
+		}
+	}
+
+	foreach ( $context as $line ) {
+		$trimmed = trim( $line );
+		if ( $trimmed !== '' && strpos( $trimmed, 'HOST_SMOKE_' ) !== 0 && strpos( $trimmed, 'Host smoke test failed:' ) !== 0 ) {
+			return $trimmed;
+		}
+	}
+
+	return sprintf( 'Host smoke test failed: %s (exit %d)', $file, $exit_code );
 }
 
 // ============================================================================
