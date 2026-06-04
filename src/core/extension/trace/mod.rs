@@ -40,8 +40,9 @@ pub use report::{
     TraceAggregateRunOutput, TraceAggregateSpanOutput, TraceClassificationSummaryOutput,
     TraceCommandOutput, TraceCompareClassificationSummaryOutput, TraceCompareOutput,
     TraceCompareSpanOutput, TraceGuardrailOutput, TraceListOutput, TraceOverlayLocksOutput,
-    TraceProfileListItem, TraceResolvedProfileOutput, TraceRunOrderEntryOutput, TraceSpanMetadata,
-    TraceVariantMatrixOutput, TraceVariantMatrixRunOutput,
+    TraceProfileListItem, TraceResolvedProfileOutput, TraceRunOrderEntryOutput,
+    TraceScenarioMatrixAxisOutput, TraceScenarioMatrixCellOutput, TraceScenarioMatrixOutput,
+    TraceSpanMetadata, TraceVariantMatrixOutput, TraceVariantMatrixRunOutput,
 };
 pub use report::{push_overlay_markdown, render_markdown};
 pub use run::{

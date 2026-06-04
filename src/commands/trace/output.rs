@@ -878,6 +878,62 @@ pub(super) fn render_matrix_markdown(matrix: &extension_trace::TraceVariantMatri
     out
 }
 
+pub(super) fn render_scenario_matrix_markdown(
+    matrix: &extension_trace::TraceScenarioMatrixOutput,
+) -> String {
+    let mut out = String::new();
+    out.push_str("# Trace Scenario Matrix\n\n");
+    out.push_str(&format!("- **Component:** `{}`\n", matrix.component));
+    out.push_str(&format!("- **Scenario:** `{}`\n", matrix.scenario_id));
+    out.push_str(&format!("- **Status:** `{}`\n", matrix.status));
+    out.push_str(&format!("- **Cells:** `{}`\n", matrix.cell_count));
+    out.push_str(&format!("- **Failures:** `{}`\n", matrix.failure_count));
+    out.push_str(&format!("- **Output dir:** `{}`\n", matrix.output_dir));
+    out.push_str(&format!("- **Matrix JSON:** `{}`\n", matrix.matrix_path));
+
+    if !matrix.axes.is_empty() {
+        out.push_str("\n## Axes\n\n");
+        for axis in &matrix.axes {
+            out.push_str(&format!(
+                "- `{}`: {}\n",
+                axis.name,
+                axis.values
+                    .iter()
+                    .map(|value| format!("`{}`", value))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+    }
+
+    out.push_str("\n## Cells\n\n");
+    out.push_str("| Cell | Axes | Status | Exit | Artifact | Output | Failure |\n");
+    out.push_str("|---|---|---|---:|---|---|---|\n");
+    for cell in &matrix.cells {
+        let axes = cell
+            .axes
+            .iter()
+            .map(|(key, value)| format!("`{}`=`{}`", key, value))
+            .collect::<Vec<_>>()
+            .join(" ");
+        out.push_str(&format!(
+            "| `{}` | {} | `{}` | {} | `{}` | `{}` | {} |\n",
+            cell.label,
+            axes,
+            cell.status,
+            cell.exit_code,
+            cell.artifact_path,
+            cell.output_path,
+            cell.failure
+                .as_deref()
+                .map(|failure| format!("`{}`", failure.replace('`', "'")))
+                .unwrap_or_else(|| "-".to_string())
+        ));
+    }
+
+    out
+}
+
 pub(super) fn fmt_ms(value: Option<u64>) -> String {
     value
         .map(|value| format!("{}ms", value))

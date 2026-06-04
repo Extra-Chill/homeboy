@@ -41,13 +41,15 @@ use experiment::{
     trace_experiment_settings,
 };
 use guardrails::run_trace_guardrails_for_args;
+use matrix::TraceMatrixAxis;
 use metadata::trace_span_metadata_for_args;
 use observations::record_trace_artifacts;
 use overlay_locks::run_overlay_locks;
 
 use output::{
     aggregate_span, attach_span_metadata, classification_summaries, render_aggregate_markdown,
-    render_compare_markdown, render_matrix_markdown, run_compare, TraceAggregateSpanSample,
+    render_compare_markdown, render_matrix_markdown, render_scenario_matrix_markdown, run_compare,
+    TraceAggregateSpanSample,
 };
 use probes::trace_probes_for_args;
 pub(super) use schedule::{
@@ -149,7 +151,14 @@ pub struct TraceArgs {
     #[arg(long = "matrix", value_enum, default_value_t = TraceVariantMatrixMode::None)]
     pub matrix: TraceVariantMatrixMode,
 
-    /// Directory where `trace compare-variant` writes aggregate, compare, and summary artifacts.
+    /// Add a scenario matrix axis as `name=value1,value2`. Repeatable.
+    #[arg(long = "axis", value_name = "NAME=VALUE[,VALUE...]", value_parser = matrix::parse_trace_matrix_axis)]
+    pub axes: Vec<TraceMatrixAxis>,
+
+    #[arg(skip)]
+    pub matrix_env: Vec<(String, String)>,
+
+    /// Directory where trace matrix modes write aggregate, compare, cell, and summary artifacts.
     #[arg(long = "output-dir", value_name = "DIR")]
     pub output_dir: Option<PathBuf>,
 
@@ -225,6 +234,7 @@ fn render_markdown_output(output: &TraceCommandOutput) -> String {
         TraceCommandOutput::Aggregate(aggregate) => render_aggregate_markdown(aggregate),
         TraceCommandOutput::Compare(compare) => render_compare_markdown(compare),
         TraceCommandOutput::Matrix(matrix) => render_matrix_markdown(matrix),
+        TraceCommandOutput::ScenarioMatrix(matrix) => render_scenario_matrix_markdown(matrix),
         TraceCommandOutput::List(list) => {
             if !list.profiles.is_empty() || list.command == "trace.list.profiles" {
                 let mut markdown = "# Trace Profiles\n\n".to_string();
@@ -313,6 +323,12 @@ fn run_outputs(mut args: TraceArgs) -> CmdResult<(TraceCommandOutput, Option<Tra
         return Ok(((output, None), exit_code));
     }
 
+    if args.comp.component.as_deref() == Some("matrix") {
+        apply_matrix_target_args(&mut args);
+        let (output, exit_code) = matrix::run_scenario_matrix(args)?;
+        return Ok(((output, None), exit_code));
+    }
+
     if args.comp.component.as_deref() == Some("compare-variant") {
         let (output, exit_code) = if args.matrix == TraceVariantMatrixMode::None {
             run_compare_variant(args)?
@@ -372,6 +388,16 @@ fn run_outputs(mut args: TraceArgs) -> CmdResult<(TraceCommandOutput, Option<Tra
 
 pub(super) fn apply_command_target_component(args: &mut TraceArgs) {
     args.comp.component = args.component_arg.clone();
+}
+
+fn apply_matrix_target_args(args: &mut TraceArgs) {
+    let positional_component = args.scenario.take();
+    let positional_scenario = args
+        .compare_after
+        .take()
+        .map(|path| path.to_string_lossy().to_string());
+    args.comp.component = args.component_arg.clone().or(positional_component);
+    args.scenario = args.scenario_arg.clone().or(positional_scenario);
 }
 
 pub(super) fn required_trace_scenario(args: &TraceArgs) -> homeboy::core::Result<String> {
@@ -501,7 +527,8 @@ fn execute_trace_run(args: TraceArgs) -> homeboy::core::Result<TraceRunExecution
         })
         .unwrap_or_default();
     let experiment_settings = trace_experiment_settings(experiment_plan.as_ref())?;
-    let experiment_env = trace_experiment_env(experiment_plan.as_ref())?;
+    let mut experiment_env = trace_experiment_env(experiment_plan.as_ref())?;
+    experiment_env.extend(args.matrix_env.clone());
     let trace_probes =
         trace_probes_for_args(&args, rig_context.as_ref(), ctx.extension_id.as_deref())?;
     let attachments = TraceAttachment::parse_all(&args.attachments)?;
