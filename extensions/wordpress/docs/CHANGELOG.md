@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.115.25] - 2026-06-04
+
+### Fixed
+- guard wp-codebox test runner against mis-resolved component paths
+
 ## [2.115.24] - 2026-06-04
 
 ### Fixed
