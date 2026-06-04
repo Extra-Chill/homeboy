@@ -2,6 +2,13 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.115.1] - 2026-06-04
+
+### Fixed
+- load mounted datamachine workload
+- use host workload wrapper path
+- prepare composer-backed Codebox plugins
+
 ## [2.115.0] - 2026-06-03
 
 ### Added
