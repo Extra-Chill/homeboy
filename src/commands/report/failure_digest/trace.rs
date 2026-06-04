@@ -30,6 +30,7 @@ pub(super) fn render_trace_section(out: &mut String, output_dir: &Path, run_url:
     let _ = writeln!(out, "**Status:** {}\n", status.to_uppercase());
 
     render_trace_summary(out, &data, &results, &failure, &error);
+    render_trace_toolchain(out, &data, &results);
     render_trace_artifacts(out, &data, &results);
     render_full_log(out, "trace", run_url);
     out.push('\n');
@@ -67,6 +68,73 @@ fn render_trace_summary(
     }
 
     render_trace_spans(out, data, results);
+}
+
+fn render_trace_toolchain(
+    out: &mut String,
+    data: &Map<String, Value>,
+    results: &Map<String, Value>,
+) {
+    let toolchain = first_object(data, results, "toolchain");
+    let components = first_object(data, results, "components");
+    let Some(ref toolchain) = toolchain else {
+        return;
+    };
+
+    out.push_str("**Toolchain provenance**\n");
+    let mode = string_value(toolchain, "mode").unwrap_or_else(|| "unknown".to_string());
+    let canonical = toolchain
+        .get("canonical")
+        .and_then(Value::as_bool)
+        .map(|value| if value { "yes" } else { "no" })
+        .unwrap_or("unknown");
+    let _ = writeln!(out, "- Mode: `{mode}`; canonical: **{canonical}**");
+    let homeboy = object_value(toolchain, "homeboy");
+    if !homeboy.is_empty() {
+        render_trace_git_provenance(out, "Homeboy", &homeboy);
+    }
+    let wp_codebox = object_value(toolchain, "wp_codebox");
+    if !wp_codebox.is_empty() {
+        render_trace_git_provenance(out, "WP Codebox", &wp_codebox);
+    }
+    if let Some(components) = components.as_ref() {
+        let target = object_value(components, "target");
+        if !target.is_empty() {
+            render_trace_git_provenance(out, "Target", &target);
+        }
+    }
+    if let Some(reasons) = toolchain.get("reasons").and_then(Value::as_array) {
+        let reasons = reasons.iter().filter_map(Value::as_str).collect::<Vec<_>>();
+        if !reasons.is_empty() {
+            let _ = writeln!(out, "- Non-canonical reason(s): {}", reasons.join("; "));
+        }
+    }
+    out.push('\n');
+}
+
+fn first_object(
+    data: &Map<String, Value>,
+    results: &Map<String, Value>,
+    key: &str,
+) -> Option<Map<String, Value>> {
+    [object_value(data, key), object_value(results, key)]
+        .into_iter()
+        .find(|value| !value.is_empty())
+}
+
+fn render_trace_git_provenance(out: &mut String, label: &str, provenance: &Map<String, Value>) {
+    let path = string_value(provenance, "path").unwrap_or_else(|| "unknown".to_string());
+    let sha = string_value(provenance, "sha").unwrap_or_else(|| "unknown".to_string());
+    let branch = string_value(provenance, "branch").unwrap_or_else(|| "unknown".to_string());
+    let dirty = provenance
+        .get("dirty")
+        .and_then(Value::as_bool)
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    let _ = writeln!(
+        out,
+        "- {label}: `{path}` @ `{sha}` (branch `{branch}`, dirty `{dirty}`)"
+    );
 }
 
 fn render_trace_spans(out: &mut String, data: &Map<String, Value>, results: &Map<String, Value>) {
