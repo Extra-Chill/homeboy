@@ -285,6 +285,9 @@ pub struct BenchConfig {
 pub struct TraceConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extension_script: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runner_capabilities: Vec<String>,
 }
 
 /// Post-write verify contract for autofix. Runs from the component root after

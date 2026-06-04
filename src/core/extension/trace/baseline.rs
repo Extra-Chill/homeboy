@@ -395,6 +395,7 @@ mod tests {
             assertions: Vec::new(),
             temporal_assertions: Vec::new(),
             artifacts: Vec::new(),
+            dependencies: Vec::new(),
         }
     }
 

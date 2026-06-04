@@ -167,6 +167,7 @@ pub fn run(args: ObserveArgs, _global: &GlobalArgs) -> CmdResult<ObserveOutput> 
             label: "observe timeline".to_string(),
             path: trace_path.to_string_lossy().to_string(),
         }],
+        dependencies: Vec::new(),
     };
 
     write_trace_results(&trace_path, &results)?;

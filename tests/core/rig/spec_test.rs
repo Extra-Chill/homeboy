@@ -407,7 +407,56 @@ fn workload_with_trace_metadata() -> WorkloadSpec {
         )]),
         trace_guardrails: Vec::new(),
         trace_probes: Vec::new(),
+        dependencies: Vec::new(),
+        runner_capabilities: Vec::new(),
     }
+}
+
+#[test]
+fn test_trace_dependency_and_runner_capability_contract_parse() {
+    let workload: WorkloadSpec = serde_json::from_str(
+        r#"{
+            "path": "/tmp/ece.trace.mjs",
+            "dependencies": [
+                {
+                    "id": "woocommerce",
+                    "kind": "wordpress-plugin",
+                    "source": "release-package-or-build-artifact",
+                    "path": "/tmp/packages/woocommerce",
+                    "plugin_file": "woocommerce/woocommerce.php",
+                    "requires_built_assets": true,
+                    "required_paths": ["vendor/autoload.php"],
+                    "source_url": "https://downloads.wordpress.org/plugin/woocommerce.zip",
+                    "version": "10.0.0",
+                    "ref": "v10.0.0",
+                    "package_marker": "packaged-zip"
+                }
+            ],
+            "runner_capabilities": [
+                "wp-codebox.recipe-run",
+                "wordpress.browser-probe.capture.network"
+            ]
+        }"#,
+    )
+    .expect("parse workload trace contract");
+
+    assert_eq!(workload.trace_dependencies().len(), 1);
+    let dependency = &workload.trace_dependencies()[0];
+    assert_eq!(dependency.id, "woocommerce");
+    assert_eq!(dependency.kind, "wordpress-plugin");
+    assert_eq!(
+        dependency.plugin_file.as_deref(),
+        Some("woocommerce/woocommerce.php")
+    );
+    assert!(dependency.requires_built_assets);
+    assert_eq!(dependency.r#ref.as_deref(), Some("v10.0.0"));
+    assert_eq!(
+        workload.runner_capabilities(),
+        &[
+            "wp-codebox.recipe-run".to_string(),
+            "wordpress.browser-probe.capture.network".to_string()
+        ]
+    );
 }
 
 #[test]

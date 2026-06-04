@@ -650,6 +650,7 @@ mod tests {
             assertions: Vec::new(),
             temporal_assertions,
             artifacts: Vec::new(),
+            dependencies: Vec::new(),
         }
     }
 

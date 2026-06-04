@@ -681,6 +681,7 @@ mod tests {
                     label: "main log".to_string(),
                     path: "artifacts/main.log".to_string(),
                 }],
+                dependencies: Vec::new(),
             }),
             failure: None,
             overlays: vec![TraceOverlay {
@@ -746,6 +747,7 @@ mod tests {
                 assertions: Vec::new(),
                 temporal_assertions: Vec::new(),
                 artifacts: Vec::new(),
+                dependencies: Vec::new(),
             }),
             failure: None,
             overlays: Vec::new(),
@@ -827,6 +829,7 @@ mod tests {
             assertions: Vec::new(),
             temporal_assertions: Vec::new(),
             artifacts: Vec::new(),
+            dependencies: Vec::new(),
         };
 
         let overlays = vec![TraceOverlay {
@@ -871,6 +874,7 @@ mod tests {
                     path: "runner-artifact://lab/run-1/trace.zip".to_string(),
                 },
             ],
+            dependencies: Vec::new(),
         };
 
         let markdown = render_markdown(&results, &[]);

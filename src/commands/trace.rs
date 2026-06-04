@@ -507,6 +507,26 @@ fn execute_trace_run(args: TraceArgs) -> homeboy::core::Result<TraceRunExecution
             })
         })
         .unwrap_or_default();
+    let trace_dependencies = rig_context
+        .as_ref()
+        .and_then(|context| {
+            ctx.extension_id.as_deref().map(|id| {
+                rig::trace_dependencies_for_extension(
+                    &context.rig_spec,
+                    context.rig_package_root.as_deref(),
+                    id,
+                )
+            })
+        })
+        .unwrap_or_default();
+    let runner_capabilities = rig_context
+        .as_ref()
+        .and_then(|context| {
+            ctx.extension_id
+                .as_deref()
+                .map(|id| rig::runner_capabilities_for_extension(&context.rig_spec, id))
+        })
+        .unwrap_or_default();
     let experiment_settings = trace_experiment_settings(experiment_plan.as_ref())?;
     let experiment_env = trace_experiment_env(experiment_plan.as_ref())?;
     let trace_probes =
@@ -534,6 +554,8 @@ fn execute_trace_run(args: TraceArgs) -> homeboy::core::Result<TraceRunExecution
                 workload_paths: extra_workloads,
                 probes: trace_probes,
                 attachments,
+                dependencies: trace_dependencies,
+                runner_capabilities,
             },
             scenario_id,
             json_summary: args.json_summary,
@@ -779,6 +801,26 @@ fn run_list(args: TraceArgs) -> CmdResult<TraceCommandOutput> {
             })
         })
         .unwrap_or_default();
+    let trace_dependencies = rig_context
+        .as_ref()
+        .and_then(|context| {
+            ctx.extension_id.as_deref().map(|id| {
+                rig::trace_dependencies_for_extension(
+                    &context.rig_spec,
+                    context.rig_package_root.as_deref(),
+                    id,
+                )
+            })
+        })
+        .unwrap_or_default();
+    let runner_capabilities = rig_context
+        .as_ref()
+        .and_then(|context| {
+            ctx.extension_id
+                .as_deref()
+                .map(|id| rig::runner_capabilities_for_extension(&context.rig_spec, id))
+        })
+        .unwrap_or_default();
     let list = extension_trace::run_trace_list_workflow(
         &ctx.component,
         TraceListWorkflowArgs {
@@ -792,6 +834,8 @@ fn run_list(args: TraceArgs) -> CmdResult<TraceCommandOutput> {
                 workload_paths: extra_workloads,
                 probes: Vec::new(),
                 attachments: Vec::new(),
+                dependencies: trace_dependencies,
+                runner_capabilities,
             },
             rig_id: args.rig,
         },
