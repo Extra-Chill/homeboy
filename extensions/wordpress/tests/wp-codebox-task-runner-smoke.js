@@ -28,7 +28,12 @@ const artifacts = artifactsIndex >= 0 ? process.argv[artifactsIndex + 1] : '';
 const recipe = recipePath ? JSON.parse(fs.readFileSync(recipePath, 'utf8')) : null;
 const sessionArg = recipe.workflow.steps[0].args.find((arg) => arg.startsWith('session-id=')) || 'session-id=fixture-session';
 const sessionId = sessionArg.slice('session-id='.length);
-const isDatamachineBundle = recipe.workflow.steps[0].args.some((arg) => arg.startsWith('code-file='));
+const codeFileArg = recipe.workflow.steps[0].args.find((arg) => arg.startsWith('code-file=')) || '';
+const codeFilePath = codeFileArg.slice('code-file='.length);
+if (codeFilePath) {
+  fs.readFileSync(codeFilePath, 'utf8');
+}
+const isDatamachineBundle = Boolean(codeFilePath);
 const agentResult = isDatamachineBundle && !process.env.FIXTURE_WP_CODEBOX_INCOMPLETE_DATAMACHINE
   ? { scenarios: [{ id: 'datamachine-agent', metadata: { engine_data: { store_idea_agent: { issue_number: 123 } } } }] }
   : { status: 'completed' };
@@ -276,8 +281,9 @@ try {
   assert.equal(composerResult.status, 0, composerResult.stderr || composerResult.stdout);
   const composerRecipe = readJson(composerCapturePath).recipe;
   const codeFileArg = composerRecipe.workflow.steps[0].args.find((arg) => arg.startsWith('code-file='));
-  assert.equal(codeFileArg, 'code-file=/homeboy-extension/scripts/agent/homeboy-datamachine-agent-workload-wrapper.php');
-  assert.match(fs.readFileSync(path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-datamachine-agent-workload-wrapper.php'), 'utf8'), /\/homeboy-extension\/scripts\/agent\/datamachine-agent-workload\.php/);
+  const expectedCodeFile = path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-datamachine-agent-workload-wrapper.php');
+  assert.equal(codeFileArg, `code-file=${expectedCodeFile}`);
+  assert.match(fs.readFileSync(expectedCodeFile, 'utf8'), /\/homeboy-extension\/scripts\/agent\/datamachine-agent-workload\.php/);
   assert(composerRecipe.inputs.secretEnv.includes('HOMEBOY_DATAMACHINE_AGENT_CONFIG'));
   assert.equal(readJson(composerCapturePath).datamachineConfig.engine_data_outputs.issue_number, 'metadata.engine_data.store_idea_agent.issue_number');
   const preparedDataMachine = composerRecipe.inputs.extraPlugins.find((plugin) => plugin.slug === 'data-machine');

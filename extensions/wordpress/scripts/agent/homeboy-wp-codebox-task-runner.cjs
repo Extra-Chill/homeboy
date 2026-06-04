@@ -308,7 +308,7 @@ function buildRecipe(input) {
     `provider-plugin-slugs=${providerSlugs.join(',')}`,
   ];
   if (isDatamachineBundle) {
-    workflowArgs.push('code-file=/homeboy-extension/scripts/agent/homeboy-datamachine-agent-workload-wrapper.php');
+    workflowArgs.push(`code-file=${path.join(input.homeboy_extensions_path, 'scripts', 'agent', 'homeboy-datamachine-agent-workload-wrapper.php')}`);
   }
   if (input.sandbox_session_id) {
     workflowArgs.push(`session-id=${input.sandbox_session_id}`);
