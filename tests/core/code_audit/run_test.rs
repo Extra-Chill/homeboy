@@ -551,7 +551,7 @@ fn execution_plan_for_duplicate_only_skips_structural_detector_family() {
 fn execution_plan_for_unwired_nested_rust_test_runs_wiring_detector() {
     let plan = AuditExecutionPlan::from_filters(&[AuditFinding::UnwiredNestedRustTest], &[]);
 
-    assert!(plan.run_rust_test_wiring());
+    assert!(plan.run_test_wiring());
     assert!(!plan.run_test_topology());
     assert_eq!(
         detector_step_status(&plan, "conventions"),

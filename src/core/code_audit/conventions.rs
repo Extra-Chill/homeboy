@@ -281,6 +281,10 @@ pub enum AuditFinding {
     CommandStatusContractViolation,
 }
 
+pub(crate) fn unwired_test_file_finding() -> AuditFinding {
+    AuditFinding::UnwiredNestedRustTest
+}
+
 impl AuditFinding {
     /// All known variant names in snake_case, for CLI help and error messages.
     pub fn all_names() -> &'static [&'static str] {

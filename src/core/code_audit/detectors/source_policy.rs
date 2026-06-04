@@ -243,12 +243,7 @@ fn severity_from_config(value: &str) -> Severity {
 
 fn language_from_config(value: &str) -> Option<Language> {
     let normalized = value.trim().to_ascii_lowercase();
-    serde_json::from_value::<Language>(serde_json::Value::String(normalized.clone()))
-        .ok()
-        .or_else(|| {
-            let language = Language::from_extension(&normalized);
-            (language != Language::Unknown).then_some(language)
-        })
+    serde_json::from_value::<Language>(serde_json::Value::String(normalized)).ok()
 }
 
 #[cfg(test)]

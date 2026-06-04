@@ -579,10 +579,6 @@ const BASELINE: &[ViolationKey] = &[
         term: "homeboy.json",
     },
     ViolationKey {
-        path: "src/core/code_audit/detectors/rust_test_wiring.rs",
-        term: "Homeboy",
-    },
-    ViolationKey {
         path: "src/core/code_audit/detectors/wrapper_inference.rs",
         term: "homeboy.json",
     },

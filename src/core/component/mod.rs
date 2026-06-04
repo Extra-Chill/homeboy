@@ -20,7 +20,7 @@ pub use audit::{
     KnownSymbolHeaderVersionProvider, KnownSymbolKind, KnownSymbolVersionedEntry,
     MutatingResourceAccessConfig, PublicRegistryExposureConfig, RedirectValidationConfig,
     RequestedDetectorRule, RequestedDetectorRuleBody, RequiredRegexScope, SourcePolicyMatchMode,
-    SourcePolicyRule, SourcePolicyRuleBody, SourcePolicyTerm,
+    SourcePolicyRule, SourcePolicyRuleBody, SourcePolicyTerm, TestWiringConfig, TestWiringPolicy,
 };
 pub use inventory::{
     exists, extension_provides_artifact_pattern, inventory, list, list_ids, load,

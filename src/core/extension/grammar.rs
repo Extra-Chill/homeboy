@@ -201,15 +201,14 @@ pub struct ContractGrammar {
     pub panic_patterns: Vec<String>,
 
     /// The separator between the parameter list and return type in function declarations.
-    /// Rust: `"->"`, PHP: `":"`, TypeScript: `":"`.
-    /// Defaults to `"->"` for backward compatibility.
-    #[serde(default = "default_return_type_separator")]
+    /// Examples: Rust uses `"->"`; PHP and TypeScript commonly use `":"`.
+    #[serde(default)]
     pub return_type_separator: String,
 
     /// Parameter format in function declarations.
-    /// `"name_colon_type"` — Rust/Go: `name: Type` (default)
+    /// `"name_colon_type"` — Rust/Go: `name: Type`
     /// `"type_dollar_name"` — PHP: `Type $name` or `$name`
-    #[serde(default = "default_param_format")]
+    #[serde(default)]
     pub param_format: String,
 
     /// Test code templates keyed by template name (e.g., "result_ok", "option_none").
@@ -226,8 +225,8 @@ pub struct ContractGrammar {
     ///
     /// Example (Rust): `"&str" → "\"\"", "&Path" → "Path::new(\"\")"`.
     ///
-    /// Patterns are tried in order; first match wins. The fallback for
-    /// unmatched types is `Default::default()` (Rust) or language equivalent.
+    /// Patterns are tried in order; first match wins. Unmatched type behavior
+    /// is supplied by `fallback_default` when the grammar owner declares one.
     #[serde(default)]
     pub type_defaults: Vec<TypeDefault>,
 
@@ -257,9 +256,9 @@ pub struct ContractGrammar {
     pub assertion_templates: HashMap<String, String>,
 
     /// Fallback default expression when no type_default or type_constructor
-    /// matches. Language-specific (e.g., `"Default::default()"` for Rust,
-    /// `"null"` for PHP).
-    #[serde(default = "default_fallback_default")]
+    /// matches. Language-specific examples include `"Default::default()"`
+    /// for Rust and `"null"` for PHP.
+    #[serde(default)]
     pub fallback_default: String,
 
     /// Regex pattern for extracting struct/class field declarations.
@@ -300,24 +299,12 @@ pub struct ContractGrammar {
     pub field_assertion_template: Option<String>,
 }
 
-fn default_fallback_default() -> String {
-    "Default::default()".to_string()
-}
-
 fn default_group_1() -> usize {
     1
 }
 
 fn default_group_2() -> usize {
     2
-}
-
-fn default_return_type_separator() -> String {
-    "->".to_string()
-}
-
-fn default_param_format() -> String {
-    "name_colon_type".to_string()
 }
 
 /// A single type-to-default-value mapping for test input construction.
@@ -1165,6 +1152,66 @@ mod tests {
                 p
             },
         }
+    }
+
+    #[test]
+    fn contract_grammar_has_no_language_behavior_without_manifest_values() {
+        let grammar: Grammar = toml::from_str(
+            r#"
+                [language]
+                id = "toy"
+                extensions = ["toy"]
+
+                [comments]
+                line = ["--"]
+                block = []
+                doc = []
+
+                [strings]
+                quotes = ["`"]
+                escape = "\\"
+
+                [blocks]
+                open = "["
+                close = "]"
+
+                [contract]
+
+                [patterns.function]
+                regex = '^def\s+(\w+)\s*\(([^)]*)\)'
+                context = "any"
+
+                [patterns.function.captures]
+                name = 1
+                params = 2
+            "#,
+        )
+        .expect("synthetic grammar should parse");
+
+        let contract = grammar
+            .contract
+            .as_ref()
+            .expect("contract section should deserialize");
+        assert_eq!(contract.return_type_separator, "");
+        assert_eq!(contract.param_format, "");
+        assert_eq!(contract.fallback_default, "");
+
+        let symbols = extract("def cook(value)\n", &grammar);
+        assert_eq!(method_names(&symbols), vec!["cook".to_string()]);
+    }
+
+    #[test]
+    fn rust_contract_behavior_is_owned_by_explicit_grammar_values() {
+        let contract: ContractGrammar = serde_json::from_value(serde_json::json!({
+            "return_type_separator": "->",
+            "param_format": "name_colon_type",
+            "fallback_default": "Default::default()"
+        }))
+        .expect("explicit Rust contract values should deserialize");
+
+        assert_eq!(contract.return_type_separator, "->");
+        assert_eq!(contract.param_format, "name_colon_type");
+        assert_eq!(contract.fallback_default, "Default::default()");
     }
 
     // ---- Structural parser tests ----
