@@ -108,7 +108,12 @@ try {
   assert.equal(captured.argv.includes('--json'), true);
   assert(!captured.argv.includes('recipe-run'));
   assert.equal(captured.input.schema, 'wp-codebox/task-input/v1');
+  assert.equal(captured.input.version, 1);
   assert.equal(captured.input.goal, 'Fix the finding.');
+  assert.equal(captured.input.sandbox_tool_policy.schema, 'wp-codebox/sandbox-tool-policy/v1');
+  assert.equal(captured.input.sandbox_tool_policy.version, 1);
+  assert.equal(captured.input.sandbox_tool_policy.tools[0].id, 'homeboy/no-runtime-tools');
+  assert.equal(captured.input.sandbox_tool_policy.tools[0].allowed, false);
   assert.equal(captured.input.provider, 'opencode');
   assert.equal(captured.input.model, 'opencode-go/kimi-k2.6');
   assert.deepEqual(captured.input.secret_env, ['OPENCODE_API_KEY']);
@@ -203,6 +208,10 @@ try {
   const datamachineCapture = readJson(datamachineCapturePath);
   assert.equal(datamachineCapture.argv[0], 'agent-task-run');
   assert(datamachineCapture.input.secret_env.includes('HOMEBOY_DATAMACHINE_AGENT_CONFIG'));
+  assert.equal(datamachineCapture.input.sandbox_tool_policy.schema, 'wp-codebox/sandbox-tool-policy/v1');
+  assert.equal(datamachineCapture.input.sandbox_tool_policy.tools.length, 1);
+  assert.equal(datamachineCapture.input.sandbox_tool_policy.tools[0].id, 'homeboy/no-runtime-tools');
+  assert.equal(datamachineCapture.input.sandbox_tool_policy.tools[0].allowed, false);
   assert.equal(datamachineCapture.input.datamachine_bundle.engine_data_outputs.issue_number, 'metadata.engine_data.store_idea_agent.issue_number');
   assert.equal(datamachineCapture.datamachineConfig.engine_data_outputs.issue_number, 'metadata.engine_data.store_idea_agent.issue_number');
   const datamachineOutput = JSON.parse(datamachineResult.stdout);

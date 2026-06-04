@@ -182,15 +182,18 @@ function runnerInput(request, artifacts) {
 }
 
 function stableTaskInput(input) {
+  const allowedTools = input.parent_request?.allowed_tools || input.parent_request?.task?.allowed_tools || [];
   const secretEnv = isDatamachineBundle(input)
     ? Array.from(new Set([...(input.secret_env || []), 'HOMEBOY_DATAMACHINE_AGENT_CONFIG']))
     : input.secret_env || [];
   return Object.fromEntries(Object.entries({
     schema: 'wp-codebox/task-input/v1',
+    version: 1,
     goal: input.parent_request?.goal || input.parent_request?.task?.prompt || input.parent_request?.task?.goal || '',
     target: input.parent_request?.target || input.parent_request?.task?.target || {},
-    allowed_tools: input.parent_request?.allowed_tools || input.parent_request?.task?.allowed_tools || [],
+    allowed_tools: allowedTools,
     expected_artifacts: input.parent_request?.expected_artifacts || input.parent_request?.task?.expected_artifacts || [],
+    sandbox_tool_policy: sandboxToolPolicy(input, allowedTools),
     policy: input.parent_request?.policy || input.parent_request?.task?.policy || {},
     context: input.parent_request?.context || input.parent_request?.task?.context || {},
     provider: input.provider,
@@ -217,6 +220,47 @@ function stableTaskInput(input) {
     datamachine_bundle: isDatamachineBundle(input) ? datamachineBundleConfig(input, input.datamachine_bundle || {}) : {},
     parent_request: input.parent_request,
   }).filter(([, value]) => value !== '' && value !== undefined && !(Array.isArray(value) && value.length === 0)));
+}
+
+function plainObject(value) {
+  return value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function sandboxToolPolicy(input, allowedTools) {
+  const explicit = input.parent_request?.sandbox_tool_policy
+    || input.parent_request?.sandboxToolPolicy
+    || input.parent_request?.task?.sandbox_tool_policy
+    || input.parent_request?.task?.sandboxToolPolicy;
+  if (plainObject(explicit) && Array.isArray(explicit.tools) && explicit.tools.length > 0) {
+    return explicit;
+  }
+
+  const tools = Array.isArray(allowedTools) ? allowedTools.filter((tool) => typeof tool === 'string' && tool.trim() !== '') : [];
+  return {
+    schema: 'wp-codebox/sandbox-tool-policy/v1',
+    version: 1,
+    tools: tools.length > 0
+      ? tools.map((tool) => {
+          const id = tool.trim();
+          return {
+            id,
+            runtime_tool_id: id.replace(/^datamachine\//, '').replace(/[^A-Za-z0-9_]+/g, '_'),
+            execution_location: 'sandbox',
+            transport_visibility: 'sandbox',
+            allowed: true,
+            metadata: { source: 'homeboy_allowed_tools' },
+          };
+        })
+      : [{
+          id: 'homeboy/no-runtime-tools',
+          runtime_tool_id: 'homeboy_no_runtime_tools',
+          execution_location: 'external',
+          transport_visibility: 'hidden',
+          allowed: false,
+          metadata: { source: 'homeboy_default_empty_policy' },
+        }],
+    metadata: { source: 'homeboy-wp-codebox-task-runner' },
+  };
 }
 
 function isDatamachineBundle(input) {
