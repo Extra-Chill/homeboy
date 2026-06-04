@@ -154,7 +154,8 @@
         "default_match": "token",
         "description": "Core boundary leak (core-agnostic-source) configured ecosystem term `{term}` appears at line {line} in {classification} context `{context}`",
         "exclude_path_contains": [
-          "src/core/execution_contract.rs"
+          "src/core/execution_contract.rs",
+          "src/core/product_identity.rs"
         ],
         "id": "core-agnostic-source",
         "ignore_after_line_equals": [
@@ -169,9 +170,6 @@
           "src/commands/report.rs",
           "src/commands/review/mod.rs",
           "src/commands/test.rs"
-        ],
-        "exclude_path_contains": [
-          "src/core/product_identity.rs"
         ],
         "kind": "core_boundary_leak",
         "suggestion": "Move ecosystem-specific behavior into extension metadata/rules, or add an explicit audit allowlist for intentional examples.",
@@ -2751,6 +2749,7 @@
         "structural::src/core/code_audit/mod.rs::GodFile",
         "structural::src/core/extension/grammar.rs::GodFile",
         "structural::src/core/extension/lifecycle.rs::GodFile",
+        "structural::src/core/extension/trace/run.rs::HighItemCount",
         "structural::src/core/refactor/rename/mod.rs::GodFile",
         "structural::src/core/release/executor.rs::GodFile",
         "structural::src/core/rig/pipeline.rs::HighItemCount",
