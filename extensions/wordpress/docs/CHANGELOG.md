@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.115.19] - 2026-06-04
+
+### Fixed
+- preserve WordPress PHPStan overrides in generated configs
+
 ## [2.115.18] - 2026-06-04
 
 ### Fixed
