@@ -13,6 +13,7 @@ homeboy trace <component> <scenario> --span submit_to_cli:ui.submit:cli.start
 homeboy trace <component> <scenario> --span running:renderer.site_event_received[data.running=true]:renderer.dom_status_running_seen
 homeboy trace <component> <scenario> --phase submit:ui.submit --phase cli:cli.start --phase ready:server.ready
 homeboy trace <component> <scenario> --rig <rig-id> --phase-preset create-site
+homeboy trace matrix <component> <scenario> --axis viewport=desktop,mobile --axis ece_locations=product,none
 homeboy trace <component> <scenario> --runs 5 --aggregate spans --schedule interleaved
 homeboy trace <component> <scenario> --attach logfile:/tmp/service.log --attach pid:1234
 homeboy trace compare before.json after.json --focus-span phase.wp_boot_start_to_wp_boot_ready
@@ -441,6 +442,31 @@ homeboy trace compare before.json after.json --focus-span phase.wp_boot_start_to
 ```
 
 Focused compare spans are evaluated independently from the full span table. When a focused span's median slowdown exceeds both `--regression-threshold` and `--regression-min-delta-ms`, or its failure count increases, `trace compare` returns a failing exit code and records `focus_status`, `focus_regression_count`, and `focus_failure_count` in JSON output. All compared spans remain present in `spans`.
+
+## Scenario Matrices
+
+Use `trace matrix` to run the same trace scenario across a Cartesian product of axis values. Each `--axis` is declared as `name=value1,value2`; repeat the flag for dimensions such as viewport, ECE location, payment method, selected variation state, or feature switches.
+
+```sh
+homeboy trace matrix woocommerce-gateway-stripe ece-product-page-waterfall \
+  --axis viewport=desktop,mobile \
+  --axis ece_locations=product,none \
+  --axis methods=card-link,card-only \
+  --output-dir .homeboy/experiments/ece-product-matrix
+```
+
+For every cell, Homeboy passes axis values through both runner config and environment:
+
+- Config settings include each axis key as a string value plus a `trace_matrix` object containing all cell values.
+- Environment includes `HOMEBOY_TRACE_MATRIX_CELL`, `HOMEBOY_TRACE_MATRIX_LABEL`, `HOMEBOY_TRACE_MATRIX_JSON`, and one `HOMEBOY_TRACE_MATRIX_<AXIS>` variable per axis. Non-alphanumeric axis characters become underscores in env-var names.
+
+The output directory keeps a stable artifact set:
+
+- `matrix.json` is the machine-readable matrix summary with cell-level pass/fail, axis values, run artifact paths, and per-cell output paths.
+- `summary.md` is a Markdown table for human review.
+- `cell-NNN-<axis-label>/trace.json` preserves the trace output for each matrix cell.
+
+The matrix command continues after failed cells so the JSON/table report shows the full matrix. It exits non-zero when any cell fails.
 
 ## Compare Variant Experiments
 

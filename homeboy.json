@@ -2703,6 +2703,7 @@
         "structural::src/core/code_audit/mod.rs::GodFile",
         "structural::src/core/extension/grammar.rs::GodFile",
         "structural::src/core/extension/lifecycle.rs::GodFile",
+        "structural::src/core/extension/trace/report.rs::HighItemCount",
         "structural::src/core/extension/trace/run.rs::HighItemCount",
         "structural::src/core/refactor/rename/mod.rs::GodFile",
         "structural::src/core/release/executor.rs::GodFile",
