@@ -114,6 +114,9 @@ homeboy audit my-plugin --baseline
 # Let a cleanup sprint ratchet an improved baseline forward
 homeboy audit my-plugin --ratchet
 
+# Refresh only generated baseline data after main changes
+homeboy audit-baseline refresh my-plugin --changed-since origin/main
+
 # Audit a workspace clone instead of local_path
 homeboy audit my-plugin --path /var/lib/datamachine/workspace/my-plugin
 
@@ -224,5 +227,6 @@ With `--baseline` comparison:
 ## Related
 
 - [docs](docs.md) — embedded documentation topics and codebase maps
+- [audit-baseline](audit-baseline.md) — deterministic audit baseline refresh workflow
 - [lint](lint.md) — extension-driven code style validation
 - [JSON output contract](../architecture/output-system.md)

@@ -159,7 +159,9 @@ extensions, runs commands, posts PR comments, and can apply safe autofixes.
 
 ```yaml
 name: Homeboy
-on: [pull_request]
+on:
+  pull_request:
+  workflow_dispatch:
 
 jobs:
   quality:
@@ -171,6 +173,10 @@ jobs:
           extension: rust
           commands: audit,lint,test,review
 ```
+
+If a pull request needs a fresh quality run without pushing another commit,
+rerun the workflow from the GitHub Actions UI or with
+`gh workflow run <workflow-file> --ref <branch>`.
 
 ## Core Workflows
 

@@ -2691,6 +2691,7 @@
         "intra-method-duplication::src/core/agent_task_scheduler.rs::IntraMethodDuplicate",
         "parallel-implementation::src/core/agent_task_scheduler.rs::ParallelImplementation",
         "parallel-implementation::src/core/config/json_pointer.rs::ParallelImplementation",
+        "enum_dispatch_contracts::src/commands/trace/output.rs::RepeatedEnumDispatchContract",
         "structural::src/commands/bench/tests.rs::HighItemCount",
         "structural::src/commands/runs/gh_actions.rs::HighItemCount",
         "structural::src/commands/trace.rs::GodFile",
