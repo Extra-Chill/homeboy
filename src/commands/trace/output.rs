@@ -525,6 +525,7 @@ fn option_sum_f64(left: Option<f64>, right: Option<f64>) -> Option<f64> {
     Some(left? + right?)
 }
 
+#[cfg(test)]
 pub(super) fn render_aggregate_markdown(
     aggregate: &extension_trace::TraceAggregateOutput,
 ) -> String {
@@ -999,6 +1000,7 @@ fn is_relative_artifact_path(path: &str) -> bool {
             .any(|component| matches!(component, std::path::Component::ParentDir))
 }
 
+#[cfg(test)]
 fn push_classification_summary_table(
     out: &mut String,
     summaries: &[extension_trace::TraceClassificationSummaryOutput],
