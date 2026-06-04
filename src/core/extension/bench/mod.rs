@@ -31,6 +31,7 @@ pub(crate) mod gate;
 pub(crate) mod metric_policy_preset;
 pub mod metrics;
 pub mod parsing;
+pub mod phase_events;
 pub mod report;
 pub mod run;
 pub(crate) mod run_metadata;
@@ -54,10 +55,10 @@ pub use gate::{evaluate_gates, BenchGate, BenchGateOp, BenchGateResult};
 pub use metric_policy_preset::{BenchMetricPolicyPreset, BenchMetricPolicyPresetKind};
 pub use metrics::MetricDelta;
 pub use parsing::{
-    parse_bench_results_file, parse_bench_results_str, BenchMemory, BenchMetrics, BenchPhaseEvent,
-    BenchPhaseFailureClassification, BenchPhaseSummary, BenchResults, BenchRunExecution,
-    BenchScenario,
+    parse_bench_results_file, parse_bench_results_str, BenchMemory, BenchMetrics, BenchResults,
+    BenchRunExecution, BenchScenario,
 };
+pub use phase_events::{BenchPhaseEvent, BenchPhaseFailureClassification, BenchPhaseSummary};
 pub use report::{
     aggregate_comparison, aggregate_comparison_with_axes, from_main_workflow,
     from_main_workflow_with_rig, from_main_workflow_with_rig_and_ci_context, BenchArtifactRef,
