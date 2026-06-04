@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.115.17] - 2026-06-04
+
+### Fixed
+- define ABSPATH for WordPress PHPStan analysis
+
 ## [2.115.16] - 2026-06-04
 
 ### Fixed
