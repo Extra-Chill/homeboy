@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.115.4] - 2026-06-04
+
+### Fixed
+- use host path for datamachine code file
+
 ## [2.115.3] - 2026-06-04
 
 ### Fixed
