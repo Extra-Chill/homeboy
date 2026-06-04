@@ -219,6 +219,7 @@ assert.equal(codeboxRequest.task_timeout_seconds, 120);
 assert.equal(codeboxRequest.expected_artifacts[0], 'screenshot');
 assert.equal(codeboxRequest.orchestrator.agent_task_id, 'task-123');
 assert.equal(codeboxRequest.context.audit_findings[0].id, 'finding-1');
+assert.deepEqual(codeboxRequest.agent_bundle, {});
 
 const codexAgentRequest = {
   ...request,
@@ -265,6 +266,7 @@ assert.deepEqual(codexRequest.secret_env, [
   'AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID',
   'AI_PROVIDER_OPENAI_CODEX_FEDRAMP',
 ]);
+assert.deepEqual(codexRequest.agent_bundle, {});
 assert(!JSON.stringify(codexRequest).includes('wp-ai-gateway'));
 assert.equal(codeboxTaskRequestFromAgentTaskRequest({
   ...request,
