@@ -1313,17 +1313,15 @@ fn core_owned_source_stays_language_and_framework_agnostic() {
     let baseline = homeboy::core::code_audit::baseline::load_baseline(root)
         .expect("homeboy.json should contain an audit baseline");
 
-    let policy = "core_boundary_leak:core-agnostic-source";
+    let policy = homeboy::core::code_audit::baseline::SOURCE_POLICY_CORE_BOUNDARY_POLICY;
+    let scope = Some(homeboy::core::code_audit::baseline::SOURCE_POLICY_CORE_BOUNDARY_SCOPE);
     let current_policy_findings = findings
         .iter()
         .filter(|finding| finding.convention == policy)
         .collect::<Vec<_>>();
 
-    let baseline_fingerprints = baseline
-        .known_fingerprints
-        .iter()
-        .map(|fingerprint| fingerprint.as_str())
-        .collect::<BTreeSet<_>>();
+    let baseline_fingerprints =
+        homeboy::core::code_audit::baseline::policy_baseline_fingerprints(&baseline, policy, scope);
     let current_policy_fingerprints = current_policy_findings
         .iter()
         .map(|finding| homeboy::core::code_audit::baseline::finding_baseline_fingerprint(finding))
@@ -1338,15 +1336,19 @@ fn core_owned_source_stays_language_and_framework_agnostic() {
                 .then(|| format!("{}: {}", fingerprint, finding.description))
         })
         .collect::<Vec<_>>();
-    let stale_policy_findings = baseline
-        .known_fingerprints
-        .iter()
-        .filter(|fingerprint| {
-            fingerprint.starts_with(policy)
-                && !current_policy_fingerprints.contains(fingerprint.as_str())
-        })
-        .cloned()
-        .collect::<Vec<_>>();
+    let baseline_mode = if is_changed_scope_run() {
+        homeboy::core::code_audit::baseline::PolicyBaselineMode::ChangedScope
+    } else {
+        homeboy::core::code_audit::baseline::PolicyBaselineMode::Full
+    };
+    let stale_policy_findings =
+        homeboy::core::code_audit::baseline::stale_policy_baseline_fingerprints(
+            &baseline,
+            &current_policy_fingerprints,
+            policy,
+            scope,
+            baseline_mode,
+        );
 
     assert!(
         !current_policy_findings.is_empty(),
@@ -1357,13 +1359,11 @@ fn core_owned_source_stays_language_and_framework_agnostic() {
         "core-owned source contains non-baselined ecosystem or Homeboy-domain behavior. Core concepts are allowed when generic (command, artifact, capability, preflight, runner), but product/domain values must come from config, extension manifests, or typed extension contracts. New audit findings:\n{}",
         new_policy_findings.join("\n")
     );
-    if !is_changed_scope_run() {
-        assert!(
-            stale_policy_findings.is_empty(),
-            "core-owned source agnostic audit baseline contains stale entries. Ratchet baselines.audit after cleanup:\n{}",
-            stale_policy_findings.join("\n")
-        );
-    }
+    assert!(
+        stale_policy_findings.is_empty(),
+        "core-owned source agnostic audit baseline contains stale entries. Ratchet baselines.audit after cleanup:\n{}",
+        stale_policy_findings.join("\n")
+    );
 }
 
 fn is_changed_scope_run() -> bool {
