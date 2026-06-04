@@ -8,15 +8,46 @@ pub(crate) struct AuditExecutionPlan {
     pub(crate) plan: HomeboyPlan,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct DetectorFamily {
-    id: &'static str,
-    findings: &'static [AuditFinding],
-    requires_discovery: bool,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DetectorAccess {
+    Discovery,
+    RootOnly,
 }
 
-const DETECTOR_FAMILIES: &[DetectorFamily] = &[
-    DetectorFamily {
+impl DetectorAccess {
+    fn requires_discovery(self) -> bool {
+        matches!(self, Self::Discovery)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DetectorRuntime {
+    Manual,
+    Fingerprint(FingerprintDetectorRunner),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FingerprintDetectorRunner {
+    ShadowModules,
+    FacadePassthrough,
+    LiteralShapes,
+    SharedScaffolding,
+    AggregateConstruction,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DetectorDescriptor {
+    pub(crate) id: &'static str,
+    pub(crate) findings: &'static [AuditFinding],
+    pub(crate) access: DetectorAccess,
+    pub(crate) runtime: DetectorRuntime,
+    pub(crate) timing_id: &'static str,
+    pub(crate) log_label: &'static str,
+    pub(crate) log_summary: &'static str,
+}
+
+const DETECTOR_DESCRIPTORS: &[DetectorDescriptor] = &[
+    DetectorDescriptor {
         id: "conventions",
         findings: &[
             AuditFinding::MissingMethod,
@@ -29,18 +60,26 @@ const DETECTOR_FAMILIES: &[DetectorFamily] = &[
             AuditFinding::NamespaceMismatch,
             AuditFinding::MissingImport,
         ],
-        requires_discovery: true,
+        access: DetectorAccess::Discovery,
+        runtime: DetectorRuntime::Manual,
+        timing_id: "detector.conventions",
+        log_label: "Conventions",
+        log_summary: "convention outliers",
     },
-    DetectorFamily {
+    DetectorDescriptor {
         id: "structural",
         findings: &[
             AuditFinding::GodFile,
             AuditFinding::HighItemCount,
             AuditFinding::DirectorySprawl,
         ],
-        requires_discovery: false,
+        access: DetectorAccess::RootOnly,
+        runtime: DetectorRuntime::Manual,
+        timing_id: "detector.structural",
+        log_label: "Structural",
+        log_summary: "god files, high item counts",
     },
-    DetectorFamily {
+    DetectorDescriptor {
         id: "duplication",
         findings: &[
             AuditFinding::DuplicateFunction,
@@ -48,9 +87,13 @@ const DETECTOR_FAMILIES: &[DetectorFamily] = &[
             AuditFinding::NearDuplicate,
             AuditFinding::ParallelImplementation,
         ],
-        requires_discovery: true,
+        access: DetectorAccess::Discovery,
+        runtime: DetectorRuntime::Manual,
+        timing_id: "detector.duplication",
+        log_label: "Duplication",
+        log_summary: "duplicate implementations",
     },
-    DetectorFamily {
+    DetectorDescriptor {
         id: "dead_code",
         findings: &[
             AuditFinding::UnusedParameter,
@@ -59,14 +102,22 @@ const DETECTOR_FAMILIES: &[DetectorFamily] = &[
             AuditFinding::UnreferencedExport,
             AuditFinding::OrphanedInternal,
         ],
-        requires_discovery: true,
+        access: DetectorAccess::Discovery,
+        runtime: DetectorRuntime::Manual,
+        timing_id: "detector.dead_code",
+        log_label: "Dead code",
+        log_summary: "unused params, unreferenced exports, orphaned internals",
     },
-    DetectorFamily {
+    DetectorDescriptor {
         id: "comment_hygiene",
         findings: &[AuditFinding::TodoMarker, AuditFinding::LegacyComment],
-        requires_discovery: true,
+        access: DetectorAccess::Discovery,
+        runtime: DetectorRuntime::Manual,
+        timing_id: "detector.comment_hygiene",
+        log_label: "Comment hygiene",
+        log_summary: "TODO/FIXME/HACK markers, stale phrasing",
     },
-    DetectorFamily {
+    DetectorDescriptor {
         id: "test_coverage",
         findings: &[
             AuditFinding::MissingTestFile,
@@ -74,77 +125,129 @@ const DETECTOR_FAMILIES: &[DetectorFamily] = &[
             AuditFinding::OrphanedTest,
             AuditFinding::VacuousTest,
         ],
-        requires_discovery: true,
+        access: DetectorAccess::Discovery,
+        runtime: DetectorRuntime::Manual,
+        timing_id: "detector.test_coverage",
+        log_label: "Test coverage",
+        log_summary: "missing test files, uncovered methods, orphaned tests",
     },
-    DetectorFamily {
+    DetectorDescriptor {
         id: "layer_ownership",
         findings: &[AuditFinding::LayerOwnershipViolation],
-        requires_discovery: false,
+        access: DetectorAccess::RootOnly,
+        runtime: DetectorRuntime::Manual,
+        timing_id: "detector.layer_ownership",
+        log_label: "Layer ownership",
+        log_summary: "architecture ownership violations",
     },
-    DetectorFamily {
+    DetectorDescriptor {
         id: "test_topology",
         findings: &[
             AuditFinding::InlineTestModule,
             AuditFinding::ScatteredTestFile,
             AuditFinding::VacuousTest,
         ],
-        requires_discovery: false,
+        access: DetectorAccess::RootOnly,
+        runtime: DetectorRuntime::Manual,
+        timing_id: "detector.test_topology",
+        log_label: "Test topology",
+        log_summary: "inline/scattered test placement",
     },
-    DetectorFamily {
+    DetectorDescriptor {
         id: "test_wiring",
         findings: &[AuditFinding::UnwiredNestedRustTest],
-        requires_discovery: false,
+        access: DetectorAccess::RootOnly,
+        runtime: DetectorRuntime::Manual,
+        timing_id: "detector.test_wiring",
+        log_label: "Nested test wiring",
+        log_summary: "nested tests not wired into the test runner",
     },
-    DetectorFamily {
+    DetectorDescriptor {
         id: "docs",
         findings: &[
             AuditFinding::BrokenDocReference,
             AuditFinding::UndocumentedFeature,
             AuditFinding::StaleDocReference,
         ],
-        requires_discovery: false,
+        access: DetectorAccess::RootOnly,
+        runtime: DetectorRuntime::Manual,
+        timing_id: "detector.docs",
+        log_label: "Docs",
+        log_summary: "broken references, stale paths",
     },
-    DetectorFamily {
+    DetectorDescriptor {
         id: "compiler_warnings",
         findings: &[AuditFinding::CompilerWarning],
-        requires_discovery: false,
+        access: DetectorAccess::RootOnly,
+        runtime: DetectorRuntime::Manual,
+        timing_id: "detector.compiler_warnings",
+        log_label: "Compiler warnings",
+        log_summary: "dead code, unused imports, unused variables",
     },
-    DetectorFamily {
+    DetectorDescriptor {
         id: "wrapper_inference",
         findings: &[AuditFinding::MissingWrapperDeclaration],
-        requires_discovery: true,
+        access: DetectorAccess::Discovery,
+        runtime: DetectorRuntime::Manual,
+        timing_id: "detector.wrapper_inference",
+        log_label: "Wrapper inference",
+        log_summary: "missing wrapper declarations",
     },
-    DetectorFamily {
+    DetectorDescriptor {
         id: "shadow_modules",
         findings: &[AuditFinding::ShadowModule],
-        requires_discovery: true,
+        access: DetectorAccess::Discovery,
+        runtime: DetectorRuntime::Fingerprint(FingerprintDetectorRunner::ShadowModules),
+        timing_id: "detector.shadow_modules",
+        log_label: "Shadow modules",
+        log_summary: "duplicate directory structures",
     },
-    DetectorFamily {
+    DetectorDescriptor {
         id: "field_patterns",
         findings: &[AuditFinding::RepeatedFieldPattern],
-        requires_discovery: true,
+        access: DetectorAccess::Discovery,
+        runtime: DetectorRuntime::Manual,
+        timing_id: "detector.field_patterns",
+        log_label: "Field patterns",
+        log_summary: "repeated struct fields",
     },
-    DetectorFamily {
+    DetectorDescriptor {
         id: "facade_passthrough",
         findings: &[AuditFinding::FacadePassthrough],
-        requires_discovery: true,
+        access: DetectorAccess::Discovery,
+        runtime: DetectorRuntime::Fingerprint(FingerprintDetectorRunner::FacadePassthrough),
+        timing_id: "detector.facade_passthrough",
+        log_label: "Facade passthrough",
+        log_summary: "thin wrapper classes",
     },
-    DetectorFamily {
+    DetectorDescriptor {
         id: "literal_shapes",
         findings: &[AuditFinding::RepeatedLiteralShape],
-        requires_discovery: true,
+        access: DetectorAccess::Discovery,
+        runtime: DetectorRuntime::Fingerprint(FingerprintDetectorRunner::LiteralShapes),
+        timing_id: "detector.literal_shapes",
+        log_label: "Literal shapes",
+        log_summary: "repeated inline array literals",
     },
-    DetectorFamily {
+    DetectorDescriptor {
         id: "deprecation_age",
         findings: &[AuditFinding::DeprecationAge],
-        requires_discovery: true,
+        access: DetectorAccess::Discovery,
+        runtime: DetectorRuntime::Manual,
+        timing_id: "detector.deprecation_age",
+        log_label: "Deprecation age",
+        log_summary: "stale @deprecated tags",
     },
-    DetectorFamily {
+    DetectorDescriptor {
         id: "dead_guard",
         findings: &[AuditFinding::DeadGuard],
-        requires_discovery: true,
+        access: DetectorAccess::Discovery,
+        runtime: DetectorRuntime::Manual,
+        timing_id: "detector.dead_guard",
+        log_label: "Dead guards",
+        log_summary: "guards on guaranteed-available symbols",
     },
-    DetectorFamily {
+    DetectorDescriptor {
         id: "requested_detectors",
         findings: &[
             AuditFinding::JsonLikeExactMatch,
@@ -153,82 +256,146 @@ const DETECTOR_FAMILIES: &[DetectorFamily] = &[
             AuditFinding::ProxyScopeDrift,
             AuditFinding::ConfigRoundtripAsymmetry,
         ],
-        requires_discovery: true,
+        access: DetectorAccess::Discovery,
+        runtime: DetectorRuntime::Manual,
+        timing_id: "detector.requested_detectors",
+        log_label: "Requested detectors",
+        log_summary: "extension rule packs",
     },
-    DetectorFamily {
+    DetectorDescriptor {
         id: "core_boundary_leaks",
         findings: &[AuditFinding::CoreBoundaryLeak],
-        requires_discovery: true,
+        access: DetectorAccess::Discovery,
+        runtime: DetectorRuntime::Manual,
+        timing_id: "detector.core_boundary_leaks",
+        log_label: "Core boundary leaks",
+        log_summary: "configured ecosystem terms in core source",
     },
-    DetectorFamily {
+    DetectorDescriptor {
         id: "source_policy",
         findings: &[AuditFinding::SourcePolicyViolation],
-        requires_discovery: true,
+        access: DetectorAccess::Discovery,
+        runtime: DetectorRuntime::Manual,
+        timing_id: "detector.source_policy",
+        log_label: "Source policy",
+        log_summary: "configured source policy rules",
     },
-    DetectorFamily {
+    DetectorDescriptor {
         id: "mutating_resource_access",
         findings: &[AuditFinding::MutatingResourceAccess],
-        requires_discovery: true,
+        access: DetectorAccess::Discovery,
+        runtime: DetectorRuntime::Manual,
+        timing_id: "detector.mutating_resource_access",
+        log_label: "Mutating resource access",
+        log_summary: "resource mutations without configured access checks",
     },
-    DetectorFamily {
+    DetectorDescriptor {
         id: "redirect_validation",
         findings: &[AuditFinding::RedirectValidation],
-        requires_discovery: true,
+        access: DetectorAccess::Discovery,
+        runtime: DetectorRuntime::Manual,
+        timing_id: "detector.redirect_validation",
+        log_label: "Redirect validation",
+        log_summary: "request-derived redirects without dominating validation",
     },
-    DetectorFamily {
+    DetectorDescriptor {
         id: "global_env_guard",
         findings: &[AuditFinding::GlobalEnvMutationGuard],
-        requires_discovery: true,
+        access: DetectorAccess::Discovery,
+        runtime: DetectorRuntime::Manual,
+        timing_id: "detector.global_env_guard",
+        log_label: "Global env guards",
+        log_summary: "test env mutation without shared guard",
     },
-    DetectorFamily {
+    DetectorDescriptor {
         id: "shared_scaffolding",
         findings: &[AuditFinding::SharedScaffolding],
-        requires_discovery: true,
+        access: DetectorAccess::Discovery,
+        runtime: DetectorRuntime::Fingerprint(FingerprintDetectorRunner::SharedScaffolding),
+        timing_id: "detector.shared_scaffolding",
+        log_label: "Shared scaffolding",
+        log_summary: "candidate base class groups",
     },
-    DetectorFamily {
+    DetectorDescriptor {
         id: "parallel_runner_setup",
         findings: &[AuditFinding::ParallelRunnerSetup],
-        requires_discovery: true,
+        access: DetectorAccess::Discovery,
+        runtime: DetectorRuntime::Manual,
+        timing_id: "detector.parallel_runner_setup",
+        log_label: "Parallel runner setup",
+        log_summary: "duplicated execution contract setup",
     },
-    DetectorFamily {
+    DetectorDescriptor {
         id: "runner_offload_preflight",
         findings: &[AuditFinding::RunnerOffloadPreflight],
-        requires_discovery: true,
+        access: DetectorAccess::Discovery,
+        runtime: DetectorRuntime::Manual,
+        timing_id: "detector.runner_offload_preflight",
+        log_label: "Runner preflight",
+        log_summary: "remote runner path/artifact parity gaps",
     },
-    DetectorFamily {
+    DetectorDescriptor {
         id: "enum_dispatch_contracts",
         findings: &[AuditFinding::RepeatedEnumDispatchContract],
-        requires_discovery: true,
+        access: DetectorAccess::Discovery,
+        runtime: DetectorRuntime::Manual,
+        timing_id: "detector.enum_dispatch_contracts",
+        log_label: "Enum dispatch contracts",
+        log_summary: "repeated exhaustive enum matches",
     },
-    DetectorFamily {
+    DetectorDescriptor {
         id: "aggregate_construction",
         findings: &[AuditFinding::DirectAggregateConstruction],
-        requires_discovery: true,
+        access: DetectorAccess::Discovery,
+        runtime: DetectorRuntime::Fingerprint(FingerprintDetectorRunner::AggregateConstruction),
+        timing_id: "detector.aggregate_construction",
+        log_label: "Aggregate construction",
+        log_summary: "direct literals bypass construction seams",
     },
-    DetectorFamily {
+    DetectorDescriptor {
         id: "public_registry_exposure",
         findings: &[AuditFinding::PublicRegistryExposure],
-        requires_discovery: true,
+        access: DetectorAccess::Discovery,
+        runtime: DetectorRuntime::Manual,
+        timing_id: "detector.public_registry_exposure",
+        log_label: "Public registry exposure",
+        log_summary: "public metadata routes bypassing resolvers",
     },
-    DetectorFamily {
+    DetectorDescriptor {
         id: "config_key_usage",
         findings: &[AuditFinding::WriteOnlyConfigKey],
-        requires_discovery: true,
+        access: DetectorAccess::Discovery,
+        runtime: DetectorRuntime::Manual,
+        timing_id: "detector.config_key_usage",
+        log_label: "Config key usage",
+        log_summary: "write/accessor evidence without production reads",
     },
-    DetectorFamily {
+    DetectorDescriptor {
         id: "artifact_portability",
         findings: &[AuditFinding::NonPortableArtifactPath],
-        requires_discovery: false,
+        access: DetectorAccess::RootOnly,
+        runtime: DetectorRuntime::Manual,
+        timing_id: "detector.artifact_portability",
+        log_label: "Artifact portability",
+        log_summary: "non-portable artifact evidence paths",
     },
-    DetectorFamily {
+    DetectorDescriptor {
         id: "output_capture",
         findings: &[AuditFinding::UnboundedOutputCapture],
-        requires_discovery: true,
+        access: DetectorAccess::Discovery,
+        runtime: DetectorRuntime::Manual,
+        timing_id: "detector.output_capture",
+        log_label: "Output capture",
+        log_summary: "unbounded stdout/stderr capture",
     },
-    DetectorFamily {
+    DetectorDescriptor {
         id: "command_status_contracts",
         findings: &[AuditFinding::CommandStatusContractViolation],
-        requires_discovery: false,
+        access: DetectorAccess::RootOnly,
+        runtime: DetectorRuntime::Manual,
+        timing_id: "detector.command_status_contracts",
+        log_label: "Command status contracts",
+        log_summary: "inconsistent no-op/dry-run status fields",
     },
 ];
 
@@ -247,8 +414,8 @@ impl AuditExecutionPlan {
         })
     }
 
-    fn from_enabled_families(mode: &str, is_enabled: impl Fn(&DetectorFamily) -> bool) -> Self {
-        let steps: Vec<PlanStep> = DETECTOR_FAMILIES
+    fn from_enabled_families(mode: &str, is_enabled: impl Fn(&DetectorDescriptor) -> bool) -> Self {
+        let steps: Vec<PlanStep> = DETECTOR_DESCRIPTORS
             .iter()
             .map(|family| detector_step(family.id, is_enabled(family)))
             .collect();
@@ -262,7 +429,7 @@ impl AuditExecutionPlan {
         }
     }
 
-    fn detector_enabled(&self, id: &str) -> bool {
+    pub(crate) fn detector_enabled(&self, id: &str) -> bool {
         let step_id = detector_step_id(id);
         self.plan
             .steps
@@ -315,20 +482,8 @@ impl AuditExecutionPlan {
         self.detector_enabled("wrapper_inference")
     }
 
-    pub(crate) fn run_shadow_modules(&self) -> bool {
-        self.detector_enabled("shadow_modules")
-    }
-
     pub(crate) fn run_field_patterns(&self) -> bool {
         self.detector_enabled("field_patterns")
-    }
-
-    pub(crate) fn run_facade_passthrough(&self) -> bool {
-        self.detector_enabled("facade_passthrough")
-    }
-
-    pub(crate) fn run_literal_shapes(&self) -> bool {
-        self.detector_enabled("literal_shapes")
     }
 
     pub(crate) fn run_deprecation_age(&self) -> bool {
@@ -363,10 +518,6 @@ impl AuditExecutionPlan {
         self.detector_enabled("global_env_guard")
     }
 
-    pub(crate) fn run_shared_scaffolding(&self) -> bool {
-        self.detector_enabled("shared_scaffolding")
-    }
-
     pub(crate) fn run_parallel_runner_setup(&self) -> bool {
         self.detector_enabled("parallel_runner_setup")
     }
@@ -377,10 +528,6 @@ impl AuditExecutionPlan {
 
     pub(crate) fn run_enum_dispatch_contracts(&self) -> bool {
         self.detector_enabled("enum_dispatch_contracts")
-    }
-
-    pub(crate) fn run_aggregate_construction(&self) -> bool {
-        self.detector_enabled("aggregate_construction")
     }
 
     pub(crate) fn run_public_registry_exposure(&self) -> bool {
@@ -404,9 +551,13 @@ impl AuditExecutionPlan {
     }
 
     pub(crate) fn requires_discovery(&self) -> bool {
-        DETECTOR_FAMILIES
+        DETECTOR_DESCRIPTORS
             .iter()
-            .any(|family| family.requires_discovery && self.detector_enabled(family.id))
+            .any(|family| family.access.requires_discovery() && self.detector_enabled(family.id))
+    }
+
+    pub(crate) fn descriptors() -> &'static [DetectorDescriptor] {
+        DETECTOR_DESCRIPTORS
     }
 }
 

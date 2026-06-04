@@ -71,6 +71,9 @@ use super::diagnostic::BenchDiagnostic;
 use super::distribution::BenchRunDistribution;
 use super::gate::{BenchGate, BenchGateResult};
 use super::metric_policy_preset::{expand_metric_policy_presets, BenchMetricPolicyPreset};
+use super::phase_events::{
+    evaluate_phase_events, BenchPhaseEvent, BenchPhaseFailureClassification, BenchPhaseSummary,
+};
 
 fn default_true() -> bool {
     true
@@ -98,6 +101,20 @@ pub struct BenchResults {
     pub span_definitions: BTreeMap<String, serde_json::Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub diagnostics: Vec<BenchDiagnostic>,
+    /// Structured lifecycle events emitted by the bench runner.
+    ///
+    /// Runners can append these as long phases progress so persisted bench
+    /// evidence can distinguish dependency setup, runtime startup, workload
+    /// execution, artifact collection, or any other runner-defined phase.
+    /// Extension-specific details belong in `payload`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub phase_events: Vec<BenchPhaseEvent>,
+    /// Derived phase rollup computed from `phase_events`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub phase_summaries: Vec<BenchPhaseSummary>,
+    /// Derived classification for the first timeout/failure phase.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_classification: Option<BenchPhaseFailureClassification>,
     #[serde(
         default,
         deserialize_with = "super::budget_findings::deserialize_budget_findings",
@@ -442,6 +459,7 @@ fn parse_bench_results_str_with_artifact_context(
     validate_unique_scenario_ids(&parsed)?;
     expand_metric_policy_presets(&mut parsed)?;
     validate_variance_policies(&parsed)?;
+    evaluate_phase_events(&mut parsed);
     evaluate_spans(&mut parsed);
     artifact_validation::validate_artifact_paths(&parsed, rig_id)?;
     Ok(parsed)

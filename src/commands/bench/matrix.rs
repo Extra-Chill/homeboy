@@ -320,6 +320,19 @@ fn merge_matrix_results(
                 .flat_map(|output| output.results.as_ref().map(|r| r.diagnostics.clone()))
                 .flatten()
                 .collect(),
+            phase_events: outputs
+                .iter()
+                .flat_map(|output| output.results.as_ref().map(|r| r.phase_events.clone()))
+                .flatten()
+                .collect(),
+            phase_summaries: outputs
+                .iter()
+                .flat_map(|output| output.results.as_ref().map(|r| r.phase_summaries.clone()))
+                .flatten()
+                .collect(),
+            failure_classification: outputs
+                .iter()
+                .find_map(|output| output.results.as_ref()?.failure_classification.clone()),
             budget_findings,
             scenarios: merged_scenarios,
             metric_policies: metric_policies_seen,
