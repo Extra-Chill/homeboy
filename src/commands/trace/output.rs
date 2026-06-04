@@ -999,7 +999,6 @@ fn is_relative_artifact_path(path: &str) -> bool {
             .any(|component| matches!(component, std::path::Component::ParentDir))
 }
 
-#[cfg(test)]
 fn push_classification_summary_table(
     out: &mut String,
     summaries: &[extension_trace::TraceClassificationSummaryOutput],
