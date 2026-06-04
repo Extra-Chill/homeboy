@@ -252,7 +252,13 @@ try {
     path.join(root, 'composer-artifacts'),
   ], {
     encoding: 'utf8',
-    input: JSON.stringify({ ...request, provider_plugin_paths: [] }),
+    input: JSON.stringify({
+      ...request,
+      execution_kind: 'datamachine_bundle',
+      homeboy_extensions: path.join(__dirname, '..'),
+      datamachine_bundle: { bundle_path: '/workspace/wp-site-generator/bundles/store-idea-agent' },
+      provider_plugin_paths: [],
+    }),
     env: {
       ...process.env,
       FIXTURE_WP_CODEBOX_CAPTURE: composerCapturePath,
@@ -262,6 +268,8 @@ try {
   });
   assert.equal(composerResult.status, 0, composerResult.stderr || composerResult.stdout);
   const composerRecipe = readJson(composerCapturePath).recipe;
+  const codeFileArg = composerRecipe.workflow.steps[0].args.find((arg) => arg.startsWith('code-file='));
+  assert.equal(codeFileArg, `code-file=${path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-datamachine-agent-workload-wrapper.php')}`);
   const preparedDataMachine = composerRecipe.inputs.extraPlugins.find((plugin) => plugin.slug === 'data-machine');
   assert.notEqual(preparedDataMachine.source, composerPluginPath);
   assert(pathInside(path.join(root, 'composer-artifacts', 'prepared-plugins'), fs.realpathSync(preparedDataMachine.source)));
