@@ -29,17 +29,13 @@ pub(super) fn record_trace_artifacts(
         run_dir.step_file(homeboy::core::engine::run_dir::files::TRACE_RESULTS);
     record_artifact_if_file(store, run_id, "trace-results", &trace_results_path);
     let artifact_dir = run_dir.path().join("artifacts");
-    let has_declared_artifacts = results
-        .map(|results| !results.artifacts.is_empty())
-        .unwrap_or(false);
-    if !has_declared_artifacts {
-        record_artifact_dir_if_non_empty(store, run_id, "trace-artifacts", &artifact_dir);
-    }
+    let mut recorded_declared_directory = false;
     if let Some(results) = results {
         for artifact in &results.artifacts {
             if let Some(resolved) =
                 declared_trace_artifact_candidate(artifact, run_dir, &artifact_dir)
             {
+                let is_declared_directory = resolved.is_dir();
                 record_declared_artifact(
                     store,
                     run_id,
@@ -48,8 +44,12 @@ pub(super) fn record_trace_artifacts(
                     &resolved,
                     &mut observation_result,
                 );
+                recorded_declared_directory |= is_declared_directory;
             }
         }
+    }
+    if !recorded_declared_directory {
+        record_artifact_dir_if_non_empty(store, run_id, "trace-artifacts", &artifact_dir);
     }
     observation_result
 }
