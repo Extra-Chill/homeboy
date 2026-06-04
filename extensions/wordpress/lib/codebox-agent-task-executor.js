@@ -3,7 +3,7 @@
 const AGENT_TASK_REQUEST_SCHEMA = 'homeboy/agent-task-request/v1';
 const AGENT_TASK_OUTCOME_SCHEMA = 'homeboy/agent-task-outcome/v1';
 const AGENT_TASK_ARTIFACT_SCHEMA = 'homeboy/agent-task-artifact/v1';
-const WP_CODEBOX_TASK_REQUEST_SCHEMA = 'homeboy/wp-codebox-task-request/v1';
+const WP_CODEBOX_TASK_REQUEST_SCHEMA = 'wp-codebox/task-input/v1';
 
 const PROVIDER_CAPABILITIES = [
   'browser_runtime',
@@ -64,12 +64,7 @@ const DATAMACHINE_BUNDLE_CONFIG_FIELDS = [
   'time_budget_ms',
 ];
 
-const WP_CODEBOX_RUNTIME_GAP_TRACKERS = [
-  'https://github.com/Automattic/wp-codebox/issues/529',
-  'https://github.com/Automattic/wp-codebox/issues/530',
-  'https://github.com/Automattic/wp-codebox/issues/531',
-  'https://github.com/Automattic/wp-codebox/issues/532',
-];
+const WP_CODEBOX_RUNTIME_GAP_TRACKERS = [];
 
 const AGENT_TASK_OUTCOME_STATUSES = [
   'succeeded',
@@ -118,8 +113,8 @@ function providerContract(options = {}) {
     failure_classifications: AGENT_TASK_FAILURE_CLASSIFICATIONS,
     redacted_metadata_keys: AGENT_TASK_REDACTED_METADATA_KEYS,
     capabilities: PROVIDER_CAPABILITIES,
-    status: 'preparatory',
-    upstream_dependency: 'https://github.com/Automattic/wp-codebox/issues/480',
+    status: 'active',
+    integration_contract: 'wp-codebox-cli/agent-task-run',
     runtime_gap_trackers: WP_CODEBOX_RUNTIME_GAP_TRACKERS,
   };
 }
@@ -128,52 +123,59 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
   assertAgentTaskRequest(request);
   const config = request.executor.config || {};
   const inputs = request.inputs || {};
-  const executionKind = config.execution_kind || config.executionKind || config.kind || options.executionKind || 'sandbox';
   const datamachineBundle = datamachineBundleConfigFromAgentTaskRequest(request, config, inputs);
   const timeoutSeconds = request.limits?.task_timeout_seconds || request.limits?.taskTimeoutSeconds;
   const timeoutMs = request.limits?.timeout_ms || request.limits?.max_runtime_ms;
   const timeoutFromMs = timeoutMs ? Math.ceil(timeoutMs / 1000) : undefined;
+  const context = {
+    ...(inputs.context || {}),
+    agent_task_id: request.task_id,
+    group_key: request.group_key,
+    parent_plan_id: request.parent_plan_id,
+    source_refs: request.source_refs || [],
+    audit_findings: inputs.audit_findings || [],
+    matrix: inputs.matrix,
+  };
 
   return {
     schema: WP_CODEBOX_TASK_REQUEST_SCHEMA,
+    goal: request.instructions,
+    target: inputs.target || request.workspace || {},
+    allowed_tools: inputs.allowed_tools || inputs.allowedTools || [],
+    expected_artifacts: request.expected_artifacts || [],
+    policy: request.policy || {},
+    context,
     sandbox_session_id: config.sandbox_session_id || request.task_id,
-    group_key: request.group_key,
-    execution_kind: executionKind,
+    session_id: config.session_id || config.sessionId || '',
     agent: config.agent || options.agent || 'wp-codebox-sandbox',
     mode: config.mode || options.mode || 'sandbox',
     provider: config.provider || options.provider || '',
     model: request.executor.model || config.model || options.model || '',
     provider_plugin_paths: config.provider_plugin_paths || options.providerPluginPaths || [],
+    agent_bundles: config.agent_bundles || config.agentBundles || options.agentBundles || [],
     runtime_stack_mounts: config.runtime_stack_mounts || options.runtimeStackMounts || [],
     runtime_overlays: config.runtime_overlays || options.runtimeOverlays || [],
     secret_env: config.secret_env || options.secretEnv || [],
-    agents_api: config.agents_api || options.agentsApi || '',
-    data_machine: config.data_machine || options.dataMachine || '',
-    data_machine_code: config.data_machine_code || options.dataMachineCode || '',
-    homeboy: config.homeboy || options.homeboy || '',
-    homeboy_extensions: config.homeboy_extensions || options.homeboyExtensions || '',
-    wp_cli_bin: config.wp_cli_bin || options.wpCliBin || '',
+    mounts: config.mounts || options.mounts || [],
+    workspaces: config.workspaces || options.workspaces || [],
+    agents_api_path: config.agents_api || config.agents_api_path || options.agentsApi || '',
+    data_machine_path: config.data_machine || config.data_machine_path || options.dataMachine || '',
+    data_machine_code_path: config.data_machine_code || config.data_machine_code_path || options.dataMachineCode || '',
+    homeboy_path: config.homeboy || config.homeboy_path || options.homeboy || '',
+    homeboy_extensions_path: config.homeboy_extensions || config.homeboy_extensions_path || options.homeboyExtensions || '',
     wp_codebox_bin: config.wp_codebox_bin || options.wpCodeboxBin || '',
-    wp_codebox_wordpress_version: config.wp_codebox_wordpress_version || config.wpCodeboxWordpressVersion || options.wpCodeboxWordpressVersion || '',
-    artifacts: config.artifacts || options.artifacts || '',
+    wp: config.wp_codebox_wordpress_version || config.wpCodeboxWordpressVersion || options.wpCodeboxWordpressVersion || '',
+    artifacts_path: config.artifacts || config.artifacts_path || options.artifacts || '',
     max_turns: config.max_turns || options.maxTurns,
     task_timeout_seconds: config.task_timeout_seconds || timeoutSeconds || timeoutFromMs || options.taskTimeoutSeconds,
-    datamachine_bundle: datamachineBundle,
     orchestrator: {
       ...(inputs.orchestrator || {}),
       agent_task_id: request.task_id,
       parent_plan_id: request.parent_plan_id,
       source_refs: request.source_refs || [],
     },
-    audit_findings: inputs.audit_findings || [],
-    task: {
-      title: inputs.title || request.metadata?.title || `Run Codebox agent task ${request.task_id}`,
-      prompt: request.instructions,
-      expected_artifacts: request.expected_artifacts || [],
-      policy: request.policy || {},
-      workspace: request.workspace || {},
-      inputs,
-    },
+    datamachine_bundle: datamachineBundle,
+    parent_request: request,
   };
 }
 
@@ -208,7 +210,7 @@ function normalizeStatus(result, exitStatus = 0) {
   if (result?.status) {
     return result.status;
   }
-  const agentResult = result?.run?.agentResult || result?.agentResult || result?.metadata?.recipe_run?.agentResult || result?.metadata?.recipe_run?.run?.agentResult;
+  const agentResult = result?.run?.agentResult || result?.agentResult || result?.agent_result || result?.metadata?.recipe_run?.agentResult || result?.metadata?.recipe_run?.run?.agentResult;
   const changedFileCount = agentResult?.changedFiles?.count;
   const patchBytes = agentResult?.patch?.bytes;
   if (result?.success === true && agentResult?.noOpReason && changedFileCount === 0 && patchBytes === 0) {
@@ -270,8 +272,9 @@ function codeboxBundleArtifacts(result) {
     });
   }
 
-  const bundleDirectory = result.run?.agentResult?.artifacts?.directory || result.completionOutcome?.provenance?.artifactDirectory;
-  const artifactBundleId = result.completionOutcome?.provenance?.artifactBundleId || result.artifacts?.id;
+  const completionOutcome = result.completionOutcome || result.completion_outcome || {};
+  const bundleDirectory = result.run?.agentResult?.artifacts?.directory || result.agent_result?.artifacts?.directory || completionOutcome?.provenance?.artifactDirectory || result.session?.artifacts?.path;
+  const artifactBundleId = completionOutcome?.provenance?.artifactBundleId || result.session?.artifacts?.bundle_id || result.artifacts?.id;
   appendUniqueArtifact(artifacts, {
     id: artifactBundleId,
     kind: 'codebox-artifact-bundle',
@@ -282,7 +285,7 @@ function codeboxBundleArtifacts(result) {
     },
   });
 
-  const agentResult = result.run?.agentResult || result.agentResult || result.metadata?.recipe_run?.agentResult || {};
+  const agentResult = result.run?.agentResult || result.agentResult || result.agent_result || result.metadata?.recipe_run?.agentResult || {};
   const changedFilesPath = artifactPath(bundleDirectory, agentResult.changedFiles?.artifact || '');
   appendUniqueArtifact(artifacts, {
     id: changedFilesPath ? 'codebox-changed-files' : '',
@@ -496,8 +499,8 @@ function datamachineBundleArtifacts(result) {
 }
 
 function codeboxDecisionEvidence(result) {
-  const agentResult = result.run?.agentResult || result.agentResult || result.metadata?.recipe_run?.agentResult || result.metadata?.recipe_run?.run?.agentResult || {};
-  const completionOutcome = result.completionOutcome || result.metadata?.recipe_run?.completionOutcome || {};
+  const agentResult = result.run?.agentResult || result.agentResult || result.agent_result || result.metadata?.recipe_run?.agentResult || result.metadata?.recipe_run?.run?.agentResult || {};
+  const completionOutcome = result.completionOutcome || result.completion_outcome || result.metadata?.recipe_run?.completionOutcome || {};
   const runtime = result.run?.runtime || result.metadata?.recipe_run?.run?.runtime || {};
   const run = result.run || result.metadata?.recipe_run?.run || {};
   return Object.fromEntries(Object.entries({
@@ -540,7 +543,7 @@ function agentTaskOutcomeFromCodeboxResult(request, result = {}, options = {}) {
     metadata: {
       provider: 'wordpress.codebox-agent-task-executor',
       codebox: sanitizePublicMetadata(result.metadata || result),
-      upstream_dependency: 'https://github.com/Automattic/wp-codebox/issues/480',
+      integration_contract: 'wp-codebox-cli/agent-task-run',
       decision_evidence: sanitizePublicMetadata(codeboxDecisionEvidence(result)),
     },
   };

@@ -22,7 +22,7 @@ const {
 } = require('./wp-codebox-apply-adapter');
 
 const PLAN_SCHEMA = 'homeboy/audit-wp-codebox-fanout/v1';
-const TASK_SCHEMA = 'homeboy/wp-codebox-task-request/v1';
+const TASK_SCHEMA = 'wp-codebox/task-input/v1';
 const RUN_SCHEMA = 'homeboy/audit-wp-codebox-run/v1';
 const DEFAULT_CONCURRENCY = 3;
 const DEFAULT_TASK_TIMEOUT_SECONDS = 45 * 60;
@@ -357,6 +357,21 @@ function createTaskRequest(group, orchestrator) {
   const sandbox_session_id = sandboxSessionId(orchestrator, group);
   const request = {
     schema: TASK_SCHEMA,
+    goal: taskPrompt(group),
+    expected_artifacts: ['patch', 'review'],
+    policy: { kind: 'audit-remediation' },
+    context: {
+      group_key: group.key,
+      audit_findings: group.findings.map((finding) => ({
+        id: finding.id,
+        fingerprint: finding.fingerprint,
+        kind: finding.kind,
+        file: finding.file,
+        line: finding.line,
+        message: finding.message,
+        severity: finding.severity,
+      })),
+    },
     sandbox_session_id,
     group_key: group.key,
     orchestrator: {

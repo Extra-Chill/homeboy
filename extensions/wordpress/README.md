@@ -437,10 +437,10 @@ homeboy refactor <component> \
 ```
 
 `scripts/agent/homeboy-audit-wp-codebox-fanout.cjs` turns a structured audit
-report into one `homeboy/wp-codebox-task-request/v1` request per fix batch. With
+report into one `wp-codebox/task-input/v1` request per fix batch. With
 `--execute`, it streams each request to a WP Codebox task runner command such as
-`scripts/agent/homeboy-wp-codebox-task-runner.cjs`, which builds a
-provider-configured `wp-codebox/workspace-recipe/v1` recipe.
+`scripts/agent/homeboy-wp-codebox-task-runner.cjs`, which calls WP Codebox's
+stable `wp-codebox agent-task-run` parent contract.
 
 ### WP Codebox agent-task executor
 
@@ -451,8 +451,8 @@ screenshots, and structured outcome capabilities without adding Codebox imports 
 WordPress assumptions to Homeboy core.
 
 `scripts/agent/homeboy-codebox-agent-task-executor.cjs` accepts a generic
-`homeboy/agent-task-request/v1` request, maps it into the existing WP Codebox task
-runner request, invokes the Codebox recipe runner, and emits a
+`homeboy/agent-task-request/v1` request, maps it into WP Codebox's stable
+`wp-codebox/task-input/v1` request, invokes `wp-codebox agent-task-run`, and emits a
 `homeboy/agent-task-outcome/v1` outcome with normalized status, artifacts,
 evidence refs, diagnostics, and failure classification.
 
@@ -467,18 +467,11 @@ The outcome preserves the Homeboy decision evidence needed for Codebox worker
 canaries: why the Codebox executor was selected, which capabilities were used,
 the WP Codebox run/runtime IDs, cleanup status, heartbeat timestamp, changed-file
 count, patch digest/size, transcript/log artifact refs, and no-op reason when the
-sandbox completes without a promotable patch. Runtime gaps discovered during the
-worker-runtime canary are tracked upstream in:
-
-- https://github.com/Automattic/wp-codebox/issues/529
-- https://github.com/Automattic/wp-codebox/issues/530
-- https://github.com/Automattic/wp-codebox/issues/531
-- https://github.com/Automattic/wp-codebox/issues/532
-
-Removing the Homeboy-owned WP Codebox task runner is blocked on the upstream
-agent task runner API tracked in https://github.com/Automattic/wp-codebox/issues/480.
-Until that lands, this provider is a preparatory contract plus request/outcome
-adapter around the current `wp-codebox.agent-sandbox-run` command boundary.
+sandbox completes without a promotable patch. The earlier worker-runtime canary
+gap trackers `Automattic/wp-codebox#529` through `#532` are closed, and Homeboy no
+longer advertises them as active provider metadata. The former `#480` dependency
+is considered satisfied by the local `wp-codebox-cli/agent-task-run` contract; any
+future blocker should be tracked as a new contract-specific issue.
 
 Approved artifact-map entries become `apply_back` records for the reviewed
 apply adapter. Rejected entries with `approved: false` become `issue_reports`

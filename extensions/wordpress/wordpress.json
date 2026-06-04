@@ -62,16 +62,12 @@
         "run_registry",
         "cleanup_observability",
         "screenshots",
-        "structured_outcome"
+        "structured_outcome",
+        "datamachine_bundle_execution"
       ],
-      "status": "preparatory",
-      "upstream_dependency": "https://github.com/Automattic/wp-codebox/issues/480",
-      "runtime_gap_trackers": [
-        "https://github.com/Automattic/wp-codebox/issues/529",
-        "https://github.com/Automattic/wp-codebox/issues/530",
-        "https://github.com/Automattic/wp-codebox/issues/531",
-        "https://github.com/Automattic/wp-codebox/issues/532"
-      ]
+      "status": "active",
+      "integration_contract": "wp-codebox-cli/agent-task-run",
+      "runtime_gap_trackers": []
     }
   ],
   "scripts": {
