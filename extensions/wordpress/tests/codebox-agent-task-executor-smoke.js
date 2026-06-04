@@ -301,6 +301,7 @@ const datamachineBundleRequest = codeboxTaskRequestFromAgentTaskRequest({
       data_machine_code: '/components/data-machine-code',
       homeboy_extensions: '/components/homeboy-extensions/wordpress',
       bundle_path: '/bundles/static-site-agent',
+      bundle_host_path: '/home/runner/work/wp-site-generator/wp-site-generator/bundles/static-site-agent',
       agent_slug: 'static-site-agent',
       pipeline_slug: 'static-site-pipeline',
       flow_slug: 'static-site-manual-flow',
@@ -324,6 +325,32 @@ assert.deepEqual(datamachineBundleRequest.datamachine_bundle.flow_step_patches, 
 assert.deepEqual(datamachineBundleRequest.datamachine_bundle.tool_recorders, [{ tool: 'github/create-pull-request', engine_data_path: 'static_site_agent.pr_url' }]);
 assert.deepEqual(datamachineBundleRequest.datamachine_bundle.engine_data_outputs, { static_site_pr_url: 'metadata.engine_data.static_site_agent.pr_url' });
 assert.equal(datamachineBundleRequest.homeboy_extensions_path, '/components/homeboy-extensions/wordpress');
+assert.deepEqual(datamachineBundleRequest.mounts, [{
+  source: '/home/runner/work/wp-site-generator/wp-site-generator/bundles/static-site-agent',
+  target: '/bundles/static-site-agent',
+  mode: 'readonly',
+  metadata: { kind: 'datamachine-bundle' },
+}]);
+
+const datamachineBundleRequestWithExplicitMount = codeboxTaskRequestFromAgentTaskRequest({
+  ...request,
+  executor: {
+    backend: 'codebox',
+    config: {
+      execution_kind: 'datamachine_bundle',
+      mounts: [{
+        source: '/custom/static-site-agent',
+        target: '/bundles/static-site-agent',
+        mode: 'readonly',
+        metadata: { kind: 'custom' },
+      }],
+      bundle_path: '/bundles/static-site-agent',
+      bundle_host_path: '/home/runner/work/wp-site-generator/wp-site-generator/bundles/static-site-agent',
+    },
+  },
+});
+assert.equal(datamachineBundleRequestWithExplicitMount.mounts.length, 1);
+assert.equal(datamachineBundleRequestWithExplicitMount.mounts[0].source, '/custom/static-site-agent');
 
 const outcome = agentTaskOutcomeFromCodeboxResult(request, {
   success: false,

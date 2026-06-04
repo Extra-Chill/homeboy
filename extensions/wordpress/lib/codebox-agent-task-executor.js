@@ -124,6 +124,7 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
   const config = request.executor.config || {};
   const inputs = request.inputs || {};
   const datamachineBundle = datamachineBundleConfigFromAgentTaskRequest(request, config, inputs);
+  const mounts = datamachineBundleMounts(datamachineBundle, config.mounts || options.mounts || []);
   const timeoutSeconds = request.limits?.task_timeout_seconds || request.limits?.taskTimeoutSeconds;
   const timeoutMs = request.limits?.timeout_ms || request.limits?.max_runtime_ms;
   const timeoutFromMs = timeoutMs ? Math.ceil(timeoutMs / 1000) : undefined;
@@ -156,7 +157,7 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     runtime_stack_mounts: config.runtime_stack_mounts || options.runtimeStackMounts || [],
     runtime_overlays: config.runtime_overlays || options.runtimeOverlays || [],
     secret_env: config.secret_env || options.secretEnv || [],
-    mounts: config.mounts || options.mounts || [],
+    mounts,
     workspaces: config.workspaces || options.workspaces || [],
     agents_api_path: config.agents_api || config.agents_api_path || options.agentsApi || '',
     data_machine_path: config.data_machine || config.data_machine_path || options.dataMachine || '',
@@ -177,6 +178,27 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     datamachine_bundle: datamachineBundle,
     parent_request: request,
   };
+}
+
+function datamachineBundleMounts(bundleConfig, explicitMounts = []) {
+  const mounts = Array.isArray(explicitMounts) ? [...explicitMounts] : [];
+  const source = bundleConfig?.bundle_host_path;
+  const target = bundleConfig?.bundle_path;
+  if (!source || !target) {
+    return mounts;
+  }
+  if (mounts.some((mount) => mount?.source === source || mount?.target === target)) {
+    return mounts;
+  }
+  return [
+    ...mounts,
+    {
+      source,
+      target,
+      mode: 'readonly',
+      metadata: { kind: 'datamachine-bundle' },
+    },
+  ];
 }
 
 function datamachineBundleConfigFromAgentTaskRequest(request, config, inputs) {
