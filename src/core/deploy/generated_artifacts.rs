@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use crate::core::component::Component;
 use crate::core::defaults::deploy_generated_build_dir;
 use crate::core::error::Result;
 use crate::core::git;
@@ -10,21 +11,66 @@ pub(super) fn is_generated_build_path(rel_path: &str) -> bool {
 }
 
 pub(super) fn unexpected_uncommitted_files_excluding_generated_build(
-    local_path: &str,
+    component: &Component,
 ) -> Result<Vec<String>> {
+    let local_path = &component.local_path;
     let uncommitted = git::get_uncommitted_changes(local_path)?;
     if !uncommitted.has_changes {
         return Ok(Vec::new());
     }
 
-    Ok(uncommitted
+    let mut unexpected: Vec<String> = uncommitted
         .staged
         .iter()
         .chain(uncommitted.unstaged.iter())
-        .chain(uncommitted.untracked.iter())
         .filter(|path| !is_generated_build_path(path))
         .cloned()
-        .collect())
+        .collect();
+
+    unexpected.extend(
+        uncommitted
+            .untracked
+            .iter()
+            .filter(|path| !is_generated_build_path(path))
+            .filter(|path| !is_deploy_target_debris_path(component, path))
+            .cloned(),
+    );
+
+    Ok(unexpected)
+}
+
+fn is_deploy_target_debris_path(component: &Component, rel_path: &str) -> bool {
+    if !component_uses_archive_deploy(component) {
+        return false;
+    }
+
+    let remote_path = component
+        .remote_path
+        .trim()
+        .trim_start_matches("./")
+        .trim_matches('/');
+    if remote_path.is_empty() || remote_path.starts_with('/') {
+        return false;
+    }
+
+    let rel_path = rel_path.trim().trim_start_matches("./").trim_matches('/');
+    if rel_path.is_empty() {
+        return false;
+    }
+
+    rel_path == remote_path
+        || rel_path.starts_with(&format!("{remote_path}/"))
+        || remote_path.starts_with(&format!("{rel_path}/"))
+}
+
+fn component_uses_archive_deploy(component: &Component) -> bool {
+    component.extract_command.is_some()
+        || component
+            .build_artifact
+            .as_deref()
+            .and_then(|artifact| Path::new(artifact).extension())
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| matches!(extension, "zip" | "tar" | "gz" | "tgz"))
 }
 
 pub(super) fn cleanup_generated_build_artifacts(local_path: &Path) {
@@ -78,9 +124,10 @@ impl Drop for GeneratedBuildArtifactCleanupGuard<'_> {
 #[cfg(test)]
 mod tests {
     use super::{
-        cleanup_generated_build_artifacts, is_generated_build_path,
+        cleanup_generated_build_artifacts, is_deploy_target_debris_path, is_generated_build_path,
         unexpected_uncommitted_files_excluding_generated_build,
     };
+    use crate::core::component::Component;
     use crate::core::defaults::deploy_generated_build_dir;
 
     fn run_git(dir: &std::path::Path, args: &[&str]) {
@@ -130,11 +177,30 @@ mod tests {
         std::fs::write(dir.join(&build_dir).join("plugin.zip"), "artifact").expect("artifact");
         std::fs::write(dir.join("src.rs"), "source\n").expect("source");
 
+        let component = Component {
+            local_path: dir.to_string_lossy().to_string(),
+            ..Component::default()
+        };
         let unexpected =
-            unexpected_uncommitted_files_excluding_generated_build(&dir.to_string_lossy())
-                .expect("status");
+            unexpected_uncommitted_files_excluding_generated_build(&component).expect("status");
 
         assert_eq!(unexpected, vec!["src.rs"]);
+    }
+
+    #[test]
+    fn deploy_target_debris_matches_relative_remote_path_and_collapsed_untracked_dir() {
+        let component = Component {
+            remote_path: "wp-content/plugins/data-machine".to_string(),
+            build_artifact: Some("dist/data-machine.zip".to_string()),
+            ..Component::default()
+        };
+
+        assert!(is_deploy_target_debris_path(
+            &component,
+            "wp-content/plugins/data-machine/data-machine"
+        ));
+        assert!(is_deploy_target_debris_path(&component, "wp-content/"));
+        assert!(!is_deploy_target_debris_path(&component, "src/lib.rs"));
     }
 
     #[test]
