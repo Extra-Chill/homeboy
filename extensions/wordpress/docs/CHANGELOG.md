@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.115.27] - 2026-06-04
+
+### Changed
+- Add deterministic WooCommerce shipping bench helper
+
 ## [2.115.26] - 2026-06-04
 
 ### Changed
