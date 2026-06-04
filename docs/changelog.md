@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.220.3] - 2026-06-04
+
+### Fixed
+- fix deploy debris and pull drift warnings
+- fix agent task output dag phases
+- fix deploy archive extraction hints
+
 ## [0.220.2] - 2026-06-03
 
 ### Fixed
