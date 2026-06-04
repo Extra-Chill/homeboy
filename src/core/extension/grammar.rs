@@ -128,14 +128,16 @@ pub struct FingerprintGrammar {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NamespaceDerivationConfig {
-    /// Prefix prepended to the derived namespace, e.g. `crate::`.
+    /// Prefix prepended to the derived namespace when the grammar profile
+    /// requires one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefix: Option<String>,
     /// Path segments to drop before deriving a namespace, e.g. `1` to drop `src`.
     #[serde(default)]
     pub strip_leading_segments: usize,
-    /// Separator used between remaining path segments.
-    #[serde(default = "default_namespace_separator")]
+    /// Separator used between remaining path segments. Grammar profiles own the
+    /// concrete separator so core has no language-specific fallback.
+    #[serde(default)]
     pub separator: String,
     /// Whether a root-level file contributes its file stem as the namespace.
     #[serde(default)]
@@ -156,10 +158,6 @@ impl FingerprintGrammar {
             && self.registration_skip_prefixes.is_empty()
             && self.namespace_derivation.is_none()
     }
-}
-
-fn default_namespace_separator() -> String {
-    "::".to_string()
 }
 
 /// Grammar section for function contract extraction.
@@ -186,7 +184,7 @@ pub struct ContractGrammar {
     #[serde(default)]
     pub return_patterns: HashMap<String, Vec<String>>,
 
-    /// Patterns that identify error propagation (e.g., `?` in Rust, `throw` in JS).
+    /// Patterns that identify error propagation tokens or expressions.
     #[serde(default)]
     pub error_propagation: Vec<String>,
 
@@ -201,13 +199,12 @@ pub struct ContractGrammar {
     pub panic_patterns: Vec<String>,
 
     /// The separator between the parameter list and return type in function declarations.
-    /// Examples: Rust uses `"->"`; PHP and TypeScript commonly use `":"`.
+    /// Concrete separators are supplied by the grammar profile.
     #[serde(default)]
     pub return_type_separator: String,
 
-    /// Parameter format in function declarations.
-    /// `"name_colon_type"` — Rust/Go: `name: Type`
-    /// `"type_dollar_name"` — PHP: `Type $name` or `$name`
+    /// Parameter format in function declarations. Concrete formats are supplied
+    /// by the grammar profile.
     #[serde(default)]
     pub param_format: String,
 
@@ -223,7 +220,8 @@ pub struct ContractGrammar {
     /// Keys are regex patterns matched against parameter types.
     /// Values are code expressions that produce a valid zero/default value.
     ///
-    /// Example (Rust): `"&str" → "\"\"", "&Path" → "Path::new(\"\")"`.
+    /// Example: an extension profile can map a string-like type pattern to an
+    /// empty literal expression.
     ///
     /// Patterns are tried in order; first match wins. Unmatched type behavior
     /// is supplied by `fallback_default` when the grammar owner declares one.
@@ -256,8 +254,7 @@ pub struct ContractGrammar {
     pub assertion_templates: HashMap<String, String>,
 
     /// Fallback default expression when no type_default or type_constructor
-    /// matches. Language-specific examples include `"Default::default()"`
-    /// for Rust and `"null"` for PHP.
+    /// matches. Concrete expressions are supplied by the grammar profile.
     #[serde(default)]
     pub fallback_default: String,
 
@@ -268,8 +265,7 @@ pub struct ContractGrammar {
     /// Which capture group is name vs type is controlled by `field_name_group`
     /// and `field_type_group` (default: group 1 = name, group 2 = type).
     ///
-    /// Rust: `"^\s*(?:pub\s+)?(\w+)\s*:\s*(.+?),?\s*$"` — name:1, type:2
-    /// PHP:  `"^\s*(?:public|protected|private)\s+(?:readonly\s+)?(\??\w+)\s+\$(\w+)"` — type:1, name:2
+    /// The grammar profile controls both the pattern and capture group mapping.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub field_pattern: Option<String>,
 
@@ -284,15 +280,12 @@ pub struct ContractGrammar {
     /// Regex pattern that identifies public visibility on a field line.
     /// Used to set `FieldDef.is_public`.
     ///
-    /// Rust: `"^\s*pub\b"`, PHP: `"^\s*public\b"`
+    /// The grammar profile controls the concrete visibility syntax.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub field_visibility_pattern: Option<String>,
 
     /// Template for asserting a single struct field in a generated test.
     /// Variables: `{field_name}`, `{expected_value}`, `{indent}`.
-    ///
-    /// Rust:  `"{indent}assert_eq!(inner.{field_name}, {expected_value});"`
-    /// PHP:   `"{indent}$this->assertSame( {expected_value}, $result->{field_name} );"`
     ///
     /// If not set, field-level assertions are not generated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -349,7 +342,7 @@ pub struct TypeConstructor {
 /// Language identification metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LanguageMeta {
-    /// Language identifier (e.g., "php", "rust", "javascript").
+    /// Language identifier declared by the grammar profile.
     pub id: String,
 
     /// File extensions this grammar applies to.
@@ -357,8 +350,8 @@ pub struct LanguageMeta {
 
     /// Optional import parser implementation to reuse for this grammar.
     ///
-    /// Example: a framework-specific grammar can set `id = "wordpress"` while
-    /// keeping PHP namespace import semantics via `import_parser = "php"`.
+    /// Example: a framework-specific grammar can set its own profile id while
+    /// reusing the import parser from the underlying source language.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub import_parser: Option<String>,
 }
@@ -591,9 +584,9 @@ pub(crate) fn walk_lines<'a>(content: &'a str, grammar: &Grammar) -> Vec<Context
             }
             Region::StringLiteral
         } else if in_regular_string {
-            // Inside a multi-line regular string. Rust permits newline escapes
-            // in ordinary strings (`let s = "\ ...`), and fixture source in
-            // tests commonly uses that form.
+            // Inside a multi-line regular string. Some grammar profiles permit
+            // newline escapes in ordinary strings, and fixture source in tests
+            // commonly uses that form.
             if line_closes_regular_string(line) {
                 in_regular_string = false;
             }
@@ -628,7 +621,7 @@ pub(crate) fn walk_lines<'a>(content: &'a str, grammar: &Grammar) -> Vec<Context
             if in_block_comment {
                 Region::BlockComment
             } else {
-                // Check for multi-line raw string opening (Rust r#"..."#, r##"..."##, etc.)
+                // Check for multi-line raw string opening.
                 if let Some(close) = find_unclosed_raw_string_on_line(line) {
                     in_raw_string = true;
                     raw_string_close = close;
@@ -1212,6 +1205,35 @@ mod tests {
         assert_eq!(contract.return_type_separator, "->");
         assert_eq!(contract.param_format, "name_colon_type");
         assert_eq!(contract.fallback_default, "Default::default()");
+    }
+
+    #[test]
+    fn namespace_separator_has_no_core_language_default() {
+        let config: NamespaceDerivationConfig = toml::from_str(
+            r#"
+                strip_leading_segments = 1
+                include_file_stem_when_root = true
+            "#,
+        )
+        .expect("namespace derivation slot should deserialize without profile defaults");
+
+        assert_eq!(config.separator, "");
+    }
+
+    #[test]
+    fn namespace_separator_is_owned_by_explicit_grammar_profile() {
+        let config: NamespaceDerivationConfig = toml::from_str(
+            r#"
+                prefix = "profile_scope::"
+                strip_leading_segments = 1
+                separator = "::"
+                include_file_stem_when_root = true
+            "#,
+        )
+        .expect("explicit namespace derivation profile should deserialize");
+
+        assert_eq!(config.prefix.as_deref(), Some("profile_scope::"));
+        assert_eq!(config.separator, "::");
     }
 
     // ---- Structural parser tests ----

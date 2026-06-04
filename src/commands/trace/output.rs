@@ -426,44 +426,6 @@ fn option_percent_delta(before: Option<f64>, after: Option<f64>) -> Option<f64> 
     }
 }
 
-pub(super) fn aggregate_span(
-    id: String,
-    samples: Vec<TraceAggregateSpanSample>,
-    failures: usize,
-) -> extension_trace::TraceAggregateSpanOutput {
-    let max_sample: Option<TraceAggregateSpanSample> =
-        samples.iter().fold(None, |max, sample| match max {
-            Some(current) if current.duration_ms >= sample.duration_ms => Some(current),
-            _ => Some(sample.clone()),
-        });
-    let mut durations = samples
-        .into_iter()
-        .map(|sample| sample.duration_ms)
-        .collect::<Vec<_>>();
-    durations.sort_unstable();
-    let n = durations.len();
-    let avg_ms = if n == 0 {
-        None
-    } else {
-        Some(durations.iter().sum::<u64>() as f64 / n as f64)
-    };
-    extension_trace::TraceAggregateSpanOutput {
-        id,
-        n,
-        min_ms: durations.first().copied(),
-        median_ms: median(&durations),
-        avg_ms,
-        p75_ms: percentile(&durations, 75, 4),
-        p90_ms: percentile(&durations, 90, 10),
-        p95_ms: percentile(&durations, 95, 20),
-        max_ms: durations.last().copied(),
-        max_run_index: max_sample.as_ref().map(|sample| sample.run_index),
-        max_artifact_path: max_sample.map(|sample| sample.artifact_path),
-        failures,
-        metadata: None,
-    }
-}
-
 pub(super) fn attach_span_metadata(
     spans: &mut [extension_trace::TraceAggregateSpanOutput],
     span_metadata: &BTreeMap<String, extension_trace::TraceSpanMetadata>,
@@ -563,34 +525,6 @@ fn option_sum_f64(left: Option<f64>, right: Option<f64>) -> Option<f64> {
     Some(left? + right?)
 }
 
-#[derive(Clone)]
-pub(super) struct TraceAggregateSpanSample {
-    pub(super) duration_ms: u64,
-    pub(super) run_index: usize,
-    pub(super) artifact_path: String,
-}
-
-fn median(values: &[u64]) -> Option<u64> {
-    if values.is_empty() {
-        return None;
-    }
-    let midpoint = values.len() / 2;
-    if values.len() % 2 == 1 {
-        Some(values[midpoint])
-    } else {
-        Some((values[midpoint - 1] + values[midpoint]) / 2)
-    }
-}
-
-fn percentile(values: &[u64], percentile: usize, min_samples: usize) -> Option<u64> {
-    if values.len() < min_samples {
-        return None;
-    }
-    let index = (values.len() * percentile).div_ceil(100).saturating_sub(1);
-    values.get(index).copied()
-}
-
-#[cfg(test)]
 pub(super) fn render_aggregate_markdown(
     aggregate: &extension_trace::TraceAggregateOutput,
 ) -> String {
@@ -635,8 +569,10 @@ pub(super) fn render_aggregate_markdown(
         if aggregate.focus_spans.is_empty() {
             out.push_str("No focused spans matched the aggregate output.\n");
         } else {
-            out.push_str("| Span | n | min | median | avg | p75 | p90 | p95 | max | failures |\n");
-            out.push_str("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n");
+            out.push_str(
+                "| Span | n | min | median | avg | stddev | p75 | p90 | p95 | max | failures |\n",
+            );
+            out.push_str("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n");
             for span in &aggregate.focus_spans {
                 push_aggregate_span_row(&mut out, span);
             }
@@ -645,8 +581,10 @@ pub(super) fn render_aggregate_markdown(
 
     if !aggregate.spans.is_empty() {
         out.push_str("\n## Spans\n\n");
-        out.push_str("| Span | n | min | median | avg | p75 | p90 | p95 | max | failures |\n");
-        out.push_str("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n");
+        out.push_str(
+            "| Span | n | min | median | avg | stddev | p75 | p90 | p95 | max | failures |\n",
+        );
+        out.push_str("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n");
         for span in &aggregate.spans {
             push_aggregate_span_row(&mut out, span);
         }
@@ -772,8 +710,10 @@ pub(super) fn render_trace_aggregate_evidence_markdown(
 
     if !aggregate.spans.is_empty() {
         out.push_str("\n## Metric Summary\n\n");
-        out.push_str("| Span | n | min | median | avg | p75 | p90 | p95 | max | failures |\n");
-        out.push_str("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n");
+        out.push_str(
+            "| Span | n | min | median | avg | stddev | p75 | p90 | p95 | max | failures |\n",
+        );
+        out.push_str("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n");
         for span in &aggregate.spans {
             push_aggregate_span_row(&mut out, span);
         }
@@ -1079,12 +1019,15 @@ fn push_classification_summary_table(
 
 fn push_aggregate_span_row(out: &mut String, span: &extension_trace::TraceAggregateSpanOutput) {
     out.push_str(&format!(
-        "| `{}` | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+        "| `{}` | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
         span.id,
         span.n,
         fmt_ms(span.min_ms),
         fmt_ms(span.median_ms),
         span.avg_ms
+            .map(|value| format!("{:.1}ms", value))
+            .unwrap_or_else(|| "-".to_string()),
+        span.stddev_ms
             .map(|value| format!("{:.1}ms", value))
             .unwrap_or_else(|| "-".to_string()),
         fmt_ms(span.p75_ms),

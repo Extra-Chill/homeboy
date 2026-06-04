@@ -38,9 +38,9 @@ pub fn run(project_id: &str, config: &DeployConfig) -> Result<DeployOrchestratio
 
 /// Deploy components across multiple projects.
 ///
-/// Handles the build-skip optimization: only the first project builds
-/// from source; subsequent projects reuse the already-built artifact.
-/// Similarly, only the first project pulls latest changes.
+/// Builds each project independently. Keeping build artifacts local to each
+/// project run avoids lifecycle coupling between deploy target cleanup and
+/// later projects in the same command.
 ///
 /// Unknown project IDs are skipped (not fatal) — fleet configs can
 /// accumulate stale references that shouldn't block the rest.
@@ -111,8 +111,6 @@ pub fn run_multi(
     let mut failed: u32 = 0;
     let skipped: u32 = unknown_projects.len() as u32;
     let mut planned: u32 = 0;
-    let mut first_project = true;
-
     // Record skipped results for unknown projects
     for pid in &unknown_projects {
         project_results.push(ProjectDeployResult {
@@ -140,12 +138,10 @@ pub fn run_multi(
             dry_run: config.dry_run,
             check: config.check,
             force: config.force,
-            // Build-skip optimization: only build on first project
-            skip_build: config.skip_build || !first_project,
+            skip_build: config.skip_build,
             keep_deps: config.keep_deps,
             expected_version: config.expected_version.clone(),
-            // Only pull on first project
-            no_pull: config.no_pull || !first_project,
+            no_pull: config.no_pull,
             head: config.head,
             tagged: config.tagged,
         };
@@ -206,8 +202,6 @@ pub fn run_multi(
                 failed += 1;
             }
         }
-
-        first_project = false;
     }
 
     let total_projects = project_results.len() as u32;

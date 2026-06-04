@@ -130,9 +130,9 @@ pub(super) fn deploy_components(
         check_unreleased_commits(&components, config)?;
     }
 
-    // Checkout latest tag for each component (unless --head or --skip-build).
+    // Checkout the deploy tag for each component (unless --head or --skip-build).
     let tag_checkouts = if !config.head && !config.skip_build {
-        checkout_latest_tags(&components)?
+        checkout_deploy_tags(&components, config.expected_version.as_deref())?
     } else {
         Vec::new()
     };
@@ -590,7 +590,10 @@ struct TagCheckout {
 ///
 /// Components without tags are skipped with a warning — they deploy
 /// from HEAD as before (the pre-tag-checkout behavior).
-fn checkout_latest_tags(components: &[Component]) -> Result<Vec<TagCheckout>> {
+fn checkout_deploy_tags(
+    components: &[Component],
+    expected_version: Option<&str>,
+) -> Result<Vec<TagCheckout>> {
     let mut checkouts = Vec::new();
 
     for component in components {
@@ -601,25 +604,27 @@ fn checkout_latest_tags(components: &[Component]) -> Result<Vec<TagCheckout>> {
 
         let path = &component.local_path;
 
-        // Get the latest tag
-        let tag = match git::get_latest_tag(path) {
-            Ok(Some(t)) => t,
-            Ok(None) => {
-                log_status!(
-                    "deploy",
-                    "Warning: '{}' has no version tags — deploying from HEAD (use --head to suppress this warning)",
-                    component.id
-                );
-                continue;
-            }
-            Err(_) => {
-                log_status!(
-                    "deploy",
-                    "Warning: could not read tags for '{}' — deploying from HEAD",
-                    component.id
-                );
-                continue;
-            }
+        let tag = match expected_version {
+            Some(version) => deploy_tag_for_version(component, version),
+            None => match git::get_latest_tag(path) {
+                Ok(Some(t)) => t,
+                Ok(None) => {
+                    log_status!(
+                        "deploy",
+                        "Warning: '{}' has no version tags — deploying from HEAD (use --head to suppress this warning)",
+                        component.id
+                    );
+                    continue;
+                }
+                Err(_) => {
+                    log_status!(
+                        "deploy",
+                        "Warning: could not read tags for '{}' — deploying from HEAD",
+                        component.id
+                    );
+                    continue;
+                }
+            },
         };
 
         // Save the current branch name. Use symbolic-ref which returns the
@@ -690,6 +695,14 @@ fn checkout_latest_tags(components: &[Component]) -> Result<Vec<TagCheckout>> {
     }
 
     Ok(checkouts)
+}
+
+fn deploy_tag_for_version(component: &Component, version: &str) -> String {
+    let version = version.trim_start_matches('v');
+    match git::MonorepoContext::detect(&component.local_path, &component.id) {
+        Some(context) => context.format_tag(version),
+        None => format!("v{}", version),
+    }
 }
 
 /// Restore original branches after deployment.
@@ -914,6 +927,25 @@ mod tests {
         assert!(run(&["commit", "--allow-empty", "-q", "-m", "init"])
             .status
             .success());
+    }
+
+    #[test]
+    fn deploy_tag_for_version_formats_regular_release_tag() {
+        let component = make_component("data-machine", "/tmp/not-a-git-repo");
+
+        assert_eq!(deploy_tag_for_version(&component, "0.139.18"), "v0.139.18");
+        assert_eq!(deploy_tag_for_version(&component, "v0.139.18"), "v0.139.18");
+    }
+
+    #[test]
+    fn deploy_tag_for_version_formats_monorepo_release_tag() {
+        let dir = TempDir::new().expect("temp dir");
+        init_clean_repo(dir.path());
+        let component_dir = dir.path().join("packages/plugin");
+        std::fs::create_dir_all(&component_dir).expect("component dir");
+        let component = make_component("plugin", &component_dir.to_string_lossy());
+
+        assert_eq!(deploy_tag_for_version(&component, "1.2.3"), "plugin-v1.2.3");
     }
 
     #[test]

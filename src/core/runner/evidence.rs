@@ -6,6 +6,9 @@ use serde_json::{json, Value};
 
 use crate::core::api_jobs::{Job, JobEvent, JobStatus};
 use crate::core::error::{Error, Result};
+use crate::core::execution_contract::{
+    decode_uri_component, encode_uri_component, EXECUTION_CONTRACT,
+};
 use crate::core::observation::{ArtifactRecord, ObservationStore, RunRecord};
 use crate::core::paths;
 
@@ -13,7 +16,7 @@ use super::execution::{canonical_daemon_body, daemon_api_get};
 use super::Runner;
 
 pub fn is_remote_runner_artifact_path(path: &str) -> bool {
-    path.starts_with("runner-artifact://")
+    EXECUTION_CONTRACT.artifacts.is_runner_artifact_ref(path)
 }
 
 pub fn is_retrievable_runner_artifact(path: &str) -> bool {
@@ -22,7 +25,7 @@ pub fn is_retrievable_runner_artifact(path: &str) -> bool {
 
 pub fn is_reportable_artifact_evidence_path(path: &str) -> bool {
     is_retrievable_runner_artifact(path)
-        || path.starts_with("metadata-only:")
+        || EXECUTION_CONTRACT.artifacts.is_metadata_only_ref(path)
         || !std::path::Path::new(path).is_absolute()
         || fs::metadata(path)
             .map(|metadata| metadata.is_file() || metadata.is_dir())
@@ -43,8 +46,8 @@ pub fn download_remote_artifact(
         &token.runner_id,
         &format!(
             "/runs/{}/artifacts/{}/content",
-            encode_component(&token.run_id),
-            encode_component(&token.artifact_id)
+            encode_uri_component(&token.run_id),
+            encode_uri_component(&token.artifact_id)
         ),
     )?;
     let body = canonical_daemon_body(&data, "runner artifact response")?;
@@ -124,14 +127,17 @@ struct RemoteArtifactToken {
 
 impl RemoteArtifactToken {
     fn parse(path: &str) -> Result<Self> {
-        let token = path.strip_prefix("runner-artifact://").ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "artifact_id",
-                "artifact is not a runner artifact token",
-                Some(path.to_string()),
-                None,
-            )
-        })?;
+        let token = EXECUTION_CONTRACT
+            .artifacts
+            .strip_runner_artifact_scheme(path)
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "artifact_id",
+                    "artifact is not a runner artifact token",
+                    Some(path.to_string()),
+                    None,
+                )
+            })?;
         let mut parts = token.split('/');
         let runner_id = parts.next().unwrap_or_default();
         let run_id = parts.next().unwrap_or_default();
@@ -143,15 +149,18 @@ impl RemoteArtifactToken {
         {
             return Err(Error::validation_invalid_argument(
                 "artifact_id",
-                "runner artifact token must be runner-artifact://<runner>/<run>/<artifact>",
+                format!(
+                    "runner artifact token must be {}<runner>/<run>/<artifact>",
+                    EXECUTION_CONTRACT.artifacts.runner_artifact_scheme
+                ),
                 Some(path.to_string()),
                 None,
             ));
         }
         Ok(Self {
-            runner_id: decode_component(runner_id),
-            run_id: decode_component(run_id),
-            artifact_id: decode_component(artifact_id),
+            runner_id: decode_uri_component(runner_id),
+            run_id: decode_uri_component(run_id),
+            artifact_id: decode_uri_component(artifact_id),
         })
     }
 }
@@ -278,8 +287,10 @@ fn mirror_remote_observation_runs(
         if !remote_run_matches_job_window(summary, job) {
             continue;
         }
-        let detail_data =
-            daemon_api_get(&runner.id, &format!("/runs/{}", encode_component(run_id)))?;
+        let detail_data = daemon_api_get(
+            &runner.id,
+            &format!("/runs/{}", encode_uri_component(run_id)),
+        )?;
         let detail_body = canonical_daemon_body(&detail_data, "runner run detail response")?;
         let Some(detail) = detail_body.get("run") else {
             continue;
@@ -501,12 +512,9 @@ fn local_job_run_id(runner_id: &str, job_id: &str) -> String {
 }
 
 fn runner_artifact_token(runner_id: &str, run_id: &str, artifact_id: &str) -> String {
-    format!(
-        "runner-artifact://{}/{}/{}",
-        encode_component(runner_id),
-        encode_component(run_id),
-        encode_component(artifact_id)
-    )
+    EXECUTION_CONTRACT
+        .artifacts
+        .runner_artifact_ref(runner_id, run_id, artifact_id)
 }
 
 fn sanitize_id_segment(value: &str) -> String {
@@ -526,39 +534,6 @@ fn ms_to_rfc3339(ms: u64) -> String {
     chrono::DateTime::<chrono::Utc>::from_timestamp_millis(i64::try_from(ms).unwrap_or(0))
         .unwrap_or_else(chrono::Utc::now)
         .to_rfc3339()
-}
-
-fn encode_component(value: &str) -> String {
-    let mut encoded = String::new();
-    for byte in value.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
-                encoded.push(byte as char);
-            }
-            _ => encoded.push_str(&format!("%{byte:02X}")),
-        }
-    }
-    encoded
-}
-
-fn decode_component(value: &str) -> String {
-    let bytes = value.as_bytes();
-    let mut decoded = Vec::new();
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'%' && index + 2 < bytes.len() {
-            if let Ok(hex) = std::str::from_utf8(&bytes[index + 1..index + 3]) {
-                if let Ok(byte) = u8::from_str_radix(hex, 16) {
-                    decoded.push(byte);
-                    index += 3;
-                    continue;
-                }
-            }
-        }
-        decoded.push(bytes[index]);
-        index += 1;
-    }
-    String::from_utf8_lossy(&decoded).to_string()
 }
 
 #[cfg(test)]

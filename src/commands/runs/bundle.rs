@@ -5,6 +5,7 @@ use clap::Args;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use homeboy::core::execution_contract::EXECUTION_CONTRACT;
 use homeboy::core::observation::{
     ArtifactRecord, FindingRecord, ObservationStore, RecordedHomeboyFinding, RunRecord,
     TraceSpanRecord,
@@ -385,10 +386,9 @@ fn portable_bundle_artifact_record(artifact: ArtifactRecord) -> ArtifactRecord {
 
     let mut portable = artifact;
     portable.artifact_type = "metadata-only".to_string();
-    portable.path = format!(
-        "metadata-only:{}",
-        portable_artifact_label(&portable.path, &portable.id)
-    );
+    portable.path = EXECUTION_CONTRACT
+        .artifacts
+        .metadata_only_ref(&portable_artifact_label(&portable.path, &portable.id));
     portable
 }
 

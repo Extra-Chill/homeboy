@@ -637,6 +637,7 @@ fn trace_aggregate_evidence_report_summarizes_metrics_and_artifact_completeness(
             min_ms: Some(100),
             median_ms: Some(125),
             avg_ms: Some(130.0),
+            stddev_ms: Some(25.0),
             p75_ms: None,
             p90_ms: None,
             p95_ms: None,
@@ -644,6 +645,7 @@ fn trace_aggregate_evidence_report_summarizes_metrics_and_artifact_completeness(
             max_run_index: Some(1),
             max_artifact_path: Some("artifacts/run-1.json".to_string()),
             failures: 0,
+            samples: Vec::new(),
             metadata: None,
         }],
         guardrails: vec![extension_trace::TraceGuardrailOutput {
@@ -666,7 +668,8 @@ fn trace_aggregate_evidence_report_summarizes_metrics_and_artifact_completeness(
     assert!(report.contains("# Trace Evidence: `create-site`"));
     assert!(report.contains("- **Command:** `trace.aggregate.spans`"));
     assert!(report.contains("## Metric Summary"));
-    assert!(report.contains("| `boot` | 2 | 100ms | 125ms | 130.0ms | - | - | - | 150ms | 0 |"));
+    assert!(report
+        .contains("| `boot` | 2 | 100ms | 125ms | 130.0ms | 25.0ms | - | - | - | 150ms | 0 |"));
     assert!(report.contains("## Assertion Status"));
     assert!(report.contains("startup guardrail"));
     assert!(report.contains("- **Status:** `complete`"));

@@ -160,7 +160,9 @@ pub(super) fn default_scp_flags() -> Vec<String> {
 }
 
 pub(super) fn default_artifact_prefix() -> String {
-    ".homeboy-".to_string()
+    crate::core::product_identity::PRODUCT_IDENTITY
+        .artifact_prefix
+        .to_string()
 }
 
 pub(crate) fn deploy_generated_build_dir() -> String {

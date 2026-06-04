@@ -28,6 +28,8 @@ pub(super) fn resolve_effective_remote_path(
         return base_path::join_remote_path(Some(fallback_base_path), &remote_path);
     }
 
+    reject_relative_parent_traversal(component, &remote_path)?;
+
     if let Some(resolved) =
         resolve_with_project_root(project, component, fallback_base_path, &remote_path)?
     {
@@ -35,6 +37,25 @@ pub(super) fn resolve_effective_remote_path(
     }
 
     base_path::join_remote_path(Some(fallback_base_path), &remote_path)
+}
+
+fn reject_relative_parent_traversal(component: &Component, remote_path: &str) -> Result<()> {
+    if !remote_path.split('/').any(|segment| segment.trim() == "..") {
+        return Ok(());
+    }
+
+    Err(Error::validation_invalid_argument(
+        "remotePath",
+        format!(
+            "Component '{}' remote path '{}' escapes the project base_path with '..' segments",
+            component.id, remote_path
+        ),
+        Some(remote_path.to_string()),
+        Some(vec![
+            "Configure an explicit absolute remote_path when deploying outside base_path".to_string(),
+            "Configure a project path_root and use the managed path prefix when the extension supports it".to_string(),
+        ]),
+    ))
 }
 
 pub(super) fn project_with_detected_path_roots(
@@ -294,34 +315,34 @@ mod tests {
     }
 
     #[test]
-    fn parent_relative_content_paths_fall_back_to_base_path() {
+    fn parent_relative_content_paths_are_rejected() {
         with_isolated_home(|_| {
             install_extension();
 
-            let resolved = resolve_effective_remote_path(
+            let err = resolve_effective_remote_path(
                 &project_with_root(),
                 &component("../wp-content/plugins/foo"),
                 "/srv/site",
             )
-            .expect("resolve path");
+            .expect_err("parent traversal should fail");
 
-            assert_eq!(resolved, "/srv/site/../wp-content/plugins/foo");
+            assert!(err.to_string().contains("escapes the project base_path"));
         });
     }
 
     #[test]
-    fn preserves_parent_relative_paths_before_base_path_fallback() {
+    fn parent_relative_non_content_paths_are_rejected() {
         with_isolated_home(|_| {
             install_extension();
 
-            let resolved = resolve_effective_remote_path(
+            let err = resolve_effective_remote_path(
                 &project_with_root(),
                 &component("../var/log/app.log"),
                 "/srv/site",
             )
-            .expect("resolve path");
+            .expect_err("parent traversal should fail");
 
-            assert_eq!(resolved, "/srv/site/../var/log/app.log");
+            assert!(err.to_string().contains("escapes the project base_path"));
         });
     }
 

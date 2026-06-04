@@ -8,6 +8,7 @@
 //! `source.event` intervals without teaching core about product-specific
 //! milestones.
 
+mod aggregate_report;
 pub mod assertions;
 mod attach;
 pub mod baseline;
@@ -23,6 +24,7 @@ pub mod spans;
 use crate::core::component::Component;
 use crate::core::extension::{ExtensionCapability, ExtensionExecutionContext};
 
+pub use aggregate_report::TraceAggregateSpanSampleOutput;
 pub use attach::TraceAttachment;
 pub use overlay::TraceOverlayRequest;
 pub use overlay_lock::{cleanup_stale_trace_overlay_locks, list_trace_overlay_locks};
