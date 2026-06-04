@@ -153,7 +153,46 @@ function writePreflightEvidence(artifacts, evidence) {
   }
 }
 
+const LEGACY_RUNTIME_PREFIX = ['data', 'machine'].join('_');
+const LEGACY_BUNDLE_KEYS = [
+  `${LEGACY_RUNTIME_PREFIX}_bundle`,
+  `${LEGACY_RUNTIME_PREFIX}Bundle`,
+];
+
+function legacyValue(source, suffix = '') {
+  if (!source || typeof source !== 'object') {
+    return '';
+  }
+  const key = suffix ? `${LEGACY_RUNTIME_PREFIX}_${suffix}` : LEGACY_RUNTIME_PREFIX;
+  return source[key] || source[`${key}_path`] || '';
+}
+
+function requestAgentBundle(request) {
+  if (request.agent_bundle && typeof request.agent_bundle === 'object') {
+    return request.agent_bundle;
+  }
+  for (const key of LEGACY_BUNDLE_KEYS) {
+    if (request[key] && typeof request[key] === 'object') {
+      return request[key];
+    }
+  }
+  return {};
+}
+
+function requestRuntimeComponents(request) {
+  const explicit = request.runtime_component_paths && typeof request.runtime_component_paths === 'object'
+    ? request.runtime_component_paths
+    : {};
+  return Object.fromEntries(Object.entries({
+    ...explicit,
+    agents_api: explicit.agents_api || request.agents_api_path || request.agents_api,
+    agent_runtime: explicit.agent_runtime || legacyValue(request),
+    agent_runtime_tools: explicit.agent_runtime_tools || legacyValue(request, 'code'),
+  }).filter(([, value]) => value !== '' && value !== undefined));
+}
+
 function runnerInput(request, artifacts) {
+  const runtimeComponentPaths = requestRuntimeComponents(request);
   return Object.fromEntries(Object.entries({
     parent_request: request,
     agent: argValue('--agent') || request.agent || 'wp-codebox-sandbox',
@@ -172,20 +211,17 @@ function runnerInput(request, artifacts) {
     artifacts_path: artifacts,
     wp_codebox_bin: argValue('--wp-codebox-bin') || request.wp_codebox_bin || '',
     agents_api_path: argValue('--agents-api') || request.agents_api_path || request.agents_api || '',
-    data_machine_path: argValue('--data-machine') || request.data_machine_path || request.data_machine || '',
-    data_machine_code_path: argValue('--data-machine-code') || request.data_machine_code_path || request.data_machine_code || '',
+    runtime_component_paths: runtimeComponentPaths,
     homeboy_path: argValue('--homeboy') || request.homeboy_path || request.homeboy || '',
     homeboy_extensions_path: argValue('--homeboy-extensions') || request.homeboy_extensions_path || request.homeboy_extensions || path.resolve(__dirname, '..', '..'),
     wp_version: request.wp_codebox_wordpress_version || request.wp_version || request.wp || undefined,
-    datamachine_bundle: request.datamachine_bundle || {},
+    agent_bundle: requestAgentBundle(request),
   }).filter(([, value]) => value !== '' && value !== undefined && !(Array.isArray(value) && value.length === 0)));
 }
 
 function stableTaskInput(input) {
   const allowedTools = input.parent_request?.allowed_tools || input.parent_request?.task?.allowed_tools || [];
-  const secretEnv = isDatamachineBundle(input)
-    ? Array.from(new Set([...(input.secret_env || []), 'HOMEBOY_DATAMACHINE_AGENT_CONFIG']))
-    : input.secret_env || [];
+  const secretEnv = input.secret_env || [];
   return Object.fromEntries(Object.entries({
     schema: 'wp-codebox/task-input/v1',
     version: 1,
@@ -214,10 +250,9 @@ function stableTaskInput(input) {
     artifacts_path: input.artifacts_path,
     wp_codebox_bin: input.wp_codebox_bin,
     agents_api_path: input.agents_api_path,
-    data_machine_path: input.data_machine_path,
-    data_machine_code_path: input.data_machine_code_path,
+    runtime_component_paths: input.runtime_component_paths || {},
     wp: input.wp_version,
-    datamachine_bundle: isDatamachineBundle(input) ? datamachineBundleConfig(input, input.datamachine_bundle || {}) : {},
+    agent_bundle: isAgentBundle(input) ? agentBundleConfig(input, input.agent_bundle || {}) : {},
     parent_request: input.parent_request,
   }).filter(([, value]) => value !== '' && value !== undefined && !(Array.isArray(value) && value.length === 0)));
 }
@@ -263,11 +298,12 @@ function sandboxToolPolicy(input, allowedTools) {
   };
 }
 
-function isDatamachineBundle(input) {
-  return Boolean(input.datamachine_bundle && Object.keys(input.datamachine_bundle).length > 0);
+function isAgentBundle(input) {
+  return Boolean(input.agent_bundle && Object.keys(input.agent_bundle).length > 0);
 }
 
-function datamachineBundleConfig(input, bundleConfig = {}) {
+function agentBundleConfig(input, bundleConfig = {}) {
+  const runtimeComponentPaths = input.runtime_component_paths || {};
   return Object.fromEntries(Object.entries({
     ...bundleConfig,
     prompt: bundleConfig.prompt || input.parent_request?.task?.prompt || input.parent_request?.goal || '',
@@ -275,37 +311,43 @@ function datamachineBundleConfig(input, bundleConfig = {}) {
     model: bundleConfig.model || input.model || '',
     provider_plugin_paths: bundleConfig.provider_plugin_paths || input.provider_plugin_paths || [],
     wp_codebox_artifacts_dir: input.artifacts_path,
-    wp_codebox_components: {
-      agents_api: input.agents_api_path,
-      data_machine: input.data_machine_path,
-      data_machine_code: input.data_machine_code_path,
-    },
+    wp_codebox_components: runtimeComponentPaths,
   }).filter(([, value]) => value !== '' && value !== undefined && !(Array.isArray(value) && value.length === 0)));
 }
 
+function resultExecutions(result) {
+  if (Array.isArray(result.executions) && result.executions.length > 0) {
+    return result.executions;
+  }
+  if (Array.isArray(result.run?.executions)) {
+    return result.run.executions;
+  }
+  return [];
+}
+
 function normalizeAgentTaskRun(input, result) {
-  if (!isDatamachineBundle(input)) {
+  if (!isAgentBundle(input)) {
     return result;
   }
 
-  const executions = Array.isArray(result.executions) && result.executions.length > 0 ? result.executions : (Array.isArray(result.run?.executions) ? result.run.executions : []);
+  const executions = resultExecutions(result);
   const execution = executions.find((item) => item?.recipeCommand === 'wp-codebox.agent-sandbox-run') || executions[0] || null;
-  const datamachineConfig = datamachineBundleConfig(input, input.datamachine_bundle || {});
-  const stdoutWorkload = datamachineWorkloadFromExecutionStdout(execution, datamachineConfig);
-  const fallbackAgentResult = result.metadata?.datamachine?.workload || execution?.agentResult || result.run?.agentResult || result.agentResult || result.agent_result || {};
+  const agentBundle = agentBundleConfig(input, input.agent_bundle || {});
+  const stdoutWorkload = agentRuntimeWorkloadFromExecutionStdout(execution, agentBundle);
+  const fallbackAgentResult = result.metadata?.agent_runtime?.workload || execution?.agentResult || result.run?.agentResult || result.agentResult || result.agent_result || {};
   const agentResult = hasScenarios(stdoutWorkload) ? stdoutWorkload : fallbackAgentResult;
-  const datamachineValidation = validateDatamachineWorkload(agentResult, datamachineConfig);
-  const success = !datamachineValidation;
+  const bundleValidation = validateAgentRuntimeWorkload(agentResult, agentBundle);
+  const success = !bundleValidation;
   const diagnostics = [
     ...(result.diagnostics || []),
-    ...(datamachineValidation ? [datamachineValidation] : []),
-    ...(datamachineDiagnostics(agentResult) || []),
+    ...(bundleValidation ? [bundleValidation] : []),
+    ...(agentRuntimeDiagnostics(agentResult) || []),
   ];
 
   return {
     ...result,
     success,
-    summary: success ? 'WP Codebox agent task succeeded.' : (datamachineValidation?.message || result.summary || 'WP Codebox agent task failed.'),
+    summary: success ? 'WP Codebox agent task succeeded.' : (bundleValidation?.message || result.summary || 'WP Codebox agent task failed.'),
     session: result.session ? {
       ...result.session,
       status: success ? 'completed' : 'failed',
@@ -317,9 +359,9 @@ function normalizeAgentTaskRun(input, result) {
     diagnostics,
     metadata: {
       ...(result.metadata || {}),
-      datamachine: {
-        ...(result.metadata?.datamachine || {}),
-        bundle: datamachineConfig,
+      agent_runtime: {
+        ...(result.metadata?.agent_runtime || {}),
+        bundle: agentBundle,
         workload: agentResult,
       },
     },
@@ -338,15 +380,15 @@ function parseJsonObject(value) {
   }
 }
 
-function datamachineWorkloadFromExecutionStdout(execution, config) {
+function agentRuntimeWorkloadFromExecutionStdout(execution, config) {
   const wrapper = parseJsonObject(execution?.stdout || '');
   const workload = parseJsonObject(wrapper?.output || '') || parseJsonObject(execution?.stdout || '');
   if (!workload) {
     return null;
   }
   const bundleRun = workload.agent_runtime?.result || workload.result || workload;
-  if (bundleRun?.schema === 'datamachine/agent-bundle-run/v1') {
-    return datamachineWorkloadFromBundleRun(bundleRun, config);
+  if (bundleRun?.schema && String(bundleRun.schema).endsWith('/agent-bundle-run/v1')) {
+    return agentRuntimeWorkloadFromBundleRun(bundleRun, config);
   }
   if (Array.isArray(workload.scenarios)) {
     return workload;
@@ -354,7 +396,7 @@ function datamachineWorkloadFromExecutionStdout(execution, config) {
   if (workload.metadata || workload.metrics) {
     return {
       scenarios: [{
-        id: config.workload_id || config.agent_slug || config.flow_slug || 'datamachine-agent',
+        id: config.workload_id || config.agent_slug || config.flow_slug || 'agent-bundle',
         metrics: workload.metrics || {},
         metadata: workload.metadata || {},
       }],
@@ -363,12 +405,12 @@ function datamachineWorkloadFromExecutionStdout(execution, config) {
   return null;
 }
 
-function datamachineWorkloadFromBundleRun(bundleRun, config) {
+function agentRuntimeWorkloadFromBundleRun(bundleRun, config) {
   const bundle = bundleRun.bundle && typeof bundleRun.bundle === 'object' ? bundleRun.bundle : {};
   const workflowSteps = Array.isArray(bundleRun.workflow?.steps) ? bundleRun.workflow.steps : [];
   return {
     scenarios: [{
-      id: config.workload_id || bundle.flow_slug || bundle.bundle_slug || config.agent_slug || config.flow_slug || 'datamachine-agent',
+      id: config.workload_id || bundle.flow_slug || bundle.bundle_slug || config.agent_slug || config.flow_slug || 'agent-bundle',
       metrics: {
         workflow_step_count: workflowSteps.length,
       },
@@ -395,12 +437,12 @@ function pathValue(source, dottedPath) {
   return String(dottedPath || '').split('.').filter(Boolean).reduce((value, key) => (value && typeof value === 'object' ? value[key] : undefined), source);
 }
 
-function validateDatamachineWorkload(workload, config) {
+function validateAgentRuntimeWorkload(workload, config) {
   const scenarios = Array.isArray(workload?.scenarios) ? workload.scenarios : [];
   if (scenarios.length === 0) {
     return {
-      class: 'datamachine.workload.incomplete',
-      message: 'Data Machine bundle workload did not return any scenarios.',
+      class: 'agent_runtime.workload.incomplete',
+      message: 'Agent bundle workload did not return any scenarios.',
       data: { reason: 'missing_scenarios' },
     };
   }
@@ -408,7 +450,7 @@ function validateDatamachineWorkload(workload, config) {
   const failedScenario = scenarios.find((scenario) => scenario?.metadata?.error || scenario?.metadata?.error_message);
   if (failedScenario) {
     return {
-      class: 'datamachine.workload.failed',
+      class: 'agent_runtime.workload.failed',
       message: failedScenario.metadata.error || failedScenario.metadata.error_message,
       data: { reason: 'scenario_error', scenario_id: failedScenario.id, metadata: failedScenario.metadata },
     };
@@ -428,8 +470,8 @@ function validateDatamachineWorkload(workload, config) {
 
   if (missing.length > 0) {
     return {
-      class: 'datamachine.workload.incomplete',
-      message: 'Data Machine bundle workload did not produce required engine data outputs.',
+      class: 'agent_runtime.workload.incomplete',
+      message: 'Agent bundle workload did not produce required engine data outputs.',
       data: { reason: 'missing_engine_data_outputs', missing },
     };
   }
@@ -437,12 +479,12 @@ function validateDatamachineWorkload(workload, config) {
   return null;
 }
 
-function datamachineDiagnostics(workload) {
+function agentRuntimeDiagnostics(workload) {
   const scenarios = Array.isArray(workload?.scenarios) ? workload.scenarios : [];
   const diagnostics = scenarios
     .filter((scenario) => scenario?.metadata?.error || scenario?.metadata?.error_message)
     .map((scenario) => ({
-      class: 'datamachine.workload',
+      class: 'agent_runtime.workload',
       message: scenario.metadata.error || scenario.metadata.error_message,
       data: { scenario_id: scenario.id, metadata: scenario.metadata },
     }));
@@ -519,7 +561,6 @@ function runWpCodeboxParentTask(request) {
     encoding: 'utf8',
     env: {
       ...process.env,
-      ...(isDatamachineBundle(input) ? { HOMEBOY_DATAMACHINE_AGENT_CONFIG: JSON.stringify(datamachineBundleConfig(input, input.datamachine_bundle || {})) } : {}),
     },
     maxBuffer: 1024 * 1024 * 20,
     timeout: timeoutMs,

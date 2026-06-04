@@ -148,12 +148,10 @@ cross-repo, and private-target runs should provide Homeboy GitHub App secrets,
 set `app_token_repos` to every repository the run must access, and enable
 `require_homeboy_app_token` so missing app credentials fail before agent setup.
 
-Inside WP Codebox, `datamachine-agent-workload.php` installs the bundle,
-configures the provider, starts the Data Machine flow, drains queued work,
-records tool results, exports the transcript, and writes a Homeboy scenario
-result. The workflow passes the runner config to the WP Codebox CLI, mounts
-provider/runtime plugins, and reads back generated artifacts from the run
-workspace.
+The reusable Data Machine Agent CI workflow is a transitional Data
+Machine-specific workflow. It still carries the bundle runner needed by existing
+consumers, while the generic Homeboy agent-task provider below stays limited to
+request/outcome adaptation around WP Codebox's runtime command boundary.
 
 ## Agent-task executor provider
 
@@ -179,7 +177,7 @@ Provider discovery uses `homeboy/agent-task-executor-provider/v1`:
   "outcome_statuses": ["succeeded", "failed", "no_op", "unable_to_remediate", "timeout", "provider_error"],
   "failure_classifications": ["provider", "timeout", "execution_failed"],
   "redacted_metadata_keys": ["secret_env_values", "secretEnvValues", "secrets"],
-  "capabilities": ["browser_runtime", "wordpress_sandbox", "workspace_mounts", "workspace_tools", "artifact_materialization", "patch_artifacts", "verification_artifacts", "run_registry", "cleanup_observability", "screenshots", "structured_outcome", "datamachine_bundle_execution"],
+  "capabilities": ["browser_runtime", "wordpress_sandbox", "workspace_mounts", "workspace_tools", "artifact_materialization", "patch_artifacts", "verification_artifacts", "run_registry", "cleanup_observability", "screenshots", "structured_outcome", "agent_bundle_execution"],
   "status": "active",
   "integration_contract": "wp-codebox-cli/agent-task-run",
   "runtime_gap_trackers": []
@@ -280,12 +278,11 @@ provider through discovery, but should keep planning, scheduling, retry, and
 dashboard logic tied to the `homeboy/agent-task-request/v1` and
 `homeboy/agent-task-outcome/v1` schemas rather than Codebox-specific fields.
 
-Set `executor.config.execution_kind` to `datamachine_bundle` when the task should
-run the Data Machine workload path instead of the generic sandbox prompt path.
-The provider still emits the same `homeboy/agent-task-outcome/v1` shape, but the
-WP Codebox recipe mounts the Homeboy WordPress extension, exports
-`HOMEBOY_DATAMACHINE_AGENT_CONFIG`, and runs
-`datamachine-agent-workload.php` through the workload wrapper.
+Set `executor.config.agent_bundle` or `inputs.agent_bundle` when the task should
+ask WP Codebox to run an agent bundle rather than only a generic sandbox prompt.
+The provider still emits the same `homeboy/agent-task-outcome/v1` shape, while
+WP Codebox owns sandbox/runtime orchestration and the selected runtime owns any
+bundle-specific import, execution, drain, transcript, or artifact behavior.
 
 The provider shells through `wp-codebox agent-task-run --input-file=<json>
 --json`. WP Codebox owns sandbox recipe synthesis, runtime lifecycle, and
@@ -331,10 +328,9 @@ by default; set `artifact_export_config: '{"include_job_artifacts":true}'` for
 deep sandbox runs that need committed job metadata beside the bundle.
 
 `provider_plugin` lets callers replace the OpenAI provider preset without
-changing the workload. The reusable workflow checks out the configured plugin,
-passes the configured register function to `datamachine-agent-workload.php`, and
-copies credential env values into `bench_env` for the workload to store as Data
-Machine options. OpenAI callers can keep using the default preset:
+changing the workload. The reusable Data Machine Agent CI workflow checks out the
+configured plugin and maps credential env values into the runtime-specific
+provider configuration. OpenAI callers can keep using the default preset:
 
 ```yaml
 with:
@@ -362,12 +358,14 @@ wrapper such as `wp-site-generator`'s site-generation loop:
         "backend": "codebox",
         "model": "gpt-5.5",
         "config": {
-          "execution_kind": "datamachine_bundle",
+          "execution_kind": "agent_bundle",
           "provider": "openai",
           "provider_plugin_paths": ["/components/ai-provider-for-openai"],
-          "agents_api": "/components/agents-api",
-          "data_machine": "/components/data-machine",
-          "data_machine_code": "/components/data-machine-code",
+          "runtime_component_paths": {
+            "agents_api": "/components/agents-api",
+            "agent_runtime": "/components/data-machine",
+            "agent_runtime_tools": "/components/data-machine-code"
+          },
           "homeboy_extensions": "/components/homeboy-extensions/wordpress",
           "wp_codebox_bin": "/components/wp-codebox/packages/wp-codebox/dist/cli.js",
           "bundle_path": "bundles/static-site-agent",
@@ -399,9 +397,9 @@ wrapper such as `wp-site-generator`'s site-generation loop:
         "task_timeout_seconds": 1800
       },
       "expected_artifacts": [
-        "datamachine-transcript",
-        "datamachine-replay-bundle",
-        "datamachine-pull-request"
+        "agent-runtime-transcript",
+        "agent-runtime-replay-bundle",
+        "agent-runtime-pull-request"
       ]
     }
   ]
@@ -565,7 +563,8 @@ and environment policy checks, and the `forbidden_mutations` /
 - `.github/workflows/README.md` documents workflow inputs and examples.
 - `wordpress/scripts/agent/run-datamachine-agent.sh` builds the WordPress
   workload config and dispatches the selected runtime.
-- `wordpress/scripts/agent/datamachine-agent-workload.php` runs the agent inside
-  WordPress.
+- `wordpress/scripts/agent/datamachine-agent-workload.php` is the transitional
+  Data Machine Agent CI workload used by the reusable workflow, not the generic
+  agent-task provider path.
 - `wordpress/tests/fixtures/datamachine-agent-ci-driver/` provides the stable
   plugin path used for workloads and transcript artifacts.

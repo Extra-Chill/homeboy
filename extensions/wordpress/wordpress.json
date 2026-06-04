@@ -63,7 +63,7 @@
         "cleanup_observability",
         "screenshots",
         "structured_outcome",
-        "datamachine_bundle_execution"
+        "agent_bundle_execution"
       ],
       "status": "active",
       "integration_contract": "wp-codebox-cli/agent-task-run",
