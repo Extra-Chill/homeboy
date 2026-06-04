@@ -291,7 +291,9 @@ function normalizeAgentTaskRun(input, result) {
   const executions = Array.isArray(result.executions) && result.executions.length > 0 ? result.executions : (Array.isArray(result.run?.executions) ? result.run.executions : []);
   const execution = executions.find((item) => item?.recipeCommand === 'wp-codebox.agent-sandbox-run') || executions[0] || null;
   const datamachineConfig = datamachineBundleConfig(input, input.datamachine_bundle || {});
-  const agentResult = datamachineWorkloadFromExecutionStdout(execution, datamachineConfig) || result.metadata?.datamachine?.workload || execution?.agentResult || result.run?.agentResult || result.agentResult || result.agent_result || {};
+  const stdoutWorkload = datamachineWorkloadFromExecutionStdout(execution, datamachineConfig);
+  const fallbackAgentResult = result.metadata?.datamachine?.workload || execution?.agentResult || result.run?.agentResult || result.agentResult || result.agent_result || {};
+  const agentResult = hasScenarios(stdoutWorkload) ? stdoutWorkload : fallbackAgentResult;
   const datamachineValidation = validateDatamachineWorkload(agentResult, datamachineConfig);
   const success = !datamachineValidation;
   const diagnostics = [
@@ -375,10 +377,18 @@ function datamachineWorkloadFromBundleRun(bundleRun, config) {
         success: bundleRun.success !== false,
         dry_run: Boolean(bundleRun.dry_run),
         bundle,
+        job_id: bundleRun.job_id,
+        job_status: bundleRun.job_status,
+        wait_result: bundleRun.wait_result,
+        engine_data: bundleRun.engine_data,
         error: bundleRun.success === false ? bundleRun.error : undefined,
       },
     }],
   };
+}
+
+function hasScenarios(value) {
+  return Array.isArray(value?.scenarios) && value.scenarios.length > 0;
 }
 
 function pathValue(source, dottedPath) {
