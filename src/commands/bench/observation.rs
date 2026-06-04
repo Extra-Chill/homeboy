@@ -223,6 +223,8 @@ fn write_status_file<T: BenchStatusTarget>(
         "artifact_count": artifacts.len(),
         "artifacts": artifacts,
         "failure": workflow.and_then(|workflow| workflow.failure.as_ref()),
+        "failure_classification": workflow.and_then(|workflow| workflow.results.as_ref()?.failure_classification.as_ref()),
+        "phase_summaries": workflow.and_then(|workflow| workflow.results.as_ref().map(|results| results.phase_summaries.clone())).unwrap_or_default(),
         "error": error.map(|error| error.to_string()),
         "exit_code": workflow.map(|workflow| workflow.exit_code),
         "gate_failures": workflow.map(|workflow| workflow.gate_failures.clone()).unwrap_or_default(),
@@ -303,6 +305,9 @@ fn bench_observation_finish_metadata(
             "gate_failures": workflow.gate_failures,
             "baseline_status": baseline_status(workflow),
             "failure": workflow.failure,
+            "failure_classification": workflow.results.as_ref().and_then(|results| results.failure_classification.clone()),
+            "phase_events": workflow.results.as_ref().map(|results| results.phase_events.clone()).unwrap_or_default(),
+            "phase_summaries": workflow.results.as_ref().map(|results| results.phase_summaries.clone()).unwrap_or_default(),
             "results": workflow.results,
             "scenario_metrics": workflow.results.as_ref().map(scenario_metric_summaries).unwrap_or_default(),
         }),
@@ -491,7 +496,9 @@ mod tests {
 
     use homeboy::core::engine::run_dir::{self, RunDir};
     use homeboy::core::extension::bench::artifact::BenchArtifact;
-    use homeboy::core::extension::bench::{BenchResults, BenchRunWorkflowResult};
+    use homeboy::core::extension::bench::{
+        parse_bench_results_str, BenchResults, BenchRunWorkflowResult,
+    };
     use homeboy::core::observation::ObservationStore;
 
     use super::*;
@@ -746,6 +753,83 @@ mod tests {
             assert_eq!(finished["exit_code"], 0);
             assert_eq!(finished["artifact_count"], 2);
             assert_eq!(finished["hints"][0], "persisted");
+        });
+    }
+
+    #[test]
+    fn bench_observation_persists_phase_evidence_and_classification() {
+        with_isolated_home(|home| {
+            let _xdg = XdgGuard::unset();
+            let run_dir = RunDir::create().expect("run dir");
+            fs::write(run_dir.step_file(run_dir::files::BENCH_RESULTS), b"{}").expect("results");
+
+            let results = parse_bench_results_str(
+                r#"{
+                    "component_id": "homeboy",
+                    "iterations": 1,
+                    "phase_events": [
+                        { "phase": "runtime_startup", "status": "started", "t_ms": 0 },
+                        { "phase": "runtime_startup", "status": "heartbeat", "t_ms": 500, "message": "booting" },
+                        { "phase": "runtime_startup", "status": "timeout", "t_ms": 1000, "message": "runtime did not become ready" }
+                    ],
+                    "scenarios": [
+                        { "id": "cold", "iterations": 1, "metrics": { "p95_ms": 42.0 } }
+                    ]
+                }"#,
+            )
+            .expect("bench results");
+            let mut workflow = BenchRunWorkflowResult {
+                status: "failed".to_string(),
+                component: "homeboy".to_string(),
+                exit_code: 124,
+                iterations: 1,
+                results: Some(results),
+                gate_failures: Vec::new(),
+                baseline_comparison: None,
+                hints: None,
+                failure: None,
+                diagnostics: Vec::new(),
+            };
+
+            let args = bench_args();
+            let observation = start(BenchObservationStart {
+                component_id: "homeboy",
+                component_label: "homeboy",
+                source_path: home.path(),
+                args: &args,
+                selected_scenarios: &["cold".to_string()],
+                rig_id: None,
+                rig_snapshot: None,
+                run_dir: &run_dir,
+            })
+            .expect("start observation");
+            let run_id = observation.run_id().to_string();
+            finish_success(Some(observation), &mut workflow, &run_dir).expect("finish observation");
+
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store.get_run(&run_id).expect("read run").expect("run");
+            assert_eq!(
+                run.metadata_json["phase_events"].as_array().unwrap().len(),
+                3
+            );
+            assert_eq!(
+                run.metadata_json["phase_summaries"][0]["phase"],
+                "runtime_startup"
+            );
+            assert_eq!(run.metadata_json["phase_summaries"][0]["status"], "timeout");
+            assert_eq!(
+                run.metadata_json["phase_summaries"][0]["heartbeat_count"],
+                1
+            );
+            assert_eq!(
+                run.metadata_json["failure_classification"],
+                serde_json::json!({
+                    "kind": "timeout",
+                    "phase": "runtime_startup",
+                    "status": "timeout",
+                    "message": "runtime did not become ready"
+                })
+            );
         });
     }
 
