@@ -1,4 +1,4 @@
-use super::TraceAggregateSpanSample;
+use super::aggregate::TraceAggregateSpanSample;
 
 pub(super) fn aggregate_samples(durations: &[u64]) -> Vec<TraceAggregateSpanSample> {
     durations

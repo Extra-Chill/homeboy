@@ -8,6 +8,7 @@
 //! `source.event` intervals without teaching core about product-specific
 //! milestones.
 
+mod aggregate_report;
 pub mod assertions;
 mod attach;
 pub mod baseline;
@@ -23,6 +24,7 @@ pub mod spans;
 use crate::core::component::Component;
 use crate::core::extension::{ExtensionCapability, ExtensionExecutionContext};
 
+pub use aggregate_report::TraceAggregateSpanSampleOutput;
 pub use attach::TraceAttachment;
 pub use overlay::TraceOverlayRequest;
 pub use overlay_lock::{cleanup_stale_trace_overlay_locks, list_trace_overlay_locks};
@@ -37,12 +39,11 @@ pub use parsing::{TraceAssertionStatus, TraceResults, TraceSpanDefinition, Trace
 pub use probes::{ActiveTraceProbes, TraceProbeConfig};
 pub use report::{
     from_list_workflow, from_main_workflow, from_main_workflow_outputs, TraceAggregateOutput,
-    TraceAggregateRunOutput, TraceAggregateSpanOutput, TraceAggregateSpanSampleOutput,
-    TraceClassificationSummaryOutput, TraceCommandOutput, TraceCompareClassificationSummaryOutput,
-    TraceCompareOutput, TraceCompareSpanOutput, TraceGuardrailOutput, TraceListOutput,
-    TraceOverlayLocksOutput, TraceProfileListItem, TraceResolvedProfileOutput,
-    TraceRunOrderEntryOutput, TraceSpanMetadata, TraceVariantMatrixOutput,
-    TraceVariantMatrixRunOutput,
+    TraceAggregateRunOutput, TraceAggregateSpanOutput, TraceClassificationSummaryOutput,
+    TraceCommandOutput, TraceCompareClassificationSummaryOutput, TraceCompareOutput,
+    TraceCompareSpanOutput, TraceGuardrailOutput, TraceListOutput, TraceOverlayLocksOutput,
+    TraceProfileListItem, TraceResolvedProfileOutput, TraceRunOrderEntryOutput, TraceSpanMetadata,
+    TraceVariantMatrixOutput, TraceVariantMatrixRunOutput,
 };
 pub use report::{push_overlay_markdown, render_markdown};
 pub use run::{

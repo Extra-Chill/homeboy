@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+use super::aggregate_report::TraceAggregateSpanSampleOutput;
 use super::baseline::TraceBaselineComparison;
 use super::overlay_lock::TraceOverlayLockRecord;
 use super::parsing::{TraceArtifact, TraceAssertionStatus, TraceList, TraceResults};
@@ -212,13 +213,6 @@ pub struct TraceAggregateSpanOutput {
     pub samples: Vec<TraceAggregateSpanSampleOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<TraceSpanMetadata>,
-}
-
-#[derive(Serialize, Clone)]
-pub struct TraceAggregateSpanSampleOutput {
-    pub run_index: usize,
-    pub duration_ms: u64,
-    pub artifact_path: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Default)]
