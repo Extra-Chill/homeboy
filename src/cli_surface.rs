@@ -1217,6 +1217,14 @@ mod tests {
             parsed_command(&["homeboy", "audit"]).lab_offload_mutation_flag(),
             None
         );
+        assert_eq!(
+            parsed_command(&["homeboy", "audit", "--baseline"]).lab_offload_mutation_flag(),
+            Some("--baseline/--ratchet")
+        );
+        assert_eq!(
+            parsed_command(&["homeboy", "audit", "--ratchet"]).lab_offload_mutation_flag(),
+            Some("--baseline/--ratchet")
+        );
     }
 
     #[test]

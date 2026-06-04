@@ -55,8 +55,8 @@ use self::detectors::{
     artifact_portability, command_status_contracts, config_key_usage, core_boundary_leak,
     dead_guard, deprecation_age, enum_dispatch_contracts, field_patterns, global_env_guard,
     mutating_resource_access, parallel_runner_setup, public_registry_exposure, redirect_validation,
-    requested_detectors, runner_offload_preflight, test_coverage, test_topology, test_wiring,
-    unbounded_output_capture, wrapper_inference,
+    requested_detectors, runner_offload_preflight, source_policy, test_coverage, test_topology,
+    test_wiring, unbounded_output_capture, wrapper_inference,
 };
 use descriptor_runtime::{run_descriptor_detectors, DetectorRunContext};
 
@@ -292,6 +292,35 @@ pub fn audit_path_with_id(component_id: &str, source_path: &str) -> Result<CodeA
         &[],
     )
     .map(|audit| audit.result)
+}
+
+/// Run only configured source policies for a component path.
+pub fn source_policy_findings_for_path(
+    component_id: &str,
+    source_path: &str,
+) -> Result<Vec<Finding>> {
+    let root = Path::new(source_path);
+    if !root.is_dir() {
+        return Err(crate::core::Error::validation_invalid_argument(
+            "path",
+            format!("Not a directory: {source_path}"),
+            None,
+            None,
+        ));
+    }
+
+    let audit_config = audit_config_for(component_id, root, &[]);
+    let snapshot = walker::walk_all_source_files_snapshot(root);
+    let fingerprints = snapshot
+        .iter()
+        .filter_map(|(path, content)| fingerprint::fingerprint_content(path, root, content))
+        .collect::<Vec<_>>();
+    let fingerprint_refs = fingerprints.iter().collect::<Vec<_>>();
+
+    Ok(source_policy::run(
+        &fingerprint_refs,
+        &audit_config.source_policies,
+    ))
 }
 
 pub(crate) fn audit_path_with_id_with_plan_and_analysis(
@@ -964,6 +993,23 @@ fn audit_internal(
             core_boundary_findings.len()
         );
         all_findings.extend(core_boundary_findings);
+    }
+
+    // Phase 4t2b: Generic component-owned source policy checks.
+    let source_policy_findings = time_audit_detector(
+        &mut timing,
+        "detector.source_policy",
+        plan.run_source_policy(),
+        || source_policy::run(&all_fingerprints, &audit_config.source_policies),
+        Vec::new,
+    );
+    if !source_policy_findings.is_empty() {
+        log_status!(
+            "audit",
+            "Source policy: {} finding(s) (configured source boundary rules)",
+            source_policy_findings.len()
+        );
+        all_findings.extend(source_policy_findings);
     }
 
     // Phase 4t3: Configured mutating handler/resource access detection.

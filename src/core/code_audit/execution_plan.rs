@@ -272,6 +272,15 @@ const DETECTOR_DESCRIPTORS: &[DetectorDescriptor] = &[
         log_summary: "configured ecosystem terms in core source",
     },
     DetectorDescriptor {
+        id: "source_policy",
+        findings: &[AuditFinding::SourcePolicyViolation],
+        access: DetectorAccess::Discovery,
+        runtime: DetectorRuntime::Manual,
+        timing_id: "detector.source_policy",
+        log_label: "Source policy",
+        log_summary: "configured source policy rules",
+    },
+    DetectorDescriptor {
         id: "mutating_resource_access",
         findings: &[AuditFinding::MutatingResourceAccess],
         access: DetectorAccess::Discovery,
@@ -491,6 +500,10 @@ impl AuditExecutionPlan {
 
     pub(crate) fn run_core_boundary_leaks(&self) -> bool {
         self.detector_enabled("core_boundary_leaks")
+    }
+
+    pub(crate) fn run_source_policy(&self) -> bool {
+        self.detector_enabled("source_policy")
     }
 
     pub(crate) fn run_mutating_resource_access(&self) -> bool {
