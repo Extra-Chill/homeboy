@@ -1,7 +1,9 @@
 use crate::cli_surface::Commands;
 
 use super::{map, JsonRun};
-use crate::commands::{audit, bench, lint, observe, review, test, trace, GlobalArgs};
+use crate::commands::{
+    audit, audit_baseline, bench, lint, observe, review, test, trace, GlobalArgs,
+};
 
 pub(super) fn dispatch(command: Commands, global: &GlobalArgs) -> JsonRun {
     match command {
@@ -12,6 +14,7 @@ pub(super) fn dispatch(command: Commands, global: &GlobalArgs) -> JsonRun {
         Commands::Lint(args) => map(lint::run(args, global)),
         Commands::Review(args) => map(review::run(args, global)),
         Commands::Audit(args) => map(audit::run(args, global)),
+        Commands::AuditBaseline(args) => map(audit_baseline::run(args, global)),
         _ => unreachable!("command routed to wrong JSON output family"),
     }
 }

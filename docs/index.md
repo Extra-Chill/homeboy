@@ -25,7 +25,7 @@ repository.
 
 - Root command + global flags: [Root command](cli/homeboy-root-command.md)
 - Full built-in command list: [Commands index](commands/commands-index.md)
-- Code audit (convention drift, structural analysis): [audit](commands/audit.md)
+- Code audit (convention drift, structural analysis): [audit](commands/audit.md), [audit-baseline](commands/audit-baseline.md)
 - Changes summary: [changes](commands/changes.md)
 - Reproducible local dev environments: [rig](commands/rig.md)
 - Rig spec JSON schema: [rig-spec](commands/rig-spec.md)
