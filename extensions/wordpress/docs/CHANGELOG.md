@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.115.29] - 2026-06-04
+
+### Fixed
+- avoid importing directory-backed agent bundles
+
 ## [2.115.28] - 2026-06-04
 
 ### Fixed
