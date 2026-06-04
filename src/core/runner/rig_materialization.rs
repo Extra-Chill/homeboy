@@ -1,11 +1,27 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
 use crate::core::rig;
 use crate::core::{Error, Result};
 
 use super::{
-    exec, sync_workspace, RunnerExecOptions, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
+    exec, load, sync_workspace,
+    workspace::{
+        materialize_git_dependency, RunnerGitDependencyMaterializationOptions,
+        RunnerGitDependencyMaterializationOutput,
+    },
+    RunnerExecOptions, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
 };
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct RigComponentDependency {
+    pub rig_id: String,
+    pub component_id: String,
+    pub local_checkout_root: String,
+    pub remote_checkout_root: String,
+    pub required_subpath: Option<String>,
+    pub remote_url: Option<String>,
+}
 
 pub(super) fn sync_lab_offload_rigs(
     runner_id: &str,
@@ -80,6 +96,103 @@ pub(super) fn sync_lab_offload_rigs(
     }
 
     Ok(rig_ids.len())
+}
+
+pub(super) fn sync_lab_offload_rig_component_dependencies(
+    runner_id: &str,
+    args: &[String],
+) -> Result<Vec<RunnerGitDependencyMaterializationOutput>> {
+    let dependencies = lab_offload_rig_component_dependencies(args)?;
+    if dependencies.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let runner = load(runner_id)?;
+    let mut synced = Vec::new();
+    let mut seen = HashSet::new();
+    for dependency in dependencies {
+        if !seen.insert(dependency.remote_checkout_root.clone()) {
+            continue;
+        }
+        synced.push(materialize_git_dependency(
+            &runner,
+            RunnerGitDependencyMaterializationOptions {
+                local_path: dependency.local_checkout_root,
+                remote_path: dependency.remote_checkout_root,
+                remote_url: dependency.remote_url,
+                required_subpath: dependency.required_subpath,
+            },
+        )?);
+    }
+
+    Ok(synced)
+}
+
+pub(super) fn lab_offload_rig_component_dependencies(
+    args: &[String],
+) -> Result<Vec<RigComponentDependency>> {
+    let mut dependencies = Vec::new();
+    for rig_id in lab_offload_rig_ids(args) {
+        let spec = rig::load(&rig_id)?;
+        for (component_id, component) in &spec.components {
+            let checkout_root = component
+                .checkout_root
+                .as_deref()
+                .unwrap_or(component.path.as_str());
+            let local_checkout_root = expanded_local_path(&spec, checkout_root);
+            let local_component_path = expanded_local_path(&spec, &component.path);
+            let required_subpath = required_component_subpath(
+                Path::new(&local_checkout_root),
+                Path::new(&local_component_path),
+                &rig_id,
+                component_id,
+            )?;
+            dependencies.push(RigComponentDependency {
+                rig_id: rig_id.clone(),
+                component_id: component_id.clone(),
+                local_checkout_root,
+                remote_checkout_root: checkout_root.to_string(),
+                required_subpath,
+                remote_url: component.remote_url.clone(),
+            });
+        }
+    }
+    Ok(dependencies)
+}
+
+fn expanded_local_path(spec: &rig::RigSpec, value: &str) -> String {
+    rig::expand::expand_vars(spec, value)
+}
+
+fn required_component_subpath(
+    checkout_root: &Path,
+    component_path: &Path,
+    rig_id: &str,
+    component_id: &str,
+) -> Result<Option<String>> {
+    let checkout_root = normalize_path_for_prefix(checkout_root);
+    let component_path = normalize_path_for_prefix(component_path);
+    if checkout_root == component_path {
+        return Ok(None);
+    }
+    let subpath = component_path.strip_prefix(&checkout_root).map_err(|_| {
+        Error::validation_invalid_argument(
+            "checkout_root",
+            format!(
+                "rig `{rig_id}` component `{component_id}` declares checkout_root outside its component path"
+            ),
+            Some(checkout_root.display().to_string()),
+            Some(vec![format!(
+                "Set checkout_root to the repository root that contains {}.",
+                component_path.display()
+            )]),
+        )
+    })?;
+    Ok(Some(subpath.display().to_string()))
+}
+
+fn normalize_path_for_prefix(path: &Path) -> PathBuf {
+    path.components().collect()
 }
 
 fn lab_offload_rig_ids(args: &[String]) -> Vec<String> {
@@ -164,5 +277,67 @@ mod tests {
             "candidate".to_string(),
         ];
         assert!(lab_offload_rig_ids(&passthrough).is_empty());
+    }
+
+    #[test]
+    fn collects_rig_component_dependency_checkout_roots() {
+        crate::test_support::with_isolated_home(|home| {
+            let checkout = home.path().join("Developer/woocommerce");
+            std::fs::create_dir_all(checkout.join("plugins/woocommerce")).expect("checkout");
+            let rig_dir = crate::core::paths::rigs().expect("rig dir");
+            std::fs::create_dir_all(&rig_dir).expect("create rig dir");
+            std::fs::write(
+                rig_dir.join("woocommerce-performance.json"),
+                serde_json::json!({
+                    "id": "woocommerce-performance",
+                    "components": {
+                        "woocommerce": {
+                            "path": format!("{}/plugins/woocommerce", checkout.display()),
+                            "checkout_root": checkout.display().to_string(),
+                            "remote_url": "https://github.com/woocommerce/woocommerce.git"
+                        }
+                    }
+                })
+                .to_string(),
+            )
+            .expect("save rig");
+
+            let dependencies = lab_offload_rig_component_dependencies(&[
+                "homeboy".to_string(),
+                "bench".to_string(),
+                "--rig".to_string(),
+                "woocommerce-performance".to_string(),
+            ])
+            .expect("dependencies");
+
+            assert_eq!(dependencies.len(), 1);
+            assert_eq!(dependencies[0].component_id, "woocommerce");
+            assert_eq!(
+                dependencies[0].local_checkout_root,
+                checkout.display().to_string()
+            );
+            assert_eq!(
+                dependencies[0].remote_checkout_root,
+                checkout.display().to_string()
+            );
+            assert_eq!(
+                dependencies[0].required_subpath.as_deref(),
+                Some("plugins/woocommerce")
+            );
+        });
+    }
+
+    #[test]
+    fn rejects_checkout_root_outside_component_path() {
+        let err = required_component_subpath(
+            Path::new("/tmp/wordpress"),
+            Path::new("/tmp/woocommerce/plugins/woocommerce"),
+            "rig",
+            "woocommerce",
+        )
+        .expect_err("root outside component path");
+
+        assert_eq!(err.details["field"], "checkout_root");
+        assert!(err.message.contains("component `woocommerce`"));
     }
 }
