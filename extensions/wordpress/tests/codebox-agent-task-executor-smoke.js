@@ -572,6 +572,7 @@ try {
   assert.equal(capturedDatamachineRun.recipe.workflow.steps[0].args.includes('code-file=/homeboy-extension/scripts/agent/homeboy-datamachine-agent-workload-wrapper.php'), true);
   assert.equal(capturedDatamachineRun.recipe.inputs.mounts.some((mount) => mount.target === '/homeboy-extension'), true);
   assert.equal(capturedDatamachineRun.recipe.inputs.mounts.some((mount) => mount.target === '/wordpress/wp-content/plugins/static-site-agent'), true);
+  assert.equal(capturedDatamachineRun.recipe.inputs.secretEnv.includes('HOMEBOY_DATAMACHINE_AGENT_CONFIG'), true);
   assert.equal(capturedDatamachineRun.datamachineConfig.bundle_path, '/wordpress/wp-content/plugins/static-site-agent');
   assert.equal(capturedDatamachineRun.datamachineConfig.agent_slug, 'static-site-agent');
   assert.equal(capturedDatamachineRun.datamachineConfig.pipeline_slug, 'static-site-pipeline');

@@ -297,6 +297,7 @@ function buildRecipe(input) {
   const isDatamachineBundle = input.execution_kind === 'datamachine_bundle' || input.execution_kind === 'datamachine-bundle';
   const bundleMount = datamachineBundleMount(input);
   const datamachineConfig = datamachineBundleConfig(input, bundleMount.config);
+  const secretEnv = input.secret_env || [];
   const task = input.parent_request?.task || {};
   const workflowArgs = [
     `task=${isDatamachineBundle ? (datamachineConfig.workload_label || task.title || 'Run Data Machine agent bundle') : (task.prompt || '')}`,
@@ -307,7 +308,7 @@ function buildRecipe(input) {
     `provider-plugin-slugs=${providerSlugs.join(',')}`,
   ];
   if (isDatamachineBundle) {
-    workflowArgs.push(`code-file=${path.join(input.homeboy_extensions_path, 'scripts', 'agent', 'homeboy-datamachine-agent-workload-wrapper.php')}`);
+    workflowArgs.push('code-file=/homeboy-extension/scripts/agent/homeboy-datamachine-agent-workload-wrapper.php');
   }
   if (input.sandbox_session_id) {
     workflowArgs.push(`session-id=${input.sandbox_session_id}`);
@@ -342,7 +343,7 @@ function buildRecipe(input) {
         extraPlugin(input.homeboy_path, 'homeboy', true, { artifactsRoot: input.artifacts_path }),
         ...providerPlugins,
       ].filter(Boolean),
-      secretEnv: input.secret_env || [],
+      secretEnv: isDatamachineBundle ? Array.from(new Set([...secretEnv, 'HOMEBOY_DATAMACHINE_AGENT_CONFIG'])) : secretEnv,
     }).filter(([, value]) => !(Array.isArray(value) && value.length === 0))),
     workflow: {
       steps: [{ command: 'wp-codebox.agent-sandbox-run', args: workflowArgs }],
@@ -378,14 +379,16 @@ function agentTaskRunFromRecipeRun(input, result, artifacts) {
     ? datamachineBundleConfig(input, datamachineBundleMount(input).config)
     : null;
   const previewUrl = result.runtime?.preview?.url || result.artifacts?.preview_url || result.artifacts?.previewUrl || '';
+  const datamachineValidation = datamachineConfig ? validateDatamachineWorkload(agentResult, datamachineConfig) : null;
+  const success = Boolean(result.success) && !datamachineValidation;
   return {
-    success: Boolean(result.success),
+    success,
     schema: 'wp-codebox/agent-task-run/v1',
-    summary: result.success ? 'WP Codebox agent task succeeded.' : (result.error?.message || 'WP Codebox agent task failed.'),
+    summary: success ? 'WP Codebox agent task succeeded.' : (datamachineValidation?.message || result.error?.message || 'WP Codebox agent task failed.'),
     session: {
       schema: 'wp-codebox/sandbox-session/v1',
       id: input.sandbox_session_id || input.orchestrator?.agent_task_id || '',
-      status: result.success ? 'completed' : 'failed',
+      status: success ? 'completed' : 'failed',
       artifacts: {
         bundle_id: result.artifacts?.id || result.artifacts?.bundle_id || result.artifacts?.bundleId || '',
         preview_url: previewUrl,
@@ -404,14 +407,56 @@ function agentTaskRunFromRecipeRun(input, result, artifacts) {
       context: input.parent_request?.task?.context || {},
     },
     artifacts,
-    exit_code: result.success ? 0 : 1,
+    exit_code: success ? 0 : 1,
     run: { ...result.run, agentResult },
-    diagnostics: result.diagnostics || datamachineDiagnostics(agentResult) || (result.error ? [{ class: result.error.code || 'wp-codebox.recipe-run', message: result.error.message || String(result.error), data: result.error }] : []),
+    diagnostics: [
+      ...(result.diagnostics || []),
+      ...(datamachineValidation ? [datamachineValidation] : []),
+      ...(datamachineDiagnostics(agentResult) || []),
+      ...(result.error ? [{ class: result.error.code || 'wp-codebox.recipe-run', message: result.error.message || String(result.error), data: result.error }] : []),
+    ],
     metadata: {
       recipe_run: result,
       ...(datamachineConfig ? { datamachine: { bundle: datamachineConfig, workload: agentResult } } : {}),
     },
   };
+}
+
+function pathValue(source, dottedPath) {
+  return String(dottedPath || '').split('.').filter(Boolean).reduce((value, key) => (value && typeof value === 'object' ? value[key] : undefined), source);
+}
+
+function validateDatamachineWorkload(workload, config) {
+  const scenarios = Array.isArray(workload?.scenarios) ? workload.scenarios : [];
+  if (scenarios.length === 0) {
+    return {
+      class: 'datamachine.workload.incomplete',
+      message: 'Data Machine bundle workload did not return any scenarios.',
+      data: { reason: 'missing_scenarios' },
+    };
+  }
+
+  const outputs = config.engine_data_outputs && typeof config.engine_data_outputs === 'object' ? config.engine_data_outputs : {};
+  const missing = [];
+  for (const [name, outputPath] of Object.entries(outputs)) {
+    const present = scenarios.some((scenario) => {
+      const value = pathValue(scenario, outputPath);
+      return value !== undefined && value !== null && value !== '';
+    });
+    if (!present) {
+      missing.push({ name, path: outputPath });
+    }
+  }
+
+  if (missing.length > 0) {
+    return {
+      class: 'datamachine.workload.incomplete',
+      message: 'Data Machine bundle workload did not produce required engine data outputs.',
+      data: { reason: 'missing_engine_data_outputs', missing },
+    };
+  }
+
+  return null;
 }
 
 function datamachineDiagnostics(workload) {
@@ -511,7 +556,9 @@ function runWpCodeboxParentTask(request) {
 
   if (result.stdout) {
     try {
-      process.stdout.write(`${JSON.stringify(agentTaskRunFromRecipeRun(input, JSON.parse(result.stdout), artifacts), null, 2)}\n`);
+      const payload = agentTaskRunFromRecipeRun(input, JSON.parse(result.stdout), artifacts);
+      process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+      return payload.success ? (result.status ?? 0) : 1;
     } catch {
       process.stdout.write(result.stdout);
     }
