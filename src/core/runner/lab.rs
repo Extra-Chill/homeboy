@@ -30,7 +30,7 @@ use super::lab_selection::{
 };
 use super::lab_workspaces::{
     lab_extra_workspaces, lab_workspace_mapping_metadata, sync_extra_lab_workspaces,
-    workspace_mapping_entry,
+    workspace_mapping_entry, workspace_mapping_entry_for_git_dependency,
 };
 
 pub struct LabOffloadRequest<'a> {
@@ -425,6 +425,32 @@ fn run_lab_offload_inner(
             PlanStep::ready("lab.sync_rigs", "lab.sync_rigs")
                 .inputs(PlanValues::new().json("count", synced_rigs))
                 .build(),
+        );
+    }
+
+    let synced_rig_dependencies = rig_materialization::sync_lab_offload_rig_component_dependencies(
+        runner_id,
+        &changed_since_preflight.args,
+    )?;
+    if !synced_rig_dependencies.is_empty() {
+        for dependency in &synced_rig_dependencies {
+            workspace_mapping.push(workspace_mapping_entry_for_git_dependency(
+                "rig_component_dependency",
+                dependency,
+            ));
+        }
+        plan = with_step(
+            plan,
+            PlanStep::ready(
+                "lab.sync_rig_component_dependencies",
+                "lab.sync_rig_component_dependencies",
+            )
+            .inputs(
+                PlanValues::new()
+                    .json("count", synced_rig_dependencies.len())
+                    .json("dependencies", &synced_rig_dependencies),
+            )
+            .build(),
         );
     }
 

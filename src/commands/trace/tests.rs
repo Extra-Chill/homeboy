@@ -7,7 +7,8 @@ use homeboy::core::component::ScopedExtensionConfig;
 use homeboy::core::rig::ComponentSpec;
 
 use super::test_fixture::{
-    init_overlay_component, write_trace_extension, write_trace_rig,
+    init_overlay_component, write_missing_trace_artifact_extension,
+    write_nested_trace_artifact_extension, write_trace_extension, write_trace_rig,
     write_trace_rig_with_phase_preset, write_trace_rig_with_span_metadata,
     write_trace_rig_with_variant, TRACE_FIXTURE_EXTENSION_ID,
 };
@@ -27,6 +28,46 @@ fn trace_args_for_profile(profile: &str) -> TraceArgs {
         candidate: None,
         rig: None,
         profile: Some(profile.to_string()),
+        profiles: false,
+        setting_args: SettingArgs::default(),
+        json_summary: false,
+        report: None,
+        experiment: None,
+        repeat: 1,
+        aggregate: None,
+        schedule: TraceSchedule::Grouped,
+        focus_spans: Vec::new(),
+        spans: Vec::new(),
+        phases: Vec::new(),
+        attachments: Vec::new(),
+        phase_preset: None,
+        baseline_args: BaselineArgs::default(),
+        regression_threshold: extension_trace::baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT,
+        regression_min_delta_ms: extension_trace::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
+        overlays: Vec::new(),
+        variants: Vec::new(),
+        matrix: TraceVariantMatrixMode::None,
+        output_dir: None,
+        keep_overlay: false,
+        stale: false,
+        force: false,
+    }
+}
+
+fn trace_args_for_rig(rig_id: &str, component_id: &str, scenario_id: &str) -> TraceArgs {
+    TraceArgs {
+        comp: PositionalComponentArgs {
+            component: Some(component_id.to_string()),
+            path: None,
+        },
+        component_arg: None,
+        scenario: Some(scenario_id.to_string()),
+        scenario_arg: None,
+        compare_after: None,
+        baseline_target: None,
+        candidate: None,
+        rig: Some(rig_id.to_string()),
+        profile: None,
         profiles: false,
         setting_args: SettingArgs::default(),
         json_summary: false,
@@ -101,6 +142,7 @@ fn rig_component_path_and_trace_env_are_threaded() {
         "studio".to_string(),
         ComponentSpec {
             path: component_dir.path().to_string_lossy().to_string(),
+            checkout_root: None,
             remote_url: Some("https://github.com/Automattic/studio".to_string()),
             triage_remote_url: None,
             stack: None,
@@ -500,13 +542,91 @@ fn trace_run_persists_observation_history() {
         assert_eq!(spans[0].duration_ms, Some(125.0));
 
         let artifacts = store.list_artifacts(&runs[0].id).expect("artifacts");
-        assert_eq!(artifacts.len(), 2);
+        assert!(artifacts.len() >= 3);
         assert!(artifacts
             .iter()
             .any(|artifact| artifact.kind == "trace-results"));
         assert!(artifacts
             .iter()
             .any(|artifact| artifact.kind == "trace-artifact"));
+        assert!(artifacts
+            .iter()
+            .any(|artifact| artifact.kind == "trace-artifacts"));
+    });
+}
+
+#[test]
+fn trace_run_preserves_nested_child_artifact_directories() {
+    with_isolated_home(|home| {
+        write_nested_trace_artifact_extension(home);
+        let component_dir = tempfile::TempDir::new().expect("component dir");
+        write_trace_rig(home, "studio-rig", "studio", component_dir.path());
+
+        let (_output, exit_code) = run(
+            trace_args_for_rig("studio-rig", "studio", "studio-app-create-site"),
+            &GlobalArgs {},
+        )
+        .expect("trace should run");
+
+        assert_eq!(exit_code, 0);
+        let store = ObservationStore::open_initialized().expect("store");
+        let runs = store
+            .list_runs(homeboy::core::observation::RunListFilter {
+                kind: Some("trace".to_string()),
+                ..Default::default()
+            })
+            .expect("runs");
+        assert_eq!(runs[0].status, "pass");
+        let artifacts = store.list_artifacts(&runs[0].id).expect("artifacts");
+        let directory_artifact = artifacts
+            .iter()
+            .find(|artifact| {
+                artifact.kind == "trace-artifacts" && artifact.artifact_type == "directory"
+            })
+            .expect("trace artifact directory is preserved");
+        assert!(std::path::Path::new(&directory_artifact.path)
+            .join("wp-codebox-artifacts/runtime-fixture/files/browser/network.jsonl")
+            .is_file());
+        assert!(artifacts.iter().any(|artifact| {
+            artifact.kind == "trace-artifact"
+                && artifact.artifact_type == "file"
+                && artifact.path.ends_with("network.jsonl")
+        }));
+    });
+}
+
+#[test]
+fn trace_run_fails_when_declared_artifact_is_missing() {
+    with_isolated_home(|home| {
+        write_missing_trace_artifact_extension(home);
+        let component_dir = tempfile::TempDir::new().expect("component dir");
+        write_trace_rig(home, "studio-rig", "studio", component_dir.path());
+
+        let (output, exit_code) = run(
+            trace_args_for_rig("studio-rig", "studio", "studio-app-create-site"),
+            &GlobalArgs {},
+        )
+        .expect("trace should run and report missing artifact");
+
+        assert_eq!(exit_code, 1);
+        let TraceCommandOutput::Run(result) = output else {
+            panic!("expected run output");
+        };
+        let results = result.results.expect("trace results");
+        assert_eq!(results.status.as_str(), "error");
+        assert!(results
+            .failure
+            .as_deref()
+            .expect("failure")
+            .contains("wp-codebox-artifacts/runtime-fixture/files/browser/network.jsonl"));
+        assert!(results.assertions.iter().any(|assertion| {
+            assertion.status == extension_trace::TraceAssertionStatus::Error
+                && assertion
+                    .message
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("wp-codebox-artifacts/runtime-fixture/files/browser/network.jsonl")
+        }));
     });
 }
 

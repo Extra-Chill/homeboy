@@ -83,6 +83,76 @@ printf 'trace log\n' > "$HOMEBOY_TRACE_ARTIFACT_DIR/trace-log.txt"
     }
 }
 
+pub(super) fn write_nested_trace_artifact_extension(home: &tempfile::TempDir) {
+    write_custom_trace_extension(
+        home,
+        r#"#!/bin/sh
+set -eu
+if [ "$HOMEBOY_TRACE_LIST_ONLY" = "1" ]; then
+  cat > "$HOMEBOY_TRACE_RESULTS_FILE" <<JSON
+{"component_id":"$HOMEBOY_COMPONENT_ID","scenarios":[{"id":"studio-app-create-site","source":"fixture"}]}
+JSON
+  exit 0
+fi
+mkdir -p "$HOMEBOY_TRACE_ARTIFACT_DIR/wp-codebox-artifacts/runtime-fixture/files/browser"
+printf '{"url":"https://example.test"}\n' > "$HOMEBOY_TRACE_ARTIFACT_DIR/wp-codebox-artifacts/runtime-fixture/files/browser/network.jsonl"
+cat > "$HOMEBOY_TRACE_RESULTS_FILE" <<JSON
+{"component_id":"$HOMEBOY_COMPONENT_ID","scenario_id":"$HOMEBOY_TRACE_SCENARIO","status":"pass","timeline":[],"assertions":[],"artifacts":[{"label":"Browser network log","path":"wp-codebox-artifacts/runtime-fixture/files/browser/network.jsonl"}]}
+JSON
+"#,
+    );
+}
+
+pub(super) fn write_missing_trace_artifact_extension(home: &tempfile::TempDir) {
+    write_custom_trace_extension(
+        home,
+        r#"#!/bin/sh
+set -eu
+if [ "$HOMEBOY_TRACE_LIST_ONLY" = "1" ]; then
+  cat > "$HOMEBOY_TRACE_RESULTS_FILE" <<JSON
+{"component_id":"$HOMEBOY_COMPONENT_ID","scenarios":[{"id":"studio-app-create-site","source":"fixture"}]}
+JSON
+  exit 0
+fi
+cat > "$HOMEBOY_TRACE_RESULTS_FILE" <<JSON
+{"component_id":"$HOMEBOY_COMPONENT_ID","scenario_id":"$HOMEBOY_TRACE_SCENARIO","status":"pass","timeline":[],"assertions":[],"artifacts":[{"label":"Missing browser log","path":"wp-codebox-artifacts/runtime-fixture/files/browser/network.jsonl"}]}
+JSON
+"#,
+    );
+}
+
+fn write_custom_trace_extension(home: &tempfile::TempDir, script: &str) {
+    let extension_dir = home
+        .path()
+        .join(".config")
+        .join("homeboy")
+        .join("extensions")
+        .join(TRACE_FIXTURE_EXTENSION_ID);
+    fs::create_dir_all(&extension_dir).expect("mkdir extension");
+    fs::write(
+        extension_dir.join(format!("{TRACE_FIXTURE_EXTENSION_ID}.json")),
+        r#"{
+                "name": "Fixture Trace",
+                "version": "0.0.0",
+                "trace": { "extension_script": "trace-runner.sh" }
+            }"#,
+    )
+    .expect("write extension manifest");
+
+    let script_path = extension_dir.join("trace-runner.sh");
+    fs::write(&script_path, script).expect("write trace script");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(&script_path)
+            .expect("script metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script_path, permissions).expect("chmod script");
+    }
+}
+
 pub(super) fn init_overlay_component(path: &std::path::Path) {
     fs::write(path.join("scenario.txt"), "base\n").expect("write scenario");
     run_git(path, &["init"]);

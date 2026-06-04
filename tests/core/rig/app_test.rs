@@ -16,6 +16,7 @@ fn rig_with_launcher(install_dir: &str) -> RigSpec {
         "studio".to_string(),
         ComponentSpec {
             path: "/tmp/studio-dev".to_string(),
+            checkout_root: None,
             remote_url: None,
             triage_remote_url: None,
             stack: None,

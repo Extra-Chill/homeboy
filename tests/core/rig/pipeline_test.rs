@@ -329,6 +329,7 @@ mod dag {
             "studio".to_string(),
             ComponentSpec {
                 path: tmp.path().to_string_lossy().into_owned(),
+                checkout_root: None,
                 remote_url: None,
                 triage_remote_url: None,
                 stack: Some(stack_id),
@@ -371,6 +372,7 @@ mod dag {
             "a".to_string(),
             ComponentSpec {
                 path: component_a.to_string_lossy().into_owned(),
+                checkout_root: None,
                 remote_url: None,
                 triage_remote_url: None,
                 stack: None,
@@ -382,6 +384,7 @@ mod dag {
             "b".to_string(),
             ComponentSpec {
                 path: component_b.to_string_lossy().into_owned(),
+                checkout_root: None,
                 remote_url: None,
                 triage_remote_url: None,
                 stack: None,
@@ -452,6 +455,7 @@ mod git_steps {
             "repo".to_string(),
             ComponentSpec {
                 path: component_path,
+                checkout_root: None,
                 remote_url: None,
                 triage_remote_url: None,
                 stack: None,
@@ -569,6 +573,7 @@ mod extension_lifecycle {
             "studio".to_string(),
             ComponentSpec {
                 path: component_path,
+                checkout_root: None,
                 remote_url: None,
                 triage_remote_url: None,
                 stack: None,
@@ -804,6 +809,7 @@ mod patch {
             "c".to_string(),
             ComponentSpec {
                 path: component_path.to_string(),
+                checkout_root: None,
                 remote_url: None,
                 triage_remote_url: None,
                 stack: None,
