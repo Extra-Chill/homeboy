@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.115.15] - 2026-06-04
+
+### Changed
+- add browser trace waterfall attribution
+
 ## [2.115.14] - 2026-06-04
 
 ### Fixed
