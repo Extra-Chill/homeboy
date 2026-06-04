@@ -72,6 +72,8 @@ const AGENT_BUNDLE_TRIGGER_FIELDS = AGENT_BUNDLE_CONFIG_FIELDS.filter((field) =>
 ].includes(field));
 
 const LEGACY_RUNTIME_PREFIX = ['data', 'machine'].join('_');
+const WP_CODEBOX_RUNTIME_PATH_KEY = `${LEGACY_RUNTIME_PREFIX}_path`;
+const WP_CODEBOX_RUNTIME_TOOLS_PATH_KEY = `${LEGACY_RUNTIME_PREFIX}_code_path`;
 const LEGACY_BUNDLE_KEYS = [
   `${LEGACY_RUNTIME_PREFIX}_bundle`,
   `${LEGACY_RUNTIME_PREFIX}Bundle`,
@@ -138,6 +140,7 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
   const inputs = request.inputs || {};
   const agentBundle = agentBundleConfigFromAgentTaskRequest(request, config, inputs);
   const mounts = agentBundleMounts(agentBundle, config.mounts || options.mounts || []);
+  const components = runtimeComponentPaths(config, options);
   const timeoutSeconds = request.limits?.task_timeout_seconds || request.limits?.taskTimeoutSeconds;
   const timeoutMs = request.limits?.timeout_ms || request.limits?.max_runtime_ms;
   const timeoutFromMs = timeoutMs ? Math.ceil(timeoutMs / 1000) : undefined;
@@ -172,8 +175,10 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     secret_env: config.secret_env || options.secretEnv || [],
     mounts,
     workspaces: config.workspaces || options.workspaces || [],
-    agents_api_path: config.agents_api || config.agents_api_path || options.agentsApi || '',
-    runtime_component_paths: runtimeComponentPaths(config, options),
+    agents_api_path: components.agents_api || config.agents_api || config.agents_api_path || options.agentsApi || '',
+    [WP_CODEBOX_RUNTIME_PATH_KEY]: components.agent_runtime || '',
+    [WP_CODEBOX_RUNTIME_TOOLS_PATH_KEY]: components.agent_runtime_tools || '',
+    runtime_component_paths: components,
     homeboy_path: config.homeboy || config.homeboy_path || options.homeboy || '',
     homeboy_extensions_path: config.homeboy_extensions || config.homeboy_extensions_path || options.homeboyExtensions || '',
     wp_codebox_bin: config.wp_codebox_bin || options.wpCodeboxBin || '',

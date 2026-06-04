@@ -154,6 +154,8 @@ function writePreflightEvidence(artifacts, evidence) {
 }
 
 const LEGACY_RUNTIME_PREFIX = ['data', 'machine'].join('_');
+const WP_CODEBOX_RUNTIME_PATH_KEY = `${LEGACY_RUNTIME_PREFIX}_path`;
+const WP_CODEBOX_RUNTIME_TOOLS_PATH_KEY = `${LEGACY_RUNTIME_PREFIX}_code_path`;
 const LEGACY_BUNDLE_KEYS = [
   `${LEGACY_RUNTIME_PREFIX}_bundle`,
   `${LEGACY_RUNTIME_PREFIX}Bundle`,
@@ -250,6 +252,8 @@ function stableTaskInput(input) {
     artifacts_path: input.artifacts_path,
     wp_codebox_bin: input.wp_codebox_bin,
     agents_api_path: input.agents_api_path,
+    [WP_CODEBOX_RUNTIME_PATH_KEY]: input.runtime_component_paths?.agent_runtime,
+    [WP_CODEBOX_RUNTIME_TOOLS_PATH_KEY]: input.runtime_component_paths?.agent_runtime_tools,
     runtime_component_paths: input.runtime_component_paths || {},
     wp: input.wp_version,
     agent_bundle: isAgentBundle(input) ? agentBundleConfig(input, input.agent_bundle || {}) : {},

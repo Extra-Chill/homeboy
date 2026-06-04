@@ -600,6 +600,8 @@ try {
   assert.equal(capturedCodex.request.model, 'gpt-5.5');
   assert.deepEqual(capturedCodex.request.provider_plugin_paths, ['/components/ai-provider-for-openai']);
   assert.equal(capturedCodex.request.agents_api_path, '/components/agents-api');
+  assert.equal(capturedCodex.request.data_machine_path, '/components/data-machine');
+  assert.equal(capturedCodex.request.data_machine_code_path, '/components/data-machine-code');
   assert.equal(capturedCodex.request.runtime_component_paths.agent_runtime, '/components/data-machine');
   assert.equal(capturedCodex.request.runtime_component_paths.agent_runtime_tools, '/components/data-machine-code');
   assert.equal(capturedCodex.request.homeboy_path, '/components/homeboy');

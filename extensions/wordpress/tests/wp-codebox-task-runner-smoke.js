@@ -160,6 +160,8 @@ try {
   assert.equal(captured.input.runtime_stack_mounts[1].source, '/components/wordpress-develop');
   assert.equal(captured.input.mounts[0].source, '/repo/plugin');
   assert.equal(captured.input.agents_api_path, '/components/agents-api');
+  assert.equal(captured.input.data_machine_path, '/components/data-machine');
+  assert.equal(captured.input.data_machine_code_path, '/components/data-machine-code');
   assert.equal(captured.input.runtime_component_paths.agent_runtime, '/components/data-machine');
   assert.equal(captured.input.runtime_component_paths.agent_runtime_tools, '/components/data-machine-code');
   assert(!JSON.stringify(captured.input).includes('redacted-test-key'));
