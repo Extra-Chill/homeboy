@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.7.9] - 2026-06-04
+
+### Fixed
+- print scoped failure reproduction commands
+
 ## [2.7.8] - 2026-06-03
 
 ### Fixed
