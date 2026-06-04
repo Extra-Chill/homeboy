@@ -181,6 +181,80 @@ if [ "$WP_CODEBOX_BIN" = "wp-codebox" ] && ! command -v wp-codebox >/dev/null 2>
     exit 1
 fi
 
+# Guard against a mis-resolved component path mounting the wrong directory.
+#
+# The recipe mounts PLUGIN_PATH wholesale into
+# /wordpress/wp-content/plugins/<slug>, and the Playground runtime detects the
+# plugin main file by globbing "*.php" for a "Plugin Name:" header and taking
+# the first alphabetical match. If PLUGIN_PATH resolves to a shared scratch
+# directory (e.g. a junk-drawer /tmp populated with stray debug .php files), an
+# unrelated file like "an_main.php" wins detection and the wrong plugin is
+# mounted under this component's slug — producing a confusing load_component
+# fatal that looks like the component under test is broken when it is not.
+#
+# When the component identity is known, require PLUGIN_PATH to actually contain
+# a WordPress plugin main file whose slug matches the component, and refuse to
+# mount obvious shared scratch roots. Fail loud with an actionable message
+# instead of silently mounting a junk directory.
+guard_component_path() {
+    # Only enforce when we know which component we are testing.
+    [ -n "${COMPONENT_ID:-}" ] || return 0
+
+    local scratch_tmpdir="${TMPDIR:-}"
+    scratch_tmpdir="${scratch_tmpdir%/}"
+    case "$PLUGIN_PATH" in
+        /tmp | /tmp/ | /var/tmp | /var/tmp/ | ${scratch_tmpdir:+"$scratch_tmpdir"})
+            echo "ERROR: Refusing to run tests against a shared temporary directory as the component source." >&2
+            echo "  Component: ${COMPONENT_ID}" >&2
+            echo "  Resolved path: ${PLUGIN_PATH}" >&2
+            echo "  This usually means '--path .' was run from (or resolved to) a scratch directory." >&2
+            echo "  Pass an explicit path to the component checkout, e.g. --path /abs/path/to/${COMPONENT_ID}" >&2
+            return 1
+            ;;
+    esac
+
+    # Collect plugin main files (a *.php in the root carrying a "Plugin Name:"
+    # header) and check whether any matches this component's slug.
+    #
+    # Deliberately conservative to avoid false positives against legitimate
+    # fixture layouts that ship a tests/ directory without a plugin header (those
+    # route to host-smoke or composer-script backends and never reach the
+    # wordpress.phpunit mount): only REJECT when a foreign plugin header is the
+    # ONLY thing present and none matches the slug. If no plugin header exists at
+    # all, defer to the downstream tests/ + composer-script handling.
+    local found_main=""
+    local slug_match=""
+    local candidate
+    for candidate in "${PLUGIN_PATH}"/*.php; do
+        [ -f "$candidate" ] || continue
+        grep -q '^[[:space:]]*\*\?[[:space:]]*Plugin Name:' "$candidate" || continue
+        found_main="$candidate"
+        if [ "$(basename "$candidate" .php)" = "${PLUGIN_SLUG}" ]; then
+            slug_match="$candidate"
+            break
+        fi
+    done
+
+    if [ -n "$found_main" ] && [ -z "$slug_match" ]; then
+        echo "ERROR: The resolved component path contains a WordPress plugin, but none matches the expected slug '${PLUGIN_SLUG}'." >&2
+        echo "  Component: ${COMPONENT_ID}" >&2
+        echo "  Resolved path: ${PLUGIN_PATH}" >&2
+        echo "  Detected plugin main file instead: ${found_main}" >&2
+        echo "  This typically means '--path' resolved to a directory that is not this component's checkout" >&2
+        echo "  (for example a shared scratch directory holding a stray plugin file)." >&2
+        echo "  Refusing to mount a mismatched directory under '${PLUGIN_SLUG}'. Pass an explicit --path to the checkout." >&2
+        return 1
+    fi
+
+    return 0
+}
+
+if ! guard_component_path; then
+    FAILED_STEP="Component path validation"
+    write_phpunit_discovery_result failed "component-path-mismatch" "Resolved component path does not contain the expected plugin; refused to mount a mismatched or scratch directory."
+    exit 1
+fi
+
 TEST_DIR="${PLUGIN_PATH}/tests"
 if [ ! -d "$TEST_DIR" ]; then
     if component_has_composer_test_script; then
