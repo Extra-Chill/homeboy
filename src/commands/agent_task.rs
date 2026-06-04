@@ -678,31 +678,30 @@ fn read_dispatch_tasks_json(spec: Option<&str>) -> homeboy::core::Result<Vec<Str
     })?;
 
     match value {
-        Value::Array(items) => items
-            .into_iter()
-            .enumerate()
-            .map(|(index, item)| task_prompt_from_json_item(item, index))
-            .collect(),
+        Value::Array(items) => task_prompts_from_json_items(items),
         Value::Object(mut object) => match object.remove("tasks") {
-            Some(Value::Array(items)) => items
-                .into_iter()
-                .enumerate()
-                .map(|(index, item)| task_prompt_from_json_item(item, index))
-                .collect(),
-            _ => Err(homeboy::core::Error::validation_invalid_argument(
-                "tasks",
-                "agent-task dispatch --tasks expects a JSON array or object with a tasks array",
-                None,
-                None,
-            )),
+            Some(Value::Array(items)) => task_prompts_from_json_items(items),
+            _ => Err(invalid_tasks_json_error()),
         },
-        _ => Err(homeboy::core::Error::validation_invalid_argument(
-            "tasks",
-            "agent-task dispatch --tasks expects a JSON array or object with a tasks array",
-            None,
-            None,
-        )),
+        _ => Err(invalid_tasks_json_error()),
     }
+}
+
+fn task_prompts_from_json_items(items: Vec<Value>) -> homeboy::core::Result<Vec<String>> {
+    items
+        .into_iter()
+        .enumerate()
+        .map(|(index, item)| task_prompt_from_json_item(item, index))
+        .collect()
+}
+
+fn invalid_tasks_json_error() -> homeboy::core::Error {
+    homeboy::core::Error::validation_invalid_argument(
+        "tasks",
+        "agent-task dispatch --tasks expects a JSON array or object with a tasks array",
+        None,
+        None,
+    )
 }
 
 fn task_prompt_from_json_item(item: Value, index: usize) -> homeboy::core::Result<String> {
