@@ -420,12 +420,45 @@ const agentBundleOutcome = agentTaskOutcomeFromCodeboxResult({
 });
 assert.equal(agentBundleOutcome.schema, 'homeboy/agent-task-outcome/v1');
 assert.equal(agentBundleOutcome.status, 'succeeded');
+assert.equal(agentBundleOutcome.outputs.static_site_pr_url, 'https://github.com/chubes4/wp-site-generator/pull/123');
 assert.equal(agentBundleOutcome.artifacts.some((artifact) => artifact.kind === 'agent-runtime-transcript' && artifact.path === '/tmp/transcript.json'), true);
 assert.equal(agentBundleOutcome.artifacts.some((artifact) => artifact.kind === 'agent-runtime-replay-bundle' && artifact.path === '/tmp/replay-bundle'), true);
 assert.equal(agentBundleOutcome.evidence_refs.some((ref) => ref.uri === 'https://github.com/chubes4/wp-site-generator/pull/123'), true);
 assert.equal(upstreamRunnerOutcome.artifacts[1].kind, 'codebox-session-artifacts');
 assert.equal(upstreamRunnerOutcome.evidence_refs[0].uri, 'https://preview.example.test/sandbox-session-1');
 assert.equal(upstreamRunnerOutcome.evidence_refs[1].uri, '/tmp/wp-codebox-artifacts');
+
+const singleResultAgentBundleOutcome = agentTaskOutcomeFromCodeboxResult({
+  ...request,
+  task_id: 'single-result-agent-bundle-task-123',
+  executor: { backend: 'codebox' },
+}, {
+  success: true,
+  schema: 'wp-codebox/agent-task-run/v1',
+  artifacts: '/tmp/wp-codebox-artifacts',
+  metadata: {
+    agent_runtime: {
+      bundle: {
+        engine_data_outputs: {
+          issue_number: 'metadata.engine_data.store_idea_agent.issue_number',
+          issue_url: 'metadata.engine_data.store_idea_agent.issue_url',
+        },
+      },
+      workload: {
+        outputs: {
+          issue_number: 123,
+          issue_url: 'https://github.com/chubes4/wp-site-generator/issues/123',
+        },
+        diagnostics: [{ class: 'agent_runtime.output', message: 'Semantic outputs captured.' }],
+      },
+    },
+  },
+});
+assert.equal(singleResultAgentBundleOutcome.schema, 'homeboy/agent-task-outcome/v1');
+assert.equal(singleResultAgentBundleOutcome.status, 'succeeded');
+assert.equal(singleResultAgentBundleOutcome.outputs.issue_number, 123);
+assert.equal(singleResultAgentBundleOutcome.outputs.issue_url, 'https://github.com/chubes4/wp-site-generator/issues/123');
+assert.equal(singleResultAgentBundleOutcome.evidence_refs.some((ref) => ref.uri === 'https://github.com/chubes4/wp-site-generator/issues/123'), true);
 
 const canaryRunOutcome = agentTaskOutcomeFromCodeboxResult(request, {
   success: true,

@@ -335,7 +335,7 @@ function normalizeAgentTaskRun(input, result) {
   const agentBundle = agentBundleConfig(input, input.agent_bundle || {});
   const stdoutWorkload = agentRuntimeWorkloadFromExecutionStdout(execution, agentBundle);
   const fallbackAgentResult = result.metadata?.agent_runtime?.workload || execution?.agentResult || result.run?.agentResult || result.agentResult || result.agent_result || {};
-  const agentResult = hasScenarios(stdoutWorkload) ? stdoutWorkload : fallbackAgentResult;
+  const agentResult = hasSemanticWorkload(stdoutWorkload) ? stdoutWorkload : fallbackAgentResult;
   const bundleValidation = validateAgentRuntimeWorkload(agentResult, agentBundle);
   const success = !bundleValidation;
   const diagnostics = [
@@ -393,6 +393,9 @@ function agentRuntimeWorkloadFromExecutionStdout(execution, config) {
   if (Array.isArray(workload.scenarios)) {
     return workload;
   }
+  if (isSingleResultWorkload(workload)) {
+    return agentRuntimeWorkloadFromSingleResult(workload, config);
+  }
   if (workload.metadata || workload.metrics) {
     return {
       scenarios: [{
@@ -405,10 +408,40 @@ function agentRuntimeWorkloadFromExecutionStdout(execution, config) {
   return null;
 }
 
+function isSingleResultWorkload(workload) {
+  return plainObject(workload) && (
+    plainObject(workload.outputs)
+      || plainObject(workload.output)
+      || Array.isArray(workload.diagnostics)
+      || typeof workload.summary === 'string'
+  );
+}
+
+function agentRuntimeWorkloadFromSingleResult(workload, config) {
+  let outputs = {};
+  if (plainObject(workload.outputs)) {
+    outputs = workload.outputs;
+  } else if (plainObject(workload.output)) {
+    outputs = workload.output;
+  }
+  return Object.fromEntries(Object.entries({
+    id: config.workload_id || config.agent_slug || config.flow_slug || 'agent-bundle',
+    success: workload.success,
+    status: workload.status,
+    summary: workload.summary || workload.message,
+    outputs,
+    diagnostics: Array.isArray(workload.diagnostics) ? workload.diagnostics : [],
+    metrics: workload.metrics || {},
+    metadata: workload.metadata || {},
+  }).filter(([, value]) => value !== undefined && !(Array.isArray(value) && value.length === 0)));
+}
+
 function agentRuntimeWorkloadFromBundleRun(bundleRun, config) {
   const bundle = bundleRun.bundle && typeof bundleRun.bundle === 'object' ? bundleRun.bundle : {};
   const workflowSteps = Array.isArray(bundleRun.workflow?.steps) ? bundleRun.workflow.steps : [];
+  const outputs = plainObject(bundleRun.outputs) ? bundleRun.outputs : {};
   return {
+    outputs,
     scenarios: [{
       id: config.workload_id || bundle.flow_slug || bundle.bundle_slug || config.agent_slug || config.flow_slug || 'agent-bundle',
       metrics: {
@@ -433,20 +466,16 @@ function hasScenarios(value) {
   return Array.isArray(value?.scenarios) && value.scenarios.length > 0;
 }
 
+function hasSemanticWorkload(value) {
+  return hasScenarios(value) || plainObject(value?.outputs) || isSingleResultWorkload(value);
+}
+
 function pathValue(source, dottedPath) {
   return String(dottedPath || '').split('.').filter(Boolean).reduce((value, key) => (value && typeof value === 'object' ? value[key] : undefined), source);
 }
 
 function validateAgentRuntimeWorkload(workload, config) {
   const scenarios = Array.isArray(workload?.scenarios) ? workload.scenarios : [];
-  if (scenarios.length === 0) {
-    return {
-      class: 'agent_runtime.workload.incomplete',
-      message: 'Agent bundle workload did not return any scenarios.',
-      data: { reason: 'missing_scenarios' },
-    };
-  }
-
   const failedScenario = scenarios.find((scenario) => scenario?.metadata?.error || scenario?.metadata?.error_message);
   if (failedScenario) {
     return {
@@ -459,6 +488,9 @@ function validateAgentRuntimeWorkload(workload, config) {
   const outputs = config.engine_data_outputs && typeof config.engine_data_outputs === 'object' ? config.engine_data_outputs : {};
   const missing = [];
   for (const [name, outputPath] of Object.entries(outputs)) {
+    if (workload?.outputs?.[name] !== undefined && workload.outputs[name] !== null && workload.outputs[name] !== '') {
+      continue;
+    }
     const present = scenarios.some((scenario) => {
       const value = pathValue(scenario, outputPath);
       return value !== undefined && value !== null && value !== '';
@@ -471,8 +503,16 @@ function validateAgentRuntimeWorkload(workload, config) {
   if (missing.length > 0) {
     return {
       class: 'agent_runtime.workload.incomplete',
-      message: 'Agent bundle workload did not produce required engine data outputs.',
+      message: `Agent bundle workload did not produce required semantic outputs: ${missing.map((item) => item.name).join(', ')}.`,
       data: { reason: 'missing_engine_data_outputs', missing },
+    };
+  }
+
+  if (scenarios.length === 0 && (!plainObject(workload?.outputs) || Object.keys(workload.outputs).length === 0)) {
+    return {
+      class: 'agent_runtime.workload.incomplete',
+      message: 'Agent bundle workload did not produce scenarios or semantic outputs.',
+      data: { reason: 'missing_semantic_outputs' },
     };
   }
 
@@ -480,6 +520,11 @@ function validateAgentRuntimeWorkload(workload, config) {
 }
 
 function agentRuntimeDiagnostics(workload) {
+  const workloadDiagnostics = Array.isArray(workload?.diagnostics) ? workload.diagnostics.map((diagnostic) => ({
+    class: diagnostic.class || diagnostic.kind || 'agent_runtime.workload',
+    message: diagnostic.message || String(diagnostic),
+    data: diagnostic.data || {},
+  })) : [];
   const scenarios = Array.isArray(workload?.scenarios) ? workload.scenarios : [];
   const diagnostics = scenarios
     .filter((scenario) => scenario?.metadata?.error || scenario?.metadata?.error_message)
@@ -488,7 +533,8 @@ function agentRuntimeDiagnostics(workload) {
       message: scenario.metadata.error || scenario.metadata.error_message,
       data: { scenario_id: scenario.id, metadata: scenario.metadata },
     }));
-  return diagnostics.length > 0 ? diagnostics : null;
+  const allDiagnostics = [...workloadDiagnostics, ...diagnostics];
+  return allDiagnostics.length > 0 ? allDiagnostics : null;
 }
 
 function timeoutPayload(timeoutMs, artifacts, evidencePath, inputPath, command, args) {
