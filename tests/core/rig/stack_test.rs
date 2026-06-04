@@ -12,6 +12,7 @@ use super::{plan_stack_sync, run_component_sync, run_sync_with, validate_compone
 fn component(path: &str, stack: Option<&str>) -> ComponentSpec {
     ComponentSpec {
         path: path.to_string(),
+        checkout_root: None,
         remote_url: None,
         triage_remote_url: None,
         stack: stack.map(str::to_string),

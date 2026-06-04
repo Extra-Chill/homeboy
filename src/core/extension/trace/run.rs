@@ -25,7 +25,8 @@ use super::overlay::{
 };
 
 use super::parsing::{
-    parse_trace_list_str, parse_trace_results_file, TraceList, TraceResults, TraceSpanDefinition,
+    parse_trace_list_str, parse_trace_results_file, TraceAssertion, TraceAssertionStatus,
+    TraceList, TraceResults, TraceSpanDefinition, TraceStatus,
 };
 use super::probes::{ActiveTraceProbes, TraceProbeConfig};
 
@@ -269,7 +270,7 @@ fn run_trace_workflow_with_context(
         &args.runner_inputs.attachments,
     );
     let active_probes =
-        ActiveTraceProbes::start_with_artifact_dir(&probe_configs, Some(artifact_dir))?;
+        ActiveTraceProbes::start_with_artifact_dir(&probe_configs, Some(artifact_dir.clone()))?;
     let started_at = Instant::now();
     let mut attach_observations =
         observe_trace_attachments(&args.runner_inputs.attachments, "before", started_at);
@@ -306,6 +307,7 @@ fn run_trace_workflow_with_context(
         append_attach_observations(parsed, run_dir, &attach_observations)?;
         super::spans::apply_span_definitions(parsed, &args.span_definitions);
         super::assertions::apply_temporal_assertions(parsed);
+        validate_declared_trace_artifacts(parsed, run_dir, &artifact_dir);
         persist_trace_results(&results_path, parsed)?;
     }
 
@@ -418,6 +420,60 @@ fn run_trace_workflow_with_context(
         baseline_comparison,
         hints: if hints.is_empty() { None } else { Some(hints) },
     })
+}
+
+fn validate_declared_trace_artifacts(
+    results: &mut TraceResults,
+    run_dir: &RunDir,
+    artifact_dir: &Path,
+) {
+    let missing = results
+        .artifacts
+        .iter()
+        .filter(|artifact| {
+            resolve_declared_trace_artifact_path(&artifact.path, run_dir, artifact_dir).is_none()
+        })
+        .map(|artifact| artifact.path.clone())
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        return;
+    }
+
+    results.status = TraceStatus::Error;
+    results.failure = Some(format!(
+        "missing declared trace artifact{}: {}",
+        if missing.len() == 1 { "" } else { "s" },
+        missing.join(", ")
+    ));
+    for path in missing {
+        results.assertions.push(TraceAssertion {
+            id: format!("trace_artifact_exists:{}", path),
+            status: TraceAssertionStatus::Error,
+            message: Some(format!("Declared trace artifact is missing: {path}")),
+            details: Some(serde_json::json!({ "path": path })),
+        });
+    }
+}
+
+pub fn resolve_declared_trace_artifact_path(
+    path: &str,
+    run_dir: &RunDir,
+    artifact_dir: &Path,
+) -> Option<PathBuf> {
+    let relative = Path::new(path);
+    if relative.is_absolute() {
+        return relative.exists().then(|| relative.to_path_buf());
+    }
+    if relative
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return None;
+    }
+
+    [run_dir.path().join(relative), artifact_dir.join(relative)]
+        .into_iter()
+        .find(|candidate| candidate.exists())
 }
 
 fn persist_trace_results(path: &Path, results: &TraceResults) -> Result<()> {

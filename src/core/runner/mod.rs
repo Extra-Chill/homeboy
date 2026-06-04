@@ -17,6 +17,7 @@ mod connection;
 mod daemon_health;
 mod evidence;
 mod execution;
+mod git_dependency_materialization;
 mod lab;
 mod lab_apply;
 mod lab_args;
@@ -54,6 +55,10 @@ pub use evidence::{
 };
 pub(crate) use execution::daemon_api_get;
 pub use execution::{exec, RunnerExecMode, RunnerExecOptions, RunnerExecOutput};
+pub(crate) use git_dependency_materialization::{
+    materialize_git_dependency, RunnerGitDependencyMaterializationOptions,
+    RunnerGitDependencyMaterializationOutput,
+};
 pub use lab::{
     execute_lab_offload, LabOffloadCommand, LabOffloadOutcome, LabOffloadRequest,
     LabOffloadWorkspaceModePolicy, LabRunnerSelectionSource,
