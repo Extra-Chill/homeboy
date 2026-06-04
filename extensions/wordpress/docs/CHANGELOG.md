@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.115.23] - 2026-06-04
+
+### Fixed
+- keep WordPress bench prepare opt-in explicit
+
 ## [2.115.22] - 2026-06-04
 
 ### Fixed
