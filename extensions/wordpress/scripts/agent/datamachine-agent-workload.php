@@ -323,9 +323,21 @@ if ( ! function_exists( 'homeboy_datamachine_agent_result' ) ) {
             $metadata['eval_artifact'] = homeboy_datamachine_agent_eval_artifact( $metrics, $metadata, $error );
         }
 
+        $scenario_id = (string) ( $metadata['task_id'] ?? $metadata['workload_id'] ?? $metadata['flow_slug'] ?? $metadata['agent_slug'] ?? 'datamachine-agent' );
+        if ( '' === $scenario_id ) {
+            $scenario_id = 'datamachine-agent';
+        }
+
         return array(
-            'metrics'  => $metrics,
-            'metadata' => $metadata,
+            'metrics'   => $metrics,
+            'metadata'  => $metadata,
+            'scenarios' => array(
+                array(
+                    'id'       => $scenario_id,
+                    'metrics'  => $metrics,
+                    'metadata' => $metadata,
+                ),
+            ),
         );
     }
 }
@@ -2688,16 +2700,39 @@ if ( ! function_exists( 'homeboy_datamachine_agent_export_transcript' ) ) {
     }
 }
 
+if ( ! function_exists( 'homeboy_datamachine_agent_job_status_terminal' ) ) {
+    function homeboy_datamachine_agent_job_status_terminal( string $job_status ): bool {
+        return in_array( $job_status, array( 'completed', 'failed', 'cancelled' ), true );
+    }
+
+    function homeboy_datamachine_agent_job_terminal_error( int $job_id, string $job_status, string $label = 'Data Machine job' ): string {
+        if ( 'completed' === $job_status ) {
+            return '';
+        }
+
+        if ( homeboy_datamachine_agent_job_status_terminal( $job_status ) ) {
+            return sprintf( '%s %d ended with status %s.', $label, $job_id, $job_status );
+        }
+
+        $status = '' !== $job_status ? $job_status : 'unknown';
+        return sprintf( '%s %d did not reach a terminal state after drain; current status is %s.', $label, $job_id, $status );
+    }
+}
+
 if ( ! function_exists( 'homeboy_datamachine_agent_drain_job' ) ) {
     function homeboy_datamachine_agent_drain_job( int $job_id, array $config, Jobs $jobs ): array {
         $started_at              = hrtime( true );
         $retry_wait_budget_ms    = isset( $config['retry_wait_budget_ms'] ) ? max( 0, (int) $config['retry_wait_budget_ms'] ) : 180000;
         $retry_max_sleep_ms      = isset( $config['retry_max_sleep_ms'] ) ? max( 1000, (int) $config['retry_max_sleep_ms'] ) : 30000;
+        $terminal_wait_budget_ms = isset( $config['terminal_wait_budget_ms'] ) ? max( 0, (int) $config['terminal_wait_budget_ms'] ) : 300000;
+        $poll_sleep_ms           = isset( $config['terminal_poll_sleep_ms'] ) ? max( 100, (int) $config['terminal_poll_sleep_ms'] ) : 1000;
         $step_budget             = isset( $config['step_budget'] ) ? max( 1, (int) $config['step_budget'] ) : 20;
         $time_budget_ms          = isset( $config['time_budget_ms'] ) ? max( 1000, (int) $config['time_budget_ms'] ) : 300000;
         $history                 = array();
         $drain_result            = array( 'success' => false );
         $waited_ms               = 0;
+        $terminal_waited_ms      = 0;
+        $job_status              = '';
 
         do {
             $drain_result = wp_get_ability( 'datamachine/drain-job' )->execute(
@@ -2718,42 +2753,47 @@ if ( ! function_exists( 'homeboy_datamachine_agent_drain_job' ) ) {
                 'retry'        => is_array( $engine_data['retry'] ?? null ) ? $engine_data['retry'] : array(),
             );
 
-            if ( is_array( $drain_result ) && ! empty( $drain_result['success'] ) ) {
-                break;
-            }
-
-            if ( in_array( $job_status, array( 'completed', 'failed', 'cancelled' ), true ) ) {
+            if ( homeboy_datamachine_agent_job_status_terminal( $job_status ) ) {
                 break;
             }
 
             $retry = is_array( $engine_data['retry'] ?? null ) ? $engine_data['retry'] : array();
+            $sleep_ms = 0;
             if ( empty( $retry['last_retryable'] ) || empty( $retry['next_retry_at'] ) ) {
-                break;
-            }
+                $remaining_budget_ms = $terminal_wait_budget_ms - $terminal_waited_ms;
+                if ( $remaining_budget_ms <= 0 ) {
+                    break;
+                }
+                $sleep_ms = min( $poll_sleep_ms, $remaining_budget_ms );
+                $terminal_waited_ms += $sleep_ms;
+            } else {
+                $next_retry_ts = strtotime( (string) $retry['next_retry_at'] );
+                if ( false === $next_retry_ts ) {
+                    break;
+                }
 
-            $next_retry_ts = strtotime( (string) $retry['next_retry_at'] );
-            if ( false === $next_retry_ts ) {
-                break;
-            }
+                $remaining_budget_ms = $retry_wait_budget_ms - $waited_ms;
+                if ( $remaining_budget_ms <= 0 ) {
+                    break;
+                }
 
-            $remaining_budget_ms = $retry_wait_budget_ms - $waited_ms;
-            if ( $remaining_budget_ms <= 0 ) {
-                break;
-            }
-
-            $delay_ms = max( 0, ( $next_retry_ts - time() ) * 1000 ) + 1000;
-            $sleep_ms = min( $delay_ms, $retry_max_sleep_ms, $remaining_budget_ms );
-            if ( $sleep_ms > 0 ) {
-                usleep( $sleep_ms * 1000 );
+                $delay_ms = max( 0, ( $next_retry_ts - time() ) * 1000 ) + 1000;
+                $sleep_ms = min( $delay_ms, $retry_max_sleep_ms, $remaining_budget_ms );
                 $waited_ms += $sleep_ms;
             }
-        } while ( $waited_ms <= $retry_wait_budget_ms );
+            if ( $sleep_ms > 0 ) {
+                usleep( $sleep_ms * 1000 );
+            }
+        } while ( ( $waited_ms <= $retry_wait_budget_ms ) && ( $terminal_waited_ms <= $terminal_wait_budget_ms ) );
 
         return array(
             'drain_result'     => $drain_result,
             'drain_elapsed_ms' => ( hrtime( true ) - $started_at ) / 1000000,
             'drain_history'    => $history,
             'retry_waited_ms'  => $waited_ms,
+            'terminal_waited_ms' => $terminal_waited_ms,
+            'final_job_status' => $job_status,
+            'job_terminal'     => homeboy_datamachine_agent_job_status_terminal( $job_status ),
         );
     }
 
@@ -3035,6 +3075,8 @@ $drain_elapsed_ms = (float) $drain_summary['drain_elapsed_ms'];
 $metadata['drain_result'] = $drain_result;
 $metadata['drain_history'] = $drain_summary['drain_history'];
 $metadata['retry_waited_ms'] = $drain_summary['retry_waited_ms'];
+$metadata['terminal_waited_ms'] = $drain_summary['terminal_waited_ms'];
+$metadata['job_terminal'] = ! empty( $drain_summary['job_terminal'] );
 
 $child_drain_summary = homeboy_datamachine_agent_drain_child_jobs( $job_id, $config, $jobs );
 $metadata['child_jobs'] = array_map(
@@ -3049,6 +3091,42 @@ $metadata['child_drain_results'] = $child_drain_summary['drain_results'];
 
 $job = $jobs->get_job( $job_id );
 $job_status = is_array( $job ) ? (string) ( $job['status'] ?? '' ) : '';
+$terminal_error = homeboy_datamachine_agent_job_terminal_error( $job_id, $job_status );
+if ( '' !== $terminal_error ) {
+    $metadata['job_id'] = $job_id;
+    $metadata['job_status'] = $job_status;
+    return homeboy_datamachine_agent_result(
+        array(
+            'job_completed' => 0,
+            'job_terminal'  => homeboy_datamachine_agent_job_status_terminal( $job_status ) ? 1 : 0,
+        ),
+        $metadata,
+        $terminal_error
+    );
+}
+
+foreach ( $child_drain_summary['children'] as $child_job ) {
+    if ( ! is_array( $child_job ) ) {
+        continue;
+    }
+    $child_job_id = (int) ( $child_job['job_id'] ?? 0 );
+    $child_status = (string) ( $child_job['status'] ?? '' );
+    $child_error = homeboy_datamachine_agent_job_terminal_error( $child_job_id, $child_status, 'Data Machine child job' );
+    if ( '' !== $child_error ) {
+        $metadata['job_id'] = $job_id;
+        $metadata['job_status'] = $job_status;
+        return homeboy_datamachine_agent_result(
+            array(
+                'job_completed' => 1,
+                'child_job_completed' => 0,
+                'child_job_terminal' => homeboy_datamachine_agent_job_status_terminal( $child_status ) ? 1 : 0,
+            ),
+            $metadata,
+            $child_error
+        );
+    }
+}
+
 $engine_data = function_exists( 'datamachine_get_engine_data' ) ? datamachine_get_engine_data( $job_id ) : array();
 $engine_data = homeboy_datamachine_agent_merge_recorded_tool_results( $engine_data, $config );
 $engine_data = homeboy_datamachine_agent_merge_child_engine_data( $engine_data, $child_drain_summary['children'], $config );
