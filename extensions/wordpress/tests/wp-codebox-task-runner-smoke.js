@@ -43,6 +43,22 @@ process.stdout.write(JSON.stringify({
   return binPath;
 }
 
+function createFixtureComposer(root) {
+  const binDir = path.join(root, 'bin');
+  const binPath = path.join(binDir, 'composer');
+  fs.mkdirSync(binDir, { recursive: true });
+  fs.writeFileSync(binPath, `#!/usr/bin/env node
+'use strict';
+const fs = require('node:fs');
+const path = require('node:path');
+fs.mkdirSync(path.join(process.cwd(), 'vendor'), { recursive: true });
+fs.writeFileSync(path.join(process.cwd(), 'vendor', 'autoload.php'), '<?php // fixture autoload');
+process.stdout.write('fixture composer install\\n');
+`);
+  fs.chmodSync(binPath, 0o755);
+  return binDir;
+}
+
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-wp-codebox-task-runner-'));
 
 try {
@@ -220,6 +236,46 @@ try {
   assert(!serializedCodexRecipe.includes('access-token-value'));
   assert(!serializedCodexRecipe.includes('refresh-token-value'));
   assert(!serializedCodexRecipe.includes('wp-ai-gateway'));
+
+  const composerCapturePath = path.join(root, 'capture-composer.json');
+  const composerPluginPath = path.join(root, 'data-machine-with-composer');
+  fs.mkdirSync(composerPluginPath, { recursive: true });
+  fs.writeFileSync(path.join(composerPluginPath, 'composer.json'), JSON.stringify({ name: 'fixture/data-machine' }));
+  fs.writeFileSync(path.join(composerPluginPath, 'data-machine.php'), '<?php require __DIR__ . "/vendor/autoload.php";');
+  const composerResult = spawnSync(process.execPath, [
+    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-wp-codebox-task-runner.cjs'),
+    '--wp-codebox-bin',
+    fixtureWpCodebox,
+    '--data-machine',
+    composerPluginPath,
+    '--artifacts',
+    path.join(root, 'composer-artifacts'),
+  ], {
+    encoding: 'utf8',
+    input: JSON.stringify({
+      ...request,
+      execution_kind: 'datamachine_bundle',
+      homeboy_extensions: path.join(__dirname, '..'),
+      datamachine_bundle: { bundle_path: '/workspace/wp-site-generator/bundles/store-idea-agent' },
+      provider_plugin_paths: [],
+    }),
+    env: {
+      ...process.env,
+      FIXTURE_WP_CODEBOX_CAPTURE: composerCapturePath,
+      PATH: `${createFixtureComposer(root)}${path.delimiter}${process.env.PATH}`,
+      OPENCODE_API_KEY: 'redacted-test-key',
+    },
+  });
+  assert.equal(composerResult.status, 0, composerResult.stderr || composerResult.stdout);
+  const composerRecipe = readJson(composerCapturePath).recipe;
+  const codeFileArg = composerRecipe.workflow.steps[0].args.find((arg) => arg.startsWith('code-file='));
+  assert.equal(codeFileArg, `code-file=${path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-datamachine-agent-workload-wrapper.php')}`);
+  assert.match(fs.readFileSync(codeFileArg.slice('code-file='.length), 'utf8'), /\/homeboy-extension\/scripts\/agent\/datamachine-agent-workload\.php/);
+  const preparedDataMachine = composerRecipe.inputs.extraPlugins.find((plugin) => plugin.slug === 'data-machine');
+  assert.notEqual(preparedDataMachine.source, composerPluginPath);
+  assert(pathInside(path.join(root, 'composer-artifacts', 'prepared-plugins'), fs.realpathSync(preparedDataMachine.source)));
+  assert(fs.existsSync(path.join(preparedDataMachine.source, 'vendor', 'autoload.php')));
+  assert(!fs.existsSync(path.join(composerPluginPath, 'vendor', 'autoload.php')));
 
   const nonExecutableCapturePath = path.join(root, 'capture-non-executable.json');
   const nonExecutableFixture = createFixtureWpCodebox(root, 0o644);
