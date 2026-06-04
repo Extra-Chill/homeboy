@@ -435,8 +435,16 @@ pub(super) fn aggregate_span(
             Some(current) if current.duration_ms >= sample.duration_ms => Some(current),
             _ => Some(sample.clone()),
         });
+    let sample_outputs = samples
+        .iter()
+        .map(|sample| extension_trace::TraceAggregateSpanSampleOutput {
+            run_index: sample.run_index,
+            duration_ms: sample.duration_ms,
+            artifact_path: sample.artifact_path.clone(),
+        })
+        .collect::<Vec<_>>();
     let mut durations = samples
-        .into_iter()
+        .iter()
         .map(|sample| sample.duration_ms)
         .collect::<Vec<_>>();
     durations.sort_unstable();
@@ -452,6 +460,7 @@ pub(super) fn aggregate_span(
         min_ms: durations.first().copied(),
         median_ms: median(&durations),
         avg_ms,
+        stddev_ms: stddev(&durations, avg_ms),
         p75_ms: percentile(&durations, 75, 4),
         p90_ms: percentile(&durations, 90, 10),
         p95_ms: percentile(&durations, 95, 20),
@@ -459,6 +468,7 @@ pub(super) fn aggregate_span(
         max_run_index: max_sample.as_ref().map(|sample| sample.run_index),
         max_artifact_path: max_sample.map(|sample| sample.artifact_path),
         failures,
+        samples: sample_outputs,
         metadata: None,
     }
 }
@@ -581,6 +591,22 @@ fn median(values: &[u64]) -> Option<u64> {
     }
 }
 
+fn stddev(values: &[u64], avg: Option<f64>) -> Option<f64> {
+    let avg = avg?;
+    if values.is_empty() {
+        return None;
+    }
+    let variance = values
+        .iter()
+        .map(|value| {
+            let delta = *value as f64 - avg;
+            delta * delta
+        })
+        .sum::<f64>()
+        / values.len() as f64;
+    Some(variance.sqrt())
+}
+
 fn percentile(values: &[u64], percentile: usize, min_samples: usize) -> Option<u64> {
     if values.len() < min_samples {
         return None;
@@ -633,8 +659,10 @@ pub(super) fn render_aggregate_markdown(
         if aggregate.focus_spans.is_empty() {
             out.push_str("No focused spans matched the aggregate output.\n");
         } else {
-            out.push_str("| Span | n | min | median | avg | p75 | p90 | p95 | max | failures |\n");
-            out.push_str("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n");
+            out.push_str(
+                "| Span | n | min | median | avg | stddev | p75 | p90 | p95 | max | failures |\n",
+            );
+            out.push_str("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n");
             for span in &aggregate.focus_spans {
                 push_aggregate_span_row(&mut out, span);
             }
@@ -643,8 +671,10 @@ pub(super) fn render_aggregate_markdown(
 
     if !aggregate.spans.is_empty() {
         out.push_str("\n## Spans\n\n");
-        out.push_str("| Span | n | min | median | avg | p75 | p90 | p95 | max | failures |\n");
-        out.push_str("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n");
+        out.push_str(
+            "| Span | n | min | median | avg | stddev | p75 | p90 | p95 | max | failures |\n",
+        );
+        out.push_str("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n");
         for span in &aggregate.spans {
             push_aggregate_span_row(&mut out, span);
         }
@@ -707,12 +737,15 @@ fn push_classification_summary_table(
 
 fn push_aggregate_span_row(out: &mut String, span: &extension_trace::TraceAggregateSpanOutput) {
     out.push_str(&format!(
-        "| `{}` | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+        "| `{}` | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
         span.id,
         span.n,
         fmt_ms(span.min_ms),
         fmt_ms(span.median_ms),
         span.avg_ms
+            .map(|value| format!("{:.1}ms", value))
+            .unwrap_or_else(|| "-".to_string()),
+        span.stddev_ms
             .map(|value| format!("{:.1}ms", value))
             .unwrap_or_else(|| "-".to_string()),
         fmt_ms(span.p75_ms),

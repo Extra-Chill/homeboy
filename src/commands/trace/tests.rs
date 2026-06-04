@@ -571,6 +571,7 @@ fn trace_repeat_aggregates_span_timings_and_preserves_artifacts() {
                 assert_eq!(span.min_ms, Some(125));
                 assert_eq!(span.median_ms, Some(125));
                 assert_eq!(span.avg_ms, Some(125.0));
+                assert_eq!(span.stddev_ms, Some(0.0));
                 assert_eq!(span.p75_ms, None);
                 assert_eq!(span.p90_ms, None);
                 assert_eq!(span.p95_ms, None);
@@ -581,6 +582,12 @@ fn trace_repeat_aggregates_span_timings_and_preserves_artifacts() {
                     .as_ref()
                     .is_some_and(|path| std::path::Path::new(path).is_file()));
                 assert_eq!(span.failures, 0);
+                assert_eq!(span.samples.len(), 3);
+                assert!(span.samples.iter().all(|sample| sample.duration_ms == 125));
+                assert!(span
+                    .samples
+                    .iter()
+                    .all(|sample| std::path::Path::new(&sample.artifact_path).is_file()));
                 assert!(aggregate
                     .runs
                     .iter()
@@ -1410,6 +1417,9 @@ fn aggregate_span_reports_percentiles_when_sample_size_is_sufficient() {
     assert_eq!(span.min_ms, Some(10));
     assert_eq!(span.median_ms, Some(105));
     assert_eq!(span.avg_ms, Some(105.0));
+    assert!(span
+        .stddev_ms
+        .is_some_and(|value| (value - 57.66281297335398).abs() < 0.000001));
     assert_eq!(span.p75_ms, Some(150));
     assert_eq!(span.p90_ms, Some(180));
     assert_eq!(span.p95_ms, Some(190));
@@ -1420,6 +1430,10 @@ fn aggregate_span_reports_percentiles_when_sample_size_is_sufficient() {
         Some("/tmp/trace-run-1.json")
     );
     assert_eq!(span.failures, 2);
+    assert_eq!(span.samples.len(), 20);
+    assert_eq!(span.samples[0].run_index, 1);
+    assert_eq!(span.samples[0].duration_ms, 200);
+    assert_eq!(span.samples[0].artifact_path, "/tmp/trace-run-1.json");
 }
 
 #[test]
@@ -1444,6 +1458,7 @@ fn aggregate_span_omits_percentiles_for_small_sample_sizes() {
     assert_eq!(single.min_ms, Some(42));
     assert_eq!(single.median_ms, Some(42));
     assert_eq!(single.avg_ms, Some(42.0));
+    assert_eq!(single.stddev_ms, Some(0.0));
     assert_eq!(single.p75_ms, None);
     assert_eq!(single.p90_ms, None);
     assert_eq!(single.p95_ms, None);
@@ -1489,11 +1504,10 @@ fn aggregate_markdown_includes_percentile_columns() {
 
     let markdown = render_aggregate_markdown(&aggregate);
 
-    assert!(
-        markdown.contains("| Span | n | min | median | avg | p75 | p90 | p95 | max | failures |")
-    );
+    assert!(markdown
+        .contains("| Span | n | min | median | avg | stddev | p75 | p90 | p95 | max | failures |"));
     assert!(markdown.contains(
-        "| `boot_to_ready` | 20 | 10ms | 105ms | 105.0ms | 150ms | 180ms | 190ms | 200ms | 0 |"
+        "| `boot_to_ready` | 20 | 10ms | 105ms | 105.0ms | 57.7ms | 150ms | 180ms | 190ms | 200ms | 0 |"
     ));
     assert!(markdown.contains("| Span | max | max run | max artifact |"));
     assert!(markdown.contains("| `boot_to_ready` | 200ms | 20 | `/tmp/trace-run-20.json` |"));
@@ -1512,6 +1526,85 @@ fn aggregate_json_serializes_available_percentiles() {
     assert_eq!(value["p75_ms"], 150);
     assert_eq!(value["p90_ms"], 180);
     assert_eq!(value["p95_ms"], 190);
+    assert!(value["stddev_ms"]
+        .as_f64()
+        .is_some_and(|stddev| stddev > 57.6));
+    assert_eq!(value["samples"].as_array().expect("samples").len(), 20);
+    assert_eq!(value["samples"][0]["run_index"], 1);
+    assert_eq!(value["samples"][0]["duration_ms"], 10);
+}
+
+#[test]
+fn trace_repeat_counts_failed_runs_as_span_failures() {
+    with_isolated_home(|home| {
+        write_trace_extension(home);
+        let component_dir = tempfile::TempDir::new().expect("component dir");
+        write_trace_rig(home, "studio-rig", "studio", component_dir.path());
+
+        let (output, exit_code) = run(
+            TraceArgs {
+                comp: PositionalComponentArgs {
+                    component: Some("studio".to_string()),
+                    path: None,
+                },
+                component_arg: None,
+                scenario: Some("missing-scenario".to_string()),
+                scenario_arg: None,
+                compare_after: None,
+                rig: Some("studio-rig".to_string()),
+                profile: None,
+                profiles: false,
+                setting_args: SettingArgs::default(),
+                json_summary: false,
+                report: None,
+                experiment: None,
+                repeat: 2,
+                aggregate: Some("spans".to_string()),
+                schedule: TraceSchedule::Grouped,
+                focus_spans: Vec::new(),
+                spans: vec![extension_trace::spans::parse_span_definition(
+                    "boot_to_ready:runner.boot:runner.ready",
+                )
+                .expect("span")],
+                phases: Vec::new(),
+                attachments: Vec::new(),
+                phase_preset: None,
+                baseline_args: BaselineArgs::default(),
+                regression_threshold:
+                    extension_trace::baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT,
+                regression_min_delta_ms: extension_trace::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
+                overlays: Vec::new(),
+                variants: Vec::new(),
+                matrix: TraceVariantMatrixMode::None,
+                output_dir: None,
+                keep_overlay: false,
+                stale: false,
+                force: false,
+            },
+            &GlobalArgs {},
+        )
+        .expect("repeat aggregate should return failed output");
+
+        assert_eq!(exit_code, 1);
+        let TraceCommandOutput::Aggregate(aggregate) = output else {
+            panic!("expected aggregate output");
+        };
+        assert_eq!(aggregate.run_count, 2);
+        assert_eq!(aggregate.failure_count, 2);
+        assert_eq!(aggregate.runs.len(), 2);
+        assert!(aggregate.runs.iter().all(|run| !run.passed));
+        let span = aggregate
+            .spans
+            .iter()
+            .find(|span| span.id == "boot_to_ready")
+            .expect("span aggregate");
+        assert_eq!(span.n, 0);
+        assert_eq!(span.failures, 2);
+        assert!(span.samples.is_empty());
+        assert_eq!(span.min_ms, None);
+        assert_eq!(span.median_ms, None);
+        assert_eq!(span.max_ms, None);
+    });
 }
 
 #[test]

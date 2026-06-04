@@ -194,6 +194,8 @@ pub struct TraceAggregateSpanOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub avg_ms: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub stddev_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub p75_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub p90_ms: Option<u64>,
@@ -206,8 +208,17 @@ pub struct TraceAggregateSpanOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_artifact_path: Option<String>,
     pub failures: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub samples: Vec<TraceAggregateSpanSampleOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<TraceSpanMetadata>,
+}
+
+#[derive(Serialize, Clone)]
+pub struct TraceAggregateSpanSampleOutput {
+    pub run_index: usize,
+    pub duration_ms: u64,
+    pub artifact_path: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Default)]
