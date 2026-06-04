@@ -718,6 +718,125 @@ homeboy_merge_validation_dependency_paths() {
     done
 }
 
+homeboy_dependency_needs_composer_prepare() {
+    local dependency_path="${1:-}"
+
+    [ -n "$dependency_path" ] && [ -d "$dependency_path" ] || return 1
+    [ -f "${dependency_path}/composer.json" ] || return 1
+    [ ! -f "${dependency_path}/vendor/autoload.php" ] || return 1
+    [ ! -f "${dependency_path}/vendor/autoload_packages.php" ] || return 1
+
+    return 0
+}
+
+_homeboy_dependency_repo_root() {
+    local dependency_path="${1:-}"
+
+    [ -n "$dependency_path" ] && [ -d "$dependency_path" ] || return 1
+    git -C "$dependency_path" rev-parse --show-toplevel 2>/dev/null || printf '%s\n' "$dependency_path"
+}
+
+_homeboy_copy_dependency_prepare_root() {
+    local source_root="${1:-}"
+    local target_root="${2:-}"
+
+    [ -n "$source_root" ] && [ -d "$source_root" ] || return 1
+    [ -n "$target_root" ] || return 1
+
+    rm -rf "$target_root"
+    mkdir -p "$target_root"
+
+    if command -v rsync >/dev/null 2>&1; then
+        rsync -a --delete --exclude '.git' "${source_root}/" "${target_root}/"
+    else
+        ( cd "$source_root" && tar --exclude './.git' -cf - . ) | ( cd "$target_root" && tar -xf - )
+    fi
+}
+
+homeboy_prepare_validation_dependency_for_wp_codebox_bench() {
+    local dependency_path="${1:-}"
+    local artifacts_dir="${2:-}"
+
+    [ -n "$dependency_path" ] && [ -d "$dependency_path" ] || return 1
+
+    if ! homeboy_dependency_needs_composer_prepare "$dependency_path"; then
+        printf '%s\n' "$dependency_path"
+        return 0
+    fi
+
+    if ! command -v composer >/dev/null 2>&1; then
+        echo "Error: WordPress bench dependency '${dependency_path}' has composer.json but no vendor autoload files, and composer is not available." >&2
+        return 1
+    fi
+
+    local dependency_slug
+    dependency_slug=$(homeboy_get_validation_dependency_slug "$dependency_path" || basename "$dependency_path")
+
+    local prepare_root
+    prepare_root="$(_homeboy_dependency_repo_root "$dependency_path")"
+    [ -n "$prepare_root" ] && [ -d "$prepare_root" ] || prepare_root="$dependency_path"
+
+    local dependency_realpath prepare_realpath relative_plugin_path
+    dependency_realpath=$(cd "$dependency_path" && pwd -P)
+    prepare_realpath=$(cd "$prepare_root" && pwd -P)
+    case "$dependency_realpath" in
+        "$prepare_realpath")
+            relative_plugin_path=""
+            ;;
+        "$prepare_realpath"/*)
+            relative_plugin_path="${dependency_realpath#"$prepare_realpath"/}"
+            ;;
+        *)
+            prepare_root="$dependency_path"
+            prepare_realpath="$dependency_realpath"
+            relative_plugin_path=""
+            ;;
+    esac
+
+    local prepared_root prepared_plugin_path
+    prepared_root="${artifacts_dir%/}/prepared-bench-dependencies/${dependency_slug}"
+    _homeboy_copy_dependency_prepare_root "$prepare_root" "$prepared_root"
+
+    prepared_plugin_path="$prepared_root"
+    if [ -n "$relative_plugin_path" ]; then
+        prepared_plugin_path="${prepared_root}/${relative_plugin_path}"
+    fi
+
+    if [ ! -f "${prepared_plugin_path}/composer.json" ]; then
+        echo "Error: Prepared WordPress bench dependency '${dependency_path}' lost composer.json at '${prepared_plugin_path}'." >&2
+        return 1
+    fi
+
+    echo "Preparing WordPress bench dependency '${dependency_slug}' with Composer at ${prepared_plugin_path}" >&2
+    if ! composer install --working-dir="$prepared_plugin_path" --no-dev --no-interaction --no-progress --prefer-dist; then
+        echo "Error: Could not prepare WordPress bench dependency '${dependency_slug}' with Composer at ${prepared_plugin_path}." >&2
+        return 1
+    fi
+
+    if [ ! -f "${prepared_plugin_path}/vendor/autoload.php" ] && [ ! -f "${prepared_plugin_path}/vendor/autoload_packages.php" ]; then
+        echo "Error: Composer preparation for WordPress bench dependency '${dependency_slug}' did not create vendor autoload files at ${prepared_plugin_path}." >&2
+        return 1
+    fi
+
+    printf '%s\n' "$prepared_plugin_path"
+}
+
+homeboy_prepare_validation_dependency_paths_for_wp_codebox_bench() {
+    local dependency_paths="${1:-}"
+    local artifacts_dir="${2:-}"
+
+    [ -n "$dependency_paths" ] || return 0
+    [ -n "$artifacts_dir" ] || return 1
+
+    local dependency_path prepared_path
+    while IFS= read -r dependency_path; do
+        [ -n "$dependency_path" ] || continue
+        [ -d "$dependency_path" ] || continue
+        prepared_path=$(homeboy_prepare_validation_dependency_for_wp_codebox_bench "$dependency_path" "$artifacts_dir")
+        [ -n "$prepared_path" ] && printf '%s\n' "$prepared_path"
+    done <<< "$dependency_paths"
+}
+
 homeboy_export_validation_dependency_paths() {
     local plugin_path="${1:-}"
     local existing_paths
