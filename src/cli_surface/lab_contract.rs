@@ -41,7 +41,13 @@ impl Commands {
     pub fn lab_contract(&self) -> Option<LabCommandContract> {
         let contract = match self {
             Commands::Audit(args) if args.changed_since.is_none() && !args.conventions => {
-                lab_portable_contract("audit", None, true, LAB_NO_EXTRA_TOOLS)
+                lab_portable_contract(
+                    "audit",
+                    (args.baseline_args.baseline || args.baseline_args.ratchet)
+                        .then_some("--baseline/--ratchet"),
+                    true,
+                    LAB_NO_EXTRA_TOOLS,
+                )
             }
             Commands::Bench(args) if args.is_lab_offload_command() => lab_portable_contract(
                 "bench",
