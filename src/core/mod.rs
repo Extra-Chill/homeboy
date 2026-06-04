@@ -28,6 +28,7 @@ pub mod deps;
 pub mod engine;
 pub mod error;
 pub mod execution;
+pub mod execution_contract;
 pub(crate) mod expand;
 pub mod extension;
 pub mod finding;

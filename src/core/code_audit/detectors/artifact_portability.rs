@@ -3,6 +3,7 @@ use std::path::Path;
 use crate::core::code_audit::conventions::AuditFinding;
 use crate::core::code_audit::findings::{Finding, Severity};
 use crate::core::component::ArtifactPortabilityConfig;
+use crate::core::execution_contract::EXECUTION_CONTRACT;
 use crate::core::observation::{ArtifactRecord, ObservationStore, RunListFilter, RunRecord};
 use serde_json::Value;
 
@@ -101,7 +102,9 @@ fn artifact_path_is_portable(
     artifact_root: Option<&Path>,
     config: &ArtifactPortabilityConfig,
 ) -> bool {
-    if path.starts_with("runner-artifact://") || path.starts_with("metadata-only:") {
+    if EXECUTION_CONTRACT.artifacts.is_runner_artifact_ref(path)
+        || EXECUTION_CONTRACT.artifacts.is_metadata_only_ref(path)
+    {
         return true;
     }
     let path_ref = Path::new(path);
@@ -261,7 +264,7 @@ fn looks_like_local_absolute_path(
     artifact_root: Option<&Path>,
     _config: &ArtifactPortabilityConfig,
 ) -> bool {
-    if is_runner_artifact_ref(path) || path.starts_with("metadata-only:") {
+    if is_runner_artifact_ref(path) || EXECUTION_CONTRACT.artifacts.is_metadata_only_ref(path) {
         return false;
     }
     let path_ref = Path::new(path);
@@ -277,7 +280,7 @@ fn looks_like_local_absolute_path(
 }
 
 fn is_runner_artifact_ref(path: &str) -> bool {
-    path.starts_with("runner-artifact://")
+    EXECUTION_CONTRACT.artifacts.is_runner_artifact_ref(path)
 }
 
 fn metadata_promises_cleanup(value: &Value) -> bool {
