@@ -44,6 +44,8 @@ fn trace_args_for_profile(profile: &str) -> TraceArgs {
         keep_overlay: false,
         stale: false,
         force: false,
+        canonical: false,
+        allow_local_toolchain: false,
     }
 }
 
@@ -183,6 +185,8 @@ fn trace_list_profiles_lists_rig_profiles() {
             keep_overlay: false,
             stale: false,
             force: false,
+            canonical: false,
+            allow_local_toolchain: false,
         })
         .expect("profile list should run");
 

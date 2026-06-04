@@ -158,6 +158,7 @@ pub fn run(args: ObserveArgs, _global: &GlobalArgs) -> CmdResult<ObserveOutput> 
         summary: Some("Passive observation timeline".to_string()),
         failure: failure.clone(),
         rig: None,
+        evidence: None,
         timeline,
         span_definitions: Vec::new(),
         span_results: Vec::new(),

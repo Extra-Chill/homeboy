@@ -8,8 +8,8 @@ use homeboy::core::engine::execution_context::{self, ResolveOptions};
 use homeboy::core::engine::run_dir::RunDir;
 use homeboy::core::extension::trace as extension_trace;
 use homeboy::core::extension::trace::{
-    TraceAttachment, TraceCommandOutput, TraceListWorkflowArgs, TraceOverlayRequest,
-    TraceRunWorkflowArgs, TraceRunnerInputs, TraceSpanDefinition,
+    TraceAttachment, TraceCanonicalPolicy, TraceCommandOutput, TraceListWorkflowArgs,
+    TraceOverlayRequest, TraceRunWorkflowArgs, TraceRunnerInputs, TraceSpanDefinition,
 };
 use homeboy::core::extension::ExtensionCapability;
 use homeboy::core::observation::{
@@ -182,6 +182,14 @@ pub struct TraceArgs {
     /// Leave overlay changes in place after the trace run.
     #[arg(long)]
     pub keep_overlay: bool,
+
+    /// Require canonical proof inputs and refuse dirty, stale, or arbitrary local toolchain state.
+    #[arg(long, alias = "proof")]
+    pub canonical: bool,
+
+    /// Permit local toolchain overrides for development traces and mark evidence non-canonical.
+    #[arg(long)]
+    pub allow_local_toolchain: bool,
 
     /// Clean only stale trace overlay locks.
     #[arg(long)]
@@ -566,7 +574,7 @@ fn execute_trace_run(args: TraceArgs) -> homeboy::core::Result<TraceRunExecution
             },
             scenario_id,
             json_summary: args.json_summary,
-            rig_id: args.rig,
+            rig_id: args.rig.clone(),
             overlays,
             keep_overlay: args.keep_overlay,
             span_definitions,
@@ -577,6 +585,7 @@ fn execute_trace_run(args: TraceArgs) -> homeboy::core::Result<TraceRunExecution
             },
             regression_threshold_percent: args.regression_threshold,
             regression_min_delta_ms: args.regression_min_delta_ms,
+            canonical_policy: trace_canonical_policy(&args),
         },
         &run_dir,
         rig_state.clone(),
@@ -610,6 +619,16 @@ fn execute_trace_run(args: TraceArgs) -> homeboy::core::Result<TraceRunExecution
         run_dir,
         rig_state,
     })
+}
+
+fn trace_canonical_policy(args: &TraceArgs) -> TraceCanonicalPolicy {
+    if args.allow_local_toolchain {
+        TraceCanonicalPolicy::AllowLocalToolchain
+    } else if args.canonical {
+        TraceCanonicalPolicy::Canonical
+    } else {
+        TraceCanonicalPolicy::Development
+    }
 }
 
 fn trace_scenario(args: &TraceArgs) -> homeboy::core::Result<&str> {

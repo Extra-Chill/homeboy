@@ -292,6 +292,7 @@ mod tests {
             summary: None,
             failure: None,
             rig: None,
+            evidence: None,
             timeline: Vec::new(),
             span_definitions: Vec::new(),
             span_results: Vec::new(),

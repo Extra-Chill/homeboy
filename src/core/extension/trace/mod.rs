@@ -50,7 +50,7 @@ pub use report::{
 pub use report::{push_overlay_markdown, render_markdown};
 pub use run::{
     resolve_declared_trace_artifact_path, run_trace_list_workflow, run_trace_workflow,
-    trace_is_unclaimed, TraceListWorkflowArgs,
+    trace_is_unclaimed, TraceCanonicalPolicy, TraceListWorkflowArgs,
 };
 pub use run::{TraceRunWorkflowArgs, TraceRunWorkflowResult, TraceRunnerInputs};
 pub use span_summary::{

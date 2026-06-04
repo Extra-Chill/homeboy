@@ -6,7 +6,9 @@ use std::collections::BTreeMap;
 use super::aggregate_report::TraceAggregateSpanSampleOutput;
 use super::baseline::TraceBaselineComparison;
 use super::overlay_lock::TraceOverlayLockRecord;
-use super::parsing::{TraceArtifact, TraceAssertionStatus, TraceList, TraceResults};
+use super::parsing::{
+    TraceArtifact, TraceAssertionStatus, TraceEvidenceMetadata, TraceList, TraceResults,
+};
 use super::run::{TraceOverlay, TraceRunWorkflowResult};
 use super::span_summary::{
     format_span_summary_metadata, format_span_summary_status, trace_span_summaries,
@@ -35,6 +37,7 @@ pub struct TraceRunOutput {
     pub status: String,
     pub component: String,
     pub exit_code: i32,
+    pub evidence: TraceEvidenceMetadata,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub artifacts: Vec<TraceArtifact>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -66,6 +69,7 @@ pub struct TraceRunSummaryOutput {
     pub status: String,
     pub component: String,
     pub exit_code: i32,
+    pub evidence: TraceEvidenceMetadata,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scenario_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -455,6 +459,7 @@ pub fn from_main_workflow_outputs(
             status: result.status,
             component: result.component,
             exit_code,
+            evidence: result.evidence,
             scenario_id: result.results.as_ref().map(|r| r.scenario_id.clone()),
             summary: result.results.as_ref().and_then(|r| r.summary.clone()),
             assertion_count: result
@@ -506,6 +511,7 @@ fn from_run_workflow_result(
         status: result.status,
         component: result.component,
         exit_code: result.exit_code,
+        evidence: result.evidence,
         artifacts,
         results: result.results,
         span_summaries,
@@ -525,6 +531,15 @@ pub fn render_markdown(results: &TraceResults, overlays: &[TraceOverlay]) -> Str
     out.push_str(&format!("# Trace: `{}`\n\n", results.scenario_id));
     out.push_str(&format!("- **Component:** `{}`\n", results.component_id));
     out.push_str(&format!("- **Status:** `{}`\n", results.status.as_str()));
+    if let Some(evidence) = &results.evidence {
+        out.push_str(&format!(
+            "- **Canonical evidence:** `{}` (`{}` mode)\n",
+            evidence.canonical, evidence.mode
+        ));
+        for reason in &evidence.reasons {
+            out.push_str(&format!("  - Non-canonical reason: {}\n", reason));
+        }
+    }
     if let Some(summary) = &results.summary {
         out.push_str(&format!("- **Summary:** {}\n", summary));
     }
@@ -784,6 +799,7 @@ mod tests {
             status: "pass".to_string(),
             component: "Studio".to_string(),
             exit_code: 0,
+            evidence: canonical_evidence(),
             results: Some(TraceResults {
                 component_id: "studio".to_string(),
                 scenario_id: "close-window-running-site".to_string(),
@@ -791,6 +807,7 @@ mod tests {
                 summary: Some("No window reopened".to_string()),
                 failure: None,
                 rig: None,
+                evidence: None,
                 timeline: Vec::new(),
                 span_definitions: Vec::new(),
                 span_results: Vec::new(),
@@ -842,6 +859,7 @@ mod tests {
             status: "pass".to_string(),
             component: "Studio".to_string(),
             exit_code: 0,
+            evidence: canonical_evidence(),
             results: Some(TraceResults {
                 component_id: "studio".to_string(),
                 scenario_id: "create-site".to_string(),
@@ -849,6 +867,7 @@ mod tests {
                 summary: Some("Created a site".to_string()),
                 failure: None,
                 rig: None,
+                evidence: None,
                 timeline: vec![crate::core::extension::trace::parsing::TraceEvent {
                     t_ms: 10,
                     source: "ui".to_string(),
@@ -940,6 +959,7 @@ mod tests {
             summary: Some("Created a site".to_string()),
             failure: None,
             rig: None,
+            evidence: None,
             timeline: Vec::new(),
             span_definitions: Vec::new(),
             span_results: vec![crate::core::extension::trace::parsing::TraceSpanResult {
@@ -1017,6 +1037,7 @@ mod tests {
             summary: None,
             failure: None,
             rig: None,
+            evidence: None,
             timeline: Vec::new(),
             span_definitions: Vec::new(),
             span_results: Vec::new(),
@@ -1041,5 +1062,14 @@ mod tests {
 
         assert!(!markdown.contains("/srv/remote-only/trace.zip"));
         assert!(markdown.contains("runner-artifact://lab/run-1/trace.zip"));
+    }
+
+    fn canonical_evidence() -> TraceEvidenceMetadata {
+        TraceEvidenceMetadata {
+            canonical: true,
+            mode: "canonical".to_string(),
+            reasons: Vec::new(),
+            checks: Vec::new(),
+        }
     }
 }

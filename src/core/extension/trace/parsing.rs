@@ -54,6 +54,8 @@ pub struct TraceResults {
     pub failure: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rig: Option<RigStateSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<TraceEvidenceMetadata>,
     #[serde(default)]
     pub timeline: Vec<TraceEvent>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -141,6 +143,35 @@ pub struct TraceRuntimeAssetProvenance {
     pub version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TraceEvidenceMetadata {
+    pub canonical: bool,
+    pub mode: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reasons: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checks: Vec<TraceCanonicalCheck>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TraceCanonicalCheck {
+    pub target: String,
+    pub path: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ahead: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub behind: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
