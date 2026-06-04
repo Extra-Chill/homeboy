@@ -187,11 +187,50 @@ function slugFromPath(filePath, fallback) {
   return (base.split('@')[0] || fallback).replace(/[^A-Za-z0-9_-]/g, '-');
 }
 
-function extraPlugin(source, slug, activate = true) {
+function copyFilter(source) {
+  const base = path.basename(source);
+  return base !== '.git' && base !== 'node_modules' && base !== 'vendor';
+}
+
+function prepareComposerPluginSource(source, slug, artifactsRoot) {
+  if (!source || !fs.existsSync(source) || !fs.existsSync(path.join(source, 'composer.json')) || fs.existsSync(path.join(source, 'vendor', 'autoload.php'))) {
+    return source;
+  }
+  if (!artifactsRoot) {
+    throw new Error(`Plugin ${slug} requires Composer dependencies but no artifacts directory is available for staging.`);
+  }
+
+  const preparedRoot = path.join(artifactsRoot, 'prepared-plugins');
+  const preparedSource = path.join(preparedRoot, slug);
+  fs.rmSync(preparedSource, { recursive: true, force: true });
+  fs.mkdirSync(preparedRoot, { recursive: true });
+  fs.cpSync(source, preparedSource, { recursive: true, filter: copyFilter });
+
+  const result = spawnSync('composer', ['install', '--no-interaction', '--prefer-dist', '--no-progress'], {
+    cwd: preparedSource,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  if (result.status !== 0) {
+    throw new Error(`Composer install failed for plugin ${slug}: ${result.stderr || result.stdout || `exit ${result.status}`}`);
+  }
+  if (!fs.existsSync(path.join(preparedSource, 'vendor', 'autoload.php'))) {
+    throw new Error(`Composer install for plugin ${slug} did not create vendor/autoload.php.`);
+  }
+
+  return preparedSource;
+}
+
+function extraPlugin(source, slug, activate = true, options = {}) {
   if (!source) {
     return null;
   }
-  return { source, slug: slug || slugFromPath(source, 'plugin'), activate };
+  const pluginSlug = slug || slugFromPath(source, 'plugin');
+  return {
+    source: prepareComposerPluginSource(source, pluginSlug, options.artifactsRoot || ''),
+    slug: pluginSlug,
+    activate,
+  };
 }
 
 function workspaceMounts(request) {
@@ -249,7 +288,7 @@ function homeboyExtensionMount(input) {
 }
 
 function providerPluginSpecs(input) {
-  return (input.provider_plugin_paths || []).map((source) => extraPlugin(source, slugFromPath(source, 'provider'), false)).filter(Boolean);
+  return (input.provider_plugin_paths || []).map((source) => extraPlugin(source, slugFromPath(source, 'provider'), false, { artifactsRoot: input.artifacts_path })).filter(Boolean);
 }
 
 function buildRecipe(input) {
@@ -297,10 +336,10 @@ function buildRecipe(input) {
         ...(isDatamachineBundle ? bundleMount.mounts : []),
       ],
       extraPlugins: [
-        extraPlugin(input.agents_api_path, 'agents-api'),
-        extraPlugin(input.data_machine_path, 'data-machine'),
-        extraPlugin(input.data_machine_code_path, 'data-machine-code'),
-        extraPlugin(input.homeboy_path, 'homeboy'),
+        extraPlugin(input.agents_api_path, 'agents-api', true, { artifactsRoot: input.artifacts_path }),
+        extraPlugin(input.data_machine_path, 'data-machine', true, { artifactsRoot: input.artifacts_path }),
+        extraPlugin(input.data_machine_code_path, 'data-machine-code', true, { artifactsRoot: input.artifacts_path }),
+        extraPlugin(input.homeboy_path, 'homeboy', true, { artifactsRoot: input.artifacts_path }),
         ...providerPlugins,
       ].filter(Boolean),
       secretEnv: input.secret_env || [],
