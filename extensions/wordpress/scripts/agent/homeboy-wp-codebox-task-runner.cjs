@@ -288,9 +288,10 @@ function normalizeAgentTaskRun(input, result) {
     return result;
   }
 
-  const execution = Array.isArray(result.executions) ? result.executions.find((item) => item?.recipeCommand === 'wp-codebox.agent-sandbox-run') || result.executions[0] : null;
+  const executions = Array.isArray(result.executions) && result.executions.length > 0 ? result.executions : (Array.isArray(result.run?.executions) ? result.run.executions : []);
+  const execution = executions.find((item) => item?.recipeCommand === 'wp-codebox.agent-sandbox-run') || executions[0] || null;
   const datamachineConfig = datamachineBundleConfig(input, input.datamachine_bundle || {});
-  const agentResult = result.run?.agentResult || result.agentResult || result.agent_result || result.metadata?.datamachine?.workload || execution?.agentResult || datamachineWorkloadFromExecutionStdout(execution, datamachineConfig) || {};
+  const agentResult = datamachineWorkloadFromExecutionStdout(execution, datamachineConfig) || result.metadata?.datamachine?.workload || execution?.agentResult || result.run?.agentResult || result.agentResult || result.agent_result || {};
   const datamachineValidation = validateDatamachineWorkload(agentResult, datamachineConfig);
   const success = !datamachineValidation;
   const diagnostics = [
@@ -339,7 +340,11 @@ function datamachineWorkloadFromExecutionStdout(execution, config) {
   const wrapper = parseJsonObject(execution?.stdout || '');
   const workload = parseJsonObject(wrapper?.output || '') || parseJsonObject(execution?.stdout || '');
   if (!workload) {
-    return {};
+    return null;
+  }
+  const bundleRun = workload.agent_runtime?.result || workload.result || workload;
+  if (bundleRun?.schema === 'datamachine/agent-bundle-run/v1') {
+    return datamachineWorkloadFromBundleRun(bundleRun, config);
   }
   if (Array.isArray(workload.scenarios)) {
     return workload;
@@ -353,7 +358,27 @@ function datamachineWorkloadFromExecutionStdout(execution, config) {
       }],
     };
   }
-  return {};
+  return null;
+}
+
+function datamachineWorkloadFromBundleRun(bundleRun, config) {
+  const bundle = bundleRun.bundle && typeof bundleRun.bundle === 'object' ? bundleRun.bundle : {};
+  const workflowSteps = Array.isArray(bundleRun.workflow?.steps) ? bundleRun.workflow.steps : [];
+  return {
+    scenarios: [{
+      id: config.workload_id || bundle.flow_slug || bundle.bundle_slug || config.agent_slug || config.flow_slug || 'datamachine-agent',
+      metrics: {
+        workflow_step_count: workflowSteps.length,
+      },
+      metadata: {
+        schema: bundleRun.schema,
+        success: bundleRun.success !== false,
+        dry_run: Boolean(bundleRun.dry_run),
+        bundle,
+        error: bundleRun.success === false ? bundleRun.error : undefined,
+      },
+    }],
+  };
 }
 
 function pathValue(source, dottedPath) {
