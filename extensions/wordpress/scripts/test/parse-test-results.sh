@@ -40,4 +40,4 @@ fi
 ADAPTERS_HELPER="${HOMEBOY_RUNTIME_TEST_RESULT_ADAPTERS:-$(cd "${SCRIPT_DIR}/../../.." && pwd)/scripts/lib/test-result-adapters.sh}"
 # shellcheck source=../../../scripts/lib/test-result-adapters.sh
 source "$ADAPTERS_HELPER"
-homeboy_parse_test_results_with_adapters "$OUTPUT_FILE" wp-codebox-json phpunit phpunit-testdox
+homeboy_parse_test_results_with_adapters "$OUTPUT_FILE" wp-codebox-json host-smoke phpunit phpunit-testdox
