@@ -230,6 +230,7 @@ generate_dependency_config() {
     local has_component_context=0
     local context_path
     local scan_file_count=0
+    local wordpress_api_overrides="${EXTENSION_PATH}/stubs/wordpress-api-overrides.stub.php"
 
     tmpfile=$(homeboy_mktemp 'phpstan-dependencies.XXXXXX.neon')
 
@@ -276,6 +277,14 @@ generate_dependency_config() {
                 has_component_context=1
                 printf '        - %s\n' "$context_path"
             done < <(homeboy_resolve_phpstan_context_files "$PLUGIN_PATH")
+        fi
+
+        if [ -f "$wordpress_api_overrides" ]; then
+            if [ "$scan_file_count" -eq 0 ]; then
+                printf '%s\n' '    scanFiles:'
+            fi
+            scan_file_count=$((scan_file_count + 1))
+            printf '        - %s\n' "$wordpress_api_overrides"
         fi
     } > "$tmpfile"
 
