@@ -89,7 +89,7 @@ pub struct DispatchArgs {
     pub queue_only: bool,
 }
 
-pub fn dispatch(args: DispatchArgs) -> CmdResult<Value> {
+pub fn run(args: DispatchArgs) -> CmdResult<Value> {
     dispatch_with_executor(args, ExtensionProviderAgentTaskExecutor::discover())
 }
 

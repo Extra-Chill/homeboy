@@ -10,7 +10,7 @@ use homeboy::core::agent_task_scheduler::{
 };
 use homeboy::core::config;
 
-use super::agent_task_dispatch::{dispatch, DispatchArgs};
+use super::agent_task_dispatch::{run as dispatch, DispatchArgs};
 use super::{CmdResult, GlobalArgs};
 
 #[derive(Args, Debug)]
