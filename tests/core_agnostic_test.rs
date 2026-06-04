@@ -1357,11 +1357,19 @@ fn core_owned_source_stays_language_and_framework_agnostic() {
         "core-owned source contains non-baselined ecosystem or Homeboy-domain behavior. Core concepts are allowed when generic (command, artifact, capability, preflight, runner), but product/domain values must come from config, extension manifests, or typed extension contracts. New audit findings:\n{}",
         new_policy_findings.join("\n")
     );
-    assert!(
-        stale_policy_findings.is_empty(),
-        "core-owned source agnostic audit baseline contains stale entries. Ratchet baselines.audit after cleanup:\n{}",
-        stale_policy_findings.join("\n")
-    );
+    if !is_changed_scope_run() {
+        assert!(
+            stale_policy_findings.is_empty(),
+            "core-owned source agnostic audit baseline contains stale entries. Ratchet baselines.audit after cleanup:\n{}",
+            stale_policy_findings.join("\n")
+        );
+    }
+}
+
+fn is_changed_scope_run() -> bool {
+    std::env::var("SCOPE_MODE")
+        .map(|value| value == "changed")
+        .unwrap_or(false)
 }
 
 #[test]
