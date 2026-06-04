@@ -29,11 +29,16 @@ pub(super) fn record_trace_artifacts(
         run_dir.step_file(homeboy::core::engine::run_dir::files::TRACE_RESULTS);
     record_artifact_if_file(store, run_id, "trace-results", &trace_results_path);
     let artifact_dir = run_dir.path().join("artifacts");
-    record_artifact_dir_if_non_empty(store, run_id, "trace-artifacts", &artifact_dir);
+    let has_declared_artifacts = results
+        .map(|results| !results.artifacts.is_empty())
+        .unwrap_or(false);
+    if !has_declared_artifacts {
+        record_artifact_dir_if_non_empty(store, run_id, "trace-artifacts", &artifact_dir);
+    }
     if let Some(results) = results {
         for artifact in &results.artifacts {
             if let Some(resolved) =
-                resolve_declared_trace_artifact_path(&artifact.path, run_dir, &artifact_dir)
+                declared_trace_artifact_candidate(artifact, run_dir, &artifact_dir)
             {
                 record_declared_artifact(
                     store,
@@ -47,6 +52,28 @@ pub(super) fn record_trace_artifacts(
         }
     }
     observation_result
+}
+
+fn declared_trace_artifact_candidate(
+    artifact: &extension_trace::TraceArtifact,
+    run_dir: &RunDir,
+    artifact_dir: &Path,
+) -> Option<std::path::PathBuf> {
+    if let Some(path) = resolve_declared_trace_artifact_path(&artifact.path, run_dir, artifact_dir)
+    {
+        return Some(path);
+    }
+
+    let relative = Path::new(&artifact.path);
+    if relative.is_absolute()
+        || relative
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return None;
+    }
+
+    Some(run_dir.path().join(relative))
 }
 
 fn record_artifact_if_file(store: &ObservationStore, run_id: &str, kind: &str, path: &Path) {
