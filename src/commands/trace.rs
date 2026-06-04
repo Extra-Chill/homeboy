@@ -1552,11 +1552,21 @@ fn persist_trace_workflow_result(
         }
     }
 
-    record_trace_artifacts(&observation.store, &observation.run_id, run_dir, results);
+    let artifact_observation =
+        record_trace_artifacts(&observation.store, &observation.run_id, run_dir, results);
+    let finish_status =
+        if run_status == RunStatus::Pass && artifact_observation.has_declared_artifact_failures() {
+            RunStatus::Fail
+        } else {
+            run_status
+        };
     let _ = observation.store.finish_run(
         &observation.run_id,
-        run_status,
-        Some(trace_run_finish_metadata(workflow)),
+        finish_status,
+        Some(trace_run_finish_metadata(
+            workflow,
+            Some(&artifact_observation),
+        )),
     );
 }
 
@@ -1583,11 +1593,16 @@ fn persist_trace_workflow_error(
         .metadata(error_metadata.clone())
         .build(),
     );
-    record_trace_artifacts(&observation.store, &observation.run_id, run_dir, None);
-    let _ =
-        observation
-            .store
-            .finish_run(&observation.run_id, RunStatus::Error, Some(error_metadata));
+    let artifact_observation =
+        record_trace_artifacts(&observation.store, &observation.run_id, run_dir, None);
+    let _ = observation.store.finish_run(
+        &observation.run_id,
+        RunStatus::Error,
+        Some(merge_trace_artifact_metadata(
+            error_metadata,
+            &artifact_observation,
+        )),
+    );
 }
 
 fn trace_run_status(workflow: &extension_trace::TraceRunWorkflowResult) -> RunStatus {
@@ -1615,8 +1630,9 @@ fn baseline_status(workflow: &extension_trace::TraceRunWorkflowResult) -> Option
 
 fn trace_run_finish_metadata(
     workflow: &extension_trace::TraceRunWorkflowResult,
+    artifact_observation: Option<&observations::TraceArtifactObservationResult>,
 ) -> serde_json::Value {
-    serde_json::json!({
+    let metadata = serde_json::json!({
         "status": &workflow.status,
         "exit_code": workflow.exit_code,
         "failure": &workflow.failure,
@@ -1624,7 +1640,32 @@ fn trace_run_finish_metadata(
         "baseline_comparison": &workflow.baseline_comparison,
         "hints": &workflow.hints,
         "results": &workflow.results,
-    })
+    });
+    if let Some(artifact_observation) = artifact_observation {
+        merge_trace_artifact_metadata(metadata, artifact_observation)
+    } else {
+        metadata
+    }
+}
+
+fn merge_trace_artifact_metadata(
+    mut metadata: serde_json::Value,
+    artifact_observation: &observations::TraceArtifactObservationResult,
+) -> serde_json::Value {
+    if !artifact_observation.has_declared_artifact_failures() {
+        return metadata;
+    }
+    if let Some(object) = metadata.as_object_mut() {
+        object.insert(
+            "artifact_validation".to_string(),
+            serde_json::json!({
+                "status": "fail",
+                "missing_declared_artifacts": artifact_observation.missing_declared_artifacts,
+                "invalid_declared_artifacts": artifact_observation.invalid_declared_artifacts,
+            }),
+        );
+    }
+    metadata
 }
 
 #[cfg(test)]
