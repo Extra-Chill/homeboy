@@ -97,6 +97,8 @@ pub(crate) fn refused_trace_result(
             .collect(),
         temporal_assertions: Vec::new(),
         artifacts: Vec::new(),
+        toolchain: None,
+        components: None,
     };
 
     TraceRunWorkflowResult {
@@ -117,6 +119,8 @@ pub(crate) fn refused_trace_result(
         hints: Some(vec![
             "Use --allow-local-toolchain for development-only trace runs; evidence will be marked non-canonical.".to_string(),
         ]),
+        toolchain: None,
+        components: None,
     }
 }
 
