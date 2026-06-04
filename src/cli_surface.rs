@@ -2,10 +2,11 @@ use clap::{Command, CommandFactory, Parser, Subcommand};
 use std::path::PathBuf;
 
 use crate::commands::{
-    agent_task, api, audit, auth, bench, build, changelog, changes, ci, cleanup, component, config,
-    daemon, db, deploy, deps, doctor, extension, file, fleet, git, http, issues, lint, logs,
-    observe, project, refactor, refs, release, report, review, rig, runner, runs, self_cmd, server,
-    ssh, stack, status, test, trace, triage, tunnel, undo, upgrade, version, worktree,
+    agent_task, api, audit, audit_baseline, auth, bench, build, changelog, changes, ci, cleanup,
+    component, config, daemon, db, deploy, deps, doctor, extension, file, fleet, git, http, issues,
+    lint, logs, observe, project, refactor, refs, release, report, review, rig, runner, runs,
+    self_cmd, server, ssh, stack, status, test, trace, triage, tunnel, undo, upgrade, version,
+    worktree,
 };
 
 mod lab_contract;
@@ -116,6 +117,9 @@ pub enum Commands {
     Review(review::ReviewArgs),
     /// Audit code conventions and detect architectural drift
     Audit(audit::AuditArgs),
+    /// Refresh and inspect generated audit baseline data
+    #[command(name = "audit-baseline")]
+    AuditBaseline(audit_baseline::AuditBaselineArgs),
     /// Structural refactoring (rename terms across codebase)
     Refactor(refactor::RefactorArgs),
     /// Read-only reference discovery for a symbol or term
@@ -317,6 +321,12 @@ impl Commands {
             Commands::Audit(_) | Commands::Observe(_) => quality_json_descriptor(
                 output_file_mode,
                 matches!(self, Commands::Audit(_)),
+                None,
+                CommandOutputContractKind::JsonEnvelope,
+            ),
+            Commands::AuditBaseline(_) => quality_json_descriptor(
+                output_file_mode,
+                false,
                 None,
                 CommandOutputContractKind::JsonEnvelope,
             ),

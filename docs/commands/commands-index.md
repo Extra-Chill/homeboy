@@ -3,6 +3,7 @@
 - [api](api.md)
 - [agent-task](agent-task.md)
 - [audit](audit.md) — code convention drift and structural analysis
+- [audit-baseline](audit-baseline.md) — deterministic audit baseline refresh workflow
 - [auth](auth.md)
 - [bench](bench.md) — performance benchmarks + p95 regression ratchet
 - [build](build.md)
