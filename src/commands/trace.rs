@@ -24,6 +24,7 @@ mod aggregate;
 #[cfg(test)]
 mod aggregate_tests;
 mod bundle;
+mod compare_targets;
 mod compare_variant;
 mod experiment;
 mod guardrails;
@@ -40,6 +41,7 @@ mod schedule;
 #[cfg(test)]
 mod test_fixture;
 
+use compare_targets::run_compare_targets;
 use compare_variant::run_compare_variant;
 use experiment::{
     collect_trace_experiment_artifacts_for_plan, run_trace_experiment_setup_for_plan,
@@ -47,6 +49,7 @@ use experiment::{
     trace_experiment_settings,
 };
 use guardrails::run_trace_guardrails_for_args;
+use matrix::TraceMatrixAxis;
 use metadata::trace_span_metadata_for_args;
 use observations::record_trace_artifacts;
 use overlay_locks::run_overlay_locks;
@@ -55,8 +58,8 @@ use overlay_locks::run_overlay_locks;
 use output::render_aggregate_markdown;
 use output::{
     attach_span_metadata, classification_summaries, render_matrix_markdown,
-    render_trace_aggregate_evidence_markdown, render_trace_compare_evidence_markdown,
-    render_trace_run_evidence_markdown, run_compare,
+    render_scenario_matrix_markdown, render_trace_aggregate_evidence_markdown,
+    render_trace_compare_evidence_markdown, render_trace_run_evidence_markdown, run_compare,
 };
 use probes::trace_probes_for_args;
 use repeat::run_repeat;
@@ -81,6 +84,12 @@ pub struct TraceArgs {
     /// After aggregate JSON when running `homeboy trace compare before.json after.json`.
     #[arg(value_name = "AFTER_JSON")]
     pub compare_after: Option<PathBuf>,
+    /// Baseline path or git ref for `homeboy trace compare COMPONENT SCENARIO`.
+    #[arg(long = "baseline-target", value_name = "PATH_OR_REF")]
+    pub baseline_target: Option<String>,
+    /// Candidate path or git ref for `homeboy trace compare COMPONENT SCENARIO`.
+    #[arg(long, value_name = "PATH_OR_REF")]
+    pub candidate: Option<String>,
     /// Run trace against a rig-pinned component path after `rig check` passes.
     #[arg(long, value_name = "RIG_ID")]
     pub rig: Option<String>,
@@ -159,7 +168,14 @@ pub struct TraceArgs {
     #[arg(long = "matrix", value_enum, default_value_t = TraceVariantMatrixMode::None)]
     pub matrix: TraceVariantMatrixMode,
 
-    /// Directory where `trace compare-variant` writes aggregate, compare, and summary artifacts.
+    /// Add a scenario matrix axis as `name=value1,value2`. Repeatable.
+    #[arg(long = "axis", value_name = "NAME=VALUE[,VALUE...]", value_parser = matrix::parse_trace_matrix_axis)]
+    pub axes: Vec<TraceMatrixAxis>,
+
+    #[arg(skip)]
+    pub matrix_env: Vec<(String, String)>,
+
+    /// Directory where trace matrix modes write aggregate, compare, cell, and summary artifacts.
     #[arg(long = "output-dir", value_name = "DIR")]
     pub output_dir: Option<PathBuf>,
 
@@ -232,6 +248,7 @@ fn render_markdown_output(output: &TraceCommandOutput) -> String {
         }
         TraceCommandOutput::Compare(compare) => render_trace_compare_evidence_markdown(compare),
         TraceCommandOutput::Matrix(matrix) => render_matrix_markdown(matrix),
+        TraceCommandOutput::ScenarioMatrix(matrix) => render_scenario_matrix_markdown(matrix),
         TraceCommandOutput::List(list) => {
             if !list.profiles.is_empty() || list.command == "trace.list.profiles" {
                 let mut markdown = "# Trace Profiles\n\n".to_string();
@@ -316,7 +333,17 @@ fn run_outputs(mut args: TraceArgs) -> CmdResult<(TraceCommandOutput, Option<Tra
     }
 
     if args.comp.component.as_deref() == Some("compare") {
+        if args.baseline_target.is_some() || args.candidate.is_some() {
+            let (output, exit_code) = run_compare_targets(args)?;
+            return Ok(((output, None), exit_code));
+        }
         let (output, exit_code) = run_compare(args)?;
+        return Ok(((output, None), exit_code));
+    }
+
+    if args.comp.component.as_deref() == Some("matrix") {
+        apply_matrix_target_args(&mut args);
+        let (output, exit_code) = matrix::run_scenario_matrix(args)?;
         return Ok(((output, None), exit_code));
     }
 
@@ -379,6 +406,16 @@ fn run_outputs(mut args: TraceArgs) -> CmdResult<(TraceCommandOutput, Option<Tra
 
 pub(super) fn apply_command_target_component(args: &mut TraceArgs) {
     args.comp.component = args.component_arg.clone();
+}
+
+fn apply_matrix_target_args(args: &mut TraceArgs) {
+    let positional_component = args.scenario.take();
+    let positional_scenario = args
+        .compare_after
+        .take()
+        .map(|path| path.to_string_lossy().to_string());
+    args.comp.component = args.component_arg.clone().or(positional_component);
+    args.scenario = args.scenario_arg.clone().or(positional_scenario);
 }
 
 pub(super) fn required_trace_scenario(args: &TraceArgs) -> homeboy::core::Result<String> {
@@ -508,7 +545,8 @@ fn execute_trace_run(args: TraceArgs) -> homeboy::core::Result<TraceRunExecution
         })
         .unwrap_or_default();
     let experiment_settings = trace_experiment_settings(experiment_plan.as_ref())?;
-    let experiment_env = trace_experiment_env(experiment_plan.as_ref())?;
+    let mut experiment_env = trace_experiment_env(experiment_plan.as_ref())?;
+    experiment_env.extend(args.matrix_env.clone());
     let trace_probes =
         trace_probes_for_args(&args, rig_context.as_ref(), ctx.extension_id.as_deref())?;
     let attachments = TraceAttachment::parse_all(&args.attachments)?;

@@ -271,6 +271,16 @@ pub(super) fn compare_trace_aggregates_with_focus(
         command: "trace.compare.spans",
         before_path: before_path.display().to_string(),
         after_path: after_path.display().to_string(),
+        before_target: None,
+        after_target: None,
+        before_git_sha: None,
+        after_git_sha: None,
+        before_status: None,
+        after_status: None,
+        before_exit_code: None,
+        after_exit_code: None,
+        output_dir: None,
+        summary_path: None,
         before_component: before.component,
         after_component: after.component,
         before_scenario_id: before.scenario_id,
@@ -1044,6 +1054,21 @@ pub(super) fn render_compare_markdown(compare: &extension_trace::TraceCompareOut
     out.push_str("# Trace Compare\n\n");
     out.push_str(&format!("- **Before:** `{}`\n", compare.before_path));
     out.push_str(&format!("- **After:** `{}`\n", compare.after_path));
+    if let (Some(before), Some(after)) = (&compare.before_target, &compare.after_target) {
+        out.push_str(&format!("- **Targets:** `{}` -> `{}`\n", before, after));
+    }
+    if let (Some(before), Some(after)) = (&compare.before_git_sha, &compare.after_git_sha) {
+        out.push_str(&format!("- **Git SHAs:** `{}` -> `{}`\n", before, after));
+    }
+    if let (Some(before), Some(after)) = (&compare.before_status, &compare.after_status) {
+        out.push_str(&format!("- **Status:** `{}` -> `{}`\n", before, after));
+    }
+    if let Some(output_dir) = compare.output_dir.as_deref() {
+        out.push_str(&format!("- **Output dir:** `{}`\n", output_dir));
+    }
+    if let Some(summary_path) = compare.summary_path.as_deref() {
+        out.push_str(&format!("- **Summary:** `{}`\n", summary_path));
+    }
     if let (Some(before), Some(after)) = (&compare.before_scenario_id, &compare.after_scenario_id) {
         out.push_str(&format!("- **Scenario:** `{}` -> `{}`\n", before, after));
     }
@@ -1188,6 +1213,62 @@ pub(super) fn render_matrix_markdown(matrix: &extension_trace::TraceVariantMatri
         out.push_str(&format!(
             "| `{}` | {} | `{}` | {} | `{}` | `{}` |\n",
             run.label, variants, run.status, run.exit_code, run.aggregate_path, run.compare_path
+        ));
+    }
+
+    out
+}
+
+pub(super) fn render_scenario_matrix_markdown(
+    matrix: &extension_trace::TraceScenarioMatrixOutput,
+) -> String {
+    let mut out = String::new();
+    out.push_str("# Trace Scenario Matrix\n\n");
+    out.push_str(&format!("- **Component:** `{}`\n", matrix.component));
+    out.push_str(&format!("- **Scenario:** `{}`\n", matrix.scenario_id));
+    out.push_str(&format!("- **Status:** `{}`\n", matrix.status));
+    out.push_str(&format!("- **Cells:** `{}`\n", matrix.cell_count));
+    out.push_str(&format!("- **Failures:** `{}`\n", matrix.failure_count));
+    out.push_str(&format!("- **Output dir:** `{}`\n", matrix.output_dir));
+    out.push_str(&format!("- **Matrix JSON:** `{}`\n", matrix.matrix_path));
+
+    if !matrix.axes.is_empty() {
+        out.push_str("\n## Axes\n\n");
+        for axis in &matrix.axes {
+            out.push_str(&format!(
+                "- `{}`: {}\n",
+                axis.name,
+                axis.values
+                    .iter()
+                    .map(|value| format!("`{}`", value))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+    }
+
+    out.push_str("\n## Cells\n\n");
+    out.push_str("| Cell | Axes | Status | Exit | Artifact | Output | Failure |\n");
+    out.push_str("|---|---|---|---:|---|---|---|\n");
+    for cell in &matrix.cells {
+        let axes = cell
+            .axes
+            .iter()
+            .map(|(key, value)| format!("`{}`=`{}`", key, value))
+            .collect::<Vec<_>>()
+            .join(" ");
+        out.push_str(&format!(
+            "| `{}` | {} | `{}` | {} | `{}` | `{}` | {} |\n",
+            cell.label,
+            axes,
+            cell.status,
+            cell.exit_code,
+            cell.artifact_path,
+            cell.output_path,
+            cell.failure
+                .as_deref()
+                .map(|failure| format!("`{}`", failure.replace('`', "'")))
+                .unwrap_or_else(|| "-".to_string())
         ));
     }
 
