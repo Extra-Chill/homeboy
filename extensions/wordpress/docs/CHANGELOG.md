@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.115.13] - 2026-06-04
+
+### Fixed
+- mount Data Machine bundles in Codebox tasks
+
 ## [2.115.12] - 2026-06-04
 
 ### Fixed
