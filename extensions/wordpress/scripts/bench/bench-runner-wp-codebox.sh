@@ -156,6 +156,149 @@ homeboy_wp_codebox_compile_bootstrap_steps() {
     WP_CODEBOX_BOOTSTRAP_STEPS_JSON="$steps_json"
 }
 
+homeboy_wp_codebox_compile_prepare_steps() {
+    local steps_json
+    steps_json=$(printf '%s' "$settings_json" | jq -c '
+        .wp_codebox_prepare_steps // .plugin_prepare // .bench_prepare // []
+        | if type == "array" then . else [] end
+    ' 2>/dev/null || echo '[]')
+
+    WP_CODEBOX_PREPARE_STEPS_JSON="[]"
+    if ! printf '%s' "$steps_json" | jq -e 'type == "array" and length > 0' >/dev/null 2>&1; then
+        return 0
+    fi
+
+    if ! printf '%s' "$steps_json" | jq -e '
+        all(.[];
+            type == "object"
+            and (.command | type == "string" and . != "")
+            and ((.args // []) | type == "array" and all(.[]; type == "string"))
+            and ((.cwd // "") | type == "string")
+        )
+    ' >/dev/null 2>&1; then
+        echo "Error: wp_codebox_prepare_steps entries require command plus optional string args and cwd." >&2
+        FAILED_STEP="WP Codebox bench prepare setup"
+        exit 1
+    fi
+
+    WP_CODEBOX_PREPARE_STEPS_JSON="$steps_json"
+}
+
+homeboy_wp_codebox_prepare_step_cwd() {
+    local cwd_ref="${1:-}"
+    local cwd_host
+
+    if [ -z "$cwd_ref" ]; then
+        printf '%s\n' "$PLUGIN_PATH"
+        return 0
+    fi
+    if [[ "$cwd_ref" = /* ]] || [[ "$cwd_ref" == *..* ]]; then
+        return 1
+    fi
+
+    cwd_host="${PLUGIN_PATH}/${cwd_ref}"
+    case "$cwd_host" in
+        "$PLUGIN_PATH"|"$PLUGIN_PATH"/*)
+            [ -d "$cwd_host" ] || return 1
+            printf '%s\n' "$cwd_host"
+            return 0
+            ;;
+    esac
+
+    return 1
+}
+
+homeboy_wp_codebox_emit_prepare_failure_diagnostic() {
+    local step_index="$1"
+    local command_name="$2"
+    local cwd_host="$3"
+    local output_file="$4"
+    local exit_code="$5"
+    local diagnostics_file="${ARTIFACTS_DIR}/wp-codebox-bench-prepare-diagnostics.json"
+    local output_artifact="${ARTIFACTS_DIR}/wp-codebox-prepare-step-${step_index}-output.txt"
+
+    mkdir -p "$ARTIFACTS_DIR"
+    cp "$output_file" "$output_artifact"
+
+    jq -n \
+        --arg schema "homeboy/wordpress-bench-diagnostic/v1" \
+        --arg code "wp-codebox-bench-prepare-failed" \
+        --arg message "WP Codebox bench prepare step failed before the plugin was mounted into WordPress." \
+        --arg command "$command_name" \
+        --arg cwd "$cwd_host" \
+        --argjson stepIndex "$step_index" \
+        --argjson exitCode "$exit_code" \
+        --arg artifactsDir "$ARTIFACTS_DIR" \
+        --arg outputArtifact "$output_artifact" \
+        '{
+            schema: $schema,
+            diagnostics: [{
+                code: $code,
+                severity: "error",
+                phase: "prepare",
+                message: $message,
+                step_index: $stepIndex,
+                command: $command,
+                cwd: $cwd,
+                exit_code: $exitCode,
+                artifacts: {
+                    directory: $artifactsDir,
+                    output: $outputArtifact
+                }
+            }]
+        }' > "$diagnostics_file"
+
+    echo "WP Codebox bench prepare step failed before plugin runtime launch." >&2
+    echo "  Step: ${step_index}" >&2
+    echo "  Command: ${command_name}" >&2
+    echo "  CWD: ${cwd_host}" >&2
+    echo "  Exit code: ${exit_code}" >&2
+    echo "  Diagnostics: ${diagnostics_file}" >&2
+    echo "  Raw output: ${output_artifact}" >&2
+}
+
+homeboy_wp_codebox_run_prepare_steps() {
+    if ! printf '%s' "$WP_CODEBOX_PREPARE_STEPS_JSON" | jq -e 'type == "array" and length > 0' >/dev/null 2>&1; then
+        return 0
+    fi
+
+    local index=0
+    local step_json command_name cwd_ref cwd_host output_file exit_code
+    while IFS= read -r step_json; do
+        command_name=$(printf '%s' "$step_json" | jq -r '.command')
+        cwd_ref=$(printf '%s' "$step_json" | jq -r '.cwd // empty')
+        if ! cwd_host=$(homeboy_wp_codebox_prepare_step_cwd "$cwd_ref"); then
+            echo "Error: wp_codebox_prepare_steps[$index].cwd must be a directory under component root." >&2
+            FAILED_STEP="WP Codebox bench prepare setup"
+            exit 1
+        fi
+
+        output_file=$(mktemp "${TMPDIR:-/tmp}/homeboy-wp-codebox-prepare-${index}.XXXXXX")
+        echo "Preparing WordPress bench plugin source: ${command_name}" >&2
+        set +e
+        (
+            cd "$cwd_host"
+            step_args=()
+            while IFS= read -r step_arg; do
+                step_args+=("$step_arg")
+            done < <(printf '%s' "$step_json" | jq -r '(.args // [])[]')
+            "$command_name" "${step_args[@]}"
+        ) >"$output_file" 2>&1
+        exit_code=$?
+        set -e
+
+        if [ "$exit_code" -ne 0 ]; then
+            homeboy_wp_codebox_emit_prepare_failure_diagnostic "$index" "$command_name" "$cwd_host" "$output_file" "$exit_code"
+            rm -f "$output_file"
+            FAILED_STEP="WP Codebox bench prepare step"
+            exit "$exit_code"
+        fi
+
+        rm -f "$output_file"
+        index=$((index + 1))
+    done < <(printf '%s' "$WP_CODEBOX_PREPARE_STEPS_JSON" | jq -c '.[]')
+}
+
 homeboy_wp_codebox_output_has_bootstrap_failure() {
     local output_file="$1"
 
@@ -470,6 +613,7 @@ homeboy_wp_codebox_compile_scenario_manifests() {
 homeboy_wp_codebox_compile_scenario_manifests
 homeboy_wp_codebox_compile_bootstrap_files
 homeboy_wp_codebox_compile_bootstrap_steps
+homeboy_wp_codebox_compile_prepare_steps
 
 WP_CODEBOX_WORDPRESS_VERSION="7.0"
 if [ "$settings_json" != "{}" ]; then
@@ -504,6 +648,8 @@ fi
 if [ -z "$ARTIFACTS_DIR" ]; then
     ARTIFACTS_DIR=$(mktemp -d "${TMPDIR:-/tmp}/homeboy-wp-codebox-bench-artifacts.XXXXXX")
 fi
+
+homeboy_wp_codebox_run_prepare_steps
 
 if type homeboy_preflight_declared_validation_dependency_paths &>/dev/null; then
     if ! homeboy_preflight_declared_validation_dependency_paths "$ARTIFACTS_DIR" "bench"; then
