@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.115.14] - 2026-06-04
+
+### Fixed
+- fix Data Machine bundle run normalization
+
 ## [2.115.13] - 2026-06-04
 
 ### Fixed
