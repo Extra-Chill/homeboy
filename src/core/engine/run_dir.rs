@@ -222,9 +222,11 @@ mod tests {
 
     #[test]
     fn test_path() {
-        let run_dir = RunDir::create().expect("should create run dir");
-        assert!(run_dir.path().is_dir());
-        run_dir.cleanup();
+        crate::test_support::with_isolated_home(|_| {
+            let run_dir = RunDir::create().expect("should create run dir");
+            assert!(run_dir.path().is_dir());
+            run_dir.cleanup();
+        });
     }
 
     #[test]
