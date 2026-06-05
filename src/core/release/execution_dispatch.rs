@@ -159,6 +159,7 @@ pub(super) fn execute_release_plan_step(
                 &context.state,
                 context.component_id,
                 &context.component.local_path,
+                Some(&context.component.github),
                 target,
             )
             .unwrap_or_else(|err| {

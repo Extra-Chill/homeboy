@@ -1,6 +1,7 @@
 //! GitHub Release helper result builders and probes.
 
 use crate::core::component::Component;
+use crate::core::component::GithubConfig;
 use crate::core::deploy::release_download::GitHubRepo;
 use crate::core::error::{Error, Result};
 use crate::core::release::changelog;
@@ -56,7 +57,7 @@ pub(crate) fn run_github_release(
                 format!("Remote URL '{}' is not a GitHub URL", remote_url),
                 None,
                 Some(vec![
-                    "Only github.com remotes are supported for automatic GitHub Releases"
+                    "Use a GitHub or GitHub Enterprise remote for automatic GitHub Releases"
                         .to_string(),
                     "Use --no-github-release to skip this step".to_string(),
                 ]),
@@ -81,9 +82,18 @@ pub(crate) fn run_github_release(
         .map(|artifact| artifact.path.clone())
         .collect();
     let has_artifacts = !artifact_paths.is_empty();
+    let repair_commands = |notes_start_tag: Option<&str>| {
+        github_release_repair_commands(
+            &tag,
+            &github,
+            &component.github,
+            &artifact_paths,
+            notes_start_tag,
+        )
+    };
 
     if !gh_is_available() {
-        let repair = github_release_repair_commands(&tag, &github, &artifact_paths, None);
+        let repair = repair_commands(None);
         log_status!(
             "release",
             "⚠ `gh` CLI not found on PATH — skipping GitHub Release creation"
@@ -97,8 +107,8 @@ pub(crate) fn run_github_release(
         ));
     }
 
-    if !gh_is_authenticated() {
-        let repair = github_release_repair_commands(&tag, &github, &artifact_paths, None);
+    if !gh_is_authenticated(&github, &component.github) {
+        let repair = repair_commands(None);
         log_status!(
             "release",
             "⚠ `gh` is not authenticated — skipping GitHub Release creation"
@@ -114,7 +124,7 @@ pub(crate) fn run_github_release(
     }
 
     let repo_flag = format!("{}/{}", github.owner, github.repo);
-    if gh_release_exists(&tag, &repo_flag) {
+    if gh_release_exists(&github, &component.github, &tag, &repo_flag) {
         // Release entry already exists (idempotent retry, or release
         // created out of band). When the release has no artifacts to
         // attach, skip — there is nothing to update. When artifacts are
@@ -149,8 +159,7 @@ pub(crate) fn run_github_release(
         }
         upload_args.extend_from_slice(&["--clobber", "-R", &repo_flag]);
 
-        let upload_output = std::process::Command::new("gh")
-            .args(&upload_args)
+        let upload_output = gh_command(&github, &component.github, &upload_args)
             .output()
             .map_err(|e| {
                 Error::internal_io(
@@ -176,10 +185,15 @@ pub(crate) fn run_github_release(
     }
 
     let notes_start_tag = github_generated_notes_start_tag(component, &tag)?;
-    let generated_notes = match github_generated_notes(&github, &tag, notes_start_tag.as_deref()) {
+    let generated_notes = match github_generated_notes(
+        &github,
+        &component.github,
+        &tag,
+        notes_start_tag.as_deref(),
+    ) {
         Ok(notes) => notes,
         Err(err) => {
-            let repair = github_release_repair_commands(&tag, &github, &artifact_paths, None);
+            let repair = repair_commands(None);
             log_status!(
                 "release",
                 "⚠ GitHub generated release notes failed: {}",
@@ -229,8 +243,7 @@ pub(crate) fn run_github_release(
         create_args.push(path);
     }
 
-    let output = std::process::Command::new("gh")
-        .args(&create_args)
+    let output = gh_command(&github, &component.github, &create_args)
         .output()
         .map_err(|e| {
             Error::internal_io(
@@ -242,12 +255,7 @@ pub(crate) fn run_github_release(
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let repair = github_release_repair_commands(
-            &tag,
-            &github,
-            &artifact_paths,
-            notes_start_tag.as_deref(),
-        );
+        let repair = repair_commands(notes_start_tag.as_deref());
         log_status!("release", "⚠ `gh release create` failed: {}", stderr.trim());
         log_repair_commands(&repair);
         return Ok(step_success(
@@ -291,6 +299,7 @@ pub(crate) fn run_github_release(
 
 fn github_generated_notes(
     github: &GitHubRepo,
+    config: &GithubConfig,
     tag: &str,
     previous_tag: Option<&str>,
 ) -> Result<String> {
@@ -306,15 +315,12 @@ fn github_generated_notes(
         args.extend_from_slice(&["-f", &previous_field]);
     }
 
-    let output = std::process::Command::new("gh")
-        .args(&args)
-        .output()
-        .map_err(|e| {
-            Error::internal_io(
-                format!("Failed to invoke gh: {}", e),
-                Some("gh api releases/generate-notes".to_string()),
-            )
-        })?;
+    let output = gh_command(github, config, &args).output().map_err(|e| {
+        Error::internal_io(
+            format!("Failed to invoke gh: {}", e),
+            Some("gh api releases/generate-notes".to_string()),
+        )
+    })?;
 
     if !output.status.success() {
         return Err(Error::internal_unexpected(format!(
@@ -335,8 +341,8 @@ fn github_changelog_url(component: &Component, github: &GitHubRepo, tag: &str) -
         .to_string_lossy()
         .replace('\\', "/");
     Some(format!(
-        "https://github.com/{}/{}/blob/{}/{}",
-        github.owner, github.repo, tag, relative
+        "https://{}/{}/{}/blob/{}/{}",
+        github.host, github.owner, github.repo, tag, relative
     ))
 }
 
@@ -346,7 +352,7 @@ pub(super) fn replace_full_changelog_footer(notes: &str, changelog_url: &str) ->
 
     if let Some(index) = lines.iter().rposition(|line| {
         line.trim_start()
-            .starts_with("**Full Changelog**: https://github.com/")
+            .starts_with("**Full Changelog**: https://")
     }) {
         lines[index] = &replacement;
         return lines.join("\n");
@@ -378,6 +384,7 @@ pub(super) fn skipped_result(
         "skipped": true,
         "reason": reason,
         "tag": tag,
+        "host": github.host,
         "owner": github.owner,
         "repo": github.repo,
     });
@@ -403,6 +410,7 @@ pub(super) fn upload_failed_result(
             "skipped": true,
             "reason": "gh-upload-failed",
             "tag": tag,
+            "host": github.host,
             "owner": github.owner,
             "repo": github.repo,
             "stdout": stdout,
@@ -424,6 +432,7 @@ pub(super) fn upload_success_result(
         Some(serde_json::json!({
             "action": "github.release.upload",
             "tag": tag,
+            "host": github.host,
             "owner": github.owner,
             "repo": github.repo,
             "artifact_count": artifact_count,
@@ -436,29 +445,40 @@ pub(super) fn gh_is_available() -> bool {
     crate::core::git::gh_probe_succeeds(&["--version"])
 }
 
-pub(super) fn gh_is_authenticated() -> bool {
-    crate::core::git::gh_probe_succeeds(&["auth", "status", "--hostname", "github.com"])
+pub(super) fn gh_is_authenticated(github: &GitHubRepo, config: &GithubConfig) -> bool {
+    gh_probe_succeeds(
+        github,
+        config,
+        &["auth", "status", "--hostname", &github.host],
+    )
 }
 
-pub(super) fn gh_release_exists(tag: &str, repo_flag: &str) -> bool {
-    crate::core::git::gh_probe_succeeds(&["release", "view", tag, "-R", repo_flag])
+pub(super) fn gh_release_exists(
+    github: &GitHubRepo,
+    config: &GithubConfig,
+    tag: &str,
+    repo_flag: &str,
+) -> bool {
+    gh_probe_succeeds(github, config, &["release", "view", tag, "-R", repo_flag])
 }
 
 pub(super) fn github_release_repair_commands(
     tag: &str,
     github: &GitHubRepo,
+    config: &GithubConfig,
     artifact_paths: &[String],
     previous_tag: Option<&str>,
 ) -> GitHubReleaseRepairCommands {
-    github_release_repair_commands_with_proxy(
+    github_release_repair_commands_with_env(
         tag,
         github,
         artifact_paths,
         previous_tag,
-        configured_proxy_hint().as_deref(),
+        github_cli_env(github, config),
     )
 }
 
+#[cfg(test)]
 pub(super) fn github_release_repair_commands_with_proxy(
     tag: &str,
     github: &GitHubRepo,
@@ -466,7 +486,34 @@ pub(super) fn github_release_repair_commands_with_proxy(
     previous_tag: Option<&str>,
     proxy_hint: Option<&str>,
 ) -> GitHubReleaseRepairCommands {
-    let env_prefix = gh_env_prefix(github, proxy_hint);
+    let env = proxy_hint
+        .filter(|value| !value.trim().is_empty())
+        .map(|proxy| {
+            let mut env = Vec::new();
+            if github.host != "github.com" {
+                env.push(("GH_HOST".to_string(), github.host.clone()));
+            }
+            env.push(("HTTPS_PROXY".to_string(), proxy.trim().to_string()));
+            env
+        })
+        .unwrap_or_else(|| {
+            if github.host != "github.com" {
+                vec![("GH_HOST".to_string(), github.host.clone())]
+            } else {
+                Vec::new()
+            }
+        });
+    github_release_repair_commands_with_env(tag, github, artifact_paths, previous_tag, env)
+}
+
+fn github_release_repair_commands_with_env(
+    tag: &str,
+    github: &GitHubRepo,
+    artifact_paths: &[String],
+    previous_tag: Option<&str>,
+    env: Vec<(String, String)>,
+) -> GitHubReleaseRepairCommands {
+    let env_prefix = gh_env_prefix(&env);
     let repo_flag = format!("{}/{}", github.owner, github.repo);
     let notes_file = format!("build/{}-release-notes.md", safe_filename(tag));
     let endpoint = format!(
@@ -514,7 +561,7 @@ pub(super) fn github_release_repair_commands_with_proxy(
         shell_quote(tag),
         shell_quote(&repo_flag)
     );
-    let env_hint = gh_env_hint(github, proxy_hint);
+    let env_hint = gh_env_hint(github, &env);
 
     GitHubReleaseRepairCommands {
         notes_file,
@@ -556,15 +603,12 @@ fn log_repair_commands(repair: &GitHubReleaseRepairCommands) {
     log_status!("release", "Verify release: `{}`", repair.view_command);
 }
 
-fn gh_env_prefix(github: &GitHubRepo, proxy_hint: Option<&str>) -> String {
-    let mut parts = Vec::new();
-    if github.host != "github.com" {
-        parts.push(format!("GH_HOST={}", shell_quote(&github.host)));
-    }
-    if let Some(proxy) = proxy_hint.filter(|value| !value.trim().is_empty()) {
-        parts.push(format!("HTTPS_PROXY={}", shell_quote(proxy.trim())));
-    }
-
+fn gh_env_prefix(env: &[(String, String)]) -> String {
+    let parts = env
+        .iter()
+        .filter(|(key, value)| !key.is_empty() && !value.is_empty())
+        .map(|(key, value)| format!("{}={}", key, shell_quote(value)))
+        .collect::<Vec<_>>();
     if parts.is_empty() {
         String::new()
     } else {
@@ -572,19 +616,22 @@ fn gh_env_prefix(github: &GitHubRepo, proxy_hint: Option<&str>) -> String {
     }
 }
 
-fn gh_env_hint(github: &GitHubRepo, proxy_hint: Option<&str>) -> Option<String> {
-    if github.host == "github.com" && proxy_hint.is_none() {
+fn gh_env_hint(github: &GitHubRepo, env: &[(String, String)]) -> Option<String> {
+    if github.host == "github.com" && env.is_empty() {
         return None;
     }
 
     let mut hints = Vec::new();
+    let has_proxy = env
+        .iter()
+        .any(|(key, value)| key.eq_ignore_ascii_case("HTTPS_PROXY") && !value.is_empty());
     if github.host != "github.com" {
         hints.push(format!(
             "GitHub Enterprise host detected: repair commands include GH_HOST={}",
             github.host
         ));
     }
-    if proxy_hint.is_some() {
+    if has_proxy {
         hints.push("Configured HTTPS_PROXY is included in repair commands.".to_string());
     } else if github.host != "github.com" {
         hints.push(
@@ -593,14 +640,6 @@ fn gh_env_hint(github: &GitHubRepo, proxy_hint: Option<&str>) -> Option<String> 
     }
 
     Some(hints.join(" "))
-}
-
-fn configured_proxy_hint() -> Option<String> {
-    ["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"]
-        .iter()
-        .find_map(|name| std::env::var(name).ok())
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
 }
 
 fn safe_filename(value: &str) -> String {
@@ -625,4 +664,124 @@ fn shell_quote(value: &str) -> String {
     }
 
     format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn gh_probe_succeeds(github: &GitHubRepo, config: &GithubConfig, args: &[&str]) -> bool {
+    gh_command(github, config, args)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn gh_command(github: &GitHubRepo, config: &GithubConfig, args: &[&str]) -> std::process::Command {
+    let mut command = std::process::Command::new("gh");
+    command.args(args);
+    for (key, value) in github_cli_env(github, config) {
+        command.env(key, value);
+    }
+    command
+}
+
+pub(super) fn github_cli_env(github: &GitHubRepo, config: &GithubConfig) -> Vec<(String, String)> {
+    let mut env = Vec::new();
+    if github.host != "github.com" {
+        env.push(("GH_HOST".to_string(), github.host.clone()));
+    }
+
+    let Some(host_config) = config.hosts.get(&github.host) else {
+        return env;
+    };
+
+    if let Some(proxy) = host_config
+        .proxy
+        .as_deref()
+        .filter(|proxy| !proxy.is_empty())
+    {
+        env.push(("HTTPS_PROXY".to_string(), proxy.to_string()));
+    }
+
+    for (key, value) in &host_config.env {
+        if !key.is_empty() && key != "GH_HOST" {
+            env.retain(|(existing, _)| existing != key);
+            env.push((key.clone(), value.clone()));
+        }
+    }
+
+    env
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use crate::core::component::{GithubConfig, GithubHostConfig};
+    use crate::core::deploy::release_download::GitHubRepo;
+
+    use super::github_cli_env;
+
+    #[test]
+    fn github_cli_env_sets_enterprise_host_and_proxy() {
+        let github = GitHubRepo {
+            host: "github.enterprise.test".to_string(),
+            owner: "owner".to_string(),
+            repo: "repo".to_string(),
+        };
+        let config = GithubConfig {
+            hosts: HashMap::from([(
+                "github.enterprise.test".to_string(),
+                GithubHostConfig {
+                    proxy: Some("socks5://127.0.0.1:9999".to_string()),
+                    env: HashMap::new(),
+                },
+            )]),
+        };
+
+        let env = github_cli_env(&github, &config);
+
+        assert_eq!(
+            env,
+            vec![
+                ("GH_HOST".to_string(), "github.enterprise.test".to_string()),
+                (
+                    "HTTPS_PROXY".to_string(),
+                    "socks5://127.0.0.1:9999".to_string()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn github_cli_env_allows_explicit_host_env_override() {
+        let github = GitHubRepo {
+            host: "github.enterprise.test".to_string(),
+            owner: "owner".to_string(),
+            repo: "repo".to_string(),
+        };
+        let config = GithubConfig {
+            hosts: HashMap::from([(
+                "github.enterprise.test".to_string(),
+                GithubHostConfig {
+                    proxy: Some("socks5://127.0.0.1:9999".to_string()),
+                    env: HashMap::from([(
+                        "HTTPS_PROXY".to_string(),
+                        "https://proxy.example.test:8443".to_string(),
+                    )]),
+                },
+            )]),
+        };
+
+        let env = github_cli_env(&github, &config);
+
+        assert!(env.contains(&("GH_HOST".to_string(), "github.enterprise.test".to_string())));
+        assert!(env.contains(&(
+            "HTTPS_PROXY".to_string(),
+            "https://proxy.example.test:8443".to_string()
+        )));
+        assert!(!env.contains(&(
+            "HTTPS_PROXY".to_string(),
+            "socks5://127.0.0.1:9999".to_string()
+        )));
+    }
 }

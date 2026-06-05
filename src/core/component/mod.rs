@@ -191,6 +191,24 @@ pub struct ComponentLabConfig {
     pub self_command_prefix: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct GithubConfig {
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub hosts: HashMap<String, GithubHostConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct GithubHostConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub env: HashMap<String, String>,
+}
+
+fn is_default_github_config(config: &GithubConfig) -> bool {
+    config.hosts.is_empty()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CleanupArtifactDeclaration {
     pub label: String,
@@ -224,6 +242,9 @@ pub struct Component {
     /// Git remote URL for the component's source repository (e.g., GitHub URL).
     /// Used by deploy to download release artifacts or initialize server-side git repos.
     pub remote_url: Option<String>,
+    /// Host-scoped GitHub CLI/API environment used by release automation.
+    #[serde(default, skip_serializing_if = "is_default_github_config")]
+    pub github: GithubConfig,
     /// Reporting-only GitHub remote override for `homeboy triage`.
     /// Does not affect git, deploy, or release operations.
     pub triage_remote_url: Option<String>,
@@ -314,6 +335,8 @@ struct RawComponent {
     git_deploy: Option<GitDeployConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     remote_url: Option<String>,
+    #[serde(default, skip_serializing_if = "is_default_github_config")]
+    github: GithubConfig,
     #[serde(skip_serializing_if = "Option::is_none")]
     triage_remote_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -368,6 +391,7 @@ impl From<RawComponent> for Component {
             deploy_strategy: raw.deploy_strategy,
             git_deploy: raw.git_deploy,
             remote_url: raw.remote_url,
+            github: raw.github,
             triage_remote_url: raw.triage_remote_url,
             priority_labels: raw.priority_labels,
             auto_cleanup: raw.auto_cleanup,
@@ -408,6 +432,7 @@ impl From<Component> for RawComponent {
             deploy_strategy: c.deploy_strategy,
             git_deploy: c.git_deploy,
             remote_url: c.remote_url,
+            github: c.github,
             triage_remote_url: c.triage_remote_url,
             priority_labels: c.priority_labels,
             auto_cleanup: c.auto_cleanup,
@@ -491,6 +516,7 @@ impl Component {
             deploy_strategy: None,
             git_deploy: None,
             remote_url: None,
+            github: GithubConfig::default(),
             triage_remote_url: None,
             priority_labels: None,
             auto_cleanup: false,
