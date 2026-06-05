@@ -17,6 +17,7 @@ mod manifest_action_config;
 mod manifest_config;
 mod manifest_deploy_config;
 mod manifest_sidecar;
+mod manifest_test_config;
 mod refactor_protocol;
 mod registry;
 mod repair;

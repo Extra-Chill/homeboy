@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use super::manifest::TestDriftConfig;
+use super::manifest_test_config::TestPassthroughFilter;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequirementsConfig {
@@ -248,17 +249,6 @@ pub struct TestConfig {
     /// hint before invoking the extension test runner.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub passthrough_filter: Option<TestPassthroughFilter>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct TestPassthroughFilter {
-    pub strategy: TestPassthroughFilterStrategy,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum TestPassthroughFilterStrategy {
-    RunnerPositional,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

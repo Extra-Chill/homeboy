@@ -18,11 +18,11 @@ pub use super::manifest_config::{
     DeployVerification, DepsConfig, DiscoveryConfig, EnvProviderConfig, FileContainsCondition,
     LintChangedFileRoute, LintConfig, RemotePathInferenceRule, RemotePathRootRule,
     RequirementsConfig, SinceTagConfig, TestChangedFileExclusiveEnv, TestChangedFileRouting,
-    TestChangedFileRoutingStrategy, TestConfig, TestPassthroughFilter,
-    TestPassthroughFilterStrategy, TraceConfig, VersionPatternConfig,
+    TestChangedFileRoutingStrategy, TestConfig, TraceConfig, VersionPatternConfig,
 };
 pub use super::manifest_deploy_config::DeployArchiveInstallPolicy;
 pub use super::manifest_sidecar::{StructuredSidecarContract, StructuredSidecarDeclaration};
+pub use super::manifest_test_config::{TestPassthroughFilter, TestPassthroughFilterStrategy};
 
 /// Type of action that can be executed by a extension.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
