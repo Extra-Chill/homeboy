@@ -214,6 +214,36 @@ pub fn evaluate(command: HotCommand, resources: &DoctorOutput) -> Option<Resourc
     }
 }
 
+pub fn non_interactive_preflight_error(
+    warning: &ResourcePolicyWarning,
+    force_hot: bool,
+    interactive: bool,
+) -> Option<crate::core::Error> {
+    if force_hot || interactive {
+        return None;
+    }
+
+    Some(crate::core::Error::validation_invalid_argument(
+        "resource-policy",
+        format!(
+            "Refusing to start `{}` on a {} machine from a non-interactive shell. {} Use a safe Lab/offload path once this command supports it, or rerun later when `homeboy doctor resources` reports ok.",
+            warning.command,
+            severity_str(warning.recommendation),
+            primary_action(warning),
+        ),
+        None,
+        None,
+    ))
+}
+
+fn primary_action(warning: &ResourcePolicyWarning) -> &'static str {
+    if warning.message.contains("--runner <id>") {
+        "Connect a default Homeboy Lab runner or pass --runner <id> when Lab offload supports this mode."
+    } else {
+        "This command is currently local-only under resource policy."
+    }
+}
+
 fn warning_message(
     command: HotCommand,
     recommendation: ResourceRecommendation,
@@ -371,6 +401,36 @@ mod tests {
             &resources(ResourceRecommendation::Ok)
         )
         .is_none());
+    }
+
+    #[test]
+    fn non_interactive_hot_warning_fails_before_starting_command() {
+        let warning = evaluate(
+            lab_supported_hot("audit"),
+            &resources(ResourceRecommendation::Hot),
+        )
+        .expect("hot machines warn");
+
+        let error = non_interactive_preflight_error(&warning, false, false)
+            .expect("non-interactive hot runs should fail fast");
+
+        assert_eq!(error.code.as_str(), "validation.invalid_argument");
+        assert!(error.message.contains("Refusing to start `audit`"));
+        assert!(error.message.contains("non-interactive shell"));
+        assert!(error.message.contains("--runner <id>"));
+        assert!(!error.message.contains("Use --force-hot"));
+    }
+
+    #[test]
+    fn interactive_or_forced_hot_warning_does_not_fail_preflight() {
+        let warning = evaluate(
+            lab_supported_hot("audit"),
+            &resources(ResourceRecommendation::Hot),
+        )
+        .expect("hot machines warn");
+
+        assert!(non_interactive_preflight_error(&warning, false, true).is_none());
+        assert!(non_interactive_preflight_error(&warning, true, false).is_none());
     }
 
     #[test]
