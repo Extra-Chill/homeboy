@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.115.45] - 2026-06-05
+
+### Changed
+- Add WordPress bench state sampling helpers
+
 ## [2.115.44] - 2026-06-05
 
 ### Changed
