@@ -278,6 +278,50 @@ if [ -f "$WP_TEST_SMELLS" ]; then
     python3 "$WP_TEST_SMELLS" "$PLUGIN_PATH"
 fi
 
+compile_phpunit_bootstrap_files() {
+    local settings_json="${HOMEBOY_SETTINGS_JSON:-}"
+    [ -n "$settings_json" ] || settings_json="{}"
+    local entries_json
+    entries_json=$(printf '%s' "$settings_json" | jq -c '
+        .wp_codebox_bootstrap_files // []
+        | if type == "array" then . elif type == "string" then [.] else [] end
+    ' 2>/dev/null || echo '[]')
+
+    WP_CODEBOX_BOOTSTRAP_FILES_JSON="[]"
+    if ! printf '%s' "$entries_json" | jq -e 'type == "array" and length > 0' >/dev/null 2>&1; then
+        return 0
+    fi
+
+    local index=0
+    while IFS= read -r bootstrap_ref; do
+        [ -n "$bootstrap_ref" ] || continue
+        if [[ "$bootstrap_ref" == *..* ]]; then
+            echo "Error: wp_codebox_bootstrap_files[$index] must stay under component root: $bootstrap_ref" >&2
+            FAILED_STEP="WP Codebox bootstrap file setup"
+            exit 1
+        fi
+
+        local bootstrap_host
+        bootstrap_host=$(homeboy_wp_codebox_resolve_host_path "$PLUGIN_PATH" "$bootstrap_ref")
+        if [[ "$bootstrap_host" = /* && "$bootstrap_host" != "$PLUGIN_PATH"/* ]]; then
+            echo "Error: wp_codebox_bootstrap_files[$index] must stay under component root: $bootstrap_ref" >&2
+            FAILED_STEP="WP Codebox bootstrap file setup"
+            exit 1
+        fi
+        if [ ! -f "$bootstrap_host" ]; then
+            index=$((index + 1))
+            continue
+        fi
+
+        local bootstrap_rel
+        bootstrap_rel=$(homeboy_wp_codebox_component_relative_path "$bootstrap_host")
+        WP_CODEBOX_BOOTSTRAP_FILES_JSON=$(jq -nc --argjson files "$WP_CODEBOX_BOOTSTRAP_FILES_JSON" --arg file "$bootstrap_rel" '$files + [$file]')
+        index=$((index + 1))
+    done < <(printf '%s' "$entries_json" | jq -r '.[] | select(type == "string" and . != "")')
+}
+
+compile_phpunit_bootstrap_files
+
 if [ -n "${COMPONENT_ID:-}" ]; then
     export HOMEBOY_COMPONENT_ID="$COMPONENT_ID"
     export HOMEBOY_COMPONENT_PATH="$PLUGIN_PATH"
@@ -331,6 +375,11 @@ if [ -n "${HOMEBOY_CHANGED_TEST_FILES:-}" ]; then
         echo json_encode($files, JSON_UNESCAPED_SLASHES);
     ' 2>/dev/null || printf '[]')
 fi
+PHPUNIT_ARGS_JSON=$(printf '%s\0' "${PASSTHROUGH_ARGS[@]}" | php -r '
+    $raw = stream_get_contents(STDIN);
+    $parts = array_values(array_filter(explode("\0", $raw), static function ($value) { return $value !== ""; }));
+    echo json_encode($parts, JSON_UNESCAPED_SLASHES);
+' 2>/dev/null || printf '[]')
 
 SELECTED_TEST_FILE_REL=""
 if [ -n "$SELECTED_TEST_FILE" ]; then
@@ -485,8 +534,10 @@ jq -n \
     --arg pluginSlug "$PLUGIN_SLUG" \
     --arg selectedTestFile "$SELECTED_TEST_FILE_REL" \
     --argjson changedTests "$CHANGED_TEST_FILES_JSON" \
+    --argjson phpunitArgs "$PHPUNIT_ARGS_JSON" \
     --argjson env "$BENCH_ENV_JSON" \
     --argjson defines "$WP_CONFIG_DEFINES_JSON" \
+    --argjson bootstrapFiles "$WP_CODEBOX_BOOTSTRAP_FILES_JSON" \
     --arg dependencyMounts "$WP_CODEBOX_DEP_MOUNTS" \
     --arg multisite "$WP_CODEBOX_MULTISITE" \
     '{
@@ -495,8 +546,10 @@ jq -n \
         pluginSlug: $pluginSlug,
         selectedTestFile: $selectedTestFile,
         changedTestFiles: $changedTests,
+        phpunitArgs: $phpunitArgs,
         env: $env,
         wpConfigDefines: $defines,
+        bootstrapFiles: $bootstrapFiles,
         autoloadFile: "/wp-codebox-vendor/autoload.php",
         testsDir: "/wp-codebox-vendor/wp-phpunit/wp-phpunit",
         dependencyMounts: ($dependencyMounts | split("\n") | map(select(. != ""))),

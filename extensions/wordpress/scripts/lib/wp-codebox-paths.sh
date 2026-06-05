@@ -23,3 +23,24 @@ homeboy_wp_codebox_resolve_mount_path() {
 
     printf '%s\n' "$host_path"
 }
+
+homeboy_wp_codebox_resolve_host_path() {
+    local root="$1"
+    local ref="$2"
+
+    if [[ "$ref" = /* ]]; then
+        printf '%s\n' "$ref"
+    else
+        printf '%s/%s\n' "${root%/}" "$ref"
+    fi
+}
+
+homeboy_wp_codebox_component_relative_path() {
+    local host_path="$1"
+
+    if [[ "$host_path" = "$PLUGIN_PATH"/* ]]; then
+        printf '%s\n' "${host_path#"$PLUGIN_PATH/"}"
+    else
+        printf '%s\n' "$host_path"
+    fi
+}

@@ -37,7 +37,7 @@ if [ -n "$WRITE_TEST_RESULTS_HELPER" ] && [ -f "$WRITE_TEST_RESULTS_HELPER" ]; t
     source "$WRITE_TEST_RESULTS_HELPER"
 fi
 
-ADAPTERS_HELPER="${HOMEBOY_RUNTIME_TEST_RESULT_ADAPTERS:-$(cd "${SCRIPT_DIR}/../../.." && pwd)/scripts/lib/test-result-adapters.sh}"
-# shellcheck source=../../../scripts/lib/test-result-adapters.sh
+ADAPTERS_HELPER="${HOMEBOY_RUNTIME_TEST_RESULT_ADAPTERS:-${SCRIPT_DIR}/../lib/test-result-adapters.sh}"
+# shellcheck source=../lib/test-result-adapters.sh
 source "$ADAPTERS_HELPER"
 homeboy_parse_test_results_with_adapters "$OUTPUT_FILE" wp-codebox-json host-smoke phpunit phpunit-testdox
