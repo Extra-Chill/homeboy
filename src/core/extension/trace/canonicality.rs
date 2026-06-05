@@ -99,6 +99,7 @@ pub(crate) fn refused_trace_result(
         artifacts: Vec::new(),
         toolchain: None,
         components: None,
+        dependencies: Vec::new(),
     };
 
     TraceRunWorkflowResult {
