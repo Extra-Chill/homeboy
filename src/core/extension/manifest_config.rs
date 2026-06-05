@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use super::manifest::TestDriftConfig;
+use super::manifest_test_config::TestPassthroughFilter;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequirementsConfig {
@@ -243,6 +244,11 @@ pub struct TestConfig {
     /// extension test runner.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub changed_file_routing: Option<TestChangedFileRouting>,
+
+    /// Manifest-driven mapping for Homeboy's generic `--filter` passthrough
+    /// hint before invoking the extension test runner.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub passthrough_filter: Option<TestPassthroughFilter>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

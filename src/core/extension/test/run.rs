@@ -4,9 +4,10 @@ use crate::core::engine::run_dir::{self, RunDir};
 use crate::core::extension::test::analyze::{analyze, TestAnalysis, TestAnalysisInput};
 use crate::core::extension::test::baseline::{self, TestBaselineComparison, TestCounts};
 use crate::core::extension::test::{
-    build_test_runner, build_test_summary, compute_changed_test_scope, parse_coverage_file,
-    parse_failures_file, parse_test_results_file, parse_test_results_text,
-    parse_test_results_text_with_spec, CoverageOutput, TestScopeOutput, TestSummaryOutput,
+    build_test_runner, build_test_summary, compute_changed_test_scope,
+    normalize_test_passthrough_args, parse_coverage_file, parse_failures_file,
+    parse_test_results_file, parse_test_results_text, parse_test_results_text_with_spec,
+    CoverageOutput, TestScopeOutput, TestSummaryOutput,
 };
 use crate::core::extension::{self, ExtensionCapability};
 use crate::core::finding::HomeboyFinding;
@@ -228,6 +229,7 @@ pub fn run_main_test_workflow(
         .ci_env
         .iter()
         .fold(runner, |runner, (key, value)| runner.env(key, value));
+    let passthrough_args = normalize_test_passthrough_args(component, &args.passthrough_args)?;
     let output = runner
         .env_if(args.changed_since.is_some(), "SCOPE_MODE", "changed")
         .env_if(
@@ -240,7 +242,7 @@ pub fn run_main_test_workflow(
             "HOMEBOY_STRICT_VALIDATION_DEPENDENCIES",
             "1",
         )
-        .script_args(&args.passthrough_args)
+        .script_args(&passthrough_args)
         .run()?;
 
     let mut test_counts = parse_test_results_file(&results_file).or_else(|| {

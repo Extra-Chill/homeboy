@@ -237,6 +237,32 @@ fn manifest_parses_changed_test_routing_contract() {
 }
 
 #[test]
+fn manifest_parses_passthrough_filter_contract() {
+    let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
+        "name": "Example",
+        "version": "0.0.0",
+        "test": {
+            "extension_script": "test.sh",
+            "passthrough_filter": {
+                "strategy": "runner_positional"
+            }
+        }
+    }))
+    .unwrap();
+
+    let filter = manifest
+        .test
+        .as_ref()
+        .and_then(|test| test.passthrough_filter.as_ref())
+        .expect("test passthrough filter should parse");
+
+    assert_eq!(
+        filter.strategy,
+        TestPassthroughFilterStrategy::RunnerPositional
+    );
+}
+
+#[test]
 fn manifest_rejects_legacy_discovery_marker_alias() {
     let err = serde_json::from_value::<ExtensionManifest>(serde_json::json!({
         "name": "Example",

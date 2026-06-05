@@ -10,7 +10,8 @@ use crate::core::component::Component;
 use crate::core::extension::test::drift::DriftOptions;
 use crate::core::extension::{
     ExtensionCapability, ExtensionExecutionContext, ExtensionRunner, TestChangedFileExclusiveEnv,
-    TestChangedFileRouting, TestChangedFileRoutingStrategy,
+    TestChangedFileRouting, TestChangedFileRoutingStrategy, TestPassthroughFilter,
+    TestPassthroughFilterStrategy,
 };
 use crate::core::git;
 use serde::Serialize;
@@ -90,6 +91,61 @@ pub fn build_test_runner(
     }
 
     Ok(runner)
+}
+
+pub fn normalize_test_passthrough_args(
+    component: &Component,
+    args: &[String],
+) -> crate::core::error::Result<Vec<String>> {
+    let Some(filter) = test_passthrough_filter(component)? else {
+        return Ok(args.to_vec());
+    };
+
+    Ok(normalize_filter_passthrough_args(args, &filter))
+}
+
+fn test_passthrough_filter(
+    component: &Component,
+) -> crate::core::error::Result<Option<TestPassthroughFilter>> {
+    let context = resolve_test_command(component)?;
+    let manifest = crate::core::extension::load_extension(&context.extension_id)?;
+    Ok(manifest
+        .test
+        .and_then(|test| test.passthrough_filter.clone()))
+}
+
+fn normalize_filter_passthrough_args(
+    args: &[String],
+    filter: &TestPassthroughFilter,
+) -> Vec<String> {
+    match filter.strategy {
+        TestPassthroughFilterStrategy::RunnerPositional => positional_filter_args(args),
+    }
+}
+
+fn positional_filter_args(args: &[String]) -> Vec<String> {
+    let mut normalized = Vec::new();
+    let mut iter = args.iter();
+
+    while let Some(arg) = iter.next() {
+        if let Some(filter) = arg.strip_prefix("--filter=") {
+            if !filter.is_empty() {
+                normalized.push(filter.to_string());
+            }
+            continue;
+        }
+
+        if arg == "--filter" {
+            if let Some(filter) = iter.next() {
+                normalized.push(filter.clone());
+            }
+            continue;
+        }
+
+        normalized.push(arg.clone());
+    }
+
+    normalized
 }
 
 fn test_changed_file_routing(
@@ -565,6 +621,49 @@ mod tests {
             "HOMEBOY_TEST_RUNNER_ARGS".to_string(),
             "--\ncore::daemon".to_string()
         )));
+    }
+
+    #[test]
+    fn positional_passthrough_translates_equals_filter_to_runner_filter() {
+        let args = vec![
+            "--filter=core::daemon".to_string(),
+            "--".to_string(),
+            "--nocapture".to_string(),
+        ];
+        let filter = TestPassthroughFilter {
+            strategy: TestPassthroughFilterStrategy::RunnerPositional,
+        };
+
+        assert_eq!(
+            normalize_filter_passthrough_args(&args, &filter),
+            vec![
+                "core::daemon".to_string(),
+                "--".to_string(),
+                "--nocapture".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn positional_passthrough_translates_split_filter_to_runner_filter() {
+        let args = vec![
+            "--filter".to_string(),
+            "core::daemon".to_string(),
+            "--".to_string(),
+            "--nocapture".to_string(),
+        ];
+        let filter = TestPassthroughFilter {
+            strategy: TestPassthroughFilterStrategy::RunnerPositional,
+        };
+
+        assert_eq!(
+            normalize_filter_passthrough_args(&args, &filter),
+            vec![
+                "core::daemon".to_string(),
+                "--".to_string(),
+                "--nocapture".to_string()
+            ]
+        );
     }
 
     #[test]
