@@ -1425,6 +1425,12 @@ fn changed_source_files(root: &Path, changed_since: &str) -> Option<BTreeSet<Str
 }
 
 fn is_retired_homeboy_domain_policy_fingerprint(fingerprint: &str) -> bool {
+    if fingerprint.contains("src/core/extension/runtime/bench-helper.php")
+        && fingerprint.contains("configured ecosystem term `php`")
+    {
+        return true;
+    }
+
     [
         "`Homeboy`",
         "`homeboy.json`",
