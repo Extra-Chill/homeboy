@@ -224,6 +224,42 @@ If a workload writes its own detailed step-series file, attach it predictably as
 that artifact reference in `series.json`, so Homeboy evidence and reporting can
 discover either inline rows or workload-owned row files through the same key.
 
+### WordPress benchmark state sampling helpers
+
+Bench workloads that need to sample WordPress option or transient growth can use
+the generic state sampling helper mounted with the WordPress extension:
+
+```php
+<?php
+require_once '/homeboy-extension/scripts/bench/lib/wordpress-state-sampling.php';
+
+$before = homeboy_wordpress_bench_sample_transient('example_cache', [
+    'sample_index' => 0,
+    'label' => 'before',
+]);
+
+// Run the workload operation that may change option or transient state.
+
+$after = homeboy_wordpress_bench_sample_transient('example_cache', [
+    'sample_index' => 1,
+    'label' => 'after',
+]);
+
+return [
+    'metadata' => [
+        'state_samples' => [$before, $after],
+        'state_delta' => homeboy_wordpress_bench_sample_delta($before, $after),
+    ],
+];
+```
+
+`homeboy_wordpress_bench_sample_option($name, $context)` samples a named option.
+`homeboy_wordpress_bench_sample_transient($name, $context)` samples the backing
+transient option row without workload SQL. Both helpers report existence/missing
+state, serialized byte size, value type, array entry count when applicable, and
+sample context such as `sample_index`, `label`, and `sampled_at_unix_ms`. Pass
+`network => true` in the transient context to sample a site transient.
+
 Playground grader workloads may also return a normalized reward payload:
 
 ```json
