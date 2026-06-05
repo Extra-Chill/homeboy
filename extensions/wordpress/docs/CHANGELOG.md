@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.115.34] - 2026-06-05
+
+### Fixed
+- fix agent bundle runner status normalization
+
 ## [2.115.33] - 2026-06-05
 
 ### Fixed
