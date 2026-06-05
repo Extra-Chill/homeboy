@@ -7,6 +7,7 @@ use crate::core::release::executor;
 use crate::core::release::types::{
     ReleaseOptions, ReleaseState, ReleaseStepResult, ReleaseStepStatus,
 };
+use std::collections::BTreeSet;
 
 pub(super) struct ReleaseExecutionContext<'a> {
     pub(super) component: &'a Component,
@@ -25,7 +26,8 @@ pub(super) fn execute_release_plan_step(
         return Ok(None);
     }
 
-    match step.kind.as_str() {
+    let tracked_dirty_before = tracked_dirty_snapshot_for_step(step, context)?;
+    let result = match step.kind.as_str() {
         "preflight.default_branch" => Ok(Some(run_default_branch_preflight(step, context))),
         "preflight.git_identity" => configure_git_identity(step, context).map(Some),
         "preflight.working_tree" => Ok(Some(run_working_tree_preflight(step, context))),
@@ -174,7 +176,14 @@ pub(super) fn execute_release_plan_step(
             "release plan contains unsupported executable step '{}'",
             step.kind
         ))),
+    }?;
+
+    if let Some(result) = result {
+        return guard_step_dirty_side_effects(step, context, tracked_dirty_before, result)
+            .map(Some);
     }
+
+    Ok(None)
 }
 
 fn release_step_is_plan_only(step: &PlanStep) -> bool {
@@ -471,13 +480,109 @@ fn failed_result(id: &str, step_type: &str, err: Error) -> ReleaseStepResult {
     }
 }
 
+fn tracked_dirty_snapshot_for_step(
+    step: &PlanStep,
+    context: &ReleaseExecutionContext,
+) -> Result<Option<BTreeSet<String>>> {
+    if !release_step_dirty_side_effects_are_guarded(step) {
+        return Ok(None);
+    }
+    if !git::is_git_repo(&context.component.local_path) {
+        return Ok(None);
+    }
+
+    tracked_dirty_snapshot(&context.component.local_path).map(Some)
+}
+
+fn guard_step_dirty_side_effects(
+    step: &PlanStep,
+    context: &ReleaseExecutionContext,
+    before: Option<BTreeSet<String>>,
+    result: ReleaseStepResult,
+) -> Result<ReleaseStepResult> {
+    if !matches!(result.status, ReleaseStepStatus::Success) {
+        return Ok(result);
+    }
+
+    let Some(before) = before else {
+        return Ok(result);
+    };
+
+    let after = tracked_dirty_snapshot(&context.component.local_path)?;
+    let introduced: Vec<String> = after.difference(&before).cloned().collect();
+    if introduced.is_empty() {
+        return Ok(result);
+    }
+
+    Ok(dirty_side_effect_failure(step, introduced))
+}
+
+fn release_step_dirty_side_effects_are_guarded(step: &PlanStep) -> bool {
+    matches!(
+        step.kind.as_str(),
+        "preflight.lint" | "preflight.test" | "preflight.package" | "release.prepare" | "package"
+    )
+}
+
+fn tracked_dirty_snapshot(path: &str) -> Result<BTreeSet<String>> {
+    let changes = git::get_uncommitted_changes(path)?;
+    let files = changes
+        .staged
+        .into_iter()
+        .chain(changes.unstaged)
+        .collect::<Vec<_>>();
+    Ok(super::planning_worktree::filter_homeboy_managed(files)
+        .into_iter()
+        .collect())
+}
+
+fn dirty_side_effect_failure(step: &PlanStep, files: Vec<String>) -> ReleaseStepResult {
+    let file_count = files.len();
+    let displayed_files = files.iter().take(10).cloned().collect::<Vec<_>>();
+    let suffix = if file_count > 10 { ", ..." } else { "" };
+    let err = Error::validation_invalid_argument(
+        "working_tree",
+        format!(
+            "{} dirtied tracked file{}: {}{}",
+            step.kind,
+            if file_count == 1 { "" } else { "s" },
+            displayed_files.join(", "),
+            suffix,
+        ),
+        Some(step.kind.clone()),
+        Some(vec![
+            "Commit intentional generated asset changes before retrying the release".to_string(),
+            "Fix the build/test/package step so it is deterministic and leaves tracked files unchanged".to_string(),
+            "Restore generated output with `git restore <file>` before rerunning if the change was not intentional".to_string(),
+        ]),
+    )
+    .with_hint("Commit intentional generated asset changes before retrying the release")
+    .with_hint(
+        "Fix the build/test/package step so it is deterministic and leaves tracked files unchanged",
+    )
+    .with_hint(
+        "Restore generated output with `git restore <file>` before rerunning if the change was not intentional",
+    );
+    let mut result = failed_result(&step.id, &step.kind, err);
+    result.data = Some(serde_json::json!({
+        "phase": step.kind,
+        "dirty_tracked_files": files,
+        "recovery": [
+            "Commit intentional generated asset changes before retrying the release",
+            "Fix the build/test/package step so it is deterministic and leaves tracked files unchanged",
+            "Restore generated output with `git restore <file>` before rerunning if the change was not intentional"
+        ]
+    }));
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         execute_release_plan_step, release_step_is_plan_only, release_step_is_show_stopper,
         ReleaseExecutionContext,
     };
-    use crate::core::component::{Component, VersionTarget};
+    use crate::core::component::{Component, ComponentScriptsConfig, VersionTarget};
     use crate::core::plan::PlanStep;
     use crate::core::release::types::{
         ReleaseOptions, ReleaseState, ReleaseStepResult, ReleaseStepStatus,
@@ -715,6 +820,76 @@ mod tests {
             assert_eq!(result.data, Some(serde_json::json!({ "ran": false })));
             assert!(!release_step_is_show_stopper(&result));
         }
+    }
+
+    #[test]
+    fn quality_preflight_reports_phase_that_dirties_tracked_files() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        run_in(temp.path(), &["git", "init", "-q"]);
+        configure_git_user(temp.path());
+        std::fs::write(temp.path().join("tracked.txt"), "clean\n").expect("write tracked file");
+        std::fs::create_dir(temp.path().join("scripts")).expect("create scripts dir");
+        std::fs::write(
+            temp.path().join("scripts/test.sh"),
+            "printf 'dirty\\n' > tracked.txt\n",
+        )
+        .expect("write test script");
+        run_in(temp.path(), &["git", "add", "."]);
+        run_in(
+            temp.path(),
+            &["git", "commit", "-q", "-m", "Initial commit"],
+        );
+
+        let component = Component {
+            id: "fixture".to_string(),
+            local_path: temp.path().to_string_lossy().to_string(),
+            scripts: Some(ComponentScriptsConfig {
+                test: vec!["sh scripts/test.sh".to_string()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let options = ReleaseOptions::default();
+        let mut context = ReleaseExecutionContext {
+            component: &component,
+            extensions: &[],
+            component_id: "fixture",
+            options: &options,
+            state: ReleaseState::default(),
+            publish_failed: false,
+        };
+
+        let result = execute_release_plan_step(&plan_step("preflight.test"), &mut context)
+            .expect("dispatch")
+            .expect("result");
+
+        assert_eq!(result.status, ReleaseStepStatus::Failed);
+        assert!(release_step_is_show_stopper(&result));
+        assert!(result
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("preflight.test dirtied tracked file"));
+        assert_eq!(
+            result
+                .data
+                .as_ref()
+                .and_then(|data| data.get("phase"))
+                .and_then(|value| value.as_str()),
+            Some("preflight.test")
+        );
+        assert!(result
+            .data
+            .as_ref()
+            .and_then(|data| data.get("dirty_tracked_files"))
+            .and_then(|value| value.as_array())
+            .expect("dirty tracked files should be reported")
+            .iter()
+            .any(|value| value.as_str() == Some("tracked.txt")));
+        assert!(result
+            .hints
+            .iter()
+            .any(|hint| hint.message.contains("Fix the build/test/package step")));
     }
 
     #[test]
