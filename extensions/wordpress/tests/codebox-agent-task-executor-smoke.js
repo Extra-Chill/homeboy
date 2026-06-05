@@ -66,10 +66,11 @@ fs.writeFileSync(${JSON.stringify(capture)}, JSON.stringify({ argv: process.argv
 process.stdout.write(JSON.stringify({
   success: true,
   schema: 'wp-codebox/agent-task-run/v1',
+  status: 'failed',
   session: {
     schema: 'wp-codebox/sandbox-session/v1',
     id: input.sandbox_session_id,
-    status: 'completed',
+    status: 'failed',
     artifacts: { bundle_id: 'fake-artifact-bundle', path: input.artifacts_path, preview_url: 'https://preview.example.test/fake' },
     orchestrator: input.orchestrator
   },
