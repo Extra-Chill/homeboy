@@ -73,8 +73,8 @@ pub use manifest::{
     ProvidesConfig, RemotePathInferenceRule, RemotePathRootRule, RequirementsConfig, RuntimeConfig,
     RuntimeRequirementsConfig, ScriptsConfig, SelectOption, SettingConfig, SinceTagConfig,
     StructuredSidecarDeclaration, TestChangedFileExclusiveEnv, TestChangedFileRouting,
-    TestChangedFileRoutingStrategy, TestConfig, TestDriftConfig, TestMappingConfig, TraceConfig,
-    VersionPatternConfig,
+    TestChangedFileRoutingStrategy, TestConfig, TestDriftConfig, TestMappingConfig,
+    TestPassthroughFilter, TestPassthroughFilterStrategy, TraceConfig, VersionPatternConfig,
 };
 pub use manifest_deploy_config::{DeployArchiveInstallPolicy, DeployRequiredHeader};
 pub use refactor_protocol::{

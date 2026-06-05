@@ -18,7 +18,8 @@ pub use super::manifest_config::{
     DeployVerification, DepsConfig, DiscoveryConfig, EnvProviderConfig, FileContainsCondition,
     LintChangedFileRoute, LintConfig, RemotePathInferenceRule, RemotePathRootRule,
     RequirementsConfig, SinceTagConfig, TestChangedFileExclusiveEnv, TestChangedFileRouting,
-    TestChangedFileRoutingStrategy, TestConfig, TraceConfig, VersionPatternConfig,
+    TestChangedFileRoutingStrategy, TestConfig, TestPassthroughFilter,
+    TestPassthroughFilterStrategy, TraceConfig, VersionPatternConfig,
 };
 pub use super::manifest_deploy_config::DeployArchiveInstallPolicy;
 pub use super::manifest_sidecar::{StructuredSidecarContract, StructuredSidecarDeclaration};

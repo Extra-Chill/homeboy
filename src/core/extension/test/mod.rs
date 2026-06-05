@@ -10,7 +10,8 @@ use crate::core::component::Component;
 use crate::core::extension::test::drift::DriftOptions;
 use crate::core::extension::{
     ExtensionCapability, ExtensionExecutionContext, ExtensionRunner, TestChangedFileExclusiveEnv,
-    TestChangedFileRouting, TestChangedFileRoutingStrategy,
+    TestChangedFileRouting, TestChangedFileRoutingStrategy, TestPassthroughFilter,
+    TestPassthroughFilterStrategy,
 };
 use crate::core::git;
 use serde::Serialize;
@@ -96,24 +97,33 @@ pub fn normalize_test_passthrough_args(
     component: &Component,
     args: &[String],
 ) -> crate::core::error::Result<Vec<String>> {
-    if !uses_rust_cargo_test_routing(component)? {
+    let Some(filter) = test_passthrough_filter(component)? else {
         return Ok(args.to_vec());
-    }
+    };
 
-    Ok(normalize_rust_cargo_test_filter_args(args))
+    Ok(normalize_filter_passthrough_args(args, &filter))
 }
 
-fn uses_rust_cargo_test_routing(component: &Component) -> crate::core::error::Result<bool> {
+fn test_passthrough_filter(
+    component: &Component,
+) -> crate::core::error::Result<Option<TestPassthroughFilter>> {
     let context = resolve_test_command(component)?;
     let manifest = crate::core::extension::load_extension(&context.extension_id)?;
-
-    Ok(test_changed_file_routing(&context.extension_id)?
-        .is_some_and(|routing| routing.strategy == TestChangedFileRoutingStrategy::RustCargo)
-        || manifest.cli.as_ref().is_some_and(|cli| cli.tool == "cargo")
-        || context.extension_id == "rust")
+    Ok(manifest
+        .test
+        .and_then(|test| test.passthrough_filter.clone()))
 }
 
-fn normalize_rust_cargo_test_filter_args(args: &[String]) -> Vec<String> {
+fn normalize_filter_passthrough_args(
+    args: &[String],
+    filter: &TestPassthroughFilter,
+) -> Vec<String> {
+    match filter.strategy {
+        TestPassthroughFilterStrategy::RunnerPositional => positional_filter_args(args),
+    }
+}
+
+fn positional_filter_args(args: &[String]) -> Vec<String> {
     let mut normalized = Vec::new();
     let mut iter = args.iter();
 
@@ -614,15 +624,18 @@ mod tests {
     }
 
     #[test]
-    fn rust_cargo_passthrough_translates_equals_filter_to_positional_filter() {
+    fn positional_passthrough_translates_equals_filter_to_runner_filter() {
         let args = vec![
             "--filter=core::daemon".to_string(),
             "--".to_string(),
             "--nocapture".to_string(),
         ];
+        let filter = TestPassthroughFilter {
+            strategy: TestPassthroughFilterStrategy::RunnerPositional,
+        };
 
         assert_eq!(
-            normalize_rust_cargo_test_filter_args(&args),
+            normalize_filter_passthrough_args(&args, &filter),
             vec![
                 "core::daemon".to_string(),
                 "--".to_string(),
@@ -632,16 +645,19 @@ mod tests {
     }
 
     #[test]
-    fn rust_cargo_passthrough_translates_split_filter_to_positional_filter() {
+    fn positional_passthrough_translates_split_filter_to_runner_filter() {
         let args = vec![
             "--filter".to_string(),
             "core::daemon".to_string(),
             "--".to_string(),
             "--nocapture".to_string(),
         ];
+        let filter = TestPassthroughFilter {
+            strategy: TestPassthroughFilterStrategy::RunnerPositional,
+        };
 
         assert_eq!(
-            normalize_rust_cargo_test_filter_args(&args),
+            normalize_filter_passthrough_args(&args, &filter),
             vec![
                 "core::daemon".to_string(),
                 "--".to_string(),
