@@ -11,7 +11,7 @@ homeboy bench matrix [<component>] --setting-matrix <key=value[,value...]> [opti
 homeboy bench list <component> [options] [-- <runner-args>]
 homeboy bench history <component> [--scenario <id>] [--rig <id>] [--limit 20]
 homeboy bench distribution <component> --field <metadata.path> [--scenario <id>] [--rig <id>] [--status <status>] [--limit 20]
-homeboy bench compare --from-run <run-id> --to-run <run-id>
+homeboy bench compare --from-run <run-id> --to-run <run-id> [--metric <name>]
 ```
 
 ## Description
@@ -183,7 +183,13 @@ Omit `--rig <rig>` from the list command for unpinned bench runs.
 
 `homeboy bench distribution <component> --field <metadata.path>` summarizes repeated categorical values from persisted benchmark run metadata. It is generic over metadata shape: scalar string, number, and boolean values are counted directly, and arrays are flattened. Use `--scenario`, `--rig`, `--status`, and `--limit` to narrow the persisted run window before aggregation.
 
-`homeboy bench compare --from-run <run-id> --to-run <run-id>` compares numeric metrics recorded in two persisted benchmark runs. It matches scenario + metric rows, reports absolute deltas and percent changes, and lists metrics that exist in only one run. The command is read-only and exits successfully for a valid comparison even when the numbers regress.
+`homeboy bench compare --from-run <baseline-run-id> --to-run <candidate-run-id>` compares numeric metrics recorded in two persisted benchmark runs. It is the first useful baseline-vs-candidate comparison slice: it captures both run IDs, component state, shared bench context, selected metric deltas, and a Markdown table under `reports.markdown` in the JSON payload.
+
+The command is read-only and exits successfully for a valid comparison even when the numbers regress. Repeat `--metric <name>` to keep the comparison focused; omit it to compare all shared numeric scenario metrics.
+
+Homeboy rejects comparisons when the stored shared benchmark context differs for settings, selected scenarios, workload fingerprints, iteration count, run count, or concurrency. This keeps manually-created baseline/candidate runs from being compared when they were not actually measuring the same scenario contract.
+
+This slice compares two existing persisted run IDs. A future execution mode should wrap two `homeboy bench` invocations in one command, using the same rig/scenario/settings and separate component paths or refs, then feed the resulting persisted run IDs through this comparison layer.
 
 ## Scenario Discovery
 

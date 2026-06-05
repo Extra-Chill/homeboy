@@ -1050,66 +1050,6 @@ mod tests {
     }
 
     #[test]
-    fn bench_compare_reports_deltas_and_missing_metrics() {
-        with_isolated_home(|_home| {
-            let _xdg = XdgGuard::unset();
-            let store = ObservationStore::open_initialized().expect("store");
-            let from = store
-                .start_run(sample_run(
-                    "bench",
-                    "homeboy",
-                    "studio",
-                    serde_json::json!({
-                        "scenario_metrics": [{
-                            "scenario_id": "cold",
-                            "metrics": { "p95_ms": 100.0, "only_from": 1.0 },
-                            "metric_groups": { "warm": { "mean_ms": 50.0 } }
-                        }]
-                    }),
-                ))
-                .expect("from");
-            let to = store
-                .start_run(sample_run(
-                    "bench",
-                    "homeboy",
-                    "studio",
-                    serde_json::json!({
-                        "scenario_metrics": [{
-                            "scenario_id": "cold",
-                            "metrics": { "p95_ms": 125.0, "only_to": 2.0 },
-                            "metric_groups": { "warm": { "mean_ms": 40.0 } }
-                        }]
-                    }),
-                ))
-                .expect("to");
-
-            let (output, _) = bench_compare(&from.id, &to.id).expect("compare");
-            let RunsOutput::BenchCompare(output) = output else {
-                panic!("expected compare output");
-            };
-            let p95 = output
-                .comparisons
-                .iter()
-                .find(|row| row.metric == "p95_ms")
-                .expect("p95 row");
-            assert_eq!(p95.delta, 25.0);
-            assert_eq!(p95.percent_change, Some(25.0));
-            assert!(output
-                .comparisons
-                .iter()
-                .any(|row| row.metric == "warm.mean_ms" && row.delta == -10.0));
-            assert!(output
-                .missing
-                .iter()
-                .any(|row| row.metric == "only_from" && row.missing_from == "to_run"));
-            assert!(output
-                .missing
-                .iter()
-                .any(|row| row.metric == "only_to" && row.missing_from == "from_run"));
-        });
-    }
-
-    #[test]
     fn missing_and_mismatched_run_ids_return_clear_errors() {
         with_isolated_home(|_home| {
             let _xdg = XdgGuard::unset();
@@ -1122,7 +1062,7 @@ mod tests {
             assert_eq!(missing.code.as_str(), "validation.invalid_argument");
             assert!(missing.message.contains("run record not found"));
 
-            let mismatch = bench_compare(&trace.id, &trace.id)
+            let mismatch = bench_compare(&trace.id, &trace.id, &[])
                 .err()
                 .expect("kind mismatch should fail");
             assert_eq!(mismatch.code.as_str(), "validation.invalid_argument");

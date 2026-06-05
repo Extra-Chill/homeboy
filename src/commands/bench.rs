@@ -124,6 +124,9 @@ struct BenchCompareArgs {
     /// Later run ID
     #[arg(long = "to-run")]
     to_run: String,
+    /// Metric to include. Repeat to compare multiple metrics. Defaults to all shared numeric metrics.
+    #[arg(long = "metric")]
+    metrics: Vec<String>,
 }
 
 #[derive(Args)]
@@ -371,8 +374,11 @@ pub fn run(mut args: BenchArgs, _global: &GlobalArgs) -> CmdResult<BenchOutput> 
                 Ok((BenchOutput::Observation(output), exit_code))
             }
             BenchCommand::Compare(compare_args) => {
-                let (output, exit_code) =
-                    runs::bench_compare(&compare_args.from_run, &compare_args.to_run)?;
+                let (output, exit_code) = runs::bench_compare(
+                    &compare_args.from_run,
+                    &compare_args.to_run,
+                    &compare_args.metrics,
+                )?;
                 Ok((BenchOutput::Observation(output), exit_code))
             }
         };
