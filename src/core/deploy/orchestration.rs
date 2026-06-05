@@ -139,7 +139,12 @@ pub(super) fn deploy_components(
 
     // Verify expected version if --version was specified
     if let Some(ref expected) = config.expected_version {
-        verify_expected_version(&components, expected)?;
+        if let Err(err) = verify_expected_version(&components, expected) {
+            if !tag_checkouts.is_empty() {
+                restore_branches(&tag_checkouts);
+            }
+            return Err(err);
+        }
     }
 
     local_versions = components
@@ -686,6 +691,9 @@ fn checkout_deploy_tags(
                 });
             }
             Err(e) => {
+                if !checkouts.is_empty() {
+                    restore_branches(&checkouts);
+                }
                 return Err(Error::git_command_failed(format!(
                     "Failed to checkout tag {} for '{}': {}",
                     tag, component.id, e
@@ -728,16 +736,55 @@ fn restore_branches(checkouts: &[TagCheckout]) {
                 );
             }
             Err(e) => {
+                let current_ref = current_checkout_ref(&checkout.local_path);
+                let dirty_files = dirty_checkout_files(&checkout.local_path);
+                let dirty_summary = if dirty_files.is_empty() {
+                    "none".to_string()
+                } else {
+                    dirty_files.join(", ")
+                };
+                let recovery_command = format!(
+                    "git -C {:?} checkout {:?}",
+                    checkout.local_path, checkout.original_ref
+                );
                 log_status!(
                     "deploy",
-                    "Warning: could not restore '{}' to {}: {}",
+                    "Warning: could not restore '{}' after tagged deploy. starting_ref={}, current_ref={}, dirty_files=[{}], recovery_command=`{}`. Error: {}",
                     checkout.component_id,
                     checkout.original_ref,
+                    current_ref,
+                    dirty_summary,
+                    recovery_command,
                     e
                 );
             }
         }
     }
+}
+
+fn current_checkout_ref(path: &str) -> String {
+    crate::core::engine::command::run_in_optional(path, "git", &["symbolic-ref", "--short", "HEAD"])
+        .or_else(|| {
+            crate::core::engine::command::run_in_optional(
+                path,
+                "git",
+                &["rev-parse", "--short", "HEAD"],
+            )
+        })
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn dirty_checkout_files(path: &str) -> Vec<String> {
+    crate::core::engine::command::run_in_optional(path, "git", &["status", "--porcelain"])
+        .map(|status| {
+            status
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Check for unreleased commits ahead of the latest tag.
@@ -909,6 +956,21 @@ mod tests {
         assert!(run(&["commit", "--allow-empty", "-q", "-m", "fix: next"])
             .status
             .success());
+    }
+
+    fn git_stdout(path: &Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .output()
+            .expect("git command");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
 
     fn init_clean_repo(path: &Path) {
@@ -1203,6 +1265,43 @@ mod tests {
             err.message.contains("HEAD has unreleased commits"),
             "unexpected error: {}",
             err.message
+        );
+    }
+
+    #[test]
+    fn checkout_deploy_tags_restores_prior_checkout_when_later_checkout_fails() {
+        let first = TempDir::new().expect("first temp dir");
+        let second = TempDir::new().expect("second temp dir");
+        init_repo_with_tag_gap(first.path());
+        init_clean_repo(second.path());
+
+        let starting_ref = git_stdout(first.path(), &["symbolic-ref", "--short", "HEAD"]);
+        let starting_head = git_stdout(first.path(), &["rev-parse", "HEAD"]);
+        let components = vec![
+            make_component("first", &first.path().to_string_lossy()),
+            make_component("second", &second.path().to_string_lossy()),
+        ];
+
+        let err = match checkout_deploy_tags(&components, Some("1.0.0")) {
+            Ok(_) => panic!("missing later tag should fail checkout_deploy_tags"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.message
+                .contains("Failed to checkout tag v1.0.0 for 'second'"),
+            "unexpected error: {}",
+            err.message
+        );
+        assert_eq!(
+            git_stdout(first.path(), &["symbolic-ref", "--short", "HEAD"]),
+            starting_ref,
+            "first component should be restored to its starting branch"
+        );
+        assert_eq!(
+            git_stdout(first.path(), &["rev-parse", "HEAD"]),
+            starting_head,
+            "first component should be restored to its starting commit"
         );
     }
 
