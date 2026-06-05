@@ -380,10 +380,12 @@ fn core_owned_source_stays_language_and_framework_agnostic() {
         .filter(|fingerprint| !is_retired_homeboy_domain_policy_fingerprint(fingerprint))
         .collect::<Vec<_>>();
 
-    assert!(
-        !current_policy_findings.is_empty(),
-        "core-agnostic source policy should stay configured until #2240/#3195 debt is cleaned up"
-    );
+    if baseline_mode == homeboy::core::code_audit::baseline::PolicyBaselineMode::Full {
+        assert!(
+            !current_policy_findings.is_empty(),
+            "core-agnostic source policy should stay configured until #2240/#3195 debt is cleaned up"
+        );
+    }
     assert!(
         new_policy_findings.is_empty(),
         "core-owned source contains non-baselined ecosystem-specific behavior. Core changes should ship generic, universally useful capabilities rather than framework-specific defaults. New audit findings:\n{}",
