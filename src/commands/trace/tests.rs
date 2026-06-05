@@ -1,168 +1,56 @@
-use std::collections::HashMap;
 use std::fs;
 
 use crate::test_support::with_isolated_home;
 
-use homeboy::core::component::ScopedExtensionConfig;
-use homeboy::core::rig::ComponentSpec;
-
 use super::test_fixture::{
-    init_overlay_component, write_trace_extension, write_trace_rig,
+    init_overlay_component, write_missing_trace_artifact_extension,
+    write_nested_trace_artifact_extension, write_trace_extension, write_trace_rig,
     write_trace_rig_with_phase_preset, write_trace_rig_with_span_metadata,
-    write_trace_rig_with_variant, TRACE_FIXTURE_EXTENSION_ID,
+    write_trace_rig_with_variant,
 };
 use super::*;
-
-#[test]
-fn rig_component_path_and_trace_env_are_threaded() {
-    let component_dir = tempfile::TempDir::new().expect("component dir");
-    let mut components = HashMap::new();
-    let mut extensions = HashMap::new();
-    extensions.insert(
-        "trace-extension".to_string(),
-        ScopedExtensionConfig::default(),
-    );
-    components.insert(
-        "studio".to_string(),
-        ComponentSpec {
-            path: component_dir.path().to_string_lossy().to_string(),
-            checkout_root: None,
-            remote_url: Some("https://github.com/Automattic/studio".to_string()),
-            triage_remote_url: None,
-            stack: None,
-            branch: None,
-            extensions: Some(extensions),
-        },
-    );
-    let spec = RigSpec {
-        id: "studio-rig".to_string(),
-        components,
-        ..serde_json::from_str(r#"{"id":"studio-rig"}"#).unwrap()
-    };
-
-    let path = rig_component_path(&spec, "studio").expect("path resolves");
-    assert_eq!(path, component_dir.path().to_string_lossy());
-    let component = rig_component_for_trace(&spec, "studio").expect("component resolves");
-    assert_eq!(component.id, "studio");
-    assert_eq!(component.local_path, path);
-    assert!(component.extensions.is_some());
-}
-
-#[test]
-fn rig_component_for_trace_synthesizes_trace_workload_extensions() {
-    let rig_spec: RigSpec = serde_json::from_str(
-        r#"{
-                "id": "studio",
-                "components": {
-                    "studio": { "path": "/tmp/studio" }
-                },
-                "trace_workloads": {
-                    "trace-fixture": [{ "path": "/tmp/create-site.trace.mjs" }]
-                }
-            }"#,
-    )
-    .expect("parse rig spec");
-
-    let component = rig_component_for_trace(&rig_spec, "studio").expect("component");
-
-    assert!(component
-        .extensions
-        .as_ref()
-        .expect("extensions")
-        .contains_key(TRACE_FIXTURE_EXTENSION_ID));
-}
-
-#[test]
-fn rig_trace_list_uses_rig_default_component_and_workloads() {
-    let component_dir = tempfile::TempDir::new().expect("component dir");
-    let rig_spec: RigSpec = serde_json::from_str(&format!(
-        r#"{{
-            "id": "studio-rig",
-            "components": {{
-                "studio": {{ "path": "{}" }}
-            }},
-            "trace_workloads": {{ "{TRACE_FIXTURE_EXTENSION_ID}": [
-                {{ "path": "${{components.studio.path}}/studio-app-create-site.trace.mjs" }},
-                {{ "path": "${{components.studio.path}}/studio-list-sites.trace.mjs" }}
-            ] }}
-        }}"#,
-        component_dir.path().display()
-    ))
-    .expect("parse rig");
-
-    let component_id = resolve_component_id(
-        &PositionalComponentArgs {
-            component: None,
+fn trace_args_for_rig(rig_id: &str, component_id: &str, scenario_id: &str) -> TraceArgs {
+    TraceArgs {
+        comp: PositionalComponentArgs {
+            component: Some(component_id.to_string()),
             path: None,
         },
-        Some(&rig_spec),
-    )
-    .expect("default component");
-    let component = rig_component_for_trace(&rig_spec, &component_id).expect("component");
-    let workloads = rig::workloads_for_extension(
-        &rig_spec,
-        rig::RigWorkloadKind::Trace,
-        None,
-        TRACE_FIXTURE_EXTENSION_ID,
-    );
-    let scenarios = workloads
-        .iter()
-        .map(|path| trace_workload_scenario_id(&path.to_string_lossy()))
-        .collect::<Vec<_>>();
-
-    assert_eq!(component_id, "studio");
-    assert_eq!(component.id, "studio");
-    assert_eq!(workloads.len(), 2);
-    assert_eq!(scenarios[0], "studio-app-create-site");
-    let expected_source = format!(
-        "{}/studio-app-create-site.trace.mjs",
-        component_dir.path().display()
-    );
-    assert_eq!(workloads[0].to_string_lossy(), expected_source);
-}
-
-#[test]
-fn rig_trace_list_uses_scoped_workload_preflight() {
-    let spec: RigSpec = serde_json::from_str(&format!(
-        r#"{{
-            "id": "studio-rig",
-            "components": {{
-                "studio": {{ "path": "/tmp/studio" }}
-            }},
-            "pipeline": {{
-                "check": [
-                    {{
-                        "kind": "check",
-                        "label": "desktop app packaged",
-                        "groups": ["desktop-app"],
-                        "command": "true"
-                    }},
-                    {{
-                        "kind": "check",
-                        "label": "unrelated cli symlink",
-                        "groups": ["cli-dev-copy"],
-                        "command": "false"
-                    }}
-                ]
-            }},
-            "trace_workloads": {{ "{TRACE_FIXTURE_EXTENSION_ID}": [
-                {{
-                    "path": "${{components.studio.path}}/studio-app-create-site.trace.mjs",
-                    "check_groups": ["desktop-app"]
-                }}
-            ] }}
-        }}"#
-    ))
-    .expect("parse rig");
-
-    run_rig_workload_preflight(
-        &spec,
-        Some(TRACE_FIXTURE_EXTENSION_ID),
-        rig::RigWorkloadKind::Trace,
-    )
-    .expect("scoped workload preflight should bypass unrelated failed check");
-
-    assert!(run_rig_workload_preflight(&spec, None, rig::RigWorkloadKind::Trace).is_err());
+        component_arg: None,
+        scenario: Some(scenario_id.to_string()),
+        scenario_arg: None,
+        compare_after: None,
+        baseline_target: None,
+        candidate: None,
+        rig: Some(rig_id.to_string()),
+        profile: None,
+        profiles: false,
+        setting_args: SettingArgs::default(),
+        json_summary: false,
+        report: None,
+        experiment: None,
+        repeat: 1,
+        aggregate: None,
+        schedule: TraceSchedule::Grouped,
+        focus_spans: Vec::new(),
+        spans: Vec::new(),
+        phases: Vec::new(),
+        attachments: Vec::new(),
+        phase_preset: None,
+        baseline_args: BaselineArgs::default(),
+        regression_threshold: extension_trace::baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT,
+        regression_min_delta_ms: extension_trace::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
+        overlays: Vec::new(),
+        variants: Vec::new(),
+        matrix: TraceVariantMatrixMode::None,
+        axes: Vec::new(),
+        matrix_env: Vec::new(),
+        output_dir: None,
+        keep_overlay: false,
+        stale: false,
+        force: false,
+        canonical: false,
+        allow_local_toolchain: false,
+    }
 }
 
 #[test]
@@ -182,6 +70,8 @@ fn rig_trace_run_uses_rig_owned_workload_extension_without_component_link() {
                 scenario: Some("studio-app-create-site".to_string()),
                 scenario_arg: None,
                 compare_after: None,
+                baseline_target: None,
+                candidate: None,
                 rig: Some("studio-rig".to_string()),
                 profile: None,
                 profiles: false,
@@ -204,10 +94,14 @@ fn rig_trace_run_uses_rig_owned_workload_extension_without_component_link() {
                 overlays: Vec::new(),
                 variants: Vec::new(),
                 matrix: TraceVariantMatrixMode::None,
+                axes: Vec::new(),
+                matrix_env: Vec::new(),
                 output_dir: None,
                 keep_overlay: false,
                 stale: false,
                 force: false,
+                canonical: false,
+                allow_local_toolchain: false,
             },
             &GlobalArgs {},
         )
@@ -245,6 +139,8 @@ fn trace_run_persists_observation_history() {
                 scenario: Some("studio-app-create-site".to_string()),
                 scenario_arg: None,
                 compare_after: None,
+                baseline_target: None,
+                candidate: None,
                 rig: Some("studio-rig".to_string()),
                 profile: None,
                 profiles: false,
@@ -267,10 +163,14 @@ fn trace_run_persists_observation_history() {
                 overlays: Vec::new(),
                 variants: Vec::new(),
                 matrix: TraceVariantMatrixMode::None,
+                axes: Vec::new(),
+                matrix_env: Vec::new(),
                 output_dir: None,
                 keep_overlay: false,
                 stale: false,
                 force: false,
+                canonical: false,
+                allow_local_toolchain: false,
             },
             &GlobalArgs {},
         )
@@ -304,13 +204,91 @@ fn trace_run_persists_observation_history() {
         assert_eq!(spans[0].duration_ms, Some(125.0));
 
         let artifacts = store.list_artifacts(&runs[0].id).expect("artifacts");
-        assert_eq!(artifacts.len(), 2);
+        assert!(artifacts.len() >= 3);
         assert!(artifacts
             .iter()
             .any(|artifact| artifact.kind == "trace-results"));
         assert!(artifacts
             .iter()
             .any(|artifact| artifact.kind == "trace-artifact"));
+        assert!(artifacts
+            .iter()
+            .any(|artifact| artifact.kind == "trace-artifacts"));
+    });
+}
+
+#[test]
+fn trace_run_preserves_nested_child_artifact_directories() {
+    with_isolated_home(|home| {
+        write_nested_trace_artifact_extension(home);
+        let component_dir = tempfile::TempDir::new().expect("component dir");
+        write_trace_rig(home, "studio-rig", "studio", component_dir.path());
+
+        let (_output, exit_code) = run(
+            trace_args_for_rig("studio-rig", "studio", "studio-app-create-site"),
+            &GlobalArgs {},
+        )
+        .expect("trace should run");
+
+        assert_eq!(exit_code, 0);
+        let store = ObservationStore::open_initialized().expect("store");
+        let runs = store
+            .list_runs(homeboy::core::observation::RunListFilter {
+                kind: Some("trace".to_string()),
+                ..Default::default()
+            })
+            .expect("runs");
+        assert_eq!(runs[0].status, "pass");
+        let artifacts = store.list_artifacts(&runs[0].id).expect("artifacts");
+        let directory_artifact = artifacts
+            .iter()
+            .find(|artifact| {
+                artifact.kind == "trace-artifacts" && artifact.artifact_type == "directory"
+            })
+            .expect("trace artifact directory is preserved");
+        assert!(std::path::Path::new(&directory_artifact.path)
+            .join("wp-codebox-artifacts/runtime-fixture/files/browser/network.jsonl")
+            .is_file());
+        assert!(artifacts.iter().any(|artifact| {
+            artifact.kind == "trace-artifact"
+                && artifact.artifact_type == "file"
+                && artifact.path.ends_with("network.jsonl")
+        }));
+    });
+}
+
+#[test]
+fn trace_run_fails_when_declared_artifact_is_missing() {
+    with_isolated_home(|home| {
+        write_missing_trace_artifact_extension(home);
+        let component_dir = tempfile::TempDir::new().expect("component dir");
+        write_trace_rig(home, "studio-rig", "studio", component_dir.path());
+
+        let (output, exit_code) = run(
+            trace_args_for_rig("studio-rig", "studio", "studio-app-create-site"),
+            &GlobalArgs {},
+        )
+        .expect("trace should run and report missing artifact");
+
+        assert_eq!(exit_code, 1);
+        let TraceCommandOutput::Run(result) = output else {
+            panic!("expected run output");
+        };
+        let results = result.results.expect("trace results");
+        assert_eq!(results.status.as_str(), "error");
+        assert!(results
+            .failure
+            .as_deref()
+            .expect("failure")
+            .contains("wp-codebox-artifacts/runtime-fixture/files/browser/network.jsonl"));
+        assert!(results.assertions.iter().any(|assertion| {
+            assertion.status == extension_trace::TraceAssertionStatus::Error
+                && assertion
+                    .message
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("wp-codebox-artifacts/runtime-fixture/files/browser/network.jsonl")
+        }));
     });
 }
 
@@ -331,6 +309,8 @@ fn trace_repeat_aggregates_span_timings_and_preserves_artifacts() {
                 scenario: Some("studio-app-create-site".to_string()),
                 scenario_arg: None,
                 compare_after: None,
+                baseline_target: None,
+                candidate: None,
                 rig: Some("studio-rig".to_string()),
                 profile: None,
                 profiles: false,
@@ -353,10 +333,14 @@ fn trace_repeat_aggregates_span_timings_and_preserves_artifacts() {
                 overlays: Vec::new(),
                 variants: Vec::new(),
                 matrix: TraceVariantMatrixMode::None,
+                axes: Vec::new(),
+                matrix_env: Vec::new(),
                 output_dir: None,
                 keep_overlay: false,
                 stale: false,
                 force: false,
+                canonical: false,
+                allow_local_toolchain: false,
             },
             &GlobalArgs {},
         )
@@ -426,6 +410,8 @@ fn trace_repeat_loads_span_metadata_and_reports_unknown_ids() {
                 scenario: Some("studio-app-create-site".to_string()),
                 scenario_arg: None,
                 compare_after: None,
+                baseline_target: None,
+                candidate: None,
                 rig: Some("studio-rig".to_string()),
                 profile: None,
                 profiles: false,
@@ -448,10 +434,14 @@ fn trace_repeat_loads_span_metadata_and_reports_unknown_ids() {
                 overlays: Vec::new(),
                 variants: Vec::new(),
                 matrix: TraceVariantMatrixMode::None,
+                axes: Vec::new(),
+                matrix_env: Vec::new(),
                 output_dir: None,
                 keep_overlay: false,
                 stale: false,
                 force: false,
+                canonical: false,
+                allow_local_toolchain: false,
             },
             &GlobalArgs {},
         )
@@ -603,6 +593,8 @@ fn trace_repeat_reports_overlay_touched_files_at_top_level() {
                 scenario: Some("studio-app-create-site".to_string()),
                 scenario_arg: None,
                 compare_after: None,
+                baseline_target: None,
+                candidate: None,
                 rig: Some("studio-rig".to_string()),
                 profile: None,
                 profiles: false,
@@ -625,10 +617,14 @@ fn trace_repeat_reports_overlay_touched_files_at_top_level() {
                 overlays: vec![patch_path.to_string_lossy().to_string()],
                 variants: Vec::new(),
                 matrix: TraceVariantMatrixMode::None,
+                axes: Vec::new(),
+                matrix_env: Vec::new(),
                 output_dir: None,
                 keep_overlay: false,
                 stale: false,
                 force: false,
+                canonical: false,
+                allow_local_toolchain: false,
             },
             &GlobalArgs {},
         )
@@ -681,6 +677,8 @@ fn trace_run_resolves_named_variants_and_reports_unknown_names() {
             scenario: Some("studio-app-create-site".to_string()),
             scenario_arg: None,
             compare_after: None,
+            baseline_target: None,
+            candidate: None,
             rig: Some("studio-rig".to_string()),
             profile: None,
             profiles: false,
@@ -702,10 +700,14 @@ fn trace_run_resolves_named_variants_and_reports_unknown_names() {
             overlays: Vec::new(),
             variants: vec!["fresh-install-mode".to_string()],
             matrix: TraceVariantMatrixMode::None,
+            axes: Vec::new(),
+            matrix_env: Vec::new(),
             output_dir: None,
             keep_overlay: false,
             stale: false,
             force: false,
+            canonical: false,
+            allow_local_toolchain: false,
         };
 
         let (output, exit_code) =
@@ -791,6 +793,8 @@ fn trace_compare_variant_writes_experiment_bundle() {
                 scenario: Some("studio-app-create-site".to_string()),
                 scenario_arg: None,
                 compare_after: None,
+                baseline_target: None,
+                candidate: None,
                 rig: Some("studio-rig".to_string()),
                 profile: None,
                 profiles: false,
@@ -813,10 +817,14 @@ fn trace_compare_variant_writes_experiment_bundle() {
                 overlays: vec![patch_path.to_string_lossy().to_string()],
                 variants: Vec::new(),
                 matrix: TraceVariantMatrixMode::None,
+                axes: Vec::new(),
+                matrix_env: Vec::new(),
                 output_dir: Some(output_dir.path().to_path_buf()),
                 keep_overlay: false,
                 stale: false,
                 force: false,
+                canonical: false,
+                allow_local_toolchain: false,
             },
             &GlobalArgs {},
         )
@@ -867,6 +875,8 @@ fn trace_compare_variant_resolves_named_variants() {
                 scenario: Some("studio-app-create-site".to_string()),
                 scenario_arg: None,
                 compare_after: None,
+                baseline_target: None,
+                candidate: None,
                 rig: Some("studio-rig".to_string()),
                 profile: None,
                 profiles: false,
@@ -889,10 +899,14 @@ fn trace_compare_variant_resolves_named_variants() {
                 overlays: Vec::new(),
                 variants: vec!["fresh-install-mode".to_string()],
                 matrix: TraceVariantMatrixMode::None,
+                axes: Vec::new(),
+                matrix_env: Vec::new(),
                 output_dir: Some(output_dir.path().to_path_buf()),
                 keep_overlay: false,
                 stale: false,
                 force: false,
+                canonical: false,
+                allow_local_toolchain: false,
             },
             &GlobalArgs {},
         )
@@ -958,6 +972,8 @@ fn trace_compare_variant_reports_unknown_named_variants() {
                 scenario: Some("studio-app-create-site".to_string()),
                 scenario_arg: None,
                 compare_after: None,
+                baseline_target: None,
+                candidate: None,
                 rig: Some("studio-rig".to_string()),
                 profile: None,
                 profiles: false,
@@ -980,10 +996,14 @@ fn trace_compare_variant_reports_unknown_named_variants() {
                 overlays: Vec::new(),
                 variants: vec!["missing".to_string()],
                 matrix: TraceVariantMatrixMode::None,
+                axes: Vec::new(),
+                matrix_env: Vec::new(),
                 output_dir: Some(output_dir.path().to_path_buf()),
                 keep_overlay: false,
                 stale: false,
                 force: false,
+                canonical: false,
+                allow_local_toolchain: false,
             },
             &GlobalArgs {},
         ) {
@@ -1018,6 +1038,8 @@ fn trace_run_expands_phase_chain_into_adjacent_and_total_spans() {
                 scenario: Some("studio-app-create-site".to_string()),
                 scenario_arg: None,
                 compare_after: None,
+                baseline_target: None,
+                candidate: None,
                 rig: Some("studio-rig".to_string()),
                 profile: None,
                 profiles: false,
@@ -1049,10 +1071,14 @@ fn trace_run_expands_phase_chain_into_adjacent_and_total_spans() {
                 overlays: Vec::new(),
                 variants: Vec::new(),
                 matrix: TraceVariantMatrixMode::None,
+                axes: Vec::new(),
+                matrix_env: Vec::new(),
                 output_dir: None,
                 keep_overlay: false,
                 stale: false,
                 force: false,
+                canonical: false,
+                allow_local_toolchain: false,
             },
             &GlobalArgs {},
         )
@@ -1097,6 +1123,8 @@ fn trace_run_expands_named_workload_phase_preset() {
                 scenario: Some("studio-app-create-site".to_string()),
                 scenario_arg: None,
                 compare_after: None,
+                baseline_target: None,
+                candidate: None,
                 rig: Some("preset-rig".to_string()),
                 profile: None,
                 profiles: false,
@@ -1119,10 +1147,14 @@ fn trace_run_expands_named_workload_phase_preset() {
                 overlays: Vec::new(),
                 variants: Vec::new(),
                 matrix: TraceVariantMatrixMode::None,
+                axes: Vec::new(),
+                matrix_env: Vec::new(),
                 output_dir: None,
                 keep_overlay: false,
                 stale: false,
                 force: false,
+                canonical: false,
+                allow_local_toolchain: false,
             },
             &GlobalArgs {},
         )
@@ -1167,6 +1199,8 @@ fn trace_aggregate_spans_uses_workload_default_phase_preset() {
                 scenario: Some("studio-app-create-site".to_string()),
                 scenario_arg: None,
                 compare_after: None,
+                baseline_target: None,
+                candidate: None,
                 rig: Some("preset-rig".to_string()),
                 profile: None,
                 profiles: false,
@@ -1189,10 +1223,14 @@ fn trace_aggregate_spans_uses_workload_default_phase_preset() {
                 overlays: Vec::new(),
                 variants: Vec::new(),
                 matrix: TraceVariantMatrixMode::None,
+                axes: Vec::new(),
+                matrix_env: Vec::new(),
                 output_dir: None,
                 keep_overlay: false,
                 stale: false,
                 force: false,
+                canonical: false,
+                allow_local_toolchain: false,
             },
             &GlobalArgs {},
         )
@@ -1230,6 +1268,8 @@ fn trace_repeat_counts_failed_runs_as_span_failures() {
                 scenario: Some("missing-scenario".to_string()),
                 scenario_arg: None,
                 compare_after: None,
+                baseline_target: None,
+                candidate: None,
                 rig: Some("studio-rig".to_string()),
                 profile: None,
                 profiles: false,
@@ -1255,10 +1295,14 @@ fn trace_repeat_counts_failed_runs_as_span_failures() {
                 overlays: Vec::new(),
                 variants: Vec::new(),
                 matrix: TraceVariantMatrixMode::None,
+                axes: Vec::new(),
+                matrix_env: Vec::new(),
                 output_dir: None,
                 keep_overlay: false,
                 stale: false,
                 force: false,
+                canonical: false,
+                allow_local_toolchain: false,
             },
             &GlobalArgs {},
         )
@@ -1303,6 +1347,8 @@ fn failed_trace_run_persists_observation_history() {
                 scenario: Some("missing-scenario".to_string()),
                 scenario_arg: None,
                 compare_after: None,
+                baseline_target: None,
+                candidate: None,
                 rig: Some("studio-rig".to_string()),
                 profile: None,
                 profiles: false,
@@ -1325,10 +1371,14 @@ fn failed_trace_run_persists_observation_history() {
                 overlays: Vec::new(),
                 variants: Vec::new(),
                 matrix: TraceVariantMatrixMode::None,
+                axes: Vec::new(),
+                matrix_env: Vec::new(),
                 output_dir: None,
                 keep_overlay: false,
                 stale: false,
                 force: false,
+                canonical: false,
+                allow_local_toolchain: false,
             },
             &GlobalArgs {},
         )

@@ -10,6 +10,7 @@ use homeboy::core::agent_task_scheduler::{
 };
 use homeboy::core::config;
 
+use super::agent_task_dispatch::{run as dispatch, DispatchArgs};
 use super::{CmdResult, GlobalArgs};
 
 #[derive(Args, Debug)]
@@ -20,6 +21,8 @@ pub struct AgentTaskArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum AgentTaskCommand {
+    /// Build and dispatch common repo-cooking agent tasks without hand-authored provider JSON.
+    Dispatch(DispatchArgs),
     /// Run an agent-task plan through extension-declared executor providers.
     RunPlan(RunPlanArgs),
     /// Execute a previously submitted durable agent-task run.
@@ -93,8 +96,9 @@ pub struct PromoteArgs {
     pub verify: Vec<String>,
 }
 
-pub fn run(args: AgentTaskArgs, _global: &GlobalArgs) -> CmdResult<Value> {
+pub fn run(args: AgentTaskArgs, global: &GlobalArgs) -> CmdResult<Value> {
     match args.command {
+        AgentTaskCommand::Dispatch(dispatch_args) => dispatch(dispatch_args, global),
         AgentTaskCommand::RunPlan(run_args) => run_plan(run_args),
         AgentTaskCommand::Run(status_args) => run_submitted(status_args),
         AgentTaskCommand::RunNext => run_next(),

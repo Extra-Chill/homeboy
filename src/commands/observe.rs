@@ -158,6 +158,7 @@ pub fn run(args: ObserveArgs, _global: &GlobalArgs) -> CmdResult<ObserveOutput> 
         summary: Some("Passive observation timeline".to_string()),
         failure: failure.clone(),
         rig: None,
+        evidence: None,
         timeline,
         span_definitions: Vec::new(),
         span_results: Vec::new(),
@@ -167,6 +168,9 @@ pub fn run(args: ObserveArgs, _global: &GlobalArgs) -> CmdResult<ObserveOutput> 
             label: "observe timeline".to_string(),
             path: trace_path.to_string_lossy().to_string(),
         }],
+        toolchain: None,
+        components: None,
+        dependencies: Vec::new(),
     };
 
     write_trace_results(&trace_path, &results)?;

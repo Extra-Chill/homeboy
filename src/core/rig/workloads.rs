@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use crate::core::engine::invocation::InvocationRequirements;
 
-use super::spec::RigSpec;
+use super::spec::{RigSpec, TraceDependencySpec};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RigWorkloadKind {
@@ -39,6 +39,50 @@ pub fn workloads_for_extension(
         .flat_map(|paths| paths.iter())
         .map(|workload| expand_workload_path(rig_spec, package_root, workload.path()))
         .collect()
+}
+
+pub fn trace_dependencies_for_extension(
+    rig_spec: &RigSpec,
+    package_root: Option<&Path>,
+    extension_id: &str,
+) -> Vec<TraceDependencySpec> {
+    let Some(entries) = rig_spec.trace_workloads.get(extension_id) else {
+        return Vec::new();
+    };
+
+    let mut dependencies = Vec::new();
+    for workload in entries {
+        for dependency in workload.trace_dependencies() {
+            let mut dependency = dependency.clone();
+            if let Some(path) = dependency.path.as_deref() {
+                dependency.path = Some(
+                    expand_workload_path(rig_spec, package_root, path)
+                        .to_string_lossy()
+                        .to_string(),
+                );
+            }
+            dependencies.push(dependency);
+        }
+    }
+    dependencies
+}
+
+pub fn runner_capabilities_for_extension(rig_spec: &RigSpec, extension_id: &str) -> Vec<String> {
+    let Some(entries) = rig_spec.trace_workloads.get(extension_id) else {
+        return Vec::new();
+    };
+
+    let mut capabilities = BTreeSet::new();
+    for workload in entries {
+        capabilities.extend(
+            workload
+                .runner_capabilities()
+                .iter()
+                .filter(|capability| !capability.is_empty())
+                .cloned(),
+        );
+    }
+    capabilities.into_iter().collect()
 }
 
 /// Return the scoped check groups required by all rig-owned workloads for an

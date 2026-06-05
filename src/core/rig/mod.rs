@@ -58,8 +58,8 @@ pub use spec::{
     AppLauncherPlatform, AppLauncherPreflight, AppLauncherSpec, BenchSpec, CheckSpec,
     ComponentSpec, DiscoverSpec, NewerThanSpec, PatchOp, PipelineStep, RigResourcesSpec, RigSpec,
     ServiceKind, ServiceSpec, SharedPathOp, SharedPathSpec, StackOp, SymlinkSpec, TimeSource,
-    TraceExperimentArtifactSpec, TraceExperimentCommandSpec, TraceExperimentSpec,
-    TraceGuardrailSpec, TraceProfileSpec, TraceVariantSpec, WorkloadSpec,
+    TraceDependencySpec, TraceExperimentArtifactSpec, TraceExperimentCommandSpec,
+    TraceExperimentSpec, TraceGuardrailSpec, TraceProfileSpec, TraceVariantSpec, WorkloadSpec,
 };
 pub use stack::{
     plan_stack_sync, run_component_sync, run_sync, RigStackPlanEntry, RigStackSyncEntry,
@@ -70,7 +70,8 @@ pub use state::{
 };
 pub use workloads::{
     check_groups_for_extension_workloads, extension_ids_for_workloads,
-    invocation_requirements_for_extension_workloads, workloads_for_extension, RigWorkloadKind,
+    invocation_requirements_for_extension_workloads, runner_capabilities_for_extension,
+    trace_dependencies_for_extension, workloads_for_extension, RigWorkloadKind,
 };
 
 use crate::core::error::{Error, Result};

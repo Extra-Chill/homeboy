@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -270,6 +271,16 @@ pub(super) fn compare_trace_aggregates_with_focus(
         command: "trace.compare.spans",
         before_path: before_path.display().to_string(),
         after_path: after_path.display().to_string(),
+        before_target: None,
+        after_target: None,
+        before_git_sha: None,
+        after_git_sha: None,
+        before_status: None,
+        after_status: None,
+        before_exit_code: None,
+        after_exit_code: None,
+        output_dir: None,
+        summary_path: None,
         before_component: before.component,
         after_component: after.component,
         before_scenario_id: before.scenario_id,
@@ -524,6 +535,7 @@ fn option_sum_f64(left: Option<f64>, right: Option<f64>) -> Option<f64> {
     Some(left? + right?)
 }
 
+#[cfg(test)]
 pub(super) fn render_aggregate_markdown(
     aggregate: &extension_trace::TraceAggregateOutput,
 ) -> String {
@@ -627,6 +639,378 @@ pub(super) fn render_aggregate_markdown(
     out
 }
 
+pub(super) fn render_trace_run_evidence_markdown(
+    run: &extension_trace::report::TraceRunOutput,
+) -> String {
+    let mut out = String::new();
+    let scenario = run
+        .results
+        .as_ref()
+        .map(|results| results.scenario_id.as_str())
+        .unwrap_or("unknown");
+    let _ = writeln!(out, "# Trace Evidence: `{}`\n", scenario);
+    let _ = writeln!(out, "- **Command:** `homeboy trace`");
+    let _ = writeln!(out, "- **Component:** `{}`", run.component);
+    let _ = writeln!(out, "- **Scenario:** `{}`", scenario);
+    let _ = writeln!(out, "- **Status:** `{}`", run.status);
+    let _ = writeln!(out, "- **Exit code:** `{}`", run.exit_code);
+    if let Some(summary) = run
+        .results
+        .as_ref()
+        .and_then(|results| results.summary.as_ref())
+    {
+        let _ = writeln!(out, "- **Summary:** {}", summary);
+    }
+    if let Some(failure) = run
+        .results
+        .as_ref()
+        .and_then(|results| results.failure.as_ref())
+    {
+        let _ = writeln!(out, "- **Failure:** {}", failure);
+    }
+    push_trace_refs_markdown(&mut out, run.rig_state.as_ref());
+    extension_trace::push_overlay_markdown(&mut out, &run.overlays);
+
+    if !run.span_summaries.is_empty() {
+        out.push_str("\n## Metric Summary\n\n");
+        out.push_str("| Span | From | To | Duration | Status | Metadata |\n");
+        out.push_str("|---|---|---|---:|---|---|\n");
+        for span in &run.span_summaries {
+            let duration = span
+                .duration_ms
+                .map(|ms| format!("{}ms", ms))
+                .unwrap_or_else(|| "-".to_string());
+            let status = extension_trace::format_span_summary_status(span);
+            let metadata = extension_trace::format_span_summary_metadata(span.metadata.as_ref());
+            let _ = writeln!(
+                out,
+                "| `{}` | `{}` | `{}` | {} | {} | {} |",
+                span.id, span.from, span.to, duration, status, metadata
+            );
+        }
+    }
+
+    if let Some(results) = run.results.as_ref() {
+        push_trace_assertions_markdown(&mut out, &results.assertions);
+        push_browser_summary_markdown(&mut out, &results.artifacts);
+        push_trace_artifact_completeness_markdown(&mut out, &results.artifacts, &run.artifacts);
+    } else {
+        out.push_str("\n## Artifact Completeness\n\n- **Status:** `missing`\n- No trace results were available.\n");
+    }
+
+    out
+}
+
+pub(super) fn render_trace_aggregate_evidence_markdown(
+    aggregate: &extension_trace::TraceAggregateOutput,
+) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "# Trace Evidence: `{}`\n", aggregate.scenario_id);
+    let _ = writeln!(out, "- **Command:** `{}`", aggregate.command);
+    let _ = writeln!(out, "- **Component:** `{}`", aggregate.component);
+    let _ = writeln!(out, "- **Scenario:** `{}`", aggregate.scenario_id);
+    let _ = writeln!(out, "- **Status:** `{}`", aggregate.status);
+    let _ = writeln!(out, "- **Exit code:** `{}`", aggregate.exit_code);
+    let _ = writeln!(out, "- **Runs:** `{}`", aggregate.run_count);
+    let _ = writeln!(out, "- **Failures:** `{}`", aggregate.failure_count);
+    if let Some(schedule) = aggregate.schedule.as_deref() {
+        let _ = writeln!(out, "- **Schedule:** `{}`", schedule);
+    }
+    push_trace_refs_markdown(&mut out, aggregate.rig_state.as_ref());
+    extension_trace::push_overlay_markdown(&mut out, &aggregate.overlays);
+
+    if !aggregate.spans.is_empty() {
+        out.push_str("\n## Metric Summary\n\n");
+        out.push_str(
+            "| Span | n | min | median | avg | stddev | p75 | p90 | p95 | max | failures |\n",
+        );
+        out.push_str("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n");
+        for span in &aggregate.spans {
+            push_aggregate_span_row(&mut out, span);
+        }
+    }
+
+    push_guardrail_markdown(&mut out, "Assertion Status", &aggregate.guardrails);
+    push_aggregate_artifact_completeness_markdown(&mut out, &aggregate.runs, &aggregate.spans);
+    out
+}
+
+pub(super) fn render_trace_compare_evidence_markdown(
+    compare: &extension_trace::TraceCompareOutput,
+) -> String {
+    let mut out = String::new();
+    out.push_str("# Trace Compare Evidence\n\n");
+    out.push_str("- **Command:** `trace.compare.spans`\n");
+    let _ = writeln!(
+        out,
+        "- **Before:** `{}`",
+        safe_report_path(&compare.before_path)
+    );
+    let _ = writeln!(
+        out,
+        "- **After:** `{}`",
+        safe_report_path(&compare.after_path)
+    );
+    if let (Some(before), Some(after)) = (&compare.before_component, &compare.after_component) {
+        let _ = writeln!(out, "- **Components:** `{}` -> `{}`", before, after);
+    }
+    if let (Some(before), Some(after)) = (&compare.before_scenario_id, &compare.after_scenario_id) {
+        let _ = writeln!(out, "- **Scenarios:** `{}` -> `{}`", before, after);
+    }
+    let _ = writeln!(out, "- **Span count:** `{}`", compare.span_count);
+    if let Some(status) = compare.focus_status.as_deref() {
+        let _ = writeln!(out, "- **Focus assertion status:** `{}`", status);
+    }
+    if let Some(status) = compare.guardrail_status.as_deref() {
+        let _ = writeln!(out, "- **Guardrail assertion status:** `{}`", status);
+    }
+
+    if !compare.spans.is_empty() {
+        out.push_str("\n## Metric Delta Summary\n\n");
+        out.push_str("| Span | before median | after median | median delta | median % | before avg | after avg | avg delta | avg % |\n");
+        out.push_str("|---|---:|---:|---:|---:|---:|---:|---:|---:|\n");
+        for span in &compare.spans {
+            let _ = writeln!(
+                out,
+                "| `{}` | {} | {} | {} | {} | {} | {} | {} | {} |",
+                span.id,
+                fmt_ms(span.before_median_ms),
+                fmt_ms(span.after_median_ms),
+                fmt_signal_delta_ms(span.median_delta_ms),
+                fmt_percent(span.median_delta_percent),
+                fmt_avg_ms(span.before_avg_ms),
+                fmt_avg_ms(span.after_avg_ms),
+                fmt_signal_delta_avg_ms(span.avg_delta_ms),
+                fmt_percent(span.avg_delta_percent),
+            );
+        }
+    }
+
+    if !compare.focus_span_ids.is_empty() {
+        out.push_str("\n## Assertion Status\n\n");
+        let _ = writeln!(
+            out,
+            "- Focus spans: `{}`",
+            compare.focus_span_ids.join("`, `")
+        );
+        let _ = writeln!(
+            out,
+            "- Focus regressions: `{}`",
+            compare.focus_regression_count
+        );
+        let _ = writeln!(out, "- Focus failures: `{}`", compare.focus_failure_count);
+    }
+    push_guardrail_markdown(&mut out, "Before Guardrails", &compare.before_guardrails);
+    push_guardrail_markdown(&mut out, "After Guardrails", &compare.after_guardrails);
+
+    out.push_str("\n## Artifact Completeness\n\n");
+    out.push_str("- **Status:** `input-only`\n");
+    out.push_str("- Compare evidence references aggregate JSON inputs; run-level artifact completeness is reported by the aggregate reports.\n");
+    out
+}
+
+fn push_trace_refs_markdown(
+    out: &mut String,
+    rig_state: Option<&homeboy::core::rig::RigStateSnapshot>,
+) {
+    let Some(rig_state) = rig_state else {
+        return;
+    };
+    out.push_str("\n## Git Refs\n\n");
+    let _ = writeln!(out, "- **Rig:** `{}`", rig_state.rig_id);
+    let _ = writeln!(out, "- **Captured at:** `{}`", rig_state.captured_at);
+    out.push_str("\n| Component | Branch | SHA | Path |\n");
+    out.push_str("|---|---|---|---|\n");
+    for (component, snapshot) in &rig_state.components {
+        let _ = writeln!(
+            out,
+            "| `{}` | `{}` | `{}` | `{}` |",
+            component,
+            snapshot.branch.as_deref().unwrap_or("unknown"),
+            snapshot.sha.as_deref().unwrap_or("unknown"),
+            safe_report_path(&snapshot.path),
+        );
+    }
+}
+
+fn push_trace_assertions_markdown(
+    out: &mut String,
+    assertions: &[extension_trace::TraceAssertion],
+) {
+    out.push_str("\n## Assertion Status\n\n");
+    if assertions.is_empty() {
+        out.push_str("- No assertions were reported.\n");
+        return;
+    }
+    for assertion in assertions {
+        let status = match assertion.status {
+            extension_trace::TraceAssertionStatus::Pass => "pass",
+            extension_trace::TraceAssertionStatus::Fail => "fail",
+            extension_trace::TraceAssertionStatus::Error => "error",
+        };
+        match assertion.message.as_deref() {
+            Some(message) => {
+                let _ = writeln!(out, "- `{}`: **{}** - {}", assertion.id, status, message);
+            }
+            None => {
+                let _ = writeln!(out, "- `{}`: **{}**", assertion.id, status);
+            }
+        }
+    }
+}
+
+fn push_browser_summary_markdown(out: &mut String, artifacts: &[extension_trace::TraceArtifact]) {
+    let browser_artifacts = artifacts
+        .iter()
+        .filter(|artifact| {
+            let label = artifact.label.to_ascii_lowercase();
+            let path = artifact.path.to_ascii_lowercase();
+            label.contains("console")
+                || label.contains("browser")
+                || label.contains("screenshot")
+                || label.contains("trace")
+                || path.contains("console")
+                || path.contains("screenshot")
+                || path.contains("trace")
+        })
+        .collect::<Vec<_>>();
+    if browser_artifacts.is_empty() {
+        return;
+    }
+    out.push_str("\n## Browser Evidence Summary\n\n");
+    for artifact in browser_artifacts {
+        let _ = writeln!(
+            out,
+            "- **{}:** `{}`",
+            artifact.label,
+            safe_report_path(&artifact.path)
+        );
+    }
+}
+
+fn push_trace_artifact_completeness_markdown(
+    out: &mut String,
+    declared_artifacts: &[extension_trace::TraceArtifact],
+    reportable_artifacts: &[extension_trace::TraceArtifact],
+) {
+    out.push_str("\n## Artifact Completeness\n\n");
+    let status = artifact_completeness_status(declared_artifacts.len(), reportable_artifacts.len());
+    let _ = writeln!(out, "- **Status:** `{}`", status);
+    let _ = writeln!(
+        out,
+        "- **Declared artifacts:** `{}`",
+        declared_artifacts.len()
+    );
+    let _ = writeln!(
+        out,
+        "- **Reportable artifacts:** `{}`",
+        reportable_artifacts.len()
+    );
+    if reportable_artifacts.is_empty() {
+        out.push_str("- No reportable artifact paths were produced.\n");
+        return;
+    }
+    for artifact in reportable_artifacts {
+        let _ = writeln!(
+            out,
+            "- **{}:** `{}`",
+            artifact.label,
+            safe_report_path(&artifact.path)
+        );
+    }
+}
+
+fn push_aggregate_artifact_completeness_markdown(
+    out: &mut String,
+    runs: &[extension_trace::TraceAggregateRunOutput],
+    spans: &[extension_trace::TraceAggregateSpanOutput],
+) {
+    out.push_str("\n## Artifact Completeness\n\n");
+    let run_artifact_count = runs
+        .iter()
+        .filter(|run| !run.artifact_path.is_empty())
+        .count();
+    let span_artifact_count = spans
+        .iter()
+        .filter(|span| span.max_artifact_path.is_some())
+        .count();
+    let status = if runs.is_empty() {
+        "missing"
+    } else if run_artifact_count == runs.len() {
+        "complete"
+    } else if run_artifact_count > 0 || span_artifact_count > 0 {
+        "partial"
+    } else {
+        "missing"
+    };
+    let _ = writeln!(out, "- **Status:** `{}`", status);
+    let _ = writeln!(
+        out,
+        "- **Run artifacts:** `{}/{}`",
+        run_artifact_count,
+        runs.len()
+    );
+    let _ = writeln!(
+        out,
+        "- **Span outlier artifacts:** `{}`",
+        span_artifact_count
+    );
+    for run in runs.iter().filter(|run| !run.artifact_path.is_empty()) {
+        let _ = writeln!(
+            out,
+            "- Run {}: `{}` `{}`",
+            run.index,
+            run.status,
+            safe_report_path(&run.artifact_path)
+        );
+    }
+    for span in spans.iter().filter(|span| span.max_artifact_path.is_some()) {
+        let _ = writeln!(
+            out,
+            "- Span `{}` max artifact: `{}`",
+            span.id,
+            safe_report_path(span.max_artifact_path.as_deref().unwrap_or_default())
+        );
+    }
+}
+
+fn artifact_completeness_status(declared: usize, reportable: usize) -> &'static str {
+    if declared == 0 {
+        "missing"
+    } else if declared == reportable {
+        "complete"
+    } else if reportable > 0 {
+        "partial"
+    } else {
+        "missing"
+    }
+}
+
+fn safe_report_path(path: &str) -> String {
+    if is_url(path) || is_relative_artifact_path(path) {
+        return path.to_string();
+    }
+    let file_name = Path::new(path)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("path");
+    format!("[local path redacted: {file_name}]")
+}
+
+fn is_url(path: &str) -> bool {
+    path.starts_with("https://") || path.starts_with("http://")
+}
+
+fn is_relative_artifact_path(path: &str) -> bool {
+    let path = Path::new(path);
+    !path.is_absolute()
+        && !path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+}
+
+#[cfg(test)]
 fn push_classification_summary_table(
     out: &mut String,
     summaries: &[extension_trace::TraceClassificationSummaryOutput],
@@ -670,6 +1054,21 @@ pub(super) fn render_compare_markdown(compare: &extension_trace::TraceCompareOut
     out.push_str("# Trace Compare\n\n");
     out.push_str(&format!("- **Before:** `{}`\n", compare.before_path));
     out.push_str(&format!("- **After:** `{}`\n", compare.after_path));
+    if let (Some(before), Some(after)) = (&compare.before_target, &compare.after_target) {
+        out.push_str(&format!("- **Targets:** `{}` -> `{}`\n", before, after));
+    }
+    if let (Some(before), Some(after)) = (&compare.before_git_sha, &compare.after_git_sha) {
+        out.push_str(&format!("- **Git SHAs:** `{}` -> `{}`\n", before, after));
+    }
+    if let (Some(before), Some(after)) = (&compare.before_status, &compare.after_status) {
+        out.push_str(&format!("- **Status:** `{}` -> `{}`\n", before, after));
+    }
+    if let Some(output_dir) = compare.output_dir.as_deref() {
+        out.push_str(&format!("- **Output dir:** `{}`\n", output_dir));
+    }
+    if let Some(summary_path) = compare.summary_path.as_deref() {
+        out.push_str(&format!("- **Summary:** `{}`\n", summary_path));
+    }
     if let (Some(before), Some(after)) = (&compare.before_scenario_id, &compare.after_scenario_id) {
         out.push_str(&format!("- **Scenario:** `{}` -> `{}`\n", before, after));
     }
@@ -814,6 +1213,62 @@ pub(super) fn render_matrix_markdown(matrix: &extension_trace::TraceVariantMatri
         out.push_str(&format!(
             "| `{}` | {} | `{}` | {} | `{}` | `{}` |\n",
             run.label, variants, run.status, run.exit_code, run.aggregate_path, run.compare_path
+        ));
+    }
+
+    out
+}
+
+pub(super) fn render_scenario_matrix_markdown(
+    matrix: &extension_trace::TraceScenarioMatrixOutput,
+) -> String {
+    let mut out = String::new();
+    out.push_str("# Trace Scenario Matrix\n\n");
+    out.push_str(&format!("- **Component:** `{}`\n", matrix.component));
+    out.push_str(&format!("- **Scenario:** `{}`\n", matrix.scenario_id));
+    out.push_str(&format!("- **Status:** `{}`\n", matrix.status));
+    out.push_str(&format!("- **Cells:** `{}`\n", matrix.cell_count));
+    out.push_str(&format!("- **Failures:** `{}`\n", matrix.failure_count));
+    out.push_str(&format!("- **Output dir:** `{}`\n", matrix.output_dir));
+    out.push_str(&format!("- **Matrix JSON:** `{}`\n", matrix.matrix_path));
+
+    if !matrix.axes.is_empty() {
+        out.push_str("\n## Axes\n\n");
+        for axis in &matrix.axes {
+            out.push_str(&format!(
+                "- `{}`: {}\n",
+                axis.name,
+                axis.values
+                    .iter()
+                    .map(|value| format!("`{}`", value))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+    }
+
+    out.push_str("\n## Cells\n\n");
+    out.push_str("| Cell | Axes | Status | Exit | Artifact | Output | Failure |\n");
+    out.push_str("|---|---|---|---:|---|---|---|\n");
+    for cell in &matrix.cells {
+        let axes = cell
+            .axes
+            .iter()
+            .map(|(key, value)| format!("`{}`=`{}`", key, value))
+            .collect::<Vec<_>>()
+            .join(" ");
+        out.push_str(&format!(
+            "| `{}` | {} | `{}` | {} | `{}` | `{}` | {} |\n",
+            cell.label,
+            axes,
+            cell.status,
+            cell.exit_code,
+            cell.artifact_path,
+            cell.output_path,
+            cell.failure
+                .as_deref()
+                .map(|failure| format!("`{}`", failure.replace('`', "'")))
+                .unwrap_or_else(|| "-".to_string())
         ));
     }
 

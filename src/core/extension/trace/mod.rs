@@ -12,9 +12,12 @@ mod aggregate_report;
 pub mod assertions;
 mod attach;
 pub mod baseline;
+mod canonicality;
+mod generic_runner;
 mod overlay;
 mod overlay_lock;
 pub mod parsing;
+mod preflight;
 pub mod probes;
 pub mod report;
 pub mod run;
@@ -26,6 +29,7 @@ use crate::core::extension::{ExtensionCapability, ExtensionExecutionContext};
 
 pub use aggregate_report::TraceAggregateSpanSampleOutput;
 pub use attach::TraceAttachment;
+pub use canonicality::TraceCanonicalPolicy;
 pub use overlay::TraceOverlayRequest;
 pub use overlay_lock::{cleanup_stale_trace_overlay_locks, list_trace_overlay_locks};
 pub use overlay_lock::{
@@ -33,7 +37,8 @@ pub use overlay_lock::{
 };
 pub use parsing::{parse_trace_list_str, parse_trace_results_file};
 pub use parsing::{
-    TraceArtifact, TraceAssertion, TraceEvent, TraceList, TraceScenario, TraceStatus,
+    TraceArtifact, TraceAssertion, TraceEvent, TraceEvidenceMetadata, TraceList, TraceScenario,
+    TraceStatus,
 };
 pub use parsing::{TraceAssertionStatus, TraceResults, TraceSpanDefinition, TraceSpanResult};
 pub use probes::{ActiveTraceProbes, TraceProbeConfig};
@@ -42,15 +47,20 @@ pub use report::{
     TraceAggregateRunOutput, TraceAggregateSpanOutput, TraceClassificationSummaryOutput,
     TraceCommandOutput, TraceCompareClassificationSummaryOutput, TraceCompareOutput,
     TraceCompareSpanOutput, TraceGuardrailOutput, TraceListOutput, TraceOverlayLocksOutput,
-    TraceProfileListItem, TraceResolvedProfileOutput, TraceRunOrderEntryOutput, TraceSpanMetadata,
-    TraceVariantMatrixOutput, TraceVariantMatrixRunOutput,
+    TraceProfileListItem, TraceResolvedProfileOutput, TraceRunOrderEntryOutput,
+    TraceScenarioMatrixAxisOutput, TraceScenarioMatrixCellOutput, TraceScenarioMatrixOutput,
+    TraceSpanMetadata, TraceVariantMatrixOutput, TraceVariantMatrixRunOutput,
 };
 pub use report::{push_overlay_markdown, render_markdown};
 pub use run::{
-    run_trace_list_workflow, run_trace_workflow, trace_is_unclaimed, TraceListWorkflowArgs,
+    resolve_declared_trace_artifact_path, run_trace_list_workflow, run_trace_workflow,
+    trace_is_unclaimed, TraceListWorkflowArgs,
 };
 pub use run::{TraceRunWorkflowArgs, TraceRunWorkflowResult, TraceRunnerInputs};
-pub use span_summary::{attach_span_summary_metadata, TraceSpanSummaryOutput};
+pub use span_summary::{
+    attach_span_summary_metadata, format_span_summary_metadata, format_span_summary_status,
+    TraceSpanSummaryOutput,
+};
 
 pub fn resolve_trace_command(
     component: &Component,

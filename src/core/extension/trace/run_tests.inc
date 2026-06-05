@@ -82,6 +82,8 @@ JSON
                 workload_paths: vec![component_dir.join("trace-fixture.trace.mjs")],
                 probes: Vec::new(),
                 attachments: vec![TraceAttachment::parse("logfile:/tmp/homeboy-trace.log").unwrap()],
+                dependencies: Vec::new(),
+                runner_capabilities: Vec::new(),
             },
             scenario_id: "close-window".to_string(),
             json_summary: false,
@@ -98,6 +100,7 @@ JSON
                 crate::core::extension::trace::baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT,
             regression_min_delta_ms:
                 crate::core::extension::trace::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
+            canonical_policy: TraceCanonicalPolicy::Development,
         };
 
         let output =
@@ -171,6 +174,7 @@ JSON
                 crate::core::extension::trace::baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT,
             regression_min_delta_ms:
                 crate::core::extension::trace::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
+            canonical_policy: TraceCanonicalPolicy::Development,
         };
 
         let output = build_trace_runner(Some(&context), &component, &args, &run_dir, true).unwrap();
@@ -265,6 +269,7 @@ JSON
                 crate::core::extension::trace::baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT,
             regression_min_delta_ms:
                 crate::core::extension::trace::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
+            canonical_policy: TraceCanonicalPolicy::Development,
         };
         let output = RunnerOutput {
             success: false,
@@ -350,6 +355,7 @@ JSON
                 crate::core::extension::trace::baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT,
             regression_min_delta_ms:
                 crate::core::extension::trace::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
+            canonical_policy: TraceCanonicalPolicy::Development,
         };
 
         let output =
@@ -418,6 +424,8 @@ JSON
                         log_path.display()
                     ))
                     .unwrap()],
+                    dependencies: Vec::new(),
+                    runner_capabilities: Vec::new(),
                 },
                 scenario_id: "attach".to_string(),
                 json_summary: false,
@@ -434,6 +442,7 @@ JSON
                     crate::core::extension::trace::baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT,
                 regression_min_delta_ms:
                     crate::core::extension::trace::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
+            canonical_policy: TraceCanonicalPolicy::Development,
             },
             &run_dir,
             None,
@@ -626,6 +635,7 @@ JSON
                 crate::core::extension::trace::baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT,
             regression_min_delta_ms:
                 crate::core::extension::trace::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
+            canonical_policy: TraceCanonicalPolicy::Development,
         };
         OverlayFixture {
             _temp: temp,

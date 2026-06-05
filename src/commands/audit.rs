@@ -303,7 +303,7 @@ fn code_audit_result_observation_summary(
 ///
 /// Setup still speaks the legacy shell boundary (`--export` stdout), but the command
 /// converts that output into typed workflow input instead of process-global state.
-fn resolve_audit_reference_paths(source_ctx: &ExecutionContext) -> Vec<String> {
+pub(crate) fn resolve_audit_reference_paths(source_ctx: &ExecutionContext) -> Vec<String> {
     let extensions = match &source_ctx.component.extensions {
         Some(ext) => ext,
         None => return Vec::new(),

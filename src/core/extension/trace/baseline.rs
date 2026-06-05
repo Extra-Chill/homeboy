@@ -379,6 +379,7 @@ mod tests {
             summary: None,
             failure: None,
             rig: None,
+            evidence: None,
             timeline: Vec::new(),
             span_definitions: Vec::new(),
             span_results: vec![TraceSpanResult {
@@ -395,6 +396,9 @@ mod tests {
             assertions: Vec::new(),
             temporal_assertions: Vec::new(),
             artifacts: Vec::new(),
+            toolchain: None,
+            components: None,
+            dependencies: Vec::new(),
         }
     }
 

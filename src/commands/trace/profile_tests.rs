@@ -15,6 +15,8 @@ fn trace_args_for_profile(profile: &str) -> TraceArgs {
         scenario: None,
         scenario_arg: None,
         compare_after: None,
+        baseline_target: None,
+        candidate: None,
         rig: None,
         profile: Some(profile.to_string()),
         profiles: false,
@@ -36,10 +38,14 @@ fn trace_args_for_profile(profile: &str) -> TraceArgs {
         overlays: Vec::new(),
         variants: Vec::new(),
         matrix: TraceVariantMatrixMode::None,
+        axes: Vec::new(),
+        matrix_env: Vec::new(),
         output_dir: None,
         keep_overlay: false,
         stale: false,
         force: false,
+        canonical: false,
+        allow_local_toolchain: false,
     }
 }
 
@@ -150,6 +156,8 @@ fn trace_list_profiles_lists_rig_profiles() {
             scenario: None,
             scenario_arg: None,
             compare_after: None,
+            baseline_target: None,
+            candidate: None,
             rig: None,
             profile: None,
             profiles: true,
@@ -171,10 +179,14 @@ fn trace_list_profiles_lists_rig_profiles() {
             overlays: Vec::new(),
             variants: Vec::new(),
             matrix: TraceVariantMatrixMode::None,
+            axes: Vec::new(),
+            matrix_env: Vec::new(),
             output_dir: None,
             keep_overlay: false,
             stale: false,
             force: false,
+            canonical: false,
+            allow_local_toolchain: false,
         })
         .expect("profile list should run");
 

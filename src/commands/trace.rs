@@ -8,8 +8,8 @@ use homeboy::core::engine::execution_context::{self, ResolveOptions};
 use homeboy::core::engine::run_dir::RunDir;
 use homeboy::core::extension::trace as extension_trace;
 use homeboy::core::extension::trace::{
-    TraceAttachment, TraceCommandOutput, TraceListWorkflowArgs, TraceOverlayRequest,
-    TraceRunWorkflowArgs, TraceRunnerInputs, TraceSpanDefinition,
+    TraceAttachment, TraceCanonicalPolicy, TraceCommandOutput, TraceListWorkflowArgs,
+    TraceOverlayRequest, TraceRunWorkflowArgs, TraceRunnerInputs, TraceSpanDefinition,
 };
 use homeboy::core::extension::ExtensionCapability;
 use homeboy::core::observation::{
@@ -24,22 +24,30 @@ mod aggregate;
 #[cfg(test)]
 mod aggregate_tests;
 mod bundle;
+mod compare_targets;
 mod compare_variant;
 mod experiment;
 mod guardrails;
 mod matrix;
+#[cfg(test)]
+mod matrix_tests;
 mod metadata;
 mod observations;
 mod output;
 mod overlay_locks;
+mod phase_args;
 mod probes;
 #[cfg(test)]
 mod profile_tests;
 pub(super) mod repeat;
+#[cfg(test)]
+mod rig_tests;
 mod schedule;
 #[cfg(test)]
 mod test_fixture;
+mod workload;
 
+use compare_targets::run_compare_targets;
 use compare_variant::run_compare_variant;
 use experiment::{
     collect_trace_experiment_artifacts_for_plan, run_trace_experiment_setup_for_plan,
@@ -47,19 +55,25 @@ use experiment::{
     trace_experiment_settings,
 };
 use guardrails::run_trace_guardrails_for_args;
+use matrix::TraceMatrixAxis;
 use metadata::trace_span_metadata_for_args;
 use observations::record_trace_artifacts;
 use overlay_locks::run_overlay_locks;
+use phase_args::{cli_span_definitions_for_args, span_definitions_for_args};
 
+#[cfg(test)]
+use output::render_aggregate_markdown;
 use output::{
-    attach_span_metadata, classification_summaries, render_aggregate_markdown,
-    render_compare_markdown, render_matrix_markdown, run_compare,
+    attach_span_metadata, classification_summaries, render_matrix_markdown,
+    render_scenario_matrix_markdown, render_trace_aggregate_evidence_markdown,
+    render_trace_compare_evidence_markdown, render_trace_run_evidence_markdown, run_compare,
 };
 use probes::trace_probes_for_args;
 use repeat::run_repeat;
 pub(super) use schedule::{
     plan_trace_run_order, TraceRunPlanEntry, TraceSchedule, TraceVariantMatrixMode,
 };
+use workload::trace_workload_scenario_id;
 
 #[cfg(test)]
 use matrix::{expand_variant_matrix, TraceVariantStackItem};
@@ -78,6 +92,12 @@ pub struct TraceArgs {
     /// After aggregate JSON when running `homeboy trace compare before.json after.json`.
     #[arg(value_name = "AFTER_JSON")]
     pub compare_after: Option<PathBuf>,
+    /// Baseline path or git ref for `homeboy trace compare COMPONENT SCENARIO`.
+    #[arg(long = "baseline-target", value_name = "PATH_OR_REF")]
+    pub baseline_target: Option<String>,
+    /// Candidate path or git ref for `homeboy trace compare COMPONENT SCENARIO`.
+    #[arg(long, value_name = "PATH_OR_REF")]
+    pub candidate: Option<String>,
     /// Run trace against a rig-pinned component path after `rig check` passes.
     #[arg(long, value_name = "RIG_ID")]
     pub rig: Option<String>,
@@ -156,13 +176,25 @@ pub struct TraceArgs {
     #[arg(long = "matrix", value_enum, default_value_t = TraceVariantMatrixMode::None)]
     pub matrix: TraceVariantMatrixMode,
 
-    /// Directory where `trace compare-variant` writes aggregate, compare, and summary artifacts.
+    /// Add a scenario matrix axis as `name=value1,value2`. Repeatable.
+    #[arg(long = "axis", value_name = "NAME=VALUE[,VALUE...]", value_parser = matrix::parse_trace_matrix_axis)]
+    pub axes: Vec<TraceMatrixAxis>,
+
+    #[arg(skip)]
+    pub matrix_env: Vec<(String, String)>,
+
+    /// Directory where trace matrix modes write aggregate, compare, cell, and summary artifacts.
     #[arg(long = "output-dir", value_name = "DIR")]
     pub output_dir: Option<PathBuf>,
 
     /// Leave overlay changes in place after the trace run.
     #[arg(long)]
     pub keep_overlay: bool,
+
+    #[arg(long, alias = "proof")]
+    pub canonical: bool,
+    #[arg(long)]
+    pub allow_local_toolchain: bool,
 
     /// Clean only stale trace overlay locks.
     #[arg(long)]
@@ -217,21 +249,19 @@ pub fn run_markdown_with_json_artifact(
 
 fn render_markdown_output(output: &TraceCommandOutput) -> String {
     match output {
-        TraceCommandOutput::Run(run_output) => {
-            let Some(results) = run_output.results.as_ref() else {
-                return "# Trace\n\nNo trace results were produced.\n".to_string();
-            };
-            extension_trace::render_markdown(results, &run_output.overlays)
-        }
+        TraceCommandOutput::Run(run_output) => render_trace_run_evidence_markdown(run_output),
         TraceCommandOutput::Summary(summary) => {
             format!(
                 "# Trace Summary\n\n- **Component:** `{}`\n- **Status:** `{}`\n- **Exit code:** `{}`\n",
                 summary.component, summary.status, summary.exit_code
             )
         }
-        TraceCommandOutput::Aggregate(aggregate) => render_aggregate_markdown(aggregate),
-        TraceCommandOutput::Compare(compare) => render_compare_markdown(compare),
+        TraceCommandOutput::Aggregate(aggregate) => {
+            render_trace_aggregate_evidence_markdown(aggregate)
+        }
+        TraceCommandOutput::Compare(compare) => render_trace_compare_evidence_markdown(compare),
         TraceCommandOutput::Matrix(matrix) => render_matrix_markdown(matrix),
+        TraceCommandOutput::ScenarioMatrix(matrix) => render_scenario_matrix_markdown(matrix),
         TraceCommandOutput::List(list) => {
             if !list.profiles.is_empty() || list.command == "trace.list.profiles" {
                 let mut markdown = "# Trace Profiles\n\n".to_string();
@@ -316,7 +346,17 @@ fn run_outputs(mut args: TraceArgs) -> CmdResult<(TraceCommandOutput, Option<Tra
     }
 
     if args.comp.component.as_deref() == Some("compare") {
+        if args.baseline_target.is_some() || args.candidate.is_some() {
+            let (output, exit_code) = run_compare_targets(args)?;
+            return Ok(((output, None), exit_code));
+        }
         let (output, exit_code) = run_compare(args)?;
+        return Ok(((output, None), exit_code));
+    }
+
+    if args.comp.component.as_deref() == Some("matrix") {
+        apply_matrix_target_args(&mut args);
+        let (output, exit_code) = matrix::run_scenario_matrix(args)?;
         return Ok(((output, None), exit_code));
     }
 
@@ -379,6 +419,16 @@ fn run_outputs(mut args: TraceArgs) -> CmdResult<(TraceCommandOutput, Option<Tra
 
 pub(super) fn apply_command_target_component(args: &mut TraceArgs) {
     args.comp.component = args.component_arg.clone();
+}
+
+fn apply_matrix_target_args(args: &mut TraceArgs) {
+    let positional_component = args.scenario.take();
+    let positional_scenario = args
+        .compare_after
+        .take()
+        .map(|path| path.to_string_lossy().to_string());
+    args.comp.component = args.component_arg.clone().or(positional_component);
+    args.scenario = args.scenario_arg.clone().or(positional_scenario);
 }
 
 pub(super) fn required_trace_scenario(args: &TraceArgs) -> homeboy::core::Result<String> {
@@ -494,21 +544,11 @@ fn execute_trace_run(args: TraceArgs) -> homeboy::core::Result<TraceRunExecution
                 scenario_id: scenario_id.clone(),
             })
     });
-    let extra_workloads = rig_context
-        .as_ref()
-        .and_then(|context| {
-            ctx.extension_id.as_deref().map(|id| {
-                rig::workloads_for_extension(
-                    &context.rig_spec,
-                    rig::RigWorkloadKind::Trace,
-                    context.rig_package_root.as_deref(),
-                    id,
-                )
-            })
-        })
-        .unwrap_or_default();
+    let (extra_workloads, trace_dependencies, runner_capabilities) =
+        trace_workload_inputs(rig_context.as_ref(), ctx.extension_id.as_deref());
     let experiment_settings = trace_experiment_settings(experiment_plan.as_ref())?;
-    let experiment_env = trace_experiment_env(experiment_plan.as_ref())?;
+    let mut experiment_env = trace_experiment_env(experiment_plan.as_ref())?;
+    experiment_env.extend(args.matrix_env.clone());
     let trace_probes =
         trace_probes_for_args(&args, rig_context.as_ref(), ctx.extension_id.as_deref())?;
     let attachments = TraceAttachment::parse_all(&args.attachments)?;
@@ -534,10 +574,12 @@ fn execute_trace_run(args: TraceArgs) -> homeboy::core::Result<TraceRunExecution
                 workload_paths: extra_workloads,
                 probes: trace_probes,
                 attachments,
+                dependencies: trace_dependencies,
+                runner_capabilities,
             },
             scenario_id,
             json_summary: args.json_summary,
-            rig_id: args.rig,
+            rig_id: args.rig.clone(),
             overlays,
             keep_overlay: args.keep_overlay,
             span_definitions,
@@ -548,6 +590,10 @@ fn execute_trace_run(args: TraceArgs) -> homeboy::core::Result<TraceRunExecution
             },
             regression_threshold_percent: args.regression_threshold,
             regression_min_delta_ms: args.regression_min_delta_ms,
+            canonical_policy: TraceCanonicalPolicy::from_flags(
+                args.canonical,
+                args.allow_local_toolchain,
+            ),
         },
         &run_dir,
         rig_state.clone(),
@@ -597,147 +643,6 @@ fn trace_scenario(args: &TraceArgs) -> homeboy::core::Result<&str> {
         })
 }
 
-const DEFAULT_TRACE_PHASE_PRESET: &str = "default";
-
-fn cli_span_definitions_for_args(
-    args: &TraceArgs,
-) -> homeboy::core::Result<Vec<TraceSpanDefinition>> {
-    let mut definitions = args.spans.clone();
-    let phase_definitions =
-        extension_trace::spans::phase_span_definitions(&args.phases).map_err(|message| {
-            homeboy::core::Error::validation_invalid_argument("--phase", message, None, None)
-        })?;
-    definitions.extend(phase_definitions);
-    Ok(definitions)
-}
-
-fn span_definitions_for_args(
-    args: &TraceArgs,
-    rig_context: Option<&TraceRigContext>,
-    extension_id: Option<&str>,
-    use_default_preset: bool,
-) -> homeboy::core::Result<Vec<TraceSpanDefinition>> {
-    let mut definitions = cli_span_definitions_for_args(args)?;
-    let Some(preset_name) = args.phase_preset.as_deref().or_else(|| {
-        if use_default_preset {
-            default_trace_phase_preset_for_args(args, rig_context, extension_id)
-        } else {
-            None
-        }
-    }) else {
-        return Ok(definitions);
-    };
-
-    let preset_phases = trace_phase_preset_for_args(args, rig_context, extension_id, preset_name)?;
-    let phase_definitions = extension_trace::spans::phase_span_definitions(&preset_phases)
-        .map_err(|message| {
-            homeboy::core::Error::validation_invalid_argument("--phase-preset", message, None, None)
-        })?;
-    definitions.extend(phase_definitions);
-    Ok(definitions)
-}
-
-fn default_trace_phase_preset_for_args<'a>(
-    args: &TraceArgs,
-    rig_context: Option<&'a TraceRigContext>,
-    extension_id: Option<&str>,
-) -> Option<&'a str> {
-    let scenario = trace_scenario(args).ok()?;
-    let context = rig_context?;
-    let extension_id = extension_id?;
-    let workload = context
-        .rig_spec
-        .trace_workloads
-        .get(extension_id)
-        .and_then(|workloads| {
-            workloads
-                .iter()
-                .find(|workload| trace_workload_scenario_id(workload.path()) == scenario)
-        })?;
-    workload.trace_default_phase_preset().or_else(|| {
-        workload
-            .trace_phase_preset(DEFAULT_TRACE_PHASE_PRESET)
-            .map(|_| DEFAULT_TRACE_PHASE_PRESET)
-    })
-}
-
-fn trace_phase_preset_for_args(
-    args: &TraceArgs,
-    rig_context: Option<&TraceRigContext>,
-    extension_id: Option<&str>,
-    preset_name: &str,
-) -> homeboy::core::Result<Vec<extension_trace::spans::TracePhaseMilestone>> {
-    let scenario = trace_scenario(args)?;
-    let context = rig_context.ok_or_else(|| {
-        homeboy::core::Error::validation_invalid_argument(
-            "--phase-preset",
-            "phase presets require --rig so Homeboy can read rig/workload metadata",
-            None,
-            None,
-        )
-    })?;
-    let extension_id = extension_id.ok_or_else(|| {
-        homeboy::core::Error::validation_invalid_argument(
-            "--phase-preset",
-            "phase presets require a resolved trace extension",
-            None,
-            None,
-        )
-    })?;
-
-    let workloads = context
-        .rig_spec
-        .trace_workloads
-        .get(extension_id)
-        .map(|workloads| workloads.as_slice())
-        .unwrap_or(&[]);
-    let workload = workloads
-        .iter()
-        .find(|workload| trace_workload_scenario_id(workload.path()) == scenario);
-    let phases = workload
-        .and_then(|workload| workload.trace_phase_preset(preset_name))
-        .ok_or_else(|| {
-            homeboy::core::Error::validation_invalid_argument(
-                "--phase-preset",
-                format!(
-                    "trace phase preset '{}' is not declared for scenario '{}'",
-                    preset_name, scenario
-                ),
-                None,
-                None,
-            )
-        })?;
-
-    phases
-        .iter()
-        .map(|phase| {
-            extension_trace::spans::parse_phase_milestone(phase).map_err(|message| {
-                homeboy::core::Error::validation_invalid_argument(
-                    "--phase-preset",
-                    message,
-                    None,
-                    None,
-                )
-            })
-        })
-        .collect()
-}
-
-fn trace_workload_scenario_id(path: &str) -> String {
-    let file_name = Path::new(path)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or(path);
-    if let Some((stem, _)) = file_name.split_once(".trace.") {
-        return stem.to_string();
-    }
-    Path::new(file_name)
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .unwrap_or(file_name)
-        .to_string()
-}
-
 fn run_list(args: TraceArgs) -> CmdResult<TraceCommandOutput> {
     let rig_context = load_rig_context(args.rig.as_deref())?;
     let effective_id = resolve_component_id(&args.comp, rig_context.as_ref().map(|c| &c.rig_spec))?;
@@ -766,19 +671,8 @@ fn run_list(args: TraceArgs) -> CmdResult<TraceCommandOutput> {
     }
 
     let run_dir = RunDir::create()?;
-    let extra_workloads = rig_context
-        .as_ref()
-        .and_then(|context| {
-            ctx.extension_id.as_deref().map(|id| {
-                rig::workloads_for_extension(
-                    &context.rig_spec,
-                    rig::RigWorkloadKind::Trace,
-                    context.rig_package_root.as_deref(),
-                    id,
-                )
-            })
-        })
-        .unwrap_or_default();
+    let (extra_workloads, trace_dependencies, runner_capabilities) =
+        trace_workload_inputs(rig_context.as_ref(), ctx.extension_id.as_deref());
     let list = extension_trace::run_trace_list_workflow(
         &ctx.component,
         TraceListWorkflowArgs {
@@ -792,6 +686,8 @@ fn run_list(args: TraceArgs) -> CmdResult<TraceCommandOutput> {
                 workload_paths: extra_workloads,
                 probes: Vec::new(),
                 attachments: Vec::new(),
+                dependencies: trace_dependencies,
+                runner_capabilities,
             },
             rig_id: args.rig,
         },
@@ -805,6 +701,30 @@ struct TraceRigContext {
     rig_spec: RigSpec,
     rig_package_root: Option<PathBuf>,
     rig_config_root: Option<PathBuf>,
+}
+
+fn trace_workload_inputs(
+    rig_context: Option<&TraceRigContext>,
+    extension_id: Option<&str>,
+) -> (Vec<PathBuf>, Vec<rig::TraceDependencySpec>, Vec<String>) {
+    let Some((context, id)) = rig_context.zip(extension_id) else {
+        return (Vec::new(), Vec::new(), Vec::new());
+    };
+
+    (
+        rig::workloads_for_extension(
+            &context.rig_spec,
+            rig::RigWorkloadKind::Trace,
+            context.rig_package_root.as_deref(),
+            id,
+        ),
+        rig::trace_dependencies_for_extension(
+            &context.rig_spec,
+            context.rig_package_root.as_deref(),
+            id,
+        ),
+        rig::runner_capabilities_for_extension(&context.rig_spec, id),
+    )
 }
 
 #[derive(Clone)]

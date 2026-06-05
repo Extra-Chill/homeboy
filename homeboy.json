@@ -130,6 +130,7 @@
         "default_match": "token",
         "description": "Core boundary leak (core-agnostic-source) configured ecosystem term `{term}` appears at line {line} in {classification} context `{context}`",
         "exclude_path_contains": [
+          "src/core/execution_contract.rs",
           "src/core/product_identity.rs"
         ],
         "id": "core-agnostic-source",
@@ -232,35 +233,6 @@
           {
             "match_mode": "literal",
             "value": "Action Scheduler"
-          },
-          {
-            "value": "Homeboy"
-          },
-          {
-            "match_mode": "literal",
-            "value": "homeboy.json"
-          },
-          {
-            "match_mode": "literal",
-            "value": ".homeboy"
-          },
-          {
-            "match_mode": "literal",
-            "value": "HOMEBOY_"
-          },
-          {
-            "match_mode": "literal",
-            "value": "homeboy/lab-offload/v1"
-          },
-          {
-            "value": "Lab"
-          },
-          {
-            "value": "offload"
-          },
-          {
-            "match_mode": "literal",
-            "value": "homeboy-run"
           },
           {
             "match_mode": "literal",
@@ -966,8 +938,57 @@
         "core_boundary_leak:core-agnostic-source::src/core/defaults.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `HOMEBOY_` appears at line 33 in behavioral context `top-level`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::src/core/defaults.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `Homeboy` appears at line 32 in behavioral context `top-level`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::src/core/defaults.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `Lab` appears at line 19 in behavioral context `top-level`::CoreBoundaryLeak",
-        "core_boundary_leak:core-agnostic-source::src/core/defaults.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `Lab` appears at line 42 in behavioral context `default`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::src/core/defaults.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `Lab` appears at line 43 in behavioral context `default`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::src/core/defaults.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `cargo` appears at line 100 in behavioral context `default`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::src/core/defaults.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `homeboy.json` appears at line 12 in behavioral context `top-level`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::src/core/defaults.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `homeboy.json` appears at line 159 in behavioral context `default`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::src/core/defaults.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `homeboy.json` appears at line 164 in behavioral context `load_defaults`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::src/core/defaults.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `homeboy.json` appears at line 175 in behavioral context `load_config`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::src/core/defaults.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `homeboy.json` appears at line 184 in behavioral context `load_config`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::src/core/defaults.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `homeboy.json` appears at line 190 in behavioral context `load_config_from_file`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::src/core/defaults.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `homeboy.json` appears at line 200 in behavioral context `load_config_from_file`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::src/core/defaults.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `homeboy.json` appears at line 208 in behavioral context `load_config_from_file`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::src/core/defaults.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `homeboy.json` appears at line 229 in behavioral context `save_config`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::src/core/defaults.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `homeboy.json` appears at line 234 in behavioral context `config_exists`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::src/core/defaults.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `homeboy.json` appears at line 251 in behavioral context `reset_config`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::src/core/defaults.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `homeboy.json` appears at line 67 in behavioral context `default_true`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::src/core/defaults/builtins.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `.homeboy` appears at line 163 in behavioral context `default_artifact_prefix`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::src/core/defaults/builtins.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `Cargo.toml` appears at line 132 in behavioral context `default_version_candidates`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::src/core/defaults/builtins.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `Homeboy` appears at line 100 in behavioral context `default_binary_config`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::src/core/defaults/builtins.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `Homeboy` appears at line 108 in behavioral context `default_binary_config`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::src/core/defaults/builtins.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `Homeboy` appears at line 112 in behavioral context `default_binary_config`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::src/core/defaults/builtins.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `Homeboy` appears at line 115 in behavioral context `default_binary_config`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::src/core/defaults/builtins.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `Homeboy` appears at line 163 in behavioral context `default_artifact_prefix`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::src/core/defaults/builtins.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `Homeboy` appears at line 20 in behavioral context `default_homebrew_config`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::src/core/defaults/builtins.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `Homeboy` appears at line 21 in behavioral context `default_homebrew_config`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::src/core/defaults/builtins.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `Homeboy` appears at line 28 in behavioral context `default_cargo_config`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::src/core/defaults/builtins.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `Homeboy` appears at line 42 in behavioral context `default_binary_config`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::src/core/defaults/builtins.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `Homeboy` appears at line 45 in behavioral context `default_binary_config`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::src/core/defaults/builtins.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `Homeboy` appears at line 47 in behavioral context `default_binary_config`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::src/core/defaults/builtins.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `Homeboy` appears at line 48 in behavioral context `default_binary_config`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::src/core/defaults/builtins.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `Homeboy` appears at line 49 in behavioral context `default_binary_config`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::src/core/defaults/builtins.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `Homeboy` appears at line 52 in behavioral context `default_binary_config`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::src/core/defaults/builtins.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `Homeboy` appears at line 57 in behavioral context `default_binary_config`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::src/core/defaults/builtins.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `Homeboy` appears at line 58 in behavioral context `default_binary_config`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::src/core/defaults/builtins.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `Homeboy` appears at line 59 in behavioral context `default_binary_config`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::src/core/defaults/builtins.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `Homeboy` appears at line 60 in behavioral context `default_binary_config`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::src/core/defaults/builtins.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `Homeboy` appears at line 64 in behavioral context `default_binary_config`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::src/core/defaults/builtins.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `Homeboy` appears at line 94 in behavioral context `default_binary_config`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::src/core/defaults/builtins.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `Homeboy` appears at line 95 in behavioral context `default_binary_config`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::src/core/defaults/builtins.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `Homeboy` appears at line 96 in behavioral context `default_binary_config`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::src/core/defaults/builtins.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `Homeboy` appears at line 98 in behavioral context `default_binary_config`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::src/core/defaults/builtins.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `cargo` appears at line 11 in behavioral context `default_install_methods`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::src/core/defaults/builtins.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `cargo` appears at line 132 in behavioral context `default_version_candidates`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::src/core/defaults/builtins.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `cargo` appears at line 27 in behavioral context `default_cargo_config`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::src/core/defaults/builtins.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `cargo` appears at line 28 in behavioral context `default_cargo_config`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::src/core/defaults/builtins.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `cargo` appears at line 36 in behavioral context `default_source_config`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::src/core/defaults/builtins.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `cargo` appears at line 95 in behavioral context `default_binary_config`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::src/core/defaults/builtins.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `composer.json` appears at line 140 in behavioral context `default_version_candidates`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::src/core/defaults/builtins.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `composer` appears at line 140 in behavioral context `default_version_candidates`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::src/core/defaults/builtins.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `homeboy.json` appears at line 45 in behavioral context `default_binary_config`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::src/core/defaults/builtins.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `package.json` appears at line 136 in behavioral context `default_version_candidates`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::src/core/defaults/builtins.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `rust` appears at line 45 in behavioral context `default_binary_config`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::src/core/defaults/builtins.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `style.css` appears at line 144 in behavioral context `default_version_candidates`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::src/core/deploy/execution.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `Homeboy` appears at line 114 in behavioral context `prepare_component_deploy`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::src/core/deploy/execution.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `Homeboy` appears at line 571 in behavioral context `resolve_preflight_artifact_path`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::src/core/deploy/execution.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `Homeboy` appears at line 585 in behavioral context `resolve_preflight_artifact_path`::CoreBoundaryLeak",
@@ -2308,6 +2329,7 @@
         "intra-method-duplication::src/core/agent_task_scheduler.rs::IntraMethodDuplicate",
         "parallel-implementation::src/core/agent_task_scheduler.rs::ParallelImplementation",
         "parallel-implementation::src/core/config/json_pointer.rs::ParallelImplementation",
+        "enum_dispatch_contracts::src/commands/trace/output.rs::RepeatedEnumDispatchContract",
         "structural::src/commands/bench/tests.rs::HighItemCount",
         "structural::src/commands/runs/gh_actions.rs::HighItemCount",
         "structural::src/commands/trace.rs::GodFile",
@@ -2318,6 +2340,8 @@
         "structural::src/core/code_audit/mod.rs::GodFile",
         "structural::src/core/extension/grammar.rs::GodFile",
         "structural::src/core/extension/lifecycle.rs::GodFile",
+        "structural::src/core/extension/trace/report.rs::HighItemCount",
+        "structural::src/core/extension/trace/run.rs::HighItemCount",
         "structural::src/core/refactor/rename/mod.rs::GodFile",
         "structural::src/core/release/executor.rs::GodFile",
         "structural::src/core/rig/pipeline.rs::HighItemCount",

@@ -1,6 +1,7 @@
 //! Trace workflows: invoke extension runners, parse JSON, preserve artifacts.
 
 use serde::Serialize;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
@@ -10,13 +11,16 @@ use crate::core::engine::baseline::BaselineFlags;
 use crate::core::engine::run_dir::{self, RunDir};
 use crate::core::error::{Error, ErrorCode, Result};
 use crate::core::extension::trace::baseline::TraceBaselineComparison;
+use crate::core::extension::trace::preflight::{
+    preflight_trace_dependencies, preflight_trace_runner_capabilities,
+};
 use crate::core::extension::RunnerOutput;
 use crate::core::extension::{
-    build_scenario_runner, path_list_env_value, resolve_execution_context, stderr_tail,
-    ExtensionCapability, ExtensionExecutionContext, ScenarioRunnerOptions,
+    build_scenario_runner, resolve_execution_context, stderr_tail, ExtensionCapability,
+    ExtensionExecutionContext, ScenarioRunnerOptions,
 };
 use crate::core::paths;
-use crate::core::rig::RigStateSnapshot;
+use crate::core::rig::{RigStateSnapshot, TraceDependencySpec};
 
 use super::attach::{append_attach_observations, observe_trace_attachments, TraceAttachment};
 use super::overlay::{
@@ -24,8 +28,16 @@ use super::overlay::{
     cleanup_trace_overlays, TraceOverlayRequest,
 };
 
+use super::canonicality::{
+    evaluate_trace_canonicality, refused_trace_result, TraceCanonicalPolicy,
+};
+use super::generic_runner::run_generic_trace_runner;
+#[cfg(test)]
+use super::generic_runner::{discover_generic_trace_workloads, trace_workload_scenario_id};
 use super::parsing::{
-    parse_trace_list_str, parse_trace_results_file, TraceList, TraceResults, TraceSpanDefinition,
+    parse_trace_list_str, parse_trace_results_file, TraceAssertion, TraceAssertionStatus,
+    TraceComponentsProvenance, TraceEvidenceMetadata, TraceGitProvenance, TraceList, TraceResults,
+    TraceRuntimeAssetProvenance, TraceSpanDefinition, TraceStatus, TraceToolchainProvenance,
 };
 use super::probes::{ActiveTraceProbes, TraceProbeConfig};
 
@@ -45,6 +57,7 @@ pub struct TraceRunWorkflowArgs {
     pub baseline_flags: BaselineFlags,
     pub regression_threshold_percent: f64,
     pub regression_min_delta_ms: u64,
+    pub canonical_policy: TraceCanonicalPolicy,
 }
 
 #[derive(Debug, Clone)]
@@ -64,6 +77,8 @@ pub struct TraceRunnerInputs {
     pub workload_paths: Vec<PathBuf>,
     pub probes: Vec<TraceProbeConfig>,
     pub attachments: Vec<TraceAttachment>,
+    pub dependencies: Vec<TraceDependencySpec>,
+    pub runner_capabilities: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -71,6 +86,7 @@ pub struct TraceRunWorkflowResult {
     pub status: String,
     pub component: String,
     pub exit_code: i32,
+    pub evidence: TraceEvidenceMetadata,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub results: Option<TraceResults>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -81,6 +97,10 @@ pub struct TraceRunWorkflowResult {
     pub baseline_comparison: Option<TraceBaselineComparison>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hints: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub toolchain: Option<TraceToolchainProvenance>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub components: Option<TraceComponentsProvenance>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -139,6 +159,20 @@ fn run_trace_workflow_with_component_script(
         .path_override
         .as_deref()
         .unwrap_or(component.local_path.as_str());
+    let dependency_provenance = preflight_trace_dependencies(&args.runner_inputs.dependencies)?;
+    preflight_trace_runner_capabilities(None, &args.runner_inputs.runner_capabilities)?;
+    let canonicality = evaluate_trace_canonicality(None, component, &args)?;
+    if args.canonical_policy.refuses_non_canonical() && !canonicality.is_canonical() {
+        return Ok(refused_trace_result(
+            args,
+            canonicality.metadata(TraceCanonicalPolicy::Canonical),
+        ));
+    }
+    let (mut toolchain, components) = trace_provenance(None, component_path);
+    mark_non_canonical(
+        &mut toolchain,
+        "component script trace runs do not resolve an extension runner checkout",
+    );
     let source_path = Path::new(component_path);
     let _overlay_locks = if args.overlays.is_empty() {
         None
@@ -146,6 +180,14 @@ fn run_trace_workflow_with_component_script(
         Some(acquire_trace_overlay_locks(&args.overlays, run_dir)?)
     };
     let applied_overlays = apply_trace_overlays(&args.overlays, args.keep_overlay)?;
+    let mut script_env = vec![
+        (
+            "HOMEBOY_TRACE_SCENARIO".to_string(),
+            args.scenario_id.clone(),
+        ),
+        ("HOMEBOY_TRACE_LIST_ONLY".to_string(), "0".to_string()),
+    ];
+    script_env.extend(args.runner_inputs.env.clone());
     let script_output =
         crate::core::extension::component_script::run_component_scripts_with_run_dir(
             component,
@@ -153,13 +195,7 @@ fn run_trace_workflow_with_component_script(
             source_path,
             run_dir,
             true,
-            &[
-                (
-                    "HOMEBOY_TRACE_SCENARIO".to_string(),
-                    args.scenario_id.clone(),
-                ),
-                ("HOMEBOY_TRACE_LIST_ONLY".to_string(), "0".to_string()),
-            ],
+            &script_env,
             &[],
         );
     if !args.keep_overlay {
@@ -172,11 +208,15 @@ fn run_trace_workflow_with_component_script(
         if parsed.rig.is_none() {
             parsed.rig = rig_state;
         }
+        parsed.evidence = Some(canonicality.metadata(args.canonical_policy));
         Some(parsed)
     } else {
         None
     };
     if let Some(parsed) = results.as_mut() {
+        parsed.toolchain = Some(toolchain.clone());
+        parsed.components = Some(components.clone());
+        parsed.dependencies = dependency_provenance;
         super::spans::apply_span_definitions(parsed, &args.span_definitions);
         super::assertions::apply_temporal_assertions(parsed);
         persist_trace_results(&results_path, parsed)?;
@@ -213,6 +253,7 @@ fn run_trace_workflow_with_component_script(
         status,
         component: args.component_label,
         exit_code,
+        evidence: canonicality.metadata(args.canonical_policy),
         results,
         failure,
         overlays: applied_overlays
@@ -231,6 +272,8 @@ fn run_trace_workflow_with_component_script(
             "Component scripts use the extension runner env contract without extension resolution."
                 .to_string(),
         ]),
+        toolchain: Some(toolchain),
+        components: Some(components),
     })
 }
 
@@ -245,6 +288,19 @@ fn run_trace_workflow_with_context(
         .path_override
         .as_deref()
         .unwrap_or(component.local_path.as_str());
+    let dependency_provenance = preflight_trace_dependencies(&args.runner_inputs.dependencies)?;
+    preflight_trace_runner_capabilities(
+        execution_context,
+        &args.runner_inputs.runner_capabilities,
+    )?;
+    let canonicality = evaluate_trace_canonicality(execution_context, component, &args)?;
+    if args.canonical_policy.refuses_non_canonical() && !canonicality.is_canonical() {
+        return Ok(refused_trace_result(
+            args,
+            canonicality.metadata(TraceCanonicalPolicy::Canonical),
+        ));
+    }
+    let (toolchain, components) = trace_provenance(execution_context, component_path);
     let _overlay_locks = if args.overlays.is_empty() {
         None
     } else {
@@ -267,7 +323,7 @@ fn run_trace_workflow_with_context(
         &args.runner_inputs.attachments,
     );
     let active_probes =
-        ActiveTraceProbes::start_with_artifact_dir(&probe_configs, Some(artifact_dir))?;
+        ActiveTraceProbes::start_with_artifact_dir(&probe_configs, Some(artifact_dir.clone()))?;
     let started_at = Instant::now();
     let mut attach_observations =
         observe_trace_attachments(&args.runner_inputs.attachments, "before", started_at);
@@ -293,17 +349,22 @@ fn run_trace_workflow_with_context(
         if parsed.rig.is_none() {
             parsed.rig = rig_state;
         }
+        parsed.evidence = Some(canonicality.metadata(args.canonical_policy));
         Some(parsed)
     } else {
         None
     };
     let failure = (!runner_output.success).then(|| failure_from_output(&args, &runner_output));
     if let Some(parsed) = results.as_mut() {
+        parsed.toolchain = Some(toolchain.clone());
+        parsed.components = Some(components.clone());
+        parsed.dependencies = dependency_provenance;
         parsed.timeline.extend(probe_events);
         parsed.timeline.sort_by_key(|event| event.t_ms);
         append_attach_observations(parsed, run_dir, &attach_observations)?;
         super::spans::apply_span_definitions(parsed, &args.span_definitions);
         super::assertions::apply_temporal_assertions(parsed);
+        validate_declared_trace_artifacts(parsed, run_dir, &artifact_dir);
         persist_trace_results(&results_path, parsed)?;
     }
 
@@ -400,6 +461,7 @@ fn run_trace_workflow_with_context(
         status,
         component: args.component_label,
         exit_code,
+        evidence: canonicality.metadata(args.canonical_policy),
         results,
         failure,
         overlays: applied_overlays
@@ -415,7 +477,193 @@ fn run_trace_workflow_with_context(
             .collect(),
         baseline_comparison,
         hints: if hints.is_empty() { None } else { Some(hints) },
+        toolchain: Some(toolchain),
+        components: Some(components),
     })
+}
+
+fn trace_provenance(
+    execution_context: Option<&ExtensionExecutionContext>,
+    component_path: &str,
+) -> (TraceToolchainProvenance, TraceComponentsProvenance) {
+    let homeboy = homeboy_git_provenance();
+    let target = git_provenance(Path::new(component_path), Some("target"));
+    let env_wp_codebox_bin = std::env::var("HOMEBOY_WP_CODEBOX_BIN").ok();
+    let wp_codebox_path = execution_context
+        .filter(|context| {
+            context.extension_id.contains("wp-codebox")
+                || context
+                    .extension_path
+                    .to_string_lossy()
+                    .contains("wp-codebox")
+        })
+        .map(|context| context.extension_path.as_path())
+        .or_else(|| env_wp_codebox_bin.as_deref().map(Path::new));
+    let mut reasons = Vec::new();
+    let mut wp_codebox = wp_codebox_path.map(|path| git_provenance(path, Some("wp_codebox")));
+
+    if env_wp_codebox_bin.is_some() {
+        reasons.push("HOMEBOY_WP_CODEBOX_BIN selected a local WP Codebox runner path".to_string());
+        if let Some(provenance) = wp_codebox.as_mut() {
+            provenance.source = Some("env:HOMEBOY_WP_CODEBOX_BIN".to_string());
+        }
+    }
+    if execution_context.is_none() {
+        reasons.push("trace runner used generic local workload discovery".to_string());
+    }
+    for (label, provenance) in [("homeboy", &homeboy), ("target", &target)] {
+        if provenance.sha.is_none() || provenance.dirty.is_none() {
+            reasons.push(format!(
+                "{label} checkout git provenance is incomplete for {}",
+                provenance.path
+            ));
+        }
+    }
+    if wp_codebox.is_none() {
+        reasons.push("WP Codebox checkout was not resolved for this trace run".to_string());
+    }
+    let canonical = reasons.is_empty();
+    let mut runtime_assets = BTreeMap::new();
+    runtime_assets.insert(
+        "browser_runtime".to_string(),
+        browser_runtime_asset_provenance(),
+    );
+
+    (
+        TraceToolchainProvenance {
+            canonical,
+            mode: if canonical {
+                "canonical"
+            } else {
+                "development"
+            }
+            .to_string(),
+            reasons,
+            homeboy,
+            wp_codebox,
+            node: command_version("node", &["--version"]),
+            runtime_assets,
+        },
+        TraceComponentsProvenance {
+            target,
+            dependencies: Vec::new(),
+        },
+    )
+}
+
+fn mark_non_canonical(toolchain: &mut TraceToolchainProvenance, reason: &str) {
+    toolchain.canonical = false;
+    toolchain.mode = "development".to_string();
+    if !toolchain.reasons.iter().any(|item| item == reason) {
+        toolchain.reasons.push(reason.to_string());
+    }
+}
+
+fn git_provenance(path: &Path, source: Option<&str>) -> TraceGitProvenance {
+    let git_root = crate::core::git::get_git_root(&path.to_string_lossy())
+        .ok()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| path.to_path_buf());
+    TraceGitProvenance {
+        path: git_root.to_string_lossy().to_string(),
+        sha: git_stdout(&git_root, &["rev-parse", "HEAD"]),
+        branch: crate::core::git::current_branch(&git_root),
+        dirty: git_stdout(&git_root, &["status", "--porcelain=v1"])
+            .map(|status| !status.trim().is_empty()),
+        source: source.map(ToString::to_string),
+    }
+}
+
+fn homeboy_git_provenance() -> TraceGitProvenance {
+    let exe_path = std::env::current_exe().ok();
+    let exe_parent = exe_path.as_deref().and_then(Path::parent);
+    let manifest_dir = env!(concat!("CARGO", "_MANIFEST_DIR"));
+    let provenance = exe_parent
+        .map(|path| git_provenance(path, Some("homeboy")))
+        .filter(|provenance| provenance.sha.is_some());
+
+    provenance.unwrap_or_else(|| git_provenance(Path::new(manifest_dir), Some("homeboy")))
+}
+
+fn git_stdout(path: &Path, args: &[&str]) -> Option<String> {
+    crate::core::git::run_git(path, args, "trace provenance git probe")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn command_version(command: &str, args: &[&str]) -> Option<String> {
+    Command::new(command)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn browser_runtime_asset_provenance() -> TraceRuntimeAssetProvenance {
+    TraceRuntimeAssetProvenance {
+        present: false,
+        mode: Some("jspi".to_string()),
+        version: None,
+        path: None,
+    }
+}
+
+fn validate_declared_trace_artifacts(
+    results: &mut TraceResults,
+    run_dir: &RunDir,
+    artifact_dir: &Path,
+) {
+    let missing = results
+        .artifacts
+        .iter()
+        .filter(|artifact| {
+            resolve_declared_trace_artifact_path(&artifact.path, run_dir, artifact_dir).is_none()
+        })
+        .map(|artifact| artifact.path.clone())
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        return;
+    }
+
+    results.status = TraceStatus::Error;
+    results.failure = Some(format!(
+        "missing declared trace artifact{}: {}",
+        if missing.len() == 1 { "" } else { "s" },
+        missing.join(", ")
+    ));
+    for path in missing {
+        results.assertions.push(TraceAssertion {
+            id: format!("trace_artifact_exists:{}", path),
+            status: TraceAssertionStatus::Error,
+            message: Some(format!("Declared trace artifact is missing: {path}")),
+            details: Some(serde_json::json!({ "path": path })),
+        });
+    }
+}
+
+pub fn resolve_declared_trace_artifact_path(
+    path: &str,
+    run_dir: &RunDir,
+    artifact_dir: &Path,
+) -> Option<PathBuf> {
+    let relative = Path::new(path);
+    if relative.is_absolute() {
+        return relative.exists().then(|| relative.to_path_buf());
+    }
+    if relative
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return None;
+    }
+
+    [run_dir.path().join(relative), artifact_dir.join(relative)]
+        .into_iter()
+        .find(|candidate| candidate.exists())
 }
 
 fn persist_trace_results(path: &Path, results: &TraceResults) -> Result<()> {
@@ -483,6 +731,7 @@ pub fn run_trace_list_workflow(
         },
         regression_threshold_percent: super::baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT,
         regression_min_delta_ms: super::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
+        canonical_policy: TraceCanonicalPolicy::Development,
     };
     let output = build_trace_runner(
         execution_context.as_ref(),
@@ -583,8 +832,14 @@ pub(crate) fn build_trace_runner(
     })?;
 
     let Some(execution_context) = execution_context else {
+        preflight_trace_runner_capabilities(None, &args.runner_inputs.runner_capabilities)?;
         return run_generic_trace_runner(component, args, run_dir, &artifact_dir, list_only);
     };
+
+    preflight_trace_runner_capabilities(
+        Some(execution_context),
+        &args.runner_inputs.runner_capabilities,
+    )?;
 
     let mut runner = build_scenario_runner(ScenarioRunnerOptions {
         execution_context,
@@ -660,253 +915,6 @@ fn trace_probes_with_fswatch_attachments(
         }
     }
     merged
-}
-
-fn run_generic_trace_runner(
-    component: &Component,
-    args: &TraceRunWorkflowArgs,
-    run_dir: &RunDir,
-    artifact_dir: &Path,
-    list_only: bool,
-) -> Result<RunnerOutput> {
-    let component_path = args
-        .path_override
-        .as_deref()
-        .unwrap_or(component.local_path.as_str());
-    let workloads =
-        discover_generic_trace_workloads(Path::new(component_path), &args.runner_inputs)?;
-
-    if list_only {
-        let scenarios = workloads
-            .iter()
-            .map(|path| {
-                serde_json::json!({
-                    "id": trace_workload_scenario_id(path),
-                    "source": path.to_string_lossy()
-                })
-            })
-            .collect::<Vec<_>>();
-        let stdout = serde_json::json!({
-            "component_id": args.component_id,
-            "scenarios": scenarios
-        })
-        .to_string();
-        return Ok(RunnerOutput {
-            exit_code: 0,
-            success: true,
-            stdout,
-            stderr: String::new(),
-        });
-    }
-
-    let Some(workload) = workloads
-        .iter()
-        .find(|path| trace_workload_scenario_id(path) == args.scenario_id)
-    else {
-        return Ok(RunnerOutput {
-            exit_code: 3,
-            success: false,
-            stdout: String::new(),
-            stderr: format!("unknown trace scenario {}", args.scenario_id),
-        });
-    };
-
-    let mut command = generic_trace_workload_command(workload);
-    command.current_dir(component_path);
-    command.envs(generic_trace_env(
-        component,
-        args,
-        run_dir,
-        artifact_dir,
-        &workloads,
-        list_only,
-    )?);
-    let output = command.output().map_err(|e| {
-        Error::internal_io(
-            format!(
-                "Failed to run generic trace workload {}: {}",
-                workload.display(),
-                e
-            ),
-            Some("trace.generic.run".to_string()),
-        )
-    })?;
-
-    Ok(RunnerOutput {
-        exit_code: output.status.code().unwrap_or(1),
-        success: output.status.success(),
-        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-    })
-}
-
-fn discover_generic_trace_workloads(
-    component_path: &Path,
-    runner_inputs: &TraceRunnerInputs,
-) -> Result<Vec<PathBuf>> {
-    let mut paths = Vec::new();
-    for dir in [
-        component_path.join("traces"),
-        component_path.join("scripts/trace"),
-    ] {
-        if !dir.is_dir() {
-            continue;
-        }
-        let entries = std::fs::read_dir(&dir).map_err(|e| {
-            Error::internal_io(
-                format!("Failed to read trace workload dir {}: {}", dir.display(), e),
-                Some("trace.generic.discover".to_string()),
-            )
-        })?;
-        for entry in entries {
-            let entry = entry.map_err(|e| {
-                Error::internal_io(
-                    format!(
-                        "Failed to read trace workload entry in {}: {}",
-                        dir.display(),
-                        e
-                    ),
-                    Some("trace.generic.discover".to_string()),
-                )
-            })?;
-            let path = entry.path();
-            if is_generic_trace_workload(&path) {
-                paths.push(path);
-            }
-        }
-    }
-
-    paths.extend(runner_inputs.workload_paths.iter().cloned());
-    if let Some(extra) = std::env::var_os("HOMEBOY_TRACE_EXTRA_WORKLOADS") {
-        paths.extend(std::env::split_paths(&extra));
-    }
-
-    paths.sort();
-    paths.dedup();
-    Ok(paths)
-}
-
-fn is_generic_trace_workload(path: &Path) -> bool {
-    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-        return false;
-    };
-    (name.ends_with(".trace.mjs") || name.ends_with(".trace.sh") || name.ends_with(".trace.py"))
-        || matches!(
-            path.extension().and_then(|ext| ext.to_str()),
-            Some("mjs" | "sh" | "py")
-        ) && path
-            .parent()
-            .and_then(|parent| parent.file_name())
-            .and_then(|name| name.to_str())
-            == Some("trace")
-}
-
-fn trace_workload_scenario_id(path: &Path) -> String {
-    let name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or_default();
-    for suffix in [".trace.mjs", ".trace.sh", ".trace.py", ".mjs", ".sh", ".py"] {
-        if let Some(stripped) = name.strip_suffix(suffix) {
-            return stripped.to_string();
-        }
-    }
-    name.to_string()
-}
-
-fn generic_trace_workload_command(workload: &Path) -> Command {
-    match workload.extension().and_then(|ext| ext.to_str()) {
-        Some("mjs") => {
-            let mut command = Command::new("node");
-            command.arg(workload);
-            command
-        }
-        Some("py") => {
-            let mut command = Command::new("python3");
-            command.arg(workload);
-            command
-        }
-        Some("sh") => {
-            let mut command = Command::new("sh");
-            command.arg(workload);
-            command
-        }
-        _ => Command::new(workload),
-    }
-}
-
-fn generic_trace_env(
-    component: &Component,
-    args: &TraceRunWorkflowArgs,
-    run_dir: &RunDir,
-    artifact_dir: &Path,
-    workloads: &[PathBuf],
-    list_only: bool,
-) -> Result<Vec<(String, String)>> {
-    let component_path = args
-        .path_override
-        .as_deref()
-        .unwrap_or(component.local_path.as_str());
-    let mut env = run_dir.legacy_env_vars();
-    env.extend([
-        (
-            "HOMEBOY_EXTENSION_ID".to_string(),
-            "generic-shell".to_string(),
-        ),
-        (
-            "HOMEBOY_COMPONENT_ID".to_string(),
-            args.component_id.clone(),
-        ),
-        (
-            "HOMEBOY_COMPONENT_PATH".to_string(),
-            component_path.to_string(),
-        ),
-        (
-            "HOMEBOY_TRACE_RESULTS_FILE".to_string(),
-            run_dir
-                .step_file(run_dir::files::TRACE_RESULTS)
-                .to_string_lossy()
-                .to_string(),
-        ),
-        (
-            "HOMEBOY_TRACE_SCENARIO".to_string(),
-            args.scenario_id.clone(),
-        ),
-        (
-            "HOMEBOY_TRACE_ARTIFACT_DIR".to_string(),
-            artifact_dir.to_string_lossy().to_string(),
-        ),
-        (
-            "HOMEBOY_TRACE_LIST_ONLY".to_string(),
-            if list_only { "1" } else { "0" }.to_string(),
-        ),
-        (
-            "HOMEBOY_TRACE_EXTRA_WORKLOADS".to_string(),
-            extra_workloads_env_value(workloads)?,
-        ),
-    ]);
-    if let Some(rig_id) = &args.rig_id {
-        env.push(("HOMEBOY_TRACE_RIG_ID".to_string(), rig_id.clone()));
-    }
-    if !args.runner_inputs.attachments.is_empty() {
-        env.push((
-            "HOMEBOY_TRACE_ATTACHMENTS".to_string(),
-            serde_json::to_string(&args.runner_inputs.attachments).map_err(|e| {
-                Error::internal_json(
-                    format!("Failed to serialize trace attachments: {e}"),
-                    Some("trace.attach.serialize".to_string()),
-                )
-            })?,
-        ));
-    }
-    for (key, value) in &args.runner_inputs.env {
-        env.push((key.clone(), value.clone()));
-    }
-    Ok(env)
-}
-
-fn extra_workloads_env_value(paths: &[PathBuf]) -> Result<String> {
-    path_list_env_value("trace_workloads", paths)
 }
 
 /// Resolve the directory that holds the trace baseline `homeboy.json`.
@@ -1083,6 +1091,7 @@ mod tests {
             summary: None,
             failure: None,
             rig: None,
+            evidence: None,
             timeline: Vec::new(),
             span_definitions: Vec::new(),
             span_results: vec![TraceSpanResult {
@@ -1099,6 +1108,9 @@ mod tests {
             assertions: Vec::new(),
             temporal_assertions: Vec::new(),
             artifacts: Vec::new(),
+            toolchain: None,
+            components: None,
+            dependencies: Vec::new(),
         };
 
         let written = baseline::save_baseline(&baseline_root, "studio", &results, Some(&rig_id))
@@ -1174,6 +1186,7 @@ mod tests {
             regression_threshold_percent:
                 super::super::baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT,
             regression_min_delta_ms: super::super::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
+            canonical_policy: TraceCanonicalPolicy::Development,
         }
     }
 }

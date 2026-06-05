@@ -1,8 +1,10 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use homeboy::core::engine::run_dir::RunDir;
 use homeboy::core::extension::trace as extension_trace;
 use homeboy::core::observation::{NewFindingRecord, ObservationStore};
+
+use extension_trace::resolve_declared_trace_artifact_path;
 
 #[derive(Debug, Default)]
 pub(super) struct TraceArtifactObservationResult {
@@ -26,30 +28,81 @@ pub(super) fn record_trace_artifacts(
     let trace_results_path =
         run_dir.step_file(homeboy::core::engine::run_dir::files::TRACE_RESULTS);
     record_artifact_if_file(store, run_id, "trace-results", &trace_results_path);
+    let artifact_dir = run_dir.path().join("artifacts");
+    let mut recorded_declared_directory = false;
     if let Some(results) = results {
         for artifact in &results.artifacts {
-            let path = PathBuf::from(&artifact.path);
-            let resolved = if path.is_absolute() {
-                path
+            if let Some(resolved) =
+                declared_trace_artifact_candidate(artifact, run_dir, &artifact_dir)
+            {
+                let is_declared_directory = resolved.is_dir();
+                record_declared_artifact(
+                    store,
+                    run_id,
+                    run_dir.path(),
+                    artifact,
+                    &resolved,
+                    &mut observation_result,
+                );
+                recorded_declared_directory |= is_declared_directory;
             } else {
-                run_dir.path().join(path)
-            };
-            record_declared_artifact(
-                store,
-                run_id,
-                run_dir.path(),
-                artifact,
-                &resolved,
-                &mut observation_result,
-            );
+                record_unresolved_declared_artifact(
+                    store,
+                    run_id,
+                    run_dir.path(),
+                    artifact,
+                    &mut observation_result,
+                );
+            }
         }
     }
+    if !recorded_declared_directory {
+        record_artifact_dir_if_non_empty(store, run_id, "trace-artifacts", &artifact_dir);
+    }
     observation_result
+}
+
+fn declared_trace_artifact_candidate(
+    artifact: &extension_trace::TraceArtifact,
+    run_dir: &RunDir,
+    artifact_dir: &Path,
+) -> Option<std::path::PathBuf> {
+    if let Some(path) = resolve_declared_trace_artifact_path(&artifact.path, run_dir, artifact_dir)
+    {
+        return Some(path);
+    }
+
+    let relative = Path::new(&artifact.path);
+    if relative.is_absolute()
+        || relative
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return None;
+    }
+
+    Some(run_dir.path().join(relative))
 }
 
 fn record_artifact_if_file(store: &ObservationStore, run_id: &str, kind: &str, path: &Path) {
     if path.is_file() {
         let _ = store.record_artifact(run_id, kind, path);
+    }
+}
+
+fn record_artifact_dir_if_non_empty(
+    store: &ObservationStore,
+    run_id: &str,
+    kind: &str,
+    path: &Path,
+) {
+    if path.is_dir()
+        && std::fs::read_dir(path)
+            .ok()
+            .and_then(|mut entries| entries.next())
+            .is_some()
+    {
+        let _ = store.record_directory_artifact(run_id, kind, path);
     }
 }
 
@@ -139,6 +192,56 @@ fn record_declared_artifact(
     }
 }
 
+fn record_unresolved_declared_artifact(
+    store: &ObservationStore,
+    run_id: &str,
+    run_root: &Path,
+    artifact: &extension_trace::TraceArtifact,
+    result: &mut TraceArtifactObservationResult,
+) {
+    let declared_path = Path::new(&artifact.path);
+    if declared_path
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        result.invalid_declared_artifacts += 1;
+        record_declared_artifact_finding(
+            store,
+            run_id,
+            "trace.artifact.invalid_path",
+            "error",
+            format!(
+                "trace result declared artifact '{}' at '{}' is outside the trace run directory",
+                artifact.label, artifact.path
+            ),
+            artifact,
+            run_root,
+            declared_path,
+        );
+        return;
+    }
+
+    result.missing_declared_artifacts += 1;
+    let resolved = if declared_path.is_absolute() {
+        declared_path.to_path_buf()
+    } else {
+        run_root.join(declared_path)
+    };
+    record_declared_artifact_finding(
+        store,
+        run_id,
+        "trace.artifact.missing",
+        "error",
+        format!(
+            "trace result declared artifact '{}' at '{}', but the path does not exist",
+            artifact.label, artifact.path
+        ),
+        artifact,
+        run_root,
+        &resolved,
+    );
+}
+
 fn record_declared_artifact_finding(
     store: &ObservationStore,
     run_id: &str,
@@ -174,6 +277,8 @@ fn record_declared_artifact_finding(
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
     use homeboy::core::engine::run_dir::RunDir;
     use homeboy::core::extension::trace::parsing::{TraceArtifact, TraceResults, TraceStatus};
@@ -187,12 +292,16 @@ mod tests {
             summary: None,
             failure: None,
             rig: None,
+            evidence: None,
             timeline: Vec::new(),
             span_definitions: Vec::new(),
             span_results: Vec::new(),
             assertions: Vec::new(),
             temporal_assertions: Vec::new(),
             artifacts,
+            toolchain: None,
+            components: None,
+            dependencies: Vec::new(),
         }
     }
 
@@ -223,11 +332,15 @@ mod tests {
 
             let outcome = record_trace_artifacts(&store, &run.id, &run_dir, Some(&results));
             let artifacts = store.list_artifacts(&run.id).expect("artifacts");
+            let declared_artifact = artifacts
+                .iter()
+                .find(|artifact| {
+                    artifact.kind == "trace-artifact" && artifact.artifact_type == "directory"
+                })
+                .expect("declared trace artifact");
 
             assert!(!outcome.has_declared_artifact_failures());
-            assert_eq!(artifacts.len(), 1);
-            assert_eq!(artifacts[0].artifact_type, "directory");
-            let persisted = PathBuf::from(&artifacts[0].path);
+            let persisted = PathBuf::from(&declared_artifact.path);
             assert_eq!(
                 std::fs::read_to_string(persisted.join("network.jsonl")).expect("network"),
                 "{\"url\":\"/\"}\n"
@@ -260,19 +373,21 @@ mod tests {
 
             let outcome = record_trace_artifacts(&store, &run.id, &run_dir, Some(&results));
             let findings = store.list_findings_for_run(&run.id).expect("findings");
+            let missing_finding = findings
+                .iter()
+                .find(|finding| finding.rule.as_deref() == Some("trace.artifact.missing"))
+                .expect("missing artifact finding");
 
             assert!(outcome.has_declared_artifact_failures());
             assert_eq!(outcome.missing_declared_artifacts, 1);
-            assert_eq!(findings.len(), 1);
-            assert_eq!(findings[0].tool, "trace");
-            assert_eq!(findings[0].rule.as_deref(), Some("trace.artifact.missing"));
-            assert_eq!(findings[0].severity.as_deref(), Some("error"));
+            assert_eq!(missing_finding.tool, "trace");
+            assert_eq!(missing_finding.severity.as_deref(), Some("error"));
             assert_eq!(
-                findings[0].metadata_json["declared_artifact"]["label"],
+                missing_finding.metadata_json["declared_artifact"]["label"],
                 "network log"
             );
             assert_eq!(
-                findings[0].metadata_json["declared_artifact"]["path"],
+                missing_finding.metadata_json["declared_artifact"]["path"],
                 "artifacts/wp-codebox-artifacts/runtime-missing/files/browser/network.jsonl"
             );
             run_dir.cleanup();

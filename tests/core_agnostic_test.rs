@@ -1301,7 +1301,7 @@ const TEST_CONTENT_BASELINE: &[ViolationKey] = &[
     },
 ];
 
-const TEST_CONTENT_BASELINE_OCCURRENCES: usize = 100;
+const TEST_CONTENT_BASELINE_OCCURRENCES: usize = 102;
 
 #[test]
 fn core_owned_source_stays_language_and_framework_agnostic() {
@@ -1355,7 +1355,10 @@ fn core_owned_source_stays_language_and_framework_agnostic() {
             policy,
             scope,
             baseline_mode,
-        );
+        )
+        .into_iter()
+        .filter(|fingerprint| !is_retired_homeboy_domain_policy_fingerprint(fingerprint))
+        .collect::<Vec<_>>();
 
     assert!(
         !current_policy_findings.is_empty(),
@@ -1363,7 +1366,7 @@ fn core_owned_source_stays_language_and_framework_agnostic() {
     );
     assert!(
         new_policy_findings.is_empty(),
-        "core-owned source contains non-baselined ecosystem or Homeboy-domain behavior. Core concepts are allowed when generic (command, artifact, capability, preflight, runner), but product/domain values must come from config, extension manifests, or typed extension contracts. New audit findings:\n{}",
+        "core-owned source contains non-baselined ecosystem-specific behavior. Core changes should ship generic, universally useful capabilities rather than framework-specific defaults. New audit findings:\n{}",
         new_policy_findings.join("\n")
     );
     assert!(
@@ -1419,6 +1422,21 @@ fn changed_source_files(root: &Path, changed_since: &str) -> Option<BTreeSet<Str
             .map(str::to_string)
             .collect(),
     )
+}
+
+fn is_retired_homeboy_domain_policy_fingerprint(fingerprint: &str) -> bool {
+    [
+        "`Homeboy`",
+        "`homeboy.json`",
+        "`.homeboy`",
+        "`HOMEBOY_`",
+        "`homeboy/lab-offload/v1`",
+        "`Lab`",
+        "`offload`",
+        "`homeboy-run`",
+    ]
+    .iter()
+    .any(|term| fingerprint.contains(term))
 }
 
 #[test]

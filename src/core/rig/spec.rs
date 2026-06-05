@@ -296,7 +296,6 @@ impl BenchMetricGateCondition {
     }
 }
 
-/// Rig-owned extension workload declaration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkloadSpec {
     pub path: String,
@@ -304,14 +303,9 @@ pub struct WorkloadSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub check_groups: Option<Vec<String>>,
 
-    /// Number of contiguous local ports this workload needs for one child
-    /// invocation. Homeboy allocates non-overlapping ranges and exposes them as
-    /// HOMEBOY_INVOCATION_PORT_BASE/MAX.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port_range_size: Option<u16>,
 
-    /// Logical machine-local resources this workload requires exclusively while
-    /// its child process is running.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub named_leases: Vec<String>,
 
@@ -332,6 +326,44 @@ pub struct WorkloadSpec {
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub trace_probes: Vec<TraceProbeConfig>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependencies: Vec<TraceDependencySpec>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runner_capabilities: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TraceDependencySpec {
+    pub id: String,
+    pub kind: String,
+    pub source: String,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_file: Option<String>,
+
+    #[serde(default)]
+    pub requires_built_assets: bool,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_paths: Vec<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_url: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub r#ref: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package_marker: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -484,6 +516,14 @@ impl WorkloadSpec {
     pub fn trace_probes(&self) -> &[TraceProbeConfig] {
         &self.trace_probes
     }
+
+    pub fn trace_dependencies(&self) -> &[TraceDependencySpec] {
+        &self.dependencies
+    }
+
+    pub fn runner_capabilities(&self) -> &[String] {
+        &self.runner_capabilities
+    }
 }
 
 #[cfg(test)]
@@ -541,6 +581,8 @@ mod tests {
             trace_variants: HashMap::new(),
             trace_guardrails: Vec::new(),
             trace_probes: Vec::new(),
+            dependencies: Vec::new(),
+            runner_capabilities: Vec::new(),
         };
 
         assert_eq!(workload.trace_phase_preset("missing"), None);
@@ -703,6 +745,8 @@ mod tests {
             trace_variants: HashMap::new(),
             trace_guardrails: Vec::new(),
             trace_probes: Vec::new(),
+            dependencies: Vec::new(),
+            runner_capabilities: Vec::new(),
         };
 
         assert_eq!(workload.trace_default_phase_preset(), Some("startup"));
@@ -724,6 +768,8 @@ mod tests {
             trace_variants: HashMap::new(),
             trace_guardrails: Vec::new(),
             trace_probes: Vec::new(),
+            dependencies: Vec::new(),
+            runner_capabilities: Vec::new(),
         };
 
         assert_eq!(workload.port_range_size(), Some(8));
@@ -745,6 +791,8 @@ mod tests {
             trace_variants: HashMap::new(),
             trace_guardrails: Vec::new(),
             trace_probes: Vec::new(),
+            dependencies: Vec::new(),
+            runner_capabilities: Vec::new(),
         };
 
         assert_eq!(workload.named_leases(), &["browser-profile".to_string()]);
