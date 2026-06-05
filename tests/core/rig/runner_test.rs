@@ -79,8 +79,10 @@ fn unix_symlink(target: &std::path::Path, link: &std::path::Path) {
 fn test_up_report_serializes_success_flag() {
     let report = UpReport {
         rig_id: "test".to_string(),
+        run_id: None,
         pipeline: empty_pipeline("up"),
         success: true,
+        artifact_index: None,
     };
     let json = serde_json::to_string(&report).expect("serialize");
     assert!(json.contains("\"rig_id\":\"test\""));
@@ -91,8 +93,10 @@ fn test_up_report_serializes_success_flag() {
 fn test_check_report_serializes_success_flag() {
     let report = CheckReport {
         rig_id: "test".to_string(),
+        run_id: None,
         pipeline: empty_pipeline("check"),
         success: false,
+        artifact_index: None,
     };
     let json = serde_json::to_string(&report).expect("serialize");
     assert!(json.contains("\"success\":false"));

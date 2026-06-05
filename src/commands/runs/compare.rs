@@ -395,6 +395,7 @@ mod tests {
                     command: None,
                     cwd: None,
                     status_note: None,
+                    artifact_index: None,
                 },
                 artifact_count: 3,
                 scenario_id: None,
