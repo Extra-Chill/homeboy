@@ -310,7 +310,7 @@ function normalizeStatus(result) {
 }
 
 function agentRuntimeWorkload(result) {
-  return result?.metadata?.agent_runtime?.workload || result?.run?.agentResult || result?.agentResult || result?.agent_result || null;
+  return result?.raw?.agent_runtime?.result || result?.metadata?.agent_runtime?.workload || result?.run?.agentResult || result?.agentResult || result?.agent_result || null;
 }
 
 function appendUniqueArtifact(artifacts, artifact) {

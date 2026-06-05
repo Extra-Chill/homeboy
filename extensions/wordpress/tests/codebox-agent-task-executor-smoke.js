@@ -448,6 +448,28 @@ const nestedAgentRuntimeOutputFailureOutcome = agentTaskOutcomeFromCodeboxResult
 assert.equal(nestedAgentRuntimeOutputFailureOutcome.status, 'failed');
 assert.equal(nestedAgentRuntimeOutputFailureOutcome.failure_classification, 'execution_failed');
 
+const rawNestedAgentRuntimeFailureOutcome = agentTaskOutcomeFromCodeboxResult(request, {
+  success: true,
+  schema: 'wp-codebox/agent-task-run/v1',
+  status: 'completed',
+  summary: 'WP Codebox agent task succeeded.',
+  raw: {
+    agent_runtime: {
+      success: true,
+      result: {
+        success: false,
+        status: 'completed_no_items',
+        completion_outcome: {
+          status: 'completed_no_items',
+          success: false,
+        },
+      },
+    },
+  },
+});
+assert.equal(rawNestedAgentRuntimeFailureOutcome.status, 'failed');
+assert.equal(rawNestedAgentRuntimeFailureOutcome.failure_classification, 'execution_failed');
+
 const agentBundleOutcome = agentTaskOutcomeFromCodeboxResult({
   ...request,
   task_id: 'agent-bundle-task-123',
