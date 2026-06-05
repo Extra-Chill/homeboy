@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.115.39] - 2026-06-05
+
+### Changed
+- Honor agent bundle output failures
+
 ## [2.115.38] - 2026-06-05
 
 ### Changed
