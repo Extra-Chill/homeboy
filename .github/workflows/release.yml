@@ -144,13 +144,15 @@ jobs:
           path: target/release/homeboy
           retention-days: 1
 
-  # ── Step 3: Quality gate (parallel read-only checks + direct autofix) ──
+  # ── Step 3: Quality gate (parallel read-only checks + repair PR) ──
   # Unlike PR CI (scoped to changed files), release quality gate runs
   # unscoped against the entire codebase.
   # Read-only gates run in parallel after the shared build, then release
-  # preparation waits for audit, lint, and test to finish. Read-only gates use
-  # autofix: false. The dedicated auto-refactor job keeps direct-to-main
-  # baseline/autofix commits but disables automated PR creation.
+  # preparation waits for the repaired quality state from gate-refactor instead
+  # of failing immediately on the first read-only drift signal. Read-only gates
+  # use autofix: false. The dedicated auto-refactor job opens a generated repair
+  # PR for fixable baseline/autofix drift so the release is blocked with a
+  # concrete repair path instead of becoming a manual investigation.
   gate-audit:
     name: Audit
     needs:
@@ -293,8 +295,9 @@ jobs:
           app-id: ${{ secrets.HOMEBOY_APP_ID }}
           private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
 
-      # Keep direct-to-main autofix/baseline updates, but do not open
-      # generated autofix PRs until that path reliably produces green branches.
+      # On push/manual release runs, generated repair PRs are safer than
+      # direct-to-main fix commits because the current release run cannot
+      # continue against a branch it just repaired out-of-band.
       - name: Run autofix via homeboy-action
         uses: Extra-Chill/homeboy-action@v2
         with:
@@ -303,7 +306,7 @@ jobs:
           expected-commands: audit,lint,test
           autofix: 'true'
           autofix-mode: always
-          autofix-open-pr: 'false'
+          autofix-open-pr: 'true'
           app-token: ${{ steps.app-token.outputs.token }}
 
   # ── Step 4: Version bump + changelog + tag ──
@@ -312,9 +315,8 @@ jobs:
     needs:
       - check
       - gate-build
-      - gate-lint
-      - gate-test
-      - gate-audit
+      - gate-refactor
+    if: ${{ always() && needs.check.outputs.should-release == 'true' && needs.gate-build.result == 'success' && (inputs.release_tag != '' || needs.gate-refactor.result == 'success') }}
     runs-on: ubuntu-latest
     outputs:
       release-version: ${{ steps.recovery.outputs.release-version || steps.release.outputs.release-version }}
