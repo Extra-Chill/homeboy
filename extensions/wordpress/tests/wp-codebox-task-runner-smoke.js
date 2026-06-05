@@ -82,6 +82,7 @@ const executions = [execution];
 process.stdout.write(JSON.stringify({
   success: !isAgentBundle,
   schema: 'wp-codebox/agent-task-run/v1',
+  status: isAgentBundle ? 'failed' : 'completed',
   session: {
     schema: 'wp-codebox/sandbox-session/v1',
     id: input.sandbox_session_id,
@@ -394,6 +395,7 @@ try {
   assert.equal(recorderBundleRunResult.status, 0, recorderBundleRunResult.stderr || recorderBundleRunResult.stdout);
   const recorderBundleRunOutput = JSON.parse(recorderBundleRunResult.stdout);
   assert.equal(recorderBundleRunOutput.success, true);
+  assert.equal(recorderBundleRunOutput.status, 'completed');
   assert.equal(recorderBundleRunOutput.outputs.issue_number, 123);
   assert.equal(recorderBundleRunOutput.outputs.issue_url, 'https://github.com/chubes4/wp-site-generator/issues/123');
   assert.equal(recorderBundleRunOutput.run.agentResult.outputs.issue_number, 123);
@@ -441,6 +443,7 @@ try {
   assert.equal(completedBundleNonzeroExitResult.status, 0, completedBundleNonzeroExitResult.stderr || completedBundleNonzeroExitResult.stdout);
   const completedBundleNonzeroExitOutput = JSON.parse(completedBundleNonzeroExitResult.stdout);
   assert.equal(completedBundleNonzeroExitOutput.success, true);
+  assert.equal(completedBundleNonzeroExitOutput.status, 'completed');
   assert.equal(completedBundleNonzeroExitOutput.outputs.issue_number, 123);
   assert.equal(completedBundleNonzeroExitOutput.session.status, 'completed');
 

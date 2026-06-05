@@ -367,6 +367,7 @@ function normalizeAgentTaskRun(input, result) {
   return {
     ...result,
     success,
+    status: success ? 'completed' : result.status,
     outputs: plainObject(agentResult.outputs) ? agentResult.outputs : result.outputs,
     summary: success ? 'WP Codebox agent task succeeded.' : (bundleValidation?.message || result.summary || 'WP Codebox agent task failed.'),
     session: result.session ? {
