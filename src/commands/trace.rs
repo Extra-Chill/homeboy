@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use homeboy::core::component::{Component, ScopedExtensionConfig};
 use homeboy::core::engine::baseline::BaselineFlags;
 use homeboy::core::engine::execution_context::{self, ResolveOptions};
+use homeboy::core::engine::invocation::InvocationRequirements;
 use homeboy::core::engine::run_dir::RunDir;
 use homeboy::core::extension::trace as extension_trace;
 use homeboy::core::extension::trace::{
@@ -544,7 +545,7 @@ fn execute_trace_run(args: TraceArgs) -> homeboy::core::Result<TraceRunExecution
                 scenario_id: scenario_id.clone(),
             })
     });
-    let (extra_workloads, trace_dependencies, runner_capabilities) =
+    let (extra_workloads, trace_dependencies, runner_capabilities, invocation_requirements) =
         trace_workload_inputs(rig_context.as_ref(), ctx.extension_id.as_deref());
     let experiment_settings = trace_experiment_settings(experiment_plan.as_ref())?;
     let mut experiment_env = trace_experiment_env(experiment_plan.as_ref())?;
@@ -576,6 +577,7 @@ fn execute_trace_run(args: TraceArgs) -> homeboy::core::Result<TraceRunExecution
                 attachments,
                 dependencies: trace_dependencies,
                 runner_capabilities,
+                invocation_requirements,
             },
             scenario_id,
             json_summary: args.json_summary,
@@ -671,7 +673,7 @@ fn run_list(args: TraceArgs) -> CmdResult<TraceCommandOutput> {
     }
 
     let run_dir = RunDir::create()?;
-    let (extra_workloads, trace_dependencies, runner_capabilities) =
+    let (extra_workloads, trace_dependencies, runner_capabilities, invocation_requirements) =
         trace_workload_inputs(rig_context.as_ref(), ctx.extension_id.as_deref());
     let list = extension_trace::run_trace_list_workflow(
         &ctx.component,
@@ -688,6 +690,7 @@ fn run_list(args: TraceArgs) -> CmdResult<TraceCommandOutput> {
                 attachments: Vec::new(),
                 dependencies: trace_dependencies,
                 runner_capabilities,
+                invocation_requirements,
             },
             rig_id: args.rig,
         },
@@ -706,9 +709,19 @@ struct TraceRigContext {
 fn trace_workload_inputs(
     rig_context: Option<&TraceRigContext>,
     extension_id: Option<&str>,
-) -> (Vec<PathBuf>, Vec<rig::TraceDependencySpec>, Vec<String>) {
+) -> (
+    Vec<PathBuf>,
+    Vec<rig::TraceDependencySpec>,
+    Vec<String>,
+    InvocationRequirements,
+) {
     let Some((context, id)) = rig_context.zip(extension_id) else {
-        return (Vec::new(), Vec::new(), Vec::new());
+        return (
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            InvocationRequirements::default(),
+        );
     };
 
     (
@@ -724,6 +737,11 @@ fn trace_workload_inputs(
             id,
         ),
         rig::runner_capabilities_for_extension(&context.rig_spec, id),
+        rig::invocation_requirements_for_extension_workloads(
+            &context.rig_spec,
+            rig::RigWorkloadKind::Trace,
+            id,
+        ),
     )
 }
 
