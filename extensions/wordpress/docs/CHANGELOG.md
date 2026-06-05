@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.115.31] - 2026-06-05
+
+### Fixed
+- fix agent bundle tool recorder outputs
+
 ## [2.115.30] - 2026-06-04
 
 ### Fixed
