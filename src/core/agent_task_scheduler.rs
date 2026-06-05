@@ -22,6 +22,7 @@ use crate::core::agent_task_timeout_artifacts::{
     append_unique_artifacts, append_unique_evidence_refs, is_actionable_patch_artifact,
     is_empty_patch_artifact, merge_timeout_outcome, TimeoutArtifactDiscovery,
 };
+use crate::core::config::value_type_name;
 
 pub trait AgentTaskExecutorAdapter: Send + Sync + 'static {
     fn execute(
@@ -147,26 +148,18 @@ where
                     if running.is_empty() {
                         if let Some(task) = queued.pop_front() {
                             if let Some(message) =
-                                AgentTaskScheduleSupport::waiting_for_dependencies(
-                                    &task.request,
+                                AgentTaskScheduleSupport::waiting_for_task_dependencies(
+                                    &task,
                                     &completed_by_task,
                                     &output_dependencies,
                                 )
                             {
-                                backpressure.push(AgentTaskBackpressureStatus {
-                                    kind: "output_dependency".to_string(),
-                                    message: message.clone(),
-                                    task_id: Some(task.request.task_id.clone()),
-                                });
-                                events.push(event(
-                                    &task.request.task_id,
-                                    AgentTaskState::Blocked,
-                                    task.attempt,
-                                    Some(message.clone()),
-                                ));
-                                let outcome = AgentTaskScheduleSupport::blocked_outcome(
-                                    task.request.task_id,
+                                let outcome = AgentTaskScheduleSupport::block_scheduled_task(
+                                    &task,
+                                    "output_dependency",
                                     message,
+                                    &mut backpressure,
+                                    &mut events,
                                 );
                                 completed_by_task.insert(outcome.task_id.clone(), outcome.clone());
                                 outcomes.push(outcome);
@@ -184,20 +177,12 @@ where
                             let message = format!(
                                 "task requires resource_units={task_units} over max_active_units={max_active_units}"
                             );
-                            backpressure.push(AgentTaskBackpressureStatus {
-                                kind: "resource_budget".to_string(),
-                                message: message.clone(),
-                                task_id: Some(task.request.task_id.clone()),
-                            });
-                            events.push(event(
-                                &task.request.task_id,
-                                AgentTaskState::Blocked,
-                                task.attempt,
-                                Some(message.clone()),
-                            ));
-                            outcomes.push(AgentTaskScheduleSupport::blocked_outcome(
-                                task.request.task_id,
+                            outcomes.push(AgentTaskScheduleSupport::block_scheduled_task(
+                                &task,
+                                "resource_budget",
                                 message,
+                                &mut backpressure,
+                                &mut events,
                             ));
                             blocked_count += 1;
                             continue;
@@ -205,8 +190,8 @@ where
                         break;
                     }
                     let dependency_wait = queued.front().and_then(|task| {
-                        AgentTaskScheduleSupport::waiting_for_dependencies(
-                            &task.request,
+                        AgentTaskScheduleSupport::waiting_for_task_dependencies(
+                            task,
                             &completed_by_task,
                             &output_dependencies,
                         )
@@ -476,6 +461,35 @@ impl AgentTaskScheduleSupport {
                 missing.join(", ")
             )
         })
+    }
+
+    fn waiting_for_task_dependencies(
+        task: &ScheduledTask,
+        completed_by_task: &HashMap<String, AgentTaskOutcome>,
+        output_dependencies: &HashMap<String, AgentTaskOutputDependencies>,
+    ) -> Option<String> {
+        Self::waiting_for_dependencies(&task.request, completed_by_task, output_dependencies)
+    }
+
+    fn block_scheduled_task(
+        task: &ScheduledTask,
+        kind: &str,
+        message: String,
+        backpressure: &mut Vec<AgentTaskBackpressureStatus>,
+        events: &mut Vec<AgentTaskProgressEvent>,
+    ) -> AgentTaskOutcome {
+        backpressure.push(AgentTaskBackpressureStatus {
+            kind: kind.to_string(),
+            message: message.clone(),
+            task_id: Some(task.request.task_id.clone()),
+        });
+        events.push(event(
+            &task.request.task_id,
+            AgentTaskState::Blocked,
+            task.attempt,
+            Some(message.clone()),
+        ));
+        Self::blocked_outcome(task.request.task_id.clone(), message)
     }
 
     fn dependency_task_ids(
@@ -1118,13 +1132,19 @@ fn render_template_string(raw: &str, bindings: &HashMap<String, Value>) -> Strin
 }
 
 fn template_replacement(value: &Value) -> String {
-    match value {
-        Value::Null => String::new(),
-        Value::String(value) => value.clone(),
-        Value::Number(value) => value.to_string(),
-        Value::Bool(value) => value.to_string(),
-        Value::Array(_) | Value::Object(_) => value.to_string(),
+    if value.is_null() {
+        return String::new();
     }
+    if let Some(value) = value.as_str() {
+        return value.to_string();
+    }
+    if matches!(
+        value_type_name(value),
+        "number" | "bool" | "array" | "object"
+    ) {
+        return value.to_string();
+    }
+    String::new()
 }
 
 fn mark_generated_from_outputs(

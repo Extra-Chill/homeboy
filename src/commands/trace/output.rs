@@ -843,11 +843,7 @@ fn push_trace_assertions_markdown(
         return;
     }
     for assertion in assertions {
-        let status = match assertion.status {
-            extension_trace::TraceAssertionStatus::Pass => "pass",
-            extension_trace::TraceAssertionStatus::Fail => "fail",
-            extension_trace::TraceAssertionStatus::Error => "error",
-        };
+        let status = assertion.status.as_str();
         match assertion.message.as_deref() {
             Some(message) => {
                 let _ = writeln!(out, "- `{}`: **{}** - {}", assertion.id, status, message);

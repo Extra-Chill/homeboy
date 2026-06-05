@@ -245,7 +245,7 @@ fn unescape_token(token: &str) -> String {
     token.replace("~1", "/").replace("~0", "~")
 }
 
-fn value_type_name(value: &Value) -> &'static str {
+pub(crate) fn value_type_name(value: &Value) -> &'static str {
     match value {
         Value::Null => "null",
         Value::Bool(_) => "bool",
