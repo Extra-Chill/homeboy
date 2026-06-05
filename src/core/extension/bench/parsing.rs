@@ -463,7 +463,7 @@ fn parse_bench_results_str_with_artifact_context(
         object.remove("warmup_iterations");
         object.remove("provenance");
     }
-    normalize_wp_codebox_metrics(&mut value);
+    normalize_extension_sample_metrics(&mut value);
     let mut parsed: BenchResults = serde_json::from_value(value).map_err(|e| {
         Error::internal_json(
             format!("Failed to parse bench results JSON: {}", e),
@@ -479,7 +479,7 @@ fn parse_bench_results_str_with_artifact_context(
     Ok(parsed)
 }
 
-fn normalize_wp_codebox_metrics(value: &mut serde_json::Value) {
+fn normalize_extension_sample_metrics(value: &mut serde_json::Value) {
     let Some(scenarios) = value
         .get_mut("scenarios")
         .and_then(serde_json::Value::as_array_mut)
@@ -670,9 +670,9 @@ mod tests {
     }
 
     #[test]
-    fn parses_wp_codebox_bench_result_markers_and_sample_metrics() {
+    fn parses_extension_bench_result_markers_and_sample_metrics() {
         let raw = r#"{
-            "schema": "wp-codebox/bench-results/v1",
+            "schema": "extension/bench-results/v1",
             "component_id": "woocommerce",
             "iterations": 1,
             "warmup_iterations": 0,
