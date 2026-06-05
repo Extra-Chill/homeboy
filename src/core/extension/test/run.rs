@@ -229,6 +229,12 @@ pub fn run_main_test_workflow(
         .iter()
         .fold(runner, |runner, (key, value)| runner.env(key, value));
     let output = runner
+        .env_if(args.changed_since.is_some(), "SCOPE_MODE", "changed")
+        .env_if(
+            args.changed_since.is_some(),
+            "HOMEBOY_CHANGED_SINCE",
+            args.changed_since.as_deref().unwrap_or_default(),
+        )
         .env_if(
             args.changed_since.is_some(),
             "HOMEBOY_STRICT_VALIDATION_DEPENDENCIES",
