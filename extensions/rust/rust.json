@@ -32,6 +32,9 @@
   },
   "test": {
     "extension_script": "scripts/test-runner.sh",
+    "passthrough_filter": {
+      "strategy": "runner_positional"
+    },
     "changed_file_routing": {
       "strategy": "rust_cargo"
     },
