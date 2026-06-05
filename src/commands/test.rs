@@ -102,9 +102,11 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestCommandOutput>
         &args.extension_override,
         None,
     )?;
+    let cli_passthrough_args = filter_homeboy_flags(&args.args);
 
     if !args.drift
         && args.ci_job.is_none()
+        && cli_passthrough_args.is_empty()
         && source_ctx.component.has_script(ExtensionCapability::Test)
     {
         let observation = start_test_observation(
@@ -164,7 +166,7 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestCommandOutput>
         Some(runner.run_dir()),
     );
     let mut passthrough_args = ci_job_passthrough_args(ci_job.as_ref());
-    passthrough_args.extend(filter_homeboy_flags(&args.args));
+    passthrough_args.extend(cli_passthrough_args);
     let workflow = extension_test::run_main_test_workflow(
         &ctx.component,
         &ctx.source_path,

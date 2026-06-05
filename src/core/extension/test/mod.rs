@@ -92,6 +92,52 @@ pub fn build_test_runner(
     Ok(runner)
 }
 
+pub fn normalize_test_passthrough_args(
+    component: &Component,
+    args: &[String],
+) -> crate::core::error::Result<Vec<String>> {
+    if !uses_rust_cargo_test_routing(component)? {
+        return Ok(args.to_vec());
+    }
+
+    Ok(normalize_rust_cargo_test_filter_args(args))
+}
+
+fn uses_rust_cargo_test_routing(component: &Component) -> crate::core::error::Result<bool> {
+    let context = resolve_test_command(component)?;
+    let manifest = crate::core::extension::load_extension(&context.extension_id)?;
+
+    Ok(test_changed_file_routing(&context.extension_id)?
+        .is_some_and(|routing| routing.strategy == TestChangedFileRoutingStrategy::RustCargo)
+        || manifest.cli.as_ref().is_some_and(|cli| cli.tool == "cargo")
+        || context.extension_id == "rust")
+}
+
+fn normalize_rust_cargo_test_filter_args(args: &[String]) -> Vec<String> {
+    let mut normalized = Vec::new();
+    let mut iter = args.iter();
+
+    while let Some(arg) = iter.next() {
+        if let Some(filter) = arg.strip_prefix("--filter=") {
+            if !filter.is_empty() {
+                normalized.push(filter.to_string());
+            }
+            continue;
+        }
+
+        if arg == "--filter" {
+            if let Some(filter) = iter.next() {
+                normalized.push(filter.clone());
+            }
+            continue;
+        }
+
+        normalized.push(arg.clone());
+    }
+
+    normalized
+}
+
 fn test_changed_file_routing(
     extension_id: &str,
 ) -> crate::core::error::Result<Option<TestChangedFileRouting>> {
@@ -565,6 +611,43 @@ mod tests {
             "HOMEBOY_TEST_RUNNER_ARGS".to_string(),
             "--\ncore::daemon".to_string()
         )));
+    }
+
+    #[test]
+    fn rust_cargo_passthrough_translates_equals_filter_to_positional_filter() {
+        let args = vec![
+            "--filter=core::daemon".to_string(),
+            "--".to_string(),
+            "--nocapture".to_string(),
+        ];
+
+        assert_eq!(
+            normalize_rust_cargo_test_filter_args(&args),
+            vec![
+                "core::daemon".to_string(),
+                "--".to_string(),
+                "--nocapture".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn rust_cargo_passthrough_translates_split_filter_to_positional_filter() {
+        let args = vec![
+            "--filter".to_string(),
+            "core::daemon".to_string(),
+            "--".to_string(),
+            "--nocapture".to_string(),
+        ];
+
+        assert_eq!(
+            normalize_rust_cargo_test_filter_args(&args),
+            vec![
+                "core::daemon".to_string(),
+                "--".to_string(),
+                "--nocapture".to_string()
+            ]
+        );
     }
 
     #[test]
