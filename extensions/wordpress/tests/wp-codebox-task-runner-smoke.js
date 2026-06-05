@@ -94,6 +94,9 @@ process.stdout.write(JSON.stringify({
   run: isAgentBundle && process.env.FIXTURE_WP_CODEBOX_BUNDLE_RUN ? { executions } : (isAgentBundle ? {} : { agentResult }),
   executions: isAgentBundle && process.env.FIXTURE_WP_CODEBOX_BUNDLE_RUN ? [] : executions,
 }));
+if (process.env.FIXTURE_WP_CODEBOX_EXIT_CODE) {
+  process.exitCode = Number(process.env.FIXTURE_WP_CODEBOX_EXIT_CODE);
+}
 `);
   fs.chmodSync(binPath, mode);
   return binPath;
@@ -391,8 +394,55 @@ try {
   assert.equal(recorderBundleRunResult.status, 0, recorderBundleRunResult.stderr || recorderBundleRunResult.stdout);
   const recorderBundleRunOutput = JSON.parse(recorderBundleRunResult.stdout);
   assert.equal(recorderBundleRunOutput.success, true);
+  assert.equal(recorderBundleRunOutput.outputs.issue_number, 123);
+  assert.equal(recorderBundleRunOutput.outputs.issue_url, 'https://github.com/chubes4/wp-site-generator/issues/123');
   assert.equal(recorderBundleRunOutput.run.agentResult.outputs.issue_number, 123);
   assert.equal(recorderBundleRunOutput.run.agentResult.outputs.issue_url, 'https://github.com/chubes4/wp-site-generator/issues/123');
+
+  const completedBundleNonzeroExitCapturePath = path.join(root, 'capture-completed-bundle-nonzero-exit.json');
+  const completedBundleNonzeroExitResult = spawnSync(process.execPath, [
+    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-wp-codebox-task-runner.cjs'),
+    '--wp-codebox-bin',
+    fixtureWpCodebox,
+    '--artifacts',
+    path.join(root, 'completed-bundle-nonzero-exit-artifacts'),
+  ], {
+    encoding: 'utf8',
+    input: JSON.stringify({
+      ...request,
+      agent_bundle: {
+        bundle_path: '/workspace/wp-site-generator/bundles/store-idea-agent',
+        engine_data_outputs: {
+          issue_number: 'metadata.engine_data.store_idea_agent.issue_number',
+          issue_url: 'metadata.engine_data.store_idea_agent.issue_url',
+        },
+        tool_recorders: [{
+          tool: 'github_issue_publish',
+          record: {
+            engine_key: 'store_idea_agent',
+            fields: {
+              issue_number: 'data.issue_number',
+              issue_url: 'data.issue_url',
+            },
+          },
+        }],
+      },
+      provider_plugin_paths: [],
+    }),
+    env: {
+      ...process.env,
+      FIXTURE_WP_CODEBOX_CAPTURE: completedBundleNonzeroExitCapturePath,
+      FIXTURE_WP_CODEBOX_BUNDLE_RUN: '1',
+      FIXTURE_WP_CODEBOX_BUNDLE_RUN_TOOL_RECORDERS: '1',
+      FIXTURE_WP_CODEBOX_EXIT_CODE: '1',
+      OPENCODE_API_KEY: 'redacted-test-key',
+    },
+  });
+  assert.equal(completedBundleNonzeroExitResult.status, 0, completedBundleNonzeroExitResult.stderr || completedBundleNonzeroExitResult.stdout);
+  const completedBundleNonzeroExitOutput = JSON.parse(completedBundleNonzeroExitResult.stdout);
+  assert.equal(completedBundleNonzeroExitOutput.success, true);
+  assert.equal(completedBundleNonzeroExitOutput.outputs.issue_number, 123);
+  assert.equal(completedBundleNonzeroExitOutput.session.status, 'completed');
 
   const incompleteDatamachineCapturePath = path.join(root, 'capture-incomplete-datamachine.json');
   const incompleteDatamachineResult = spawnSync(process.execPath, [

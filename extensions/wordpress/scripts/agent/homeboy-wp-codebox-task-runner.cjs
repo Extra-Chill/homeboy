@@ -367,6 +367,7 @@ function normalizeAgentTaskRun(input, result) {
   return {
     ...result,
     success,
+    outputs: plainObject(agentResult.outputs) ? agentResult.outputs : result.outputs,
     summary: success ? 'WP Codebox agent task succeeded.' : (bundleValidation?.message || result.summary || 'WP Codebox agent task failed.'),
     session: result.session ? {
       ...result.session,
@@ -699,7 +700,7 @@ function runWpCodeboxParentTask(request) {
     try {
       const payload = normalizeAgentTaskRun(input, JSON.parse(result.stdout));
       process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
-      return payload.success === false ? 1 : (result.status ?? 0);
+      return payload.success === false ? 1 : 0;
     } catch {
       process.stdout.write(result.stdout);
     }
