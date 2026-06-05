@@ -66,11 +66,11 @@ fs.writeFileSync(${JSON.stringify(capture)}, JSON.stringify({ argv: process.argv
 process.stdout.write(JSON.stringify({
   success: true,
   schema: 'wp-codebox/agent-task-run/v1',
-  status: 'failed',
+  status: 'completed',
   session: {
     schema: 'wp-codebox/sandbox-session/v1',
     id: input.sandbox_session_id,
-    status: 'failed',
+    status: 'completed',
     artifacts: { bundle_id: 'fake-artifact-bundle', path: input.artifacts_path, preview_url: 'https://preview.example.test/fake' },
     orchestrator: input.orchestrator
   },
@@ -191,6 +191,8 @@ assert.equal(provider.capabilities.includes('workspace_tools'), true);
 assert.equal(provider.capabilities.includes('patch_artifacts'), true);
 assert.equal(provider.capabilities.includes('cleanup_observability'), true);
 assert.equal(provider.capabilities.includes('agent_bundle_execution'), true);
+assert.equal(provider.capabilities.includes('external_recipe_packs'), true);
+assert.equal(provider.capabilities.includes('recipe_probe_artifacts'), true);
 assert.deepEqual(provider.runtime_gap_trackers, []);
 
 const codeboxRequest = codeboxTaskRequestFromAgentTaskRequest(request);
@@ -221,6 +223,34 @@ assert.equal(codeboxRequest.expected_artifacts[0], 'screenshot');
 assert.equal(codeboxRequest.orchestrator.agent_task_id, 'task-123');
 assert.equal(codeboxRequest.context.audit_findings[0].id, 'finding-1');
 assert.deepEqual(codeboxRequest.agent_bundle, {});
+
+const recipePackRequest = codeboxTaskRequestFromAgentTaskRequest({
+  ...request,
+  task_id: 'recipe-task-123',
+  executor: {
+    backend: 'codebox',
+    model: 'gpt-5.5',
+    config: {
+      recipe_pack: 'example-codebox-recipes',
+      recipe_ref: 'release/v1',
+      recipe: 'minimal-runtime',
+      target_ref: 'Extra-Chill/example#42',
+      recipe_secret_env: ['EXAMPLE_RECIPE_TOKEN'],
+    },
+  },
+  inputs: {
+    recipe_inputs: { fixture: 'minimal' },
+  },
+});
+assert.deepEqual(recipePackRequest.recipe, {
+  schema: 'wp-codebox/external-recipe-request/v1',
+  pack: 'example-codebox-recipes',
+  name: 'minimal-runtime',
+  ref: 'release/v1',
+  target_ref: 'Extra-Chill/example#42',
+  inputs: { fixture: 'minimal' },
+  secret_env: ['EXAMPLE_RECIPE_TOKEN'],
+});
 
 const codexAgentRequest = {
   ...request,
@@ -387,6 +417,63 @@ const upstreamRunnerOutcome = agentTaskOutcomeFromCodeboxResult(request, {
 assert.equal(upstreamRunnerOutcome.status, 'succeeded');
 assert.equal(upstreamRunnerOutcome.artifacts[0].kind, 'codebox-artifact-directory');
 assert.equal(upstreamRunnerOutcome.artifacts[0].path, '/tmp/wp-codebox-artifacts');
+
+const recipeProbeFailureOutcome = agentTaskOutcomeFromCodeboxResult(request, {
+  success: true,
+  schema: 'wp-codebox/agent-task-run/v1',
+  status: 'completed',
+  recipe_run: {
+    pack: 'example-codebox-recipes',
+    name: 'minimal-runtime',
+    ref: 'release/v1',
+    target_ref: 'Extra-Chill/example#42',
+    startup: { success: true, log_path: '/tmp/recipe/startup.log' },
+    probes: [{ id: 'home-page', status: 'failed', path: '/tmp/recipe/probes/home-page.json', screenshot: '/tmp/recipe/screens/home-page.png' }],
+    fake_side_effects: '/tmp/recipe/fakes/side-effects.json',
+    declared_artifacts: [{ name: 'runtime-log', path: '/tmp/recipe/logs/runtime.log' }],
+  },
+});
+assert.equal(recipeProbeFailureOutcome.status, 'failed');
+assert.equal(recipeProbeFailureOutcome.summary, 'WP Codebox home-page failed.');
+assert.equal(recipeProbeFailureOutcome.failure_classification, 'execution_failed');
+assert.equal(recipeProbeFailureOutcome.metadata.recipe_failed_phase, 'probe');
+assert.equal(recipeProbeFailureOutcome.metadata.decision_evidence.recipe_pack, 'example-codebox-recipes');
+assert.equal(recipeProbeFailureOutcome.metadata.decision_evidence.recipe_failed_phase, 'probe');
+assert.equal(recipeProbeFailureOutcome.diagnostics[0].class, 'codebox.recipe.probe.failed');
+assert.equal(recipeProbeFailureOutcome.artifacts.some((artifact) => artifact.kind === 'codebox-recipe-startup-log' && artifact.path === '/tmp/recipe/startup.log'), true);
+assert.equal(recipeProbeFailureOutcome.artifacts.some((artifact) => artifact.kind === 'codebox-recipe-probe-json' && artifact.path === '/tmp/recipe/probes/home-page.json'), true);
+assert.equal(recipeProbeFailureOutcome.artifacts.some((artifact) => artifact.kind === 'codebox-recipe-screenshot' && artifact.path === '/tmp/recipe/screens/home-page.png'), true);
+assert.equal(recipeProbeFailureOutcome.artifacts.some((artifact) => artifact.kind === 'codebox-recipe-fake-side-effects' && artifact.path === '/tmp/recipe/fakes/side-effects.json'), true);
+assert.equal(recipeProbeFailureOutcome.artifacts.some((artifact) => artifact.kind === 'codebox-recipe-artifact' && artifact.path === '/tmp/recipe/logs/runtime.log'), true);
+assert.equal(recipeProbeFailureOutcome.evidence_refs.some((ref) => ref.uri === '/tmp/recipe/screens/home-page.png'), true);
+
+const recipeStartupFailureOutcome = agentTaskOutcomeFromCodeboxResult(request, {
+  success: false,
+  schema: 'wp-codebox/agent-task-run/v1',
+  status: 'completed',
+  metadata: {
+    recipe_run: {
+      name: 'minimal-runtime',
+      startup: { success: false, message: 'Recipe could not boot WordPress.', log: '/tmp/recipe/startup.log' },
+    },
+  },
+});
+assert.equal(recipeStartupFailureOutcome.status, 'failed');
+assert.equal(recipeStartupFailureOutcome.summary, 'Recipe could not boot WordPress.');
+assert.equal(recipeStartupFailureOutcome.metadata.recipe_failed_phase, 'startup');
+
+const recipeArtifactCollectionFailureOutcome = agentTaskOutcomeFromCodeboxResult(request, {
+  success: false,
+  schema: 'wp-codebox/agent-task-run/v1',
+  status: 'completed',
+  recipe_run: {
+    name: 'minimal-runtime',
+    artifact_collection: { success: false, summary: 'Declared artifact path was missing.' },
+  },
+});
+assert.equal(recipeArtifactCollectionFailureOutcome.status, 'failed');
+assert.equal(recipeArtifactCollectionFailureOutcome.summary, 'Declared artifact path was missing.');
+assert.equal(recipeArtifactCollectionFailureOutcome.metadata.recipe_failed_phase, 'artifact_collection');
 
 const normalizedCompletedOutcome = agentTaskOutcomeFromCodeboxResult(request, {
   success: true,
@@ -657,6 +744,33 @@ try {
   assert.equal(captured.request.orchestrator.agent_task_id, 'task-123');
   assert.equal(captured.request.runtime_overlays[0].type, 'bundled-library');
 
+  const recipeCliResult = spawnSync(process.execPath, [
+    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs'),
+    '--task-runner',
+    fixture,
+  ], {
+    encoding: 'utf8',
+    input: JSON.stringify({
+      ...request,
+      task_id: 'recipe-cli-task-123',
+      executor: {
+        backend: 'codebox',
+        config: {
+          recipe_pack: 'example-codebox-recipes',
+          recipe_ref: 'release/v1',
+          recipe: 'minimal-runtime',
+          target_ref: 'Extra-Chill/example#42',
+          recipe_secret_env: [],
+        },
+      },
+    }),
+  });
+  assert.equal(recipeCliResult.status, 0, recipeCliResult.stderr || recipeCliResult.stdout);
+  const capturedRecipe = JSON.parse(fs.readFileSync(capture, 'utf8'));
+  assert.equal(capturedRecipe.request.recipe.pack, 'example-codebox-recipes');
+  assert.equal(capturedRecipe.request.recipe.name, 'minimal-runtime');
+  assert.equal(capturedRecipe.request.recipe.target_ref, 'Extra-Chill/example#42');
+
   const codexResult = spawnSync(process.execPath, [
     path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs'),
     '--task-runner',
@@ -735,6 +849,35 @@ try {
   assert.equal(capturedAgentBundleRun.input.agent_bundle.agent_slug, 'static-site-agent');
   assert.equal(capturedAgentBundleRun.input.agent_bundle.pipeline_slug, 'static-site-pipeline');
   assert.deepEqual(capturedAgentBundleRun.input.agent_bundle.tool_recorders, [{ tool: 'github/create-pull-request', engine_data_path: 'static_site_agent.pr_url' }]);
+
+  const recipeWpCodeboxRoot = fs.mkdtempSync(path.join(root, 'recipe-wp-codebox-'));
+  const { fixture: recipeFakeWpCodebox, capture: recipeFakeWpCodeboxCapture } = writeFakeWpCodebox(recipeWpCodeboxRoot);
+  const recipeWpCodeboxResult = spawnSync(process.execPath, [
+    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs'),
+  ], {
+    encoding: 'utf8',
+    input: JSON.stringify({
+      ...request,
+      task_id: 'recipe-wp-codebox-task-123',
+      executor: {
+        backend: 'codebox',
+        config: {
+          wp_codebox_bin: recipeFakeWpCodebox,
+          recipe_pack: 'example-codebox-recipes',
+          recipe_ref: 'release/v1',
+          recipe: 'minimal-runtime',
+          target_ref: 'Extra-Chill/example#42',
+          recipe_secret_env: [],
+        },
+      },
+    }),
+  });
+  assert.equal(recipeWpCodeboxResult.status, 0, recipeWpCodeboxResult.stderr || recipeWpCodeboxResult.stdout);
+  const capturedRecipeWpCodeboxRun = JSON.parse(fs.readFileSync(recipeFakeWpCodeboxCapture, 'utf8'));
+  assert.equal(capturedRecipeWpCodeboxRun.argv[0], 'agent-task-run');
+  assert.equal(capturedRecipeWpCodeboxRun.input.recipe.pack, 'example-codebox-recipes');
+  assert.equal(capturedRecipeWpCodeboxRun.input.recipe.name, 'minimal-runtime');
+  assert.equal(capturedRecipeWpCodeboxRun.input.recipe.target_ref, 'Extra-Chill/example#42');
 
   const contractResult = spawnSync(process.execPath, [
     path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs'),

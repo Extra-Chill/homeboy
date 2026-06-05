@@ -18,6 +18,8 @@ const PROVIDER_CAPABILITIES = [
   'screenshots',
   'structured_outcome',
   'agent_bundle_execution',
+  'external_recipe_packs',
+  'recipe_probe_artifacts',
 ];
 
 const AGENT_BUNDLE_CONFIG_FIELDS = [
@@ -139,6 +141,7 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
   const config = request.executor.config || {};
   const inputs = request.inputs || {};
   const agentBundle = agentBundleConfigFromAgentTaskRequest(request, config, inputs);
+  const recipe = recipeConfigFromAgentTaskRequest(request, config, inputs);
   const mounts = agentBundleMounts(agentBundle, config.mounts || options.mounts || []);
   const components = runtimeComponentPaths(config, options);
   const timeoutSeconds = request.limits?.task_timeout_seconds || request.limits?.taskTimeoutSeconds;
@@ -162,6 +165,7 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     expected_artifacts: request.expected_artifacts || [],
     policy: request.policy || {},
     context,
+    recipe,
     sandbox_session_id: config.sandbox_session_id || request.task_id,
     session_id: config.session_id || config.sessionId || '',
     agent: config.agent || options.agent || 'wp-codebox-sandbox',
@@ -233,6 +237,53 @@ function agentBundleMounts(bundleConfig, explicitMounts = []) {
   ];
 }
 
+function firstObject(...candidates) {
+  return candidates.find((candidate) => candidate && typeof candidate === 'object' && !Array.isArray(candidate)) || null;
+}
+
+function firstValue(...candidates) {
+  return candidates.find((candidate) => candidate !== undefined && candidate !== null && candidate !== '');
+}
+
+function recipeConfigFromAgentTaskRequest(request, config, inputs) {
+  const explicit = firstObject(
+    inputs.recipe,
+    inputs.recipe_pack,
+    inputs.recipePack,
+    config.recipe,
+    config.recipe_pack,
+    config.recipePack,
+  ) || {};
+  const recipeValue = firstValue(
+    inputs.recipe,
+    inputs.recipe_name,
+    inputs.recipeName,
+    config.recipe,
+    config.recipe_name,
+    config.recipeName,
+  );
+  const sourceRefs = Array.isArray(request.source_refs) ? request.source_refs : [];
+  const sourceRef = sourceRefs.find((ref) => ref && typeof ref === 'object' && (ref.kind === 'pull_request' || ref.kind === 'branch' || ref.kind === 'commit' || ref.uri || ref.ref)) || {};
+
+  const recipe = Object.fromEntries(Object.entries({
+    schema: 'wp-codebox/external-recipe-request/v1',
+    pack: explicit.pack || explicit.package || firstValue(inputs.recipe_pack, inputs.recipePack, config.recipe_pack, config.recipePack),
+    name: explicit.name || (typeof recipeValue === 'string' ? recipeValue : undefined),
+    ref: explicit.ref || firstValue(inputs.recipe_ref, inputs.recipeRef, config.recipe_ref, config.recipeRef),
+    path: explicit.path || firstValue(inputs.recipe_path, inputs.recipePath, config.recipe_path, config.recipePath),
+    repository: explicit.repository || explicit.repo || firstValue(inputs.recipe_repo, inputs.recipeRepo, config.recipe_repo, config.recipeRepo),
+    target_ref: explicit.target_ref || explicit.targetRef || firstValue(inputs.target_ref, inputs.targetRef, config.target_ref, config.targetRef, request.ref, sourceRef.ref, sourceRef.uri),
+    target_repo: explicit.target_repo || explicit.targetRepo || firstValue(inputs.target_repo, inputs.targetRepo, config.target_repo, config.targetRepo, sourceRef.repo),
+    target_pr: explicit.target_pr || explicit.targetPr || firstValue(inputs.target_pr, inputs.targetPr, config.target_pr, config.targetPr, sourceRef.pr, sourceRef.number),
+    target_branch: explicit.target_branch || explicit.targetBranch || firstValue(inputs.target_branch, inputs.targetBranch, config.target_branch, config.targetBranch),
+    inputs: explicit.inputs || inputs.recipe_inputs || inputs.recipeInputs || config.recipe_inputs || config.recipeInputs,
+    secret_env: explicit.secret_env || explicit.secretEnv || inputs.recipe_secret_env || inputs.recipeSecretEnv || config.recipe_secret_env || config.recipeSecretEnv,
+    metadata: explicit.metadata,
+  }).filter(([, value]) => value !== undefined && value !== '' && !(Array.isArray(value) && value.length === 0)));
+
+  return recipe.pack || recipe.name || recipe.path || recipe.repository || recipe.target_ref ? recipe : {};
+}
+
 function agentBundleConfigFromAgentTaskRequest(request, config, inputs) {
   const explicitBundleSources = [
     inputs.agent_bundle,
@@ -275,6 +326,9 @@ function agentBundleConfigFromAgentTaskRequest(request, config, inputs) {
 }
 
 function normalizeStatus(result) {
+  if (recipeRunFailedPhase(recipeRunFromResult(result))) {
+    return 'failed';
+  }
   if (result?.outputs && typeof result.outputs === 'object' && result.outputs.success === false) {
     return 'failed';
   }
@@ -411,6 +465,126 @@ function codeboxBundleArtifacts(result) {
   return artifacts;
 }
 
+function recipeRunFromResult(result) {
+  return firstObject(
+    result?.recipe_run,
+    result?.recipeRun,
+    result?.metadata?.recipe_run,
+    result?.metadata?.recipeRun,
+    result?.run?.recipe_run,
+    result?.run?.recipeRun,
+  ) || {};
+}
+
+function recipeRunFailedPhase(recipeRun) {
+  if (!recipeRun || Object.keys(recipeRun).length === 0) {
+    return '';
+  }
+  if (recipeRun.startup?.success === false || recipeRun.startup_failed || recipeRun.startupFailed) {
+    return 'startup';
+  }
+  const probes = Array.isArray(recipeRun.probes) ? recipeRun.probes : [];
+  if (recipeRun.probe?.success === false || recipeRun.probe_failed || recipeRun.probeFailed || probes.some((probe) => probe?.success === false || probe?.status === 'failed')) {
+    return 'probe';
+  }
+  if (recipeRun.artifact_collection?.success === false || recipeRun.artifactCollection?.success === false || recipeRun.artifact_collection_failed || recipeRun.artifactCollectionFailed) {
+    return 'artifact_collection';
+  }
+  return '';
+}
+
+function recipeRunFailureSummary(recipeRun) {
+  const failedPhase = recipeRunFailedPhase(recipeRun);
+  if (failedPhase === 'startup') {
+    return recipeRun.startup?.summary || recipeRun.startup?.message || 'WP Codebox recipe startup failed.';
+  }
+  if (failedPhase === 'probe') {
+    const failedProbe = (Array.isArray(recipeRun.probes) ? recipeRun.probes : []).find((probe) => probe?.success === false || probe?.status === 'failed') || recipeRun.probe || {};
+    const label = failedProbe.name || failedProbe.id || failedProbe.path || 'recipe probe';
+    return failedProbe.summary || failedProbe.message || `WP Codebox ${label} failed.`;
+  }
+  if (failedPhase === 'artifact_collection') {
+    return recipeRun.artifact_collection?.summary || recipeRun.artifactCollection?.summary || recipeRun.artifact_collection?.message || recipeRun.artifactCollection?.message || 'WP Codebox recipe artifact collection failed.';
+  }
+  return '';
+}
+
+function recipeRunFailureDiagnostic(recipeRun) {
+  const failedPhase = recipeRunFailedPhase(recipeRun);
+  if (!failedPhase) {
+    return null;
+  }
+  return {
+    class: `codebox.recipe.${failedPhase}.failed`,
+    message: recipeRunFailureSummary(recipeRun),
+    data: sanitizePublicMetadata({ phase: failedPhase, recipe_run: recipeRun }),
+  };
+}
+
+function appendRecipeArtifact(artifacts, artifact, fallbackKind, index) {
+  if (!artifact) {
+    return;
+  }
+  if (typeof artifact === 'string') {
+    appendUniqueArtifact(artifacts, {
+      id: artifact,
+      kind: fallbackKind,
+      path: artifact,
+    });
+    return;
+  }
+  appendUniqueArtifact(artifacts, {
+    id: artifact.id || artifact.name || artifact.path || artifact.url || `${fallbackKind}-${index + 1}`,
+    kind: artifact.kind || artifact.type || fallbackKind,
+    name: artifact.name,
+    path: artifact.path || artifact.file || artifact.directory,
+    url: artifact.url,
+    mime: artifact.mime,
+    size_bytes: artifact.size_bytes || artifact.sizeBytes,
+    sha256: artifact.sha256,
+    metadata: artifact.metadata || {},
+  });
+}
+
+function recipeRunArtifacts(result) {
+  const recipeRun = recipeRunFromResult(result);
+  if (!recipeRun || Object.keys(recipeRun).length === 0) {
+    return [];
+  }
+
+  const artifacts = [];
+  const startupLogs = [recipeRun.startup_log, recipeRun.startupLog, recipeRun.startup?.log, recipeRun.startup?.log_path, recipeRun.startup?.logPath].filter(Boolean);
+  startupLogs.forEach((artifact, index) => appendRecipeArtifact(artifacts, artifact, 'codebox-recipe-startup-log', index));
+
+  const probeJson = [recipeRun.probe_json, recipeRun.probeJson, recipeRun.probe_results, recipeRun.probeResults, recipeRun.probe?.artifact, recipeRun.probe?.path].filter(Boolean);
+  probeJson.forEach((artifact, index) => appendRecipeArtifact(artifacts, artifact, 'codebox-recipe-probe-json', index));
+
+  const probes = Array.isArray(recipeRun.probes) ? recipeRun.probes : [];
+  probes.forEach((probe, index) => {
+    appendRecipeArtifact(artifacts, probe.artifact || probe.path || probe.result_path || probe.resultPath, 'codebox-recipe-probe-json', index);
+    appendRecipeArtifact(artifacts, probe.screenshot || probe.screenshot_path || probe.screenshotPath, 'codebox-recipe-screenshot', index);
+  });
+
+  const screenshots = [
+    ...(Array.isArray(recipeRun.screenshots) ? recipeRun.screenshots : []),
+    ...(Array.isArray(recipeRun.browser_screenshots) ? recipeRun.browser_screenshots : []),
+    ...(Array.isArray(recipeRun.browserScreenshots) ? recipeRun.browserScreenshots : []),
+  ];
+  screenshots.forEach((artifact, index) => appendRecipeArtifact(artifacts, artifact, 'codebox-recipe-screenshot', index));
+
+  const sideEffects = [recipeRun.fake_side_effects, recipeRun.fakeSideEffects, recipeRun.side_effects, recipeRun.sideEffects].filter(Boolean);
+  sideEffects.forEach((artifact, index) => appendRecipeArtifact(artifacts, artifact, 'codebox-recipe-fake-side-effects', index));
+
+  const declaredArtifacts = [
+    ...(Array.isArray(recipeRun.artifacts) ? recipeRun.artifacts : []),
+    ...(Array.isArray(recipeRun.declared_artifacts) ? recipeRun.declared_artifacts : []),
+    ...(Array.isArray(recipeRun.declaredArtifacts) ? recipeRun.declaredArtifacts : []),
+  ];
+  declaredArtifacts.forEach((artifact, index) => appendRecipeArtifact(artifacts, artifact, 'codebox-recipe-artifact', index));
+
+  return artifacts;
+}
+
 function failureClassificationForStatus(status) {
   if (status === 'provider_error') {
     return 'provider';
@@ -526,6 +700,9 @@ function normalizeArtifacts(result) {
     for (const artifact of agentRuntimeBundleArtifacts(result)) {
       appendUniqueArtifact(artifacts, artifact);
     }
+    for (const artifact of recipeRunArtifacts(result)) {
+      appendUniqueArtifact(artifacts, artifact);
+    }
     return artifacts.map(artifactFromCodeboxArtifact);
   }
   const artifacts = Array.isArray(result?.artifacts)
@@ -560,6 +737,13 @@ function normalizeEvidenceRefs(result) {
         kind: artifact.kind,
         uri: artifact.path || artifact.url,
         label: artifact.kind.replace(/^agent-runtime-/, 'Agent runtime ').replace(/-/g, ' '),
+      });
+    }
+    for (const artifact of recipeRunArtifacts(result)) {
+      appendUniqueEvidenceRef(refs, {
+        kind: artifact.kind,
+        uri: artifact.path || artifact.url,
+        label: artifact.kind.replace(/^codebox-recipe-/, 'WP Codebox recipe ').replace(/-/g, ' '),
       });
     }
     for (const ref of outputEvidenceRefs(normalizeOutputs(result))) {
@@ -627,6 +811,8 @@ function codeboxDecisionEvidence(result) {
   const completionOutcome = result.completionOutcome || result.completion_outcome || result.metadata?.recipe_run?.completionOutcome || {};
   const runtime = result.run?.runtime || result.metadata?.recipe_run?.run?.runtime || {};
   const run = result.run || result.metadata?.recipe_run?.run || {};
+  const recipeRun = recipeRunFromResult(result);
+  const recipeFailedPhase = recipeRunFailedPhase(recipeRun);
   return Object.fromEntries(Object.entries({
     selected_backend: 'codebox',
     selected_executor: 'wordpress.codebox-agent-task-executor',
@@ -645,6 +831,11 @@ function codeboxDecisionEvidence(result) {
     completion_status: completionOutcome.status,
     completion_next_action: completionOutcome.nextAction,
     confidence: completionOutcome.confidence,
+    recipe_pack: recipeRun.pack || recipeRun.recipe_pack || recipeRun.recipePack,
+    recipe_name: recipeRun.name || recipeRun.recipe,
+    recipe_ref: recipeRun.ref,
+    recipe_target_ref: recipeRun.target_ref || recipeRun.targetRef,
+    recipe_failed_phase: recipeFailedPhase,
   }).filter(([, value]) => value !== undefined && value !== ''));
 }
 
@@ -653,15 +844,18 @@ function agentTaskOutcomeFromCodeboxResult(request, result = {}, options = {}) {
   const status = normalizeStatus(result, options.exitStatus ?? 0);
   const failureClassification = result.failure_classification || failureClassificationForStatus(status);
   const outputs = normalizeOutputs(result);
+  const recipeRun = recipeRunFromResult(result);
+  const recipeSummary = recipeRunFailureSummary(recipeRun);
+  const recipeFailedPhase = recipeRunFailedPhase(recipeRun);
   const outcome = {
     schema: AGENT_TASK_OUTCOME_SCHEMA,
     task_id: request.task_id,
     status,
-    summary: result.summary || result.message || (status === 'succeeded' ? 'WP Codebox agent task succeeded.' : 'WP Codebox agent task failed.'),
+    summary: recipeSummary || result.summary || result.message || (status === 'succeeded' ? 'WP Codebox agent task succeeded.' : 'WP Codebox agent task failed.'),
     artifacts: normalizeArtifacts(result),
     evidence_refs: normalizeEvidenceRefs(result),
     outputs,
-    diagnostics: (result.diagnostics || []).map((diagnostic) => ({
+    diagnostics: [recipeRunFailureDiagnostic(recipeRun), ...(result.diagnostics || [])].filter(Boolean).map((diagnostic) => ({
       class: diagnostic.class || diagnostic.kind || 'codebox',
       message: diagnostic.message || String(diagnostic),
       data: sanitizePublicMetadata(diagnostic.data || {}),
@@ -671,6 +865,7 @@ function agentTaskOutcomeFromCodeboxResult(request, result = {}, options = {}) {
       codebox: sanitizePublicMetadata(result.metadata || result),
       integration_contract: 'wp-codebox-cli/agent-task-run',
       decision_evidence: sanitizePublicMetadata(codeboxDecisionEvidence(result)),
+      recipe_failed_phase: recipeFailedPhase || undefined,
     },
   };
   if (failureClassification) {

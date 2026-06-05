@@ -51,7 +51,7 @@ function readTaskRequest() {
 }
 
 function secretEnvNames(request) {
-  return Array.from(new Set([...(request.secret_env || []), ...argValues('--secret-env')].filter(Boolean)));
+  return Array.from(new Set([...(request.secret_env || []), ...(request.recipe?.secret_env || []), ...argValues('--secret-env')].filter(Boolean)));
 }
 
 function assertRequiredSecretEnvAvailable(request) {
@@ -210,6 +210,7 @@ function runnerInput(request, artifacts) {
     task_timeout_seconds: Number.parseInt(argValue('--task-timeout-seconds') || request.task_timeout_seconds || request.taskTimeoutSeconds || 0, 10) || undefined,
     sandbox_session_id: request.sandbox_session_id || '',
     orchestrator: request.orchestrator || {},
+    recipe: request.recipe || {},
     artifacts_path: artifacts,
     wp_codebox_bin: argValue('--wp-codebox-bin') || request.wp_codebox_bin || '',
     agents_api_path: argValue('--agents-api') || request.agents_api_path || request.agents_api || '',
@@ -234,6 +235,7 @@ function stableTaskInput(input) {
     sandbox_tool_policy: sandboxToolPolicy(input, allowedTools),
     policy: input.parent_request?.policy || input.parent_request?.task?.policy || {},
     context: input.parent_request?.context || input.parent_request?.task?.context || {},
+    recipe: input.recipe || input.parent_request?.recipe || {},
     provider: input.provider,
     model: input.model,
     provider_plugin_paths: input.provider_plugin_paths || [],
