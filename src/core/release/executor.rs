@@ -918,6 +918,7 @@ mod tests {
         github_release, run_cleanup, run_git_push, run_package, store_artifacts_from_output,
     };
     use crate::core::component::Component;
+    use crate::core::deploy::release_download::GitHubRepo;
     use crate::core::extension::ExtensionManifest;
     use crate::core::release::types::ReleaseState;
     use crate::core::release::{ReleaseArtifact, ReleaseStepStatus};
@@ -938,12 +939,51 @@ mod tests {
     }
 
     #[test]
-    fn fallback_gh_command_includes_tag_twice() {
-        let cmd = github_release::fallback_gh_command("v1.2.3");
-        assert!(cmd.contains("gh release create v1.2.3"));
-        assert!(cmd.contains("--title v1.2.3"));
-        assert!(cmd.contains("--generate-notes"));
-        assert!(!cmd.contains("--notes <release-notes>"));
+    fn github_release_repair_commands_include_repo_asset_notes_and_enterprise_env() {
+        let github = GitHubRepo {
+            host: "github.a8c.com".to_string(),
+            owner: "chubes4".to_string(),
+            repo: "studio-web".to_string(),
+        };
+        let artifacts = vec!["build/studio-web.zip".to_string()];
+
+        let repair = github_release::github_release_repair_commands_with_proxy(
+            "v0.10.5",
+            &github,
+            &artifacts,
+            Some("v0.10.4"),
+            Some("socks5://127.0.0.1:8080"),
+        );
+
+        assert_eq!(repair.notes_file, "build/v0.10.5-release-notes.md");
+        assert!(repair.notes_guidance.contains("--notes-file"));
+        assert!(repair
+            .generate_notes_command
+            .contains("GH_HOST=github.a8c.com HTTPS_PROXY=socks5://127.0.0.1:8080 gh api repos/chubes4/studio-web/releases/generate-notes"));
+        assert!(repair
+            .generate_notes_command
+            .contains("-f tag_name=v0.10.5"));
+        assert!(repair
+            .generate_notes_command
+            .contains("-f previous_tag_name=v0.10.4"));
+        assert!(repair
+            .generate_notes_command
+            .contains("> build/v0.10.5-release-notes.md"));
+        assert!(repair.create_command.contains("gh release create v0.10.5"));
+        assert!(repair
+            .create_command
+            .contains("--notes-file build/v0.10.5-release-notes.md"));
+        assert!(repair.create_command.contains("build/studio-web.zip"));
+        assert!(repair.create_command.contains("-R chubes4/studio-web"));
+        assert_eq!(
+            repair.view_command,
+            "GH_HOST=github.a8c.com HTTPS_PROXY=socks5://127.0.0.1:8080 gh release view v0.10.5 -R chubes4/studio-web"
+        );
+        assert!(repair
+            .env_hint
+            .as_deref()
+            .unwrap_or_default()
+            .contains("GitHub Enterprise host detected"));
     }
 
     #[test]

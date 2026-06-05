@@ -8,6 +8,16 @@ use crate::core::release::types::{ReleaseState, ReleaseStepResult};
 
 use super::step_success;
 
+#[derive(Debug, Clone)]
+pub(super) struct GitHubReleaseRepairCommands {
+    pub notes_file: String,
+    pub notes_guidance: String,
+    pub generate_notes_command: String,
+    pub create_command: String,
+    pub view_command: String,
+    pub env_hint: Option<String>,
+}
+
 /// Create a GitHub Release for the just-pushed tag. Fails soft in every
 /// plausible failure mode (no `gh` binary, not authenticated, release already
 /// exists, `gh release create` errors) — the tag is already pushed by the
@@ -53,40 +63,6 @@ pub(crate) fn run_github_release(
             )
         })?;
 
-    if !gh_is_available() {
-        let fallback = fallback_gh_command(&tag);
-        log_status!(
-            "release",
-            "⚠ `gh` CLI not found on PATH — skipping GitHub Release creation"
-        );
-        log_status!("release", "Manual fallback: {}", fallback);
-        return Ok(skipped_result(
-            &tag,
-            &github,
-            "gh-not-available",
-            Some(fallback),
-        ));
-    }
-
-    if !gh_is_authenticated() {
-        let fallback = fallback_gh_command(&tag);
-        log_status!(
-            "release",
-            "⚠ `gh` is not authenticated — skipping GitHub Release creation"
-        );
-        log_status!(
-            "release",
-            "Authenticate with `gh auth login`, then manual fallback: {}",
-            fallback
-        );
-        return Ok(skipped_result(
-            &tag,
-            &github,
-            "gh-not-authenticated",
-            Some(fallback),
-        ));
-    }
-
     // Collect artifact paths from state. Populated by release.package
     // (or any other extension action that emits artifact metadata into
     // ReleaseState::artifacts). Passing these to `gh release create` or
@@ -105,6 +81,37 @@ pub(crate) fn run_github_release(
         .map(|artifact| artifact.path.clone())
         .collect();
     let has_artifacts = !artifact_paths.is_empty();
+
+    if !gh_is_available() {
+        let repair = github_release_repair_commands(&tag, &github, &artifact_paths, None);
+        log_status!(
+            "release",
+            "⚠ `gh` CLI not found on PATH — skipping GitHub Release creation"
+        );
+        log_repair_commands(&repair);
+        return Ok(skipped_result(
+            &tag,
+            &github,
+            "gh-not-available",
+            Some(repair),
+        ));
+    }
+
+    if !gh_is_authenticated() {
+        let repair = github_release_repair_commands(&tag, &github, &artifact_paths, None);
+        log_status!(
+            "release",
+            "⚠ `gh` is not authenticated — skipping GitHub Release creation"
+        );
+        log_status!("release", "Authenticate with `gh auth login`, then run:");
+        log_repair_commands(&repair);
+        return Ok(skipped_result(
+            &tag,
+            &github,
+            "gh-not-authenticated",
+            Some(repair),
+        ));
+    }
 
     let repo_flag = format!("{}/{}", github.owner, github.repo);
     if gh_release_exists(&tag, &repo_flag) {
@@ -172,18 +179,18 @@ pub(crate) fn run_github_release(
     let generated_notes = match github_generated_notes(&github, &tag, notes_start_tag.as_deref()) {
         Ok(notes) => notes,
         Err(err) => {
-            let fallback = fallback_gh_command(&tag);
+            let repair = github_release_repair_commands(&tag, &github, &artifact_paths, None);
             log_status!(
                 "release",
                 "⚠ GitHub generated release notes failed: {}",
                 err
             );
-            log_status!("release", "Manual fallback: {}", fallback);
+            log_repair_commands(&repair);
             return Ok(skipped_result(
                 &tag,
                 &github,
                 "generated-notes-failed",
-                Some(fallback),
+                Some(repair),
             ));
         }
     };
@@ -235,9 +242,14 @@ pub(crate) fn run_github_release(
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let fallback = fallback_gh_command(&tag);
+        let repair = github_release_repair_commands(
+            &tag,
+            &github,
+            &artifact_paths,
+            notes_start_tag.as_deref(),
+        );
         log_status!("release", "⚠ `gh release create` failed: {}", stderr.trim());
-        log_status!("release", "Manual fallback: {}", fallback);
+        log_repair_commands(&repair);
         return Ok(step_success(
             "github.release",
             "github.release",
@@ -249,7 +261,8 @@ pub(crate) fn run_github_release(
                 "repo": github.repo,
                 "stdout": stdout,
                 "stderr": stderr,
-                "fallback_command": fallback,
+                "fallback_command": repair.create_command.clone(),
+                "repair": repair_data(&repair),
             })),
             Vec::new(),
         ));
@@ -359,7 +372,7 @@ pub(super) fn skipped_result(
     tag: &str,
     github: &GitHubRepo,
     reason: &str,
-    fallback_command: Option<String>,
+    repair: Option<GitHubReleaseRepairCommands>,
 ) -> ReleaseStepResult {
     let mut data = serde_json::json!({
         "skipped": true,
@@ -368,8 +381,9 @@ pub(super) fn skipped_result(
         "owner": github.owner,
         "repo": github.repo,
     });
-    if let Some(fallback) = fallback_command {
-        data["fallback_command"] = serde_json::json!(fallback);
+    if let Some(repair) = repair {
+        data["fallback_command"] = serde_json::json!(repair.create_command.clone());
+        data["repair"] = repair_data(&repair);
     }
 
     step_success("github.release", "github.release", Some(data), Vec::new())
@@ -430,6 +444,185 @@ pub(super) fn gh_release_exists(tag: &str, repo_flag: &str) -> bool {
     crate::core::git::gh_probe_succeeds(&["release", "view", tag, "-R", repo_flag])
 }
 
-pub(super) fn fallback_gh_command(tag: &str) -> String {
-    format!("gh release create {} --title {} --generate-notes", tag, tag)
+pub(super) fn github_release_repair_commands(
+    tag: &str,
+    github: &GitHubRepo,
+    artifact_paths: &[String],
+    previous_tag: Option<&str>,
+) -> GitHubReleaseRepairCommands {
+    github_release_repair_commands_with_proxy(
+        tag,
+        github,
+        artifact_paths,
+        previous_tag,
+        configured_proxy_hint().as_deref(),
+    )
+}
+
+pub(super) fn github_release_repair_commands_with_proxy(
+    tag: &str,
+    github: &GitHubRepo,
+    artifact_paths: &[String],
+    previous_tag: Option<&str>,
+    proxy_hint: Option<&str>,
+) -> GitHubReleaseRepairCommands {
+    let env_prefix = gh_env_prefix(github, proxy_hint);
+    let repo_flag = format!("{}/{}", github.owner, github.repo);
+    let notes_file = format!("build/{}-release-notes.md", safe_filename(tag));
+    let endpoint = format!(
+        "repos/{}/{}/releases/generate-notes",
+        github.owner, github.repo
+    );
+    let mut generate_notes = vec![
+        format!("{}gh", env_prefix),
+        "api".to_string(),
+        shell_quote(&endpoint),
+        "-f".to_string(),
+        shell_quote(&format!("tag_name={}", tag)),
+    ];
+    if let Some(previous) = previous_tag {
+        generate_notes.push("-f".to_string());
+        generate_notes.push(shell_quote(&format!("previous_tag_name={}", previous)));
+    }
+    generate_notes.push("--jq".to_string());
+    generate_notes.push(shell_quote(".body"));
+    let generate_notes_command = format!(
+        "{} > {}",
+        generate_notes.join(" "),
+        shell_quote(&notes_file)
+    );
+
+    let mut create = vec![
+        format!("{}gh", env_prefix),
+        "release".to_string(),
+        "create".to_string(),
+        shell_quote(tag),
+        "--title".to_string(),
+        shell_quote(tag),
+        "--notes-file".to_string(),
+        shell_quote(&notes_file),
+    ];
+    for path in artifact_paths {
+        create.push(shell_quote(path));
+    }
+    create.push("-R".to_string());
+    create.push(shell_quote(&repo_flag));
+
+    let view_command = format!(
+        "{}gh release view {} -R {}",
+        env_prefix,
+        shell_quote(tag),
+        shell_quote(&repo_flag)
+    );
+    let env_hint = gh_env_hint(github, proxy_hint);
+
+    GitHubReleaseRepairCommands {
+        notes_file,
+        notes_guidance: "Review the generated markdown body in the notes file before creating the release; keep it as the content passed to --notes-file.".to_string(),
+        generate_notes_command,
+        create_command: create.join(" "),
+        view_command,
+        env_hint,
+    }
+}
+
+fn repair_data(repair: &GitHubReleaseRepairCommands) -> serde_json::Value {
+    serde_json::json!({
+        "notes_file": repair.notes_file,
+        "notes_guidance": repair.notes_guidance,
+        "generate_notes_command": repair.generate_notes_command,
+        "create_command": repair.create_command,
+        "view_command": repair.view_command,
+        "env_hint": repair.env_hint,
+    })
+}
+
+fn log_repair_commands(repair: &GitHubReleaseRepairCommands) {
+    if let Some(hint) = repair.env_hint.as_deref() {
+        log_status!("release", "{}", hint);
+    }
+    log_status!(
+        "release",
+        "Repair release notes file: {}",
+        repair.notes_file
+    );
+    log_status!("release", "{}", repair.notes_guidance);
+    log_status!(
+        "release",
+        "Generate notes: `{}`",
+        repair.generate_notes_command
+    );
+    log_status!("release", "Create release: `{}`", repair.create_command);
+    log_status!("release", "Verify release: `{}`", repair.view_command);
+}
+
+fn gh_env_prefix(github: &GitHubRepo, proxy_hint: Option<&str>) -> String {
+    let mut parts = Vec::new();
+    if github.host != "github.com" {
+        parts.push(format!("GH_HOST={}", shell_quote(&github.host)));
+    }
+    if let Some(proxy) = proxy_hint.filter(|value| !value.trim().is_empty()) {
+        parts.push(format!("HTTPS_PROXY={}", shell_quote(proxy.trim())));
+    }
+
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!("{} ", parts.join(" "))
+    }
+}
+
+fn gh_env_hint(github: &GitHubRepo, proxy_hint: Option<&str>) -> Option<String> {
+    if github.host == "github.com" && proxy_hint.is_none() {
+        return None;
+    }
+
+    let mut hints = Vec::new();
+    if github.host != "github.com" {
+        hints.push(format!(
+            "GitHub Enterprise host detected: repair commands include GH_HOST={}",
+            github.host
+        ));
+    }
+    if proxy_hint.is_some() {
+        hints.push("Configured HTTPS_PROXY is included in repair commands.".to_string());
+    } else if github.host != "github.com" {
+        hints.push(
+            "If this Enterprise host requires a proxy, prefix the commands with HTTPS_PROXY=<proxy-url>.".to_string(),
+        );
+    }
+
+    Some(hints.join(" "))
+}
+
+fn configured_proxy_hint() -> Option<String> {
+    ["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"]
+        .iter()
+        .find_map(|name| std::env::var(name).ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn safe_filename(value: &str) -> String {
+    value
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+fn shell_quote(value: &str) -> String {
+    if value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | ':' | '=' | '@'))
+    {
+        return value.to_string();
+    }
+
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
