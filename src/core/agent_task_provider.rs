@@ -206,6 +206,7 @@ fn fixture_success_outcome(
                 .to_string(),
             data: json!({ "artifact_root": artifact_root.display().to_string() }),
         }],
+        outputs: Value::Null,
         workflow: None,
         follow_up: None,
         metadata,
@@ -526,6 +527,7 @@ fn failure_outcome(
             message,
             data,
         }],
+        outputs: Value::Null,
         workflow: None,
         follow_up: None,
         metadata: Value::Null,
@@ -594,7 +596,7 @@ mod tests {
     fn scheduler_dispatches_extension_provider_command() {
         let command = format!(
             "node {}",
-            script("let fs=require('fs'); let req=JSON.parse(fs.readFileSync(0,'utf8')); process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'succeeded',summary:'ok'}));")
+            script("let fs=require('fs'); let req=JSON.parse(fs.readFileSync(0,'utf8')); process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'succeeded',summary:'ok',outputs:{issue_number:3447}}));")
         );
         let (request, provider) = request("task-a", command);
         let scheduler =
@@ -609,6 +611,7 @@ mod tests {
             aggregate.outcomes[0].status,
             AgentTaskOutcomeStatus::Succeeded
         );
+        assert_eq!(aggregate.outcomes[0].outputs["issue_number"], json!(3447));
     }
 
     #[test]

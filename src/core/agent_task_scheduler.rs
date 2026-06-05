@@ -597,6 +597,7 @@ impl AgentTaskScheduleSupport {
                 message: summary,
                 data: Value::Null,
             }],
+            outputs: Value::Null,
             workflow: None,
             follow_up: None,
             metadata: serde_json::json!({ "skipped": true, "skip_reason": "output_dependency_missing" }),
@@ -750,6 +751,7 @@ impl AgentTaskScheduleSupport {
                 label: Some("scheduler cancellation".to_string()),
             }],
             diagnostics: Vec::new(),
+            outputs: Value::Null,
             workflow: None,
             follow_up: None,
             metadata: Value::Null,
@@ -779,6 +781,7 @@ impl AgentTaskScheduleSupport {
                 message: format!("task exceeded timeout_ms={timeout_ms}"),
                 data: Value::Null,
             }],
+            outputs: Value::Null,
             workflow: None,
             follow_up: None,
             metadata: Value::Null,
@@ -878,6 +881,7 @@ impl AgentTaskScheduleSupport {
                 message: summary,
                 data: Value::Null,
             }],
+            outputs: Value::Null,
             follow_up: None,
             metadata: Value::Null,
             workflow: None,
@@ -1306,6 +1310,7 @@ mod tests {
                     label: Some("runtime bundle".to_string()),
                 }],
                 diagnostics: Vec::new(),
+                outputs: Value::Null,
                 workflow: None,
                 follow_up: None,
                 metadata: json!({}),
@@ -1666,7 +1671,7 @@ mod tests {
                     "issue_number".to_string(),
                     AgentTaskOutputBinding {
                         task_id: "idea".to_string(),
-                        path: "/metadata/github/issue_number".to_string(),
+                        path: "/outputs/issue_number".to_string(),
                         required: true,
                         default: Value::Null,
                     },
@@ -1723,7 +1728,7 @@ mod tests {
                     "issue_number".to_string(),
                     AgentTaskOutputBinding {
                         task_id: "idea".to_string(),
-                        path: "/metadata/github/issue_number".to_string(),
+                        path: "/outputs/issue_number".to_string(),
                         required: true,
                         default: Value::Null,
                     },
@@ -1846,6 +1851,11 @@ mod tests {
             } else {
                 json!({})
             };
+            let outputs = if request.task_id == "idea" && self.include_issue_number {
+                json!({ "issue_number": 3447 })
+            } else {
+                Value::Null
+            };
 
             AgentTaskOutcome {
                 schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
@@ -1856,6 +1866,7 @@ mod tests {
                 artifacts: Vec::new(),
                 evidence_refs: Vec::new(),
                 diagnostics: Vec::new(),
+                outputs,
                 workflow: None,
                 follow_up: None,
                 metadata,
@@ -1959,6 +1970,7 @@ mod tests {
                 label: Some("task log".to_string()),
             }],
             diagnostics: Vec::new(),
+            outputs: Value::Null,
             workflow: None,
             follow_up: None,
             metadata: json!({}),
