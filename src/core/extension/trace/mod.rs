@@ -12,6 +12,8 @@ mod aggregate_report;
 pub mod assertions;
 mod attach;
 pub mod baseline;
+mod canonicality;
+mod generic_runner;
 mod overlay;
 mod overlay_lock;
 pub mod parsing;
@@ -27,6 +29,7 @@ use crate::core::extension::{ExtensionCapability, ExtensionExecutionContext};
 
 pub use aggregate_report::TraceAggregateSpanSampleOutput;
 pub use attach::TraceAttachment;
+pub use canonicality::TraceCanonicalPolicy;
 pub use overlay::TraceOverlayRequest;
 pub use overlay_lock::{cleanup_stale_trace_overlay_locks, list_trace_overlay_locks};
 pub use overlay_lock::{
@@ -34,7 +37,8 @@ pub use overlay_lock::{
 };
 pub use parsing::{parse_trace_list_str, parse_trace_results_file};
 pub use parsing::{
-    TraceArtifact, TraceAssertion, TraceEvent, TraceList, TraceScenario, TraceStatus,
+    TraceArtifact, TraceAssertion, TraceEvent, TraceEvidenceMetadata, TraceList, TraceScenario,
+    TraceStatus,
 };
 pub use parsing::{TraceAssertionStatus, TraceResults, TraceSpanDefinition, TraceSpanResult};
 pub use probes::{ActiveTraceProbes, TraceProbeConfig};

@@ -44,6 +44,8 @@ fn trace_args_for_rig(rig_id: &str) -> TraceArgs {
         keep_overlay: false,
         stale: false,
         force: false,
+        canonical: false,
+        allow_local_toolchain: false,
     }
 }
 

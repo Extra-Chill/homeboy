@@ -61,6 +61,8 @@ JSON
                 keep_overlay: false,
                 stale: false,
                 force: false,
+                canonical: false,
+                allow_local_toolchain: false,
             },
             &GlobalArgs {},
         )

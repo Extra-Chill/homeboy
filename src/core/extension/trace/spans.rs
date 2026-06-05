@@ -130,6 +130,7 @@ mod tests {
             summary: None,
             failure: None,
             rig: None,
+            evidence: None,
             timeline: vec![event(10, "runner", "start"), event(35, "runner", "done")],
             span_definitions: Vec::new(),
             span_results: Vec::new(),
