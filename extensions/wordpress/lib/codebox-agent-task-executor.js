@@ -275,6 +275,9 @@ function agentBundleConfigFromAgentTaskRequest(request, config, inputs) {
 }
 
 function normalizeStatus(result) {
+  if (result?.outputs && typeof result.outputs === 'object' && result.outputs.success === false) {
+    return 'failed';
+  }
   const workload = agentRuntimeWorkload(result);
   if (workload && workload.success === false) {
     return 'failed';
