@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.115.42] - 2026-06-05
+
+### Changed
+- Support external Codebox recipe evidence
+
 ## [2.115.41] - 2026-06-05
 
 ### Fixed
