@@ -504,6 +504,44 @@ assert.equal(upstreamRunnerOutcome.artifacts[1].kind, 'codebox-session-artifacts
 assert.equal(upstreamRunnerOutcome.evidence_refs[0].uri, 'https://preview.example.test/sandbox-session-1');
 assert.equal(upstreamRunnerOutcome.evidence_refs[1].uri, '/tmp/wp-codebox-artifacts');
 
+const canonicalTopLevelAgentBundleOutcome = agentTaskOutcomeFromCodeboxResult({
+  ...request,
+  task_id: 'canonical-top-level-agent-bundle-task-123',
+  executor: { backend: 'codebox' },
+}, {
+  success: true,
+  schema: 'wp-codebox/agent-task-run/v1',
+  artifacts: '/tmp/wp-codebox-artifacts',
+  metadata: {
+    agent_runtime: {
+      bundle: {
+        engine_data_outputs: {
+          static_site_branch: 'metadata.engine_data.static_site_agent.branch',
+          static_site_pr_url: 'metadata.engine_data.static_site_agent.pr_url',
+          static_site_slug: 'metadata.engine_data.static_site_agent.slug',
+        },
+      },
+      workload: {
+        outputs: [],
+      },
+    },
+  },
+  outputs: {
+    engine_data: {
+      static_site_agent: {
+        branch: 'static/issue-451-design-direction',
+        pr_url: 'https://github.com/chubes4/wp-site-generator/pull/453',
+        slug: 'issue-451-design-direction',
+      },
+    },
+  },
+});
+assert.equal(canonicalTopLevelAgentBundleOutcome.status, 'succeeded');
+assert.equal(canonicalTopLevelAgentBundleOutcome.outputs.static_site_branch, 'static/issue-451-design-direction');
+assert.equal(canonicalTopLevelAgentBundleOutcome.outputs.static_site_pr_url, 'https://github.com/chubes4/wp-site-generator/pull/453');
+assert.equal(canonicalTopLevelAgentBundleOutcome.outputs.static_site_slug, 'issue-451-design-direction');
+assert.equal(canonicalTopLevelAgentBundleOutcome.evidence_refs.some((ref) => ref.uri === 'https://github.com/chubes4/wp-site-generator/pull/453'), true);
+
 const singleResultAgentBundleOutcome = agentTaskOutcomeFromCodeboxResult({
   ...request,
   task_id: 'single-result-agent-bundle-task-123',

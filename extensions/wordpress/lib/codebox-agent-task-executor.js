@@ -475,10 +475,25 @@ function normalizeOutputs(result) {
   const bundle = result.metadata?.agent_runtime?.bundle || result.task_input?.agent_bundle || {};
   const configuredOutputs = bundle.engine_data_outputs && typeof bundle.engine_data_outputs === 'object' ? bundle.engine_data_outputs : {};
   const scenarios = Array.isArray(workload.scenarios) ? workload.scenarios : [];
+  const configuredOutputSources = [
+    ...scenarios,
+    result.run?.agentResult,
+    result.agentResult,
+    result.agent_result,
+    result.metadata?.agent_runtime?.result,
+    result.outputs,
+    result.run?.agentResult?.outputs,
+    result.agentResult?.outputs,
+    result.agent_result?.outputs,
+    result.metadata?.agent_runtime?.result?.outputs,
+    workload,
+    workload.outputs,
+  ].filter((source) => source && typeof source === 'object' && !Array.isArray(source));
+  const outputSources = configuredOutputSources.flatMap((source) => [source, { metadata: source }]);
   const outputs = {};
   for (const [name, outputPath] of Object.entries(configuredOutputs)) {
-    for (const scenario of scenarios) {
-      const value = pathValue(scenario, outputPath);
+    for (const source of outputSources) {
+      const value = pathValue(source, outputPath);
       if (value !== undefined && value !== null && value !== '') {
         outputs[name] = value;
         break;
