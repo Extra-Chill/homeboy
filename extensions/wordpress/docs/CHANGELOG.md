@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.115.35] - 2026-06-05
+
+### Fixed
+- fix agent bundle wrapper status normalization
+- Fix WordPress release GitHub host proxy
+
 ## [2.115.34] - 2026-06-05
 
 ### Fixed
