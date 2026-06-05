@@ -45,6 +45,62 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXTENSION_PATH="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
+normalize_github_remote() {
+  local remote_url="$1"
+  local host=""
+  local slug=""
+
+  case "${remote_url}" in
+    git@*:*)
+      host="${remote_url#git@}"
+      host="${host%%:*}"
+      slug="${remote_url#*:}"
+      ;;
+    ssh://git@*/*)
+      local rest="${remote_url#ssh://git@}"
+      host="${rest%%/*}"
+      slug="${rest#*/}"
+      ;;
+    http://*/*|https://*/*)
+      local rest="${remote_url#http://}"
+      rest="${rest#https://}"
+      host="${rest%%/*}"
+      host="${host##*@}"
+      slug="${rest#*/}"
+      ;;
+  esac
+
+  slug="${slug%.git}"
+  slug="${slug%/}"
+  if [[ -n "${host}" && -n "${slug}" && "${slug}" == */* ]]; then
+    printf '%s\t%s\n' "${host}" "${slug}"
+  fi
+}
+
+apply_github_host_env() {
+  local host="$1"
+  local proxy=""
+  proxy="$(echo "${PAYLOAD}" | jq -r --arg host "${host}" '.config.github.hosts[$host].proxy // empty')"
+
+  if [[ "${host}" != "github.com" ]]; then
+    export GH_HOST="${host}"
+  fi
+
+  if [[ -n "${proxy}" ]]; then
+    export HTTPS_PROXY="${proxy}"
+  fi
+
+  while IFS=$'\t' read -r key value; do
+    [[ -n "${key}" ]] || continue
+    if [[ "${key}" == "GH_HOST" ]]; then
+      continue
+    fi
+    if [[ "${key}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+      export "${key}=${value}"
+    fi
+  done < <(echo "${PAYLOAD}" | jq -r --arg host "${host}" '.config.github.hosts[$host].env // {} | to_entries[] | [.key, .value] | @tsv')
+}
+
 if ! command -v gh >/dev/null 2>&1; then
   echo "Error: gh CLI is required to upload release assets" >&2
   exit 1
@@ -87,15 +143,21 @@ fi
 
 # Resolve the GitHub repository slug. Prefer the env var set by GitHub Actions;
 # fall back to parsing the origin remote so local dry-runs also work.
+GITHUB_HOST="${GH_HOST:-github.com}"
 REPO_SLUG="${GITHUB_REPOSITORY:-}"
+if [[ -n "${GITHUB_SERVER_URL:-}" ]]; then
+  GITHUB_HOST="${GITHUB_SERVER_URL#http://}"
+  GITHUB_HOST="${GITHUB_HOST#https://}"
+  GITHUB_HOST="${GITHUB_HOST%%/*}"
+fi
 if [[ -z "${REPO_SLUG}" ]]; then
   REMOTE_URL="$(git config --get remote.origin.url 2>/dev/null || true)"
   if [[ -n "${REMOTE_URL}" ]]; then
-    # Normalize both git@github.com:owner/repo.git and https://github.com/owner/repo(.git)
-    REPO_SLUG="$(echo "${REMOTE_URL}" \
-      | sed -E 's#^git@github\.com:#https://github.com/#' \
-      | sed -E 's#\.git$##' \
-      | sed -E 's#^https://github\.com/##')"
+    NORMALIZED_REMOTE="$(normalize_github_remote "${REMOTE_URL}")"
+    if [[ -n "${NORMALIZED_REMOTE}" ]]; then
+      GITHUB_HOST="${NORMALIZED_REMOTE%%$'\t'*}"
+      REPO_SLUG="${NORMALIZED_REMOTE#*$'\t'}"
+    fi
   fi
 fi
 
@@ -103,6 +165,8 @@ if [[ -z "${REPO_SLUG}" ]]; then
   echo "Error: could not determine GitHub repository (set GITHUB_REPOSITORY or configure git remote origin)" >&2
   exit 1
 fi
+
+apply_github_host_env "${GITHUB_HOST}"
 
 echo "Uploading ${ARTIFACT_PATH} to ${REPO_SLUG} release ${TAG}..." >&2
 
@@ -184,7 +248,7 @@ Branch is force-pushed on every release; do not commit here directly."
 
   # Push using a token-authenticated HTTPS URL. We never reuse the source
   # repo's remote so the source checkout's credentials are untouched.
-  REMOTE_AUTHENTICATED_URL="https://x-access-token:${GH_TOKEN}@github.com/${REPO_SLUG}.git"
+  REMOTE_AUTHENTICATED_URL="https://x-access-token:${GH_TOKEN}@${GITHUB_HOST}/${REPO_SLUG}.git"
 
   git -C "${MIRROR_REPO}" push --force "${REMOTE_AUTHENTICATED_URL}" \
     "${RELEASE_LATEST_BRANCH}:${RELEASE_LATEST_BRANCH}" >&2
@@ -198,12 +262,14 @@ fi
 # without re-reading homeboy.json.
 jq -cn \
   --arg tag "${TAG}" \
+  --arg host "${GITHUB_HOST}" \
   --arg repo "${REPO_SLUG}" \
   --arg path "${ARTIFACT_PATH}" \
   --arg branch "${PUSHED_BRANCH}" \
   '{
     target: "github-release-asset",
     tag: $tag,
+    github_host: $host,
     repository: $repo,
     artifact_path: $path,
     release_latest_branch: (if $branch == "" then null else $branch end),
