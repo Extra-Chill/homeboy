@@ -1034,6 +1034,20 @@
       "description": "Component-relative bootstrap file fallbacks for WP Codebox bench workloads. The runner resolves the list against the mounted component and passes the first existing file to wordpress.bench so it loads before workloads execute."
     },
     {
+      "id": "wp_codebox_phpunit_bootstrap_mode",
+      "label": "WP Codebox PHPUnit bootstrap mode",
+      "type": "string",
+      "default": "auto",
+      "description": "How the WP Codebox PHPUnit backend prepares WordPress tests. Use 'managed' for the Homeboy-managed WordPress test bootstrap, 'project' for the component's native PHPUnit bootstrap, or 'auto' to use project mode when phpunit.xml(.dist) declares a bootstrap attribute."
+    },
+    {
+      "id": "wp_codebox_phpunit_project_bootstrap",
+      "label": "WP Codebox PHPUnit project bootstrap",
+      "type": "string",
+      "default": "",
+      "description": "Optional component-relative PHPUnit bootstrap path for wp_codebox_phpunit_bootstrap_mode=project. When empty, the runner reads the bootstrap attribute from phpunit.xml or phpunit.xml.dist."
+    },
+    {
       "id": "wp_codebox_bootstrap_steps",
       "label": "WP Codebox bench bootstrap steps",
       "type": "array",

@@ -322,6 +322,85 @@ compile_phpunit_bootstrap_files() {
 
 compile_phpunit_bootstrap_files
 
+detect_phpunit_project_bootstrap() {
+    local config_file
+    for config_file in "${PLUGIN_PATH}/phpunit.xml" "${PLUGIN_PATH}/phpunit.xml.dist"; do
+        [ -f "$config_file" ] || continue
+
+        php -r '
+            $xml = file_get_contents($argv[1]);
+            if (!is_string($xml)) {
+                exit(1);
+            }
+            if (preg_match("/<phpunit\\b[^>]*\\sbootstrap=([\\\"\\x27])(.*?)\\1/is", $xml, $matches)) {
+                echo html_entity_decode($matches[2], ENT_QUOTES | ENT_XML1, "UTF-8");
+                exit(0);
+            }
+            exit(1);
+        ' "$config_file" 2>/dev/null && return 0
+    done
+
+    return 1
+}
+
+validate_project_bootstrap_ref() {
+    local bootstrap_ref="$1"
+
+    if [ -z "$bootstrap_ref" ]; then
+        echo "Error: wp_codebox_phpunit_bootstrap_mode=project requires a project bootstrap path from wp_codebox_phpunit_project_bootstrap or phpunit.xml(.dist)." >&2
+        FAILED_STEP="WP Codebox PHPUnit bootstrap mode setup"
+        exit 1
+    fi
+    if [[ "$bootstrap_ref" = /* ]] || [[ "$bootstrap_ref" == *..* ]]; then
+        echo "Error: project PHPUnit bootstrap must be component-relative and stay under component root: $bootstrap_ref" >&2
+        FAILED_STEP="WP Codebox PHPUnit bootstrap mode setup"
+        exit 1
+    fi
+    if [ ! -f "${PLUGIN_PATH}/${bootstrap_ref}" ]; then
+        echo "Error: project PHPUnit bootstrap file not found: ${PLUGIN_PATH}/${bootstrap_ref}" >&2
+        FAILED_STEP="WP Codebox PHPUnit bootstrap mode setup"
+        exit 1
+    fi
+}
+
+configure_phpunit_bootstrap_mode() {
+    local settings_json="${HOMEBOY_SETTINGS_JSON:-}"
+    [ -n "$settings_json" ] || settings_json="{}"
+
+    WP_CODEBOX_PHPUNIT_BOOTSTRAP_MODE=$(printf '%s' "$settings_json" | jq -r '.wp_codebox_phpunit_bootstrap_mode // "auto"' 2>/dev/null || printf 'auto')
+    WP_CODEBOX_PHPUNIT_PROJECT_BOOTSTRAP=$(printf '%s' "$settings_json" | jq -r '.wp_codebox_phpunit_project_bootstrap // empty' 2>/dev/null || true)
+
+    case "$WP_CODEBOX_PHPUNIT_BOOTSTRAP_MODE" in
+        managed|project|auto)
+            ;;
+        *)
+            echo "Error: wp_codebox_phpunit_bootstrap_mode must be one of managed, project, or auto (got '$WP_CODEBOX_PHPUNIT_BOOTSTRAP_MODE')." >&2
+            FAILED_STEP="WP Codebox PHPUnit bootstrap mode setup"
+            exit 1
+            ;;
+    esac
+
+    if [ -z "$WP_CODEBOX_PHPUNIT_PROJECT_BOOTSTRAP" ]; then
+        WP_CODEBOX_PHPUNIT_PROJECT_BOOTSTRAP=$(detect_phpunit_project_bootstrap || true)
+    fi
+
+    if [ "$WP_CODEBOX_PHPUNIT_BOOTSTRAP_MODE" = "auto" ]; then
+        if [ -n "$WP_CODEBOX_PHPUNIT_PROJECT_BOOTSTRAP" ]; then
+            WP_CODEBOX_PHPUNIT_BOOTSTRAP_MODE="project"
+        else
+            WP_CODEBOX_PHPUNIT_BOOTSTRAP_MODE="managed"
+        fi
+    fi
+
+    if [ "$WP_CODEBOX_PHPUNIT_BOOTSTRAP_MODE" = "project" ]; then
+        validate_project_bootstrap_ref "$WP_CODEBOX_PHPUNIT_PROJECT_BOOTSTRAP"
+    else
+        WP_CODEBOX_PHPUNIT_PROJECT_BOOTSTRAP=""
+    fi
+}
+
+configure_phpunit_bootstrap_mode
+
 if [ -n "${COMPONENT_ID:-}" ]; then
     export HOMEBOY_COMPONENT_ID="$COMPONENT_ID"
     export HOMEBOY_COMPONENT_PATH="$PLUGIN_PATH"
@@ -538,6 +617,8 @@ jq -n \
     --argjson env "$BENCH_ENV_JSON" \
     --argjson defines "$WP_CONFIG_DEFINES_JSON" \
     --argjson bootstrapFiles "$WP_CODEBOX_BOOTSTRAP_FILES_JSON" \
+    --arg bootstrapMode "$WP_CODEBOX_PHPUNIT_BOOTSTRAP_MODE" \
+    --arg projectBootstrap "$WP_CODEBOX_PHPUNIT_PROJECT_BOOTSTRAP" \
     --arg dependencyMounts "$WP_CODEBOX_DEP_MOUNTS" \
     --arg multisite "$WP_CODEBOX_MULTISITE" \
     '{
@@ -550,6 +631,8 @@ jq -n \
         env: $env,
         wpConfigDefines: $defines,
         bootstrapFiles: $bootstrapFiles,
+        bootstrapMode: $bootstrapMode,
+        projectBootstrap: $projectBootstrap,
         autoloadFile: "/wp-codebox-vendor/autoload.php",
         testsDir: "/wp-codebox-vendor/wp-phpunit/wp-phpunit",
         dependencyMounts: ($dependencyMounts | split("\n") | map(select(. != ""))),
