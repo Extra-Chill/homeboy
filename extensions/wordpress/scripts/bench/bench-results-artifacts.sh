@@ -93,11 +93,66 @@ homeboy_wordpress_bench_leaderboard_filter() {
     '
 }
 
+homeboy_wordpress_bench_step_series_filter() {
+    jq \
+        --arg schema "homeboy/wordpress-bench-step-series/v1" \
+        '
+        def row_array($scenario):
+            (
+                $scenario.step_series
+                // $scenario.metadata.step_series
+                // $scenario.metadata.series
+                // []
+            )
+            | if type == "array" then map(select(type == "object")) else [] end;
+
+        def normalize_row($scenario; $index):
+            . as $row
+            | $row + {
+                scenario_id: ($row.scenario_id // $scenario.id // null),
+                index: ($row.index // $index)
+            }
+            | if has("success") then . else
+                if (.status // null) == "pass" or (.status // null) == "passed" or (.status // null) == "ok" then . + {success: true}
+                elif (.status // null) == "fail" or (.status // null) == "failed" or (.status // null) == "error" then . + {success: false}
+                else . end
+            end;
+
+        . as $root
+        | {
+            schema: $schema,
+            component_id: ($root.component_id // null),
+            generated_from: "homeboy/bench-results/v1",
+            series: [
+                ($root.scenarios // [])[]
+                | select((.id // null) != "__bootstrap")
+                | . as $scenario
+                | (row_array($scenario)) as $rows
+                | ($scenario.artifacts.step_series // null) as $artifact
+                | select(($rows | length) > 0 or $artifact != null)
+                | {
+                    scenario_id: ($scenario.id // null),
+                    label: ($scenario.label // null),
+                    source: ($scenario.source // null),
+                    artifact: $artifact,
+                    rows: [
+                        $rows
+                        | to_entries[]
+                        | . as $entry
+                        | $entry.value | normalize_row($scenario; $entry.key)
+                    ]
+                }
+            ]
+        }
+        '
+}
+
 homeboy_wordpress_emit_bench_results_artifacts() {
 	local bench_results_file="$1"
 	local artifact_dir
 	local jsonl_file
 	local leaderboard_file
+	local series_file
 	local baseline_results_file
 	local codebox_memory_report_file
 	local codebox_thresholds_json
@@ -111,6 +166,7 @@ homeboy_wordpress_emit_bench_results_artifacts() {
 
 	jsonl_file="${artifact_dir}/results.jsonl"
 	leaderboard_file="${artifact_dir}/leaderboard.md"
+	series_file="${artifact_dir}/series.json"
 	codebox_memory_report_file="${artifact_dir}/codebox-browser-memory-comparison.md"
 
     if ! homeboy_wordpress_bench_jsonl_filter < "$bench_results_file" > "$jsonl_file"; then
@@ -120,6 +176,11 @@ homeboy_wordpress_emit_bench_results_artifacts() {
 
 	if ! homeboy_wordpress_bench_leaderboard_filter < "$jsonl_file" > "$leaderboard_file"; then
 		echo "ERROR: failed to emit bench leaderboard artifact at $leaderboard_file" >&2
+		return 1
+	fi
+
+	if ! homeboy_wordpress_bench_step_series_filter < "$bench_results_file" > "$series_file"; then
+		echo "ERROR: failed to emit bench step-series artifact at $series_file" >&2
 		return 1
 	fi
 
@@ -139,6 +200,7 @@ homeboy_wordpress_emit_bench_results_artifacts() {
 	if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
 		echo "DEBUG: [bench] Results JSONL: $jsonl_file"
 		echo "DEBUG: [bench] Leaderboard: $leaderboard_file"
+		echo "DEBUG: [bench] Step series: $series_file"
 		[ -s "$codebox_memory_report_file" ] && echo "DEBUG: [bench] Codebox browser memory comparison: $codebox_memory_report_file"
 	fi
 }
