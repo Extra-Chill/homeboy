@@ -433,12 +433,19 @@ fn inspect_release_tag_state(component: &Component, tag_name: &str) -> Result<Re
         })
         .and_then(|remote_url| crate::core::deploy::release_download::parse_github_url(&remote_url))
         .and_then(|github| {
-            if !github_release::gh_is_available() || !github_release::gh_is_authenticated() {
+            if !github_release::gh_is_available()
+                || !github_release::gh_is_authenticated(&github, &component.github)
+            {
                 return None;
             }
 
             let repo_flag = format!("{}/{}", github.owner, github.repo);
-            Some(github_release::gh_release_exists(tag_name, &repo_flag))
+            Some(github_release::gh_release_exists(
+                &github,
+                &component.github,
+                tag_name,
+                &repo_flag,
+            ))
         });
 
     Ok(ReleaseTagState {

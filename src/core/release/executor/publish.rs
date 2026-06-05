@@ -1,5 +1,6 @@
 use std::fmt::Write;
 
+use crate::core::component::GithubConfig;
 use crate::core::error::{Error, Result};
 use crate::core::extension::{self, ExtensionManifest};
 use crate::core::release::types::{ReleaseState, ReleaseStepResult};
@@ -12,6 +13,7 @@ pub(crate) fn run_publish(
     state: &ReleaseState,
     component_id: &str,
     component_local_path: &str,
+    github_config: Option<&GithubConfig>,
     target: &str,
 ) -> Result<ReleaseStepResult> {
     let extension = extensions.iter().find(|m| m.id == target).ok_or_else(|| {
@@ -40,7 +42,13 @@ pub(crate) fn run_publish(
         ));
     }
 
-    let payload = build_release_payload(state, component_id, component_local_path, None);
+    let extra_config = release_publish_config(github_config);
+    let payload = build_release_payload(
+        state,
+        component_id,
+        component_local_path,
+        extra_config.as_ref(),
+    );
     let response = extension::execute_action(&extension.id, action_id, None, None, Some(&payload))?;
     let extension_data = serde_json::to_value(&response).map_err(|e| {
         Error::internal_json(e.to_string(), Some("extension action output".to_string()))
@@ -62,6 +70,16 @@ pub(crate) fn run_publish(
         &response,
         state.version.as_deref(),
     ))
+}
+
+fn release_publish_config(
+    github_config: Option<&GithubConfig>,
+) -> Option<std::collections::HashMap<String, serde_json::Value>> {
+    let github_config = github_config.filter(|config| !config.hosts.is_empty())?;
+    Some(std::collections::HashMap::from([(
+        "github".to_string(),
+        serde_json::to_value(github_config).unwrap_or(serde_json::Value::Null),
+    )]))
 }
 
 fn publish_step_result(
@@ -369,9 +387,11 @@ fn publish_failure_message(target: &str, response: &serde_json::Value) -> String
 #[cfg(test)]
 mod tests {
     use super::{publish_step_result, run_publish};
+    use crate::core::component::{GithubConfig, GithubHostConfig};
     use crate::core::extension::ExtensionManifest;
     use crate::core::release::types::ReleaseState;
     use crate::core::release::ReleaseStepStatus;
+    use std::collections::HashMap;
     use std::io::{Read, Write};
     use std::net::TcpListener;
 
@@ -442,6 +462,7 @@ mod tests {
                 &ReleaseState::default(),
                 "intelligence-horse-theme",
                 &component.path().to_string_lossy(),
+                None,
                 "registry",
             )
             .expect("publish step");
@@ -458,6 +479,51 @@ mod tests {
             assert_eq!(
                 env["component_path"].as_str().expect("component path"),
                 component.path().to_string_lossy()
+            );
+        });
+    }
+
+    #[test]
+    fn run_publish_passes_github_host_config_to_action_payload() {
+        crate::test_support::with_isolated_home(|_| {
+            let component = tempfile::tempdir_in(std::env::temp_dir()).expect("component tempdir");
+            let publish =
+                release_publish_extension("registry", "printf '%s' \"$HOMEBOY_SETTINGS_JSON\"");
+            crate::core::extension::save_manifest(&publish).expect("save publish extension");
+            let github = GithubConfig {
+                hosts: HashMap::from([(
+                    "github.enterprise.test".to_string(),
+                    GithubHostConfig {
+                        proxy: Some("socks5://127.0.0.1:9999".to_string()),
+                        env: HashMap::from([(
+                            "NO_PROXY".to_string(),
+                            "localhost,127.0.0.1".to_string(),
+                        )]),
+                    },
+                )]),
+            };
+
+            let result = run_publish(
+                &[publish],
+                &ReleaseState::default(),
+                "intelligence-horse-theme",
+                &component.path().to_string_lossy(),
+                Some(&github),
+                "registry",
+            )
+            .expect("publish step");
+
+            assert_eq!(result.status, ReleaseStepStatus::Success);
+            let data = result.data.expect("publish data");
+            let stdout = data["response"]["stdout"].as_str().expect("stdout");
+            let payload: serde_json::Value = serde_json::from_str(stdout).expect("payload json");
+            assert_eq!(
+                payload["config"]["github"]["hosts"]["github.enterprise.test"]["proxy"],
+                "socks5://127.0.0.1:9999"
+            );
+            assert_eq!(
+                payload["config"]["github"]["hosts"]["github.enterprise.test"]["env"]["NO_PROXY"],
+                "localhost,127.0.0.1"
             );
         });
     }
