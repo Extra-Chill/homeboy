@@ -138,6 +138,69 @@ mod tests {
         );
     }
 
+    #[test]
+    fn apply_lab_offload_patch_writes_returned_homeboy_json_baseline() {
+        let repo = tempfile::tempdir().expect("repo tempdir");
+        git(repo.path(), &["init"]);
+        git(repo.path(), &["config", "user.email", "test@example.com"]);
+        git(repo.path(), &["config", "user.name", "Test User"]);
+        std::fs::write(repo.path().join("homeboy.json"), "{\"id\":\"demo\"}\n")
+            .expect("seed manifest");
+        git(repo.path(), &["add", "."]);
+        git(repo.path(), &["commit", "-m", "base"]);
+        let snapshot = SourceSnapshot::collect_local(
+            "lab",
+            repo.path(),
+            Some("/srv/homeboy/_lab_workspaces/repo-abc"),
+            "lab_offload",
+        );
+        let artifact_dir = tempfile::tempdir().expect("artifact tempdir");
+        let patch_path = artifact_dir.path().join("patch.diff");
+        std::fs::write(
+            &patch_path,
+            "diff --git a/homeboy.json b/homeboy.json\nindex 9911a67..6856254 100644\n--- a/homeboy.json\n+++ b/homeboy.json\n@@ -1 +1 @@\n-{\"id\":\"demo\"}\n+{\"id\":\"demo\",\"baselines\":{\"audit\":{\"known_fingerprints\":[\"abc\"]}}}\n",
+        )
+        .expect("patch file");
+        let exec_output = RunnerExecOutput {
+            command: "runner.exec",
+            runner_id: "lab".to_string(),
+            mode: super::super::RunnerExecMode::Daemon,
+            argv: vec![
+                "homeboy".to_string(),
+                "audit".to_string(),
+                "--baseline".to_string(),
+            ],
+            remote_cwd: "/srv/homeboy/_lab_workspaces/repo-abc".to_string(),
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+            source_snapshot: Some(snapshot),
+            job: None,
+            job_id: None,
+            job_events: None,
+            mirror_run_id: None,
+            patch: Some(serde_json::json!({
+                "modified_files": ["homeboy.json"],
+                "patch_artifact_path": patch_path.display().to_string(),
+            })),
+            metrics: None,
+            capture: None,
+        };
+
+        let output = apply_lab_offload_patch(&exec_output)
+            .expect("apply patch")
+            .expect("patch applied");
+
+        assert_eq!(
+            output.result.modified_files,
+            vec!["homeboy.json".to_string()]
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join("homeboy.json")).expect("manifest"),
+            "{\"id\":\"demo\",\"baselines\":{\"audit\":{\"known_fingerprints\":[\"abc\"]}}}\n"
+        );
+    }
+
     fn git(path: &Path, args: &[&str]) {
         let output = std::process::Command::new("git")
             .args(args)
