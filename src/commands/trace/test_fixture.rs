@@ -83,6 +83,32 @@ printf 'trace log\n' > "$HOMEBOY_TRACE_ARTIFACT_DIR/trace-log.txt"
     }
 }
 
+pub(super) fn write_trace_port_env_extension(home: &tempfile::TempDir) {
+    write_custom_trace_extension(
+        home,
+        r#"#!/bin/sh
+set -eu
+if [ "$HOMEBOY_TRACE_LIST_ONLY" = "1" ]; then
+  cat > "$HOMEBOY_TRACE_RESULTS_FILE" <<JSON
+{"component_id":"$HOMEBOY_COMPONENT_ID","scenarios":[{"id":"studio-app-create-site","source":"fixture"}]}
+JSON
+  exit 0
+fi
+
+test -n "${HOMEBOY_INVOCATION_PORT_BASE:-}"
+test -n "${HOMEBOY_INVOCATION_PORT_MAX:-}"
+expected_max=$((HOMEBOY_INVOCATION_PORT_BASE + 2))
+test "$HOMEBOY_INVOCATION_PORT_MAX" = "$expected_max"
+
+mkdir -p "$HOMEBOY_TRACE_ARTIFACT_DIR"
+printf 'base=%s\nmax=%s\n' "$HOMEBOY_INVOCATION_PORT_BASE" "$HOMEBOY_INVOCATION_PORT_MAX" > "$HOMEBOY_TRACE_ARTIFACT_DIR/invocation-ports.txt"
+cat > "$HOMEBOY_TRACE_RESULTS_FILE" <<JSON
+{"component_id":"$HOMEBOY_COMPONENT_ID","scenario_id":"$HOMEBOY_TRACE_SCENARIO","status":"pass","timeline":[],"assertions":[{"id":"invocation-ports","status":"pass","message":"port range env was present"}],"artifacts":[{"label":"Invocation ports","path":"artifacts/invocation-ports.txt"}]}
+JSON
+"#,
+    );
+}
+
 pub(super) fn write_nested_trace_artifact_extension(home: &tempfile::TempDir) {
     write_custom_trace_extension(
         home,
@@ -203,6 +229,34 @@ pub(super) fn write_trace_rig(
                     "trace_workloads": {{ "{TRACE_FIXTURE_EXTENSION_ID}": [
                         {{ "path": "${{components.{component_id}.path}}/studio-app-create-site.trace.mjs" }},
                         {{ "path": "${{components.{component_id}.path}}/studio-list-sites.trace.mjs" }}
+                    ] }}
+                }}"#,
+            path.display()
+        ),
+    )
+    .expect("write rig");
+}
+
+pub(super) fn write_trace_rig_with_port_range(
+    home: &tempfile::TempDir,
+    rig_id: &str,
+    component_id: &str,
+    path: &std::path::Path,
+) {
+    let rig_dir = home.path().join(".config").join("homeboy").join("rigs");
+    fs::create_dir_all(&rig_dir).expect("mkdir rigs");
+    fs::write(
+        rig_dir.join(format!("{}.json", rig_id)),
+        format!(
+            r#"{{
+                    "components": {{
+                        "{component_id}": {{ "path": "{}" }}
+                    }},
+                    "trace_workloads": {{ "{TRACE_FIXTURE_EXTENSION_ID}": [
+                        {{
+                            "path": "${{components.{component_id}.path}}/studio-app-create-site.trace.mjs",
+                            "port_range_size": 3
+                        }}
                     ] }}
                 }}"#,
             path.display()

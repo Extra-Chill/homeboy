@@ -4,9 +4,9 @@ use crate::test_support::with_isolated_home;
 
 use super::test_fixture::{
     init_overlay_component, write_missing_trace_artifact_extension,
-    write_nested_trace_artifact_extension, write_trace_extension, write_trace_rig,
-    write_trace_rig_with_phase_preset, write_trace_rig_with_span_metadata,
-    write_trace_rig_with_variant,
+    write_nested_trace_artifact_extension, write_trace_extension, write_trace_port_env_extension,
+    write_trace_rig, write_trace_rig_with_phase_preset, write_trace_rig_with_port_range,
+    write_trace_rig_with_span_metadata, write_trace_rig_with_variant,
 };
 use super::*;
 fn trace_args_for_rig(rig_id: &str, component_id: &str, scenario_id: &str) -> TraceArgs {
@@ -116,6 +116,33 @@ fn rig_trace_run_uses_rig_owned_workload_extension_without_component_link() {
                     result.results.expect("results").scenario_id,
                     "studio-app-create-site"
                 );
+            }
+            _ => panic!("expected run output"),
+        }
+    });
+}
+
+#[test]
+fn rig_trace_workload_port_range_sets_invocation_env() {
+    with_isolated_home(|home| {
+        write_trace_port_env_extension(home);
+        let component_dir = tempfile::TempDir::new().expect("component dir");
+        write_trace_rig_with_port_range(home, "studio-rig", "studio", component_dir.path());
+
+        let (output, exit_code) = run(
+            trace_args_for_rig("studio-rig", "studio", "studio-app-create-site"),
+            &GlobalArgs {},
+        )
+        .expect("rig trace run should receive invocation port env");
+
+        assert_eq!(exit_code, 0);
+        match output {
+            TraceCommandOutput::Run(result) => {
+                assert!(result.passed);
+                let assertions = result.results.expect("results").assertions;
+                assert!(assertions
+                    .iter()
+                    .any(|assertion| assertion.id == "invocation-ports"));
             }
             _ => panic!("expected run output"),
         }

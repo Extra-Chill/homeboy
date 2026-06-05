@@ -8,6 +8,7 @@ use std::time::Instant;
 
 use crate::core::component::Component;
 use crate::core::engine::baseline::BaselineFlags;
+use crate::core::engine::invocation::InvocationRequirements;
 use crate::core::engine::run_dir::{self, RunDir};
 use crate::core::error::{Error, ErrorCode, Result};
 use crate::core::extension::trace::baseline::TraceBaselineComparison;
@@ -79,6 +80,7 @@ pub struct TraceRunnerInputs {
     pub attachments: Vec<TraceAttachment>,
     pub dependencies: Vec<TraceDependencySpec>,
     pub runner_capabilities: Vec<String>,
+    pub invocation_requirements: InvocationRequirements,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -860,7 +862,7 @@ pub(crate) fn build_trace_runner(
             &args.runner_inputs.workload_paths,
             "trace_workloads",
         )),
-        invocation_requirements: crate::core::engine::invocation::InvocationRequirements::default(),
+        invocation_requirements: args.runner_inputs.invocation_requirements.clone(),
     })?;
 
     if let Some(rig_id) = &args.rig_id {
