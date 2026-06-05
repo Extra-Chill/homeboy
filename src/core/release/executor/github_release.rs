@@ -82,10 +82,18 @@ pub(crate) fn run_github_release(
         .map(|artifact| artifact.path.clone())
         .collect();
     let has_artifacts = !artifact_paths.is_empty();
+    let repair_commands = |notes_start_tag: Option<&str>| {
+        github_release_repair_commands(
+            &tag,
+            &github,
+            &component.github,
+            &artifact_paths,
+            notes_start_tag,
+        )
+    };
 
     if !gh_is_available() {
-        let repair =
-            github_release_repair_commands(&tag, &github, &component.github, &artifact_paths, None);
+        let repair = repair_commands(None);
         log_status!(
             "release",
             "⚠ `gh` CLI not found on PATH — skipping GitHub Release creation"
@@ -100,8 +108,7 @@ pub(crate) fn run_github_release(
     }
 
     if !gh_is_authenticated(&github, &component.github) {
-        let repair =
-            github_release_repair_commands(&tag, &github, &component.github, &artifact_paths, None);
+        let repair = repair_commands(None);
         log_status!(
             "release",
             "⚠ `gh` is not authenticated — skipping GitHub Release creation"
@@ -186,13 +193,7 @@ pub(crate) fn run_github_release(
     ) {
         Ok(notes) => notes,
         Err(err) => {
-            let repair = github_release_repair_commands(
-                &tag,
-                &github,
-                &component.github,
-                &artifact_paths,
-                None,
-            );
+            let repair = repair_commands(None);
             log_status!(
                 "release",
                 "⚠ GitHub generated release notes failed: {}",
@@ -254,13 +255,7 @@ pub(crate) fn run_github_release(
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let repair = github_release_repair_commands(
-            &tag,
-            &github,
-            &component.github,
-            &artifact_paths,
-            notes_start_tag.as_deref(),
-        );
+        let repair = repair_commands(notes_start_tag.as_deref());
         log_status!("release", "⚠ `gh release create` failed: {}", stderr.trim());
         log_repair_commands(&repair);
         return Ok(step_success(
