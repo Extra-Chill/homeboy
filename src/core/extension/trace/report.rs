@@ -6,9 +6,7 @@ use std::collections::BTreeMap;
 use super::aggregate_report::TraceAggregateSpanSampleOutput;
 use super::baseline::TraceBaselineComparison;
 use super::overlay_lock::TraceOverlayLockRecord;
-use super::parsing::{
-    TraceArtifact, TraceAssertionStatus, TraceEvidenceMetadata, TraceList, TraceResults,
-};
+use super::parsing::{TraceArtifact, TraceEvidenceMetadata, TraceList, TraceResults};
 use super::run::{TraceOverlay, TraceRunWorkflowResult};
 use super::span_summary::{
     format_span_summary_metadata, format_span_summary_status, trace_span_summaries,
@@ -576,11 +574,7 @@ pub fn render_markdown(results: &TraceResults, overlays: &[TraceOverlay]) -> Str
         out.push_str("\n## Assertions\n\n");
         let (assertions, metadata) = bounded_items(&results.assertions, DEFAULT_DETAIL_ITEM_LIMIT);
         for assertion in assertions {
-            let status = match assertion.status {
-                TraceAssertionStatus::Pass => "pass",
-                TraceAssertionStatus::Fail => "fail",
-                TraceAssertionStatus::Error => "error",
-            };
+            let status = assertion.status.as_str();
             match &assertion.message {
                 Some(message) => out.push_str(&format!(
                     "- `{}`: **{}** - {}\n",

@@ -20,6 +20,7 @@ pub(crate) use json_io::{
 pub use json_io::{serialize_with_id, to_json_string};
 pub use json_ops::collect_array_fields;
 pub(crate) use json_ops::{merge_config, remove_config};
+pub(crate) use json_pointer::value_type_name;
 pub use json_pointer::{remove_json_pointer, set_json_pointer};
 
 // ============================================================================

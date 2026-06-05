@@ -42,6 +42,16 @@ pub enum TraceAssertionStatus {
     Error,
 }
 
+impl TraceAssertionStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TraceAssertionStatus::Pass => "pass",
+            TraceAssertionStatus::Fail => "fail",
+            TraceAssertionStatus::Error => "error",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct TraceResults {
