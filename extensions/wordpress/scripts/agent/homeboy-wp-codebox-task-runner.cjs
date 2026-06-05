@@ -459,7 +459,10 @@ function agentRuntimeWorkloadFromSingleResult(workload, config) {
 function agentRuntimeWorkloadFromBundleRun(bundleRun, config) {
   const bundle = bundleRun.bundle && typeof bundleRun.bundle === 'object' ? bundleRun.bundle : {};
   const workflowSteps = Array.isArray(bundleRun.workflow?.steps) ? bundleRun.workflow.steps : [];
-  const outputs = plainObject(bundleRun.outputs) ? bundleRun.outputs : {};
+  const outputs = {
+    ...(plainObject(bundleRun.outputs) ? bundleRun.outputs : {}),
+    ...toolRecorderOutputs(bundleRun.engine_data, config),
+  };
   return {
     outputs,
     scenarios: [{
@@ -492,6 +495,61 @@ function hasSemanticWorkload(value) {
 
 function pathValue(source, dottedPath) {
   return String(dottedPath || '').split('.').filter(Boolean).reduce((value, key) => (value && typeof value === 'object' ? value[key] : undefined), source);
+}
+
+function stepDataPackets(engineData) {
+  const packetsByStep = plainObject(engineData?.direct_step_data_packets) ? engineData.direct_step_data_packets : {};
+  return Object.values(packetsByStep).flatMap((packets) => (Array.isArray(packets) ? packets : []));
+}
+
+function toolRecorderOutputs(engineData, config) {
+  if (!plainObject(engineData) || !Array.isArray(config.tool_recorders)) {
+    return {};
+  }
+
+  const outputs = {};
+  const packets = stepDataPackets(engineData);
+  for (const recorder of config.tool_recorders) {
+    if (!plainObject(recorder) || typeof recorder.tool !== 'string') {
+      continue;
+    }
+
+    const record = plainObject(recorder.record) ? recorder.record : {};
+    const fields = plainObject(record.fields) ? record.fields : {};
+    if (Object.keys(fields).length === 0) {
+      continue;
+    }
+
+    const packet = packets.find((candidate) => {
+      const metadata = plainObject(candidate?.metadata) ? candidate.metadata : {};
+      return metadata.tool_name === recorder.tool && metadata.step_execution_success === true;
+    });
+    if (!packet) {
+      continue;
+    }
+
+    const metadata = plainObject(packet.metadata) ? packet.metadata : {};
+    const sources = [
+      metadata.tool_result_data,
+      metadata.tool_result_envelope,
+      metadata.tool_result_envelope?.result,
+    ].filter(plainObject);
+
+    for (const [outputName, resultPath] of Object.entries(fields)) {
+      if (outputs[outputName] !== undefined || typeof resultPath !== 'string') {
+        continue;
+      }
+      for (const source of sources) {
+        const value = pathValue(source, resultPath);
+        if (value !== undefined && value !== null && value !== '') {
+          outputs[outputName] = value;
+          break;
+        }
+      }
+    }
+  }
+
+  return outputs;
 }
 
 function validateAgentRuntimeWorkload(workload, config) {
