@@ -416,6 +416,41 @@ It can contain credentials or auto-login URLs; runners must not print it to logs
 or publish it with benchmark results without redacting the fields listed in
 `artifactPolicy.secretFields`.
 
+## WordPress bench crawl helper
+
+`scripts/bench/lib/wordpress-bench-crawl.php` provides a generic helper for
+benchmark workloads that need to crawl a bounded ordered list of WordPress URLs
+or routes through the WordPress HTTP API. It is intended for WP Codebox-backed
+WordPress workloads and does not require browser automation.
+
+Minimal workload:
+
+```php
+<?php
+require_once '/homeboy-extension/scripts/bench/lib/wordpress-bench-crawl.php';
+
+return function (): array {
+    return homeboy_wordpress_bench_crawl_payload(
+        [
+            '/',
+            '/sample-page/',
+            [ 'route' => '/wp-json/', 'method' => 'GET' ],
+        ],
+        [
+            'batch_index' => 0,
+            'max_requests' => 3,
+            'timeout' => 10,
+        ]
+    );
+};
+```
+
+The payload includes numeric crawl metrics for normal bench aggregation and
+structured metadata under `metadata.wordpress_bench_crawl.rows`. Each row
+contains `batch_index`, `request_index`, `url`, optional `route`, `method`,
+`status`, `http_status`, `elapsed_ms`, optional `response_bytes`, and optional
+`failure_message`.
+
 ## Playground HTTP readiness
 
 `lib/playground-readiness.js` exports a Node helper for callers that boot a

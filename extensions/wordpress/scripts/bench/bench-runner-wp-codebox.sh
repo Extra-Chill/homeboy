@@ -701,6 +701,7 @@ else
     EXTRA_PLUGINS_JSON="[]"
     MOUNTS_JSON=$(jq -nc --arg source "$PLUGIN_PATH" --arg target "/wordpress/wp-content/plugins/${PLUGIN_SLUG}" '[{source: $source, target: $target, mode: "readonly"}]')
 fi
+MOUNTS_JSON=$(jq -nc --argjson mounts "$MOUNTS_JSON" --arg source "$EXTENSION_DIR" '$mounts + [{source: $source, target: "/homeboy-extension", mode: "readonly"}]')
 DEPENDENCY_SLUGS=()
 if [ -n "$DEPENDENCY_PATHS" ]; then
     while IFS= read -r dep_path; do
