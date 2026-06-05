@@ -1,4 +1,5 @@
 use clap::{ArgMatches, Command, CommandFactory, FromArgMatches};
+use std::io::IsTerminal;
 
 use homeboy::cli_surface::Cli;
 use homeboy::cli_surface::Commands;
@@ -209,6 +210,16 @@ fn main() -> std::process::ExitCode {
                     cli.force_hot,
                 ),
             );
+            if let Some(warning) = warning.as_ref() {
+                if let Some(err) = resource_policy::non_interactive_preflight_error(
+                    warning,
+                    cli.force_hot,
+                    is_interactive_shell(),
+                ) {
+                    emit_json_result(Err(err), output_file.as_deref(), 2);
+                    return std::process::ExitCode::from(exit_code_to_u8(2));
+                }
+            }
         }
     }
 
@@ -253,6 +264,10 @@ fn exit_code_to_u8(code: i32) -> u8 {
     } else {
         code as u8
     }
+}
+
+fn is_interactive_shell() -> bool {
+    std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
 }
 
 fn emit_json_result(
