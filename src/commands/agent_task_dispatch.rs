@@ -636,6 +636,7 @@ mod tests {
                 artifacts: Vec::new(),
                 evidence_refs: Vec::new(),
                 diagnostics: Vec::new(),
+                outputs: Value::Null,
                 workflow: None,
                 follow_up: None,
                 metadata: Value::Null,

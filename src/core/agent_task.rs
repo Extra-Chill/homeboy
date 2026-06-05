@@ -396,6 +396,8 @@ pub struct AgentTaskOutcome {
     pub evidence_refs: Vec<AgentTaskEvidenceRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub diagnostics: Vec<AgentTaskDiagnostic>,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub outputs: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow: Option<AgentTaskWorkflowEvidence>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -420,6 +422,7 @@ impl AgentTaskOutcome {
             .into_iter()
             .map(|diagnostic| diagnostic.redacted_with(&policy))
             .collect();
+        redacted.outputs = policy.redact_json(&redacted.outputs);
         redacted.workflow = redacted
             .workflow
             .map(|workflow| workflow.redacted_with(&policy));
@@ -761,6 +764,7 @@ mod tests {
                     message: "provider returned retryable error".to_string(),
                     data: json!({}),
                 }],
+                outputs: json!({ "issue_number": 3447 }),
                 workflow: None,
                 follow_up: Some(AgentTaskFollowUp {
                     kind: "issue_report".to_string(),
@@ -802,6 +806,7 @@ mod tests {
             }],
             evidence_refs: Vec::new(),
             diagnostics: Vec::new(),
+            outputs: Value::Null,
             workflow: Some(AgentTaskWorkflowEvidence {
                 schema: AGENT_TASK_WORKFLOW_SCHEMA.to_string(),
                 id: "site-build".to_string(),
@@ -961,6 +966,7 @@ mod tests {
                 metadata: json!({ "client_secret": "secret" }),
             }),
             follow_up: None,
+            outputs: json!({ "api_key": "secret-value", "safe": "value" }),
             metadata: json!({ "safe": "value", "password": "hunter2" }),
         };
 
@@ -1106,6 +1112,7 @@ mod tests {
                     artifacts: Vec::new(),
                     evidence_refs: Vec::new(),
                     diagnostics: Vec::new(),
+                    outputs: Value::Null,
                     workflow: None,
                     follow_up: None,
                     metadata: json!({}),
@@ -1145,6 +1152,7 @@ mod tests {
                     artifacts: Vec::new(),
                     evidence_refs: Vec::new(),
                     diagnostics: Vec::new(),
+                    outputs: Value::Null,
                     workflow: None,
                     follow_up: None,
                     metadata: json!({}),
@@ -1264,6 +1272,7 @@ mod tests {
                     artifacts: Vec::new(),
                     evidence_refs: Vec::new(),
                     diagnostics: Vec::new(),
+                    outputs: Value::Null,
                     workflow: None,
                     follow_up: None,
                     metadata: json!({}),

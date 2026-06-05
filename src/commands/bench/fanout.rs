@@ -219,6 +219,7 @@ impl homeboy::core::agent_task_scheduler::AgentTaskExecutorAdapter for LocalBenc
             artifacts: Vec::new(),
             evidence_refs: Vec::new(),
             diagnostics: Vec::new(),
+            outputs: serde_json::Value::Null,
             workflow: None,
             follow_up: None,
             metadata: serde_json::json!({

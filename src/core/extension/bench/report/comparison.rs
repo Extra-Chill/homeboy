@@ -492,6 +492,7 @@ fn agent_task_outcome_for_entry(
         },
         summary: Some(entry.status.clone()),
         failure_classification: None,
+        outputs: serde_json::Value::Null,
         artifacts: entry
             .artifacts
             .iter()
