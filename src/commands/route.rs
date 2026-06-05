@@ -60,18 +60,15 @@ fn lab_offload_command(
     } else {
         Vec::new()
     };
-    let mutation_flag = contract.mutation_flag;
     Ok(Some(homeboy::core::runner::LabOffloadCommand {
         hot_label: contract.hot_label,
-        portable: mutation_flag.is_none()
-            && matches!(
-                contract.portability,
-                homeboy::cli_surface::LabCommandPortability::Portable
-            ),
-        unsupported_reason: match (mutation_flag, contract.portability) {
-            (Some(flag), _) => Some(flag),
-            (None, homeboy::cli_surface::LabCommandPortability::Portable) => None,
-            (None, homeboy::cli_surface::LabCommandPortability::LocalOnly(reason)) => Some(reason),
+        portable: matches!(
+            contract.portability,
+            homeboy::cli_surface::LabCommandPortability::Portable
+        ),
+        unsupported_reason: match contract.portability {
+            homeboy::cli_surface::LabCommandPortability::Portable => None,
+            homeboy::cli_surface::LabCommandPortability::LocalOnly(reason) => Some(reason),
         },
         workspace_mode_policy: match contract.workspace_mode_policy {
             homeboy::cli_surface::LabWorkspaceModePolicy::ChangedSinceGitElseSnapshot => {
@@ -186,14 +183,26 @@ mod tests {
     }
 
     #[test]
-    fn lab_command_with_local_mutation_flag_stays_local() {
+    fn lab_command_with_mutation_flag_stays_portable_for_patch_capture() {
         let cli = Cli::parse_from(["homeboy", "audit", "--baseline"]);
 
         let command = lab_offload_command(&cli.command).unwrap().unwrap();
 
         assert_eq!(command.hot_label, "audit");
-        assert!(!command.portable);
-        assert_eq!(command.unsupported_reason, Some("--baseline/--ratchet"));
+        assert!(command.portable);
+        assert_eq!(command.unsupported_reason, None);
+        assert!(command.requires_extension_parity);
+    }
+
+    #[test]
+    fn lab_command_with_ratchet_stays_portable_for_patch_capture() {
+        let cli = Cli::parse_from(["homeboy", "audit", "--ratchet"]);
+
+        let command = lab_offload_command(&cli.command).unwrap().unwrap();
+
+        assert_eq!(command.hot_label, "audit");
+        assert!(command.portable);
+        assert_eq!(command.unsupported_reason, None);
         assert!(command.requires_extension_parity);
     }
 
