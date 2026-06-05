@@ -12,6 +12,7 @@ use crate::core::observation::{
     RunRecord, RunStatus,
 };
 use crate::test_support::with_isolated_home;
+use std::sync::{Arc, Barrier};
 
 struct XdgGuard {
     prior: Option<String>,
@@ -125,6 +126,54 @@ fn initialization_is_idempotent() {
         assert_eq!(status.schema_version, CURRENT_SCHEMA_VERSION);
         assert_eq!(status.migration_count, 5);
         assert_eq!(status.table_count, 7);
+    });
+}
+
+#[test]
+fn initialization_recovers_when_artifact_type_migration_was_interrupted() {
+    with_isolated_home(|_home| {
+        let _xdg = XdgGuard::unset();
+
+        ObservationStore::open_initialized().expect("initial migration");
+        let path = store::database_path().expect("db path");
+        let connection = rusqlite::Connection::open(&path).expect("open raw db");
+        connection
+            .execute("DELETE FROM schema_migrations WHERE version = 4", [])
+            .expect("remove migration marker");
+        drop(connection);
+
+        let reopened = ObservationStore::open_initialized().expect("resume migration");
+        let status = reopened.status().expect("status");
+
+        assert_eq!(status.schema_version, CURRENT_SCHEMA_VERSION);
+        assert_eq!(status.migration_count, 5);
+    });
+}
+
+#[test]
+fn initialization_is_safe_under_concurrent_setup() {
+    with_isolated_home(|_home| {
+        let _xdg = XdgGuard::unset();
+        let workers = 4;
+        let barrier = Arc::new(Barrier::new(workers));
+        let handles = (0..workers)
+            .map(|_| {
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    ObservationStore::open_initialized()
+                        .expect("concurrent init")
+                        .status()
+                        .expect("status")
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for handle in handles {
+            let status = handle.join().expect("worker joined");
+            assert_eq!(status.schema_version, CURRENT_SCHEMA_VERSION);
+            assert_eq!(status.migration_count, 5);
+        }
     });
 }
 

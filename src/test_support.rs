@@ -9,6 +9,7 @@ pub(crate) struct HomeGuard {
     prior_runtime_tmpdir: Option<String>,
     prior_invocation_runtime: Option<String>,
     dir: TempDir,
+    _runtime_dir: TempDir,
     /// Held alongside `dir` so the short invocation runtime tempdir is
     /// dropped only after the test completes. Distinct from `dir` so the
     /// invocation root can live on a short path (e.g. `/tmp/hb-XXXX`)
@@ -62,7 +63,8 @@ impl HomeGuard {
         std::env::set_var("HOME", dir.path());
         std::env::set_var("XDG_DATA_HOME", dir.path().join(".local").join("share"));
         std::env::remove_var("HOMEBOY_ARTIFACT_ROOT");
-        std::env::remove_var("HOMEBOY_RUNTIME_TMPDIR");
+        let runtime_dir = TempDir::new().expect("runtime tempdir");
+        std::env::set_var("HOMEBOY_RUNTIME_TMPDIR", runtime_dir.path());
         crate::core::set_artifact_root_override(None);
         // Pin invocation runtime to a SHORT tempdir, isolated from `$TMPDIR`
         // and from the home tempdir (which itself can already live on a long
@@ -81,6 +83,7 @@ impl HomeGuard {
             prior_runtime_tmpdir,
             prior_invocation_runtime,
             dir,
+            _runtime_dir: runtime_dir,
             _inv_dir: Some(inv_dir),
             _guard: guard,
         }

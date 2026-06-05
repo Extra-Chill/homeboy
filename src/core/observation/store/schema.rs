@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use rusqlite::Connection;
 
@@ -110,10 +111,7 @@ const MIGRATIONS: &[Migration] = &[
     },
     Migration {
         version: 4,
-        sql: r#"
-        ALTER TABLE artifacts
-            ADD COLUMN artifact_type TEXT NOT NULL DEFAULT 'file';
-    "#,
+        sql: "",
     },
     Migration {
         version: 5,
@@ -192,11 +190,14 @@ pub(crate) fn apply_migrations(connection: &Connection) -> Result<()> {
         let tx = connection
             .unchecked_transaction()
             .map_err(sqlite_error("begin observation migration"))?;
-        tx.execute_batch(migration.sql)
-            .map_err(sqlite_error(format!(
-                "apply migration {}",
+        if migration_applied(&tx, migration.version)? {
+            tx.commit().map_err(sqlite_error(format!(
+                "commit migration {}",
                 migration.version
             )))?;
+            continue;
+        }
+        apply_migration_sql(&tx, migration)?;
         tx.execute(
             "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?1, ?2)",
             rusqlite::params![migration.version, chrono::Utc::now().to_rfc3339()],
@@ -229,10 +230,37 @@ pub(crate) fn status_for_open_connection(
 }
 
 pub(crate) fn open_connection(path: &Path) -> Result<Connection> {
-    Connection::open(path).map_err(sqlite_error(format!(
+    let connection = Connection::open(path).map_err(sqlite_error(format!(
         "open observation store {}",
         path.display()
-    )))
+    )))?;
+    connection
+        .busy_timeout(Duration::from_secs(5))
+        .map_err(sqlite_error("configure observation store busy timeout"))?;
+    Ok(connection)
+}
+
+fn apply_migration_sql(connection: &Connection, migration: &Migration) -> Result<()> {
+    if migration.version == 4 {
+        if !column_exists(connection, "artifacts", "artifact_type")? {
+            connection
+                .execute_batch(
+                    r#"
+                    ALTER TABLE artifacts
+                        ADD COLUMN artifact_type TEXT NOT NULL DEFAULT 'file';
+                    "#,
+                )
+                .map_err(sqlite_error("apply migration 4"))?;
+        }
+        return Ok(());
+    }
+
+    connection
+        .execute_batch(migration.sql)
+        .map_err(sqlite_error(format!(
+            "apply migration {}",
+            migration.version
+        )))
 }
 
 fn migration_applied(connection: &Connection, version: i64) -> Result<bool> {
@@ -291,4 +319,20 @@ fn table_exists(connection: &Connection, table: &str) -> Result<bool> {
         )
         .map_err(sqlite_error(format!("check table {}", table)))?;
     Ok(count > 0)
+}
+
+fn column_exists(connection: &Connection, table: &str, column: &str) -> Result<bool> {
+    let mut statement = connection
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(sqlite_error(format!("inspect table {table}")))?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(sqlite_error(format!("list columns for {table}")))?;
+
+    for row in rows {
+        if row.map_err(sqlite_error(format!("read column for {table}")))? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
