@@ -33,6 +33,7 @@ pub mod metrics;
 pub mod parsing;
 pub mod phase_events;
 pub mod report;
+pub(crate) mod result_types;
 pub mod run;
 pub(crate) mod run_metadata;
 pub(crate) mod side_by_side;
