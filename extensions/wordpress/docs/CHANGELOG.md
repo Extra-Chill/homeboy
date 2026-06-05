@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.115.36] - 2026-06-05
+
+### Fixed
+- fix wp-codebox phpunit runner plumbing
+
 ## [2.115.35] - 2026-06-05
 
 ### Fixed
