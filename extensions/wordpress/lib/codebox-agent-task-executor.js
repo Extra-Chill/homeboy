@@ -274,12 +274,12 @@ function agentBundleConfigFromAgentTaskRequest(request, config, inputs) {
   return Object.fromEntries(Object.entries(bundleConfig).filter(([, value]) => value !== undefined && value !== ''));
 }
 
-function normalizeStatus(result, exitStatus = 0) {
+function normalizeStatus(result) {
   if (AGENT_TASK_OUTCOME_STATUSES.includes(result?.status)) {
     return result.status;
   }
   if (result?.status === 'completed') {
-    return result?.success === true && exitStatus === 0 ? 'succeeded' : 'failed';
+    return result?.success === true ? 'succeeded' : 'failed';
   }
   const agentResult = result?.run?.agentResult || result?.agentResult || result?.agent_result || result?.metadata?.recipe_run?.agentResult || result?.metadata?.recipe_run?.run?.agentResult;
   const changedFileCount = agentResult?.changedFiles?.count;
@@ -299,7 +299,7 @@ function normalizeStatus(result, exitStatus = 0) {
   if (result?.provider_error) {
     return 'provider_error';
   }
-  return result?.success === true && exitStatus === 0 ? 'succeeded' : 'failed';
+  return result?.success === true ? 'succeeded' : 'failed';
 }
 
 function appendUniqueArtifact(artifacts, artifact) {
@@ -453,6 +453,9 @@ function pathValue(source, dottedPath) {
 }
 
 function normalizeOutputs(result) {
+  if (result.outputs && typeof result.outputs === 'object' && !Array.isArray(result.outputs)) {
+    return sanitizePublicMetadata(result.outputs);
+  }
   const workload = result.metadata?.agent_runtime?.workload || result.run?.agentResult || result.agentResult || result.agent_result || {};
   if (workload.outputs && typeof workload.outputs === 'object' && !Array.isArray(workload.outputs)) {
     return sanitizePublicMetadata(workload.outputs);

@@ -387,6 +387,21 @@ assert.equal(upstreamRunnerOutcome.status, 'succeeded');
 assert.equal(upstreamRunnerOutcome.artifacts[0].kind, 'codebox-artifact-directory');
 assert.equal(upstreamRunnerOutcome.artifacts[0].path, '/tmp/wp-codebox-artifacts');
 
+const normalizedCompletedOutcome = agentTaskOutcomeFromCodeboxResult(request, {
+  success: true,
+  schema: 'wp-codebox/agent-task-run/v1',
+  status: 'completed',
+  summary: 'WP Codebox agent task succeeded.',
+  outputs: {
+    issue_number: 123,
+    issue_url: 'https://github.com/chubes4/wp-site-generator/issues/123',
+  },
+  session: { id: 'sandbox-session-1', status: 'completed' },
+}, { exitStatus: 1 });
+assert.equal(normalizedCompletedOutcome.status, 'succeeded');
+assert.equal(normalizedCompletedOutcome.outputs.issue_number, 123);
+assert.equal(normalizedCompletedOutcome.failure_classification, undefined);
+
 const completedFailureOutcome = agentTaskOutcomeFromCodeboxResult(request, {
   success: false,
   schema: 'wp-codebox/agent-task-run/v1',
