@@ -140,6 +140,90 @@ Numeric metrics are aggregated across measured iterations with the same
 mean/p50/p95/p99/min/max suffixes used by PHP bench files. Artifacts and metadata
 are carried into the Homeboy BenchResults scenario envelope.
 
+### WordPress benchmark step-series artifacts
+
+WordPress bench workloads that need row-level proof data can attach a generic
+step-series artifact without changing top-level benchmark metrics. Return rows
+under `metadata.step_series`; the WordPress bench artifact post-processor emits a
+stable `series.json` next to `results.jsonl` and `leaderboard.md`:
+
+```php
+return [
+    'metrics'  => [ 'transient_count' => 42 ],
+    'metadata' => [
+        'step_series' => [
+            [
+                'type'        => 'request',
+                'label'       => 'GET /shop/',
+                'url'         => '/shop/',
+                'status'      => 'pass',
+                'status_code' => 200,
+                'elapsed_ms'  => 25.5,
+                'metrics'     => [ 'db_queries' => 12 ],
+                'metadata'    => [ 'cache_state' => 'cold' ],
+            ],
+            [
+                'type'     => 'option_sample',
+                'label'    => 'Layered nav transient count',
+                'option'   => '_transient_wc_layered_nav_counts',
+                'status'   => 'fail',
+                'failure'  => [ 'message' => 'transient grew past budget' ],
+                'metadata' => [ 'transient_count' => 42, 'budget' => 30 ],
+            ],
+        ],
+    ],
+];
+```
+
+`series.json` uses schema `homeboy/wordpress-bench-step-series/v1`:
+
+```json
+{
+  "schema": "homeboy/wordpress-bench-step-series/v1",
+  "component_id": "example-plugin",
+  "generated_from": "homeboy/bench-results/v1",
+  "series": [
+    {
+      "scenario_id": "layered-nav-cache",
+      "label": "Layered nav cache",
+      "source": "component",
+      "artifact": null,
+      "rows": [
+        {
+          "scenario_id": "layered-nav-cache",
+          "index": 0,
+          "type": "request",
+          "label": "GET /shop/",
+          "url": "/shop/",
+          "status": "pass",
+          "success": true,
+          "status_code": 200,
+          "elapsed_ms": 25.5,
+          "metrics": { "db_queries": 12 },
+          "metadata": { "cache_state": "cold" }
+        }
+      ]
+    }
+  ]
+}
+```
+
+Recommended row fields:
+
+- `type`: short category such as `request`, `crawl`, `option_sample`, `transient_sample`, or a domain-specific value.
+- `label`: human-readable step label for reports.
+- `elapsed_ms`: step elapsed time when applicable.
+- `status` and `success`: row outcome. `status` values `pass`, `passed`, and `ok` normalize to `success: true`; `fail`, `failed`, and `error` normalize to `success: false`.
+- `failure`: string or object with failure details.
+- `metrics`: numeric or structured measurements for the row.
+- `metadata`: arbitrary domain metadata, such as option keys, transient counts, cache state, request method, crawl depth, or fixture identifiers.
+
+If a workload writes its own detailed step-series file, attach it predictably as
+`artifacts.step_series` with `kind: "json"` and
+`schema: "homeboy/wordpress-bench-step-series/v1"`. The post-processor preserves
+that artifact reference in `series.json`, so Homeboy evidence and reporting can
+discover either inline rows or workload-owned row files through the same key.
+
 Playground grader workloads may also return a normalized reward payload:
 
 ```json
