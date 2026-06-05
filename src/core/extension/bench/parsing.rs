@@ -450,7 +450,21 @@ fn parse_bench_results_str_with_artifact_context(
     raw: &str,
     rig_id: Option<&str>,
 ) -> Result<BenchResults> {
-    let mut parsed: BenchResults = serde_json::from_str(raw).map_err(|e| {
+    let mut value: serde_json::Value = serde_json::from_str(raw).map_err(|e| {
+        Error::internal_json(
+            format!("Failed to parse bench results JSON: {}", e),
+            Some("bench.parsing.deserialize".to_string()),
+        )
+    })?;
+    if let Some(object) = value.as_object_mut() {
+        object.remove("schema");
+        object.remove("lifecycle");
+        object.remove("reset_policy");
+        object.remove("warmup_iterations");
+        object.remove("provenance");
+    }
+    normalize_wp_codebox_metrics(&mut value);
+    let mut parsed: BenchResults = serde_json::from_value(value).map_err(|e| {
         Error::internal_json(
             format!("Failed to parse bench results JSON: {}", e),
             Some("bench.parsing.deserialize".to_string()),
@@ -463,6 +477,57 @@ fn parse_bench_results_str_with_artifact_context(
     evaluate_spans(&mut parsed);
     artifact_validation::validate_artifact_paths(&parsed, rig_id)?;
     Ok(parsed)
+}
+
+fn normalize_wp_codebox_metrics(value: &mut serde_json::Value) {
+    let Some(scenarios) = value
+        .get_mut("scenarios")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return;
+    };
+
+    for scenario in scenarios {
+        if let Some(object) = scenario.as_object_mut() {
+            object.remove("provenance");
+        }
+        let Some(metrics) = scenario
+            .get_mut("metrics")
+            .and_then(serde_json::Value::as_object_mut)
+        else {
+            continue;
+        };
+
+        let mut normalized = serde_json::Map::new();
+        let mut distributions = serde_json::Map::new();
+        for (name, metric) in std::mem::take(metrics) {
+            if metric.is_number() {
+                normalized.insert(name, metric);
+                continue;
+            }
+
+            let Some(samples) = metric.get("samples").and_then(serde_json::Value::as_object) else {
+                normalized.insert(name, metric);
+                continue;
+            };
+            if let Some(mean) = samples.get("mean").and_then(serde_json::Value::as_f64) {
+                if let Some(number) = serde_json::Number::from_f64(mean) {
+                    normalized.insert(name.clone(), serde_json::Value::Number(number));
+                }
+            }
+            if let Some(values) = samples.get("values").and_then(serde_json::Value::as_array) {
+                distributions.insert(name, serde_json::Value::Array(values.clone()));
+            }
+        }
+
+        if !distributions.is_empty() {
+            normalized.insert(
+                "distributions".to_string(),
+                serde_json::Value::Object(distributions),
+            );
+        }
+        *metrics = normalized;
+    }
 }
 
 fn validate_unique_scenario_ids(results: &BenchResults) -> Result<()> {
@@ -582,6 +647,63 @@ mod tests {
         assert_eq!(scenario.memory.as_ref().unwrap().peak_bytes, 41943040);
         assert!(scenario.metadata.is_empty());
         assert!(scenario.artifacts.is_empty());
+    }
+
+    #[test]
+    fn parses_results_with_top_level_schema_marker() {
+        let raw = r#"{
+            "schema": "homeboy/bench-results/v1",
+            "component_id": "example",
+            "iterations": 1,
+            "scenarios": [
+                {
+                    "id": "scenario_one",
+                    "iterations": 1,
+                    "metrics": { "p95_ms": 145.0 }
+                }
+            ]
+        }"#;
+
+        let parsed = parse_bench_results_str(raw).unwrap();
+        assert_eq!(parsed.component_id, "example");
+        assert_eq!(parsed.scenarios.len(), 1);
+    }
+
+    #[test]
+    fn parses_wp_codebox_bench_result_markers_and_sample_metrics() {
+        let raw = r#"{
+            "schema": "wp-codebox/bench-results/v1",
+            "component_id": "woocommerce",
+            "iterations": 1,
+            "warmup_iterations": 0,
+            "lifecycle": { "phases": [], "diagnostics": [] },
+            "provenance": { "command": "wordpress.bench" },
+            "reset_policy": { "betweenIterations": "none", "betweenScenarios": "none" },
+            "scenarios": [
+                {
+                    "id": "checkout-shipping-cache",
+                    "iterations": 1,
+                    "provenance": { "workload_file": "tests/bench/checkout-shipping-cache.php" },
+                    "metrics": {
+                        "actual_package_count": {
+                            "unit": "count",
+                            "samples": {
+                                "mean": 8,
+                                "values": [8]
+                            }
+                        }
+                    }
+                }
+            ]
+        }"#;
+
+        let parsed = parse_bench_results_str(raw).unwrap();
+        let metrics = &parsed.scenarios[0].metrics;
+        assert_eq!(metrics.get("actual_package_count"), Some(8.0));
+        assert_eq!(
+            metrics.distribution("actual_package_count"),
+            Some(&[8.0][..])
+        );
     }
 
     #[test]
