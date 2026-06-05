@@ -275,6 +275,10 @@ function agentBundleConfigFromAgentTaskRequest(request, config, inputs) {
 }
 
 function normalizeStatus(result) {
+  const workload = agentRuntimeWorkload(result);
+  if (workload && workload.success === false) {
+    return 'failed';
+  }
   if (AGENT_TASK_OUTCOME_STATUSES.includes(result?.status)) {
     return result.status;
   }
@@ -300,6 +304,10 @@ function normalizeStatus(result) {
     return 'provider_error';
   }
   return result?.success === true ? 'succeeded' : 'failed';
+}
+
+function agentRuntimeWorkload(result) {
+  return result?.metadata?.agent_runtime?.workload || result?.run?.agentResult || result?.agentResult || result?.agent_result || null;
 }
 
 function appendUniqueArtifact(artifacts, artifact) {
@@ -456,7 +464,7 @@ function normalizeOutputs(result) {
   if (result.outputs && typeof result.outputs === 'object' && !Array.isArray(result.outputs)) {
     return sanitizePublicMetadata(result.outputs);
   }
-  const workload = result.metadata?.agent_runtime?.workload || result.run?.agentResult || result.agentResult || result.agent_result || {};
+  const workload = agentRuntimeWorkload(result) || {};
   if (workload.outputs && typeof workload.outputs === 'object' && !Array.isArray(workload.outputs)) {
     return sanitizePublicMetadata(workload.outputs);
   }
@@ -566,7 +574,7 @@ function normalizeEvidenceRefs(result) {
 
 function agentRuntimeBundleArtifacts(result) {
   const artifacts = [];
-  const workload = result.metadata?.agent_runtime?.workload || result.run?.agentResult || result.agentResult || {};
+  const workload = agentRuntimeWorkload(result) || {};
   const scenarios = Array.isArray(workload.scenarios) ? workload.scenarios : [];
   for (const scenario of scenarios) {
     const metadata = scenario?.metadata || {};
