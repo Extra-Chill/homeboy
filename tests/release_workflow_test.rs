@@ -29,12 +29,13 @@ fn job_section<'a>(workflow: &'a str, job: &str) -> &'a str {
 }
 
 #[test]
-fn release_refactor_gate_opens_repair_prs() {
+fn release_refactor_gate_enables_non_pr_repair_path() {
     let gate_refactor = job_section(release_workflow(), "gate-refactor");
 
     assert!(gate_refactor.contains("commands: audit,lint,test"));
     assert!(gate_refactor.contains("autofix: 'true'"));
     assert!(gate_refactor.contains("autofix-mode: always"));
+    assert!(gate_refactor.contains("Baseline/Cargo.lock-only drift is pushed directly"));
     assert!(gate_refactor.contains("autofix-open-pr: 'true'"));
 }
 

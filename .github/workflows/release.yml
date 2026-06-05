@@ -144,15 +144,16 @@ jobs:
           path: target/release/homeboy
           retention-days: 1
 
-  # ── Step 3: Quality gate (parallel read-only checks + repair PR) ──
+  # ── Step 3: Quality gate (parallel read-only checks + repair) ──
   # Unlike PR CI (scoped to changed files), release quality gate runs
   # unscoped against the entire codebase.
   # Read-only gates run in parallel after the shared build, then release
   # preparation waits for the repaired quality state from gate-refactor instead
   # of failing immediately on the first read-only drift signal. Read-only gates
-  # use autofix: false. The dedicated auto-refactor job opens a generated repair
-  # PR for fixable baseline/autofix drift so the release is blocked with a
-  # concrete repair path instead of becoming a manual investigation.
+  # use autofix: false. The dedicated auto-refactor job runs Homeboy Action's
+  # non-PR repair path: drift-only baseline/Cargo.lock changes are committed
+  # directly back to the release branch, while source autofixes fall through to
+  # the generated PR path.
   gate-audit:
     name: Audit
     needs:
@@ -295,9 +296,9 @@ jobs:
           app-id: ${{ secrets.HOMEBOY_APP_ID }}
           private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
 
-      # On push/manual release runs, generated repair PRs are safer than
-      # direct-to-main fix commits because the current release run cannot
-      # continue against a branch it just repaired out-of-band.
+      # In Homeboy Action, autofix-open-pr gates the non-PR repair transaction.
+      # Baseline/Cargo.lock-only drift is pushed directly to the base branch;
+      # source changes still use the generated autofix PR fallback.
       - name: Run autofix via homeboy-action
         uses: Extra-Chill/homeboy-action@v2
         with:
