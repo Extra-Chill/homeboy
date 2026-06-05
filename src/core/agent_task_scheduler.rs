@@ -583,9 +583,9 @@ impl AgentTaskScheduleSupport {
         AgentTaskOutcome {
             schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
             task_id: request.task_id.clone(),
-            status: AgentTaskOutcomeStatus::NoOp,
+            status: AgentTaskOutcomeStatus::Failed,
             summary: Some(summary.clone()),
-            failure_classification: None,
+            failure_classification: Some(AgentTaskFailureClassification::InvalidInput),
             artifacts: Vec::new(),
             evidence_refs: vec![AgentTaskEvidenceRef {
                 kind: "scheduler".to_string(),
@@ -1739,9 +1739,10 @@ mod tests {
         let aggregate = scheduler.run(plan);
         let observed = observed.lock().expect("observed requests");
 
-        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+        assert_eq!(aggregate.status, AgentTaskAggregateStatus::PartialFailure);
         assert_eq!(aggregate.totals.succeeded, 1);
         assert_eq!(aggregate.totals.skipped, 1);
+        assert_eq!(aggregate.totals.failed, 0);
         assert!(observed.iter().all(|request| request.task_id != "design"));
         assert!(aggregate
             .events
@@ -1752,7 +1753,11 @@ mod tests {
             .iter()
             .find(|outcome| outcome.task_id == "design")
             .expect("skipped outcome");
-        assert_eq!(skipped.status, AgentTaskOutcomeStatus::NoOp);
+        assert_eq!(skipped.status, AgentTaskOutcomeStatus::Failed);
+        assert_eq!(
+            skipped.failure_classification,
+            Some(AgentTaskFailureClassification::InvalidInput)
+        );
         assert!(skipped.diagnostics.iter().any(|diagnostic| {
             diagnostic.class == "output_dependency_missing"
                 && diagnostic.message.contains("required output binding")
