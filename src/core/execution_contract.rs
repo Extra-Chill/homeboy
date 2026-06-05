@@ -24,7 +24,7 @@ impl ArtifactUriContract {
         path.starts_with(self.metadata_only_scheme)
     }
 
-    pub fn strip_runner_artifact_scheme<'a>(self, path: &'a str) -> Option<&'a str> {
+    pub fn strip_runner_artifact_scheme(self, path: &str) -> Option<&str> {
         path.strip_prefix(self.runner_artifact_scheme)
     }
 

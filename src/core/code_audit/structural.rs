@@ -71,7 +71,7 @@ pub(crate) fn analyze_snapshot(root: &Path, snapshot: &CodebaseSnapshot) -> Vec<
 
         // Count top-level items before line-count severity so god-file warnings
         // require more than size alone.
-        let item_count = count_top_level_items(&content, ext);
+        let item_count = count_top_level_items(content, ext);
 
         // Check line count
         let line_count = content.lines().count();
