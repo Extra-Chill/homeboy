@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use rusqlite::Connection;
@@ -149,6 +150,8 @@ const MIGRATIONS: &[Migration] = &[
     },
 ];
 
+static MIGRATION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
 pub(crate) fn database_path() -> Result<PathBuf> {
     paths::observation_db()
 }
@@ -171,6 +174,13 @@ pub(crate) fn status() -> Result<ObservationDbStatus> {
 }
 
 pub(crate) fn apply_migrations(connection: &Connection) -> Result<()> {
+    let _guard = MIGRATION_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| {
+            crate::core::Error::internal_unexpected("observation migration lock poisoned")
+        })?;
+
     connection
         .execute_batch(
             r#"
