@@ -86,7 +86,7 @@ Example:
       "schema": "homeboy/agent-task-request/v1",
       "task_id": "design",
       "executor": {
-          "backend": "provider",
+        "backend": "provider",
         "config": {
           "github_issue": "{{outputs.issue_number}}"
         }
