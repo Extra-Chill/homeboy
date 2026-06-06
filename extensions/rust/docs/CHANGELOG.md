@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.20.8] - 2026-06-06
+
+### Changed
+- Share runtime helper fallbacks
+
 ## [1.20.7] - 2026-06-05
 
 ### Changed
