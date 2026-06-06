@@ -459,6 +459,10 @@ homeboy docs schemas/component-schema
 Start with [docs/commands/commands-index.md](docs/commands/commands-index.md)
 for the command index.
 
+## Name
+
+Named after ["Homeboy" by SUSTO](https://www.youtube.com/watch?v=-bBvwfn2ibU), a Charleston band.
+
 ## License
 
 MIT License — Created by [Chris Huber](https://chubes.net)
