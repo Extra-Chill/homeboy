@@ -59,8 +59,8 @@ Internal system architecture and internals:
 - [Release pipeline system](architecture/release-pipeline.md) - Local release orchestration
 - [Planned change execution](architecture/planned-change-execution.md) - Core lifecycle vocabulary for plan, execute, artifact, approve, apply, and publish
 - [Apply and publish contract](architecture/apply-publish-contract.md) - Local apply boundary and post-apply publish semantics
-- [Agent task executor adapter](architecture/agent-task-executor-adapter.md) - Provider-neutral adapter boundary for Codebox, CLI/OpenCode, and runner backends
-- [Homeboy/WP Codebox fanout boundary](architecture/homeboy-wp-codebox-fanout-boundary.md) - Ownership contract for durable orchestration versus Codebox runtime fanout
+- [Agent task executor adapter](architecture/agent-task-executor-adapter.md) - Provider-neutral adapter boundary for runtime providers, CLI sessions, and runner backends
+- [Provider fanout boundary](architecture/provider-fanout-boundary.md) - Ownership contract for durable orchestration versus provider runtime fanout
 - [Preview metadata](architecture/preview-metadata.md) - Generic preview URL, hold, lifecycle, runtime, and cleanup metadata preserved across runs
 - [Scope model](architecture/scope-model.md) - Components, targets/projects, rigs, fleets, workspace, and paths
 - [Execution context](architecture/execution-context.md) - Runtime context for extensions

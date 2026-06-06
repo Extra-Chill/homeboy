@@ -335,16 +335,15 @@ fn runs_rig_and_bench_output_variants_have_unambiguous_contracts() {
 }
 
 #[test]
-fn codebox_fanout_provider_payload_normalizes_to_homeboy_outcome_refs() {
-    let provider_payload: Value = serde_json::from_str(include_str!(
-        "fixtures/codebox_fanout_provider_payload.json"
-    ))
-    .expect("codebox fanout fixture parses");
+fn provider_fanout_payload_normalizes_to_homeboy_outcome_refs() {
+    let provider_payload: Value =
+        serde_json::from_str(include_str!("fixtures/provider_fanout_payload.json"))
+            .expect("provider fanout fixture parses");
 
-    let outcome = normalize_codebox_fanout_fixture("codebox-fanout-smoke", &provider_payload);
+    let outcome = normalize_provider_fanout_fixture("provider-fanout-smoke", &provider_payload);
 
     assert_eq!(outcome.schema, AGENT_TASK_OUTCOME_SCHEMA);
-    assert_eq!(outcome.task_id, "codebox-fanout-smoke");
+    assert_eq!(outcome.task_id, "provider-fanout-smoke");
     assert_eq!(outcome.status, AgentTaskOutcomeStatus::Succeeded);
     assert_eq!(outcome.artifacts.len(), 1);
     assert_eq!(outcome.artifacts[0].schema, AGENT_TASK_ARTIFACT_SCHEMA);
@@ -353,20 +352,20 @@ fn codebox_fanout_provider_payload_normalizes_to_homeboy_outcome_refs() {
     assert!(outcome
         .evidence_refs
         .iter()
-        .any(|evidence| evidence.uri == "codebox://sessions/session-parent-123/events"));
+        .any(|evidence| evidence.uri == "provider://sessions/provider-session-parent-123/events"));
     assert!(outcome
         .evidence_refs
         .iter()
-        .any(|evidence| evidence.uri == "codebox://sessions/session-worker-1"));
+        .any(|evidence| evidence.uri == "provider://sessions/provider-session-worker-1"));
     assert!(outcome
         .evidence_refs
         .iter()
-        .any(|evidence| evidence.uri == "codebox://fanout/cbx-fanout-123/aggregate"));
+        .any(|evidence| evidence.uri == "provider://fanout/provider-fanout-123/aggregate"));
 
     let workflow = outcome.workflow.expect("workflow evidence");
     assert_eq!(workflow.schema, AGENT_TASK_WORKFLOW_SCHEMA);
     assert_eq!(workflow.steps.len(), 2);
-    assert_eq!(workflow.steps[0].id, "worker-static-import");
+    assert_eq!(workflow.steps[0].id, "worker-build");
     assert_eq!(
         workflow.steps[0].status,
         AgentTaskWorkflowStepStatus::Succeeded
@@ -374,24 +373,24 @@ fn codebox_fanout_provider_payload_normalizes_to_homeboy_outcome_refs() {
     assert_eq!(workflow.steps[0].artifact_refs[0].kind, "patch");
     assert_eq!(workflow.steps[1].artifact_refs[0].kind, "screenshot");
 
-    assert_eq!(outcome.metadata["provider"], json!("wp-codebox"));
+    assert_eq!(outcome.metadata["provider"], json!("runtime-provider"));
     assert_eq!(
         outcome.metadata["provider_schema"],
-        json!("wp-codebox/agent-fanout-result/v1")
+        json!("example-provider/fanout-result/v1")
     );
     assert_eq!(
         outcome.metadata["provider_refs"]["fanout_id"],
-        json!("cbx-fanout-123")
+        json!("provider-fanout-123")
     );
     assert_eq!(
         outcome.metadata["provider_refs"]["worker_ids"],
-        json!(["worker-static-import", "worker-browser-proof"])
+        json!(["worker-build", "worker-proof"])
     );
     assert!(outcome.metadata.get("workers").is_none());
     assert!(outcome.metadata.get("sessions").is_none());
 }
 
-fn normalize_codebox_fanout_fixture(task_id: &str, provider_payload: &Value) -> AgentTaskOutcome {
+fn normalize_provider_fanout_fixture(task_id: &str, provider_payload: &Value) -> AgentTaskOutcome {
     let fanout_id = provider_payload["fanout_id"].as_str().expect("fanout id");
     let parent_session = &provider_payload["parent_session"];
     let workers = provider_payload["workers"]
@@ -401,8 +400,8 @@ fn normalize_codebox_fanout_fixture(task_id: &str, provider_payload: &Value) -> 
     let mut evidence_refs = vec![
         AgentTaskEvidenceRef {
             kind: "provider_fanout".to_string(),
-            uri: format!("codebox://fanout/{fanout_id}"),
-            label: Some("Codebox fanout".to_string()),
+            uri: format!("provider://fanout/{fanout_id}"),
+            label: Some("Provider fanout".to_string()),
         },
         AgentTaskEvidenceRef {
             kind: "event_stream".to_string(),
@@ -410,7 +409,7 @@ fn normalize_codebox_fanout_fixture(task_id: &str, provider_payload: &Value) -> 
                 .as_str()
                 .expect("parent event stream")
                 .to_string(),
-            label: Some("Codebox parent event stream".to_string()),
+            label: Some("Provider parent event stream".to_string()),
         },
     ];
 
@@ -426,7 +425,7 @@ fn normalize_codebox_fanout_fixture(task_id: &str, provider_payload: &Value) -> 
                 .as_str()
                 .expect("worker session ref")
                 .to_string(),
-            label: Some(format!("Codebox worker {worker_id}")),
+            label: Some(format!("Provider worker {worker_id}")),
         });
         evidence_refs.push(AgentTaskEvidenceRef {
             kind: "worker_result".to_string(),
@@ -434,7 +433,7 @@ fn normalize_codebox_fanout_fixture(task_id: &str, provider_payload: &Value) -> 
                 .as_str()
                 .expect("worker result ref")
                 .to_string(),
-            label: Some(format!("Codebox worker {worker_id} result")),
+            label: Some(format!("Provider worker {worker_id} result")),
         });
 
         let artifact_refs = worker["artifact_refs"]
@@ -480,7 +479,7 @@ fn normalize_codebox_fanout_fixture(task_id: &str, provider_payload: &Value) -> 
             .as_str()
             .expect("aggregation result ref")
             .to_string(),
-        label: Some("Codebox fanout aggregation".to_string()),
+        label: Some("Provider fanout aggregation".to_string()),
     });
 
     let artifacts = provider_payload["artifacts"]
@@ -500,7 +499,7 @@ fn normalize_codebox_fanout_fixture(task_id: &str, provider_payload: &Value) -> 
             mime: artifact["mime"].as_str().map(str::to_string),
             size_bytes: None,
             sha256: None,
-            metadata: json!({ "provider": "wp-codebox" }),
+            metadata: json!({ "provider": "runtime-provider" }),
         })
         .collect();
 
@@ -517,13 +516,13 @@ fn normalize_codebox_fanout_fixture(task_id: &str, provider_payload: &Value) -> 
         workflow: Some(AgentTaskWorkflowEvidence {
             schema: AGENT_TASK_WORKFLOW_SCHEMA.to_string(),
             id: fanout_id.to_string(),
-            label: Some("Codebox fanout".to_string()),
+            label: Some("Provider fanout".to_string()),
             steps: workflow_steps,
-            metadata: json!({ "provider": "wp-codebox" }),
+            metadata: json!({ "provider": "runtime-provider" }),
         }),
         follow_up: None,
         metadata: json!({
-            "provider": "wp-codebox",
+            "provider": "runtime-provider",
             "provider_schema": provider_payload["schema"],
             "provider_refs": {
                 "fanout_id": fanout_id,
