@@ -150,6 +150,34 @@ fn trace_json_with_toolchain() -> &'static str {
     }"#
 }
 
+fn trace_json_with_wp_codebox_partial_manifest() -> &'static str {
+    r#"{
+        "success": false,
+        "data": {
+            "passed": false,
+            "status": "error",
+            "component": "studio",
+            "exit_code": 2,
+            "wp_codebox": {
+                "manifest_path": "wp-codebox-artifacts/runtime-123/manifest.json",
+                "runtime_metadata_path": "wp-codebox-artifacts/runtime-123/runtime.json",
+                "commands_log_path": "wp-codebox-artifacts/runtime-123/commands.jsonl",
+                "events_log_path": "wp-codebox-artifacts/runtime-123/events.jsonl",
+                "browser_summary_path": "wp-codebox-artifacts/runtime-123/browser-summary.json",
+                "current_phase": "browser.probe.wait_for_ready",
+                "current_command": "browser probe /wp-admin/",
+                "last_command": "runtime setup"
+            },
+            "failure": {
+                "component_id": "studio",
+                "scenario_id": "close-window-running-site",
+                "exit_code": 2,
+                "stderr_excerpt": "browser probe timed out before final artifacts"
+            }
+        }
+    }"#
+}
+
 fn bench_json() -> &'static str {
     r#"{
         "success": true,
@@ -403,6 +431,7 @@ fn renders_trace_pass_status_and_artifact_paths() {
     assert!(markdown.contains("- Window stayed closed."));
     assert!(markdown.contains("- main log: artifacts/main.log"));
     assert!(markdown.contains("- process tree: artifacts/process-tree.txt"));
+    assert!(!markdown.contains("**WP Codebox runtime diagnostics**"));
     assert!(!markdown.contains("raw log body that should never appear"));
 
     let _ = fs::remove_dir_all(&dir);
@@ -487,6 +516,35 @@ fn renders_trace_toolchain_provenance() {
         markdown.contains("- Target: `/repo/studio` @ `789abc` (branch `trunk`, dirty `false`)")
     );
     assert!(markdown.contains("HOMEBOY_WP_CODEBOX_BIN selected a local WP Codebox runner path"));
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn renders_wp_codebox_partial_manifest_and_failure_phase() {
+    let dir = tmp_dir("trace-codebox-manifest");
+    fs::create_dir_all(&dir).expect("temp dir should exist");
+    write_file(
+        &dir,
+        "trace.json",
+        trace_json_with_wp_codebox_partial_manifest(),
+    );
+
+    let markdown = render(&dir, r#"{"trace":"error"}"#, false, false);
+
+    assert!(markdown.contains("**WP Codebox runtime diagnostics**"));
+    assert!(markdown.contains("- Failure phase: **browser probe hang/failure**"));
+    assert!(markdown.contains("- Current/last phase: `browser.probe.wait_for_ready`"));
+    assert!(markdown.contains("- Current command: `browser probe /wp-admin/`"));
+    assert!(markdown.contains("- Last command: `runtime setup`"));
+    assert!(
+        markdown.contains("- WP Codebox manifest: wp-codebox-artifacts/runtime-123/manifest.json")
+    );
+    assert!(markdown.contains("- Runtime metadata: wp-codebox-artifacts/runtime-123/runtime.json"));
+    assert!(markdown.contains("- Commands log: wp-codebox-artifacts/runtime-123/commands.jsonl"));
+    assert!(markdown.contains("- Events log: wp-codebox-artifacts/runtime-123/events.jsonl"));
+    assert!(markdown
+        .contains("- Browser summary: wp-codebox-artifacts/runtime-123/browser-summary.json"));
 
     let _ = fs::remove_dir_all(&dir);
 }

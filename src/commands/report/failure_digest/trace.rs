@@ -31,6 +31,7 @@ pub(super) fn render_trace_section(out: &mut String, output_dir: &Path, run_url:
 
     render_trace_summary(out, &data, &results, &failure, &error);
     render_trace_toolchain(out, &data, &results);
+    render_wp_codebox_trace_diagnostics(out, &data, &results, &failure, &error);
     render_trace_artifacts(out, &data, &results);
     render_full_log(out, "trace", run_url);
     out.push('\n');
@@ -267,6 +268,218 @@ fn render_trace_artifacts(
     } else {
         out.push_str("**Artifacts**\n- No structured trace artifacts available.\n");
     }
+}
+
+fn render_wp_codebox_trace_diagnostics(
+    out: &mut String,
+    data: &Map<String, Value>,
+    results: &Map<String, Value>,
+    failure: &Map<String, Value>,
+    error: &Map<String, Value>,
+) {
+    let candidates = trace_diagnostic_candidates(data, results, failure, error);
+    let artifact_paths = collect_wp_codebox_manifest_paths(&candidates);
+    let phase = first_string_by_keys(
+        &candidates,
+        &["failure_phase", "current_phase", "last_phase", "phase"],
+    );
+    let current_command = first_string_by_keys(&candidates, &["current_command", "command"]);
+    let last_command = first_string_by_keys(&candidates, &["last_command", "previous_command"]);
+    let classification = classify_trace_failure_phase(
+        phase.as_deref(),
+        current_command.as_deref().or(last_command.as_deref()),
+        first_string_by_keys(
+            &candidates,
+            &["message", "summary", "failure", "stderr_excerpt"],
+        )
+        .as_deref(),
+    );
+
+    if artifact_paths.is_empty()
+        && phase.is_none()
+        && current_command.is_none()
+        && last_command.is_none()
+        && classification.is_none()
+    {
+        return;
+    }
+
+    out.push_str("**WP Codebox runtime diagnostics**\n");
+    if let Some(classification) = classification {
+        let _ = writeln!(out, "- Failure phase: **{classification}**");
+    }
+    if let Some(phase) = phase {
+        let _ = writeln!(out, "- Current/last phase: `{phase}`");
+    }
+    if let Some(command) = current_command {
+        let _ = writeln!(out, "- Current command: `{command}`");
+    }
+    if let Some(command) = last_command {
+        let _ = writeln!(out, "- Last command: `{command}`");
+    }
+    for (label, path) in artifact_paths {
+        let _ = writeln!(out, "- {label}: {path}");
+    }
+    out.push('\n');
+}
+
+fn trace_diagnostic_candidates<'a>(
+    data: &'a Map<String, Value>,
+    results: &'a Map<String, Value>,
+    failure: &'a Map<String, Value>,
+    error: &'a Map<String, Value>,
+) -> Vec<&'a Map<String, Value>> {
+    let mut candidates = vec![data, results, failure, error];
+    for source in [data, results, failure, error] {
+        collect_nested_diagnostic_objects(source, &mut candidates);
+    }
+    candidates
+}
+
+fn collect_nested_diagnostic_objects<'a>(
+    source: &'a Map<String, Value>,
+    candidates: &mut Vec<&'a Map<String, Value>>,
+) {
+    for key in [
+        "wp_codebox",
+        "wp_codebox_artifacts",
+        "wp_codebox_runtime",
+        "artifact_manifest",
+        "artifacts_manifest",
+        "runtime_manifest",
+        "remote_artifact_manifest",
+        "manifest",
+        "runtime",
+        "diagnostics",
+        "failure_diagnostics",
+        "browser",
+    ] {
+        let value = source.get(key);
+        if let Some(object) = value.and_then(Value::as_object) {
+            candidates.push(object);
+            collect_nested_diagnostic_objects(object, candidates);
+        }
+        if let Some(items) = value.and_then(Value::as_array) {
+            for object in items.iter().filter_map(Value::as_object) {
+                candidates.push(object);
+                collect_nested_diagnostic_objects(object, candidates);
+            }
+        }
+    }
+}
+
+fn collect_wp_codebox_manifest_paths(candidates: &[&Map<String, Value>]) -> Vec<(String, String)> {
+    let mut seen = BTreeSet::new();
+    let mut rows = Vec::new();
+    for (label, keys) in [
+        (
+            "WP Codebox manifest",
+            &[
+                "manifest_path",
+                "artifact_manifest_path",
+                "top_level_manifest_path",
+            ][..],
+        ),
+        (
+            "Runtime metadata",
+            &["runtime_metadata_path", "metadata_path", "runtime_metadata"],
+        ),
+        (
+            "Commands log",
+            &[
+                "commands_log_path",
+                "command_log_path",
+                "commands_path",
+                "commands_log",
+            ],
+        ),
+        (
+            "Events log",
+            &[
+                "events_log_path",
+                "event_log_path",
+                "events_path",
+                "events_log",
+            ],
+        ),
+        (
+            "Browser summary",
+            &["browser_summary_path", "summary_path", "browser_summary"],
+        ),
+    ] {
+        if let Some(path) = first_string_by_keys(candidates, keys) {
+            if seen.insert((label.to_string(), path.clone())) {
+                rows.push((label.to_string(), path));
+            }
+        }
+    }
+    rows
+}
+
+fn first_string_by_keys(candidates: &[&Map<String, Value>], keys: &[&str]) -> Option<String> {
+    candidates.iter().find_map(|candidate| {
+        keys.iter().find_map(|key| {
+            string_value(candidate, key).or_else(|| path_from_object(candidate, key))
+        })
+    })
+}
+
+fn path_from_object(candidate: &Map<String, Value>, key: &str) -> Option<String> {
+    candidate
+        .get(key)
+        .and_then(Value::as_object)
+        .and_then(|object| string_value(object, "path").or_else(|| string_value(object, "file")))
+}
+
+fn classify_trace_failure_phase(
+    phase: Option<&str>,
+    command: Option<&str>,
+    message: Option<&str>,
+) -> Option<&'static str> {
+    let direct = [phase, command]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
+    classify_trace_failure_text(&direct).or_else(|| {
+        message.and_then(|message| classify_trace_failure_text(&message.to_lowercase()))
+    })
+}
+
+fn classify_trace_failure_text(text: &str) -> Option<&'static str> {
+    if text.is_empty() {
+        return None;
+    }
+    if contains_any(
+        text,
+        &["browser", "probe", "playwright", "page", "navigation"],
+    ) {
+        Some("browser probe hang/failure")
+    } else if contains_any(
+        text,
+        &["artifact", "extract", "manifest", "capture", "upload"],
+    ) {
+        Some("artifact extraction failure")
+    } else if contains_any(
+        text,
+        &[
+            "runtime",
+            "setup",
+            "bootstrap",
+            "install",
+            "prepare",
+            "preflight",
+        ],
+    ) {
+        Some("runtime setup hang/failure")
+    } else {
+        None
+    }
+}
+
+fn contains_any(text: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| text.contains(needle))
 }
 
 fn collect_trace_artifacts(
