@@ -632,6 +632,10 @@ fn resolve_preserved_invocation_artifact(path: &Path, run_dir: &RunDir) -> Optio
 }
 
 #[cfg(test)]
+#[path = "../../../tests/commands/bench/observation_artifact_test.rs"]
+mod observation_artifact_test;
+
+#[cfg(test)]
 mod tests {
     use std::fs;
 
@@ -653,10 +657,10 @@ mod tests {
     use crate::commands::utils::resource_policy::{self, HotCommand, ResourcePolicyContext};
     use crate::test_support::with_isolated_home;
 
-    struct XdgGuard(Option<String>);
+    pub(super) struct XdgGuard(Option<String>);
 
     impl XdgGuard {
-        fn unset() -> Self {
+        pub(super) fn unset() -> Self {
             let prior = std::env::var("XDG_DATA_HOME").ok();
             std::env::remove_var("XDG_DATA_HOME");
             Self(prior)
@@ -672,7 +676,7 @@ mod tests {
         }
     }
 
-    fn bench_results(component_id: &str, scenario_id: &str, p95: f64) -> BenchResults {
+    pub(super) fn bench_results(component_id: &str, scenario_id: &str, p95: f64) -> BenchResults {
         serde_json::from_value(serde_json::json!({
             "component_id": component_id,
             "iterations": 10,
@@ -690,7 +694,7 @@ mod tests {
         .expect("bench results")
     }
 
-    fn bench_args() -> BenchRunArgs {
+    pub(super) fn bench_args() -> BenchRunArgs {
         BenchRunArgs {
             comp: PositionalComponentArgs {
                 component: Some("homeboy".to_string()),
@@ -850,94 +854,10 @@ mod tests {
             assert_eq!(transcript_record.metadata_json["scenario_id"], "cold");
             assert_eq!(transcript_record.metadata_json["name"], "transcript");
             assert_eq!(transcript_record.metadata_json["kind"], "json");
-            assert_eq!(transcript_record.metadata_json["label"], "Transcript");
-            assert_eq!(
-                transcript_record.metadata_json["original_path"],
-                "bench-artifacts/cold/transcript.json"
-            );
             assert!(
                 workflow.results.as_ref().unwrap().scenarios[0].artifacts["admin"]
                     .observation_artifact_id
                     .is_some()
-            );
-        });
-    }
-
-    #[test]
-    fn bench_observation_reports_missing_and_blocked_artifacts() {
-        with_isolated_home(|home| {
-            let _xdg = XdgGuard::unset();
-            let run_dir = RunDir::create().expect("run dir");
-            fs::write(run_dir.step_file(run_dir::files::BENCH_RESULTS), b"{}").expect("results");
-
-            let mut results = bench_results("homeboy", "cold", 42.0);
-            results.scenarios[0].artifacts.insert(
-                "missing".to_string(),
-                BenchArtifact {
-                    path: Some("bench-artifacts/cold/missing.json".to_string()),
-                    url: None,
-                    artifact_type: None,
-                    kind: Some("json".to_string()),
-                    label: Some("Missing".to_string()),
-                    observation_artifact_id: None,
-                },
-            );
-            results.scenarios[0].artifacts.insert(
-                "escape".to_string(),
-                BenchArtifact {
-                    path: Some("../escape.json".to_string()),
-                    url: None,
-                    artifact_type: None,
-                    kind: Some("json".to_string()),
-                    label: Some("Escape".to_string()),
-                    observation_artifact_id: None,
-                },
-            );
-            let mut workflow = BenchRunWorkflowResult {
-                status: "passed".to_string(),
-                component: "homeboy".to_string(),
-                exit_code: 0,
-                iterations: 10,
-                results: Some(results),
-                gate_failures: Vec::new(),
-                baseline_comparison: None,
-                hints: None,
-                failure: None,
-                diagnostics: Vec::new(),
-            };
-
-            let args = bench_args();
-            let observation = start(BenchObservationStart {
-                component_id: "homeboy",
-                component_label: "homeboy",
-                source_path: home.path(),
-                args: &args,
-                selected_scenarios: &["cold".to_string()],
-                rig_id: None,
-                rig_snapshot: None,
-                run_dir: &run_dir,
-            })
-            .expect("start observation");
-
-            finish_success(Some(observation), &mut workflow, &run_dir)
-                .expect("observation summary");
-
-            let classes: Vec<_> = workflow
-                .diagnostics
-                .iter()
-                .map(|diagnostic| diagnostic.class.as_str())
-                .collect();
-            assert!(classes.contains(&"bench_artifact_path_missing"));
-            assert!(classes.contains(&"bench_artifact_path_blocked"));
-            assert!(
-                workflow.results.as_ref().unwrap().scenarios[0].artifacts["missing"]
-                    .observation_artifact_id
-                    .is_none()
-            );
-            assert!(
-                workflow.results.as_ref().unwrap().scenarios[0].artifacts["escape"]
-                    .observation_artifact_id
-                    .is_none()
             );
         });
     }
