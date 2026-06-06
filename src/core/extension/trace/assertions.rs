@@ -654,6 +654,7 @@ mod tests {
             toolchain: None,
             components: None,
             dependencies: Vec::new(),
+            preview: None,
         }
     }
 

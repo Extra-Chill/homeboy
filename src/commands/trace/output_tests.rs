@@ -590,6 +590,7 @@ fn trace_run_evidence_report_includes_refs_assertions_and_safe_artifacts() {
             toolchain: None,
             components: None,
             dependencies: Vec::new(),
+            preview: None,
         }),
         span_summaries: vec![extension_trace::TraceSpanSummaryOutput {
             id: "boot_to_ready".to_string(),

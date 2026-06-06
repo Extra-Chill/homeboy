@@ -18,6 +18,7 @@ mod overlay;
 mod overlay_lock;
 pub mod parsing;
 mod preflight;
+mod preview;
 pub mod probes;
 pub mod report;
 pub mod run;
@@ -41,6 +42,7 @@ pub use parsing::{
     TraceStatus,
 };
 pub use parsing::{TraceAssertionStatus, TraceResults, TraceSpanDefinition, TraceSpanResult};
+pub use preview::{TracePreviewMetadata, TracePublicPreviewSession};
 pub use probes::{ActiveTraceProbes, TraceProbeConfig};
 pub use report::{
     from_list_workflow, from_main_workflow, from_main_workflow_outputs, TraceAggregateOutput,
