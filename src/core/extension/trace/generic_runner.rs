@@ -42,6 +42,7 @@ pub(super) fn run_generic_trace_runner(
             success: true,
             stdout,
             stderr: String::new(),
+            child_resource: None,
         });
     }
 
@@ -54,6 +55,7 @@ pub(super) fn run_generic_trace_runner(
             success: false,
             stdout: String::new(),
             stderr: format!("unknown trace scenario {}", args.scenario_id),
+            child_resource: None,
         });
     };
 
@@ -83,6 +85,7 @@ pub(super) fn run_generic_trace_runner(
         success: output.status.success(),
         stdout: String::from_utf8_lossy(&output.stdout).to_string(),
         stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        child_resource: None,
     })
 }
 

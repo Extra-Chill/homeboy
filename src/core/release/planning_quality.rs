@@ -245,6 +245,7 @@ mod tests {
             success: exit_code == 0,
             stdout: stdout.to_string(),
             stderr: stderr.to_string(),
+            child_resource: None,
         }
     }
 
