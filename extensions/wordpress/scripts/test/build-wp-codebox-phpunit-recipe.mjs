@@ -7,9 +7,10 @@ import { readFileSync } from 'node:fs';
 /**
  * Internal dependencies
  */
-import { buildWordPressPhpunitRecipe } from '../bench/wp-codebox-bench-recipe-builder.mjs';
+import { loadCodeboxRecipeBuilder } from '../bench/wp-codebox-recipe-builder-loader.mjs';
 
 const input = JSON.parse(readFileSync(0, 'utf8'));
+const { builder: buildWordPressPhpunitRecipe } = await loadCodeboxRecipeBuilder('buildWordPressPhpunitRecipe');
 const recipe = buildWordPressPhpunitRecipe(input.options ?? input);
 
 process.stdout.write(`${JSON.stringify(recipe, null, 2)}\n`);

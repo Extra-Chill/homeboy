@@ -3,6 +3,7 @@ const { spawnSync } = require('node:child_process');
 const path = require('node:path');
 
 const script = path.join(__dirname, '..', 'scripts', 'test', 'build-wp-codebox-phpunit-recipe.mjs');
+const fixtureCoreModule = path.join(__dirname, 'fixtures', 'wp-codebox-core-recipe-builder.mjs');
 const input = {
 	wordpressVersion: '6.9',
 	pluginSlug: 'fixture-plugin',
@@ -23,6 +24,7 @@ const result = spawnSync(process.execPath, [script], {
 	cwd: path.join(__dirname, '..'),
 	input: JSON.stringify(input),
 	encoding: 'utf8',
+	env: { ...process.env, HOMEBOY_WP_CODEBOX_CORE_MODULE: fixtureCoreModule },
 });
 
 assert.equal(result.status, 0, result.stderr);
@@ -31,22 +33,25 @@ const recipe = JSON.parse(result.stdout);
 assert.equal(recipe.schema, 'wp-codebox/workspace-recipe/v1');
 assert.equal(recipe.inputs.mounts[0].mode, 'readwrite');
 assert.deepEqual(recipe.workflow.steps, [{
-	command: 'wordpress.phpunit',
+	command: 'fixture.wordpress.phpunit',
 	args: [
 		'plugin-slug=fixture-plugin',
-		'test-file=tests/fixture-test.php',
-		'changed-tests-json=["tests/fixture-test.php"]',
 		'phpunit-args-json=["--filter","FixtureTest::test_selected"]',
-		'env-json={"FIXTURE":"1"}',
-		'wp-config-defines-json={"WP_DEBUG":true}',
-		'bootstrap-files-json=["tests/bootstrap-fragment.php"]',
 		'bootstrap-mode=project',
 		'project-bootstrap=tests/legacy/bootstrap.php',
-		'autoload-file=/wp-codebox-vendor/autoload.php',
-		'tests-dir=/wp-codebox-vendor/wp-phpunit/wp-phpunit',
-		'dependency-mounts=/wordpress/wp-content/plugins/dependency-one',
-		'multisite=1',
 	],
 }]);
+
+const diagnosticResult = spawnSync(process.execPath, [script], {
+	cwd: path.join(__dirname, '..'),
+	input: JSON.stringify(input),
+	encoding: 'utf8',
+	env: { ...process.env, HOMEBOY_WP_CODEBOX_CORE_MODULE: '/missing/wp-codebox-core.mjs' },
+});
+
+assert.notEqual(diagnosticResult.status, 0);
+assert.match(diagnosticResult.stderr, /WP Codebox recipe builder export buildWordPressPhpunitRecipe is unavailable/);
+assert.match(diagnosticResult.stderr, /no longer falls back to bundled WP Codebox recipe builders/);
+assert.match(diagnosticResult.stderr, /\/missing\/wp-codebox-core\.mjs/);
 
 console.log('wp-codebox phpunit recipe builder smoke passed');
