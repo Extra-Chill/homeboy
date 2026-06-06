@@ -552,6 +552,8 @@ fn execute_trace_run(args: TraceArgs) -> homeboy::core::Result<TraceRunExecution
     experiment_env.extend(args.matrix_env.clone());
     let trace_probes =
         trace_probes_for_args(&args, rig_context.as_ref(), ctx.extension_id.as_deref())?;
+    let public_preview =
+        trace_public_preview_for_args(&args, rig_context.as_ref(), ctx.extension_id.as_deref())?;
     let attachments = TraceAttachment::parse_all(&args.attachments)?;
     let resolved_settings = ctx.resolved_settings();
     let mut json_settings = experiment_settings;
@@ -578,6 +580,7 @@ fn execute_trace_run(args: TraceArgs) -> homeboy::core::Result<TraceRunExecution
                 dependencies: trace_dependencies,
                 runner_capabilities,
                 invocation_requirements,
+                public_preview,
             },
             scenario_id,
             json_summary: args.json_summary,
@@ -691,6 +694,7 @@ fn run_list(args: TraceArgs) -> CmdResult<TraceCommandOutput> {
                 dependencies: trace_dependencies,
                 runner_capabilities,
                 invocation_requirements,
+                public_preview: None,
             },
             rig_id: args.rig,
         },
@@ -743,6 +747,66 @@ fn trace_workload_inputs(
             id,
         ),
     )
+}
+
+fn trace_public_preview_for_args(
+    args: &TraceArgs,
+    rig_context: Option<&TraceRigContext>,
+    extension_id: Option<&str>,
+) -> homeboy::core::Result<Option<rig::TracePublicPreviewSpec>> {
+    let Some(context) = rig_context else {
+        return Ok(None);
+    };
+
+    if let Some(profile_id) = args.profile.as_deref() {
+        if let Some(profile) = context.rig_spec.trace_profiles.get(profile_id) {
+            if let Some(spec) = profile.public_preview.as_ref() {
+                return Ok(Some(expand_trace_public_preview(context, spec)));
+            }
+        }
+    }
+
+    let Some(extension_id) = extension_id else {
+        return Ok(None);
+    };
+    let scenario = trace_scenario(args)?;
+    let Some(workload) = context
+        .rig_spec
+        .trace_workloads
+        .get(extension_id)
+        .and_then(|workloads| {
+            workloads
+                .iter()
+                .find(|workload| trace_workload_scenario_id(workload.path()) == scenario)
+        })
+    else {
+        return Ok(None);
+    };
+
+    Ok(workload
+        .public_preview()
+        .map(|spec| expand_trace_public_preview(context, spec)))
+}
+
+fn expand_trace_public_preview(
+    context: &TraceRigContext,
+    spec: &rig::TracePublicPreviewSpec,
+) -> rig::TracePublicPreviewSpec {
+    let expand = |value: &str| {
+        let expanded = rig::expand::expand_vars(&context.rig_spec, value);
+        match context.rig_package_root.as_ref() {
+            Some(root) => expanded.replace("${package.root}", &root.to_string_lossy()),
+            None => expanded,
+        }
+    };
+    rig::TracePublicPreviewSpec {
+        local_origin: expand(&spec.local_origin),
+        public_origin: spec.public_origin.as_deref().map(|value| expand(value)),
+        command: spec.command.as_deref().map(|value| expand(value)),
+        require_https: spec.require_https,
+        provider: spec.provider.clone(),
+        startup_timeout_seconds: spec.startup_timeout_seconds,
+    }
 }
 
 #[derive(Clone)]

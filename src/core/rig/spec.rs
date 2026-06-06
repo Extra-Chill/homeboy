@@ -301,6 +301,9 @@ pub struct WorkloadSpec {
     pub path: String,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_preview: Option<TracePublicPreviewSpec>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub check_groups: Option<Vec<String>>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -400,6 +403,37 @@ pub struct TraceProfileSpec {
 
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub settings: BTreeMap<String, serde_json::Value>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_preview: Option<TracePublicPreviewSpec>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TracePublicPreviewSpec {
+    /// Local HTTP origin to expose, for example `http://127.0.0.1:8888`.
+    pub local_origin: String,
+
+    /// Optional already-known public origin. When omitted, Homeboy starts
+    /// `command` and reads the first HTTPS URL printed to stdout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_origin: Option<String>,
+
+    /// Long-running shell command that starts the tunnel provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+
+    /// Fail before the trace runner starts unless the effective origin is HTTPS.
+    #[serde(default)]
+    pub require_https: bool,
+
+    /// Human-readable provider label for artifacts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+
+    /// Seconds to wait for the provider command to print a public HTTPS URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startup_timeout_seconds: Option<u64>,
 }
 
 impl TraceProfileSpec {
@@ -477,6 +511,10 @@ pub enum TraceExperimentArtifactSpec {
 impl WorkloadSpec {
     pub fn path(&self) -> &str {
         &self.path
+    }
+
+    pub fn public_preview(&self) -> Option<&TracePublicPreviewSpec> {
+        self.public_preview.as_ref()
     }
 
     pub fn check_groups(&self) -> Option<&[String]> {
@@ -569,6 +607,7 @@ mod tests {
     fn test_trace_phase_preset() {
         let workload = WorkloadSpec {
             path: "trace.mjs".to_string(),
+            public_preview: None,
             check_groups: None,
             port_range_size: None,
             named_leases: Vec::new(),
@@ -690,6 +729,29 @@ mod tests {
     }
 
     #[test]
+    fn test_trace_public_preview_parse() {
+        let workload: WorkloadSpec = serde_json::from_str(
+            r#"{
+                "path": "/tmp/wallet.trace.mjs",
+                "public_preview": {
+                    "local_origin": "http://127.0.0.1:8080",
+                    "command": "cloudflared tunnel --url http://127.0.0.1:8080",
+                    "require_https": true,
+                    "provider": "cloudflared",
+                    "startup_timeout_seconds": 5
+                }
+            }"#,
+        )
+        .expect("parse public preview workload");
+
+        let preview = workload.public_preview().expect("public preview");
+        assert_eq!(preview.local_origin, "http://127.0.0.1:8080");
+        assert_eq!(preview.provider.as_deref(), Some("cloudflared"));
+        assert!(preview.require_https);
+        assert_eq!(preview.startup_timeout_seconds, Some(5));
+    }
+
+    #[test]
     fn test_string_settings() {
         let profile: TraceProfileSpec = serde_json::from_str(
             r#"{
@@ -736,6 +798,7 @@ mod tests {
     fn test_trace_default_phase_preset() {
         let workload = WorkloadSpec {
             path: "trace.mjs".to_string(),
+            public_preview: None,
             check_groups: None,
             port_range_size: None,
             named_leases: Vec::new(),
@@ -759,6 +822,7 @@ mod tests {
     fn test_port_range_size() {
         let workload = WorkloadSpec {
             path: "bench.mjs".to_string(),
+            public_preview: None,
             check_groups: None,
             port_range_size: Some(8),
             named_leases: Vec::new(),
@@ -782,6 +846,7 @@ mod tests {
     fn test_named_leases() {
         let workload = WorkloadSpec {
             path: "bench.mjs".to_string(),
+            public_preview: None,
             check_groups: None,
             port_range_size: None,
             named_leases: vec!["browser-profile".to_string()],

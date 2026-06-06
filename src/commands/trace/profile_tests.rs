@@ -205,3 +205,65 @@ fn trace_list_profiles_lists_rig_profiles() {
         );
     });
 }
+
+#[test]
+fn trace_profile_public_preview_overrides_workload_preview() {
+    with_isolated_home(|home| {
+        let rig_dir = home.path().join(".config").join("homeboy").join("rigs");
+        fs::create_dir_all(&rig_dir).expect("mkdir rigs");
+        let component_dir = tempfile::TempDir::new().expect("component dir");
+        fs::write(
+            rig_dir.join("studio-rig.json"),
+            format!(
+                r#"{{
+                    "components": {{
+                        "studio": {{ "path": "{}" }}
+                    }},
+                    "trace_workloads": {{ "{TRACE_FIXTURE_EXTENSION_ID}": [
+                        {{
+                            "path": "${{components.studio.path}}/wallet.trace.mjs",
+                            "public_preview": {{
+                                "local_origin": "http://127.0.0.1:8080",
+                                "public_origin": "https://workload.example.test",
+                                "require_https": true
+                            }}
+                        }}
+                    ] }},
+                    "trace_profiles": {{
+                        "wallet": {{
+                            "component": "studio",
+                            "scenario": "wallet",
+                            "public_preview": {{
+                                "local_origin": "http://127.0.0.1:9090",
+                                "public_origin": "https://profile.example.test",
+                                "require_https": true,
+                                "provider": "fixture"
+                            }}
+                        }}
+                    }}
+                }}"#,
+                component_dir.path().display()
+            ),
+        )
+        .expect("write rig");
+
+        let mut args = trace_args_for_profile("wallet");
+        resolve_trace_profile_args(&mut args).expect("profile resolves");
+        let context = load_rig_context(args.rig.as_deref()).expect("rig context");
+        let preview = trace_public_preview_for_args(
+            &args,
+            context.as_ref(),
+            Some(TRACE_FIXTURE_EXTENSION_ID),
+        )
+        .expect("preview resolves")
+        .expect("preview present");
+
+        assert_eq!(preview.local_origin, "http://127.0.0.1:9090");
+        assert_eq!(
+            preview.public_origin.as_deref(),
+            Some("https://profile.example.test")
+        );
+        assert_eq!(preview.provider.as_deref(), Some("fixture"));
+        assert!(preview.require_https);
+    });
+}

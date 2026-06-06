@@ -171,6 +171,7 @@ pub fn run(args: ObserveArgs, _global: &GlobalArgs) -> CmdResult<ObserveOutput> 
         toolchain: None,
         components: None,
         dependencies: Vec::new(),
+        preview: None,
     };
 
     write_trace_results(&trace_path, &results)?;

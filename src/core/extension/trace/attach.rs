@@ -527,6 +527,7 @@ mod tests {
             toolchain: None,
             components: None,
             dependencies: Vec::new(),
+            preview: None,
         };
 
         append_attach_observations(&mut results, &run_dir, &observations).unwrap();
