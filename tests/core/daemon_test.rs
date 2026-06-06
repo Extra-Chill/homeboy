@@ -417,8 +417,16 @@ fn route_with_body_validates_exec_requests() {
     assert_eq!(response.body["error"], "validation.invalid_argument");
 }
 
+fn create_lab_local_runner() -> HomeGuard {
+    let home = HomeGuard::new();
+    crate::core::runner::create(r#"{"id":"lab-local","kind":"local"}"#, false)
+        .expect("create lab local runner");
+    home
+}
+
 #[test]
 fn routes_exec_body_to_daemon_job() {
+    let _home = create_lab_local_runner();
     let store = JobStore::default();
     let response = route_with_job_store_and_body(
         "POST",
@@ -462,6 +470,7 @@ fn routes_exec_body_to_daemon_job() {
 
 #[test]
 fn exec_applies_request_env_to_daemon_command() {
+    let _home = create_lab_local_runner();
     let store = JobStore::default();
     let response = route_with_job_store_and_body(
         "POST",
@@ -491,7 +500,21 @@ fn exec_applies_request_env_to_daemon_command() {
         .find(|event| event.kind == JobEventKind::Result)
         .and_then(|event| event.data.as_ref())
         .expect("result event");
+    assert_eq!(result["runner_id"], "lab-local");
+    assert_eq!(
+        result["cwd"],
+        std::env::current_dir()
+            .expect("cwd")
+            .to_string_lossy()
+            .to_string()
+    );
+    assert_eq!(
+        result["command"],
+        serde_json::json!(["sh", "-c", "printf '%s' \"$HOMEBOY_TEST_DAEMON_ENV\""])
+    );
     assert_eq!(result["stdout"], "ok");
+    assert_eq!(result["source_snapshot"]["runner_id"], "lab-local");
+    assert_eq!(result["source_snapshot"]["sync_mode"], "existing_remote");
     assert!(result["metrics"]["duration_ms"].as_u64().is_some());
     if cfg!(target_os = "linux") {
         assert_eq!(result["metrics"]["source"], "linux_procfs_process_tree");
@@ -503,6 +526,7 @@ fn exec_applies_request_env_to_daemon_command() {
 
 #[test]
 fn exec_failed_command_marks_job_failed_after_result_event() {
+    let _home = create_lab_local_runner();
     let store = JobStore::default();
     let response = route_with_job_store_and_body(
         "POST",
@@ -547,7 +571,7 @@ fn exec_failed_command_marks_job_failed_after_result_event() {
 
 #[test]
 fn exec_capture_patch_records_remote_delta_artifact() {
-    let _home = HomeGuard::new();
+    let _home = create_lab_local_runner();
     let workspace = tempfile::tempdir().expect("workspace");
     std::fs::write(workspace.path().join("file.txt"), "before\n").expect("seed file");
     let source_snapshot = SourceSnapshot::existing_remote(
@@ -601,6 +625,38 @@ fn exec_capture_patch_records_remote_delta_artifact() {
     let patch_body = std::fs::read_to_string(&artifacts[0].path).expect("patch file");
     assert!(patch_body.contains("-before"));
     assert!(patch_body.contains("+after"));
+}
+
+#[test]
+fn exec_rejects_requests_that_violate_runner_policy() {
+    let _home = HomeGuard::new();
+    crate::core::server::create(
+        r#"{"id":"lab-server","host":"192.0.2.10","user":"chubes"}"#,
+        false,
+    )
+    .expect("create server");
+    crate::core::runner::create(
+        r#"{"id":"lab-server","kind":"ssh","server_id":"lab-server","workspace_root":"/srv/homeboy"}"#,
+        false,
+    )
+    .expect("create ssh runner");
+
+    let response = route_with_job_store_and_body(
+        "POST",
+        "/exec",
+        Some(serde_json::json!({
+            "runner_id": "lab-server",
+            "cwd": "/srv/homeboy/project",
+            "command": ["sh", "-c", "printf denied"],
+            "raw_exec": true
+        })),
+        daemon_job_store(),
+    );
+
+    assert_eq!(response.status_code, 400);
+    assert_eq!(response.body["error"], "runner.policy_denied");
+    assert_eq!(response.body["details"]["runner_id"], "lab-server");
+    assert_eq!(response.body["details"]["field"], "raw_exec");
 }
 
 fn wait_for_job(store: &JobStore, job_id: &str) -> crate::core::api_jobs::Job {

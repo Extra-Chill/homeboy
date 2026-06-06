@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use reqwest::blocking::Client;
@@ -73,6 +74,27 @@ pub struct RunnerExecOutput {
     pub capture: Option<CommandCaptureMetadata>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct RunnerProcessRequest {
+    pub runner_id: String,
+    pub cwd: Option<String>,
+    pub project_id: Option<String>,
+    pub command: Vec<String>,
+    pub env: HashMap<String, String>,
+    pub capture_patch: bool,
+    pub raw_exec: bool,
+    pub source_snapshot: Option<SourceSnapshot>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RunnerProcessPlan {
+    pub runner: Runner,
+    pub cwd: String,
+    pub command: Vec<String>,
+    pub env: HashMap<String, String>,
+    pub source_snapshot: SourceSnapshot,
+}
+
 #[derive(Debug, Deserialize)]
 struct DaemonEnvelope {
     success: bool,
@@ -90,22 +112,20 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
         ));
     }
 
-    let runner = load(runner_id)?;
-    let cwd = resolve_cwd(&runner, options.cwd.as_deref())?;
-    validate_runner_policy(
-        &runner,
-        &cwd,
-        RunnerPolicyRequest {
-            project_id: options.project_id.as_deref(),
-            command: &options.command,
-            capture_patch: options.capture_patch,
-            raw_exec: options.raw_exec,
-        },
-    )?;
+    let plan = prepare_runner_process(RunnerProcessRequest {
+        runner_id: runner_id.to_string(),
+        cwd: options.cwd.clone(),
+        project_id: options.project_id.clone(),
+        command: options.command.clone(),
+        env: options.env.clone(),
+        capture_patch: options.capture_patch,
+        raw_exec: options.raw_exec,
+        source_snapshot: options.source_snapshot.clone(),
+    })?;
+    let runner = plan.runner.clone();
+    let cwd = plan.cwd.clone();
     let connected = status(runner_id)?;
-    let mut request_env = runner.env.clone();
-    request_env.extend(options.env.clone());
-    normalize_runner_command_env(&mut request_env);
+    let request_env = plan.env.clone();
     let required_extensions =
         required_extensions_for_command(&options.command, &options.required_extensions);
 
@@ -123,10 +143,11 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
                     &runner,
                     local_url,
                     cwd,
+                    options.project_id,
                     options.command,
                     request_env,
                     options.capture_patch,
-                    options.source_snapshot,
+                    Some(plan.source_snapshot),
                 );
             }
             if session.mode == RunnerTunnelMode::Reverse {
@@ -147,7 +168,7 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
     }
 
     match runner.kind {
-        RunnerKind::Local => exec_local(&runner, cwd, options.command, request_env),
+        RunnerKind::Local => exec_local(plan),
         RunnerKind::Ssh if options.allow_diagnostic_ssh => {
             preflight_runner_capability_plan(
                 &runner,
@@ -406,6 +427,7 @@ fn exec_via_daemon(
     runner: &Runner,
     local_url: &str,
     cwd: String,
+    project_id: Option<String>,
     command: Vec<String>,
     env: HashMap<String, String>,
     capture_patch: bool,
@@ -422,6 +444,7 @@ fn exec_via_daemon(
         .post(format!("{}/exec", local_url.trim_end_matches('/')))
         .json(&json!({
             "runner_id": runner.id,
+            "project_id": project_id,
             "cwd": cwd,
             "command": command,
             "env": env,
@@ -610,31 +633,15 @@ fn result_event_data(events: &[JobEvent]) -> Option<Value> {
         .and_then(|event| event.data.clone())
 }
 
-fn exec_local(
-    runner: &Runner,
-    cwd: String,
-    command: Vec<String>,
-    env: HashMap<String, String>,
-) -> Result<(RunnerExecOutput, i32)> {
-    let output = command_output(
-        std::process::Command::new(&command[0])
-            .args(&command[1..])
-            .current_dir(&cwd)
-            .envs(env),
-    )?;
-    let source_snapshot = SourceSnapshot::collect_local(
-        &runner.id,
-        std::path::Path::new(&cwd),
-        Some(&cwd),
-        "existing_remote",
-    );
+fn exec_local(plan: RunnerProcessPlan) -> Result<(RunnerExecOutput, i32)> {
+    let output = execute_runner_process(&plan)?;
     Ok(exec_output(
-        runner,
+        &plan.runner,
         RunnerExecMode::Local,
-        cwd,
-        command,
+        plan.cwd,
+        plan.command,
         output,
-        Some(source_snapshot),
+        Some(plan.source_snapshot),
     ))
 }
 
@@ -684,12 +691,99 @@ fn exec_diagnostic_ssh(
     ))
 }
 
-struct ProcessOutput {
-    stdout: String,
-    stderr: String,
-    exit_code: i32,
-    metrics: Option<RunnerResourceMetrics>,
-    capture: Option<CommandCaptureMetadata>,
+pub(crate) struct ProcessOutput {
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: i32,
+    pub metrics: Option<RunnerResourceMetrics>,
+    pub capture: Option<CommandCaptureMetadata>,
+}
+
+pub(crate) fn prepare_runner_process(request: RunnerProcessRequest) -> Result<RunnerProcessPlan> {
+    if request.command.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "command",
+            "runner exec requires a command after --",
+            None,
+            None,
+        ));
+    }
+
+    let runner = load(&request.runner_id)?;
+    let cwd = resolve_cwd(&runner, request.cwd.as_deref())?;
+    validate_runner_process_cwd(&runner, &cwd)?;
+    validate_runner_policy(
+        &runner,
+        &cwd,
+        RunnerPolicyRequest {
+            project_id: request.project_id.as_deref(),
+            command: &request.command,
+            capture_patch: request.capture_patch,
+            raw_exec: request.raw_exec,
+        },
+    )?;
+
+    let mut env = runner.env.clone();
+    env.extend(request.env);
+    normalize_runner_command_env(&mut env);
+
+    let source_snapshot = request
+        .source_snapshot
+        .unwrap_or_else(|| match runner.kind {
+            RunnerKind::Local => SourceSnapshot::collect_local(
+                &runner.id,
+                Path::new(&cwd),
+                Some(&cwd),
+                "existing_remote",
+            ),
+            RunnerKind::Ssh => {
+                SourceSnapshot::existing_remote(&runner.id, &cwd, runner.workspace_root.as_deref())
+            }
+        });
+
+    Ok(RunnerProcessPlan {
+        runner,
+        cwd,
+        command: request.command,
+        env,
+        source_snapshot,
+    })
+}
+
+fn validate_runner_process_cwd(runner: &Runner, cwd: &str) -> Result<()> {
+    if !Path::new(cwd).is_absolute() {
+        return Err(Error::validation_invalid_argument(
+            "cwd",
+            "runner exec requires an absolute cwd",
+            Some(cwd.to_string()),
+            None,
+        ));
+    }
+
+    if runner.kind == RunnerKind::Local && !Path::new(cwd).is_dir() {
+        return Err(Error::validation_invalid_argument(
+            "cwd",
+            "local runner cwd must exist and be a directory",
+            Some(cwd.to_string()),
+            None,
+        ));
+    }
+
+    Ok(())
+}
+
+pub(crate) fn execute_runner_process(plan: &RunnerProcessPlan) -> Result<ProcessOutput> {
+    let mut command = std::process::Command::new(&plan.command[0]);
+    command
+        .args(&plan.command[1..])
+        .current_dir(&plan.cwd)
+        .envs(plan.env.iter())
+        .env(
+            crate::core::observation::SOURCE_SNAPSHOT_METADATA_ENV,
+            serde_json::to_string(&plan.source_snapshot).unwrap_or_default(),
+        );
+
+    command_output(&mut command)
 }
 
 fn command_output(command: &mut std::process::Command) -> Result<ProcessOutput> {

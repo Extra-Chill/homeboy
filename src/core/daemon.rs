@@ -4,8 +4,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use crate::core::api_jobs::JobStore;
@@ -13,7 +12,7 @@ use crate::core::error::{Error, RemoteCommandFailedDetails, Result, TargetDetail
 use crate::core::http_api::{self, AnalysisJobRunner, HttpMethod, UnsupportedAnalysisJobRunner};
 use crate::core::paths;
 use crate::core::process::pid_is_running;
-use crate::core::runner::{measured_command_output, normalize_runner_command_env};
+use crate::core::runner::{execute_runner_process, prepare_runner_process, RunnerProcessRequest};
 use crate::core::source_snapshot::SourceSnapshot;
 use crate::core::upgrade::VERSION;
 
@@ -68,14 +67,18 @@ pub struct HttpResponse {
 
 #[derive(Debug, Clone, Deserialize)]
 struct ExecRequest {
+    runner_id: String,
     #[serde(default)]
-    runner_id: Option<String>,
-    cwd: String,
+    project_id: Option<String>,
+    #[serde(default)]
+    cwd: Option<String>,
     command: Vec<String>,
     #[serde(default)]
     env: HashMap<String, String>,
     #[serde(default)]
     capture_patch: bool,
+    #[serde(default)]
+    raw_exec: bool,
     #[serde(default)]
     source_snapshot: Option<SourceSnapshot>,
 }
@@ -326,36 +329,22 @@ fn enqueue_exec_job(
                 None,
             )
         })?;
-    if request.command.is_empty() {
-        return Err(Error::validation_invalid_argument(
-            "command",
-            "exec request requires command array",
-            None,
-            None,
-        ));
-    }
-    if request.cwd.is_empty() || !Path::new(&request.cwd).is_absolute() {
-        return Err(Error::validation_invalid_argument(
-            "cwd",
-            "exec request requires an absolute cwd",
-            Some(request.cwd),
-            None,
-        ));
-    }
-
-    let runner_id = request.runner_id.as_deref().unwrap_or("unknown");
-    let source_snapshot = request.source_snapshot.clone().or_else(|| {
-        Some(SourceSnapshot::existing_remote(
-            runner_id,
-            &request.cwd,
-            None,
-        ))
-    });
+    let plan = prepare_runner_process(RunnerProcessRequest {
+        runner_id: request.runner_id,
+        cwd: request.cwd,
+        project_id: request.project_id,
+        command: request.command,
+        env: request.env,
+        capture_patch: request.capture_patch,
+        raw_exec: request.raw_exec,
+        source_snapshot: request.source_snapshot,
+    })?;
+    let source_snapshot = Some(plan.source_snapshot.clone());
 
     let summary = json!({
-        "runner_id": request.runner_id,
-        "cwd": request.cwd,
-        "command": request.command,
+        "runner_id": plan.runner.id,
+        "cwd": plan.cwd,
+        "command": plan.command,
         "capture_patch": request.capture_patch,
         "source_snapshot": source_snapshot,
     });
@@ -366,37 +355,23 @@ fn enqueue_exec_job(
         move |job| {
             job.progress(json!({
                 "phase": "started",
-                "runner_id": request.runner_id,
-                "cwd": request.cwd,
-                "command": request.command,
+                "runner_id": plan.runner.id,
+                "cwd": plan.cwd,
+                "command": plan.command,
                 "capture_patch": request.capture_patch,
                 "job_id": job.job_id(),
                 "source_snapshot": source_snapshot,
             }))?;
             let baseline = if request.capture_patch {
-                Some(capture_baseline(&request.cwd)?)
+                Some(capture_baseline(&plan.cwd)?)
             } else {
                 None
             };
-            let mut env = request.env.clone();
-            normalize_runner_command_env(&mut env);
-            let mut command = Command::new(&request.command[0]);
-            command
-                .args(&request.command[1..])
-                .envs(env.iter())
-                .current_dir(&request.cwd);
-            if let Some(snapshot) = &source_snapshot {
-                command.env(
-                    crate::core::observation::SOURCE_SNAPSHOT_METADATA_ENV,
-                    serde_json::to_string(snapshot).unwrap_or_default(),
-                );
-            }
-            let measured = measured_command_output(&mut command)?;
-            let output = measured.output;
-            let metrics = measured.metrics;
-            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            let exit_code = output.status.code().unwrap_or(1);
+            let process_output = execute_runner_process(&plan)?;
+            let stdout = process_output.stdout.clone();
+            let stderr = process_output.stderr.clone();
+            let exit_code = process_output.exit_code;
+            let metrics = process_output.metrics.clone();
             if !stdout.is_empty() {
                 job.stdout(stdout.clone())?;
             }
@@ -411,9 +386,9 @@ fn enqueue_exec_job(
             let patch = if let Some(baseline) = baseline {
                 Some(capture_patch_report(
                     job.job_id(),
-                    request.runner_id.as_deref().unwrap_or("unknown"),
-                    &request.cwd,
-                    &request.command,
+                    &plan.runner.id,
+                    &plan.cwd,
+                    &plan.command,
                     source_snapshot.as_ref(),
                     &baseline,
                     exit_code,
@@ -422,9 +397,9 @@ fn enqueue_exec_job(
                 None
             };
             let result = json!({
-                "runner_id": request.runner_id,
-                "cwd": request.cwd,
-                "command": request.command,
+                "runner_id": plan.runner.id,
+                "cwd": plan.cwd,
+                "command": plan.command,
                 "exit_code": exit_code,
                 "stdout": stdout,
                 "stderr": stderr,
@@ -435,13 +410,13 @@ fn enqueue_exec_job(
             if exit_code != 0 {
                 job.result(result.clone())?;
                 return Err(Error::remote_command_failed(RemoteCommandFailedDetails {
-                    command: request.command.join(" "),
+                    command: plan.command.join(" "),
                     exit_code,
                     stdout,
                     stderr,
                     target: TargetDetails {
                         project_id: None,
-                        server_id: request.runner_id,
+                        server_id: Some(plan.runner.id.clone()),
                         host: None,
                     },
                 }));

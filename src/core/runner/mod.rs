@@ -53,7 +53,9 @@ pub use evidence::{
     download_remote_artifact, is_remote_runner_artifact_path, is_reportable_artifact_evidence_path,
     is_retrievable_runner_artifact, reportable_artifact_evidence_path, RemoteArtifactDownload,
 };
-pub(crate) use execution::daemon_api_get;
+pub(crate) use execution::{
+    daemon_api_get, execute_runner_process, prepare_runner_process, RunnerProcessRequest,
+};
 pub use execution::{exec, RunnerExecMode, RunnerExecOptions, RunnerExecOutput};
 pub(crate) use git_dependency_materialization::{
     materialize_git_dependency, RunnerGitDependencyMaterializationOptions,
@@ -71,7 +73,6 @@ pub use offload_metadata::{
     capture_lab_offload_subprocess_metadata, lab_offload_metadata,
     lab_offload_metadata_with_workspace_mapping,
 };
-pub(crate) use resource_metrics::measured_command_output;
 pub use resource_metrics::RunnerResourceMetrics;
 pub use session::{
     ReverseRunnerConnectOptions, RunnerConnectReport, RunnerDisconnectReport, RunnerFailureKind,
