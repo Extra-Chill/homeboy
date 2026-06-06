@@ -1,0 +1,79 @@
+use clap::{Args, Subcommand};
+use serde::Serialize;
+
+use super::CmdResult;
+
+#[derive(Args)]
+pub struct RuntimeArgs {
+    #[command(subcommand)]
+    command: RuntimeCommand,
+}
+
+#[derive(Subcommand)]
+enum RuntimeCommand {
+    /// Resolve core-owned runner runtime helper paths.
+    Helper {
+        #[command(subcommand)]
+        command: RuntimeHelperCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum RuntimeHelperCommand {
+    /// Print the materialized path for a runtime helper.
+    Path {
+        /// Helper filename or HOMEBOY_RUNTIME_* env var name.
+        helper: String,
+    },
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+pub enum RuntimeOutput {
+    HelperPath(RuntimeHelperPathOutput),
+}
+
+#[derive(Serialize)]
+pub struct RuntimeHelperPathOutput {
+    command: String,
+    helper: String,
+    path: String,
+}
+
+pub fn run(args: RuntimeArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<RuntimeOutput> {
+    match args.command {
+        RuntimeCommand::Helper { command } => match command {
+            RuntimeHelperCommand::Path { helper } => helper_path(&helper),
+        },
+    }
+}
+
+fn helper_path(helper: &str) -> CmdResult<RuntimeOutput> {
+    let path = homeboy::core::extension::helper_path(helper)?;
+
+    Ok((
+        RuntimeOutput::HelperPath(RuntimeHelperPathOutput {
+            command: "runtime.helper.path".to_string(),
+            helper: helper.to_string(),
+            path: path.to_string_lossy().to_string(),
+        }),
+        0,
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn helper_path_resolves_core_helper() {
+        crate::test_support::with_isolated_home(|_| {
+            let (output, exit_code) = helper_path("command-capture.sh").unwrap();
+
+            assert_eq!(exit_code, 0);
+            let RuntimeOutput::HelperPath(output) = output;
+            assert!(output.path.ends_with("command-capture.sh"));
+            assert!(std::path::Path::new(&output.path).is_file());
+        });
+    }
+}
