@@ -648,6 +648,7 @@ fi
 if [ -z "$ARTIFACTS_DIR" ]; then
     ARTIFACTS_DIR=$(mktemp -d "${TMPDIR:-/tmp}/homeboy-wp-codebox-bench-artifacts.XXXXXX")
 fi
+mkdir -p "$ARTIFACTS_DIR"
 
 homeboy_wp_codebox_run_prepare_steps
 
@@ -896,7 +897,7 @@ homeboy_wp_codebox_emit_memory_fatal_diagnostic() {
     echo "  Raw output: $output_artifact" >&2
 }
 
-RECIPE_FILE=$(mktemp "${TMPDIR:-/tmp}/homeboy-wp-codebox-bench-recipe.XXXXXX")
+RECIPE_FILE=$(mktemp "${ARTIFACTS_DIR}/homeboy-wp-codebox-bench-recipe.XXXXXX")
 jq -n \
     --arg wpCodeboxBin "$WP_CODEBOX_RESOLVED_BIN" \
     --arg wp "$WP_CODEBOX_WORDPRESS_VERSION" \
@@ -933,7 +934,7 @@ jq -n \
         }
     }' | node "$BENCH_RECIPE_BUILDER" > "$RECIPE_FILE"
 
-WP_CODEBOX_TMPFILE=$(mktemp)
+WP_CODEBOX_TMPFILE=$(mktemp "${ARTIFACTS_DIR}/homeboy-wp-codebox-output.XXXXXX")
 set +e
 "${wp_codebox_command[@]}" recipe-run \
     --recipe "$RECIPE_FILE" \

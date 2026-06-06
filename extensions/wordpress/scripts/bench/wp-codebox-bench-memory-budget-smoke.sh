@@ -12,6 +12,7 @@ FAKE_CORE_MODULE="${TMPDIR}/wp-codebox-core.mjs"
 FAKE_PREFLIGHT="${TMPDIR}/bash-preflight.sh"
 FAKE_BENCH_HELPER="${TMPDIR}/bench-helper.sh"
 CAPTURED_RECIPE="${TMPDIR}/captured-recipe.json"
+CAPTURED_RECIPE_PATH="${TMPDIR}/captured-recipe-path.txt"
 RESULTS_FILE="${TMPDIR}/bench-results.json"
 ARTIFACTS_DIR="${TMPDIR}/artifacts"
 
@@ -42,6 +43,7 @@ import { copyFileSync, writeFileSync } from "node:fs"
 const recipeIndex = process.argv.indexOf("--recipe")
 if (recipeIndex !== -1 && process.argv[recipeIndex + 1]) {
   copyFileSync(process.argv[recipeIndex + 1], process.env.CAPTURED_RECIPE)
+  writeFileSync(process.env.CAPTURED_RECIPE_PATH, process.argv[recipeIndex + 1])
 }
 writeFileSync(1, 'PHP.run() failed with exit code 255.\n\nFatal error: Allowed memory size of 268435456 bytes exhausted (tried to allocate 126976 bytes) in /internal/shared/sqlite-database-integration/wp-includes/database/sqlite/class-wp-pdo-proxy-statement.php on line 358\n')
 process.exit(255)
@@ -50,6 +52,7 @@ chmod +x "$FAKE_WP_CODEBOX"
 
 set +e
 output=$(CAPTURED_RECIPE="$CAPTURED_RECIPE" \
+    CAPTURED_RECIPE_PATH="$CAPTURED_RECIPE_PATH" \
     HOMEBOY_WP_CODEBOX_BIN="$FAKE_WP_CODEBOX" \
     HOMEBOY_WP_CODEBOX_CORE_MODULE="$FAKE_CORE_MODULE" \
     HOMEBOY_RUNTIME_BASH_PREFLIGHT="$FAKE_PREFLIGHT" \
@@ -80,6 +83,16 @@ if ! jq -e '.runtime.wp == "latest"' "$CAPTURED_RECIPE" >/dev/null; then
     cat "$CAPTURED_RECIPE" >&2
     exit 1
 fi
+
+captured_recipe_path=$(cat "$CAPTURED_RECIPE_PATH")
+case "$captured_recipe_path" in
+    "$ARTIFACTS_DIR"/*) ;;
+    *)
+        echo "Expected generated recipe scratch file to live under artifacts directory" >&2
+        echo "$captured_recipe_path" >&2
+        exit 1
+        ;;
+esac
 
 DIAGNOSTICS_FILE="${ARTIFACTS_DIR}/wp-codebox-bench-diagnostics.json"
 if ! jq -e '
