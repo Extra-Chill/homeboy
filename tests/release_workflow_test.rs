@@ -32,30 +32,62 @@ fn job_section<'a>(workflow: &'a str, job: &str) -> &'a str {
 fn release_refactor_gate_enables_non_pr_repair_path() {
     let gate_refactor = job_section(release_workflow(), "gate-refactor");
 
-    assert!(gate_refactor.contains("commands: audit,lint,test"));
+    assert!(gate_refactor.contains("commands: ${{ env.RELEASE_BLOCKING_COMMANDS }}"));
     assert!(gate_refactor.contains("autofix: 'true'"));
     assert!(gate_refactor.contains("autofix-mode: always"));
-    assert!(gate_refactor.contains("Baseline/Cargo.lock-only drift is pushed directly"));
+    assert!(gate_refactor.contains("Only release-blocking commands are repaired"));
     assert!(gate_refactor.contains("autofix-open-pr: 'true'"));
+    assert!(gate_refactor.contains("continue-on-error: true"));
 }
 
 #[test]
-fn release_prepare_waits_for_repaired_quality_state() {
+fn release_quality_policy_defaults_to_lint_and_test_blocking() {
+    assert!(release_workflow().contains(
+        "RELEASE_BLOCKING_COMMANDS: ${{ inputs.release_blocking_commands || 'lint,test' }}"
+    ));
+
+    let policy = job_section(release_workflow(), "release-quality-policy");
+
+    assert!(policy.contains("BLOCKING_COMMANDS: ${{ env.RELEASE_BLOCKING_COMMANDS }}"));
+    assert!(policy.contains("check_command audit"));
+    assert!(policy.contains("check_command lint"));
+    assert!(policy.contains("check_command test"));
+    assert!(policy.contains("Command ${command} is tracked but not release-blocking"));
+}
+
+#[test]
+fn release_prepare_waits_for_command_policy_not_raw_audit_or_refactor() {
     let gate_refactor = job_section(release_workflow(), "gate-refactor");
     let prepare = job_section(release_workflow(), "prepare");
 
-    for gate in ["gate-audit", "gate-lint", "gate-test"] {
+    assert!(
+        !gate_refactor.contains("- gate-audit"),
+        "gate-refactor should not wait on tracked-only audit by default"
+    );
+
+    for gate in ["gate-lint", "gate-test"] {
         assert!(
             gate_refactor.contains(&format!("- {gate}")),
-            "gate-refactor should inspect the read-only {gate} result before repair"
-        );
-        assert!(
-            !prepare.contains(&format!("- {gate}")),
-            "prepare should wait on gate-refactor, not fail directly on {gate}"
+            "gate-refactor should inspect the read-only {gate} result for advisory repair"
         );
     }
 
-    assert!(prepare.contains("- gate-refactor"));
-    assert!(prepare.contains("needs.gate-refactor.result == 'success'"));
+    for gate in ["gate-audit", "gate-lint", "gate-test"] {
+        assert!(
+            !prepare.contains(&format!("- {gate}")),
+            "prepare should wait on release-quality-policy, not raw {gate}"
+        );
+    }
+
+    assert!(prepare.contains("- release-quality-policy"));
+    assert!(!prepare.contains("- gate-refactor"));
+    assert!(prepare.contains("needs.release-quality-policy.result == 'success'"));
     assert!(prepare.contains("inputs.release_tag != ''"));
+}
+
+#[test]
+fn release_test_gate_exposes_release_blocking_policy_to_rust_tests() {
+    let gate_test = job_section(release_workflow(), "gate-test");
+
+    assert!(gate_test.contains("RELEASE_BLOCKING_COMMANDS: ${{ env.RELEASE_BLOCKING_COMMANDS }}"));
 }
