@@ -3,6 +3,8 @@ const { spawnSync } = require('node:child_process');
 const path = require('node:path');
 
 const script = path.join(__dirname, '..', 'scripts', 'bench', 'build-wp-codebox-bench-recipe.mjs');
+const fixtureCoreModule = path.join(__dirname, 'fixtures', 'wp-codebox-core-recipe-builder.mjs');
+const missingBenchBuilderModule = path.join(__dirname, 'fixtures', 'wp-codebox-core-missing-bench-builder.mjs');
 
 const input = {
 	options: {
@@ -15,6 +17,8 @@ const input = {
 		wpConfigDefines: { WP_DEBUG: true },
 		bootstrapFiles: ['/wordpress/wp-content/plugins/fixture-plugin/bootstrap.php'],
 		workloads: [{ id: 'fixture-workload', steps: [{ type: 'php', code: 'return [];' }] }],
+		lifecycle: { before: ['fixture'] },
+		resetPolicy: { mode: 'snapshot' },
 		pluginRuntime: {
 			url: 'https://example.com/runtime.zip',
 			sha256: 'abc123',
@@ -29,7 +33,7 @@ const result = spawnSync(process.execPath, [script], {
 	cwd: path.join(__dirname, '..'),
 	input: JSON.stringify(input),
 	encoding: 'utf8',
-	env: { ...process.env, HOMEBOY_WP_CODEBOX_CORE_MODULE: '' },
+	env: { ...process.env, HOMEBOY_WP_CODEBOX_CORE_MODULE: fixtureCoreModule },
 });
 
 assert.equal(result.status, 0, result.stderr);
@@ -39,19 +43,12 @@ assert.equal(recipe.schema, 'wp-codebox/workspace-recipe/v1');
 assert.equal(recipe.inputs.mounts[0].mode, 'readonly');
 assert.deepEqual(recipe.inputs.extraPlugins[0], { source: '/tmp/extra-plugin.zip', slug: 'extra-plugin', activate: true });
 assert.deepEqual(recipe.inputs.pluginRuntime, input.options.pluginRuntime);
-assert.equal(recipe.runtime.blueprint.steps[0].step, 'defineWpConfigConsts');
-assert.deepEqual(recipe.runtime.blueprint.steps[0].consts, { WP_DEBUG: true });
 assert.deepEqual(recipe.workflow.steps, [{
-	command: 'wordpress.bench',
+	command: 'fixture.wordpress.bench',
 	args: [
-		'component-id=fixture-component',
 		'plugin-slug=fixture-plugin',
-		'iterations=5',
-		'warmup=0',
-		'dependency-slugs=dependency-one,dependency-two',
-		'env-json={"FIXTURE":"1"}',
-		'bootstrap-files-json=["/wordpress/wp-content/plugins/fixture-plugin/bootstrap.php"]',
-		'workloads-json=[{"id":"fixture-workload","steps":[{"type":"php","code":"return [];"}]}]',
+		'lifecycle-json={"before":["fixture"]}',
+		'reset-policy-json={"mode":"snapshot"}',
 	],
 }]);
 
@@ -62,15 +59,26 @@ const diagnosticResult = spawnSync(process.execPath, [script], {
 	env: { ...process.env, HOMEBOY_WP_CODEBOX_CORE_MODULE: '/missing/wp-codebox-core.mjs' },
 });
 
-assert.equal(diagnosticResult.status, 0, diagnosticResult.stderr);
-assert.match(diagnosticResult.stderr, /HOMEBOY_WP_CODEBOX_CORE_MODULE could not be loaded; using bundled WP Codebox bench recipe builder/);
+assert.notEqual(diagnosticResult.status, 0);
+assert.match(diagnosticResult.stderr, /WP Codebox recipe builder export buildWordPressBenchRecipe is unavailable/);
+assert.match(diagnosticResult.stderr, /no longer falls back to bundled WP Codebox recipe builders/);
 assert.match(diagnosticResult.stderr, /\/missing\/wp-codebox-core\.mjs/);
+
+const staleModuleResult = spawnSync(process.execPath, [script], {
+	cwd: path.join(__dirname, '..'),
+	input: JSON.stringify(input),
+	encoding: 'utf8',
+	env: { ...process.env, HOMEBOY_WP_CODEBOX_CORE_MODULE: missingBenchBuilderModule },
+});
+
+assert.notEqual(staleModuleResult.status, 0);
+assert.match(staleModuleResult.stderr, /missing buildWordPressBenchRecipe export/);
 
 const invalidMountResult = spawnSync(process.execPath, [script], {
 	cwd: path.join(__dirname, '..'),
 	input: JSON.stringify({ options: { pluginSlug: 'fixture-plugin', mounts: [{ source: '/tmp/plugin', target: 'relative/path' }] } }),
 	encoding: 'utf8',
-	env: { ...process.env, HOMEBOY_WP_CODEBOX_CORE_MODULE: '' },
+	env: { ...process.env, HOMEBOY_WP_CODEBOX_CORE_MODULE: fixtureCoreModule },
 });
 
 assert.notEqual(invalidMountResult.status, 0);
