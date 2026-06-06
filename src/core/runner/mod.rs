@@ -71,7 +71,7 @@ pub use offload_metadata::{
     capture_lab_offload_subprocess_metadata, lab_offload_metadata,
     lab_offload_metadata_with_workspace_mapping,
 };
-pub(crate) use resource_metrics::measured_command_output;
+pub(crate) use resource_metrics::measured_command_output_until_cancelled;
 pub use resource_metrics::RunnerResourceMetrics;
 pub use session::{
     ReverseRunnerConnectOptions, RunnerConnectReport, RunnerDisconnectReport, RunnerFailureKind,

@@ -520,6 +520,13 @@ impl JobHandle {
         self.job_id
     }
 
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.store
+            .get(self.job_id)
+            .map(|job| job.status == JobStatus::Cancelled)
+            .unwrap_or(true)
+    }
+
     pub(crate) fn stdout(&self, message: impl Into<String>) -> Result<JobEvent> {
         self.store.append_event(
             self.job_id,

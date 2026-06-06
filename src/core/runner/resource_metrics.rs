@@ -6,7 +6,8 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use crate::core::engine::command::{
-    wait_with_bounded_output, CommandCaptureMetadata, DEFAULT_CAPTURE_LIMIT_BYTES,
+    isolate_process_tree, wait_with_bounded_output, wait_with_bounded_output_until_cancelled,
+    CommandCaptureMetadata, DEFAULT_CAPTURE_LIMIT_BYTES,
 };
 use crate::core::error::{Error, Result};
 
@@ -55,6 +56,36 @@ pub(crate) fn measured_command_output(command: &mut Command) -> Result<MeasuredO
         wait_with_bounded_output(child, DEFAULT_CAPTURE_LIMIT_BYTES).map_err(|err| {
             Error::internal_io(err.to_string(), Some("wait for runner command".to_string()))
         })?;
+    let capture = bounded_output.capture.clone();
+    let output = bounded_output.into_output();
+    let metrics = collector.finish(started.elapsed());
+    Ok(MeasuredOutput {
+        output,
+        capture,
+        metrics,
+    })
+}
+
+pub(crate) fn measured_command_output_until_cancelled(
+    command: &mut Command,
+    is_cancelled: impl FnMut() -> bool,
+) -> Result<MeasuredOutput> {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    isolate_process_tree(command);
+    let started = Instant::now();
+    let mut child = command.spawn().map_err(|err| {
+        Error::internal_io(err.to_string(), Some("execute runner command".to_string()))
+    })?;
+    let pid = child.id();
+    let collector = ResourceMetricsCollector::start(pid);
+    let bounded_output = wait_with_bounded_output_until_cancelled(
+        &mut child,
+        DEFAULT_CAPTURE_LIMIT_BYTES,
+        is_cancelled,
+    )
+    .map_err(|err| {
+        Error::internal_io(err.to_string(), Some("wait for runner command".to_string()))
+    })?;
     let capture = bounded_output.capture.clone();
     let output = bounded_output.into_output();
     let metrics = collector.finish(started.elapsed());

@@ -8,12 +8,12 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
-use crate::core::api_jobs::JobStore;
+use crate::core::api_jobs::{JobStatus, JobStore};
 use crate::core::error::{Error, RemoteCommandFailedDetails, Result, TargetDetails};
 use crate::core::http_api::{self, AnalysisJobRunner, HttpMethod, UnsupportedAnalysisJobRunner};
 use crate::core::paths;
 use crate::core::process::pid_is_running;
-use crate::core::runner::{measured_command_output, normalize_runner_command_env};
+use crate::core::runner::{measured_command_output_until_cancelled, normalize_runner_command_env};
 use crate::core::source_snapshot::SourceSnapshot;
 use crate::core::upgrade::VERSION;
 
@@ -391,12 +391,31 @@ fn enqueue_exec_job(
                     serde_json::to_string(snapshot).unwrap_or_default(),
                 );
             }
-            let measured = measured_command_output(&mut command)?;
+            let measured =
+                measured_command_output_until_cancelled(&mut command, || job.is_cancelled())?;
             let output = measured.output;
             let metrics = measured.metrics;
             let stdout = String::from_utf8_lossy(&output.stdout).to_string();
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
             let exit_code = output.status.code().unwrap_or(1);
+            if job.is_cancelled() {
+                let _ = job.progress(json!({
+                    "phase": "cancelled",
+                    "exit_code": exit_code,
+                    "metrics": metrics.clone(),
+                }));
+                return Ok(json!({
+                    "runner_id": request.runner_id,
+                    "cwd": request.cwd,
+                    "command": request.command,
+                    "exit_code": exit_code,
+                    "stdout": stdout,
+                    "stderr": stderr,
+                    "source_snapshot": source_snapshot,
+                    "metrics": metrics,
+                    "status": JobStatus::Cancelled,
+                }));
+            }
             if !stdout.is_empty() {
                 job.stdout(stdout.clone())?;
             }
