@@ -38,6 +38,7 @@
 - [review](review.md) — scoped audit + lint + test umbrella for PR-style changes
 - [rig](rig.md) — reproducible local dev environments ([spec](rig-spec.md))
 - [runner](runner.md) — local and SSH execution runner registry
+- [runtime](runtime.md) — core-owned runner runtime helper lookup
 - [runs](runs.md) — persisted observation runs and artifacts
 - [server](server.md)
 - [self](self.md) — active binary and install-signal inspection

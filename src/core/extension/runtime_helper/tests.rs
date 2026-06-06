@@ -22,6 +22,10 @@ fn ensure_all_helpers_writes_all_files() {
             "runner prelude helper should be in pairs"
         );
         assert!(
+            pairs.iter().any(|(k, _)| k == COMMAND_CAPTURE_ENV),
+            "command capture helper should be in pairs"
+        );
+        assert!(
             pairs.iter().any(|(k, _)| k == BASH_PREFLIGHT_ENV),
             "bash preflight helper should be in pairs"
         );
@@ -45,6 +49,17 @@ fn ensure_all_helpers_writes_all_files() {
             pairs.iter().any(|(k, _)| k == BENCH_HELPER_PHP_ENV),
             "bench PHP helper should be in pairs"
         );
+    });
+}
+
+#[test]
+fn helper_path_resolves_by_filename_and_env_var() {
+    with_isolated_home(|_| {
+        let by_filename = helper_path("command-capture.sh").expect("helper path by filename");
+        let by_env = helper_path(COMMAND_CAPTURE_ENV).expect("helper path by env var");
+
+        assert_eq!(by_filename, by_env);
+        assert!(by_filename.is_file());
     });
 }
 

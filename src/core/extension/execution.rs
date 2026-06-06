@@ -806,6 +806,7 @@ mod tests {
             for (env_var, filename) in [
                 (runtime_helper::RUNNER_STEPS_ENV, "runner-steps.sh"),
                 (runtime_helper::RUNNER_PRELUDE_ENV, "runner-prelude.sh"),
+                (runtime_helper::COMMAND_CAPTURE_ENV, "command-capture.sh"),
                 (runtime_helper::BASH_PREFLIGHT_ENV, "bash-preflight.sh"),
             ] {
                 let helper = env
