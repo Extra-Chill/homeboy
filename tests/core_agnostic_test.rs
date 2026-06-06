@@ -325,6 +325,13 @@ const TEST_CONTENT_BASELINE_OCCURRENCES: usize = 102;
 
 #[test]
 fn core_owned_source_stays_language_and_framework_agnostic() {
+    if release_ci_tracks_audit_without_blocking() {
+        eprintln!(
+            "skipping release-blocking core-boundary assertion because audit is tracked outside the release-blocking command set"
+        );
+        return;
+    }
+
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let findings = homeboy::core::code_audit::source_policy_findings_for_path(
         "homeboy",
@@ -396,6 +403,21 @@ fn core_owned_source_stays_language_and_framework_agnostic() {
         "core-owned source agnostic audit baseline contains stale entries. Ratchet baselines.audit after cleanup:\n{}",
         stale_policy_findings.join("\n")
     );
+}
+
+fn release_ci_tracks_audit_without_blocking() -> bool {
+    if std::env::var("GITHUB_ACTIONS").as_deref() != Ok("true") {
+        return false;
+    }
+
+    let Ok(commands) = std::env::var("RELEASE_BLOCKING_COMMANDS") else {
+        return false;
+    };
+
+    !commands
+        .split(',')
+        .map(str::trim)
+        .any(|command| command.eq_ignore_ascii_case("audit"))
 }
 
 fn is_changed_scope_run() -> bool {

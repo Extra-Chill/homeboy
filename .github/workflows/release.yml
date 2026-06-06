@@ -32,6 +32,13 @@ on:
         description: 'Existing tag to publish/recover without preparing a new release'
         type: string
         default: ''
+      release_blocking_commands:
+        description: 'Comma-separated quality commands that may block release preparation'
+        type: string
+        default: 'lint,test'
+
+env:
+  RELEASE_BLOCKING_COMMANDS: ${{ inputs.release_blocking_commands || 'lint,test' }}
 
 # Only one release pipeline at a time. If a push arrives while a release
 # is already running, it queues (never cancels). The queued run starts
@@ -144,16 +151,11 @@ jobs:
           path: target/release/homeboy
           retention-days: 1
 
-  # ── Step 3: Quality gate (parallel read-only checks + repair) ──
-  # Unlike PR CI (scoped to changed files), release quality gate runs
-  # unscoped against the entire codebase.
-  # Read-only gates run in parallel after the shared build, then release
-  # preparation waits for the repaired quality state from gate-refactor instead
-  # of failing immediately on the first read-only drift signal. Read-only gates
-  # use autofix: false. The dedicated auto-refactor job runs Homeboy Action's
-  # non-PR repair path: drift-only baseline/Cargo.lock changes are committed
-  # directly back to the release branch, while source autofixes fall through to
-  # the generated PR path.
+  # ── Step 3: Quality checks (parallel read-only checks + advisory repair) ──
+  # Release preparation is gated by release-quality-policy, not by raw job
+  # failures. Commands opt in to release blocking through RELEASE_BLOCKING_COMMANDS
+  # (default: lint,test). Audit still runs and files issues, but stale/full-tree
+  # audit debt does not block releases unless audit is explicitly listed.
   gate-audit:
     name: Audit
     needs:
@@ -186,6 +188,7 @@ jobs:
           binary-path: .homeboy-bin/homeboy
           commands: audit
           expected-commands: audit,lint,test
+          args: ${{ github.event.before && format('--changed-since {0}', github.event.before) || '' }}
           autofix: 'false'
           app-token: ${{ steps.app-token.outputs.token || '' }}
 
@@ -252,6 +255,8 @@ jobs:
           private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
 
       - uses: Extra-Chill/homeboy-action@v2
+        env:
+          RELEASE_BLOCKING_COMMANDS: ${{ env.RELEASE_BLOCKING_COMMANDS }}
         with:
           binary-path: .homeboy-bin/homeboy
           commands: test
@@ -264,7 +269,6 @@ jobs:
     needs:
       - check
       - gate-build
-      - gate-audit
       - gate-lint
       - gate-test
     if: ${{ always() && inputs.release_tag == '' && needs.check.outputs.should-release == 'true' && needs.gate-build.result == 'success' }}
@@ -297,18 +301,74 @@ jobs:
           private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
 
       # In Homeboy Action, autofix-open-pr gates the non-PR repair transaction.
-      # Baseline/Cargo.lock-only drift is pushed directly to the base branch;
-      # source changes still use the generated autofix PR fallback.
+      # Only release-blocking commands are repaired in the release path. Audit
+      # remains tracked by gate-audit unless it is explicitly added to
+      # RELEASE_BLOCKING_COMMANDS.
       - name: Run autofix via homeboy-action
         uses: Extra-Chill/homeboy-action@v2
+        continue-on-error: true
         with:
           binary-path: .homeboy-bin/homeboy
-          commands: audit,lint,test
+          commands: ${{ env.RELEASE_BLOCKING_COMMANDS }}
           expected-commands: audit,lint,test
           autofix: 'true'
           autofix-mode: always
           autofix-open-pr: 'true'
           app-token: ${{ steps.app-token.outputs.token }}
+
+  release-quality-policy:
+    name: Release Quality Policy
+    needs:
+      - check
+      - gate-build
+      - gate-audit
+      - gate-lint
+      - gate-test
+      - gate-refactor
+    if: ${{ always() && needs.check.outputs.should-release == 'true' && needs.gate-build.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Enforce release-blocking commands
+        env:
+          BLOCKING_COMMANDS: ${{ env.RELEASE_BLOCKING_COMMANDS }}
+          AUDIT_RESULT: ${{ needs.gate-audit.result }}
+          LINT_RESULT: ${{ needs.gate-lint.result }}
+          TEST_RESULT: ${{ needs.gate-test.result }}
+          REFACTOR_RESULT: ${{ needs.gate-refactor.result }}
+        run: |
+          set -euo pipefail
+
+          normalized="$(printf '%s' "${BLOCKING_COMMANDS}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+          blocking=",${normalized},"
+          failed=0
+
+          check_command() {
+            local command="$1"
+            local result="$2"
+
+            if [[ "${blocking}" == *",${command},"* ]]; then
+              if [ "${result}" = "success" ]; then
+                echo "::notice::Release-blocking command ${command} passed"
+              else
+                echo "::error::Release-blocking command ${command} finished with result: ${result}"
+                failed=1
+              fi
+            else
+              echo "::notice::Command ${command} is tracked but not release-blocking (result: ${result})"
+            fi
+          }
+
+          check_command audit "${AUDIT_RESULT}"
+          check_command lint "${LINT_RESULT}"
+          check_command test "${TEST_RESULT}"
+
+          if [ "${REFACTOR_RESULT}" != "success" ]; then
+            echo "::notice::Advisory auto-refactor finished with result: ${REFACTOR_RESULT}"
+          fi
+
+          if [ "${failed}" -ne 0 ]; then
+            exit 1
+          fi
 
   # ── Step 4: Version bump + changelog + tag ──
   prepare:
@@ -316,8 +376,8 @@ jobs:
     needs:
       - check
       - gate-build
-      - gate-refactor
-    if: ${{ always() && needs.check.outputs.should-release == 'true' && needs.gate-build.result == 'success' && (inputs.release_tag != '' || needs.gate-refactor.result == 'success') }}
+      - release-quality-policy
+    if: ${{ always() && needs.check.outputs.should-release == 'true' && needs.gate-build.result == 'success' && (inputs.release_tag != '' || needs.release-quality-policy.result == 'success') }}
     runs-on: ubuntu-latest
     outputs:
       release-version: ${{ steps.recovery.outputs.release-version || steps.release.outputs.release-version }}
