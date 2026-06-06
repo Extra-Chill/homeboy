@@ -595,6 +595,7 @@ fn run_scoped_lint_runs(
         success,
         stdout: String::new(),
         stderr: String::new(),
+        child_resource: None,
     })
 }
 

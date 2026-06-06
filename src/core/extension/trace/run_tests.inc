@@ -280,9 +280,10 @@ JSON
                 .map(|i| format!("line {i}"))
                 .collect::<Vec<_>>()
                 .join("\n"),
+            child_resource: None,
         };
 
-        let failure = failure_from_output(&args, &output);
+        let failure = failure_from_output(&args, &output, None, None);
 
         assert_eq!(failure.component_id, "example");
         assert_eq!(failure.scenario_id, "close-window");

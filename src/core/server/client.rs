@@ -22,6 +22,9 @@ use std::process::{Command, Stdio};
 static ACTIVE_CLEANUP_PGID: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 
 #[cfg(unix)]
+static ACTIVE_CLEANUP_SIGNAL: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+#[cfg(unix)]
 static CLEANUP_SIGNALS_INSTALLED: std::sync::Once = std::sync::Once::new();
 
 pub struct SshClient {
@@ -519,19 +522,24 @@ fn execute_local_command_in_dir_impl(
         invocation_child_guard(env, child.id(), cleanup_guard.pgid(), command);
     let monitor = ChildResourceMonitor::start(child.id(), command.to_string());
 
-    let output = match child.wait_with_output() {
+    let waited_output = child.wait_with_output();
+    let interrupted_signal = active_cleanup_signal();
+    let output = match waited_output {
         Ok(out) => CommandOutput {
             stdout: String::from_utf8_lossy(&out.stdout).to_string(),
-            stderr: String::from_utf8_lossy(&out.stderr).to_string(),
-            success: out.status.success(),
-            exit_code: out.status.code().unwrap_or(-1),
+            stderr: stderr_with_interruption(
+                String::from_utf8_lossy(&out.stderr).to_string(),
+                interrupted_signal,
+            ),
+            success: out.status.success() && interrupted_signal.is_none(),
+            exit_code: interrupted_exit_code(interrupted_signal, out.status.code().unwrap_or(-1)),
             child_resource: Some(monitor.finish()),
         },
         Err(e) => CommandOutput {
             stdout: String::new(),
-            stderr: format!("Command error: {}", e),
+            stderr: stderr_with_interruption(format!("Command error: {}", e), interrupted_signal),
             success: false,
-            exit_code: -1,
+            exit_code: interrupted_exit_code(interrupted_signal, -1),
             child_resource: Some(monitor.finish()),
         },
     };
@@ -679,6 +687,7 @@ fn execute_local_command_passthrough_impl(
         .map(|pipe| thread::spawn(move || tee_to(pipe, std::io::stderr())));
 
     let status = child.wait();
+    let interrupted_signal = active_cleanup_signal();
 
     let stdout = stdout_handle
         .and_then(|h| h.join().ok())
@@ -690,16 +699,19 @@ fn execute_local_command_passthrough_impl(
     let output = match status {
         Ok(status) => CommandOutput {
             stdout,
-            stderr,
-            success: status.success(),
-            exit_code: status.code().unwrap_or(-1),
+            stderr: stderr_with_interruption(stderr, interrupted_signal),
+            success: status.success() && interrupted_signal.is_none(),
+            exit_code: interrupted_exit_code(interrupted_signal, status.code().unwrap_or(-1)),
             child_resource: Some(monitor.finish()),
         },
         Err(e) => CommandOutput {
             stdout,
-            stderr: format!("{stderr}\nCommand error: {}", e),
+            stderr: stderr_with_interruption(
+                format!("{stderr}\nCommand error: {}", e),
+                interrupted_signal,
+            ),
             success: false,
-            exit_code: -1,
+            exit_code: interrupted_exit_code(interrupted_signal, -1),
             child_resource: Some(monitor.finish()),
         },
     };
@@ -799,6 +811,7 @@ pub(crate) fn execute_local_command_stderr_passthrough(
         .map(|pipe| thread::spawn(move || tee_to_stderr(pipe)));
 
     let status = child.wait();
+    let interrupted_signal = active_cleanup_signal();
 
     let stdout = stdout_handle
         .and_then(|h| h.join().ok())
@@ -810,16 +823,19 @@ pub(crate) fn execute_local_command_stderr_passthrough(
     let output = match status {
         Ok(status) => CommandOutput {
             stdout,
-            stderr,
-            success: status.success(),
-            exit_code: status.code().unwrap_or(-1),
+            stderr: stderr_with_interruption(stderr, interrupted_signal),
+            success: status.success() && interrupted_signal.is_none(),
+            exit_code: interrupted_exit_code(interrupted_signal, status.code().unwrap_or(-1)),
             child_resource: Some(monitor.finish()),
         },
         Err(e) => CommandOutput {
             stdout,
-            stderr: format!("{stderr}\nCommand error: {}", e),
+            stderr: stderr_with_interruption(
+                format!("{stderr}\nCommand error: {}", e),
+                interrupted_signal,
+            ),
             success: false,
-            exit_code: -1,
+            exit_code: interrupted_exit_code(interrupted_signal, -1),
             child_resource: Some(monitor.finish()),
         },
     };
@@ -935,14 +951,40 @@ fn install_process_cleanup_signal_handlers() {
 #[cfg(unix)]
 extern "C" fn cleanup_signal_handler(signal: libc::c_int) {
     let pgid = ACTIVE_CLEANUP_PGID.load(Ordering::SeqCst);
+    ACTIVE_CLEANUP_SIGNAL.store(signal, Ordering::SeqCst);
     if pgid > 0 {
         unsafe {
             libc::kill(-pgid, libc::SIGTERM);
+            libc::kill(-pgid, libc::SIGKILL);
         }
     }
-    unsafe {
-        libc::_exit(128 + signal);
+}
+
+#[cfg(unix)]
+fn active_cleanup_signal() -> Option<i32> {
+    let signal = ACTIVE_CLEANUP_SIGNAL.swap(0, Ordering::SeqCst);
+    (signal > 0).then_some(signal)
+}
+
+#[cfg(not(unix))]
+fn active_cleanup_signal() -> Option<i32> {
+    None
+}
+
+fn interrupted_exit_code(signal: Option<i32>, fallback: i32) -> i32 {
+    signal.map(|value| 128 + value).unwrap_or(fallback)
+}
+
+fn stderr_with_interruption(mut stderr: String, signal: Option<i32>) -> String {
+    if let Some(signal) = signal {
+        if !stderr.is_empty() && !stderr.ends_with('\n') {
+            stderr.push('\n');
+        }
+        stderr.push_str(&format!(
+            "Homeboy interrupted by signal {signal}; terminated child process group before returning failure evidence."
+        ));
     }
+    stderr
 }
 
 #[cfg(unix)]
@@ -1423,6 +1465,16 @@ mod tests {
 
         assert!(output.success);
         assert_eq!(output.stdout, "passthrough\n");
+    }
+
+    #[test]
+    fn interrupted_command_output_records_signal() {
+        let stderr = stderr_with_interruption("runner output".to_string(), Some(15));
+
+        assert_eq!(interrupted_exit_code(Some(15), 0), 143);
+        assert!(stderr.contains("runner output"));
+        assert!(stderr.contains("Homeboy interrupted by signal 15"));
+        assert!(stderr.contains("terminated child process group"));
     }
 
     fn local_managed_session_client() -> SshClient {

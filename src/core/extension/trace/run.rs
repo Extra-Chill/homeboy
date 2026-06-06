@@ -125,6 +125,20 @@ pub struct TraceRunFailure {
     pub scenario_id: String,
     pub exit_code: i32,
     pub stderr_excerpt: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_phase: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub child_pid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub child_command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recipe_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact_root: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_observed_homeboy_event: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cleanup_succeeded: Option<bool>,
 }
 
 pub fn run_trace_workflow(
@@ -249,6 +263,13 @@ fn run_trace_workflow_with_component_script(
         scenario_id: args.scenario_id.clone(),
         exit_code: script_output.exit_code,
         stderr_excerpt: stderr_tail(&script_output.stderr),
+        current_phase: None,
+        child_pid: None,
+        child_command: None,
+        recipe_path: recipe_path_from_args(&args),
+        artifact_root: None,
+        last_observed_homeboy_event: None,
+        cleanup_succeeded: None,
     });
 
     Ok(TraceRunWorkflowResult {
@@ -356,7 +377,8 @@ fn run_trace_workflow_with_context(
     } else {
         None
     };
-    let failure = (!runner_output.success).then(|| failure_from_output(&args, &runner_output));
+    let failure = (!runner_output.success)
+        .then(|| failure_from_output(&args, &runner_output, Some(&artifact_dir), results.as_ref()));
     if let Some(parsed) = results.as_mut() {
         parsed.toolchain = Some(toolchain.clone());
         parsed.components = Some(components.clone());
@@ -947,14 +969,54 @@ fn resolve_trace_baseline_root(component_path: &str, rig_id: Option<&str>) -> Re
     }
 }
 
-fn failure_from_output(args: &TraceRunWorkflowArgs, output: &RunnerOutput) -> TraceRunFailure {
+fn failure_from_output(
+    args: &TraceRunWorkflowArgs,
+    output: &RunnerOutput,
+    artifact_dir: Option<&Path>,
+    results: Option<&TraceResults>,
+) -> TraceRunFailure {
+    let child = output.child_resource.as_ref().map(|summary| &summary.child);
+    let last_event = results.and_then(last_observed_homeboy_event);
     TraceRunFailure {
         component_id: args.component_id.clone(),
         path_override: args.path_override.clone(),
         scenario_id: args.scenario_id.clone(),
         exit_code: output.exit_code,
         stderr_excerpt: stderr_tail(&output.stderr),
+        current_phase: last_event.clone(),
+        child_pid: child.map(|child| child.root_pid),
+        child_command: child.map(|child| child.command_label.clone()),
+        recipe_path: recipe_path_from_args(args),
+        artifact_root: artifact_dir.map(|path| path.to_string_lossy().to_string()),
+        last_observed_homeboy_event: last_event,
+        cleanup_succeeded: output.child_resource.as_ref().map(|_| true),
     }
+}
+
+fn recipe_path_from_args(args: &TraceRunWorkflowArgs) -> Option<String> {
+    args.runner_inputs
+        .json_settings
+        .iter()
+        .find_map(|(key, value)| {
+            key.to_ascii_lowercase()
+                .contains("recipe")
+                .then(|| value.as_str().map(ToString::to_string))
+                .flatten()
+        })
+        .or_else(|| {
+            args.runner_inputs
+                .workload_paths
+                .first()
+                .map(|path| path.to_string_lossy().to_string())
+        })
+}
+
+fn last_observed_homeboy_event(results: &TraceResults) -> Option<String> {
+    results
+        .timeline
+        .iter()
+        .max_by_key(|event| event.t_ms)
+        .map(|event| format!("{}.{}", event.source, event.event))
 }
 
 #[cfg(test)]
@@ -1018,6 +1080,85 @@ mod tests {
         assert_eq!(result.status, "error");
         assert_eq!(result.exit_code, 3);
         run_dir.cleanup();
+    }
+
+    #[test]
+    fn trace_failure_records_child_cleanup_context() {
+        let temp = tempfile::tempdir().unwrap();
+        let artifact_dir = temp.path().join("artifacts");
+        let mut args = test_run_args(temp.path());
+        args.runner_inputs.json_settings.push((
+            "recipe_path".to_string(),
+            serde_json::Value::String("recipes/stripe-ece.yml".to_string()),
+        ));
+        let output = RunnerOutput {
+            exit_code: 143,
+            success: false,
+            stdout: String::new(),
+            stderr: "Homeboy interrupted by signal 15".to_string(),
+            child_resource: Some(
+                crate::core::engine::resource::ExtensionChildResourceSummary {
+                    child: crate::core::engine::resource::ChildProcessIdentity {
+                        root_pid: 4242,
+                        command_label: "wp-codebox recipe-run recipes/stripe-ece.yml".to_string(),
+                    },
+                    started_at: "2026-06-06T00:00:00Z".to_string(),
+                    finished_at: "2026-06-06T00:00:01Z".to_string(),
+                    duration_ms: 1000,
+                    sampled_peak_rss_bytes: None,
+                    sampled_peak_cpu_percent: None,
+                    warnings: Vec::new(),
+                },
+            ),
+        };
+        let results = TraceResults {
+            component_id: "example".to_string(),
+            scenario_id: "fixture".to_string(),
+            status: TraceStatus::Error,
+            summary: None,
+            failure: None,
+            rig: None,
+            evidence: None,
+            timeline: vec![crate::core::observation::timeline::ObservationEvent {
+                t_ms: 250,
+                source: "homeboy".to_string(),
+                event: "recipe.waiting".to_string(),
+                data: BTreeMap::new(),
+            }],
+            span_definitions: Vec::new(),
+            span_results: Vec::new(),
+            assertions: Vec::new(),
+            temporal_assertions: Vec::new(),
+            artifacts: Vec::new(),
+            dependencies: Vec::new(),
+            toolchain: None,
+            components: None,
+        };
+
+        let failure = failure_from_output(&args, &output, Some(&artifact_dir), Some(&results));
+
+        assert_eq!(failure.child_pid, Some(4242));
+        assert_eq!(
+            failure.child_command.as_deref(),
+            Some("wp-codebox recipe-run recipes/stripe-ece.yml")
+        );
+        assert_eq!(
+            failure.recipe_path.as_deref(),
+            Some("recipes/stripe-ece.yml")
+        );
+        assert_eq!(
+            failure.artifact_root.as_deref(),
+            Some(artifact_dir.to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            failure.last_observed_homeboy_event.as_deref(),
+            Some("homeboy.recipe.waiting")
+        );
+        assert_eq!(
+            failure.current_phase.as_deref(),
+            Some("homeboy.recipe.waiting")
+        );
+        assert_eq!(failure.cleanup_succeeded, Some(true));
     }
 
     #[test]
