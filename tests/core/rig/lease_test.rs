@@ -96,6 +96,33 @@ fn test_acquire_active_run_lease_blocks_env_expanded_exclusive_resources() {
 }
 
 #[test]
+fn test_acquire_active_run_lease_uses_default_namespace_for_empty_exclusive_resource_suffix() {
+    with_isolated_home(|_| {
+        let previous = std::env::var("RIG_LEASE_NAMESPACE").ok();
+        std::env::remove_var("RIG_LEASE_NAMESPACE");
+
+        let studio = rig("studio", namespaced_resources("RIG_LEASE_NAMESPACE"));
+        let studio_bfb = rig("studio-bfb", namespaced_resources("RIG_LEASE_NAMESPACE"));
+
+        let lease = acquire_active_run_lease(&studio, "trace")
+            .expect("first lease")
+            .expect("resourceful rig leases");
+        let conflict = acquire_active_run_lease(&studio_bfb, "trace")
+            .expect_err("default namespace token conflicts");
+
+        match previous {
+            Some(value) => std::env::set_var("RIG_LEASE_NAMESPACE", value),
+            None => std::env::remove_var("RIG_LEASE_NAMESPACE"),
+        }
+
+        assert_eq!(conflict.code, ErrorCode::RigResourceConflict);
+        assert!(conflict.message.contains("studio-runtime:<default>"));
+
+        drop(lease);
+    });
+}
+
+#[test]
 fn test_active_run_leases_lists_live_leases_without_mutating_them() {
     with_isolated_home(|_| {
         let studio = rig("studio", resources());
