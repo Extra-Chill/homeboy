@@ -355,6 +355,7 @@ fn artifact_record() -> ArtifactRecord {
         ),
         size_bytes: Some(1234),
         mime: Some("application/json".to_string()),
+        metadata_json: serde_json::json!({}),
         created_at: "2026-05-24T00:01:00Z".to_string(),
     }
 }
