@@ -166,9 +166,15 @@ fn time_audit_detector<T>(
     skipped: impl FnOnce() -> T,
 ) -> T {
     if enabled {
+        eprintln!("[audit] Running {id}...");
         let started = std::time::Instant::now();
         let value = run();
-        timing.push_ok(id, started.elapsed());
+        let elapsed = started.elapsed();
+        eprintln!(
+            "[audit] Completed {id} in {:.0}ms",
+            elapsed.as_secs_f64() * 1000.0
+        );
+        timing.push_ok(id, elapsed);
         value
     } else {
         timing.push_skipped(id);

@@ -15,57 +15,34 @@ pub(in crate::core::code_audit) fn run(fingerprints: &[&FileFingerprint]) -> Vec
     const MIN_PUBLIC_METHODS: usize = 3;
     const DELEGATE_RATIO_THRESHOLD: f32 = 0.70;
 
-    let call_site_counts = count_new_call_sites(fingerprints);
+    let candidates = facade_candidates(fingerprints, MIN_PUBLIC_METHODS, DELEGATE_RATIO_THRESHOLD);
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+
+    let candidate_classes: HashSet<String> = candidates
+        .iter()
+        .map(|candidate| candidate.class_name.clone())
+        .collect();
+    let call_site_counts = count_new_call_sites_for_classes(fingerprints, &candidate_classes);
     let mut findings = Vec::new();
 
-    for fp in fingerprints {
-        if fp.language != Language::Php {
-            continue;
-        }
-
-        let Some(class_name) = fp.type_name.as_deref() else {
-            continue;
-        };
-
-        let public_methods = collect_public_methods(fp);
-        if public_methods.len() < MIN_PUBLIC_METHODS {
-            continue;
-        }
-
-        let mut delegate_count = 0usize;
-        let mut target_members: HashMap<String, usize> = HashMap::new();
-
-        for method in &public_methods {
-            let Some(body) = extract_method_body(&fp.content, method) else {
-                continue;
-            };
-            let Some(member) = classify_delegate(&body) else {
-                continue;
-            };
-            delegate_count += 1;
-            *target_members.entry(member).or_default() += 1;
-        }
-
-        let total_public = public_methods.len();
-        let ratio = delegate_count as f32 / total_public as f32;
-        if ratio < DELEGATE_RATIO_THRESHOLD {
-            continue;
-        }
-
+    for candidate in candidates {
+        let class_name = candidate.class_name.as_str();
         let total_call_sites = call_site_counts.get(class_name).copied().unwrap_or(0);
-        let own_call_sites = count_new_in_content(&fp.content, class_name);
+        let own_call_sites = count_new_in_content(&candidate.fp.content, class_name);
         let external_call_sites = total_call_sites.saturating_sub(own_call_sites);
-        let member_list = render_member_counts(target_members);
+        let member_list = render_member_counts(candidate.target_members);
 
         findings.push(Finding {
             convention: "facade_passthrough".to_string(),
             severity: Severity::Warning,
-            file: fp.relative_path.clone(),
+            file: candidate.fp.relative_path.clone(),
             description: format!(
                 "Facade passthrough: {}/{} public methods delegate ({:.0}%) to [{}]; {} external call site(s) of `new {}(`",
-                delegate_count,
-                total_public,
-                ratio * 100.0,
+                candidate.delegate_count,
+                candidate.total_public,
+                candidate.ratio * 100.0,
                 member_list,
                 external_call_sites,
                 class_name
@@ -85,6 +62,69 @@ pub(in crate::core::code_audit) fn run(fingerprints: &[&FileFingerprint]) -> Vec
 
     findings.sort_by(|a, b| a.file.cmp(&b.file).then(a.description.cmp(&b.description)));
     findings
+}
+
+struct FacadeCandidate<'a> {
+    fp: &'a FileFingerprint,
+    class_name: String,
+    delegate_count: usize,
+    total_public: usize,
+    ratio: f32,
+    target_members: HashMap<String, usize>,
+}
+
+fn facade_candidates<'a>(
+    fingerprints: &'a [&'a FileFingerprint],
+    min_public_methods: usize,
+    delegate_ratio_threshold: f32,
+) -> Vec<FacadeCandidate<'a>> {
+    let mut candidates = Vec::new();
+
+    for fp in fingerprints {
+        if fp.language != Language::Php {
+            continue;
+        }
+
+        let Some(class_name) = fp.type_name.as_deref() else {
+            continue;
+        };
+
+        let public_methods = collect_public_methods(fp);
+        if public_methods.len() < min_public_methods {
+            continue;
+        }
+
+        let mut delegate_count = 0usize;
+        let mut target_members: HashMap<String, usize> = HashMap::new();
+
+        for method in &public_methods {
+            let Some(body) = extract_method_body(&fp.content, method) else {
+                continue;
+            };
+            let Some(member) = classify_delegate(&body) else {
+                continue;
+            };
+            delegate_count += 1;
+            *target_members.entry(member).or_default() += 1;
+        }
+
+        let total_public = public_methods.len();
+        let ratio = delegate_count as f32 / total_public as f32;
+        if ratio < delegate_ratio_threshold {
+            continue;
+        }
+
+        candidates.push(FacadeCandidate {
+            fp,
+            class_name: class_name.to_string(),
+            delegate_count,
+            total_public,
+            ratio,
+            target_members,
+        });
+    }
+
+    candidates
 }
 
 fn collect_public_methods(fp: &FileFingerprint) -> Vec<String> {
@@ -237,23 +277,30 @@ fn classify_delegate(body: &str) -> Option<String> {
         .and_then(|caps| caps.get(1).map(|m| m.as_str().to_string()))
 }
 
-fn count_new_call_sites(fingerprints: &[&FileFingerprint]) -> HashMap<String, usize> {
-    let classes: HashSet<String> = fingerprints
-        .iter()
-        .flat_map(|fp| fp.type_name.iter().chain(fp.type_names.iter()))
-        .cloned()
-        .collect();
+fn count_new_call_sites_for_classes(
+    fingerprints: &[&FileFingerprint],
+    classes: &HashSet<String>,
+) -> HashMap<String, usize> {
+    if classes.is_empty() {
+        return HashMap::new();
+    }
 
-    classes
-        .into_iter()
-        .map(|class| {
-            let count = fingerprints
-                .iter()
-                .map(|fp| count_new_in_content(&fp.content, &class))
-                .sum();
-            (class, count)
-        })
-        .collect()
+    let constructor_re =
+        Regex::new(r"\bnew\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(").expect("constructor regex is valid");
+    let mut counts: HashMap<String, usize> = HashMap::new();
+
+    for fp in fingerprints {
+        for captures in constructor_re.captures_iter(&fp.content) {
+            let Some(class) = captures.get(1).map(|m| m.as_str()) else {
+                continue;
+            };
+            if classes.contains(class) {
+                *counts.entry(class.to_string()).or_default() += 1;
+            }
+        }
+    }
+
+    counts
 }
 
 fn count_new_in_content(content: &str, class: &str) -> usize {
@@ -435,6 +482,58 @@ class Facade {
         let findings = run(&[&facade, &caller]);
         assert_eq!(findings.len(), 1);
         assert!(findings[0].description.contains("1 external call site"));
+    }
+
+    #[test]
+    fn constructor_counting_is_limited_to_facade_candidates() {
+        let facade = make_fp(
+            "inc/Facade.php",
+            "Facade",
+            r#"<?php
+class Facade {
+    public function a() { return $this->inner->a(); }
+    public function b() { return $this->inner->b(); }
+    public function c() { return $this->inner->c(); }
+}
+"#,
+            &[("a", "public"), ("b", "public"), ("c", "public")],
+        );
+        let non_candidate = make_fp(
+            "inc/Service.php",
+            "Service",
+            r#"<?php
+class Service {
+    public function a() { return $this->inner->a(); }
+    public function b() { return $this->inner->b(); }
+    public function c() { return $this->compute(); }
+    public function compute() { return 1; }
+}
+"#,
+            &[
+                ("a", "public"),
+                ("b", "public"),
+                ("c", "public"),
+                ("compute", "public"),
+            ],
+        );
+        let caller = make_fp(
+            "inc/Caller.php",
+            "Caller",
+            "<?php class Caller { public function make() { new Facade(); new Service(); } }",
+            &[("make", "public")],
+        );
+
+        let fingerprints = [&facade, &non_candidate, &caller];
+        let candidates = facade_candidates(&fingerprints, 3, 0.70);
+        let candidate_classes: HashSet<String> = candidates
+            .iter()
+            .map(|candidate| candidate.class_name.clone())
+            .collect();
+        let counts = count_new_call_sites_for_classes(&fingerprints, &candidate_classes);
+
+        assert_eq!(candidate_classes, HashSet::from(["Facade".to_string()]));
+        assert_eq!(counts.get("Facade"), Some(&1));
+        assert_eq!(counts.get("Service"), None);
     }
 
     #[test]
