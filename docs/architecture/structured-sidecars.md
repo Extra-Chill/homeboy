@@ -16,6 +16,8 @@ Canonical sidecar keys:
 
 Core validation is intentionally shape-focused: it rejects unknown sidecar keys, wrong top-level JSON containers, non-object array items, and missing minimum required fields. Extension-specific parsers can still enforce richer producer semantics after the generic contract passes.
 
+`bench.results` and `trace.results` additionally validate known product-neutral browser/profile/trace evidence fields against the core browser evidence schemas. See [Browser Evidence Schemas](browser-evidence-schemas.md).
+
 Runtime helper distribution is also core-owned. Normal Homeboy extension execution injects `HOMEBOY_RUNTIME_*` helper paths, and direct invocations can resolve a helper with:
 
 ```bash

@@ -1,7 +1,7 @@
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::core::engine::run_dir;
+use crate::core::{browser_evidence, engine::run_dir};
 use crate::core::{Error, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -120,6 +120,12 @@ pub fn validate_payload(key: &str, payload: &Value) -> Result<()> {
     match schema.shape {
         StructuredSidecarShape::Array => validate_array_payload(schema, payload),
         StructuredSidecarShape::Object => validate_object_payload(schema, payload),
+    }?;
+
+    match key {
+        "bench.results" => browser_evidence::validate_bench_results_payload(payload),
+        "trace.results" => browser_evidence::validate_trace_results_payload(payload),
+        _ => Ok(()),
     }
 }
 
@@ -221,6 +227,12 @@ mod tests {
         validate_payload("test.failures", &json!([{ "message": "test failed" }])).unwrap();
         validate_payload("bench.results", &json!({ "results": [] })).unwrap();
         validate_payload("trace.results", &json!({ "runs": [] })).unwrap();
+        validate_payload("bench.results", &json!({ "browser_profiles": [] })).unwrap();
+        validate_payload(
+            "trace.results",
+            &json!({ "timeline": [], "assertions": [] }),
+        )
+        .unwrap();
     }
 
     #[test]

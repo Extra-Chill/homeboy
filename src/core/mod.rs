@@ -15,6 +15,7 @@ pub mod api_jobs;
 pub mod artifact_inputs;
 pub mod artifact_manifest;
 pub(crate) mod artifact_metadata;
+pub mod browser_evidence;
 pub mod change_artifact;
 pub mod ci_profile;
 pub mod cleanup;
