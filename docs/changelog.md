@@ -4,6 +4,17 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.221.2] - 2026-06-06
+
+### Changed
+- Define provider-neutral fanout boundary
+- expect default resource namespace
+- keep trace resource lease test scoped
+
+### Fixed
+- fix agent task executor adapter seam
+- enforce trace rig resource leases
+
 ## [0.221.1] - 2026-06-06
 
 ### Fixed
