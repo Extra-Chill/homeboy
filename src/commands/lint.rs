@@ -138,14 +138,14 @@ pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintCommandOutput>
     let effective_id = ctx.component_id.clone();
     let ci_job = resolve_ci_job_for_command(args.ci_job.as_deref(), &ctx.component, "lint")?;
 
-    let stringified_settings = ctx.resolved_settings().string_lossy_overrides();
+    let typed_settings = ctx.resolved_settings().typed_overrides();
 
     // --fix dispatches to the canonical refactor sources pipeline.
     // The fixer pipeline already exists; this flag connects the existing wire
     // so users don't have to re-type `homeboy refactor <component> --from lint
     // --write` to resolve the auto-fix CTA.
     if args.fix {
-        return run_fix(args, &ctx, effective_id, stringified_settings);
+        return run_fix(args, &ctx, effective_id, typed_settings);
     }
 
     let runner = ObservedWorkflowRunner::create(format!("lint {}", effective_id))?;
@@ -162,7 +162,7 @@ pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintCommandOutput>
             component_label: effective_id.clone(),
             component_id: ctx.component_id.clone(),
             path_override: args.comp.path.clone(),
-            settings: stringified_settings,
+            settings: typed_settings,
             summary: args.summary,
             file: args.file.clone(),
             glob: args.glob.clone(),
@@ -299,7 +299,7 @@ fn run_fix(
     args: LintArgs,
     ctx: &homeboy::core::engine::execution_context::ExecutionContext,
     component_label: String,
-    settings: Vec<(String, String)>,
+    settings: Vec<(String, serde_json::Value)>,
 ) -> CmdResult<LintCommandOutput> {
     let selected_files = if args.changed_only {
         let changes = git::get_uncommitted_changes(&ctx.component.local_path)?;
@@ -325,7 +325,7 @@ fn run_fix(
     let mut request = lint_refactor_request(
         ctx.component.clone(),
         ctx.source_path.clone(),
-        settings,
+        settings_to_legacy_strings(settings),
         lint_options,
         true,
     );
@@ -335,6 +335,19 @@ fn run_fix(
     let run = collect_refactor_sources(request)?;
 
     Ok(report::from_lint_fix(component_label, run))
+}
+
+fn settings_to_legacy_strings(settings: Vec<(String, serde_json::Value)>) -> Vec<(String, String)> {
+    settings
+        .into_iter()
+        .map(|(key, value)| {
+            let value = match value {
+                serde_json::Value::String(value) => value,
+                value => value.to_string(),
+            };
+            (key, value)
+        })
+        .collect()
 }
 
 #[cfg(test)]

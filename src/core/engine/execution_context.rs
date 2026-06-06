@@ -361,6 +361,11 @@ impl<'a> ResolvedSettings<'a> {
         Self { settings }
     }
 
+    /// Return every resolved setting with its typed JSON value preserved.
+    pub fn typed_overrides(&self) -> Vec<(String, serde_json::Value)> {
+        self.settings.to_vec()
+    }
+
     /// Return only settings that are already strings.
     pub fn string_overrides(&self) -> Vec<(String, String)> {
         self.settings
