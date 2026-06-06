@@ -68,16 +68,25 @@ fn runner_prelude_initializes_context_steps_trap_and_sidecar() {
     let dir = tempfile::tempdir().expect("tempdir");
     let runtime_dir = dir.path().join("runtime");
     std::fs::create_dir_all(&runtime_dir).expect("runtime dir");
-    std::fs::write(runtime_dir.join("runner-prelude.sh"), assets::RUNNER_PRELUDE_SH)
-        .expect("write prelude");
-    std::fs::write(runtime_dir.join("resolve-context.sh"), assets::RESOLVE_CONTEXT_SH)
-        .expect("write resolve context");
+    std::fs::write(
+        runtime_dir.join("runner-prelude.sh"),
+        assets::RUNNER_PRELUDE_SH,
+    )
+    .expect("write prelude");
+    std::fs::write(
+        runtime_dir.join("resolve-context.sh"),
+        assets::RESOLVE_CONTEXT_SH,
+    )
+    .expect("write resolve context");
     std::fs::write(runtime_dir.join("runner-steps.sh"), assets::RUNNER_STEPS_SH)
         .expect("write runner steps");
     std::fs::write(runtime_dir.join("failure-trap.sh"), assets::FAILURE_TRAP_SH)
         .expect("write failure trap");
-    std::fs::write(runtime_dir.join("sidecar-writer.sh"), assets::SIDECAR_WRITER_SH)
-        .expect("write sidecar writer");
+    std::fs::write(
+        runtime_dir.join("sidecar-writer.sh"),
+        assets::SIDECAR_WRITER_SH,
+    )
+    .expect("write sidecar writer");
 
     let output = std::process::Command::new("bash")
         .arg("-c")
@@ -450,7 +459,10 @@ fn bench_shell_helper_writes_scenarios_from_payload_files() {
     assert_eq!(value["scenarios"][0]["memory"]["peak_bytes"], 4096);
     assert_eq!(value["scenarios"][0]["source"], "custom");
     assert_eq!(value["scenarios"][0]["metadata"]["fixture"], true);
-    assert_eq!(value["scenarios"][0]["artifacts"]["stdout"]["path"], "bench.log");
+    assert_eq!(
+        value["scenarios"][0]["artifacts"]["stdout"]["path"],
+        "bench.log"
+    );
 }
 
 #[test]
@@ -565,7 +577,10 @@ await homeboyWriteBenchScenarioInventory('{results}', 'demo', 9, [
     assert_eq!(value["scenarios"][0]["id"], "cold");
     assert_eq!(value["scenarios"][0]["iterations"], 0);
     assert_eq!(value["scenarios"][0]["default_iterations"], 9);
-    assert_eq!(value["scenarios"][0]["artifacts"]["log"]["path"], "bench.log");
+    assert_eq!(
+        value["scenarios"][0]["artifacts"]["log"]["path"],
+        "bench.log"
+    );
 }
 
 #[test]
