@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.222.2] - 2026-06-06
+
+### Changed
+- reuse runner path normalization helper
+- split runner extension parity helpers
+- route runner exec through typed process primitive
+
 ## [0.222.1] - 2026-06-06
 
 ### Changed
