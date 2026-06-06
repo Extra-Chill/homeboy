@@ -131,7 +131,7 @@ pub(super) fn filter_homeboy_managed(files: Vec<String>) -> Vec<String> {
         .collect()
 }
 
-fn get_release_allowed_files(
+pub(super) fn get_release_allowed_files(
     changelog_path: &std::path::Path,
     version_targets: &[String],
     repo_root: &std::path::Path,
@@ -144,11 +144,39 @@ fn get_release_allowed_files(
 
     for target in version_targets {
         if let Ok(relative) = std::path::Path::new(target).strip_prefix(repo_root) {
-            allowed.push(relative.to_string_lossy().to_string());
+            let relative = relative.to_string_lossy().to_string();
+            allowed.push(relative.clone());
+            allowed.extend(derived_release_lockfiles(&relative));
         }
     }
 
+    allowed.sort();
+    allowed.dedup();
     allowed
+}
+
+fn derived_release_lockfiles(version_target: &str) -> Vec<String> {
+    let path = std::path::Path::new(version_target);
+    let parent = path
+        .parent()
+        .and_then(|parent| parent.to_str())
+        .unwrap_or("");
+    let prefix = if parent.is_empty() {
+        String::new()
+    } else {
+        format!("{parent}/")
+    };
+
+    match path.file_name().and_then(|file| file.to_str()) {
+        Some("Cargo.toml") => vec![format!("{prefix}Cargo.lock")],
+        Some("package.json") => vec![
+            format!("{prefix}package-lock.json"),
+            format!("{prefix}pnpm-lock.yaml"),
+            format!("{prefix}yarn.lock"),
+        ],
+        Some("composer.json") => vec![format!("{prefix}composer.lock")],
+        _ => Vec::new(),
+    }
 }
 
 fn get_unexpected_uncommitted_files(
@@ -394,5 +422,42 @@ mod tests {
         );
 
         assert_eq!(allowed, vec!["docs/changelog.md", "manifest.toml"]);
+    }
+
+    #[test]
+    fn release_allowed_files_include_lockfiles_derived_from_version_targets() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let repo_root = temp_dir.path();
+        let changelog = repo_root.join("docs/changelog.md");
+        let cargo = repo_root.join("Cargo.toml");
+        let package = repo_root.join("packages/app/package.json");
+        let composer = repo_root.join("plugin/composer.json");
+
+        let allowed = get_release_allowed_files(
+            &changelog,
+            &[
+                cargo.to_string_lossy().to_string(),
+                package.to_string_lossy().to_string(),
+                composer.to_string_lossy().to_string(),
+            ],
+            repo_root,
+        );
+
+        for expected in [
+            "Cargo.lock",
+            "Cargo.toml",
+            "docs/changelog.md",
+            "packages/app/package-lock.json",
+            "packages/app/package.json",
+            "packages/app/pnpm-lock.yaml",
+            "packages/app/yarn.lock",
+            "plugin/composer.json",
+            "plugin/composer.lock",
+        ] {
+            assert!(
+                allowed.contains(&expected.to_string()),
+                "allowed release files should include {expected}, got {allowed:?}"
+            );
+        }
     }
 }
