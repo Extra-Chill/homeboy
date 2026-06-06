@@ -16,7 +16,7 @@ pub enum RunnerWorkspaceOutput {
 
 #[derive(Subcommand)]
 pub(super) enum RunnerWorkspaceCommand {
-    /// Sync a local worktree snapshot into the runner workspace root
+    /// Materialize a controller-side worktree into the runner workspace root
     Sync {
         /// Runner ID
         runner_id: String,
@@ -25,7 +25,7 @@ pub(super) enum RunnerWorkspaceCommand {
         #[arg(long)]
         path: String,
 
-        /// Sync mode. snapshot includes dirty local files; git requires a clean tree and clones/checks out HEAD remotely.
+        /// Sync mode. snapshot streams source from the controller; git is only for public/runner-accessible remotes.
         #[arg(long, value_enum, default_value_t = RunnerWorkspaceSyncModeArg::Snapshot)]
         mode: RunnerWorkspaceSyncModeArg,
     },

@@ -92,6 +92,12 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
 
     let runner = load(runner_id)?;
     let cwd = resolve_cwd(&runner, options.cwd.as_deref())?;
+    if runner.kind != RunnerKind::Local {
+        super::source_materialization::validate_runner_exec_source_fetch(
+            &options.command,
+            &runner.id,
+        )?;
+    }
     validate_runner_policy(
         &runner,
         &cwd,

@@ -294,12 +294,19 @@ homeboy runner workspace sync <runner-id> --path <local-worktree> --mode snapsho
 homeboy runner workspace sync <runner-id> --path <local-worktree> --mode git
 ```
 
-`workspace sync` materializes a local worktree under the runner's configured `workspace_root` so runner execution can run against an explicit remote path while Git operations and canonical edits stay local.
+`workspace sync` materializes a controller-side worktree under the runner's configured `workspace_root` so runner execution can run against an explicit remote path while Git operations and canonical edits stay local.
 
 Modes:
 
-- `snapshot` copies the current local tree, including dirty edits, through a tar stream.
-- `git` requires a clean local tree, then clones or refreshes `remote.origin.url` on the runner and checks out local `HEAD` detached.
+- `snapshot` copies the current local tree, including dirty edits, through a tar stream from the controller. Use this for private or proxy-dependent sources because the runner does not need repository access.
+- `git` requires a clean local tree, then clones or refreshes `remote.origin.url` on the runner and checks out local `HEAD` detached. Use this only when the runner is allowed to fetch the remote directly.
+
+Private/proxied sources:
+
+- Private or proxy-dependent source access stays on the controller machine.
+- Materialize those sources with `homeboy runner workspace sync <runner-id> --path <local-worktree> --mode snapshot`.
+- Use the returned `remote_path` for downstream `runner exec --cwd` or job inputs.
+- Runner-side Git fetches for configured private/proxied hosts are refused with an actionable diagnostic. The default host list includes `github.a8c.com`; override with `HOMEBOY_PRIVATE_PROXIED_SOURCE_HOSTS` only when a runner is explicitly allowed to fetch those sources.
 
 Safety rules:
 
