@@ -13,7 +13,9 @@ use crate::core::server::{self, SshClient};
 use crate::core::source_snapshot::SourceSnapshot;
 
 use super::broker_http;
-use super::capabilities::{runner_capability_snapshot, validate_runner_capability_preflight};
+use super::capabilities::{
+    runner_capability_snapshot_for_preflight, validate_runner_capability_preflight,
+};
 use super::evidence::mirror_daemon_evidence;
 use super::normalize_runner_command_env;
 use super::resource_metrics::{measured_command_output, RunnerResourceMetrics};
@@ -529,7 +531,7 @@ fn preflight_runner_capability_plan(
         return Ok(());
     }
 
-    let capabilities = runner_capability_snapshot(runner)?;
+    let capabilities = runner_capability_snapshot_for_preflight(runner, preflight)?;
     validate_runner_capability_preflight(&runner.id, preflight, &capabilities, request_env)
 }
 

@@ -19,6 +19,7 @@ pub use types::RunnerDoctorOutput;
 pub struct RunnerDoctorOptions {
     pub path: Option<String>,
     pub extensions: Vec<String>,
+    pub required_tools: Vec<String>,
 }
 
 pub fn run(runner_id: &str) -> CmdResult<RunnerDoctorOutput> {
@@ -323,6 +324,12 @@ mod local {
             tools.insert(spec.id.to_string(), probe);
         }
 
+        for command in normalized_required_tools(&options.required_tools) {
+            let probe = probes::local_tool_probe(&command, &[]);
+            checks.push(checks::required_tool_check(&command, &probe));
+            tools.entry(command).or_insert(probe);
+        }
+
         let playwright = probes::tool_available(&tools, "playwright");
         let browser_ready = probes::local_browser_ready();
         checks.push(checks::playwright_check(playwright, browser_ready));
@@ -512,6 +519,12 @@ mod remote {
             let probe = probes::remote_tool_probe(client, spec.command, spec.version_args);
             checks.push(checks::tool_check(*spec, &probe));
             tools.insert(spec.id.to_string(), probe);
+        }
+
+        for command in normalized_required_tools(&options.required_tools) {
+            let probe = probes::remote_tool_probe(client, &command, &[]);
+            checks.push(checks::required_tool_check(&command, &probe));
+            tools.entry(command).or_insert(probe);
         }
 
         let playwright = probes::tool_available(&tools, "playwright");
@@ -739,17 +752,21 @@ mod probes {
                 error: Some("not found on PATH".to_string()),
             };
         };
-        let version = Command::new(command)
-            .args(version_args)
-            .output()
-            .ok()
-            .and_then(|output| {
-                if output.status.success() {
-                    common::first_output_line(&output.stdout, &output.stderr)
-                } else {
-                    None
-                }
-            });
+        let version = if version_args.is_empty() {
+            None
+        } else {
+            Command::new(command)
+                .args(version_args)
+                .output()
+                .ok()
+                .and_then(|output| {
+                    if output.status.success() {
+                        common::first_output_line(&output.stdout, &output.stderr)
+                    } else {
+                        None
+                    }
+                })
+        };
         ToolProbe {
             available: true,
             path: Some(path),
@@ -775,19 +792,23 @@ mod probes {
                 error: Some("not found on PATH".to_string()),
             };
         };
-        let args = version_args
-            .iter()
-            .map(|arg| common::shell_word(arg))
-            .collect::<Vec<_>>()
-            .join(" ");
-        let version = common::remote_line(
-            client,
-            &format!(
-                "{} {} 2>&1 | sed -n '1p'",
-                common::shell_word(command),
-                args
-            ),
-        );
+        let version = if version_args.is_empty() {
+            None
+        } else {
+            let args = version_args
+                .iter()
+                .map(|arg| common::shell_word(arg))
+                .collect::<Vec<_>>()
+                .join(" ");
+            common::remote_line(
+                client,
+                &format!(
+                    "{} {} 2>&1 | sed -n '1p'",
+                    common::shell_word(command),
+                    args
+                ),
+            )
+        };
         ToolProbe {
             available: true,
             path: Some(path),
@@ -985,6 +1006,31 @@ mod checks {
                 spec.check_id,
                 format!("{} was not found", spec.command),
                 Some(spec.remediation.to_string()),
+            )
+        }
+    }
+
+    pub fn required_tool_check(command: &str, probe: &ToolProbe) -> RunnerCheck {
+        let mut details = BTreeMap::new();
+        details.insert("command".to_string(), command.to_string());
+        if let Some(path) = &probe.path {
+            details.insert("path".to_string(), path.clone());
+        }
+
+        if probe.available {
+            ok_with_details(
+                format!("tool.required.{command}"),
+                format!("Required runner tool {command} is available"),
+                details,
+            )
+        } else {
+            error(
+                format!("tool.required.{command}"),
+                format!("Required runner tool {command} was not found"),
+                Some(format!(
+                    "Install {command} on the runner and ensure it is on PATH, or remove it from the provider preflight requirements"
+                )),
+                details,
             )
         }
     }
@@ -1241,6 +1287,18 @@ fn normalized_extension_ids(extension_ids: &[String]) -> Vec<String> {
     ids
 }
 
+fn normalized_required_tools(commands: &[String]) -> Vec<String> {
+    let mut tools = commands
+        .iter()
+        .map(|command| command.trim())
+        .filter(|command| !command.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    tools.sort();
+    tools.dedup();
+    tools
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1356,6 +1414,64 @@ mod tests {
             ]),
             vec!["fixture-a".to_string(), "rust".to_string()]
         );
+    }
+
+    #[test]
+    fn normalizes_required_tools_before_preflight_checks() {
+        assert_eq!(
+            normalized_required_tools(&[
+                " zip ".to_string(),
+                "".to_string(),
+                "tar".to_string(),
+                "zip".to_string(),
+            ]),
+            vec!["tar".to_string(), "zip".to_string()]
+        );
+    }
+
+    #[test]
+    fn required_tool_check_errors_with_actionable_remediation() {
+        let check = checks::required_tool_check(
+            "zip",
+            &types::ToolProbe {
+                available: false,
+                path: None,
+                version: None,
+                error: Some("not found on PATH".to_string()),
+            },
+        );
+
+        assert_eq!(check.id, "tool.required.zip");
+        assert_eq!(check.status, RunnerDoctorStatus::Error);
+        assert!(check.message.contains("zip"));
+        assert_eq!(
+            check.details.get("command").map(String::as_str),
+            Some("zip")
+        );
+        assert!(check
+            .remediation
+            .as_deref()
+            .is_some_and(|value| value.contains("Install zip on the runner")));
+    }
+
+    #[test]
+    fn local_doctor_honors_required_tool_errors() {
+        let (report, exit_code) = run_with_options(
+            "local",
+            RunnerDoctorOptions {
+                path: None,
+                extensions: Vec::new(),
+                required_tools: vec!["homeboy-definitely-missing-tool".to_string()],
+            },
+        )
+        .expect("local doctor report");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(report.status, RunnerDoctorStatus::Error);
+        assert!(report.checks.iter().any(|check| {
+            check.id == "tool.required.homeboy-definitely-missing-tool"
+                && check.status == RunnerDoctorStatus::Error
+        }));
     }
 
     #[test]

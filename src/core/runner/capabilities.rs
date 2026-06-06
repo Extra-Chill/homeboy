@@ -11,6 +11,7 @@ use super::Runner;
 pub struct RunnerCapabilityPreflight {
     pub command: String,
     pub required_tools: Vec<RunnerRequiredTool>,
+    pub required_commands: Vec<String>,
     pub required_components: Vec<String>,
     pub required_env: Vec<String>,
 }
@@ -89,7 +90,7 @@ pub fn evaluate_lab_runner_capabilities_for_runner(
     plan: &LabRunnerCapabilityPlan,
     mode: LabRunnerGateMode,
 ) -> Result<LabRunnerGateDecision> {
-    let capabilities = RunnerCapabilitySnapshot::from_runner_probe(runner)?;
+    let capabilities = RunnerCapabilitySnapshot::from_runner_probe_with_commands(runner, &[])?;
     Ok(evaluate_lab_runner_capabilities(
         &runner.id,
         plan,
@@ -98,8 +99,11 @@ pub fn evaluate_lab_runner_capabilities_for_runner(
     ))
 }
 
-pub(crate) fn runner_capability_snapshot(runner: &Runner) -> Result<RunnerCapabilitySnapshot> {
-    RunnerCapabilitySnapshot::from_runner_probe(runner)
+pub(crate) fn runner_capability_snapshot_for_preflight(
+    runner: &Runner,
+    preflight: &RunnerCapabilityPreflight,
+) -> Result<RunnerCapabilitySnapshot> {
+    RunnerCapabilitySnapshot::from_runner_probe_with_commands(runner, &preflight.required_commands)
 }
 
 pub(crate) fn validate_runner_capability_preflight(
@@ -120,6 +124,13 @@ pub(crate) fn validate_runner_capability_preflight(
         .filter(|component| !capabilities.components.contains(component.as_str()))
         .cloned()
         .collect::<Vec<_>>();
+    let missing_commands = preflight
+        .required_commands
+        .iter()
+        .filter(|command| !command.trim().is_empty())
+        .filter(|command| !capabilities.has_command(command))
+        .cloned()
+        .collect::<Vec<_>>();
     let missing_env = preflight
         .required_env
         .iter()
@@ -131,7 +142,11 @@ pub(crate) fn validate_runner_capability_preflight(
         .cloned()
         .collect::<Vec<_>>();
 
-    if missing_tools.is_empty() && missing_components.is_empty() && missing_env.is_empty() {
+    if missing_tools.is_empty()
+        && missing_components.is_empty()
+        && missing_commands.is_empty()
+        && missing_env.is_empty()
+    {
         return Ok(());
     }
 
@@ -149,6 +164,9 @@ pub(crate) fn validate_runner_capability_preflight(
     if !missing_components.is_empty() {
         missing.push(format!("components: {}", missing_components.join(", ")));
     }
+    if !missing_commands.is_empty() {
+        missing.push(format!("commands: {}", missing_commands.join(", ")));
+    }
     if !missing_env.is_empty() {
         missing.push(format!("environment: {}", missing_env.join(", ")));
     }
@@ -165,6 +183,11 @@ pub(crate) fn validate_runner_capability_preflight(
     remediation.extend(missing_components.iter().map(|component| {
         format!("Register component '{component}' on the runner capability profile or choose a runner with that component.")
     }));
+    remediation.extend(
+        missing_commands
+            .iter()
+            .map(|command| format!("Install '{command}' on the runner and ensure it is on PATH.")),
+    );
     remediation.extend(missing_env.iter().map(|name| {
         format!("Set required environment variable '{name}' on the runner or pass it with the runner exec request.")
     }));
@@ -187,11 +210,15 @@ pub(crate) fn validate_runner_capability_preflight(
 #[derive(Debug, Clone, Default)]
 pub(crate) struct RunnerCapabilitySnapshot {
     tools: BTreeSet<RunnerRequiredTool>,
+    commands: BTreeSet<String>,
     components: BTreeSet<String>,
 }
 
 impl RunnerCapabilitySnapshot {
-    fn from_runner_probe(runner: &Runner) -> Result<Self> {
+    fn from_runner_probe_with_commands(
+        runner: &Runner,
+        required_commands: &[String],
+    ) -> Result<Self> {
         let client = Self::ssh_client_for_runner(runner)?;
         let mut tools = BTreeSet::new();
         for tool in [
@@ -210,15 +237,35 @@ impl RunnerCapabilitySnapshot {
                 tools.insert(tool);
             }
         }
+        let mut commands = BTreeSet::new();
+        for command in normalized_command_names(required_commands) {
+            if Self::command_available(&client, &command) {
+                commands.insert(command);
+            }
+        }
 
         Ok(Self {
             tools,
+            commands,
             components: configured_runner_components(runner),
         })
     }
 
     fn has_tool(&self, tool: RunnerRequiredTool) -> bool {
         self.tools.contains(&tool)
+    }
+
+    fn has_command(&self, command: &str) -> bool {
+        self.commands.contains(command.trim())
+    }
+
+    fn command_available(client: &SshClient, command: &str) -> bool {
+        client
+            .execute(&format!(
+                "command -v {} >/dev/null 2>&1",
+                shell::quote_arg(command)
+            ))
+            .success
     }
 
     fn tool_available(runner: &Runner, client: &SshClient, tool: RunnerRequiredTool) -> bool {
@@ -345,6 +392,18 @@ fn push_unique<T: PartialEq>(items: &mut Vec<T>, item: T) {
     }
 }
 
+fn normalized_command_names(commands: &[String]) -> Vec<String> {
+    let mut names = commands
+        .iter()
+        .map(|command| command.trim())
+        .filter(|command| !command.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    names.sort();
+    names.dedup();
+    names
+}
+
 fn tool_list(tools: &[RunnerRequiredTool]) -> String {
     tools
         .iter()
@@ -358,6 +417,7 @@ impl From<LabRunnerCapabilityPlan> for RunnerCapabilityPreflight {
         Self {
             command: plan.command.to_string(),
             required_tools: plan.required_tools,
+            required_commands: Vec::new(),
             required_components: Vec::new(),
             required_env: Vec::new(),
         }
@@ -367,6 +427,7 @@ impl From<LabRunnerCapabilityPlan> for RunnerCapabilityPreflight {
 impl RunnerCapabilityPreflight {
     pub(crate) fn is_empty(&self) -> bool {
         self.required_tools.is_empty()
+            && self.required_commands.is_empty()
             && self.required_components.is_empty()
             && self.required_env.is_empty()
     }
@@ -518,6 +579,7 @@ mod tests {
             ]
             .into_iter()
             .collect(),
+            commands: BTreeSet::new(),
             components: BTreeSet::new(),
         };
 
@@ -540,6 +602,7 @@ mod tests {
         };
         let capabilities = RunnerCapabilitySnapshot {
             tools: [RunnerRequiredTool::Git].into_iter().collect(),
+            commands: BTreeSet::new(),
             components: BTreeSet::new(),
         };
 
@@ -575,6 +638,7 @@ mod tests {
         };
         let capabilities = RunnerCapabilitySnapshot {
             tools: [RunnerRequiredTool::Git].into_iter().collect(),
+            commands: BTreeSet::new(),
             components: BTreeSet::new(),
         };
 
@@ -603,11 +667,13 @@ mod tests {
         let preflight = RunnerCapabilityPreflight {
             command: "test".to_string(),
             required_tools: vec![RunnerRequiredTool::Git, RunnerRequiredTool::Pnpm],
+            required_commands: vec!["zip".to_string()],
             required_components: vec!["fixture-a".to_string(), "fixture-b".to_string()],
             required_env: vec!["HOMEBOY_TOKEN".to_string()],
         };
         let capabilities = RunnerCapabilitySnapshot {
             tools: [RunnerRequiredTool::Git].into_iter().collect(),
+            commands: BTreeSet::new(),
             components: ["fixture-a".to_string()].into_iter().collect(),
         };
 
@@ -617,6 +683,7 @@ mod tests {
 
         assert_eq!(err.code.as_str(), "validation.invalid_argument");
         assert!(err.message.contains(concat!("tools: p", "n", "pm")));
+        assert!(err.message.contains("commands: zip"));
         assert!(err.message.contains("components: fixture-b"));
         assert!(err.message.contains("environment: HOMEBOY_TOKEN"));
         let tried = err
@@ -634,6 +701,7 @@ mod tests {
         let preflight = RunnerCapabilityPreflight {
             command: "lint".to_string(),
             required_tools: vec![RunnerRequiredTool::Git, RunnerRequiredTool::Node],
+            required_commands: vec!["zip".to_string()],
             required_components: vec!["fixture-a".to_string()],
             required_env: vec!["HOMEBOY_TOKEN".to_string()],
         };
@@ -641,6 +709,7 @@ mod tests {
             tools: [RunnerRequiredTool::Git, RunnerRequiredTool::Node]
                 .into_iter()
                 .collect(),
+            commands: ["zip".to_string()].into_iter().collect(),
             components: ["fixture-a".to_string()].into_iter().collect(),
         };
         let mut env = HashMap::new();

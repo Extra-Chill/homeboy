@@ -83,6 +83,7 @@ homeboy config set /lab/preferred_runner '"<runner-id>"'
 homeboy runner doctor local
 homeboy runner doctor <runner-id>
 homeboy runner doctor <runner-id> --path <component-path> --extension rust
+homeboy runner doctor <runner-id> --require-tool zip --require-tool unzip
 ```
 
 Diagnoses a local or configured SSH runner without mutating it. Use `local`,
@@ -92,6 +93,18 @@ The JSON payload uses `command: "runner.doctor"` and includes `runner_id`,
 
 Use `doctor` before `connect` when you need to know whether Homeboy, Git, SSH,
 and the configured workspace root are usable on the target machine.
+
+Pass one or more `--require-tool <command>` values when a provider or job path
+knows it needs additional runner-side commands before starting expensive work.
+Doctor resolves each command on the runner `PATH` and reports missing requested
+tools as `tool.required.<command>` errors with install/setup remediation. This is
+generic: provider layers declare their own tools; Homeboy core only checks command
+availability.
+
+Programmatic runner execution can use the same generic boundary through
+`RunnerCapabilityPreflight.required_commands`. Those commands are checked before
+remote execution starts, alongside existing required tools, components, and
+environment variables.
 
 Pass one or more `--extension <id>` values to validate extension parity before
 Lab offload. Doctor runs the same `homeboy extension show <id>` contract on the
