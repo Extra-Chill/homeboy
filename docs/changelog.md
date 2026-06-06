@@ -4,6 +4,102 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.221.0] - 2026-06-06
+
+### Added
+- add agent task dispatch command
+- add source policy audit primitive
+
+### Changed
+- refresh release lockfile fixture baseline
+- Expose rig run artifact indexes
+- Add browser evidence comparison report
+- Keep test manifest filter config focused
+- Wire trace workload invocation requirements
+- Move test filter mapping into extension metadata
+- Serialize observation store migrations
+- Fail fast on noninteractive hot runs
+- Allow audit baselines through lab offload
+- Remove retired core agnostic baseline helpers
+- Fail missing agent task output dependencies
+- Harden test observation isolation
+- Preserve agent task outcome outputs
+- Deduplicate GitHub release repair guidance
+- Split trace audit modules
+- Update trace evidence report fixtures
+- Refuse non-canonical trace toolchains
+- Move bench compare tests beside implementation
+- Keep trace runtime asset provenance generic
+- Add trace toolchain provenance
+- Add trace workload dependency preflight
+- Add persisted bench comparison context
+- Add audit baseline refresh command
+- allow manual PR quality runs
+- align dispatch module command shape
+- split agent task dispatch command
+- deduplicate dispatch task parsing
+- Refresh trace artifact audit baseline
+- Refresh trace matrix audit baseline
+- centralize product identity literals
+- add execution contract surface
+- add trace scenario matrix runner
+- refresh agnostic source policy baseline
+- Refine bench phase event parsing
+- add bench phase event persistence
+
+### Fixed
+- allow release prepare lockfile updates
+- make release quality blocking configurable
+- Fix Cargo test filter passthrough
+- Fix bench parsing for extension sample metrics
+- Fix small audit cleanup findings
+- Fix release repair gate
+- Fix GitHub release host proxy config
+- Fix core agnostic baseline gate
+- Fix release repair guidance
+- Fix tagged deploy checkout restoration
+- Fix release dirty phase attribution
+- stabilize changed-scope guard checks
+- Fix canonical trace refusal dependencies
+- Fix core agnostic trace provenance fixture
+- Fix canonical trace provenance fields
+- Fix trace audit structure
+- Fix trace preflight CI regressions
+- preserve trace artifact directory evidence
+- record declared trace artifacts once
+- Fix trace observation artifact handling
+- deduplicate audit config exclusions
+- align dispatch run signature
+- Fix trace evidence audit baseline
+- Fix trace evidence audit findings
+- Fix trace compare audit config merge
+- Fix trace evidence audit config merge
+- Fix trace artifact audit config merge
+- Fix trace matrix audit config merge
+- Fix trace evidence markdown build
+- refresh runner audit baseline
+- keep worktree metadata paths audit-clean
+- split runner dependency materialization
+- add scoped audit baseline sections
+- route test audit detectors through descriptors
+- clean runner materialization boundary terms
+- keep trace aggregation audit-clean
+- move namespace grammar defaults into profiles
+- harden deploy version and status papercuts
+- preserve nested trace artifacts
+- materialize rig dependencies for Lab offload
+- add trace baseline candidate compare
+- render trace evidence reports
+- enrich trace run aggregation
+- Fix trace nested artifact preservation
+- skip stale source baseline checks in changed scope
+- Fix bench phase audit drift
+- route agnostic baselines through audit policy
+- run audit detectors through descriptors
+- configure test wiring policy
+- keep contract grammar defaults language neutral
+- keep fleet check useful when live checks fail
+
 ## [0.220.3] - 2026-06-04
 
 ### Fixed
