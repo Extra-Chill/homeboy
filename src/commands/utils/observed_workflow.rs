@@ -3,7 +3,6 @@ use homeboy::core::engine::run_dir::RunDir;
 use homeboy::core::observation::{
     merge_metadata, ActiveObservation, NewFindingRecord, NewRunRecord, RunStatus,
 };
-use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ObservationPersistenceWarning {
@@ -108,22 +107,6 @@ impl BestEffortObservedRun {
         };
         if let Err(error) = observation.store().record_findings(records) {
             self.warn("record_findings", error);
-        }
-    }
-
-    #[allow(dead_code)]
-    fn record_artifact_if_file(&mut self, kind: &str, path: &Path) {
-        if !path.is_file() {
-            return;
-        }
-        let Some(observation) = &self.observation else {
-            return;
-        };
-        if let Err(error) = observation
-            .store()
-            .record_artifact(observation.run_id(), kind, path)
-        {
-            self.warn("record_artifact", error);
         }
     }
 
