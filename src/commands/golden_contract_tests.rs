@@ -338,6 +338,7 @@ fn run_summary() -> RunSummary {
         command: Some("homeboy bench --format=json".to_string()),
         cwd: Some("/work/homeboy".to_string()),
         status_note: Some("fixture".to_string()),
+        artifact_index: None,
     }
 }
 

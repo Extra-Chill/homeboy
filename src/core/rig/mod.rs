@@ -18,6 +18,7 @@
 //! lifecycle automation, extension-registered service kinds, spec sharing.
 
 pub mod app;
+pub mod artifact_index;
 pub mod check;
 pub mod expand;
 pub mod install;
@@ -34,6 +35,9 @@ pub mod toolchain;
 pub mod workloads;
 
 pub use app::{AppLauncherAction, AppLauncherOptions, AppLauncherReport};
+pub use artifact_index::{
+    for_run as artifact_index_for_run, RigRunArtifactIndex, RigRunArtifactRef, RigRunFailedStepRef,
+};
 pub use install::{
     discover_rigs, discover_stacks, install, read_source_metadata, read_stack_source_metadata,
     DiscoveredRig, DiscoveredStack, InstalledStack, RigInstallResult, RigSourceMetadata,

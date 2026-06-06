@@ -1,3 +1,5 @@
+#[cfg(test)]
+mod artifact_index_tests;
 mod bench;
 mod bundle;
 #[cfg(test)]
@@ -371,7 +373,7 @@ pub fn list_runs(args: RunsListArgs, command: &'static str) -> CmdResult<RunsOut
             limit: Some(args.limit),
         })?
         .into_iter()
-        .map(run_summary)
+        .map(|run| run_summary_with_artifact_index(&store, run))
         .collect();
 
     Ok((RunsOutput::List(RunsListOutput { command, runs }), 0))
@@ -560,6 +562,15 @@ pub(crate) fn run_summary(run: RunRecord) -> RunSummary {
         command: run.command,
         cwd: run.cwd,
         status_note,
+        artifact_index: None,
+    }
+}
+
+fn run_summary_with_artifact_index(store: &ObservationStore, run: RunRecord) -> RunSummary {
+    let artifact_index = homeboy::core::rig::artifact_index_for_run(store, &run);
+    RunSummary {
+        artifact_index,
+        ..run_summary(run)
     }
 }
 

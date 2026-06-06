@@ -118,10 +118,47 @@ fn test_run_check_persists_failing_observation() {
 
         let report = run_check(&rig).expect("check returns failed report");
         assert!(!report.success);
+        let run_id = report.run_id.as_deref().expect("run id exposed");
+        let artifact_index = report
+            .artifact_index
+            .as_ref()
+            .expect("artifact index exposed");
+        assert_eq!(artifact_index.run_id, run_id);
+        assert_eq!(artifact_index.rig_id, rig.id);
+        assert_eq!(artifact_index.status, "fail");
+        assert!(artifact_index
+            .artifact_index_path
+            .ends_with("rig-artifact-index.json"));
+        assert!(std::path::Path::new(&artifact_index.artifact_index_path).is_file());
+        assert_eq!(
+            artifact_index.artifacts_command,
+            format!("homeboy runs artifacts {run_id}")
+        );
+        assert!(artifact_index
+            .retrieval_commands
+            .contains(&format!("homeboy runs evidence {run_id}")));
+        assert_eq!(artifact_index.failed_step_refs.len(), 1);
+        assert_eq!(artifact_index.failed_step_refs[0].pipeline, "check");
+        assert_eq!(artifact_index.failed_step_refs[0].kind, "command");
+        assert_eq!(
+            artifact_index.failed_step_refs[0].label,
+            "intentional check failure"
+        );
+        assert!(artifact_index
+            .key_report_refs
+            .iter()
+            .any(|artifact| artifact.kind == "rig_artifact_index"));
 
         let runs = list_rig_runs(&rig.id);
         assert_eq!(runs.len(), 1);
         let run = &runs[0];
+        let persisted_index = crate::core::rig::artifact_index_for_run(
+            &ObservationStore::open_initialized().expect("store"),
+            run,
+        )
+        .expect("persisted run artifact index");
+        assert_eq!(persisted_index.run_id, run_id);
+        assert_eq!(persisted_index.failed_step_refs.len(), 1);
         assert_eq!(run.status, "fail");
         assert_eq!(run.metadata_json["pipeline"]["failed"], 1);
         assert_eq!(

@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
+use super::artifact_index::{self, RigRunArtifactIndex};
+
 use super::expand::{expand_resources, expand_vars};
 use super::lease::acquire_active_run_lease;
 use super::pipeline::{
@@ -27,16 +29,24 @@ use crate::core::observation::{NewRunRecord, ObservationStore, RunStatus};
 #[derive(Debug, Clone, Serialize)]
 pub struct UpReport {
     pub rig_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
     pub pipeline: PipelineOutcome,
     pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact_index: Option<RigRunArtifactIndex>,
 }
 
 /// Report from `rig check`.
 #[derive(Debug, Clone, Serialize)]
 pub struct CheckReport {
     pub rig_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
     pub pipeline: PipelineOutcome,
     pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact_index: Option<RigRunArtifactIndex>,
 }
 
 /// Report from a bench preparation pipeline.
@@ -130,7 +140,7 @@ pub fn run_up(rig: &RigSpec) -> Result<UpReport> {
     let _lease = acquire_active_run_lease(rig, "up")?;
     let observer = RigRunObserver::start(rig, "up");
 
-    let result = (|| {
+    let mut result = (|| {
         let outcome = run_pipeline(rig, "up", true)?;
 
         if outcome.is_success() {
@@ -149,17 +159,23 @@ pub fn run_up(rig: &RigSpec) -> Result<UpReport> {
 
         Ok(UpReport {
             rig_id: rig.id.clone(),
+            run_id: None,
             success: outcome.is_success(),
             pipeline: outcome,
+            artifact_index: None,
         })
     })();
 
-    RigRunObserver::finish(
+    let artifact_index = RigRunObserver::finish(
         observer.as_ref(),
         rig,
         result.as_ref().ok().map(|report| &report.pipeline),
         &result,
     );
+    if let Ok(report) = result.as_mut() {
+        report.run_id = observer.as_ref().map(|observer| observer.run_id.clone());
+        report.artifact_index = artifact_index;
+    }
     result
 }
 
@@ -168,7 +184,7 @@ pub fn run_up(rig: &RigSpec) -> Result<UpReport> {
 pub fn run_check(rig: &RigSpec) -> Result<CheckReport> {
     let observer = RigRunObserver::start(rig, "check");
 
-    let result = (|| {
+    let mut result = (|| {
         let outcome = run_pipeline(rig, "check", false)?;
 
         let mut state = RigState::load(&rig.id)?;
@@ -179,17 +195,23 @@ pub fn run_check(rig: &RigSpec) -> Result<CheckReport> {
 
         Ok(CheckReport {
             rig_id: rig.id.clone(),
+            run_id: None,
             success: outcome.is_success(),
             pipeline: outcome,
+            artifact_index: None,
         })
     })();
 
-    RigRunObserver::finish(
+    let artifact_index = RigRunObserver::finish(
         observer.as_ref(),
         rig,
         result.as_ref().ok().map(|report| &report.pipeline),
         &result,
     );
+    if let Ok(report) = result.as_mut() {
+        report.run_id = observer.as_ref().map(|observer| observer.run_id.clone());
+        report.artifact_index = artifact_index;
+    }
     result
 }
 
@@ -202,8 +224,10 @@ pub fn run_check_groups(rig: &RigSpec, groups: &[String]) -> Result<CheckReport>
 
     Ok(CheckReport {
         rig_id: rig.id.clone(),
+        run_id: None,
         success: outcome.is_success(),
         pipeline: outcome,
+        artifact_index: None,
     })
 }
 
@@ -575,9 +599,9 @@ impl RigRunObserver {
         rig: &RigSpec,
         pipeline: Option<&PipelineOutcome>,
         result: &Result<T>,
-    ) {
+    ) -> Option<RigRunArtifactIndex> {
         let Some(observer) = observer else {
-            return;
+            return None;
         };
         let status = match result {
             Ok(_) if pipeline.is_some_and(PipelineOutcome::is_success) => RunStatus::Pass,
@@ -591,6 +615,13 @@ impl RigRunObserver {
         let _ = observer
             .store
             .finish_run(&observer.run_id, status, Some(metadata));
+        artifact_index::for_completed_rig_run(
+            &observer.store,
+            rig,
+            &observer.run_id,
+            status.as_str(),
+            pipeline,
+        )
     }
 }
 

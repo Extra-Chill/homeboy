@@ -10,6 +10,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use homeboy::core::observation::{ArtifactRecord, ObservationStore, RunListFilter, RunRecord};
+use homeboy::core::rig::RigRunArtifactIndex;
 use homeboy::core::runner::is_reportable_artifact_evidence_path;
 use homeboy::core::Error;
 use serde::{Deserialize, Serialize};
@@ -29,6 +30,8 @@ pub struct RunSummary {
     pub cwd: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status_note: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact_index: Option<RigRunArtifactIndex>,
 }
 
 /// Convert a `--since <duration>` flag value into an RFC-3339 timestamp.
