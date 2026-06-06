@@ -24,6 +24,11 @@ use crate::core::agent_task_timeout_artifacts::{
 };
 use crate::core::config::value_type_name;
 
+/// Authoritative execution adapter consumed by the agent-task scheduler.
+///
+/// Provider lifecycle payloads live with the agent-task schemas, but execution
+/// dispatch goes through this single adapter shape so provider selection,
+/// outcome normalization, timeouts, and cancellation do not drift across seams.
 pub trait AgentTaskExecutorAdapter: Send + Sync + 'static {
     fn execute(
         &self,

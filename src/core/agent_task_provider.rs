@@ -615,6 +615,76 @@ mod tests {
     }
 
     #[test]
+    fn scheduler_reports_missing_extension_provider() {
+        let (request, _provider) = request("task-missing-provider", "unused".to_string());
+        let scheduler = AgentTaskScheduler::new(ExtensionProviderAgentTaskExecutor::default());
+
+        let aggregate = scheduler.run(AgentTaskPlan::new("plan-missing-provider", vec![request]));
+
+        assert_eq!(aggregate.totals.failed, 1);
+        assert_eq!(
+            aggregate.outcomes[0].failure_classification,
+            Some(AgentTaskFailureClassification::CapabilityMissing)
+        );
+        assert_eq!(
+            aggregate.outcomes[0].diagnostics[0].class,
+            "agent_task.provider_missing"
+        );
+    }
+
+    #[test]
+    fn scheduler_reports_missing_provider_capability() {
+        let (mut request, provider) = request("task-missing-capability", "unused".to_string());
+        request.executor.required_capabilities = vec!["workspace_write".to_string()];
+        let scheduler =
+            AgentTaskScheduler::new(ExtensionProviderAgentTaskExecutor::with_providers(vec![
+                provider,
+            ]));
+
+        let aggregate = scheduler.run(AgentTaskPlan::new("plan-missing-capability", vec![request]));
+
+        assert_eq!(aggregate.totals.failed, 1);
+        assert_eq!(
+            aggregate.outcomes[0].failure_classification,
+            Some(AgentTaskFailureClassification::CapabilityMissing)
+        );
+        assert_eq!(
+            aggregate.outcomes[0].diagnostics[0].class,
+            "agent_task.capability_missing"
+        );
+        assert_eq!(
+            aggregate.outcomes[0].diagnostics[0].data["missing_capabilities"],
+            json!(["workspace_write"])
+        );
+    }
+
+    #[test]
+    fn scheduler_normalizes_malformed_provider_output() {
+        let command = format!("node {}", script("process.stdout.write('{not json');"));
+        let (request, provider) = request("task-malformed-provider", command);
+        let scheduler =
+            AgentTaskScheduler::new(ExtensionProviderAgentTaskExecutor::with_providers(vec![
+                provider,
+            ]));
+
+        let aggregate = scheduler.run(AgentTaskPlan::new("plan-malformed-provider", vec![request]));
+
+        assert_eq!(aggregate.totals.failed, 1);
+        assert_eq!(
+            aggregate.outcomes[0].failure_classification,
+            Some(AgentTaskFailureClassification::Provider)
+        );
+        assert_eq!(
+            aggregate.outcomes[0].diagnostics[0].class,
+            "agent_task.provider_malformed_json"
+        );
+        assert_eq!(
+            aggregate.outcomes[0].diagnostics[0].data["stdout"],
+            "{not json"
+        );
+    }
+
+    #[test]
     fn provider_timeout_returns_structured_outcome() {
         let command = format!("node {}", script("setInterval(() => {}, 1000);"));
         let (mut request, provider) = request("task-timeout", command);
