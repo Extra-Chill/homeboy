@@ -321,10 +321,35 @@ URLs and readiness gates. The helpers collect resource timings, classify REST /
 admin / asset waterfalls, and correlate browser timings with rows from the
 temporary request profiler.
 
+### Helper manifest consumers
+
+Installed WordPress extensions expose helper paths through
+`HOMEBOY_WORDPRESS_HELPER_MANIFEST`. Node/ESM workloads can consume that
+manifest without copying `createRequire()` boilerplate:
+
+```js
+import helperConsumer from 'homeboy-extension-wordpress/wordpress-helper-consumer';
+
+const { loadWordPressHelper, loadWordPressLibHelper } = helperConsumer;
+const { path: profilerPath, module: profiler } = loadWordPressHelper('requestProfiler');
+const { module: pageProfiler } = loadWordPressLibHelper('page-profiler.js', { required: true });
+```
+
+The loader returns stable handles shaped as `{ path, module, found, reason }`.
+Missing optional helpers return `module: null`; pass `{ required: true }` to fail
+with a diagnostic error.
+
+Request-profiler JSONL rows can be compacted for benchmark artifacts with
+`summarizeWordPressRequestProfilerRows(rows, options)`. The summary groups rows
+by `request_id`, extracts final URI/method/duration/status, and includes bounded
+`requests`, `slow_requests`, `hooks`, and `timing_rows` arrays. Product-specific
+route attribution and gate decisions should stay in the calling rig.
+
 ```js
 const {
 	installWordPressRequestProfiler,
 	collectWordPressRequestProfiles,
+	summarizeWordPressRequestProfilerRows,
 	profileWordPressPages,
 } = require('homeboy-extension-wordpress');
 
@@ -350,6 +375,11 @@ const result = await profileWordPressPages({
 	},
 	wordpressProfilerRows: collectWordPressRequestProfiles(sitePath),
 });
+
+const wordpressRequestSummary = summarizeWordPressRequestProfilerRows(
+	collectWordPressRequestProfiles(sitePath),
+	{ slowThresholdMs: 50 }
+);
 ```
 
 For common wp-admin and Site Editor profiling, use the documented admin page

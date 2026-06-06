@@ -9,6 +9,7 @@ module.exports = {
 	...require('./lib/editor-canvas-probes'),
 	...require('./lib/timing-correlator'),
 	...require('./lib/helper-manifest'),
+	...require('./lib/wordpress-helper-consumer'),
 	...require('./lib/fixture-setup'),
 	...require('./lib/codebox-memory-report'),
 	...require('./lib/agent-terminal-actions'),
