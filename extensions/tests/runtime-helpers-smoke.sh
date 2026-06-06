@@ -7,6 +7,12 @@ FAILURE_TRAP_HELPER="${HOMEBOY_RUNTIME_FAILURE_TRAP:-${HOMEBOY_CORE_DIR}/src/cor
 WRITE_TEST_RESULTS_HELPER="${HOMEBOY_RUNTIME_WRITE_TEST_RESULTS:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/write-test-results.sh}"
 SIDECAR_WRITER_HELPER="${HOMEBOY_RUNTIME_SIDECAR_WRITER:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/sidecar-writer.sh}"
 PROJECT_SCRIPTS_HELPER="${ROOT_DIR}/scripts/lib/project-scripts.sh"
+SHARED_RUNNER_PRELUDE_HELPER="${ROOT_DIR}/scripts/lib/runner-prelude.sh"
+RUNNER_PRELUDE_HELPERS=(
+    "${ROOT_DIR}/nodejs/scripts/lib/runner-prelude.sh"
+    "${ROOT_DIR}/rust/scripts/lib/runner-prelude.sh"
+    "${ROOT_DIR}/wordpress/scripts/lib/runner-prelude.sh"
+)
 FIX_RESULTS_HELPERS=(
     "${ROOT_DIR}/nodejs/scripts/lib/fix-results.sh"
     "${ROOT_DIR}/rust/scripts/lib/fix-results.sh"
@@ -20,6 +26,7 @@ SETTINGS_HELPERS=(
     "${ROOT_DIR}/wordpress/scripts/lib/settings.sh"
 )
 COMMAND_CAPTURE_HELPERS=(
+    "${ROOT_DIR}/scripts/lib/command-capture.sh"
     "${ROOT_DIR}/nodejs/scripts/lib/command-capture.sh"
     "${ROOT_DIR}/rust/scripts/lib/command-capture.sh"
     "${ROOT_DIR}/wordpress/scripts/lib/command-capture.sh"
@@ -60,9 +67,15 @@ assert_file "$WRITE_TEST_RESULTS_HELPER"
 assert_file "$SIDECAR_WRITER_HELPER"
 assert_file "$BASH_PREFLIGHT_HELPER"
 assert_file "$PROJECT_SCRIPTS_HELPER"
+assert_file "$SHARED_RUNNER_PRELUDE_HELPER"
 bash -c 'source "$1"; type homeboy_sidecar_emit >/dev/null; type homeboy_sidecar_write >/dev/null; type homeboy_sidecar_merge >/dev/null; type homeboy_merge_lint_findings >/dev/null; type homeboy_merge_test_failures >/dev/null; type homeboy_write_fix_results >/dev/null; type homeboy_merge_annotations >/dev/null' _ "$SIDECAR_WRITER_HELPER"
 bash -c 'source "$1"; homeboy_require_bash_version 4' _ "$BASH_PREFLIGHT_HELPER"
 bash -c 'source "$1"; type homeboy_project_init >/dev/null; type homeboy_project_has_script >/dev/null; type homeboy_project_run_script_command >/dev/null' _ "$PROJECT_SCRIPTS_HELPER"
+bash -c 'source "$1"; type homeboy_runner_init >/dev/null; type homeboy_source_runtime_helper >/dev/null; type homeboy_require_bash_version >/dev/null' _ "$SHARED_RUNNER_PRELUDE_HELPER"
+for runner_prelude_helper in "${RUNNER_PRELUDE_HELPERS[@]}"; do
+    assert_file "$runner_prelude_helper"
+    bash -c 'source "$1"; type homeboy_runner_init >/dev/null; type homeboy_source_runtime_helper >/dev/null; type homeboy_require_bash_version >/dev/null' _ "$runner_prelude_helper"
+done
 for fix_results_helper in "${FIX_RESULTS_HELPERS[@]}"; do
     assert_file "$fix_results_helper"
     bash -c 'source "$1"; type homeboy_fix_results_capture >/dev/null; type homeboy_fix_results_append_changed >/dev/null; type homeboy_fix_results_write >/dev/null' _ "$fix_results_helper"
@@ -83,9 +96,15 @@ if ! cmp -s "${SETTINGS_HELPERS[0]}" "${SETTINGS_HELPERS[1]}" \
     exit 1
 fi
 
-if ! cmp -s "${COMMAND_CAPTURE_HELPERS[0]}" "${COMMAND_CAPTURE_HELPERS[1]}" \
-    || ! cmp -s "${COMMAND_CAPTURE_HELPERS[0]}" "${COMMAND_CAPTURE_HELPERS[2]}"; then
-    echo "Command capture helpers should stay identical across installed extension trees" >&2
+if ! cmp -s "${COMMAND_CAPTURE_HELPERS[1]}" "${COMMAND_CAPTURE_HELPERS[2]}" \
+    || ! cmp -s "${COMMAND_CAPTURE_HELPERS[1]}" "${COMMAND_CAPTURE_HELPERS[3]}"; then
+    echo "Command capture wrappers should stay identical across installed extension trees" >&2
+    exit 1
+fi
+
+if ! cmp -s "${RUNNER_PRELUDE_HELPERS[0]}" "${RUNNER_PRELUDE_HELPERS[1]}" \
+    || ! cmp -s "${RUNNER_PRELUDE_HELPERS[0]}" "${RUNNER_PRELUDE_HELPERS[2]}"; then
+    echo "Runner prelude wrappers should stay identical across installed extension trees" >&2
     exit 1
 fi
 
