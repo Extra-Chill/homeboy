@@ -471,6 +471,11 @@ fn execute_trace_run(args: TraceArgs) -> homeboy::core::Result<TraceRunExecution
             rig::RigWorkloadKind::Trace,
         )?;
     }
+    let _lease = rig_context
+        .as_ref()
+        .map(|context| rig::lease::acquire_active_run_lease(&context.rig_spec, "trace"))
+        .transpose()?
+        .flatten();
     let span_definitions = span_definitions_for_args(
         &args,
         rig_context.as_ref(),

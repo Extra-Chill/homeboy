@@ -556,6 +556,10 @@ impl Error {
                 }
             }),
         )
+        .with_hint(
+            "If this parallel run is intentional, give each run a distinct namespace or port range so their rig resources no longer overlap."
+                .to_string(),
+        )
     }
 
     pub fn docs_topic_not_found(topic: impl Into<String>) -> Self {

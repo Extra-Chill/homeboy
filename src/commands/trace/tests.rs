@@ -53,6 +53,72 @@ fn trace_args_for_rig(rig_id: &str, component_id: &str, scenario_id: &str) -> Tr
     }
 }
 
+fn set_trace_rig_resources(home: &tempfile::TempDir, rig_id: &str, resources: serde_json::Value) {
+    let rig_path = home
+        .path()
+        .join(".config")
+        .join("homeboy")
+        .join("rigs")
+        .join(format!("{rig_id}.json"));
+    let mut rig_json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&rig_path).expect("read rig")).expect("parse rig");
+    rig_json["resources"] = resources;
+    fs::write(
+        &rig_path,
+        serde_json::to_string(&rig_json).expect("serialize rig"),
+    )
+    .expect("write rig");
+}
+
+#[test]
+fn rig_trace_run_fails_fast_on_active_default_namespace_resource_lease() {
+    with_isolated_home(|home| {
+        write_trace_extension(home);
+        let previous = std::env::var("HOMEBOY_TRACE_RESOURCE_NAMESPACE").ok();
+        std::env::remove_var("HOMEBOY_TRACE_RESOURCE_NAMESPACE");
+        let active_component = tempfile::TempDir::new().expect("active component");
+        let blocked_component = tempfile::TempDir::new().expect("blocked component");
+        write_trace_rig(home, "studio-rig", "studio", active_component.path());
+        write_trace_rig(home, "studio-alt", "studio", blocked_component.path());
+        let resources = serde_json::json!({
+            "exclusive": ["wp-codebox-preview:${env.HOMEBOY_TRACE_RESOURCE_NAMESPACE}"]
+        });
+        set_trace_rig_resources(home, "studio-rig", resources.clone());
+        set_trace_rig_resources(home, "studio-alt", resources);
+
+        let active_spec = rig::load("studio-rig").expect("load active rig");
+        let _lease = rig::lease::acquire_active_run_lease(&active_spec, "trace")
+            .expect("acquire active trace lease")
+            .expect("resourceful trace rig leases");
+
+        let error = match run(
+            trace_args_for_rig("studio-alt", "studio", "studio-app-create-site"),
+            &GlobalArgs {},
+        ) {
+            Ok(_) => panic!("trace should fail before running with conflicting rig resources"),
+            Err(error) => error,
+        };
+
+        match previous {
+            Some(value) => std::env::set_var("HOMEBOY_TRACE_RESOURCE_NAMESPACE", value),
+            None => std::env::remove_var("HOMEBOY_TRACE_RESOURCE_NAMESPACE"),
+        }
+
+        assert_eq!(
+            error.code,
+            homeboy::core::error::ErrorCode::RigResourceConflict
+        );
+        assert!(error.message.contains("studio-alt"));
+        assert!(error.message.contains("studio-rig"));
+        assert!(error.message.contains("wp-codebox-preview:<default>"));
+        assert!(error.message.contains("trace"));
+        assert!(error
+            .hints
+            .iter()
+            .any(|hint| hint.message.contains("namespace") && hint.message.contains("port range")));
+    });
+}
+
 #[test]
 fn rig_trace_run_uses_rig_owned_workload_extension_without_component_link() {
     with_isolated_home(|home| {
