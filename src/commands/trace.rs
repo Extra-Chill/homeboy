@@ -37,6 +37,7 @@ mod observations;
 mod output;
 mod overlay_locks;
 mod phase_args;
+mod preview_args;
 mod probes;
 #[cfg(test)]
 mod profile_tests;
@@ -61,6 +62,7 @@ use metadata::trace_span_metadata_for_args;
 use observations::record_trace_artifacts;
 use overlay_locks::run_overlay_locks;
 use phase_args::{cli_span_definitions_for_args, span_definitions_for_args};
+use preview_args::trace_public_preview_for_args;
 
 #[cfg(test)]
 use output::render_aggregate_markdown;
@@ -747,66 +749,6 @@ fn trace_workload_inputs(
             id,
         ),
     )
-}
-
-fn trace_public_preview_for_args(
-    args: &TraceArgs,
-    rig_context: Option<&TraceRigContext>,
-    extension_id: Option<&str>,
-) -> homeboy::core::Result<Option<rig::TracePublicPreviewSpec>> {
-    let Some(context) = rig_context else {
-        return Ok(None);
-    };
-
-    if let Some(profile_id) = args.profile.as_deref() {
-        if let Some(profile) = context.rig_spec.trace_profiles.get(profile_id) {
-            if let Some(spec) = profile.public_preview.as_ref() {
-                return Ok(Some(expand_trace_public_preview(context, spec)));
-            }
-        }
-    }
-
-    let Some(extension_id) = extension_id else {
-        return Ok(None);
-    };
-    let scenario = trace_scenario(args)?;
-    let Some(workload) = context
-        .rig_spec
-        .trace_workloads
-        .get(extension_id)
-        .and_then(|workloads| {
-            workloads
-                .iter()
-                .find(|workload| trace_workload_scenario_id(workload.path()) == scenario)
-        })
-    else {
-        return Ok(None);
-    };
-
-    Ok(workload
-        .public_preview()
-        .map(|spec| expand_trace_public_preview(context, spec)))
-}
-
-fn expand_trace_public_preview(
-    context: &TraceRigContext,
-    spec: &rig::TracePublicPreviewSpec,
-) -> rig::TracePublicPreviewSpec {
-    let expand = |value: &str| {
-        let expanded = rig::expand::expand_vars(&context.rig_spec, value);
-        match context.rig_package_root.as_ref() {
-            Some(root) => expanded.replace("${package.root}", &root.to_string_lossy()),
-            None => expanded,
-        }
-    };
-    rig::TracePublicPreviewSpec {
-        local_origin: expand(&spec.local_origin),
-        public_origin: spec.public_origin.as_deref().map(|value| expand(value)),
-        command: spec.command.as_deref().map(|value| expand(value)),
-        require_https: spec.require_https,
-        provider: spec.provider.clone(),
-        startup_timeout_seconds: spec.startup_timeout_seconds,
-    }
 }
 
 #[derive(Clone)]

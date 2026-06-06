@@ -9,6 +9,8 @@ use std::collections::{BTreeMap, HashMap};
 use crate::core::component::ScopedExtensionConfig;
 use crate::core::extension::bench::{BenchGate, BenchGateOp};
 
+mod workload;
+
 /// A rig: components + services + pipelines.
 ///
 /// Lives at `~/.config/homeboy/rigs/{id}.json`.
@@ -508,62 +510,6 @@ pub enum TraceExperimentArtifactSpec {
     Detailed { label: String, path: String },
 }
 
-impl WorkloadSpec {
-    pub fn path(&self) -> &str {
-        &self.path
-    }
-
-    pub fn public_preview(&self) -> Option<&TracePublicPreviewSpec> {
-        self.public_preview.as_ref()
-    }
-
-    pub fn check_groups(&self) -> Option<&[String]> {
-        self.check_groups.as_deref()
-    }
-
-    pub fn port_range_size(&self) -> Option<u16> {
-        self.port_range_size
-    }
-
-    pub fn named_leases(&self) -> &[String] {
-        &self.named_leases
-    }
-
-    pub fn trace_phase_preset(&self, name: &str) -> Option<&[String]> {
-        self.trace_phase_presets
-            .get(name)
-            .map(|phases| phases.as_slice())
-    }
-
-    pub fn trace_span_metadata(&self) -> &HashMap<String, TraceSpanMetadata> {
-        &self.trace_span_metadata
-    }
-
-    pub fn trace_default_phase_preset(&self) -> Option<&str> {
-        self.trace_default_phase_preset.as_deref()
-    }
-
-    pub fn trace_variants(&self) -> &HashMap<String, TraceVariantSpec> {
-        &self.trace_variants
-    }
-
-    pub fn trace_guardrails(&self) -> &[TraceGuardrailSpec] {
-        &self.trace_guardrails
-    }
-
-    pub fn trace_probes(&self) -> &[TraceProbeConfig] {
-        &self.trace_probes
-    }
-
-    pub fn trace_dependencies(&self) -> &[TraceDependencySpec] {
-        &self.dependencies
-    }
-
-    pub fn runner_capabilities(&self) -> &[String] {
-        &self.runner_capabilities
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -726,29 +672,6 @@ mod tests {
         let workload_without_probes: WorkloadSpec =
             serde_json::from_str(r#"{"path":"/tmp/no-probes.trace.mjs"}"#).expect("parse workload");
         assert!(workload_without_probes.trace_probes().is_empty());
-    }
-
-    #[test]
-    fn test_trace_public_preview_parse() {
-        let workload: WorkloadSpec = serde_json::from_str(
-            r#"{
-                "path": "/tmp/wallet.trace.mjs",
-                "public_preview": {
-                    "local_origin": "http://127.0.0.1:8080",
-                    "command": "cloudflared tunnel --url http://127.0.0.1:8080",
-                    "require_https": true,
-                    "provider": "cloudflared",
-                    "startup_timeout_seconds": 5
-                }
-            }"#,
-        )
-        .expect("parse public preview workload");
-
-        let preview = workload.public_preview().expect("public preview");
-        assert_eq!(preview.local_origin, "http://127.0.0.1:8080");
-        assert_eq!(preview.provider.as_deref(), Some("cloudflared"));
-        assert!(preview.require_https);
-        assert_eq!(preview.startup_timeout_seconds, Some(5));
     }
 
     #[test]
@@ -1557,6 +1480,10 @@ mod trace_experiment_spec_tests {
 #[cfg(test)]
 #[path = "../../../tests/core/rig/spec_test.rs"]
 mod spec_test;
+
+#[cfg(test)]
+#[path = "../../../tests/core/rig/public_preview_spec_test.rs"]
+mod public_preview_spec_test;
 
 #[cfg(test)]
 #[path = "../../../tests/core/rig/bench_default_baseline_spec_test.rs"]
