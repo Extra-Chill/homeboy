@@ -511,6 +511,7 @@ fn guard_step_dirty_side_effects(
 
     let after = tracked_dirty_snapshot(&context.component.local_path)?;
     let introduced: Vec<String> = after.difference(&before).cloned().collect();
+    let introduced = release_step_unexpected_dirty_files(step, context, introduced)?;
     if introduced.is_empty() {
         return Ok(result);
     }
@@ -523,6 +524,46 @@ fn release_step_dirty_side_effects_are_guarded(step: &PlanStep) -> bool {
         step.kind.as_str(),
         "preflight.lint" | "preflight.test" | "preflight.package" | "release.prepare" | "package"
     )
+}
+
+fn release_step_unexpected_dirty_files(
+    step: &PlanStep,
+    context: &ReleaseExecutionContext,
+    files: Vec<String>,
+) -> Result<Vec<String>> {
+    if step.kind != "release.prepare" {
+        return Ok(files);
+    }
+
+    let allowed = release_prepare_allowed_dirty_files(context.component)?;
+    Ok(files
+        .into_iter()
+        .filter(|file| !allowed.iter().any(|allowed| file == allowed))
+        .collect())
+}
+
+fn release_prepare_allowed_dirty_files(
+    component: &crate::core::component::Component,
+) -> Result<Vec<String>> {
+    let changelog_path = super::changelog::resolve_changelog_path(component)?;
+    let version_targets = component
+        .version_targets
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .map(|target| {
+            std::path::Path::new(&component.local_path)
+                .join(&target.file)
+                .to_string_lossy()
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+
+    Ok(super::planning_worktree::get_release_allowed_files(
+        &changelog_path,
+        &version_targets,
+        std::path::Path::new(&component.local_path),
+    ))
 }
 
 fn tracked_dirty_snapshot(path: &str) -> Result<BTreeSet<String>> {
@@ -581,7 +622,7 @@ fn dirty_side_effect_failure(step: &PlanStep, files: Vec<String>) -> ReleaseStep
 mod tests {
     use super::{
         execute_release_plan_step, release_step_is_plan_only, release_step_is_show_stopper,
-        ReleaseExecutionContext,
+        release_step_unexpected_dirty_files, ReleaseExecutionContext,
     };
     use crate::core::component::{Component, ComponentScriptsConfig, VersionTarget};
     use crate::core::plan::PlanStep;
@@ -891,6 +932,45 @@ mod tests {
             .hints
             .iter()
             .any(|hint| hint.message.contains("Fix the build/test/package step")));
+    }
+
+    #[test]
+    fn release_prepare_dirty_guard_allows_release_owned_lockfiles() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path();
+        let component = Component {
+            id: "fixture".to_string(),
+            local_path: root.to_string_lossy().to_string(),
+            changelog_target: Some("docs/changelog.md".to_string()),
+            version_targets: Some(vec![VersionTarget {
+                file: "Cargo.toml".to_string(),
+                pattern: None,
+            }]),
+            ..Default::default()
+        };
+        let options = ReleaseOptions::default();
+        let context = ReleaseExecutionContext {
+            component: &component,
+            extensions: &[],
+            component_id: "fixture",
+            options: &options,
+            state: ReleaseState::default(),
+            publish_failed: false,
+        };
+
+        let unexpected = release_step_unexpected_dirty_files(
+            &plan_step("release.prepare"),
+            &context,
+            vec![
+                "Cargo.lock".to_string(),
+                "Cargo.toml".to_string(),
+                "docs/changelog.md".to_string(),
+                "src/lib.rs".to_string(),
+            ],
+        )
+        .expect("guard should classify dirty files");
+
+        assert_eq!(unexpected, vec!["src/lib.rs"]);
     }
 
     #[test]
