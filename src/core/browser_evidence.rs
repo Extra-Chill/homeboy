@@ -161,6 +161,18 @@ pub struct TraceAssertion {
     pub data: Option<Value>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct TraceTimeline {
+    #[serde(default)]
+    pub timeline: Vec<TraceEvent>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct TraceAssertions {
+    #[serde(default)]
+    pub assertions: Vec<TraceAssertion>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TraceEnvelopeStatus {
@@ -172,16 +184,15 @@ pub enum TraceEnvelopeStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
 pub struct TraceEnvelope {
     pub component_id: String,
     pub scenario_id: String,
     pub status: TraceEnvelopeStatus,
     pub summary: String,
-    #[serde(default)]
-    pub timeline: Vec<TraceEvent>,
-    #[serde(default)]
-    pub assertions: Vec<TraceAssertion>,
+    #[serde(flatten)]
+    pub timeline: TraceTimeline,
+    #[serde(flatten)]
+    pub assertions: TraceAssertions,
     #[serde(default)]
     pub artifacts: Vec<BrowserArtifactMetadata>,
     #[serde(default)]
