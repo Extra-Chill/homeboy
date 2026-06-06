@@ -352,6 +352,30 @@ The helper returns a `fixtureSetup` summary and writes
 steps throw errors that include the fixture label, command, exit code, stdout,
 and stderr.
 
+Workloads that need temporary fixture plugins can use the plugin helpers from
+`wordpress/lib/fixture-setup.js`:
+
+```js
+const {
+	withWordPressFixturePlugins,
+} = require('./wordpress/lib/fixture-setup');
+
+await withWordPressFixturePlugins({
+	sitePath,
+	plugins: [
+		{ path: '/path/to/plugin', plugin: 'plugin/plugin.php' },
+		{ path: '/path/to/copied-plugin', copy: true, activate: false },
+	],
+	runCli: (command) => runCli(command, { cwd: sitePath }),
+}, async (installedPlugins) => {
+	// Run the profiling workload while plugins are mounted and activated.
+});
+```
+
+The plugin helper backs up an existing plugin directory, installs each fixture
+plugin by symlink or copy, activates entries unless `activate: false`, and
+restores the original plugin tree in reverse order.
+
 ## Reusable Block Quality Probes
 
 WordPress workloads can collect product-neutral block quality counts without

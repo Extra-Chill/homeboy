@@ -74,7 +74,7 @@ import { readFileSync } from 'node:fs';
 const results = JSON.parse(readFileSync(process.argv[2], 'utf8'));
 const scenario = results.scenarios?.[0];
 if (!scenario) throw new Error('missing scenario');
-if (scenario.metrics?.helper_count !== 5) {
+if (scenario.metrics?.helper_count !== 7) {
     throw new Error(`helper count metric regressed: ${JSON.stringify(scenario.metrics)}`);
 }
 if (!scenario.metadata?.wordpress_helper_manifest?.endsWith('/wordpress/lib/helper-manifest.js')) {

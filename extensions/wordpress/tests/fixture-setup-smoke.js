@@ -9,8 +9,12 @@ const path = require('node:path');
 
 const {
 	fixtureRecipeStep,
+	installWordPressFixturePlugins,
 	normalizeFixtureList,
+	normalizeFixturePluginList,
+	restoreWordPressFixturePlugins,
 	runWordPressFixtureSetup,
+	withWordPressFixturePlugins,
 } = require('../lib/fixture-setup');
 
 const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-wp-fixtures-'));
@@ -20,6 +24,10 @@ async function main() {
 		assert.deepEqual(
 			normalizeFixtureList([{ path: 'fixtures/seed.php' }]).map((step) => ({ type: step.type, label: step.label })),
 			[{ type: 'wp-eval-file', label: 'wp-eval-file:1' }]
+		);
+		assert.deepEqual(
+			normalizeFixturePluginList(['/tmp/example-plugin']).map((plugin) => ({ slug: plugin.slug, plugin: plugin.plugin, activate: plugin.activate })),
+			[{ slug: 'example-plugin', plugin: 'example-plugin', activate: true }]
 		);
 
 		const calls = [];
@@ -89,6 +97,59 @@ async function main() {
 			args: ['code-file=fixtures/seed-codebox-posts.php'],
 		});
 		assert.deepEqual(recipeSteps.map((call) => call.recipeStep.command), ['wordpress.wp-cli', 'wordpress.run-php']);
+
+		const sitePath = path.join(fixtureDir, 'site');
+		const pluginsDir = path.join(sitePath, 'wp-content', 'plugins');
+		const sourceDir = path.join(fixtureDir, 'source-plugin');
+		const copySourceDir = path.join(fixtureDir, 'copy-source-plugin');
+		const existingDir = path.join(pluginsDir, 'source-plugin');
+		fs.mkdirSync(sourceDir, { recursive: true });
+		fs.mkdirSync(copySourceDir, { recursive: true });
+		fs.mkdirSync(existingDir, { recursive: true });
+		fs.writeFileSync(path.join(sourceDir, 'source-plugin.php'), '<?php /* Plugin Name: Source Plugin */');
+		fs.writeFileSync(path.join(copySourceDir, 'copy-source-plugin.php'), '<?php /* Plugin Name: Copy Source Plugin */');
+		fs.writeFileSync(path.join(existingDir, 'existing.txt'), 'existing plugin');
+
+		const activationCalls = [];
+		const installedPlugins = await installWordPressFixturePlugins({
+			sitePath,
+			plugins: [
+				{ path: sourceDir, plugin: 'source-plugin/source-plugin.php' },
+				{ path: copySourceDir, copy: true, activate: false },
+			],
+			runCli: async (command, context) => {
+				activationCalls.push({ command, slug: context.plugin.slug, timeoutMs: context.timeoutMs });
+				return { exitCode: 0, stdout: 'activated', stderr: '' };
+			},
+			activateTimeoutMs: 12345,
+		});
+		assert.equal(installedPlugins.length, 2);
+		assert.equal(installedPlugins[0].hadExistingPath, true);
+		assert.equal(fs.lstatSync(path.join(pluginsDir, 'source-plugin')).isSymbolicLink(), true);
+		assert.equal(fs.existsSync(path.join(pluginsDir, 'copy-source-plugin', 'copy-source-plugin.php')), true);
+		assert.deepEqual(activationCalls, [{ command: 'plugin activate source-plugin/source-plugin.php', slug: 'source-plugin', timeoutMs: 12345 }]);
+
+		await restoreWordPressFixturePlugins(installedPlugins);
+		assert.equal(fs.readFileSync(path.join(existingDir, 'existing.txt'), 'utf8'), 'existing plugin');
+		assert.equal(fs.existsSync(path.join(pluginsDir, 'copy-source-plugin')), false);
+
+		const callbackSource = path.join(fixtureDir, 'callback-plugin');
+		fs.mkdirSync(callbackSource, { recursive: true });
+		fs.writeFileSync(path.join(callbackSource, 'callback-plugin.php'), '<?php /* Plugin Name: Callback Plugin */');
+		await assert.rejects(
+			() => withWordPressFixturePlugins(
+				{
+					sitePath,
+					plugins: [{ path: callbackSource, activate: false }],
+				},
+				async () => {
+					assert.equal(fs.existsSync(path.join(pluginsDir, 'callback-plugin')), true);
+					throw new Error('callback failure');
+				}
+			),
+			/callback failure/
+		);
+		assert.equal(fs.existsSync(path.join(pluginsDir, 'callback-plugin')), false);
 
 		await assert.rejects(
 			() => runWordPressFixtureSetup({

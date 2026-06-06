@@ -4,6 +4,7 @@
  * External dependencies
  */
 const fs = require('node:fs');
+const fsp = require('node:fs/promises');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 
@@ -134,6 +135,149 @@ function normalizeCliResult(result) {
 		};
 	}
 	return { exitCode: 0, stdout: String(result), stderr: '' };
+}
+
+function normalizeFixturePluginList(plugins) {
+	if (plugins === undefined || plugins === null) {
+		return [];
+	}
+	if (!Array.isArray(plugins)) {
+		throw new TypeError('fixture plugins must be an array');
+	}
+	return plugins.map((plugin, index) => normalizeFixturePlugin(plugin, index));
+}
+
+function normalizeFixturePlugin(plugin, index) {
+	const entry = typeof plugin === 'string' ? { path: plugin } : plugin;
+	if (!isPlainObject(entry)) {
+		throw new TypeError(`fixture plugin ${index + 1} must be a path string or object`);
+	}
+	if (typeof entry.path !== 'string' || entry.path.trim() === '') {
+		throw new TypeError(`fixture plugin ${index + 1} requires a non-empty path`);
+	}
+	const pluginPath = entry.path.trim();
+	const slug = typeof entry.slug === 'string' && entry.slug.trim()
+		? entry.slug.trim()
+		: path.basename(pluginPath);
+	return {
+		...entry,
+		path: pluginPath,
+		slug,
+		plugin: entry.plugin || slug,
+		activate: entry.activate !== false,
+		copy: entry.copy === true,
+	};
+}
+
+async function installWordPressFixturePlugins(options = {}) {
+	if (!isPlainObject(options)) {
+		throw new TypeError('installWordPressFixturePlugins options must be an object');
+	}
+	const plugins = normalizeFixturePluginList(options.plugins || options.fixturePlugins);
+	if (plugins.length === 0) {
+		return [];
+	}
+	const sitePath = typeof options.sitePath === 'string' && options.sitePath.trim()
+		? options.sitePath.trim()
+		: '';
+	const pluginDir = options.pluginDir || (sitePath ? path.join(sitePath, 'wp-content', 'plugins') : '');
+	if (!pluginDir) {
+		throw new Error('installWordPressFixturePlugins requires sitePath or pluginDir');
+	}
+
+	await fsp.mkdir(pluginDir, { recursive: true });
+	const installed = [];
+	for (const plugin of plugins) {
+		const linkPath = path.join(pluginDir, plugin.slug);
+		const backupPath = `${linkPath}.homeboy-fixture-backup-${process.pid}-${Date.now()}-${installed.length}`;
+		let hadExistingPath = false;
+
+		try {
+			await fsp.rename(linkPath, backupPath);
+			hadExistingPath = true;
+		} catch (error) {
+			if (error?.code !== 'ENOENT') {
+				throw error;
+			}
+		}
+
+		await fsp.rm(linkPath, { recursive: true, force: true });
+		if (plugin.copy) {
+			await fsp.cp(plugin.path, linkPath, { recursive: true, force: true });
+		} else {
+			await fsp.symlink(plugin.path, linkPath, 'dir');
+		}
+
+		installed.push({
+			...plugin,
+			linkPath,
+			backupPath,
+			hadExistingPath,
+		});
+	}
+
+	const runCli = options.runCli || ((command, runContext) => defaultRunCli(command, {
+		...options,
+		...runContext,
+	}));
+	for (const plugin of installed.filter((entry) => entry.activate)) {
+		const result = normalizeCliResult(await runCli(`plugin activate ${plugin.plugin}`, {
+			plugin,
+			role: 'fixture-plugin-activate',
+			timeoutMs: options.activateTimeoutMs,
+		}));
+		if (result.exitCode !== 0) {
+			throw Object.assign(failedStepError({ label: `activate:${plugin.slug}`, type: 'wp-cli' }, `plugin activate ${plugin.plugin}`, result), {
+				fixturePlugin: plugin,
+				installedPlugins: installed,
+			});
+		}
+		plugin.activation = {
+			command: `plugin activate ${plugin.plugin}`,
+			exitCode: result.exitCode,
+			stdout: result.stdout,
+			stderr: result.stderr,
+		};
+	}
+
+	return installed.map((plugin) => ({
+		slug: plugin.slug,
+		plugin: plugin.plugin,
+		path: plugin.path,
+		copy: plugin.copy,
+		activate: plugin.activate,
+		linkPath: plugin.linkPath,
+		backupPath: plugin.backupPath,
+		hadExistingPath: plugin.hadExistingPath,
+		...(plugin.activation ? { activation: plugin.activation } : {}),
+	}));
+}
+
+async function restoreWordPressFixturePlugins(installedPlugins = []) {
+	if (!Array.isArray(installedPlugins)) {
+		throw new TypeError('installed fixture plugins must be an array');
+	}
+	for (const plugin of [...installedPlugins].reverse()) {
+		if (!plugin?.linkPath) {
+			continue;
+		}
+		await fsp.rm(plugin.linkPath, { recursive: true, force: true });
+		if (plugin.hadExistingPath) {
+			await fsp.rename(plugin.backupPath, plugin.linkPath);
+		}
+	}
+}
+
+async function withWordPressFixturePlugins(options, callback) {
+	if (typeof callback !== 'function') {
+		throw new TypeError('withWordPressFixturePlugins requires a callback');
+	}
+	const installedPlugins = await installWordPressFixturePlugins(options);
+	try {
+		return await callback(installedPlugins);
+	} finally {
+		await restoreWordPressFixturePlugins(installedPlugins);
+	}
 }
 
 function normalizeExecutionRoute(options) {
@@ -335,6 +479,10 @@ function writeFixtureSummary(summary, options, error) {
 module.exports = {
 	fixtureRecipeStep,
 	defaultRunCli,
+	installWordPressFixturePlugins,
 	normalizeFixtureList,
+	normalizeFixturePluginList,
+	restoreWordPressFixturePlugins,
 	runWordPressFixtureSetup,
+	withWordPressFixturePlugins,
 };
