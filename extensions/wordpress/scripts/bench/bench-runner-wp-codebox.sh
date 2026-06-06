@@ -646,7 +646,8 @@ if [ -z "$ARTIFACTS_DIR" ] && [ "$settings_json" != "{}" ]; then
     ARTIFACTS_DIR=$(printf '%s' "$settings_json" | jq -r '.wp_codebox_artifacts_dir // empty' 2>/dev/null || true)
 fi
 if [ -z "$ARTIFACTS_DIR" ]; then
-    ARTIFACTS_DIR=$(mktemp -d "${TMPDIR:-/tmp}/homeboy-wp-codebox-bench-artifacts.XXXXXX")
+    mkdir -p "${PLUGIN_PATH}/.homeboy"
+    ARTIFACTS_DIR=$(mktemp -d "${PLUGIN_PATH}/.homeboy/wp-codebox-bench-artifacts.XXXXXX")
 fi
 mkdir -p "$ARTIFACTS_DIR"
 

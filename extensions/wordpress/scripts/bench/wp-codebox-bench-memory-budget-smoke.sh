@@ -14,7 +14,7 @@ FAKE_BENCH_HELPER="${TMPDIR}/bench-helper.sh"
 CAPTURED_RECIPE="${TMPDIR}/captured-recipe.json"
 CAPTURED_RECIPE_PATH="${TMPDIR}/captured-recipe-path.txt"
 RESULTS_FILE="${TMPDIR}/bench-results.json"
-ARTIFACTS_DIR="${TMPDIR}/artifacts"
+ARTIFACTS_DIR="${PLUGIN_PATH}/.homeboy/wp-codebox-bench-artifacts"
 
 mkdir -p "${PLUGIN_PATH}/tests/bench"
 printf '<?php\nreturn array( "metrics" => array( "noop" => 1 ) );\n' > "${PLUGIN_PATH}/tests/bench/noop.php"
@@ -61,7 +61,7 @@ output=$(CAPTURED_RECIPE="$CAPTURED_RECIPE" \
     HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
     HOMEBOY_COMPONENT_PATH="$PLUGIN_PATH" \
     HOMEBOY_COMPONENT_ID="bench-memory-budget" \
-    HOMEBOY_SETTINGS_JSON="{\"wp_codebox_php_memory_limit\":\"768M\",\"wp_codebox_artifacts_dir\":\"${ARTIFACTS_DIR}\"}" \
+    HOMEBOY_SETTINGS_JSON="{\"wp_codebox_php_memory_limit\":\"768M\"}" \
     bash "${SCRIPT_DIR}/bench-runner.sh" 2>&1)
 status=$?
 set -e
@@ -86,15 +86,16 @@ fi
 
 captured_recipe_path=$(cat "$CAPTURED_RECIPE_PATH")
 case "$captured_recipe_path" in
-    "$ARTIFACTS_DIR"/*) ;;
+    "$ARTIFACTS_DIR".*/*) ;;
     *)
         echo "Expected generated recipe scratch file to live under artifacts directory" >&2
         echo "$captured_recipe_path" >&2
         exit 1
         ;;
 esac
+actual_artifacts_dir=$(dirname "$captured_recipe_path")
 
-DIAGNOSTICS_FILE="${ARTIFACTS_DIR}/wp-codebox-bench-diagnostics.json"
+DIAGNOSTICS_FILE="${actual_artifacts_dir}/wp-codebox-bench-diagnostics.json"
 if ! jq -e '
     .schema == "homeboy/wordpress-bench-diagnostic/v1"
     and .diagnostics[0].code == "wp-codebox-php-memory-exhausted"
