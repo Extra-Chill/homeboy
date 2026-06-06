@@ -109,7 +109,7 @@ fn test_run_check_persists_failing_observation() {
             vec![PipelineStep::Command {
                 step_id: None,
                 depends_on: Vec::new(),
-                cmd: "test -n \"$HOMEBOY_RUN_ID\" && test -n \"$HOMEBOY_RIG_ARTIFACT_INDEX\" && exit 1 || exit 2".to_string(),
+                cmd: "false".to_string(),
                 cwd: None,
                 env: HashMap::new(),
                 label: Some("intentional check failure".to_string()),

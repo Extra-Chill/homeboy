@@ -6,7 +6,6 @@
 //! Every step emits a `PipelineStepOutcome`. The runner aggregates them into
 //! a `PipelineOutcome` with overall success/failure.
 
-use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -25,10 +24,6 @@ use super::state::{now_rfc3339, RigState, SharedPathState};
 use super::toolchain;
 use crate::core::component::Component;
 use crate::core::error::{Error, Result};
-
-thread_local! {
-    static COMMAND_ENV: RefCell<Vec<(String, String)>> = const { RefCell::new(Vec::new()) };
-}
 
 /// Result of one pipeline step.
 #[derive(Debug, Clone, Serialize)]
@@ -62,26 +57,6 @@ pub fn run_pipeline(rig: &RigSpec, name: &str, fail_fast: bool) -> Result<Pipeli
     let steps = rig.pipeline.get(name).cloned().unwrap_or_default();
     let ordered_indices = order_pipeline_steps(rig, name, &steps)?;
     run_ordered_steps(rig, name, &steps, ordered_indices, fail_fast)
-}
-
-pub fn with_command_env<T>(vars: Vec<(String, String)>, f: impl FnOnce() -> T) -> T {
-    COMMAND_ENV.with(|env| {
-        let prior = env.replace(vars);
-        let _guard = CommandEnvGuard { prior };
-        f()
-    })
-}
-
-struct CommandEnvGuard {
-    prior: Vec<(String, String)>,
-}
-
-impl Drop for CommandEnvGuard {
-    fn drop(&mut self) {
-        COMMAND_ENV.with(|env| {
-            env.replace(std::mem::take(&mut self.prior));
-        });
-    }
 }
 
 pub fn run_pipeline_check_groups(
@@ -588,12 +563,6 @@ fn run_command_step(
             command.env("PATH", path);
         }
     }
-
-    COMMAND_ENV.with(|vars| {
-        for (key, value) in vars.borrow().iter() {
-            command.env(key, value);
-        }
-    });
 
     for (k, v) in env {
         command.env(k, expand_vars(rig, v));

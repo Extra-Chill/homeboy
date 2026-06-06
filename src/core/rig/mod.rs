@@ -18,6 +18,7 @@
 //! lifecycle automation, extension-registered service kinds, spec sharing.
 
 pub mod app;
+pub mod artifact_index;
 pub mod check;
 pub mod expand;
 pub mod install;
@@ -34,6 +35,9 @@ pub mod toolchain;
 pub mod workloads;
 
 pub use app::{AppLauncherAction, AppLauncherOptions, AppLauncherReport};
+pub use artifact_index::{
+    for_run as artifact_index_for_run, RigRunArtifactIndex, RigRunArtifactRef, RigRunFailedStepRef,
+};
 pub use install::{
     discover_rigs, discover_stacks, install, read_source_metadata, read_stack_source_metadata,
     DiscoveredRig, DiscoveredStack, InstalledStack, RigInstallResult, RigSourceMetadata,
@@ -42,10 +46,9 @@ pub use install::{
 pub use lease::{acquire_active_run_lease, active_run_leases, ActiveRigRunLease, RigRunLease};
 pub use pipeline::{PipelineOutcome, PipelineStepOutcome};
 pub use runner::{
-    artifact_index_for_run, head_sha_and_branch, run_bench_prepare, run_check, run_check_groups,
-    run_down, run_repair, run_status, run_up, snapshot_state, BenchPrepareReport, CheckReport,
-    DownReport, RepairReport, RepairResourceReport, RigRunArtifactIndex, RigRunArtifactRef,
-    RigRunFailedStepRef, RigStatusReport, SymlinkStatusReport, SymlinkStatusState, UpReport,
+    head_sha_and_branch, run_bench_prepare, run_check, run_check_groups, run_down, run_repair,
+    run_status, run_up, snapshot_state, BenchPrepareReport, CheckReport, DownReport, RepairReport,
+    RepairResourceReport, RigStatusReport, SymlinkStatusReport, SymlinkStatusState, UpReport,
 };
 pub use service::{DiscoveredProcess, ServiceStatus};
 pub use source::{
