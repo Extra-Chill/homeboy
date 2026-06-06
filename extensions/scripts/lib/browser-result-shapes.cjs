@@ -225,6 +225,7 @@ function normalizeTraceEnvelope(envelope) {
 		assertions: Array.isArray(source.assertions) ? source.assertions.map((assertion) => stableJson(assertion)) : [],
 		artifacts: Array.isArray(source.artifacts) ? source.artifacts.map(normalizeBrowserArtifact) : [],
 	};
+	if (source.metrics !== undefined) normalized.metrics = stableJson(source.metrics);
 	if (source.failure !== undefined) normalized.failure = source.failure;
 	return stableJson(normalized);
 }

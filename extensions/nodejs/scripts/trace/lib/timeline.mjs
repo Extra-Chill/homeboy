@@ -26,7 +26,7 @@ export class TraceRecorder {
     }
 
     async recordEvent(source, event, data = {}) {
-        const entry = normalizeTraceEvent(source || 'scenario', event, data, this.timestampMs());
+        const entry = normalizeTraceEvent(source || 'scenario', event, redactSensitiveValue(data), this.timestampMs());
 
         this.timeline.push(entry);
         await mkdir(dirname(this.timelinePath), { recursive: true });
@@ -36,7 +36,7 @@ export class TraceRecorder {
     }
 
     recordAssertion(id, status, message, data = undefined) {
-        const assertion = normalizeTraceAssertion(id, status, message, data);
+        const assertion = normalizeTraceAssertion(id, status, message, redactSensitiveValue(data));
         this.assertions.push(assertion);
         return assertion;
     }
@@ -46,6 +46,10 @@ export class TraceRecorder {
     }
 
     addArtifact(label, path, kind = undefined) {
+        if (!path || typeof path !== 'string') {
+            throw new Error('Trace artifact requires a non-empty path.');
+        }
+
         const artifact = normalizeBrowserArtifact({ label, path: artifactRelativePath(path), kind });
 
         if (!this.artifacts.some((existing) => existing.label === artifact.label && existing.path === artifact.path)) {
@@ -74,7 +78,8 @@ export class TraceRecorder {
             timeline: this.timeline,
             assertions: this.assertions,
             artifacts: this.artifacts,
-            failure: options.failure,
+            metrics: redactSensitiveValue(options.metrics),
+            failure: normalizeFailure(options.failure),
         });
 
         await mkdir(dirname(this.resultsFile), { recursive: true });
@@ -85,6 +90,55 @@ export class TraceRecorder {
 
 export function createTraceRecorder(options = {}) {
     return new TraceRecorder(options);
+}
+
+export function createTraceReporter(options = {}) {
+    const recorder = new TraceRecorder(options);
+    const pendingEvents = [];
+
+    return {
+        get recorder() {
+            return recorder;
+        },
+        get timeline() {
+            return recorder.timeline;
+        },
+        get assertions() {
+            return recorder.assertions;
+        },
+        get artifacts() {
+            return recorder.artifacts;
+        },
+        mark(name, data = {}, source = 'scenario') {
+            const promise = recorder.recordEvent(source, name, data);
+            pendingEvents.push(promise);
+            return promise;
+        },
+        artifact({ path, kind, label } = {}) {
+            return recorder.addArtifact(label || kind || 'artifact', path, kind);
+        },
+        assertion({ id, status, message, data } = {}) {
+            return recorder.recordAssertion(id, status, message, data);
+        },
+        async pass(metrics = {}, options = {}) {
+            await Promise.all(pendingEvents);
+            return recorder.writeTraceResults({
+                ...options,
+                status: 'pass',
+                metrics,
+            });
+        },
+        async fail(error, metrics = {}, options = {}) {
+            await Promise.all(pendingEvents);
+            return recorder.writeTraceResults({
+                ...options,
+                status: options.status || 'fail',
+                summary: options.summary || failureMessage(error),
+                failure: error,
+                metrics,
+            });
+        },
+    };
 }
 
 function deriveStatus(assertions) {
@@ -102,4 +156,39 @@ function defaultSummary(status) {
         case 'error': return 'Trace errored';
         default: return 'Trace completed with unknown evidence';
     }
+}
+
+function normalizeFailure(error) {
+    if (error === undefined || error === null) return undefined;
+    if (error instanceof Error) {
+        return redactSensitiveValue({
+            name: error.name,
+            message: error.message,
+            stack: error.stack,
+        });
+    }
+    if (typeof error === 'object') return redactSensitiveValue(error);
+    return { message: String(error) };
+}
+
+function failureMessage(error) {
+    if (error instanceof Error) return error.message;
+    return String(error || 'Trace failed');
+}
+
+function redactSensitiveValue(value, depth = 0) {
+    if (depth > 8) return '[Redacted:depth]';
+    if (Array.isArray(value)) return value.map((item) => redactSensitiveValue(item, depth + 1));
+    if (!value || typeof value !== 'object') return value;
+
+    return Object.fromEntries(
+        Object.entries(value).map(([key, item]) => [
+            key,
+            isSensitiveKey(key) ? '[Redacted]' : redactSensitiveValue(item, depth + 1),
+        ])
+    );
+}
+
+function isSensitiveKey(key) {
+    return /(?:token|secret|password|passwd|authorization|cookie|api[_-]?key|private[_-]?key|credential)/i.test(String(key));
 }
