@@ -2,11 +2,15 @@
 
 Run provider-neutral task plans through Homeboy's durable agent-task lifecycle.
 
+Homeboy owns durable orchestration and provider-neutral outcomes. Runtime
+providers own backend-specific execution. For the provider fanout ownership seam,
+see [`docs/architecture/provider-fanout-boundary.md`](../architecture/provider-fanout-boundary.md).
+
 ## Deterministic Smoke Gate
 
 Issue #3392 is covered by a no-secret fixture plan at
 `tests/fixtures/agent_task_smoke_plan.json`. It exercises the operator path
-without Codebox, Codex, chat state, or long-running external services.
+without provider credentials, chat state, or long-running external services.
 
 Run it from a disposable Homeboy worktree:
 
@@ -75,14 +79,14 @@ Example:
     {
       "schema": "homeboy/agent-task-request/v1",
       "task_id": "idea",
-      "executor": { "backend": "codebox" },
+      "executor": { "backend": "provider" },
       "instructions": "Create the GitHub issue for this site idea."
     },
     {
       "schema": "homeboy/agent-task-request/v1",
       "task_id": "design",
       "executor": {
-        "backend": "codebox",
+        "backend": "provider",
         "config": {
           "github_issue": "{{outputs.issue_number}}"
         }

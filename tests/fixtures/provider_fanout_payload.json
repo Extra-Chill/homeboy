@@ -1,0 +1,55 @@
+{
+  "schema": "example-provider/fanout-result/v1",
+  "fanout_id": "provider-fanout-123",
+  "status": "succeeded",
+  "summary": "planner, worker, and aggregation phases completed",
+  "parent_session": {
+    "id": "provider-session-parent-123",
+    "event_stream_uri": "provider://sessions/provider-session-parent-123/events"
+  },
+  "workers": [
+    {
+      "id": "worker-build",
+      "agent": "build-agent",
+      "status": "succeeded",
+      "session_ref": "provider://sessions/provider-session-worker-1",
+      "result_ref": "provider://fanout/provider-fanout-123/workers/worker-build/result",
+      "artifact_refs": [
+        {
+          "kind": "patch",
+          "uri": "provider://artifacts/provider-fanout-123/worker-build/changes.patch",
+          "label": "worker patch"
+        }
+      ],
+      "duration_ms": 2400
+    },
+    {
+      "id": "worker-proof",
+      "agent": "proof-agent",
+      "status": "succeeded",
+      "session_ref": "provider://sessions/provider-session-worker-2",
+      "result_ref": "provider://fanout/provider-fanout-123/workers/worker-proof/result",
+      "artifact_refs": [
+        {
+          "kind": "screenshot",
+          "uri": "provider://artifacts/provider-fanout-123/worker-proof/homepage.png",
+          "label": "homepage screenshot"
+        }
+      ],
+      "duration_ms": 1800
+    }
+  ],
+  "artifacts": [
+    {
+      "id": "manifest",
+      "kind": "manifest",
+      "uri": "provider://artifacts/provider-fanout-123/manifest.json",
+      "label": "provider fanout manifest",
+      "mime": "application/json"
+    }
+  ],
+  "aggregation": {
+    "result_ref": "provider://fanout/provider-fanout-123/aggregate",
+    "conflict_count": 0
+  }
+}
