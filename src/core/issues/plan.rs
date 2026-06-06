@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 use crate::core::code_audit::FindingConfidence;
 use crate::core::plan::{HomeboyPlan, PlanKind, PlanStep, PlanStepStatus, PlanValues};
 
+const ACTION_INPUT_KEY: &str = "action";
+
 /// One row of incoming findings: "command produced N findings of category X
 /// for component Y." This is the input grain reconcile reasons over.
 ///
@@ -102,7 +104,7 @@ fn default_refresh_closed() -> bool {
 /// One concrete action the reconciler decided on. Order matters in the plan:
 /// dedupe-closes run before file-new so race-condition duplicates don't
 /// inflate the new-issue count.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ReconcileAction {
     /// File a new issue.
@@ -217,32 +219,54 @@ impl ReconcilePlan {
 fn actions_from_plan(plan: &HomeboyPlan) -> Vec<ReconcileAction> {
     plan.steps
         .iter()
-        .filter_map(|step| step.input_as("action"))
+        .filter_map(IssueReconcilePlanStep::action_from_plan_step)
         .collect()
 }
 
 fn action_step((index, action): (usize, &ReconcileAction)) -> PlanStep {
-    let action_kind = action_kind(action);
-    let id = format!("issues.reconcile.{:03}.{}", index + 1, action_kind);
-    let kind = format!("issues.reconcile.{action_kind}");
-    let builder = PlanStep::builder(
-        id,
-        kind,
-        if matches!(action, ReconcileAction::Skip { .. }) {
-            PlanStepStatus::Skipped
-        } else {
-            PlanStepStatus::Ready
-        },
-    )
-    .label(action_label(action))
-    .blocking(!matches!(action, ReconcileAction::Skip { .. }))
-    .inputs(PlanValues::new().json("action", action));
+    IssueReconcilePlanStep::new(index, action.clone()).into_plan_step()
+}
 
-    match action {
-        ReconcileAction::Skip { reason, .. } => builder.skip_reason(format!("{:?}", reason)),
-        _ => builder,
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct IssueReconcilePlanStep {
+    index: usize,
+    action: ReconcileAction,
+}
+
+impl IssueReconcilePlanStep {
+    fn new(index: usize, action: ReconcileAction) -> Self {
+        Self { index, action }
     }
-    .build()
+
+    fn action_from_plan_step(step: &PlanStep) -> Option<ReconcileAction> {
+        step.input_as(ACTION_INPUT_KEY)
+    }
+
+    fn into_plan_step(self) -> PlanStep {
+        let action = self.action;
+        let index = self.index;
+        let action_kind = action_kind(&action);
+        let id = format!("issues.reconcile.{:03}.{}", index + 1, action_kind);
+        let kind = format!("issues.reconcile.{action_kind}");
+        let builder = PlanStep::builder(
+            id,
+            kind,
+            if matches!(action, ReconcileAction::Skip { .. }) {
+                PlanStepStatus::Skipped
+            } else {
+                PlanStepStatus::Ready
+            },
+        )
+        .label(action_label(&action))
+        .blocking(!matches!(action, ReconcileAction::Skip { .. }))
+        .inputs(PlanValues::new().json(ACTION_INPUT_KEY, &action));
+
+        match action {
+            ReconcileAction::Skip { reason, .. } => builder.skip_reason(format!("{:?}", reason)),
+            _ => builder,
+        }
+        .build()
+    }
 }
 
 fn action_kind(action: &ReconcileAction) -> &'static str {
@@ -307,6 +331,7 @@ pub struct ReconcilePlanCounts {
 #[cfg(test)]
 mod tests {
     use super::{action_kind, ReconcileAction, ReconcilePlan, ReconcileSkipReason};
+    use serde_json::json;
 
     #[test]
     fn planned_actions_are_projected_from_homeboy_plan_steps() {
@@ -338,5 +363,50 @@ mod tests {
         assert_eq!(plan.counts().file_new, 1);
         assert_eq!(plan.counts().skip, 1);
         assert!(!plan.is_noop());
+    }
+
+    #[test]
+    fn issue_reconcile_steps_keep_public_action_input_json() {
+        let action = ReconcileAction::Close {
+            number: 42,
+            category: "resolved".to_string(),
+            comment: "Resolved by latest run.".to_string(),
+        };
+
+        let plan = ReconcilePlan::new("homeboy", vec![action]);
+        let step = &plan.plan.steps[0];
+
+        assert_eq!(
+            step.inputs.get("action"),
+            Some(&json!({
+                "kind": "close",
+                "number": 42,
+                "category": "resolved",
+                "comment": "Resolved by latest run."
+            }))
+        );
+    }
+
+    #[test]
+    fn issue_reconcile_actions_round_trip_through_typed_plan_steps() {
+        let actions = vec![
+            ReconcileAction::Update {
+                number: 7,
+                title: "audit: refreshed".to_string(),
+                body: "new body".to_string(),
+                category: "stale".to_string(),
+                count: 4,
+            },
+            ReconcileAction::Skip {
+                category: "clean".to_string(),
+                component_id: "homeboy".to_string(),
+                reason: ReconcileSkipReason::NoFindingsNoIssue,
+            },
+        ];
+
+        let plan = ReconcilePlan::new("homeboy", actions.clone());
+
+        assert_eq!(plan.actions, actions);
+        assert_eq!(plan.planned_actions(), actions);
     }
 }
