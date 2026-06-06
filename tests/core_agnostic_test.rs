@@ -256,6 +256,10 @@ const TEST_CONTENT_BASELINE: &[ViolationKey] = &[
         term: "wordpress",
     },
     ViolationKey {
+        path: "src/core/release/planning_worktree.rs",
+        term: "npm",
+    },
+    ViolationKey {
         path: "src/core/rig/spec.rs",
         term: "wordpress",
     },
@@ -321,7 +325,7 @@ const TEST_CONTENT_BASELINE: &[ViolationKey] = &[
     },
 ];
 
-const TEST_CONTENT_BASELINE_OCCURRENCES: usize = 102;
+const TEST_CONTENT_BASELINE_OCCURRENCES: usize = 103;
 
 #[test]
 fn core_owned_source_stays_language_and_framework_agnostic() {
