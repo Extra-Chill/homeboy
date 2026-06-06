@@ -9,9 +9,11 @@ const {
 	DEFAULT_ARTIFACT_RELATIVE_PATH,
 	collectWordPressRequestProfiles,
 	generateProfilerPlugin,
+	groupWordPressRequestProfilerRows,
 	installWordPressRequestProfiler,
 	parseWordPressRequestProfileJsonl,
 	resolveProfilerPaths,
+	summarizeWordPressRequestProfilerRows,
 	uninstallWordPressRequestProfiler,
 } = require('../lib/request-profiler');
 
@@ -48,6 +50,40 @@ try {
 
 	const parsed = parseWordPressRequestProfileJsonl('{"event":"one"}\n\n{"event":"two"}\n');
 	assert.deepEqual(parsed.map((entry) => entry.event), ['one', 'two']);
+
+	const profileRows = [
+		{ event: 'request.start', request_id: 'fast', method: 'GET', uri: '/wp-json/fast', t_ms: 0 },
+		{ event: 'shutdown', request_id: 'fast', method: 'GET', uri: '/wp-json/fast', t_ms: 12, data: { status: 200 } },
+		{ event: 'request.start', request_id: 'slow', method: 'POST', uri: '/wp-admin/admin-ajax.php', t_ms: 0 },
+		{ event: 'http.request.start', request_id: 'slow', method: 'POST', uri: '/wp-admin/admin-ajax.php', t_ms: 20, data: { url: 'https://api.example.test/private?token=secret' } },
+		{ event: 'hook.stop', request_id: 'slow', method: 'POST', uri: '/wp-admin/admin-ajax.php', t_ms: 55, data: { hook: 'init', duration_ms: 25 } },
+		{ event: 'shutdown', request_id: 'slow', method: 'POST', uri: '/wp-admin/admin-ajax.php', t_ms: 80, status: 500 },
+	];
+	const grouped = groupWordPressRequestProfilerRows(profileRows);
+	assert.equal(grouped.length, 2);
+	assert.deepEqual(grouped.map((group) => group.request_id), ['fast', 'slow']);
+
+	const summary = summarizeWordPressRequestProfilerRows(profileRows, {
+		slowThresholdMs: 50,
+		formatUrl: (value) => value.replace(/token=[^&]+/, 'token=redacted'),
+	});
+	assert.equal(summary.row_count, 6);
+	assert.equal(summary.request_count, 2);
+	assert.equal(summary.requests[0].request_id, 'slow');
+	assert.equal(summary.requests[0].duration_ms, 80);
+	assert.equal(summary.requests[0].status, 500);
+	assert.deepEqual(summary.requests[0].http_urls, ['https://api.example.test/private?token=redacted']);
+	assert.deepEqual(summary.requests[0].hooks[0], {
+		event: 'hook.stop',
+		hook: 'init',
+		duration_ms: 25,
+		t_ms: 55,
+		priority: undefined,
+	});
+	assert.equal(summary.slow_requests.length, 1);
+	assert.equal(summary.slow_requests[0].request_id, 'slow');
+	assert.equal(summary.hooks[0].request_id, 'slow');
+	assert.equal(summary.timing_rows[0].t_ms, 80);
 
 	assert.throws(
 		() => parseWordPressRequestProfileJsonl('{"event":"ok"}\nnot-json'),
