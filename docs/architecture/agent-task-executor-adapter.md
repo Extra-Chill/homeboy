@@ -129,3 +129,6 @@ they reach the owning adapter. Core stores, forwards, and redacts generic task
 structures; adapters are responsible for interpreting backend-specific payloads
 and returning normalized Homeboy artifacts, diagnostics, evidence refs, and
 status values.
+
+For the Codebox fanout boundary, see
+[Homeboy and WP Codebox fanout boundary](homeboy-wp-codebox-fanout-boundary.md).

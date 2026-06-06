@@ -2,6 +2,11 @@
 
 Run provider-neutral task plans through Homeboy's durable agent-task lifecycle.
 
+Homeboy owns durable orchestration and provider-neutral outcomes. Runtime
+providers own backend-specific execution. For the Codebox fanout ownership seam,
+see
+[`docs/architecture/homeboy-wp-codebox-fanout-boundary.md`](../architecture/homeboy-wp-codebox-fanout-boundary.md).
+
 ## Deterministic Smoke Gate
 
 Issue #3392 is covered by a no-secret fixture plan at
