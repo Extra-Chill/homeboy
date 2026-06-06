@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.115.47] - 2026-06-06
+
+### Changed
+- Share runtime helper fallbacks
+
 ## [2.115.46] - 2026-06-06
 
 ### Changed
