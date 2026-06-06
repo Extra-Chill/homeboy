@@ -33,11 +33,11 @@ Adapters provide these operations:
 Core should only see generic task types and adapter trait objects. Backend
 details stay with the component that knows how to run that backend.
 
-| Backend | Adapter owner | Core-facing backend string |
-|---------|---------------|----------------------------|
-| WP Codebox | Homeboy Extensions WordPress integration | `codebox` |
-| CLI/OpenCode session | Local CLI/session integration | `cli` or `opencode` |
-| Remote runner job | Runner/job integration | `runner` |
+| Backend category | Adapter owner | Core-facing backend string |
+|------------------|---------------|----------------------------|
+| Runtime sandbox provider | Provider extension integration | provider-defined string |
+| CLI/session provider | Local CLI/session integration | `cli`, `opencode`, or provider-defined string |
+| Remote runner job | Runner/job integration | `runner` or provider-defined string |
 
 The string values are selectors, not an enum in core. This keeps core open to
 new backends without adding provider-specific variants.
@@ -129,3 +129,6 @@ they reach the owning adapter. Core stores, forwards, and redacts generic task
 structures; adapters are responsible for interpreting backend-specific payloads
 and returning normalized Homeboy artifacts, diagnostics, evidence refs, and
 status values.
+
+For the fanout boundary, see
+[Provider fanout boundary](provider-fanout-boundary.md).

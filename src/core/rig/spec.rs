@@ -9,6 +9,8 @@ use std::collections::{BTreeMap, HashMap};
 use crate::core::component::ScopedExtensionConfig;
 use crate::core::extension::bench::{BenchGate, BenchGateOp};
 
+mod workload;
+
 /// A rig: components + services + pipelines.
 ///
 /// Lives at `~/.config/homeboy/rigs/{id}.json`.
@@ -301,6 +303,9 @@ pub struct WorkloadSpec {
     pub path: String,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_preview: Option<TracePublicPreviewSpec>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub check_groups: Option<Vec<String>>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -400,6 +405,37 @@ pub struct TraceProfileSpec {
 
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub settings: BTreeMap<String, serde_json::Value>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_preview: Option<TracePublicPreviewSpec>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TracePublicPreviewSpec {
+    /// Local HTTP origin to expose, for example `http://127.0.0.1:8888`.
+    pub local_origin: String,
+
+    /// Optional already-known public origin. When omitted, Homeboy starts
+    /// `command` and reads the first HTTPS URL printed to stdout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_origin: Option<String>,
+
+    /// Long-running shell command that starts the tunnel provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+
+    /// Fail before the trace runner starts unless the effective origin is HTTPS.
+    #[serde(default)]
+    pub require_https: bool,
+
+    /// Human-readable provider label for artifacts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+
+    /// Seconds to wait for the provider command to print a public HTTPS URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startup_timeout_seconds: Option<u64>,
 }
 
 impl TraceProfileSpec {
@@ -474,58 +510,6 @@ pub enum TraceExperimentArtifactSpec {
     Detailed { label: String, path: String },
 }
 
-impl WorkloadSpec {
-    pub fn path(&self) -> &str {
-        &self.path
-    }
-
-    pub fn check_groups(&self) -> Option<&[String]> {
-        self.check_groups.as_deref()
-    }
-
-    pub fn port_range_size(&self) -> Option<u16> {
-        self.port_range_size
-    }
-
-    pub fn named_leases(&self) -> &[String] {
-        &self.named_leases
-    }
-
-    pub fn trace_phase_preset(&self, name: &str) -> Option<&[String]> {
-        self.trace_phase_presets
-            .get(name)
-            .map(|phases| phases.as_slice())
-    }
-
-    pub fn trace_span_metadata(&self) -> &HashMap<String, TraceSpanMetadata> {
-        &self.trace_span_metadata
-    }
-
-    pub fn trace_default_phase_preset(&self) -> Option<&str> {
-        self.trace_default_phase_preset.as_deref()
-    }
-
-    pub fn trace_variants(&self) -> &HashMap<String, TraceVariantSpec> {
-        &self.trace_variants
-    }
-
-    pub fn trace_guardrails(&self) -> &[TraceGuardrailSpec] {
-        &self.trace_guardrails
-    }
-
-    pub fn trace_probes(&self) -> &[TraceProbeConfig] {
-        &self.trace_probes
-    }
-
-    pub fn trace_dependencies(&self) -> &[TraceDependencySpec] {
-        &self.dependencies
-    }
-
-    pub fn runner_capabilities(&self) -> &[String] {
-        &self.runner_capabilities
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -569,6 +553,7 @@ mod tests {
     fn test_trace_phase_preset() {
         let workload = WorkloadSpec {
             path: "trace.mjs".to_string(),
+            public_preview: None,
             check_groups: None,
             port_range_size: None,
             named_leases: Vec::new(),
@@ -736,6 +721,7 @@ mod tests {
     fn test_trace_default_phase_preset() {
         let workload = WorkloadSpec {
             path: "trace.mjs".to_string(),
+            public_preview: None,
             check_groups: None,
             port_range_size: None,
             named_leases: Vec::new(),
@@ -759,6 +745,7 @@ mod tests {
     fn test_port_range_size() {
         let workload = WorkloadSpec {
             path: "bench.mjs".to_string(),
+            public_preview: None,
             check_groups: None,
             port_range_size: Some(8),
             named_leases: Vec::new(),
@@ -782,6 +769,7 @@ mod tests {
     fn test_named_leases() {
         let workload = WorkloadSpec {
             path: "bench.mjs".to_string(),
+            public_preview: None,
             check_groups: None,
             port_range_size: None,
             named_leases: vec!["browser-profile".to_string()],
@@ -1492,6 +1480,10 @@ mod trace_experiment_spec_tests {
 #[cfg(test)]
 #[path = "../../../tests/core/rig/spec_test.rs"]
 mod spec_test;
+
+#[cfg(test)]
+#[path = "../../../tests/core/rig/public_preview_spec_test.rs"]
+mod public_preview_spec_test;
 
 #[cfg(test)]
 #[path = "../../../tests/core/rig/bench_default_baseline_spec_test.rs"]

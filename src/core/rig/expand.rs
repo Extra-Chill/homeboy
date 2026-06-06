@@ -26,7 +26,10 @@ pub fn expand_resources(rig: &RigSpec) -> RigResourcesSpec {
         rig,
         resources.exclusive.iter().map(String::as_str),
         std::iter::empty(),
-    );
+    )
+    .into_iter()
+    .map(normalize_exclusive_resource)
+    .collect();
 
     let derived_paths = rig.symlinks.iter().map(|symlink| symlink.link.as_str());
     resources.paths = merge_expanded_strings(
@@ -79,6 +82,17 @@ fn merge_values<T: Clone + Eq + Ord>(
         }
     }
     values
+}
+
+fn normalize_exclusive_resource(resource: String) -> String {
+    let resource = resource.trim().to_string();
+    if resource.is_empty() {
+        return "<default>".to_string();
+    }
+    if resource.ends_with(':') {
+        return format!("{}<default>", resource);
+    }
+    resource
 }
 
 fn resolve_token(rig: &RigSpec, token: &str) -> Option<String> {

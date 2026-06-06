@@ -4,6 +4,31 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.222.0] - 2026-06-06
+
+### Added
+- add trace public preview lifecycle
+
+### Changed
+- type issue reconcile plan actions
+- keep trace public preview audit clean
+
+## [0.221.2] - 2026-06-06
+
+### Changed
+- Define provider-neutral fanout boundary
+- expect default resource namespace
+- keep trace resource lease test scoped
+
+### Fixed
+- fix agent task executor adapter seam
+- enforce trace rig resource leases
+
+## [0.221.1] - 2026-06-06
+
+### Fixed
+- fix trace codebox artifact diagnostics
+
 ## [0.221.0] - 2026-06-06
 
 ### Added

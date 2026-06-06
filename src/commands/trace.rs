@@ -37,6 +37,7 @@ mod observations;
 mod output;
 mod overlay_locks;
 mod phase_args;
+mod preview_args;
 mod probes;
 #[cfg(test)]
 mod profile_tests;
@@ -61,6 +62,7 @@ use metadata::trace_span_metadata_for_args;
 use observations::record_trace_artifacts;
 use overlay_locks::run_overlay_locks;
 use phase_args::{cli_span_definitions_for_args, span_definitions_for_args};
+use preview_args::trace_public_preview_for_args;
 
 #[cfg(test)]
 use output::render_aggregate_markdown;
@@ -471,6 +473,11 @@ fn execute_trace_run(args: TraceArgs) -> homeboy::core::Result<TraceRunExecution
             rig::RigWorkloadKind::Trace,
         )?;
     }
+    let _lease = rig_context
+        .as_ref()
+        .map(|context| rig::lease::acquire_active_run_lease(&context.rig_spec, "trace"))
+        .transpose()?
+        .flatten();
     let span_definitions = span_definitions_for_args(
         &args,
         rig_context.as_ref(),
@@ -552,6 +559,8 @@ fn execute_trace_run(args: TraceArgs) -> homeboy::core::Result<TraceRunExecution
     experiment_env.extend(args.matrix_env.clone());
     let trace_probes =
         trace_probes_for_args(&args, rig_context.as_ref(), ctx.extension_id.as_deref())?;
+    let public_preview =
+        trace_public_preview_for_args(&args, rig_context.as_ref(), ctx.extension_id.as_deref())?;
     let attachments = TraceAttachment::parse_all(&args.attachments)?;
     let resolved_settings = ctx.resolved_settings();
     let mut json_settings = experiment_settings;
@@ -578,6 +587,7 @@ fn execute_trace_run(args: TraceArgs) -> homeboy::core::Result<TraceRunExecution
                 dependencies: trace_dependencies,
                 runner_capabilities,
                 invocation_requirements,
+                public_preview,
             },
             scenario_id,
             json_summary: args.json_summary,
@@ -691,6 +701,7 @@ fn run_list(args: TraceArgs) -> CmdResult<TraceCommandOutput> {
                 dependencies: trace_dependencies,
                 runner_capabilities,
                 invocation_requirements,
+                public_preview: None,
             },
             rig_id: args.rig,
         },

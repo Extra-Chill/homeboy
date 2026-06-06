@@ -209,6 +209,7 @@ pub mod rig;
 pub mod route;
 pub mod runner;
 pub mod runs;
+pub mod runtime;
 pub mod self_cmd;
 pub mod server;
 pub mod source_command;

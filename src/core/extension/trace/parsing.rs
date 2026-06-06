@@ -11,6 +11,8 @@ use crate::core::observation::timeline::{
 };
 use crate::core::rig::RigStateSnapshot;
 
+use super::preview::TracePreviewMetadata;
+
 pub type TraceEvent = ObservationEvent;
 pub type TraceSpanDefinition = ObservationSpanDefinition;
 pub type TraceSpanResult = ObservationSpanResult;
@@ -84,6 +86,8 @@ pub struct TraceResults {
     pub toolchain: Option<TraceToolchainProvenance>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub components: Option<TraceComponentsProvenance>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<TracePreviewMetadata>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

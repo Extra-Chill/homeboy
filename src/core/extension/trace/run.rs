@@ -40,6 +40,7 @@ use super::parsing::{
     TraceComponentsProvenance, TraceEvidenceMetadata, TraceGitProvenance, TraceList, TraceResults,
     TraceRuntimeAssetProvenance, TraceSpanDefinition, TraceStatus, TraceToolchainProvenance,
 };
+use super::preview::{TracePreviewMetadata, TracePublicPreviewSession};
 use super::probes::{ActiveTraceProbes, TraceProbeConfig};
 
 #[derive(Debug, Clone)]
@@ -81,6 +82,7 @@ pub struct TraceRunnerInputs {
     pub dependencies: Vec<TraceDependencySpec>,
     pub runner_capabilities: Vec<String>,
     pub invocation_requirements: InvocationRequirements,
+    pub public_preview: Option<crate::core::rig::TracePublicPreviewSpec>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -167,14 +169,14 @@ pub fn run_trace_workflow(
 
 fn run_trace_workflow_with_component_script(
     component: &Component,
-    args: TraceRunWorkflowArgs,
+    mut args: TraceRunWorkflowArgs,
     run_dir: &RunDir,
     rig_state: Option<RigStateSnapshot>,
 ) -> Result<TraceRunWorkflowResult> {
     let component_path = args
         .path_override
-        .as_deref()
-        .unwrap_or(component.local_path.as_str());
+        .clone()
+        .unwrap_or_else(|| component.local_path.clone());
     let dependency_provenance = preflight_trace_dependencies(&args.runner_inputs.dependencies)?;
     preflight_trace_runner_capabilities(None, &args.runner_inputs.runner_capabilities)?;
     let canonicality = evaluate_trace_canonicality(None, component, &args)?;
@@ -184,18 +186,19 @@ fn run_trace_workflow_with_component_script(
             canonicality.metadata(TraceCanonicalPolicy::Canonical),
         ));
     }
-    let (mut toolchain, components) = trace_provenance(None, component_path);
+    let (mut toolchain, components) = trace_provenance(None, &component_path);
     mark_non_canonical(
         &mut toolchain,
         "component script trace runs do not resolve an extension runner checkout",
     );
-    let source_path = Path::new(component_path);
+    let source_path = Path::new(&component_path);
     let _overlay_locks = if args.overlays.is_empty() {
         None
     } else {
         Some(acquire_trace_overlay_locks(&args.overlays, run_dir)?)
     };
     let applied_overlays = apply_trace_overlays(&args.overlays, args.keep_overlay)?;
+    let preview_session = start_trace_public_preview(&mut args)?;
     let mut script_env = vec![
         (
             "HOMEBOY_TRACE_SCENARIO".to_string(),
@@ -218,6 +221,7 @@ fn run_trace_workflow_with_component_script(
         cleanup_trace_overlays(&applied_overlays)?
     }
     let script_output = script_output?;
+    let preview = finish_trace_public_preview(preview_session, run_dir)?;
     let results_path = run_dir.step_file(run_dir::files::TRACE_RESULTS);
     let mut results = if results_path.exists() {
         let mut parsed = parse_trace_results_file(&results_path)?;
@@ -233,6 +237,7 @@ fn run_trace_workflow_with_component_script(
         parsed.toolchain = Some(toolchain.clone());
         parsed.components = Some(components.clone());
         parsed.dependencies = dependency_provenance;
+        apply_trace_preview_metadata(parsed, preview.as_ref());
         super::spans::apply_span_definitions(parsed, &args.span_definitions);
         super::assertions::apply_temporal_assertions(parsed);
         persist_trace_results(&results_path, parsed)?;
@@ -303,14 +308,14 @@ fn run_trace_workflow_with_component_script(
 fn run_trace_workflow_with_context(
     execution_context: Option<&ExtensionExecutionContext>,
     component: &Component,
-    args: TraceRunWorkflowArgs,
+    mut args: TraceRunWorkflowArgs,
     run_dir: &RunDir,
     rig_state: Option<RigStateSnapshot>,
 ) -> Result<TraceRunWorkflowResult> {
     let component_path = args
         .path_override
-        .as_deref()
-        .unwrap_or(component.local_path.as_str());
+        .clone()
+        .unwrap_or_else(|| component.local_path.clone());
     let dependency_provenance = preflight_trace_dependencies(&args.runner_inputs.dependencies)?;
     preflight_trace_runner_capabilities(
         execution_context,
@@ -323,13 +328,14 @@ fn run_trace_workflow_with_context(
             canonicality.metadata(TraceCanonicalPolicy::Canonical),
         ));
     }
-    let (toolchain, components) = trace_provenance(execution_context, component_path);
+    let (toolchain, components) = trace_provenance(execution_context, &component_path);
     let _overlay_locks = if args.overlays.is_empty() {
         None
     } else {
         Some(acquire_trace_overlay_locks(&args.overlays, run_dir)?)
     };
     let applied_overlays = apply_trace_overlays(&args.overlays, args.keep_overlay)?;
+    let preview_session = start_trace_public_preview(&mut args)?;
     let artifact_dir = run_dir.path().join("artifacts");
     std::fs::create_dir_all(&artifact_dir).map_err(|e| {
         Error::internal_io(
@@ -366,6 +372,7 @@ fn run_trace_workflow_with_context(
     if !args.keep_overlay {
         cleanup_trace_overlays(&applied_overlays)?
     }
+    let preview = finish_trace_public_preview(preview_session, run_dir)?;
     let results_path = run_dir.step_file(run_dir::files::TRACE_RESULTS);
     let mut results = if results_path.exists() {
         let mut parsed = parse_trace_results_file(&results_path)?;
@@ -385,6 +392,7 @@ fn run_trace_workflow_with_context(
         parsed.dependencies = dependency_provenance;
         parsed.timeline.extend(probe_events);
         parsed.timeline.sort_by_key(|event| event.t_ms);
+        apply_trace_preview_metadata(parsed, preview.as_ref());
         append_attach_observations(parsed, run_dir, &attach_observations)?;
         super::spans::apply_span_definitions(parsed, &args.span_definitions);
         super::assertions::apply_temporal_assertions(parsed);
@@ -413,7 +421,7 @@ fn run_trace_workflow_with_context(
         runner_output.exit_code
     };
     let rig_id = args.rig_id.as_deref();
-    let baseline_root = resolve_trace_baseline_root(component_path, rig_id)?;
+    let baseline_root = resolve_trace_baseline_root(&component_path, rig_id)?;
     let mut baseline_comparison = None;
     let mut baseline_exit_override = None;
     let mut hints = Vec::new();
@@ -1019,6 +1027,99 @@ fn last_observed_homeboy_event(results: &TraceResults) -> Option<String> {
         .map(|event| format!("{}.{}", event.source, event.event))
 }
 
+fn start_trace_public_preview(
+    args: &mut TraceRunWorkflowArgs,
+) -> Result<Option<TracePublicPreviewSession>> {
+    let Some(spec) = args.runner_inputs.public_preview.clone() else {
+        return Ok(None);
+    };
+    let session = TracePublicPreviewSession::start(&spec)?;
+    args.runner_inputs.env.extend(session.env_vars()?);
+    Ok(Some(session))
+}
+
+fn finish_trace_public_preview(
+    session: Option<TracePublicPreviewSession>,
+    run_dir: &RunDir,
+) -> Result<Option<TracePreviewMetadata>> {
+    let Some(session) = session else {
+        return Ok(None);
+    };
+    let metadata = session.finish();
+    let artifact_dir = run_dir.path().join("artifacts");
+    std::fs::create_dir_all(&artifact_dir).map_err(|e| {
+        Error::internal_io(
+            format!(
+                "Failed to create trace preview artifact dir {}: {}",
+                artifact_dir.display(),
+                e
+            ),
+            Some("trace.preview.artifact_dir".to_string()),
+        )
+    })?;
+    let path = artifact_dir.join("preview.json");
+    let content = serde_json::to_string_pretty(&metadata).map_err(|e| {
+        Error::internal_json(
+            format!("Failed to serialize trace preview artifact: {e}"),
+            Some("trace.preview.artifact_serialize".to_string()),
+        )
+    })?;
+    std::fs::write(&path, content).map_err(|e| {
+        Error::internal_io(
+            format!(
+                "Failed to write trace preview artifact {}: {e}",
+                path.display()
+            ),
+            Some("trace.preview.artifact_write".to_string()),
+        )
+    })?;
+    Ok(Some(metadata))
+}
+
+fn apply_trace_preview_metadata(
+    results: &mut TraceResults,
+    preview: Option<&TracePreviewMetadata>,
+) {
+    let Some(preview) = preview else {
+        return;
+    };
+    results.preview = Some(preview.clone());
+    if !results
+        .artifacts
+        .iter()
+        .any(|artifact| artifact.path == "artifacts/preview.json")
+    {
+        results.artifacts.push(super::parsing::TraceArtifact {
+            label: "Public preview metadata".to_string(),
+            path: "artifacts/preview.json".to_string(),
+        });
+    }
+    if preview.require_https {
+        let status = if preview.window_is_secure_context {
+            TraceAssertionStatus::Pass
+        } else {
+            results.status = TraceStatus::Error;
+            TraceAssertionStatus::Error
+        };
+        results.assertions.push(TraceAssertion {
+            id: "public_preview.secure_context".to_string(),
+            status,
+            message: Some(format!(
+                "Browser effective origin `{}` secure_context={}",
+                preview.browser_effective_origin, preview.window_is_secure_context
+            )),
+            details: Some(serde_json::json!({
+                "requested_mode": preview.requested_mode,
+                "local_origin": preview.local_origin,
+                "public_origin": preview.public_origin,
+                "browser_effective_origin": preview.browser_effective_origin,
+                "window_location_origin": preview.window_location_origin,
+                "window_is_secure_context": preview.window_is_secure_context
+            })),
+        });
+    }
+}
+
 #[cfg(test)]
 mod run_tests {
     include!("run_tests.inc");
@@ -1119,6 +1220,7 @@ mod tests {
             failure: None,
             rig: None,
             evidence: None,
+            preview: None,
             timeline: vec![crate::core::observation::timeline::ObservationEvent {
                 t_ms: 250,
                 source: "homeboy".to_string(),
@@ -1254,6 +1356,7 @@ mod tests {
             toolchain: None,
             components: None,
             dependencies: Vec::new(),
+            preview: None,
         };
 
         let written = baseline::save_baseline(&baseline_root, "studio", &results, Some(&rig_id))

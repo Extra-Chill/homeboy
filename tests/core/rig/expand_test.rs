@@ -148,7 +148,7 @@ fn test_expand_resources_expands_string_entries() {
 }
 
 #[test]
-fn test_expand_resources_unset_env_in_exclusive_becomes_empty() {
+fn test_expand_resources_unset_env_in_exclusive_uses_default_namespace() {
     let previous = std::env::var("RIG_RESOURCE_NAMESPACE_NEVER_SET_XYZ").ok();
     std::env::remove_var("RIG_RESOURCE_NAMESPACE_NEVER_SET_XYZ");
 
@@ -167,7 +167,7 @@ fn test_expand_resources_unset_env_in_exclusive_becomes_empty() {
 
     assert_eq!(
         resources.exclusive,
-        vec!["studio-runtime", "studio-runtime:"]
+        vec!["studio-runtime", "studio-runtime:<default>"]
     );
 }
 
