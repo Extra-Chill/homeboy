@@ -1,11 +1,122 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, fs};
 
+use crate::test_support::with_isolated_home;
 use homeboy::core::component::ScopedExtensionConfig;
 use homeboy::core::rig::{self, ComponentSpec, RigSpec};
 
-use super::test_fixture::TRACE_FIXTURE_EXTENSION_ID;
+use super::test_fixture::{write_trace_extension, write_trace_rig, TRACE_FIXTURE_EXTENSION_ID};
 use super::workload::trace_workload_scenario_id;
 use super::*;
+
+fn set_trace_rig_resources(home: &tempfile::TempDir, rig_id: &str, resources: serde_json::Value) {
+    let rig_path = home
+        .path()
+        .join(".config")
+        .join("homeboy")
+        .join("rigs")
+        .join(format!("{rig_id}.json"));
+    let mut rig_json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&rig_path).expect("read rig")).expect("parse rig");
+    rig_json["resources"] = resources;
+    fs::write(
+        &rig_path,
+        serde_json::to_string(&rig_json).expect("serialize rig"),
+    )
+    .expect("write rig");
+}
+
+fn trace_args_for_rig(rig_id: &str, component_id: &str, scenario_id: &str) -> TraceArgs {
+    TraceArgs {
+        comp: PositionalComponentArgs {
+            component: Some(component_id.to_string()),
+            path: None,
+        },
+        component_arg: None,
+        scenario: Some(scenario_id.to_string()),
+        scenario_arg: None,
+        compare_after: None,
+        baseline_target: None,
+        candidate: None,
+        rig: Some(rig_id.to_string()),
+        profile: None,
+        profiles: false,
+        setting_args: SettingArgs::default(),
+        json_summary: false,
+        report: None,
+        experiment: None,
+        repeat: 1,
+        aggregate: None,
+        schedule: TraceSchedule::Grouped,
+        focus_spans: Vec::new(),
+        spans: Vec::new(),
+        phases: Vec::new(),
+        attachments: Vec::new(),
+        phase_preset: None,
+        baseline_args: BaselineArgs::default(),
+        regression_threshold: extension_trace::baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT,
+        regression_min_delta_ms: extension_trace::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
+        overlays: Vec::new(),
+        variants: Vec::new(),
+        matrix: TraceVariantMatrixMode::None,
+        axes: Vec::new(),
+        matrix_env: Vec::new(),
+        output_dir: None,
+        keep_overlay: false,
+        stale: false,
+        force: false,
+        canonical: false,
+        allow_local_toolchain: false,
+    }
+}
+
+#[test]
+fn rig_trace_run_fails_fast_on_active_default_namespace_resource_lease() {
+    with_isolated_home(|home| {
+        write_trace_extension(home);
+        let previous = std::env::var("HOMEBOY_TRACE_RESOURCE_NAMESPACE").ok();
+        std::env::remove_var("HOMEBOY_TRACE_RESOURCE_NAMESPACE");
+        let active_component = tempfile::TempDir::new().expect("active component");
+        let blocked_component = tempfile::TempDir::new().expect("blocked component");
+        write_trace_rig(home, "studio-rig", "studio", active_component.path());
+        write_trace_rig(home, "studio-alt", "studio", blocked_component.path());
+        let resources = serde_json::json!({
+            "exclusive": ["wp-codebox-preview:${env.HOMEBOY_TRACE_RESOURCE_NAMESPACE}"]
+        });
+        set_trace_rig_resources(home, "studio-rig", resources.clone());
+        set_trace_rig_resources(home, "studio-alt", resources);
+
+        let active_spec = rig::load("studio-rig").expect("load active rig");
+        let _lease = rig::lease::acquire_active_run_lease(&active_spec, "trace")
+            .expect("acquire active trace lease")
+            .expect("resourceful trace rig leases");
+
+        let error = match run(
+            trace_args_for_rig("studio-alt", "studio", "studio-app-create-site"),
+            &GlobalArgs {},
+        ) {
+            Ok(_) => panic!("trace should fail before running with conflicting rig resources"),
+            Err(error) => error,
+        };
+
+        match previous {
+            Some(value) => std::env::set_var("HOMEBOY_TRACE_RESOURCE_NAMESPACE", value),
+            None => std::env::remove_var("HOMEBOY_TRACE_RESOURCE_NAMESPACE"),
+        }
+
+        assert_eq!(
+            error.code,
+            homeboy::core::error::ErrorCode::RigResourceConflict
+        );
+        assert!(error.message.contains("studio-alt"));
+        assert!(error.message.contains("studio-rig"));
+        assert!(error.message.contains("wp-codebox-preview:<default>"));
+        assert!(error.message.contains("trace"));
+        assert!(error
+            .hints
+            .iter()
+            .any(|hint| hint.message.contains("namespace") && hint.message.contains("port range")));
+    });
+}
 
 #[test]
 fn rig_component_path_and_trace_env_are_threaded() {
