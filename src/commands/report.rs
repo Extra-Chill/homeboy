@@ -4,11 +4,16 @@ use serde::Serialize;
 use super::CmdResult;
 
 mod bench_coverage;
+mod browser_evidence_compare;
 mod failure_digest;
 mod performance_digest;
 
 pub use bench_coverage::{
     render_markdown as render_bench_coverage_markdown, BenchCoverageArgs, BenchCoverageReport,
+};
+pub use browser_evidence_compare::{
+    browser_evidence_compare_from_args, render_browser_evidence_compare_from_args,
+    BrowserEvidenceCompareArgs, BrowserEvidenceCompareReport,
 };
 pub use failure_digest::{render_failure_digest_from_args, FailureDigestArgs};
 pub use performance_digest::{
@@ -30,6 +35,8 @@ pub enum ReportCommand {
     PerformanceDigest(PerformanceDigestArgs),
     /// Report list-only benchmark coverage for hot command paths
     BenchCoverage(BenchCoverageArgs),
+    /// Compare before/after browser evidence artifact sets
+    BrowserEvidenceCompare(BrowserEvidenceCompareArgs),
 }
 
 #[derive(Serialize)]
@@ -40,6 +47,8 @@ pub struct ReportOutput {
     pub performance_digest: Option<PerformanceDigestReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bench_coverage: Option<BenchCoverageReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub browser_evidence_compare: Option<BrowserEvidenceCompareReport>,
 }
 
 pub fn is_markdown_mode(args: &ReportArgs) -> bool {
@@ -52,6 +61,9 @@ pub fn is_markdown_mode(args: &ReportArgs) -> bool {
     ) || matches!(
         &args.command,
         ReportCommand::BenchCoverage(coverage_args) if coverage_args.format == "markdown"
+    ) || matches!(
+        &args.command,
+        ReportCommand::BrowserEvidenceCompare(compare_args) if compare_args.format == "markdown"
     )
 }
 
@@ -69,6 +81,10 @@ pub fn run_markdown(args: ReportArgs) -> CmdResult<String> {
             let report = bench_coverage::run(&coverage_args)?;
             Ok((bench_coverage::render_markdown(&report), 0))
         }
+        ReportCommand::BrowserEvidenceCompare(compare_args) => {
+            let markdown = render_browser_evidence_compare_from_args(&compare_args)?;
+            Ok((markdown, 0))
+        }
     }
 }
 
@@ -82,6 +98,7 @@ pub fn run(args: ReportArgs, _global: &super::GlobalArgs) -> CmdResult<ReportOut
                     markdown,
                     performance_digest: None,
                     bench_coverage: None,
+                    browser_evidence_compare: None,
                 },
                 0,
             ))
@@ -94,6 +111,7 @@ pub fn run(args: ReportArgs, _global: &super::GlobalArgs) -> CmdResult<ReportOut
                     markdown: report.markdown.clone(),
                     performance_digest: Some(report),
                     bench_coverage: None,
+                    browser_evidence_compare: None,
                 },
                 0,
             ))
@@ -107,6 +125,20 @@ pub fn run(args: ReportArgs, _global: &super::GlobalArgs) -> CmdResult<ReportOut
                     markdown,
                     performance_digest: None,
                     bench_coverage: Some(report),
+                    browser_evidence_compare: None,
+                },
+                0,
+            ))
+        }
+        ReportCommand::BrowserEvidenceCompare(compare_args) => {
+            let report = browser_evidence_compare_from_args(&compare_args)?;
+            Ok((
+                ReportOutput {
+                    command: "report.browser-evidence-compare".to_string(),
+                    markdown: report.markdown.clone(),
+                    performance_digest: None,
+                    bench_coverage: None,
+                    browser_evidence_compare: Some(report),
                 },
                 0,
             ))
