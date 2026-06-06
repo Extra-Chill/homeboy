@@ -4,7 +4,7 @@ use crate::core::error::{Error, ErrorCode, Result};
 
 use crate::core::runner::{Runner, RunnerKind};
 
-use super::RunnerExecOptions;
+use super::{trim_trailing_slashes, RunnerExecOptions};
 
 pub(super) struct RunnerPolicyRequest<'a> {
     pub(super) project_id: Option<&'a str>,
@@ -183,13 +183,4 @@ fn path_is_inside(root: &str, cwd: &str) -> bool {
     let root = trim_trailing_slashes(root);
     let cwd = trim_trailing_slashes(cwd);
     cwd == root || cwd.starts_with(&format!("{root}/"))
-}
-
-fn trim_trailing_slashes(path: &str) -> String {
-    let trimmed = path.trim_end_matches('/');
-    if trimmed.is_empty() {
-        "/".to_string()
-    } else {
-        trimmed.to_string()
-    }
 }
