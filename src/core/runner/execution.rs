@@ -162,7 +162,7 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
                         options.command,
                         request_env,
                         options.capture_patch,
-                        options.source_snapshot,
+                        Some(plan.source_snapshot),
                     );
                 }
             }
@@ -589,6 +589,12 @@ pub(crate) fn prepare_runner_process(request: RunnerProcessRequest) -> Result<Ru
     let runner = load(&request.runner_id)?;
     let cwd = resolve_cwd(&runner, request.cwd.as_deref())?;
     validate_runner_process_cwd(&runner, &cwd)?;
+    if runner.kind != RunnerKind::Local {
+        super::source_materialization::validate_runner_exec_source_fetch(
+            &request.command,
+            &runner.id,
+        )?;
+    }
     validate_runner_policy(
         &runner,
         &cwd,

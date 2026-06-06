@@ -1,5 +1,6 @@
 pub(super) const RUNNER_STEPS_SH: &str = include_str!("../runtime/runner-steps.sh");
 pub(super) const RUNNER_PRELUDE_SH: &str = include_str!("../runtime/runner-prelude.sh");
+pub(super) const COMMAND_CAPTURE_SH: &str = include_str!("../runtime/command-capture.sh");
 pub(super) const BASH_PREFLIGHT_SH: &str = include_str!("../runtime/bash-preflight.sh");
 pub(super) const FAILURE_TRAP_SH: &str = include_str!("../runtime/failure-trap.sh");
 pub(super) const WRITE_TEST_RESULTS_SH: &str = include_str!("../runtime/write-test-results.sh");
@@ -18,6 +19,7 @@ mod tests {
         for content in [
             RUNNER_STEPS_SH,
             RUNNER_PRELUDE_SH,
+            COMMAND_CAPTURE_SH,
             BASH_PREFLIGHT_SH,
             FAILURE_TRAP_SH,
             WRITE_TEST_RESULTS_SH,

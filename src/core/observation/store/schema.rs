@@ -148,6 +148,10 @@ const MIGRATIONS: &[Migration] = &[
             ON triage_items(provider, repo_owner, repo_name, item_type, number);
     "#,
     },
+    Migration {
+        version: 6,
+        sql: "",
+    },
 ];
 
 static MIGRATION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -261,6 +265,20 @@ fn apply_migration_sql(connection: &Connection, migration: &Migration) -> Result
                     "#,
                 )
                 .map_err(sqlite_error("apply migration 4"))?;
+        }
+        return Ok(());
+    }
+
+    if migration.version == 6 {
+        if !column_exists(connection, "artifacts", "metadata_json")? {
+            connection
+                .execute_batch(
+                    r#"
+                    ALTER TABLE artifacts
+                        ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}';
+                    "#,
+                )
+                .map_err(sqlite_error("apply migration 6"))?;
         }
         return Ok(());
     }

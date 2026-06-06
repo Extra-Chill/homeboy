@@ -57,6 +57,7 @@ pub mod self_status;
 pub mod server;
 pub mod source_snapshot;
 pub mod stack;
+pub mod structured_sidecar;
 pub mod top_n;
 pub mod triage;
 pub mod tunnel;

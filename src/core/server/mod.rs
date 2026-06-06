@@ -6,6 +6,7 @@ mod connection;
 pub mod health;
 pub(crate) mod http;
 mod keys;
+mod process_cleanup;
 mod session;
 pub mod transfer;
 

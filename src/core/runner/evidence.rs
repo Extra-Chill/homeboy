@@ -409,6 +409,10 @@ fn remote_detail_artifacts(
                 .get("mime")
                 .and_then(Value::as_str)
                 .map(str::to_string),
+            metadata_json: artifact
+                .get("metadata_json")
+                .cloned()
+                .unwrap_or_else(|| json!({})),
             created_at: artifact
                 .get("created_at")
                 .and_then(Value::as_str)
@@ -705,6 +709,7 @@ mod tests {
                     sha256: Some("abc".to_string()),
                     size_bytes: Some(12),
                     mime: Some("text/x-diff".to_string()),
+                    metadata_json: json!({}),
                     created_at: "2026-05-16T00:00:01Z".to_string(),
                 })
                 .expect("import artifact");

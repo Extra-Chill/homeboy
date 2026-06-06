@@ -9,6 +9,7 @@ mod assets;
 
 pub const RUNNER_STEPS_ENV: &str = "HOMEBOY_RUNTIME_RUNNER_STEPS";
 pub const RUNNER_PRELUDE_ENV: &str = "HOMEBOY_RUNTIME_RUNNER_PRELUDE";
+pub const COMMAND_CAPTURE_ENV: &str = "HOMEBOY_RUNTIME_COMMAND_CAPTURE";
 pub const BASH_PREFLIGHT_ENV: &str = "HOMEBOY_RUNTIME_BASH_PREFLIGHT";
 pub const FAILURE_TRAP_ENV: &str = "HOMEBOY_RUNTIME_FAILURE_TRAP";
 pub const WRITE_TEST_RESULTS_ENV: &str = "HOMEBOY_RUNTIME_WRITE_TEST_RESULTS";
@@ -36,6 +37,12 @@ const HELPERS: &[RuntimeHelper] = &[
         filename: "runner-prelude.sh",
         content: assets::RUNNER_PRELUDE_SH,
         env_var: RUNNER_PRELUDE_ENV,
+        legacy_fallback: false,
+    },
+    RuntimeHelper {
+        filename: "command-capture.sh",
+        content: assets::COMMAND_CAPTURE_SH,
+        env_var: COMMAND_CAPTURE_ENV,
         legacy_fallback: false,
     },
     RuntimeHelper {
@@ -154,6 +161,47 @@ pub fn ensure_all_helpers() -> Result<Vec<(String, String)>> {
     }
 
     Ok(env_pairs)
+}
+
+pub fn helper_path(name: &str) -> Result<PathBuf> {
+    let normalized = name.trim();
+    let helper = HELPERS
+        .iter()
+        .find(|helper| helper.filename == normalized || helper.env_var == normalized)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "helper",
+                format!("unknown runtime helper `{normalized}`"),
+                None,
+                Some(vec![format!(
+                    "Known helpers: {}",
+                    HELPERS
+                        .iter()
+                        .map(|helper| helper.filename)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )]),
+            )
+        })?;
+
+    let pairs = ensure_all_helpers()?;
+    let path = pairs
+        .into_iter()
+        .find_map(|(key, path)| (key == helper.env_var).then(|| PathBuf::from(path)))
+        .ok_or_else(|| {
+            Error::internal_unexpected(format!(
+                "runtime helper `{normalized}` was not materialized"
+            ))
+        })?;
+
+    if !path.is_file() {
+        return Err(Error::internal_unexpected(format!(
+            "runtime helper `{normalized}` path does not exist: {}",
+            path.display()
+        )));
+    }
+
+    Ok(path)
 }
 
 #[cfg(test)]

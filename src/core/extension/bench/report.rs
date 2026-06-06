@@ -131,6 +131,8 @@ pub struct BenchArtifactRef {
     pub kind: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observation_artifact_id: Option<String>,
 }
 
 pub(crate) fn collect_artifacts(results: &BenchResults) -> Vec<BenchArtifactRef> {
@@ -168,6 +170,7 @@ fn artifact_ref(
         artifact_type: artifact.artifact_type.clone(),
         kind: artifact.kind.clone(),
         label: artifact.label.clone(),
+        observation_artifact_id: artifact.observation_artifact_id.clone(),
     }
 }
 
