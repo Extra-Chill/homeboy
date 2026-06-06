@@ -615,7 +615,7 @@ homeboy_wp_codebox_compile_bootstrap_files
 homeboy_wp_codebox_compile_bootstrap_steps
 homeboy_wp_codebox_compile_prepare_steps
 
-WP_CODEBOX_WORDPRESS_VERSION="7.0"
+WP_CODEBOX_WORDPRESS_VERSION="latest"
 if [ "$settings_json" != "{}" ]; then
     extracted=$(printf '%s' "$settings_json" | jq -r '.wp_codebox_wordpress_version // empty' 2>/dev/null || true)
     [ -n "$extracted" ] && [ "$extracted" != "null" ] && WP_CODEBOX_WORDPRESS_VERSION="$extracted"

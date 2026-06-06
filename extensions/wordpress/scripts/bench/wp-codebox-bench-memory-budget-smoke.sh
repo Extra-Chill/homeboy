@@ -75,6 +75,12 @@ if ! jq -e '.inputs.pluginRuntime.php.memoryLimit == "768M"' "$CAPTURED_RECIPE" 
     exit 1
 fi
 
+if ! jq -e '.runtime.wp == "latest"' "$CAPTURED_RECIPE" >/dev/null; then
+    echo "Expected generated recipe to use a valid default WordPress runtime" >&2
+    cat "$CAPTURED_RECIPE" >&2
+    exit 1
+fi
+
 DIAGNOSTICS_FILE="${ARTIFACTS_DIR}/wp-codebox-bench-diagnostics.json"
 if ! jq -e '
     .schema == "homeboy/wordpress-bench-diagnostic/v1"
