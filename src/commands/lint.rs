@@ -8,7 +8,7 @@ use homeboy::core::extension::lint::{
 use homeboy::core::extension::ExtensionCapability;
 use homeboy::core::git;
 use homeboy::core::observation::{
-    finding_records_from_lint, ActiveObservation, NewRunRecord, RunStatus,
+    finding_records_from_lint, NewFindingRecord, NewRunRecord, RunStatus,
 };
 use homeboy::core::refactor::plan::{
     collect_refactor_sources, lint_refactor_request, LintSourceOptions,
@@ -18,7 +18,9 @@ use super::source_command::{resolve_ci_job_for_command, resolve_source_context};
 use super::utils::args::{
     BaselineArgs, ExtensionOverrideArgs, PositionalComponentArgs, SettingArgs,
 };
-use super::utils::observed_workflow::{finish_observed_workflow, ObservedWorkflowRunner};
+use super::utils::observed_workflow::{
+    finish_adapted_observed_workflow, ObservedWorkflowRunner, WorkflowObservationAdapter,
+};
 use super::{CmdResult, GlobalArgs};
 
 #[derive(Args)]
@@ -109,12 +111,12 @@ pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintCommandOutput>
         && args.ci_job.is_none()
         && source_ctx.component.has_script(ExtensionCapability::Lint)
     {
-        let observation = LintObservation::start(
+        let observation = LintObservationAdapter::new(
             source_ctx.component_id.clone(),
             &source_ctx.source_path,
             lint_command_label(&source_ctx.component_id, &args),
         );
-        let workflow = finish_lint_workflow(
+        let workflow = finish_adapted_observed_workflow(
             observation,
             run_self_check_lint_workflow(
                 &source_ctx.component,
@@ -147,7 +149,7 @@ pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintCommandOutput>
     }
 
     let runner = ObservedWorkflowRunner::create(format!("lint {}", effective_id))?;
-    let observation = LintObservation::start(
+    let observation = LintObservationAdapter::new(
         ctx.component_id.clone(),
         &ctx.source_path,
         lint_command_label(&effective_id, &args),
@@ -180,12 +182,7 @@ pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintCommandOutput>
         },
         runner.run_dir(),
     );
-    let workflow = runner.finish(
-        observation,
-        workflow,
-        |observation, workflow| observation.finish_workflow(workflow),
-        |observation, _error| observation.finish_error(),
-    )?;
+    let workflow = runner.finish_adapted(observation, workflow)?;
 
     Ok(report::from_main_workflow_with_ci_context(
         workflow,
@@ -193,57 +190,67 @@ pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintCommandOutput>
     ))
 }
 
-fn finish_lint_workflow(
-    observation: Option<LintObservation>,
-    workflow: homeboy::core::Result<homeboy::core::extension::lint::LintRunWorkflowResult>,
-) -> homeboy::core::Result<homeboy::core::extension::lint::LintRunWorkflowResult> {
-    finish_observed_workflow(
-        observation,
-        workflow,
-        |observation, workflow| observation.finish_workflow(workflow),
-        |observation, _error| observation.finish_error(),
-    )
+struct LintObservationAdapter {
+    component_id: String,
+    source_path: std::path::PathBuf,
+    command: String,
 }
 
-struct LintObservation(ActiveObservation);
+impl LintObservationAdapter {
+    fn new(component_id: String, source_path: &std::path::Path, command: String) -> Self {
+        Self {
+            component_id,
+            source_path: source_path.to_path_buf(),
+            command,
+        }
+    }
+}
 
-impl LintObservation {
-    fn start(component_id: String, source_path: &std::path::Path, command: String) -> Option<Self> {
-        ActiveObservation::start_best_effort(
-            NewRunRecord::builder("lint")
-                .component_id(component_id)
-                .command(command)
-                .cwd_path(source_path)
-                .current_homeboy_version()
-                .metadata(serde_json::json!({ "source": "homeboy lint" }))
-                .build(),
-        )
-        .map(Self)
+impl WorkflowObservationAdapter<homeboy::core::extension::lint::LintRunWorkflowResult>
+    for LintObservationAdapter
+{
+    fn start_record(&self) -> NewRunRecord {
+        NewRunRecord::builder("lint")
+            .component_id(self.component_id.clone())
+            .command(self.command.clone())
+            .cwd_path(&self.source_path)
+            .current_homeboy_version()
+            .metadata(serde_json::json!({ "source": "homeboy lint" }))
+            .build()
     }
 
-    fn finish_workflow(self, workflow: &homeboy::core::extension::lint::LintRunWorkflowResult) {
-        if let Some(findings) = &workflow.findings {
-            let records = finding_records_from_lint(self.0.run_id(), findings);
-            self.0.record_findings(&records);
-        }
-
-        let status = if workflow.status == "passed" {
+    fn success_status(
+        &self,
+        workflow: &homeboy::core::extension::lint::LintRunWorkflowResult,
+    ) -> RunStatus {
+        if workflow.status == "passed" {
             RunStatus::Pass
         } else {
             RunStatus::Fail
-        };
-        self.0.finish(
-            status,
-            Some(serde_json::json!({
-                "exit_code": workflow.exit_code,
-                "finding_count": workflow.findings.as_ref().map(Vec::len).unwrap_or(0),
-                "producer_summaries": workflow.producer_summaries,
-            })),
-        );
+        }
     }
 
-    fn finish_error(self) {
-        self.0.finish_error(None);
+    fn success_metadata(
+        &self,
+        workflow: &homeboy::core::extension::lint::LintRunWorkflowResult,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "exit_code": workflow.exit_code,
+            "finding_count": workflow.findings.as_ref().map(Vec::len).unwrap_or(0),
+            "producer_summaries": workflow.producer_summaries,
+        })
+    }
+
+    fn success_findings(
+        &self,
+        run_id: &str,
+        workflow: &homeboy::core::extension::lint::LintRunWorkflowResult,
+    ) -> Vec<NewFindingRecord> {
+        workflow
+            .findings
+            .as_ref()
+            .map(|findings| finding_records_from_lint(run_id, findings))
+            .unwrap_or_default()
     }
 }
 

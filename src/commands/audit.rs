@@ -7,12 +7,15 @@ use homeboy::core::code_audit::{
 use homeboy::core::engine::execution_context::ExecutionContext;
 use homeboy::core::git::short_head_revision_at;
 use homeboy::core::observation::{
-    finding_records_from_audit, ActiveObservation, NewRunRecord, RunStatus,
+    finding_records_from_audit, NewFindingRecord, NewRunRecord, RunStatus,
 };
 
 use super::source_command::resolve_source_context;
 use super::utils::args::{
     BaselineArgs, ExtensionOverrideArgs, PositionalComponentArgs, SettingArgs,
+};
+use super::utils::observed_workflow::{
+    finish_adapted_observed_workflow, WorkflowObservationAdapter,
 };
 use super::{CmdResult, GlobalArgs};
 
@@ -82,7 +85,7 @@ pub fn run(args: AuditArgs, _global: &GlobalArgs) -> CmdResult<AuditCommandOutpu
     let resolved_id = source_ctx.component_id.clone();
     let resolved_path = source_ctx.source_path.to_string_lossy().to_string();
 
-    let observation = start_audit_observation(&resolved_id, &resolved_path, &args);
+    let observation = AuditObservationAdapter::new(&resolved_id, &resolved_path, &args);
     let workflow = run_main_audit_workflow(AuditRunWorkflowArgs {
         component_id: resolved_id.clone(),
         source_path: resolved_path.clone(),
@@ -103,81 +106,74 @@ pub fn run(args: AuditArgs, _global: &GlobalArgs) -> CmdResult<AuditCommandOutpu
         include_fixability: args.fixability,
     });
 
-    let workflow = match workflow {
-        Ok(workflow) => {
-            finish_audit_observation(observation, &workflow);
-            workflow
-        }
-        Err(error) => {
-            finish_audit_observation_error(observation, &error);
-            return Err(error);
-        }
-    };
+    let workflow = finish_adapted_observed_workflow(observation, workflow)?;
 
     Ok(report::from_main_workflow(workflow))
 }
 
-struct AuditObservation(ActiveObservation);
+struct AuditObservationAdapter {
+    component_id: String,
+    source_path: String,
+    command: String,
+    initial_metadata: serde_json::Value,
+}
 
-fn start_audit_observation(
-    component_id: &str,
-    source_path: &str,
-    args: &AuditArgs,
-) -> Option<AuditObservation> {
-    let path = Path::new(source_path);
-    let metadata = audit_observation_initial_metadata(source_path, args);
-    ActiveObservation::start_best_effort(
+impl AuditObservationAdapter {
+    fn new(component_id: &str, source_path: &str, args: &AuditArgs) -> Self {
+        Self {
+            component_id: component_id.to_string(),
+            source_path: source_path.to_string(),
+            command: audit_observation_command(component_id, args),
+            initial_metadata: audit_observation_initial_metadata(source_path, args),
+        }
+    }
+}
+
+impl WorkflowObservationAdapter<code_audit::AuditRunWorkflowResult> for AuditObservationAdapter {
+    fn start_record(&self) -> NewRunRecord {
+        let path = Path::new(&self.source_path);
         NewRunRecord::builder("audit")
-            .component_id(component_id)
-            .command(audit_observation_command(component_id, args))
+            .component_id(self.component_id.clone())
+            .command(self.command.clone())
             .cwd_path(path)
             .current_homeboy_version()
             .git_sha(short_head_revision_at(path))
-            .metadata(metadata)
-            .build(),
-    )
-    .map(AuditObservation)
-}
+            .metadata(self.initial_metadata.clone())
+            .build()
+    }
 
-fn finish_audit_observation(
-    observation: Option<AuditObservation>,
-    workflow: &code_audit::AuditRunWorkflowResult,
-) {
-    let Some(observation) = observation else {
-        return;
-    };
+    fn success_status(&self, workflow: &code_audit::AuditRunWorkflowResult) -> RunStatus {
+        if workflow.exit_code == 0 {
+            RunStatus::Pass
+        } else {
+            RunStatus::Fail
+        }
+    }
 
-    let metadata = serde_json::json!({
-        "observation_status": if workflow.exit_code == 0 { "pass" } else { "fail" },
-        "exit_code": workflow.exit_code,
-        "summary": audit_observation_summary(&workflow.output),
-        "timing": audit_observation_timing(&workflow.timing),
-    });
-    let records = finding_records_from_audit(observation.0.run_id(), &workflow.findings);
-    observation.0.record_findings(&records);
-    let status = if workflow.exit_code == 0 {
-        RunStatus::Pass
-    } else {
-        RunStatus::Fail
-    };
-    observation.0.finish_with_merged_metadata(status, metadata);
-}
+    fn success_metadata(&self, workflow: &code_audit::AuditRunWorkflowResult) -> serde_json::Value {
+        serde_json::json!({
+            "observation_status": if workflow.exit_code == 0 { "pass" } else { "fail" },
+            "exit_code": workflow.exit_code,
+            "summary": audit_observation_summary(&workflow.output),
+            "timing": audit_observation_timing(&workflow.timing),
+        })
+    }
 
-fn finish_audit_observation_error(
-    observation: Option<AuditObservation>,
-    error: &homeboy::core::Error,
-) {
-    let Some(observation) = observation else {
-        return;
-    };
+    fn success_findings(
+        &self,
+        run_id: &str,
+        workflow: &code_audit::AuditRunWorkflowResult,
+    ) -> Vec<NewFindingRecord> {
+        finding_records_from_audit(run_id, &workflow.findings)
+    }
 
-    observation
-        .0
-        .finish_error_with_merged_metadata(serde_json::json!({
+    fn error_metadata(&self, error: &homeboy::core::Error) -> Option<serde_json::Value> {
+        Some(serde_json::json!({
             "observation_status": "error",
             "error": error.to_string(),
             "timing": audit_observation_timing(&code_audit::AuditTiming::default()),
-        }));
+        }))
+    }
 }
 
 fn audit_observation_timing(timing: &code_audit::AuditTiming) -> serde_json::Value {
@@ -400,7 +396,7 @@ mod tests {
         with_isolated_audit_home, with_isolated_home, write_source_extension,
     };
     use clap::Parser;
-    use homeboy::core::observation::ObservationStore;
+    use homeboy::core::observation::{ObservationStore, RunListFilter};
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -458,6 +454,59 @@ mod tests {
             changed_since: Some("origin/main".to_string()),
             json_summary: true,
             fixability: false,
+        }
+    }
+
+    fn latest_audit_run(store: &ObservationStore) -> homeboy::core::observation::RunRecord {
+        store
+            .latest_run(RunListFilter {
+                kind: Some("audit".to_string()),
+                component_id: Some("homeboy".to_string()),
+                ..RunListFilter::default()
+            })
+            .expect("latest run")
+            .expect("audit run")
+    }
+
+    fn sample_audit_workflow(home: &std::path::Path) -> code_audit::AuditRunWorkflowResult {
+        let finding = code_audit::Finding {
+            convention: "command modules".to_string(),
+            severity: code_audit::Severity::Warning,
+            file: "src/commands/foo.rs".to_string(),
+            description: "Missing run function".to_string(),
+            suggestion: "Add run()".to_string(),
+            kind: code_audit::AuditFinding::MissingMethod,
+        };
+        code_audit::AuditRunWorkflowResult {
+            output: AuditCommandOutput::Full {
+                passed: false,
+                result: code_audit::CodeAuditResult {
+                    component_id: "homeboy".to_string(),
+                    source_path: home.to_string_lossy().to_string(),
+                    summary: code_audit::AuditSummary {
+                        files_scanned: 1,
+                        conventions_detected: 1,
+                        outliers_found: 1,
+                        alignment_score: Some(0.5),
+                        files_skipped: 0,
+                        warnings: vec![],
+                    },
+                    conventions: vec![],
+                    directory_conventions: vec![],
+                    findings: vec![finding.clone()],
+                    duplicate_groups: vec![],
+                },
+                fixability: None,
+            },
+            exit_code: 1,
+            findings: vec![finding],
+            timing: code_audit::AuditTiming {
+                spans: vec![code_audit::AuditTimingSpan {
+                    id: "detector.structural".to_string(),
+                    status: "ok".to_string(),
+                    duration_ms: Some(1.0),
+                }],
+            },
         }
     }
 
@@ -686,26 +735,21 @@ mod tests {
             let _xdg = XdgGuard::unset();
             let args = sample_args();
 
-            let observation =
-                start_audit_observation("homeboy", &home.path().to_string_lossy(), &args)
-                    .expect("observation should start");
-            let run_id = observation.0.run_id().to_string();
-
-            finish_audit_observation_error(
-                Some(observation),
-                &homeboy::core::Error::validation_invalid_argument(
-                    "fixture",
-                    "simulated audit error",
-                    None,
-                    None,
+            let result = finish_adapted_observed_workflow(
+                AuditObservationAdapter::new("homeboy", &home.path().to_string_lossy(), &args),
+                Err::<code_audit::AuditRunWorkflowResult, _>(
+                    homeboy::core::Error::validation_invalid_argument(
+                        "fixture",
+                        "simulated audit error",
+                        None,
+                        None,
+                    ),
                 ),
             );
+            assert!(result.is_err());
 
             let store = ObservationStore::open_initialized().expect("store");
-            let run = store
-                .get_run(&run_id)
-                .expect("read run")
-                .expect("run exists");
+            let run = latest_audit_run(&store);
 
             assert_eq!(run.kind, "audit");
             assert_eq!(run.status, "error");
@@ -720,56 +764,19 @@ mod tests {
         with_isolated_home(|home| {
             let _xdg = XdgGuard::unset();
             let args = sample_args();
-            let observation =
-                start_audit_observation("homeboy", &home.path().to_string_lossy(), &args)
-                    .expect("observation should start");
-            let run_id = observation.0.run_id().to_string();
-            let finding = code_audit::Finding {
-                convention: "command modules".to_string(),
-                severity: code_audit::Severity::Warning,
-                file: "src/commands/foo.rs".to_string(),
-                description: "Missing run function".to_string(),
-                suggestion: "Add run()".to_string(),
-                kind: code_audit::AuditFinding::MissingMethod,
-            };
-            let workflow = code_audit::AuditRunWorkflowResult {
-                output: AuditCommandOutput::Full {
-                    passed: false,
-                    result: code_audit::CodeAuditResult {
-                        component_id: "homeboy".to_string(),
-                        source_path: home.path().to_string_lossy().to_string(),
-                        summary: code_audit::AuditSummary {
-                            files_scanned: 1,
-                            conventions_detected: 1,
-                            outliers_found: 1,
-                            alignment_score: Some(0.5),
-                            files_skipped: 0,
-                            warnings: vec![],
-                        },
-                        conventions: vec![],
-                        directory_conventions: vec![],
-                        findings: vec![finding.clone()],
-                        duplicate_groups: vec![],
-                    },
-                    fixability: None,
-                },
-                exit_code: 1,
-                findings: vec![finding],
-                timing: code_audit::AuditTiming {
-                    spans: vec![code_audit::AuditTimingSpan {
-                        id: "detector.structural".to_string(),
-                        status: "ok".to_string(),
-                        duration_ms: Some(1.0),
-                    }],
-                },
-            };
+            let workflow = sample_audit_workflow(home.path());
 
-            finish_audit_observation(Some(observation), &workflow);
+            finish_adapted_observed_workflow(
+                AuditObservationAdapter::new("homeboy", &home.path().to_string_lossy(), &args),
+                Ok(workflow),
+            )
+            .expect("finish workflow");
 
             let store = ObservationStore::open_initialized().expect("store");
+            let run = latest_audit_run(&store);
             let findings = store
                 .list_findings(homeboy::core::observation::FindingListFilter {
-                    run_id: Some(run_id.clone()),
+                    run_id: Some(run.id.clone()),
                     tool: Some("audit".to_string()),
                     ..homeboy::core::observation::FindingListFilter::default()
                 })
@@ -786,10 +793,6 @@ mod tests {
                 "audit-findings"
             );
 
-            let run = store
-                .get_run(&run_id)
-                .expect("read run")
-                .expect("run exists");
             assert_eq!(
                 run.metadata_json["timing"]["spans"][0]["id"],
                 "detector.structural"
@@ -805,10 +808,16 @@ mod tests {
             fs::write(&bad_data_home, "file blocks observation dir").expect("write marker");
             let _xdg = XdgGuard::set(&bad_data_home);
 
-            let observation =
-                start_audit_observation("homeboy", &home.path().to_string_lossy(), &sample_args());
+            let result = finish_adapted_observed_workflow(
+                AuditObservationAdapter::new(
+                    "homeboy",
+                    &home.path().to_string_lossy(),
+                    &sample_args(),
+                ),
+                Ok(sample_audit_workflow(home.path())),
+            );
 
-            assert!(observation.is_none());
+            assert!(result.is_ok());
         });
     }
 
