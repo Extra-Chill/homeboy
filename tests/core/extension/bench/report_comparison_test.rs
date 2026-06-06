@@ -130,6 +130,7 @@ mod fixtures {
             artifact_type: None,
             kind: kind.map(str::to_string),
             label: label.map(str::to_string),
+            observation_artifact_id: None,
         }
     }
 
@@ -145,6 +146,7 @@ mod fixtures {
             artifact_type: None,
             kind: kind.map(str::to_string),
             label: label.map(str::to_string),
+            observation_artifact_id: None,
         }
     }
 
@@ -500,6 +502,7 @@ fn test_collect_url_artifacts() {
             artifact_type: Some("url".to_string()),
             kind: Some("frontend_url".to_string()),
             label: Some("Frontend".to_string()),
+            observation_artifact_id: None,
         },
     );
 

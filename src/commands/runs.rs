@@ -1256,6 +1256,7 @@ mod tests {
                     sha256: None,
                     size_bytes: None,
                     mime: None,
+                    metadata_json: serde_json::json!({}),
                     created_at: chrono::Utc::now().to_rfc3339(),
                 })
                 .expect("artifact");

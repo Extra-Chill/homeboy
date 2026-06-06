@@ -274,6 +274,7 @@ mod tests {
                 sha256: Some("abc123".to_string()),
                 size_bytes: Some(13),
                 mime: Some("text/plain".to_string()),
+                metadata_json: serde_json::json!({}),
                 created_at: chrono::Utc::now().to_rfc3339(),
             },
             path: artifact_path.path().to_path_buf(),

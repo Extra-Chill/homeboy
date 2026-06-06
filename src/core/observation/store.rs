@@ -22,7 +22,7 @@ use super::records::{
 };
 use crate::core::{paths, Error, Result};
 
-pub const CURRENT_SCHEMA_VERSION: i64 = 5;
+pub const CURRENT_SCHEMA_VERSION: i64 = 6;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ObservationDbStatus {
@@ -313,8 +313,8 @@ impl ObservationStore {
         self.connection
             .execute(
                 r#"
-                INSERT INTO artifacts(id, run_id, kind, artifact_type, path, sha256, size_bytes, mime, created_at)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                INSERT INTO artifacts(id, run_id, kind, artifact_type, path, sha256, size_bytes, mime, metadata_json, created_at)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
                 "#,
                 params![
                     artifact.id,
@@ -325,6 +325,7 @@ impl ObservationStore {
                     artifact.sha256,
                     artifact.size_bytes,
                     artifact.mime,
+                    serialize_metadata(&artifact.metadata_json)?,
                     artifact.created_at,
                 ],
             )
@@ -337,6 +338,16 @@ impl ObservationStore {
         run_id: &str,
         kind: &str,
         path: impl AsRef<Path>,
+    ) -> Result<ArtifactRecord> {
+        self.record_artifact_with_metadata(run_id, kind, path, serde_json::json!({}))
+    }
+
+    pub fn record_artifact_with_metadata(
+        &self,
+        run_id: &str,
+        kind: &str,
+        path: impl AsRef<Path>,
+        metadata_json: serde_json::Value,
     ) -> Result<ArtifactRecord> {
         validate_required("run_id", run_id)?;
         validate_required("kind", kind)?;
@@ -385,8 +396,8 @@ impl ObservationStore {
         self.connection
             .execute(
                 r#"
-                INSERT INTO artifacts(id, run_id, kind, artifact_type, path, sha256, size_bytes, mime, created_at)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                INSERT INTO artifacts(id, run_id, kind, artifact_type, path, sha256, size_bytes, mime, metadata_json, created_at)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
                 "#,
                 params![
                     id,
@@ -397,6 +408,7 @@ impl ObservationStore {
                     sha256,
                     size_bytes,
                     mime,
+                    serialize_metadata(&metadata_json)?,
                     created_at,
                 ],
             )
@@ -417,6 +429,16 @@ impl ObservationStore {
         run_id: &str,
         kind: &str,
         path: impl AsRef<Path>,
+    ) -> Result<ArtifactRecord> {
+        self.record_directory_artifact_with_metadata(run_id, kind, path, serde_json::json!({}))
+    }
+
+    pub fn record_directory_artifact_with_metadata(
+        &self,
+        run_id: &str,
+        kind: &str,
+        path: impl AsRef<Path>,
+        metadata_json: serde_json::Value,
     ) -> Result<ArtifactRecord> {
         validate_required("run_id", run_id)?;
         validate_required("kind", kind)?;
@@ -465,8 +487,8 @@ impl ObservationStore {
         self.connection
             .execute(
                 r#"
-                INSERT INTO artifacts(id, run_id, kind, artifact_type, path, sha256, size_bytes, mime, created_at)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                INSERT INTO artifacts(id, run_id, kind, artifact_type, path, sha256, size_bytes, mime, metadata_json, created_at)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
                 "#,
                 params![
                     id,
@@ -477,6 +499,7 @@ impl ObservationStore {
                     Option::<String>::None,
                     Option::<i64>::None,
                     Option::<String>::None,
+                    serialize_metadata(&metadata_json)?,
                     created_at,
                 ],
             )
@@ -498,6 +521,16 @@ impl ObservationStore {
         kind: &str,
         url: &str,
     ) -> Result<ArtifactRecord> {
+        self.record_url_artifact_with_metadata(run_id, kind, url, serde_json::json!({}))
+    }
+
+    pub fn record_url_artifact_with_metadata(
+        &self,
+        run_id: &str,
+        kind: &str,
+        url: &str,
+        metadata_json: serde_json::Value,
+    ) -> Result<ArtifactRecord> {
         validate_required("run_id", run_id)?;
         validate_required("kind", kind)?;
         validate_required("url", url)?;
@@ -516,8 +549,8 @@ impl ObservationStore {
         self.connection
             .execute(
                 r#"
-                INSERT INTO artifacts(id, run_id, kind, artifact_type, path, sha256, size_bytes, mime, created_at)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                INSERT INTO artifacts(id, run_id, kind, artifact_type, path, sha256, size_bytes, mime, metadata_json, created_at)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
                 "#,
                 params![
                     id,
@@ -528,6 +561,7 @@ impl ObservationStore {
                     Option::<String>::None,
                     Option::<i64>::None,
                     Option::<String>::None,
+                    serialize_metadata(&metadata_json)?,
                     created_at,
                 ],
             )
@@ -549,7 +583,7 @@ impl ObservationStore {
             .connection
             .prepare(
                 r#"
-                SELECT id, run_id, kind, artifact_type, path, sha256, size_bytes, mime, created_at
+                SELECT id, run_id, kind, artifact_type, path, sha256, size_bytes, mime, metadata_json, created_at
                 FROM artifacts
                 WHERE run_id = ?1
                 ORDER BY created_at ASC
@@ -568,7 +602,7 @@ impl ObservationStore {
         self.connection
             .query_row(
                 r#"
-                SELECT id, run_id, kind, artifact_type, path, sha256, size_bytes, mime, created_at
+                SELECT id, run_id, kind, artifact_type, path, sha256, size_bytes, mime, metadata_json, created_at
                 FROM artifacts
                 WHERE id = ?1
                 "#,
@@ -589,7 +623,7 @@ impl ObservationStore {
             .prepare(
                 r#"
                 SELECT a.id, a.run_id, a.kind, a.artifact_type, a.path, a.sha256,
-                       a.size_bytes, a.mime, a.created_at,
+                       a.size_bytes, a.mime, a.metadata_json, a.created_at,
                        r.kind, r.component_id, r.started_at, r.status
                 FROM artifacts a
                 INNER JOIN runs r ON r.id = a.run_id
@@ -954,7 +988,8 @@ fn row_to_artifact_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<ArtifactR
         sha256: row.get(5)?,
         size_bytes: row.get(6)?,
         mime: row.get(7)?,
-        created_at: row.get(8)?,
+        metadata_json: parse_metadata(row.get(8)?)?,
+        created_at: row.get(9)?,
     })
 }
 
@@ -963,10 +998,10 @@ fn row_to_artifact_cleanup_candidate(
 ) -> rusqlite::Result<ArtifactCleanupCandidateRecord> {
     Ok(ArtifactCleanupCandidateRecord {
         artifact: row_to_artifact_record(row)?,
-        run_kind: row.get(9)?,
-        component_id: row.get(10)?,
-        run_started_at: row.get(11)?,
-        run_status: row.get(12)?,
+        run_kind: row.get(10)?,
+        component_id: row.get(11)?,
+        run_started_at: row.get(12)?,
+        run_status: row.get(13)?,
     })
 }
 

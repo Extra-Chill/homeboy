@@ -1,9 +1,12 @@
+use std::collections::BTreeMap;
 use std::fs;
+use std::path::Component;
 use std::path::{Path, PathBuf};
 
 use homeboy::core::engine::run_dir::{self, RunDir};
-use homeboy::core::extension::bench::report::collect_artifacts;
-use homeboy::core::extension::bench::{BenchResults, BenchRunWorkflowResult};
+use homeboy::core::extension::bench::{
+    BenchDiagnostic, BenchDiagnosticSource, BenchResults, BenchRunWorkflowResult,
+};
 use homeboy::core::git::short_head_revision_at;
 use homeboy::core::observation::{
     finding_records_from_budget, merge_metadata, ActiveObservation, NewRunRecord, RunStatus,
@@ -356,7 +359,13 @@ fn record_bench_observation_artifacts(
     run_dir: &RunDir,
 ) {
     if let Some(results) = workflow.results.as_mut() {
-        persist_bench_result_artifact_paths(observation, results, run_dir);
+        workflow
+            .diagnostics
+            .extend(persist_bench_result_artifact_paths(
+                observation,
+                results,
+                run_dir,
+            ));
         rewrite_bench_results_file(results, run_dir);
     }
 
@@ -378,15 +387,6 @@ fn record_bench_observation_artifacts(
         observation.run_id(),
         &results.budget_findings,
     ));
-    for artifact in collect_artifacts(results) {
-        if let Some(url) = artifact.url.as_deref() {
-            let kind = artifact.kind.as_deref().unwrap_or(&artifact.name);
-            let _ = observation
-                .0
-                .store()
-                .record_url_artifact(observation.run_id(), kind, url);
-        }
-    }
 }
 
 fn record_if_exists(observation: &BenchObservation, kind: &str, path: PathBuf) {
@@ -397,46 +397,187 @@ fn persist_bench_result_artifact_paths(
     observation: &BenchObservation,
     results: &mut BenchResults,
     run_dir: &RunDir,
-) {
+) -> Vec<BenchDiagnostic> {
+    let mut diagnostics = Vec::new();
     for scenario in &mut results.scenarios {
-        for artifact in scenario.artifacts.values_mut() {
-            persist_bench_artifact_path(observation, artifact, run_dir);
+        for (name, artifact) in &mut scenario.artifacts {
+            if let Some(diagnostic) =
+                persist_bench_artifact(observation, &scenario.id, None, name, artifact, run_dir)
+            {
+                diagnostics.push(diagnostic);
+            }
         }
         if let Some(runs) = &mut scenario.runs {
-            for run in runs {
-                for artifact in run.artifacts.values_mut() {
-                    persist_bench_artifact_path(observation, artifact, run_dir);
+            for (run_index, run) in runs.iter_mut().enumerate() {
+                for (name, artifact) in &mut run.artifacts {
+                    if let Some(diagnostic) = persist_bench_artifact(
+                        observation,
+                        &scenario.id,
+                        Some(run_index),
+                        name,
+                        artifact,
+                        run_dir,
+                    ) {
+                        diagnostics.push(diagnostic);
+                    }
                 }
             }
         }
     }
+    diagnostics
 }
 
-fn persist_bench_artifact_path(
+fn persist_bench_artifact(
     observation: &BenchObservation,
+    scenario_id: &str,
+    run_index: Option<usize>,
+    name: &str,
     artifact: &mut homeboy::core::extension::bench::BenchArtifact,
     run_dir: &RunDir,
-) {
-    let Some(path) = artifact.path.as_deref() else {
-        return;
+) -> Option<BenchDiagnostic> {
+    let kind = artifact.kind.clone().unwrap_or_else(|| name.to_string());
+    let metadata = bench_artifact_metadata(scenario_id, run_index, name, artifact);
+
+    if let Some(url) = artifact.url.clone() {
+        return match observation.0.store().record_url_artifact_with_metadata(
+            observation.run_id(),
+            &kind,
+            &url,
+            metadata,
+        ) {
+            Ok(record) => {
+                artifact.observation_artifact_id = Some(record.id);
+                None
+            }
+            Err(error) => Some(bench_artifact_diagnostic(
+                scenario_id,
+                run_index,
+                name,
+                "bench_artifact_url_record_failed",
+                format!("failed to record bench URL artifact `{name}`: {error}"),
+                serde_json::json!({ "url": url }),
+            )),
+        };
+    }
+
+    let Some(original_path) = artifact.path.clone() else {
+        return None;
     };
-    let path = resolve_bench_artifact_path(path, run_dir);
+    if bench_artifact_path_is_blocked(&original_path) {
+        return Some(bench_artifact_diagnostic(
+            scenario_id,
+            run_index,
+            name,
+            "bench_artifact_path_blocked",
+            format!("blocked bench artifact path `{original_path}` for `{name}`"),
+            serde_json::json!({ "path": original_path }),
+        ));
+    }
+
+    let path = resolve_bench_artifact_path(&original_path, run_dir);
     let record = if path.is_file() {
-        observation
-            .0
-            .store()
-            .record_artifact(observation.run_id(), "bench_artifact", &path)
-    } else if path.is_dir() {
-        observation.0.store().record_directory_artifact(
+        observation.0.store().record_artifact_with_metadata(
             observation.run_id(),
             "bench_artifact",
             &path,
+            metadata,
         )
+    } else if path.is_dir() {
+        observation
+            .0
+            .store()
+            .record_directory_artifact_with_metadata(
+                observation.run_id(),
+                "bench_artifact",
+                &path,
+                metadata,
+            )
     } else {
-        return;
+        return Some(bench_artifact_diagnostic(
+            scenario_id,
+            run_index,
+            name,
+            "bench_artifact_path_missing",
+            format!("bench artifact path for `{name}` was not found: {original_path}"),
+            serde_json::json!({
+                "path": original_path,
+                "resolved_path": path.to_string_lossy().to_string(),
+            }),
+        ));
     };
-    if let Ok(record) = record {
-        artifact.path = Some(record.path);
+
+    match record {
+        Ok(record) => {
+            artifact.path = Some(record.path);
+            artifact.observation_artifact_id = Some(record.id);
+            None
+        }
+        Err(error) => Some(bench_artifact_diagnostic(
+            scenario_id,
+            run_index,
+            name,
+            "bench_artifact_record_failed",
+            format!("failed to persist bench artifact `{name}`: {error}"),
+            serde_json::json!({
+                "path": original_path,
+                "resolved_path": path.to_string_lossy().to_string(),
+            }),
+        )),
+    }
+}
+
+fn bench_artifact_metadata(
+    scenario_id: &str,
+    run_index: Option<usize>,
+    name: &str,
+    artifact: &homeboy::core::extension::bench::BenchArtifact,
+) -> serde_json::Value {
+    serde_json::json!({
+        "source": "bench",
+        "scenario_id": scenario_id,
+        "run_index": run_index,
+        "name": name,
+        "kind": artifact.kind,
+        "label": artifact.label,
+        "original_path": artifact.path,
+        "url": artifact.url,
+    })
+}
+
+fn bench_artifact_path_is_blocked(path: &str) -> bool {
+    Path::new(path)
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+}
+
+fn bench_artifact_diagnostic(
+    scenario_id: &str,
+    run_index: Option<usize>,
+    name: &str,
+    class: &str,
+    message: String,
+    metadata: serde_json::Value,
+) -> BenchDiagnostic {
+    let mut diagnostic_metadata = BTreeMap::new();
+    diagnostic_metadata.insert("artifact_name".to_string(), serde_json::json!(name));
+    if let Some(object) = metadata.as_object() {
+        for (key, value) in object {
+            diagnostic_metadata.insert(key.clone(), value.clone());
+        }
+    }
+    BenchDiagnostic {
+        class: class.to_string(),
+        message: Some(message),
+        source: Some(match run_index {
+            Some(run_index) => BenchDiagnosticSource::ScenarioRun {
+                scenario_id: scenario_id.to_string(),
+                run_index,
+            },
+            None => BenchDiagnosticSource::Scenario {
+                scenario_id: scenario_id.to_string(),
+            },
+        }),
+        metadata: diagnostic_metadata,
     }
 }
 
@@ -604,6 +745,7 @@ mod tests {
                     artifact_type: None,
                     kind: Some("json".to_string()),
                     label: Some("Transcript".to_string()),
+                    observation_artifact_id: None,
                 },
             );
             results.scenarios[0].artifacts.insert(
@@ -614,6 +756,7 @@ mod tests {
                     artifact_type: Some("url".to_string()),
                     kind: Some("admin_url".to_string()),
                     label: Some("Admin".to_string()),
+                    observation_artifact_id: None,
                 },
             );
             let mut workflow = BenchRunWorkflowResult {
@@ -694,6 +837,108 @@ mod tests {
                 .expect("persisted transcript path");
             assert_ne!(persisted_transcript, "bench-artifacts/cold/transcript.json");
             assert!(PathBuf::from(persisted_transcript).is_file());
+            let transcript_observation_id = workflow.results.as_ref().unwrap().scenarios[0]
+                .artifacts["transcript"]
+                .observation_artifact_id
+                .as_deref()
+                .expect("transcript observation artifact id");
+            let transcript_record = artifacts
+                .iter()
+                .find(|artifact| artifact.id == transcript_observation_id)
+                .expect("transcript artifact record");
+            assert_eq!(transcript_record.metadata_json["source"], "bench");
+            assert_eq!(transcript_record.metadata_json["scenario_id"], "cold");
+            assert_eq!(transcript_record.metadata_json["name"], "transcript");
+            assert_eq!(transcript_record.metadata_json["kind"], "json");
+            assert_eq!(transcript_record.metadata_json["label"], "Transcript");
+            assert_eq!(
+                transcript_record.metadata_json["original_path"],
+                "bench-artifacts/cold/transcript.json"
+            );
+            assert!(
+                workflow.results.as_ref().unwrap().scenarios[0].artifacts["admin"]
+                    .observation_artifact_id
+                    .is_some()
+            );
+        });
+    }
+
+    #[test]
+    fn bench_observation_reports_missing_and_blocked_artifacts() {
+        with_isolated_home(|home| {
+            let _xdg = XdgGuard::unset();
+            let run_dir = RunDir::create().expect("run dir");
+            fs::write(run_dir.step_file(run_dir::files::BENCH_RESULTS), b"{}").expect("results");
+
+            let mut results = bench_results("homeboy", "cold", 42.0);
+            results.scenarios[0].artifacts.insert(
+                "missing".to_string(),
+                BenchArtifact {
+                    path: Some("bench-artifacts/cold/missing.json".to_string()),
+                    url: None,
+                    artifact_type: None,
+                    kind: Some("json".to_string()),
+                    label: Some("Missing".to_string()),
+                    observation_artifact_id: None,
+                },
+            );
+            results.scenarios[0].artifacts.insert(
+                "escape".to_string(),
+                BenchArtifact {
+                    path: Some("../escape.json".to_string()),
+                    url: None,
+                    artifact_type: None,
+                    kind: Some("json".to_string()),
+                    label: Some("Escape".to_string()),
+                    observation_artifact_id: None,
+                },
+            );
+            let mut workflow = BenchRunWorkflowResult {
+                status: "passed".to_string(),
+                component: "homeboy".to_string(),
+                exit_code: 0,
+                iterations: 10,
+                results: Some(results),
+                gate_failures: Vec::new(),
+                baseline_comparison: None,
+                hints: None,
+                failure: None,
+                diagnostics: Vec::new(),
+            };
+
+            let args = bench_args();
+            let observation = start(BenchObservationStart {
+                component_id: "homeboy",
+                component_label: "homeboy",
+                source_path: home.path(),
+                args: &args,
+                selected_scenarios: &["cold".to_string()],
+                rig_id: None,
+                rig_snapshot: None,
+                run_dir: &run_dir,
+            })
+            .expect("start observation");
+
+            finish_success(Some(observation), &mut workflow, &run_dir)
+                .expect("observation summary");
+
+            let classes: Vec<_> = workflow
+                .diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.class.as_str())
+                .collect();
+            assert!(classes.contains(&"bench_artifact_path_missing"));
+            assert!(classes.contains(&"bench_artifact_path_blocked"));
+            assert!(
+                workflow.results.as_ref().unwrap().scenarios[0].artifacts["missing"]
+                    .observation_artifact_id
+                    .is_none()
+            );
+            assert!(
+                workflow.results.as_ref().unwrap().scenarios[0].artifacts["escape"]
+                    .observation_artifact_id
+                    .is_none()
+            );
         });
     }
 
@@ -856,6 +1101,7 @@ mod tests {
                     artifact_type: None,
                     kind: Some("json".to_string()),
                     label: Some("Semantic fidelity".to_string()),
+                    observation_artifact_id: None,
                 },
             );
             let mut workflow = BenchRunWorkflowResult {
@@ -942,6 +1188,7 @@ mod tests {
                     artifact_type: None,
                     kind: Some("json".to_string()),
                     label: Some("Semantic fidelity".to_string()),
+                    observation_artifact_id: None,
                 },
             );
             let mut workflow = BenchRunWorkflowResult {
@@ -1015,6 +1262,7 @@ mod tests {
                     artifact_type: Some("directory".to_string()),
                     kind: Some("visual_comparison_dir".to_string()),
                     label: Some("Visual comparisons".to_string()),
+                    observation_artifact_id: None,
                 },
             );
             let mut workflow = BenchRunWorkflowResult {

@@ -219,6 +219,12 @@ pub fn import_from_gh_actions(args: GhActionsImportArgs) -> CmdResult<RunsOutput
                     sha256: Some(sha),
                     size_bytes: size,
                     mime: Some("application/json".to_string()),
+                    metadata_json: serde_json::json!({
+                        "source": "github_actions",
+                        "gh_run_id": gh_run.id,
+                        "gh_artifact_id": artifact.id,
+                        "artifact_name": artifact.name,
+                    }),
                     created_at: chrono::Utc::now().to_rfc3339(),
                 };
                 store.import_artifact(&artifact_record)?;
