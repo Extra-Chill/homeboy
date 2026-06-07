@@ -3,9 +3,7 @@ use std::path::{Path, PathBuf};
 
 use crate::core::error::{Error, Result};
 
-use super::workspace::{
-    materialize_snapshot, parent_remote_path, sanitize_path_segment, DEFAULT_EXCLUDES,
-};
+use super::workspace::{materialize_snapshot, parent_remote_path, sanitize_path_segment};
 use super::Runner;
 
 const PORTABLE_CONFIG_FILE: &str = concat!("homeboy", ".json");
@@ -14,6 +12,7 @@ pub(super) fn sync_validation_dependency_workspaces(
     runner: &Runner,
     local_path: &Path,
     remote_path: &str,
+    excludes: &[String],
 ) -> Result<()> {
     for dependency in validation_dependency_workspaces(local_path)? {
         let remote_dependency_path = format!(
@@ -26,12 +25,7 @@ pub(super) fn sync_validation_dependency_workspaces(
                     .unwrap_or("dependency"),
             )
         );
-        materialize_snapshot(
-            runner,
-            &dependency,
-            &remote_dependency_path,
-            DEFAULT_EXCLUDES,
-        )?;
+        materialize_snapshot(runner, &dependency, &remote_dependency_path, excludes)?;
     }
     Ok(())
 }

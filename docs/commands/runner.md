@@ -314,6 +314,7 @@ Safety rules:
 
 - The remote path is deterministic and lives under `<workspace_root>/_lab_workspaces/`.
 - Snapshot sync excludes dependency directories, build outputs, caches, `.git`, and common secret file patterns such as `.env*`, `*.pem`, and `*.key`.
+- Runner config can add project-specific generated-state patterns with `snapshot_excludes`; configured patterns are merged with the default snapshot safety excludes and affect snapshot hashing, stats, and materialization.
 - Output includes `local_path`, `remote_path`, `sync_mode`, `snapshot_identity`, and snapshot `files` / `bytes` when available.
 - The runner workspace is execution-only; this command does not push branches, commit, or make the runner authoritative for source changes.
 
