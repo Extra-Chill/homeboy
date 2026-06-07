@@ -5,6 +5,7 @@ module.exports = {
 	...require('./lib/wordpress-bootstrap-timeline'),
 	...require('./lib/request-profiler'),
 	...require('./lib/page-profiler'),
+	...require('./lib/wordpress-route-latency'),
 	...require('./lib/block-quality'),
 	...require('./lib/materialized-site-quality'),
 	...require('./lib/editor-canvas-probes'),
