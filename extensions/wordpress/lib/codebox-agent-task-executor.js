@@ -182,7 +182,7 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     agent: config.agent || options.agent || 'wp-codebox-sandbox',
     mode: config.mode || options.mode || 'sandbox',
     provider: config.provider || options.provider || defaults.provider || '',
-    model: request.executor.model || config.model || options.model || '',
+    model: request.executor.model || config.model || options.model || defaults.model || '',
     provider_plugin_paths: config.provider_plugin_paths || options.providerPluginPaths || defaults.providerPluginPaths || [],
     agent_bundles: config.agent_bundles || config.agentBundles || options.agentBundles || [],
     runtime_stack_mounts: config.runtime_stack_mounts || options.runtimeStackMounts || [],
@@ -252,6 +252,7 @@ function defaultCodeboxRuntimeConfig(request, config, inputs, options = {}) {
     siblingPath(workspaceBase, 'ai-provider-for-openai-main'),
   );
   const provider = config.provider || options.provider || defaultProviderForPluginPath(providerPluginPath);
+  const model = config.model || options.model || defaultModelForProvider(provider, settings);
   const agentsApiPath = firstExistingPath(
     options.agentsApi,
     settings.wp_codebox_agents_api_path,
@@ -266,6 +267,7 @@ function defaultCodeboxRuntimeConfig(request, config, inputs, options = {}) {
     legacyRuntimeTools: dataMachineCodePath,
     providerPluginPaths: normalizeArray(settings.wp_codebox_provider_plugin_paths || settings.provider_plugin_paths || (providerPluginPath ? [providerPluginPath] : [])),
     provider,
+    model,
     secretEnv: defaultSecretEnv(provider, settings),
     mounts: defaultWorkspaceMounts(workspaceRoot, request, config, inputs, options),
     workspaces: defaultWorkspaces(config, inputs, options),
@@ -333,6 +335,14 @@ function defaultProviderForPluginPath(providerPluginPath) {
     return '';
   }
   return path.basename(providerPluginPath).startsWith('ai-provider-for-openai') ? 'openai' : '';
+}
+
+function defaultModelForProvider(provider, settings) {
+  const explicit = settings.wp_codebox_model || settings.model || process.env.HOMEBOY_WP_CODEBOX_MODEL;
+  if (explicit) {
+    return explicit;
+  }
+  return provider === 'openai' || provider === 'codex' ? 'gpt-4.1-mini' : '';
 }
 
 function resolveWorkspaceRoot(request, config, inputs, settings, options) {

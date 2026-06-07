@@ -405,6 +405,38 @@ try {
   assert.equal(openAiDefaultedRequest.model, 'gpt-4.1-mini');
   assert.deepEqual(openAiDefaultedRequest.secret_env, ['OPENAI_API_KEY']);
 
+  const bareOpenAiDefaultedRequest = codeboxTaskRequestFromAgentTaskRequest({
+    ...request,
+    task_id: 'bare-default-openai-provider-task-123',
+    executor: {
+      backend: 'codebox',
+      config: {},
+    },
+    inputs: {
+      target: { root: workspaceRoot },
+    },
+  }, {
+    settings: {},
+  });
+  assert.equal(bareOpenAiDefaultedRequest.provider, 'openai');
+  assert.equal(bareOpenAiDefaultedRequest.model, 'gpt-4.1-mini');
+  assert.deepEqual(bareOpenAiDefaultedRequest.secret_env, ['OPENAI_API_KEY']);
+
+  const settingsModelRequest = codeboxTaskRequestFromAgentTaskRequest({
+    ...request,
+    task_id: 'settings-model-default-task-123',
+    executor: {
+      backend: 'codebox',
+      config: {},
+    },
+    inputs: {
+      target: { root: workspaceRoot },
+    },
+  }, {
+    settings: { wp_codebox_model: 'gpt-4.1-mini' },
+  });
+  assert.equal(settingsModelRequest.model, 'gpt-4.1-mini');
+
   fs.rmSync(bundledAgentsApiPath, { recursive: true, force: true });
   fs.mkdirSync(alternateBundledAgentsApiPath, { recursive: true });
   const alternateDefaultedRequest = codeboxTaskRequestFromAgentTaskRequest({
