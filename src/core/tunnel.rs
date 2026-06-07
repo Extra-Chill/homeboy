@@ -148,20 +148,34 @@ pub struct ServiceTunnelCommandSpec {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ServiceTunnelProcessDescriptor {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub process_group_id: Option<i32>,
+    pub command: ServiceTunnelCommandSpec,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ServiceTunnelLogPaths {
+    pub stdout_path: String,
+    pub stderr_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ServiceTunnelRuntimeState {
     #[serde(flatten)]
     pub preview_identity: ServiceTunnelPreviewIdentity,
     pub pid: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub process_group_id: Option<i32>,
+    #[serde(flatten)]
+    pub process: ServiceTunnelProcessDescriptor,
     pub started_at: String,
     pub local_url: String,
-    pub command: ServiceTunnelCommandSpec,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub health_url: Option<String>,
-    pub stdout_path: String,
-    pub stderr_path: String,
+    #[serde(flatten)]
+    pub logs: ServiceTunnelLogPaths,
     pub backend: ServiceTunnelTunnelBackend,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend_process: Option<ServiceTunnelBackendProcessState>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_run_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -172,16 +186,26 @@ pub struct ServiceTunnelRuntimeState {
 #[serde(rename_all = "snake_case")]
 pub enum ServiceTunnelTunnelBackend {
     None,
+    Command,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ServiceTunnelBackendProcessState {
+    pub pid: u32,
+    #[serde(flatten)]
+    pub process: ServiceTunnelProcessDescriptor,
+    pub started_at: String,
+    #[serde(flatten)]
+    pub logs: ServiceTunnelLogPaths,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ServiceTunnelProcessStatus {
     pub pid: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub process_group_id: Option<i32>,
+    #[serde(flatten)]
+    pub process: ServiceTunnelProcessDescriptor,
     pub running: bool,
     pub started_at: String,
-    pub command: ServiceTunnelCommandSpec,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -199,15 +223,21 @@ pub struct ServiceTunnelHealthStatus {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ServiceTunnelEvidence {
     pub state_path: String,
-    pub stdout_path: String,
-    pub stderr_path: String,
+    #[serde(flatten)]
+    pub logs: ServiceTunnelLogPaths,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ServiceTunnelBackendStatus {
     pub backend: ServiceTunnelTunnelBackend,
     pub active: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub process: Option<ServiceTunnelProcessStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<ServiceTunnelBackendEvidence>,
 }
+
+pub type ServiceTunnelBackendEvidence = ServiceTunnelLogPaths;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ServiceTunnelPreviewArtifact {
@@ -264,6 +294,8 @@ pub struct StartServiceTunnelSpec {
     pub health_path: Option<String>,
     pub readiness_timeout_secs: u64,
     pub backend: ServiceTunnelTunnelBackend,
+    pub backend_command: Option<String>,
+    pub backend_public_url: Option<String>,
     pub source_run_id: Option<String>,
     pub source_workflow_id: Option<String>,
 }
@@ -353,14 +385,7 @@ pub fn status(id: &str) -> Result<ServiceTunnelStatus> {
 
 pub fn start(spec: StartServiceTunnelSpec) -> Result<ServiceTunnelStatus> {
     let mut tunnel = load(&spec.id)?;
-    if matches!(spec.backend, ServiceTunnelTunnelBackend::None) == false {
-        return Err(Error::validation_invalid_argument(
-            "public_tunnel_backend",
-            "only the explicit 'none' backend is currently supported",
-            Some(spec.id),
-            Some(vec!["none".to_string()]),
-        ));
-    }
+    validate_backend_spec(&spec)?;
 
     let existing = load_runtime_state(&tunnel.id)?;
     if let Some(state) = existing {
@@ -436,21 +461,26 @@ pub fn start(spec: StartServiceTunnelSpec) -> Result<ServiceTunnelStatus> {
     let state = ServiceTunnelRuntimeState {
         preview_identity: ServiceTunnelPreviewIdentity {
             service_id: tunnel.id.clone(),
-            public_url: None,
+            public_url: spec.backend_public_url.clone(),
         },
         pid,
-        process_group_id,
+        process: ServiceTunnelProcessDescriptor {
+            process_group_id,
+            command: ServiceTunnelCommandSpec {
+                command: spec.command,
+                cwd: spec.cwd.map(|path| path.display().to_string()),
+                env_keys: spec.env.keys().cloned().collect(),
+            },
+        },
         started_at: chrono::Utc::now().to_rfc3339(),
         local_url: local_url_for(&tunnel),
-        command: ServiceTunnelCommandSpec {
-            command: spec.command,
-            cwd: spec.cwd.map(|path| path.display().to_string()),
-            env_keys: spec.env.keys().cloned().collect(),
-        },
         health_url,
-        stdout_path: stdout_path.display().to_string(),
-        stderr_path: stderr_path.display().to_string(),
+        logs: ServiceTunnelLogPaths {
+            stdout_path: stdout_path.display().to_string(),
+            stderr_path: stderr_path.display().to_string(),
+        },
         backend: spec.backend,
+        backend_process: None,
         source_run_id: spec.source_run_id,
         source_workflow_id: spec.source_workflow_id,
     };
@@ -460,12 +490,24 @@ pub fn start(spec: StartServiceTunnelSpec) -> Result<ServiceTunnelStatus> {
         remove_runtime_state(&state.preview_identity.service_id)?;
         return Err(error);
     }
+    let state = match start_backend_if_needed(state, &tunnel, spec.backend_command) {
+        Ok(state) => state,
+        Err(error) => {
+            if let Some(state) = load_runtime_state(&tunnel.id)? {
+                terminate_runtime_state(&state)?;
+                remove_runtime_state(&state.preview_identity.service_id)?;
+            }
+            return Err(error);
+        }
+    };
+    save_runtime_state(&state)?;
     status(&tunnel.id)
 }
 
 pub fn stop(id: &str) -> Result<ServiceTunnelStatus> {
     let tunnel = load(id)?;
     if let Some(state) = load_runtime_state(id)? {
+        terminate_backend_state(&state)?;
         terminate_runtime_state(&state)?;
         remove_runtime_state(id)?;
     }
@@ -484,14 +526,26 @@ fn service_tunnel_status(tunnel: &ServiceTunnel) -> ServiceTunnelStatus {
     let evidence = state.as_ref().map(runtime_evidence);
     let process = state.as_ref().map(|state| ServiceTunnelProcessStatus {
         pid: state.pid,
-        process_group_id: state.process_group_id,
+        process: state.process.clone(),
         running,
         started_at: state.started_at.clone(),
-        command: state.command.clone(),
     });
     let backend = state.as_ref().map(|state| ServiceTunnelBackendStatus {
         backend: state.backend.clone(),
-        active: state.preview_identity.public_url.is_some(),
+        active: backend_state_is_running(state) || state.preview_identity.public_url.is_some(),
+        process: state.backend_process.as_ref().map(|backend| {
+            let running = backend_process_is_running(backend);
+            ServiceTunnelProcessStatus {
+                pid: backend.pid,
+                process: backend.process.clone(),
+                running,
+                started_at: backend.started_at.clone(),
+            }
+        }),
+        evidence: state
+            .backend_process
+            .as_ref()
+            .map(|backend| backend.logs.clone()),
     });
     let public_url = state
         .as_ref()
@@ -518,7 +572,7 @@ fn service_tunnel_status(tunnel: &ServiceTunnel) -> ServiceTunnelStatus {
     }
 }
 
-fn preview_policy_allows(
+pub(super) fn preview_policy_allows(
     policy: &ServiceTunnelPreviewPolicy,
     context: &ServiceTunnelPreviewDecisionContext,
 ) -> bool {
@@ -535,7 +589,7 @@ fn preview_policy_allows(
     }
 }
 
-fn preview_artifact_for(
+pub(super) fn preview_artifact_for(
     tunnel: &ServiceTunnel,
     state: &ServiceTunnelRuntimeState,
     context: &ServiceTunnelPreviewDecisionContext,
@@ -708,6 +762,106 @@ fn validate_loopback_host(host: &str, id: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_backend_spec(spec: &StartServiceTunnelSpec) -> Result<()> {
+    match spec.backend {
+        ServiceTunnelTunnelBackend::None => Ok(()),
+        ServiceTunnelTunnelBackend::Command => {
+            require_backend_value(
+                "public_tunnel_command",
+                spec.backend_command.as_deref(),
+                "command backend requires a backend command",
+                &spec.id,
+            )?;
+            require_backend_value(
+                "public_tunnel_public_url",
+                spec.backend_public_url.as_deref(),
+                "command backend requires the public URL it exposes",
+                &spec.id,
+            )?;
+            Ok(())
+        }
+    }
+}
+
+fn require_backend_value(field: &str, value: Option<&str>, message: &str, id: &str) -> Result<()> {
+    if value.unwrap_or_default().trim().is_empty() {
+        return Err(Error::validation_invalid_argument(
+            field,
+            message,
+            Some(id.to_string()),
+            None,
+        ));
+    }
+    Ok(())
+}
+
+fn start_backend_if_needed(
+    mut state: ServiceTunnelRuntimeState,
+    tunnel: &ServiceTunnel,
+    backend_command: Option<String>,
+) -> Result<ServiceTunnelRuntimeState> {
+    if !matches!(state.backend, ServiceTunnelTunnelBackend::Command) {
+        return Ok(state);
+    }
+
+    let command_string = backend_command.unwrap_or_default();
+    let runtime_dir = paths::service_tunnel_runtime_dir(&tunnel.id)?;
+    let stdout_path = runtime_dir.join("backend-stdout.log");
+    let stderr_path = runtime_dir.join("backend-stderr.log");
+    let stdout = File::create(&stdout_path)
+        .map_err(|e| Error::internal_io(e.to_string(), Some(stdout_path.display().to_string())))?;
+    let stderr = File::create(&stderr_path)
+        .map_err(|e| Error::internal_io(e.to_string(), Some(stderr_path.display().to_string())))?;
+
+    let mut command = shell_command(&command_string);
+    command
+        .env("HOMEBOY_SERVICE_ID", &tunnel.id)
+        .env("HOMEBOY_SERVICE_LOCAL_URL", &state.local_url);
+    if let Some(public_url) = &state.preview_identity.public_url {
+        command.env("HOMEBOY_TUNNEL_PUBLIC_URL", public_url);
+    }
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr));
+    #[cfg(unix)]
+    unsafe {
+        command.pre_exec(|| {
+            libc::setpgid(0, 0);
+            Ok(())
+        });
+    }
+
+    let child = command.spawn().map_err(|e| {
+        Error::internal_io(
+            e.to_string(),
+            Some(format!("start service tunnel backend {}", tunnel.id)),
+        )
+    })?;
+    let pid = child.id();
+    state.backend_process = Some(ServiceTunnelBackendProcessState {
+        pid,
+        process: ServiceTunnelProcessDescriptor {
+            process_group_id: process_group_id_for(pid),
+            command: ServiceTunnelCommandSpec {
+                command: command_string,
+                cwd: None,
+                env_keys: vec![
+                    "HOMEBOY_SERVICE_ID".to_string(),
+                    "HOMEBOY_SERVICE_LOCAL_URL".to_string(),
+                    "HOMEBOY_TUNNEL_PUBLIC_URL".to_string(),
+                ],
+            },
+        },
+        started_at: chrono::Utc::now().to_rfc3339(),
+        logs: ServiceTunnelLogPaths {
+            stdout_path: stdout_path.display().to_string(),
+            stderr_path: stderr_path.display().to_string(),
+        },
+    });
+    Ok(state)
+}
+
 fn shell_command(command: &str) -> Command {
     #[cfg(windows)]
     {
@@ -779,11 +933,55 @@ fn remove_runtime_state(id: &str) -> Result<()> {
 }
 
 fn runtime_state_is_running(state: &ServiceTunnelRuntimeState) -> bool {
-    if let Some(pgid) = state.process_group_id {
+    if let Some(pgid) = state.process.process_group_id {
         process_group_is_running(pgid)
     } else {
         pid_is_running(state.pid)
     }
+}
+
+fn backend_state_is_running(state: &ServiceTunnelRuntimeState) -> bool {
+    state
+        .backend_process
+        .as_ref()
+        .is_some_and(backend_process_is_running)
+}
+
+fn backend_process_is_running(state: &ServiceTunnelBackendProcessState) -> bool {
+    if let Some(pgid) = state.process.process_group_id {
+        process_group_is_running(pgid)
+    } else {
+        pid_is_running(state.pid)
+    }
+}
+
+fn terminate_backend_state(state: &ServiceTunnelRuntimeState) -> Result<()> {
+    let Some(backend) = &state.backend_process else {
+        return Ok(());
+    };
+    if !backend_process_is_running(backend) {
+        return Ok(());
+    }
+
+    #[cfg(unix)]
+    unsafe {
+        if let Some(pgid) = backend.process.process_group_id {
+            libc::kill(-(pgid as libc::pid_t), libc::SIGTERM);
+            std::thread::sleep(Duration::from_millis(250));
+            if process_group_is_running(pgid) {
+                libc::kill(-(pgid as libc::pid_t), libc::SIGKILL);
+            }
+        } else {
+            libc::kill(backend.pid as libc::pid_t, libc::SIGTERM);
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = backend;
+    }
+
+    Ok(())
 }
 
 fn terminate_runtime_state(state: &ServiceTunnelRuntimeState) -> Result<()> {
@@ -793,7 +991,7 @@ fn terminate_runtime_state(state: &ServiceTunnelRuntimeState) -> Result<()> {
 
     #[cfg(unix)]
     unsafe {
-        if let Some(pgid) = state.process_group_id {
+        if let Some(pgid) = state.process.process_group_id {
             libc::kill(-(pgid as libc::pid_t), libc::SIGTERM);
             std::thread::sleep(Duration::from_millis(250));
             if process_group_is_running(pgid) {
@@ -895,380 +1093,6 @@ fn runtime_evidence(state: &ServiceTunnelRuntimeState) -> ServiceTunnelEvidence 
         state_path: paths::service_tunnel_runtime_state_file(&state.preview_identity.service_id)
             .map(|path| path.display().to_string())
             .unwrap_or_default(),
-        stdout_path: state.stdout_path.clone(),
-        stderr_path: state.stderr_path.clone(),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::core::server::Server;
-    use crate::test_support;
-    use std::collections::{BTreeMap, HashMap};
-
-    fn create_server() {
-        crate::core::server::save(&Server {
-            id: "private-host".to_string(),
-            aliases: Vec::new(),
-            host: "private.example.test".to_string(),
-            user: "tester".to_string(),
-            port: 22,
-            identity_file: None,
-            kind: None,
-            auth: None,
-            env: HashMap::new(),
-            runner: None,
-        })
-        .expect("save server");
-    }
-
-    #[test]
-    fn expose_records_private_loopback_declaration_without_running_tunnel() {
-        test_support::with_isolated_home(|_| {
-            create_server();
-
-            let tunnel = expose(ExposeServiceTunnelSpec {
-                id: "site-preview".to_string(),
-                server_id: "private-host".to_string(),
-                target: ServiceTunnelTarget {
-                    host: "127.0.0.1".to_string(),
-                    port: 7331,
-                },
-                scheme: "http".to_string(),
-                local_port: Some(8831),
-                auth: ServiceTunnelAuth {
-                    mode: ServiceTunnelAuthMode::BearerEnv,
-                    env_var: Some("SITE_PREVIEW_TOKEN".to_string()),
-                    header: Some("Authorization".to_string()),
-                },
-                policy: ServiceTunnelPolicy {
-                    exposure: ServiceTunnelExposure::PrivateLoopback,
-                    require_auth: true,
-                    allowed_clients: vec!["app-runtime".to_string()],
-                    preview: ServiceTunnelPreviewPolicy::default(),
-                },
-                description: Some("Private preview service".to_string()),
-            })
-            .expect("expose service");
-
-            assert_eq!(tunnel.id, "site-preview");
-            let report = status("site-preview").expect("status");
-            assert!(report.declared);
-            assert!(!report.running);
-            assert_eq!(report.local_url, "http://127.0.0.1:8831");
-        });
-    }
-
-    #[test]
-    fn validation_rejects_auth_mode_without_env_var() {
-        test_support::with_isolated_home(|_| {
-            create_server();
-            let err = expose(ExposeServiceTunnelSpec {
-                id: "bad".to_string(),
-                server_id: "private-host".to_string(),
-                target: ServiceTunnelTarget {
-                    host: "127.0.0.1".to_string(),
-                    port: 7331,
-                },
-                scheme: "http".to_string(),
-                local_port: None,
-                auth: ServiceTunnelAuth {
-                    mode: ServiceTunnelAuthMode::BearerEnv,
-                    env_var: None,
-                    header: None,
-                },
-                policy: ServiceTunnelPolicy {
-                    exposure: ServiceTunnelExposure::PrivateLoopback,
-                    require_auth: true,
-                    allowed_clients: Vec::new(),
-                    preview: ServiceTunnelPreviewPolicy::default(),
-                },
-                description: None,
-            })
-            .expect_err("missing auth env should fail");
-
-            assert_eq!(err.code, crate::core::ErrorCode::ValidationInvalidArgument);
-            assert!(err.message.contains("auth.env_var"));
-        });
-    }
-
-    #[test]
-    fn start_status_and_stop_manage_local_service_runtime_state() {
-        test_support::with_isolated_home(|_| {
-            create_server();
-            expose(ExposeServiceTunnelSpec {
-                id: "local-preview".to_string(),
-                server_id: "private-host".to_string(),
-                target: ServiceTunnelTarget {
-                    host: "127.0.0.1".to_string(),
-                    port: 7331,
-                },
-                scheme: "http".to_string(),
-                local_port: Some(8832),
-                auth: ServiceTunnelAuth {
-                    mode: ServiceTunnelAuthMode::BearerEnv,
-                    env_var: Some("LOCAL_PREVIEW_TOKEN".to_string()),
-                    header: Some("Authorization".to_string()),
-                },
-                policy: ServiceTunnelPolicy {
-                    exposure: ServiceTunnelExposure::PrivateLoopback,
-                    require_auth: true,
-                    allowed_clients: vec!["app-runtime".to_string()],
-                    preview: ServiceTunnelPreviewPolicy {
-                        mode: ServiceTunnelPreviewPolicyMode::Always,
-                        keep_alive_until: None,
-                    },
-                },
-                description: None,
-            })
-            .expect("expose service");
-
-            let started = start(StartServiceTunnelSpec {
-                id: "local-preview".to_string(),
-                command: "while true; do sleep 1; done".to_string(),
-                cwd: None,
-                env: BTreeMap::from([("LOCAL_PREVIEW_MODE".to_string(), "test".to_string())]),
-                host: Some("127.0.0.1".to_string()),
-                port: Some(8832),
-                scheme: Some("http".to_string()),
-                health_url: None,
-                health_path: None,
-                readiness_timeout_secs: 1,
-                backend: ServiceTunnelTunnelBackend::None,
-                source_run_id: Some("run-123".to_string()),
-                source_workflow_id: Some("workflow-abc".to_string()),
-            })
-            .expect("start service");
-
-            assert!(started.running);
-            assert_eq!(started.local_url, "http://127.0.0.1:8832");
-            assert_eq!(started.preview_identity.public_url, None);
-            let preview = started.preview.as_ref().expect("preview artifact");
-            assert_eq!(preview.kind, "preview_url");
-            assert_eq!(preview.preview_identity.service_id, "local-preview");
-            assert_eq!(preview.local_url, "http://127.0.0.1:8832");
-            assert_eq!(preview.source.run_id.as_deref(), Some("run-123"));
-            assert_eq!(preview.source.workflow_id.as_deref(), Some("workflow-abc"));
-            let process = started.process.expect("process status");
-            assert!(process.running);
-            assert_eq!(process.command.env_keys, vec!["LOCAL_PREVIEW_MODE"]);
-            let evidence = started.evidence.expect("evidence paths");
-            assert!(std::path::Path::new(&evidence.state_path).exists());
-            assert!(std::path::Path::new(&evidence.stdout_path).exists());
-            assert!(std::path::Path::new(&evidence.stderr_path).exists());
-
-            let running = status("local-preview").expect("status");
-            assert!(running.running);
-
-            let stopped = stop("local-preview").expect("stop service");
-            assert!(!stopped.running);
-            assert!(stopped.process.is_none());
-            assert!(!std::path::Path::new(&evidence.state_path).exists());
-        });
-    }
-
-    #[test]
-    fn start_cleans_runtime_state_when_readiness_fails() {
-        test_support::with_isolated_home(|_| {
-            create_server();
-            expose(ExposeServiceTunnelSpec {
-                id: "failing-preview".to_string(),
-                server_id: "private-host".to_string(),
-                target: ServiceTunnelTarget {
-                    host: "127.0.0.1".to_string(),
-                    port: 7331,
-                },
-                scheme: "http".to_string(),
-                local_port: Some(8833),
-                auth: ServiceTunnelAuth {
-                    mode: ServiceTunnelAuthMode::BearerEnv,
-                    env_var: Some("FAILING_PREVIEW_TOKEN".to_string()),
-                    header: Some("Authorization".to_string()),
-                },
-                policy: ServiceTunnelPolicy {
-                    exposure: ServiceTunnelExposure::PrivateLoopback,
-                    require_auth: true,
-                    allowed_clients: Vec::new(),
-                    preview: ServiceTunnelPreviewPolicy::default(),
-                },
-                description: None,
-            })
-            .expect("expose service");
-
-            let err = start(StartServiceTunnelSpec {
-                id: "failing-preview".to_string(),
-                command: "while true; do sleep 1; done".to_string(),
-                cwd: None,
-                env: BTreeMap::new(),
-                host: Some("127.0.0.1".to_string()),
-                port: Some(8833),
-                scheme: Some("http".to_string()),
-                health_url: Some("http://127.0.0.1:9/health".to_string()),
-                health_path: None,
-                readiness_timeout_secs: 0,
-                backend: ServiceTunnelTunnelBackend::None,
-                source_run_id: None,
-                source_workflow_id: None,
-            })
-            .expect_err("readiness should fail");
-
-            assert_eq!(err.code, crate::core::ErrorCode::ValidationInvalidArgument);
-            let state_path =
-                paths::service_tunnel_runtime_state_file("failing-preview").expect("state path");
-            assert!(!state_path.exists());
-            let stopped = status("failing-preview").expect("status");
-            assert!(!stopped.running);
-        });
-    }
-
-    #[test]
-    fn preview_policy_decisions_match_workflow_outcomes() {
-        let now = chrono::DateTime::parse_from_rfc3339("2026-06-07T12:00:00Z")
-            .expect("timestamp")
-            .with_timezone(&chrono::Utc);
-        let failed = ServiceTunnelPreviewDecisionContext {
-            run_failed: true,
-            manual_approval_required: false,
-            now,
-        };
-        let success = ServiceTunnelPreviewDecisionContext {
-            run_failed: false,
-            manual_approval_required: false,
-            now,
-        };
-        let approval = ServiceTunnelPreviewDecisionContext {
-            run_failed: false,
-            manual_approval_required: true,
-            now,
-        };
-
-        assert!(!preview_policy_allows(
-            &ServiceTunnelPreviewPolicy::default(),
-            &failed
-        ));
-        assert!(preview_policy_allows(
-            &ServiceTunnelPreviewPolicy {
-                mode: ServiceTunnelPreviewPolicyMode::Always,
-                keep_alive_until: None,
-            },
-            &success
-        ));
-        assert!(preview_policy_allows(
-            &ServiceTunnelPreviewPolicy {
-                mode: ServiceTunnelPreviewPolicyMode::OnFailure,
-                keep_alive_until: None,
-            },
-            &failed
-        ));
-        assert!(!preview_policy_allows(
-            &ServiceTunnelPreviewPolicy {
-                mode: ServiceTunnelPreviewPolicyMode::OnFailure,
-                keep_alive_until: None,
-            },
-            &success
-        ));
-        assert!(preview_policy_allows(
-            &ServiceTunnelPreviewPolicy {
-                mode: ServiceTunnelPreviewPolicyMode::ManualApproval,
-                keep_alive_until: None,
-            },
-            &approval
-        ));
-        assert!(preview_policy_allows(
-            &ServiceTunnelPreviewPolicy {
-                mode: ServiceTunnelPreviewPolicyMode::KeepAliveUntil,
-                keep_alive_until: Some("2026-06-07T12:30:00Z".to_string()),
-            },
-            &success
-        ));
-        assert!(!preview_policy_allows(
-            &ServiceTunnelPreviewPolicy {
-                mode: ServiceTunnelPreviewPolicyMode::KeepAliveUntil,
-                keep_alive_until: Some("2026-06-07T11:59:59Z".to_string()),
-            },
-            &success
-        ));
-    }
-
-    #[test]
-    fn preview_artifact_serializes_structured_reviewer_contract() {
-        let tunnel = ServiceTunnel {
-            id: "site-preview".to_string(),
-            aliases: Vec::new(),
-            description: None,
-            server_id: "private-host".to_string(),
-            target: ServiceTunnelTarget {
-                host: "127.0.0.1".to_string(),
-                port: 3000,
-            },
-            scheme: "http".to_string(),
-            local_host: "127.0.0.1".to_string(),
-            local_port: Some(3000),
-            auth: ServiceTunnelAuth {
-                mode: ServiceTunnelAuthMode::BearerEnv,
-                env_var: Some("TOKEN".to_string()),
-                header: Some("Authorization".to_string()),
-            },
-            policy: ServiceTunnelPolicy {
-                exposure: ServiceTunnelExposure::PrivateLoopback,
-                require_auth: true,
-                allowed_clients: Vec::new(),
-                preview: ServiceTunnelPreviewPolicy {
-                    mode: ServiceTunnelPreviewPolicyMode::KeepAliveUntil,
-                    keep_alive_until: Some("2026-06-07T13:00:00Z".to_string()),
-                },
-            },
-        };
-        let state = ServiceTunnelRuntimeState {
-            preview_identity: ServiceTunnelPreviewIdentity {
-                service_id: "site-preview".to_string(),
-                public_url: Some("https://preview.example.test/site-preview".to_string()),
-            },
-            pid: 123,
-            process_group_id: Some(123),
-            started_at: "2026-06-07T12:00:00Z".to_string(),
-            local_url: "http://127.0.0.1:3000".to_string(),
-            command: ServiceTunnelCommandSpec {
-                command: "serve-app".to_string(),
-                cwd: Some("/workspace/app".to_string()),
-                env_keys: vec!["TOKEN".to_string()],
-            },
-            health_url: Some("http://127.0.0.1:3000/".to_string()),
-            stdout_path: "/tmp/homeboy/stdout.log".to_string(),
-            stderr_path: "/tmp/homeboy/stderr.log".to_string(),
-            backend: ServiceTunnelTunnelBackend::None,
-            source_run_id: Some("run-1".to_string()),
-            source_workflow_id: Some("workflow-1".to_string()),
-        };
-        let context = ServiceTunnelPreviewDecisionContext {
-            run_failed: false,
-            manual_approval_required: false,
-            now: chrono::DateTime::parse_from_rfc3339("2026-06-07T12:30:00Z")
-                .expect("timestamp")
-                .with_timezone(&chrono::Utc),
-        };
-
-        let artifact = preview_artifact_for(&tunnel, &state, &context).expect("artifact");
-        let serialized = serde_json::to_value(&artifact).expect("serialize artifact");
-        let expected: serde_json::Value = serde_json::from_str(include_str!(
-            "../../tests/fixtures/output_contracts/tunnel/preview-artifact.json"
-        ))
-        .expect("fixture");
-
-        assert_eq!(serialized, expected);
-        assert_eq!(serialized["schema"], "homeboy/preview-url/v1");
-        assert_eq!(serialized["kind"], "preview_url");
-        assert_eq!(serialized["service_id"], "site-preview");
-        assert_eq!(serialized["local_url"], "http://127.0.0.1:3000");
-        assert_eq!(
-            serialized["public_url"],
-            "https://preview.example.test/site-preview"
-        );
-        assert_eq!(serialized["backend"], "none");
-        assert_eq!(serialized["policy"]["mode"], "keep_alive_until");
-        assert_eq!(serialized["cleanup"]["expires_at"], "2026-06-07T13:00:00Z");
-        assert_eq!(serialized["source"]["run_id"], "run-1");
-        assert_eq!(serialized["source"]["workflow_id"], "workflow-1");
+        logs: state.logs.clone(),
     }
 }

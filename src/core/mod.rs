@@ -5,6 +5,7 @@ pub mod agent_task;
 pub mod agent_task_aggregate;
 pub mod agent_task_fanout;
 pub mod agent_task_finalization;
+pub mod agent_task_gate;
 pub mod agent_task_lifecycle;
 mod agent_task_pr_body;
 pub mod agent_task_promotion;
@@ -65,6 +66,8 @@ pub mod structured_sidecar;
 pub mod top_n;
 pub mod triage;
 pub mod tunnel;
+#[cfg(test)]
+mod tunnel_tests;
 pub mod update_check_cache;
 pub mod upgrade;
 pub mod worktree;

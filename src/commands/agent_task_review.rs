@@ -6,7 +6,9 @@ use homeboy::core::agent_task_finalization::{
     finalize_pr, AgentTaskGateResult, AgentTaskPrEvidence, AgentTaskPrFinalizationOptions,
 };
 use homeboy::core::agent_task_lifecycle;
-use homeboy::core::agent_task_promotion::{promote, AgentTaskPromotionOptions};
+use homeboy::core::agent_task_promotion::{
+    promote, AgentTaskPromotionOptions, AgentTaskPromotionStatus,
+};
 use homeboy::core::agent_task_provider::ExtensionProviderAgentTaskExecutor;
 use homeboy::core::agent_task_scheduler::AgentTaskAggregate;
 use homeboy::core::config;
@@ -100,8 +102,16 @@ pub(crate) fn promote_artifact(args: PromoteArgs) -> CmdResult<Value> {
         dry_run: args.dry_run,
         verify: args.verify,
     })?;
+    let exit_code = if report.status == AgentTaskPromotionStatus::GateFailed {
+        1
+    } else {
+        0
+    };
 
-    Ok((serde_json::to_value(report).unwrap_or(Value::Null), 0))
+    Ok((
+        serde_json::to_value(report).unwrap_or(Value::Null),
+        exit_code,
+    ))
 }
 
 pub(crate) fn finalize_pull_request(args: FinalizePrArgs) -> CmdResult<Value> {
