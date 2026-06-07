@@ -4,6 +4,41 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.222.5] - 2026-06-07
+
+### Changed
+- Move runner snapshot excludes to policy
+- add runner snapshot excludes
+- Expose lab offload settings diagnostics
+- Generalize remote execution preflight audit
+- add trace A/B browser proof reports
+- split runner doctor tests
+- format rig expansion test
+- split deploy effect version checks
+
+### Fixed
+- Fix lab offload rig refresh for trace commands
+- fix runner snapshot tsbuild metadata
+- fix git stdin handling
+- fix extension script stdin handling
+- fix trace browser proof CI drift
+- restore main release gates
+- scope trace lab runner tool inference
+- skip primary rig dependency materialization
+- map rig dependencies to lab workspace
+- expand rig dependency roots for lab
+- execute daemon jobs without runner config
+- pass runner snapshot to daemon exec
+- prevent recursive lab offload routing
+- expand package root in rig specs
+- surface lab daemon exec failures
+- derive deploy status from applied effect
+- require opt-in for lab fallback
+- improve runner exec path diagnostics
+- speed up facade audit detector
+- terminate cancelled runner exec process trees
+- preflight runner command dependencies
+
 ## [0.222.4] - 2026-06-07
 
 ### Changed
