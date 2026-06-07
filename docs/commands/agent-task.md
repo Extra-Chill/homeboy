@@ -64,6 +64,16 @@ The gate passes when:
 - `artifacts` lists a patch artifact, an agent result artifact, and a transcript evidence ref.
 - `promote <run-id> --dry-run` resolves the aggregate from the durable run id and reports the selected non-empty patch plus changed files without requiring the operator to look up `aggregate_path` manually.
 
+Queued runs that should not execute can be cancelled without chat/session state:
+
+```bash
+homeboy agent-task cancel "$run_id" --reason "not selected by controller"
+```
+
+`cancel` marks queued runs and stale-running records as `cancelled` in the
+durable lifecycle store. It refuses to claim live provider cancellation for an
+active runner process until a provider-owned cancellation channel is available.
+
 ## Dispatch Workspaces
 
 `agent-task dispatch` accepts generic Homeboy workspace inputs and does not
