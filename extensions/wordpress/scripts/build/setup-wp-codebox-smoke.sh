@@ -11,6 +11,7 @@ HOME_DIR="${TMPDIR}/home"
 EXTENSION_DIR="${TMPDIR}/extension"
 GITHUB_ENV_FILE="${TMPDIR}/github-env"
 SOURCE_GITHUB_ENV_FILE="${TMPDIR}/source-github-env"
+MISSING_RELEASE_GITHUB_ENV_FILE="${TMPDIR}/missing-release-github-env"
 ARTIFACT_ROOT="${TMPDIR}/artifact-root"
 ARTIFACT_PATH="${TMPDIR}/wp-codebox-cli-linux-x64.tar.gz"
 
@@ -28,6 +29,19 @@ tar -czf "${ARTIFACT_PATH}" -C "${ARTIFACT_ROOT}" wp-codebox-cli
 cat > "${FAKE_BIN}/curl" <<SH
 #!/usr/bin/env bash
 set -euo pipefail
+
+if [ "\${FAKE_WP_CODEBOX_RELEASE_MISSING:-}" = "1" ]; then
+    if [ "\$#" -ge 2 ] && [ "\${1}" = "-fsIL" ]; then
+        exit 22
+    fi
+
+    printf 'unexpected download after missing release probe: %s\n' "\$*" >&2
+    exit 1
+fi
+
+if [ "\$#" -ge 2 ] && [ "\${1}" = "-fsIL" ]; then
+    exit 0
+fi
 
 if [ "\$#" -lt 4 ] || [ "\${3}" != "-o" ]; then
     printf 'unexpected curl invocation: %s\n' "\$*" >&2
@@ -143,6 +157,31 @@ fi
 
 if [ ! -f "${source_wp_codebox_core_module}" ]; then
     echo "Expected source fallback to export built runtime core module" >&2
+    exit 1
+fi
+
+(
+    cd "${EXTENSION_DIR}"
+    HOME="${HOME_DIR}" \
+    PATH="${FAKE_BIN}:${NODE_BIN_DIR}:/usr/bin:/bin:/usr/sbin:/sbin" \
+    GITHUB_ENV="${MISSING_RELEASE_GITHUB_ENV_FILE}" \
+    FAKE_WP_CODEBOX_RELEASE_MISSING="1" \
+    HOMEBOY_WP_CODEBOX_INSTALL_DIR="${TMPDIR}/missing-release-install" \
+    HOMEBOY_WP_CODEBOX_DOWNLOAD_URL="https://example.test/wp-codebox-cli-linux-x64.tar.gz" \
+    HOMEBOY_WP_CODEBOX_SOURCE="https://example.test/wp-codebox.git" \
+    HOMEBOY_WP_CODEBOX_REF="main" \
+    bash "${ROOT_DIR}/scripts/build/setup.sh" > "${TMPDIR}/missing-release-setup.out" 2> "${TMPDIR}/missing-release-setup.err"
+)
+
+missing_release_wp_codebox_bin="$(grep '^HOMEBOY_WP_CODEBOX_BIN=' "${MISSING_RELEASE_GITHUB_ENV_FILE}" | tail -n 1 | cut -d= -f2-)"
+
+if [ "$("${missing_release_wp_codebox_bin}")" != "wp-codebox source stub" ]; then
+    echo "Expected missing release artifact to fall back to built CLI" >&2
+    exit 1
+fi
+
+if ! grep -q 'WP Codebox release artifact not published' "${TMPDIR}/missing-release-setup.err"; then
+    echo "Expected missing release artifact message" >&2
     exit 1
 fi
 
