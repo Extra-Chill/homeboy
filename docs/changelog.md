@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.222.13] - 2026-06-07
+
+### Changed
+- reuse gate log tail helper
+- add agent task gate feedback loop
+
 ## [0.222.12] - 2026-06-07
 
 ### Changed
