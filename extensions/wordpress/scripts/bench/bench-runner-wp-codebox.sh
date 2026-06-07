@@ -709,8 +709,29 @@ if [ -n "$DEPENDENCY_PATHS" ]; then
     while IFS= read -r dep_path; do
         [ -n "$dep_path" ] || continue
         dep_slug="$(homeboy_get_validation_dependency_slug "$dep_path" || basename "$dep_path")"
+        dep_plugin_file=""
+        dep_plugin_relative_file=""
+        dep_plugin_source="$dep_path"
+        if type homeboy_find_validation_dependency_plugin_main_file &>/dev/null; then
+            dep_plugin_file="$(homeboy_find_validation_dependency_plugin_main_file "$dep_path" || true)"
+        fi
+        if [ -n "$dep_plugin_file" ]; then
+            dep_plugin_relative_file="${dep_plugin_file#"${dep_path%/}/"}"
+            dep_plugin_basename="$(basename "$dep_plugin_file" .php)"
+            if [ -n "$dep_plugin_basename" ] && { [ "$dep_plugin_basename" != "$dep_slug" ] || [[ "$dep_plugin_relative_file" == packages/wordpress-plugin/* ]]; }; then
+                dep_slug="$dep_plugin_basename"
+            fi
+            if [[ "$dep_plugin_relative_file" == packages/wordpress-plugin/* ]]; then
+                dep_plugin_source="$(dirname "$dep_plugin_file")"
+                dep_plugin_relative_file="$(basename "$dep_plugin_file")"
+            fi
+        fi
         DEPENDENCY_SLUGS+=("$dep_slug")
-        EXTRA_PLUGINS_JSON=$(jq -nc --argjson plugins "$EXTRA_PLUGINS_JSON" --arg source "$dep_path" --arg slug "$dep_slug" '$plugins + [{source: $source, slug: $slug, activate: false}]')
+        if [ -n "$dep_plugin_relative_file" ] && [ "$dep_plugin_relative_file" != "$dep_plugin_file" ]; then
+            EXTRA_PLUGINS_JSON=$(jq -nc --argjson plugins "$EXTRA_PLUGINS_JSON" --arg source "$dep_plugin_source" --arg slug "$dep_slug" --arg pluginFile "${dep_slug}/${dep_plugin_relative_file}" '$plugins + [{source: $source, slug: $slug, pluginFile: $pluginFile, activate: false}]')
+        else
+            EXTRA_PLUGINS_JSON=$(jq -nc --argjson plugins "$EXTRA_PLUGINS_JSON" --arg source "$dep_plugin_source" --arg slug "$dep_slug" '$plugins + [{source: $source, slug: $slug, activate: false}]')
+        fi
     done <<< "$DEPENDENCY_PATHS"
 fi
 

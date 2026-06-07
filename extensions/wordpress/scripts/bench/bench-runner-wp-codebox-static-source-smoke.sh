@@ -57,6 +57,14 @@ homeboy_export_validation_dependency_paths() {
 homeboy_get_validation_dependency_slug() {
     basename "$1"
 }
+homeboy_find_validation_dependency_plugin_main_file() {
+    local plugin_path="${1:-}"
+    if [ -f "${plugin_path}/packages/wordpress-plugin/wp-codebox.php" ]; then
+        printf '%s\n' "${plugin_path}/packages/wordpress-plugin/wp-codebox.php"
+        return 0
+    fi
+    return 1
+}
 STUB
 
 CAPTURE_FILE="${TMP_ROOT}/capture.json"
@@ -217,5 +225,33 @@ jq -e --arg sourceRoot "$PLUGIN_ROOT" '
     .recipe.inputs.extraPlugins == [{source: $sourceRoot, slug: "wp-site-generator", pluginFile: "wp-site-generator/plugin-main.php", activate: false}]
     and ([.recipe.inputs.mounts[] | select(.source == $sourceRoot and .target == "/wordpress/wp-content/plugins/wp-site-generator")] | length == 0)
 ' "$PLUGIN_CAPTURE_FILE" >/dev/null
+
+DEPENDENCY_ROOT="${TMP_ROOT}/wp-codebox-release-fixture"
+mkdir -p "${DEPENDENCY_ROOT}/packages/wordpress-plugin"
+printf '<?php\n/**\n * Plugin Name: WP Codebox Fixture\n */\n' > "${DEPENDENCY_ROOT}/packages/wordpress-plugin/wp-codebox.php"
+
+DEPENDENCY_CAPTURE_FILE="${TMP_ROOT}/dependency-capture.json"
+HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$RESOLVE_HELPER" \
+HOMEBOY_RUNTIME_BENCH_HELPER_SH="$BENCH_HELPER" \
+HOMEBOY_WORDPRESS_DEPENDENCY_HELPER="$DEPENDENCY_HELPER" \
+HOMEBOY_WORDPRESS_DEPENDENCY_PATHS="$DEPENDENCY_ROOT" \
+HOMEBOY_SMOKE_SOURCE_ROOT="$PLUGIN_ROOT" \
+HOMEBOY_SMOKE_CAPTURE_FILE="$DEPENDENCY_CAPTURE_FILE" \
+HOMEBOY_SETTINGS_JSON="$SETTINGS_JSON" \
+HOMEBOY_WP_CODEBOX_BIN="$WP_CODEBOX_BIN" \
+HOMEBOY_WP_CODEBOX_CORE_MODULE="$WP_CODEBOX_CORE_MODULE" \
+HOMEBOY_BENCH_RESULTS_FILE="${TMP_ROOT}/dependency-bench-results.json" \
+HOMEBOY_WP_CODEBOX_ARTIFACTS_DIR="${TMP_ROOT}/dependency-artifacts" \
+HOMEBOY_RUNTIME_FAILURE_TRAP="" \
+HOMEBOY_BENCH_ITERATIONS=1 \
+HOMEBOY_BENCH_WARMUP_ITERATIONS=0 \
+bash "$SCRIPT_DIR/bench-runner-wp-codebox.sh" >/dev/null
+
+jq -e --arg pluginRoot "$PLUGIN_ROOT" --arg dependencyRoot "${DEPENDENCY_ROOT}/packages/wordpress-plugin" '
+    .recipe.inputs.extraPlugins == [
+        {source: $pluginRoot, slug: "wp-site-generator", pluginFile: "wp-site-generator/plugin-main.php", activate: false},
+        {source: $dependencyRoot, slug: "wp-codebox", pluginFile: "wp-codebox/wp-codebox.php", activate: false}
+    ]
+' "$DEPENDENCY_CAPTURE_FILE" >/dev/null
 
 echo "WP Codebox static-source bench smoke passed"
