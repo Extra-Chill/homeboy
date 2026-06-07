@@ -501,8 +501,6 @@ fn browser_proof_for_runs(
         )
     })?;
     Ok(Some(extension_trace::TraceBrowserProofOutput {
-        baseline_label: baseline_label.to_string(),
-        candidate_label: candidate_label.to_string(),
         baseline_dirs: baseline_dirs
             .iter()
             .map(|path| path.to_string_lossy().to_string())

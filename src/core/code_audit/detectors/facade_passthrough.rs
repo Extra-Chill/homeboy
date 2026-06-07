@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 
 use regex::Regex;
 
-use super::conventions::{AuditFinding, Language};
+use super::conventions::AuditFinding;
 use super::findings::{Finding, Severity};
 use super::fingerprint::FileFingerprint;
 
@@ -81,10 +81,6 @@ fn facade_candidates<'a>(
     let mut candidates = Vec::new();
 
     for fp in fingerprints {
-        if fp.language != Language::Php {
-            continue;
-        }
-
         let Some(class_name) = fp.type_name.as_deref() else {
             continue;
         };
@@ -322,6 +318,7 @@ fn render_member_counts(target_members: HashMap<String, usize>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::code_audit::Language;
 
     fn make_fp(
         path: &str,

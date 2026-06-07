@@ -338,8 +338,6 @@ pub struct TraceCompareRunOrderOutput {
 
 #[derive(Serialize, Clone)]
 pub struct TraceBrowserProofOutput {
-    pub baseline_label: String,
-    pub candidate_label: String,
     pub baseline_dirs: Vec<String>,
     pub candidate_dirs: Vec<String>,
     pub markdown: String,
