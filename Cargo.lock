@@ -767,7 +767,7 @@ dependencies = [
 
 [[package]]
 name = "homeboy"
-version = "0.222.5"
+version = "0.222.6"
 dependencies = [
  "arboard",
  "base64",
