@@ -13,7 +13,7 @@ use crate::core::http_api::{self, AnalysisJobRunner, HttpMethod, UnsupportedAnal
 use crate::core::paths;
 use crate::core::process::pid_is_running;
 use crate::core::runner::{
-    execute_runner_process_until_cancelled, prepare_runner_process, RunnerProcessRequest,
+    execute_runner_process_until_cancelled, prepare_daemon_local_process, RunnerProcessRequest,
 };
 use crate::core::source_snapshot::SourceSnapshot;
 use crate::core::upgrade::VERSION;
@@ -333,7 +333,7 @@ fn enqueue_exec_job(
                 None,
             )
         })?;
-    let plan = prepare_runner_process(RunnerProcessRequest {
+    let plan = prepare_daemon_local_process(RunnerProcessRequest {
         runner_id: request.runner_id,
         cwd: request.cwd,
         project_id: request.project_id,

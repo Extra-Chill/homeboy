@@ -55,7 +55,7 @@ pub use evidence::{
     is_retrievable_runner_artifact, reportable_artifact_evidence_path, RemoteArtifactDownload,
 };
 pub(crate) use execution::{
-    daemon_api_get, execute_runner_process_until_cancelled, prepare_runner_process,
+    daemon_api_get, execute_runner_process_until_cancelled, prepare_daemon_local_process,
     RunnerProcessRequest,
 };
 pub use execution::{exec, RunnerExecMode, RunnerExecOptions, RunnerExecOutput};
