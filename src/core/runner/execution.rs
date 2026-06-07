@@ -94,6 +94,7 @@ pub struct RunnerExecDiagnostics {
 #[derive(Debug, Clone)]
 pub(crate) struct RunnerProcessRequest {
     pub runner_id: String,
+    pub runner: Option<Runner>,
     pub cwd: Option<String>,
     pub project_id: Option<String>,
     pub command: Vec<String>,
@@ -134,6 +135,7 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
 
     let plan = prepare_runner_process(RunnerProcessRequest {
         runner_id: runner_id.to_string(),
+        runner: None,
         cwd: options.cwd.clone(),
         project_id: options.project_id.clone(),
         command: options.command.clone(),
@@ -347,6 +349,7 @@ fn exec_via_daemon(
         .post(format!("{}/exec", local_url.trim_end_matches('/')))
         .json(&json!({
             "runner_id": runner.id,
+            "runner": runner,
             "project_id": project_id,
             "cwd": cwd,
             "command": command,
@@ -618,7 +621,16 @@ pub(crate) fn prepare_runner_process(request: RunnerProcessRequest) -> Result<Ru
         ));
     }
 
-    let runner = load(&request.runner_id)?;
+    let runner = request
+        .runner
+        .map(|mut runner| {
+            if runner.id.is_empty() {
+                runner.id = request.runner_id.clone();
+            }
+            runner
+        })
+        .map(Ok)
+        .unwrap_or_else(|| load(&request.runner_id))?;
     let cwd = resolve_cwd(&runner, request.cwd.as_deref())?;
     validate_runner_process_cwd(&runner, &cwd)?;
     if runner.kind != RunnerKind::Local {
@@ -964,6 +976,29 @@ mod tests {
         let err = resolve_cwd(&ssh_runner(), Some("/tmp/project")).expect_err("reject cwd");
         assert_eq!(err.code.as_str(), "validation.invalid_argument");
         assert!(err.message.contains("workspace_root"));
+    }
+
+    #[test]
+    fn prepare_runner_process_uses_embedded_runner_snapshot() {
+        crate::test_support::with_isolated_home(|_| {
+            let plan = prepare_runner_process(RunnerProcessRequest {
+                runner_id: "lab".to_string(),
+                runner: Some(ssh_runner()),
+                cwd: Some("/srv/homeboy/project".to_string()),
+                project_id: None,
+                command: vec!["homeboy".to_string(), "--version".to_string()],
+                env: Default::default(),
+                capture_patch: false,
+                raw_exec: false,
+                source_snapshot: None,
+                require_paths: Vec::new(),
+                validate_require_paths_on_host: false,
+            })
+            .expect("prepare from runner snapshot");
+
+            assert_eq!(plan.runner.id, "lab");
+            assert_eq!(plan.cwd, "/srv/homeboy/project");
+        });
     }
 
     #[test]
@@ -1423,6 +1458,7 @@ mod tests {
             Default::default(),
             false,
             None,
+            Vec::new(),
         )
         .expect_err("daemon exec failure");
 
