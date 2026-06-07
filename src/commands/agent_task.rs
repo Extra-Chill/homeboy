@@ -1,19 +1,18 @@
 use clap::{Args, Subcommand};
 use serde_json::Value;
 
-use homeboy::core::agent_task::{AgentTaskAggregateReport, AgentTaskRequest};
+use homeboy::core::agent_task::AgentTaskRequest;
 use homeboy::core::agent_task_lifecycle;
-use homeboy::core::agent_task_promotion::{
-    promote, AgentTaskPromotionOptions, AgentTaskPromotionStatus,
-};
 use homeboy::core::agent_task_provider::ExtensionProviderAgentTaskExecutor;
 use homeboy::core::agent_task_scheduler::{
-    AgentTaskAggregate, AgentTaskExecutorAdapter, AgentTaskPlan, AgentTaskScheduler,
+    AgentTaskExecutorAdapter, AgentTaskPlan, AgentTaskScheduler,
 };
 use homeboy::core::config;
 
 use super::agent_task_dispatch::{run as dispatch, DispatchArgs};
 use super::{CmdResult, GlobalArgs};
+
+pub mod review;
 
 #[derive(Args, Debug)]
 pub struct AgentTaskArgs {
@@ -49,6 +48,8 @@ pub enum AgentTaskCommand {
     Review(ReviewArgs),
     /// Promote a completed generic patch artifact into a managed worktree.
     Promote(PromoteArgs),
+    /// Finalize a green cook run into a review-ready pull request.
+    FinalizePr(FinalizePrArgs),
     /// List extension-declared agent-task executor providers.
     Providers,
 }
@@ -140,6 +141,56 @@ pub struct PromoteArgs {
     pub verify: Vec<String>,
 }
 
+#[derive(Args, Debug)]
+pub struct FinalizePrArgs {
+    /// Durable cook/agent-task run id to link in the PR body.
+    #[arg(long, value_name = "ID")]
+    pub run_id: String,
+
+    /// Verified candidate worktree path.
+    #[arg(long, value_name = "PATH")]
+    pub path: String,
+
+    /// PR base branch.
+    #[arg(long, default_value = "main", value_name = "BRANCH")]
+    pub base: String,
+
+    /// PR head branch. Defaults to the current branch in --path.
+    #[arg(long, value_name = "BRANCH")]
+    pub head: Option<String>,
+
+    /// PR title.
+    #[arg(long, value_name = "TEXT")]
+    pub title: String,
+
+    /// Commit message for the verified candidate changes.
+    #[arg(long, value_name = "TEXT")]
+    pub commit_message: String,
+
+    #[command(flatten)]
+    pub evidence: review::FinalizePrEvidenceArgs,
+
+    /// Green gate result as name=status or name=status:detail. Repeatable.
+    #[arg(long = "gate-result", value_name = "NAME=STATUS[:DETAIL]")]
+    pub gate_results: Vec<String>,
+
+    /// Changed file summary to include in output/PR body. Defaults to git status discovery.
+    #[arg(long = "changed-file", value_name = "PATH")]
+    pub changed_files: Vec<String>,
+
+    /// Protected branch that may not be finalized directly. Repeatable.
+    #[arg(long = "protected-branch", default_values_t = review::default_protected_branches(), value_name = "BRANCH")]
+    pub protected_branches: Vec<String>,
+
+    /// AI assistance scope for the PR body.
+    #[arg(
+        long,
+        default_value = "Drafted implementation and tests; Chris reviews and owns the change.",
+        value_name = "TEXT"
+    )]
+    pub ai_used_for: String,
+}
+
 pub fn run(args: AgentTaskArgs, global: &GlobalArgs) -> CmdResult<Value> {
     match args.command {
         AgentTaskCommand::Dispatch(dispatch_args) => dispatch(dispatch_args, global),
@@ -153,9 +204,10 @@ pub fn run(args: AgentTaskArgs, global: &GlobalArgs) -> CmdResult<Value> {
         AgentTaskCommand::Cancel(cancel_args) => cancel(cancel_args),
         AgentTaskCommand::Resume(status_args) => resume(status_args),
         AgentTaskCommand::Retry(retry_args) => retry(retry_args),
-        AgentTaskCommand::Review(review_args) => review(review_args),
-        AgentTaskCommand::Promote(promote_args) => promote_artifact(promote_args),
-        AgentTaskCommand::Providers => providers(),
+        AgentTaskCommand::Review(review_args) => review::review(review_args),
+        AgentTaskCommand::Promote(promote_args) => review::promote_artifact(promote_args),
+        AgentTaskCommand::FinalizePr(finalize_args) => review::finalize_pull_request(finalize_args),
+        AgentTaskCommand::Providers => review::providers(),
     }
 }
 
@@ -298,217 +350,6 @@ fn retry(args: RetryArgs) -> CmdResult<Value> {
         );
     }
     Ok((serde_json::to_value(record).unwrap_or(Value::Null), 0))
-}
-
-fn review(args: ReviewArgs) -> CmdResult<Value> {
-    let record = agent_task_lifecycle::status(&args.run_id)?;
-    let log = agent_task_lifecycle::logs(&args.run_id)?;
-    let artifacts = agent_task_lifecycle::artifacts(&args.run_id)?;
-    let aggregate = completed_run_aggregate(&args.run_id).transpose()?;
-    let aggregate_review = aggregate
-        .as_ref()
-        .map(|aggregate| AgentTaskAggregateReport::from(aggregate.outcomes.clone()));
-    let promotion_candidates = aggregate_review
-        .as_ref()
-        .map(|review| promotion_candidates(&args.run_id, args.to_worktree.as_deref(), review))
-        .unwrap_or_default();
-    let next_actions = review_next_actions(
-        &record.state,
-        aggregate_review.as_ref(),
-        args.to_worktree.as_deref(),
-    );
-
-    Ok((
-        serde_json::json!({
-            "schema": "homeboy/agent-task-review/v1",
-            "run_id": record.run_id,
-            "state": record.state,
-            "plan_id": record.plan_id,
-            "plan_path": record.plan_path,
-            "aggregate_path": record.aggregate_path,
-            "record": record,
-            "logs": log,
-            "artifacts": artifacts,
-            "aggregate_review": aggregate_review,
-            "promotion_candidates": promotion_candidates,
-            "next_actions": next_actions,
-            "transport": {
-                "authoritative": "homeboy-agent-task-lifecycle",
-                "chat_state_required": false
-            }
-        }),
-        0,
-    ))
-}
-
-fn completed_run_aggregate(run_id: &str) -> Option<homeboy::core::Result<AgentTaskAggregate>> {
-    match agent_task_lifecycle::aggregate_source(run_id) {
-        Ok((raw, _path)) => Some(serde_json::from_str(&raw).map_err(|error| {
-            homeboy::core::Error::validation_invalid_json(
-                error,
-                Some("agent-task aggregate".to_string()),
-                Some(raw),
-            )
-        })),
-        Err(error) if error.code == homeboy::core::ErrorCode::ValidationInvalidArgument => None,
-        Err(error) => Some(Err(error)),
-    }
-}
-
-fn promotion_candidates(
-    run_id: &str,
-    to_worktree: Option<&str>,
-    review: &AgentTaskAggregateReport,
-) -> Vec<Value> {
-    review
-        .apply_candidates
-        .iter()
-        .flat_map(|candidate| {
-            candidate.artifact_ids.iter().map(move |artifact_id| {
-                let mut command = vec![
-                    "homeboy".to_string(),
-                    "agent-task".to_string(),
-                    "promote".to_string(),
-                    run_id.to_string(),
-                    "--task-id".to_string(),
-                    candidate.task_id.clone(),
-                    "--artifact-id".to_string(),
-                    artifact_id.clone(),
-                ];
-                if let Some(to_worktree) = to_worktree {
-                    command.push("--to-worktree".to_string());
-                    command.push(to_worktree.to_string());
-                }
-
-                serde_json::json!({
-                    "task_id": candidate.task_id,
-                    "artifact_id": artifact_id,
-                    "reason": candidate.reason,
-                    "command": command,
-                    "ready": to_worktree.is_some()
-                })
-            })
-        })
-        .collect()
-}
-
-fn review_next_actions(
-    state: &agent_task_lifecycle::AgentTaskRunState,
-    aggregate_review: Option<&AgentTaskAggregateReport>,
-    to_worktree: Option<&str>,
-) -> Vec<String> {
-    if matches!(state, agent_task_lifecycle::AgentTaskRunState::Queued) {
-        return vec!["run this queued durable task with `homeboy agent-task run <run-id>` or let a daemon claim it with `homeboy agent-task run-next`".to_string()];
-    }
-
-    if matches!(state, agent_task_lifecycle::AgentTaskRunState::Running) {
-        return vec!["inspect progress with `homeboy agent-task status <run-id>` and `homeboy agent-task logs <run-id>`; stale running records are annotated in status metadata".to_string()];
-    }
-
-    let Some(review) = aggregate_review else {
-        return vec!["terminal run has no aggregate artifact; inspect lifecycle status for finalization errors".to_string()];
-    };
-
-    let mut actions = Vec::new();
-    if review.summary.apply_candidates > 0 {
-        if to_worktree.is_some() {
-            actions.push("review `promotion_candidates` and run the generated `homeboy agent-task promote` command for the selected patch artifact".to_string());
-        } else {
-            actions.push("rerun review with `--to-worktree <handle>` to generate complete promotion commands for apply candidates".to_string());
-        }
-    }
-    if review.summary.retry_candidates > 0 {
-        actions.push(
-            "retry provider-error or timeout candidates after fixing executor/preflight issues"
-                .to_string(),
-        );
-    }
-    if review.summary.issue_report_candidates > 0 {
-        actions.push(
-            "open or update the tracker with `issue_report_candidates` diagnostics and evidence"
-                .to_string(),
-        );
-    }
-    if review.summary.review_candidates > 0 {
-        actions.push(
-            "inspect `review_candidates` before deciding whether to retry, report, or ignore"
-                .to_string(),
-        );
-    }
-    if actions.is_empty() {
-        actions.push("no promotion, retry, or issue-report candidates were produced; inspect task summaries for no-op completion".to_string());
-    }
-    actions
-}
-
-fn promote_artifact(args: PromoteArgs) -> CmdResult<Value> {
-    let (raw, source_path) = read_promotion_source(&args.source)?;
-    let report = promote(AgentTaskPromotionOptions {
-        source: raw,
-        source_path,
-        to_worktree: args.to_worktree,
-        task_id: args.task_id,
-        artifact_id: args.artifact_id,
-        dry_run: args.dry_run,
-        verify: args.verify,
-    })?;
-    let exit_code = if report.status == AgentTaskPromotionStatus::GateFailed {
-        1
-    } else {
-        0
-    };
-
-    Ok((
-        serde_json::to_value(report).unwrap_or(Value::Null),
-        exit_code,
-    ))
-}
-
-fn read_promotion_source(
-    spec: &str,
-) -> homeboy::core::Result<(String, Option<std::path::PathBuf>)> {
-    if spec != "-" {
-        let path = std::path::PathBuf::from(spec.strip_prefix('@').unwrap_or(spec));
-        if path.is_file() {
-            let raw = std::fs::read_to_string(&path).map_err(|error| {
-                homeboy::core::Error::internal_io(
-                    error.to_string(),
-                    Some(format!(
-                        "read agent-task promotion source {}",
-                        path.display()
-                    )),
-                )
-            })?;
-            return Ok((raw, Some(path)));
-        }
-    }
-
-    if let Ok((raw, path)) = agent_task_lifecycle::aggregate_source(spec) {
-        return Ok((raw, Some(path)));
-    }
-
-    Ok((
-        config::read_json_spec_to_string(spec)?,
-        source_spec_path(spec),
-    ))
-}
-
-fn source_spec_path(spec: &str) -> Option<std::path::PathBuf> {
-    if spec == "-" {
-        return None;
-    }
-
-    Some(std::path::PathBuf::from(
-        spec.strip_prefix('@').unwrap_or(spec),
-    ))
-}
-
-fn providers() -> CmdResult<Value> {
-    let executor = ExtensionProviderAgentTaskExecutor::discover();
-    Ok((
-        serde_json::to_value(executor.providers()).unwrap_or(Value::Null),
-        0,
-    ))
 }
 
 fn read_plan(spec: &str) -> homeboy::core::Result<AgentTaskPlan> {
@@ -880,7 +721,8 @@ mod tests {
             run_loaded_plan(test_plan(), Some(run_id), InspectingExecutor::noop(run_id))
                 .expect("run completed");
 
-            let (raw, path) = read_promotion_source(run_id).expect("promotion source resolved");
+            let (raw, path) =
+                review::read_promotion_source(run_id).expect("promotion source resolved");
 
             assert!(raw.contains("homeboy/agent-task-aggregate/v1"));
             assert_eq!(
@@ -901,7 +743,7 @@ mod tests {
         )
         .expect("write source");
 
-        let (raw, path) = read_promotion_source(&file.path().display().to_string())
+        let (raw, path) = review::read_promotion_source(&file.path().display().to_string())
             .expect("promotion source file resolved");
 
         assert!(raw.contains("homeboy/agent-task-aggregate/v1"));
@@ -914,7 +756,7 @@ mod tests {
             agent_task_lifecycle::submit_plan(&test_plan(), Some("run-review-queued"))
                 .expect("submitted");
 
-            let (value, exit_code) = review(ReviewArgs {
+            let (value, exit_code) = review::review(ReviewArgs {
                 run_id: "run-review-queued".to_string(),
                 to_worktree: None,
             })
@@ -944,7 +786,7 @@ mod tests {
             )
             .expect("run completed");
 
-            let (value, exit_code) = review(ReviewArgs {
+            let (value, exit_code) = review::review(ReviewArgs {
                 run_id: "run-review-completed".to_string(),
                 to_worktree: Some("homeboy@fix-review-flow".to_string()),
             })
