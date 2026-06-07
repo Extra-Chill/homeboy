@@ -1099,4 +1099,4 @@ fn runtime_evidence(state: &ServiceTunnelRuntimeState) -> ServiceTunnelEvidence 
 
 #[cfg(test)]
 #[path = "tunnel_tests.rs"]
-mod tests;
+mod tunnel_tests;
