@@ -51,4 +51,5 @@ jobs:
       - name: Run WP Codebox-backed test runner canary
         env:
           HOMEBOY_WP_CODEBOX_BIN: ${{ github.workspace }}/.ci/wp-codebox/packages/cli/dist/index.js
+          HOMEBOY_WP_CODEBOX_CORE_MODULE: ${{ github.workspace }}/.ci/wp-codebox/packages/runtime-core/dist/index.js
         run: bash wordpress/scripts/test/playground-db-activation-smoke.sh
