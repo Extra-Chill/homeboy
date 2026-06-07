@@ -40,6 +40,10 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "RUNNER_ID")]
     pub runner: Option<String>,
 
+    /// Permit a selected Lab runner to fall back to local execution after offload preflight fails.
+    #[arg(long, global = true)]
+    pub allow_local_fallback: bool,
+
     #[command(subcommand)]
     pub command: Commands,
 }
@@ -1087,6 +1091,16 @@ mod tests {
         let cli = parsed_cli(&["homeboy", "lint", "--runner", "lab-a"]);
         assert_eq!(cli.runner.as_deref(), Some("lab-a"));
         assert!(cli.command.supports_lab_runner());
+
+        let cli = parsed_cli(&[
+            "homeboy",
+            "trace",
+            "--runner",
+            "homeboy-lab",
+            "--allow-local-fallback",
+        ]);
+        assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
+        assert!(cli.allow_local_fallback);
     }
 
     #[test]
