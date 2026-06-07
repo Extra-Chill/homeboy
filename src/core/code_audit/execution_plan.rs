@@ -333,13 +333,13 @@ const DETECTOR_DESCRIPTORS: &[DetectorDescriptor] = &[
         log_summary: "duplicated execution contract setup",
     },
     DetectorDescriptor {
-        id: "runner_offload_preflight",
-        findings: &[AuditFinding::RunnerOffloadPreflight],
+        id: "remote_execution_preflight",
+        findings: &[AuditFinding::RemoteExecutionPreflight],
         access: DetectorAccess::Discovery,
         runtime: DetectorRuntime::Manual,
-        timing_id: "detector.runner_offload_preflight",
-        log_label: "Runner preflight",
-        log_summary: "remote runner path/artifact parity gaps",
+        timing_id: "detector.remote_execution_preflight",
+        log_label: "Remote execution preflight",
+        log_summary: "remote execution path/artifact parity gaps",
     },
     DetectorDescriptor {
         id: "enum_dispatch_contracts",
@@ -521,8 +521,8 @@ impl AuditExecutionPlan {
         self.detector_enabled("parallel_runner_setup")
     }
 
-    pub(crate) fn run_runner_offload_preflight(&self) -> bool {
-        self.detector_enabled("runner_offload_preflight")
+    pub(crate) fn run_remote_execution_preflight(&self) -> bool {
+        self.detector_enabled("remote_execution_preflight")
     }
 
     pub(crate) fn run_enum_dispatch_contracts(&self) -> bool {
