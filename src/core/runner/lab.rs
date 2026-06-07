@@ -21,7 +21,7 @@ use super::lab_args::EXPLICIT_PASSTHROUGH_SENTINEL;
 use super::lab_args::{lab_offload_source_path, rewrite_lab_offload_args};
 use super::lab_capabilities::lab_runner_capability_contract;
 use super::lab_command::lab_offload_command_prefix;
-use super::lab_env::{build_lab_offload_env, forward_env_if_present};
+use super::lab_env::{build_lab_offload_env, forward_env_if_present, settings_env_diagnostics};
 use super::lab_plan::{base_lab_plan, disabled_select_runner_plan, with_step};
 pub use super::lab_selection::LabRunnerSelectionSource;
 use super::lab_selection::{
@@ -491,7 +491,7 @@ fn run_lab_offload_inner(
         remote_cwd
     );
     let workspace_mapping_metadata = lab_workspace_mapping_metadata(&workspace_mapping);
-    let lab_metadata = lab_offload_metadata_with_workspace_mapping(
+    let mut lab_metadata = lab_offload_metadata_with_workspace_mapping(
         &plan,
         selection.source.metadata_value(),
         Some(runner_id),
@@ -502,6 +502,15 @@ fn run_lab_offload_inner(
         Some(&workspace_mapping_metadata),
     );
     let mut env = build_lab_offload_env(&lab_metadata);
+    forward_env_if_present(&mut env, PREVIEW_METADATA_ENV);
+    forward_env_if_present(&mut env, PREVIEW_PUBLIC_URL_ENV);
+    lab_metadata["settings_env"] = settings_env_diagnostics(&changed_since_preflight.args, &env);
+    lab_metadata["rig_sync"] = serde_json::json!({
+        "step": "lab.sync_rigs",
+        "synced_count": synced_rigs,
+        "selected_before_remote_settings_resolution": true,
+    });
+    env = build_lab_offload_env(&lab_metadata);
     forward_env_if_present(&mut env, PREVIEW_METADATA_ENV);
     forward_env_if_present(&mut env, PREVIEW_PUBLIC_URL_ENV);
     let exec_result = exec(
