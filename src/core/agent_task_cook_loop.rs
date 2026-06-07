@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 use crate::core::agent_task::{
     AgentTaskRequest, AgentTaskSourceRef, AgentTaskWorkspaceMode, AGENT_TASK_REQUEST_SCHEMA,
 };
-use crate::core::agent_task_gate::{AgentTaskGateReport, AgentTaskGateStatus};
+use crate::core::agent_task_gate::{text_tail, AgentTaskGateReport, AgentTaskGateStatus};
 use crate::core::agent_task_promotion::{AgentTaskPromotionReport, AgentTaskPromotionStatus};
 
 pub const AGENT_TASK_COOK_LOOP_REPORT_SCHEMA: &str = "homeboy/agent-task-cook-loop-report/v1";
@@ -249,12 +249,6 @@ fn worktree_root_hint(report: &AgentTaskPromotionReport) -> Option<String> {
         .get("worktree_path")
         .and_then(Value::as_str)
         .map(str::to_string)
-}
-
-fn text_tail(text: &str, max_lines: usize) -> String {
-    let lines: Vec<&str> = text.lines().collect();
-    let start = lines.len().saturating_sub(max_lines);
-    lines[start..].join("\n")
 }
 
 fn cook_loop_report_schema() -> String {
