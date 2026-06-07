@@ -3,11 +3,11 @@
 //! Audit convention requires a `test_expand_vars` method matching the sole
 //! public function of the module; additional cases cover edge conditions.
 
+use crate::core::paths;
 use crate::core::rig::expand::{expand_resources, expand_vars};
 use crate::core::rig::spec::{
     ComponentSpec, DiscoverSpec, RigSpec, ServiceKind, ServiceSpec, SymlinkSpec,
 };
-use crate::core::paths;
 use crate::test_support::with_isolated_home;
 use std::collections::HashMap;
 use std::fs;
@@ -100,7 +100,9 @@ fn test_expand_vars_package_root_from_installed_source_metadata() {
 
         assert_eq!(
             expand_vars(&rig, "${package.root}/scripts/workflow-bench.mjs"),
-            package_root.join("scripts/workflow-bench.mjs").to_string_lossy()
+            package_root
+                .join("scripts/workflow-bench.mjs")
+                .to_string_lossy()
         );
         assert_eq!(
             expand_vars(&rig, "${components.studio-web.path}/bench"),
