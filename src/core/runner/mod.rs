@@ -55,7 +55,7 @@ pub use evidence::{
     is_retrievable_runner_artifact, reportable_artifact_evidence_path, RemoteArtifactDownload,
 };
 pub(crate) use execution::{
-    daemon_api_get, execute_runner_process, prepare_runner_process, RunnerProcessRequest,
+    daemon_api_get, execute_runner_process, prepare_daemon_local_process, RunnerProcessRequest,
 };
 pub use execution::{exec, RunnerExecMode, RunnerExecOptions, RunnerExecOutput};
 pub(crate) use git_dependency_materialization::{
