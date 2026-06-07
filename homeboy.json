@@ -423,8 +423,8 @@
   "baselines": {
     "audit": {
       "context_id": "homeboy",
-      "created_at": "2026-06-07T19:27:52Z",
-      "item_count": 629,
+      "created_at": "2026-06-07T20:14:49Z",
+      "item_count": 628,
       "known_fingerprints": [
         "Runs (Tests)::src/commands/runs/corpus_tests.rs::MissingMethod",
         "artifact_portability::artifact_portability/local_artifact_path/$.run_dir::NonPortableArtifactPath",
@@ -1034,7 +1034,6 @@
         "remote_execution_preflight::src/core/runner/lab.rs::RemoteExecutionPreflight",
         "remote_execution_preflight::src/core/runner/rig_materialization.rs::RemoteExecutionPreflight",
         "remote_execution_preflight::src/core/runner/worker.rs::RemoteExecutionPreflight",
-        "structural::src/commands/agent_task.rs::HighItemCount",
         "structural::src/commands/bench/tests.rs::HighItemCount",
         "structural::src/commands/runs/gh_actions.rs::HighItemCount",
         "structural::src/commands::DirectorySprawl",
