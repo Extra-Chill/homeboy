@@ -253,6 +253,69 @@ pub fn claim_next_queued_run() -> Result<Option<AgentTaskRunRecord>> {
     Ok(None)
 }
 
+pub fn cancel_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRunRecord> {
+    let mut record = store::read_record(&sanitize_run_id(run_id))?;
+    if record.state == AgentTaskRunState::Cancelled {
+        return Ok(record);
+    }
+
+    if matches!(
+        record.state,
+        AgentTaskRunState::Succeeded
+            | AgentTaskRunState::PartialFailure
+            | AgentTaskRunState::Failed
+    ) {
+        return Err(Error::validation_invalid_argument(
+            "run_id",
+            format!(
+                "agent-task run '{}' is already terminal with state {:?}",
+                record.run_id, record.state
+            ),
+            Some(record.run_id),
+            None,
+        ));
+    }
+
+    if record.state == AgentTaskRunState::Running && record.owner_process_is_running() {
+        return Err(Error::validation_invalid_argument(
+            "run_id",
+            format!(
+                "agent-task run '{}' is running under pid {}; provider live cancellation is not available through this durable record yet",
+                record.run_id,
+                record.owner_pid().unwrap_or_default()
+            ),
+            Some(record.run_id),
+            None,
+        ));
+    }
+
+    let cancelled_at = now_timestamp();
+    let was_stale_running = record.state == AgentTaskRunState::Running;
+    record.state = AgentTaskRunState::Cancelled;
+    record.updated_at = Some(cancelled_at.clone());
+    for task in &mut record.tasks {
+        if matches!(task.state, AgentTaskState::Queued | AgentTaskState::Running) {
+            task.state = AgentTaskState::Cancelled;
+        }
+    }
+
+    let metadata = record.ensure_metadata_object();
+    metadata.insert("cancelled_at".to_string(), json!(cancelled_at));
+    metadata.insert("cancelled_by_pid".to_string(), json!(std::process::id()));
+    metadata.insert(
+        "cancel_reason".to_string(),
+        json!(reason.unwrap_or("cancel requested")),
+    );
+    if was_stale_running {
+        metadata.insert("cancelled_stale_running".to_string(), json!(true));
+    }
+    metadata.remove("stale_running");
+    metadata.remove("stale_running_reason");
+
+    store::write_record(&record)?;
+    Ok(record)
+}
+
 pub fn record_run_aggregate(
     run_id: &str,
     plan: &AgentTaskPlan,
@@ -727,6 +790,57 @@ mod tests {
             let error = mark_running("run-live-owner").expect_err("live run rejected");
 
             assert!(error.message.contains("already running"));
+        });
+    }
+
+    #[test]
+    fn cancel_run_marks_queued_record_cancelled() {
+        with_isolated_home(|_| {
+            let plan = test_plan();
+            submit_plan(&plan, Some("run-cancel-queued")).expect("submitted");
+
+            let cancelled =
+                cancel_run("run-cancel-queued", Some("loser cell")).expect("queued run cancelled");
+            let loaded = status("run-cancel-queued").expect("status loaded");
+
+            assert_eq!(cancelled.state, AgentTaskRunState::Cancelled);
+            assert_eq!(cancelled.tasks[0].state, AgentTaskState::Cancelled);
+            assert_eq!(cancelled.metadata["cancel_reason"], json!("loser cell"));
+            assert_eq!(loaded.state, AgentTaskRunState::Cancelled);
+        });
+    }
+
+    #[test]
+    fn cancel_run_reclaims_stale_running_record() {
+        with_isolated_home(|_| {
+            let plan = test_plan();
+            submit_plan(&plan, Some("run-cancel-stale")).expect("submitted");
+            let mut record = store::read_record("run-cancel-stale").expect("record");
+            record.state = AgentTaskRunState::Running;
+            record.tasks[0].state = AgentTaskState::Running;
+            record.metadata = json!({ "runner_pid": u32::MAX });
+            store::write_record(&record).expect("stored stale record");
+
+            let cancelled = cancel_run("run-cancel-stale", None).expect("stale run cancelled");
+
+            assert_eq!(cancelled.state, AgentTaskRunState::Cancelled);
+            assert_eq!(cancelled.tasks[0].state, AgentTaskState::Cancelled);
+            assert_eq!(cancelled.metadata["cancelled_stale_running"], json!(true));
+            assert!(cancelled.metadata.get("stale_running").is_none());
+        });
+    }
+
+    #[test]
+    fn cancel_run_rejects_live_running_record() {
+        with_isolated_home(|_| {
+            let plan = test_plan();
+            submit_plan(&plan, Some("run-cancel-live")).expect("submitted");
+            mark_running("run-cancel-live").expect("marked running");
+
+            let error = cancel_run("run-cancel-live", None).expect_err("live run rejected");
+
+            assert!(error.message.contains("running under pid"));
+            assert!(error.message.contains("provider live cancellation"));
         });
     }
 
