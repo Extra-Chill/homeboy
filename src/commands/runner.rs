@@ -768,6 +768,7 @@ fn exec(
     require_paths: Vec<String>,
     command: Vec<String>,
 ) -> CmdResult<RunnerExecOutput> {
+    let required_commands = command.first().cloned().into_iter().collect();
     runner::exec(
         runner_id,
         runner::RunnerExecOptions {
@@ -779,7 +780,11 @@ fn exec(
             capture_patch,
             raw_exec: true,
             source_snapshot: None,
-            capability_preflight: None,
+            capability_preflight: Some(runner::RunnerCapabilityPreflight {
+                command: "runner.exec".to_string(),
+                required_commands,
+                ..Default::default()
+            }),
             required_extensions: Vec::new(),
             require_paths,
         },

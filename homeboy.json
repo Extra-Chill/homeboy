@@ -142,6 +142,7 @@
         "source_snapshot"
       ],
       "capability_preflight_markers": [
+        "RunnerCapabilityPreflight",
         "component_runner_capability_plan",
         "evaluate_component_runner_capabilities"
       ],
