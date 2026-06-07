@@ -29,13 +29,16 @@ const {
 	formatWordPressRestWaterfallMarkdownReport,
 	normalizeBrowserAction,
 	normalizePageManifest,
+	normalizeWordPressPageMatrixManifest,
 	profileWordPressPage,
+	profileWordPressPageMatrix,
 	profileWordPressPages,
 	profileWordPressRestMatrix,
 	recommendWordPressPerformanceGates,
 	resourceFamily,
 	resolveWordPressUrl,
 	runBrowserActions,
+	summarizeWordPressPageMatrix,
 	summarizeThirdPartyWaterfall,
 	summarizeWordPressAdminPageProfile,
 	summarizeWordPressRestNetworkRows,
@@ -745,6 +748,57 @@ process.stdout.write(JSON.stringify(output) + '\\n');
 	assert.equal(multi.pages.length, 2);
 	assert.equal(multi.fixtureSetup.steps[0].label, 'profile-ready');
 	assert.equal(multi.topRestWaterfalls[0].restCount, 2);
+
+	const matrixManifest = normalizeWordPressPageMatrixManifest({
+		defaultPaths: '/',
+		paths: '/wp-admin/index.php,admin-menu\n/wp-admin/site-editor.php?canvas=edit',
+		pages: [{ path: '/wp-admin/plugins.php', label: 'Plugins' }],
+	});
+	assert.equal(matrixManifest.includeAdminMenu, true);
+	assert.equal(matrixManifest.pages.length, 4);
+	assert.equal(matrixManifest.pages[0].metricName, 'front_page');
+	assert.equal(matrixManifest.pages[2].metricName, 'wp_admin_site_editor_php_canvas_edit');
+
+	const matrixSummary = summarizeWordPressPageMatrix({
+		baseUrl: 'https://example.test',
+		pages: [
+			{
+				id: 'dashboard',
+				path: '/wp-admin/index.php',
+				url: 'https://example.test/wp-admin/index.php',
+				finalUrl: 'https://example.test/wp-admin/index.php?_wpnonce=secret',
+				status: 200,
+				readyMs: 250,
+				resources: { count: 2, restCount: 1, resources: [{ url: '/wp-json/wp/v2/posts', durationMs: 100 }] },
+				matrixRequests: [
+					{ url: 'https://example.test/wp-json/wp/v2/posts?context=edit', method: 'GET', status: 200, durationMs: 80, resourceType: 'fetch' },
+					{ url: 'https://third-party.example.test/api', method: 'POST', status: 500, durationMs: 120, resourceType: 'xhr' },
+				],
+			},
+			{
+				id: 'login-leak',
+				path: '/wp-admin/plugins.php',
+				status: 200,
+				readyMs: 300,
+				loginFormSeen: 1,
+				matrixRequests: [],
+			},
+		],
+	});
+	assert.equal(matrixSummary.totals.pageCount, 2);
+	assert.equal(matrixSummary.totals.failingPageCount, 2);
+	assert.equal(matrixSummary.metrics.page_wp_admin_index_php_ready_ms, 250);
+	assert.equal(matrixSummary.pages[0].finalUrl, '/wp-admin/index.php');
+	assert.equal(matrixSummary.pages[0].requests[0].failed, true);
+	assert.equal(matrixSummary.pages[0].requests[0].url, '/api');
+
+	const pageMatrix = await profileWordPressPageMatrix({
+		page: new FakePage(resources),
+		baseUrl: 'https://example.test',
+		paths: ['/wp-admin/index.php'],
+	});
+	assert.equal(pageMatrix.pages.length, 1);
+	assert.equal(pageMatrix.summary.metrics.page_wp_admin_index_php_status, 200);
 
 	const matrixPage = new FakeRestMatrixPage([
 		{ status: 200, durationMs: 80, body: [{ id: 1 }, { id: 2 }] },

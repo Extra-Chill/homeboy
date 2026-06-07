@@ -122,6 +122,104 @@ function normalizePageManifest(manifest) {
 	return pages.map(normalizePageSpec);
 }
 
+function normalizeWordPressPageMatrixInputValues(value) {
+	if (value === undefined || value === null || value === '') {
+		return [];
+	}
+	if (Array.isArray(value)) {
+		return value.flatMap((entry) => normalizeWordPressPageMatrixInputValues(entry));
+	}
+	if (isPlainObject(value)) {
+		return [value];
+	}
+	const raw = String(value).trim();
+	if (!raw) {
+		return [];
+	}
+	try {
+		const parsed = JSON.parse(raw);
+		if (Array.isArray(parsed)) {
+			return normalizeWordPressPageMatrixInputValues(parsed);
+		}
+	} catch {
+		// Fall back to comma/newline separated path values.
+	}
+	return raw.split(/[,\n]/).map((entry) => entry.trim()).filter(Boolean);
+}
+
+function pageMatrixMetricName(value) {
+	const clean = String(value || '')
+		.replace(/^https?:\/\/[^/]+/i, '')
+		.replace(/^\/+|\/+$/g, '') || 'front_page';
+	return browserMetricName(clean) || 'page';
+}
+
+function normalizeWordPressPageMatrixSpec(value, index = 0) {
+	if (isPlainObject(value)) {
+		const url = value.url || value.path;
+		const id = value.id || value.metricName || pageMatrixMetricName(url || `page-${index + 1}`);
+		return normalizePageSpec({
+			...value,
+			id,
+			metricName: value.metricName || pageMatrixMetricName(url || id),
+		});
+	}
+	const url = String(value || '').trim();
+	if (!url) {
+		throw new TypeError('page matrix path must be a non-empty string or page spec object');
+	}
+	const metricName = pageMatrixMetricName(url);
+	return normalizePageSpec({
+		id: metricName,
+		label: metricName,
+		path: url,
+		metricName,
+	});
+}
+
+function dedupeWordPressPageMatrixSpecs(specs) {
+	const seen = new Set();
+	const deduped = [];
+	for (const spec of specs) {
+		const key = spec.url || spec.path || spec.id;
+		if (!key || seen.has(key)) {
+			continue;
+		}
+		seen.add(key);
+		deduped.push(spec);
+	}
+	return deduped;
+}
+
+function normalizeWordPressPageMatrixManifest(input = {}) {
+	const manifest = Array.isArray(input) || typeof input === 'string' ? { paths: input } : input;
+	if (!isPlainObject(manifest)) {
+		throw new TypeError('page matrix manifest must be an object, array, or path string');
+	}
+	const values = [
+		...normalizeWordPressPageMatrixInputValues(manifest.defaultPaths),
+		...normalizeWordPressPageMatrixInputValues(manifest.paths),
+		...normalizeWordPressPageMatrixInputValues(manifest.pages),
+		...normalizeWordPressPageMatrixInputValues(manifest.manifest),
+	];
+	let includeAdminMenu = Boolean(manifest.includeAdminMenu);
+	const pageValues = [];
+	for (const value of values) {
+		if (String(value).trim() === 'admin-menu') {
+			includeAdminMenu = true;
+			continue;
+		}
+		pageValues.push(value);
+	}
+	const pages = dedupeWordPressPageMatrixSpecs(pageValues.map(normalizeWordPressPageMatrixSpec));
+
+	return {
+		pages,
+		includeAdminMenu,
+		adminMenuSourcePath: manifest.adminMenuSourcePath || '/wp-admin/index.php',
+	};
+}
+
 function shouldIncludeResource(url, options = {}) {
 	const include = Array.isArray(options.includeResourceSubstrings)
 		? options.includeResourceSubstrings
@@ -3397,6 +3495,282 @@ async function profileWordPressPages(input) {
 	};
 }
 
+function scrubWordPressPageMatrixUrl(url, baseUrl) {
+	if (!url) {
+		return '';
+	}
+	try {
+		const parsed = new URL(url);
+		const base = new URL(normalizeBaseUrl(baseUrl));
+		if (parsed.origin === base.origin) {
+			return normalizeUrl(`${parsed.pathname}${parsed.search}`, { lowercasePath: false });
+		}
+	} catch {
+		// Fall through to generic URL normalization.
+	}
+	return normalizeUrl(url, { lowercasePath: false });
+}
+
+function normalizeWordPressPageMatrixRequest(row, baseUrl) {
+	const durationMs = round(row?.durationMs ?? row?.duration_ms ?? row?.duration ?? 0);
+	return {
+		url: scrubWordPressPageMatrixUrl(row?.url || row?.name || row?.path || '', baseUrl),
+		method: normalizeRestMethod(row?.method || 'GET'),
+		status: round(row?.status),
+		failed: Boolean(row?.failed || row?.failure || row?.error || row?.status >= 400),
+		durationMs,
+		resourceType: row?.resourceType || row?.resource_type || row?.initiatorType || '',
+		...(row?.failure ? { failure: row.failure } : {}),
+	};
+}
+
+function summarizeWordPressPageMatrixRequests(requests = [], baseUrl, limit = 40) {
+	return (Array.isArray(requests) ? requests : [])
+		.map((request) => normalizeWordPressPageMatrixRequest(request, baseUrl))
+		.filter((request) => request.durationMs > 10 || request.failed || request.status >= 400)
+		.sort((a, b) => {
+			if (a.failed !== b.failed) {
+				return a.failed ? -1 : 1;
+			}
+			return b.durationMs - a.durationMs;
+		})
+		.slice(0, limit);
+}
+
+function pageMatrixProfileRequests(profile) {
+	if (Array.isArray(profile?.matrixRequests)) {
+		return profile.matrixRequests;
+	}
+	if (Array.isArray(profile?.requests)) {
+		return profile.requests;
+	}
+	if (Array.isArray(profile?.networkRequests)) {
+		return profile.networkRequests;
+	}
+	return [];
+}
+
+function summarizeWordPressPageMatrixPage(profile, options = {}) {
+	const baseUrl = options.baseUrl || options.siteUrl || profile?.baseUrl || profile?.siteUrl || profile?.url || 'https://example.invalid/';
+	const spec = profile?.spec || profile?.pageSpec || {};
+	const path = profile?.path || spec.path || spec.url || profile?.url || '';
+	const metricName = profile?.metricName || spec.metricName || pageMatrixMetricName(path || profile?.id);
+	const requests = pageMatrixProfileRequests(profile);
+	const summarizedRequests = summarizeWordPressPageMatrixRequests(requests, baseUrl, options.requestLimit || 40);
+	const normalizedRequests = requests.map((request) => normalizeWordPressPageMatrixRequest(request, baseUrl));
+	const failedRequests = normalizedRequests.filter((request) => request.failed || request.status >= 400);
+	const requestDurations = normalizedRequests.map((request) => request.durationMs).filter((value) => Number.isFinite(value));
+	const resources = Array.isArray(profile?.resources?.resources) ? profile.resources.resources : [];
+	const slowestResource = resources.length > 0
+		? [...resources].sort((a, b) => round(b.durationMs) - round(a.durationMs))[0]
+		: null;
+	const readyError = profile?.readyError || profile?.ready_error || profile?.readiness?.error || '';
+	const loginFormSeen = round(profile?.loginFormSeen ?? profile?.login_form_seen);
+	const status = round(profile?.status);
+	const readyMs = round(profile?.readyMs ?? profile?.ready_ms ?? profile?.elapsed_ms);
+	const loadProbeMs = round(profile?.loadProbeMs ?? profile?.load_probe_ms ?? profile?.readiness?.loadStateMs ?? profile?.timings?.load_ms);
+	const networkIdleProbeMs = round(profile?.networkIdleProbeMs ?? profile?.network_idle_probe_ms ?? profile?.timings?.network_idle_ms);
+	const failed = status >= 500 || status === 0 || loginFormSeen > 0 || Boolean(readyError) || failedRequests.length > 0;
+
+	return {
+		id: profile?.id || spec.id || metricName,
+		label: profile?.label || spec.label || metricName,
+		metricName,
+		path,
+		requestedUrl: scrubWordPressPageMatrixUrl(profile?.requestedUrl || profile?.requested_url || profile?.url || spec.url || spec.path || path, baseUrl),
+		finalUrl: scrubWordPressPageMatrixUrl(profile?.finalUrl || profile?.final_url || profile?.url || path, baseUrl),
+		status,
+		readyMs,
+		elapsedMs: round(profile?.elapsedMs ?? profile?.elapsed_ms ?? readyMs),
+		loadProbeMs,
+		networkIdleProbeMs,
+		loadTimedOut: Boolean(profile?.loadTimedOut || profile?.load_timed_out),
+		networkIdleTimedOut: Boolean(profile?.networkIdleTimedOut || profile?.network_idle_timed_out),
+		readyError,
+		loginFormSeen,
+		requestCount: normalizedRequests.length || round(profile?.requestCount ?? profile?.request_count),
+		failedRequestCount: failedRequests.length,
+		slowestRequestMs: requestDurations.length ? Math.max(...requestDurations) : 0,
+		resourceCount: round(profile?.resources?.count ?? resources.length),
+		restCount: round(profile?.resources?.restCount ?? profile?.restWaterfall?.counts?.network ?? profile?.restWaterfall?.count),
+		slowestResource,
+		requests: summarizedRequests,
+		failed,
+	};
+}
+
+function summarizeWordPressPageMatrix(input = {}) {
+	const pages = Array.isArray(input) ? input : input.pages;
+	if (!Array.isArray(pages)) {
+		throw new TypeError('summarizeWordPressPageMatrix requires pages');
+	}
+	const baseUrl = input.baseUrl || input.siteUrl || 'https://example.invalid/';
+	const pageSummaries = pages.map((page) => page?.metricName !== undefined && page?.readyMs !== undefined && page?.requestCount !== undefined
+		? page
+		: summarizeWordPressPageMatrixPage(page, { ...input, baseUrl }));
+	const slowestPageMs = pageSummaries.reduce((max, page) => Math.max(max, round(page.elapsedMs ?? page.readyMs)), 0);
+	const metrics = {
+		page_count: pageSummaries.length,
+		failing_page_count: pageSummaries.filter((page) => page.failed).length,
+		slowest_page_ms: slowestPageMs,
+		login_form_seen: pageSummaries.reduce((total, page) => total + round(page.loginFormSeen), 0),
+	};
+	for (const page of pageSummaries) {
+		const prefix = `page_${page.metricName}`;
+		metrics[`${prefix}_status`] = round(page.status);
+		metrics[`${prefix}_elapsed_ms`] = round(page.elapsedMs ?? page.readyMs);
+		metrics[`${prefix}_ready_ms`] = round(page.readyMs);
+		metrics[`${prefix}_load_probe_ms`] = round(page.loadProbeMs);
+		metrics[`${prefix}_network_idle_probe_ms`] = round(page.networkIdleProbeMs);
+		metrics[`${prefix}_request_count`] = round(page.requestCount);
+		metrics[`${prefix}_failed_request_count`] = round(page.failedRequestCount);
+		metrics[`${prefix}_slowest_request_ms`] = round(page.slowestRequestMs);
+		metrics[`${prefix}_login_form_seen`] = round(page.loginFormSeen);
+		metrics[`${prefix}_load_timed_out`] = page.loadTimedOut ? 1 : 0;
+		metrics[`${prefix}_network_idle_timed_out`] = page.networkIdleTimedOut ? 1 : 0;
+		metrics[`${prefix}_ready_failed`] = page.readyError ? 1 : 0;
+	}
+
+	return {
+		pages: pageSummaries,
+		totals: {
+			pageCount: pageSummaries.length,
+			failingPageCount: metrics.failing_page_count,
+			requestCount: pageSummaries.reduce((total, page) => total + round(page.requestCount), 0),
+			failedRequestCount: pageSummaries.reduce((total, page) => total + round(page.failedRequestCount), 0),
+			resourceCount: pageSummaries.reduce((total, page) => total + round(page.resourceCount), 0),
+			restCount: pageSummaries.reduce((total, page) => total + round(page.restCount), 0),
+			loginFormSeen: metrics.login_form_seen,
+			slowestPageMs,
+		},
+		slowestPages: [...pageSummaries].sort((a, b) => round(b.readyMs) - round(a.readyMs)).slice(0, input.slowestPageLimit || 10),
+		metrics,
+	};
+}
+
+function startWordPressPageMatrixRequestCapture(page) {
+	const requests = [];
+	const startedRequests = new Map();
+	const pending = [];
+	if (!page || typeof page.on !== 'function' || typeof page.off !== 'function') {
+		return { requests, stop: async () => {} };
+	}
+	const startedAt = Date.now();
+	const onRequest = (request) => {
+		startedRequests.set(request, Date.now());
+	};
+	const onFinished = (request) => {
+		pending.push((async () => {
+			const started = startedRequests.get(request) || Date.now();
+			const response = typeof request.response === 'function' ? await request.response().catch(() => null) : null;
+			requests.push({
+				url: typeof request.url === 'function' ? request.url() : request.url,
+				method: typeof request.method === 'function' ? request.method() : request.method,
+				status: response && typeof response.status === 'function' ? response.status() : 0,
+				failed: false,
+				durationMs: Date.now() - started,
+				startMs: started - startedAt,
+				resourceType: typeof request.resourceType === 'function' ? request.resourceType() : request.resourceType,
+			});
+		})());
+	};
+	const onFailed = (request) => {
+		const started = startedRequests.get(request) || Date.now();
+		const failure = typeof request.failure === 'function' ? request.failure() : request.failure;
+		requests.push({
+			url: typeof request.url === 'function' ? request.url() : request.url,
+			method: typeof request.method === 'function' ? request.method() : request.method,
+			status: 0,
+			failed: true,
+			failure: failure?.errorText || failure || 'request failed',
+			durationMs: Date.now() - started,
+			startMs: started - startedAt,
+			resourceType: typeof request.resourceType === 'function' ? request.resourceType() : request.resourceType,
+		});
+	};
+	page.on('request', onRequest);
+	page.on('requestfinished', onFinished);
+	page.on('requestfailed', onFailed);
+	return {
+		requests,
+		stop: async () => {
+			page.off('request', onRequest);
+			page.off('requestfinished', onFinished);
+			page.off('requestfailed', onFailed);
+			await Promise.allSettled(pending);
+		},
+	};
+}
+
+async function collectWordPressPageMatrixAdminMenuSpecs(input, manifest) {
+	const { page, baseUrl } = input;
+	if (!manifest.includeAdminMenu) {
+		return [];
+	}
+	if (!page || typeof page.goto !== 'function' || typeof page.evaluate !== 'function') {
+		throw new TypeError('includeAdminMenu requires a Playwright page with goto() and evaluate()');
+	}
+	await page.goto(resolveWordPressUrl(baseUrl, manifest.adminMenuSourcePath), {
+		waitUntil: 'domcontentloaded',
+		timeout: input.adminMenuTimeout || 120000,
+	});
+	await waitForPageReady(page, input.adminMenuReady || { selector: '#adminmenu, body.wp-admin' }, {
+		timeout: input.adminMenuTimeout || 120000,
+	}).catch(() => {});
+	const paths = await page.evaluate(() => [...document.querySelectorAll('#adminmenu a[href]')].map((anchor) => anchor.href).filter(Boolean));
+	const origin = new URL(normalizeBaseUrl(baseUrl)).origin;
+	const specs = [];
+	for (const href of paths) {
+		try {
+			const parsed = new URL(href);
+			if (parsed.origin === origin && parsed.pathname.startsWith('/wp-admin/')) {
+				specs.push(normalizeWordPressPageMatrixSpec(`${parsed.pathname}${parsed.search}`));
+			}
+		} catch {
+			// Ignore invalid hrefs from the menu DOM.
+		}
+	}
+	return dedupeWordPressPageMatrixSpecs(specs);
+}
+
+async function profileWordPressPageMatrix(input) {
+	if (!input || typeof input !== 'object') {
+		throw new TypeError('profileWordPressPageMatrix requires an input object');
+	}
+	if (typeof input.baseUrl !== 'string' || input.baseUrl.trim() === '') {
+		throw new TypeError('profileWordPressPageMatrix requires baseUrl');
+	}
+	const manifest = normalizeWordPressPageMatrixManifest(input.manifest || input);
+	const fixtureSetup = input.fixtures || input.setupWordPressFixture
+		? await runWordPressFixtureSetup(input)
+		: undefined;
+	const adminMenuSpecs = await collectWordPressPageMatrixAdminMenuSpecs(input, manifest);
+	const specs = dedupeWordPressPageMatrixSpecs([...manifest.pages, ...adminMenuSpecs]);
+	const pages = [];
+	for (const spec of specs) {
+		const capture = startWordPressPageMatrixRequestCapture(input.page);
+		let profile;
+		try {
+			profile = await profileWordPressPage({ ...input, spec, networkRequests: capture.requests });
+		} finally {
+			await capture.stop();
+		}
+		pages.push({
+			...profile,
+			metricName: spec.metricName || pageMatrixMetricName(spec.url),
+			matrixRequests: capture.requests,
+		});
+	}
+	const summary = summarizeWordPressPageMatrix({ pages, baseUrl: input.baseUrl });
+	return {
+		manifest: { ...manifest, pages: specs },
+		pages,
+		summary,
+		metrics: summary.metrics,
+		...(fixtureSetup ? { fixtureSetup } : {}),
+	};
+}
+
 module.exports = {
 	DEFAULT_REST_OBSERVATION_MS,
 	WORDPRESS_RESOURCE_INCLUDE,
@@ -3422,9 +3796,11 @@ module.exports = {
 	formatWordPressRestWaterfallMarkdownReport,
 	installWordPressRestInstrumentation,
 	normalizeBrowserAction,
+	normalizeWordPressPageMatrixManifest,
 	runWordPressFixtureSetup,
 	normalizePageManifest,
 	normalizePageSpec,
+	profileWordPressPageMatrix,
 	profileWordPressRestMatrix,
 	resourceFamily,
 	profileWordPressPage,
@@ -3432,6 +3808,7 @@ module.exports = {
 	recommendWordPressPerformanceGates,
 	resolveWordPressUrl,
 	runBrowserActions,
+	summarizeWordPressPageMatrix,
 	summarizeWordPressAdminPageProfile,
 	summarizeThirdPartyWaterfall,
 	summarizeWordPressRestNetworkRows,
