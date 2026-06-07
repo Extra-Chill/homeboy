@@ -24,7 +24,9 @@ Server configuration defines SSH server connections stored in `servers/<id>.json
     "daemon": boolean,
     "concurrency_limit": number,
     "artifact_policy": "string",
-    "snapshot_excludes": ["string"],
+    "policy": {
+      "snapshot_excludes": ["string"]
+    },
     "env": {},
     "resources": {}
   },
@@ -72,7 +74,9 @@ Server configuration defines SSH server connections stored in `servers/<id>.json
     "daemon": false,
     "concurrency_limit": 4,
     "artifact_policy": "copy",
-    "snapshot_excludes": ["generated-state", "generated-state/**"],
+    "policy": {
+      "snapshot_excludes": ["generated-state", "generated-state/**"]
+    },
     "env": {},
     "resources": {}
   },
