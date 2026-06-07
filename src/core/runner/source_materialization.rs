@@ -71,13 +71,8 @@ fn private_proxied_source_host(value: &str) -> Option<String> {
 }
 
 fn private_proxied_source_hosts() -> Vec<String> {
-    let raw = std::env::var(PRIVATE_PROXIED_SOURCE_HOSTS_ENV).unwrap_or_else(|_| {
-        DEFAULT_PRIVATE_PROXIED_SOURCE_HOSTS
-            .iter()
-            .copied()
-            .collect::<Vec<_>>()
-            .join(",")
-    });
+    let raw = std::env::var(PRIVATE_PROXIED_SOURCE_HOSTS_ENV)
+        .unwrap_or_else(|_| DEFAULT_PRIVATE_PROXIED_SOURCE_HOSTS.to_vec().join(","));
 
     raw.split(',')
         .map(str::trim)
