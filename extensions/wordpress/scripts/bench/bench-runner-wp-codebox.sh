@@ -615,7 +615,7 @@ homeboy_wp_codebox_compile_bootstrap_files
 homeboy_wp_codebox_compile_bootstrap_steps
 homeboy_wp_codebox_compile_prepare_steps
 
-WP_CODEBOX_WORDPRESS_VERSION="latest"
+WP_CODEBOX_WORDPRESS_VERSION=""
 if [ "$settings_json" != "{}" ]; then
     extracted=$(printf '%s' "$settings_json" | jq -r '.wp_codebox_wordpress_version // empty' 2>/dev/null || true)
     [ -n "$extracted" ] && [ "$extracted" != "null" ] && WP_CODEBOX_WORDPRESS_VERSION="$extracted"
@@ -917,8 +917,7 @@ jq -n \
     --argjson pluginRuntime "$WP_CODEBOX_PLUGIN_RUNTIME_JSON" \
     '{
         wpCodeboxBin: $wpCodeboxBin,
-        options: {
-            wordpressVersion: $wp,
+        options: ({
             blueprint: $blueprint,
             mounts: $mounts,
             extraPlugins: $extraPlugins,
@@ -932,7 +931,7 @@ jq -n \
             pluginRuntime: $pluginRuntime,
             bootstrapFiles: $bootstrapFiles,
             workloads: $workloads
-        }
+        } + (if $wp == "" then {} else {wordpressVersion: $wp} end))
     }' | node "$BENCH_RECIPE_BUILDER" > "$RECIPE_FILE"
 
 WP_CODEBOX_TMPFILE=$(mktemp "${ARTIFACTS_DIR}/homeboy-wp-codebox-output.XXXXXX")

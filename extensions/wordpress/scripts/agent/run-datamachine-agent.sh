@@ -216,7 +216,7 @@ PHP
         --arg providerSlugs "$provider_slugs_csv" \
         '{
             schema: "wp-codebox/workspace-recipe/v1",
-            runtime: {wp: $wp, blueprint: {steps: []}},
+            runtime: ({blueprint: {steps: []}} + (if $wp == "" then {} else {wp: $wp} end)),
             inputs: {extraPlugins: $extraPlugins, mounts: $mounts, secretEnv: $secretEnv},
             workflow: {steps: [{command: "wp-codebox.agent-sandbox-run", args: ["task=" + $task, "code-file=" + $codeFile, "provider-plugin-slugs=" + $providerSlugs]}]}
         }' >"$recipe_file"
@@ -901,7 +901,7 @@ fi
 
 WORKLOAD_ID=$(jq -r '.workload_id // "datamachine-agent"' "$CONFIG_PATH")
 WORKLOAD_LABEL=$(jq -r '.workload_label // "Run Data Machine agent"' "$CONFIG_PATH")
-WP_CODEBOX_WORDPRESS_VERSION=$(jq -r '.wp_codebox_wordpress_version // "7.0"' "$CONFIG_PATH")
+WP_CODEBOX_WORDPRESS_VERSION=$(jq -r '.wp_codebox_wordpress_version // ""' "$CONFIG_PATH")
 ENABLE_TERMINAL_ACTIONS=$(jq -r 'if (.enable_terminal_actions // .enable_wp_cli_tool // false) then "1" else "0" end' <<<"$CONFIG_JSON")
 if [ "$ENABLE_TERMINAL_ACTIONS" = "1" ]; then
     if [ -z "$RUNTIME_DIR" ]; then

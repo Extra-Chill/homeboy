@@ -29,7 +29,7 @@ cat > "$FAKE_CORE_MODULE" <<'NODE'
 export function buildWordPressBenchRecipe(options) {
   return {
     schema: "wp-codebox/workspace-recipe/v1",
-    runtime: { wp: options.wordpressVersion, blueprint: options.blueprint },
+    runtime: { wp: options.wordpressVersion ?? "latest", blueprint: options.blueprint },
     inputs: { mounts: options.mounts ?? [] },
     workflow: { steps: [{ command: "wordpress.bench", args: [`plugin-slug=${options.pluginSlug}`] }] },
   }

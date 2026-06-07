@@ -283,7 +283,7 @@ assert_contains "${TMPDIR}/wp-codebox-args.txt" "recipe-run"
 assert_contains "${TMPDIR}/wp-codebox-args.txt" "--recipe"
 assert_contains "${TMPDIR}/wp-codebox-args.txt" "wordpress.phpunit"
 assert_contains "${TMPDIR}/wp-codebox-args.txt" "autoload-file=/wp-codebox-vendor/autoload.php"
-assert_contains "${TMPDIR}/wp-codebox-args.txt" "6.9"
+assert_not_contains "${TMPDIR}/wp-codebox-args.txt" "6.9"
 assert_contains "${TMPDIR}/wp-codebox-args.txt" '"target": "/wordpress/wp-content/plugins/component"'
 
 HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \

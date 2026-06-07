@@ -105,7 +105,7 @@ if [ -n "${HOMEBOY_CHANGED_TEST_FILES:-}" ]; then
 fi
 
 WP_CONFIG_DEFINES_JSON="{}"
-WP_CODEBOX_WORDPRESS_VERSION="6.9"
+WP_CODEBOX_WORDPRESS_VERSION=""
 WP_CODEBOX_MULTISITE="${HOMEBOY_WORDPRESS_MULTISITE:-}"
 if [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]; then
     extracted=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -c '.wp_config_defines // {}' 2>/dev/null || echo "{}")
@@ -160,7 +160,7 @@ jq -n \
     --arg multisite "$WP_CODEBOX_MULTISITE" \
     '{
         schema: "wp-codebox/workspace-recipe/v1",
-        runtime: {wp: $wp, blueprint: {steps: []}},
+        runtime: ({blueprint: {steps: []}} + (if $wp == "" then {} else {wp: $wp} end)),
         inputs: {mounts: $mounts},
         workflow: {steps: [{command: "wordpress.core-phpunit", args: [
             "core-root=/wordpress",
