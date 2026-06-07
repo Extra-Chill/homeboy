@@ -738,6 +738,47 @@ try {
   assertMetrics(timeoutRecord);
   assert.equal(timeoutRecord.metrics.sample_count, 0);
   assert.equal(timeoutRecord.metrics.artifact_bytes, null);
+
+  const coreModulePath = path.join(root, 'wp-codebox-core-partial-discovery-fixture.mjs');
+  fs.writeFileSync(coreModulePath, [
+    'export async function discoverPartialRunArtifacts(options) {',
+    '  return {',
+    '    schema: "wp-codebox/partial-artifact-discovery/v1",',
+    '    artifactsRoot: options.artifactsRoot,',
+    '    sessionId: options.sessionId,',
+    '    selectedBy: "session-id",',
+    '    candidateCount: 1,',
+    '    artifacts: [{',
+    '      directory: `${options.artifactsRoot}/core-${options.sessionId}`,',
+    '      bytes: 321,',
+    '      mtime: "2026-06-06T12:00:01.000Z",',
+    '      hasManifest: false,',
+    '      hasChangedFiles: true,',
+    '      hasRuntimeReferenceManifest: true,',
+    '      manifest: { path: `${options.artifactsRoot}/core/manifest.json`, relativePath: "manifest.json", available: false },',
+    '      changedFiles: { path: `${options.artifactsRoot}/core/files/changed-files.json`, relativePath: "files/changed-files.json", available: true },',
+    '      runtimeReferenceManifest: { path: `${options.artifactsRoot}/core/files/runtime-reference-manifest.json`, relativePath: "files/runtime-reference-manifest.json", available: true, payload: { schema: "wp-codebox/runtime-reference-manifest-fixture/v1", token: "[redacted]" } }',
+    '    }]',
+    '  };',
+    '}',
+    '',
+  ].join('\n'));
+  const coreDiscoveryExecution = await executeAuditWpCodeboxFanout({
+    report,
+    wp_codebox_command: process.execPath,
+    wp_codebox_args: [fixtureCommand, '--artifacts', path.join(root, 'core-discovery-artifacts')],
+    concurrency: 1,
+    task_timeout_seconds: 1,
+    wpCodeboxCoreModule: coreModulePath,
+    env: { FIXTURE_HANG_GROUP: 'PHPCS Formatting/Auto Fix!' },
+  });
+  const coreDiscoveryRecord = coreDiscoveryExecution.records.find((record) => record.group_key === 'PHPCS Formatting/Auto Fix!');
+  assert.equal(coreDiscoveryRecord.partial_artifacts.length, 1);
+  assert.match(coreDiscoveryRecord.partial_artifacts[0].directory, /core-homeboy-audit-/);
+  assert.equal(coreDiscoveryRecord.partial_artifacts[0].has_changed_files, true);
+  assert.equal(coreDiscoveryRecord.partial_artifacts[0].changed_files_path.endsWith('files/changed-files.json'), true);
+  assert.equal(coreDiscoveryRecord.partial_artifacts[0].runtime_reference_manifest.payload.token, '[redacted]');
+
   const timeoutFollowupRecord = timeoutExecution.records.find((record) => record.group_key === 'docs-reference');
   assert.equal(timeoutFollowupRecord.status, 'failed');
   assert.equal(timeoutFollowupRecord.command.exit_code, 3);

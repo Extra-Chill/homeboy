@@ -8,6 +8,11 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
+/**
+ * Internal dependencies
+ */
+const { loadWpCodeboxCoreFunction } = require('./wp-codebox-core-loader');
+
 const ADAPTER_ID = 'homeboy/wp-codebox-apply-adapter/v1';
 const APPLY_RESULT_SCHEMA = 'homeboy/apply-result/v1';
 const WP_CODEBOX_PREFLIGHT_SCHEMA = 'wp-codebox/artifact-apply-preflight/v1';
@@ -219,6 +224,11 @@ function normalizeWpCodeboxPreflight(input) {
     if (preflight.schema && preflight.schema !== WP_CODEBOX_PREFLIGHT_SCHEMA) {
       throw new Error(`unsupported WP Codebox preflight schema: ${preflight.schema}`);
     }
+    if (preflight.ready === false) {
+      const violations = Array.isArray(preflight.violations) ? preflight.violations : [];
+      const details = violations.map((violation) => violation.message || violation.code).filter(Boolean).join('; ');
+      throw new Error(`WP Codebox apply preflight is not ready${details ? `: ${details}` : ''}`);
+    }
     const payload = preflight.payload || preflight;
     verifyWpCodeboxPayload(payload);
     return {
@@ -238,6 +248,27 @@ function normalizeWpCodeboxPreflight(input) {
   return {
     ...runWpCodeboxApplyPreflight(input),
   };
+}
+
+async function normalizeWpCodeboxPreflightAsync(input) {
+  const normalizeArtifactApplyPreflight = await loadWpCodeboxCoreFunction('normalizeArtifactApplyPreflight', input);
+  if (!normalizeArtifactApplyPreflight) {
+    return normalizeWpCodeboxPreflight(input);
+  }
+  const preflight = await normalizeArtifactApplyPreflight(input);
+  if (!preflight.ready) {
+    const details = (preflight.violations || []).map((violation) => violation.message || violation.code).filter(Boolean).join('; ');
+    throw new Error(`WP Codebox apply preflight is not ready${details ? `: ${details}` : ''}`);
+  }
+  return preflight;
+}
+
+async function wpCodeboxApplyRequestFromBundleAsync(options) {
+  const createArtifactApplyRequest = await loadWpCodeboxCoreFunction('createArtifactApplyRequest', options);
+  if (!createArtifactApplyRequest) {
+    return wpCodeboxApplyRequestFromBundle(options);
+  }
+  return createArtifactApplyRequest(options);
 }
 
 function normalizeApplyRequest(input) {
@@ -459,9 +490,11 @@ module.exports = {
   APPLY_RESULT_SCHEMA,
   applyApprovedWpCodeboxArtifact,
   loadWpCodeboxArtifactBundle,
+  normalizeWpCodeboxPreflightAsync,
   normalizeWpCodeboxPreflight,
   runWpCodeboxApplyPreflight,
   verifyWpCodeboxPayload,
+  wpCodeboxApplyRequestFromBundleAsync,
   wpCodeboxApplyRequestFromBundle,
   wpCodeboxChangeArtifactFromBundle,
   wpCodeboxChangeArtifactFromPreflight,
