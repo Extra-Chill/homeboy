@@ -17,7 +17,9 @@ use super::broker_http;
 use super::capabilities::{runner_capability_snapshot, validate_runner_capability_preflight};
 use super::evidence::mirror_daemon_evidence;
 use super::normalize_runner_command_env;
-use super::resource_metrics::{measured_command_output, RunnerResourceMetrics};
+use super::resource_metrics::{
+    measured_command_output, measured_command_output_until_cancelled, RunnerResourceMetrics,
+};
 use super::{load, status, Runner, RunnerCapabilityPreflight, RunnerKind, RunnerTunnelMode};
 
 mod extension_parity;
@@ -671,6 +673,62 @@ pub(crate) fn prepare_runner_process(request: RunnerProcessRequest) -> Result<Ru
     })
 }
 
+pub(crate) fn prepare_daemon_local_process(
+    request: RunnerProcessRequest,
+) -> Result<RunnerProcessPlan> {
+    if request.command.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "command",
+            "runner exec requires a command after --",
+            None,
+            None,
+        ));
+    }
+
+    let cwd = request.cwd.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "cwd",
+            "daemon exec requires an absolute cwd",
+            Some(request.runner_id.clone()),
+            Some(vec![
+                "Pass the synced remote workspace path as cwd when submitting daemon exec."
+                    .to_string(),
+            ]),
+        )
+    })?;
+    let runner = Runner {
+        id: request.runner_id,
+        kind: RunnerKind::Local,
+        server_id: None,
+        workspace_root: Some(cwd.clone()),
+        settings: server::RunnerSettings::default(),
+        env: HashMap::new(),
+        resources: HashMap::new(),
+        policy: server::RunnerPolicy::default(),
+    };
+    validate_runner_process_cwd(&runner, &cwd)?;
+    validate_required_paths(
+        &runner,
+        &request.require_paths,
+        request.validate_require_paths_on_host,
+    )?;
+
+    let mut env = request.env;
+    normalize_runner_command_env(&mut env);
+    let source_snapshot = request.source_snapshot.unwrap_or_else(|| {
+        SourceSnapshot::collect_local(&runner.id, Path::new(&cwd), Some(&cwd), "existing_remote")
+    });
+
+    Ok(RunnerProcessPlan {
+        runner,
+        cwd,
+        command: request.command,
+        env,
+        source_snapshot,
+        require_paths: request.require_paths,
+    })
+}
+
 fn validate_required_paths(
     runner: &Runner,
     required_paths: &[String],
@@ -767,8 +825,40 @@ pub(crate) fn execute_runner_process(plan: &RunnerProcessPlan) -> Result<Process
     command_output(&mut command)
 }
 
+pub(crate) fn execute_runner_process_until_cancelled(
+    plan: &RunnerProcessPlan,
+    is_cancelled: impl FnMut() -> bool,
+) -> Result<ProcessOutput> {
+    let mut command = std::process::Command::new(&plan.command[0]);
+    command
+        .args(&plan.command[1..])
+        .current_dir(&plan.cwd)
+        .envs(plan.env.iter())
+        .env(
+            crate::core::observation::SOURCE_SNAPSHOT_METADATA_ENV,
+            serde_json::to_string(&plan.source_snapshot).unwrap_or_default(),
+        );
+
+    command_output_until_cancelled(&mut command, is_cancelled)
+}
+
 fn command_output(command: &mut std::process::Command) -> Result<ProcessOutput> {
     let measured = measured_command_output(command)?;
+    let output = measured.output;
+    Ok(ProcessOutput {
+        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        exit_code: output.status.code().unwrap_or(1),
+        metrics: Some(measured.metrics),
+        capture: Some(measured.capture),
+    })
+}
+
+fn command_output_until_cancelled(
+    command: &mut std::process::Command,
+    is_cancelled: impl FnMut() -> bool,
+) -> Result<ProcessOutput> {
+    let measured = measured_command_output_until_cancelled(command, is_cancelled)?;
     let output = measured.output;
     Ok(ProcessOutput {
         stdout: String::from_utf8_lossy(&output.stdout).to_string(),

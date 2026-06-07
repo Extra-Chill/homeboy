@@ -163,14 +163,23 @@ fn default_test_wiring_suggestion() -> String {
     "Wire `{test_path}` using the configured explicit wiring convention".to_string()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RemoteExecutionSafetyConfig {
+    /// Report convention label for remote execution preflight findings.
+    #[serde(
+        default = "default_remote_execution_preflight_convention",
+        skip_serializing_if = "is_default_remote_execution_preflight_convention"
+    )]
+    pub convention: String,
     /// Markers that identify remote execution dispatch sites.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dispatch_markers: Vec<String>,
     /// Markers that prove local arguments/paths are translated or rejected.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub path_translation_markers: Vec<String>,
+    /// Markers that identify caller-provided arguments entering remote commands.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub argument_forward_markers: Vec<String>,
     /// Markers that prove required remote capabilities were declared/checked.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capability_preflight_markers: Vec<String>,
@@ -194,10 +203,37 @@ pub struct RemoteExecutionSafetyConfig {
     pub artifact_access_markers: Vec<String>,
 }
 
+fn default_remote_execution_preflight_convention() -> String {
+    "remote_execution_preflight".to_string()
+}
+
+fn is_default_remote_execution_preflight_convention(value: &String) -> bool {
+    value.as_str() == default_remote_execution_preflight_convention()
+}
+
+impl Default for RemoteExecutionSafetyConfig {
+    fn default() -> Self {
+        Self {
+            convention: default_remote_execution_preflight_convention(),
+            dispatch_markers: Vec::new(),
+            path_translation_markers: Vec::new(),
+            argument_forward_markers: Vec::new(),
+            capability_preflight_markers: Vec::new(),
+            artifact_capture_markers: Vec::new(),
+            artifact_snapshot_markers: Vec::new(),
+            extension_parity_markers: Vec::new(),
+            extension_selector_markers: Vec::new(),
+            artifact_report_markers: Vec::new(),
+            artifact_access_markers: Vec::new(),
+        }
+    }
+}
+
 impl RemoteExecutionSafetyConfig {
     pub fn is_empty(&self) -> bool {
         self.dispatch_markers.is_empty()
             && self.path_translation_markers.is_empty()
+            && self.argument_forward_markers.is_empty()
             && self.capability_preflight_markers.is_empty()
             && self.artifact_capture_markers.is_empty()
             && self.artifact_snapshot_markers.is_empty()
@@ -208,10 +244,17 @@ impl RemoteExecutionSafetyConfig {
     }
 
     fn merge(&mut self, other: &RemoteExecutionSafetyConfig) {
+        if other.convention != default_remote_execution_preflight_convention() {
+            self.convention = other.convention.clone();
+        }
         extend_unique(&mut self.dispatch_markers, &other.dispatch_markers);
         extend_unique(
             &mut self.path_translation_markers,
             &other.path_translation_markers,
+        );
+        extend_unique(
+            &mut self.argument_forward_markers,
+            &other.argument_forward_markers,
         );
         extend_unique(
             &mut self.capability_preflight_markers,
