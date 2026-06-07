@@ -6,6 +6,7 @@ pub mod agent_task_aggregate;
 pub mod agent_task_fanout;
 pub mod agent_task_finalization;
 pub mod agent_task_lifecycle;
+mod agent_task_pr_body;
 pub mod agent_task_promotion;
 pub mod agent_task_provider;
 pub mod agent_task_schedule;
