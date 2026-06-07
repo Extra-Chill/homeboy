@@ -625,10 +625,15 @@ impl ExtensionManifest {
         self.structured_sidecars
             .get(name)
             .and_then(|contract| match contract {
-                StructuredSidecarContract::Detail(detail) if detail.enabled => {
-                    detail.schema_version.as_deref()
+                StructuredSidecarContract::Enabled(true) => {
+                    crate::core::structured_sidecar::default_schema_version(name)
                 }
-                _ => None,
+                StructuredSidecarContract::Enabled(false) => None,
+                StructuredSidecarContract::Detail(detail) if detail.enabled => detail
+                    .schema_version
+                    .as_deref()
+                    .or_else(|| crate::core::structured_sidecar::default_schema_version(name)),
+                StructuredSidecarContract::Detail(_) => None,
             })
     }
 

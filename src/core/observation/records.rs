@@ -80,6 +80,8 @@ pub struct ArtifactRecord {
     pub sha256: Option<String>,
     pub size_bytes: Option<i64>,
     pub mime: Option<String>,
+    #[serde(default)]
+    pub metadata_json: serde_json::Value,
     pub created_at: String,
 }
 

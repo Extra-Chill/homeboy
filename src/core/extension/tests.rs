@@ -97,7 +97,7 @@ fn manifest_parses_declared_structured_sidecars() {
     assert_eq!(sidecars[0].producer, None);
     assert_eq!(sidecars[1].name, "lint.findings");
     assert_eq!(sidecars[1].path, "lint-findings.json");
-    assert_eq!(sidecars[1].schema_version, None);
+    assert_eq!(sidecars[1].schema_version.as_deref(), Some("v1"));
     assert_eq!(sidecars[1].producer.as_deref(), Some("lint"));
     assert_eq!(sidecars[2].name, "lint.producers");
     assert_eq!(sidecars[2].path, "lint-producers.json");
@@ -139,7 +139,7 @@ fn structured_sidecar_schema_versions_come_from_top_level_contract() {
     );
     assert_eq!(
         manifest.structured_sidecar_schema_version("lint.findings"),
-        None
+        Some("v1")
     );
     assert_eq!(
         manifest.structured_sidecar_schema_version("test.failures"),

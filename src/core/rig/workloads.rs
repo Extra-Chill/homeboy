@@ -148,12 +148,11 @@ pub fn invocation_requirements_for_extension_workloads(
 }
 
 fn expand_workload_path(rig_spec: &RigSpec, package_root: Option<&Path>, path: &str) -> PathBuf {
-    let expanded = super::expand::expand_vars(rig_spec, path);
-    let expanded = match package_root {
-        Some(root) => expanded.replace("${package.root}", &root.to_string_lossy()),
-        None => expanded,
+    let path = match package_root {
+        Some(root) => path.replace("${package.root}", &root.to_string_lossy()),
+        None => path.to_string(),
     };
-    PathBuf::from(expanded)
+    PathBuf::from(super::expand::expand_vars(rig_spec, &path))
 }
 
 #[cfg(test)]

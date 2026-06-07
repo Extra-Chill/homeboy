@@ -34,6 +34,7 @@ impl From<ComponentScriptOutput> for RunnerOutput {
             success: output.success,
             stdout: output.stdout,
             stderr: output.stderr,
+            child_resource: None,
         }
     }
 }

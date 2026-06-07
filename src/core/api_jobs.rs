@@ -1256,6 +1256,7 @@ mod tests {
                 "/srv/extrachill",
                 Some("/srv"),
             )),
+            require_paths: Vec::new(),
             metadata: Some(json!({ "submitted_by": "controller" })),
         }
     }

@@ -648,11 +648,12 @@ fn run_lint_stage(
 
     // Helper: build the lint runner with the current stage options.
     // Used by both the diagnostic pass and the fix-only pass.
+    let typed_settings = extension::lint::settings_from_legacy_strings(settings);
     let build_lint_runner = |effective_glob: Option<&str>| {
         extension::lint::build_lint_runner(
             component,
             None,
-            settings,
+            &typed_settings,
             false,
             options.file.as_deref(),
             effective_glob,

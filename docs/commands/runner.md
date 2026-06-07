@@ -266,6 +266,7 @@ homeboy runner remove <id>
 homeboy runner exec <runner-id> -- <command...>
 homeboy runner exec <runner-id> --project <project-id> --cwd /runner/workspace/project -- <command...>
 homeboy runner exec <runner-id> --ssh --cwd /runner/workspace/project -- <command...>
+homeboy runner exec <runner-id> --cwd /runner/workspace/project --require-path /runner/workspace/project -- <command...>
 ```
 
 `exec` submits the command to the connected runner daemon when `homeboy runner connect <runner-id>` has established a live loopback tunnel. If no daemon session is connected, local runners execute directly and SSH runners require explicit diagnostic `--ssh`. SSH runner raw exec is policy-denied by default until `policy.allow_raw_exec` is explicitly true.
@@ -275,6 +276,7 @@ Path rules:
 - SSH runners require `workspace_root` so local paths are not silently reused remotely.
 - SSH `--cwd` must be an absolute path under the configured `workspace_root`.
 - Omitting `--cwd` on an SSH runner uses the runner `workspace_root`.
+- `--require-path <path>` preflights one or more runner-side paths before execution. Use it when a command references a lab worktree path so missing controller-only paths fail with a structured `require_path` error instead of an empty command failure.
 - `--project <id>` feeds the runner trust policy project allowlist check.
 - `--ssh` is the explicit diagnostic fallback when `connect` is unavailable; daemon execution is preferred because it records job metadata and supports artifact-oriented workflows.
 - Diagnostic SSH output serializes as `mode: "diagnostic_ssh"` and does not include job/event evidence.
@@ -294,12 +296,19 @@ homeboy runner workspace sync <runner-id> --path <local-worktree> --mode snapsho
 homeboy runner workspace sync <runner-id> --path <local-worktree> --mode git
 ```
 
-`workspace sync` materializes a local worktree under the runner's configured `workspace_root` so runner execution can run against an explicit remote path while Git operations and canonical edits stay local.
+`workspace sync` materializes a controller-side worktree under the runner's configured `workspace_root` so runner execution can run against an explicit remote path while Git operations and canonical edits stay local.
 
 Modes:
 
-- `snapshot` copies the current local tree, including dirty edits, through a tar stream.
-- `git` requires a clean local tree, then clones or refreshes `remote.origin.url` on the runner and checks out local `HEAD` detached.
+- `snapshot` copies the current local tree, including dirty edits, through a tar stream from the controller. Use this for private or proxy-dependent sources because the runner does not need repository access.
+- `git` requires a clean local tree, then clones or refreshes `remote.origin.url` on the runner and checks out local `HEAD` detached. Use this only when the runner is allowed to fetch the remote directly.
+
+Private/proxied sources:
+
+- Private or proxy-dependent source access stays on the controller machine.
+- Materialize those sources with `homeboy runner workspace sync <runner-id> --path <local-worktree> --mode snapshot`.
+- Use the returned `remote_path` for downstream `runner exec --cwd` or job inputs.
+- Runner-side Git fetches for configured private/proxied hosts are refused with an actionable diagnostic. The default host list includes `github.a8c.com`; override with `HOMEBOY_PRIVATE_PROXIED_SOURCE_HOSTS` only when a runner is explicitly allowed to fetch those sources.
 
 Safety rules:
 
