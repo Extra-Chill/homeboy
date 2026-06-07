@@ -203,7 +203,8 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     provider_plugin_paths: config.provider_plugin_paths || options.providerPluginPaths || defaults.providerPluginPaths || [],
     agent_bundles: config.agent_bundles || config.agentBundles || options.agentBundles || [],
     runtime_stack_mounts: config.runtime_stack_mounts || options.runtimeStackMounts || [],
-    runtime_overlays: config.runtime_overlays || options.runtimeOverlays || defaults.runtimeOverlays || [],
+    runtime_overlay_profiles: config.runtime_overlay_profiles || config.runtimeOverlayProfiles || options.runtimeOverlayProfiles || defaults.runtimeOverlayProfiles || [],
+    runtime_overlays: config.runtime_overlays || options.runtimeOverlays || [],
     secret_env: config.secret_env || options.secretEnv || defaults.secretEnv || [],
     mounts,
     workspaces: inputs.workspaces || config.workspaces || options.workspaces || defaults.workspaces || [],
@@ -272,7 +273,6 @@ function defaultCodeboxRuntimeConfig(request, config, inputs, options = {}) {
   );
   const provider = config.provider || options.provider || defaultProvider(settings, providerPluginPath);
   const model = config.model || options.model || defaultModelForProvider(provider, settings);
-  const phpAiClientPath = defaultPhpAiClientPath(provider, settings, workspaceBase);
   const agentsApiPath = firstExistingPath(
     options.agentsApi,
     settings.wp_codebox_agents_api_path,
@@ -285,11 +285,11 @@ function defaultCodeboxRuntimeConfig(request, config, inputs, options = {}) {
     agentsApi: agentsApiPath,
     legacyRuntime: dataMachinePath,
     legacyRuntimeTools: dataMachineCodePath,
-    providerPluginPaths: defaultProviderPluginPaths(provider, settings, workspaceBase, providerPluginPath),
+    providerPluginPaths: defaultProviderPluginPaths(provider, settings, providerPluginPath),
     provider,
     model,
     secretEnv: defaultSecretEnv(provider, settings),
-    runtimeOverlays: defaultRuntimeOverlays(provider, phpAiClientPath),
+    runtimeOverlayProfiles: defaultRuntimeOverlayProfiles(provider),
     mounts: defaultWorkspaceMounts(workspaceRoot, request, config, inputs, options),
     workspaces: defaultWorkspaces(config, inputs, options),
     allowedTools: defaultWorkspaceAllowedTools(workspaceRoot),
@@ -297,47 +297,19 @@ function defaultCodeboxRuntimeConfig(request, config, inputs, options = {}) {
   };
 }
 
-function defaultProviderPluginPaths(provider, settings, workspaceBase, fallbackProviderPluginPath) {
+function defaultProviderPluginPaths(provider, settings, fallbackProviderPluginPath) {
   const explicit = normalizeArray(settings.wp_codebox_provider_plugin_paths || settings.provider_plugin_paths);
   if (explicit.length > 0) {
     return explicit;
   }
   if (provider === 'codex') {
-    return normalizeArray(firstExistingPath(
-      settings.wp_codebox_codex_provider_plugin_path,
-      process.env.HOMEBOY_WP_CODEBOX_CODEX_PROVIDER_PLUGIN_PATH,
-      siblingPath(workspaceBase, 'ai-provider-for-openai@codex-oauth-provider'),
-      fallbackProviderPluginPath,
-    ));
+    return [];
   }
   return fallbackProviderPluginPath ? [fallbackProviderPluginPath] : [];
 }
 
-function defaultPhpAiClientPath(provider, settings, workspaceBase) {
-  if (provider !== 'codex') {
-    return '';
-  }
-  return firstExistingPath(
-    settings.wp_codebox_php_ai_client_path,
-    settings.php_ai_client_path,
-    process.env.HOMEBOY_WP_CODEBOX_PHP_AI_CLIENT_PATH,
-    siblingPath(workspaceBase, 'php-ai-client@custom-provider-auth'),
-    siblingPath(workspaceBase, 'php-ai-client'),
-  );
-}
-
-function defaultRuntimeOverlays(provider, phpAiClientPath) {
-  if (provider !== 'codex' || !phpAiClientPath) {
-    return [];
-  }
-  return [{
-    kind: 'bundled-library',
-    library: 'php-ai-client',
-    source: phpAiClientPath,
-    target: '/wordpress/wp-includes/php-ai-client',
-    strategy: 'wordpress-scoped-bundle',
-    metadata: { component: 'php-ai-client', ref: 'custom-provider-auth' },
-  }];
+function defaultRuntimeOverlayProfiles(provider) {
+  return provider === 'codex' ? ['codex-subscription'] : [];
 }
 
 function firstDefined(...values) {
