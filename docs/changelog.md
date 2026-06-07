@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.222.9] - 2026-06-07
+
+### Changed
+- Refine preview lifecycle artifact metadata
+- Harden managed preview artifact contract
+- Use neutral core audit examples
+- Add managed service preview artifacts
+- Add comparison preview links
+
 ## [0.222.8] - 2026-06-07
 
 ### Changed
