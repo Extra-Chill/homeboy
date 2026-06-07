@@ -1,4 +1,4 @@
-use super::BenchArtifact;
+use super::{BenchArtifact, BenchPreviewLifecycleMetadata};
 
 #[test]
 fn bench_artifact_serializes_optional_fields_when_present() {
@@ -68,12 +68,14 @@ fn bench_artifact_serializes_preview_metadata_when_present() {
         public_url: Some("https://preview.example.test/".to_string()),
         local_url: Some("http://127.0.0.1:8080".to_string()),
         status: Some("running".to_string()),
-        expires_at: Some("2026-06-08T12:00:00Z".to_string()),
-        cleanup_status: Some("pending".to_string()),
-        service_lifecycle: Some(serde_json::json!({ "service_id": "site-preview" })),
-        browser_origin_evidence: Some(serde_json::json!({
-            "browser_effective_origin": "https://preview.example.test/"
-        })),
+        preview_lifecycle: BenchPreviewLifecycleMetadata {
+            expires_at: Some("2026-06-08T12:00:00Z".to_string()),
+            cleanup_status: Some("pending".to_string()),
+            service_lifecycle: Some(serde_json::json!({ "service_id": "site-preview" })),
+            browser_origin_evidence: Some(serde_json::json!({
+                "browser_effective_origin": "https://preview.example.test/"
+            })),
+        },
         ..BenchArtifact::default()
     };
 

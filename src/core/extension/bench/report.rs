@@ -2,7 +2,7 @@
 
 use serde::Serialize;
 
-use super::artifact::BenchArtifact;
+use super::artifact::{BenchArtifact, BenchPreviewLifecycleMetadata};
 use super::baseline::BenchBaselineComparison;
 use super::diagnostic::BenchDiagnostic;
 use super::parsing::BenchResults;
@@ -144,14 +144,8 @@ pub struct BenchArtifactRef {
     pub local_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub expires_at: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cleanup_status: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub service_lifecycle: Option<serde_json::Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub browser_origin_evidence: Option<serde_json::Value>,
+    #[serde(flatten)]
+    pub preview_lifecycle: BenchPreviewLifecycleMetadata,
 }
 
 pub(crate) fn collect_artifacts(results: &BenchResults) -> Vec<BenchArtifactRef> {
@@ -195,10 +189,7 @@ fn artifact_ref(
         public_url: artifact.public_url.clone(),
         local_url: artifact.local_url.clone(),
         status: artifact.status.clone(),
-        expires_at: artifact.expires_at.clone(),
-        cleanup_status: artifact.cleanup_status.clone(),
-        service_lifecycle: artifact.service_lifecycle.clone(),
-        browser_origin_evidence: artifact.browser_origin_evidence.clone(),
+        preview_lifecycle: artifact.preview_lifecycle.clone(),
     }
 }
 

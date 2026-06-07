@@ -1,5 +1,6 @@
 use serde::Serialize;
 
+use super::artifact::BenchPreviewLifecycleMetadata;
 use super::parsing::BenchResults;
 use super::report::{comparison_metrics, BenchArtifactRef, RigBenchEntry};
 
@@ -64,14 +65,8 @@ pub struct BenchSideBySidePreviewLink {
     pub local_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub expires_at: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cleanup_status: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub service_lifecycle: Option<serde_json::Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub browser_origin_evidence: Option<serde_json::Value>,
+    #[serde(flatten)]
+    pub preview_lifecycle: BenchPreviewLifecycleMetadata,
 }
 
 pub(super) fn build_side_by_side_report(
@@ -186,10 +181,7 @@ fn side_by_side_preview_link(
         url,
         local_url: artifact.local_url.clone(),
         status: artifact.status.clone(),
-        expires_at: artifact.expires_at.clone(),
-        cleanup_status: artifact.cleanup_status.clone(),
-        service_lifecycle: artifact.service_lifecycle.clone(),
-        browser_origin_evidence: artifact.browser_origin_evidence.clone(),
+        preview_lifecycle: artifact.preview_lifecycle.clone(),
     })
 }
 
@@ -198,10 +190,10 @@ fn is_preview_artifact(artifact: &BenchArtifactRef) -> bool {
         || artifact.public_url.is_some()
         || artifact.local_url.is_some()
         || artifact.status.is_some()
-        || artifact.expires_at.is_some()
-        || artifact.cleanup_status.is_some()
-        || artifact.service_lifecycle.is_some()
-        || artifact.browser_origin_evidence.is_some()
+        || artifact.preview_lifecycle.expires_at.is_some()
+        || artifact.preview_lifecycle.cleanup_status.is_some()
+        || artifact.preview_lifecycle.service_lifecycle.is_some()
+        || artifact.preview_lifecycle.browser_origin_evidence.is_some()
         || artifact.kind.as_deref() == Some("preview")
         || artifact.artifact_type.as_deref() == Some("preview")
         || artifact.name == "preview"

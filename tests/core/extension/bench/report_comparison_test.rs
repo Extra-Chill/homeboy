@@ -5,7 +5,7 @@ use super::{
     aggregate_comparison, aggregate_comparison_with_axes, BenchComparisonDiff, BenchPhaseGroups,
     RigBenchEntry,
 };
-use crate::core::extension::bench::artifact::BenchArtifact;
+use crate::core::extension::bench::artifact::{BenchArtifact, BenchPreviewLifecycleMetadata};
 use crate::core::extension::bench::diagnostic::{BenchDiagnostic, BenchDiagnosticSource};
 use crate::core::extension::bench::distribution::BenchRunDistribution;
 use crate::core::extension::bench::parsing::{
@@ -170,17 +170,19 @@ mod fixtures {
             public_url: Some(preview_url.to_string()),
             local_url: Some("http://127.0.0.1:8080".to_string()),
             status: Some(status.to_string()),
-            expires_at: expires_at.map(str::to_string),
-            cleanup_status: Some("pending".to_string()),
-            service_lifecycle: Some(serde_json::json!({
-                "service_id": "site-preview",
-                "lifecycle": status,
-                "running": status == "running"
-            })),
-            browser_origin_evidence: Some(serde_json::json!({
-                "browser_effective_origin": preview_url,
-                "window_is_secure_context": true
-            })),
+            preview_lifecycle: BenchPreviewLifecycleMetadata {
+                expires_at: expires_at.map(str::to_string),
+                cleanup_status: Some("pending".to_string()),
+                service_lifecycle: Some(serde_json::json!({
+                    "service_id": "site-preview",
+                    "lifecycle": status,
+                    "running": status == "running"
+                })),
+                browser_origin_evidence: Some(serde_json::json!({
+                    "browser_effective_origin": preview_url,
+                    "window_is_secure_context": true
+                })),
+            },
         }
     }
 
@@ -280,11 +282,15 @@ fn comparison_side_by_side_renders_baseline_and_candidate_preview_links() {
         "https://baseline-preview.example.test/"
     );
     assert_eq!(
-        report.rigs[0].preview_links[0].expires_at.as_deref(),
+        report.rigs[0].preview_links[0]
+            .preview_lifecycle
+            .expires_at
+            .as_deref(),
         Some("2026-06-08T12:00:00Z")
     );
     assert_eq!(
         report.rigs[0].preview_links[0]
+            .preview_lifecycle
             .service_lifecycle
             .as_ref()
             .unwrap()["service_id"],
@@ -292,6 +298,7 @@ fn comparison_side_by_side_renders_baseline_and_candidate_preview_links() {
     );
     assert_eq!(
         report.rigs[0].preview_links[0]
+            .preview_lifecycle
             .browser_origin_evidence
             .as_ref()
             .unwrap()["window_is_secure_context"],
