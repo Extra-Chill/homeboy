@@ -1,20 +1,21 @@
 use clap::Args;
 use serde_json::Value;
 
-use homeboy::core::agent_task::AgentTaskAggregateReport;
+use homeboy::core::agent_task::{AgentTaskAggregateReport, AgentTaskRequest};
+use homeboy::core::agent_task_cook_loop::{evaluate_cook_loop, AgentTaskCookLoopOptions};
 use homeboy::core::agent_task_finalization::{
     finalize_pr, AgentTaskGateResult, AgentTaskPrEvidence, AgentTaskPrFinalizationOptions,
 };
 use homeboy::core::agent_task_lifecycle;
 use homeboy::core::agent_task_promotion::{
-    promote, AgentTaskPromotionOptions, AgentTaskPromotionStatus,
+    promote, AgentTaskPromotionOptions, AgentTaskPromotionReport, AgentTaskPromotionStatus,
 };
 use homeboy::core::agent_task_provider::ExtensionProviderAgentTaskExecutor;
 use homeboy::core::agent_task_scheduler::AgentTaskAggregate;
 use homeboy::core::config;
 
 use super::super::CmdResult;
-use super::{FinalizePrArgs, PromoteArgs, ReviewArgs};
+use super::{FinalizePrArgs, GateFeedbackArgs, PromoteArgs, ReviewArgs};
 
 #[derive(Args, Debug)]
 pub struct FinalizePrEvidenceArgs {
@@ -139,6 +140,44 @@ pub(crate) fn finalize_pull_request(args: FinalizePrArgs) -> CmdResult<Value> {
         serde_json::to_value(report).unwrap_or(Value::Null),
         exit_code,
     ))
+}
+
+pub(crate) fn gate_feedback(args: GateFeedbackArgs) -> CmdResult<Value> {
+    let promotion_raw = config::read_json_spec_to_string(&args.promotion)?;
+    let source_task_raw = config::read_json_spec_to_string(&args.source_task)?;
+    let promotion_report: AgentTaskPromotionReport =
+        serde_json::from_str(&promotion_raw).map_err(|error| {
+            homeboy::core::Error::validation_invalid_json(
+                error,
+                Some("agent-task promotion report".to_string()),
+                Some(promotion_raw.clone()),
+            )
+        })?;
+    let source_request: AgentTaskRequest =
+        serde_json::from_str(&source_task_raw).map_err(|error| {
+            homeboy::core::Error::validation_invalid_json(
+                error,
+                Some("agent-task source request".to_string()),
+                Some(source_task_raw.clone()),
+            )
+        })?;
+    let current_diff = args
+        .current_diff
+        .as_deref()
+        .map(config::read_json_spec_to_string)
+        .transpose()?
+        .unwrap_or_default();
+    let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
+        source_request,
+        promotion_report,
+        attempt: args.attempt,
+        max_attempts: args.max_attempts.max(1),
+        source_run_id: args.source_run_id,
+        current_diff,
+        metadata: Value::Null,
+    });
+
+    Ok((serde_json::to_value(report).unwrap_or(Value::Null), 0))
 }
 
 pub(crate) fn providers() -> CmdResult<Value> {

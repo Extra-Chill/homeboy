@@ -117,6 +117,26 @@ set promotion `status: "gate_failed"`, exit nonzero, and include
 `failure_evidence.agent_feedback` plus stdout/stderr tails so the next cook-loop
 agent task can receive exact failure context instead of a generic shell error.
 
+`agent-task gate-feedback` converts a promotion report and the original
+`AgentTaskRequest` into a provider-neutral cook-loop decision:
+
+```bash
+homeboy agent-task gate-feedback \
+  --promotion @promotion.json \
+  --source-task @source-task.json \
+  --source-run-id "$run_id" \
+  --attempt 1 \
+  --max-attempts 3 \
+  --current-diff @current.diff
+```
+
+The command returns `homeboy/agent-task-cook-loop-report/v1`. Red gates with
+remaining budget produce `status: "retry_requested"` and a complete
+`follow_up_request` containing the failed command, exit status, log tails,
+changed files, patch artifact ref, current diff context, and source run/task
+refs. Red gates with exhausted budget return `status: "retries_exhausted"`.
+Green promotion returns `status: "green_completed"` and no follow-up task.
+
 Queued runs that should not execute can be cancelled without chat/session state:
 
 ```bash
