@@ -363,9 +363,7 @@ try {
   const dataMachineCodePath = path.join(defaultsRoot, 'data-machine-code');
   const staleStandaloneAgentsApiPath = path.join(defaultsRoot, 'agents-api');
   const providerPath = path.join(defaultsRoot, 'ai-provider-for-openai');
-  const codexProviderPath = path.join(defaultsRoot, 'ai-provider-for-openai@codex-oauth-provider');
-  const phpAiClientPath = path.join(defaultsRoot, 'php-ai-client@custom-provider-auth');
-  for (const directory of [workspaceRoot, bundledAgentsApiPath, dataMachineCodePath, staleStandaloneAgentsApiPath, providerPath, codexProviderPath, phpAiClientPath]) {
+  for (const directory of [workspaceRoot, bundledAgentsApiPath, dataMachineCodePath, staleStandaloneAgentsApiPath, providerPath]) {
     fs.mkdirSync(directory, { recursive: true });
   }
 
@@ -386,15 +384,9 @@ try {
   assert.equal(defaultedRequest.runtime_component_paths.agents_api, bundledAgentsApiPath);
   assert.equal(defaultedRequest.runtime_component_paths.agent_runtime, dataMachinePath);
   assert.equal(defaultedRequest.runtime_component_paths.agent_runtime_tools, dataMachineCodePath);
-  assert.deepEqual(defaultedRequest.provider_plugin_paths, [codexProviderPath]);
-  assert.deepEqual(defaultedRequest.runtime_overlays, [{
-    kind: 'bundled-library',
-    library: 'php-ai-client',
-    source: phpAiClientPath,
-    target: '/wordpress/wp-includes/php-ai-client',
-    strategy: 'wordpress-scoped-bundle',
-    metadata: { component: 'php-ai-client', ref: 'custom-provider-auth' },
-  }]);
+  assert.deepEqual(defaultedRequest.provider_plugin_paths, []);
+  assert.deepEqual(defaultedRequest.runtime_overlay_profiles, ['codex-subscription']);
+  assert.deepEqual(defaultedRequest.runtime_overlays, []);
   assert.deepEqual(defaultedRequest.secret_env, [
     'AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN',
     'AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN',
@@ -433,8 +425,9 @@ try {
   });
   assert.equal(codexSubscriptionDefaultedRequest.provider, 'codex');
   assert.equal(codexSubscriptionDefaultedRequest.model, 'gpt-5.5');
-  assert.deepEqual(codexSubscriptionDefaultedRequest.provider_plugin_paths, [codexProviderPath]);
-  assert.equal(codexSubscriptionDefaultedRequest.runtime_overlays[0].source, phpAiClientPath);
+  assert.deepEqual(codexSubscriptionDefaultedRequest.provider_plugin_paths, []);
+  assert.deepEqual(codexSubscriptionDefaultedRequest.runtime_overlay_profiles, ['codex-subscription']);
+  assert.deepEqual(codexSubscriptionDefaultedRequest.runtime_overlays, []);
   assert.deepEqual(codexSubscriptionDefaultedRequest.secret_env, codexSecretEnv);
 
   const openAiDefaultedRequest = codeboxTaskRequestFromAgentTaskRequest({
