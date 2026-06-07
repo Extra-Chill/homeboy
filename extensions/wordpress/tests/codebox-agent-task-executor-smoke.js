@@ -387,6 +387,24 @@ try {
   assert(!JSON.stringify(defaultedRequest).includes(staleStandaloneAgentsApiPath));
   assert(!JSON.stringify(defaultedRequest).includes(alternateBundledAgentsApiPath));
 
+  const openAiDefaultedRequest = codeboxTaskRequestFromAgentTaskRequest({
+    ...request,
+    task_id: 'default-openai-provider-task-123',
+    executor: {
+      backend: 'codebox',
+      model: 'gpt-4.1-mini',
+      config: {},
+    },
+    inputs: {
+      target: { root: workspaceRoot },
+    },
+  }, {
+    settings: {},
+  });
+  assert.equal(openAiDefaultedRequest.provider, 'openai');
+  assert.equal(openAiDefaultedRequest.model, 'gpt-4.1-mini');
+  assert.deepEqual(openAiDefaultedRequest.secret_env, ['OPENAI_API_KEY']);
+
   fs.rmSync(bundledAgentsApiPath, { recursive: true, force: true });
   fs.mkdirSync(alternateBundledAgentsApiPath, { recursive: true });
   const alternateDefaultedRequest = codeboxTaskRequestFromAgentTaskRequest({
