@@ -17,11 +17,14 @@ const {
 	WORDPRESS_ADMIN_PAGE_SCENARIO_IDS,
 	WORDPRESS_ADMIN_PAGE_PROFILE_SCENARIO_IDS,
 	WORDPRESS_ADMIN_PAGE_SCENARIOS,
+	WORDPRESS_ADMIN_SCALE_SWEEP_DEFAULT_PAGES,
 	WORDPRESS_RESOURCE_INCLUDE,
 	createWordPressAdminPageScenarioMetrics,
 	createWordPressAdminPageScenarioManifest,
 	getWordPressAdminPageScenario,
 	listWordPressAdminPageScenarios,
+	loadWordPressAdminScaleSweepManifest,
+	normalizeWordPressAdminScaleSweepManifest,
 	normalizeWordPressAdminPageScenarioInput,
 	normalizePageManifest,
 	profileWordPressAdminPageScenario,
@@ -120,6 +123,7 @@ const expectedIds = [
 assert.deepEqual(WORDPRESS_ADMIN_PAGE_SCENARIO_IDS, expectedIds);
 assert.deepEqual(WORDPRESS_ADMIN_PAGE_PROFILE_SCENARIO_IDS, ['dashboard', 'add-themes', 'site-editor-root']);
 assert.equal(WORDPRESS_ADMIN_PAGE_SCENARIOS.length, expectedIds.length);
+assert.deepEqual(WORDPRESS_ADMIN_SCALE_SWEEP_DEFAULT_PAGES.map((page) => page.id), ['dashboard', 'plugins', 'themes', 'posts', 'add-post']);
 
 for (const scenario of WORDPRESS_ADMIN_PAGE_SCENARIOS) {
 	assert.equal(typeof scenario.id, 'string');
@@ -197,9 +201,41 @@ assert.deepEqual(manifest.pages.map((scenario) => scenario.id), ['dashboard', 'a
 assert.equal(manifest.pages[3].restObservationMs, 0);
 assert.equal(normalizePageManifest(manifest).length, 4);
 
+const scaleSweepManifest = normalizeWordPressAdminScaleSweepManifest({
+	pages: [
+		{ path: '/wp-admin/admin.php?page=custom-settings' },
+		{ id: 'custom-metric', metricId: 'explicit_metric', path: '/wp-admin/tools.php', interactions: [{ type: 'click', selector: '#submit' }] },
+	],
+});
+assert.deepEqual(scaleSweepManifest.pages.map((page) => page.id), ['wp-admin-admin.php-page-custom-settings', 'custom-metric']);
+assert.equal(scaleSweepManifest.pages[0].metricId, 'wp_admin_admin_php_page_custom_settings');
+assert.equal(scaleSweepManifest.pages[0].label, 'wp-admin-admin.php-page-custom-settings');
+assert.equal(scaleSweepManifest.pages[0].ready.selector, '#wpbody-content, body.wp-admin');
+assert.equal(scaleSweepManifest.pages[0].timeout, 120000);
+assert.deepEqual(scaleSweepManifest.pages[0].interactions, []);
+assert.equal(scaleSweepManifest.pages[0].resources.includeResourceSubstrings.includes('/wp-json/'), true);
+assert.equal(scaleSweepManifest.pages[1].metricId, 'explicit_metric');
+assert.equal(scaleSweepManifest.pages[1].interactions.length, 1);
+assert.deepEqual(normalizeWordPressAdminScaleSweepManifest({ pages: [{ path: '/wp-admin/index.php' }] }, {
+	pageProfiler: { DEFAULT_RESOURCE_INCLUDE: ['/custom-resource/'] },
+}).pages[0].resources.includeResourceSubstrings, ['/custom-resource/']);
+
 assert.throws(() => getWordPressAdminPageScenario('missing'), /Unknown WordPress admin page scenario/);
 
 async function main() {
+	const defaultScaleSweepManifest = await loadWordPressAdminScaleSweepManifest();
+	assert.deepEqual(defaultScaleSweepManifest.pages.map((page) => page.id), ['dashboard', 'plugins', 'themes', 'posts', 'add-post']);
+
+	const manifestPath = path.join(os.tmpdir(), `homeboy-admin-scale-sweep-${process.pid}.json`);
+	try {
+		writeJson(manifestPath, { pages: [{ id: 'tools', path: '/wp-admin/tools.php' }] });
+		const loadedScaleSweepManifest = await loadWordPressAdminScaleSweepManifest({ path: manifestPath });
+		assert.deepEqual(loadedScaleSweepManifest.pages.map((page) => page.id), ['tools']);
+		assert.equal(loadedScaleSweepManifest.pages[0].metricId, 'tools');
+	} finally {
+		fs.rmSync(manifestPath, { force: true });
+	}
+
 	const marks = [];
 	const page = new FakePage([
 		{ name: 'https://example.test/wp-admin/load-styles.php', startTime: 1, duration: 10 },
