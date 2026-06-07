@@ -35,12 +35,35 @@ install_wp_codebox() {
         return 0
     }
 
+    # Re-derive the core runtime module from the deterministic install
+    # locations on disk. The CLI binary is persisted across GitHub Actions
+    # steps via GITHUB_ENV, but HOMEBOY_WP_CODEBOX_CORE_MODULE does not always
+    # survive process/step boundaries (e.g. `homeboy extension setup` runs in a
+    # child process, and a cached bin can be picked up in a later step where the
+    # earlier export is gone). The recipe loader hard-fails without the module,
+    # so probe the known on-disk paths instead of trusting the env var.
+    resolve_core_module_from_known_locations() {
+        local probe_root="${HOMEBOY_WP_CODEBOX_INSTALL_DIR:-${HOME}/.cache/homeboy/wp-codebox}"
+        local candidate
+        for candidate in \
+            "${HOMEBOY_WP_CODEBOX_CORE_MODULE:-}" \
+            "${probe_root}/source/packages/runtime-core/dist/index.js" \
+            "${probe_root}/source/node_modules/@automattic/wp-codebox-core/dist/index.js" \
+            "${probe_root}/release/wp-codebox-cli/packages/runtime-core/dist/index.js" \
+            "${probe_root}/release/wp-codebox-cli/node_modules/@automattic/wp-codebox-core/dist/index.js"; do
+            if [ -n "${candidate}" ] && configure_core_module "${candidate}"; then
+                return 0
+            fi
+        done
+        return 1
+    }
+
     if [ -n "${HOMEBOY_WP_CODEBOX_BIN:-}" ] && [ -x "${HOMEBOY_WP_CODEBOX_BIN}" ]; then
         echo "WP Codebox already configured: ${HOMEBOY_WP_CODEBOX_BIN}"
-        if [ -n "${HOMEBOY_WP_CODEBOX_CORE_MODULE:-}" ] && configure_core_module "${HOMEBOY_WP_CODEBOX_CORE_MODULE}"; then
+        if resolve_core_module_from_known_locations; then
             return 0
         fi
-        echo "WP Codebox CLI is configured without a runtime core module; installing source module" >&2
+        echo "WP Codebox CLI is configured without a runtime core module; (re)installing source module" >&2
     fi
 
     if command -v wp-codebox >/dev/null 2>&1; then
@@ -48,10 +71,10 @@ install_wp_codebox() {
         detected_bin="$(command -v wp-codebox)"
         echo "WP Codebox already available: ${detected_bin}"
         write_github_env "HOMEBOY_WP_CODEBOX_BIN" "${detected_bin}"
-        if [ -n "${HOMEBOY_WP_CODEBOX_CORE_MODULE:-}" ] && configure_core_module "${HOMEBOY_WP_CODEBOX_CORE_MODULE}"; then
+        if resolve_core_module_from_known_locations; then
             return 0
         fi
-        echo "WP Codebox CLI is available without a runtime core module; installing source module" >&2
+        echo "WP Codebox CLI is available without a runtime core module; (re)installing source module" >&2
     fi
 
     local install_mode install_root bin_dir bin_path platform arch artifact_name download_url artifact_path extract_dir
