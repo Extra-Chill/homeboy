@@ -7,8 +7,10 @@ use crate::core::rig::expand::{expand_resources, expand_vars};
 use crate::core::rig::spec::{
     ComponentSpec, DiscoverSpec, RigSpec, ServiceKind, ServiceSpec, SymlinkSpec,
 };
+use crate::core::paths;
 use crate::test_support::with_isolated_home;
 use std::collections::HashMap;
+use std::fs;
 
 fn rig_with(id: &str, components: HashMap<String, ComponentSpec>) -> RigSpec {
     RigSpec {
@@ -59,6 +61,52 @@ fn test_expand_vars_component_path() {
         expand_vars(&rig, "${components.studio.path}/dist"),
         "/tmp/studio/dist"
     );
+}
+
+#[test]
+fn test_expand_vars_package_root_from_installed_source_metadata() {
+    with_isolated_home(|home| {
+        let package_root = home.path().join("rig-packages/studio-web");
+        let metadata_dir = paths::rig_sources().expect("rig sources dir");
+        fs::create_dir_all(&metadata_dir).expect("mkdir rig sources");
+        fs::write(
+            metadata_dir.join("studio-web-product-matrix.json"),
+            serde_json::json!({
+                "source": package_root,
+                "package_path": package_root,
+                "rig_path": package_root.join("rigs/studio-web-product-matrix/rig.json"),
+                "discovery_path": package_root,
+                "linked": true,
+                "source_revision": null
+            })
+            .to_string(),
+        )
+        .expect("write rig source metadata");
+
+        let mut components = HashMap::new();
+        components.insert(
+            "studio-web".to_string(),
+            ComponentSpec {
+                path: "${package.root}".to_string(),
+                checkout_root: None,
+                remote_url: None,
+                triage_remote_url: None,
+                stack: None,
+                branch: None,
+                extensions: None,
+            },
+        );
+        let rig = rig_with("studio-web-product-matrix", components);
+
+        assert_eq!(
+            expand_vars(&rig, "${package.root}/scripts/workflow-bench.mjs"),
+            package_root.join("scripts/workflow-bench.mjs").to_string_lossy()
+        );
+        assert_eq!(
+            expand_vars(&rig, "${components.studio-web.path}/bench"),
+            package_root.join("bench").to_string_lossy()
+        );
+    });
 }
 
 #[test]
