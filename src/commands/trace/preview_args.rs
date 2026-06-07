@@ -54,8 +54,8 @@ fn expand_trace_public_preview(
     };
     rig::TracePublicPreviewSpec {
         local_origin: expand(&spec.local_origin),
-        public_origin: spec.public_origin.as_deref().map(|value| expand(value)),
-        command: spec.command.as_deref().map(|value| expand(value)),
+        public_origin: spec.public_origin.as_deref().map(&expand),
+        command: spec.command.as_deref().map(expand),
         require_https: spec.require_https,
         provider: spec.provider.clone(),
         startup_timeout_seconds: spec.startup_timeout_seconds,
