@@ -4,7 +4,9 @@ use serde_json::{json, Value};
 use std::path::PathBuf;
 use uuid::Uuid;
 
-use crate::core::agent_task::{AgentTaskArtifact, AgentTaskEvidenceRef, AgentTaskOutcome};
+use crate::core::agent_task::{
+    AgentTaskArtifact, AgentTaskEvidenceRef, AgentTaskExecutionHandle, AgentTaskOutcome,
+};
 use crate::core::agent_task_scheduler::{
     AgentTaskAggregate, AgentTaskPlan, AgentTaskProgressEvent, AgentTaskState,
 };
@@ -39,6 +41,8 @@ pub struct AgentTaskRunRecord {
     pub tasks: Vec<AgentTaskRunTask>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifact_refs: Vec<AgentTaskArtifactRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provider_handles: Vec<AgentTaskRunProviderHandle>,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub metadata: Value,
 }
@@ -126,6 +130,19 @@ pub struct AgentTaskArtifactRef {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentTaskRunProviderHandle {
+    pub task_id: String,
+    pub backend: String,
+    pub provider_run_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_uri: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<AgentTaskState>,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub metadata: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgentTaskRunLog {
     pub schema: String,
     pub run_id: String,
@@ -161,6 +178,7 @@ pub fn submit_plan(
         totals: None,
         tasks: plan.tasks.iter().map(queued_task).collect(),
         artifact_refs: Vec::new(),
+        provider_handles: Vec::new(),
         metadata: json!({
             "task_count": plan.tasks.len(),
             "max_concurrency": plan.options.max_concurrency,
@@ -290,6 +308,14 @@ fn apply_aggregate_to_record(
     record.totals = Some(aggregate.totals.clone());
     record.tasks = tasks_for_aggregate(plan, aggregate);
     record.artifact_refs = artifact_refs_for_outcomes(&aggregate.outcomes);
+    record.provider_handles = provider_handles_for_outcomes(&aggregate.outcomes);
+    let provider_run_ids: Vec<String> = record
+        .provider_handles
+        .iter()
+        .map(|handle| handle.provider_run_id.clone())
+        .collect();
+    let metadata = record.ensure_metadata_object();
+    metadata.insert("provider_run_ids".to_string(), json!(provider_run_ids));
 }
 
 pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
@@ -316,6 +342,88 @@ pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
     }
     record.annotate_stale_running();
     Ok(record)
+}
+
+pub fn cancel(run_id: &str) -> Result<AgentTaskRunRecord> {
+    let mut record = store::read_record(&sanitize_run_id(run_id))?;
+    if matches!(
+        record.state,
+        AgentTaskRunState::Succeeded
+            | AgentTaskRunState::PartialFailure
+            | AgentTaskRunState::Failed
+            | AgentTaskRunState::Cancelled
+    ) {
+        return Err(Error::validation_invalid_argument(
+            "run_id",
+            format!(
+                "agent-task run '{}' is already terminal with state {:?}",
+                record.run_id, record.state
+            ),
+            Some(record.run_id),
+            None,
+        ));
+    }
+
+    record.state = AgentTaskRunState::Cancelled;
+    record.updated_at = Some(now_timestamp());
+    for task in &mut record.tasks {
+        if matches!(task.state, AgentTaskState::Queued | AgentTaskState::Running) {
+            task.state = AgentTaskState::Cancelled;
+        }
+    }
+    for handle in &mut record.provider_handles {
+        if !matches!(
+            handle.state,
+            Some(AgentTaskState::Succeeded | AgentTaskState::Failed | AgentTaskState::Cancelled)
+        ) {
+            handle.state = Some(AgentTaskState::Cancelled);
+        }
+    }
+    let metadata = record.ensure_metadata_object();
+    metadata.insert("cancel_requested_at".to_string(), json!(now_timestamp()));
+    metadata.insert(
+        "cancel_note".to_string(),
+        json!("provider-specific cancellation is delegated through opaque provider handles"),
+    );
+    store::write_record(&record)?;
+    Ok(record)
+}
+
+pub fn mark_resuming(run_id: &str) -> Result<AgentTaskRunRecord> {
+    let mut record = store::read_record(&sanitize_run_id(run_id))?;
+    if matches!(
+        record.state,
+        AgentTaskRunState::Succeeded
+            | AgentTaskRunState::PartialFailure
+            | AgentTaskRunState::Failed
+            | AgentTaskRunState::Cancelled
+    ) {
+        return Err(Error::validation_invalid_argument(
+            "run_id",
+            format!(
+                "agent-task run '{}' is already terminal with state {:?}",
+                record.run_id, record.state
+            ),
+            Some(record.run_id),
+            None,
+        ));
+    }
+
+    let metadata = record.ensure_metadata_object();
+    metadata.insert("resume_requested_at".to_string(), json!(now_timestamp()));
+    store::write_record(&record)?;
+    mark_running(run_id)
+}
+
+pub fn retry(run_id: &str, requested_run_id: Option<&str>) -> Result<AgentTaskRunRecord> {
+    let source = store::read_record(&sanitize_run_id(run_id))?;
+    let plan = store::read_plan_path(&source.plan_path)?;
+    let mut retry = submit_plan(&plan, requested_run_id)?;
+    let metadata = retry.ensure_metadata_object();
+    metadata.insert("retry_of".to_string(), json!(source.run_id));
+    metadata.insert("retry_requested_at".to_string(), json!(now_timestamp()));
+    store::write_record(&retry)?;
+    Ok(retry)
 }
 
 pub fn logs(run_id: &str) -> Result<AgentTaskRunLog> {
@@ -464,6 +572,61 @@ fn artifact_refs_for_outcomes(outcomes: &[AgentTaskOutcome]) -> Vec<AgentTaskArt
         .collect()
 }
 
+fn provider_handles_for_outcomes(outcomes: &[AgentTaskOutcome]) -> Vec<AgentTaskRunProviderHandle> {
+    outcomes
+        .iter()
+        .flat_map(|outcome| provider_handles_for_outcome(outcome))
+        .collect()
+}
+
+fn provider_handles_for_outcome(outcome: &AgentTaskOutcome) -> Vec<AgentTaskRunProviderHandle> {
+    let mut handles = Vec::new();
+    if let Some(handle) = outcome
+        .metadata
+        .get("provider_handle")
+        .and_then(provider_handle_from_value)
+    {
+        handles.push(run_provider_handle(outcome, handle));
+    }
+    if let Some(values) = outcome
+        .metadata
+        .get("provider_handles")
+        .and_then(Value::as_array)
+    {
+        handles.extend(
+            values
+                .iter()
+                .filter_map(provider_handle_from_value)
+                .map(|handle| run_provider_handle(outcome, handle)),
+        );
+    }
+    handles
+}
+
+fn provider_handle_from_value(value: &Value) -> Option<AgentTaskExecutionHandle> {
+    serde_json::from_value(value.clone()).ok()
+}
+
+fn run_provider_handle(
+    outcome: &AgentTaskOutcome,
+    handle: AgentTaskExecutionHandle,
+) -> AgentTaskRunProviderHandle {
+    AgentTaskRunProviderHandle {
+        task_id: handle.task_id,
+        backend: handle.backend,
+        provider_run_id: handle.run_id,
+        stream_uri: handle.stream_uri,
+        state: Some(match outcome.status {
+            crate::core::agent_task::AgentTaskOutcomeStatus::Succeeded
+            | crate::core::agent_task::AgentTaskOutcomeStatus::NoOp => AgentTaskState::Succeeded,
+            crate::core::agent_task::AgentTaskOutcomeStatus::Timeout => AgentTaskState::TimedOut,
+            crate::core::agent_task::AgentTaskOutcomeStatus::Cancelled => AgentTaskState::Cancelled,
+            _ => AgentTaskState::Failed,
+        }),
+        metadata: handle.metadata,
+    }
+}
+
 fn run_state_for_aggregate(aggregate: &AgentTaskAggregate) -> AgentTaskRunState {
     match aggregate.status {
         crate::core::agent_task_scheduler::AgentTaskAggregateStatus::Succeeded => {
@@ -502,8 +665,8 @@ fn sanitize_run_id(run_id: &str) -> String {
 mod tests {
     use super::*;
     use crate::core::agent_task::{
-        AgentTaskExecutor, AgentTaskLimits, AgentTaskPolicy, AgentTaskRequest, AgentTaskWorkspace,
-        AGENT_TASK_REQUEST_SCHEMA,
+        AgentTaskExecutionHandle, AgentTaskExecutor, AgentTaskLimits, AgentTaskPolicy,
+        AgentTaskRequest, AgentTaskWorkspace, AGENT_TASK_REQUEST_SCHEMA,
     };
     use crate::core::agent_task_scheduler::{
         AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
@@ -616,6 +779,80 @@ mod tests {
             assert_eq!(durable_status.tasks[0].state, AgentTaskState::Succeeded);
             assert_eq!(durable_status.totals, Some(aggregate.totals.clone()));
             assert!(completed.aggregate_path.is_some());
+        });
+    }
+
+    #[test]
+    fn completed_run_persists_opaque_provider_handles_from_outcome_metadata() {
+        with_isolated_home(|_| {
+            let plan = test_plan();
+            let mut aggregate = succeeded_aggregate(&plan);
+            aggregate.outcomes[0].metadata = json!({
+                "provider_handle": AgentTaskExecutionHandle {
+                    task_id: "task-a".to_string(),
+                    backend: "codebox".to_string(),
+                    run_id: "provider-run-123".to_string(),
+                    stream_uri: Some("provider://runs/provider-run-123/events".to_string()),
+                    metadata: json!({ "opaque": { "provider_owned": true } }),
+                }
+            });
+
+            let record = record_completed_run(&plan, &aggregate, Some("run-provider-handle"))
+                .expect("recorded");
+
+            assert_eq!(record.provider_handles.len(), 1);
+            assert_eq!(record.provider_handles[0].task_id, "task-a");
+            assert_eq!(record.provider_handles[0].backend, "codebox");
+            assert_eq!(
+                record.provider_handles[0].provider_run_id,
+                "provider-run-123"
+            );
+            assert_eq!(
+                record.provider_handles[0].stream_uri.as_deref(),
+                Some("provider://runs/provider-run-123/events")
+            );
+            assert_eq!(
+                record.provider_handles[0].state,
+                Some(AgentTaskState::Succeeded)
+            );
+            assert_eq!(
+                record.provider_handles[0].metadata["opaque"]["provider_owned"],
+                json!(true)
+            );
+            assert_eq!(
+                record.metadata["provider_run_ids"],
+                json!(["provider-run-123"])
+            );
+        });
+    }
+
+    #[test]
+    fn cancel_marks_queued_run_and_tasks_cancelled() {
+        with_isolated_home(|_| {
+            let plan = test_plan();
+            submit_plan(&plan, Some("run-cancel")).expect("submitted");
+
+            let record = cancel("run-cancel").expect("cancelled");
+
+            assert_eq!(record.state, AgentTaskRunState::Cancelled);
+            assert_eq!(record.tasks[0].state, AgentTaskState::Cancelled);
+            assert!(record.metadata["cancel_requested_at"].is_string());
+        });
+    }
+
+    #[test]
+    fn retry_submits_new_run_from_existing_plan() {
+        with_isolated_home(|_| {
+            let plan = test_plan();
+            submit_plan(&plan, Some("run-original")).expect("submitted");
+
+            let record = retry("run-original", Some("run-retry")).expect("retry submitted");
+            let loaded_plan = load_plan("run-retry").expect("retry plan loaded");
+
+            assert_eq!(record.run_id, "run-retry");
+            assert_eq!(record.state, AgentTaskRunState::Queued);
+            assert_eq!(record.metadata["retry_of"], json!("run-original"));
+            assert_eq!(loaded_plan.plan_id, "plan-a");
         });
     }
 
