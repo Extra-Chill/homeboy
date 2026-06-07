@@ -1,7 +1,10 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use homeboy::commands::report::{browser_evidence_compare_from_args, BrowserEvidenceCompareArgs};
+use homeboy::commands::report::{
+    browser_evidence_compare_from_args, browser_evidence_compare_from_dirs,
+    BrowserEvidenceCompareArgs,
+};
 
 fn tmp_dir(name: &str) -> PathBuf {
     let nanos = std::time::SystemTime::now()
@@ -187,6 +190,53 @@ fn can_include_local_paths_when_requested() {
     let report = browser_evidence_compare_from_args(&args(&root, true)).expect("report renders");
 
     assert!(report.markdown.contains(root.to_string_lossy().as_ref()));
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn compares_browser_evidence_across_multiple_run_dirs() {
+    let root = tmp_dir("multi-dirs");
+    write_fixture_file(
+        &root.join("baseline-run-1"),
+        "browser.json",
+        r#"{"scenario_id":"checkout","profile":"throttled-mobile","browser_metrics":{"ready_ms":900}}"#,
+    );
+    write_fixture_file(
+        &root.join("baseline-run-2"),
+        "browser.json",
+        r#"{"scenario_id":"checkout","profile":"throttled-mobile","browser_metrics":{"ready_ms":1100}}"#,
+    );
+    write_fixture_file(
+        &root.join("candidate-run-1"),
+        "browser.json",
+        r#"{"scenario_id":"checkout","profile":"throttled-mobile","browser_metrics":{"ready_ms":700}}"#,
+    );
+    write_fixture_file(
+        &root.join("candidate-run-2"),
+        "browser.json",
+        r#"{"scenario_id":"checkout","profile":"throttled-mobile","browser_metrics":{"ready_ms":900}}"#,
+    );
+
+    let report = browser_evidence_compare_from_dirs(
+        &[root.join("baseline-run-1"), root.join("baseline-run-2")],
+        &[root.join("candidate-run-1"), root.join("candidate-run-2")],
+        "baseline-ref",
+        "candidate-ref",
+        false,
+    )
+    .expect("multi-dir report renders");
+
+    assert_eq!(report.totals.baseline_samples, 2);
+    assert_eq!(report.totals.candidate_samples, 2);
+    assert_eq!(report.variants.len(), 1);
+    assert_eq!(
+        report.variants[0].browser_metrics["ready_ms"].median_delta,
+        Some(-200.0)
+    );
+    assert!(report.markdown.contains("throttled-mobile"));
+    assert!(report.markdown.contains("baseline-ref"));
+    assert!(report.markdown.contains("candidate-ref"));
 
     let _ = fs::remove_dir_all(&root);
 }

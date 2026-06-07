@@ -12,8 +12,9 @@ pub use bench_coverage::{
     render_markdown as render_bench_coverage_markdown, BenchCoverageArgs, BenchCoverageReport,
 };
 pub use browser_evidence_compare::{
-    browser_evidence_compare_from_args, render_browser_evidence_compare_from_args,
-    BrowserEvidenceCompareArgs, BrowserEvidenceCompareReport,
+    browser_evidence_compare_from_args, browser_evidence_compare_from_dirs,
+    render_browser_evidence_compare_from_args, BrowserEvidenceCompareArgs,
+    BrowserEvidenceCompareReport,
 };
 pub use failure_digest::{render_failure_digest_from_args, FailureDigestArgs};
 pub use performance_digest::{
