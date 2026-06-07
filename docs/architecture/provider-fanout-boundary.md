@@ -20,6 +20,19 @@ Homeboy submits provider-neutral `AgentTaskRequest` tasks to an executor provide
 The provider may translate the task into any backend-specific single-task or
 fanout request, but Homeboy core does not depend on provider runtime field names.
 
+Homeboy's first-class fanout primitive is `AgentTaskFanoutPlan`, which wraps
+generic `AgentTaskRequest` tasks with a Homeboy-owned fanout id and one of two
+provider-neutral planes:
+
+- `isolated_tasks` for many isolated execution units scheduled under one fanout
+  id.
+- `workflow` for dependent task steps inside one logical execution unit.
+
+The fanout scheduler lowers both planes into `AgentTaskPlan`, reuses the generic
+agent-task scheduler for concurrency, retry, timeout, dependency, and
+backpressure behavior, then emits `AgentTaskFanoutAggregate` with the normalized
+schedule aggregate plus the generic reconciliation report.
+
 The provider returns a normalized `AgentTaskOutcome`:
 
 - `status`, `summary`, and `failure_classification` use Homeboy outcome values.

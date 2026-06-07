@@ -3,6 +3,7 @@
 pub mod config;
 pub mod agent_task;
 pub mod agent_task_aggregate;
+pub mod agent_task_fanout;
 pub mod agent_task_lifecycle;
 pub mod agent_task_promotion;
 pub mod agent_task_provider;
