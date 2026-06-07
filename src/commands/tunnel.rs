@@ -3,7 +3,8 @@ use serde::Serialize;
 
 use homeboy::core::tunnel::{
     self, ExposeServiceTunnelSpec, ServiceTunnel, ServiceTunnelAuth, ServiceTunnelAuthMode,
-    ServiceTunnelExposure, ServiceTunnelPolicy, ServiceTunnelStatus, ServiceTunnelTarget,
+    ServiceTunnelExposure, ServiceTunnelPolicy, ServiceTunnelPreviewPolicy,
+    ServiceTunnelPreviewPolicyMode, ServiceTunnelStatus, ServiceTunnelTarget,
     ServiceTunnelTunnelBackend, StartServiceTunnelSpec,
 };
 use homeboy::core::{EntityCrudOutput, MergeOutput};
@@ -91,6 +92,14 @@ enum TunnelServiceCommand {
         /// Human-readable description
         #[arg(long)]
         description: Option<String>,
+
+        /// Workflow preview URL policy for this managed service
+        #[arg(long, value_enum, default_value_t = ServiceTunnelPreviewPolicyArg::None)]
+        preview_policy: ServiceTunnelPreviewPolicyArg,
+
+        /// RFC3339 expiry for --preview-policy keep-alive-until
+        #[arg(long)]
+        preview_keep_alive_until: Option<String>,
     },
     /// List private service tunnel declarations
     List,
@@ -163,6 +172,14 @@ enum TunnelServiceCommand {
         /// Public tunnel backend. Only 'none' is currently implemented.
         #[arg(long, value_enum, default_value_t = ServiceTunnelBackendArg::None)]
         public_tunnel_backend: ServiceTunnelBackendArg,
+
+        /// Owning workflow run ID to attach to preview artifacts
+        #[arg(long)]
+        source_run_id: Option<String>,
+
+        /// Owning workflow ID to attach to preview artifacts
+        #[arg(long)]
+        source_workflow_id: Option<String>,
     },
     /// Stop a running managed local service and cleanup runtime state
     Stop {
@@ -183,6 +200,31 @@ enum ServiceTunnelAuthModeArg {
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum ServiceTunnelBackendArg {
     None,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ServiceTunnelPreviewPolicyArg {
+    None,
+    Always,
+    OnFailure,
+    ManualApproval,
+    KeepAliveUntil,
+}
+
+impl From<ServiceTunnelPreviewPolicyArg> for ServiceTunnelPreviewPolicyMode {
+    fn from(value: ServiceTunnelPreviewPolicyArg) -> Self {
+        match value {
+            ServiceTunnelPreviewPolicyArg::None => ServiceTunnelPreviewPolicyMode::None,
+            ServiceTunnelPreviewPolicyArg::Always => ServiceTunnelPreviewPolicyMode::Always,
+            ServiceTunnelPreviewPolicyArg::OnFailure => ServiceTunnelPreviewPolicyMode::OnFailure,
+            ServiceTunnelPreviewPolicyArg::ManualApproval => {
+                ServiceTunnelPreviewPolicyMode::ManualApproval
+            }
+            ServiceTunnelPreviewPolicyArg::KeepAliveUntil => {
+                ServiceTunnelPreviewPolicyMode::KeepAliveUntil
+            }
+        }
+    }
 }
 
 impl std::fmt::Display for ServiceTunnelBackendArg {
@@ -233,6 +275,8 @@ fn run_service(command: TunnelServiceCommand) -> CmdResult<TunnelOutput> {
             auth_header,
             allowed_clients,
             description,
+            preview_policy,
+            preview_keep_alive_until,
         } => expose_service(ExposeServiceTunnelSpec {
             id,
             server_id: server,
@@ -251,6 +295,10 @@ fn run_service(command: TunnelServiceCommand) -> CmdResult<TunnelOutput> {
                 exposure: ServiceTunnelExposure::PrivateLoopback,
                 require_auth: true,
                 allowed_clients,
+                preview: ServiceTunnelPreviewPolicy {
+                    mode: preview_policy.into(),
+                    keep_alive_until: preview_keep_alive_until,
+                },
             },
             description,
         }),
@@ -272,6 +320,8 @@ fn run_service(command: TunnelServiceCommand) -> CmdResult<TunnelOutput> {
             health_path,
             readiness_timeout,
             public_tunnel_backend,
+            source_run_id,
+            source_workflow_id,
         } => start_service(StartServiceTunnelSpec {
             id,
             command,
@@ -284,6 +334,8 @@ fn run_service(command: TunnelServiceCommand) -> CmdResult<TunnelOutput> {
             health_path,
             readiness_timeout_secs: readiness_timeout,
             backend: public_tunnel_backend.into(),
+            source_run_id,
+            source_workflow_id,
         }),
         TunnelServiceCommand::Stop { id } => stop_service(&id),
     }
@@ -496,23 +548,25 @@ mod tests {
         test_support::with_isolated_home(|_| {
             create_server();
             let (output, exit_code) = run_service(TunnelServiceCommand::Expose {
-                id: "context-a8c".to_string(),
+                id: "site-preview".to_string(),
                 server: "private-host".to_string(),
                 remote_host: "127.0.0.1".to_string(),
                 remote_port: 7331,
                 scheme: "http".to_string(),
                 local_port: Some(8831),
                 auth_mode: ServiceTunnelAuthModeArg::BearerEnv,
-                auth_env: Some("CONTEXTA8C_TOKEN".to_string()),
+                auth_env: Some("SITE_PREVIEW_TOKEN".to_string()),
                 auth_header: Some("Authorization".to_string()),
-                allowed_clients: vec!["wp-runtime".to_string()],
+                allowed_clients: vec!["app-runtime".to_string()],
                 description: None,
+                preview_policy: ServiceTunnelPreviewPolicyArg::None,
+                preview_keep_alive_until: None,
             })
             .expect("command succeeds");
 
             assert_eq!(exit_code, 0);
             assert_eq!(output.command, "tunnel.service.expose");
-            assert_eq!(output.entity.expect("entity").id, "context-a8c");
+            assert_eq!(output.entity.expect("entity").id, "site-preview");
         });
     }
 }

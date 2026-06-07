@@ -1,0 +1,21 @@
+{
+  "schema": "homeboy/preview-url/v1",
+  "kind": "preview_url",
+  "service_id": "site-preview",
+  "local_url": "http://127.0.0.1:3000",
+  "public_url": "https://preview.example.test/site-preview",
+  "backend": "none",
+  "policy": {
+    "mode": "keep_alive_until",
+    "keep_alive_until": "2026-06-07T13:00:00Z"
+  },
+  "cleanup": {
+    "cleanup_policy": "keep_alive_until",
+    "expires_at": "2026-06-07T13:00:00Z",
+    "stop_on_cleanup": true
+  },
+  "source": {
+    "run_id": "run-1",
+    "workflow_id": "workflow-1"
+  }
+}
