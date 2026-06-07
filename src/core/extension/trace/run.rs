@@ -1173,14 +1173,16 @@ mod tests {
 
     #[test]
     fn test_run_trace_workflow() {
-        let temp = tempfile::tempdir().unwrap();
-        let component = test_component(temp.path());
-        let run_dir = RunDir::create().unwrap();
-        let result =
-            run_trace_workflow(&component, test_run_args(temp.path()), &run_dir, None).unwrap();
-        assert_eq!(result.status, "error");
-        assert_eq!(result.exit_code, 3);
-        run_dir.cleanup();
+        crate::test_support::with_isolated_home(|_| {
+            let temp = tempfile::tempdir().unwrap();
+            let component = test_component(temp.path());
+            let run_dir = RunDir::create().unwrap();
+            let result =
+                run_trace_workflow(&component, test_run_args(temp.path()), &run_dir, None).unwrap();
+            assert_eq!(result.status, "error");
+            assert_eq!(result.exit_code, 3);
+            run_dir.cleanup();
+        });
     }
 
     #[test]
