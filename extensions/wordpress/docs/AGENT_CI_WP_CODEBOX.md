@@ -292,6 +292,13 @@ The provider shells through `wp-codebox agent-task-run --input-file=<json>
 artifact capture behind that stable command; Homeboy keeps only request/outcome
 adaptation and redaction logic in this extension.
 
+When Codex subscription credentials are available, the provider selects WP
+Codebox's reusable `codex-subscription` runtime overlay profile through the
+generic `runtime_overlay_profiles` field. Homeboy does not expand that profile
+into provider plugin paths or bundled-library overlays; WP Codebox owns the
+profile example and callers can use the same field for other reusable runtime
+stacks.
+
 ## Runner config surface
 
 Most consumers should use `.github/workflows/datamachine-agent-ci.yml` rather than
