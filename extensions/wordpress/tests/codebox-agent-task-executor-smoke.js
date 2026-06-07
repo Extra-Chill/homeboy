@@ -341,6 +341,82 @@ assert.deepEqual(codexRequest.secret_env, [
 ]);
 assert.deepEqual(codexRequest.agent_bundle, {});
 assert(!JSON.stringify(codexRequest).includes('wp-ai-gateway'));
+
+const defaultsRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-codebox-agent-task-defaults-'));
+try {
+  const workspaceRoot = path.join(defaultsRoot, 'target-repo@issue-1161');
+  const dataMachinePath = path.join(defaultsRoot, 'data-machine');
+  const bundledAgentsApiPath = path.join(dataMachinePath, 'vendor', 'automattic', 'agents-api');
+  const dataMachineCodePath = path.join(defaultsRoot, 'data-machine-code');
+  const staleStandaloneAgentsApiPath = path.join(defaultsRoot, 'agents-api');
+  const providerPath = path.join(defaultsRoot, 'ai-provider-for-openai');
+  for (const directory of [workspaceRoot, bundledAgentsApiPath, dataMachineCodePath, staleStandaloneAgentsApiPath, providerPath]) {
+    fs.mkdirSync(directory, { recursive: true });
+  }
+
+  const defaultedRequest = codeboxTaskRequestFromAgentTaskRequest({
+    ...request,
+    task_id: 'default-runtime-stack-task-123',
+    executor: {
+      backend: 'codebox',
+      config: { provider: 'codex' },
+    },
+    inputs: {
+      target: { root: workspaceRoot },
+    },
+  }, {
+    settings: {},
+  });
+  assert.equal(defaultedRequest.agents_api_path, bundledAgentsApiPath);
+  assert.equal(defaultedRequest.runtime_component_paths.agents_api, bundledAgentsApiPath);
+  assert.equal(defaultedRequest.runtime_component_paths.agent_runtime, dataMachinePath);
+  assert.equal(defaultedRequest.runtime_component_paths.agent_runtime_tools, dataMachineCodePath);
+  assert.deepEqual(defaultedRequest.provider_plugin_paths, [providerPath]);
+  assert.deepEqual(defaultedRequest.secret_env, [
+    'AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN',
+    'AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN',
+    'AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT',
+    'AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID',
+    'AI_PROVIDER_OPENAI_CODEX_FEDRAMP',
+  ]);
+  assert.equal(defaultedRequest.mounts[0].source, workspaceRoot);
+  assert.equal(defaultedRequest.mounts[0].target, '/workspace');
+  assert.equal(defaultedRequest.mounts[0].mode, 'readwrite');
+  assert.equal(defaultedRequest.workspaces[0].target, '/workspace');
+  assert(!JSON.stringify(defaultedRequest).includes(staleStandaloneAgentsApiPath));
+
+  const explicitOverrideRequest = codeboxTaskRequestFromAgentTaskRequest({
+    ...request,
+    task_id: 'explicit-runtime-stack-task-123',
+    executor: {
+      backend: 'codebox',
+      config: {
+        provider: 'codex',
+        agents_api: staleStandaloneAgentsApiPath,
+        runtime_component_paths: {
+          agent_runtime: '/explicit/data-machine',
+          agent_runtime_tools: '/explicit/data-machine-code',
+        },
+        provider_plugin_paths: ['/explicit/provider'],
+        secret_env: ['EXPLICIT_SECRET'],
+        mounts: [{ source: '/explicit/worktree', target: '/workspace', mode: 'readonly' }],
+        workspaces: [{ target: '/explicit-workspace', mode: 'readonly' }],
+      },
+    },
+    inputs: {
+      target: { root: workspaceRoot },
+    },
+  });
+  assert.equal(explicitOverrideRequest.agents_api_path, staleStandaloneAgentsApiPath);
+  assert.equal(explicitOverrideRequest.runtime_component_paths.agent_runtime, '/explicit/data-machine');
+  assert.equal(explicitOverrideRequest.runtime_component_paths.agent_runtime_tools, '/explicit/data-machine-code');
+  assert.deepEqual(explicitOverrideRequest.provider_plugin_paths, ['/explicit/provider']);
+  assert.deepEqual(explicitOverrideRequest.secret_env, ['EXPLICIT_SECRET']);
+  assert.deepEqual(explicitOverrideRequest.mounts, [{ source: '/explicit/worktree', target: '/workspace', mode: 'readonly' }]);
+  assert.deepEqual(explicitOverrideRequest.workspaces, [{ target: '/explicit-workspace', mode: 'readonly' }]);
+} finally {
+  fs.rmSync(defaultsRoot, { recursive: true, force: true });
+}
 assert.equal(codeboxTaskRequestFromAgentTaskRequest({
   ...request,
   executor: {
