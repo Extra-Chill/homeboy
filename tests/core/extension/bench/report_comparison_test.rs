@@ -131,6 +131,7 @@ mod fixtures {
             kind: kind.map(str::to_string),
             label: label.map(str::to_string),
             observation_artifact_id: None,
+            ..BenchArtifact::default()
         }
     }
 
@@ -147,6 +148,39 @@ mod fixtures {
             kind: kind.map(str::to_string),
             label: label.map(str::to_string),
             observation_artifact_id: None,
+            ..BenchArtifact::default()
+        }
+    }
+
+    pub(super) fn preview_artifact(
+        role: Option<&str>,
+        preview_url: &str,
+        status: &str,
+        expires_at: Option<&str>,
+    ) -> BenchArtifact {
+        BenchArtifact {
+            path: Some("artifacts/preview.json".to_string()),
+            url: None,
+            artifact_type: Some("preview".to_string()),
+            kind: Some("preview".to_string()),
+            label: Some("Public preview".to_string()),
+            observation_artifact_id: Some("obs-preview".to_string()),
+            role: role.map(str::to_string),
+            preview_url: Some(preview_url.to_string()),
+            public_url: Some(preview_url.to_string()),
+            local_url: Some("http://127.0.0.1:8080".to_string()),
+            status: Some(status.to_string()),
+            expires_at: expires_at.map(str::to_string),
+            cleanup_status: Some("pending".to_string()),
+            service_lifecycle: Some(serde_json::json!({
+                "service_id": "site-preview",
+                "lifecycle": status,
+                "running": status == "running"
+            })),
+            browser_origin_evidence: Some(serde_json::json!({
+                "browser_effective_origin": preview_url,
+                "window_is_secure_context": true
+            })),
         }
     }
 
@@ -200,6 +234,83 @@ mod fixtures {
 }
 
 use fixtures::*;
+
+#[test]
+fn comparison_side_by_side_renders_baseline_and_candidate_preview_links() {
+    let mut baseline_scenario = scenario("site-build", &[("elapsed_ms", 12_000.0)]);
+    baseline_scenario.artifacts.insert(
+        "preview".to_string(),
+        preview_artifact(
+            None,
+            "https://baseline-preview.example.test/",
+            "running",
+            Some("2026-06-08T12:00:00Z"),
+        ),
+    );
+
+    let mut candidate_scenario = scenario("site-build", &[("elapsed_ms", 8_000.0)]);
+    candidate_scenario.artifacts.insert(
+        "preview".to_string(),
+        preview_artifact(
+            Some("candidate"),
+            "https://candidate-preview.example.test/",
+            "expired",
+            Some("2026-06-07T12:00:00Z"),
+        ),
+    );
+
+    let entries = vec![
+        entry("baseline-rig", true, Some(results(vec![baseline_scenario]))),
+        entry(
+            "candidate-rig",
+            true,
+            Some(results(vec![candidate_scenario])),
+        ),
+    ];
+
+    let (out, exit) = aggregate_comparison("studio".into(), 10, entries);
+    let value = serde_json::to_value(&out).expect("serialize comparison");
+    let report = &out.reports.side_by_side;
+
+    assert_eq!(exit, 0);
+    assert_eq!(report.rigs[0].preview_links.len(), 1);
+    assert_eq!(report.rigs[0].preview_links[0].role, "baseline");
+    assert_eq!(
+        report.rigs[0].preview_links[0].url,
+        "https://baseline-preview.example.test/"
+    );
+    assert_eq!(
+        report.rigs[0].preview_links[0].expires_at.as_deref(),
+        Some("2026-06-08T12:00:00Z")
+    );
+    assert_eq!(
+        report.rigs[0].preview_links[0]
+            .service_lifecycle
+            .as_ref()
+            .unwrap()["service_id"],
+        "site-preview"
+    );
+    assert_eq!(
+        report.rigs[0].preview_links[0]
+            .browser_origin_evidence
+            .as_ref()
+            .unwrap()["window_is_secure_context"],
+        true
+    );
+    assert_eq!(report.rigs[1].preview_links[0].role, "candidate");
+    assert_eq!(
+        report.rigs[1].preview_links[0].status.as_deref(),
+        Some("expired")
+    );
+    assert_eq!(
+        value["reports"]["side_by_side"]["rigs"][0]["preview_links"][0]["role"],
+        "baseline"
+    );
+    assert_eq!(
+        value["reports"]["side_by_side"]["rigs"][1]["preview_links"][0]["url"],
+        "https://candidate-preview.example.test/"
+    );
+}
 
 #[test]
 fn test_from_main_workflow() {
@@ -503,6 +614,7 @@ fn test_collect_url_artifacts() {
             kind: Some("frontend_url".to_string()),
             label: Some("Frontend".to_string()),
             observation_artifact_id: None,
+            ..BenchArtifact::default()
         },
     );
 

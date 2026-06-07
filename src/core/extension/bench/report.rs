@@ -13,7 +13,8 @@ use crate::core::rig::RigStateSnapshot;
 use crate::core::runner::reportable_artifact_evidence_path;
 
 pub use super::side_by_side::{
-    BenchSideBySideArtifact, BenchSideBySideMetric, BenchSideBySideReport, BenchSideBySideRigReport,
+    BenchSideBySideArtifact, BenchSideBySideMetric, BenchSideBySidePreviewLink,
+    BenchSideBySideReport, BenchSideBySideRigReport,
 };
 
 #[derive(Serialize)]
@@ -115,7 +116,7 @@ pub use comparison::{
 /// A compact, grep-friendly pointer to an artifact emitted by a bench
 /// scenario. `results` remains the full-fidelity source of truth; this
 /// index surfaces the paths that users need immediately after a run.
-#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Clone, Debug, PartialEq)]
 pub struct BenchArtifactRef {
     pub scenario_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -133,6 +134,24 @@ pub struct BenchArtifactRef {
     pub label: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub observation_artifact_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub public_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cleanup_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service_lifecycle: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub browser_origin_evidence: Option<serde_json::Value>,
 }
 
 pub(crate) fn collect_artifacts(results: &BenchResults) -> Vec<BenchArtifactRef> {
@@ -171,6 +190,15 @@ fn artifact_ref(
         kind: artifact.kind.clone(),
         label: artifact.label.clone(),
         observation_artifact_id: artifact.observation_artifact_id.clone(),
+        role: artifact.role.clone(),
+        preview_url: artifact.preview_url.clone(),
+        public_url: artifact.public_url.clone(),
+        local_url: artifact.local_url.clone(),
+        status: artifact.status.clone(),
+        expires_at: artifact.expires_at.clone(),
+        cleanup_status: artifact.cleanup_status.clone(),
+        service_lifecycle: artifact.service_lifecycle.clone(),
+        browser_origin_evidence: artifact.browser_origin_evidence.clone(),
     }
 }
 

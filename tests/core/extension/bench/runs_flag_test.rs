@@ -159,6 +159,7 @@ mod cases {
                 kind: Some("json".to_string()),
                 label: Some("Run 1 transcript".to_string()),
                 observation_artifact_id: None,
+                ..BenchArtifact::default()
             },
         );
         let mut second = scenario("agent", &[("success_rate", 1.0)]);
@@ -171,6 +172,7 @@ mod cases {
                 kind: Some("json".to_string()),
                 label: Some("Run 2 transcript".to_string()),
                 observation_artifact_id: None,
+                ..BenchArtifact::default()
             },
         );
 

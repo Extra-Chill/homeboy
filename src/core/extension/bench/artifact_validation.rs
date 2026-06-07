@@ -186,6 +186,7 @@ mod tests {
                             kind: None,
                             label: None,
                             observation_artifact_id: None,
+                            ..BenchArtifact::default()
                         },
                     )]),
                     diagnostics: Vec::new(),

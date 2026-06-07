@@ -43,3 +43,13 @@ same caller-supplied preview facts.
 `homeboy report performance-digest` renders scalar preview fields in a
 `Preview` section, including local URL, public URL, hold/expiry, lifecycle
 status, runtime/process ID, and cleanup status when available.
+
+Bench comparison side-by-side reports also consume structured preview artifacts
+when scenario or run artifacts use `type: "preview"`, `kind: "preview"`, the
+artifact name `preview`, or preview-specific fields such as `preview_url`,
+`public_url`, `local_url`, `status`, `expires_at`, `cleanup_status`,
+`service_lifecycle`, and `browser_origin_evidence`. The rendered
+`reports.side_by_side.rigs[].preview_links[]` table labels links by explicit
+artifact `role` when present; otherwise comparison order infers `baseline` for
+the first rig, `candidate` for the second rig, and `provider` for additional
+rigs.
