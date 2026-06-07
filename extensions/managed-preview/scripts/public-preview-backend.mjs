@@ -12,6 +12,7 @@ async function main() {
   const expectedEffectiveOrigin = options.expectedEffectiveOrigin || process.env.HOMEBOY_EXPECTED_EFFECTIVE_ORIGIN || '';
   const expectedConfigHostname = options.expectedConfigHostname || process.env.HOMEBOY_EXPECTED_CONFIG_HOSTNAME || '';
   const requireHostPreservation = Boolean(options.requireHostPreservation || expectedEffectiveOrigin || expectedConfigHostname);
+  const target = buildTargetMetadata(options);
 
   const brokerUrl = brokerUrlValue ? parseUrl(brokerUrlValue, 'broker URL') : null;
   const plan = buildPlan({ provider, localUrl, publicUrl, brokerUrl, options });
@@ -50,6 +51,7 @@ async function main() {
     localUrl,
     publicUrl,
     preservation,
+    target,
   });
 
   const startEvidence = {
@@ -58,6 +60,7 @@ async function main() {
     provider,
     local_url: localUrl.href,
     public_url: publicUrl.href,
+    target,
     command: plan.command,
     args: plan.args,
     host_preservation: preservation,
@@ -148,12 +151,13 @@ function evaluateHostPreservation({
   };
 }
 
-async function registerPreview({ dryRun, brokerUrl, provider, localUrl, publicUrl, preservation }) {
+async function registerPreview({ dryRun, brokerUrl, provider, localUrl, publicUrl, preservation, target }) {
   const request = {
     schema: 'homeboy/managed-preview-broker-request/v1',
     provider,
     local_url: localUrl.href,
     public_url: publicUrl.href,
+    target,
     host_preservation: preservation,
   };
 
@@ -180,6 +184,35 @@ async function registerPreview({ dryRun, brokerUrl, provider, localUrl, publicUr
     throw new Error('Preview broker response did not prove hostname-preserving browser-origin capability');
   }
   return payload;
+}
+
+function buildTargetMetadata(options) {
+  const routes = {};
+  for (const route of options.routes || []) {
+    const separator = route.indexOf('=');
+    if (separator <= 0) {
+      throw new Error(`Invalid --route value: ${route}`);
+    }
+    const name = route.slice(0, separator);
+    const value = route.slice(separator + 1);
+    routes[name] = parseUrl(value, `route ${name}`).href;
+  }
+
+  const target = {
+    id: options.targetId || process.env.HOMEBOY_PREVIEW_TARGET_ID || null,
+    url: options.targetUrl || process.env.HOMEBOY_PREVIEW_TARGET_URL || null,
+    routes,
+  };
+
+  if (target.url) {
+    target.url = parseUrl(target.url, 'target URL').href;
+  }
+
+  if (!target.id && !target.url && Object.keys(routes).length === 0) {
+    return null;
+  }
+
+  return target;
 }
 
 function parseUrl(value, label) {
@@ -213,7 +246,12 @@ function parseArgs(args) {
     if (!value || value.startsWith('--')) {
       throw new Error(`Missing value for ${arg}`);
     }
-    options[key] = value;
+    if (key === 'route') {
+      options.routes ||= [];
+      options.routes.push(value);
+    } else {
+      options[key] = value;
+    }
     i += 1;
   }
   return options;
