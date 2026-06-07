@@ -6,6 +6,27 @@ Homeboy owns durable orchestration and provider-neutral outcomes. Runtime
 providers own backend-specific execution. For the provider fanout ownership seam,
 see [`docs/architecture/provider-fanout-boundary.md`](../architecture/provider-fanout-boundary.md).
 
+## Dispatch
+
+`agent-task dispatch` builds a durable task plan from common repo-cooking inputs
+without requiring hand-authored provider JSON:
+
+```bash
+homeboy agent-task dispatch \
+  --repo data-machine \
+  --cwd /path/to/worktree \
+  --provider-config @provider-config.json \
+  --client-context @client-context.json \
+  --prompt @task.txt
+```
+
+Homeboy core treats `--client-context` as an optional opaque JSON object. Client
+adapters may include whatever correlation data they need to reconcile their own
+notifications or UI state, but Homeboy does not interpret transport-specific
+identifiers in core lifecycle state. Provider-specific execution settings belong
+in `--provider-config`; durable lifecycle commands remain headless and can be
+claimed later with `agent-task run` or `agent-task run-next`.
+
 ## Deterministic Smoke Gate
 
 Issue #3392 is covered by a no-secret fixture plan at
