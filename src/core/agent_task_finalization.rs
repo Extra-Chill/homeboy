@@ -52,12 +52,9 @@ pub struct AgentTaskPrFinalizationOptions {
     pub head: Option<String>,
     pub title: String,
     pub commit_message: String,
-    pub attempt_summary: String,
-    pub source_refs: Vec<String>,
-    pub artifact_refs: Vec<String>,
     pub gate_results: Vec<AgentTaskGateResult>,
     pub changed_files: Vec<String>,
-    pub ai_tool: String,
+    pub evidence: AgentTaskPrEvidence,
     pub ai_used_for: String,
     pub protected_branches: Vec<String>,
 }
@@ -358,12 +355,7 @@ fn report(
         pr_url,
         changed_files,
         gate_results: options.gate_results.clone(),
-        evidence: AgentTaskPrEvidence {
-            source_refs: options.source_refs.clone(),
-            artifact_refs: options.artifact_refs.clone(),
-            attempt_summary: options.attempt_summary.clone(),
-            ai_tool: options.ai_tool.clone(),
-        },
+        evidence: options.evidence.clone(),
     }
 }
 
@@ -556,16 +548,18 @@ mod tests {
             head: None,
             title: "Cook issue #3678".to_string(),
             commit_message: "finalize cook loop PR plumbing".to_string(),
-            attempt_summary: "attempt 1 passed deterministic gates".to_string(),
-            source_refs: vec!["https://github.com/Extra-Chill/homeboy/issues/3678".to_string()],
-            artifact_refs: vec!["artifact://aggregate.json".to_string()],
             gate_results: vec![AgentTaskGateResult {
                 name: "cargo test".to_string(),
                 status: "passed".to_string(),
                 detail: Some("targeted".to_string()),
             }],
             changed_files: Vec::new(),
-            ai_tool: "OpenCode (GPT-5.5)".to_string(),
+            evidence: AgentTaskPrEvidence {
+                source_refs: vec!["https://github.com/Extra-Chill/homeboy/issues/3678".to_string()],
+                artifact_refs: vec!["artifact://aggregate.json".to_string()],
+                attempt_summary: "attempt 1 passed deterministic gates".to_string(),
+                ai_tool: "OpenCode (GPT-5.5)".to_string(),
+            },
             ai_used_for: "Drafted implementation and tests; Chris reviews and owns the change."
                 .to_string(),
             protected_branches: vec![

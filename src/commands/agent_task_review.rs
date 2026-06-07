@@ -1,8 +1,9 @@
+use clap::Args;
 use serde_json::Value;
 
 use homeboy::core::agent_task::AgentTaskAggregateReport;
 use homeboy::core::agent_task_finalization::{
-    finalize_pr, AgentTaskGateResult, AgentTaskPrFinalizationOptions,
+    finalize_pr, AgentTaskGateResult, AgentTaskPrEvidence, AgentTaskPrFinalizationOptions,
 };
 use homeboy::core::agent_task_lifecycle;
 use homeboy::core::agent_task_promotion::{promote, AgentTaskPromotionOptions};
@@ -12,6 +13,40 @@ use homeboy::core::config;
 
 use super::agent_task::{FinalizePrArgs, PromoteArgs, ReviewArgs};
 use super::CmdResult;
+
+#[derive(Args, Debug)]
+pub struct FinalizePrEvidenceArgs {
+    /// Attempt summary to include in the PR body.
+    #[arg(
+        long,
+        default_value = "green deterministic gates completed",
+        value_name = "TEXT"
+    )]
+    pub attempt_summary: String,
+
+    /// Source tracker/reference URL or identifier. Repeatable.
+    #[arg(long = "source-ref", value_name = "REF")]
+    pub source_refs: Vec<String>,
+
+    /// Artifact/evidence URL, path, or identifier. Repeatable.
+    #[arg(long = "artifact-ref", value_name = "REF")]
+    pub artifact_refs: Vec<String>,
+
+    /// AI tool disclosure line for the PR body.
+    #[arg(long, default_value = "OpenCode (GPT-5.5)", value_name = "TEXT")]
+    pub ai_tool: String,
+}
+
+impl From<FinalizePrEvidenceArgs> for AgentTaskPrEvidence {
+    fn from(args: FinalizePrEvidenceArgs) -> Self {
+        Self {
+            source_refs: args.source_refs,
+            artifact_refs: args.artifact_refs,
+            attempt_summary: args.attempt_summary,
+            ai_tool: args.ai_tool,
+        }
+    }
+}
 
 pub(crate) fn review(args: ReviewArgs) -> CmdResult<Value> {
     let record = agent_task_lifecycle::status(&args.run_id)?;
@@ -78,12 +113,9 @@ pub(crate) fn finalize_pull_request(args: FinalizePrArgs) -> CmdResult<Value> {
         head: args.head,
         title: args.title,
         commit_message: args.commit_message,
-        attempt_summary: args.attempt_summary,
-        source_refs: args.source_refs,
-        artifact_refs: args.artifact_refs,
         gate_results,
         changed_files: args.changed_files,
-        ai_tool: args.ai_tool,
+        evidence: args.evidence.into(),
         ai_used_for: args.ai_used_for,
         protected_branches: args.protected_branches,
     })?;

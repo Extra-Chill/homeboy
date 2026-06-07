@@ -166,21 +166,8 @@ pub struct FinalizePrArgs {
     #[arg(long, value_name = "TEXT")]
     pub commit_message: String,
 
-    /// Attempt summary to include in the PR body.
-    #[arg(
-        long,
-        default_value = "green deterministic gates completed",
-        value_name = "TEXT"
-    )]
-    pub attempt_summary: String,
-
-    /// Source tracker/reference URL or identifier. Repeatable.
-    #[arg(long = "source-ref", value_name = "REF")]
-    pub source_refs: Vec<String>,
-
-    /// Artifact/evidence URL, path, or identifier. Repeatable.
-    #[arg(long = "artifact-ref", value_name = "REF")]
-    pub artifact_refs: Vec<String>,
+    #[command(flatten)]
+    pub evidence: agent_task_review::FinalizePrEvidenceArgs,
 
     /// Green gate result as name=status or name=status:detail. Repeatable.
     #[arg(long = "gate-result", value_name = "NAME=STATUS[:DETAIL]")]
@@ -193,10 +180,6 @@ pub struct FinalizePrArgs {
     /// Protected branch that may not be finalized directly. Repeatable.
     #[arg(long = "protected-branch", default_values_t = agent_task_review::default_protected_branches(), value_name = "BRANCH")]
     pub protected_branches: Vec<String>,
-
-    /// AI tool disclosure line for the PR body.
-    #[arg(long, default_value = "OpenCode (GPT-5.5)", value_name = "TEXT")]
-    pub ai_tool: String,
 
     /// AI assistance scope for the PR body.
     #[arg(
