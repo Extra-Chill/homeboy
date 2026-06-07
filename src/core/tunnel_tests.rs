@@ -1,4 +1,5 @@
-use super::*;
+use super::tunnel::*;
+use crate::core::paths;
 use crate::core::server::Server;
 use crate::test_support;
 use std::collections::{BTreeMap, HashMap};

@@ -572,7 +572,7 @@ fn service_tunnel_status(tunnel: &ServiceTunnel) -> ServiceTunnelStatus {
     }
 }
 
-fn preview_policy_allows(
+pub(super) fn preview_policy_allows(
     policy: &ServiceTunnelPreviewPolicy,
     context: &ServiceTunnelPreviewDecisionContext,
 ) -> bool {
@@ -589,7 +589,7 @@ fn preview_policy_allows(
     }
 }
 
-fn preview_artifact_for(
+pub(super) fn preview_artifact_for(
     tunnel: &ServiceTunnel,
     state: &ServiceTunnelRuntimeState,
     context: &ServiceTunnelPreviewDecisionContext,
@@ -1096,7 +1096,3 @@ fn runtime_evidence(state: &ServiceTunnelRuntimeState) -> ServiceTunnelEvidence 
         logs: state.logs.clone(),
     }
 }
-
-#[cfg(test)]
-#[path = "tunnel_tests.rs"]
-mod tunnel_tests;
