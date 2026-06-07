@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use homeboy::core::runner::{self, Runner, RunnerKind};
+use homeboy::core::runner::{self, Runner, RunnerKind, RunnerTunnelMode};
 use homeboy::core::server::{self, Server, SshClient};
 use serde::Serialize;
 
@@ -535,6 +535,11 @@ mod remote {
             "Create the artifact root or configure HOMEBOY_ARTIFACT_ROOT to a writable directory",
         ));
 
+        checks.extend(probes::connected_daemon_exec_checks(
+            runner_id,
+            &workspace_root,
+        ));
+
         for extension_id in normalized_extension_ids(&options.extensions) {
             checks.push(extension_parity::remote_check(
                 client,
@@ -603,7 +608,7 @@ mod remote {
 
 mod probes {
     use super::*;
-    use types::{DiskProbe, MemoryProbe, RunnerCapabilities, ToolProbe};
+    use types::{DiskProbe, MemoryProbe, RunnerCapabilities, RunnerCheck, ToolProbe};
 
     #[derive(Clone, Copy)]
     pub struct ToolSpec {
@@ -915,6 +920,127 @@ mod probes {
                 common::shell_word(path)
             ))
             .success
+    }
+
+    pub fn connected_daemon_exec_checks(runner_id: &str, workspace_root: &str) -> Vec<RunnerCheck> {
+        let Ok(status) = runner::status(runner_id) else {
+            return Vec::new();
+        };
+        if !status.connected {
+            return Vec::new();
+        }
+        let Some(session) = status.session else {
+            return Vec::new();
+        };
+        if session.mode != RunnerTunnelMode::DirectSsh {
+            return Vec::new();
+        }
+        let Some(local_url) = session.local_url else {
+            return vec![checks::error(
+                "daemon.exec",
+                "Connected direct runner session is missing its local daemon URL".to_string(),
+                Some(format!(
+                    "Reconnect runner `{runner_id}` with `homeboy runner connect {runner_id}`"
+                )),
+                BTreeMap::new(),
+            )];
+        };
+
+        vec![daemon_exec_check(runner_id, workspace_root, &local_url)]
+    }
+
+    pub(super) fn daemon_exec_check(
+        runner_id: &str,
+        workspace_root: &str,
+        local_url: &str,
+    ) -> RunnerCheck {
+        let mut details = BTreeMap::new();
+        details.insert("url".to_string(), local_url.to_string());
+        details.insert("cwd".to_string(), workspace_root.to_string());
+        let client = match reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+        {
+            Ok(client) => client,
+            Err(err) => {
+                details.insert("error".to_string(), err.to_string());
+                return checks::error(
+                    "daemon.exec",
+                    "Could not build daemon exec probe HTTP client".to_string(),
+                    None,
+                    details,
+                );
+            }
+        };
+        let response = client
+            .post(format!("{}/exec", local_url.trim_end_matches('/')))
+            .json(&serde_json::json!({
+                "runner_id": runner_id,
+                "cwd": workspace_root,
+                "command": ["homeboy", "--version"],
+                "capture_patch": false
+            }))
+            .send();
+        let response = match response {
+            Ok(response) => response,
+            Err(err) => {
+                details.insert("error".to_string(), err.to_string());
+                return checks::error(
+                    "daemon.exec",
+                    "Connected runner daemon did not accept the exec probe".to_string(),
+                    Some(format!(
+                        "Reconnect runner `{runner_id}` with `homeboy runner connect {runner_id}` before retrying Lab offload"
+                    )),
+                    details,
+                );
+            }
+        };
+        let status_code = response.status().as_u16();
+        let body: serde_json::Value = match response.json() {
+            Ok(body) => body,
+            Err(err) => {
+                details.insert("status".to_string(), status_code.to_string());
+                details.insert("error".to_string(), err.to_string());
+                return checks::error(
+                    "daemon.exec",
+                    "Connected runner daemon returned an invalid exec probe response".to_string(),
+                    Some(format!(
+                        "Reconnect runner `{runner_id}` with `homeboy runner connect {runner_id}` before retrying Lab offload"
+                    )),
+                    details,
+                );
+            }
+        };
+        details.insert("status".to_string(), status_code.to_string());
+        if let Some(job_id) = body
+            .pointer("/data/body/job/id")
+            .and_then(serde_json::Value::as_str)
+        {
+            details.insert("job_id".to_string(), job_id.to_string());
+        }
+        if status_code < 400
+            && body.get("success").and_then(serde_json::Value::as_bool) == Some(true)
+        {
+            return checks::ok_with_details(
+                "daemon.exec",
+                "Connected runner daemon accepted a lightweight exec probe".to_string(),
+                details,
+            );
+        }
+
+        let error_payload = body
+            .get("error")
+            .or_else(|| body.get("data"))
+            .unwrap_or(&body);
+        details.insert("response".to_string(), error_payload.to_string());
+        checks::error(
+            "daemon.exec",
+            "Connected runner daemon failed the lightweight exec probe".to_string(),
+            Some(format!(
+                "Reconnect runner `{runner_id}` with `homeboy runner connect {runner_id}` before retrying Lab offload"
+            )),
+            details,
+        )
     }
 
     fn memory_from_proc_meminfo() -> Option<MemoryProbe> {
@@ -1242,205 +1368,5 @@ fn normalized_extension_ids(extension_ids: &[String]) -> Vec<String> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use types::RunnerDoctorStatus;
-
-    #[test]
-    fn local_alias_report_has_stable_top_level_shape() {
-        let (report, exit_code) = run("local").expect("local doctor report");
-        assert_eq!(exit_code, 0);
-        let value = serde_json::to_value(report).expect("serialize report");
-        assert_eq!(value["command"], "runner.doctor");
-        assert_eq!(value["runner_id"], "local");
-        assert!(value.get("status").is_some());
-        assert!(value.get("capabilities").is_some());
-        assert!(value.get("resources").is_some());
-        assert!(value
-            .get("checks")
-            .and_then(|checks| checks.as_array())
-            .is_some());
-    }
-
-    #[test]
-    fn overall_status_promotes_errors_over_warnings() {
-        let checks = vec![
-            checks::warning("optional", "optional missing".to_string(), None),
-            checks::error(
-                "required",
-                "required missing".to_string(),
-                None,
-                BTreeMap::new(),
-            ),
-        ];
-        assert_eq!(checks::overall_status(&checks), RunnerDoctorStatus::Error);
-    }
-
-    #[test]
-    fn extension_parity_check_reports_missing_extension_with_remediation() {
-        let check = extension_parity::check_from_probe(
-            "remote",
-            "/home/chubes/.local/bin/homeboy",
-            Some("/home/chubes/Developer/component"),
-            "rust",
-            false,
-            "first\nsecond\nthird\nfourth",
-            "",
-        );
-
-        assert_eq!(check.id, "extension.parity");
-        assert_eq!(check.status, RunnerDoctorStatus::Error);
-        assert!(check.message.contains("rust"));
-        assert!(check
-            .remediation
-            .as_deref()
-            .expect("remediation")
-            .contains("extension install <source> --id rust"));
-        assert_eq!(
-            check.details.get("cwd").map(String::as_str),
-            Some("/home/chubes/Developer/component")
-        );
-        assert_eq!(
-            check.details.get("diagnostics").map(String::as_str),
-            Some("second\nthird\nfourth")
-        );
-    }
-
-    #[test]
-    fn extension_parity_check_extracts_nested_json_error_message() {
-        let check = extension_parity::check_from_probe(
-            "remote",
-            "homeboy",
-            None,
-            "rust",
-            false,
-            "",
-            r#"{"success":false,"error":{"message":"Extension 'rust' not found"}}"#,
-        );
-
-        assert_eq!(
-            check.details.get("diagnostics").map(String::as_str),
-            Some("Extension 'rust' not found")
-        );
-    }
-
-    #[test]
-    fn extension_parity_check_reports_resolved_extension() {
-        let check = extension_parity::check_from_probe(
-            "remote",
-            "homeboy",
-            None,
-            "rust",
-            true,
-            "",
-            "extension details",
-        );
-
-        assert_eq!(check.id, "extension.parity");
-        assert_eq!(check.status, RunnerDoctorStatus::Ok);
-        assert!(check.remediation.is_none());
-        assert_eq!(
-            check.details.get("extension_id").map(String::as_str),
-            Some("rust")
-        );
-    }
-
-    #[test]
-    fn normalizes_requested_extensions_before_parity_checks() {
-        assert_eq!(
-            normalized_extension_ids(&[
-                " rust ".to_string(),
-                "".to_string(),
-                "fixture-a".to_string(),
-                "rust".to_string(),
-            ]),
-            vec!["fixture-a".to_string(), "rust".to_string()]
-        );
-    }
-
-    #[test]
-    fn homeboy_version_skew_check_is_absent_for_equal_versions() {
-        assert!(checks::homeboy_version_skew_check("0.198.7", "0.198.7", "lab", "lab").is_none());
-    }
-
-    #[test]
-    fn homeboy_version_skew_check_warns_for_different_versions() {
-        let check = checks::homeboy_version_skew_check("0.198.7", "0.197.7", "lab", "lab")
-            .expect("version skew warning");
-
-        assert_eq!(check.id, "homeboy.version_skew");
-        assert_eq!(check.status, RunnerDoctorStatus::Warning);
-        assert!(check.message.contains("0.198.7"));
-        assert!(check.message.contains("0.197.7"));
-        assert_eq!(
-            check.details.get("local_version").map(String::as_str),
-            Some("0.198.7")
-        );
-        assert_eq!(
-            check.details.get("remote_version").map(String::as_str),
-            Some("0.197.7")
-        );
-        assert!(check
-            .remediation
-            .as_deref()
-            .is_some_and(|value| value.contains("homeboy ssh lab -- homeboy upgrade")));
-    }
-
-    #[test]
-    fn ssh_target_uses_runner_env_for_remote_probes() {
-        crate::test_support::with_isolated_home(|_| {
-            server::create(
-                r#"{
-                    "id":"lab",
-                    "host":"localhost",
-                    "user":"tester",
-                    "env":{"PATH":"/server/bin:$PATH"}
-                }"#,
-                false,
-            )
-            .expect("create server");
-            runner::create(
-                r#"{
-                    "id":"lab",
-                    "kind":"ssh",
-                    "server_id":"lab",
-                    "workspace_root":"/tmp",
-                    "env":{"PATH":"/runner/bin:$PATH"}
-                }"#,
-                false,
-            )
-            .expect("create runner");
-
-            let target = target::resolve("lab").expect("resolve runner target");
-            let target::RunnerTarget::Ssh { client, .. } = target else {
-                panic!("expected ssh target");
-            };
-
-            assert_eq!(
-                client.env.get("PATH").map(String::as_str),
-                Some("/runner/bin:$PATH")
-            );
-        });
-    }
-
-    #[test]
-    fn remote_default_artifact_root_expands_under_home() {
-        assert_eq!(
-            remote::default_artifact_root_for_home("/home/runner"),
-            Some("/home/runner/.local/share/homeboy/artifacts".to_string())
-        );
-    }
-
-    #[test]
-    fn remote_default_artifact_root_normalizes_trailing_home_slash() {
-        assert_eq!(
-            remote::default_artifact_root_for_home("/Users/chubes/"),
-            Some("/Users/chubes/.local/share/homeboy/artifacts".to_string())
-        );
-    }
-
-    #[test]
-    fn remote_default_artifact_root_rejects_empty_home() {
-        assert_eq!(remote::default_artifact_root_for_home("  "), None);
-    }
-}
+#[path = "doctor/tests.rs"]
+mod tests;

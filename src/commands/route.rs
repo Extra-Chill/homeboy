@@ -5,6 +5,10 @@ pub fn route_after_parse(
     normalized_args: &[String],
     output_file: Option<&str>,
 ) -> homeboy::core::Result<Option<i32>> {
+    if is_lab_offload_subprocess() {
+        return Ok(None);
+    }
+
     let lab_command = lab_offload_command(&cli.command)?;
 
     match homeboy::core::runner::execute_lab_offload(homeboy::core::runner::LabOffloadRequest {
@@ -42,6 +46,11 @@ pub fn route_after_parse(
             Ok(Some(exit_code))
         }
     }
+}
+
+fn is_lab_offload_subprocess() -> bool {
+    std::env::var(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV)
+        .is_ok_and(|value| !value.trim().is_empty())
 }
 
 fn write_offloaded_stdout(path: &str, stdout: &str) -> homeboy::core::Result<()> {
@@ -147,13 +156,79 @@ fn test_lab_extension_ids(
 mod tests {
     use super::*;
     use clap::Parser;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
     use tempfile::tempdir;
+
+    struct EnvGuard {
+        name: &'static str,
+        previous: Option<String>,
+        _guard: MutexGuard<'static, ()>,
+    }
+
+    impl EnvGuard {
+        fn set(name: &'static str, value: &str) -> Self {
+            let guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+            let previous = std::env::var(name).ok();
+            std::env::set_var(name, value);
+            Self {
+                name,
+                previous,
+                _guard: guard,
+            }
+        }
+    }
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => std::env::set_var(self.name, value),
+                None => std::env::remove_var(self.name),
+            }
+        }
+    }
 
     #[test]
     fn non_lab_command_continues_local_dispatch() {
         let cli = Cli::parse_from(["homeboy", "status"]);
 
         let outcome = route_after_parse(&cli, &["homeboy".into(), "status".into()], None).unwrap();
+
+        assert_eq!(outcome, None);
+    }
+
+    #[test]
+    fn lab_offload_subprocess_skips_recursive_lab_routing() {
+        let _env = EnvGuard::set(
+            homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV,
+            r#"{"status":"offloaded"}"#,
+        );
+        let cli = Cli::parse_from([
+            "homeboy",
+            "--runner",
+            "homeboy-lab",
+            "trace",
+            "--rig",
+            "gutenberg-pattern-preview-assets",
+            "gutenberg",
+            "pattern-preview-assets",
+        ]);
+        let normalized = [
+            "homeboy".to_string(),
+            "--runner".to_string(),
+            "homeboy-lab".to_string(),
+            "trace".to_string(),
+            "--rig".to_string(),
+            "gutenberg-pattern-preview-assets".to_string(),
+            "gutenberg".to_string(),
+            "pattern-preview-assets".to_string(),
+        ];
+
+        let outcome = route_after_parse(&cli, &normalized, None).unwrap();
 
         assert_eq!(outcome, None);
     }
