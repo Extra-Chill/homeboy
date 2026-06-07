@@ -118,13 +118,12 @@ impl Default for ServiceTunnelPreviewPolicyMode {
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ServiceTunnelStatus {
-    pub service_id: String,
+    #[serde(flatten)]
+    pub preview_identity: ServiceTunnelPreviewIdentity,
     pub declared: bool,
     pub running: bool,
     pub lifecycle: String,
     pub local_url: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub public_url: Option<String>,
     pub remote_target: String,
     pub policy: ServiceTunnelPolicy,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -150,14 +149,13 @@ pub struct ServiceTunnelCommandSpec {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ServiceTunnelRuntimeState {
-    pub service_id: String,
+    #[serde(flatten)]
+    pub preview_identity: ServiceTunnelPreviewIdentity,
     pub pid: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub process_group_id: Option<i32>,
     pub started_at: String,
     pub local_url: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub public_url: Option<String>,
     pub command: ServiceTunnelCommandSpec,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub health_url: Option<String>,
@@ -215,14 +213,20 @@ pub struct ServiceTunnelBackendStatus {
 pub struct ServiceTunnelPreviewArtifact {
     pub schema: String,
     pub kind: String,
-    pub service_id: String,
+    #[serde(flatten)]
+    pub preview_identity: ServiceTunnelPreviewIdentity,
     pub local_url: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub public_url: Option<String>,
     pub backend: ServiceTunnelTunnelBackend,
     pub policy: ServiceTunnelPreviewPolicy,
     pub cleanup: ServiceTunnelPreviewCleanupMetadata,
     pub source: ServiceTunnelPreviewSource,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ServiceTunnelPreviewIdentity {
+    pub service_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub public_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -430,12 +434,14 @@ pub fn start(spec: StartServiceTunnelSpec) -> Result<ServiceTunnelStatus> {
     let process_group_id = process_group_id_for(pid);
     let health_url = resolve_health_url(&tunnel, spec.health_url, spec.health_path);
     let state = ServiceTunnelRuntimeState {
-        service_id: tunnel.id.clone(),
+        preview_identity: ServiceTunnelPreviewIdentity {
+            service_id: tunnel.id.clone(),
+            public_url: None,
+        },
         pid,
         process_group_id,
         started_at: chrono::Utc::now().to_rfc3339(),
         local_url: local_url_for(&tunnel),
-        public_url: None,
         command: ServiceTunnelCommandSpec {
             command: spec.command,
             cwd: spec.cwd.map(|path| path.display().to_string()),
@@ -451,7 +457,7 @@ pub fn start(spec: StartServiceTunnelSpec) -> Result<ServiceTunnelStatus> {
     save_runtime_state(&state)?;
     if let Err(error) = wait_until_ready(&state, spec.readiness_timeout_secs) {
         terminate_runtime_state(&state)?;
-        remove_runtime_state(&state.service_id)?;
+        remove_runtime_state(&state.preview_identity.service_id)?;
         return Err(error);
     }
     status(&tunnel.id)
@@ -485,19 +491,23 @@ fn service_tunnel_status(tunnel: &ServiceTunnel) -> ServiceTunnelStatus {
     });
     let backend = state.as_ref().map(|state| ServiceTunnelBackendStatus {
         backend: state.backend.clone(),
-        active: state.public_url.is_some(),
+        active: state.preview_identity.public_url.is_some(),
     });
-    let public_url = state.as_ref().and_then(|state| state.public_url.clone());
+    let public_url = state
+        .as_ref()
+        .and_then(|state| state.preview_identity.public_url.clone());
     let preview = state
         .as_ref()
         .and_then(|state| preview_artifact_for_status(tunnel, state));
     ServiceTunnelStatus {
-        service_id: tunnel.id.clone(),
+        preview_identity: ServiceTunnelPreviewIdentity {
+            service_id: tunnel.id.clone(),
+            public_url,
+        },
         declared: true,
         running,
         lifecycle: if running { "running" } else { "declared" }.to_string(),
         local_url: local_url_for(tunnel),
-        public_url,
         remote_target: format!("{}:{}", tunnel.target.host, tunnel.target.port),
         policy: tunnel.policy.clone(),
         process,
@@ -508,7 +518,7 @@ fn service_tunnel_status(tunnel: &ServiceTunnel) -> ServiceTunnelStatus {
     }
 }
 
-pub fn preview_policy_allows(
+fn preview_policy_allows(
     policy: &ServiceTunnelPreviewPolicy,
     context: &ServiceTunnelPreviewDecisionContext,
 ) -> bool {
@@ -525,7 +535,7 @@ pub fn preview_policy_allows(
     }
 }
 
-pub fn preview_artifact_for(
+fn preview_artifact_for(
     tunnel: &ServiceTunnel,
     state: &ServiceTunnelRuntimeState,
     context: &ServiceTunnelPreviewDecisionContext,
@@ -537,9 +547,11 @@ pub fn preview_artifact_for(
     Some(ServiceTunnelPreviewArtifact {
         schema: "homeboy/preview-url/v1".to_string(),
         kind: "preview_url".to_string(),
-        service_id: tunnel.id.clone(),
+        preview_identity: ServiceTunnelPreviewIdentity {
+            service_id: tunnel.id.clone(),
+            public_url: state.preview_identity.public_url.clone(),
+        },
         local_url: state.local_url.clone(),
-        public_url: state.public_url.clone(),
         backend: state.backend.clone(),
         policy: tunnel.policy.preview.clone(),
         cleanup: preview_cleanup_metadata(&tunnel.policy.preview),
@@ -742,13 +754,17 @@ fn load_runtime_state(id: &str) -> Result<Option<ServiceTunnelRuntimeState>> {
 }
 
 fn save_runtime_state(state: &ServiceTunnelRuntimeState) -> Result<()> {
-    let path = paths::service_tunnel_runtime_state_file(&state.service_id)?;
+    let path = paths::service_tunnel_runtime_state_file(&state.preview_identity.service_id)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .map_err(|e| Error::internal_io(e.to_string(), Some(parent.display().to_string())))?;
     }
-    let data = serde_json::to_string_pretty(state)
-        .map_err(|e| Error::internal_json(e.to_string(), Some(state.service_id.clone())))?;
+    let data = serde_json::to_string_pretty(state).map_err(|e| {
+        Error::internal_json(
+            e.to_string(),
+            Some(state.preview_identity.service_id.clone()),
+        )
+    })?;
     fs::write(&path, data)
         .map_err(|e| Error::internal_io(e.to_string(), Some(path.display().to_string())))
 }
@@ -821,7 +837,7 @@ fn wait_until_ready(state: &ServiceTunnelRuntimeState, timeout_secs: u64) -> Res
             return Err(Error::validation_invalid_argument(
                 "service",
                 "service process exited before becoming ready",
-                Some(state.service_id.clone()),
+                Some(state.preview_identity.service_id.clone()),
                 None,
             ));
         }
@@ -833,7 +849,7 @@ fn wait_until_ready(state: &ServiceTunnelRuntimeState, timeout_secs: u64) -> Res
             return Err(Error::validation_invalid_argument(
                 "readiness",
                 "service did not become healthy before readiness timeout",
-                Some(state.service_id.clone()),
+                Some(state.preview_identity.service_id.clone()),
                 health.error.map(|error| vec![error]),
             ));
         }
@@ -876,7 +892,7 @@ fn check_runtime_health(state: &ServiceTunnelRuntimeState) -> ServiceTunnelHealt
 
 fn runtime_evidence(state: &ServiceTunnelRuntimeState) -> ServiceTunnelEvidence {
     ServiceTunnelEvidence {
-        state_path: paths::service_tunnel_runtime_state_file(&state.service_id)
+        state_path: paths::service_tunnel_runtime_state_file(&state.preview_identity.service_id)
             .map(|path| path.display().to_string())
             .unwrap_or_default(),
         stdout_path: state.stdout_path.clone(),
@@ -913,7 +929,7 @@ mod tests {
             create_server();
 
             let tunnel = expose(ExposeServiceTunnelSpec {
-                id: "context-a8c".to_string(),
+                id: "site-preview".to_string(),
                 server_id: "private-host".to_string(),
                 target: ServiceTunnelTarget {
                     host: "127.0.0.1".to_string(),
@@ -923,21 +939,21 @@ mod tests {
                 local_port: Some(8831),
                 auth: ServiceTunnelAuth {
                     mode: ServiceTunnelAuthMode::BearerEnv,
-                    env_var: Some("CONTEXTA8C_TOKEN".to_string()),
+                    env_var: Some("SITE_PREVIEW_TOKEN".to_string()),
                     header: Some("Authorization".to_string()),
                 },
                 policy: ServiceTunnelPolicy {
                     exposure: ServiceTunnelExposure::PrivateLoopback,
                     require_auth: true,
-                    allowed_clients: vec!["wp-runtime".to_string()],
+                    allowed_clients: vec!["app-runtime".to_string()],
                     preview: ServiceTunnelPreviewPolicy::default(),
                 },
-                description: Some("Private MCP service".to_string()),
+                description: Some("Private preview service".to_string()),
             })
             .expect("expose service");
 
-            assert_eq!(tunnel.id, "context-a8c");
-            let report = status("context-a8c").expect("status");
+            assert_eq!(tunnel.id, "site-preview");
+            let report = status("site-preview").expect("status");
             assert!(report.declared);
             assert!(!report.running);
             assert_eq!(report.local_url, "http://127.0.0.1:8831");
@@ -998,7 +1014,7 @@ mod tests {
                 policy: ServiceTunnelPolicy {
                     exposure: ServiceTunnelExposure::PrivateLoopback,
                     require_auth: true,
-                    allowed_clients: vec!["wpcom-calypso".to_string()],
+                    allowed_clients: vec!["app-runtime".to_string()],
                     preview: ServiceTunnelPreviewPolicy {
                         mode: ServiceTunnelPreviewPolicyMode::Always,
                         keep_alive_until: None,
@@ -1027,10 +1043,10 @@ mod tests {
 
             assert!(started.running);
             assert_eq!(started.local_url, "http://127.0.0.1:8832");
-            assert_eq!(started.public_url, None);
+            assert_eq!(started.preview_identity.public_url, None);
             let preview = started.preview.as_ref().expect("preview artifact");
             assert_eq!(preview.kind, "preview_url");
-            assert_eq!(preview.service_id, "local-preview");
+            assert_eq!(preview.preview_identity.service_id, "local-preview");
             assert_eq!(preview.local_url, "http://127.0.0.1:8832");
             assert_eq!(preview.source.run_id.as_deref(), Some("run-123"));
             assert_eq!(preview.source.workflow_id.as_deref(), Some("workflow-abc"));
@@ -1178,7 +1194,7 @@ mod tests {
     #[test]
     fn preview_artifact_serializes_structured_reviewer_contract() {
         let tunnel = ServiceTunnel {
-            id: "wpcom-calypso".to_string(),
+            id: "site-preview".to_string(),
             aliases: Vec::new(),
             description: None,
             server_id: "private-host".to_string(),
@@ -1205,18 +1221,20 @@ mod tests {
             },
         };
         let state = ServiceTunnelRuntimeState {
-            service_id: "wpcom-calypso".to_string(),
+            preview_identity: ServiceTunnelPreviewIdentity {
+                service_id: "site-preview".to_string(),
+                public_url: Some("https://preview.example.test/site-preview".to_string()),
+            },
             pid: 123,
             process_group_id: Some(123),
             started_at: "2026-06-07T12:00:00Z".to_string(),
             local_url: "http://127.0.0.1:3000".to_string(),
-            public_url: Some("https://preview.example.test/wpcom-calypso".to_string()),
             command: ServiceTunnelCommandSpec {
-                command: "npm run dev".to_string(),
-                cwd: Some("/workspace/wpcom".to_string()),
+                command: "serve-app".to_string(),
+                cwd: Some("/workspace/app".to_string()),
                 env_keys: vec!["TOKEN".to_string()],
             },
-            health_url: Some("http://127.0.0.1:3000/start".to_string()),
+            health_url: Some("http://127.0.0.1:3000/".to_string()),
             stdout_path: "/tmp/homeboy/stdout.log".to_string(),
             stderr_path: "/tmp/homeboy/stderr.log".to_string(),
             backend: ServiceTunnelTunnelBackend::None,
@@ -1241,11 +1259,11 @@ mod tests {
         assert_eq!(serialized, expected);
         assert_eq!(serialized["schema"], "homeboy/preview-url/v1");
         assert_eq!(serialized["kind"], "preview_url");
-        assert_eq!(serialized["service_id"], "wpcom-calypso");
+        assert_eq!(serialized["service_id"], "site-preview");
         assert_eq!(serialized["local_url"], "http://127.0.0.1:3000");
         assert_eq!(
             serialized["public_url"],
-            "https://preview.example.test/wpcom-calypso"
+            "https://preview.example.test/site-preview"
         );
         assert_eq!(serialized["backend"], "none");
         assert_eq!(serialized["policy"]["mode"], "keep_alive_until");

@@ -13,14 +13,14 @@ homeboy tunnel service <COMMAND>
 Declare a private service reachable from a configured SSH server:
 
 ```sh
-homeboy tunnel service expose context-a8c \
-  --server wp-cloud-runtime \
+homeboy tunnel service expose site-preview \
+  --server private-runtime \
   --remote-host 127.0.0.1 \
   --remote-port 7331 \
   --auth-mode bearer-env \
-  --auth-env CONTEXTA8C_TOKEN \
+  --auth-env SITE_PREVIEW_TOKEN \
   --auth-header Authorization \
-  --allow-client wp-runtime \
+  --allow-client app-runtime \
   --preview-policy always
 ```
 
@@ -29,9 +29,9 @@ The declaration requires an explicit auth mode and stores a private-loopback pol
 Start a declared local service command and record lifecycle evidence:
 
 ```sh
-homeboy tunnel service start context-a8c \
-  --command 'npm run dev -- --host 127.0.0.1 --port 7331' \
-  --cwd /path/to/workspace \
+homeboy tunnel service start site-preview \
+  --command 'serve-app --host 127.0.0.1 --port 7331' \
+  --cwd /workspace/app \
   --host 127.0.0.1 \
   --port 7331 \
   --health-path / \

@@ -548,16 +548,16 @@ mod tests {
         test_support::with_isolated_home(|_| {
             create_server();
             let (output, exit_code) = run_service(TunnelServiceCommand::Expose {
-                id: "context-a8c".to_string(),
+                id: "site-preview".to_string(),
                 server: "private-host".to_string(),
                 remote_host: "127.0.0.1".to_string(),
                 remote_port: 7331,
                 scheme: "http".to_string(),
                 local_port: Some(8831),
                 auth_mode: ServiceTunnelAuthModeArg::BearerEnv,
-                auth_env: Some("CONTEXTA8C_TOKEN".to_string()),
+                auth_env: Some("SITE_PREVIEW_TOKEN".to_string()),
                 auth_header: Some("Authorization".to_string()),
-                allowed_clients: vec!["wp-runtime".to_string()],
+                allowed_clients: vec!["app-runtime".to_string()],
                 description: None,
                 preview_policy: ServiceTunnelPreviewPolicyArg::None,
                 preview_keep_alive_until: None,
@@ -566,7 +566,7 @@ mod tests {
 
             assert_eq!(exit_code, 0);
             assert_eq!(output.command, "tunnel.service.expose");
-            assert_eq!(output.entity.expect("entity").id, "context-a8c");
+            assert_eq!(output.entity.expect("entity").id, "site-preview");
         });
     }
 }

@@ -251,7 +251,7 @@ fn renders_managed_service_preview_url_artifact_metadata() {
     assert!(report.markdown.contains("### Preview"));
     assert!(report
         .markdown
-        .contains("- public_url: `https://preview.example.test/wpcom-calypso`"));
+        .contains("- public_url: `https://preview.example.test/site-preview`"));
     assert!(report
         .markdown
         .contains("- policy.mode: `keep_alive_until`"));

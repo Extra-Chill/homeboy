@@ -1,9 +1,9 @@
 {
   "schema": "homeboy/preview-url/v1",
   "kind": "preview_url",
-  "service_id": "wpcom-calypso",
+  "service_id": "site-preview",
   "local_url": "http://127.0.0.1:3000",
-  "public_url": "https://preview.example.test/wpcom-calypso",
+  "public_url": "https://preview.example.test/site-preview",
   "backend": "none",
   "policy": {
     "mode": "keep_alive_until",
