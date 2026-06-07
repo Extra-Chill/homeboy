@@ -21,6 +21,14 @@ $homeboy_config = json_decode( base64_decode( '${config}' ), true );
 $post_types = isset( $homeboy_config['post_types'] ) && is_array( $homeboy_config['post_types'] ) ? $homeboy_config['post_types'] : array( 'page', 'post', 'wp_template', 'wp_template_part' );
 $post_statuses = isset( $homeboy_config['post_statuses'] ) && is_array( $homeboy_config['post_statuses'] ) ? $homeboy_config['post_statuses'] : array( 'any' );
 $fallback_option_names = isset( $homeboy_config['fallback_option_names'] ) && is_array( $homeboy_config['fallback_option_names'] ) ? $homeboy_config['fallback_option_names'] : array();
+$target_post_ids = isset( $homeboy_config['target_post_ids'] ) && is_array( $homeboy_config['target_post_ids'] ) ? array_map( 'absint', $homeboy_config['target_post_ids'] ) : array();
+$target_post_titles = isset( $homeboy_config['target_post_titles'] ) && is_array( $homeboy_config['target_post_titles'] ) ? array_map( 'strval', $homeboy_config['target_post_titles'] ) : array();
+if ( ! empty( $homeboy_config['include_front_page_target'] ) ) {
+    $front_page_id = (int) get_option( 'page_on_front', 0 );
+    if ( $front_page_id > 0 && ! in_array( $front_page_id, $target_post_ids, true ) ) {
+        $target_post_ids[] = $front_page_id;
+    }
+}
 
 $counts = homeboy_wordpress_empty_block_quality_counts();
 $counts['fallback_count'] = homeboy_wordpress_fallback_option_total( $fallback_option_names );
@@ -32,10 +40,16 @@ $posts = get_posts( array(
 ) );
 
 foreach ( $posts as $post ) {
+    $before = homeboy_wordpress_block_quality_target_snapshot( $counts );
     homeboy_wordpress_add_post_block_quality( $counts, $post );
+    if ( homeboy_wordpress_is_target_block_quality_post( $post, $target_post_ids, $target_post_titles ) ) {
+        homeboy_wordpress_add_target_post_block_quality( $counts, $post, $before );
+    }
 }
 
 $counts['core_html_without_fallback'] = max( 0, $counts['core_html_blocks'] - $counts['fallback_count'] );
+$counts['target_core_html_without_fallback'] = max( 0, $counts['target_core_html_blocks'] - $counts['fallback_count'] );
+$counts['target_core_html_without_bfb_fallback'] = $counts['target_core_html_without_fallback'];
 
 echo wp_json_encode( $counts, JSON_PRETTY_PRINT ) . PHP_EOL;
 `);
@@ -179,6 +193,9 @@ function normalizeBlockQualityOptions(options = {}) {
   post_types: normalizeStringList(options.postTypes, DEFAULT_POST_TYPES),
   post_statuses: normalizeStringList(options.postStatuses, DEFAULT_POST_STATUSES),
   fallback_option_names: normalizeStringList(options.fallbackOptionNames, []),
+  target_post_ids: normalizePositiveIntegerList(options.targetPostIds),
+  target_post_titles: normalizeStringList(options.targetPostTitles, []),
+  include_front_page_target: Boolean(options.includeFrontPageTarget),
  };
 }
 
@@ -199,6 +216,16 @@ function normalizeContentPreviewBytes(value) {
   throw new TypeError('contentPreviewBytes must be a non-negative number');
  }
  return Math.floor(number);
+}
+
+function normalizePositiveIntegerList(value) {
+ if (value === undefined || value === null) {
+  return [];
+ }
+ const list = Array.isArray(value) ? value : [value];
+ return list
+  .map((item) => Number(item))
+  .filter((item) => Number.isInteger(item) && item > 0);
 }
 
 function requiredPositiveInteger(value, label) {
@@ -248,6 +275,15 @@ function homeboy_wordpress_empty_block_quality_counts() {
         'serialized_block_comments'   => 0,
         'fallback_count'              => 0,
         'core_html_without_fallback'  => 0,
+        'target_posts_seen'           => 0,
+        'target_pages_seen'           => 0,
+        'target_posts_with_blocks'    => 0,
+        'target_raw_html_unconverted' => 0,
+        'target_total_blocks'         => 0,
+        'target_core_html_blocks'     => 0,
+        'target_core_html_without_fallback' => 0,
+        'target_core_html_without_bfb_fallback' => 0,
+        'target_serialized_block_comments' => 0,
         'post_type_counts'            => new stdClass(),
     );
 }
@@ -282,6 +318,36 @@ function homeboy_wordpress_add_post_block_quality( &$counts, $post ) {
         $counts['raw_html_unconverted']++;
     }
     homeboy_wordpress_count_blocks( parse_blocks( $content ), $counts );
+}
+
+function homeboy_wordpress_block_quality_target_snapshot( $counts ) {
+    return array(
+        'total_blocks'              => (int) $counts['total_blocks'],
+        'core_html_blocks'          => (int) $counts['core_html_blocks'],
+        'serialized_block_comments' => (int) $counts['serialized_block_comments'],
+        'raw_html_unconverted'      => (int) $counts['raw_html_unconverted'],
+    );
+}
+
+function homeboy_wordpress_is_target_block_quality_post( $post, $target_post_ids, $target_post_titles ) {
+    if ( in_array( (int) $post->ID, $target_post_ids, true ) ) {
+        return true;
+    }
+    return in_array( (string) $post->post_title, $target_post_titles, true );
+}
+
+function homeboy_wordpress_add_target_post_block_quality( &$counts, $post, $before ) {
+    $counts['target_posts_seen']++;
+    if ( 'page' === $post->post_type ) {
+        $counts['target_pages_seen']++;
+    }
+    if ( false !== strpos( (string) $post->post_content, '<!-- wp:' ) ) {
+        $counts['target_posts_with_blocks']++;
+    }
+    $counts['target_total_blocks'] += max( 0, (int) $counts['total_blocks'] - (int) $before['total_blocks'] );
+    $counts['target_core_html_blocks'] += max( 0, (int) $counts['core_html_blocks'] - (int) $before['core_html_blocks'] );
+    $counts['target_serialized_block_comments'] += max( 0, (int) $counts['serialized_block_comments'] - (int) $before['serialized_block_comments'] );
+    $counts['target_raw_html_unconverted'] += max( 0, (int) $counts['raw_html_unconverted'] - (int) $before['raw_html_unconverted'] );
 }
 
 function homeboy_wordpress_fallback_option_total( $option_names ) {
