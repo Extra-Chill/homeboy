@@ -345,6 +345,21 @@ by `request_id`, extracts final URI/method/duration/status, and includes bounded
 `requests`, `slow_requests`, `hooks`, and `timing_rows` arrays. Product-specific
 route attribution and gate decisions should stay in the calling rig.
 
+### Block quality probes
+
+`probeWordPressBlockQuality(sitePath, options)` collects site-wide block quality
+counters and can include a target post/page aggregate for scenario gates. Target
+posts can be selected with `targetPostIds`, `targetPostTitles`, and
+`includeFrontPageTarget`; the result includes counters such as
+`target_pages_seen`, `target_posts_with_blocks`, `target_total_blocks`, and
+`target_core_html_blocks` alongside the whole-site totals. When
+`fallbackOptionNames` is set, `target_core_html_without_fallback` and the
+Studio-compatible `target_core_html_without_bfb_fallback` subtract that fallback
+total from the target `core/html` count.
+
+`probeWordPressPostBlockQuality(sitePath, postId, options)` remains available for
+single-post diagnostics where stored-content metadata and previews are useful.
+
 ```js
 const {
 	installWordPressRequestProfiler,

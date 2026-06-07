@@ -17,9 +17,15 @@ async function main() {
 		postTypes: ['page'],
 		postStatuses: ['publish'],
 		fallbackOptionNames: ['example_fallback_count'],
+		targetPostIds: [42],
+		targetPostTitles: ['Studio Code'],
+		includeFrontPageTarget: true,
 	});
 	assert.match(siteProbe, /homeboy_wordpress_count_blocks/);
 	assert.match(siteProbe, /fallback_option_names/);
+	assert.match(siteProbe, /target_post_ids/);
+	assert.match(siteProbe, /target_post_titles/);
+	assert.match(siteProbe, /include_front_page_target/);
 	assert.doesNotMatch(siteProbe, /studio_bfb_unsupported_fallback_count/);
 
 	const postProbe = wordpressPostBlockQualityProbeCode(123, { contentPreviewBytes: 80 });
@@ -35,9 +41,16 @@ async function main() {
 		serialized_block_comments: 4,
 		fallback_count: 1,
 		core_html_without_fallback: 0,
+		target_pages_seen: 1,
+		target_posts_with_blocks: 1,
+		target_total_blocks: 3,
+		target_core_html_without_bfb_fallback: 2,
 	})}`);
 	assert.equal(parsed.total_blocks, 4);
 	assert.equal(parsed.core_html_without_fallback, 0);
+	assert.equal(parsed.target_pages_seen, 1);
+	assert.equal(parsed.target_total_blocks, 3);
+	assert.equal(parsed.target_core_html_without_bfb_fallback, 2);
 	assert.throws(() => parseWordPressBlockQualityProbeOutput('no json'), /did not emit JSON/);
 
 	const calls = [];
@@ -46,12 +59,14 @@ async function main() {
 			calls.push({ command, context });
 			return {
 				exitCode: 0,
-				stdout: JSON.stringify({ posts_seen: 1, pages_seen: 1, total_blocks: 3 }),
+				stdout: JSON.stringify({ posts_seen: 1, pages_seen: 1, total_blocks: 3, target_posts_seen: 1 }),
 				stderr: '',
 			};
 		},
+		targetPostTitles: ['Studio Code'],
 	});
 	assert.equal(siteQuality.total_blocks, 3);
+	assert.equal(siteQuality.target_posts_seen, 1);
 	assert.equal(calls[0].context.sitePath, '/tmp/wp-site');
 	assert.equal(calls[0].context.role, 'wordpress-block-quality-probe');
 	assert.match(calls[0].command, /^eval '/);
