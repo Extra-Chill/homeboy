@@ -6,6 +6,7 @@ module.exports = {
 	...require('./lib/request-profiler'),
 	...require('./lib/page-profiler'),
 	...require('./lib/block-quality'),
+	...require('./lib/materialized-site-quality'),
 	...require('./lib/editor-canvas-probes'),
 	...require('./lib/timing-correlator'),
 	...require('./lib/helper-manifest'),
