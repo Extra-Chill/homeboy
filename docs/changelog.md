@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.222.7] - 2026-06-07
+
+### Changed
+- Replace dispatch workspace handling
+- Remove agent-task dispatch transport routing
+
 ## [0.222.6] - 2026-06-07
 
 ### Changed
