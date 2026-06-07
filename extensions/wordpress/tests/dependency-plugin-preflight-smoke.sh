@@ -90,4 +90,39 @@ if [ -f "${READY_ARTIFACTS}/wordpress-dependency-plugin-preflight-diagnostics.js
     exit 1
 fi
 
+NESTED_PACKAGE_DEP="${TMP_ROOT}/wp-codebox-release-fixture"
+mkdir -p "${NESTED_PACKAGE_DEP}/packages/wordpress-plugin"
+cat > "${NESTED_PACKAGE_DEP}/packages/wordpress-plugin/wp-codebox.php" <<'PHP'
+<?php
+/**
+ * Plugin Name: WP Codebox Fixture
+ */
+PHP
+
+NESTED_PACKAGE_ARTIFACTS="${TMP_ROOT}/nested-package-artifacts"
+homeboy_preflight_wordpress_dependency_plugins "$NESTED_PACKAGE_DEP" "$NESTED_PACKAGE_ARTIFACTS" "bench"
+if [ -f "${NESTED_PACKAGE_ARTIFACTS}/wordpress-dependency-plugin-preflight-diagnostics.json" ]; then
+    echo "ERROR: nested package plugin dependency should not emit preflight diagnostics." >&2
+    jq '.' "${NESTED_PACKAGE_ARTIFACTS}/wordpress-dependency-plugin-preflight-diagnostics.json" >&2 || true
+    exit 1
+fi
+
+SANITIZE_KEY_DEP="${TMP_ROOT}/sanitize-key-plugin"
+mkdir -p "$SANITIZE_KEY_DEP"
+cat > "${SANITIZE_KEY_DEP}/sanitize-key-plugin.php" <<'PHP'
+<?php
+/**
+ * Plugin Name: Sanitize Key Fixture
+ */
+$fixture_key = sanitize_key('Fixture Key');
+PHP
+
+SANITIZE_KEY_ARTIFACTS="${TMP_ROOT}/sanitize-key-artifacts"
+homeboy_preflight_wordpress_dependency_plugins "$SANITIZE_KEY_DEP" "$SANITIZE_KEY_ARTIFACTS" "bench"
+if [ -f "${SANITIZE_KEY_ARTIFACTS}/wordpress-dependency-plugin-preflight-diagnostics.json" ]; then
+    echo "ERROR: sanitize_key plugin dependency should not emit preflight diagnostics." >&2
+    jq '.' "${SANITIZE_KEY_ARTIFACTS}/wordpress-dependency-plugin-preflight-diagnostics.json" >&2 || true
+    exit 1
+fi
+
 echo "dependency plugin preflight smoke passed"

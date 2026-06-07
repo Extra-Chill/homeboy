@@ -119,7 +119,9 @@ homeboy_find_validation_dependency_plugin_main_file() {
 
     [ -n "$plugin_path" ] && [ -d "$plugin_path" ] || return 1
 
-    local candidate
+    local candidate canonical_slug
+    canonical_slug="$(basename "$plugin_path")"
+    canonical_slug="${canonical_slug%%@*}"
     for candidate in "${plugin_path}/$(basename "$plugin_path").php" "${plugin_path}/plugin.php"; do
         [ -f "$candidate" ] || continue
         if grep -q 'Plugin Name:' "$candidate"; then
@@ -129,6 +131,24 @@ homeboy_find_validation_dependency_plugin_main_file() {
     done
 
     for candidate in "$plugin_path"/*.php; do
+        [ -f "$candidate" ] || continue
+        if grep -q 'Plugin Name:' "$candidate"; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+
+    for candidate in \
+        "${plugin_path}/packages/wordpress-plugin/${canonical_slug}.php" \
+        "${plugin_path}/packages/wordpress-plugin/plugin.php"; do
+        [ -f "$candidate" ] || continue
+        if grep -q 'Plugin Name:' "$candidate"; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+
+    for candidate in "${plugin_path}/packages/wordpress-plugin"/*.php; do
         [ -f "$candidate" ] || continue
         if grep -q 'Plugin Name:' "$candidate"; then
             printf '%s\n' "$candidate"
@@ -269,6 +289,8 @@ if (!function_exists('plugin_dir_path')) { function plugin_dir_path($file) { ret
 if (!function_exists('plugin_dir_url')) { function plugin_dir_url($file) { return ''; } }
 if (!function_exists('plugin_basename')) { function plugin_basename($file) { return basename(dirname($file)) . '/' . basename($file); } }
 if (!function_exists('trailingslashit')) { function trailingslashit($string) { return rtrim($string, '/\\') . '/'; } }
+if (!function_exists('sanitize_key')) { function sanitize_key($key) { return preg_replace('/[^a-z0-9_\\-]/', '', strtolower((string) $key)); } }
+if (!function_exists('sanitize_text_field')) { function sanitize_text_field($str) { return trim(strip_tags((string) $str)); } }
 if (!function_exists('wp_normalize_path')) { function wp_normalize_path($path) { return str_replace('\\', '/', $path); } }
 if (!function_exists('wp_die')) { function wp_die($message = '', $title = '', $args = array()) { fwrite(STDERR, (string) $message); exit(1); } }
 if (!function_exists('__')) { function __($text, $domain = 'default') { return $text; } }
