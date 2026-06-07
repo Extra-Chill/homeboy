@@ -229,10 +229,6 @@ fn normalize_path_for_prefix(path: &Path) -> PathBuf {
 
 fn lab_offload_rig_ids(args: &[String]) -> Vec<String> {
     let mut rig_ids = Vec::new();
-    let is_bench = args.iter().any(|arg| arg == "bench");
-    if !is_bench {
-        return rig_ids;
-    }
 
     let mut iter = args.iter().peekable();
     let mut passthrough = false;
@@ -292,14 +288,14 @@ mod tests {
     }
 
     #[test]
-    fn ignores_non_bench_and_passthrough_rig_args_for_lab_materialization() {
-        let non_bench = vec![
+    fn extracts_trace_rig_ids_and_ignores_passthrough_args_for_lab_materialization() {
+        let trace = vec![
             "homeboy".to_string(),
-            "test".to_string(),
+            "trace".to_string(),
             "--rig".to_string(),
             "candidate".to_string(),
         ];
-        assert!(lab_offload_rig_ids(&non_bench).is_empty());
+        assert_eq!(lab_offload_rig_ids(&trace), vec!["candidate".to_string()]);
 
         let passthrough = vec![
             "homeboy".to_string(),
