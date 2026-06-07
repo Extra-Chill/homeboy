@@ -63,6 +63,8 @@ pub mod structured_sidecar;
 pub mod top_n;
 pub mod triage;
 pub mod tunnel;
+#[cfg(test)]
+mod tunnel_tests;
 pub mod update_check_cache;
 pub mod upgrade;
 pub mod worktree;
