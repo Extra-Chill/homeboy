@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.222.10] - 2026-06-07
+
+### Changed
+- Wire tunnel tests to changed-scope filter
+- Match tunnel test module to changed-scope filter
+- Keep service tunnel backend audit-clean
+- Harden agent-task patch promotion
+- Add provider-neutral service tunnel backend
+
 ## [0.222.9] - 2026-06-07
 
 ### Changed
