@@ -1,0 +1,33 @@
+{
+  "name": "Managed Preview",
+  "id": "managed-preview",
+  "version": "0.1.0",
+  "icon": "globe",
+  "description": "Provider command helpers for Homeboy managed service public previews",
+  "author": "Extra Chill",
+  "provides": {
+    "file_extensions": ["json", "mjs", "sh"],
+    "capabilities": ["preview-backend"]
+  },
+  "scripts": {
+    "validate": "tests/public-preview-backend-smoke.mjs"
+  },
+  "preview_backends": [
+    {
+      "schema": "homeboy/managed-preview-backend-command/v1",
+      "id": "managed-preview.kimaki",
+      "label": "Kimaki public tunnel backend",
+      "provider": "kimaki",
+      "command": "node {{extension_path}}/scripts/public-preview-backend.mjs --provider kimaki",
+      "contract": {
+        "requires_env": ["HOMEBOY_SERVICE_LOCAL_URL", "HOMEBOY_TUNNEL_PUBLIC_URL"],
+        "keeps_process_alive": true,
+        "records_stdout_stderr": true
+      },
+      "capabilities": ["reviewer-clickable-public-url", "stable-id-public-url"],
+      "limitations": [
+        "Kimaki public tunnel URLs use the tunnel hostname as the browser origin. They are not exact proof for hostname-sensitive apps that require a browser-effective localhost origin such as calypso.localhost:3000."
+      ]
+    }
+  ]
+}
