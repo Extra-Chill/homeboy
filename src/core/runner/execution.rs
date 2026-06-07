@@ -17,7 +17,9 @@ use super::broker_http;
 use super::capabilities::{runner_capability_snapshot, validate_runner_capability_preflight};
 use super::evidence::mirror_daemon_evidence;
 use super::normalize_runner_command_env;
-use super::resource_metrics::{measured_command_output, RunnerResourceMetrics};
+use super::resource_metrics::{
+    measured_command_output, measured_command_output_until_cancelled, RunnerResourceMetrics,
+};
 use super::{load, status, Runner, RunnerCapabilityPreflight, RunnerKind, RunnerTunnelMode};
 
 mod extension_parity;
@@ -767,8 +769,40 @@ pub(crate) fn execute_runner_process(plan: &RunnerProcessPlan) -> Result<Process
     command_output(&mut command)
 }
 
+pub(crate) fn execute_runner_process_until_cancelled(
+    plan: &RunnerProcessPlan,
+    is_cancelled: impl FnMut() -> bool,
+) -> Result<ProcessOutput> {
+    let mut command = std::process::Command::new(&plan.command[0]);
+    command
+        .args(&plan.command[1..])
+        .current_dir(&plan.cwd)
+        .envs(plan.env.iter())
+        .env(
+            crate::core::observation::SOURCE_SNAPSHOT_METADATA_ENV,
+            serde_json::to_string(&plan.source_snapshot).unwrap_or_default(),
+        );
+
+    command_output_until_cancelled(&mut command, is_cancelled)
+}
+
 fn command_output(command: &mut std::process::Command) -> Result<ProcessOutput> {
     let measured = measured_command_output(command)?;
+    let output = measured.output;
+    Ok(ProcessOutput {
+        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        exit_code: output.status.code().unwrap_or(1),
+        metrics: Some(measured.metrics),
+        capture: Some(measured.capture),
+    })
+}
+
+fn command_output_until_cancelled(
+    command: &mut std::process::Command,
+    is_cancelled: impl FnMut() -> bool,
+) -> Result<ProcessOutput> {
+    let measured = measured_command_output_until_cancelled(command, is_cancelled)?;
     let output = measured.output;
     Ok(ProcessOutput {
         stdout: String::from_utf8_lossy(&output.stdout).to_string(),
@@ -1423,6 +1457,7 @@ mod tests {
             Default::default(),
             false,
             None,
+            Vec::new(),
         )
         .expect_err("daemon exec failure");
 

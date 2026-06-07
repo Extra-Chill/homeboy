@@ -3,6 +3,7 @@
 use std::io::{self, Read};
 use std::process::{Child, Command, ExitStatus, Output};
 use std::thread;
+use std::time::Duration;
 
 use crate::core::error::{Error, Result};
 use serde::Serialize;
@@ -133,6 +134,14 @@ pub fn wait_with_bounded_output(
     mut child: Child,
     byte_limit: usize,
 ) -> io::Result<BoundedCommandOutput> {
+    wait_with_bounded_output_until_cancelled(&mut child, byte_limit, || false)
+}
+
+pub fn wait_with_bounded_output_until_cancelled(
+    child: &mut Child,
+    byte_limit: usize,
+    mut is_cancelled: impl FnMut() -> bool,
+) -> io::Result<BoundedCommandOutput> {
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let stdout_handle =
@@ -140,7 +149,16 @@ pub fn wait_with_bounded_output(
     let stderr_handle =
         stderr.map(|stream| thread::spawn(move || capture_tail(stream, byte_limit)));
 
-    let status = child.wait()?;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if is_cancelled() {
+            terminate_process_tree(child.id())?;
+            break child.wait()?;
+        }
+        thread::sleep(Duration::from_millis(100));
+    };
     let stdout = join_capture(stdout_handle)?;
     let stderr = join_capture(stderr_handle)?;
 
@@ -153,6 +171,51 @@ pub fn wait_with_bounded_output(
             stderr: stderr.metadata,
         },
     })
+}
+
+pub fn isolate_process_tree(command: &mut Command) {
+    #[cfg(unix)]
+    unsafe {
+        use std::os::unix::process::CommandExt;
+
+        command.pre_exec(|| {
+            if libc::setpgid(0, 0) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = command;
+    }
+}
+
+fn terminate_process_tree(root_pid: u32) -> io::Result<()> {
+    #[cfg(unix)]
+    unsafe {
+        let pgid = -(root_pid as libc::pid_t);
+        if libc::kill(pgid, libc::SIGTERM) != 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                return Err(error);
+            }
+        }
+        thread::sleep(Duration::from_millis(500));
+        if libc::kill(pgid, 0) == 0 {
+            let _ = libc::kill(pgid, libc::SIGKILL);
+        }
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = root_pid;
+        Err(io::Error::other(
+            "process tree cancellation is not implemented on this platform",
+        ))
+    }
 }
 
 #[derive(Debug)]

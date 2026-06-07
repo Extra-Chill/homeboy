@@ -186,6 +186,51 @@ fn routes_read_only_http_api_contract() {
 }
 
 #[test]
+fn cancelling_daemon_exec_job_terminates_process_tree() {
+    let _home = create_lab_local_runner();
+    let store = JobStore::default();
+    let cwd = std::env::temp_dir().join(format!("homeboy-daemon-cancel-{}", std::process::id()));
+    std::fs::create_dir_all(&cwd).expect("test cwd");
+    let marker = cwd.join("orphan-marker");
+
+    let response = route_with_job_store_and_body(
+        "POST",
+        "/exec",
+        Some(serde_json::json!({
+            "runner_id": "lab-local",
+            "cwd": cwd.display().to_string(),
+            "command": [
+                "sh",
+                "-c",
+                format!("sleep 1; touch {}", marker.display()),
+            ],
+        })),
+        &store,
+    );
+    assert_eq!(response.status_code, 200);
+    let job_id =
+        uuid::Uuid::parse_str(response.body["body"]["job"]["id"].as_str().expect("job id"))
+            .expect("parse job id");
+
+    for _ in 0..50 {
+        if store.get(job_id).expect("job").status == JobStatus::Running {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    store
+        .cancel(job_id, "test cancellation")
+        .expect("cancel job");
+    std::thread::sleep(std::time::Duration::from_millis(1600));
+
+    assert_eq!(store.get(job_id).expect("job").status, JobStatus::Cancelled);
+    assert!(
+        !marker.exists(),
+        "cancelled daemon runner exec left a child process running"
+    );
+}
+
+#[test]
 fn routes_registered_artifact_downloads_and_sync_manifest() {
     let _home = HomeGuard::new();
     let home_path = std::path::PathBuf::from(std::env::var("HOME").expect("home"));
