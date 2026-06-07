@@ -1,0 +1,31 @@
+{
+  "name": "Managed Preview",
+  "id": "managed-preview",
+  "version": "0.1.0",
+  "icon": "globe",
+  "description": "Provider command helpers for Homeboy managed service public previews",
+  "author": "Extra Chill",
+  "provides": {
+    "file_extensions": ["json", "mjs", "sh"],
+    "capabilities": ["preview-backend"]
+  },
+  "scripts": {
+    "validate": "tests/public-preview-backend-smoke.mjs"
+  },
+  "preview_backends": [
+    {
+      "schema": "homeboy/managed-preview-backend-command/v1",
+      "id": "managed-preview.host-preserving-broker",
+      "label": "Hostname-preserving preview broker",
+      "provider": "external-broker",
+      "command": "node {{extension_path}}/scripts/public-preview-backend.mjs",
+      "contract": {
+        "requires_env": ["HOMEBOY_SERVICE_LOCAL_URL", "HOMEBOY_TUNNEL_PUBLIC_URL", "HOMEBOY_PREVIEW_BROKER_URL"],
+        "keeps_process_alive": true,
+        "records_stdout_stderr": true,
+        "requires_capability": "hostname-preserving-browser-origin"
+      },
+      "capabilities": ["reviewer-clickable-public-url", "hostname-preserving-browser-origin", "browser-origin-evidence"]
+    }
+  ]
+}

@@ -13,6 +13,7 @@ This is a **monorepo** — each subdirectory is a standalone extension. Install 
 | `nodejs` | Node.js project type — discovery, audit grammar (Express/Mongoose/etc.), and npm release lifecycle |
 | `go` | Go project type — Cargo-equivalent CLI integration for services and binaries |
 | `swift` | Swift project type — testing infrastructure for macOS, iOS, and Swift CLI projects |
+| `managed-preview` | Provider command helpers for Homeboy managed service public previews |
 
 ## Scope
 
