@@ -14,6 +14,7 @@ const HELPER_PATHS = Object.freeze({
 	blockQuality: path.join(WORDPRESS_EXTENSION_ROOT, 'lib', 'block-quality.js'),
 	materializedSiteQuality: path.join(WORDPRESS_EXTENSION_ROOT, 'lib', 'materialized-site-quality.js'),
 	editorCanvasProbes: path.join(WORDPRESS_EXTENSION_ROOT, 'lib', 'editor-canvas-probes.js'),
+	fidelityComparison: path.join(WORDPRESS_EXTENSION_ROOT, 'lib', 'fidelity-comparison.js'),
 	fixtureSetup: path.join(WORDPRESS_EXTENSION_ROOT, 'lib', 'fixture-setup.js'),
 	woocommerceExpensiveShipping: path.join(WORDPRESS_EXTENSION_ROOT, 'scripts', 'bench', 'lib', 'woocommerce-expensive-shipping.php'),
 });

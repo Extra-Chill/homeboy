@@ -8,6 +8,7 @@ module.exports = {
 	...require('./lib/block-quality'),
 	...require('./lib/materialized-site-quality'),
 	...require('./lib/editor-canvas-probes'),
+	...require('./lib/fidelity-comparison'),
 	...require('./lib/timing-correlator'),
 	...require('./lib/helper-manifest'),
 	...require('./lib/wordpress-helper-consumer'),
