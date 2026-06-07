@@ -12,6 +12,7 @@ use crate::core::agent_task_timeout_artifacts::is_actionable_patch_artifact;
 use crate::core::{Error, Result};
 
 pub const AGENT_TASK_PROMOTION_REPORT_SCHEMA: &str = "homeboy/agent-task-promotion-report/v1";
+pub const AGENT_TASK_GATE_REPORT_SCHEMA: &str = "homeboy/agent-task-gate-report/v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskPromotionOptions {
@@ -39,7 +40,7 @@ pub struct AgentTaskPromotionReport {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dmc_commands: Vec<AgentTaskPromotionCommandReport>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub verification: Vec<AgentTaskPromotionCommandReport>,
+    pub deterministic_gates: Vec<AgentTaskGateReport>,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub provenance: Value,
 }
@@ -49,6 +50,7 @@ pub struct AgentTaskPromotionReport {
 pub enum AgentTaskPromotionStatus {
     DryRun,
     Applied,
+    GateFailed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -76,6 +78,41 @@ pub struct AgentTaskPromotionCommandReport {
     pub stdout: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub stderr: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskGateReport {
+    #[serde(default = "gate_report_schema")]
+    pub schema: String,
+    pub id: String,
+    pub status: AgentTaskGateStatus,
+    pub command: Vec<String>,
+    pub exit_code: i32,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub stdout: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub stderr: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_evidence: Option<AgentTaskGateFailureEvidence>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentTaskGateStatus {
+    Succeeded,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskGateFailureEvidence {
+    pub summary: String,
+    pub command: String,
+    pub exit_code: i32,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub stdout_tail: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub stderr_tail: String,
+    pub agent_feedback: String,
 }
 
 pub fn promote(options: AgentTaskPromotionOptions) -> Result<AgentTaskPromotionReport> {
@@ -117,18 +154,23 @@ pub fn promote(options: AgentTaskPromotionOptions) -> Result<AgentTaskPromotionR
         dmc_commands.push(apply_patch_with_dmc(&options.to_worktree, &patch_path)?);
     }
 
-    let mut verification = Vec::new();
+    let mut deterministic_gates = Vec::new();
     if !options.dry_run && !options.verify.is_empty() {
         let worktree_path = dmc_worktree_path(&options.to_worktree)?;
-        for command in &options.verify {
-            verification.push(run_verification_command(&worktree_path, command)?);
+        for (index, command) in options.verify.iter().enumerate() {
+            deterministic_gates.push(run_gate_command(&worktree_path, index + 1, command)?);
         }
     }
+    let has_gate_failure = deterministic_gates
+        .iter()
+        .any(|gate| gate.status == AgentTaskGateStatus::Failed);
 
     Ok(AgentTaskPromotionReport {
         schema: AGENT_TASK_PROMOTION_REPORT_SCHEMA.to_string(),
         status: if options.dry_run {
             AgentTaskPromotionStatus::DryRun
+        } else if has_gate_failure {
+            AgentTaskPromotionStatus::GateFailed
         } else {
             AgentTaskPromotionStatus::Applied
         },
@@ -149,7 +191,7 @@ pub fn promote(options: AgentTaskPromotionOptions) -> Result<AgentTaskPromotionR
         },
         changed_files,
         dmc_commands,
-        verification,
+        deterministic_gates,
         provenance: json!({
             "source_schema": outcome.schema,
             "artifact_metadata": artifact.metadata,
@@ -159,6 +201,10 @@ pub fn promote(options: AgentTaskPromotionOptions) -> Result<AgentTaskPromotionR
 
 fn promotion_report_schema() -> String {
     AGENT_TASK_PROMOTION_REPORT_SCHEMA.to_string()
+}
+
+fn gate_report_schema() -> String {
+    AGENT_TASK_GATE_REPORT_SCHEMA.to_string()
 }
 
 fn select_outcome(source: Value, task_id: Option<&str>) -> Result<(String, AgentTaskOutcome)> {
@@ -434,13 +480,6 @@ fn dmc_worktree_path(handle: &str) -> Result<PathBuf> {
         })
 }
 
-fn run_verification_command(cwd: &Path, command: &str) -> Result<AgentTaskPromotionCommandReport> {
-    run_command(
-        vec!["sh".to_string(), "-lc".to_string(), command.to_string()],
-        Some(cwd),
-    )
-}
-
 fn run_command(
     command: Vec<String>,
     cwd: Option<&Path>,
@@ -476,6 +515,68 @@ fn run_command(
         ));
     }
     Ok(report)
+}
+
+fn run_gate_command(cwd: &Path, index: usize, command: &str) -> Result<AgentTaskGateReport> {
+    let command_vec = vec!["sh".to_string(), "-lc".to_string(), command.to_string()];
+    let mut process = Command::new(&command_vec[0]);
+    process.args(&command_vec[1..]).current_dir(cwd);
+    let output = process.output().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("run deterministic gate {command}")),
+        )
+    })?;
+    let exit_code = output.status.code().unwrap_or(1);
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let status = if output.status.success() {
+        AgentTaskGateStatus::Succeeded
+    } else {
+        AgentTaskGateStatus::Failed
+    };
+    let failure_evidence = (status == AgentTaskGateStatus::Failed)
+        .then(|| gate_failure_evidence(command, exit_code, &stdout, &stderr));
+
+    Ok(AgentTaskGateReport {
+        schema: AGENT_TASK_GATE_REPORT_SCHEMA.to_string(),
+        id: format!("gate-{index}"),
+        status,
+        command: command_vec,
+        exit_code,
+        stdout,
+        stderr,
+        failure_evidence,
+    })
+}
+
+fn gate_failure_evidence(
+    command: &str,
+    exit_code: i32,
+    stdout: &str,
+    stderr: &str,
+) -> AgentTaskGateFailureEvidence {
+    let stdout_tail = text_tail(stdout, 20);
+    let stderr_tail = text_tail(stderr, 20);
+    let summary = format!("deterministic gate failed with exit code {exit_code}: {command}");
+    let agent_feedback = format!(
+        "A deterministic verification gate failed after the candidate patch was applied. Fix the code so `{command}` passes, using the captured stdout/stderr tails as the primary failure evidence."
+    );
+
+    AgentTaskGateFailureEvidence {
+        summary,
+        command: command.to_string(),
+        exit_code,
+        stdout_tail,
+        stderr_tail,
+        agent_feedback,
+    }
+}
+
+fn text_tail(text: &str, max_lines: usize) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let start = lines.len().saturating_sub(max_lines);
+    lines[start..].join("\n")
 }
 
 #[cfg(test)]
@@ -635,5 +736,44 @@ mod tests {
         assert_eq!(report.patch_artifact.id, "patch");
         assert_eq!(report.changed_files, vec!["src/lib.rs"]);
         assert!(report.dmc_commands.is_empty());
+        assert!(report.deterministic_gates.is_empty());
+    }
+
+    #[test]
+    fn gate_command_reports_success_without_failure_evidence() {
+        let temp = tempfile::tempdir().expect("tempdir");
+
+        let report = run_gate_command(temp.path(), 1, "printf 'ok'").expect("gate report");
+
+        assert_eq!(report.schema, AGENT_TASK_GATE_REPORT_SCHEMA);
+        assert_eq!(report.id, "gate-1");
+        assert_eq!(report.status, AgentTaskGateStatus::Succeeded);
+        assert_eq!(report.exit_code, 0);
+        assert_eq!(report.stdout, "ok");
+        assert!(report.failure_evidence.is_none());
+    }
+
+    #[test]
+    fn gate_command_normalizes_failure_for_agent_feedback() {
+        let temp = tempfile::tempdir().expect("tempdir");
+
+        let report = run_gate_command(
+            temp.path(),
+            2,
+            "printf 'line one\\nline two\\n'; printf 'boom\\n' >&2; exit 42",
+        )
+        .expect("gate report");
+        let evidence = report.failure_evidence.expect("failure evidence");
+
+        assert_eq!(report.status, AgentTaskGateStatus::Failed);
+        assert_eq!(report.exit_code, 42);
+        assert_eq!(
+            evidence.command,
+            "printf 'line one\\nline two\\n'; printf 'boom\\n' >&2; exit 42"
+        );
+        assert_eq!(evidence.stdout_tail, "line one\nline two");
+        assert_eq!(evidence.stderr_tail, "boom");
+        assert!(evidence.summary.contains("deterministic gate failed"));
+        assert!(evidence.agent_feedback.contains("Fix the code"));
     }
 }
