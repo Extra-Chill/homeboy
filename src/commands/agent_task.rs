@@ -39,6 +39,10 @@ pub enum AgentTaskCommand {
     Artifacts(StatusArgs),
     /// Mark a queued or stale-running durable agent-task run as cancelled.
     Cancel(CancelArgs),
+    /// Resume a queued or stale-running durable run.
+    Resume(StatusArgs),
+    /// Submit a fresh durable run from an existing run's plan.
+    Retry(RetryArgs),
     /// Build a durable aggregate review envelope from run state, logs, artifacts, and promotion hints.
     Review(ReviewArgs),
     /// Promote a completed generic patch artifact into a managed worktree.
@@ -71,6 +75,20 @@ pub struct SubmitArgs {
 pub struct StatusArgs {
     /// Durable run id returned by `agent-task submit` or `agent-task run-plan --record-run-id`.
     pub run_id: String,
+}
+
+#[derive(Args, Debug)]
+pub struct RetryArgs {
+    /// Existing durable run id whose plan should be retried.
+    pub run_id: String,
+
+    /// Optional durable run id for the retry. Generated when omitted.
+    #[arg(long, value_name = "ID")]
+    pub new_run_id: Option<String>,
+
+    /// Execute the newly queued retry immediately.
+    #[arg(long)]
+    pub run: bool,
 }
 
 #[derive(Args, Debug)]
@@ -131,6 +149,8 @@ pub fn run(args: AgentTaskArgs, global: &GlobalArgs) -> CmdResult<Value> {
         AgentTaskCommand::Logs(status_args) => logs(status_args),
         AgentTaskCommand::Artifacts(status_args) => artifacts(status_args),
         AgentTaskCommand::Cancel(cancel_args) => cancel(cancel_args),
+        AgentTaskCommand::Resume(status_args) => resume(status_args),
+        AgentTaskCommand::Retry(retry_args) => retry(retry_args),
         AgentTaskCommand::Review(review_args) => review(review_args),
         AgentTaskCommand::Promote(promote_args) => promote_artifact(promote_args),
         AgentTaskCommand::Providers => providers(),
@@ -252,6 +272,29 @@ fn artifacts(args: StatusArgs) -> CmdResult<Value> {
 
 fn cancel(args: CancelArgs) -> CmdResult<Value> {
     let record = agent_task_lifecycle::cancel_run(&args.run_id, args.reason.as_deref())?;
+    Ok((serde_json::to_value(record).unwrap_or(Value::Null), 0))
+}
+
+fn resume(args: StatusArgs) -> CmdResult<Value> {
+    run_resume_with_executor(args.run_id, ExtensionProviderAgentTaskExecutor::discover())
+}
+
+fn run_resume_with_executor<E>(run_id: String, executor: E) -> CmdResult<Value>
+where
+    E: AgentTaskExecutorAdapter,
+{
+    agent_task_lifecycle::mark_resuming(&run_id)?;
+    run_claimed(run_id, executor)
+}
+
+fn retry(args: RetryArgs) -> CmdResult<Value> {
+    let record = agent_task_lifecycle::retry(&args.run_id, args.new_run_id.as_deref())?;
+    if args.run {
+        return run_submitted_with_executor(
+            record.run_id,
+            ExtensionProviderAgentTaskExecutor::discover(),
+        );
+    }
     Ok((serde_json::to_value(record).unwrap_or(Value::Null), 0))
 }
 
@@ -706,6 +749,56 @@ mod tests {
             assert_eq!(record.state, AgentTaskRunState::Cancelled);
             assert_eq!(record.tasks[0].state, AgentTaskState::Cancelled);
             assert_eq!(record.metadata["cancel_reason"], json!("not selected"));
+        });
+    }
+
+    #[test]
+    fn retry_command_submits_new_queued_run() {
+        with_temp_home(|| {
+            agent_task_lifecycle::submit_plan(&test_plan(), Some("run-retry-source"))
+                .expect("submitted");
+
+            let (value, exit_code) = retry(RetryArgs {
+                run_id: "run-retry-source".to_string(),
+                new_run_id: Some("run-retry-cli".to_string()),
+                run: false,
+            })
+            .expect("retry queued");
+            let record: AgentTaskRunRecord = serde_json::from_value(value).expect("record");
+
+            assert_eq!(exit_code, 0);
+            assert_eq!(record.run_id, "run-retry-cli");
+            assert_eq!(record.state, AgentTaskRunState::Queued);
+            assert_eq!(record.metadata["retry_of"], json!("run-retry-source"));
+        });
+    }
+
+    #[test]
+    fn resume_command_executes_existing_run() {
+        with_temp_home(|| {
+            agent_task_lifecycle::submit_plan(&test_plan(), Some("run-resume-cli"))
+                .expect("submitted");
+            let observed_status = Arc::new(Mutex::new(None));
+
+            let (_value, exit_code) = run_resume_with_executor(
+                "run-resume-cli".to_string(),
+                InspectingExecutor {
+                    run_id: "run-resume-cli".to_string(),
+                    observed_status: Arc::clone(&observed_status),
+                },
+            )
+            .expect("resumed");
+
+            let observed = observed_status
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+                .expect("executor observed status");
+            let completed = lifecycle_status("run-resume-cli").expect("completed status");
+
+            assert_eq!(exit_code, 0);
+            assert!(observed.metadata["resume_requested_at"].is_string());
+            assert_eq!(completed.state, AgentTaskRunState::Succeeded);
         });
     }
 
