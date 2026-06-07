@@ -2,6 +2,9 @@ use clap::{Args, Subcommand};
 use serde_json::Value;
 
 use homeboy::core::agent_task::{AgentTaskAggregateReport, AgentTaskRequest};
+use homeboy::core::agent_task_finalization::{
+    finalize_pr, AgentTaskGateResult, AgentTaskPrFinalizationOptions,
+};
 use homeboy::core::agent_task_lifecycle;
 use homeboy::core::agent_task_promotion::{promote, AgentTaskPromotionOptions};
 use homeboy::core::agent_task_provider::ExtensionProviderAgentTaskExecutor;
@@ -47,6 +50,8 @@ pub enum AgentTaskCommand {
     Review(ReviewArgs),
     /// Promote a completed generic patch artifact into a managed worktree.
     Promote(PromoteArgs),
+    /// Finalize a green cook run into a review-ready pull request.
+    FinalizePr(FinalizePrArgs),
     /// List extension-declared agent-task executor providers.
     Providers,
 }
@@ -138,6 +143,73 @@ pub struct PromoteArgs {
     pub verify: Vec<String>,
 }
 
+#[derive(Args, Debug)]
+pub struct FinalizePrArgs {
+    /// Durable cook/agent-task run id to link in the PR body.
+    #[arg(long, value_name = "ID")]
+    pub run_id: String,
+
+    /// Verified candidate worktree path.
+    #[arg(long, value_name = "PATH")]
+    pub path: String,
+
+    /// PR base branch.
+    #[arg(long, default_value = "main", value_name = "BRANCH")]
+    pub base: String,
+
+    /// PR head branch. Defaults to the current branch in --path.
+    #[arg(long, value_name = "BRANCH")]
+    pub head: Option<String>,
+
+    /// PR title.
+    #[arg(long, value_name = "TEXT")]
+    pub title: String,
+
+    /// Commit message for the verified candidate changes.
+    #[arg(long, value_name = "TEXT")]
+    pub commit_message: String,
+
+    /// Attempt summary to include in the PR body.
+    #[arg(
+        long,
+        default_value = "green deterministic gates completed",
+        value_name = "TEXT"
+    )]
+    pub attempt_summary: String,
+
+    /// Source tracker/reference URL or identifier. Repeatable.
+    #[arg(long = "source-ref", value_name = "REF")]
+    pub source_refs: Vec<String>,
+
+    /// Artifact/evidence URL, path, or identifier. Repeatable.
+    #[arg(long = "artifact-ref", value_name = "REF")]
+    pub artifact_refs: Vec<String>,
+
+    /// Green gate result as name=status or name=status:detail. Repeatable.
+    #[arg(long = "gate-result", value_name = "NAME=STATUS[:DETAIL]")]
+    pub gate_results: Vec<String>,
+
+    /// Changed file summary to include in output/PR body. Defaults to git status discovery.
+    #[arg(long = "changed-file", value_name = "PATH")]
+    pub changed_files: Vec<String>,
+
+    /// Protected branch that may not be finalized directly. Repeatable.
+    #[arg(long = "protected-branch", default_values_t = default_protected_branches(), value_name = "BRANCH")]
+    pub protected_branches: Vec<String>,
+
+    /// AI tool disclosure line for the PR body.
+    #[arg(long, default_value = "OpenCode (GPT-5.5)", value_name = "TEXT")]
+    pub ai_tool: String,
+
+    /// AI assistance scope for the PR body.
+    #[arg(
+        long,
+        default_value = "Drafted implementation and tests; Chris reviews and owns the change.",
+        value_name = "TEXT"
+    )]
+    pub ai_used_for: String,
+}
+
 pub fn run(args: AgentTaskArgs, global: &GlobalArgs) -> CmdResult<Value> {
     match args.command {
         AgentTaskCommand::Dispatch(dispatch_args) => dispatch(dispatch_args, global),
@@ -153,6 +225,7 @@ pub fn run(args: AgentTaskArgs, global: &GlobalArgs) -> CmdResult<Value> {
         AgentTaskCommand::Retry(retry_args) => retry(retry_args),
         AgentTaskCommand::Review(review_args) => review(review_args),
         AgentTaskCommand::Promote(promote_args) => promote_artifact(promote_args),
+        AgentTaskCommand::FinalizePr(finalize_args) => finalize_pull_request(finalize_args),
         AgentTaskCommand::Providers => providers(),
     }
 }
@@ -452,6 +525,77 @@ fn promote_artifact(args: PromoteArgs) -> CmdResult<Value> {
     })?;
 
     Ok((serde_json::to_value(report).unwrap_or(Value::Null), 0))
+}
+
+fn finalize_pull_request(args: FinalizePrArgs) -> CmdResult<Value> {
+    let gate_results = parse_gate_results(&args.gate_results)?;
+    let report = finalize_pr(AgentTaskPrFinalizationOptions {
+        path: args.path,
+        run_id: args.run_id,
+        base: args.base,
+        head: args.head,
+        title: args.title,
+        commit_message: args.commit_message,
+        attempt_summary: args.attempt_summary,
+        source_refs: args.source_refs,
+        artifact_refs: args.artifact_refs,
+        gate_results,
+        changed_files: args.changed_files,
+        ai_tool: args.ai_tool,
+        ai_used_for: args.ai_used_for,
+        protected_branches: args.protected_branches,
+    })?;
+    let exit_code = if report.status == "review_ready" {
+        0
+    } else {
+        1
+    };
+
+    Ok((
+        serde_json::to_value(report).unwrap_or(Value::Null),
+        exit_code,
+    ))
+}
+
+fn parse_gate_results(raw: &[String]) -> homeboy::core::Result<Vec<AgentTaskGateResult>> {
+    raw.iter()
+        .map(|item| {
+            let (name, rest) = item.split_once('=').ok_or_else(|| {
+                homeboy::core::Error::validation_invalid_argument(
+                    "gate-result",
+                    "expected NAME=STATUS or NAME=STATUS:DETAIL",
+                    None,
+                    Some(vec!["cargo test=passed:targeted suite".to_string()]),
+                )
+            })?;
+            let (status, detail) = rest
+                .split_once(':')
+                .map(|(status, detail)| (status, Some(detail.to_string())))
+                .unwrap_or((rest, None));
+            if name.trim().is_empty() || status.trim().is_empty() {
+                return Err(homeboy::core::Error::validation_invalid_argument(
+                    "gate-result",
+                    "gate name and status must be non-empty",
+                    None,
+                    None,
+                ));
+            }
+
+            Ok(AgentTaskGateResult {
+                name: name.trim().to_string(),
+                status: status.trim().to_string(),
+                detail,
+            })
+        })
+        .collect()
+}
+
+fn default_protected_branches() -> Vec<String> {
+    vec![
+        "main".to_string(),
+        "master".to_string(),
+        "trunk".to_string(),
+    ]
 }
 
 fn read_promotion_source(
