@@ -9,6 +9,10 @@ pub use super::agent_task_aggregate::{
     AgentTaskDecisionRef, AgentTaskMatrixRow, AgentTaskReconciliationDecision,
     AgentTaskReconciliationItem, AGENT_TASK_AGGREGATE_SCHEMA,
 };
+pub use super::agent_task_fanout::{
+    AgentTaskFanoutAggregate, AgentTaskFanoutPlan, AgentTaskFanoutPlane, AgentTaskFanoutScheduler,
+    AGENT_TASK_FANOUT_AGGREGATE_SCHEMA, AGENT_TASK_FANOUT_PLAN_SCHEMA,
+};
 
 pub const AGENT_TASK_REQUEST_SCHEMA: &str = "homeboy/agent-task-request/v1";
 pub const AGENT_TASK_OUTCOME_SCHEMA: &str = "homeboy/agent-task-outcome/v1";
