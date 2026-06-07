@@ -4,8 +4,11 @@ use serde::Serialize;
 use homeboy::core::tunnel::{
     self, ExposeServiceTunnelSpec, ServiceTunnel, ServiceTunnelAuth, ServiceTunnelAuthMode,
     ServiceTunnelExposure, ServiceTunnelPolicy, ServiceTunnelStatus, ServiceTunnelTarget,
+    ServiceTunnelTunnelBackend, StartServiceTunnelSpec,
 };
 use homeboy::core::{EntityCrudOutput, MergeOutput};
+use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use super::{CmdResult, DynamicSetArgs};
 
@@ -111,8 +114,58 @@ enum TunnelServiceCommand {
         /// Service tunnel ID
         id: String,
     },
-    /// Show no-op lifecycle status for a service tunnel declaration
+    /// Show declaration, process, health, backend, and evidence status
     Status {
+        /// Service tunnel ID
+        id: String,
+    },
+    /// Start and supervise a declared local service command
+    Start {
+        /// Service tunnel ID
+        id: String,
+
+        /// Long-running service command to execute through the platform shell
+        #[arg(long)]
+        command: String,
+
+        /// Working directory for the service command
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+
+        /// Environment assignment passed to the service command. Repeat for multiple values.
+        #[arg(long = "env")]
+        env: Vec<String>,
+
+        /// Local loopback host declared for this service
+        #[arg(long)]
+        host: Option<String>,
+
+        /// Local port declared for this service
+        #[arg(long)]
+        port: Option<u16>,
+
+        /// Local URL scheme
+        #[arg(long)]
+        scheme: Option<String>,
+
+        /// Full health-check URL to poll before reporting the service ready
+        #[arg(long)]
+        health_url: Option<String>,
+
+        /// Health-check path appended to the declared local URL
+        #[arg(long)]
+        health_path: Option<String>,
+
+        /// Seconds to wait for the service health check
+        #[arg(long, default_value_t = 30)]
+        readiness_timeout: u64,
+
+        /// Public tunnel backend. Only 'none' is currently implemented.
+        #[arg(long, value_enum, default_value_t = ServiceTunnelBackendArg::None)]
+        public_tunnel_backend: ServiceTunnelBackendArg,
+    },
+    /// Stop a running managed local service and cleanup runtime state
+    Stop {
         /// Service tunnel ID
         id: String,
     },
@@ -125,6 +178,27 @@ enum ServiceTunnelAuthModeArg {
     BasicEnv,
     MutualTls,
     SshOnly,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ServiceTunnelBackendArg {
+    None,
+}
+
+impl std::fmt::Display for ServiceTunnelBackendArg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ServiceTunnelBackendArg::None => write!(f, "none"),
+        }
+    }
+}
+
+impl From<ServiceTunnelBackendArg> for ServiceTunnelTunnelBackend {
+    fn from(value: ServiceTunnelBackendArg) -> Self {
+        match value {
+            ServiceTunnelBackendArg::None => ServiceTunnelTunnelBackend::None,
+        }
+    }
 }
 
 impl From<ServiceTunnelAuthModeArg> for ServiceTunnelAuthMode {
@@ -186,6 +260,32 @@ fn run_service(command: TunnelServiceCommand) -> CmdResult<TunnelOutput> {
         TunnelServiceCommand::Remove { id } => remove_service(&id),
         TunnelServiceCommand::Url { id } => url_service(&id),
         TunnelServiceCommand::Status { id } => status_service(&id),
+        TunnelServiceCommand::Start {
+            id,
+            command,
+            cwd,
+            env,
+            host,
+            port,
+            scheme,
+            health_url,
+            health_path,
+            readiness_timeout,
+            public_tunnel_backend,
+        } => start_service(StartServiceTunnelSpec {
+            id,
+            command,
+            cwd,
+            env: parse_env_assignments(env)?,
+            host,
+            port,
+            scheme,
+            health_url,
+            health_path,
+            readiness_timeout_secs: readiness_timeout,
+            backend: public_tunnel_backend.into(),
+        }),
+        TunnelServiceCommand::Stop { id } => stop_service(&id),
     }
 }
 
@@ -309,6 +409,63 @@ fn status_service(id: &str) -> CmdResult<TunnelOutput> {
         },
         0,
     ))
+}
+
+fn start_service(spec: StartServiceTunnelSpec) -> CmdResult<TunnelOutput> {
+    let id = spec.id.clone();
+    let report = tunnel::start(spec)?;
+    Ok((
+        TunnelOutput {
+            command: "tunnel.service.start".to_string(),
+            id: Some(id),
+            extra: TunnelExtra {
+                service: Some(ServiceTunnelActionOutput::Status(report)),
+            },
+            ..Default::default()
+        },
+        0,
+    ))
+}
+
+fn stop_service(id: &str) -> CmdResult<TunnelOutput> {
+    let report = tunnel::stop(id)?;
+    Ok((
+        TunnelOutput {
+            command: "tunnel.service.stop".to_string(),
+            id: Some(id.to_string()),
+            extra: TunnelExtra {
+                service: Some(ServiceTunnelActionOutput::Status(report)),
+            },
+            ..Default::default()
+        },
+        0,
+    ))
+}
+
+fn parse_env_assignments(
+    assignments: Vec<String>,
+) -> homeboy::core::Result<BTreeMap<String, String>> {
+    let mut env = BTreeMap::new();
+    for assignment in assignments {
+        let Some((key, value)) = assignment.split_once('=') else {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                "env",
+                "environment values must use KEY=VALUE syntax",
+                None,
+                Some(vec![assignment]),
+            ));
+        };
+        if key.trim().is_empty() {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                "env",
+                "environment variable name is required",
+                None,
+                None,
+            ));
+        }
+        env.insert(key.to_string(), value.to_string());
+    }
+    Ok(env)
 }
 
 #[cfg(test)]
