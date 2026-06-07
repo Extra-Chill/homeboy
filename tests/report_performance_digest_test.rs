@@ -216,6 +216,54 @@ fn renders_resource_summary_budget_findings_and_baseline_health() {
 }
 
 #[test]
+fn renders_managed_service_preview_url_artifact_metadata() {
+    let dir = tmp_dir("managed-preview");
+    fs::create_dir_all(&dir).expect("temp dir should exist");
+    write_fixture_file(&dir, "resource-summary.json", r#"{}"#);
+    write_fixture_file(&dir, "bench.json", r#"{}"#);
+    write_fixture_file(
+        &dir,
+        "metadata.json",
+        &format!(
+            r#"{{"preview":{}}}"#,
+            include_str!("fixtures/output_contracts/tunnel/preview-artifact.json")
+        ),
+    );
+
+    let report = performance_digest_from_args(&args(&dir)).expect("digest should render");
+
+    assert_eq!(
+        report.preview.get("schema"),
+        Some(&"homeboy/preview-url/v1".to_string())
+    );
+    assert_eq!(
+        report.preview.get("policy.mode"),
+        Some(&"keep_alive_until".to_string())
+    );
+    assert_eq!(
+        report.preview.get("cleanup.expires_at"),
+        Some(&"2026-06-07T13:00:00Z".to_string())
+    );
+    assert_eq!(
+        report.preview.get("source.run_id"),
+        Some(&"run-1".to_string())
+    );
+    assert!(report.markdown.contains("### Preview"));
+    assert!(report
+        .markdown
+        .contains("- public_url: `https://preview.example.test/wpcom-calypso`"));
+    assert!(report
+        .markdown
+        .contains("- policy.mode: `keep_alive_until`"));
+    assert!(report
+        .markdown
+        .contains("- cleanup.expires_at: `2026-06-07T13:00:00Z`"));
+    assert!(report.markdown.contains("- source.run_id: `run-1`"));
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn reads_persisted_uuid_prefixed_artifacts() {
     let dir = tmp_dir("persisted");
     fs::create_dir_all(&dir).expect("temp dir should exist");

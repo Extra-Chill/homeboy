@@ -849,14 +849,30 @@ mod helpers {
     }
 
     pub(super) fn scalar_object(map: &Map<String, Value>) -> BTreeMap<String, String> {
-        map.iter()
-            .filter_map(|(key, value)| match value {
+        let mut flattened = BTreeMap::new();
+        flatten_scalar_object("", map, &mut flattened);
+        flattened
+    }
+
+    fn flatten_scalar_object(
+        prefix: &str,
+        map: &Map<String, Value>,
+        out: &mut BTreeMap<String, String>,
+    ) {
+        for (key, value) in map {
+            let path = if prefix.is_empty() {
+                key.clone()
+            } else {
+                format!("{prefix}.{key}")
+            };
+            match value {
                 Value::String(_) | Value::Number(_) | Value::Bool(_) => {
-                    Some((key.clone(), scalar_display(value)))
+                    out.insert(path, scalar_display(value));
                 }
-                _ => None,
-            })
-            .collect()
+                Value::Object(child) => flatten_scalar_object(&path, child, out),
+                _ => {}
+            }
+        }
     }
 
     pub(super) fn dedupe_diagnostics(
