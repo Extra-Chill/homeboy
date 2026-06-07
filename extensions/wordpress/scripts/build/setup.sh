@@ -13,19 +13,45 @@ set -euo pipefail
 EXTENSION_PATH="$(pwd)"
 
 install_wp_codebox() {
+    write_github_env() {
+        local name="$1"
+        local value="$2"
+
+        if [ -n "${GITHUB_ENV:-}" ]; then
+            echo "${name}=${value}" >> "${GITHUB_ENV}"
+        fi
+    }
+
+    configure_core_module() {
+        local module_path="$1"
+
+        if [ ! -f "${module_path}" ]; then
+            return 1
+        fi
+
+        export HOMEBOY_WP_CODEBOX_CORE_MODULE="${module_path}"
+        write_github_env "HOMEBOY_WP_CODEBOX_CORE_MODULE" "${module_path}"
+        echo "WP Codebox core module configured: ${module_path}"
+        return 0
+    }
+
     if [ -n "${HOMEBOY_WP_CODEBOX_BIN:-}" ] && [ -x "${HOMEBOY_WP_CODEBOX_BIN}" ]; then
         echo "WP Codebox already configured: ${HOMEBOY_WP_CODEBOX_BIN}"
-        return 0
+        if [ -n "${HOMEBOY_WP_CODEBOX_CORE_MODULE:-}" ] && configure_core_module "${HOMEBOY_WP_CODEBOX_CORE_MODULE}"; then
+            return 0
+        fi
+        echo "WP Codebox CLI is configured without a runtime core module; installing source module" >&2
     fi
 
     if command -v wp-codebox >/dev/null 2>&1; then
         local detected_bin
         detected_bin="$(command -v wp-codebox)"
         echo "WP Codebox already available: ${detected_bin}"
-        if [ -n "${GITHUB_ENV:-}" ]; then
-            echo "HOMEBOY_WP_CODEBOX_BIN=${detected_bin}" >> "${GITHUB_ENV}"
+        write_github_env "HOMEBOY_WP_CODEBOX_BIN" "${detected_bin}"
+        if [ -n "${HOMEBOY_WP_CODEBOX_CORE_MODULE:-}" ] && configure_core_module "${HOMEBOY_WP_CODEBOX_CORE_MODULE}"; then
+            return 0
         fi
-        return 0
+        echo "WP Codebox CLI is available without a runtime core module; installing source module" >&2
     fi
 
     local install_mode install_root bin_dir bin_path platform arch artifact_name download_url artifact_path extract_dir
@@ -35,6 +61,7 @@ install_wp_codebox() {
     bin_path="${bin_dir}/wp-codebox"
 
     if [ "${install_mode}" != "source" ]; then
+        local release_artifact_downloaded=0
         platform="$(uname -s | tr '[:upper:]' '[:lower:]')"
         arch="$(uname -m)"
         case "${platform}" in
@@ -54,6 +81,7 @@ install_wp_codebox() {
         mkdir -p "${install_root}" "${bin_dir}"
 
         if command -v curl >/dev/null 2>&1 && curl -fsSL "${download_url}" -o "${artifact_path}"; then
+            release_artifact_downloaded=1
             rm -rf "${extract_dir}"
             mkdir -p "${extract_dir}"
             tar -xzf "${artifact_path}" -C "${extract_dir}"
@@ -69,16 +97,21 @@ exec "${extract_dir}/wp-codebox-cli/bin/wp-codebox" "\$@"
 EOF
             chmod +x "${bin_path}"
 
-            if [ -n "${GITHUB_ENV:-}" ]; then
-                echo "HOMEBOY_WP_CODEBOX_BIN=${bin_path}" >> "${GITHUB_ENV}"
-                echo "PATH=${bin_dir}:${PATH}" >> "${GITHUB_ENV}"
-            fi
+            write_github_env "HOMEBOY_WP_CODEBOX_BIN" "${bin_path}"
+            write_github_env "PATH" "${bin_dir}:${PATH}"
 
             echo "WP Codebox installed: ${bin_path}"
-            return 0
+            if configure_core_module "${extract_dir}/wp-codebox-cli/packages/runtime-core/dist/index.js" || \
+                configure_core_module "${extract_dir}/wp-codebox-cli/node_modules/@automattic/wp-codebox-core/dist/index.js"; then
+                return 0
+            fi
+
+            echo "WP Codebox release artifact did not include a runtime core module; falling back to source install" >&2
         fi
 
-        echo "WP Codebox release artifact unavailable; falling back to source install" >&2
+        if [ "${release_artifact_downloaded}" -eq 0 ]; then
+            echo "WP Codebox release artifact unavailable; falling back to source install" >&2
+        fi
     fi
 
     local source ref repo_dir
@@ -100,16 +133,19 @@ EOF
     npm --prefix "${repo_dir}" install --quiet --no-fund --no-audit --omit=optional
     npm --prefix "${repo_dir}" run build --silent
 
+    configure_core_module "${repo_dir}/packages/runtime-core/dist/index.js" || {
+        echo "Built WP Codebox source did not contain packages/runtime-core/dist/index.js" >&2
+        exit 1
+    }
+
     cat > "${bin_path}" <<EOF
 #!/usr/bin/env bash
 exec node "${repo_dir}/packages/cli/dist/index.js" "\$@"
 EOF
     chmod +x "${bin_path}"
 
-    if [ -n "${GITHUB_ENV:-}" ]; then
-        echo "HOMEBOY_WP_CODEBOX_BIN=${bin_path}" >> "${GITHUB_ENV}"
-        echo "PATH=${bin_dir}:${PATH}" >> "${GITHUB_ENV}"
-    fi
+    write_github_env "HOMEBOY_WP_CODEBOX_BIN" "${bin_path}"
+    write_github_env "PATH" "${bin_dir}:${PATH}"
 
     echo "WP Codebox installed: ${bin_path}"
 }

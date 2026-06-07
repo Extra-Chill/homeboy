@@ -14,7 +14,7 @@ SOURCE_GITHUB_ENV_FILE="${TMPDIR}/source-github-env"
 ARTIFACT_ROOT="${TMPDIR}/artifact-root"
 ARTIFACT_PATH="${TMPDIR}/wp-codebox-cli-linux-x64.tar.gz"
 
-mkdir -p "${FAKE_BIN}" "${HOME_DIR}" "${EXTENSION_DIR}" "${ARTIFACT_ROOT}/wp-codebox-cli/bin"
+mkdir -p "${FAKE_BIN}" "${HOME_DIR}" "${EXTENSION_DIR}" "${ARTIFACT_ROOT}/wp-codebox-cli/bin" "${ARTIFACT_ROOT}/wp-codebox-cli/packages/runtime-core/dist"
 
 cat > "${ARTIFACT_ROOT}/wp-codebox-cli/bin/wp-codebox" <<'SH'
 #!/usr/bin/env bash
@@ -22,6 +22,7 @@ set -euo pipefail
 printf '%s\n' 'wp-codebox release stub'
 SH
 chmod +x "${ARTIFACT_ROOT}/wp-codebox-cli/bin/wp-codebox"
+printf '%s\n' 'export const fixture = true;' > "${ARTIFACT_ROOT}/wp-codebox-cli/packages/runtime-core/dist/index.js"
 tar -czf "${ARTIFACT_PATH}" -C "${ARTIFACT_ROOT}" wp-codebox-cli
 
 cat > "${FAKE_BIN}/curl" <<SH
@@ -76,8 +77,9 @@ while [ "$#" -gt 0 ]; do
             exit 0
             ;;
         run)
-            mkdir -p "${prefix}/packages/cli/dist"
+            mkdir -p "${prefix}/packages/cli/dist" "${prefix}/packages/runtime-core/dist"
             printf '%s\n' 'console.log("wp-codebox source stub")' > "${prefix}/packages/cli/dist/index.js"
+            printf '%s\n' 'export const fixture = true;' > "${prefix}/packages/runtime-core/dist/index.js"
             exit 0
             ;;
         *)
@@ -99,6 +101,11 @@ chmod +x "${FAKE_BIN}/npm"
 
 if ! grep -q '^HOMEBOY_WP_CODEBOX_BIN=' "${GITHUB_ENV_FILE}"; then
     echo "Expected setup to export HOMEBOY_WP_CODEBOX_BIN" >&2
+    exit 1
+fi
+
+if ! grep -q '^HOMEBOY_WP_CODEBOX_CORE_MODULE=' "${GITHUB_ENV_FILE}"; then
+    echo "Expected setup to export HOMEBOY_WP_CODEBOX_CORE_MODULE" >&2
     exit 1
 fi
 
@@ -127,9 +134,15 @@ fi
 )
 
 source_wp_codebox_bin="$(grep '^HOMEBOY_WP_CODEBOX_BIN=' "${SOURCE_GITHUB_ENV_FILE}" | tail -n 1 | cut -d= -f2-)"
+source_wp_codebox_core_module="$(grep '^HOMEBOY_WP_CODEBOX_CORE_MODULE=' "${SOURCE_GITHUB_ENV_FILE}" | tail -n 1 | cut -d= -f2-)"
 
 if [ "$("${source_wp_codebox_bin}")" != "wp-codebox source stub" ]; then
     echo "Expected source fallback wrapper to execute built CLI" >&2
+    exit 1
+fi
+
+if [ ! -f "${source_wp_codebox_core_module}" ]; then
+    echo "Expected source fallback to export built runtime core module" >&2
     exit 1
 fi
 
