@@ -383,7 +383,7 @@ try {
   assert.equal(defaultedRequest.mounts[0].source, workspaceRoot);
   assert.equal(defaultedRequest.mounts[0].target, '/workspace');
   assert.equal(defaultedRequest.mounts[0].mode, 'readwrite');
-  assert.equal(defaultedRequest.workspaces[0].target, '/workspace');
+  assert.deepEqual(defaultedRequest.workspaces, []);
   assert(!JSON.stringify(defaultedRequest).includes(staleStandaloneAgentsApiPath));
   assert(!JSON.stringify(defaultedRequest).includes(alternateBundledAgentsApiPath));
 

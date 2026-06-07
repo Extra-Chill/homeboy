@@ -266,7 +266,7 @@ function defaultCodeboxRuntimeConfig(request, config, inputs, options = {}) {
     providerPluginPaths: normalizeArray(settings.wp_codebox_provider_plugin_paths || settings.provider_plugin_paths || (providerPluginPath ? [providerPluginPath] : [])),
     secretEnv: defaultSecretEnv(config.provider || options.provider || '', settings),
     mounts: defaultWorkspaceMounts(workspaceRoot, request, config, inputs, options),
-    workspaces: defaultWorkspaces(workspaceRoot, request, config, inputs, options),
+    workspaces: defaultWorkspaces(config, inputs, options),
   };
 }
 
@@ -362,18 +362,9 @@ function defaultWorkspaceMounts(workspaceRoot, request, config, inputs, options)
   ];
 }
 
-function defaultWorkspaces(workspaceRoot, request, config, inputs, options) {
+function defaultWorkspaces(config, inputs, options) {
   const explicit = inputs.workspaces || config.workspaces || options.workspaces || [];
-  if (!workspaceRoot || explicit.some((workspace) => workspace?.target === '/workspace')) {
-    return explicit;
-  }
-  return [
-    ...explicit,
-    {
-      target: '/workspace',
-      mode: workspaceMode(request, config, inputs),
-    },
-  ];
+  return explicit;
 }
 
 function agentBundleMounts(bundleConfig, explicitMounts = []) {
