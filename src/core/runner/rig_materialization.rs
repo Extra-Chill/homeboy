@@ -99,8 +99,13 @@ pub(super) fn sync_lab_offload_rigs(
 pub(super) fn sync_lab_offload_rig_component_dependencies(
     runner_id: &str,
     args: &[String],
+    primary_local_path: &str,
+    primary_remote_path: &str,
 ) -> Result<Vec<RunnerGitDependencyMaterializationOutput>> {
-    let dependencies = lab_offload_rig_component_dependencies(args)?;
+    let dependencies = lab_offload_rig_component_dependencies(
+        args,
+        Some((primary_local_path, primary_remote_path)),
+    )?;
     if dependencies.is_empty() {
         return Ok(Vec::new());
     }
@@ -128,6 +133,7 @@ pub(super) fn sync_lab_offload_rig_component_dependencies(
 
 pub(super) fn lab_offload_rig_component_dependencies(
     args: &[String],
+    primary_workspace: Option<(&str, &str)>,
 ) -> Result<Vec<RigComponentDependency>> {
     let mut dependencies = Vec::new();
     for rig_id in lab_offload_rig_ids(args) {
@@ -148,7 +154,10 @@ pub(super) fn lab_offload_rig_component_dependencies(
             dependencies.push(RigComponentDependency {
                 rig_id: rig_id.clone(),
                 component_id: component_id.clone(),
-                remote_checkout_root: local_checkout_root.clone(),
+                remote_checkout_root: remote_checkout_root_for_local(
+                    &local_checkout_root,
+                    primary_workspace,
+                ),
                 local_checkout_root,
                 required_subpath,
                 remote_url: component.remote_url.clone(),
@@ -160,6 +169,21 @@ pub(super) fn lab_offload_rig_component_dependencies(
 
 fn expanded_local_path(spec: &rig::RigSpec, value: &str) -> String {
     rig::expand::expand_vars(spec, value)
+}
+
+fn remote_checkout_root_for_local(
+    local_checkout_root: &str,
+    primary_workspace: Option<(&str, &str)>,
+) -> String {
+    let Some((primary_local_path, primary_remote_path)) = primary_workspace else {
+        return local_checkout_root.to_string();
+    };
+    if normalize_path_for_prefix(Path::new(local_checkout_root))
+        == normalize_path_for_prefix(Path::new(primary_local_path))
+    {
+        return primary_remote_path.to_string();
+    }
+    local_checkout_root.to_string()
 }
 
 fn required_component_subpath(
@@ -300,12 +324,15 @@ mod tests {
             )
             .expect("save rig");
 
-            let dependencies = lab_offload_rig_component_dependencies(&[
-                "homeboy".to_string(),
-                "bench".to_string(),
-                "--rig".to_string(),
-                "woocommerce-performance".to_string(),
-            ])
+            let dependencies = lab_offload_rig_component_dependencies(
+                &[
+                    "homeboy".to_string(),
+                    "bench".to_string(),
+                    "--rig".to_string(),
+                    "woocommerce-performance".to_string(),
+                ],
+                None,
+            )
             .expect("dependencies");
 
             assert_eq!(dependencies.len(), 1);
@@ -365,12 +392,18 @@ mod tests {
             )
             .expect("source metadata");
 
-            let dependencies = lab_offload_rig_component_dependencies(&[
-                "homeboy".to_string(),
-                "bench".to_string(),
-                "--rig".to_string(),
-                "studio-web-product-matrix".to_string(),
-            ])
+            let dependencies = lab_offload_rig_component_dependencies(
+                &[
+                    "homeboy".to_string(),
+                    "bench".to_string(),
+                    "--rig".to_string(),
+                    "studio-web-product-matrix".to_string(),
+                ],
+                Some((
+                    &checkout.display().to_string(),
+                    "/home/chubes/Developer/_lab_workspaces/studio-web-snapshot",
+                )),
+            )
             .expect("dependencies");
 
             assert_eq!(dependencies.len(), 1);
@@ -380,7 +413,7 @@ mod tests {
             );
             assert_eq!(
                 dependencies[0].remote_checkout_root,
-                checkout.display().to_string()
+                "/home/chubes/Developer/_lab_workspaces/studio-web-snapshot"
             );
             assert!(!dependencies[0]
                 .remote_checkout_root
