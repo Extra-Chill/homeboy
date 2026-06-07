@@ -66,6 +66,8 @@ pub struct RunnerSettings {
     pub concurrency_limit: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact_policy: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub snapshot_excludes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]

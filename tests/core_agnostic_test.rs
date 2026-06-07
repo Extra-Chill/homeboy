@@ -115,6 +115,10 @@ const TERMS: &[Term] = &[
         kind: MatchKind::Literal,
     },
     Term {
+        name: "tsbuildinfo",
+        kind: MatchKind::Token,
+    },
+    Term {
         name: "go vet",
         kind: MatchKind::Literal,
     },
