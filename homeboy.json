@@ -122,7 +122,43 @@
       "src/core/code_audit/detectors/test_vacuity.rs",
       "src/core/code_audit/detectors/upstream_workaround.rs"
     ],
-    "remote_execution_safety": {},
+    "remote_execution_safety": {
+      "argument_forward_markers": [
+        "normalized_args",
+        "std::env::args",
+        "args.iter()",
+        "command.extend(args"
+      ],
+      "artifact_access_markers": [
+        "is_retrievable_runner_artifact"
+      ],
+      "artifact_capture_markers": [
+        "capture_change: true"
+      ],
+      "artifact_report_markers": [
+        "change_artifact_path"
+      ],
+      "artifact_snapshot_markers": [
+        "source_snapshot"
+      ],
+      "capability_preflight_markers": [
+        "component_runner_capability_plan",
+        "evaluate_component_runner_capabilities"
+      ],
+      "dispatch_markers": [
+        "runner::exec",
+        "RunnerExecOptions"
+      ],
+      "extension_parity_markers": [
+        "required_extensions"
+      ],
+      "extension_selector_markers": [
+        "extension_selector"
+      ],
+      "path_translation_markers": [
+        "rewrite_component_remote_args"
+      ]
+    },
     "source_policies": [
       {
         "case_insensitive": true,
