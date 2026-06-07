@@ -346,7 +346,8 @@ const defaultsRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-codebox-agen
 try {
   const workspaceRoot = path.join(defaultsRoot, 'target-repo@issue-1161');
   const dataMachinePath = path.join(defaultsRoot, 'data-machine');
-  const bundledAgentsApiPath = path.join(dataMachinePath, 'vendor', 'automattic', 'agents-api');
+  const bundledAgentsApiPath = path.join(dataMachinePath, 'vendor', 'wordpress', 'agents-api');
+  const alternateBundledAgentsApiPath = path.join(dataMachinePath, 'vendor', 'automattic', 'agents-api');
   const dataMachineCodePath = path.join(defaultsRoot, 'data-machine-code');
   const staleStandaloneAgentsApiPath = path.join(defaultsRoot, 'agents-api');
   const providerPath = path.join(defaultsRoot, 'ai-provider-for-openai');
@@ -384,6 +385,24 @@ try {
   assert.equal(defaultedRequest.mounts[0].mode, 'readwrite');
   assert.equal(defaultedRequest.workspaces[0].target, '/workspace');
   assert(!JSON.stringify(defaultedRequest).includes(staleStandaloneAgentsApiPath));
+  assert(!JSON.stringify(defaultedRequest).includes(alternateBundledAgentsApiPath));
+
+  fs.rmSync(bundledAgentsApiPath, { recursive: true, force: true });
+  fs.mkdirSync(alternateBundledAgentsApiPath, { recursive: true });
+  const alternateDefaultedRequest = codeboxTaskRequestFromAgentTaskRequest({
+    ...request,
+    task_id: 'alternate-default-runtime-stack-task-123',
+    executor: {
+      backend: 'codebox',
+      config: { provider: 'codex' },
+    },
+    inputs: {
+      target: { root: workspaceRoot },
+    },
+  }, {
+    settings: {},
+  });
+  assert.equal(alternateDefaultedRequest.agents_api_path, alternateBundledAgentsApiPath);
 
   const explicitOverrideRequest = codeboxTaskRequestFromAgentTaskRequest({
     ...request,

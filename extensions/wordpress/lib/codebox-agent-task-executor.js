@@ -303,7 +303,10 @@ function siblingPath(base, name) {
 }
 
 function bundledAgentsApiPath(dataMachinePath) {
-  return dataMachinePath ? path.join(dataMachinePath, 'vendor', 'automattic', 'agents-api') : '';
+  return dataMachinePath ? [
+    path.join(dataMachinePath, 'vendor', 'wordpress', 'agents-api'),
+    path.join(dataMachinePath, 'vendor', 'automattic', 'agents-api'),
+  ] : [];
 }
 
 function defaultSecretEnv(provider, settings) {
