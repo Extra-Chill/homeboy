@@ -181,7 +181,7 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     session_id: config.session_id || config.sessionId || '',
     agent: config.agent || options.agent || 'wp-codebox-sandbox',
     mode: config.mode || options.mode || 'sandbox',
-    provider: config.provider || options.provider || '',
+    provider: config.provider || options.provider || defaults.provider || '',
     model: request.executor.model || config.model || options.model || '',
     provider_plugin_paths: config.provider_plugin_paths || options.providerPluginPaths || defaults.providerPluginPaths || [],
     agent_bundles: config.agent_bundles || config.agentBundles || options.agentBundles || [],
@@ -251,6 +251,7 @@ function defaultCodeboxRuntimeConfig(request, config, inputs, options = {}) {
     siblingPath(workspaceBase, 'ai-provider-for-openai'),
     siblingPath(workspaceBase, 'ai-provider-for-openai-main'),
   );
+  const provider = config.provider || options.provider || defaultProviderForPluginPath(providerPluginPath);
   const agentsApiPath = firstExistingPath(
     options.agentsApi,
     settings.wp_codebox_agents_api_path,
@@ -264,7 +265,8 @@ function defaultCodeboxRuntimeConfig(request, config, inputs, options = {}) {
     legacyRuntime: dataMachinePath,
     legacyRuntimeTools: dataMachineCodePath,
     providerPluginPaths: normalizeArray(settings.wp_codebox_provider_plugin_paths || settings.provider_plugin_paths || (providerPluginPath ? [providerPluginPath] : [])),
-    secretEnv: defaultSecretEnv(config.provider || options.provider || '', settings),
+    provider,
+    secretEnv: defaultSecretEnv(provider, settings),
     mounts: defaultWorkspaceMounts(workspaceRoot, request, config, inputs, options),
     workspaces: defaultWorkspaces(config, inputs, options),
   };
@@ -324,6 +326,13 @@ function defaultSecretEnv(provider, settings) {
     ];
   }
   return provider === 'openai' ? ['OPENAI_API_KEY'] : [];
+}
+
+function defaultProviderForPluginPath(providerPluginPath) {
+  if (!providerPluginPath) {
+    return '';
+  }
+  return path.basename(providerPluginPath).startsWith('ai-provider-for-openai') ? 'openai' : '';
 }
 
 function resolveWorkspaceRoot(request, config, inputs, settings, options) {
