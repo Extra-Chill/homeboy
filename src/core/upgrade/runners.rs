@@ -167,6 +167,7 @@ fn runner_exec_options(runner: &Runner, command: Vec<String>) -> RunnerExecOptio
         source_snapshot: None,
         capability_preflight: Some(runner_upgrade_capability_plan()),
         required_extensions: Vec::new(),
+        require_paths: Vec::new(),
     }
 }
 
@@ -341,6 +342,7 @@ mod tests {
             patch: None,
             metrics: None,
             capture: None,
+            diagnostics: None,
         }
     }
 }

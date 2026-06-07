@@ -83,6 +83,7 @@ pub fn run_reverse_worker(
             source_snapshot: claim.request.source_snapshot.clone(),
             capability_preflight: None,
             required_extensions: Vec::new(),
+            require_paths: claim.request.require_paths.clone(),
         },
     )?;
     let job = finish_job(
@@ -230,6 +231,7 @@ mod tests {
                     env: Default::default(),
                     capture_patch: false,
                     source_snapshot: None,
+                    require_paths: Vec::new(),
                     metadata: None,
                 })
                 .expect("submit job");

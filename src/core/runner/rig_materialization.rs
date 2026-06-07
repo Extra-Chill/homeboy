@@ -76,6 +76,7 @@ pub(super) fn sync_lab_offload_rigs(
                 source_snapshot: None,
                 capability_preflight: None,
                 required_extensions: Vec::new(),
+                require_paths: Vec::new(),
             },
         )?;
 

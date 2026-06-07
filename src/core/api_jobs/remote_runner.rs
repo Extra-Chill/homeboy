@@ -46,6 +46,8 @@ pub struct RemoteRunnerJobRequest {
     pub capture_patch: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_snapshot: Option<SourceSnapshot>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub require_paths: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<Value>,
 }
