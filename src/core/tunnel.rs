@@ -79,17 +79,51 @@ pub struct ServiceTunnelPolicy {
     pub require_auth: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_clients: Vec<String>,
+    #[serde(default)]
+    pub preview: ServiceTunnelPreviewPolicy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ServiceTunnelPreviewPolicy {
+    #[serde(default)]
+    pub mode: ServiceTunnelPreviewPolicyMode,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keep_alive_until: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceTunnelPreviewPolicyMode {
+    None,
+    Always,
+    OnFailure,
+    ManualApproval,
+    KeepAliveUntil,
+}
+
+impl Default for ServiceTunnelPreviewPolicy {
+    fn default() -> Self {
+        Self {
+            mode: ServiceTunnelPreviewPolicyMode::None,
+            keep_alive_until: None,
+        }
+    }
+}
+
+impl Default for ServiceTunnelPreviewPolicyMode {
+    fn default() -> Self {
+        Self::None
+    }
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ServiceTunnelStatus {
-    pub service_id: String,
+    #[serde(flatten)]
+    pub preview_identity: ServiceTunnelPreviewIdentity,
     pub declared: bool,
     pub running: bool,
     pub lifecycle: String,
     pub local_url: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub public_url: Option<String>,
     pub remote_target: String,
     pub policy: ServiceTunnelPolicy,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -100,6 +134,8 @@ pub struct ServiceTunnelStatus {
     pub evidence: Option<ServiceTunnelEvidence>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tunnel_backend: Option<ServiceTunnelBackendStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview: Option<ServiceTunnelPreviewArtifact>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -113,14 +149,13 @@ pub struct ServiceTunnelCommandSpec {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ServiceTunnelRuntimeState {
-    pub service_id: String,
+    #[serde(flatten)]
+    pub preview_identity: ServiceTunnelPreviewIdentity,
     pub pid: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub process_group_id: Option<i32>,
     pub started_at: String,
     pub local_url: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub public_url: Option<String>,
     pub command: ServiceTunnelCommandSpec,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub health_url: Option<String>,
@@ -129,6 +164,10 @@ pub struct ServiceTunnelRuntimeState {
     pub backend: ServiceTunnelTunnelBackend,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub backend_process: Option<ServiceTunnelBackendProcessState>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_workflow_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -194,6 +233,49 @@ pub struct ServiceTunnelBackendEvidence {
     pub stderr_path: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ServiceTunnelPreviewArtifact {
+    pub schema: String,
+    pub kind: String,
+    #[serde(flatten)]
+    pub preview_identity: ServiceTunnelPreviewIdentity,
+    pub local_url: String,
+    pub backend: ServiceTunnelTunnelBackend,
+    pub policy: ServiceTunnelPreviewPolicy,
+    pub cleanup: ServiceTunnelPreviewCleanupMetadata,
+    pub source: ServiceTunnelPreviewSource,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ServiceTunnelPreviewIdentity {
+    pub service_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub public_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ServiceTunnelPreviewCleanupMetadata {
+    pub cleanup_policy: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+    pub stop_on_cleanup: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ServiceTunnelPreviewSource {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workflow_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceTunnelPreviewDecisionContext {
+    pub run_failed: bool,
+    pub manual_approval_required: bool,
+    pub now: chrono::DateTime<chrono::Utc>,
+}
+
 pub struct StartServiceTunnelSpec {
     pub id: String,
     pub command: String,
@@ -208,6 +290,8 @@ pub struct StartServiceTunnelSpec {
     pub backend: ServiceTunnelTunnelBackend,
     pub backend_command: Option<String>,
     pub backend_public_url: Option<String>,
+    pub source_run_id: Option<String>,
+    pub source_workflow_id: Option<String>,
 }
 
 pub struct ExposeServiceTunnelSpec {
@@ -369,12 +453,14 @@ pub fn start(spec: StartServiceTunnelSpec) -> Result<ServiceTunnelStatus> {
     let process_group_id = process_group_id_for(pid);
     let health_url = resolve_health_url(&tunnel, spec.health_url, spec.health_path);
     let state = ServiceTunnelRuntimeState {
-        service_id: tunnel.id.clone(),
+        preview_identity: ServiceTunnelPreviewIdentity {
+            service_id: tunnel.id.clone(),
+            public_url: spec.backend_public_url.clone(),
+        },
         pid,
         process_group_id,
         started_at: chrono::Utc::now().to_rfc3339(),
         local_url: local_url_for(&tunnel),
-        public_url: spec.backend_public_url.clone(),
         command: ServiceTunnelCommandSpec {
             command: spec.command,
             cwd: spec.cwd.map(|path| path.display().to_string()),
@@ -385,11 +471,13 @@ pub fn start(spec: StartServiceTunnelSpec) -> Result<ServiceTunnelStatus> {
         stderr_path: stderr_path.display().to_string(),
         backend: spec.backend,
         backend_process: None,
+        source_run_id: spec.source_run_id,
+        source_workflow_id: spec.source_workflow_id,
     };
     save_runtime_state(&state)?;
     if let Err(error) = wait_until_ready(&state, spec.readiness_timeout_secs) {
         terminate_runtime_state(&state)?;
-        remove_runtime_state(&state.service_id)?;
+        remove_runtime_state(&state.preview_identity.service_id)?;
         return Err(error);
     }
     let state = match start_backend_if_needed(state, &tunnel, spec.backend_command) {
@@ -397,7 +485,7 @@ pub fn start(spec: StartServiceTunnelSpec) -> Result<ServiceTunnelStatus> {
         Err(error) => {
             if let Some(state) = load_runtime_state(&tunnel.id)? {
                 terminate_runtime_state(&state)?;
-                remove_runtime_state(&state.service_id)?;
+                remove_runtime_state(&state.preview_identity.service_id)?;
             }
             return Err(error);
         }
@@ -435,7 +523,7 @@ fn service_tunnel_status(tunnel: &ServiceTunnel) -> ServiceTunnelStatus {
     });
     let backend = state.as_ref().map(|state| ServiceTunnelBackendStatus {
         backend: state.backend.clone(),
-        active: backend_state_is_running(state) || state.public_url.is_some(),
+        active: backend_state_is_running(state) || state.preview_identity.public_url.is_some(),
         process: state.backend_process.as_ref().map(|backend| {
             let running = backend_process_is_running(backend);
             ServiceTunnelProcessStatus {
@@ -454,21 +542,112 @@ fn service_tunnel_status(tunnel: &ServiceTunnel) -> ServiceTunnelStatus {
                 stderr_path: backend.stderr_path.clone(),
             }),
     });
-    let public_url = state.as_ref().and_then(|state| state.public_url.clone());
+    let public_url = state
+        .as_ref()
+        .and_then(|state| state.preview_identity.public_url.clone());
+    let preview = state
+        .as_ref()
+        .and_then(|state| preview_artifact_for_status(tunnel, state));
     ServiceTunnelStatus {
-        service_id: tunnel.id.clone(),
+        preview_identity: ServiceTunnelPreviewIdentity {
+            service_id: tunnel.id.clone(),
+            public_url,
+        },
         declared: true,
         running,
         lifecycle: if running { "running" } else { "declared" }.to_string(),
         local_url: local_url_for(tunnel),
-        public_url,
         remote_target: format!("{}:{}", tunnel.target.host, tunnel.target.port),
         policy: tunnel.policy.clone(),
         process,
         health,
         evidence,
         tunnel_backend: backend,
+        preview,
     }
+}
+
+fn preview_policy_allows(
+    policy: &ServiceTunnelPreviewPolicy,
+    context: &ServiceTunnelPreviewDecisionContext,
+) -> bool {
+    match policy.mode {
+        ServiceTunnelPreviewPolicyMode::None => false,
+        ServiceTunnelPreviewPolicyMode::Always => true,
+        ServiceTunnelPreviewPolicyMode::OnFailure => context.run_failed,
+        ServiceTunnelPreviewPolicyMode::ManualApproval => context.manual_approval_required,
+        ServiceTunnelPreviewPolicyMode::KeepAliveUntil => policy
+            .keep_alive_until
+            .as_deref()
+            .and_then(parse_rfc3339_utc)
+            .is_some_and(|expires_at| context.now <= expires_at),
+    }
+}
+
+fn preview_artifact_for(
+    tunnel: &ServiceTunnel,
+    state: &ServiceTunnelRuntimeState,
+    context: &ServiceTunnelPreviewDecisionContext,
+) -> Option<ServiceTunnelPreviewArtifact> {
+    if !preview_policy_allows(&tunnel.policy.preview, context) {
+        return None;
+    }
+
+    Some(ServiceTunnelPreviewArtifact {
+        schema: "homeboy/preview-url/v1".to_string(),
+        kind: "preview_url".to_string(),
+        preview_identity: ServiceTunnelPreviewIdentity {
+            service_id: tunnel.id.clone(),
+            public_url: state.preview_identity.public_url.clone(),
+        },
+        local_url: state.local_url.clone(),
+        backend: state.backend.clone(),
+        policy: tunnel.policy.preview.clone(),
+        cleanup: preview_cleanup_metadata(&tunnel.policy.preview),
+        source: ServiceTunnelPreviewSource {
+            run_id: state.source_run_id.clone(),
+            workflow_id: state.source_workflow_id.clone(),
+        },
+    })
+}
+
+fn preview_artifact_for_status(
+    tunnel: &ServiceTunnel,
+    state: &ServiceTunnelRuntimeState,
+) -> Option<ServiceTunnelPreviewArtifact> {
+    preview_artifact_for(
+        tunnel,
+        state,
+        &ServiceTunnelPreviewDecisionContext {
+            run_failed: false,
+            manual_approval_required: false,
+            now: chrono::Utc::now(),
+        },
+    )
+}
+
+fn preview_cleanup_metadata(
+    policy: &ServiceTunnelPreviewPolicy,
+) -> ServiceTunnelPreviewCleanupMetadata {
+    let cleanup_policy = match policy.mode {
+        ServiceTunnelPreviewPolicyMode::None => "stop_immediately",
+        ServiceTunnelPreviewPolicyMode::Always => "keep_while_running",
+        ServiceTunnelPreviewPolicyMode::OnFailure => "keep_on_failure",
+        ServiceTunnelPreviewPolicyMode::ManualApproval => "keep_for_manual_approval",
+        ServiceTunnelPreviewPolicyMode::KeepAliveUntil => "keep_alive_until",
+    };
+
+    ServiceTunnelPreviewCleanupMetadata {
+        cleanup_policy: cleanup_policy.to_string(),
+        expires_at: policy.keep_alive_until.clone(),
+        stop_on_cleanup: true,
+    }
+}
+
+fn parse_rfc3339_utc(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|datetime| datetime.with_timezone(&chrono::Utc))
 }
 
 fn local_url_for(tunnel: &ServiceTunnel) -> String {
@@ -541,6 +720,27 @@ fn validate_service_tunnel(tunnel: &ServiceTunnel) -> Result<()> {
             Some(tunnel.id.clone()),
             None,
         ));
+    }
+    if matches!(
+        tunnel.policy.preview.mode,
+        ServiceTunnelPreviewPolicyMode::KeepAliveUntil
+    ) {
+        let Some(expires_at) = tunnel.policy.preview.keep_alive_until.as_deref() else {
+            return Err(Error::validation_invalid_argument(
+                "policy.preview.keep_alive_until",
+                "keep_alive_until preview policy requires an RFC3339 expiry",
+                Some(tunnel.id.clone()),
+                None,
+            ));
+        };
+        if parse_rfc3339_utc(expires_at).is_none() {
+            return Err(Error::validation_invalid_argument(
+                "policy.preview.keep_alive_until",
+                "preview expiry must be a valid RFC3339 timestamp",
+                Some(tunnel.id.clone()),
+                None,
+            ));
+        }
     }
     Ok(())
 }
@@ -616,7 +816,7 @@ fn start_backend_if_needed(
     command
         .env("HOMEBOY_SERVICE_ID", &tunnel.id)
         .env("HOMEBOY_SERVICE_LOCAL_URL", &state.local_url);
-    if let Some(public_url) = &state.public_url {
+    if let Some(public_url) = &state.preview_identity.public_url {
         command.env("HOMEBOY_TUNNEL_PUBLIC_URL", public_url);
     }
     command
@@ -703,13 +903,17 @@ fn load_runtime_state(id: &str) -> Result<Option<ServiceTunnelRuntimeState>> {
 }
 
 fn save_runtime_state(state: &ServiceTunnelRuntimeState) -> Result<()> {
-    let path = paths::service_tunnel_runtime_state_file(&state.service_id)?;
+    let path = paths::service_tunnel_runtime_state_file(&state.preview_identity.service_id)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .map_err(|e| Error::internal_io(e.to_string(), Some(parent.display().to_string())))?;
     }
-    let data = serde_json::to_string_pretty(state)
-        .map_err(|e| Error::internal_json(e.to_string(), Some(state.service_id.clone())))?;
+    let data = serde_json::to_string_pretty(state).map_err(|e| {
+        Error::internal_json(
+            e.to_string(),
+            Some(state.preview_identity.service_id.clone()),
+        )
+    })?;
     fs::write(&path, data)
         .map_err(|e| Error::internal_io(e.to_string(), Some(path.display().to_string())))
 }
@@ -826,7 +1030,7 @@ fn wait_until_ready(state: &ServiceTunnelRuntimeState, timeout_secs: u64) -> Res
             return Err(Error::validation_invalid_argument(
                 "service",
                 "service process exited before becoming ready",
-                Some(state.service_id.clone()),
+                Some(state.preview_identity.service_id.clone()),
                 None,
             ));
         }
@@ -838,7 +1042,7 @@ fn wait_until_ready(state: &ServiceTunnelRuntimeState, timeout_secs: u64) -> Res
             return Err(Error::validation_invalid_argument(
                 "readiness",
                 "service did not become healthy before readiness timeout",
-                Some(state.service_id.clone()),
+                Some(state.preview_identity.service_id.clone()),
                 health.error.map(|error| vec![error]),
             ));
         }
@@ -881,7 +1085,7 @@ fn check_runtime_health(state: &ServiceTunnelRuntimeState) -> ServiceTunnelHealt
 
 fn runtime_evidence(state: &ServiceTunnelRuntimeState) -> ServiceTunnelEvidence {
     ServiceTunnelEvidence {
-        state_path: paths::service_tunnel_runtime_state_file(&state.service_id)
+        state_path: paths::service_tunnel_runtime_state_file(&state.preview_identity.service_id)
             .map(|path| path.display().to_string())
             .unwrap_or_default(),
         stdout_path: state.stdout_path.clone(),
@@ -918,7 +1122,7 @@ mod tests {
             create_server();
 
             let tunnel = expose(ExposeServiceTunnelSpec {
-                id: "context-a8c".to_string(),
+                id: "site-preview".to_string(),
                 server_id: "private-host".to_string(),
                 target: ServiceTunnelTarget {
                     host: "127.0.0.1".to_string(),
@@ -928,20 +1132,21 @@ mod tests {
                 local_port: Some(8831),
                 auth: ServiceTunnelAuth {
                     mode: ServiceTunnelAuthMode::BearerEnv,
-                    env_var: Some("CONTEXTA8C_TOKEN".to_string()),
+                    env_var: Some("SITE_PREVIEW_TOKEN".to_string()),
                     header: Some("Authorization".to_string()),
                 },
                 policy: ServiceTunnelPolicy {
                     exposure: ServiceTunnelExposure::PrivateLoopback,
                     require_auth: true,
-                    allowed_clients: vec!["wp-runtime".to_string()],
+                    allowed_clients: vec!["app-runtime".to_string()],
+                    preview: ServiceTunnelPreviewPolicy::default(),
                 },
-                description: Some("Private MCP service".to_string()),
+                description: Some("Private preview service".to_string()),
             })
             .expect("expose service");
 
-            assert_eq!(tunnel.id, "context-a8c");
-            let report = status("context-a8c").expect("status");
+            assert_eq!(tunnel.id, "site-preview");
+            let report = status("site-preview").expect("status");
             assert!(report.declared);
             assert!(!report.running);
             assert_eq!(report.local_url, "http://127.0.0.1:8831");
@@ -970,6 +1175,7 @@ mod tests {
                     exposure: ServiceTunnelExposure::PrivateLoopback,
                     require_auth: true,
                     allowed_clients: Vec::new(),
+                    preview: ServiceTunnelPreviewPolicy::default(),
                 },
                 description: None,
             })
@@ -1002,6 +1208,10 @@ mod tests {
                     exposure: ServiceTunnelExposure::PrivateLoopback,
                     require_auth: true,
                     allowed_clients: vec!["app-runtime".to_string()],
+                    preview: ServiceTunnelPreviewPolicy {
+                        mode: ServiceTunnelPreviewPolicyMode::Always,
+                        keep_alive_until: None,
+                    },
                 },
                 description: None,
             })
@@ -1021,12 +1231,20 @@ mod tests {
                 backend: ServiceTunnelTunnelBackend::None,
                 backend_command: None,
                 backend_public_url: None,
+                source_run_id: Some("run-123".to_string()),
+                source_workflow_id: Some("workflow-abc".to_string()),
             })
             .expect("start service");
 
             assert!(started.running);
             assert_eq!(started.local_url, "http://127.0.0.1:8832");
-            assert_eq!(started.public_url, None);
+            assert_eq!(started.preview_identity.public_url, None);
+            let preview = started.preview.as_ref().expect("preview artifact");
+            assert_eq!(preview.kind, "preview_url");
+            assert_eq!(preview.preview_identity.service_id, "local-preview");
+            assert_eq!(preview.local_url, "http://127.0.0.1:8832");
+            assert_eq!(preview.source.run_id.as_deref(), Some("run-123"));
+            assert_eq!(preview.source.workflow_id.as_deref(), Some("workflow-abc"));
             let process = started.process.expect("process status");
             assert!(process.running);
             assert_eq!(process.command.env_keys, vec!["LOCAL_PREVIEW_MODE"]);
@@ -1067,6 +1285,7 @@ mod tests {
                     exposure: ServiceTunnelExposure::PrivateLoopback,
                     require_auth: true,
                     allowed_clients: Vec::new(),
+                    preview: ServiceTunnelPreviewPolicy::default(),
                 },
                 description: None,
             })
@@ -1086,6 +1305,8 @@ mod tests {
                 backend: ServiceTunnelTunnelBackend::None,
                 backend_command: None,
                 backend_public_url: None,
+                source_run_id: None,
+                source_workflow_id: None,
             })
             .expect_err("readiness should fail");
 
@@ -1120,6 +1341,7 @@ mod tests {
                     exposure: ServiceTunnelExposure::PrivateLoopback,
                     require_auth: true,
                     allowed_clients: Vec::new(),
+                    preview: ServiceTunnelPreviewPolicy::default(),
                 },
                 description: None,
             })
@@ -1139,12 +1361,14 @@ mod tests {
                 backend: ServiceTunnelTunnelBackend::Command,
                 backend_command: Some("while true; do sleep 1; done".to_string()),
                 backend_public_url: Some("https://preview.example.test".to_string()),
+                source_run_id: None,
+                source_workflow_id: None,
             })
             .expect("start service with backend");
 
             assert!(started.running);
             assert_eq!(
-                started.public_url.as_deref(),
+                started.preview_identity.public_url.as_deref(),
                 Some("https://preview.example.test")
             );
             let backend = started.tunnel_backend.expect("backend status");
@@ -1168,5 +1392,156 @@ mod tests {
             assert!(!stopped.running);
             assert!(stopped.tunnel_backend.is_none());
         });
+    }
+
+    #[test]
+    fn preview_policy_decisions_match_workflow_outcomes() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-06-07T12:00:00Z")
+            .expect("timestamp")
+            .with_timezone(&chrono::Utc);
+        let failed = ServiceTunnelPreviewDecisionContext {
+            run_failed: true,
+            manual_approval_required: false,
+            now,
+        };
+        let success = ServiceTunnelPreviewDecisionContext {
+            run_failed: false,
+            manual_approval_required: false,
+            now,
+        };
+        let approval = ServiceTunnelPreviewDecisionContext {
+            run_failed: false,
+            manual_approval_required: true,
+            now,
+        };
+
+        assert!(!preview_policy_allows(
+            &ServiceTunnelPreviewPolicy::default(),
+            &failed
+        ));
+        assert!(preview_policy_allows(
+            &ServiceTunnelPreviewPolicy {
+                mode: ServiceTunnelPreviewPolicyMode::Always,
+                keep_alive_until: None,
+            },
+            &success
+        ));
+        assert!(preview_policy_allows(
+            &ServiceTunnelPreviewPolicy {
+                mode: ServiceTunnelPreviewPolicyMode::OnFailure,
+                keep_alive_until: None,
+            },
+            &failed
+        ));
+        assert!(!preview_policy_allows(
+            &ServiceTunnelPreviewPolicy {
+                mode: ServiceTunnelPreviewPolicyMode::OnFailure,
+                keep_alive_until: None,
+            },
+            &success
+        ));
+        assert!(preview_policy_allows(
+            &ServiceTunnelPreviewPolicy {
+                mode: ServiceTunnelPreviewPolicyMode::ManualApproval,
+                keep_alive_until: None,
+            },
+            &approval
+        ));
+        assert!(preview_policy_allows(
+            &ServiceTunnelPreviewPolicy {
+                mode: ServiceTunnelPreviewPolicyMode::KeepAliveUntil,
+                keep_alive_until: Some("2026-06-07T12:30:00Z".to_string()),
+            },
+            &success
+        ));
+        assert!(!preview_policy_allows(
+            &ServiceTunnelPreviewPolicy {
+                mode: ServiceTunnelPreviewPolicyMode::KeepAliveUntil,
+                keep_alive_until: Some("2026-06-07T11:59:59Z".to_string()),
+            },
+            &success
+        ));
+    }
+
+    #[test]
+    fn preview_artifact_serializes_structured_reviewer_contract() {
+        let tunnel = ServiceTunnel {
+            id: "site-preview".to_string(),
+            aliases: Vec::new(),
+            description: None,
+            server_id: "private-host".to_string(),
+            target: ServiceTunnelTarget {
+                host: "127.0.0.1".to_string(),
+                port: 3000,
+            },
+            scheme: "http".to_string(),
+            local_host: "127.0.0.1".to_string(),
+            local_port: Some(3000),
+            auth: ServiceTunnelAuth {
+                mode: ServiceTunnelAuthMode::BearerEnv,
+                env_var: Some("TOKEN".to_string()),
+                header: Some("Authorization".to_string()),
+            },
+            policy: ServiceTunnelPolicy {
+                exposure: ServiceTunnelExposure::PrivateLoopback,
+                require_auth: true,
+                allowed_clients: Vec::new(),
+                preview: ServiceTunnelPreviewPolicy {
+                    mode: ServiceTunnelPreviewPolicyMode::KeepAliveUntil,
+                    keep_alive_until: Some("2026-06-07T13:00:00Z".to_string()),
+                },
+            },
+        };
+        let state = ServiceTunnelRuntimeState {
+            preview_identity: ServiceTunnelPreviewIdentity {
+                service_id: "site-preview".to_string(),
+                public_url: Some("https://preview.example.test/site-preview".to_string()),
+            },
+            pid: 123,
+            process_group_id: Some(123),
+            started_at: "2026-06-07T12:00:00Z".to_string(),
+            local_url: "http://127.0.0.1:3000".to_string(),
+            command: ServiceTunnelCommandSpec {
+                command: "serve-app".to_string(),
+                cwd: Some("/workspace/app".to_string()),
+                env_keys: vec!["TOKEN".to_string()],
+            },
+            health_url: Some("http://127.0.0.1:3000/".to_string()),
+            stdout_path: "/tmp/homeboy/stdout.log".to_string(),
+            stderr_path: "/tmp/homeboy/stderr.log".to_string(),
+            backend: ServiceTunnelTunnelBackend::None,
+            backend_process: None,
+            source_run_id: Some("run-1".to_string()),
+            source_workflow_id: Some("workflow-1".to_string()),
+        };
+        let context = ServiceTunnelPreviewDecisionContext {
+            run_failed: false,
+            manual_approval_required: false,
+            now: chrono::DateTime::parse_from_rfc3339("2026-06-07T12:30:00Z")
+                .expect("timestamp")
+                .with_timezone(&chrono::Utc),
+        };
+
+        let artifact = preview_artifact_for(&tunnel, &state, &context).expect("artifact");
+        let serialized = serde_json::to_value(&artifact).expect("serialize artifact");
+        let expected: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/output_contracts/tunnel/preview-artifact.json"
+        ))
+        .expect("fixture");
+
+        assert_eq!(serialized, expected);
+        assert_eq!(serialized["schema"], "homeboy/preview-url/v1");
+        assert_eq!(serialized["kind"], "preview_url");
+        assert_eq!(serialized["service_id"], "site-preview");
+        assert_eq!(serialized["local_url"], "http://127.0.0.1:3000");
+        assert_eq!(
+            serialized["public_url"],
+            "https://preview.example.test/site-preview"
+        );
+        assert_eq!(serialized["backend"], "none");
+        assert_eq!(serialized["policy"]["mode"], "keep_alive_until");
+        assert_eq!(serialized["cleanup"]["expires_at"], "2026-06-07T13:00:00Z");
+        assert_eq!(serialized["source"]["run_id"], "run-1");
+        assert_eq!(serialized["source"]["workflow_id"], "workflow-1");
     }
 }

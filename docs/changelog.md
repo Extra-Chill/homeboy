@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.222.8] - 2026-06-07
+
+### Changed
+- Add agent-task async handle lifecycle surfaces
+- Add durable agent-task cancellation
+- Add generic agent task fanout primitive
+- Add agent-task review workflow
+- Add browser origin evidence for previews
+
 ## [0.222.7] - 2026-06-07
 
 ### Changed
