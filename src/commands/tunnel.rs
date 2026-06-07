@@ -160,7 +160,19 @@ enum TunnelServiceCommand {
         #[arg(long, default_value_t = 30)]
         readiness_timeout: u64,
 
-        /// Public tunnel backend. Only 'none' is currently implemented.
+        /// Service-declared host expected by hostname-sensitive apps
+        #[arg(long)]
+        declared_service_host: Option<String>,
+
+        /// Shell command used by the explicit command public tunnel backend
+        #[arg(long)]
+        public_tunnel_command: Option<String>,
+
+        /// Seconds to wait for the public tunnel backend to print a public HTTPS URL
+        #[arg(long, default_value_t = 20)]
+        public_tunnel_timeout: u64,
+
+        /// Public tunnel backend
         #[arg(long, value_enum, default_value_t = ServiceTunnelBackendArg::None)]
         public_tunnel_backend: ServiceTunnelBackendArg,
     },
@@ -183,12 +195,16 @@ enum ServiceTunnelAuthModeArg {
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum ServiceTunnelBackendArg {
     None,
+    Cloudflared,
+    Command,
 }
 
 impl std::fmt::Display for ServiceTunnelBackendArg {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ServiceTunnelBackendArg::None => write!(f, "none"),
+            ServiceTunnelBackendArg::Cloudflared => write!(f, "cloudflared"),
+            ServiceTunnelBackendArg::Command => write!(f, "command"),
         }
     }
 }
@@ -197,6 +213,8 @@ impl From<ServiceTunnelBackendArg> for ServiceTunnelTunnelBackend {
     fn from(value: ServiceTunnelBackendArg) -> Self {
         match value {
             ServiceTunnelBackendArg::None => ServiceTunnelTunnelBackend::None,
+            ServiceTunnelBackendArg::Cloudflared => ServiceTunnelTunnelBackend::Cloudflared,
+            ServiceTunnelBackendArg::Command => ServiceTunnelTunnelBackend::Command,
         }
     }
 }
@@ -271,6 +289,9 @@ fn run_service(command: TunnelServiceCommand) -> CmdResult<TunnelOutput> {
             health_url,
             health_path,
             readiness_timeout,
+            declared_service_host,
+            public_tunnel_command,
+            public_tunnel_timeout,
             public_tunnel_backend,
         } => start_service(StartServiceTunnelSpec {
             id,
@@ -283,6 +304,9 @@ fn run_service(command: TunnelServiceCommand) -> CmdResult<TunnelOutput> {
             health_url,
             health_path,
             readiness_timeout_secs: readiness_timeout,
+            declared_service_host,
+            public_tunnel_command,
+            public_tunnel_timeout_secs: public_tunnel_timeout,
             backend: public_tunnel_backend.into(),
         }),
         TunnelServiceCommand::Stop { id } => stop_service(&id),
@@ -496,23 +520,23 @@ mod tests {
         test_support::with_isolated_home(|_| {
             create_server();
             let (output, exit_code) = run_service(TunnelServiceCommand::Expose {
-                id: "context-a8c".to_string(),
+                id: "private-service".to_string(),
                 server: "private-host".to_string(),
                 remote_host: "127.0.0.1".to_string(),
                 remote_port: 7331,
                 scheme: "http".to_string(),
                 local_port: Some(8831),
                 auth_mode: ServiceTunnelAuthModeArg::BearerEnv,
-                auth_env: Some("CONTEXTA8C_TOKEN".to_string()),
+                auth_env: Some("PRIVATE_SERVICE_TOKEN".to_string()),
                 auth_header: Some("Authorization".to_string()),
-                allowed_clients: vec!["wp-runtime".to_string()],
+                allowed_clients: vec!["runtime-client".to_string()],
                 description: None,
             })
             .expect("command succeeds");
 
             assert_eq!(exit_code, 0);
             assert_eq!(output.command, "tunnel.service.expose");
-            assert_eq!(output.entity.expect("entity").id, "context-a8c");
+            assert_eq!(output.entity.expect("entity").id, "private-service");
         });
     }
 }
