@@ -336,7 +336,6 @@ pub fn run(
                 daemon,
                 concurrency_limit,
                 artifact_policy,
-                snapshot_excludes: Vec::new(),
             },
         })),
         RunnerCommand::Enable {
@@ -354,7 +353,6 @@ pub fn run(
                 daemon,
                 concurrency_limit,
                 artifact_policy,
-                snapshot_excludes: Vec::new(),
             },
         )),
         RunnerCommand::List => map_registry(list()),

@@ -247,7 +247,7 @@ fn snapshot_excludes(runner: &Runner) -> Vec<String> {
         .map(|value| value.to_string())
         .collect::<Vec<_>>();
 
-    for pattern in &runner.settings.snapshot_excludes {
+    for pattern in &runner.policy.snapshot_excludes {
         if !excludes.contains(pattern) {
             excludes.push(pattern.clone());
         }
@@ -707,7 +707,7 @@ mod tests {
 
             super::super::create(
                 &format!(
-                    r#"{{"id":"lab-local","kind":"local","workspace_root":"{}","snapshot_excludes":["generated-state","generated-state/**","*.state"]}}"#,
+                    r#"{{"id":"lab-local","kind":"local","workspace_root":"{}","policy":{{"snapshot_excludes":["generated-state","generated-state/**","*.state"]}}}}"#,
                     runner_root.path().display()
                 ),
                 false,
