@@ -12,6 +12,8 @@ const {
   providerContract,
 } = require('../lib/codebox-agent-task-executor');
 
+const fixtureCodeboxCoreModule = path.join(__dirname, 'fixtures', 'wp-codebox-core-agent-task-normalizer.mjs');
+
 function writeFixtureTaskRunner(root) {
   const fixture = path.join(root, 'fixture-task-runner.cjs');
   const capture = path.join(root, 'capture.json');
@@ -22,9 +24,19 @@ const fs = require('node:fs');
 fs.writeFileSync(${JSON.stringify(capture)}, JSON.stringify({ argv: process.argv.slice(2), request }, null, 2));
 process.stdout.write(JSON.stringify({
   success: true,
+  status: 'completed',
   summary: 'Sandbox completed.',
   artifacts: [{ id: 'artifact-1', kind: 'screenshot', path: '/artifacts/screenshot.png' }],
   evidence_refs: [{ kind: 'preview', uri: 'https://example.test/preview', label: 'Preview' }],
+  run: {
+    runId: 'fixture-run-1',
+    status: 'succeeded',
+    runtime: { id: 'fixture-runtime-1', status: 'destroyed' },
+    agentResult: {
+      changedFiles: { count: 2 },
+      patch: { bytes: 123, sha256: 'fixture-patch-sha' }
+    }
+  },
   metadata: { run_id: 'codebox-run-1' }
 }));
 `);
@@ -776,6 +788,24 @@ try {
   assert.equal(cliOutcome.status, 'succeeded');
   assert.equal(cliOutcome.artifacts[0].kind, 'screenshot');
   assert.equal(cliOutcome.evidence_refs[0].uri, 'https://example.test/preview');
+
+  const normalizedResult = spawnSync(process.execPath, [
+    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs'),
+    '--task-runner',
+    fixture,
+  ], {
+    encoding: 'utf8',
+    input: JSON.stringify(request),
+    env: { ...process.env, HOMEBOY_WP_CODEBOX_CORE_MODULE: fixtureCodeboxCoreModule },
+  });
+  assert.equal(normalizedResult.status, 0, normalizedResult.stderr || normalizedResult.stdout);
+  const normalizedOutcome = JSON.parse(normalizedResult.stdout);
+  assert.equal(normalizedOutcome.metadata.codebox_run_result.schema, 'wp-codebox/agent-task-run-result/v1');
+  assert.equal(normalizedOutcome.metadata.decision_evidence.run_id, 'fixture-run-1');
+  assert.equal(normalizedOutcome.metadata.decision_evidence.runtime_status, 'destroyed');
+  assert.equal(normalizedOutcome.metadata.decision_evidence.patch_sha256, 'fixture-patch-sha');
+  assert.equal(normalizedOutcome.artifacts.some((artifact) => artifact.kind === 'codebox-patch' && artifact.path === '/tmp/fixture-normalized/patch.diff'), true);
+  assert.equal(normalizedOutcome.diagnostics.some((diagnostic) => diagnostic.class === 'fixture.normalizer'), true);
 
   const captured = JSON.parse(fs.readFileSync(capture, 'utf8'));
   assert.equal(captured.request.schema, 'wp-codebox/task-input/v1');

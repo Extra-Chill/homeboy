@@ -9,6 +9,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
+const { pathToFileURL } = require('node:url');
 
 /**
  * Internal dependencies
@@ -18,6 +19,8 @@ const {
   codeboxTaskRequestFromAgentTaskRequest,
   providerContract,
 } = require('../../lib/codebox-agent-task-executor');
+
+const DEFAULT_CODEBOX_CORE_MODULE = '@automattic/wp-codebox-core';
 
 function argValue(name) {
   const index = process.argv.indexOf(name);
@@ -310,7 +313,33 @@ function stderrFailurePayload(result) {
   };
 }
 
-function runTaskRunner(request) {
+async function loadCodeboxAgentTaskRunResultNormalizer() {
+  const configuredModule = process.env.HOMEBOY_WP_CODEBOX_CORE_MODULE;
+  const candidates = configuredModule ? [configuredModule] : [DEFAULT_CODEBOX_CORE_MODULE];
+
+  for (const candidate of candidates) {
+    try {
+      const module = await importModule(candidate);
+      if (typeof module.normalizeAgentTaskRunResult === 'function') {
+        return module.normalizeAgentTaskRunResult;
+      }
+    } catch {
+      // Fall back to the local compatibility path when Codebox core is not installed yet.
+    }
+  }
+
+  return null;
+}
+
+function importModule(specifier) {
+  if (specifier.startsWith('.') || specifier.startsWith('/') || specifier.startsWith('file:')) {
+    return import(specifier.startsWith('file:') ? specifier : pathToFileURL(path.resolve(specifier)).href);
+  }
+  return import(specifier);
+}
+
+async function runTaskRunner(request) {
+  const normalizeAgentTaskRunResult = await loadCodeboxAgentTaskRunResultNormalizer();
   const runner = argValue('--task-runner') || `${__dirname}/homeboy-wp-codebox-task-runner.cjs`;
   const config = request.executor?.config || {};
   const configArgs = [
@@ -339,7 +368,7 @@ function runTaskRunner(request) {
   let payload = {};
   if (result.error && result.error.code === 'ETIMEDOUT') {
     payload = timeoutPayload(requestTimeoutMs(request), request);
-    return agentTaskOutcomeFromCodeboxResult(request, payload, { exitStatus: 1 });
+    return agentTaskOutcomeFromCodeboxResult(request, payload, { exitStatus: 1, normalizeAgentTaskRunResult });
   }
   if (result.stdout.trim()) {
     try {
@@ -370,20 +399,22 @@ function runTaskRunner(request) {
     payload = stderrFailurePayload(result);
   }
 
-  return agentTaskOutcomeFromCodeboxResult(request, payload, { exitStatus: result.status ?? 1 });
+  return agentTaskOutcomeFromCodeboxResult(request, payload, { exitStatus: result.status ?? 1, normalizeAgentTaskRunResult });
 }
 
-try {
-  if (hasFlag('--print-contract')) {
-    process.stdout.write(`${JSON.stringify(providerContract(), null, 2)}\n`);
-    process.exit(0);
+(async () => {
+  try {
+    if (hasFlag('--print-contract')) {
+      process.stdout.write(`${JSON.stringify(providerContract(), null, 2)}\n`);
+      process.exit(0);
+    }
+
+    const request = readRequest();
+    const outcome = await runTaskRunner(request);
+    process.stdout.write(`${JSON.stringify(outcome, null, 2)}\n`);
+    process.exitCode = outcome.status === 'succeeded' || outcome.status === 'no_op' ? 0 : 1;
+  } catch (error) {
+    console.error(error && error.message ? error.message : String(error));
+    process.exitCode = 1;
   }
-
-  const request = readRequest();
-  const outcome = runTaskRunner(request);
-  process.stdout.write(`${JSON.stringify(outcome, null, 2)}\n`);
-  process.exitCode = outcome.status === 'succeeded' || outcome.status === 'no_op' ? 0 : 1;
-} catch (error) {
-  console.error(error && error.message ? error.message : String(error));
-  process.exitCode = 1;
-}
+})();
