@@ -236,6 +236,31 @@ assert.equal(codeboxRequest.orchestrator.agent_task_id, 'task-123');
 assert.equal(codeboxRequest.context.audit_findings[0].id, 'finding-1');
 assert.deepEqual(codeboxRequest.agent_bundle, {});
 
+const runtimeTaskRequest = codeboxTaskRequestFromAgentTaskRequest({
+  ...request,
+  task_id: 'runtime-task-123',
+  executor: {
+    backend: 'codebox',
+    config: {
+      sandbox_tool_policy: {
+        schema: 'wp-codebox/sandbox-tool-policy/v1',
+        version: 1,
+        tools: [{ id: 'homeboy-canary/write-file', allowed: true }],
+      },
+    },
+  },
+  inputs: {
+    runtime_task: {
+      ability: 'homeboy-canary/write-file',
+      input: { path: '/workspace/codebox-canary/CANARY.md', content: 'after\n' },
+    },
+    workspaces: [{ target: '/workspace/codebox-canary', mode: 'readwrite' }],
+  },
+});
+assert.equal(runtimeTaskRequest.sandbox_tool_policy.tools[0].id, 'homeboy-canary/write-file');
+assert.equal(runtimeTaskRequest.runtime_task.ability, 'homeboy-canary/write-file');
+assert.equal(runtimeTaskRequest.workspaces[0].target, '/workspace/codebox-canary');
+
 const recipePackRequest = codeboxTaskRequestFromAgentTaskRequest({
   ...request,
   task_id: 'recipe-task-123',
