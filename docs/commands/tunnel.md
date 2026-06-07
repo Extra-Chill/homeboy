@@ -33,13 +33,26 @@ homeboy tunnel service start context-a8c \
   --cwd /path/to/workspace \
   --host 127.0.0.1 \
   --port 7331 \
-  --health-path / \
-  --public-tunnel-backend none
+  --health-path /
 ```
 
 `--env KEY=VALUE` can be repeated to pass runtime environment values. Status records only env var names, not values. The managed service writes stdout/stderr logs under Homeboy's local data directory and includes those paths in `service status` output.
 
-Public tunnel backends are an explicit seam. `none` is the only implemented backend in this release; unsupported backends should be added as first-class implementations rather than faked by wrapping Kimaki or another CLI in proof paths.
+Expose the managed service through a provider-neutral backend command:
+
+```sh
+homeboy tunnel service start context-a8c \
+  --command 'npm run dev -- --host 127.0.0.1 --port 7331' \
+  --cwd /path/to/workspace \
+  --host 127.0.0.1 \
+  --port 7331 \
+  --health-path / \
+  --public-tunnel-backend command \
+  --public-tunnel-command './tools/open-preview-tunnel.sh' \
+  --public-tunnel-public-url 'https://preview.example.test/run-123'
+```
+
+The `command` backend is a generic adapter seam. Homeboy starts and supervises the backend command, injects `HOMEBOY_SERVICE_ID`, `HOMEBOY_SERVICE_LOCAL_URL`, and `HOMEBOY_TUNNEL_PUBLIC_URL`, records backend PID/process/log evidence, and stops it with the managed service. Provider-specific behavior such as Traforo, Cloudflare, ngrok, or a Homeboy VPS broker belongs in the backend command or a future extension, not in Homeboy core semantics.
 
 ## Subcommands
 
@@ -49,6 +62,6 @@ Public tunnel backends are an explicit seam. `none` is the only implemented back
 - `service set <id> ...`: update fields using the standard dynamic set contract.
 - `service remove <id>`: delete a declaration.
 - `service url <id>`: print the declared loopback URL.
-- `service start <id>`: start and supervise a declared local service command.
+- `service start <id>`: start and supervise a declared local service command and optional provider-neutral public tunnel backend.
 - `service status <id>`: report declaration, process, local URL, public URL when present, health, backend, and log evidence state.
 - `service stop <id>`: terminate the managed process group and remove runtime state while leaving log evidence files in place.

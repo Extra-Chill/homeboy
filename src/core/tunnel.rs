@@ -127,12 +127,26 @@ pub struct ServiceTunnelRuntimeState {
     pub stdout_path: String,
     pub stderr_path: String,
     pub backend: ServiceTunnelTunnelBackend,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend_process: Option<ServiceTunnelBackendProcessState>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ServiceTunnelTunnelBackend {
     None,
+    Command,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ServiceTunnelBackendProcessState {
+    pub pid: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub process_group_id: Option<i32>,
+    pub started_at: String,
+    pub command: ServiceTunnelCommandSpec,
+    pub stdout_path: String,
+    pub stderr_path: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -168,6 +182,16 @@ pub struct ServiceTunnelEvidence {
 pub struct ServiceTunnelBackendStatus {
     pub backend: ServiceTunnelTunnelBackend,
     pub active: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub process: Option<ServiceTunnelProcessStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<ServiceTunnelBackendEvidence>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ServiceTunnelBackendEvidence {
+    pub stdout_path: String,
+    pub stderr_path: String,
 }
 
 pub struct StartServiceTunnelSpec {
@@ -182,6 +206,8 @@ pub struct StartServiceTunnelSpec {
     pub health_path: Option<String>,
     pub readiness_timeout_secs: u64,
     pub backend: ServiceTunnelTunnelBackend,
+    pub backend_command: Option<String>,
+    pub backend_public_url: Option<String>,
 }
 
 pub struct ExposeServiceTunnelSpec {
@@ -269,14 +295,7 @@ pub fn status(id: &str) -> Result<ServiceTunnelStatus> {
 
 pub fn start(spec: StartServiceTunnelSpec) -> Result<ServiceTunnelStatus> {
     let mut tunnel = load(&spec.id)?;
-    if matches!(spec.backend, ServiceTunnelTunnelBackend::None) == false {
-        return Err(Error::validation_invalid_argument(
-            "public_tunnel_backend",
-            "only the explicit 'none' backend is currently supported",
-            Some(spec.id),
-            Some(vec!["none".to_string()]),
-        ));
-    }
+    validate_backend_spec(&spec)?;
 
     let existing = load_runtime_state(&tunnel.id)?;
     if let Some(state) = existing {
@@ -355,7 +374,7 @@ pub fn start(spec: StartServiceTunnelSpec) -> Result<ServiceTunnelStatus> {
         process_group_id,
         started_at: chrono::Utc::now().to_rfc3339(),
         local_url: local_url_for(&tunnel),
-        public_url: None,
+        public_url: spec.backend_public_url.clone(),
         command: ServiceTunnelCommandSpec {
             command: spec.command,
             cwd: spec.cwd.map(|path| path.display().to_string()),
@@ -365,6 +384,7 @@ pub fn start(spec: StartServiceTunnelSpec) -> Result<ServiceTunnelStatus> {
         stdout_path: stdout_path.display().to_string(),
         stderr_path: stderr_path.display().to_string(),
         backend: spec.backend,
+        backend_process: None,
     };
     save_runtime_state(&state)?;
     if let Err(error) = wait_until_ready(&state, spec.readiness_timeout_secs) {
@@ -372,12 +392,24 @@ pub fn start(spec: StartServiceTunnelSpec) -> Result<ServiceTunnelStatus> {
         remove_runtime_state(&state.service_id)?;
         return Err(error);
     }
+    let state = match start_backend_if_needed(state, &tunnel, spec.backend_command) {
+        Ok(state) => state,
+        Err(error) => {
+            if let Some(state) = load_runtime_state(&tunnel.id)? {
+                terminate_runtime_state(&state)?;
+                remove_runtime_state(&state.service_id)?;
+            }
+            return Err(error);
+        }
+    };
+    save_runtime_state(&state)?;
     status(&tunnel.id)
 }
 
 pub fn stop(id: &str) -> Result<ServiceTunnelStatus> {
     let tunnel = load(id)?;
     if let Some(state) = load_runtime_state(id)? {
+        terminate_backend_state(&state)?;
         terminate_runtime_state(&state)?;
         remove_runtime_state(id)?;
     }
@@ -403,7 +435,24 @@ fn service_tunnel_status(tunnel: &ServiceTunnel) -> ServiceTunnelStatus {
     });
     let backend = state.as_ref().map(|state| ServiceTunnelBackendStatus {
         backend: state.backend.clone(),
-        active: state.public_url.is_some(),
+        active: backend_state_is_running(state) || state.public_url.is_some(),
+        process: state.backend_process.as_ref().map(|backend| {
+            let running = backend_process_is_running(backend);
+            ServiceTunnelProcessStatus {
+                pid: backend.pid,
+                process_group_id: backend.process_group_id,
+                running,
+                started_at: backend.started_at.clone(),
+                command: backend.command.clone(),
+            }
+        }),
+        evidence: state
+            .backend_process
+            .as_ref()
+            .map(|backend| ServiceTunnelBackendEvidence {
+                stdout_path: backend.stdout_path.clone(),
+                stderr_path: backend.stderr_path.clone(),
+            }),
     });
     let public_url = state.as_ref().and_then(|state| state.public_url.clone());
     ServiceTunnelStatus {
@@ -508,6 +557,106 @@ fn validate_loopback_host(host: &str, id: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_backend_spec(spec: &StartServiceTunnelSpec) -> Result<()> {
+    match spec.backend {
+        ServiceTunnelTunnelBackend::None => Ok(()),
+        ServiceTunnelTunnelBackend::Command => {
+            if spec
+                .backend_command
+                .as_deref()
+                .unwrap_or_default()
+                .trim()
+                .is_empty()
+            {
+                return Err(Error::validation_invalid_argument(
+                    "public_tunnel_command",
+                    "command backend requires a backend command",
+                    Some(spec.id.clone()),
+                    None,
+                ));
+            }
+            if spec
+                .backend_public_url
+                .as_deref()
+                .unwrap_or_default()
+                .trim()
+                .is_empty()
+            {
+                return Err(Error::validation_invalid_argument(
+                    "public_tunnel_public_url",
+                    "command backend requires the public URL it exposes",
+                    Some(spec.id.clone()),
+                    None,
+                ));
+            }
+            Ok(())
+        }
+    }
+}
+
+fn start_backend_if_needed(
+    mut state: ServiceTunnelRuntimeState,
+    tunnel: &ServiceTunnel,
+    backend_command: Option<String>,
+) -> Result<ServiceTunnelRuntimeState> {
+    if !matches!(state.backend, ServiceTunnelTunnelBackend::Command) {
+        return Ok(state);
+    }
+
+    let command_string = backend_command.unwrap_or_default();
+    let runtime_dir = paths::service_tunnel_runtime_dir(&tunnel.id)?;
+    let stdout_path = runtime_dir.join("backend-stdout.log");
+    let stderr_path = runtime_dir.join("backend-stderr.log");
+    let stdout = File::create(&stdout_path)
+        .map_err(|e| Error::internal_io(e.to_string(), Some(stdout_path.display().to_string())))?;
+    let stderr = File::create(&stderr_path)
+        .map_err(|e| Error::internal_io(e.to_string(), Some(stderr_path.display().to_string())))?;
+
+    let mut command = shell_command(&command_string);
+    command
+        .env("HOMEBOY_SERVICE_ID", &tunnel.id)
+        .env("HOMEBOY_SERVICE_LOCAL_URL", &state.local_url);
+    if let Some(public_url) = &state.public_url {
+        command.env("HOMEBOY_TUNNEL_PUBLIC_URL", public_url);
+    }
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr));
+    #[cfg(unix)]
+    unsafe {
+        command.pre_exec(|| {
+            libc::setpgid(0, 0);
+            Ok(())
+        });
+    }
+
+    let child = command.spawn().map_err(|e| {
+        Error::internal_io(
+            e.to_string(),
+            Some(format!("start service tunnel backend {}", tunnel.id)),
+        )
+    })?;
+    let pid = child.id();
+    state.backend_process = Some(ServiceTunnelBackendProcessState {
+        pid,
+        process_group_id: process_group_id_for(pid),
+        started_at: chrono::Utc::now().to_rfc3339(),
+        command: ServiceTunnelCommandSpec {
+            command: command_string,
+            cwd: None,
+            env_keys: vec![
+                "HOMEBOY_SERVICE_ID".to_string(),
+                "HOMEBOY_SERVICE_LOCAL_URL".to_string(),
+                "HOMEBOY_TUNNEL_PUBLIC_URL".to_string(),
+            ],
+        },
+        stdout_path: stdout_path.display().to_string(),
+        stderr_path: stderr_path.display().to_string(),
+    });
+    Ok(state)
+}
+
 fn shell_command(command: &str) -> Command {
     #[cfg(windows)]
     {
@@ -580,6 +729,50 @@ fn runtime_state_is_running(state: &ServiceTunnelRuntimeState) -> bool {
     } else {
         pid_is_running(state.pid)
     }
+}
+
+fn backend_state_is_running(state: &ServiceTunnelRuntimeState) -> bool {
+    state
+        .backend_process
+        .as_ref()
+        .is_some_and(backend_process_is_running)
+}
+
+fn backend_process_is_running(state: &ServiceTunnelBackendProcessState) -> bool {
+    if let Some(pgid) = state.process_group_id {
+        process_group_is_running(pgid)
+    } else {
+        pid_is_running(state.pid)
+    }
+}
+
+fn terminate_backend_state(state: &ServiceTunnelRuntimeState) -> Result<()> {
+    let Some(backend) = &state.backend_process else {
+        return Ok(());
+    };
+    if !backend_process_is_running(backend) {
+        return Ok(());
+    }
+
+    #[cfg(unix)]
+    unsafe {
+        if let Some(pgid) = backend.process_group_id {
+            libc::kill(-(pgid as libc::pid_t), libc::SIGTERM);
+            std::thread::sleep(Duration::from_millis(250));
+            if process_group_is_running(pgid) {
+                libc::kill(-(pgid as libc::pid_t), libc::SIGKILL);
+            }
+        } else {
+            libc::kill(backend.pid as libc::pid_t, libc::SIGTERM);
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = backend;
+    }
+
+    Ok(())
 }
 
 fn terminate_runtime_state(state: &ServiceTunnelRuntimeState) -> Result<()> {
@@ -826,6 +1019,8 @@ mod tests {
                 health_path: None,
                 readiness_timeout_secs: 1,
                 backend: ServiceTunnelTunnelBackend::None,
+                backend_command: None,
+                backend_public_url: None,
             })
             .expect("start service");
 
@@ -889,6 +1084,8 @@ mod tests {
                 health_path: None,
                 readiness_timeout_secs: 0,
                 backend: ServiceTunnelTunnelBackend::None,
+                backend_command: None,
+                backend_public_url: None,
             })
             .expect_err("readiness should fail");
 
@@ -898,6 +1095,78 @@ mod tests {
             assert!(!state_path.exists());
             let stopped = status("failing-preview").expect("status");
             assert!(!stopped.running);
+        });
+    }
+
+    #[test]
+    fn command_backend_records_public_url_and_cleans_up_backend_process() {
+        test_support::with_isolated_home(|_| {
+            create_server();
+            expose(ExposeServiceTunnelSpec {
+                id: "command-preview".to_string(),
+                server_id: "private-host".to_string(),
+                target: ServiceTunnelTarget {
+                    host: "127.0.0.1".to_string(),
+                    port: 7331,
+                },
+                scheme: "http".to_string(),
+                local_port: Some(8834),
+                auth: ServiceTunnelAuth {
+                    mode: ServiceTunnelAuthMode::BearerEnv,
+                    env_var: Some("COMMAND_PREVIEW_TOKEN".to_string()),
+                    header: Some("Authorization".to_string()),
+                },
+                policy: ServiceTunnelPolicy {
+                    exposure: ServiceTunnelExposure::PrivateLoopback,
+                    require_auth: true,
+                    allowed_clients: Vec::new(),
+                },
+                description: None,
+            })
+            .expect("expose service");
+
+            let started = start(StartServiceTunnelSpec {
+                id: "command-preview".to_string(),
+                command: "while true; do sleep 1; done".to_string(),
+                cwd: None,
+                env: BTreeMap::new(),
+                host: Some("127.0.0.1".to_string()),
+                port: Some(8834),
+                scheme: Some("http".to_string()),
+                health_url: None,
+                health_path: None,
+                readiness_timeout_secs: 1,
+                backend: ServiceTunnelTunnelBackend::Command,
+                backend_command: Some("while true; do sleep 1; done".to_string()),
+                backend_public_url: Some("https://preview.example.test".to_string()),
+            })
+            .expect("start service with backend");
+
+            assert!(started.running);
+            assert_eq!(
+                started.public_url.as_deref(),
+                Some("https://preview.example.test")
+            );
+            let backend = started.tunnel_backend.expect("backend status");
+            assert_eq!(backend.backend, ServiceTunnelTunnelBackend::Command);
+            assert!(backend.active);
+            let process = backend.process.expect("backend process");
+            assert!(process.running);
+            assert_eq!(
+                process.command.env_keys,
+                vec![
+                    "HOMEBOY_SERVICE_ID",
+                    "HOMEBOY_SERVICE_LOCAL_URL",
+                    "HOMEBOY_TUNNEL_PUBLIC_URL"
+                ]
+            );
+            let evidence = backend.evidence.expect("backend evidence");
+            assert!(std::path::Path::new(&evidence.stdout_path).exists());
+            assert!(std::path::Path::new(&evidence.stderr_path).exists());
+
+            let stopped = stop("command-preview").expect("stop service");
+            assert!(!stopped.running);
+            assert!(stopped.tunnel_backend.is_none());
         });
     }
 }

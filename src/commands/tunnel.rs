@@ -160,9 +160,17 @@ enum TunnelServiceCommand {
         #[arg(long, default_value_t = 30)]
         readiness_timeout: u64,
 
-        /// Public tunnel backend. Only 'none' is currently implemented.
+        /// Public tunnel backend adapter.
         #[arg(long, value_enum, default_value_t = ServiceTunnelBackendArg::None)]
         public_tunnel_backend: ServiceTunnelBackendArg,
+
+        /// Provider-neutral backend command to supervise when using the command backend
+        #[arg(long)]
+        public_tunnel_command: Option<String>,
+
+        /// Public URL exposed by the backend command
+        #[arg(long)]
+        public_tunnel_public_url: Option<String>,
     },
     /// Stop a running managed local service and cleanup runtime state
     Stop {
@@ -183,12 +191,14 @@ enum ServiceTunnelAuthModeArg {
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum ServiceTunnelBackendArg {
     None,
+    Command,
 }
 
 impl std::fmt::Display for ServiceTunnelBackendArg {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ServiceTunnelBackendArg::None => write!(f, "none"),
+            ServiceTunnelBackendArg::Command => write!(f, "command"),
         }
     }
 }
@@ -197,6 +207,7 @@ impl From<ServiceTunnelBackendArg> for ServiceTunnelTunnelBackend {
     fn from(value: ServiceTunnelBackendArg) -> Self {
         match value {
             ServiceTunnelBackendArg::None => ServiceTunnelTunnelBackend::None,
+            ServiceTunnelBackendArg::Command => ServiceTunnelTunnelBackend::Command,
         }
     }
 }
@@ -272,6 +283,8 @@ fn run_service(command: TunnelServiceCommand) -> CmdResult<TunnelOutput> {
             health_path,
             readiness_timeout,
             public_tunnel_backend,
+            public_tunnel_command,
+            public_tunnel_public_url,
         } => start_service(StartServiceTunnelSpec {
             id,
             command,
@@ -284,6 +297,8 @@ fn run_service(command: TunnelServiceCommand) -> CmdResult<TunnelOutput> {
             health_path,
             readiness_timeout_secs: readiness_timeout,
             backend: public_tunnel_backend.into(),
+            backend_command: public_tunnel_command,
+            backend_public_url: public_tunnel_public_url,
         }),
         TunnelServiceCommand::Stop { id } => stop_service(&id),
     }
