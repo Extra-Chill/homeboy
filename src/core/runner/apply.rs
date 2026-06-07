@@ -206,7 +206,7 @@ fn run_git_with_stdin(local_path: &Path, args: &[&str], stdin: &str) -> Result<S
         .map_err(|err| Error::internal_io(err.to_string(), Some("run git".to_string())))?;
     child
         .stdin
-        .as_mut()
+        .take()
         .ok_or_else(|| Error::internal_unexpected("git stdin unavailable"))?
         .write_all(stdin.as_bytes())
         .map_err(|err| Error::internal_io(err.to_string(), Some("write git stdin".to_string())))?;
