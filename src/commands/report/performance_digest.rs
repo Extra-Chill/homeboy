@@ -54,7 +54,40 @@ pub struct PerformanceDigestReport {
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub preview: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub preview_origin_evidence: Vec<BrowserOriginEvidenceDigest>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub gaps: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct BrowserOriginEvidenceDigest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub managed_service_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview_artifact_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub declared: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub public_preview_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub browser_requested_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub browser_final_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window_origin: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window_hostname: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window_protocol: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window_port: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_secure_context: Option<bool>,
+    pub redirect_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -162,6 +195,10 @@ pub fn performance_digest_from_args(
     let preview = find_object_recursive(&metadata, "preview")
         .map(scalar_object)
         .unwrap_or_default();
+    let preview_origin_evidence = collect_origin_evidence(&metadata)
+        .into_iter()
+        .chain(collect_origin_evidence(&Value::Object(bench_data.clone())))
+        .collect::<Vec<_>>();
 
     let mut baseline_health =
         collect_baseline_health(&bench_data, args.min_samples, args.max_cv_pct);
@@ -188,6 +225,7 @@ pub fn performance_digest_from_args(
         host_pressure.as_ref(),
         &lab_offload,
         &preview,
+        &preview_origin_evidence,
         &gaps,
         args.run_url.as_deref().unwrap_or_default(),
     );
@@ -201,6 +239,7 @@ pub fn performance_digest_from_args(
         host_pressure,
         lab_offload,
         preview,
+        preview_origin_evidence,
         gaps,
     })
 }
@@ -577,6 +616,7 @@ mod helpers {
         host_pressure: Option<&HostPressureDigest>,
         lab_offload: &BTreeMap<String, String>,
         preview: &BTreeMap<String, String>,
+        preview_origin_evidence: &[BrowserOriginEvidenceDigest],
         gaps: &[String],
         run_url: &str,
     ) -> String {
@@ -589,6 +629,7 @@ mod helpers {
         render_host_pressure(&mut out, host_pressure);
         render_lab_offload(&mut out, lab_offload);
         render_preview(&mut out, preview);
+        render_preview_origin_evidence(&mut out, preview_origin_evidence);
         render_gaps(&mut out, gaps);
         if !run_url.is_empty() {
             let _ = writeln!(out, "### Full run\n- {}\n", run_url);
@@ -802,6 +843,114 @@ mod helpers {
             }
         }
         out.push('\n');
+    }
+
+    pub(super) fn render_preview_origin_evidence(
+        out: &mut String,
+        origin_evidence: &[BrowserOriginEvidenceDigest],
+    ) {
+        if origin_evidence.is_empty() {
+            return;
+        }
+        out.push_str("### Browser Origin Evidence\n");
+        out.push_str("| Managed service | Declared | Local URL | Public preview URL | Requested URL | Final URL | Window origin | Hostname | Secure context | Redirects |\n");
+        out.push_str("| --- | --- | --- | --- | --- | --- | --- | --- | ---: | ---: |\n");
+        for evidence in origin_evidence.iter().take(12) {
+            let _ = writeln!(
+                out,
+                "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
+                table_optional(evidence.managed_service_id.as_deref()),
+                table_optional(evidence.declared.as_deref()),
+                table_optional(evidence.local_url.as_deref()),
+                table_optional(evidence.public_preview_url.as_deref()),
+                table_optional(evidence.browser_requested_url.as_deref()),
+                table_optional(evidence.browser_final_url.as_deref()),
+                table_optional(evidence.window_origin.as_deref()),
+                table_optional(evidence.window_hostname.as_deref()),
+                evidence
+                    .is_secure_context
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "-".to_string()),
+                evidence.redirect_count,
+            );
+        }
+        out.push('\n');
+    }
+
+    pub(super) fn collect_origin_evidence(value: &Value) -> Vec<BrowserOriginEvidenceDigest> {
+        let mut rows = Vec::new();
+        collect_origin_evidence_recursive(value, &mut rows);
+        rows
+    }
+
+    fn collect_origin_evidence_recursive(
+        value: &Value,
+        rows: &mut Vec<BrowserOriginEvidenceDigest>,
+    ) {
+        match value {
+            Value::Object(map) => {
+                for key in ["origin_evidence", "browser_origin_evidence"] {
+                    if let Some(Value::Array(items)) = map.get(key) {
+                        rows.extend(items.iter().filter_map(origin_evidence_digest));
+                    }
+                }
+                for child in map.values() {
+                    collect_origin_evidence_recursive(child, rows);
+                }
+            }
+            Value::Array(items) => {
+                for child in items {
+                    collect_origin_evidence_recursive(child, rows);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn origin_evidence_digest(value: &Value) -> Option<BrowserOriginEvidenceDigest> {
+        let object = value.as_object()?;
+        let window_location = object.get("window_location").and_then(Value::as_object);
+        Some(BrowserOriginEvidenceDigest {
+            managed_service_id: string_value(object, "managed_service_id"),
+            preview_artifact_id: string_value(object, "preview_artifact_id"),
+            run_id: string_value(object, "run_id"),
+            declared: object.get("declared").and_then(format_declared_origin),
+            local_url: string_value(object, "local_url"),
+            public_preview_url: string_value(object, "public_preview_url")
+                .or_else(|| string_value(object, "public_url")),
+            browser_requested_url: string_value(object, "browser_requested_url"),
+            browser_final_url: string_value(object, "browser_final_url"),
+            window_origin: window_location.and_then(|map| string_value(map, "origin")),
+            window_hostname: window_location.and_then(|map| string_value(map, "hostname")),
+            window_protocol: window_location.and_then(|map| string_value(map, "protocol")),
+            window_port: window_location.and_then(|map| string_value(map, "port")),
+            is_secure_context: window_location.and_then(|map| bool_value(map, "is_secure_context")),
+            redirect_count: object
+                .get("redirects")
+                .and_then(Value::as_array)
+                .map(Vec::len)
+                .unwrap_or_default(),
+        })
+    }
+
+    fn format_declared_origin(value: &Value) -> Option<String> {
+        let object = value.as_object()?;
+        let host = string_value(object, "host")?;
+        let port = object.get("port").and_then(Value::as_u64)?;
+        let protocol = string_value(object, "protocol").unwrap_or_else(|| "http".to_string());
+        Some(format!(
+            "{}://{}:{}",
+            protocol.trim_end_matches(':'),
+            host,
+            port
+        ))
+    }
+
+    fn table_optional(value: Option<&str>) -> String {
+        value
+            .filter(|value| !value.is_empty())
+            .map(|value| format!("`{}`", escape_markdown_table_cell(value)))
+            .unwrap_or_else(|| "-".to_string())
     }
 
     pub(super) fn render_gaps(out: &mut String, gaps: &[String]) {

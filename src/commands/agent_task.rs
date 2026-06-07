@@ -1,12 +1,12 @@
 use clap::{Args, Subcommand};
 use serde_json::Value;
 
-use homeboy::core::agent_task::AgentTaskRequest;
+use homeboy::core::agent_task::{AgentTaskAggregateReport, AgentTaskRequest};
 use homeboy::core::agent_task_lifecycle;
 use homeboy::core::agent_task_promotion::{promote, AgentTaskPromotionOptions};
 use homeboy::core::agent_task_provider::ExtensionProviderAgentTaskExecutor;
 use homeboy::core::agent_task_scheduler::{
-    AgentTaskExecutorAdapter, AgentTaskPlan, AgentTaskScheduler,
+    AgentTaskAggregate, AgentTaskExecutorAdapter, AgentTaskPlan, AgentTaskScheduler,
 };
 use homeboy::core::config;
 
@@ -37,6 +37,10 @@ pub enum AgentTaskCommand {
     Logs(StatusArgs),
     /// List artifacts and evidence refs recorded for a completed run.
     Artifacts(StatusArgs),
+    /// Mark a queued or stale-running durable agent-task run as cancelled.
+    Cancel(CancelArgs),
+    /// Build a durable aggregate review envelope from run state, logs, artifacts, and promotion hints.
+    Review(ReviewArgs),
     /// Promote a completed generic patch artifact into a managed worktree.
     Promote(PromoteArgs),
     /// List extension-declared agent-task executor providers.
@@ -67,6 +71,26 @@ pub struct SubmitArgs {
 pub struct StatusArgs {
     /// Durable run id returned by `agent-task submit` or `agent-task run-plan --record-run-id`.
     pub run_id: String,
+}
+
+#[derive(Args, Debug)]
+pub struct CancelArgs {
+    /// Durable run id returned by `agent-task submit` or `agent-task run-plan --record-run-id`.
+    pub run_id: String,
+
+    /// Operator-visible reason stored on the durable run record.
+    #[arg(long, value_name = "TEXT")]
+    pub reason: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct ReviewArgs {
+    /// Durable run id returned by `agent-task submit`, `dispatch`, or `run-plan --record-run-id`.
+    pub run_id: String,
+
+    /// Managed DMC worktree handle to include in generated promotion commands.
+    #[arg(long, value_name = "HANDLE")]
+    pub to_worktree: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -106,6 +130,8 @@ pub fn run(args: AgentTaskArgs, global: &GlobalArgs) -> CmdResult<Value> {
         AgentTaskCommand::Status(status_args) => status(status_args),
         AgentTaskCommand::Logs(status_args) => logs(status_args),
         AgentTaskCommand::Artifacts(status_args) => artifacts(status_args),
+        AgentTaskCommand::Cancel(cancel_args) => cancel(cancel_args),
+        AgentTaskCommand::Review(review_args) => review(review_args),
         AgentTaskCommand::Promote(promote_args) => promote_artifact(promote_args),
         AgentTaskCommand::Providers => providers(),
     }
@@ -222,6 +248,152 @@ fn logs(args: StatusArgs) -> CmdResult<Value> {
 fn artifacts(args: StatusArgs) -> CmdResult<Value> {
     let artifacts = agent_task_lifecycle::artifacts(&args.run_id)?;
     Ok((serde_json::to_value(artifacts).unwrap_or(Value::Null), 0))
+}
+
+fn cancel(args: CancelArgs) -> CmdResult<Value> {
+    let record = agent_task_lifecycle::cancel_run(&args.run_id, args.reason.as_deref())?;
+    Ok((serde_json::to_value(record).unwrap_or(Value::Null), 0))
+}
+
+fn review(args: ReviewArgs) -> CmdResult<Value> {
+    let record = agent_task_lifecycle::status(&args.run_id)?;
+    let log = agent_task_lifecycle::logs(&args.run_id)?;
+    let artifacts = agent_task_lifecycle::artifacts(&args.run_id)?;
+    let aggregate = completed_run_aggregate(&args.run_id).transpose()?;
+    let aggregate_review = aggregate
+        .as_ref()
+        .map(|aggregate| AgentTaskAggregateReport::from(aggregate.outcomes.clone()));
+    let promotion_candidates = aggregate_review
+        .as_ref()
+        .map(|review| promotion_candidates(&args.run_id, args.to_worktree.as_deref(), review))
+        .unwrap_or_default();
+    let next_actions = review_next_actions(
+        &record.state,
+        aggregate_review.as_ref(),
+        args.to_worktree.as_deref(),
+    );
+
+    Ok((
+        serde_json::json!({
+            "schema": "homeboy/agent-task-review/v1",
+            "run_id": record.run_id,
+            "state": record.state,
+            "plan_id": record.plan_id,
+            "plan_path": record.plan_path,
+            "aggregate_path": record.aggregate_path,
+            "record": record,
+            "logs": log,
+            "artifacts": artifacts,
+            "aggregate_review": aggregate_review,
+            "promotion_candidates": promotion_candidates,
+            "next_actions": next_actions,
+            "transport": {
+                "authoritative": "homeboy-agent-task-lifecycle",
+                "chat_state_required": false
+            }
+        }),
+        0,
+    ))
+}
+
+fn completed_run_aggregate(run_id: &str) -> Option<homeboy::core::Result<AgentTaskAggregate>> {
+    match agent_task_lifecycle::aggregate_source(run_id) {
+        Ok((raw, _path)) => Some(serde_json::from_str(&raw).map_err(|error| {
+            homeboy::core::Error::validation_invalid_json(
+                error,
+                Some("agent-task aggregate".to_string()),
+                Some(raw),
+            )
+        })),
+        Err(error) if error.code == homeboy::core::ErrorCode::ValidationInvalidArgument => None,
+        Err(error) => Some(Err(error)),
+    }
+}
+
+fn promotion_candidates(
+    run_id: &str,
+    to_worktree: Option<&str>,
+    review: &AgentTaskAggregateReport,
+) -> Vec<Value> {
+    review
+        .apply_candidates
+        .iter()
+        .flat_map(|candidate| {
+            candidate.artifact_ids.iter().map(move |artifact_id| {
+                let mut command = vec![
+                    "homeboy".to_string(),
+                    "agent-task".to_string(),
+                    "promote".to_string(),
+                    run_id.to_string(),
+                    "--task-id".to_string(),
+                    candidate.task_id.clone(),
+                    "--artifact-id".to_string(),
+                    artifact_id.clone(),
+                ];
+                if let Some(to_worktree) = to_worktree {
+                    command.push("--to-worktree".to_string());
+                    command.push(to_worktree.to_string());
+                }
+
+                serde_json::json!({
+                    "task_id": candidate.task_id,
+                    "artifact_id": artifact_id,
+                    "reason": candidate.reason,
+                    "command": command,
+                    "ready": to_worktree.is_some()
+                })
+            })
+        })
+        .collect()
+}
+
+fn review_next_actions(
+    state: &agent_task_lifecycle::AgentTaskRunState,
+    aggregate_review: Option<&AgentTaskAggregateReport>,
+    to_worktree: Option<&str>,
+) -> Vec<String> {
+    if matches!(state, agent_task_lifecycle::AgentTaskRunState::Queued) {
+        return vec!["run this queued durable task with `homeboy agent-task run <run-id>` or let a daemon claim it with `homeboy agent-task run-next`".to_string()];
+    }
+
+    if matches!(state, agent_task_lifecycle::AgentTaskRunState::Running) {
+        return vec!["inspect progress with `homeboy agent-task status <run-id>` and `homeboy agent-task logs <run-id>`; stale running records are annotated in status metadata".to_string()];
+    }
+
+    let Some(review) = aggregate_review else {
+        return vec!["terminal run has no aggregate artifact; inspect lifecycle status for finalization errors".to_string()];
+    };
+
+    let mut actions = Vec::new();
+    if review.summary.apply_candidates > 0 {
+        if to_worktree.is_some() {
+            actions.push("review `promotion_candidates` and run the generated `homeboy agent-task promote` command for the selected patch artifact".to_string());
+        } else {
+            actions.push("rerun review with `--to-worktree <handle>` to generate complete promotion commands for apply candidates".to_string());
+        }
+    }
+    if review.summary.retry_candidates > 0 {
+        actions.push(
+            "retry provider-error or timeout candidates after fixing executor/preflight issues"
+                .to_string(),
+        );
+    }
+    if review.summary.issue_report_candidates > 0 {
+        actions.push(
+            "open or update the tracker with `issue_report_candidates` diagnostics and evidence"
+                .to_string(),
+        );
+    }
+    if review.summary.review_candidates > 0 {
+        actions.push(
+            "inspect `review_candidates` before deciding whether to retry, report, or ignore"
+                .to_string(),
+        );
+    }
+    if actions.is_empty() {
+        actions.push("no promotion, retry, or issue-report candidates were produced; inspect task summaries for no-op completion".to_string());
+    }
+    actions
 }
 
 fn promote_artifact(args: PromoteArgs) -> CmdResult<Value> {
@@ -371,8 +543,9 @@ mod tests {
     use super::*;
     use crate::test_support::with_isolated_home;
     use homeboy::core::agent_task::{
-        AgentTaskExecutor, AgentTaskLimits, AgentTaskOutcome, AgentTaskOutcomeStatus,
-        AgentTaskPolicy, AgentTaskRequest, AgentTaskWorkspace, AGENT_TASK_OUTCOME_SCHEMA,
+        AgentTaskArtifact, AgentTaskEvidenceRef, AgentTaskExecutor, AgentTaskLimits,
+        AgentTaskOutcome, AgentTaskOutcomeStatus, AgentTaskPolicy, AgentTaskRequest,
+        AgentTaskWorkspace, AGENT_TASK_ARTIFACT_SCHEMA, AGENT_TASK_OUTCOME_SCHEMA,
         AGENT_TASK_REQUEST_SCHEMA,
     };
     use homeboy::core::agent_task_lifecycle::{
@@ -517,6 +690,26 @@ mod tests {
     }
 
     #[test]
+    fn cancel_command_marks_queued_run_cancelled() {
+        with_temp_home(|| {
+            agent_task_lifecycle::submit_plan(&test_plan(), Some("run-cli-cancel"))
+                .expect("submitted");
+
+            let (value, exit_code) = cancel(CancelArgs {
+                run_id: "run-cli-cancel".to_string(),
+                reason: Some("not selected".to_string()),
+            })
+            .expect("cancelled");
+            let record: AgentTaskRunRecord = serde_json::from_value(value).expect("record");
+
+            assert_eq!(exit_code, 0);
+            assert_eq!(record.state, AgentTaskRunState::Cancelled);
+            assert_eq!(record.tasks[0].state, AgentTaskState::Cancelled);
+            assert_eq!(record.metadata["cancel_reason"], json!("not selected"));
+        });
+    }
+
+    #[test]
     fn run_plan_maps_resolved_component_worktree_before_provider_dispatch() {
         let observed_request = Arc::new(Mutex::new(None));
         let executor = CapturingExecutor {
@@ -612,6 +805,77 @@ mod tests {
         assert_eq!(path.as_deref(), Some(file.path()));
     }
 
+    #[test]
+    fn review_reports_queued_run_without_chat_state() {
+        with_temp_home(|| {
+            agent_task_lifecycle::submit_plan(&test_plan(), Some("run-review-queued"))
+                .expect("submitted");
+
+            let (value, exit_code) = review(ReviewArgs {
+                run_id: "run-review-queued".to_string(),
+                to_worktree: None,
+            })
+            .expect("review loaded");
+
+            assert_eq!(exit_code, 0);
+            assert_eq!(value["schema"], "homeboy/agent-task-review/v1");
+            assert_eq!(value["run_id"], "run-review-queued");
+            assert_eq!(value["state"], "queued");
+            assert_eq!(value["transport"]["chat_state_required"], false);
+            assert!(value["aggregate_review"].is_null());
+            assert_eq!(value["logs"]["events"][0]["state"], "queued");
+            assert!(value["next_actions"][0]
+                .as_str()
+                .expect("next action")
+                .contains("run-next"));
+        });
+    }
+
+    #[test]
+    fn review_reports_completed_aggregate_and_promotion_hints() {
+        with_temp_home(|| {
+            run_loaded_plan(
+                test_plan(),
+                Some("run-review-completed"),
+                ApplyArtifactExecutor,
+            )
+            .expect("run completed");
+
+            let (value, exit_code) = review(ReviewArgs {
+                run_id: "run-review-completed".to_string(),
+                to_worktree: Some("homeboy@fix-review-flow".to_string()),
+            })
+            .expect("review loaded");
+
+            assert_eq!(exit_code, 0);
+            assert_eq!(value["state"], "succeeded");
+            assert_eq!(value["aggregate_review"]["summary"]["apply_candidates"], 1);
+            assert_eq!(value["artifacts"]["artifacts"][0]["id"], "patch-a");
+            assert_eq!(value["promotion_candidates"][0]["task_id"], "task-a");
+            assert_eq!(value["promotion_candidates"][0]["artifact_id"], "patch-a");
+            assert_eq!(value["promotion_candidates"][0]["ready"], true);
+            assert_eq!(
+                value["promotion_candidates"][0]["command"],
+                json!([
+                    "homeboy",
+                    "agent-task",
+                    "promote",
+                    "run-review-completed",
+                    "--task-id",
+                    "task-a",
+                    "--artifact-id",
+                    "patch-a",
+                    "--to-worktree",
+                    "homeboy@fix-review-flow"
+                ])
+            );
+            assert!(value["next_actions"][0]
+                .as_str()
+                .expect("next action")
+                .contains("promotion_candidates"));
+        });
+    }
+
     struct InspectingExecutor {
         run_id: String,
         observed_status: Arc<Mutex<Option<AgentTaskRunRecord>>>,
@@ -680,6 +944,46 @@ mod tests {
                 failure_classification: None,
                 artifacts: Vec::new(),
                 evidence_refs: Vec::new(),
+                diagnostics: Vec::new(),
+                outputs: Value::Null,
+                workflow: None,
+                follow_up: None,
+                metadata: Value::Null,
+            }
+        }
+    }
+
+    struct ApplyArtifactExecutor;
+
+    impl AgentTaskExecutorAdapter for ApplyArtifactExecutor {
+        fn execute(
+            &self,
+            request: AgentTaskRequest,
+            _context: AgentTaskExecutionContext,
+        ) -> AgentTaskOutcome {
+            AgentTaskOutcome {
+                schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+                task_id: request.task_id,
+                status: AgentTaskOutcomeStatus::Succeeded,
+                summary: Some("produced patch".to_string()),
+                failure_classification: None,
+                artifacts: vec![AgentTaskArtifact {
+                    schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+                    id: "patch-a".to_string(),
+                    kind: "patch".to_string(),
+                    name: Some("changes.patch".to_string()),
+                    path: Some("target/agent-task-review/changes.patch".to_string()),
+                    url: None,
+                    mime: Some("text/x-diff".to_string()),
+                    size_bytes: Some(42),
+                    sha256: Some("abc123".to_string()),
+                    metadata: Value::Null,
+                }],
+                evidence_refs: vec![AgentTaskEvidenceRef {
+                    kind: "transcript".to_string(),
+                    uri: "target/agent-task-review/transcript.log".to_string(),
+                    label: Some("transcript".to_string()),
+                }],
                 diagnostics: Vec::new(),
                 outputs: Value::Null,
                 workflow: None,

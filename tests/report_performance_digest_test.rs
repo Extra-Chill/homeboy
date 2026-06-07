@@ -141,7 +141,31 @@ fn renders_resource_summary_budget_findings_and_baseline_health() {
                 "status": "running",
                 "process_id": "pid-123",
                 "runtime_id": "runtime-abc",
-                "cleanup_status": "pending"
+                "cleanup_status": "pending",
+                "origin_evidence": [{
+                    "schema_version": 1,
+                    "managed_service_id": "site-preview",
+                    "preview_artifact_id": "preview-artifact-1",
+                    "run_id": "trace-run-1",
+                    "declared": { "host": "app.localhost", "port": 3000, "protocol": "http" },
+                    "local_url": "http://app.localhost:3000/",
+                    "public_preview_url": "https://preview.example.test/",
+                    "browser_requested_url": "https://preview.example.test/",
+                    "browser_final_url": "https://preview.example.test/?view=site",
+                    "window_location": {
+                        "origin": "https://preview.example.test",
+                        "hostname": "preview.example.test",
+                        "protocol": "https:",
+                        "port": "",
+                        "is_secure_context": true
+                    },
+                    "redirects": [{
+                        "from_url": "https://preview.example.test/",
+                        "to_url": "https://preview.example.test/?view=site",
+                        "status": 302
+                    }],
+                    "network_origin": { "tunnel": "homeboy-managed" }
+                }]
             }
         }"#,
     );
@@ -184,6 +208,22 @@ fn renders_resource_summary_budget_findings_and_baseline_health() {
         report.preview.get("public_url"),
         Some(&"https://preview.example.test/run-1".to_string())
     );
+    assert_eq!(report.preview_origin_evidence.len(), 1);
+    assert_eq!(
+        report.preview_origin_evidence[0]
+            .managed_service_id
+            .as_deref(),
+        Some("site-preview")
+    );
+    assert_eq!(
+        report.preview_origin_evidence[0].window_hostname.as_deref(),
+        Some("preview.example.test")
+    );
+    assert_eq!(
+        report.preview_origin_evidence[0].is_secure_context,
+        Some(true)
+    );
+    assert_eq!(report.preview_origin_evidence[0].redirect_count, 1);
     assert!(report.markdown.contains("## Performance Digest"));
     assert!(report.markdown.contains("### Resource Summary"));
     assert!(report.markdown.contains("- Duration: **12345 ms**"));
@@ -211,6 +251,13 @@ fn renders_resource_summary_budget_findings_and_baseline_health() {
     assert!(report.markdown.contains("- process_id: `pid-123`"));
     assert!(report.markdown.contains("- runtime_id: `runtime-abc`"));
     assert!(report.markdown.contains("- cleanup_status: `pending`"));
+    assert!(report.markdown.contains("### Browser Origin Evidence"));
+    assert!(report.markdown.contains("`site-preview`"));
+    assert!(report.markdown.contains("`http://app.localhost:3000`"));
+    assert!(report
+        .markdown
+        .contains("`https://preview.example.test/?view=site`"));
+    assert!(report.markdown.contains("| true | 1 |"));
 
     let _ = fs::remove_dir_all(&dir);
 }
