@@ -44,14 +44,6 @@ pub struct DispatchArgs {
     #[arg(long, value_name = "URL")]
     pub task_url: Option<String>,
 
-    /// Discord channel id for provider/UI routing. Does not require --user.
-    #[arg(long, value_name = "CHANNEL_ID")]
-    pub channel: Option<String>,
-
-    /// Optional Discord thread id for provider/UI routing.
-    #[arg(long, value_name = "THREAD_ID")]
-    pub thread: Option<String>,
-
     /// Executor backend to request. Defaults to the Codebox coding backend.
     #[arg(long, default_value = "codebox", value_name = "BACKEND")]
     pub backend: String,
@@ -68,9 +60,13 @@ pub struct DispatchArgs {
     #[arg(long = "secret-env", value_name = "ENV")]
     pub secret_env: Vec<String>,
 
-    /// Provider config JSON object, @file, or - for stdin. Merged with routing/workspace metadata.
+    /// Provider config JSON object, @file, or - for stdin. Merged with workspace metadata.
     #[arg(long = "provider-config", value_name = "JSON")]
     pub provider_config: Option<String>,
+
+    /// Opaque client context JSON object, @file, or - for stdin.
+    #[arg(long = "client-context", value_name = "JSON")]
+    pub client_context: Option<String>,
 
     /// Maximum number of task cells to run at once.
     #[arg(long, default_value_t = 1, value_name = "N")]
@@ -154,8 +150,8 @@ fn build_dispatch_plan(args: &DispatchArgs) -> homeboy::core::Result<AgentTaskPl
             "agent-task dispatch requires --prompt, --prompt @file, --prompt -, repeated --task inputs, or --tasks @tasks.json",
             None,
             Some(vec![
-                "Example: homeboy agent-task dispatch --repo data-machine --cwd /path/to/worktree --channel 1493345787894038649 --prompt @task.txt".to_string(),
-                "Wave input: homeboy agent-task dispatch --tasks @tasks.json --concurrency 8 --channel 1493345787894038649".to_string(),
+                "Example: homeboy agent-task dispatch --repo data-machine --cwd /path/to/worktree --prompt @task.txt".to_string(),
+                "Wave input: homeboy agent-task dispatch --tasks @tasks.json --concurrency 8".to_string(),
             ]),
         ));
     }
@@ -183,8 +179,9 @@ fn build_dispatch_plan(args: &DispatchArgs) -> homeboy::core::Result<AgentTaskPl
     prompt_specs.extend(args.tasks.clone());
     prompt_specs.extend(read_dispatch_tasks_json(args.tasks_json.as_deref())?);
 
-    let routing = dispatch_routing(args);
-    let provider_config = dispatch_provider_config(args, &repo, workspace_root.as_ref(), &routing)?;
+    let client_context = dispatch_client_context(args)?;
+    let provider_config =
+        dispatch_provider_config(args, &repo, workspace_root.as_ref(), &client_context)?;
     let mut tasks = Vec::new();
     for (index, prompt_spec) in prompt_specs.iter().enumerate() {
         let instructions = read_text_spec(prompt_spec, "prompt")?;
@@ -248,7 +245,7 @@ fn build_dispatch_plan(args: &DispatchArgs) -> homeboy::core::Result<AgentTaskPl
             metadata: serde_json::json!({
                 "repo": repo,
                 "dmc_worktree": args.dmc_worktree,
-                "routing": routing,
+                "client_context": client_context,
                 "task_url": args.task_url,
                 "prompt_source": prompt_spec,
                 "dispatch": "agent-task dispatch",
@@ -271,7 +268,7 @@ fn build_dispatch_plan(args: &DispatchArgs) -> homeboy::core::Result<AgentTaskPl
         "repo": repo,
         "dmc_worktree": args.dmc_worktree,
         "workspace_root": workspace_root.map(|path| path.display().to_string()),
-        "routing": routing,
+        "client_context": client_context,
         "task_url": args.task_url,
     });
 
@@ -325,21 +322,37 @@ fn resolve_dispatch_workspace(
     Ok(Some(path))
 }
 
-fn dispatch_routing(args: &DispatchArgs) -> Value {
-    serde_json::json!({
-        "client": if args.channel.is_some() { "discord" } else { "cli" },
-        "channel": args.channel,
-        "thread": args.thread,
-        "user_required": false,
-        "ui": if args.channel.is_some() { "kimaki" } else { "cli" },
-    })
+fn dispatch_client_context(args: &DispatchArgs) -> homeboy::core::Result<Value> {
+    let Some(spec) = &args.client_context else {
+        return Ok(serde_json::json!({}));
+    };
+
+    let raw = read_text_spec(spec, "client-context")?;
+    let context = serde_json::from_str::<Value>(&raw).map_err(|error| {
+        homeboy::core::Error::validation_invalid_json(
+            error,
+            Some("agent-task dispatch client context".to_string()),
+            Some(raw),
+        )
+    })?;
+
+    if !context.is_object() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "client-context",
+            "agent-task dispatch --client-context must resolve to a JSON object",
+            None,
+            None,
+        ));
+    }
+
+    Ok(context)
 }
 
 fn dispatch_provider_config(
     args: &DispatchArgs,
     repo: &Option<String>,
     workspace_root: Option<&std::path::PathBuf>,
-    routing: &Value,
+    client_context: &Value,
 ) -> homeboy::core::Result<Value> {
     let mut config = if let Some(spec) = &args.provider_config {
         let raw = read_text_spec(spec, "provider-config")?;
@@ -373,8 +386,8 @@ fn dispatch_provider_config(
     map.entry("workspace_root".to_string()).or_insert_with(|| {
         serde_json::json!(workspace_root.map(|path| path.display().to_string()))
     });
-    map.entry("routing".to_string())
-        .or_insert_with(|| routing.clone());
+    map.entry("client_context".to_string())
+        .or_insert_with(|| client_context.clone());
     map.entry("task_url".to_string())
         .or_insert_with(|| serde_json::json!(args.task_url));
 
@@ -501,7 +514,7 @@ mod tests {
     use homeboy::core::agent_task_scheduler::AgentTaskExecutionContext;
 
     #[test]
-    fn builds_repo_cooking_plan_from_prompt_file_and_channel() {
+    fn builds_repo_cooking_plan_from_prompt_file_and_client_context() {
         let workspace = tempfile::tempdir().expect("workspace");
         let prompt = tempfile::NamedTempFile::new().expect("prompt file");
         std::fs::write(prompt.path(), "Cook the issue cleanly.").expect("write prompt");
@@ -510,7 +523,9 @@ mod tests {
             prompt: Some(format!("@{}", prompt.path().display())),
             cwd: Some(workspace.path().display().to_string()),
             repo: Some("data-machine".to_string()),
-            channel: Some("1493345787894038649".to_string()),
+            client_context: Some(
+                r#"{"surface":"chat","conversation_id":"opaque-123"}"#.to_string(),
+            ),
             ..DispatchArgOverrides::default()
         }))
         .expect("dispatch plan");
@@ -528,13 +543,30 @@ mod tests {
             Some(workspace.path().to_str().expect("workspace utf8"))
         );
         assert_eq!(
-            plan.tasks[0].executor.config["routing"]["channel"],
-            "1493345787894038649"
+            plan.tasks[0].executor.config["client_context"]["surface"],
+            "chat"
         );
         assert_eq!(
-            plan.tasks[0].executor.config["routing"]["user_required"],
-            false
+            plan.tasks[0].metadata["client_context"]["conversation_id"],
+            "opaque-123"
         );
+        let serialized = serde_json::to_string(&plan).expect("serialize plan");
+        assert!(!serialized.contains("discord"));
+        assert!(!serialized.contains("kimaki"));
+        assert!(!serialized.contains("channel"));
+        assert!(!serialized.contains("thread"));
+    }
+
+    #[test]
+    fn rejects_non_object_client_context() {
+        let error = build_dispatch_plan(&dispatch_args(DispatchArgOverrides {
+            prompt: Some("Cook with invalid context.".to_string()),
+            client_context: Some("[]".to_string()),
+            ..DispatchArgOverrides::default()
+        }))
+        .expect_err("client context should reject non-object JSON");
+
+        assert!(error.to_string().contains("--client-context"));
     }
 
     #[test]
@@ -651,7 +683,7 @@ mod tests {
         cwd: Option<String>,
         dmc_worktree: Option<String>,
         repo: Option<String>,
-        channel: Option<String>,
+        client_context: Option<String>,
         concurrency: usize,
         attempts: u32,
         queue_only: bool,
@@ -667,13 +699,12 @@ mod tests {
             dmc_worktree: overrides.dmc_worktree,
             repo: overrides.repo,
             task_url: None,
-            channel: overrides.channel,
-            thread: None,
             backend: "fixture".to_string(),
             selector: None,
             model: None,
             secret_env: Vec::new(),
             provider_config: None,
+            client_context: overrides.client_context,
             concurrency: if overrides.concurrency == 0 {
                 1
             } else {
