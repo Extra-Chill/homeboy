@@ -360,6 +360,35 @@ total from the target `core/html` count.
 `probeWordPressPostBlockQuality(sitePath, postId, options)` remains available for
 single-post diagnostics where stored-content metadata and previews are useful.
 
+### Materialized site quality gates
+
+`evaluateMaterializedSiteQuality(input, options)` evaluates a materialized
+WordPress site from importer, native block, editor parity, frontend parity, and
+semantic summary inputs. It returns `passed`, `failureDetails`, stable
+`failureReasons`, and flattened benchmark `metrics`. Product rigs own policy and
+thresholds; pass options such as `visualPixelDiffThreshold` and
+`visualEditorPixelDiffThreshold` instead of hardcoding product gates in this
+helper.
+
+Stable metric names include `semantic_mismatch_count`,
+`importer_core_html_block_count`, `importer_freeform_block_count`,
+`importer_fallback_count`, `importer_invalid_block_count`,
+`visual_editor_vs_source_pixel_diff_ratio`,
+`visual_editor_vs_frontend_pixel_diff_ratio`,
+`visual_source_vs_frontend_pixel_diff_ratio`, `visual_pixel_diff_ratio`,
+`native_block_quality_pass`, `native_block_quality_failure_count`,
+`success_rate`, `agent_error_rate`, `timed_out`, and `agent_runner_error`.
+
+Stable failure reason codes include `semantic_mismatch`,
+`importer_core_html_blocks`, `importer_freeform_blocks`,
+`importer_fallback_blocks`, `importer_invalid_blocks`,
+`editor_visual_parity_error`, `editor_source_visual_diff`,
+`editor_frontend_visual_diff`, `source_frontend_visual_diff`,
+`missing_target_block_page`, `agent_authored_wp_html`,
+`core_html_without_bfb_fallback`, `bfb_fallback`, `importer_report_error`,
+`editor_invalid_blocks`, `editor_validation_error`, `agent_timed_out`, and
+`agent_runner_error`.
+
 ```js
 const {
 	installWordPressRequestProfiler,

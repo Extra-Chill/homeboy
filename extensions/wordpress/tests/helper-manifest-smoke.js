@@ -37,6 +37,10 @@ assert.equal(
 	path.resolve(__dirname, '..', 'lib', 'block-quality.js')
 );
 assert.equal(
+	manifest.helpers.materializedSiteQuality,
+	path.resolve(__dirname, '..', 'lib', 'materialized-site-quality.js')
+);
+assert.equal(
 	manifest.helpers.editorCanvasProbes,
 	path.resolve(__dirname, '..', 'lib', 'editor-canvas-probes.js')
 );
