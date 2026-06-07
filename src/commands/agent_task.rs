@@ -10,8 +10,9 @@ use homeboy::core::agent_task_scheduler::{
 use homeboy::core::config;
 
 use super::agent_task_dispatch::{run as dispatch, DispatchArgs};
-use super::agent_task_review;
 use super::{CmdResult, GlobalArgs};
+
+pub mod review;
 
 #[derive(Args, Debug)]
 pub struct AgentTaskArgs {
@@ -167,7 +168,7 @@ pub struct FinalizePrArgs {
     pub commit_message: String,
 
     #[command(flatten)]
-    pub evidence: agent_task_review::FinalizePrEvidenceArgs,
+    pub evidence: review::FinalizePrEvidenceArgs,
 
     /// Green gate result as name=status or name=status:detail. Repeatable.
     #[arg(long = "gate-result", value_name = "NAME=STATUS[:DETAIL]")]
@@ -178,7 +179,7 @@ pub struct FinalizePrArgs {
     pub changed_files: Vec<String>,
 
     /// Protected branch that may not be finalized directly. Repeatable.
-    #[arg(long = "protected-branch", default_values_t = agent_task_review::default_protected_branches(), value_name = "BRANCH")]
+    #[arg(long = "protected-branch", default_values_t = review::default_protected_branches(), value_name = "BRANCH")]
     pub protected_branches: Vec<String>,
 
     /// AI assistance scope for the PR body.
@@ -203,14 +204,10 @@ pub fn run(args: AgentTaskArgs, global: &GlobalArgs) -> CmdResult<Value> {
         AgentTaskCommand::Cancel(cancel_args) => cancel(cancel_args),
         AgentTaskCommand::Resume(status_args) => resume(status_args),
         AgentTaskCommand::Retry(retry_args) => retry(retry_args),
-        AgentTaskCommand::Review(review_args) => agent_task_review::review(review_args),
-        AgentTaskCommand::Promote(promote_args) => {
-            agent_task_review::promote_artifact(promote_args)
-        }
-        AgentTaskCommand::FinalizePr(finalize_args) => {
-            agent_task_review::finalize_pull_request(finalize_args)
-        }
-        AgentTaskCommand::Providers => agent_task_review::providers(),
+        AgentTaskCommand::Review(review_args) => review::review(review_args),
+        AgentTaskCommand::Promote(promote_args) => review::promote_artifact(promote_args),
+        AgentTaskCommand::FinalizePr(finalize_args) => review::finalize_pull_request(finalize_args),
+        AgentTaskCommand::Providers => review::providers(),
     }
 }
 
@@ -724,8 +721,8 @@ mod tests {
             run_loaded_plan(test_plan(), Some(run_id), InspectingExecutor::noop(run_id))
                 .expect("run completed");
 
-            let (raw, path) = agent_task_review::read_promotion_source(run_id)
-                .expect("promotion source resolved");
+            let (raw, path) =
+                review::read_promotion_source(run_id).expect("promotion source resolved");
 
             assert!(raw.contains("homeboy/agent-task-aggregate/v1"));
             assert_eq!(
@@ -746,9 +743,8 @@ mod tests {
         )
         .expect("write source");
 
-        let (raw, path) =
-            agent_task_review::read_promotion_source(&file.path().display().to_string())
-                .expect("promotion source file resolved");
+        let (raw, path) = review::read_promotion_source(&file.path().display().to_string())
+            .expect("promotion source file resolved");
 
         assert!(raw.contains("homeboy/agent-task-aggregate/v1"));
         assert_eq!(path.as_deref(), Some(file.path()));
@@ -760,7 +756,7 @@ mod tests {
             agent_task_lifecycle::submit_plan(&test_plan(), Some("run-review-queued"))
                 .expect("submitted");
 
-            let (value, exit_code) = agent_task_review::review(ReviewArgs {
+            let (value, exit_code) = review::review(ReviewArgs {
                 run_id: "run-review-queued".to_string(),
                 to_worktree: None,
             })
@@ -790,7 +786,7 @@ mod tests {
             )
             .expect("run completed");
 
-            let (value, exit_code) = agent_task_review::review(ReviewArgs {
+            let (value, exit_code) = review::review(ReviewArgs {
                 run_id: "run-review-completed".to_string(),
                 to_worktree: Some("homeboy@fix-review-flow".to_string()),
             })

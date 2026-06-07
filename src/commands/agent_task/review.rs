@@ -13,8 +13,8 @@ use homeboy::core::agent_task_provider::ExtensionProviderAgentTaskExecutor;
 use homeboy::core::agent_task_scheduler::AgentTaskAggregate;
 use homeboy::core::config;
 
-use super::agent_task::{FinalizePrArgs, PromoteArgs, ReviewArgs};
-use super::CmdResult;
+use super::super::CmdResult;
+use super::{FinalizePrArgs, PromoteArgs, ReviewArgs};
 
 #[derive(Args, Debug)]
 pub struct FinalizePrEvidenceArgs {
