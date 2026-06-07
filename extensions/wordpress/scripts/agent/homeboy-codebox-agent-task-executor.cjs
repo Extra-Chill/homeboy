@@ -21,6 +21,13 @@ const {
 } = require('../../lib/codebox-agent-task-executor');
 
 const DEFAULT_CODEBOX_CORE_MODULE = '@automattic/wp-codebox-core';
+const CODEX_SECRET_ENV = [
+  'AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN',
+  'AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN',
+  'AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT',
+  'AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID',
+  'AI_PROVIDER_OPENAI_CODEX_FEDRAMP',
+];
 
 function argValue(name) {
   const index = process.argv.indexOf(name);
@@ -61,6 +68,46 @@ function readJsonIfAvailable(filePath) {
   } catch {
     return null;
   }
+}
+
+function defaultCodexAuthPath() {
+  return process.env.HOME ? path.join(process.env.HOME, '.codex', 'auth.json') : '';
+}
+
+function jwtExpiration(token) {
+  const payload = String(token || '').split('.')[1];
+  if (!payload) {
+    return '';
+  }
+  try {
+    const decoded = Buffer.from(payload.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8');
+    const parsed = JSON.parse(decoded);
+    return parsed?.exp ? String(parsed.exp) : '';
+  } catch {
+    return '';
+  }
+}
+
+function codexAuthEnv(taskInput) {
+  if (taskInput?.provider !== 'codex') {
+    return {};
+  }
+  if (CODEX_SECRET_ENV.slice(0, 4).every((name) => Boolean(process.env[name]))) {
+    return {};
+  }
+  const authPath = process.env.HOMEBOY_WP_CODEBOX_CODEX_AUTH_PATH || defaultCodexAuthPath();
+  const auth = readJsonIfAvailable(authPath);
+  const tokens = auth?.tokens || {};
+  if (!tokens.access_token || !tokens.refresh_token || !tokens.account_id) {
+    return {};
+  }
+  return Object.fromEntries(Object.entries({
+    AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN: tokens.access_token,
+    AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN: tokens.refresh_token,
+    AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT: tokens.expires_at || tokens.expiresAt || jwtExpiration(tokens.access_token),
+    AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID: tokens.account_id,
+    AI_PROVIDER_OPENAI_CODEX_FEDRAMP: tokens.fedramp === undefined ? 'false' : String(tokens.fedramp),
+  }).filter(([name, value]) => CODEX_SECRET_ENV.includes(name) && value !== undefined && value !== null && value !== ''));
 }
 
 function directorySizeBytes(directory) {
@@ -345,6 +392,7 @@ async function runTaskRunner(request) {
   const coreNormalizers = await loadCodeboxCoreNormalizers();
   const runner = argValue('--task-runner') || `${__dirname}/homeboy-wp-codebox-task-runner.cjs`;
   const config = request.executor?.config || {};
+  const taskInput = codeboxTaskRequestFromAgentTaskRequest(request);
   const configArgs = [
     ['--agents-api', config.agents_api_path || config.agentsApiPath],
     ['--homeboy', config.homeboy_path || config.homeboyPath],
@@ -358,8 +406,8 @@ async function runTaskRunner(request) {
   });
   const result = spawnSync(process.execPath, [runner, ...args, ...configArgs], {
     encoding: 'utf8',
-    input: JSON.stringify(codeboxTaskRequestFromAgentTaskRequest(request)),
-    env: process.env,
+    input: JSON.stringify(taskInput),
+    env: { ...process.env, ...codexAuthEnv(taskInput) },
     maxBuffer: 1024 * 1024 * 20,
     timeout: requestTimeoutMs(request),
   });
