@@ -808,7 +808,7 @@ mod tests {
                 policy: ServiceTunnelPolicy {
                     exposure: ServiceTunnelExposure::PrivateLoopback,
                     require_auth: true,
-                    allowed_clients: vec!["wpcom-calypso".to_string()],
+                    allowed_clients: vec!["app-runtime".to_string()],
                 },
                 description: None,
             })
