@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.222.12] - 2026-06-07
+
+### Changed
+- Nest agent-task review helpers
+- Use shared agent-task PR evidence args
+- Extract agent-task review command helpers
+- Extract agent-task PR body rendering
+- Group agent-task PR evidence fields
+- Add agent-task PR finalization plumbing
+
 ## [0.222.11] - 2026-06-07
 
 ### Changed
