@@ -211,6 +211,18 @@ pub fn runner_session_file(id: &str) -> Result<PathBuf> {
     Ok(runner_sessions_dir()?.join(format!("{}.json", id)))
 }
 
+/// Managed service tunnel runtime state directory (~/.local/share/homeboy/service-tunnels/{id}/).
+pub fn service_tunnel_runtime_dir(id: &str) -> Result<PathBuf> {
+    Ok(homeboy_data()?
+        .join("service-tunnels")
+        .join(sanitize_path_segment(id)))
+}
+
+/// Managed service tunnel runtime state file.
+pub fn service_tunnel_runtime_state_file(id: &str) -> Result<PathBuf> {
+    Ok(service_tunnel_runtime_dir(id)?.join("state.json"))
+}
+
 /// Extension directory path
 pub fn extension(id: &str) -> Result<PathBuf> {
     Ok(extensions()?.join(id))
