@@ -114,6 +114,9 @@ pub(super) fn sync_lab_offload_rig_component_dependencies(
     let mut synced = Vec::new();
     let mut seen = HashSet::new();
     for dependency in dependencies {
+        if !should_materialize_dependency(&dependency, primary_remote_path) {
+            continue;
+        }
         if !seen.insert(dependency.remote_checkout_root.clone()) {
             continue;
         }
@@ -184,6 +187,13 @@ fn remote_checkout_root_for_local(
         return primary_remote_path.to_string();
     }
     local_checkout_root.to_string()
+}
+
+fn should_materialize_dependency(
+    dependency: &RigComponentDependency,
+    primary_remote_path: &str,
+) -> bool {
+    dependency.remote_checkout_root != primary_remote_path
 }
 
 fn required_component_subpath(
@@ -419,6 +429,25 @@ mod tests {
                 .remote_checkout_root
                 .contains("${package.root}"));
         });
+    }
+
+    #[test]
+    fn primary_workspace_dependency_is_not_materialized_again() {
+        let primary_remote_path = "/home/chubes/Developer/_lab_workspaces/studio-web-snapshot";
+        let dependencies = vec![RigComponentDependency {
+            rig_id: "studio-web-product-matrix".to_string(),
+            component_id: "studio-web".to_string(),
+            local_checkout_root: "/Users/chubes/Developer/studio-web".to_string(),
+            remote_checkout_root: primary_remote_path.to_string(),
+            required_subpath: None,
+            remote_url: Some("https://github.a8c.com/chubes4/studio-web.git".to_string()),
+        }];
+
+        assert!(dependencies
+            .into_iter()
+            .filter(|dependency| should_materialize_dependency(dependency, primary_remote_path))
+            .collect::<Vec<_>>()
+            .is_empty());
     }
 
     #[test]
