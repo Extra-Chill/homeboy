@@ -10,6 +10,7 @@ use crate::core::extension::build::resolve_artifact_path_from_root;
 use crate::core::git;
 use crate::core::project::Project;
 
+use super::effect::remote_version_after_deploy_effect;
 use super::generated_artifacts::GeneratedBuildArtifactCleanupGuard;
 use super::path_roots::{component_remote_path, resolve_effective_remote_path};
 use super::planning::{calculate_directory_size, format_bytes};
@@ -805,8 +806,33 @@ fn execute_artifact_deploy(
         Ok(DeployResult {
             success: true,
             exit_code,
+            effect,
             ..
         }) => {
+            let reported_remote_version = match remote_version_after_deploy_effect(
+                component,
+                project,
+                base_path,
+                &ctx.client,
+                effect.as_ref(),
+                prepared.local_version.as_ref(),
+            ) {
+                Ok(version) => version,
+                Err(error) => {
+                    return ComponentDeployResult::failed(
+                        component,
+                        base_path,
+                        prepared.local_version.clone(),
+                        prepared.remote_version.clone(),
+                        error,
+                    )
+                    .with_remote_path(install_dir.to_string())
+                    .with_artifact_inputs(artifact_input_metadata)
+                    .with_build_exit_code(prepared.build_exit_code)
+                    .with_deploy_exit_code(Some(exit_code));
+                }
+            };
+
             if prepared.cleanup_local_artifact {
                 cleanup_deploy_build_artifact(component, artifact_path);
             }
@@ -825,10 +851,7 @@ fn execute_artifact_deploy(
 
             ComponentDeployResult::new(component, base_path)
                 .with_status("deployed")
-                .with_versions(
-                    prepared.local_version.clone(),
-                    prepared.local_version.clone(),
-                )
+                .with_versions(prepared.local_version.clone(), reported_remote_version)
                 .with_remote_path(install_dir.to_string())
                 .with_artifact_inputs(artifact_input_metadata)
                 .with_build_exit_code(prepared.build_exit_code)
@@ -838,6 +861,7 @@ fn execute_artifact_deploy(
             success: false,
             exit_code,
             error,
+            ..
         }) => ComponentDeployResult::failed(
             component,
             base_path,
@@ -912,10 +936,6 @@ fn cleanup_empty_artifact_dirs(local_path: &Path, start_dir: Option<&Path>) {
     }
 }
 
-// =============================================================================
-// Release Artifact Download
-// =============================================================================
-
 /// Try to download a release artifact from GitHub for the component's latest tag.
 ///
 /// Returns `Ok(Some(path))` if successful and `Ok(None)` for normal download misses
@@ -934,7 +954,6 @@ fn try_download_release_artifact(
         return Ok(None);
     };
 
-    // Get the latest tag from the local clone (already synced by the pipeline)
     let Some(tag) = git::get_latest_tag(&component.local_path).ok().flatten() else {
         return Ok(None);
     };
@@ -964,27 +983,20 @@ fn try_download_release_artifact(
     }
 }
 
-// =============================================================================
-// Cleanup Functions
-// =============================================================================
-
 /// Clean up build dependencies from component's local_path after successful deploy.
 /// This is a best-effort operation - failures are logged but do not fail the deploy.
 fn cleanup_build_dependencies(
     component: &Component,
     config: &DeployConfig,
 ) -> Result<Option<String>> {
-    // Skip cleanup if disabled at component level
     if !component.auto_cleanup {
         return Ok(None);
     }
 
-    // Skip cleanup if --keep-deps flag is set
     if config.keep_deps {
         return Ok(Some("skipped (--keep-deps flag)".to_string()));
     }
 
-    // Collect cleanup paths from linked extensions
     let mut cleanup_paths = Vec::new();
     if let Some(ref extensions) = component.extensions {
         for extension_id in extensions.keys() {

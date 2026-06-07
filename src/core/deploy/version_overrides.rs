@@ -19,7 +19,7 @@ use crate::core::server::SshClient;
 
 use super::path_roots::resolve_effective_remote_path;
 use super::transfer::scp_file;
-use super::types::DeployResult;
+use super::types::{DeployEffect, DeployResult};
 
 /// Detect if a component's artifact is a CLI binary matching the currently
 /// running process name. Used to print a post-deploy hint for self-deploy.
@@ -358,6 +358,7 @@ pub(super) fn deploy_with_override(
         })?;
 
     let staging_artifact = format!("{}/{}", override_config.staging_path, artifact_filename);
+    let mut verified = false;
 
     // Step 1: Create staging directory
     let mkdir_cmd = format!(
@@ -457,6 +458,7 @@ pub(super) fn deploy_with_override(
                     .unwrap_or_else(|| format!("Deploy verification failed for {}", remote_path));
                 return Ok(DeployResult::failure(1, error_msg));
             }
+            verified = true;
         }
     }
 
@@ -467,7 +469,11 @@ pub(super) fn deploy_with_override(
         let _ = ssh_client.execute(&cleanup_cmd); // Best effort cleanup
     }
 
-    Ok(DeployResult::success(0))
+    Ok(DeployResult::success(0).with_effect(DeployEffect {
+        remote_path: remote_path.to_string(),
+        artifact_path: Some(staging_artifact),
+        verified,
+    }))
 }
 
 fn deploy_override_template_vars(
