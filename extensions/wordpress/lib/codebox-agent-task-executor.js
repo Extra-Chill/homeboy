@@ -28,6 +28,12 @@ const PROVIDER_CAPABILITIES = [
   'recipe_probe_artifacts',
 ];
 
+const DEFAULT_WORKSPACE_ALLOWED_TOOLS = [
+  'workspace_ls',
+  'workspace_read',
+  'workspace_git_status',
+];
+
 const AGENT_BUNDLE_CONFIG_FIELDS = [
   'bundle_path',
   'bundle_host_path',
@@ -152,7 +158,8 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
   const mounts = agentBundleMounts(agentBundle, config.mounts || defaults.mounts || options.mounts || []);
   const components = runtimeComponentPaths(config, { ...defaults, ...options });
   const runtimeTask = inputs.runtime_task || inputs.runtimeTask || config.runtime_task || config.runtimeTask || options.runtimeTask;
-  const sandboxToolPolicy = inputs.sandbox_tool_policy || inputs.sandboxToolPolicy || config.sandbox_tool_policy || config.sandboxToolPolicy || options.sandboxToolPolicy;
+  const sandboxToolPolicy = firstDefined(inputs.sandbox_tool_policy, inputs.sandboxToolPolicy, config.sandbox_tool_policy, config.sandboxToolPolicy, options.sandboxToolPolicy, defaults.sandboxToolPolicy);
+  const allowedTools = firstDefined(inputs.allowed_tools, inputs.allowedTools, config.allowed_tools, config.allowedTools, options.allowedTools, defaults.allowedTools);
   const timeoutSeconds = request.limits?.task_timeout_seconds || request.limits?.taskTimeoutSeconds;
   const timeoutMs = request.limits?.timeout_ms || request.limits?.max_runtime_ms;
   const timeoutFromMs = timeoutMs ? Math.ceil(timeoutMs / 1000) : undefined;
@@ -170,7 +177,7 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     schema: WP_CODEBOX_TASK_REQUEST_SCHEMA,
     goal: request.instructions,
     target: inputs.target || request.workspace || {},
-    allowed_tools: inputs.allowed_tools || inputs.allowedTools || [],
+    allowed_tools: allowedTools || [],
     expected_artifacts: request.expected_artifacts || [],
     policy: request.policy || {},
     context,
@@ -236,6 +243,7 @@ function defaultCodeboxRuntimeConfig(request, config, inputs, options = {}) {
     settings.wp_codebox_data_machine_path,
     settings.data_machine_path,
     process.env.HOMEBOY_DATA_MACHINE_PATH,
+    activeSitePluginPath('data-machine'),
     siblingPath(workspaceBase, 'data-machine'),
   );
   const dataMachineCodePath = firstExistingPath(
@@ -243,6 +251,7 @@ function defaultCodeboxRuntimeConfig(request, config, inputs, options = {}) {
     settings.wp_codebox_data_machine_code_path,
     settings.data_machine_code_path,
     process.env.HOMEBOY_DATA_MACHINE_CODE_PATH,
+    activeSitePluginPath('data-machine-code'),
     siblingPath(workspaceBase, 'data-machine-code'),
   );
   const providerPluginPath = firstExistingPath(
@@ -271,7 +280,13 @@ function defaultCodeboxRuntimeConfig(request, config, inputs, options = {}) {
     secretEnv: defaultSecretEnv(provider, settings),
     mounts: defaultWorkspaceMounts(workspaceRoot, request, config, inputs, options),
     workspaces: defaultWorkspaces(config, inputs, options),
+    allowedTools: defaultWorkspaceAllowedTools(workspaceRoot),
+    sandboxToolPolicy: defaultWorkspaceSandboxToolPolicy(workspaceRoot),
   };
+}
+
+function firstDefined(...values) {
+  return values.find((value) => value !== undefined);
 }
 
 function parseJsonObject(value) {
@@ -304,6 +319,11 @@ function firstExistingPath(...candidates) {
 
 function siblingPath(base, name) {
   return base && name ? path.join(base, name) : '';
+}
+
+function activeSitePluginPath(slug) {
+  const candidate = path.join(process.cwd(), 'wp-content', 'plugins', slug);
+  return fs.existsSync(candidate) ? candidate : '';
 }
 
 function bundledAgentsApiPath(dataMachinePath) {
@@ -345,6 +365,32 @@ function defaultModelForProvider(provider, settings) {
   return provider === 'openai' || provider === 'codex' ? 'gpt-4.1-mini' : '';
 }
 
+function defaultWorkspaceAllowedTools(workspaceRoot) {
+  return workspaceRoot ? DEFAULT_WORKSPACE_ALLOWED_TOOLS : [];
+}
+
+function defaultWorkspaceSandboxToolPolicy(workspaceRoot) {
+  if (!workspaceRoot) {
+    return undefined;
+  }
+  return {
+    schema: 'wp-codebox/sandbox-tool-policy/v1',
+    version: 1,
+    tools: DEFAULT_WORKSPACE_ALLOWED_TOOLS.map((tool) => ({
+      id: tool,
+      runtime_tool_id: tool,
+      execution_location: 'sandbox',
+      transport_visibility: 'sandbox',
+      allowed: true,
+      runtime: {
+        environment: 'runtime_local',
+        capability_scope: 'runtime_local',
+      },
+    })),
+    metadata: { source: 'homeboy.codebox-agent-task.default-workspace-tools' },
+  };
+}
+
 function resolveWorkspaceRoot(request, config, inputs, settings, options) {
   const candidates = [
     options.workspaceRoot,
@@ -367,18 +413,32 @@ function workspaceMode(request, config, inputs) {
 
 function defaultWorkspaceMounts(workspaceRoot, request, config, inputs, options) {
   const explicit = config.mounts || options.mounts || [];
-  if (!workspaceRoot || explicit.some((mount) => mount?.target === '/workspace' || mount?.source === workspaceRoot)) {
+  const workspaceTarget = defaultWorkspaceTarget(workspaceRoot);
+  if (!workspaceRoot || explicit.some((mount) => mount?.target === workspaceTarget || mount?.source === workspaceRoot)) {
     return explicit;
   }
   return [
     ...explicit,
     {
       source: workspaceRoot,
-      target: '/workspace',
+      target: workspaceTarget,
       mode: workspaceMode(request, config, inputs),
-      metadata: { kind: 'homeboy-dmc-workspace' },
+      metadata: { kind: 'homeboy-dmc-workspace', workspace_slug: workspaceSlug(workspaceRoot) },
     },
   ];
+}
+
+function defaultWorkspaceTarget(workspaceRoot) {
+  const slug = workspaceSlug(workspaceRoot);
+  return slug ? `/workspace/${slug}` : '/workspace';
+}
+
+function workspaceSlug(workspaceRoot) {
+  if (!workspaceRoot) {
+    return '';
+  }
+  const slug = path.basename(workspaceRoot).split('@')[0].replace(/[^A-Za-z0-9_-]/g, '-').replace(/^-+|-+$/g, '');
+  return slug || 'workspace';
 }
 
 function defaultWorkspaces(config, inputs, options) {

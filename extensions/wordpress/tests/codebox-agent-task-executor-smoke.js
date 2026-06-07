@@ -381,8 +381,9 @@ try {
     'AI_PROVIDER_OPENAI_CODEX_FEDRAMP',
   ]);
   assert.equal(defaultedRequest.mounts[0].source, workspaceRoot);
-  assert.equal(defaultedRequest.mounts[0].target, '/workspace');
+  assert.equal(defaultedRequest.mounts[0].target, '/workspace/target-repo');
   assert.equal(defaultedRequest.mounts[0].mode, 'readwrite');
+  assert.equal(defaultedRequest.mounts[0].metadata.workspace_slug, 'target-repo');
   assert.deepEqual(defaultedRequest.workspaces, []);
   assert(!JSON.stringify(defaultedRequest).includes(staleStandaloneAgentsApiPath));
   assert(!JSON.stringify(defaultedRequest).includes(alternateBundledAgentsApiPath));
@@ -421,6 +422,16 @@ try {
   assert.equal(bareOpenAiDefaultedRequest.provider, 'openai');
   assert.equal(bareOpenAiDefaultedRequest.model, 'gpt-4.1-mini');
   assert.deepEqual(bareOpenAiDefaultedRequest.secret_env, ['OPENAI_API_KEY']);
+  assert.deepEqual(bareOpenAiDefaultedRequest.allowed_tools, ['workspace_ls', 'workspace_read', 'workspace_git_status']);
+  assert.equal(bareOpenAiDefaultedRequest.sandbox_tool_policy.schema, 'wp-codebox/sandbox-tool-policy/v1');
+  assert.deepEqual(
+    bareOpenAiDefaultedRequest.sandbox_tool_policy.tools.map((tool) => tool.runtime_tool_id),
+    ['workspace_ls', 'workspace_read', 'workspace_git_status'],
+  );
+  assert.deepEqual(
+    bareOpenAiDefaultedRequest.sandbox_tool_policy.tools.map((tool) => tool.runtime.environment),
+    ['runtime_local', 'runtime_local', 'runtime_local'],
+  );
 
   const settingsModelRequest = codeboxTaskRequestFromAgentTaskRequest({
     ...request,
@@ -436,6 +447,30 @@ try {
     settings: { wp_codebox_model: 'gpt-4.1-mini' },
   });
   assert.equal(settingsModelRequest.model, 'gpt-4.1-mini');
+
+  const explicitEmptyToolsRequest = codeboxTaskRequestFromAgentTaskRequest({
+    ...request,
+    task_id: 'explicit-empty-tools-task-123',
+    executor: {
+      backend: 'codebox',
+      config: {
+        allowed_tools: [],
+        sandbox_tool_policy: {
+          schema: 'wp-codebox/sandbox-tool-policy/v1',
+          version: 1,
+          tools: [{ id: 'deny-all', runtime_tool_id: 'deny-all', execution_location: 'parent', transport_visibility: 'hidden', allowed: false }],
+          metadata: { source: 'test' },
+        },
+      },
+    },
+    inputs: {
+      target: { root: workspaceRoot },
+    },
+  }, {
+    settings: {},
+  });
+  assert.deepEqual(explicitEmptyToolsRequest.allowed_tools, []);
+  assert.equal(explicitEmptyToolsRequest.sandbox_tool_policy.tools[0].id, 'deny-all');
 
   fs.rmSync(bundledAgentsApiPath, { recursive: true, force: true });
   fs.mkdirSync(alternateBundledAgentsApiPath, { recursive: true });
