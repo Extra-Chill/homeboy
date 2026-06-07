@@ -28,14 +28,22 @@ fn remote_command_failed_creates_error_with_details() {
 }
 
 #[test]
-fn unsupported_runner_validation_error_writes_json_output_file() {
+fn validation_error_writes_json_output_file() {
     let dir = tempfile::tempdir().expect("tempdir");
     let output_path = dir.path().join("runner-unsupported.json");
+    register_local_runner(dir.path());
 
     let output = Command::new(homeboy_bin())
-        .args(["--runner", "lab", "--output"])
+        .args(["--output"])
         .arg(&output_path)
-        .arg("status")
+        .args([
+            "runner",
+            "exec",
+            "lab-local",
+            "--require-path",
+            "relative-path",
+            "true",
+        ])
         .env("HOME", dir.path())
         .output()
         .expect("run homeboy");
@@ -109,9 +117,19 @@ fn output_equals_json_is_rejected_as_format_footgun() {
 #[test]
 fn explicit_json_path_is_allowed() {
     let dir = tempfile::tempdir().expect("tempdir");
+    register_local_runner(dir.path());
 
     let output = Command::new(homeboy_bin())
-        .args(["--runner", "lab", "--output", "./json", "status"])
+        .args([
+            "--output",
+            "./json",
+            "runner",
+            "exec",
+            "lab-local",
+            "--require-path",
+            "relative-path",
+            "true",
+        ])
         .current_dir(dir.path())
         .env("HOME", dir.path())
         .output()
@@ -135,4 +153,27 @@ fn explicit_json_path_is_allowed() {
 
 fn homeboy_bin() -> PathBuf {
     PathBuf::from(std::env::var_os("CARGO_BIN_EXE_homeboy").expect("CARGO_BIN_EXE_homeboy"))
+}
+
+fn register_local_runner(home: &std::path::Path) {
+    let output = Command::new(homeboy_bin())
+        .args([
+            "runner",
+            "add",
+            "lab-local",
+            "--kind",
+            "local",
+            "--workspace-root",
+        ])
+        .arg(home)
+        .env("HOME", home)
+        .output()
+        .expect("register local runner");
+
+    assert!(
+        output.status.success(),
+        "expected local runner registration to succeed; stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }

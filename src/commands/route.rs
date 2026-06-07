@@ -93,6 +93,7 @@ fn lab_offload_command(
                 homeboy::cli_surface::LabCommandRequiredTool::Playwright
             )
         }),
+        infer_source_path_tools: contract.infer_source_path_tools,
     }))
 }
 

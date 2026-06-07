@@ -51,6 +51,7 @@ pub struct LabOffloadCommand {
     pub requires_extension_parity: bool,
     pub required_extensions: Vec<String>,
     pub requires_playwright: bool,
+    pub infer_source_path_tools: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -445,6 +446,8 @@ fn run_lab_offload_inner(
     let synced_rig_dependencies = rig_materialization::sync_lab_offload_rig_component_dependencies(
         runner_id,
         &changed_since_preflight.args,
+        &synced.local_path,
+        &remote_cwd,
     )?;
     if !synced_rig_dependencies.is_empty() {
         for dependency in &synced_rig_dependencies {
@@ -741,6 +744,7 @@ mod tests {
             requires_extension_parity: true,
             required_extensions: Vec::new(),
             requires_playwright: false,
+            infer_source_path_tools: true,
         }
     }
 
@@ -753,6 +757,7 @@ mod tests {
             requires_extension_parity: false,
             required_extensions: Vec::new(),
             requires_playwright: false,
+            infer_source_path_tools: false,
         }
     }
 
@@ -792,6 +797,53 @@ mod tests {
         .expect("capability contract");
 
         assert!(contract.required_tools.contains(&RunnerRequiredTool::Cargo));
+    }
+
+    #[test]
+    fn full_workspace_lab_contract_infers_source_path_tools() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(dir.path().join("package.json"), "{}").expect("package signal");
+        std::fs::write(dir.path().join("docker-compose.yml"), "services: {}")
+            .expect("docker signal");
+
+        let contract = lab_runner_capability_contract(
+            &portable_lab_command("test"),
+            dir.path(),
+            &[RunnerRequiredTool::Homeboy],
+        )
+        .expect("capability contract");
+
+        assert!(contract
+            .required_tools
+            .contains(&RunnerRequiredTool::Homeboy));
+        assert!(contract.required_tools.contains(&RunnerRequiredTool::Node));
+        assert!(contract.required_tools.contains(&RunnerRequiredTool::Npm));
+        assert!(contract
+            .required_tools
+            .contains(&RunnerRequiredTool::Docker));
+    }
+
+    #[test]
+    fn workload_scoped_lab_contract_ignores_source_path_docker_signal() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(dir.path().join("package.json"), "{}").expect("package signal");
+        std::fs::write(dir.path().join("docker-compose.yml"), "services: {}")
+            .expect("docker signal");
+        let mut command = portable_lab_command("trace");
+        command.infer_source_path_tools = false;
+
+        let contract =
+            lab_runner_capability_contract(&command, dir.path(), &[RunnerRequiredTool::Homeboy])
+                .expect("capability contract");
+
+        assert!(contract
+            .required_tools
+            .contains(&RunnerRequiredTool::Homeboy));
+        assert!(!contract.required_tools.contains(&RunnerRequiredTool::Node));
+        assert!(!contract.required_tools.contains(&RunnerRequiredTool::Npm));
+        assert!(!contract
+            .required_tools
+            .contains(&RunnerRequiredTool::Docker));
     }
 
     #[test]

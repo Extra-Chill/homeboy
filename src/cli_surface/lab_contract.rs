@@ -9,6 +9,7 @@ pub struct LabCommandContract {
     pub mutation_flag: Option<&'static str>,
     pub requires_extension_parity: bool,
     pub extra_required_tools: &'static [LabCommandRequiredTool],
+    pub infer_source_path_tools: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,7 +82,7 @@ impl Commands {
                 true,
                 LAB_NO_EXTRA_TOOLS,
             ),
-            Commands::Trace(args) => lab_portable_contract(
+            Commands::Trace(args) => lab_portable_workload_contract(
                 "trace",
                 args.keep_overlay.then_some("--keep-overlay"),
                 false,
@@ -122,6 +123,24 @@ fn lab_portable_contract(
         mutation_flag,
         requires_extension_parity,
         extra_required_tools,
+        infer_source_path_tools: true,
+    }
+}
+
+fn lab_portable_workload_contract(
+    hot_label: &'static str,
+    mutation_flag: Option<&'static str>,
+    requires_extension_parity: bool,
+    extra_required_tools: &'static [LabCommandRequiredTool],
+) -> LabCommandContract {
+    LabCommandContract {
+        infer_source_path_tools: false,
+        ..lab_portable_contract(
+            hot_label,
+            mutation_flag,
+            requires_extension_parity,
+            extra_required_tools,
+        )
     }
 }
 
@@ -134,5 +153,6 @@ fn lab_local_only_contract(hot_label: &'static str, reason: &'static str) -> Lab
         mutation_flag: None,
         requires_extension_parity: false,
         extra_required_tools: LAB_NO_EXTRA_TOOLS,
+        infer_source_path_tools: false,
     }
 }

@@ -1,7 +1,7 @@
 //! Facade-passthrough detection.
 //!
-//! Flags PHP classes where most public methods are single-statement delegates
-//! to the same inner member, e.g. `return $this->operations->create(...)`.
+//! Flags classes where most public methods are single-statement delegates to
+//! the same inner member.
 
 use std::collections::{HashMap, HashSet};
 
@@ -81,6 +81,10 @@ fn facade_candidates<'a>(
     let mut candidates = Vec::new();
 
     for fp in fingerprints {
+        if !has_facade_delegate_syntax(fp) {
+            continue;
+        }
+
         let Some(class_name) = fp.type_name.as_deref() else {
             continue;
         };
@@ -121,6 +125,10 @@ fn facade_candidates<'a>(
     }
 
     candidates
+}
+
+fn has_facade_delegate_syntax(fp: &FileFingerprint) -> bool {
+    fp.content.contains("$this->")
 }
 
 fn collect_public_methods(fp: &FileFingerprint) -> Vec<String> {
@@ -318,7 +326,7 @@ fn render_member_counts(target_members: HashMap<String, usize>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::code_audit::Language;
+    use crate::core::code_audit::conventions::Language;
 
     fn make_fp(
         path: &str,

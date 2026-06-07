@@ -17,21 +17,23 @@ pub(super) fn lab_runner_capability_contract(
         push_unique(&mut required_tools, *tool);
     }
 
-    if source_path.join(concat!("package", ".json")).is_file() {
-        push_node_package_tool(&mut required_tools, RunnerRequiredTool::Npm);
-    }
+    if command.infer_source_path_tools {
+        if source_path.join(concat!("package", ".json")).is_file() {
+            push_node_package_tool(&mut required_tools, RunnerRequiredTool::Npm);
+        }
 
-    if source_path.join("pnpm-lock.yaml").is_file() {
-        push_node_package_tool(&mut required_tools, RunnerRequiredTool::Pnpm);
-    }
+        if source_path.join("pnpm-lock.yaml").is_file() {
+            push_node_package_tool(&mut required_tools, RunnerRequiredTool::Pnpm);
+        }
 
-    if source_path.join(concat!("com", "poser", ".json")).is_file() {
-        push_unique(&mut required_tools, RunnerRequiredTool::Php);
-        push_unique(&mut required_tools, RunnerRequiredTool::Composer);
-    }
+        if source_path.join(concat!("com", "poser", ".json")).is_file() {
+            push_unique(&mut required_tools, RunnerRequiredTool::Php);
+            push_unique(&mut required_tools, RunnerRequiredTool::Composer);
+        }
 
-    if has_docker_signal(source_path) {
-        push_unique(&mut required_tools, RunnerRequiredTool::Docker);
+        if has_docker_signal(source_path) {
+            push_unique(&mut required_tools, RunnerRequiredTool::Docker);
+        }
     }
 
     Some(LabRunnerCapabilityContract {
