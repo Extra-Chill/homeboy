@@ -144,6 +144,8 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
   const recipe = recipeConfigFromAgentTaskRequest(request, config, inputs);
   const mounts = agentBundleMounts(agentBundle, config.mounts || options.mounts || []);
   const components = runtimeComponentPaths(config, options);
+  const runtimeTask = inputs.runtime_task || inputs.runtimeTask || config.runtime_task || config.runtimeTask || options.runtimeTask;
+  const sandboxToolPolicy = inputs.sandbox_tool_policy || inputs.sandboxToolPolicy || config.sandbox_tool_policy || config.sandboxToolPolicy || options.sandboxToolPolicy;
   const timeoutSeconds = request.limits?.task_timeout_seconds || request.limits?.taskTimeoutSeconds;
   const timeoutMs = request.limits?.timeout_ms || request.limits?.max_runtime_ms;
   const timeoutFromMs = timeoutMs ? Math.ceil(timeoutMs / 1000) : undefined;
@@ -166,6 +168,8 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     policy: request.policy || {},
     context,
     recipe,
+    sandbox_tool_policy: sandboxToolPolicy,
+    runtime_task: runtimeTask,
     sandbox_session_id: config.sandbox_session_id || request.task_id,
     session_id: config.session_id || config.sessionId || '',
     agent: config.agent || options.agent || 'wp-codebox-sandbox',
@@ -178,7 +182,7 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     runtime_overlays: config.runtime_overlays || options.runtimeOverlays || [],
     secret_env: config.secret_env || options.secretEnv || [],
     mounts,
-    workspaces: config.workspaces || options.workspaces || [],
+    workspaces: inputs.workspaces || config.workspaces || options.workspaces || [],
     agents_api_path: components.agents_api || config.agents_api || config.agents_api_path || options.agentsApi || '',
     [WP_CODEBOX_RUNTIME_PATH_KEY]: components.agent_runtime || '',
     [WP_CODEBOX_RUNTIME_TOOLS_PATH_KEY]: components.agent_runtime_tools || '',

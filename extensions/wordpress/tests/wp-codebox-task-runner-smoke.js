@@ -187,6 +187,33 @@ try {
   assert.equal(captured.input.runtime_component_paths.agent_runtime_tools, '/components/data-machine-code');
   assert(!JSON.stringify(captured.input).includes('redacted-test-key'));
 
+  const runtimeTaskCapturePath = path.join(root, 'capture-runtime-task.json');
+  const runtimeTaskResult = spawnSync(process.execPath, [
+    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-wp-codebox-task-runner.cjs'),
+    '--wp-codebox-bin', fixtureWpCodebox,
+  ], {
+    encoding: 'utf8',
+    input: JSON.stringify({
+      ...request,
+      sandbox_tool_policy: {
+        schema: 'wp-codebox/sandbox-tool-policy/v1',
+        version: 1,
+        tools: [{ id: 'homeboy-canary/write-file', allowed: true }],
+      },
+      runtime_task: {
+        ability: 'homeboy-canary/write-file',
+        input: { path: '/workspace/codebox-canary/CANARY.md', content: 'after\n' },
+      },
+      workspaces: [{ target: '/workspace/codebox-canary', mode: 'readwrite' }],
+    }),
+    env: { ...process.env, FIXTURE_WP_CODEBOX_CAPTURE: runtimeTaskCapturePath, OPENCODE_API_KEY: 'redacted-test-key' },
+  });
+  assert.equal(runtimeTaskResult.status, 0, runtimeTaskResult.stderr || runtimeTaskResult.stdout);
+  const runtimeTaskCaptured = readJson(runtimeTaskCapturePath);
+  assert.equal(runtimeTaskCaptured.input.sandbox_tool_policy.tools[0].id, 'homeboy-canary/write-file');
+  assert.equal(runtimeTaskCaptured.input.runtime_task.ability, 'homeboy-canary/write-file');
+  assert.equal(runtimeTaskCaptured.input.workspaces[0].target, '/workspace/codebox-canary');
+
   const codexCapturePath = path.join(root, 'capture-codex.json');
   const codexSecretEnv = [
     'AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN',

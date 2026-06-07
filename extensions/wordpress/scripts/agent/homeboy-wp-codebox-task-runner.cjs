@@ -211,6 +211,7 @@ function runnerInput(request, artifacts) {
     sandbox_session_id: request.sandbox_session_id || '',
     orchestrator: request.orchestrator || {},
     recipe: request.recipe || {},
+    runtime_task: request.runtime_task || request.runtimeTask,
     artifacts_path: artifacts,
     wp_codebox_bin: argValue('--wp-codebox-bin') || request.wp_codebox_bin || '',
     agents_api_path: argValue('--agents-api') || request.agents_api_path || request.agents_api || '',
@@ -259,7 +260,7 @@ function stableTaskInput(input) {
     runtime_component_paths: input.runtime_component_paths || {},
     wp: input.wp_version,
     agent_bundle: isAgentBundle(input) ? agentBundleConfig(input, input.agent_bundle || {}) : {},
-    runtime_task: isAgentBundle(input) ? agentBundleRuntimeTask(input, input.agent_bundle || {}) : undefined,
+    runtime_task: runtimeTask(input),
     parent_request: input.parent_request,
   }).filter(([, value]) => value !== '' && value !== undefined && !(Array.isArray(value) && value.length === 0)));
 }
@@ -307,6 +308,16 @@ function sandboxToolPolicy(input, allowedTools) {
 
 function isAgentBundle(input) {
   return Boolean(input.agent_bundle && Object.keys(input.agent_bundle).length > 0);
+}
+
+function runtimeTask(input) {
+  if (plainObject(input.runtime_task)) {
+    return input.runtime_task;
+  }
+  if (isAgentBundle(input)) {
+    return agentBundleRuntimeTask(input, input.agent_bundle || {});
+  }
+  return undefined;
 }
 
 function agentBundleConfig(input, bundleConfig = {}) {
