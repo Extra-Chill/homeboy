@@ -64,6 +64,33 @@ The gate passes when:
 - `artifacts` lists a patch artifact, an agent result artifact, and a transcript evidence ref.
 - `promote <run-id> --dry-run` resolves the aggregate from the durable run id and reports the selected non-empty patch plus changed files without requiring the operator to look up `aggregate_path` manually.
 
+## Dispatch Workspaces
+
+`agent-task dispatch` accepts generic Homeboy workspace inputs and does not
+resolve product-specific workspace handles itself.
+
+Use `--cwd <PATH>` when the caller already knows the checkout or worktree path:
+
+```bash
+homeboy agent-task dispatch \
+  --repo homeboy \
+  --cwd /path/to/homeboy@fix-issue \
+  --prompt @task.txt
+```
+
+Use `--workspace <ID_OR_PATH>` for a Homeboy-managed task worktree ID or an
+existing workspace path:
+
+```bash
+homeboy worktree create homeboy --branch fix/issue-123
+homeboy agent-task dispatch \
+  --workspace homeboy@fix-issue-123 \
+  --prompt @task.txt
+```
+
+External workspace managers should resolve their own handles to local paths and
+call dispatch with `--cwd <resolved-path>`.
+
 ## Fixture Backend
 
 The built-in `fixture` backend is intentionally narrow. It exists for smoke
