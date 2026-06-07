@@ -95,7 +95,15 @@ pub fn sync_workspace(
     })?;
     validate_absolute_path("workspace_root", workspace_root)?;
 
-    let excludes = snapshot_excludes(&runner);
+    let mut excludes = DEFAULT_EXCLUDES
+        .iter()
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>();
+    for pattern in &runner.policy.snapshot_excludes {
+        if !excludes.contains(pattern) {
+            excludes.push(pattern.clone());
+        }
+    }
 
     match options.mode {
         RunnerWorkspaceSyncMode::Snapshot => {
@@ -239,21 +247,6 @@ fn snapshot_identity(local_path: &Path, excludes: &[String]) -> Result<String> {
     hasher.update(staged.as_bytes());
     hash_snapshot_tree(local_path, local_path, excludes, &mut hasher)?;
     Ok(format!("snapshot:{}", hex_prefix(&hasher.finalize(), 16)))
-}
-
-fn snapshot_excludes(runner: &Runner) -> Vec<String> {
-    let mut excludes = DEFAULT_EXCLUDES
-        .iter()
-        .map(|value| value.to_string())
-        .collect::<Vec<_>>();
-
-    for pattern in &runner.settings.snapshot_excludes {
-        if !excludes.contains(pattern) {
-            excludes.push(pattern.clone());
-        }
-    }
-
-    excludes
 }
 
 fn git_snapshot(local_path: &Path, changed_since_base: Option<&str>) -> Result<GitSnapshot> {
@@ -707,7 +700,7 @@ mod tests {
 
             super::super::create(
                 &format!(
-                    r#"{{"id":"lab-local","kind":"local","workspace_root":"{}","snapshot_excludes":["generated-state","generated-state/**","*.state"]}}"#,
+                    r#"{{"id":"lab-local","kind":"local","workspace_root":"{}","policy":{{"snapshot_excludes":["generated-state","generated-state/**","*.state"]}}}}"#,
                     runner_root.path().display()
                 ),
                 false,
