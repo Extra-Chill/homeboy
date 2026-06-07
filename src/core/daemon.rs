@@ -7,13 +7,13 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-use crate::core::api_jobs::JobStore;
+use crate::core::api_jobs::{JobStatus, JobStore};
 use crate::core::error::{Error, RemoteCommandFailedDetails, Result, TargetDetails};
 use crate::core::http_api::{self, AnalysisJobRunner, HttpMethod, UnsupportedAnalysisJobRunner};
 use crate::core::paths;
 use crate::core::process::pid_is_running;
 use crate::core::runner::{
-    execute_runner_process, prepare_daemon_local_process, RunnerProcessRequest,
+    execute_runner_process_until_cancelled, prepare_daemon_local_process, RunnerProcessRequest,
 };
 use crate::core::source_snapshot::SourceSnapshot;
 use crate::core::upgrade::VERSION;
@@ -373,11 +373,30 @@ fn enqueue_exec_job(
             } else {
                 None
             };
-            let process_output = execute_runner_process(&plan)?;
+            let process_output =
+                execute_runner_process_until_cancelled(&plan, || job.is_cancelled())?;
             let stdout = process_output.stdout.clone();
             let stderr = process_output.stderr.clone();
             let exit_code = process_output.exit_code;
             let metrics = process_output.metrics.clone();
+            if job.is_cancelled() {
+                let _ = job.progress(json!({
+                    "phase": "cancelled",
+                    "exit_code": exit_code,
+                    "metrics": metrics.clone(),
+                }));
+                return Ok(json!({
+                    "runner_id": plan.runner.id.clone(),
+                    "cwd": plan.cwd.clone(),
+                    "command": plan.command.clone(),
+                    "exit_code": exit_code,
+                    "stdout": stdout,
+                    "stderr": stderr,
+                    "source_snapshot": source_snapshot,
+                    "metrics": metrics,
+                    "status": JobStatus::Cancelled,
+                }));
+            }
             if !stdout.is_empty() {
                 job.stdout(stdout.clone())?;
             }
