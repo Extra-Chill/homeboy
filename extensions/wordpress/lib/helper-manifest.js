@@ -13,6 +13,7 @@ const HELPER_PATHS = Object.freeze({
 	bootstrapTimeline: path.join(WORDPRESS_EXTENSION_ROOT, 'lib', 'wordpress-bootstrap-timeline.js'),
 	blockQuality: path.join(WORDPRESS_EXTENSION_ROOT, 'lib', 'block-quality.js'),
 	editorCanvasProbes: path.join(WORDPRESS_EXTENSION_ROOT, 'lib', 'editor-canvas-probes.js'),
+	fidelityComparison: path.join(WORDPRESS_EXTENSION_ROOT, 'lib', 'fidelity-comparison.js'),
 	fixtureSetup: path.join(WORDPRESS_EXTENSION_ROOT, 'lib', 'fixture-setup.js'),
 	woocommerceExpensiveShipping: path.join(WORDPRESS_EXTENSION_ROOT, 'scripts', 'bench', 'lib', 'woocommerce-expensive-shipping.php'),
 });
