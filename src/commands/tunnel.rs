@@ -160,9 +160,21 @@ enum TunnelServiceCommand {
         #[arg(long, default_value_t = 30)]
         readiness_timeout: u64,
 
-        /// Public tunnel backend. Only 'none' is currently implemented.
+        /// Public tunnel backend.
         #[arg(long, value_enum, default_value_t = ServiceTunnelBackendArg::None)]
         public_tunnel_backend: ServiceTunnelBackendArg,
+
+        /// Explicit public tunnel ID. Omit to let Homeboy generate a high-entropy ID.
+        #[arg(long)]
+        public_tunnel_id: Option<String>,
+
+        /// Traforo server URL for self-hosted relays.
+        #[arg(long)]
+        public_tunnel_server: Option<String>,
+
+        /// Traforo base domain used to compute the public URL.
+        #[arg(long)]
+        public_tunnel_base_domain: Option<String>,
     },
     /// Stop a running managed local service and cleanup runtime state
     Stop {
@@ -183,12 +195,14 @@ enum ServiceTunnelAuthModeArg {
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum ServiceTunnelBackendArg {
     None,
+    Traforo,
 }
 
 impl std::fmt::Display for ServiceTunnelBackendArg {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ServiceTunnelBackendArg::None => write!(f, "none"),
+            ServiceTunnelBackendArg::Traforo => write!(f, "traforo"),
         }
     }
 }
@@ -197,6 +211,7 @@ impl From<ServiceTunnelBackendArg> for ServiceTunnelTunnelBackend {
     fn from(value: ServiceTunnelBackendArg) -> Self {
         match value {
             ServiceTunnelBackendArg::None => ServiceTunnelTunnelBackend::None,
+            ServiceTunnelBackendArg::Traforo => ServiceTunnelTunnelBackend::Traforo,
         }
     }
 }
@@ -272,6 +287,9 @@ fn run_service(command: TunnelServiceCommand) -> CmdResult<TunnelOutput> {
             health_path,
             readiness_timeout,
             public_tunnel_backend,
+            public_tunnel_id,
+            public_tunnel_server,
+            public_tunnel_base_domain,
         } => start_service(StartServiceTunnelSpec {
             id,
             command,
@@ -284,6 +302,9 @@ fn run_service(command: TunnelServiceCommand) -> CmdResult<TunnelOutput> {
             health_path,
             readiness_timeout_secs: readiness_timeout,
             backend: public_tunnel_backend.into(),
+            public_tunnel_id,
+            public_tunnel_server_url: public_tunnel_server,
+            public_tunnel_base_domain,
         }),
         TunnelServiceCommand::Stop { id } => stop_service(&id),
     }

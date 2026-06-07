@@ -127,12 +127,34 @@ pub struct ServiceTunnelRuntimeState {
     pub stdout_path: String,
     pub stderr_path: String,
     pub backend: ServiceTunnelTunnelBackend,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend_state: Option<ServiceTunnelBackendRuntimeState>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ServiceTunnelTunnelBackend {
     None,
+    Traforo,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ServiceTunnelBackendRuntimeState {
+    pub backend: ServiceTunnelTunnelBackend,
+    pub tunnel_id: String,
+    pub public_url: String,
+    pub pid: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub process_group_id: Option<i32>,
+    pub started_at: String,
+    pub command: String,
+    pub local_host: String,
+    pub local_port: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_url: Option<String>,
+    pub base_domain: String,
+    pub stdout_path: String,
+    pub stderr_path: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -162,12 +184,50 @@ pub struct ServiceTunnelEvidence {
     pub state_path: String,
     pub stdout_path: String,
     pub stderr_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend_stdout_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend_stderr_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ServiceTunnelBackendStatus {
     pub backend: ServiceTunnelTunnelBackend,
     pub active: bool,
+    pub health: ServiceTunnelBackendHealthStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tunnel_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub public_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub process_group_id: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_mapping: Option<ServiceTunnelBackendMapping>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stdout_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stderr_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ServiceTunnelBackendHealthStatus {
+    pub running: bool,
+    pub healthy: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ServiceTunnelBackendMapping {
+    pub local_host: String,
+    pub local_port: u16,
+    pub local_url: String,
 }
 
 pub struct StartServiceTunnelSpec {
@@ -182,6 +242,9 @@ pub struct StartServiceTunnelSpec {
     pub health_path: Option<String>,
     pub readiness_timeout_secs: u64,
     pub backend: ServiceTunnelTunnelBackend,
+    pub public_tunnel_id: Option<String>,
+    pub public_tunnel_server_url: Option<String>,
+    pub public_tunnel_base_domain: Option<String>,
 }
 
 pub struct ExposeServiceTunnelSpec {
@@ -269,15 +332,6 @@ pub fn status(id: &str) -> Result<ServiceTunnelStatus> {
 
 pub fn start(spec: StartServiceTunnelSpec) -> Result<ServiceTunnelStatus> {
     let mut tunnel = load(&spec.id)?;
-    if matches!(spec.backend, ServiceTunnelTunnelBackend::None) == false {
-        return Err(Error::validation_invalid_argument(
-            "public_tunnel_backend",
-            "only the explicit 'none' backend is currently supported",
-            Some(spec.id),
-            Some(vec!["none".to_string()]),
-        ));
-    }
-
     let existing = load_runtime_state(&tunnel.id)?;
     if let Some(state) = existing {
         if runtime_state_is_running(&state) {
@@ -290,9 +344,9 @@ pub fn start(spec: StartServiceTunnelSpec) -> Result<ServiceTunnelStatus> {
         }
     }
 
-    if let Some(host) = spec.host {
+    if let Some(host) = &spec.host {
         validate_loopback_host(&host, &tunnel.id)?;
-        tunnel.local_host = host;
+        tunnel.local_host = host.clone();
     }
     if let Some(port) = spec.port {
         if port == 0 {
@@ -305,8 +359,8 @@ pub fn start(spec: StartServiceTunnelSpec) -> Result<ServiceTunnelStatus> {
         }
         tunnel.local_port = Some(port);
     }
-    if let Some(scheme) = spec.scheme {
-        tunnel.scheme = scheme;
+    if let Some(scheme) = &spec.scheme {
+        tunnel.scheme = scheme.clone();
     }
     validate_service_tunnel(&tunnel)?;
     save(&tunnel)?;
@@ -348,8 +402,8 @@ pub fn start(spec: StartServiceTunnelSpec) -> Result<ServiceTunnelStatus> {
     })?;
     let pid = child.id();
     let process_group_id = process_group_id_for(pid);
-    let health_url = resolve_health_url(&tunnel, spec.health_url, spec.health_path);
-    let state = ServiceTunnelRuntimeState {
+    let health_url = resolve_health_url(&tunnel, spec.health_url.clone(), spec.health_path.clone());
+    let mut state = ServiceTunnelRuntimeState {
         service_id: tunnel.id.clone(),
         pid,
         process_group_id,
@@ -357,14 +411,15 @@ pub fn start(spec: StartServiceTunnelSpec) -> Result<ServiceTunnelStatus> {
         local_url: local_url_for(&tunnel),
         public_url: None,
         command: ServiceTunnelCommandSpec {
-            command: spec.command,
-            cwd: spec.cwd.map(|path| path.display().to_string()),
+            command: spec.command.clone(),
+            cwd: spec.cwd.as_ref().map(|path| path.display().to_string()),
             env_keys: spec.env.keys().cloned().collect(),
         },
         health_url,
         stdout_path: stdout_path.display().to_string(),
         stderr_path: stderr_path.display().to_string(),
-        backend: spec.backend,
+        backend: spec.backend.clone(),
+        backend_state: None,
     };
     save_runtime_state(&state)?;
     if let Err(error) = wait_until_ready(&state, spec.readiness_timeout_secs) {
@@ -372,6 +427,12 @@ pub fn start(spec: StartServiceTunnelSpec) -> Result<ServiceTunnelStatus> {
         remove_runtime_state(&state.service_id)?;
         return Err(error);
     }
+    if let Err(error) = start_backend(&mut state, &spec) {
+        terminate_runtime_state(&state)?;
+        remove_runtime_state(&state.service_id)?;
+        return Err(error);
+    }
+    save_runtime_state(&state)?;
     status(&tunnel.id)
 }
 
@@ -401,10 +462,7 @@ fn service_tunnel_status(tunnel: &ServiceTunnel) -> ServiceTunnelStatus {
         started_at: state.started_at.clone(),
         command: state.command.clone(),
     });
-    let backend = state.as_ref().map(|state| ServiceTunnelBackendStatus {
-        backend: state.backend.clone(),
-        active: state.public_url.is_some(),
-    });
+    let backend = state.as_ref().map(service_tunnel_backend_status);
     let public_url = state.as_ref().and_then(|state| state.public_url.clone());
     ServiceTunnelStatus {
         service_id: tunnel.id.clone(),
@@ -419,6 +477,57 @@ fn service_tunnel_status(tunnel: &ServiceTunnel) -> ServiceTunnelStatus {
         health,
         evidence,
         tunnel_backend: backend,
+    }
+}
+
+fn service_tunnel_backend_status(state: &ServiceTunnelRuntimeState) -> ServiceTunnelBackendStatus {
+    let Some(backend_state) = &state.backend_state else {
+        return ServiceTunnelBackendStatus {
+            backend: state.backend.clone(),
+            active: false,
+            health: ServiceTunnelBackendHealthStatus {
+                running: false,
+                healthy: matches!(state.backend, ServiceTunnelTunnelBackend::None),
+                error: None,
+            },
+            tunnel_id: None,
+            public_url: None,
+            pid: None,
+            process_group_id: None,
+            started_at: None,
+            command: None,
+            local_mapping: None,
+            stdout_path: None,
+            stderr_path: None,
+        };
+    };
+
+    let running = runtime_backend_is_running(backend_state);
+    ServiceTunnelBackendStatus {
+        backend: backend_state.backend.clone(),
+        active: running,
+        health: ServiceTunnelBackendHealthStatus {
+            running,
+            healthy: running,
+            error: if running {
+                None
+            } else {
+                Some("backend process is not running".to_string())
+            },
+        },
+        tunnel_id: Some(backend_state.tunnel_id.clone()),
+        public_url: Some(backend_state.public_url.clone()),
+        pid: Some(backend_state.pid),
+        process_group_id: backend_state.process_group_id,
+        started_at: Some(backend_state.started_at.clone()),
+        command: Some(backend_state.command.clone()),
+        local_mapping: Some(ServiceTunnelBackendMapping {
+            local_host: backend_state.local_host.clone(),
+            local_port: backend_state.local_port,
+            local_url: state.local_url.clone(),
+        }),
+        stdout_path: Some(backend_state.stdout_path.clone()),
+        stderr_path: Some(backend_state.stderr_path.clone()),
     }
 }
 
@@ -583,28 +692,167 @@ fn runtime_state_is_running(state: &ServiceTunnelRuntimeState) -> bool {
 }
 
 fn terminate_runtime_state(state: &ServiceTunnelRuntimeState) -> Result<()> {
+    if let Some(backend_state) = &state.backend_state {
+        terminate_process(backend_state.pid, backend_state.process_group_id);
+    }
+
     if !runtime_state_is_running(state) {
         return Ok(());
     }
 
+    terminate_process(state.pid, state.process_group_id);
+    Ok(())
+}
+
+fn terminate_process(pid: u32, process_group_id: Option<i32>) {
     #[cfg(unix)]
     unsafe {
-        if let Some(pgid) = state.process_group_id {
+        if let Some(pgid) = process_group_id {
             libc::kill(-(pgid as libc::pid_t), libc::SIGTERM);
             std::thread::sleep(Duration::from_millis(250));
             if process_group_is_running(pgid) {
                 libc::kill(-(pgid as libc::pid_t), libc::SIGKILL);
             }
         } else {
-            libc::kill(state.pid as libc::pid_t, libc::SIGTERM);
+            libc::kill(pid as libc::pid_t, libc::SIGTERM);
         }
     }
 
     #[cfg(not(unix))]
     {
-        let _ = state;
+        let _ = pid;
+        let _ = process_group_id;
+    }
+}
+
+fn runtime_backend_is_running(state: &ServiceTunnelBackendRuntimeState) -> bool {
+    if let Some(pgid) = state.process_group_id {
+        process_group_is_running(pgid)
+    } else {
+        pid_is_running(state.pid)
+    }
+}
+
+fn start_backend(
+    state: &mut ServiceTunnelRuntimeState,
+    spec: &StartServiceTunnelSpec,
+) -> Result<()> {
+    match state.backend {
+        ServiceTunnelTunnelBackend::None => Ok(()),
+        ServiceTunnelTunnelBackend::Traforo => start_traforo_backend(state, spec),
+    }
+}
+
+fn start_traforo_backend(
+    state: &mut ServiceTunnelRuntimeState,
+    spec: &StartServiceTunnelSpec,
+) -> Result<()> {
+    let Some(local_port) = state
+        .local_url
+        .rsplit_once(':')
+        .and_then(|(_, port)| port.parse::<u16>().ok())
+    else {
+        return Err(Error::validation_invalid_argument(
+            "port",
+            "traforo backend requires an explicit local port",
+            Some(state.service_id.clone()),
+            None,
+        ));
+    };
+
+    let runtime_dir = paths::service_tunnel_runtime_dir(&state.service_id)?;
+    let stdout_path = runtime_dir.join("backend-traforo.stdout.log");
+    let stderr_path = runtime_dir.join("backend-traforo.stderr.log");
+    let stdout = File::create(&stdout_path)
+        .map_err(|e| Error::internal_io(e.to_string(), Some(stdout_path.display().to_string())))?;
+    let stderr = File::create(&stderr_path)
+        .map_err(|e| Error::internal_io(e.to_string(), Some(stderr_path.display().to_string())))?;
+
+    let tunnel_id = spec
+        .public_tunnel_id
+        .clone()
+        .unwrap_or_else(generate_public_tunnel_id);
+    validate_public_tunnel_id(&tunnel_id, &state.service_id)?;
+    let base_domain = spec
+        .public_tunnel_base_domain
+        .clone()
+        .or_else(|| std::env::var("TRAFORO_BASE_DOMAIN").ok())
+        .filter(|domain| !domain.trim().is_empty())
+        .unwrap_or_else(|| "traforo.dev".to_string());
+    let public_url = format!("https://{}-tunnel.{}", tunnel_id, base_domain);
+    let traforo_bin = std::env::var("HOMEBOY_TRAFORO_BIN")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "traforo".to_string());
+
+    let mut args = vec![
+        "-p".to_string(),
+        local_port.to_string(),
+        "-h".to_string(),
+        local_host_from_url(&state.local_url),
+        "-t".to_string(),
+        tunnel_id.clone(),
+    ];
+    if let Some(server_url) = spec.public_tunnel_server_url.as_ref() {
+        args.push("-s".to_string());
+        args.push(server_url.clone());
     }
 
+    let mut command = Command::new(&traforo_bin);
+    command
+        .args(&args)
+        .env("TRAFORO_BASE_DOMAIN", &base_domain)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr));
+    #[cfg(unix)]
+    unsafe {
+        command.pre_exec(|| {
+            libc::setpgid(0, 0);
+            Ok(())
+        });
+    }
+
+    let child = command.spawn().map_err(|e| {
+        Error::internal_io(
+            e.to_string(),
+            Some(format!("start traforo backend for {}", state.service_id)),
+        )
+    })?;
+    let pid = child.id();
+    let process_group_id = process_group_id_for(pid);
+    let backend_state = ServiceTunnelBackendRuntimeState {
+        backend: ServiceTunnelTunnelBackend::Traforo,
+        tunnel_id,
+        public_url: public_url.clone(),
+        pid,
+        process_group_id,
+        started_at: chrono::Utc::now().to_rfc3339(),
+        command: format!("{} {}", traforo_bin, shell_words(&args)),
+        local_host: local_host_from_url(&state.local_url),
+        local_port,
+        server_url: spec.public_tunnel_server_url.clone(),
+        base_domain,
+        stdout_path: stdout_path.display().to_string(),
+        stderr_path: stderr_path.display().to_string(),
+    };
+    std::thread::sleep(Duration::from_millis(250));
+    if !runtime_backend_is_running(&backend_state) {
+        let stderr_snippet = read_log_tail(&backend_state.stderr_path, 2048).unwrap_or_default();
+        return Err(Error::validation_invalid_argument(
+            "public_tunnel_backend",
+            "traforo backend exited before becoming ready",
+            Some(state.service_id.clone()),
+            if stderr_snippet.trim().is_empty() {
+                None
+            } else {
+                Some(vec![stderr_snippet])
+            },
+        ));
+    }
+
+    state.public_url = Some(public_url);
+    state.backend_state = Some(backend_state);
     Ok(())
 }
 
@@ -693,7 +941,66 @@ fn runtime_evidence(state: &ServiceTunnelRuntimeState) -> ServiceTunnelEvidence 
             .unwrap_or_default(),
         stdout_path: state.stdout_path.clone(),
         stderr_path: state.stderr_path.clone(),
+        backend_stdout_path: state
+            .backend_state
+            .as_ref()
+            .map(|backend| backend.stdout_path.clone()),
+        backend_stderr_path: state
+            .backend_state
+            .as_ref()
+            .map(|backend| backend.stderr_path.clone()),
     }
+}
+
+fn generate_public_tunnel_id() -> String {
+    format!("hb{}", uuid::Uuid::new_v4().simple())
+}
+
+fn validate_public_tunnel_id(id: &str, service_id: &str) -> Result<()> {
+    if id.len() < 12
+        || !id
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
+    {
+        return Err(Error::validation_invalid_argument(
+            "public_tunnel_id",
+            "public tunnel IDs must be at least 12 chars and contain only lowercase letters, digits, or hyphens",
+            Some(service_id.to_string()),
+            None,
+        ));
+    }
+    Ok(())
+}
+
+fn local_host_from_url(local_url: &str) -> String {
+    local_url
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(local_url)
+        .rsplit_once(':')
+        .map(|(host, _)| host.to_string())
+        .unwrap_or_else(|| "127.0.0.1".to_string())
+}
+
+fn shell_words(args: &[String]) -> String {
+    args.iter()
+        .map(|arg| {
+            if arg.chars().all(|ch| {
+                ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-' | '/' | ':' | '=')
+            }) {
+                arg.clone()
+            } else {
+                format!("'{}'", arg.replace('\'', "'\\''"))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn read_log_tail(path: &str, max_bytes: usize) -> Option<String> {
+    let data = fs::read(path).ok()?;
+    let start = data.len().saturating_sub(max_bytes);
+    Some(String::from_utf8_lossy(&data[start..]).to_string())
 }
 
 #[cfg(test)]
@@ -826,6 +1133,9 @@ mod tests {
                 health_path: None,
                 readiness_timeout_secs: 1,
                 backend: ServiceTunnelTunnelBackend::None,
+                public_tunnel_id: None,
+                public_tunnel_server_url: None,
+                public_tunnel_base_domain: None,
             })
             .expect("start service");
 
@@ -847,6 +1157,104 @@ mod tests {
             assert!(!stopped.running);
             assert!(stopped.process.is_none());
             assert!(!std::path::Path::new(&evidence.state_path).exists());
+        });
+    }
+
+    #[test]
+    fn traforo_backend_records_public_url_process_metadata_and_cleans_up() {
+        test_support::with_isolated_home(|home| {
+            create_server();
+            let fake_traforo = home.path().join("fake-traforo.sh");
+            fs::write(
+                &fake_traforo,
+                "#!/usr/bin/env sh\necho \"fake traforo $@\"\nwhile true; do sleep 1; done\n",
+            )
+            .expect("fake traforo");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut permissions = fs::metadata(&fake_traforo)
+                    .expect("fake traforo metadata")
+                    .permissions();
+                permissions.set_mode(0o755);
+                fs::set_permissions(&fake_traforo, permissions).expect("fake traforo executable");
+            }
+            let prior_traforo_bin = std::env::var("HOMEBOY_TRAFORO_BIN").ok();
+            std::env::set_var("HOMEBOY_TRAFORO_BIN", &fake_traforo);
+
+            expose(ExposeServiceTunnelSpec {
+                id: "public-preview".to_string(),
+                server_id: "private-host".to_string(),
+                target: ServiceTunnelTarget {
+                    host: "127.0.0.1".to_string(),
+                    port: 7331,
+                },
+                scheme: "http".to_string(),
+                local_port: Some(8834),
+                auth: ServiceTunnelAuth {
+                    mode: ServiceTunnelAuthMode::BearerEnv,
+                    env_var: Some("PUBLIC_PREVIEW_TOKEN".to_string()),
+                    header: Some("Authorization".to_string()),
+                },
+                policy: ServiceTunnelPolicy {
+                    exposure: ServiceTunnelExposure::PrivateLoopback,
+                    require_auth: true,
+                    allowed_clients: Vec::new(),
+                },
+                description: None,
+            })
+            .expect("expose service");
+
+            let started = start(StartServiceTunnelSpec {
+                id: "public-preview".to_string(),
+                command: "while true; do sleep 1; done".to_string(),
+                cwd: None,
+                env: BTreeMap::new(),
+                host: Some("127.0.0.1".to_string()),
+                port: Some(8834),
+                scheme: Some("http".to_string()),
+                health_url: None,
+                health_path: None,
+                readiness_timeout_secs: 1,
+                backend: ServiceTunnelTunnelBackend::Traforo,
+                public_tunnel_id: Some("custompublic123".to_string()),
+                public_tunnel_server_url: Some("wss://relay.example.test".to_string()),
+                public_tunnel_base_domain: Some("example.test".to_string()),
+            })
+            .expect("start public service");
+
+            assert_eq!(
+                started.public_url.as_deref(),
+                Some("https://custompublic123-tunnel.example.test")
+            );
+            let backend = started.tunnel_backend.expect("backend status");
+            assert_eq!(backend.backend, ServiceTunnelTunnelBackend::Traforo);
+            assert!(backend.active);
+            assert!(backend.health.healthy);
+            assert_eq!(backend.tunnel_id.as_deref(), Some("custompublic123"));
+            assert_eq!(backend.local_mapping.expect("mapping").local_port, 8834);
+            let backend_stdout = backend.stdout_path.expect("backend stdout");
+            let backend_stderr = backend.stderr_path.expect("backend stderr");
+            assert!(std::path::Path::new(&backend_stdout).exists());
+            assert!(std::path::Path::new(&backend_stderr).exists());
+            let evidence = started.evidence.expect("evidence");
+            assert_eq!(
+                evidence.backend_stdout_path.as_deref(),
+                Some(backend_stdout.as_str())
+            );
+            assert_eq!(
+                evidence.backend_stderr_path.as_deref(),
+                Some(backend_stderr.as_str())
+            );
+
+            let stopped = stop("public-preview").expect("stop public service");
+            assert!(!stopped.running);
+            assert!(stopped.tunnel_backend.is_none());
+
+            match prior_traforo_bin {
+                Some(value) => std::env::set_var("HOMEBOY_TRAFORO_BIN", value),
+                None => std::env::remove_var("HOMEBOY_TRAFORO_BIN"),
+            }
         });
     }
 
@@ -889,6 +1297,9 @@ mod tests {
                 health_path: None,
                 readiness_timeout_secs: 0,
                 backend: ServiceTunnelTunnelBackend::None,
+                public_tunnel_id: None,
+                public_tunnel_server_url: None,
+                public_tunnel_base_domain: None,
             })
             .expect_err("readiness should fail");
 
