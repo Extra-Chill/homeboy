@@ -8,9 +8,7 @@ use sha2::{Digest, Sha256};
 use crate::core::agent_task::{
     AgentTaskArtifact, AgentTaskOutcome, AgentTaskOutcomeStatus, AGENT_TASK_OUTCOME_SCHEMA,
 };
-use crate::core::agent_task_gate::{
-    run_gate_command, AgentTaskGateReport, AgentTaskGateStatus, AGENT_TASK_GATE_REPORT_SCHEMA,
-};
+use crate::core::agent_task_gate::{run_gate_command, AgentTaskGateReport, AgentTaskGateStatus};
 use crate::core::agent_task_scheduler::{AgentTaskAggregate, AGENT_TASK_AGGREGATE_SCHEMA};
 use crate::core::agent_task_timeout_artifacts::is_actionable_patch_artifact;
 use crate::core::{Error, Result};
@@ -653,7 +651,7 @@ mod tests {
             self.verify_calls
                 .push((cwd.to_path_buf(), command.to_string()));
             Ok(AgentTaskGateReport {
-                schema: AGENT_TASK_GATE_REPORT_SCHEMA.to_string(),
+                schema: crate::core::agent_task_gate::AGENT_TASK_GATE_REPORT_SCHEMA.to_string(),
                 id: format!("gate-{index}"),
                 status: AgentTaskGateStatus::Succeeded,
                 command: vec!["sh".to_string(), "-lc".to_string(), command.to_string()],
