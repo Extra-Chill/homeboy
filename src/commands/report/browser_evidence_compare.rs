@@ -140,20 +140,36 @@ pub fn browser_evidence_compare_from_args(
 ) -> homeboy::core::Result<BrowserEvidenceCompareReport> {
     let baseline_dir = PathBuf::from(&args.baseline_dir);
     let candidate_dir = PathBuf::from(&args.candidate_dir);
-    let baseline = implementation::read_evidence_set(&baseline_dir, args.include_local_paths)?;
-    let candidate = implementation::read_evidence_set(&candidate_dir, args.include_local_paths)?;
+    browser_evidence_compare_from_dirs(
+        &[baseline_dir],
+        &[candidate_dir],
+        &args.baseline_label,
+        &args.candidate_label,
+        args.include_local_paths,
+    )
+}
+
+pub fn browser_evidence_compare_from_dirs(
+    baseline_dirs: &[PathBuf],
+    candidate_dirs: &[PathBuf],
+    baseline_label: &str,
+    candidate_label: &str,
+    include_local_paths: bool,
+) -> homeboy::core::Result<BrowserEvidenceCompareReport> {
+    let baseline = implementation::read_evidence_dirs(baseline_dirs, include_local_paths)?;
+    let candidate = implementation::read_evidence_dirs(candidate_dirs, include_local_paths)?;
     let mut notes = Vec::new();
     notes.extend(
         baseline
             .notes
             .iter()
-            .map(|note| format!("{}: {}", args.baseline_label, note)),
+            .map(|note| format!("{}: {}", baseline_label, note)),
     );
     notes.extend(
         candidate
             .notes
             .iter()
-            .map(|note| format!("{}: {}", args.candidate_label, note)),
+            .map(|note| format!("{}: {}", candidate_label, note)),
     );
 
     let variants = implementation::compare_variants(&baseline.samples, &candidate.samples);
@@ -171,8 +187,8 @@ pub fn browser_evidence_compare_from_args(
             .count(),
     };
     let markdown = implementation::render_markdown(
-        &args.baseline_label,
-        &args.candidate_label,
+        baseline_label,
+        candidate_label,
         &totals,
         &variants,
         &notes,
@@ -181,8 +197,8 @@ pub fn browser_evidence_compare_from_args(
     Ok(BrowserEvidenceCompareReport {
         command: "report.browser-evidence-compare".to_string(),
         markdown,
-        baseline_label: args.baseline_label.clone(),
-        candidate_label: args.candidate_label.clone(),
+        baseline_label: baseline_label.to_string(),
+        candidate_label: candidate_label.to_string(),
         totals,
         variants,
         notes,
@@ -271,6 +287,35 @@ mod implementation {
         }
 
         Ok(EvidenceSet { samples, notes })
+    }
+
+    pub(super) fn read_evidence_dirs(
+        roots: &[PathBuf],
+        include_local_paths: bool,
+    ) -> homeboy::core::Result<EvidenceSet> {
+        let mut merged = EvidenceSet {
+            samples: Vec::new(),
+            notes: Vec::new(),
+        };
+        for root in roots {
+            match read_evidence_set(root, include_local_paths) {
+                Ok(mut set) => {
+                    merged.samples.append(&mut set.samples);
+                    merged.notes.append(&mut set.notes);
+                }
+                Err(err) => merged.notes.push(format!(
+                    "skipped unreadable evidence directory {}: {}",
+                    root.display(),
+                    err.message
+                )),
+            }
+        }
+        if roots.is_empty() {
+            merged
+                .notes
+                .push("no browser evidence directories were provided".to_string());
+        }
+        Ok(merged)
     }
 
     fn collect_json_files(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {

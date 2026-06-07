@@ -315,6 +315,33 @@ pub struct TraceCompareOutput {
     pub guardrail_status: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub classification_summaries: Vec<TraceCompareClassificationSummaryOutput>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub proof_run_order: Vec<TraceCompareRunOrderOutput>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub caveats: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub browser_proof: Option<TraceBrowserProofOutput>,
+}
+
+#[derive(Serialize, Clone)]
+pub struct TraceCompareRunOrderOutput {
+    pub index: usize,
+    pub group: String,
+    pub iteration: usize,
+    pub status: String,
+    pub exit_code: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure: Option<String>,
+}
+
+#[derive(Serialize, Clone)]
+pub struct TraceBrowserProofOutput {
+    pub baseline_dirs: Vec<String>,
+    pub candidate_dirs: Vec<String>,
+    pub markdown: String,
+    pub report: serde_json::Value,
 }
 
 #[derive(Serialize, Clone)]

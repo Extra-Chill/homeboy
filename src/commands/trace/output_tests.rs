@@ -411,6 +411,9 @@ fn trace_compare_markdown_and_experiment_bundle_render_artifacts() {
         guardrail_failure_count: 0,
         guardrail_status: None,
         classification_summaries: Vec::new(),
+        proof_run_order: Vec::new(),
+        caveats: Vec::new(),
+        browser_proof: None,
     };
 
     let markdown = render_compare_markdown(&compare);
@@ -773,6 +776,9 @@ fn trace_compare_evidence_report_redacts_local_paths_and_reports_assertion_statu
         guardrail_failure_count: 1,
         guardrail_status: Some("fail".to_string()),
         classification_summaries: Vec::new(),
+        proof_run_order: Vec::new(),
+        caveats: Vec::new(),
+        browser_proof: None,
     };
 
     let report = render_trace_compare_evidence_markdown(&compare);

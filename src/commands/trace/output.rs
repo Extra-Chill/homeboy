@@ -297,6 +297,9 @@ pub(super) fn compare_trace_aggregates_with_focus(
         guardrail_failure_count,
         guardrail_status,
         classification_summaries,
+        proof_run_order: Vec::new(),
+        caveats: Vec::new(),
+        browser_proof: None,
     }
 }
 
@@ -765,6 +768,8 @@ pub(super) fn render_trace_compare_evidence_markdown(
         let _ = writeln!(out, "- **Guardrail assertion status:** `{}`", status);
     }
 
+    push_compare_proof_markdown(&mut out, compare);
+
     if !compare.spans.is_empty() {
         out.push_str("\n## Metric Delta Summary\n\n");
         out.push_str("| Span | before median | after median | median delta | median % | before avg | after avg | avg delta | avg % |\n");
@@ -807,6 +812,43 @@ pub(super) fn render_trace_compare_evidence_markdown(
     out.push_str("- **Status:** `input-only`\n");
     out.push_str("- Compare evidence references aggregate JSON inputs; run-level artifact completeness is reported by the aggregate reports.\n");
     out
+}
+
+fn push_compare_proof_markdown(out: &mut String, compare: &extension_trace::TraceCompareOutput) {
+    if !compare.proof_run_order.is_empty() {
+        out.push_str("\n## A/B Run Matrix\n\n");
+        out.push_str("| Run | Group | Iteration | Status | Exit | Artifact | Failure |\n");
+        out.push_str("|---:|---|---:|---|---:|---|---|\n");
+        for run in &compare.proof_run_order {
+            let artifact = run
+                .artifact_path
+                .as_deref()
+                .map(safe_report_path)
+                .unwrap_or_else(|| "-".to_string());
+            let failure = run
+                .failure
+                .as_deref()
+                .map(|failure| format!("`{}`", failure.replace('`', "'")))
+                .unwrap_or_else(|| "-".to_string());
+            let _ = writeln!(
+                out,
+                "| {} | `{}` | {} | `{}` | {} | `{}` | {} |",
+                run.index, run.group, run.iteration, run.status, run.exit_code, artifact, failure
+            );
+        }
+    }
+
+    if !compare.caveats.is_empty() {
+        out.push_str("\n## Caveats\n\n");
+        for caveat in &compare.caveats {
+            let _ = writeln!(out, "- {}", caveat);
+        }
+    }
+
+    if let Some(browser_proof) = compare.browser_proof.as_ref() {
+        out.push('\n');
+        out.push_str(&browser_proof.markdown);
+    }
 }
 
 fn push_trace_refs_markdown(
@@ -1088,6 +1130,8 @@ pub(super) fn render_compare_markdown(compare: &extension_trace::TraceCompareOut
             ));
         }
     }
+
+    push_compare_proof_markdown(&mut out, compare);
 
     if !compare.classification_summaries.is_empty() {
         out.push_str("\n## Critical Path Classification\n\n");

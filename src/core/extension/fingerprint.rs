@@ -48,7 +48,7 @@ pub fn run_fingerprint_script(
         .ok()
         .and_then(|mut child| {
             use std::io::Write;
-            if let Some(ref mut stdin) = child.stdin {
+            if let Some(mut stdin) = child.stdin.take() {
                 let _ = stdin.write_all(input.to_string().as_bytes());
             }
             wait_with_bounded_output(child, DEFAULT_CAPTURE_LIMIT_BYTES).ok()

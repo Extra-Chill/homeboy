@@ -46,14 +46,16 @@ pub use preview::{TracePreviewMetadata, TracePublicPreviewSession};
 pub use probes::{ActiveTraceProbes, TraceProbeConfig};
 pub use report::{
     from_list_workflow, from_main_workflow, from_main_workflow_outputs, TraceAggregateOutput,
-    TraceAggregateRunOutput, TraceAggregateSpanOutput, TraceClassificationSummaryOutput,
-    TraceCommandOutput, TraceCompareClassificationSummaryOutput, TraceCompareOutput,
-    TraceCompareSpanOutput, TraceGuardrailOutput, TraceListOutput, TraceOverlayLocksOutput,
-    TraceProfileListItem, TraceResolvedProfileOutput, TraceRunOrderEntryOutput,
-    TraceScenarioMatrixAxisOutput, TraceScenarioMatrixCellOutput, TraceScenarioMatrixOutput,
-    TraceSpanMetadata, TraceVariantMatrixOutput, TraceVariantMatrixRunOutput,
+    TraceAggregateRunOutput, TraceAggregateSpanOutput, TraceBrowserProofOutput,
+    TraceClassificationSummaryOutput, TraceCommandOutput, TraceCompareClassificationSummaryOutput,
+    TraceCompareOutput, TraceCompareRunOrderOutput, TraceCompareSpanOutput, TraceGuardrailOutput,
+    TraceListOutput, TraceOverlayLocksOutput, TraceProfileListItem, TraceResolvedProfileOutput,
+    TraceRunOrderEntryOutput, TraceScenarioMatrixAxisOutput, TraceScenarioMatrixCellOutput,
+    TraceScenarioMatrixOutput, TraceSpanMetadata, TraceVariantMatrixOutput,
+    TraceVariantMatrixRunOutput,
 };
 pub use report::{push_overlay_markdown, render_markdown};
+pub use run::TraceOverlay;
 pub use run::{
     resolve_declared_trace_artifact_path, run_trace_list_workflow, run_trace_workflow,
     trace_is_unclaimed, TraceListWorkflowArgs,

@@ -66,7 +66,7 @@ JSON run, summary, and aggregate outputs include a `profile` object with the res
 
 ## Baseline/Candidate Compare
 
-`homeboy trace compare <component> <scenario>` can run the same trace scenario against two local paths or git refs, aggregate the span timings, write JSON artifacts, and render a Markdown summary.
+`homeboy trace compare <component> <scenario>` can run the same trace scenario against two local paths or git refs, aggregate the span timings, write JSON artifacts, and render a Markdown summary. This is the first-class A/B browser proof workflow for trace rigs: pass baseline and candidate targets, choose `--runs`, and Homeboy preserves per-run artifacts while producing reviewer-ready span and browser evidence tables.
 
 ```sh
 homeboy trace compare woocommerce-gateway-stripe ece-product-page-waterfall \
@@ -79,6 +79,12 @@ homeboy trace compare woocommerce-gateway-stripe ece-product-page-waterfall \
 `--baseline-target` accepts an existing path or a git ref in the resolved component checkout. The flag is intentionally named `--baseline-target` because `--baseline` already saves a trace baseline for the baseline engine. `--candidate` accepts the same path-or-ref shape. Ref targets are checked out into temporary detached git worktrees for the run and removed afterward.
 
 The compare command writes `baseline.aggregate.json`, `candidate.aggregate.json`, `compare.json`, and `summary.md` under `.homeboy/trace-compare/<scenario>-<timestamp>` unless `--output-dir` is provided. The JSON comparison includes target labels, git SHAs when available, pass/fail status for both sides, artifact paths, span deltas, percentage deltas, focus-span status, guardrail status, and missing metrics as `null`/omitted values rather than invented numbers.
+
+Target compares run baseline and candidate through the same scheduler. Use `--schedule interleaved` to alternate `baseline, candidate, baseline, candidate` for the configured repetition count, or `--schedule grouped` to run one side then the other. `compare.json` and `summary.md` include a `proof_run_order` / `A/B Run Matrix` section with each run's group, iteration, status, exit code, raw trace artifact path, and failure message when a run fails. Failed runs are retained in the aggregate and comparison instead of being silently dropped.
+
+When run artifacts contain browser evidence JSON, target compare also attaches `browser_proof` to `compare.json` and appends a `Browser Evidence Comparison` section to `summary.md`. The browser proof aggregates promoted browser metrics such as LCP, ready time, DOM lifecycle timings, request counts, console errors, page errors, assertion deltas, and artifact references across baseline/candidate samples. Profile and matrix labels emitted by the evidence are preserved so throttled, synthetic, viewport, or scenario-profiled runs remain distinguishable in review. Treat throttled or synthetic timing labels as relative proof data unless the underlying profile says otherwise.
+
+Known trace lab plumbing issues are tracked separately and are not papered over by this report path: [#3621](https://github.com/Extra-Chill/homeboy/issues/3621) for Docker preflight detection and [#3631](https://github.com/Extra-Chill/homeboy/issues/3631) for runner daemon restart exec diagnostics.
 
 ## Repeated Runs
 
