@@ -122,6 +122,64 @@ pub struct BrowserArtifactMetadata {
     pub label: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BrowserOriginEvidence {
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_service_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_artifact_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declared: Option<BrowserOriginDeclaredService>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_url: Option<String>,
+    #[serde(default, alias = "public_url", skip_serializing_if = "Option::is_none")]
+    pub public_preview_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser_requested_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser_final_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_location: Option<BrowserWindowLocationEvidence>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub redirects: Vec<BrowserRedirectEvidence>,
+    #[serde(default, skip_serializing_if = "Map::is_empty")]
+    pub network_origin: Map<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BrowserOriginDeclaredService {
+    pub host: String,
+    pub port: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BrowserWindowLocationEvidence {
+    pub origin: String,
+    pub hostname: String,
+    pub protocol: String,
+    pub port: String,
+    #[serde(default)]
+    pub is_secure_context: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BrowserRedirectEvidence {
+    pub from_url: String,
+    pub to_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct BrowserBottleneckRow {
@@ -206,6 +264,8 @@ pub fn validate_bench_results_payload(payload: &Value) -> Result<()> {
     validate_optional_array::<BrowserArtifactMetadata>(payload, "artifacts")?;
     validate_optional_array::<BrowserBottleneckRow>(payload, "bottlenecks")?;
     validate_optional_array::<BrowserTimingRow>(payload, "timings")?;
+    validate_optional_array::<BrowserOriginEvidence>(payload, "origin_evidence")?;
+    validate_optional_array::<BrowserOriginEvidence>(payload, "browser_origin_evidence")?;
     Ok(())
 }
 
@@ -214,6 +274,8 @@ pub fn validate_trace_results_payload(payload: &Value) -> Result<()> {
     validate_optional_array::<TraceAssertion>(payload, "assertions")?;
     validate_optional_array::<BrowserArtifactMetadata>(payload, "artifacts")?;
     validate_optional_array::<TraceEnvelope>(payload, "traces")?;
+    validate_optional_array::<BrowserOriginEvidence>(payload, "origin_evidence")?;
+    validate_optional_array::<BrowserOriginEvidence>(payload, "browser_origin_evidence")?;
     Ok(())
 }
 
@@ -289,6 +351,30 @@ mod tests {
                 "raw": { "source": "resource" }
             }],
             "artifacts": [{ "path": "browser/profile.json", "kind": "profile", "label": "profile" }],
+            "origin_evidence": [{
+                "schema_version": 1,
+                "managed_service_id": "wpcom-start",
+                "preview_artifact_id": "preview-1",
+                "run_id": "run-123",
+                "declared": { "host": "calypso.localhost", "port": 3000, "protocol": "http" },
+                "local_url": "http://calypso.localhost:3000/start",
+                "public_preview_url": "https://preview.example.test/start",
+                "browser_requested_url": "https://preview.example.test/start",
+                "browser_final_url": "https://preview.example.test/start?flow=site",
+                "window_location": {
+                    "origin": "https://preview.example.test",
+                    "hostname": "preview.example.test",
+                    "protocol": "https:",
+                    "port": "",
+                    "is_secure_context": true
+                },
+                "redirects": [{
+                    "from_url": "https://preview.example.test/start",
+                    "to_url": "https://preview.example.test/start?flow=site",
+                    "status": 302
+                }],
+                "network_origin": { "tunnel": "homeboy-managed" }
+            }],
             "bottlenecks": [{ "kind": "network", "phase": "boot", "message": "Slow script" }]
         })).unwrap();
     }
@@ -319,6 +405,16 @@ mod tests {
             }]
         }))
         .unwrap();
+    }
+
+    #[test]
+    fn validates_synthetic_browser_origin_fixture() {
+        let payload: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/browser_origin_evidence/synthetic-origin.json"
+        ))
+        .expect("synthetic browser origin fixture should be valid JSON");
+
+        validate_trace_results_payload(&payload).unwrap();
     }
 
     #[test]
