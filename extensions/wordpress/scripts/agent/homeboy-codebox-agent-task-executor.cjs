@@ -313,22 +313,25 @@ function stderrFailurePayload(result) {
   };
 }
 
-async function loadCodeboxAgentTaskRunResultNormalizer() {
+async function loadCodeboxCoreNormalizers() {
   const configuredModule = process.env.HOMEBOY_WP_CODEBOX_CORE_MODULE;
   const candidates = configuredModule ? [configuredModule] : [DEFAULT_CODEBOX_CORE_MODULE];
 
   for (const candidate of candidates) {
     try {
       const module = await importModule(candidate);
-      if (typeof module.normalizeAgentTaskRunResult === 'function') {
-        return module.normalizeAgentTaskRunResult;
+      if (typeof module.normalizeAgentTaskRunResult === 'function' || typeof module.normalizeRecipeRunSummary === 'function') {
+        return {
+          normalizeAgentTaskRunResult: typeof module.normalizeAgentTaskRunResult === 'function' ? module.normalizeAgentTaskRunResult : null,
+          normalizeRecipeRunSummary: typeof module.normalizeRecipeRunSummary === 'function' ? module.normalizeRecipeRunSummary : null,
+        };
       }
     } catch {
       // Fall back to the local compatibility path when Codebox core is not installed yet.
     }
   }
 
-  return null;
+  return {};
 }
 
 function importModule(specifier) {
@@ -339,7 +342,7 @@ function importModule(specifier) {
 }
 
 async function runTaskRunner(request) {
-  const normalizeAgentTaskRunResult = await loadCodeboxAgentTaskRunResultNormalizer();
+  const coreNormalizers = await loadCodeboxCoreNormalizers();
   const runner = argValue('--task-runner') || `${__dirname}/homeboy-wp-codebox-task-runner.cjs`;
   const config = request.executor?.config || {};
   const configArgs = [
@@ -368,7 +371,7 @@ async function runTaskRunner(request) {
   let payload = {};
   if (result.error && result.error.code === 'ETIMEDOUT') {
     payload = timeoutPayload(requestTimeoutMs(request), request);
-    return agentTaskOutcomeFromCodeboxResult(request, payload, { exitStatus: 1, normalizeAgentTaskRunResult });
+    return agentTaskOutcomeFromCodeboxResult(request, payload, { exitStatus: 1, ...coreNormalizers });
   }
   if (result.stdout.trim()) {
     try {
@@ -399,7 +402,7 @@ async function runTaskRunner(request) {
     payload = stderrFailurePayload(result);
   }
 
-  return agentTaskOutcomeFromCodeboxResult(request, payload, { exitStatus: result.status ?? 1, normalizeAgentTaskRunResult });
+  return agentTaskOutcomeFromCodeboxResult(request, payload, { exitStatus: result.status ?? 1, ...coreNormalizers });
 }
 
 (async () => {

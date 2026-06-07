@@ -712,10 +712,28 @@ function codeboxRunSummary(result, options = {}) {
   }
 }
 
-function normalizeArtifacts(result, runSummary = null) {
+function codeboxRecipeRunSummary(result, options = {}) {
+  if (typeof options.normalizeRecipeRunSummary !== 'function') {
+    return null;
+  }
+  const recipeRun = recipeRunFromResult(result);
+  if (!recipeRun || Object.keys(recipeRun).length === 0) {
+    return null;
+  }
+  try {
+    return options.normalizeRecipeRunSummary(recipeRun, { exitStatus: options.exitStatus ?? 0 });
+  } catch {
+    return null;
+  }
+}
+
+function normalizeArtifacts(result, runSummary = null, recipeSummary = null) {
   const normalizedArtifacts = Array.isArray(runSummary?.artifacts)
     ? runSummary.artifacts.map(artifactFromCodeboxArtifact)
     : [];
+  if (Array.isArray(recipeSummary?.artifacts)) {
+    recipeSummary.artifacts.map(artifactFromCodeboxArtifact).forEach((artifact) => appendUniqueArtifact(normalizedArtifacts, artifact));
+  }
 
   if (result?.schema === 'wp-codebox/agent-task-run/v1') {
     const artifacts = [...normalizedArtifacts];
@@ -744,8 +762,10 @@ function normalizeArtifacts(result, runSummary = null) {
     for (const artifact of agentRuntimeBundleArtifacts(result)) {
       appendUniqueArtifact(artifacts, artifact);
     }
-    for (const artifact of recipeRunArtifacts(result)) {
-      appendUniqueArtifact(artifacts, artifact);
+    if (!recipeSummary) {
+      for (const artifact of recipeRunArtifacts(result)) {
+        appendUniqueArtifact(artifacts, artifact);
+      }
     }
     return artifacts.map(artifactFromCodeboxArtifact);
   }
@@ -757,7 +777,7 @@ function normalizeArtifacts(result, runSummary = null) {
   return mappedArtifacts;
 }
 
-function normalizeEvidenceRefs(result, runSummary = null) {
+function normalizeEvidenceRefs(result, runSummary = null, recipeSummary = null) {
   if (result?.schema === 'wp-codebox/agent-task-run/v1') {
     const refs = [
       result.session?.artifacts?.preview_url ? {
@@ -785,14 +805,23 @@ function normalizeEvidenceRefs(result, runSummary = null) {
         label: artifact.kind.replace(/^agent-runtime-/, 'Agent runtime ').replace(/-/g, ' '),
       });
     }
-    for (const artifact of recipeRunArtifacts(result)) {
+    if (!recipeSummary) {
+      for (const artifact of recipeRunArtifacts(result)) {
+        appendUniqueEvidenceRef(refs, {
+          kind: artifact.kind,
+          uri: artifact.path || artifact.url,
+          label: artifact.kind.replace(/^codebox-recipe-/, 'WP Codebox recipe ').replace(/-/g, ' '),
+        });
+      }
+    }
+    for (const artifact of runSummary?.artifacts || []) {
       appendUniqueEvidenceRef(refs, {
         kind: artifact.kind,
         uri: artifact.path || artifact.url,
-        label: artifact.kind.replace(/^codebox-recipe-/, 'WP Codebox recipe ').replace(/-/g, ' '),
+        label: artifact.kind.replace(/^codebox-/, 'WP Codebox ').replace(/-/g, ' '),
       });
     }
-    for (const artifact of runSummary?.artifacts || []) {
+    for (const artifact of recipeSummary?.artifacts || []) {
       appendUniqueEvidenceRef(refs, {
         kind: artifact.kind,
         uri: artifact.path || artifact.url,
@@ -859,13 +888,13 @@ function agentRuntimeBundleArtifacts(result) {
   return artifacts;
 }
 
-function codeboxDecisionEvidence(result, runSummary = null) {
+function codeboxDecisionEvidence(result, runSummary = null, recipeSummary = null) {
   const agentResult = result.run?.agentResult || result.agentResult || result.agent_result || result.metadata?.recipe_run?.agentResult || result.metadata?.recipe_run?.run?.agentResult || {};
   const completionOutcome = result.completionOutcome || result.completion_outcome || result.metadata?.recipe_run?.completionOutcome || {};
   const runtime = result.run?.runtime || result.metadata?.recipe_run?.run?.runtime || {};
   const run = result.run || result.metadata?.recipe_run?.run || {};
   const recipeRun = recipeRunFromResult(result);
-  const recipeFailedPhase = recipeRunFailedPhase(recipeRun);
+  const recipeFailedPhase = recipeSummary?.failed_phase || recipeSummary?.metadata?.failure_phase || recipeRunFailedPhase(recipeRun);
   return Object.fromEntries(Object.entries({
     selected_backend: 'codebox',
     selected_executor: 'wordpress.codebox-agent-task-executor',
@@ -895,22 +924,23 @@ function codeboxDecisionEvidence(result, runSummary = null) {
 function agentTaskOutcomeFromCodeboxResult(request, result = {}, options = {}) {
   assertAgentTaskRequest(request);
   const runSummary = codeboxRunSummary(result, options);
+  const recipeSummary = codeboxRecipeRunSummary(result, options);
   const localStatus = normalizeStatus(result, options.exitStatus ?? 0);
-  const status = localStatus === 'failed' ? localStatus : (runSummary?.status || localStatus);
-  const failureClassification = homeboyFailureClassification(result.failure_classification || runSummary?.failure_classification, status);
+  const status = recipeSummary?.status && recipeSummary.status !== 'succeeded' ? recipeSummary.status : (localStatus === 'failed' ? localStatus : (runSummary?.status || recipeSummary?.status || localStatus));
+  const failureClassification = homeboyFailureClassification(result.failure_classification || recipeSummary?.metadata?.failure_classification || runSummary?.failure_classification, status);
   const outputs = normalizeOutputs(result);
   const recipeRun = recipeRunFromResult(result);
-  const recipeSummary = recipeRunFailureSummary(recipeRun);
-  const recipeFailedPhase = recipeRunFailedPhase(recipeRun);
+  const fallbackRecipeSummary = recipeRunFailureSummary(recipeRun);
+  const recipeFailedPhase = recipeSummary?.failed_phase || recipeSummary?.metadata?.failure_phase || recipeRunFailedPhase(recipeRun);
   const outcome = {
     schema: AGENT_TASK_OUTCOME_SCHEMA,
     task_id: request.task_id,
     status,
-    summary: recipeSummary || runSummary?.summary || result.summary || result.message || (status === 'succeeded' ? 'WP Codebox agent task succeeded.' : 'WP Codebox agent task failed.'),
-    artifacts: normalizeArtifacts(result, runSummary),
-    evidence_refs: normalizeEvidenceRefs(result, runSummary),
+    summary: recipeSummary?.failure_summary || fallbackRecipeSummary || runSummary?.summary || result.summary || result.message || (status === 'succeeded' ? 'WP Codebox agent task succeeded.' : 'WP Codebox agent task failed.'),
+    artifacts: normalizeArtifacts(result, runSummary, recipeSummary),
+    evidence_refs: normalizeEvidenceRefs(result, runSummary, recipeSummary),
     outputs,
-    diagnostics: [recipeRunFailureDiagnostic(recipeRun), ...(runSummary?.diagnostics || []), ...(result.diagnostics || [])].filter(Boolean).map((diagnostic) => ({
+    diagnostics: [recipeSummary ? null : recipeRunFailureDiagnostic(recipeRun), ...(recipeSummary?.diagnostics || []), ...(runSummary?.diagnostics || []), ...(result.diagnostics || [])].filter(Boolean).map((diagnostic) => ({
       class: diagnostic.class || diagnostic.kind || 'codebox',
       message: diagnostic.message || String(diagnostic),
       data: sanitizePublicMetadata(diagnostic.data || {}),
@@ -919,8 +949,9 @@ function agentTaskOutcomeFromCodeboxResult(request, result = {}, options = {}) {
       provider: 'wordpress.codebox-agent-task-executor',
       codebox: sanitizePublicMetadata(result.metadata || result),
       codebox_run_result: runSummary ? sanitizePublicMetadata(runSummary) : undefined,
+      codebox_recipe_run_summary: recipeSummary ? sanitizePublicMetadata(recipeSummary) : undefined,
       integration_contract: 'wp-codebox-cli/agent-task-run',
-      decision_evidence: sanitizePublicMetadata(codeboxDecisionEvidence(result, runSummary)),
+      decision_evidence: sanitizePublicMetadata(codeboxDecisionEvidence(result, runSummary, recipeSummary)),
       recipe_failed_phase: recipeFailedPhase || undefined,
     },
   };
