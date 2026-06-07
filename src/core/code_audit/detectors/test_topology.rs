@@ -198,7 +198,7 @@ fn run_topology_script(
         .ok()
         .and_then(|mut child| {
             use std::io::Write;
-            if let Some(ref mut stdin) = child.stdin {
+            if let Some(mut stdin) = child.stdin.take() {
                 let payload = serde_json::to_vec(input).ok()?;
                 let _ = stdin.write_all(&payload);
             }

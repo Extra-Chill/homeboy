@@ -82,7 +82,7 @@ pub fn run_refactor_script_result(
     let mut child =
         spawn_refactor_script(&script_path).map_err(RefactorScriptFailure::spawn_failed)?;
     use std::io::Write;
-    if let Some(ref mut stdin) = child.stdin {
+    if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(command.to_string().as_bytes());
     }
     let output = wait_with_bounded_output(child, DEFAULT_CAPTURE_LIMIT_BYTES)
