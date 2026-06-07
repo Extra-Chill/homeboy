@@ -11,7 +11,7 @@ use crate::core::extension::DeployVerification;
 use crate::core::server::SshClient;
 
 use super::transfer::{upload_directory, upload_file};
-use super::types::DeployResult;
+use super::types::{DeployEffect, DeployResult};
 
 /// Framework-neutral shared directory names that typically contain sibling components.
 const DANGEROUS_PATH_SUFFIXES: &[&str] = &["/node_modules", "/vendor", "/packages", "/extensions"];
@@ -107,6 +107,7 @@ pub(super) fn deploy_artifact(
     remote_owner: Option<&str>,
 ) -> Result<DeployResult> {
     let mut uploaded_artifact_path: Option<String> = None;
+    let mut verified = false;
 
     // Step 1: Upload (directory or file)
     if local_path.is_dir() {
@@ -311,9 +312,14 @@ pub(super) fn deploy_artifact(
                 .unwrap_or_else(|| format!("Deploy verification failed for {}", remote_path));
             return Ok(DeployResult::failure(1, error_msg));
         }
+        verified = true;
     }
 
-    Ok(DeployResult::success(0))
+    Ok(DeployResult::success(0).with_effect(DeployEffect {
+        remote_path: remote_path.to_string(),
+        artifact_path: uploaded_artifact_path,
+        verified,
+    }))
 }
 
 /// Return the final path segment of `remote_path` (its basename), if any.

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use reqwest::blocking::Client;
@@ -18,10 +19,14 @@ use super::capabilities::{
 };
 use super::evidence::mirror_daemon_evidence;
 use super::normalize_runner_command_env;
-use super::resource_metrics::{measured_command_output, RunnerResourceMetrics};
+use super::resource_metrics::{
+    measured_command_output, measured_command_output_until_cancelled, RunnerResourceMetrics,
+};
 use super::{load, status, Runner, RunnerCapabilityPreflight, RunnerKind, RunnerTunnelMode};
 
+mod extension_parity;
 mod policy;
+use extension_parity::{required_extensions_for_command, validate_runner_extension_parity};
 use policy::{validate_runner_policy, RunnerPolicyRequest};
 
 #[derive(Debug, Clone)]
@@ -36,6 +41,7 @@ pub struct RunnerExecOptions {
     pub source_snapshot: Option<SourceSnapshot>,
     pub capability_preflight: Option<RunnerCapabilityPreflight>,
     pub required_extensions: Vec<String>,
+    pub require_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -73,6 +79,45 @@ pub struct RunnerExecOutput {
     pub metrics: Option<RunnerResourceMetrics>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capture: Option<CommandCaptureMetadata>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnostics: Option<RunnerExecDiagnostics>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RunnerExecDiagnostics {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runner_workspace_root: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_snapshot_remote_path: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub required_paths: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub hints: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RunnerProcessRequest {
+    pub runner_id: String,
+    pub runner: Option<Runner>,
+    pub cwd: Option<String>,
+    pub project_id: Option<String>,
+    pub command: Vec<String>,
+    pub env: HashMap<String, String>,
+    pub capture_patch: bool,
+    pub raw_exec: bool,
+    pub source_snapshot: Option<SourceSnapshot>,
+    pub require_paths: Vec<String>,
+    pub validate_require_paths_on_host: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RunnerProcessPlan {
+    pub runner: Runner,
+    pub cwd: String,
+    pub command: Vec<String>,
+    pub env: HashMap<String, String>,
+    pub source_snapshot: SourceSnapshot,
+    pub require_paths: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -92,22 +137,23 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
         ));
     }
 
-    let runner = load(runner_id)?;
-    let cwd = resolve_cwd(&runner, options.cwd.as_deref())?;
-    validate_runner_policy(
-        &runner,
-        &cwd,
-        RunnerPolicyRequest {
-            project_id: options.project_id.as_deref(),
-            command: &options.command,
-            capture_patch: options.capture_patch,
-            raw_exec: options.raw_exec,
-        },
-    )?;
+    let plan = prepare_runner_process(RunnerProcessRequest {
+        runner_id: runner_id.to_string(),
+        runner: None,
+        cwd: options.cwd.clone(),
+        project_id: options.project_id.clone(),
+        command: options.command.clone(),
+        env: options.env.clone(),
+        capture_patch: options.capture_patch,
+        raw_exec: options.raw_exec,
+        source_snapshot: options.source_snapshot.clone(),
+        require_paths: options.require_paths.clone(),
+        validate_require_paths_on_host: false,
+    })?;
+    let runner = plan.runner.clone();
+    let cwd = plan.cwd.clone();
     let connected = status(runner_id)?;
-    let mut request_env = runner.env.clone();
-    request_env.extend(options.env.clone());
-    normalize_runner_command_env(&mut request_env);
+    let request_env = plan.env.clone();
     let required_extensions =
         required_extensions_for_command(&options.command, &options.required_extensions);
 
@@ -125,10 +171,12 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
                     &runner,
                     local_url,
                     cwd,
+                    options.project_id,
                     options.command,
                     request_env,
                     options.capture_patch,
-                    options.source_snapshot,
+                    Some(plan.source_snapshot),
+                    options.require_paths,
                 );
             }
             if session.mode == RunnerTunnelMode::Reverse {
@@ -141,7 +189,8 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
                         options.command,
                         request_env,
                         options.capture_patch,
-                        options.source_snapshot,
+                        Some(plan.source_snapshot),
+                        options.require_paths,
                     );
                 }
             }
@@ -149,14 +198,14 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
     }
 
     match runner.kind {
-        RunnerKind::Local => exec_local(&runner, cwd, options.command, request_env),
+        RunnerKind::Local => exec_local(plan),
         RunnerKind::Ssh if options.allow_diagnostic_ssh => {
             preflight_runner_capability_plan(
                 &runner,
                 options.capability_preflight.as_ref(),
                 &request_env,
             )?;
-            exec_diagnostic_ssh(&runner, cwd, options.command, request_env)
+            exec_diagnostic_ssh(&runner, cwd, options.command, request_env, options.require_paths)
         }
         RunnerKind::Ssh => Err(Error::validation_invalid_argument(
             "runner",
@@ -170,131 +219,6 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
     }
 }
 
-fn required_extensions_for_command(command: &[String], explicit: &[String]) -> Vec<String> {
-    let mut extensions = explicit
-        .iter()
-        .filter(|extension| !extension.trim().is_empty())
-        .cloned()
-        .collect::<Vec<_>>();
-
-    let mut args = command.iter();
-    while let Some(arg) = args.next() {
-        if arg == "--extension" {
-            if let Some(extension) = args.next().filter(|value| !value.trim().is_empty()) {
-                push_unique(&mut extensions, extension.to_string());
-            }
-            continue;
-        }
-        if let Some(extension) = arg.strip_prefix("--extension=") {
-            if !extension.trim().is_empty() {
-                push_unique(&mut extensions, extension.to_string());
-            }
-        }
-    }
-
-    extensions
-}
-
-fn push_unique(items: &mut Vec<String>, item: String) {
-    if !items.contains(&item) {
-        items.push(item);
-    }
-}
-
-fn validate_runner_extension_parity(
-    runner_id: &str,
-    runner: &Runner,
-    cwd: &str,
-    required_extensions: &[String],
-) -> Result<()> {
-    for extension_id in required_extensions {
-        validate_runner_extension(runner_id, runner, cwd, extension_id)?;
-    }
-
-    Ok(())
-}
-
-fn validate_runner_extension(
-    runner_id: &str,
-    runner: &Runner,
-    cwd: &str,
-    extension_id: &str,
-) -> Result<()> {
-    let homeboy_path = runner.settings.homeboy_path.as_deref().unwrap_or("homeboy");
-    let command = format!(
-        "cd {} && {} extension show {}",
-        shell::quote_path(cwd),
-        shell::quote_path(homeboy_path),
-        shell::quote_arg(extension_id)
-    );
-    let output = match runner.kind {
-        RunnerKind::Local => server::execute_local_command(&command),
-        RunnerKind::Ssh => {
-            let client = ssh_client_for_runner_extension_parity(runner)?;
-            client.execute(&command)
-        }
-    };
-
-    if output.success {
-        return Ok(());
-    }
-
-    Err(Error::validation_invalid_argument(
-        "runner_extension",
-        format!(
-            "Runner '{runner_id}' is missing required extension parity for '{extension_id}' before command execution"
-        ),
-        Some(extension_id.to_string()),
-        Some(vec![
-            format!(
-                "Install the extension on the runner before dispatch: {homeboy_path} extension install <source> --id {extension_id}"
-            ),
-            format!("Remote preflight command failed: {homeboy_path} extension show {extension_id}"),
-            extension_parity_diagnostic_tail(&output.stderr, &output.stdout),
-        ]),
-    ))
-}
-
-fn ssh_client_for_runner_extension_parity(runner: &Runner) -> Result<SshClient> {
-    let server_id = runner.server_id.as_deref().ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "server_id",
-            "SSH runners require server_id for runner extension parity preflight",
-            Some(runner.id.clone()),
-            None,
-        )
-    })?;
-    let server = server::load(server_id)?;
-    let mut client = SshClient::from_server(&server, server_id)?;
-    client.env.extend(runner.env.clone());
-    Ok(client)
-}
-
-fn extension_parity_diagnostic_tail(stderr: &str, stdout: &str) -> String {
-    let output = if stderr.trim().is_empty() {
-        stdout
-    } else {
-        stderr
-    };
-    let tail = output
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .rev()
-        .take(3)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    if tail.is_empty() {
-        "Runner extension parity preflight produced no diagnostic output.".to_string()
-    } else {
-        format!("Runner extension parity preflight output:\n{tail}")
-    }
-}
-
 fn exec_via_reverse_broker(
     runner: &Runner,
     broker_url: &str,
@@ -304,6 +228,7 @@ fn exec_via_reverse_broker(
     env: HashMap<String, String>,
     capture_patch: bool,
     source_snapshot_override: Option<SourceSnapshot>,
+    require_paths: Vec<String>,
 ) -> Result<(RunnerExecOutput, i32)> {
     let client = Client::builder()
         .timeout(Duration::from_secs(10))
@@ -324,6 +249,7 @@ fn exec_via_reverse_broker(
         metadata: Some(json!({
             "transport": "reverse_broker",
         })),
+        require_paths: require_paths.clone(),
     };
     let data = broker_http::post_json(
         &client,
@@ -391,7 +317,7 @@ fn exec_via_reverse_broker(
             exit_code,
             stdout,
             stderr,
-            source_snapshot: Some(source_snapshot),
+            source_snapshot: Some(source_snapshot.clone()),
             job_id: Some(job.id.to_string()),
             job: Some(job),
             job_events: Some(events),
@@ -399,6 +325,7 @@ fn exec_via_reverse_broker(
             patch: None,
             metrics,
             capture: None,
+            diagnostics: runner_exec_diagnostics(runner, Some(&source_snapshot), &require_paths),
         },
         exit_code,
     ))
@@ -408,10 +335,12 @@ fn exec_via_daemon(
     runner: &Runner,
     local_url: &str,
     cwd: String,
+    project_id: Option<String>,
     command: Vec<String>,
     env: HashMap<String, String>,
     capture_patch: bool,
     source_snapshot_override: Option<SourceSnapshot>,
+    require_paths: Vec<String>,
 ) -> Result<(RunnerExecOutput, i32)> {
     let client = Client::builder()
         .timeout(Duration::from_secs(10))
@@ -424,11 +353,14 @@ fn exec_via_daemon(
         .post(format!("{}/exec", local_url.trim_end_matches('/')))
         .json(&json!({
             "runner_id": runner.id,
+            "runner": runner,
+            "project_id": project_id,
             "cwd": cwd,
             "command": command,
             "env": env,
             "capture_patch": capture_patch,
-            "source_snapshot": source_snapshot,
+            "source_snapshot": source_snapshot.clone(),
+            "require_paths": require_paths.clone(),
         }))
         .send()
         .map_err(|err| {
@@ -444,7 +376,7 @@ fn exec_via_daemon(
     if status_code >= 400 || !envelope.success {
         return Err(Error::internal_unexpected(format!(
             "daemon exec request failed: {}",
-            envelope.error.unwrap_or(Value::Null)
+            daemon_failure_message(status_code, &envelope)
         )));
     }
 
@@ -506,7 +438,7 @@ fn exec_via_daemon(
             exit_code,
             stdout,
             stderr,
-            source_snapshot: Some(source_snapshot),
+            source_snapshot: Some(source_snapshot.clone()),
             job_id: Some(job.id.to_string()),
             job: Some(job),
             job_events: Some(events),
@@ -514,6 +446,7 @@ fn exec_via_daemon(
             patch,
             metrics,
             capture: None,
+            diagnostics: runner_exec_diagnostics(runner, Some(&source_snapshot), &require_paths),
         },
         exit_code,
     ))
@@ -612,31 +545,16 @@ fn result_event_data(events: &[JobEvent]) -> Option<Value> {
         .and_then(|event| event.data.clone())
 }
 
-fn exec_local(
-    runner: &Runner,
-    cwd: String,
-    command: Vec<String>,
-    env: HashMap<String, String>,
-) -> Result<(RunnerExecOutput, i32)> {
-    let output = command_output(
-        std::process::Command::new(&command[0])
-            .args(&command[1..])
-            .current_dir(&cwd)
-            .envs(env),
-    )?;
-    let source_snapshot = SourceSnapshot::collect_local(
-        &runner.id,
-        std::path::Path::new(&cwd),
-        Some(&cwd),
-        "existing_remote",
-    );
+fn exec_local(plan: RunnerProcessPlan) -> Result<(RunnerExecOutput, i32)> {
+    let output = execute_runner_process(&plan)?;
     Ok(exec_output(
-        runner,
+        &plan.runner,
         RunnerExecMode::Local,
-        cwd,
-        command,
+        plan.cwd,
+        plan.command,
         output,
-        Some(source_snapshot),
+        Some(plan.source_snapshot),
+        plan.require_paths,
     ))
 }
 
@@ -645,6 +563,7 @@ fn exec_diagnostic_ssh(
     cwd: String,
     command: Vec<String>,
     env: HashMap<String, String>,
+    require_paths: Vec<String>,
 ) -> Result<(RunnerExecOutput, i32)> {
     let server_id = runner.server_id.as_deref().ok_or_else(|| {
         Error::validation_invalid_argument(
@@ -658,6 +577,7 @@ fn exec_diagnostic_ssh(
     let mut client = SshClient::from_server(&server, server_id)?;
     client.env.extend(runner.env.clone());
     client.env.extend(env);
+    validate_remote_required_paths(&mut client, &require_paths)?;
     let command_line = format!(
         "cd {} && {}",
         shell::quote_arg(&cwd),
@@ -683,19 +603,276 @@ fn exec_diagnostic_ssh(
             capture: None,
         },
         Some(source_snapshot),
+        require_paths,
     ))
 }
 
-struct ProcessOutput {
-    stdout: String,
-    stderr: String,
-    exit_code: i32,
-    metrics: Option<RunnerResourceMetrics>,
-    capture: Option<CommandCaptureMetadata>,
+pub(crate) struct ProcessOutput {
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: i32,
+    pub metrics: Option<RunnerResourceMetrics>,
+    pub capture: Option<CommandCaptureMetadata>,
+}
+
+pub(crate) fn prepare_runner_process(request: RunnerProcessRequest) -> Result<RunnerProcessPlan> {
+    if request.command.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "command",
+            "runner exec requires a command after --",
+            None,
+            None,
+        ));
+    }
+
+    let runner = request
+        .runner
+        .map(|mut runner| {
+            if runner.id.is_empty() {
+                runner.id = request.runner_id.clone();
+            }
+            runner
+        })
+        .map(Ok)
+        .unwrap_or_else(|| load(&request.runner_id))?;
+    let cwd = resolve_cwd(&runner, request.cwd.as_deref())?;
+    validate_runner_process_cwd(&runner, &cwd)?;
+    if runner.kind != RunnerKind::Local {
+        super::source_materialization::validate_runner_exec_source_fetch(
+            &request.command,
+            &runner.id,
+        )?;
+    }
+    validate_runner_policy(
+        &runner,
+        &cwd,
+        RunnerPolicyRequest {
+            project_id: request.project_id.as_deref(),
+            command: &request.command,
+            capture_patch: request.capture_patch,
+            raw_exec: request.raw_exec,
+        },
+    )?;
+
+    let mut env = runner.env.clone();
+    env.extend(request.env);
+    normalize_runner_command_env(&mut env);
+
+    let source_snapshot = request
+        .source_snapshot
+        .unwrap_or_else(|| match runner.kind {
+            RunnerKind::Local => SourceSnapshot::collect_local(
+                &runner.id,
+                Path::new(&cwd),
+                Some(&cwd),
+                "existing_remote",
+            ),
+            RunnerKind::Ssh => {
+                SourceSnapshot::existing_remote(&runner.id, &cwd, runner.workspace_root.as_deref())
+            }
+        });
+    validate_required_paths(
+        &runner,
+        &request.require_paths,
+        request.validate_require_paths_on_host,
+    )?;
+
+    Ok(RunnerProcessPlan {
+        runner,
+        cwd,
+        command: request.command,
+        env,
+        source_snapshot,
+        require_paths: request.require_paths,
+    })
+}
+
+pub(crate) fn prepare_daemon_local_process(
+    request: RunnerProcessRequest,
+) -> Result<RunnerProcessPlan> {
+    if request.command.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "command",
+            "runner exec requires a command after --",
+            None,
+            None,
+        ));
+    }
+
+    let cwd = request.cwd.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "cwd",
+            "daemon exec requires an absolute cwd",
+            Some(request.runner_id.clone()),
+            Some(vec![
+                "Pass the synced remote workspace path as cwd when submitting daemon exec."
+                    .to_string(),
+            ]),
+        )
+    })?;
+    let runner = Runner {
+        id: request.runner_id,
+        kind: RunnerKind::Local,
+        server_id: None,
+        workspace_root: Some(cwd.clone()),
+        settings: server::RunnerSettings::default(),
+        env: HashMap::new(),
+        resources: HashMap::new(),
+        policy: server::RunnerPolicy::default(),
+    };
+    validate_runner_process_cwd(&runner, &cwd)?;
+    validate_required_paths(
+        &runner,
+        &request.require_paths,
+        request.validate_require_paths_on_host,
+    )?;
+
+    let mut env = request.env;
+    normalize_runner_command_env(&mut env);
+    let source_snapshot = request.source_snapshot.unwrap_or_else(|| {
+        SourceSnapshot::collect_local(&runner.id, Path::new(&cwd), Some(&cwd), "existing_remote")
+    });
+
+    Ok(RunnerProcessPlan {
+        runner,
+        cwd,
+        command: request.command,
+        env,
+        source_snapshot,
+        require_paths: request.require_paths,
+    })
+}
+
+fn validate_required_paths(
+    runner: &Runner,
+    required_paths: &[String],
+    validate_on_host: bool,
+) -> Result<()> {
+    for path in required_paths {
+        if !Path::new(path).is_absolute() {
+            return Err(Error::validation_invalid_argument(
+                "require_path",
+                "runner exec --require-path expects absolute paths on the runner",
+                Some(path.to_string()),
+                Some(vec![
+                    "Pass the path as it exists on the runner, not the controller.".to_string(),
+                ]),
+            ));
+        }
+        if (validate_on_host || runner.kind == RunnerKind::Local) && !Path::new(path).exists() {
+            return Err(missing_required_path_error(runner, path));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_remote_required_paths(client: &mut SshClient, required_paths: &[String]) -> Result<()> {
+    for path in required_paths {
+        let output = client.execute(&format!("test -e {}", shell::quote_arg(path)));
+        if output.exit_code != 0 {
+            return Err(Error::validation_invalid_argument(
+                "require_path",
+                "required runner path does not exist",
+                Some(path.to_string()),
+                Some(vec![
+                    "Use the generated _lab_workspaces/... snapshot path when the controller worktree path was synced into a lab snapshot.".to_string(),
+                    "Run an explicit workspace sync/adopt step before referencing controller worktree paths on the runner.".to_string(),
+                ]),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn missing_required_path_error(runner: &Runner, path: &str) -> Error {
+    Error::validation_invalid_argument(
+        "require_path",
+        "required runner path does not exist",
+        Some(path.to_string()),
+        Some(vec![
+            format!(
+                "Runner `{}` workspace_root is {}.",
+                runner.id,
+                runner.workspace_root.as_deref().unwrap_or("not configured")
+            ),
+            "Use the generated _lab_workspaces/... snapshot path when the controller worktree path was synced into a lab snapshot.".to_string(),
+            "Run an explicit workspace sync/adopt step before referencing controller worktree paths on the runner.".to_string(),
+        ]),
+    )
+}
+
+fn validate_runner_process_cwd(runner: &Runner, cwd: &str) -> Result<()> {
+    if !Path::new(cwd).is_absolute() {
+        return Err(Error::validation_invalid_argument(
+            "cwd",
+            "runner exec requires an absolute cwd",
+            Some(cwd.to_string()),
+            None,
+        ));
+    }
+
+    if runner.kind == RunnerKind::Local && !Path::new(cwd).is_dir() {
+        return Err(Error::validation_invalid_argument(
+            "cwd",
+            "local runner cwd must exist and be a directory",
+            Some(cwd.to_string()),
+            None,
+        ));
+    }
+
+    Ok(())
+}
+
+pub(crate) fn execute_runner_process(plan: &RunnerProcessPlan) -> Result<ProcessOutput> {
+    let mut command = std::process::Command::new(&plan.command[0]);
+    command
+        .args(&plan.command[1..])
+        .current_dir(&plan.cwd)
+        .envs(plan.env.iter())
+        .env(
+            crate::core::observation::SOURCE_SNAPSHOT_METADATA_ENV,
+            serde_json::to_string(&plan.source_snapshot).unwrap_or_default(),
+        );
+
+    command_output(&mut command)
+}
+
+pub(crate) fn execute_runner_process_until_cancelled(
+    plan: &RunnerProcessPlan,
+    is_cancelled: impl FnMut() -> bool,
+) -> Result<ProcessOutput> {
+    let mut command = std::process::Command::new(&plan.command[0]);
+    command
+        .args(&plan.command[1..])
+        .current_dir(&plan.cwd)
+        .envs(plan.env.iter())
+        .env(
+            crate::core::observation::SOURCE_SNAPSHOT_METADATA_ENV,
+            serde_json::to_string(&plan.source_snapshot).unwrap_or_default(),
+        );
+
+    command_output_until_cancelled(&mut command, is_cancelled)
 }
 
 fn command_output(command: &mut std::process::Command) -> Result<ProcessOutput> {
     let measured = measured_command_output(command)?;
+    let output = measured.output;
+    Ok(ProcessOutput {
+        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        exit_code: output.status.code().unwrap_or(1),
+        metrics: Some(measured.metrics),
+        capture: Some(measured.capture),
+    })
+}
+
+fn command_output_until_cancelled(
+    command: &mut std::process::Command,
+    is_cancelled: impl FnMut() -> bool,
+) -> Result<ProcessOutput> {
+    let measured = measured_command_output_until_cancelled(command, is_cancelled)?;
     let output = measured.output;
     Ok(ProcessOutput {
         stdout: String::from_utf8_lossy(&output.stdout).to_string(),
@@ -713,6 +890,7 @@ fn exec_output(
     command: Vec<String>,
     output: ProcessOutput,
     source_snapshot: Option<SourceSnapshot>,
+    require_paths: Vec<String>,
 ) -> (RunnerExecOutput, i32) {
     let exit_code = output.exit_code;
     (
@@ -725,7 +903,7 @@ fn exec_output(
             exit_code,
             stdout: output.stdout,
             stderr: output.stderr,
-            source_snapshot,
+            source_snapshot: source_snapshot.clone(),
             job: None,
             job_id: None,
             job_events: None,
@@ -733,9 +911,30 @@ fn exec_output(
             patch: None,
             metrics: output.metrics,
             capture: output.capture,
+            diagnostics: runner_exec_diagnostics(runner, source_snapshot.as_ref(), &require_paths),
         },
         exit_code,
     )
+}
+
+fn runner_exec_diagnostics(
+    runner: &Runner,
+    source_snapshot: Option<&SourceSnapshot>,
+    required_paths: &[String],
+) -> Option<RunnerExecDiagnostics> {
+    if required_paths.is_empty() {
+        return None;
+    }
+
+    Some(RunnerExecDiagnostics {
+        runner_workspace_root: runner.workspace_root.clone(),
+        source_snapshot_remote_path: source_snapshot.and_then(|snapshot| snapshot.remote_path.clone()),
+        required_paths: required_paths.to_vec(),
+        hints: vec![
+            "Use the generated _lab_workspaces/... snapshot path when the controller worktree path was synced into a lab snapshot.".to_string(),
+            "Use --require-path to preflight paths that a command will reference before running it.".to_string(),
+        ],
+    })
 }
 
 fn resolve_cwd(runner: &Runner, cwd: Option<&str>) -> Result<String> {
@@ -808,6 +1007,26 @@ fn string_field(value: &Value, key: &str) -> String {
         .to_string()
 }
 
+fn daemon_failure_message(status_code: u16, envelope: &DaemonEnvelope) -> String {
+    let payload = envelope
+        .error
+        .as_ref()
+        .or(envelope.data.as_ref())
+        .filter(|value| !value.is_null());
+    let Some(payload) = payload else {
+        return format!("HTTP {status_code} without error payload");
+    };
+
+    let code = payload.get("error").and_then(Value::as_str);
+    let message = payload.get("message").and_then(Value::as_str);
+    match (code, message) {
+        (Some(code), Some(message)) => format!("{code}: {message}"),
+        (Some(code), None) => code.to_string(),
+        (None, Some(message)) => message.to_string(),
+        (None, None) => payload.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -852,6 +1071,29 @@ mod tests {
     }
 
     #[test]
+    fn prepare_runner_process_uses_embedded_runner_snapshot() {
+        crate::test_support::with_isolated_home(|_| {
+            let plan = prepare_runner_process(RunnerProcessRequest {
+                runner_id: "lab".to_string(),
+                runner: Some(ssh_runner()),
+                cwd: Some("/srv/homeboy/project".to_string()),
+                project_id: None,
+                command: vec!["homeboy".to_string(), "--version".to_string()],
+                env: Default::default(),
+                capture_patch: false,
+                raw_exec: false,
+                source_snapshot: None,
+                require_paths: Vec::new(),
+                validate_require_paths_on_host: false,
+            })
+            .expect("prepare from runner snapshot");
+
+            assert_eq!(plan.runner.id, "lab");
+            assert_eq!(plan.cwd, "/srv/homeboy/project");
+        });
+    }
+
+    #[test]
     fn test_exec_runs_local_runner_command() {
         crate::test_support::with_isolated_home(|_| {
             super::super::create(r#"{"id":"lab-local","kind":"local"}"#, false)
@@ -870,6 +1112,7 @@ mod tests {
                     source_snapshot: None,
                     capability_preflight: None,
                     required_extensions: Vec::new(),
+                    require_paths: Vec::new(),
                 },
             )
             .expect("exec local runner");
@@ -895,6 +1138,100 @@ mod tests {
             assert_eq!(source_snapshot.sync_mode, "existing_remote");
             assert!(source_snapshot.snapshot_hash.starts_with("sha256:"));
             assert!(output.job_id.is_none());
+        });
+    }
+
+    #[test]
+    fn test_exec_rejects_missing_required_local_runner_path() {
+        crate::test_support::with_isolated_home(|_| {
+            let workspace = tempfile::tempdir().expect("workspace");
+            super::super::create(
+                &format!(
+                    r#"{{"id":"lab-local","kind":"local","workspace_root":"{}"}}"#,
+                    workspace.path().display()
+                ),
+                false,
+            )
+            .expect("create local runner");
+            let missing = workspace.path().join("missing-worktree");
+
+            let err = exec(
+                "lab-local",
+                RunnerExecOptions {
+                    cwd: None,
+                    project_id: None,
+                    allow_diagnostic_ssh: false,
+                    command: vec![
+                        "sh".to_string(),
+                        "-c".to_string(),
+                        "printf nope".to_string(),
+                    ],
+                    env: Default::default(),
+                    capture_patch: false,
+                    raw_exec: false,
+                    source_snapshot: None,
+                    capability_preflight: None,
+                    required_extensions: Vec::new(),
+                    require_paths: vec![missing.display().to_string()],
+                },
+            )
+            .expect_err("missing required path rejects before command");
+
+            assert_eq!(err.code.as_str(), "validation.invalid_argument");
+            assert_eq!(err.details["field"], "require_path");
+            assert!(err.message.contains("required runner path"));
+            assert!(err.details["tried"].to_string().contains("_lab_workspaces"));
+        });
+    }
+
+    #[test]
+    fn test_exec_reports_required_path_diagnostics() {
+        crate::test_support::with_isolated_home(|_| {
+            let workspace = tempfile::tempdir().expect("workspace");
+            let required_path = workspace.path().join("project");
+            std::fs::create_dir(&required_path).expect("required path");
+            super::super::create(
+                &format!(
+                    r#"{{"id":"lab-local","kind":"local","workspace_root":"{}"}}"#,
+                    workspace.path().display()
+                ),
+                false,
+            )
+            .expect("create local runner");
+
+            let (output, exit_code) = exec(
+                "lab-local",
+                RunnerExecOptions {
+                    cwd: None,
+                    project_id: None,
+                    allow_diagnostic_ssh: false,
+                    command: vec!["sh".to_string(), "-c".to_string(), "printf ok".to_string()],
+                    env: Default::default(),
+                    capture_patch: false,
+                    raw_exec: false,
+                    source_snapshot: None,
+                    capability_preflight: None,
+                    required_extensions: Vec::new(),
+                    require_paths: vec![required_path.display().to_string()],
+                },
+            )
+            .expect("exec with required path");
+
+            assert_eq!(exit_code, 0);
+            let diagnostics = output.diagnostics.expect("diagnostics");
+            assert_eq!(
+                diagnostics.runner_workspace_root,
+                Some(workspace.path().display().to_string())
+            );
+            assert_eq!(
+                diagnostics.required_paths,
+                vec![required_path.display().to_string()]
+            );
+            assert!(diagnostics.source_snapshot_remote_path.is_some());
+            assert!(diagnostics
+                .hints
+                .iter()
+                .any(|hint| hint.contains("_lab_workspaces")));
         });
     }
 
@@ -926,6 +1263,7 @@ mod tests {
                     source_snapshot: None,
                     capability_preflight: None,
                     required_extensions: Vec::new(),
+                    require_paths: Vec::new(),
                 },
             )
             .expect_err("disconnected ssh runner needs daemon or diagnostic fallback");
@@ -981,6 +1319,7 @@ mod tests {
             source_snapshot: None,
             capability_preflight: None,
             required_extensions: Vec::new(),
+            require_paths: Vec::new(),
         };
 
         let err = validate_runner_policy(&runner, "/srv/homeboy/project", policy_request(&options))
@@ -1013,6 +1352,7 @@ mod tests {
             source_snapshot: None,
             capability_preflight: None,
             required_extensions: Vec::new(),
+            require_paths: Vec::new(),
         };
         validate_runner_policy(
             &runner,
@@ -1159,6 +1499,7 @@ mod tests {
                 Default::default(),
                 false,
                 None,
+                Vec::new(),
             )
             .expect("reverse broker exec");
             worker.join().expect("worker joins");
@@ -1174,5 +1515,48 @@ mod tests {
                 .iter()
                 .any(|event| { event.kind == crate::core::api_jobs::JobEventKind::Progress }));
         });
+    }
+
+    #[test]
+    fn daemon_exec_failure_without_error_field_is_actionable() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let addr = listener.local_addr().expect("addr");
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut buffer = [0; 4096];
+            let _ = std::io::Read::read(&mut stream, &mut buffer).expect("read request");
+            let body = serde_json::json!({
+                "success": false,
+                "data": {
+                    "error": "validation.invalid_argument",
+                    "message": "Invalid argument 'cwd': runner exec requires an absolute cwd"
+                }
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            std::io::Write::write_all(&mut stream, response.as_bytes()).expect("write response");
+        });
+
+        let err = exec_via_daemon(
+            &ssh_runner(),
+            &format!("http://{addr}"),
+            "/srv/homeboy/project".to_string(),
+            None,
+            vec!["homeboy".to_string(), "--version".to_string()],
+            Default::default(),
+            false,
+            None,
+            Vec::new(),
+        )
+        .expect_err("daemon exec failure");
+
+        assert!(err.message.contains("daemon exec request failed"));
+        assert!(err.message.contains("validation.invalid_argument"));
+        assert!(err.message.contains("runner exec requires an absolute cwd"));
+        assert!(!err.message.contains(": null"));
     }
 }

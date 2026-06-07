@@ -186,6 +186,51 @@ fn routes_read_only_http_api_contract() {
 }
 
 #[test]
+fn cancelling_daemon_exec_job_terminates_process_tree() {
+    let _home = create_lab_local_runner();
+    let store = JobStore::default();
+    let cwd = std::env::temp_dir().join(format!("homeboy-daemon-cancel-{}", std::process::id()));
+    std::fs::create_dir_all(&cwd).expect("test cwd");
+    let marker = cwd.join("orphan-marker");
+
+    let response = route_with_job_store_and_body(
+        "POST",
+        "/exec",
+        Some(serde_json::json!({
+            "runner_id": "lab-local",
+            "cwd": cwd.display().to_string(),
+            "command": [
+                "sh",
+                "-c",
+                format!("sleep 1; touch {}", marker.display()),
+            ],
+        })),
+        &store,
+    );
+    assert_eq!(response.status_code, 200);
+    let job_id =
+        uuid::Uuid::parse_str(response.body["body"]["job"]["id"].as_str().expect("job id"))
+            .expect("parse job id");
+
+    for _ in 0..50 {
+        if store.get(job_id).expect("job").status == JobStatus::Running {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    store
+        .cancel(job_id, "test cancellation")
+        .expect("cancel job");
+    std::thread::sleep(std::time::Duration::from_millis(1600));
+
+    assert_eq!(store.get(job_id).expect("job").status, JobStatus::Cancelled);
+    assert!(
+        !marker.exists(),
+        "cancelled daemon runner exec left a child process running"
+    );
+}
+
+#[test]
 fn routes_registered_artifact_downloads_and_sync_manifest() {
     let _home = HomeGuard::new();
     let home_path = std::path::PathBuf::from(std::env::var("HOME").expect("home"));
@@ -337,6 +382,35 @@ fn routes_remote_runner_job_broker_lifecycle() {
 }
 
 #[test]
+fn daemon_http_error_envelope_includes_error_payload() {
+    let _home = HomeGuard::new();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+    let addr = listener.local_addr().expect("addr");
+    std::thread::spawn(move || {
+        let _ = serve_listener(listener);
+    });
+
+    let response: serde_json::Value = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .expect("client")
+        .post(format!("http://{addr}/exec"))
+        .json(&serde_json::json!({}))
+        .send()
+        .expect("response")
+        .json()
+        .expect("json");
+
+    assert_eq!(response["success"], false);
+    assert_eq!(response["data"]["error"], "validation.invalid_argument");
+    assert_eq!(response["error"]["error"], "validation.invalid_argument");
+    assert!(response["error"]["message"]
+        .as_str()
+        .expect("message")
+        .contains("invalid exec request body"));
+}
+
+#[test]
 fn routes_remote_runner_session_registration() {
     let _home = HomeGuard::new();
     crate::core::runner::create(
@@ -417,8 +491,16 @@ fn route_with_body_validates_exec_requests() {
     assert_eq!(response.body["error"], "validation.invalid_argument");
 }
 
+fn create_lab_local_runner() -> HomeGuard {
+    let home = HomeGuard::new();
+    crate::core::runner::create(r#"{"id":"lab-local","kind":"local"}"#, false)
+        .expect("create lab local runner");
+    home
+}
+
 #[test]
 fn routes_exec_body_to_daemon_job() {
+    let _home = create_lab_local_runner();
     let store = JobStore::default();
     let response = route_with_job_store_and_body(
         "POST",
@@ -461,7 +543,43 @@ fn routes_exec_body_to_daemon_job() {
 }
 
 #[test]
+fn daemon_exec_does_not_require_runner_config_on_daemon_host() {
+    let _home = HomeGuard::new();
+    let store = JobStore::default();
+    let response = route_with_job_store_and_body(
+        "POST",
+        "/exec",
+        Some(serde_json::json!({
+            "runner_id": "homeboy-lab",
+            "cwd": std::env::current_dir().expect("cwd"),
+            "command": ["sh", "-c", "printf lab"]
+        })),
+        &store,
+    );
+
+    assert_eq!(response.status_code, 200);
+    let job_id = response.body["body"]["job"]["id"]
+        .as_str()
+        .expect("job id")
+        .to_string();
+    let job = wait_for_job(&store, &job_id);
+    assert_eq!(job.status, JobStatus::Succeeded);
+
+    let events = store.events(job.id).expect("events");
+    let result = events
+        .iter()
+        .find(|event| event.kind == JobEventKind::Result)
+        .and_then(|event| event.data.as_ref())
+        .expect("result event");
+    assert_eq!(result["runner_id"], "homeboy-lab");
+    assert_eq!(result["stdout"], "lab");
+    assert_eq!(result["source_snapshot"]["runner_id"], "homeboy-lab");
+    assert_eq!(result["source_snapshot"]["sync_mode"], "existing_remote");
+}
+
+#[test]
 fn exec_applies_request_env_to_daemon_command() {
+    let _home = create_lab_local_runner();
     let store = JobStore::default();
     let response = route_with_job_store_and_body(
         "POST",
@@ -491,7 +609,21 @@ fn exec_applies_request_env_to_daemon_command() {
         .find(|event| event.kind == JobEventKind::Result)
         .and_then(|event| event.data.as_ref())
         .expect("result event");
+    assert_eq!(result["runner_id"], "lab-local");
+    assert_eq!(
+        result["cwd"],
+        std::env::current_dir()
+            .expect("cwd")
+            .to_string_lossy()
+            .to_string()
+    );
+    assert_eq!(
+        result["command"],
+        serde_json::json!(["sh", "-c", "printf '%s' \"$HOMEBOY_TEST_DAEMON_ENV\""])
+    );
     assert_eq!(result["stdout"], "ok");
+    assert_eq!(result["source_snapshot"]["runner_id"], "lab-local");
+    assert_eq!(result["source_snapshot"]["sync_mode"], "existing_remote");
     assert!(result["metrics"]["duration_ms"].as_u64().is_some());
     if cfg!(target_os = "linux") {
         assert_eq!(result["metrics"]["source"], "linux_procfs_process_tree");
@@ -503,6 +635,7 @@ fn exec_applies_request_env_to_daemon_command() {
 
 #[test]
 fn exec_failed_command_marks_job_failed_after_result_event() {
+    let _home = create_lab_local_runner();
     let store = JobStore::default();
     let response = route_with_job_store_and_body(
         "POST",
@@ -547,7 +680,7 @@ fn exec_failed_command_marks_job_failed_after_result_event() {
 
 #[test]
 fn exec_capture_patch_records_remote_delta_artifact() {
-    let _home = HomeGuard::new();
+    let _home = create_lab_local_runner();
     let workspace = tempfile::tempdir().expect("workspace");
     std::fs::write(workspace.path().join("file.txt"), "before\n").expect("seed file");
     let source_snapshot = SourceSnapshot::existing_remote(
@@ -601,6 +734,47 @@ fn exec_capture_patch_records_remote_delta_artifact() {
     let patch_body = std::fs::read_to_string(&artifacts[0].path).expect("patch file");
     assert!(patch_body.contains("-before"));
     assert!(patch_body.contains("+after"));
+}
+
+#[test]
+fn runner_exec_rejects_requests_that_violate_runner_policy_before_daemon_dispatch() {
+    let _home = HomeGuard::new();
+    crate::core::server::create(
+        r#"{"id":"lab-server","host":"192.0.2.10","user":"chubes"}"#,
+        false,
+    )
+    .expect("create server");
+    crate::core::runner::create(
+        r#"{"id":"lab-server","kind":"ssh","server_id":"lab-server","workspace_root":"/srv/homeboy"}"#,
+        false,
+    )
+    .expect("create ssh runner");
+
+    let err = crate::core::runner::exec(
+        "lab-server",
+        crate::core::runner::RunnerExecOptions {
+            cwd: Some("/srv/homeboy/project".to_string()),
+            project_id: None,
+            allow_diagnostic_ssh: false,
+            command: vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                "printf denied".to_string(),
+            ],
+            env: Default::default(),
+            capture_patch: false,
+            raw_exec: true,
+            source_snapshot: None,
+            capability_preflight: None,
+            required_extensions: Vec::new(),
+            require_paths: Vec::new(),
+        },
+    )
+    .expect_err("policy denied");
+
+    assert_eq!(err.code.as_str(), "runner.policy_denied");
+    assert_eq!(err.details["runner_id"], "lab-server");
+    assert_eq!(err.details["field"], "raw_exec");
 }
 
 fn wait_for_job(store: &JobStore, job_id: &str) -> crate::core::api_jobs::Job {

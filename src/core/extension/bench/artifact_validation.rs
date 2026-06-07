@@ -185,6 +185,7 @@ mod tests {
                             artifact_type: None,
                             kind: None,
                             label: None,
+                            observation_artifact_id: None,
                         },
                     )]),
                     diagnostics: Vec::new(),

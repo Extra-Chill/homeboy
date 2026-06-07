@@ -210,6 +210,7 @@ fn persist_patch_run(input: PatchRunInput<'_>) -> Result<()> {
             sha256: Some(format!("{:x}", Sha256::digest(&bytes))),
             size_bytes: i64::try_from(bytes.len()).ok(),
             mime: Some("text/x-diff".to_string()),
+            metadata_json: serde_json::json!({}),
             created_at: now,
         };
         if store.get_artifact(input.artifact_id)?.is_none() {

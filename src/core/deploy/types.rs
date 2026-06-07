@@ -21,6 +21,14 @@ pub struct DeployResult {
     pub success: bool,
     pub exit_code: i32,
     pub error: Option<String>,
+    pub effect: Option<DeployEffect>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct DeployEffect {
+    pub remote_path: String,
+    pub artifact_path: Option<String>,
+    pub verified: bool,
 }
 
 impl DeployResult {
@@ -29,6 +37,7 @@ impl DeployResult {
             success: true,
             exit_code,
             error: None,
+            effect: None,
         }
     }
 
@@ -37,7 +46,13 @@ impl DeployResult {
             success: false,
             exit_code,
             error: Some(error),
+            effect: None,
         }
+    }
+
+    pub(super) fn with_effect(mut self, effect: DeployEffect) -> Self {
+        self.effect = Some(effect);
+        self
     }
 }
 

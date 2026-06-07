@@ -8,6 +8,7 @@ fn bench_artifact_serializes_optional_fields_when_present() {
         artifact_type: None,
         kind: Some("json".to_string()),
         label: Some("Run 1 transcript".to_string()),
+        observation_artifact_id: None,
     };
 
     let raw = serde_json::to_string(&artifact).unwrap();
@@ -26,6 +27,7 @@ fn bench_artifact_omits_absent_optional_fields() {
         artifact_type: None,
         kind: None,
         label: None,
+        observation_artifact_id: None,
     };
 
     let raw = serde_json::to_string(&artifact).unwrap();
@@ -41,6 +43,7 @@ fn bench_artifact_serializes_url_fields_when_present() {
         artifact_type: Some("url".to_string()),
         kind: Some("admin_url".to_string()),
         label: Some("Admin".to_string()),
+        observation_artifact_id: None,
     };
 
     let raw = serde_json::to_string(&artifact).unwrap();

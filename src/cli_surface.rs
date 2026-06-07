@@ -5,8 +5,8 @@ use crate::commands::{
     agent_task, api, audit, audit_baseline, auth, bench, build, changelog, changes, ci, cleanup,
     component, config, daemon, db, deploy, deps, doctor, extension, file, fleet, git, http, issues,
     lint, logs, observe, project, refactor, refs, release, report, review, rig, runner, runs,
-    self_cmd, server, ssh, stack, status, test, trace, triage, tunnel, undo, upgrade, version,
-    worktree,
+    runtime, self_cmd, server, ssh, stack, status, test, trace, triage, tunnel, undo, upgrade,
+    version, worktree,
 };
 
 mod lab_contract;
@@ -39,6 +39,10 @@ pub struct Cli {
     /// Route commands with portable Lab offload support to a connected runner.
     #[arg(long, global = true, value_name = "RUNNER_ID")]
     pub runner: Option<String>,
+
+    /// Permit a selected Lab runner to fall back to local execution after offload preflight fails.
+    #[arg(long, global = true)]
+    pub allow_local_fallback: bool,
 
     #[command(subcommand)]
     pub command: Commands,
@@ -128,6 +132,8 @@ pub enum Commands {
     Rig(rig::RigArgs),
     /// Manage local and SSH execution runners
     Runner(runner::RunnerArgs),
+    /// Inspect core-owned runtime helper assets
+    Runtime(runtime::RuntimeArgs),
     /// Manage component-backed task worktrees
     Worktree(worktree::WorktreeArgs),
     /// Manage private service tunnel declarations
@@ -359,6 +365,7 @@ impl Commands {
             | Commands::Release(_)
             | Commands::Report(_)
             | Commands::Runner(_)
+            | Commands::Runtime(_)
             | Commands::Worktree(_)
             | Commands::Tunnel(_)
             | Commands::Stack(_)
@@ -1084,6 +1091,16 @@ mod tests {
         let cli = parsed_cli(&["homeboy", "lint", "--runner", "lab-a"]);
         assert_eq!(cli.runner.as_deref(), Some("lab-a"));
         assert!(cli.command.supports_lab_runner());
+
+        let cli = parsed_cli(&[
+            "homeboy",
+            "trace",
+            "--runner",
+            "homeboy-lab",
+            "--allow-local-fallback",
+        ]);
+        assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
+        assert!(cli.allow_local_fallback);
     }
 
     #[test]
@@ -1130,11 +1147,13 @@ mod tests {
             .expect("trace contract");
         assert_eq!(trace.extra_required_tools, LAB_TRACE_EXTRA_TOOLS);
         assert!(!trace.requires_extension_parity);
+        assert!(!trace.infer_source_path_tools);
 
         let lint = parsed_command(&["homeboy", "lint"])
             .lab_contract()
             .expect("lint contract");
         assert!(lint.requires_extension_parity);
+        assert!(lint.infer_source_path_tools);
 
         let rig = parsed_command(&["homeboy", "rig", "up", "studio"])
             .lab_contract()

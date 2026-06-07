@@ -38,6 +38,7 @@ pub struct LabOffloadRequest<'a> {
     pub normalized_args: &'a [String],
     pub explicit_runner: Option<&'a str>,
     pub force_hot: bool,
+    pub allow_local_fallback: bool,
     pub capture_patch: bool,
 }
 
@@ -50,6 +51,7 @@ pub struct LabOffloadCommand {
     pub requires_extension_parity: bool,
     pub required_extensions: Vec<String>,
     pub requires_playwright: bool,
+    pub infer_source_path_tools: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -182,6 +184,17 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
                 .skip_reason(reason.clone())
                 .build(),
             );
+            if !request.allow_local_fallback {
+                return Err(selected_runner_fallback_error(
+                    &selection,
+                    "Lab offload selected a runner but could not prepare it for remote execution",
+                    &reason,
+                    vec![format!(
+                        "Reconnect runner `{}` before retrying Lab offload.",
+                        selection.runner_id
+                    )],
+                ));
+            }
             return Ok(LabOffloadOutcome::RunLocal {
                 metadata: Some(lab_offload_metadata(
                     &plan,
@@ -324,12 +337,14 @@ fn run_lab_offload_inner(
                         .skip_reason(reason.clone())
                         .build(),
                     );
-                    return Ok(automatic_capability_fallback(
+                    return automatic_capability_fallback_or_error(
                         plan,
-                        runner_id,
+                        &selection,
                         &runner_status,
                         reason,
-                    ));
+                        remediation,
+                        request.allow_local_fallback,
+                    );
                 }
                 LabRunnerSelectionSource::Explicit => {
                     return Err(Error::validation_invalid_argument(
@@ -431,6 +446,8 @@ fn run_lab_offload_inner(
     let synced_rig_dependencies = rig_materialization::sync_lab_offload_rig_component_dependencies(
         runner_id,
         &changed_since_preflight.args,
+        &synced.local_path,
+        &remote_cwd,
     )?;
     if !synced_rig_dependencies.is_empty() {
         for dependency in &synced_rig_dependencies {
@@ -500,6 +517,7 @@ fn run_lab_offload_inner(
             source_snapshot: Some(source_snapshot),
             capability_preflight,
             required_extensions: contract.required_extensions,
+            require_paths: Vec::new(),
         },
     );
     let (exec_output, exit_code) = match exec_result {
@@ -513,20 +531,35 @@ fn run_lab_offload_inner(
                         .build(),
                 );
                 return match selection.source {
-                    LabRunnerSelectionSource::Default => Ok(LabOffloadOutcome::RunLocal {
-                        metadata: Some(lab_offload_metadata_with_workspace_mapping(
-                            &plan,
-                            selection.source.metadata_value(),
-                            Some(runner_id),
-                            Some(status_tunnel_mode(&runner_status).metadata_value()),
-                            "fallback",
-                            Some(&remote_cwd),
-                            Some(&reason),
-                            Some(&workspace_mapping_metadata),
-                        )),
-                        plan,
-                        messages: vec![format!("Lab offload: {reason}; running locally.")],
-                    }),
+                    LabRunnerSelectionSource::Default => {
+                        if !request.allow_local_fallback {
+                            Err(selected_runner_fallback_error(
+                                &selection,
+                                "Lab offload selected a runner but its daemon did not respond",
+                                &reason,
+                                vec![format!(
+                                    "Reconnect runner `{runner_id}` before retrying Lab offload."
+                                )],
+                            ))
+                        } else {
+                            Ok(LabOffloadOutcome::RunLocal {
+                                metadata: Some(lab_offload_metadata_with_workspace_mapping(
+                                    &plan,
+                                    selection.source.metadata_value(),
+                                    Some(runner_id),
+                                    Some(status_tunnel_mode(&runner_status).metadata_value()),
+                                    "fallback",
+                                    Some(&remote_cwd),
+                                    Some(&reason),
+                                    Some(&workspace_mapping_metadata),
+                                )),
+                                plan,
+                                messages: vec![format!(
+                                    "Lab offload: {reason}; running locally."
+                                )],
+                            })
+                        }
+                    }
                     LabRunnerSelectionSource::Explicit => Err(Error::validation_invalid_argument(
                         "runner",
                         format!(
@@ -613,6 +646,51 @@ fn automatic_capability_fallback(
     }
 }
 
+fn automatic_capability_fallback_or_error(
+    plan: HomeboyPlan,
+    selection: &LabRunnerSelection,
+    runner_status: &RunnerStatusReport,
+    reason: String,
+    remediation: Vec<String>,
+    allow_local_fallback: bool,
+) -> Result<LabOffloadOutcome> {
+    if !allow_local_fallback {
+        return Err(selected_runner_fallback_error(
+            selection,
+            "Lab offload selected a runner that is missing required capability parity",
+            &reason,
+            remediation,
+        ));
+    }
+
+    Ok(automatic_capability_fallback(
+        plan,
+        &selection.runner_id,
+        runner_status,
+        reason,
+    ))
+}
+
+fn selected_runner_fallback_error(
+    selection: &LabRunnerSelection,
+    message: &str,
+    reason: &str,
+    mut remediation: Vec<String>,
+) -> Error {
+    remediation.push(
+        "Pass --allow-local-fallback only when local execution is intentional and safe for this controller."
+            .to_string(),
+    );
+    remediation.push("Use --force-hot to bypass Lab offload selection entirely.".to_string());
+
+    Error::validation_invalid_argument(
+        "runner",
+        format!("{message}: {reason}"),
+        Some(selection.runner_id.clone()),
+        Some(remediation),
+    )
+}
+
 fn mutation_return_unavailable_outcome(
     plan: HomeboyPlan,
     selection: &LabRunnerSelection,
@@ -666,6 +744,7 @@ mod tests {
             requires_extension_parity: true,
             required_extensions: Vec::new(),
             requires_playwright: false,
+            infer_source_path_tools: true,
         }
     }
 
@@ -678,6 +757,7 @@ mod tests {
             requires_extension_parity: false,
             required_extensions: Vec::new(),
             requires_playwright: false,
+            infer_source_path_tools: false,
         }
     }
 
@@ -717,6 +797,53 @@ mod tests {
         .expect("capability contract");
 
         assert!(contract.required_tools.contains(&RunnerRequiredTool::Cargo));
+    }
+
+    #[test]
+    fn full_workspace_lab_contract_infers_source_path_tools() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(dir.path().join("package.json"), "{}").expect("package signal");
+        std::fs::write(dir.path().join("docker-compose.yml"), "services: {}")
+            .expect("docker signal");
+
+        let contract = lab_runner_capability_contract(
+            &portable_lab_command("test"),
+            dir.path(),
+            &[RunnerRequiredTool::Homeboy],
+        )
+        .expect("capability contract");
+
+        assert!(contract
+            .required_tools
+            .contains(&RunnerRequiredTool::Homeboy));
+        assert!(contract.required_tools.contains(&RunnerRequiredTool::Node));
+        assert!(contract.required_tools.contains(&RunnerRequiredTool::Npm));
+        assert!(contract
+            .required_tools
+            .contains(&RunnerRequiredTool::Docker));
+    }
+
+    #[test]
+    fn workload_scoped_lab_contract_ignores_source_path_docker_signal() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(dir.path().join("package.json"), "{}").expect("package signal");
+        std::fs::write(dir.path().join("docker-compose.yml"), "services: {}")
+            .expect("docker signal");
+        let mut command = portable_lab_command("trace");
+        command.infer_source_path_tools = false;
+
+        let contract =
+            lab_runner_capability_contract(&command, dir.path(), &[RunnerRequiredTool::Homeboy])
+                .expect("capability contract");
+
+        assert!(contract
+            .required_tools
+            .contains(&RunnerRequiredTool::Homeboy));
+        assert!(!contract.required_tools.contains(&RunnerRequiredTool::Node));
+        assert!(!contract.required_tools.contains(&RunnerRequiredTool::Npm));
+        assert!(!contract
+            .required_tools
+            .contains(&RunnerRequiredTool::Docker));
     }
 
     #[test]
@@ -912,12 +1039,77 @@ mod tests {
     }
 
     #[test]
+    fn default_runner_missing_capabilities_fails_without_local_fallback_opt_in() {
+        let plan = base_lab_plan(Some(&portable_lab_command("trace")));
+        let selection = LabRunnerSelection {
+            runner_id: "homeboy-lab".to_string(),
+            source: LabRunnerSelectionSource::Default,
+            mode: RunnerTunnelMode::Reverse,
+        };
+        let status = reverse_status("homeboy-lab");
+
+        let result = automatic_capability_fallback_or_error(
+            plan,
+            &selection,
+            &status,
+            "Runner 'homeboy-lab' is missing required capability parity for `trace`: tools: playwright."
+                .to_string(),
+            vec!["Install Playwright and browser binaries on the runner.".to_string()],
+            false,
+        );
+
+        let Err(err) = result else {
+            panic!("expected selected default runner to fail fast");
+        };
+        assert_eq!(err.code.as_str(), "validation.invalid_argument");
+        assert!(err.message.contains("missing required capability parity"));
+        assert!(err.message.contains("playwright"));
+        assert_eq!(err.details["id"], "homeboy-lab");
+        let tried = err.details["tried"].as_array().expect("tried");
+        assert!(tried.iter().any(|hint| hint
+            .as_str()
+            .is_some_and(|hint| hint.contains("--allow-local-fallback"))));
+    }
+
+    #[test]
+    fn default_runner_missing_capabilities_can_fallback_with_explicit_opt_in() {
+        let plan = base_lab_plan(Some(&portable_lab_command("trace")));
+        let selection = LabRunnerSelection {
+            runner_id: "homeboy-lab".to_string(),
+            source: LabRunnerSelectionSource::Default,
+            mode: RunnerTunnelMode::Reverse,
+        };
+        let status = reverse_status("homeboy-lab");
+
+        let outcome = automatic_capability_fallback_or_error(
+            plan,
+            &selection,
+            &status,
+            "Runner 'homeboy-lab' is missing required capability parity for `trace`: tools: playwright."
+                .to_string(),
+            Vec::new(),
+            true,
+        )
+        .expect("explicit fallback opt-in should allow local run");
+
+        let LabOffloadOutcome::RunLocal {
+            messages, metadata, ..
+        } = outcome
+        else {
+            panic!("expected local fallback");
+        };
+        assert!(messages[0].contains("running locally"));
+        assert_eq!(metadata.expect("metadata")["status"], "fallback");
+    }
+
+    #[test]
     fn plan_records_skipped_auto_offload() {
         let outcome = execute_lab_offload(LabOffloadRequest {
             command: Some(portable_lab_command("test")),
             normalized_args: &["homeboy".to_string(), "test".to_string()],
             explicit_runner: None,
             force_hot: true,
+            allow_local_fallback: false,
             capture_patch: false,
         })
         .expect("outcome");

@@ -5,6 +5,7 @@
 //!
 //! - `${components.<id>.path}` — component path from the rig spec
 //! - `${env.<NAME>}` — process environment variable (empty if unset)
+//! - `${package.root}` — installed rig package root, when source metadata exists
 //! - `~` — home directory (via `shellexpand::tilde`)
 //!
 //! Unknown `${...}` patterns are left untouched so users get a clear
@@ -96,6 +97,9 @@ fn normalize_exclusive_resource(resource: String) -> String {
 }
 
 fn resolve_token(rig: &RigSpec, token: &str) -> Option<String> {
+    if token == "package.root" {
+        return super::install::read_source_metadata(&rig.id).map(|metadata| metadata.package_path);
+    }
     if let Some(rest) = token.strip_prefix("components.") {
         // Expect "<id>.path" — future fields can add here.
         let (id, field) = rest.split_once('.')?;
@@ -103,7 +107,11 @@ fn resolve_token(rig: &RigSpec, token: &str) -> Option<String> {
             return None;
         }
         let component = rig.components.get(id)?;
-        let expanded = shellexpand::tilde(&component.path).into_owned();
+        let expanded = expand::expand_with_tilde(&component.path, |token| match token {
+            "package.root" => resolve_token(rig, token),
+            token if token.starts_with("env.") => resolve_token(rig, token),
+            _ => None,
+        });
         return Some(expanded);
     }
     if let Some(name) = token.strip_prefix("env.") {

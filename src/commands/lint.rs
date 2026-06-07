@@ -8,7 +8,7 @@ use homeboy::core::extension::lint::{
 use homeboy::core::extension::ExtensionCapability;
 use homeboy::core::git;
 use homeboy::core::observation::{
-    finding_records_from_lint, ActiveObservation, NewRunRecord, RunStatus,
+    finding_records_from_lint, NewFindingRecord, NewRunRecord, RunStatus,
 };
 use homeboy::core::refactor::plan::{
     collect_refactor_sources, lint_refactor_request, LintSourceOptions,
@@ -18,7 +18,9 @@ use super::source_command::{resolve_ci_job_for_command, resolve_source_context};
 use super::utils::args::{
     BaselineArgs, ExtensionOverrideArgs, PositionalComponentArgs, SettingArgs,
 };
-use super::utils::observed_workflow::{finish_observed_workflow, ObservedWorkflowRunner};
+use super::utils::observed_workflow::{
+    finish_adapted_observed_workflow, ObservedWorkflowRunner, WorkflowObservationAdapter,
+};
 use super::{CmdResult, GlobalArgs};
 
 #[derive(Args)]
@@ -109,12 +111,12 @@ pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintCommandOutput>
         && args.ci_job.is_none()
         && source_ctx.component.has_script(ExtensionCapability::Lint)
     {
-        let observation = LintObservation::start(
+        let observation = LintObservationAdapter::new(
             source_ctx.component_id.clone(),
             &source_ctx.source_path,
             lint_command_label(&source_ctx.component_id, &args),
         );
-        let workflow = finish_lint_workflow(
+        let workflow = finish_adapted_observed_workflow(
             observation,
             run_self_check_lint_workflow(
                 &source_ctx.component,
@@ -136,18 +138,18 @@ pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintCommandOutput>
     let effective_id = ctx.component_id.clone();
     let ci_job = resolve_ci_job_for_command(args.ci_job.as_deref(), &ctx.component, "lint")?;
 
-    let stringified_settings = ctx.resolved_settings().string_lossy_overrides();
+    let typed_settings = ctx.resolved_settings().typed_overrides();
 
     // --fix dispatches to the canonical refactor sources pipeline.
     // The fixer pipeline already exists; this flag connects the existing wire
     // so users don't have to re-type `homeboy refactor <component> --from lint
     // --write` to resolve the auto-fix CTA.
     if args.fix {
-        return run_fix(args, &ctx, effective_id, stringified_settings);
+        return run_fix(args, &ctx, effective_id, typed_settings);
     }
 
     let runner = ObservedWorkflowRunner::create(format!("lint {}", effective_id))?;
-    let observation = LintObservation::start(
+    let observation = LintObservationAdapter::new(
         ctx.component_id.clone(),
         &ctx.source_path,
         lint_command_label(&effective_id, &args),
@@ -160,7 +162,7 @@ pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintCommandOutput>
             component_label: effective_id.clone(),
             component_id: ctx.component_id.clone(),
             path_override: args.comp.path.clone(),
-            settings: stringified_settings,
+            settings: typed_settings,
             summary: args.summary,
             file: args.file.clone(),
             glob: args.glob.clone(),
@@ -180,12 +182,7 @@ pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintCommandOutput>
         },
         runner.run_dir(),
     );
-    let workflow = runner.finish(
-        observation,
-        workflow,
-        |observation, workflow| observation.finish_workflow(workflow),
-        |observation, _error| observation.finish_error(),
-    )?;
+    let workflow = runner.finish_adapted(observation, workflow)?;
 
     Ok(report::from_main_workflow_with_ci_context(
         workflow,
@@ -193,57 +190,67 @@ pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintCommandOutput>
     ))
 }
 
-fn finish_lint_workflow(
-    observation: Option<LintObservation>,
-    workflow: homeboy::core::Result<homeboy::core::extension::lint::LintRunWorkflowResult>,
-) -> homeboy::core::Result<homeboy::core::extension::lint::LintRunWorkflowResult> {
-    finish_observed_workflow(
-        observation,
-        workflow,
-        |observation, workflow| observation.finish_workflow(workflow),
-        |observation, _error| observation.finish_error(),
-    )
+struct LintObservationAdapter {
+    component_id: String,
+    source_path: std::path::PathBuf,
+    command: String,
 }
 
-struct LintObservation(ActiveObservation);
+impl LintObservationAdapter {
+    fn new(component_id: String, source_path: &std::path::Path, command: String) -> Self {
+        Self {
+            component_id,
+            source_path: source_path.to_path_buf(),
+            command,
+        }
+    }
+}
 
-impl LintObservation {
-    fn start(component_id: String, source_path: &std::path::Path, command: String) -> Option<Self> {
-        ActiveObservation::start_best_effort(
-            NewRunRecord::builder("lint")
-                .component_id(component_id)
-                .command(command)
-                .cwd_path(source_path)
-                .current_homeboy_version()
-                .metadata(serde_json::json!({ "source": "homeboy lint" }))
-                .build(),
-        )
-        .map(Self)
+impl WorkflowObservationAdapter<homeboy::core::extension::lint::LintRunWorkflowResult>
+    for LintObservationAdapter
+{
+    fn start_record(&self) -> NewRunRecord {
+        NewRunRecord::builder("lint")
+            .component_id(self.component_id.clone())
+            .command(self.command.clone())
+            .cwd_path(&self.source_path)
+            .current_homeboy_version()
+            .metadata(serde_json::json!({ "source": "homeboy lint" }))
+            .build()
     }
 
-    fn finish_workflow(self, workflow: &homeboy::core::extension::lint::LintRunWorkflowResult) {
-        if let Some(findings) = &workflow.findings {
-            let records = finding_records_from_lint(self.0.run_id(), findings);
-            self.0.record_findings(&records);
-        }
-
-        let status = if workflow.status == "passed" {
+    fn success_status(
+        &self,
+        workflow: &homeboy::core::extension::lint::LintRunWorkflowResult,
+    ) -> RunStatus {
+        if workflow.status == "passed" {
             RunStatus::Pass
         } else {
             RunStatus::Fail
-        };
-        self.0.finish(
-            status,
-            Some(serde_json::json!({
-                "exit_code": workflow.exit_code,
-                "finding_count": workflow.findings.as_ref().map(Vec::len).unwrap_or(0),
-                "producer_summaries": workflow.producer_summaries,
-            })),
-        );
+        }
     }
 
-    fn finish_error(self) {
-        self.0.finish_error(None);
+    fn success_metadata(
+        &self,
+        workflow: &homeboy::core::extension::lint::LintRunWorkflowResult,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "exit_code": workflow.exit_code,
+            "finding_count": workflow.findings.as_ref().map(Vec::len).unwrap_or(0),
+            "producer_summaries": workflow.producer_summaries,
+        })
+    }
+
+    fn success_findings(
+        &self,
+        run_id: &str,
+        workflow: &homeboy::core::extension::lint::LintRunWorkflowResult,
+    ) -> Vec<NewFindingRecord> {
+        workflow
+            .findings
+            .as_ref()
+            .map(|findings| finding_records_from_lint(run_id, findings))
+            .unwrap_or_default()
     }
 }
 
@@ -292,7 +299,7 @@ fn run_fix(
     args: LintArgs,
     ctx: &homeboy::core::engine::execution_context::ExecutionContext,
     component_label: String,
-    settings: Vec<(String, String)>,
+    settings: Vec<(String, serde_json::Value)>,
 ) -> CmdResult<LintCommandOutput> {
     let selected_files = if args.changed_only {
         let changes = git::get_uncommitted_changes(&ctx.component.local_path)?;
@@ -318,7 +325,7 @@ fn run_fix(
     let mut request = lint_refactor_request(
         ctx.component.clone(),
         ctx.source_path.clone(),
-        settings,
+        settings_to_legacy_strings(settings),
         lint_options,
         true,
     );
@@ -328,6 +335,19 @@ fn run_fix(
     let run = collect_refactor_sources(request)?;
 
     Ok(report::from_lint_fix(component_label, run))
+}
+
+fn settings_to_legacy_strings(settings: Vec<(String, serde_json::Value)>) -> Vec<(String, String)> {
+    settings
+        .into_iter()
+        .map(|(key, value)| {
+            let value = match value {
+                serde_json::Value::String(value) => value,
+                value => value.to_string(),
+            };
+            (key, value)
+        })
+        .collect()
 }
 
 #[cfg(test)]

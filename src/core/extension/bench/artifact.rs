@@ -15,6 +15,8 @@ pub struct BenchArtifact {
     pub kind: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation_artifact_id: Option<String>,
 }
 
 #[cfg(test)]

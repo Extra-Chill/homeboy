@@ -24,7 +24,7 @@ pub fn resolve_lint_command(
 pub fn build_lint_runner(
     component: &Component,
     path_override: Option<String>,
-    settings: &[(String, String)],
+    settings: &[(String, serde_json::Value)],
     summary: bool,
     file: Option<&str>,
     glob: Option<&str>,
@@ -36,11 +36,13 @@ pub fn build_lint_runner(
     run_dir: &RunDir,
 ) -> crate::core::Result<ExtensionRunner> {
     let resolved = resolve_lint_command(component)?;
+    let (string_settings, json_settings) = split_lint_settings(settings);
 
     Ok(ExtensionRunner::for_context(resolved)
         .component(component.clone())
         .path_override(path_override)
-        .settings(settings)
+        .settings(&string_settings)
+        .settings_json(&json_settings)
         .with_run_dir(run_dir)
         .env_if(summary, "HOMEBOY_SUMMARY_MODE", "1")
         .env_opt("HOMEBOY_LINT_FILE", &file.map(str::to_string))
@@ -53,4 +55,69 @@ pub fn build_lint_runner(
             &exclude_sniffs.map(str::to_string),
         )
         .env_opt("HOMEBOY_CATEGORY", &category.map(str::to_string)))
+}
+
+fn split_lint_settings(
+    settings: &[(String, serde_json::Value)],
+) -> (Vec<(String, String)>, Vec<(String, serde_json::Value)>) {
+    settings
+        .iter()
+        .cloned()
+        .fold((Vec::new(), Vec::new()), |mut split, (key, value)| {
+            match value {
+                serde_json::Value::String(value) => split.0.push((key, value)),
+                value => split.1.push((key, value)),
+            }
+            split
+        })
+}
+
+pub(crate) fn settings_from_legacy_strings(
+    settings: &[(String, String)],
+) -> Vec<(String, serde_json::Value)> {
+    settings
+        .iter()
+        .map(|(key, value)| (key.clone(), serde_json::Value::String(value.clone())))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn split_lint_settings_preserves_typed_json_values() {
+        let settings = vec![
+            (
+                "severity".to_string(),
+                serde_json::Value::String("strict".to_string()),
+            ),
+            ("rules".to_string(), json!({ "security": true })),
+        ];
+
+        let (string_settings, json_settings) = split_lint_settings(&settings);
+
+        assert_eq!(
+            string_settings,
+            vec![("severity".to_string(), "strict".to_string())]
+        );
+        assert_eq!(
+            json_settings,
+            vec![("rules".to_string(), json!({ "security": true }))]
+        );
+    }
+
+    #[test]
+    fn legacy_lint_settings_are_explicitly_wrapped_as_strings() {
+        let settings = settings_from_legacy_strings(&[("mode".to_string(), "strict".to_string())]);
+
+        assert_eq!(
+            settings,
+            vec![(
+                "mode".to_string(),
+                serde_json::Value::String("strict".to_string()),
+            ),]
+        );
+    }
 }

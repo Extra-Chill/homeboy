@@ -1,7 +1,7 @@
 //! Remote execution preflight detector.
 //!
-//! Flags remote runner dispatch sites that can hand local paths or artifacts to
-//! a runner without an explicit translation/mirror contract.
+//! Flags remote execution dispatch sites that can hand local paths or artifacts
+//! to a remote runtime without an explicit translation/mirror contract.
 
 use super::conventions::AuditFinding;
 use super::findings::{Finding, Severity};
@@ -25,15 +25,17 @@ pub(in crate::core::code_audit) fn run(
         if forwards_args_without_path_preflight(&fp.content, &policy) {
             findings.push(finding(
                 fp,
-                "Remote runner dispatch builds command argv from caller args without an explicit path-translation preflight.",
-                "Route argv through a rewrite/preflight function that strips local-only wrapper flags and translates or rejects local filesystem paths before runner dispatch.",
+                policy.convention,
+                "Remote execution dispatch builds command argv from caller args without an explicit path-translation preflight.",
+                "Route argv through a rewrite/preflight function that strips local-only wrapper flags and translates or rejects local filesystem paths before remote dispatch.",
             ));
         }
 
         if captures_artifacts_without_snapshot(&fp.content, &policy) {
             findings.push(finding(
                 fp,
-                "Remote runner dispatch can request artifact capture without a source snapshot or mirror contract.",
+                policy.convention,
+                "Remote execution dispatch can request artifact capture without a source snapshot or mirror contract.",
                 "Attach a source snapshot or equivalent mirror verification contract before reporting remote artifacts as run evidence.",
             ));
         }
@@ -41,24 +43,27 @@ pub(in crate::core::code_audit) fn run(
         if dispatches_without_capability_preflight(&fp.content, &policy) {
             findings.push(finding(
                 fp,
-                "Remote runner dispatch starts execution without validating runner capability parity first.",
-                "Check runner capabilities before dispatch so missing tools, components, or environment requirements fail before remote execution starts.",
+                policy.convention,
+                "Remote execution dispatch starts execution without validating remote capability parity first.",
+                "Check remote capabilities before dispatch so missing tools, components, or environment requirements fail before remote execution starts.",
             ));
         }
 
         if dispatches_extension_without_parity_preflight(&fp.content, &policy) {
             findings.push(finding(
                 fp,
-                "Remote runner dispatch accepts an extension selector without validating runner extension parity before execution.",
-                "Add a pre-dispatch extension parity check so missing runner-side extension support fails before command execution.",
+                policy.convention,
+                "Remote execution dispatch accepts an extension selector without validating remote extension parity before execution.",
+                "Add a pre-dispatch extension parity check so missing remote extension support fails before command execution.",
             ));
         }
 
         if reports_remote_artifact_without_access_check(&fp.content, &policy) {
             findings.push(finding(
                 fp,
-                "Remote runner artifact reporting does not prove the reported artifact path is locally accessible or retrievable.",
-                "Verify mirrored artifact paths with local metadata or a retrievable runner-artifact token before exposing them as run evidence.",
+                policy.convention,
+                "Remote execution artifact reporting does not prove the reported artifact path is locally accessible or retrievable.",
+                "Verify mirrored artifact paths with local metadata or a configured retrievable artifact token before exposing them as run evidence.",
             ));
         }
     }
@@ -69,8 +74,10 @@ pub(in crate::core::code_audit) fn run(
 }
 
 struct RemoteExecutionSafetyPolicy<'a> {
+    convention: &'a str,
     dispatch_markers: Vec<&'a str>,
     path_translation_markers: Vec<&'a str>,
+    argument_forward_markers: Vec<&'a str>,
     capability_preflight_markers: Vec<&'a str>,
     artifact_capture_markers: Vec<&'a str>,
     artifact_snapshot_markers: Vec<&'a str>,
@@ -83,8 +90,10 @@ struct RemoteExecutionSafetyPolicy<'a> {
 impl<'a> RemoteExecutionSafetyPolicy<'a> {
     fn new(config: &'a RemoteExecutionSafetyConfig) -> Self {
         Self {
+            convention: config.convention.as_str(),
             dispatch_markers: configured(&config.dispatch_markers),
             path_translation_markers: configured(&config.path_translation_markers),
+            argument_forward_markers: configured(&config.argument_forward_markers),
             capability_preflight_markers: configured(&config.capability_preflight_markers),
             artifact_capture_markers: configured(&config.artifact_capture_markers),
             artifact_snapshot_markers: configured(&config.artifact_snapshot_markers),
@@ -109,15 +118,7 @@ fn forwards_args_without_path_preflight(
     content: &str,
     policy: &RemoteExecutionSafetyPolicy,
 ) -> bool {
-    let forwards_caller_args = contains_any(
-        content,
-        &[
-            "normalized_args",
-            "std::env::args",
-            "args.iter()",
-            "command.extend(args",
-        ],
-    );
+    let forwards_caller_args = contains_any(content, &policy.argument_forward_markers);
     let has_path_preflight = contains_any(content, &policy.path_translation_markers);
 
     forwards_caller_args && !has_path_preflight
@@ -165,14 +166,14 @@ fn contains_any(value: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| value.contains(needle))
 }
 
-fn finding(fp: &FileFingerprint, description: &str, suggestion: &str) -> Finding {
+fn finding(fp: &FileFingerprint, convention: &str, description: &str, suggestion: &str) -> Finding {
     Finding {
-        convention: "runner_offload_preflight".to_string(),
+        convention: convention.to_string(),
         severity: Severity::Warning,
         file: fp.relative_path.clone(),
         description: description.to_string(),
         suggestion: suggestion.to_string(),
-        kind: AuditFinding::RunnerOffloadPreflight,
+        kind: AuditFinding::RemoteExecutionPreflight,
     }
 }
 
@@ -192,8 +193,13 @@ mod tests {
 
     fn policy_config() -> RemoteExecutionSafetyConfig {
         RemoteExecutionSafetyConfig {
+            convention: "homeboy_runner_preflight".to_string(),
             dispatch_markers: vec!["runner::exec".to_string(), "RunnerExecOptions".to_string()],
             path_translation_markers: vec!["rewrite_component_remote_args".to_string()],
+            argument_forward_markers: vec![
+                "args.iter()".to_string(),
+                "normalized_args".to_string(),
+            ],
             capability_preflight_markers: vec![
                 "component_runner_capability_plan".to_string(),
                 "evaluate_component_runner_capabilities".to_string(),
@@ -223,11 +229,43 @@ mod tests {
         let findings = run(&[&fp], &policy_config());
 
         assert!(findings.iter().any(|finding| {
-            finding.kind == AuditFinding::RunnerOffloadPreflight
+            finding.kind == AuditFinding::RemoteExecutionPreflight
                 && finding
                     .suggestion
                     .contains("strips local-only wrapper flags")
         }));
+    }
+
+    #[test]
+    fn uses_configured_marker_and_convention_names() {
+        let config = RemoteExecutionSafetyConfig {
+            convention: "product_remote_contract".to_string(),
+            dispatch_markers: vec!["remote_contract::dispatch".to_string()],
+            path_translation_markers: vec!["translate_product_paths".to_string()],
+            argument_forward_markers: vec!["forwarded_inputs.iter()".to_string()],
+            capability_preflight_markers: vec!["check_product_capabilities".to_string()],
+            ..Default::default()
+        };
+        let fp = fingerprint(
+            "src/main.rs",
+            r#"
+            fn run(forwarded_inputs: &[String]) {
+                let mut command = vec!["tool".to_string()];
+                command.extend(forwarded_inputs.iter().cloned());
+                remote_contract::dispatch(command);
+            }
+            "#,
+        );
+
+        let findings = run(&[&fp], &config);
+
+        assert_eq!(findings.len(), 2);
+        assert!(findings
+            .iter()
+            .all(|finding| finding.convention == "product_remote_contract"));
+        assert!(findings
+            .iter()
+            .all(|finding| finding.kind == AuditFinding::RemoteExecutionPreflight));
     }
 
     #[test]

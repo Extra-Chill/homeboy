@@ -1,4 +1,4 @@
-use crate::core::engine::run_dir;
+use crate::core::{engine::run_dir, structured_sidecar};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -14,7 +14,8 @@ impl StructuredSidecarContract {
             StructuredSidecarContract::Enabled(true) => Some(StructuredSidecarDeclaration {
                 name: name.to_string(),
                 path: default_structured_sidecar_path(name),
-                schema_version: None,
+                schema_version: structured_sidecar::default_schema_version(name)
+                    .map(str::to_string),
                 producer: default_structured_sidecar_producer(name),
             }),
             StructuredSidecarContract::Enabled(false) => None,
@@ -58,6 +59,10 @@ fn default_true() -> bool {
 }
 
 fn default_structured_sidecar_path(name: &str) -> String {
+    if let Some(path) = structured_sidecar::default_path(name) {
+        return path.to_string();
+    }
+
     match name {
         "lint.findings" => run_dir::files::LINT_FINDINGS,
         "lint.producers" => run_dir::files::LINT_PRODUCERS,
@@ -77,6 +82,10 @@ fn default_structured_sidecar_path(name: &str) -> String {
 }
 
 fn default_structured_sidecar_producer(name: &str) -> Option<String> {
+    if let Some(producer) = structured_sidecar::default_producer(name) {
+        return Some(producer.to_string());
+    }
+
     match name {
         "lint.findings" | "lint.producers" => Some("lint"),
         "test.results" | "test.failures" | "test.coverage" => Some("test"),

@@ -55,7 +55,7 @@ use self::detectors::{
     artifact_portability, command_status_contracts, config_key_usage, core_boundary_leak,
     dead_guard, deprecation_age, enum_dispatch_contracts, field_patterns, global_env_guard,
     mutating_resource_access, parallel_runner_setup, public_registry_exposure, redirect_validation,
-    requested_detectors, runner_offload_preflight, source_policy, test_coverage,
+    remote_execution_preflight, requested_detectors, source_policy, test_coverage,
     unbounded_output_capture, wrapper_inference,
 };
 use descriptor_runtime::{run_descriptor_detectors, DetectorRunContext};
@@ -166,9 +166,15 @@ fn time_audit_detector<T>(
     skipped: impl FnOnce() -> T,
 ) -> T {
     if enabled {
+        eprintln!("[audit] Running {id}...");
         let started = std::time::Instant::now();
         let value = run();
-        timing.push_ok(id, started.elapsed());
+        let elapsed = started.elapsed();
+        eprintln!(
+            "[audit] Completed {id} in {:.0}ms",
+            elapsed.as_secs_f64() * 1000.0
+        );
+        timing.push_ok(id, elapsed);
         value
     } else {
         timing.push_skipped(id);
@@ -1066,22 +1072,27 @@ fn audit_internal(
         all_findings.extend(parallel_runner_findings);
     }
 
-    // Phase 4w1: Runner/offload preflight detection — remote dispatch sites
-    // that do not prove path/artifact parity before runner execution.
-    let runner_offload_findings = time_audit_detector(
+    // Phase 4w1: Remote execution preflight detection — remote dispatch sites
+    // that do not prove path/artifact parity before remote execution.
+    let remote_execution_findings = time_audit_detector(
         &mut timing,
-        "detector.runner_offload_preflight",
-        plan.run_runner_offload_preflight(),
-        || runner_offload_preflight::run(&all_fingerprints, &audit_config.remote_execution_safety),
+        "detector.remote_execution_preflight",
+        plan.run_remote_execution_preflight(),
+        || {
+            remote_execution_preflight::run(
+                &all_fingerprints,
+                &audit_config.remote_execution_safety,
+            )
+        },
         Vec::new,
     );
-    if !runner_offload_findings.is_empty() {
+    if !remote_execution_findings.is_empty() {
         log_status!(
             "audit",
-            "Runner offload preflight: {} finding(s) (remote path/artifact parity gaps)",
-            runner_offload_findings.len()
+            "Remote execution preflight: {} finding(s) (remote path/artifact parity gaps)",
+            remote_execution_findings.len()
         );
-        all_findings.extend(runner_offload_findings);
+        all_findings.extend(remote_execution_findings);
     }
 
     // Phase 4w: Repeated enum-dispatch contract detection.

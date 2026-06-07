@@ -12,17 +12,15 @@ use crate::core::error::{Error, Result};
 use crate::core::runner::{quote_runner_env_value, remote_shell_path_preamble};
 use chrono::Utc;
 
+use super::process_cleanup::{
+    active_cleanup_signal, configure_process_group_cleanup, interrupted_exit_code,
+    stderr_with_interruption, ProcessGroupCleanupGuard,
+};
 use super::{
     session::ensure_control_path_parent, ManagedSshSession, ManagedSshSessionOutput, Server,
     ServerAuthMode, ServerSessionConfig,
 };
 use std::process::{Command, Stdio};
-
-#[cfg(unix)]
-static ACTIVE_CLEANUP_PGID: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
-
-#[cfg(unix)]
-static CLEANUP_SIGNALS_INSTALLED: std::sync::Once = std::sync::Once::new();
 
 pub struct SshClient {
     pub host: String,
@@ -519,19 +517,24 @@ fn execute_local_command_in_dir_impl(
         invocation_child_guard(env, child.id(), cleanup_guard.pgid(), command);
     let monitor = ChildResourceMonitor::start(child.id(), command.to_string());
 
-    let output = match child.wait_with_output() {
+    let waited_output = child.wait_with_output();
+    let interrupted_signal = active_cleanup_signal();
+    let output = match waited_output {
         Ok(out) => CommandOutput {
             stdout: String::from_utf8_lossy(&out.stdout).to_string(),
-            stderr: String::from_utf8_lossy(&out.stderr).to_string(),
-            success: out.status.success(),
-            exit_code: out.status.code().unwrap_or(-1),
+            stderr: stderr_with_interruption(
+                String::from_utf8_lossy(&out.stderr).to_string(),
+                interrupted_signal,
+            ),
+            success: out.status.success() && interrupted_signal.is_none(),
+            exit_code: interrupted_exit_code(interrupted_signal, out.status.code().unwrap_or(-1)),
             child_resource: Some(monitor.finish()),
         },
         Err(e) => CommandOutput {
             stdout: String::new(),
-            stderr: format!("Command error: {}", e),
+            stderr: stderr_with_interruption(format!("Command error: {}", e), interrupted_signal),
             success: false,
-            exit_code: -1,
+            exit_code: interrupted_exit_code(interrupted_signal, -1),
             child_resource: Some(monitor.finish()),
         },
     };
@@ -679,6 +682,7 @@ fn execute_local_command_passthrough_impl(
         .map(|pipe| thread::spawn(move || tee_to(pipe, std::io::stderr())));
 
     let status = child.wait();
+    let interrupted_signal = active_cleanup_signal();
 
     let stdout = stdout_handle
         .and_then(|h| h.join().ok())
@@ -690,16 +694,19 @@ fn execute_local_command_passthrough_impl(
     let output = match status {
         Ok(status) => CommandOutput {
             stdout,
-            stderr,
-            success: status.success(),
-            exit_code: status.code().unwrap_or(-1),
+            stderr: stderr_with_interruption(stderr, interrupted_signal),
+            success: status.success() && interrupted_signal.is_none(),
+            exit_code: interrupted_exit_code(interrupted_signal, status.code().unwrap_or(-1)),
             child_resource: Some(monitor.finish()),
         },
         Err(e) => CommandOutput {
             stdout,
-            stderr: format!("{stderr}\nCommand error: {}", e),
+            stderr: stderr_with_interruption(
+                format!("{stderr}\nCommand error: {}", e),
+                interrupted_signal,
+            ),
             success: false,
-            exit_code: -1,
+            exit_code: interrupted_exit_code(interrupted_signal, -1),
             child_resource: Some(monitor.finish()),
         },
     };
@@ -799,6 +806,7 @@ pub(crate) fn execute_local_command_stderr_passthrough(
         .map(|pipe| thread::spawn(move || tee_to_stderr(pipe)));
 
     let status = child.wait();
+    let interrupted_signal = active_cleanup_signal();
 
     let stdout = stdout_handle
         .and_then(|h| h.join().ok())
@@ -810,84 +818,24 @@ pub(crate) fn execute_local_command_stderr_passthrough(
     let output = match status {
         Ok(status) => CommandOutput {
             stdout,
-            stderr,
-            success: status.success(),
-            exit_code: status.code().unwrap_or(-1),
+            stderr: stderr_with_interruption(stderr, interrupted_signal),
+            success: status.success() && interrupted_signal.is_none(),
+            exit_code: interrupted_exit_code(interrupted_signal, status.code().unwrap_or(-1)),
             child_resource: Some(monitor.finish()),
         },
         Err(e) => CommandOutput {
             stdout,
-            stderr: format!("{stderr}\nCommand error: {}", e),
+            stderr: stderr_with_interruption(
+                format!("{stderr}\nCommand error: {}", e),
+                interrupted_signal,
+            ),
             success: false,
-            exit_code: -1,
+            exit_code: interrupted_exit_code(interrupted_signal, -1),
             child_resource: Some(monitor.finish()),
         },
     };
     cleanup_guard.cleanup();
     output
-}
-
-#[cfg(unix)]
-fn configure_process_group_cleanup(cmd: &mut Command) {
-    install_process_cleanup_signal_handlers();
-    use std::os::unix::process::CommandExt;
-    unsafe {
-        cmd.pre_exec(|| {
-            if libc::setpgid(0, 0) == 0 {
-                Ok(())
-            } else {
-                Err(std::io::Error::last_os_error())
-            }
-        });
-    }
-}
-
-#[cfg(not(unix))]
-fn configure_process_group_cleanup(_cmd: &mut Command) {}
-
-struct ProcessGroupCleanupGuard {
-    #[cfg(unix)]
-    pgid: Option<libc::pid_t>,
-}
-
-impl ProcessGroupCleanupGuard {
-    fn new(root_pid: u32) -> Self {
-        #[cfg(unix)]
-        {
-            let pgid = Some(root_pid as libc::pid_t);
-            if let Some(pgid) = pgid {
-                ACTIVE_CLEANUP_PGID.store(pgid, Ordering::SeqCst);
-            }
-            Self { pgid }
-        }
-
-        #[cfg(not(unix))]
-        {
-            let _ = root_pid;
-            Self {}
-        }
-    }
-
-    fn cleanup(mut self) {
-        #[cfg(unix)]
-        if let Some(pgid) = self.pgid {
-            cleanup_process_group(pgid);
-            ACTIVE_CLEANUP_PGID
-                .compare_exchange(pgid, 0, Ordering::SeqCst, Ordering::SeqCst)
-                .ok();
-            self.pgid = None;
-        }
-    }
-
-    #[cfg(unix)]
-    fn pgid(&self) -> Option<i32> {
-        self.pgid.map(|pgid| pgid)
-    }
-
-    #[cfg(not(unix))]
-    fn pgid(&self) -> Option<i32> {
-        None
-    }
 }
 
 fn invocation_child_guard(
@@ -904,58 +852,6 @@ fn invocation_child_guard(
 
     invocation::register_child_process(invocation_id, root_pid, pgid, command_label.to_string())
         .ok()
-}
-
-impl Drop for ProcessGroupCleanupGuard {
-    fn drop(&mut self) {
-        #[cfg(unix)]
-        if let Some(pgid) = self.pgid.take() {
-            cleanup_process_group(pgid);
-            ACTIVE_CLEANUP_PGID
-                .compare_exchange(pgid, 0, Ordering::SeqCst, Ordering::SeqCst)
-                .ok();
-        }
-    }
-}
-
-#[cfg(unix)]
-fn install_process_cleanup_signal_handlers() {
-    CLEANUP_SIGNALS_INSTALLED.call_once(|| unsafe {
-        libc::signal(
-            libc::SIGINT,
-            cleanup_signal_handler as *const () as libc::sighandler_t,
-        );
-        libc::signal(
-            libc::SIGTERM,
-            cleanup_signal_handler as *const () as libc::sighandler_t,
-        );
-    });
-}
-
-#[cfg(unix)]
-extern "C" fn cleanup_signal_handler(signal: libc::c_int) {
-    let pgid = ACTIVE_CLEANUP_PGID.load(Ordering::SeqCst);
-    if pgid > 0 {
-        unsafe {
-            libc::kill(-pgid, libc::SIGTERM);
-        }
-    }
-    unsafe {
-        libc::_exit(128 + signal);
-    }
-}
-
-#[cfg(unix)]
-fn cleanup_process_group(pgid: libc::pid_t) {
-    unsafe {
-        libc::kill(-pgid, libc::SIGTERM);
-    }
-    std::thread::sleep(Duration::from_millis(200));
-    if crate::core::process::process_group_is_running(pgid) {
-        unsafe {
-            libc::kill(-pgid, libc::SIGKILL);
-        }
-    }
 }
 
 struct ChildResourceMonitor {

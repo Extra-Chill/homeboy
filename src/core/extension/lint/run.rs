@@ -25,7 +25,7 @@ pub struct LintRunWorkflowArgs {
     pub component_label: String,
     pub component_id: String,
     pub path_override: Option<String>,
-    pub settings: Vec<(String, String)>,
+    pub settings: Vec<(String, serde_json::Value)>,
     pub summary: bool,
     pub file: Option<String>,
     pub glob: Option<String>,
@@ -595,6 +595,7 @@ fn run_scoped_lint_runs(
         success,
         stdout: String::new(),
         stderr: String::new(),
+        child_resource: None,
     })
 }
 

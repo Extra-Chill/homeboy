@@ -265,6 +265,10 @@ enum RunnerCommand {
         #[arg(long)]
         capture_patch: bool,
 
+        /// Runner-side path that must exist before executing the command. Repeat for multiple paths.
+        #[arg(long = "require-path")]
+        require_paths: Vec<String>,
+
         /// Command and arguments to execute on the runner
         #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<String>,
@@ -426,8 +430,17 @@ pub fn run(
             project,
             ssh,
             capture_patch,
+            require_paths,
             command,
-        } => map_execution(exec(&id, cwd, project, ssh, capture_patch, command)),
+        } => map_execution(exec(
+            &id,
+            cwd,
+            project,
+            ssh,
+            capture_patch,
+            require_paths,
+            command,
+        )),
         RunnerCommand::Work {
             runner_id,
             broker_url,
@@ -752,6 +765,7 @@ fn exec(
     project_id: Option<String>,
     allow_diagnostic_ssh: bool,
     capture_patch: bool,
+    require_paths: Vec<String>,
     command: Vec<String>,
 ) -> CmdResult<RunnerExecOutput> {
     runner::exec(
@@ -767,6 +781,7 @@ fn exec(
             source_snapshot: None,
             capability_preflight: None,
             required_extensions: Vec::new(),
+            require_paths,
         },
     )
 }

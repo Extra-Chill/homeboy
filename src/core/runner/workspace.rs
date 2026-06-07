@@ -131,6 +131,12 @@ pub fn sync_workspace(
         }
         RunnerWorkspaceSyncMode::Git => {
             let git = git_snapshot(&local_path, options.changed_since_base.as_deref())?;
+            if runner.kind != RunnerKind::Local {
+                super::source_materialization::validate_runner_git_materialization(
+                    &git.remote_url,
+                    &runner.id,
+                )?;
+            }
             let remote_path = deterministic_remote_path(workspace_root, &local_path, &git.head);
             materialize_git(
                 &runner,

@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use crate::core::component::Component;
 use crate::core::engine::invocation::{InvocationGuard, InvocationRequirements};
-use crate::core::engine::resource;
+use crate::core::engine::resource::{self, ExtensionChildResourceSummary};
 use crate::core::error::{Error, Result};
 use crate::core::server::CommandOutput;
 
@@ -15,6 +15,7 @@ pub struct RunnerOutput {
     pub success: bool,
     pub stdout: String,
     pub stderr: String,
+    pub child_resource: Option<ExtensionChildResourceSummary>,
 }
 
 use super::ExtensionExecutionContext;
@@ -242,6 +243,7 @@ impl ExtensionRunner {
             success: output.success,
             stdout: output.stdout,
             stderr: output.stderr,
+            child_resource: output.child_resource,
         })
     }
 
