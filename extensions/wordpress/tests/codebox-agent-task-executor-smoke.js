@@ -393,7 +393,7 @@ try {
     task_id: 'default-openai-provider-task-123',
     executor: {
       backend: 'codebox',
-      model: 'gpt-4.1-mini',
+      model: 'gpt-5.5',
       config: {},
     },
     inputs: {
@@ -403,7 +403,7 @@ try {
     settings: {},
   });
   assert.equal(openAiDefaultedRequest.provider, 'openai');
-  assert.equal(openAiDefaultedRequest.model, 'gpt-4.1-mini');
+  assert.equal(openAiDefaultedRequest.model, 'gpt-5.5');
   assert.deepEqual(openAiDefaultedRequest.secret_env, ['OPENAI_API_KEY']);
 
   const bareOpenAiDefaultedRequest = codeboxTaskRequestFromAgentTaskRequest({
@@ -420,7 +420,7 @@ try {
     settings: {},
   });
   assert.equal(bareOpenAiDefaultedRequest.provider, 'openai');
-  assert.equal(bareOpenAiDefaultedRequest.model, 'gpt-4.1-mini');
+  assert.equal(bareOpenAiDefaultedRequest.model, '');
   assert.deepEqual(bareOpenAiDefaultedRequest.secret_env, ['OPENAI_API_KEY']);
   assert.deepEqual(bareOpenAiDefaultedRequest.allowed_tools, ['workspace_ls', 'workspace_read', 'workspace_git_status']);
   assert.equal(bareOpenAiDefaultedRequest.sandbox_tool_policy.schema, 'wp-codebox/sandbox-tool-policy/v1');
@@ -444,9 +444,9 @@ try {
       target: { root: workspaceRoot },
     },
   }, {
-    settings: { wp_codebox_model: 'gpt-4.1-mini' },
+    settings: { wp_codebox_model: 'gpt-5.5' },
   });
-  assert.equal(settingsModelRequest.model, 'gpt-4.1-mini');
+  assert.equal(settingsModelRequest.model, 'gpt-5.5');
 
   const explicitEmptyToolsRequest = codeboxTaskRequestFromAgentTaskRequest({
     ...request,

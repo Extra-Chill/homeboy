@@ -358,11 +358,11 @@ function defaultProviderForPluginPath(providerPluginPath) {
 }
 
 function defaultModelForProvider(provider, settings) {
-  const explicit = settings.wp_codebox_model || settings.model || process.env.HOMEBOY_WP_CODEBOX_MODEL;
-  if (explicit) {
-    return explicit;
-  }
-  return provider === 'openai' || provider === 'codex' ? 'gpt-4.1-mini' : '';
+	const explicit = settings.wp_codebox_model || settings.model || process.env.HOMEBOY_WP_CODEBOX_MODEL;
+	if (explicit) {
+		return explicit;
+	}
+	return '';
 }
 
 function defaultWorkspaceAllowedTools(workspaceRoot) {
