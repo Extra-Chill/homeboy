@@ -1,5 +1,11 @@
 'use strict';
 
+/**
+ * External dependencies
+ */
+const fs = require('node:fs');
+const path = require('node:path');
+
 const AGENT_TASK_REQUEST_SCHEMA = 'homeboy/agent-task-request/v1';
 const AGENT_TASK_OUTCOME_SCHEMA = 'homeboy/agent-task-outcome/v1';
 const AGENT_TASK_ARTIFACT_SCHEMA = 'homeboy/agent-task-artifact/v1';
@@ -140,10 +146,11 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
   assertAgentTaskRequest(request);
   const config = request.executor.config || {};
   const inputs = request.inputs || {};
+  const defaults = defaultCodeboxRuntimeConfig(request, config, inputs, options);
   const agentBundle = agentBundleConfigFromAgentTaskRequest(request, config, inputs);
   const recipe = recipeConfigFromAgentTaskRequest(request, config, inputs);
-  const mounts = agentBundleMounts(agentBundle, config.mounts || options.mounts || []);
-  const components = runtimeComponentPaths(config, options);
+  const mounts = agentBundleMounts(agentBundle, config.mounts || defaults.mounts || options.mounts || []);
+  const components = runtimeComponentPaths(config, { ...defaults, ...options });
   const runtimeTask = inputs.runtime_task || inputs.runtimeTask || config.runtime_task || config.runtimeTask || options.runtimeTask;
   const sandboxToolPolicy = inputs.sandbox_tool_policy || inputs.sandboxToolPolicy || config.sandbox_tool_policy || config.sandboxToolPolicy || options.sandboxToolPolicy;
   const timeoutSeconds = request.limits?.task_timeout_seconds || request.limits?.taskTimeoutSeconds;
@@ -176,13 +183,13 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     mode: config.mode || options.mode || 'sandbox',
     provider: config.provider || options.provider || '',
     model: request.executor.model || config.model || options.model || '',
-    provider_plugin_paths: config.provider_plugin_paths || options.providerPluginPaths || [],
+    provider_plugin_paths: config.provider_plugin_paths || options.providerPluginPaths || defaults.providerPluginPaths || [],
     agent_bundles: config.agent_bundles || config.agentBundles || options.agentBundles || [],
     runtime_stack_mounts: config.runtime_stack_mounts || options.runtimeStackMounts || [],
     runtime_overlays: config.runtime_overlays || options.runtimeOverlays || [],
-    secret_env: config.secret_env || options.secretEnv || [],
+    secret_env: config.secret_env || options.secretEnv || defaults.secretEnv || [],
     mounts,
-    workspaces: inputs.workspaces || config.workspaces || options.workspaces || [],
+    workspaces: inputs.workspaces || config.workspaces || options.workspaces || defaults.workspaces || [],
     agents_api_path: components.agents_api || config.agents_api || config.agents_api_path || options.agentsApi || '',
     [WP_CODEBOX_RUNTIME_PATH_KEY]: components.agent_runtime || '',
     [WP_CODEBOX_RUNTIME_TOOLS_PATH_KEY]: components.agent_runtime_tools || '',
@@ -218,6 +225,152 @@ function runtimeComponentPaths(config, options = {}) {
     agent_runtime: explicit.agent_runtime || config.agent_runtime || config.agent_runtime_path || legacyRuntimePath,
     agent_runtime_tools: explicit.agent_runtime_tools || config.agent_runtime_tools || config.agent_runtime_tools_path || legacyRuntimeToolsPath,
   }).filter(([, value]) => value !== undefined && value !== ''));
+}
+
+function defaultCodeboxRuntimeConfig(request, config, inputs, options = {}) {
+  const settings = firstObject(options.settings, parseJsonObject(process.env.HOMEBOY_SETTINGS_JSON)) || {};
+  const workspaceRoot = resolveWorkspaceRoot(request, config, inputs, settings, options);
+  const workspaceBase = workspaceRoot ? path.dirname(workspaceRoot) : process.cwd();
+  const dataMachinePath = firstExistingPath(
+    options.agentRuntime,
+    settings.wp_codebox_data_machine_path,
+    settings.data_machine_path,
+    process.env.HOMEBOY_DATA_MACHINE_PATH,
+    siblingPath(workspaceBase, 'data-machine'),
+  );
+  const dataMachineCodePath = firstExistingPath(
+    options.agentRuntimeTools,
+    settings.wp_codebox_data_machine_code_path,
+    settings.data_machine_code_path,
+    process.env.HOMEBOY_DATA_MACHINE_CODE_PATH,
+    siblingPath(workspaceBase, 'data-machine-code'),
+  );
+  const providerPluginPath = firstExistingPath(
+    settings.wp_codebox_provider_plugin_path,
+    process.env.HOMEBOY_WP_CODEBOX_PROVIDER_PLUGIN_PATH,
+    siblingPath(workspaceBase, 'ai-provider-for-openai'),
+    siblingPath(workspaceBase, 'ai-provider-for-openai-main'),
+  );
+  const agentsApiPath = firstExistingPath(
+    options.agentsApi,
+    settings.wp_codebox_agents_api_path,
+    settings.agents_api_path,
+    process.env.HOMEBOY_WP_CODEBOX_AGENTS_API_PATH,
+    bundledAgentsApiPath(dataMachinePath),
+  );
+
+  return {
+    agentsApi: agentsApiPath,
+    legacyRuntime: dataMachinePath,
+    legacyRuntimeTools: dataMachineCodePath,
+    providerPluginPaths: normalizeArray(settings.wp_codebox_provider_plugin_paths || settings.provider_plugin_paths || (providerPluginPath ? [providerPluginPath] : [])),
+    secretEnv: defaultSecretEnv(config.provider || options.provider || '', settings),
+    mounts: defaultWorkspaceMounts(workspaceRoot, request, config, inputs, options),
+    workspaces: defaultWorkspaces(workspaceRoot, request, config, inputs, options),
+  };
+}
+
+function parseJsonObject(value) {
+  if (!value || typeof value !== 'string') {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeArray(value) {
+  if (Array.isArray(value)) {
+    return value.filter(Boolean);
+  }
+  return value ? [value] : [];
+}
+
+function firstExistingPath(...candidates) {
+  for (const candidate of candidates.flatMap((value) => normalizeArray(value))) {
+    if (candidate && fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return '';
+}
+
+function siblingPath(base, name) {
+  return base && name ? path.join(base, name) : '';
+}
+
+function bundledAgentsApiPath(dataMachinePath) {
+  return dataMachinePath ? path.join(dataMachinePath, 'vendor', 'automattic', 'agents-api') : '';
+}
+
+function defaultSecretEnv(provider, settings) {
+  const explicit = normalizeArray(settings.wp_codebox_secret_env || settings.secret_env);
+  if (explicit.length > 0) {
+    return explicit;
+  }
+  if (provider === 'codex') {
+    return [
+      'AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN',
+      'AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN',
+      'AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT',
+      'AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID',
+      'AI_PROVIDER_OPENAI_CODEX_FEDRAMP',
+    ];
+  }
+  return provider === 'openai' ? ['OPENAI_API_KEY'] : [];
+}
+
+function resolveWorkspaceRoot(request, config, inputs, settings, options) {
+  const candidates = [
+    options.workspaceRoot,
+    inputs.target?.root,
+    inputs.target?.path,
+    request.workspace?.root,
+    request.workspace?.path,
+    config.workspace_root,
+    config.workspaceRoot,
+    settings.wp_codebox_workspace_root,
+    process.env.HOMEBOY_COMPONENT_PATH,
+  ];
+  return firstExistingPath(...candidates) || '';
+}
+
+function workspaceMode(request, config, inputs) {
+  const mode = inputs.target?.mode || request.workspace?.mode || config.workspace_mode || config.workspaceMode || 'readwrite';
+  return mode === 'readonly' ? 'readonly' : 'readwrite';
+}
+
+function defaultWorkspaceMounts(workspaceRoot, request, config, inputs, options) {
+  const explicit = config.mounts || options.mounts || [];
+  if (!workspaceRoot || explicit.some((mount) => mount?.target === '/workspace' || mount?.source === workspaceRoot)) {
+    return explicit;
+  }
+  return [
+    ...explicit,
+    {
+      source: workspaceRoot,
+      target: '/workspace',
+      mode: workspaceMode(request, config, inputs),
+      metadata: { kind: 'homeboy-dmc-workspace' },
+    },
+  ];
+}
+
+function defaultWorkspaces(workspaceRoot, request, config, inputs, options) {
+  const explicit = inputs.workspaces || config.workspaces || options.workspaces || [];
+  if (!workspaceRoot || explicit.some((workspace) => workspace?.target === '/workspace')) {
+    return explicit;
+  }
+  return [
+    ...explicit,
+    {
+      target: '/workspace',
+      mode: workspaceMode(request, config, inputs),
+    },
+  ];
 }
 
 function agentBundleMounts(bundleConfig, explicitMounts = []) {
@@ -926,7 +1079,12 @@ function agentTaskOutcomeFromCodeboxResult(request, result = {}, options = {}) {
   const runSummary = codeboxRunSummary(result, options);
   const recipeSummary = codeboxRecipeRunSummary(result, options);
   const localStatus = normalizeStatus(result, options.exitStatus ?? 0);
-  const status = recipeSummary?.status && recipeSummary.status !== 'succeeded' ? recipeSummary.status : (localStatus === 'failed' ? localStatus : (runSummary?.status || recipeSummary?.status || localStatus));
+  let status = runSummary?.status || recipeSummary?.status || localStatus;
+  if (recipeSummary?.status && recipeSummary.status !== 'succeeded') {
+    status = recipeSummary.status;
+  } else if (localStatus === 'failed') {
+    status = localStatus;
+  }
   const failureClassification = homeboyFailureClassification(result.failure_classification || recipeSummary?.metadata?.failure_classification || runSummary?.failure_classification, status);
   const outputs = normalizeOutputs(result);
   const recipeRun = recipeRunFromResult(result);
