@@ -148,8 +148,8 @@ pub(super) fn lab_offload_rig_component_dependencies(
             dependencies.push(RigComponentDependency {
                 rig_id: rig_id.clone(),
                 component_id: component_id.clone(),
+                remote_checkout_root: local_checkout_root.clone(),
                 local_checkout_root,
-                remote_checkout_root: checkout_root.to_string(),
                 required_subpath,
                 remote_url: component.remote_url.clone(),
             });
@@ -322,6 +322,69 @@ mod tests {
                 dependencies[0].required_subpath.as_deref(),
                 Some("plugins/woocommerce")
             );
+        });
+    }
+
+    #[test]
+    fn expands_package_root_for_remote_component_dependency_root() {
+        crate::test_support::with_isolated_home(|home| {
+            let checkout = home.path().join("Developer/studio-web");
+            std::fs::create_dir_all(checkout.join("rigs/studio-web-product-matrix"))
+                .expect("rig package");
+            let rig_dir = crate::core::paths::rigs().expect("rig dir");
+            std::fs::create_dir_all(&rig_dir).expect("create rig dir");
+            std::fs::write(
+                rig_dir.join("studio-web-product-matrix.json"),
+                serde_json::json!({
+                    "id": "studio-web-product-matrix",
+                    "components": {
+                        "studio-web": {
+                            "path": "${package.root}",
+                            "remote_url": "https://github.a8c.com/chubes4/studio-web.git"
+                        }
+                    }
+                })
+                .to_string(),
+            )
+            .expect("save rig");
+            std::fs::create_dir_all(crate::core::paths::rig_sources().expect("rig sources"))
+                .expect("create rig sources");
+            crate::core::rig::install::write_source_metadata(
+                "studio-web-product-matrix",
+                &crate::core::rig::install::RigSourceMetadata {
+                    source: checkout.display().to_string(),
+                    package_path: checkout.display().to_string(),
+                    rig_path: checkout
+                        .join("rigs/studio-web-product-matrix/rig.json")
+                        .display()
+                        .to_string(),
+                    discovery_path: Some(checkout.display().to_string()),
+                    source_revision: None,
+                    linked: true,
+                },
+            )
+            .expect("source metadata");
+
+            let dependencies = lab_offload_rig_component_dependencies(&[
+                "homeboy".to_string(),
+                "bench".to_string(),
+                "--rig".to_string(),
+                "studio-web-product-matrix".to_string(),
+            ])
+            .expect("dependencies");
+
+            assert_eq!(dependencies.len(), 1);
+            assert_eq!(
+                dependencies[0].local_checkout_root,
+                checkout.display().to_string()
+            );
+            assert_eq!(
+                dependencies[0].remote_checkout_root,
+                checkout.display().to_string()
+            );
+            assert!(!dependencies[0]
+                .remote_checkout_root
+                .contains("${package.root}"));
         });
     }
 
