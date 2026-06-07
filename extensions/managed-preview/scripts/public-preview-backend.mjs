@@ -3,21 +3,22 @@
 import { spawn } from 'node:child_process';
 import { URL } from 'node:url';
 
-const KIMAKI_DEFAULT_DOMAIN = 'kimaki.dev';
-
 async function main() {
   const options = parseArgs(process.argv.slice(2));
-  const provider = options.provider || process.env.HOMEBOY_PREVIEW_BACKEND_PROVIDER || 'kimaki';
+  const provider = options.provider || process.env.HOMEBOY_PREVIEW_BACKEND_PROVIDER || 'external-broker';
   const localUrl = parseUrl(options.localUrl || process.env.HOMEBOY_SERVICE_LOCAL_URL, 'local URL');
   const publicUrl = parseUrl(options.publicUrl || process.env.HOMEBOY_TUNNEL_PUBLIC_URL, 'public URL');
+  const brokerUrlValue = options.brokerUrl || process.env.HOMEBOY_PREVIEW_BROKER_URL || '';
   const expectedEffectiveOrigin = options.expectedEffectiveOrigin || process.env.HOMEBOY_EXPECTED_EFFECTIVE_ORIGIN || '';
   const expectedConfigHostname = options.expectedConfigHostname || process.env.HOMEBOY_EXPECTED_CONFIG_HOSTNAME || '';
   const requireHostPreservation = Boolean(options.requireHostPreservation || expectedEffectiveOrigin || expectedConfigHostname);
 
-  const plan = buildPlan({ provider, localUrl, publicUrl, options });
+  const brokerUrl = brokerUrlValue ? parseUrl(brokerUrlValue, 'broker URL') : null;
+  const plan = buildPlan({ provider, localUrl, publicUrl, brokerUrl, options });
   const preservation = evaluateHostPreservation({
     localUrl,
     publicUrl,
+    brokerUrl,
     expectedEffectiveOrigin,
     expectedConfigHostname,
     requireHostPreservation,
@@ -34,14 +35,22 @@ async function main() {
       public_url: publicUrl.href,
       expected_effective_origin: expectedEffectiveOrigin || null,
       expected_config_hostname: expectedConfigHostname || null,
-      observed_public_origin: publicUrl.origin,
-      observed_public_hostname: publicUrl.hostname,
+      broker_url: brokerUrl?.href || null,
       recommendation: preservation.recommendation,
     };
     process.stderr.write(`${JSON.stringify(blocker, null, 2)}\n`);
     process.exitCode = 78;
     return;
   }
+
+  const registration = await registerPreview({
+    dryRun: options.dryRun,
+    brokerUrl,
+    provider,
+    localUrl,
+    publicUrl,
+    preservation,
+  });
 
   const startEvidence = {
     schema: 'homeboy/managed-preview-backend-start/v1',
@@ -52,6 +61,7 @@ async function main() {
     command: plan.command,
     args: plan.args,
     host_preservation: preservation,
+    registration,
   };
   process.stdout.write(`${JSON.stringify(startEvidence, null, 2)}\n`);
 
@@ -83,75 +93,93 @@ async function main() {
   });
 }
 
-function buildPlan({ provider, localUrl, publicUrl, options }) {
-  if (provider !== 'kimaki') {
+function buildPlan({ provider, localUrl, publicUrl, brokerUrl, options }) {
+  if (provider !== 'external-broker') {
     throw new Error(`Unsupported preview backend provider: ${provider}`);
   }
 
-  const tunnelId = options.tunnelId || inferKimakiTunnelId(publicUrl, options.kimakiDomain || KIMAKI_DEFAULT_DOMAIN);
-  const args = ['tunnel', '--port', localUrl.port || defaultPort(localUrl), '--host', localUrl.hostname];
-
-  if (tunnelId) {
-    args.push('--tunnel-id', tunnelId);
-  }
-  if (options.server) {
-    args.push('--server', options.server);
-  }
-
   return {
-    command: options.kimakiBin || process.env.HOMEBOY_KIMAKI_BIN || 'kimaki',
-    args,
+    command: options.keepaliveCommand || process.env.HOMEBOY_PREVIEW_KEEPALIVE_COMMAND || 'node',
+    args: ['-e', `setInterval(() => {}, 2147483647)`],
+    broker_url: brokerUrl?.href || null,
+    local_url: localUrl.href,
+    public_url: publicUrl.href,
   };
 }
 
 function evaluateHostPreservation({
   localUrl,
   publicUrl,
+  brokerUrl,
   expectedEffectiveOrigin,
   expectedConfigHostname,
   requireHostPreservation,
   provider,
 }) {
+  if (!brokerUrl) {
+    return {
+      required: requireHostPreservation,
+      supported: false,
+      mode: 'missing-preview-broker',
+      reason: 'A hostname-preserving managed preview requires HOMEBOY_PREVIEW_BROKER_URL or --broker-url.',
+      recommendation: 'Configure an external preview broker endpoint that can create reviewer-accessible sessions while preserving the browser-effective origin.',
+    };
+  }
+
   if (!requireHostPreservation) {
     return {
       required: false,
       supported: true,
-      mode: 'public-url-only',
+      mode: 'broker-public-url-only',
     };
   }
 
   const expectedOrigin = expectedEffectiveOrigin || localUrl.origin;
   const expectedHostname = expectedConfigHostname || localUrl.hostname;
-  const publicOriginMatches = publicUrl.origin === expectedOrigin;
-  const publicHostnameMatches = publicUrl.hostname === expectedHostname;
-
-  if (publicOriginMatches && publicHostnameMatches) {
-    return {
-      required: true,
-      supported: true,
-      mode: 'public-url-preserves-browser-origin',
-      expected_effective_origin: expectedOrigin,
-      expected_config_hostname: expectedHostname,
-    };
-  }
-
   return {
     required: true,
-    supported: false,
-    mode: 'unsupported-browser-origin-change',
-    reason: `${provider} exposes ${publicUrl.origin}, but this workload requires browser-effective origin ${expectedOrigin} and config hostname ${expectedHostname}.`,
-    recommendation: 'Use a backend/broker that can provide reviewer access without changing the browser-effective origin, or keep this workload on a local browser probe until that ingress exists.',
+    supported: true,
+    mode: 'broker-must-prove-host-preservation',
+    provider,
+    broker_url: brokerUrl.href,
+    public_review_url: publicUrl.href,
     expected_effective_origin: expectedOrigin,
     expected_config_hostname: expectedHostname,
   };
 }
 
-function inferKimakiTunnelId(publicUrl, domain) {
-  const suffix = `.${domain}`;
-  if (!publicUrl.hostname.endsWith(suffix)) {
-    return '';
+async function registerPreview({ dryRun, brokerUrl, provider, localUrl, publicUrl, preservation }) {
+  const request = {
+    schema: 'homeboy/managed-preview-broker-request/v1',
+    provider,
+    local_url: localUrl.href,
+    public_url: publicUrl.href,
+    host_preservation: preservation,
+  };
+
+  if (dryRun) {
+    return {
+      status: 'planned',
+      broker_url: brokerUrl?.href || null,
+      request,
+    };
   }
-  return publicUrl.hostname.slice(0, -suffix.length);
+
+  const response = await fetch(brokerUrl.href, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(request),
+  });
+
+  const text = await response.text();
+  const payload = text ? JSON.parse(text) : {};
+  if (!response.ok) {
+    throw new Error(`Preview broker rejected request with HTTP ${response.status}: ${text}`);
+  }
+  if (preservation.required && payload?.capabilities?.hostname_preserving_browser_origin !== true) {
+    throw new Error('Preview broker response did not prove hostname-preserving browser-origin capability');
+  }
+  return payload;
 }
 
 function parseUrl(value, label) {
@@ -163,13 +191,6 @@ function parseUrl(value, label) {
   } catch (_error) {
     throw new Error(`Invalid ${label}: ${value}`);
   }
-}
-
-function defaultPort(url) {
-  if (url.protocol === 'https:') {
-    return '443';
-  }
-  return '80';
 }
 
 function parseArgs(args) {

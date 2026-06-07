@@ -11,11 +11,13 @@ const scriptPath = resolve(extensionRoot, 'scripts/public-preview-backend.mjs');
 const planned = run([
   scriptPath,
   '--provider',
-  'kimaki',
+  'external-broker',
   '--local-url',
   'http://127.0.0.1:7331',
   '--public-url',
-  'https://site-preview.kimaki.dev',
+  'https://preview-broker.example/runs/run-123',
+  '--broker-url',
+  'https://preview-broker.example/api/managed-previews',
   '--dry-run',
 ]);
 
@@ -23,18 +25,16 @@ assert.equal(planned.status, 0, planned.stderr);
 const plannedJson = JSON.parse(planned.stdout);
 assert.equal(plannedJson.schema, 'homeboy/managed-preview-backend-start/v1');
 assert.equal(plannedJson.status, 'planned');
-assert.equal(plannedJson.provider, 'kimaki');
-assert.deepEqual(plannedJson.args.slice(0, 5), ['tunnel', '--port', '7331', '--host', '127.0.0.1']);
-assert.ok(plannedJson.args.includes('site-preview'));
+assert.equal(plannedJson.provider, 'external-broker');
+assert.equal(plannedJson.registration.status, 'planned');
+assert.equal(plannedJson.registration.broker_url, 'https://preview-broker.example/api/managed-previews');
 
 const blocked = run([
   scriptPath,
-  '--provider',
-  'kimaki',
   '--local-url',
   'http://calypso.localhost:3000',
   '--public-url',
-  'https://calypso-preview.kimaki.dev',
+  'https://preview-broker.example/runs/run-123',
   '--expected-effective-origin',
   'http://calypso.localhost:3000',
   '--expected-config-hostname',
@@ -47,16 +47,16 @@ assert.equal(blocked.status, 78, blocked.stderr);
 const blockedJson = JSON.parse(blocked.stderr);
 assert.equal(blockedJson.schema, 'homeboy/managed-preview-backend-blocker/v1');
 assert.equal(blockedJson.status, 'blocked');
-assert.match(blockedJson.reason, /requires browser-effective origin http:\/\/calypso\.localhost:3000/);
+assert.match(blockedJson.reason, /requires HOMEBOY_PREVIEW_BROKER_URL|--broker-url/);
 
 const preserved = run([
   scriptPath,
-  '--provider',
-  'kimaki',
   '--local-url',
   'http://calypso.localhost:3000',
   '--public-url',
-  'http://calypso.localhost:3000',
+  'https://preview-broker.example/runs/run-123',
+  '--broker-url',
+  'https://preview-broker.example/api/managed-previews',
   '--expected-effective-origin',
   'http://calypso.localhost:3000',
   '--expected-config-hostname',
@@ -68,11 +68,11 @@ const preserved = run([
 assert.equal(preserved.status, 0, preserved.stderr);
 const preservedJson = JSON.parse(preserved.stdout);
 assert.equal(preservedJson.host_preservation.supported, true);
-assert.equal(preservedJson.host_preservation.mode, 'public-url-preserves-browser-origin');
+assert.equal(preservedJson.host_preservation.mode, 'broker-must-prove-host-preservation');
 
 function run(args) {
   return spawnSync(process.execPath, args, {
     encoding: 'utf8',
-    env: { ...process.env, HOMEBOY_KIMAKI_BIN: 'kimaki' },
+    env: { ...process.env },
   });
 }

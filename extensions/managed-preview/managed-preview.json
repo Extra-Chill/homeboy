@@ -15,19 +15,17 @@
   "preview_backends": [
     {
       "schema": "homeboy/managed-preview-backend-command/v1",
-      "id": "managed-preview.kimaki",
-      "label": "Kimaki public tunnel backend",
-      "provider": "kimaki",
-      "command": "node {{extension_path}}/scripts/public-preview-backend.mjs --provider kimaki",
+      "id": "managed-preview.host-preserving-broker",
+      "label": "Hostname-preserving preview broker",
+      "provider": "external-broker",
+      "command": "node {{extension_path}}/scripts/public-preview-backend.mjs",
       "contract": {
-        "requires_env": ["HOMEBOY_SERVICE_LOCAL_URL", "HOMEBOY_TUNNEL_PUBLIC_URL"],
+        "requires_env": ["HOMEBOY_SERVICE_LOCAL_URL", "HOMEBOY_TUNNEL_PUBLIC_URL", "HOMEBOY_PREVIEW_BROKER_URL"],
         "keeps_process_alive": true,
-        "records_stdout_stderr": true
+        "records_stdout_stderr": true,
+        "requires_capability": "hostname-preserving-browser-origin"
       },
-      "capabilities": ["reviewer-clickable-public-url", "stable-id-public-url"],
-      "limitations": [
-        "Kimaki public tunnel URLs use the tunnel hostname as the browser origin. They are not exact proof for hostname-sensitive apps that require a browser-effective localhost origin such as calypso.localhost:3000."
-      ]
+      "capabilities": ["reviewer-clickable-public-url", "hostname-preserving-browser-origin", "browser-origin-evidence"]
     }
   ]
 }
