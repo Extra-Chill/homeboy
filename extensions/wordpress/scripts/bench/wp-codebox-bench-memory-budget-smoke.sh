@@ -78,7 +78,7 @@ if ! jq -e '.inputs.pluginRuntime.php.memoryLimit == "768M"' "$CAPTURED_RECIPE" 
     exit 1
 fi
 
-if ! jq -e '.runtime.wp == "latest"' "$CAPTURED_RECIPE" >/dev/null; then
+if ! jq -e '.runtime.wp == "6.9"' "$CAPTURED_RECIPE" >/dev/null; then
     echo "Expected generated recipe to use a valid default WordPress runtime" >&2
     cat "$CAPTURED_RECIPE" >&2
     exit 1
