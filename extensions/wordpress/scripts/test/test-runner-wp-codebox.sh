@@ -419,7 +419,7 @@ WP_CONFIG_DEFINES_JSON="{}"
 BENCH_ENV_JSON="{}"
 WP_CODEBOX_FILE_MOUNTS_JSON="[]"
 PHPUNIT_NO_TESTS="skipped"
-WP_CODEBOX_WORDPRESS_VERSION="6.9"
+WP_CODEBOX_WORDPRESS_VERSION=""
 WP_CODEBOX_MULTISITE=""
 if [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]; then
     extracted=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -c '.wp_config_defines // {}' 2>/dev/null || echo "{}")
@@ -621,8 +621,7 @@ jq -n \
     --arg projectBootstrap "$WP_CODEBOX_PHPUNIT_PROJECT_BOOTSTRAP" \
     --arg dependencyMounts "$WP_CODEBOX_DEP_MOUNTS" \
     --arg multisite "$WP_CODEBOX_MULTISITE" \
-    '{
-        wordpressVersion: $wp,
+    '({
         mounts: $mounts,
         pluginSlug: $pluginSlug,
         selectedTestFile: $selectedTestFile,
@@ -637,7 +636,7 @@ jq -n \
         testsDir: "/wp-codebox-vendor/wp-phpunit/wp-phpunit",
         dependencyMounts: ($dependencyMounts | split("\n") | map(select(. != ""))),
         multisite: (if (($multisite | ascii_downcase) as $v | $v == "1" or $v == "true" or $v == "yes" or $v == "on") then true else false end)
-    }' > "$RECIPE_OPTIONS_FILE"
+    } + (if $wp == "" then {} else {wordpressVersion: $wp} end))' > "$RECIPE_OPTIONS_FILE"
 
 if [ ! -f "$PHPUNIT_RECIPE_BUILDER" ]; then
     echo "Error: WP Codebox PHPUnit recipe builder not found: ${PHPUNIT_RECIPE_BUILDER}" >&2

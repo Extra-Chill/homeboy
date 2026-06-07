@@ -615,7 +615,7 @@ homeboy_wp_codebox_compile_bootstrap_files
 homeboy_wp_codebox_compile_bootstrap_steps
 homeboy_wp_codebox_compile_prepare_steps
 
-WP_CODEBOX_WORDPRESS_VERSION="7.0"
+WP_CODEBOX_WORDPRESS_VERSION=""
 if [ "$settings_json" != "{}" ]; then
     extracted=$(printf '%s' "$settings_json" | jq -r '.wp_codebox_wordpress_version // empty' 2>/dev/null || true)
     [ -n "$extracted" ] && [ "$extracted" != "null" ] && WP_CODEBOX_WORDPRESS_VERSION="$extracted"
@@ -646,8 +646,10 @@ if [ -z "$ARTIFACTS_DIR" ] && [ "$settings_json" != "{}" ]; then
     ARTIFACTS_DIR=$(printf '%s' "$settings_json" | jq -r '.wp_codebox_artifacts_dir // empty' 2>/dev/null || true)
 fi
 if [ -z "$ARTIFACTS_DIR" ]; then
-    ARTIFACTS_DIR=$(mktemp -d "${TMPDIR:-/tmp}/homeboy-wp-codebox-bench-artifacts.XXXXXX")
+    mkdir -p "${PLUGIN_PATH}/.homeboy"
+    ARTIFACTS_DIR=$(mktemp -d "${PLUGIN_PATH}/.homeboy/wp-codebox-bench-artifacts.XXXXXX")
 fi
+mkdir -p "$ARTIFACTS_DIR"
 
 homeboy_wp_codebox_run_prepare_steps
 
@@ -896,7 +898,7 @@ homeboy_wp_codebox_emit_memory_fatal_diagnostic() {
     echo "  Raw output: $output_artifact" >&2
 }
 
-RECIPE_FILE=$(mktemp "${TMPDIR:-/tmp}/homeboy-wp-codebox-bench-recipe.XXXXXX")
+RECIPE_FILE=$(mktemp "${ARTIFACTS_DIR}/homeboy-wp-codebox-bench-recipe.XXXXXX")
 jq -n \
     --arg wpCodeboxBin "$WP_CODEBOX_RESOLVED_BIN" \
     --arg wp "$WP_CODEBOX_WORDPRESS_VERSION" \
@@ -915,8 +917,7 @@ jq -n \
     --argjson pluginRuntime "$WP_CODEBOX_PLUGIN_RUNTIME_JSON" \
     '{
         wpCodeboxBin: $wpCodeboxBin,
-        options: {
-            wordpressVersion: $wp,
+        options: ({
             blueprint: $blueprint,
             mounts: $mounts,
             extraPlugins: $extraPlugins,
@@ -930,10 +931,10 @@ jq -n \
             pluginRuntime: $pluginRuntime,
             bootstrapFiles: $bootstrapFiles,
             workloads: $workloads
-        }
+        } + (if $wp == "" then {} else {wordpressVersion: $wp} end))
     }' | node "$BENCH_RECIPE_BUILDER" > "$RECIPE_FILE"
 
-WP_CODEBOX_TMPFILE=$(mktemp)
+WP_CODEBOX_TMPFILE=$(mktemp "${ARTIFACTS_DIR}/homeboy-wp-codebox-output.XXXXXX")
 set +e
 "${wp_codebox_command[@]}" recipe-run \
     --recipe "$RECIPE_FILE" \

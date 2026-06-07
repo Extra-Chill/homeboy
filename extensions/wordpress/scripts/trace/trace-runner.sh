@@ -84,7 +84,7 @@ homeboy_wordpress_resolve_wp_codebox_bin() {
 }
 
 homeboy_wordpress_trace_wp_version() {
-    local version="6.9"
+    local version=""
     local extracted=""
 
     if [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]; then
@@ -169,7 +169,7 @@ homeboy_trace_run_php_scenario_wp_codebox() {
         --arg codeFile "$wrapper_file" \
         '{
             schema: "wp-codebox/workspace-recipe/v1",
-            runtime: {wp: $wp, blueprint: {steps: []}},
+            runtime: ({blueprint: {steps: []}} + (if $wp == "" then {} else {wp: $wp} end)),
             inputs: {mounts: [
                 {source: $componentSource, target: $componentTarget, mode: "readwrite"},
                 {source: $runSource, target: $runTarget, mode: "readwrite"}
