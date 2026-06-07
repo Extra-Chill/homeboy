@@ -210,6 +210,10 @@ enum RunnerCommand {
         /// Required extension ID to resolve on the runner. Repeat for multiple extensions.
         #[arg(long = "extension")]
         required_extensions: Vec<String>,
+
+        /// Required command to resolve on the runner PATH. Repeat for provider/job-specific tools.
+        #[arg(long = "require-tool")]
+        required_tools: Vec<String>,
     },
     /// Connect to a runner by starting a loopback-only remote daemon and SSH tunnel
     Connect {
@@ -403,11 +407,13 @@ pub fn run(
             runner_id,
             path,
             required_extensions,
+            required_tools,
         } => map_doctor(doctor::run_with_options(
             &runner_id,
             doctor::RunnerDoctorOptions {
                 path,
                 extensions: required_extensions,
+                required_tools,
             },
         )),
         RunnerCommand::Connect {
