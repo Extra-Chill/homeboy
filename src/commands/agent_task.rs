@@ -37,8 +37,8 @@ pub enum AgentTaskCommand {
     Logs(StatusArgs),
     /// List artifacts and evidence refs recorded for a completed run.
     Artifacts(StatusArgs),
-    /// Mark a queued/running durable run cancelled.
-    Cancel(StatusArgs),
+    /// Mark a queued or stale-running durable agent-task run as cancelled.
+    Cancel(CancelArgs),
     /// Resume a queued or stale-running durable run.
     Resume(StatusArgs),
     /// Submit a fresh durable run from an existing run's plan.
@@ -92,6 +92,16 @@ pub struct RetryArgs {
 }
 
 #[derive(Args, Debug)]
+pub struct CancelArgs {
+    /// Durable run id returned by `agent-task submit` or `agent-task run-plan --record-run-id`.
+    pub run_id: String,
+
+    /// Operator-visible reason stored on the durable run record.
+    #[arg(long, value_name = "TEXT")]
+    pub reason: Option<String>,
+}
+
+#[derive(Args, Debug)]
 pub struct ReviewArgs {
     /// Durable run id returned by `agent-task submit`, `dispatch`, or `run-plan --record-run-id`.
     pub run_id: String,
@@ -138,7 +148,7 @@ pub fn run(args: AgentTaskArgs, global: &GlobalArgs) -> CmdResult<Value> {
         AgentTaskCommand::Status(status_args) => status(status_args),
         AgentTaskCommand::Logs(status_args) => logs(status_args),
         AgentTaskCommand::Artifacts(status_args) => artifacts(status_args),
-        AgentTaskCommand::Cancel(status_args) => cancel(status_args),
+        AgentTaskCommand::Cancel(cancel_args) => cancel(cancel_args),
         AgentTaskCommand::Resume(status_args) => resume(status_args),
         AgentTaskCommand::Retry(retry_args) => retry(retry_args),
         AgentTaskCommand::Review(review_args) => review(review_args),
@@ -260,8 +270,8 @@ fn artifacts(args: StatusArgs) -> CmdResult<Value> {
     Ok((serde_json::to_value(artifacts).unwrap_or(Value::Null), 0))
 }
 
-fn cancel(args: StatusArgs) -> CmdResult<Value> {
-    let record = agent_task_lifecycle::cancel(&args.run_id)?;
+fn cancel(args: CancelArgs) -> CmdResult<Value> {
+    let record = agent_task_lifecycle::cancel_run(&args.run_id, args.reason.as_deref())?;
     Ok((serde_json::to_value(record).unwrap_or(Value::Null), 0))
 }
 
@@ -723,13 +733,14 @@ mod tests {
     }
 
     #[test]
-    fn cancel_command_marks_submitted_run_cancelled() {
+    fn cancel_command_marks_queued_run_cancelled() {
         with_temp_home(|| {
-            agent_task_lifecycle::submit_plan(&test_plan(), Some("run-cancel-cli"))
+            agent_task_lifecycle::submit_plan(&test_plan(), Some("run-cli-cancel"))
                 .expect("submitted");
 
-            let (value, exit_code) = cancel(StatusArgs {
-                run_id: "run-cancel-cli".to_string(),
+            let (value, exit_code) = cancel(CancelArgs {
+                run_id: "run-cli-cancel".to_string(),
+                reason: Some("not selected".to_string()),
             })
             .expect("cancelled");
             let record: AgentTaskRunRecord = serde_json::from_value(value).expect("record");
@@ -737,6 +748,7 @@ mod tests {
             assert_eq!(exit_code, 0);
             assert_eq!(record.state, AgentTaskRunState::Cancelled);
             assert_eq!(record.tasks[0].state, AgentTaskState::Cancelled);
+            assert_eq!(record.metadata["cancel_reason"], json!("not selected"));
         });
     }
 
