@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::Component;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use homeboy::core::engine::run_dir::{self, RunDir};
 use homeboy::core::extension::bench::{
@@ -18,7 +17,6 @@ use crate::commands::utils::resource_policy;
 use super::BenchRunArgs;
 
 pub(super) struct BenchObservation(ActiveObservation);
-
 impl BenchObservation {
     fn run_id(&self) -> &str {
         self.0.run_id()
@@ -31,7 +29,6 @@ pub(super) struct BenchObservationSummary {
     pub rig_id: Option<String>,
     pub store_path: String,
 }
-
 pub(super) struct BenchObservationStart<'a> {
     pub component_id: &'a str,
     pub component_label: &'a str,
@@ -42,7 +39,6 @@ pub(super) struct BenchObservationStart<'a> {
     pub rig_snapshot: Option<&'a RigStateSnapshot>,
     pub run_dir: &'a RunDir,
 }
-
 pub(super) fn start(start: BenchObservationStart<'_>) -> Option<BenchObservation> {
     let metadata = bench_observation_initial_metadata(
         start.component_label,

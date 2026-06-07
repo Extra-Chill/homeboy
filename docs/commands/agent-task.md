@@ -6,6 +6,70 @@ Homeboy owns durable orchestration and provider-neutral outcomes. Runtime
 providers own backend-specific execution. For the provider fanout ownership seam,
 see [`docs/architecture/provider-fanout-boundary.md`](../architecture/provider-fanout-boundary.md).
 
+## Dispatch
+
+`agent-task dispatch` builds a durable task plan from common repo-cooking inputs
+without requiring hand-authored provider JSON:
+
+```bash
+homeboy agent-task dispatch \
+  --repo data-machine \
+  --cwd /path/to/worktree \
+  --provider-config @provider-config.json \
+  --client-context @client-context.json \
+  --prompt @task.txt
+```
+
+Homeboy core treats `--client-context` as an optional opaque JSON object. Client
+adapters may include whatever correlation data they need to reconcile their own
+notifications or UI state, but Homeboy does not interpret transport-specific
+identifiers in core lifecycle state. Provider-specific execution settings belong
+in `--provider-config`; durable lifecycle commands remain headless and can be
+claimed later with `agent-task run` or `agent-task run-next`.
+
+## Headless Fleet-Cooking Review
+
+The authoritative non-chat workflow is the durable `agent-task` lifecycle. Chat
+clients, Discord threads, GitHub Actions, cron, and terminal operators can all
+submit the same run id, inspect it later, and promote selected artifacts without
+depending on transport-local state.
+
+```bash
+run_id="homeboy-3357-$(date +%s)"
+
+homeboy agent-task dispatch \
+  --repo homeboy \
+  --cwd /path/to/homeboy@fix-issue \
+  --task-url https://github.com/Extra-Chill/homeboy/issues/3357 \
+  --concurrency 4 \
+  --attempts 2 \
+  --run-id "$run_id" \
+  --queue-only \
+  --prompt @task.txt
+
+# A daemon or later terminal process can claim work without chat history.
+homeboy agent-task run-next
+
+# One review envelope contains lifecycle state, logs, artifacts, aggregate
+# reconciliation, promotion candidates, and next actions.
+homeboy agent-task review "$run_id" \
+  --to-worktree homeboy@fix-issue-3357-agent-task-non-chat-flow
+```
+
+`agent-task review` returns `homeboy/agent-task-review/v1` with:
+
+- `record`: the durable run record from `status`.
+- `logs`: scheduler events from queued or completed lifecycle state.
+- `artifacts`: artifacts and evidence refs from the completed aggregate.
+- `aggregate_review`: apply/retry/issue-report/review candidate reconciliation.
+- `promotion_candidates`: generated `homeboy agent-task promote <run-id>` command
+  arrays for apply candidates, completed with `--to-worktree` when supplied.
+- `transport.chat_state_required: false`, making Homeboy the source of truth.
+
+This is the terminal/daemon-owned review surface for fleet cooking. Kimaki or any
+other chat UI should submit, poll, render, and call these commands rather than
+owning scheduling, state, artifacts, reconciliation, or promotion.
+
 ## Deterministic Smoke Gate
 
 Issue #3392 is covered by a no-secret fixture plan at
@@ -29,6 +93,8 @@ homeboy agent-task run "$run_id"
 # homeboy agent-task run-next
 homeboy agent-task status "$run_id"
 homeboy agent-task artifacts "$run_id"
+homeboy agent-task review "$run_id" \
+  --to-worktree "$target_worktree"
 homeboy agent-task promote "$run_id" \
   --to-worktree "$target_worktree" \
   --dry-run
@@ -41,7 +107,45 @@ The gate passes when:
 - `run` exits successfully and writes the aggregate lifecycle record.
 - Post-run `status` shows `state: "succeeded"`.
 - `artifacts` lists a patch artifact, an agent result artifact, and a transcript evidence ref.
+- `review` returns a `homeboy/agent-task-review/v1` envelope with `transport.chat_state_required: false`, aggregate reconciliation, and promotion candidates.
 - `promote <run-id> --dry-run` resolves the aggregate from the durable run id and reports the selected non-empty patch plus changed files without requiring the operator to look up `aggregate_path` manually.
+
+Queued runs that should not execute can be cancelled without chat/session state:
+
+```bash
+homeboy agent-task cancel "$run_id" --reason "not selected by controller"
+```
+
+`cancel` marks queued runs and stale-running records as `cancelled` in the
+durable lifecycle store. It refuses to claim live provider cancellation for an
+active runner process until a provider-owned cancellation channel is available.
+
+## Dispatch Workspaces
+
+`agent-task dispatch` accepts generic Homeboy workspace inputs and does not
+resolve product-specific workspace handles itself.
+
+Use `--cwd <PATH>` when the caller already knows the checkout or worktree path:
+
+```bash
+homeboy agent-task dispatch \
+  --repo homeboy \
+  --cwd /path/to/homeboy@fix-issue \
+  --prompt @task.txt
+```
+
+Use `--workspace <ID_OR_PATH>` for a Homeboy-managed task worktree ID or an
+existing workspace path:
+
+```bash
+homeboy worktree create homeboy --branch fix/issue-123
+homeboy agent-task dispatch \
+  --workspace homeboy@fix-issue-123 \
+  --prompt @task.txt
+```
+
+External workspace managers should resolve their own handles to local paths and
+call dispatch with `--cwd <resolved-path>`.
 
 ## Fixture Backend
 

@@ -122,6 +122,10 @@ pub fn status(id: &str) -> Result<WorktreeStatusOutput> {
     status_with_store(id, &metadata_dir()?)
 }
 
+pub fn resolve(id: &str) -> Result<TaskWorktreeRecord> {
+    read_record(&metadata_dir()?, id)
+}
+
 pub fn remove(options: WorktreeRemoveOptions) -> Result<WorktreeRemoveOutput> {
     remove_with_store(options, &metadata_dir()?)
 }

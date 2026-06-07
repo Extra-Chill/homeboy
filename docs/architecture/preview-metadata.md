@@ -20,7 +20,25 @@ Set `HOMEBOY_PREVIEW_JSON` to a JSON object. Recommended fields:
   "status": "running",
   "process_id": "pid-123",
   "runtime_id": "runtime-abc",
-  "cleanup_status": "pending"
+  "cleanup_status": "pending",
+  "origin_evidence": [
+    {
+      "schema_version": 1,
+      "managed_service_id": "site-preview",
+      "declared": { "host": "app.localhost", "port": 3000, "protocol": "http" },
+      "local_url": "http://app.localhost:3000/",
+      "public_preview_url": "https://preview.example.test/",
+      "browser_requested_url": "https://preview.example.test/",
+      "browser_final_url": "https://preview.example.test/?view=site",
+      "window_location": {
+        "origin": "https://preview.example.test",
+        "hostname": "preview.example.test",
+        "protocol": "https:",
+        "port": "",
+        "is_secure_context": true
+      }
+    }
+  ]
 }
 ```
 
@@ -53,3 +71,8 @@ artifact name `preview`, or preview-specific fields such as `preview_url`,
 artifact `role` when present; otherwise comparison order infers `baseline` for
 the first rig, `candidate` for the second rig, and `provider` for additional
 rigs.
+
+When `origin_evidence` or `browser_origin_evidence` is present in preview
+metadata, `homeboy report performance-digest` also renders the effective browser
+origin details. This gives managed-service proof artifacts enough context to
+diagnose hostname-sensitive routing, redirects, and secure-context behavior.
