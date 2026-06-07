@@ -56,7 +56,7 @@ key.
 Preview producers should emit one `BrowserOriginEvidence` row per browser probe
 that exercises a managed service. The row should capture both declared routing
 facts and browser-observed facts so hostname-sensitive failures can distinguish
-`calypso.localhost:3000`, `localhost:3000`, `127.0.0.1:3000`, and public tunnel
+`app.localhost:3000`, `localhost:3000`, `127.0.0.1:3000`, and public tunnel
 origins.
 
 Minimal example:
@@ -66,14 +66,14 @@ Minimal example:
   "origin_evidence": [
     {
       "schema_version": 1,
-      "managed_service_id": "wpcom-start",
+      "managed_service_id": "site-preview",
       "preview_artifact_id": "preview-artifact-1",
       "run_id": "trace-run-1",
-      "declared": { "host": "calypso.localhost", "port": 3000, "protocol": "http" },
-      "local_url": "http://calypso.localhost:3000/start",
-      "public_preview_url": "https://preview.example.test/start",
-      "browser_requested_url": "https://preview.example.test/start",
-      "browser_final_url": "https://preview.example.test/start?flow=site",
+      "declared": { "host": "app.localhost", "port": 3000, "protocol": "http" },
+      "local_url": "http://app.localhost:3000/",
+      "public_preview_url": "https://preview.example.test/",
+      "browser_requested_url": "https://preview.example.test/",
+      "browser_final_url": "https://preview.example.test/?view=site",
       "window_location": {
         "origin": "https://preview.example.test",
         "hostname": "preview.example.test",
@@ -83,8 +83,8 @@ Minimal example:
       },
       "redirects": [
         {
-          "from_url": "https://preview.example.test/start",
-          "to_url": "https://preview.example.test/start?flow=site",
+          "from_url": "https://preview.example.test/",
+          "to_url": "https://preview.example.test/?view=site",
           "status": 302
         }
       ],

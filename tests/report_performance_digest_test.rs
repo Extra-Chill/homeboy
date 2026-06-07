@@ -144,14 +144,14 @@ fn renders_resource_summary_budget_findings_and_baseline_health() {
                 "cleanup_status": "pending",
                 "origin_evidence": [{
                     "schema_version": 1,
-                    "managed_service_id": "wpcom-start",
+                    "managed_service_id": "site-preview",
                     "preview_artifact_id": "preview-artifact-1",
                     "run_id": "trace-run-1",
-                    "declared": { "host": "calypso.localhost", "port": 3000, "protocol": "http" },
-                    "local_url": "http://calypso.localhost:3000/start",
-                    "public_preview_url": "https://preview.example.test/start",
-                    "browser_requested_url": "https://preview.example.test/start",
-                    "browser_final_url": "https://preview.example.test/start?flow=site",
+                    "declared": { "host": "app.localhost", "port": 3000, "protocol": "http" },
+                    "local_url": "http://app.localhost:3000/",
+                    "public_preview_url": "https://preview.example.test/",
+                    "browser_requested_url": "https://preview.example.test/",
+                    "browser_final_url": "https://preview.example.test/?view=site",
                     "window_location": {
                         "origin": "https://preview.example.test",
                         "hostname": "preview.example.test",
@@ -160,8 +160,8 @@ fn renders_resource_summary_budget_findings_and_baseline_health() {
                         "is_secure_context": true
                     },
                     "redirects": [{
-                        "from_url": "https://preview.example.test/start",
-                        "to_url": "https://preview.example.test/start?flow=site",
+                        "from_url": "https://preview.example.test/",
+                        "to_url": "https://preview.example.test/?view=site",
                         "status": 302
                     }],
                     "network_origin": { "tunnel": "homeboy-managed" }
@@ -213,7 +213,7 @@ fn renders_resource_summary_budget_findings_and_baseline_health() {
         report.preview_origin_evidence[0]
             .managed_service_id
             .as_deref(),
-        Some("wpcom-start")
+        Some("site-preview")
     );
     assert_eq!(
         report.preview_origin_evidence[0].window_hostname.as_deref(),
@@ -252,11 +252,11 @@ fn renders_resource_summary_budget_findings_and_baseline_health() {
     assert!(report.markdown.contains("- runtime_id: `runtime-abc`"));
     assert!(report.markdown.contains("- cleanup_status: `pending`"));
     assert!(report.markdown.contains("### Browser Origin Evidence"));
-    assert!(report.markdown.contains("`wpcom-start`"));
-    assert!(report.markdown.contains("`http://calypso.localhost:3000`"));
+    assert!(report.markdown.contains("`site-preview`"));
+    assert!(report.markdown.contains("`http://app.localhost:3000`"));
     assert!(report
         .markdown
-        .contains("`https://preview.example.test/start?flow=site`"));
+        .contains("`https://preview.example.test/?view=site`"));
     assert!(report.markdown.contains("| true | 1 |"));
 
     let _ = fs::remove_dir_all(&dir);

@@ -24,12 +24,12 @@ Set `HOMEBOY_PREVIEW_JSON` to a JSON object. Recommended fields:
   "origin_evidence": [
     {
       "schema_version": 1,
-      "managed_service_id": "wpcom-start",
-      "declared": { "host": "calypso.localhost", "port": 3000, "protocol": "http" },
-      "local_url": "http://calypso.localhost:3000/start",
-      "public_preview_url": "https://preview.example.test/start",
-      "browser_requested_url": "https://preview.example.test/start",
-      "browser_final_url": "https://preview.example.test/start?flow=site",
+      "managed_service_id": "site-preview",
+      "declared": { "host": "app.localhost", "port": 3000, "protocol": "http" },
+      "local_url": "http://app.localhost:3000/",
+      "public_preview_url": "https://preview.example.test/",
+      "browser_requested_url": "https://preview.example.test/",
+      "browser_final_url": "https://preview.example.test/?view=site",
       "window_location": {
         "origin": "https://preview.example.test",
         "hostname": "preview.example.test",

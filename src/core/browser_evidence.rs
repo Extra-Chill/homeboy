@@ -353,14 +353,14 @@ mod tests {
             "artifacts": [{ "path": "browser/profile.json", "kind": "profile", "label": "profile" }],
             "origin_evidence": [{
                 "schema_version": 1,
-                "managed_service_id": "wpcom-start",
+                "managed_service_id": "site-preview",
                 "preview_artifact_id": "preview-1",
                 "run_id": "run-123",
-                "declared": { "host": "calypso.localhost", "port": 3000, "protocol": "http" },
-                "local_url": "http://calypso.localhost:3000/start",
-                "public_preview_url": "https://preview.example.test/start",
-                "browser_requested_url": "https://preview.example.test/start",
-                "browser_final_url": "https://preview.example.test/start?flow=site",
+                "declared": { "host": "app.localhost", "port": 3000, "protocol": "http" },
+                "local_url": "http://app.localhost:3000/",
+                "public_preview_url": "https://preview.example.test/",
+                "browser_requested_url": "https://preview.example.test/",
+                "browser_final_url": "https://preview.example.test/?view=site",
                 "window_location": {
                     "origin": "https://preview.example.test",
                     "hostname": "preview.example.test",
@@ -369,8 +369,8 @@ mod tests {
                     "is_secure_context": true
                 },
                 "redirects": [{
-                    "from_url": "https://preview.example.test/start",
-                    "to_url": "https://preview.example.test/start?flow=site",
+                    "from_url": "https://preview.example.test/",
+                    "to_url": "https://preview.example.test/?view=site",
                     "status": 302
                 }],
                 "network_origin": { "tunnel": "homeboy-managed" }
