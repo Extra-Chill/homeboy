@@ -20,6 +20,7 @@ const {
   wpCodeboxApplyRequestFromBundle,
   wpCodeboxChangeArtifactFromBundle,
 } = require('./wp-codebox-apply-adapter');
+const { loadWpCodeboxCoreFunction } = require('./wp-codebox-core-loader');
 
 const PLAN_SCHEMA = 'homeboy/audit-wp-codebox-fanout/v1';
 const TASK_SCHEMA = 'wp-codebox/task-input/v1';
@@ -159,6 +160,45 @@ function discoverTaskArtifacts(args, taskRequest, startedAt, finishedAt) {
     .sort((left, right) => left.directory.localeCompare(right.directory));
   const sessionArtifacts = artifacts.filter((artifact) => artifact.directory.includes(taskRequest.sandbox_session_id));
   return sessionArtifacts.length > 0 ? sessionArtifacts : artifacts;
+}
+
+async function discoverTaskArtifactsAsync(args, taskRequest, startedAt, finishedAt, options = {}) {
+  const discoverPartialRunArtifacts = await loadWpCodeboxCoreFunction('discoverPartialRunArtifacts', {
+    wpCodeboxCoreModule: options.wpCodeboxCoreModule || options.env?.WP_CODEBOX_CORE_MODULE,
+  });
+  const root = artifactsRootFromArgs(args);
+  if (!discoverPartialRunArtifacts || !root) {
+    return discoverTaskArtifacts(args, taskRequest, startedAt, finishedAt);
+  }
+
+  try {
+    const discovery = await discoverPartialRunArtifacts({
+      artifactsRoot: root,
+      sessionId: taskRequest.sandbox_session_id,
+      startedAt,
+      finishedAt,
+    });
+    return corePartialArtifactsToLegacy(discovery);
+  } catch {
+    return discoverTaskArtifacts(args, taskRequest, startedAt, finishedAt);
+  }
+}
+
+function corePartialArtifactsToLegacy(discovery) {
+  return (Array.isArray(discovery?.artifacts) ? discovery.artifacts : []).map((artifact) => ({
+    directory: artifact.directory,
+    bytes: artifact.bytes ?? null,
+    mtime: artifact.mtime,
+    has_manifest: Boolean(artifact.hasManifest),
+    has_changed_files: Boolean(artifact.hasChangedFiles),
+    changed_files_path: artifact.changedFiles?.available ? artifact.changedFiles.path : '',
+    runtime_reference_manifest: artifact.runtimeReferenceManifest?.available ? {
+      path: artifact.runtimeReferenceManifest.path,
+      available: true,
+      ...(artifact.runtimeReferenceManifest.payload === undefined ? {} : { payload: artifact.runtimeReferenceManifest.payload }),
+      ...(artifact.runtimeReferenceManifest.error ? { error: artifact.runtimeReferenceManifest.error } : {}),
+    } : null,
+  }));
 }
 
 function artifactEvidence(directory, earliestMs, latestMs) {
@@ -760,7 +800,7 @@ function executeWpCodeboxTaskRequestAsync(taskRequest, options = {}) {
     child.on('error', (error) => {
       spawnError = error;
     });
-    child.on('close', (code, signal) => {
+    child.on('close', async (code, signal) => {
       if (timeout) {
         clearTimeout(timeout);
       }
@@ -786,7 +826,7 @@ function executeWpCodeboxTaskRequestAsync(taskRequest, options = {}) {
         killed_process_group: killedProcessGroup,
         force_killed_process_group: forceKilledProcessGroup,
       };
-      const partialArtifacts = commandSuccess ? [] : discoverTaskArtifacts(args, taskRequest, startedAt, finishedAt);
+      const partialArtifacts = commandSuccess ? [] : await discoverTaskArtifactsAsync(args, taskRequest, startedAt, finishedAt, options);
       const outcome = enrichFailureOutcome(
         taskOutcome(taskRequest, parsed, artifact, commandSuccess, errorMessage, timedOut),
         taskRequest,
