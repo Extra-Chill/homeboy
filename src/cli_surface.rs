@@ -1147,11 +1147,13 @@ mod tests {
             .expect("trace contract");
         assert_eq!(trace.extra_required_tools, LAB_TRACE_EXTRA_TOOLS);
         assert!(!trace.requires_extension_parity);
+        assert!(!trace.infer_source_path_tools);
 
         let lint = parsed_command(&["homeboy", "lint"])
             .lab_contract()
             .expect("lint contract");
         assert!(lint.requires_extension_parity);
+        assert!(lint.infer_source_path_tools);
 
         let rig = parsed_command(&["homeboy", "rig", "up", "studio"])
             .lab_contract()
