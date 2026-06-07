@@ -8,6 +8,7 @@ use sha2::{Digest, Sha256};
 use crate::core::agent_task::{
     AgentTaskArtifact, AgentTaskOutcome, AgentTaskOutcomeStatus, AGENT_TASK_OUTCOME_SCHEMA,
 };
+use crate::core::agent_task_gate::{run_gate_command, AgentTaskGateReport, AgentTaskGateStatus};
 use crate::core::agent_task_scheduler::{AgentTaskAggregate, AGENT_TASK_AGGREGATE_SCHEMA};
 use crate::core::agent_task_timeout_artifacts::is_actionable_patch_artifact;
 use crate::core::{Error, Result};
@@ -40,7 +41,7 @@ pub struct AgentTaskPromotionReport {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dmc_commands: Vec<AgentTaskPromotionCommandReport>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub verification: Vec<AgentTaskPromotionCommandReport>,
+    pub deterministic_gates: Vec<AgentTaskGateReport>,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub provenance: Value,
 }
@@ -50,6 +51,7 @@ pub struct AgentTaskPromotionReport {
 pub enum AgentTaskPromotionStatus {
     DryRun,
     Applied,
+    GateFailed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -144,7 +146,7 @@ fn promote_with_runner(
         applied_worktree_path = Some(worktree_path);
     }
 
-    let mut verification = Vec::new();
+    let mut deterministic_gates = Vec::new();
     if !options.dry_run && !options.verify.is_empty() {
         let worktree_path = applied_worktree_path.as_deref().ok_or_else(|| {
             Error::validation_invalid_argument(
@@ -154,15 +156,20 @@ fn promote_with_runner(
                 None,
             )
         })?;
-        for command in &options.verify {
-            verification.push(runner.verify(worktree_path, command)?);
+        for (index, command) in options.verify.iter().enumerate() {
+            deterministic_gates.push(runner.verify(worktree_path, index + 1, command)?);
         }
     }
+    let has_gate_failure = deterministic_gates
+        .iter()
+        .any(|gate| gate.status == AgentTaskGateStatus::Failed);
 
     Ok(AgentTaskPromotionReport {
         schema: AGENT_TASK_PROMOTION_REPORT_SCHEMA.to_string(),
         status: if options.dry_run {
             AgentTaskPromotionStatus::DryRun
+        } else if has_gate_failure {
+            AgentTaskPromotionStatus::GateFailed
         } else {
             AgentTaskPromotionStatus::Applied
         },
@@ -183,7 +190,7 @@ fn promote_with_runner(
         },
         changed_files,
         dmc_commands,
-        verification,
+        deterministic_gates,
         provenance: json!({
             "source_schema": outcome.schema,
             "artifact_metadata": artifact.metadata,
@@ -199,7 +206,7 @@ trait AgentTaskPromotionRunner {
         handle: &str,
         patch_path: &Path,
     ) -> Result<AgentTaskPromotionCommandReport>;
-    fn verify(&mut self, cwd: &Path, command: &str) -> Result<AgentTaskPromotionCommandReport>;
+    fn verify(&mut self, cwd: &Path, index: usize, command: &str) -> Result<AgentTaskGateReport>;
 }
 
 struct DmcPromotionRunner;
@@ -221,8 +228,8 @@ impl AgentTaskPromotionRunner for DmcPromotionRunner {
         apply_patch_with_dmc(handle, patch_path)
     }
 
-    fn verify(&mut self, cwd: &Path, command: &str) -> Result<AgentTaskPromotionCommandReport> {
-        run_verification_command(cwd, command)
+    fn verify(&mut self, cwd: &Path, index: usize, command: &str) -> Result<AgentTaskGateReport> {
+        run_gate_command(cwd, index, command)
     }
 }
 
@@ -536,13 +543,6 @@ fn dmc_worktree_path(handle: &str) -> Result<Option<PathBuf>> {
         .map(PathBuf::from))
 }
 
-fn run_verification_command(cwd: &Path, command: &str) -> Result<AgentTaskPromotionCommandReport> {
-    run_command(
-        vec!["sh".to_string(), "-lc".to_string(), command.to_string()],
-        Some(cwd),
-    )
-}
-
 fn run_command(
     command: Vec<String>,
     cwd: Option<&Path>,
@@ -642,10 +642,24 @@ mod tests {
             ]))
         }
 
-        fn verify(&mut self, cwd: &Path, command: &str) -> Result<AgentTaskPromotionCommandReport> {
+        fn verify(
+            &mut self,
+            cwd: &Path,
+            index: usize,
+            command: &str,
+        ) -> Result<AgentTaskGateReport> {
             self.verify_calls
                 .push((cwd.to_path_buf(), command.to_string()));
-            Ok(command_report(vec!["sh", "-lc", command]))
+            Ok(AgentTaskGateReport {
+                schema: crate::core::agent_task_gate::AGENT_TASK_GATE_REPORT_SCHEMA.to_string(),
+                id: format!("gate-{index}"),
+                status: AgentTaskGateStatus::Succeeded,
+                command: vec!["sh".to_string(), "-lc".to_string(), command.to_string()],
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+                failure_evidence: None,
+            })
         }
     }
 
@@ -834,6 +848,7 @@ mod tests {
         assert_eq!(report.patch_artifact.id, "patch");
         assert_eq!(report.changed_files, vec!["src/lib.rs"]);
         assert!(report.dmc_commands.is_empty());
+        assert!(report.deterministic_gates.is_empty());
     }
 
     #[test]
@@ -874,7 +889,8 @@ mod tests {
             )]
         );
         assert_eq!(report.dmc_commands.len(), 1);
-        assert_eq!(report.verification.len(), 1);
+        assert_eq!(report.deterministic_gates.len(), 1);
+        assert_eq!(report.deterministic_gates[0].id, "gate-1");
     }
 
     #[test]

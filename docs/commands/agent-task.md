@@ -110,6 +110,13 @@ The gate passes when:
 - `review` returns a `homeboy/agent-task-review/v1` envelope with `transport.chat_state_required: false`, aggregate reconciliation, and promotion candidates.
 - `promote <run-id> --dry-run` resolves the aggregate from the durable run id and reports the selected non-empty patch plus changed files without requiring the operator to look up `aggregate_path` manually.
 
+When promotion runs without `--dry-run`, each `--verify <command>` is treated as
+a deterministic gate in the promoted worktree. Promotion reports gate results as
+`deterministic_gates[]` using `homeboy/agent-task-gate-report/v1`. Failed gates
+set promotion `status: "gate_failed"`, exit nonzero, and include
+`failure_evidence.agent_feedback` plus stdout/stderr tails so the next cook-loop
+agent task can receive exact failure context instead of a generic shell error.
+
 Queued runs that should not execute can be cancelled without chat/session state:
 
 ```bash
