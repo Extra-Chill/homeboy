@@ -34,6 +34,16 @@ const DEFAULT_WORKSPACE_ALLOWED_TOOLS = [
   'workspace_git_status',
 ];
 
+const CODEX_SECRET_ENV = [
+  'AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN',
+  'AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN',
+  'AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT',
+  'AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID',
+  'AI_PROVIDER_OPENAI_CODEX_FEDRAMP',
+];
+
+const DEFAULT_CODEX_MODEL = 'gpt-5.5';
+
 const AGENT_BUNDLE_CONFIG_FIELDS = [
   'bundle_path',
   'bundle_host_path',
@@ -193,7 +203,7 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     provider_plugin_paths: config.provider_plugin_paths || options.providerPluginPaths || defaults.providerPluginPaths || [],
     agent_bundles: config.agent_bundles || config.agentBundles || options.agentBundles || [],
     runtime_stack_mounts: config.runtime_stack_mounts || options.runtimeStackMounts || [],
-    runtime_overlays: config.runtime_overlays || options.runtimeOverlays || [],
+    runtime_overlays: config.runtime_overlays || options.runtimeOverlays || defaults.runtimeOverlays || [],
     secret_env: config.secret_env || options.secretEnv || defaults.secretEnv || [],
     mounts,
     workspaces: inputs.workspaces || config.workspaces || options.workspaces || defaults.workspaces || [],
@@ -260,8 +270,9 @@ function defaultCodeboxRuntimeConfig(request, config, inputs, options = {}) {
     siblingPath(workspaceBase, 'ai-provider-for-openai'),
     siblingPath(workspaceBase, 'ai-provider-for-openai-main'),
   );
-  const provider = config.provider || options.provider || defaultProviderForPluginPath(providerPluginPath);
+  const provider = config.provider || options.provider || defaultProvider(settings, providerPluginPath);
   const model = config.model || options.model || defaultModelForProvider(provider, settings);
+  const phpAiClientPath = defaultPhpAiClientPath(provider, settings, workspaceBase);
   const agentsApiPath = firstExistingPath(
     options.agentsApi,
     settings.wp_codebox_agents_api_path,
@@ -274,15 +285,59 @@ function defaultCodeboxRuntimeConfig(request, config, inputs, options = {}) {
     agentsApi: agentsApiPath,
     legacyRuntime: dataMachinePath,
     legacyRuntimeTools: dataMachineCodePath,
-    providerPluginPaths: normalizeArray(settings.wp_codebox_provider_plugin_paths || settings.provider_plugin_paths || (providerPluginPath ? [providerPluginPath] : [])),
+    providerPluginPaths: defaultProviderPluginPaths(provider, settings, workspaceBase, providerPluginPath),
     provider,
     model,
     secretEnv: defaultSecretEnv(provider, settings),
+    runtimeOverlays: defaultRuntimeOverlays(provider, phpAiClientPath),
     mounts: defaultWorkspaceMounts(workspaceRoot, request, config, inputs, options),
     workspaces: defaultWorkspaces(config, inputs, options),
     allowedTools: defaultWorkspaceAllowedTools(workspaceRoot),
     sandboxToolPolicy: defaultWorkspaceSandboxToolPolicy(workspaceRoot),
   };
+}
+
+function defaultProviderPluginPaths(provider, settings, workspaceBase, fallbackProviderPluginPath) {
+  const explicit = normalizeArray(settings.wp_codebox_provider_plugin_paths || settings.provider_plugin_paths);
+  if (explicit.length > 0) {
+    return explicit;
+  }
+  if (provider === 'codex') {
+    return normalizeArray(firstExistingPath(
+      settings.wp_codebox_codex_provider_plugin_path,
+      process.env.HOMEBOY_WP_CODEBOX_CODEX_PROVIDER_PLUGIN_PATH,
+      siblingPath(workspaceBase, 'ai-provider-for-openai@codex-oauth-provider'),
+      fallbackProviderPluginPath,
+    ));
+  }
+  return fallbackProviderPluginPath ? [fallbackProviderPluginPath] : [];
+}
+
+function defaultPhpAiClientPath(provider, settings, workspaceBase) {
+  if (provider !== 'codex') {
+    return '';
+  }
+  return firstExistingPath(
+    settings.wp_codebox_php_ai_client_path,
+    settings.php_ai_client_path,
+    process.env.HOMEBOY_WP_CODEBOX_PHP_AI_CLIENT_PATH,
+    siblingPath(workspaceBase, 'php-ai-client@custom-provider-auth'),
+    siblingPath(workspaceBase, 'php-ai-client'),
+  );
+}
+
+function defaultRuntimeOverlays(provider, phpAiClientPath) {
+  if (provider !== 'codex' || !phpAiClientPath) {
+    return [];
+  }
+  return [{
+    kind: 'bundled-library',
+    library: 'php-ai-client',
+    source: phpAiClientPath,
+    target: '/wordpress/wp-includes/php-ai-client',
+    strategy: 'wordpress-scoped-bundle',
+    metadata: { component: 'php-ai-client', ref: 'custom-provider-auth' },
+  }];
 }
 
 function firstDefined(...values) {
@@ -339,15 +394,17 @@ function defaultSecretEnv(provider, settings) {
     return explicit;
   }
   if (provider === 'codex') {
-    return [
-      'AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN',
-      'AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN',
-      'AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT',
-      'AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID',
-      'AI_PROVIDER_OPENAI_CODEX_FEDRAMP',
-    ];
+    return CODEX_SECRET_ENV;
   }
   return provider === 'openai' ? ['OPENAI_API_KEY'] : [];
+}
+
+function defaultProvider(settings, providerPluginPath) {
+  const explicit = settings.wp_codebox_provider || settings.provider || process.env.HOMEBOY_WP_CODEBOX_PROVIDER;
+  if (explicit) {
+    return explicit;
+  }
+  return hasCodexSubscriptionAuth(settings) ? 'codex' : defaultProviderForPluginPath(providerPluginPath);
 }
 
 function defaultProviderForPluginPath(providerPluginPath) {
@@ -358,11 +415,44 @@ function defaultProviderForPluginPath(providerPluginPath) {
 }
 
 function defaultModelForProvider(provider, settings) {
-	const explicit = settings.wp_codebox_model || settings.model || process.env.HOMEBOY_WP_CODEBOX_MODEL;
-	if (explicit) {
-		return explicit;
-	}
-	return '';
+  const explicit = settings.wp_codebox_model || settings.model || process.env.HOMEBOY_WP_CODEBOX_MODEL;
+  if (explicit) {
+    return explicit;
+  }
+  const codexModel = settings.wp_codebox_codex_model || process.env.HOMEBOY_WP_CODEBOX_CODEX_MODEL;
+  if (provider === 'codex' && hasCodexSubscriptionAuth(settings)) {
+    return codexModel || DEFAULT_CODEX_MODEL;
+  }
+  return '';
+}
+
+function hasCodexSubscriptionAuth(settings = {}) {
+  if (settings.wp_codebox_codex_enabled === false || settings.wp_codebox_codex_enabled === 'false') {
+    return false;
+  }
+  const envHasTokens = CODEX_SECRET_ENV.slice(0, 4).every((name) => Boolean(process.env[name]));
+  if (envHasTokens) {
+    return true;
+  }
+  const authPath = settings.wp_codebox_codex_auth_path || process.env.HOMEBOY_WP_CODEBOX_CODEX_AUTH_PATH || defaultCodexAuthPath();
+  const auth = readJsonFile(authPath);
+  return Boolean(auth?.tokens?.access_token && auth?.tokens?.refresh_token && auth?.tokens?.account_id);
+}
+
+function defaultCodexAuthPath() {
+  const home = process.env.HOME;
+  return home ? path.join(home, '.codex', 'auth.json') : '';
+}
+
+function readJsonFile(filePath) {
+  if (!filePath || !fs.existsSync(filePath)) {
+    return null;
+  }
+  try {
+    return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+  } catch {
+    return null;
+  }
 }
 
 function defaultWorkspaceAllowedTools(workspaceRoot) {

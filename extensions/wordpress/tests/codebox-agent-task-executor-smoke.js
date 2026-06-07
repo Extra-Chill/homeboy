@@ -13,6 +13,13 @@ const {
 } = require('../lib/codebox-agent-task-executor');
 
 const fixtureCodeboxCoreModule = path.join(__dirname, 'fixtures', 'wp-codebox-core-agent-task-normalizer.mjs');
+const codexSecretEnv = [
+  'AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN',
+  'AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN',
+  'AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT',
+  'AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID',
+  'AI_PROVIDER_OPENAI_CODEX_FEDRAMP',
+];
 
 function writeFixtureTaskRunner(root) {
   const fixture = path.join(root, 'fixture-task-runner.cjs');
@@ -21,7 +28,12 @@ function writeFixtureTaskRunner(root) {
 'use strict';
 const fs = require('node:fs');
   const request = JSON.parse(fs.readFileSync(0, 'utf8'));
-fs.writeFileSync(${JSON.stringify(capture)}, JSON.stringify({ argv: process.argv.slice(2), request }, null, 2));
+const codexSecretEnv = ${JSON.stringify(codexSecretEnv)};
+fs.writeFileSync(${JSON.stringify(capture)}, JSON.stringify({
+  argv: process.argv.slice(2),
+  request,
+  env_presence: Object.fromEntries(codexSecretEnv.map((name) => [name, Boolean(process.env[name])])),
+}, null, 2));
 process.stdout.write(JSON.stringify({
   success: true,
   status: 'completed',
@@ -351,7 +363,9 @@ try {
   const dataMachineCodePath = path.join(defaultsRoot, 'data-machine-code');
   const staleStandaloneAgentsApiPath = path.join(defaultsRoot, 'agents-api');
   const providerPath = path.join(defaultsRoot, 'ai-provider-for-openai');
-  for (const directory of [workspaceRoot, bundledAgentsApiPath, dataMachineCodePath, staleStandaloneAgentsApiPath, providerPath]) {
+  const codexProviderPath = path.join(defaultsRoot, 'ai-provider-for-openai@codex-oauth-provider');
+  const phpAiClientPath = path.join(defaultsRoot, 'php-ai-client@custom-provider-auth');
+  for (const directory of [workspaceRoot, bundledAgentsApiPath, dataMachineCodePath, staleStandaloneAgentsApiPath, providerPath, codexProviderPath, phpAiClientPath]) {
     fs.mkdirSync(directory, { recursive: true });
   }
 
@@ -372,7 +386,15 @@ try {
   assert.equal(defaultedRequest.runtime_component_paths.agents_api, bundledAgentsApiPath);
   assert.equal(defaultedRequest.runtime_component_paths.agent_runtime, dataMachinePath);
   assert.equal(defaultedRequest.runtime_component_paths.agent_runtime_tools, dataMachineCodePath);
-  assert.deepEqual(defaultedRequest.provider_plugin_paths, [providerPath]);
+  assert.deepEqual(defaultedRequest.provider_plugin_paths, [codexProviderPath]);
+  assert.deepEqual(defaultedRequest.runtime_overlays, [{
+    kind: 'bundled-library',
+    library: 'php-ai-client',
+    source: phpAiClientPath,
+    target: '/wordpress/wp-includes/php-ai-client',
+    strategy: 'wordpress-scoped-bundle',
+    metadata: { component: 'php-ai-client', ref: 'custom-provider-auth' },
+  }]);
   assert.deepEqual(defaultedRequest.secret_env, [
     'AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN',
     'AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN',
@@ -388,6 +410,33 @@ try {
   assert(!JSON.stringify(defaultedRequest).includes(staleStandaloneAgentsApiPath));
   assert(!JSON.stringify(defaultedRequest).includes(alternateBundledAgentsApiPath));
 
+  const codexAuthPath = path.join(defaultsRoot, 'codex-auth.json');
+  fs.writeFileSync(codexAuthPath, JSON.stringify({
+    tokens: {
+      access_token: 'fixture-access-token',
+      refresh_token: 'fixture-refresh-token',
+      account_id: 'fixture-account-id',
+    },
+  }));
+  const codexSubscriptionDefaultedRequest = codeboxTaskRequestFromAgentTaskRequest({
+    ...request,
+    task_id: 'codex-subscription-default-task-123',
+    executor: {
+      backend: 'codebox',
+      config: {},
+    },
+    inputs: {
+      target: { root: workspaceRoot },
+    },
+  }, {
+    settings: { wp_codebox_codex_auth_path: codexAuthPath },
+  });
+  assert.equal(codexSubscriptionDefaultedRequest.provider, 'codex');
+  assert.equal(codexSubscriptionDefaultedRequest.model, 'gpt-5.5');
+  assert.deepEqual(codexSubscriptionDefaultedRequest.provider_plugin_paths, [codexProviderPath]);
+  assert.equal(codexSubscriptionDefaultedRequest.runtime_overlays[0].source, phpAiClientPath);
+  assert.deepEqual(codexSubscriptionDefaultedRequest.secret_env, codexSecretEnv);
+
   const openAiDefaultedRequest = codeboxTaskRequestFromAgentTaskRequest({
     ...request,
     task_id: 'default-openai-provider-task-123',
@@ -400,7 +449,7 @@ try {
       target: { root: workspaceRoot },
     },
   }, {
-    settings: {},
+    settings: { wp_codebox_codex_enabled: false },
   });
   assert.equal(openAiDefaultedRequest.provider, 'openai');
   assert.equal(openAiDefaultedRequest.model, 'gpt-5.5');
@@ -417,7 +466,7 @@ try {
       target: { root: workspaceRoot },
     },
   }, {
-    settings: {},
+    settings: { wp_codebox_codex_enabled: false },
   });
   assert.equal(bareOpenAiDefaultedRequest.provider, 'openai');
   assert.equal(bareOpenAiDefaultedRequest.model, '');
@@ -1052,12 +1101,25 @@ try {
   assert.equal(capturedRecipe.request.recipe.name, 'minimal-runtime');
   assert.equal(capturedRecipe.request.recipe.target_ref, 'Extra-Chill/example#42');
 
+  const fakeCodexHome = path.join(root, 'fake-codex-home');
+  const fakeCodexDirectory = path.join(fakeCodexHome, '.codex');
+  fs.mkdirSync(fakeCodexDirectory, { recursive: true });
+  fs.writeFileSync(path.join(fakeCodexDirectory, 'auth.json'), JSON.stringify({
+    tokens: {
+      access_token: 'fixture-codex-access-token',
+      refresh_token: 'fixture-codex-refresh-token',
+      expires_at: '1780000000',
+      account_id: 'fixture-codex-account-id',
+    },
+  }));
+
   const codexResult = spawnSync(process.execPath, [
     path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs'),
     '--task-runner',
     fixture,
   ], {
     encoding: 'utf8',
+    env: { ...process.env, HOME: fakeCodexHome },
     input: JSON.stringify({
       ...codexAgentRequest,
       task_id: 'codex-cli-task-123',
@@ -1082,7 +1144,9 @@ try {
     'AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID',
     'AI_PROVIDER_OPENAI_CODEX_FEDRAMP',
   ]);
+  assert.deepEqual(capturedCodex.env_presence, Object.fromEntries(codexSecretEnv.map((name) => [name, true])));
   assert(!JSON.stringify(capturedCodex).includes('wp-ai-gateway'));
+  assert(!JSON.stringify(capturedCodex).includes('fixture-codex-access-token'));
 
   const agentBundleRoot = fs.mkdtempSync(path.join(root, 'agent-bundle-'));
   const bundle = writeBundleFixture(agentBundleRoot);
