@@ -37,6 +37,11 @@ process.stdout.write(JSON.stringify({
       patch: { bytes: 123, sha256: 'fixture-patch-sha' }
     }
   },
+  recipe_run: {
+    pack: 'fixture-recipes',
+    name: 'fixture-recipe',
+    probe: { success: true }
+  },
   metadata: { run_id: 'codebox-run-1' }
 }));
 `);
@@ -826,11 +831,14 @@ try {
   assert.equal(normalizedResult.status, 0, normalizedResult.stderr || normalizedResult.stdout);
   const normalizedOutcome = JSON.parse(normalizedResult.stdout);
   assert.equal(normalizedOutcome.metadata.codebox_run_result.schema, 'wp-codebox/agent-task-run-result/v1');
+  assert.equal(normalizedOutcome.metadata.codebox_recipe_run_summary.schema, 'wp-codebox/recipe-run-summary/v1');
   assert.equal(normalizedOutcome.metadata.decision_evidence.run_id, 'fixture-run-1');
   assert.equal(normalizedOutcome.metadata.decision_evidence.runtime_status, 'destroyed');
   assert.equal(normalizedOutcome.metadata.decision_evidence.patch_sha256, 'fixture-patch-sha');
   assert.equal(normalizedOutcome.artifacts.some((artifact) => artifact.kind === 'codebox-patch' && artifact.path === '/tmp/fixture-normalized/patch.diff'), true);
+  assert.equal(normalizedOutcome.artifacts.some((artifact) => artifact.kind === 'recipe-probe-result' && artifact.path === '/tmp/fixture-normalized/recipe-probe.json'), true);
   assert.equal(normalizedOutcome.diagnostics.some((diagnostic) => diagnostic.class === 'fixture.normalizer'), true);
+  assert.equal(normalizedOutcome.diagnostics.some((diagnostic) => diagnostic.class === 'fixture.recipe_normalizer'), true);
 
   const captured = JSON.parse(fs.readFileSync(capture, 'utf8'));
   assert.equal(captured.request.schema, 'wp-codebox/task-input/v1');
