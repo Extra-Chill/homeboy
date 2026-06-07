@@ -80,7 +80,7 @@ install_wp_codebox() {
         echo "Installing WP Codebox CLI from release artifact (${download_url})..."
         mkdir -p "${install_root}" "${bin_dir}"
 
-        if command -v curl >/dev/null 2>&1 && curl -fsSL "${download_url}" -o "${artifact_path}"; then
+        if command -v curl >/dev/null 2>&1 && curl -fsIL "${download_url}" >/dev/null 2>&1 && curl -fsSL "${download_url}" -o "${artifact_path}"; then
             release_artifact_downloaded=1
             rm -rf "${extract_dir}"
             mkdir -p "${extract_dir}"
@@ -110,7 +110,7 @@ EOF
         fi
 
         if [ "${release_artifact_downloaded}" -eq 0 ]; then
-            echo "WP Codebox release artifact unavailable; falling back to source install" >&2
+            echo "WP Codebox release artifact not published at ${download_url}; falling back to source install" >&2
         fi
     fi
 
