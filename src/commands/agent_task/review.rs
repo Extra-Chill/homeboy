@@ -102,6 +102,8 @@ pub(crate) fn promote_artifact(args: PromoteArgs) -> CmdResult<Value> {
         artifact_id: args.artifact_id,
         dry_run: args.dry_run,
         verify: args.verify,
+        private_verify: args.private_verify,
+        private_gate_reveal: args.private_gate_reveal,
     })?;
     let exit_code = if report.status == AgentTaskPromotionStatus::GateFailed {
         1

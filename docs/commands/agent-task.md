@@ -111,11 +111,21 @@ The gate passes when:
 - `promote <run-id> --dry-run` resolves the aggregate from the durable run id and reports the selected non-empty patch plus changed files without requiring the operator to look up `aggregate_path` manually.
 
 When promotion runs without `--dry-run`, each `--verify <command>` is treated as
-a deterministic gate in the promoted worktree. Promotion reports gate results as
-`deterministic_gates[]` using `homeboy/agent-task-gate-report/v1`. Failed gates
-set promotion `status: "gate_failed"`, exit nonzero, and include
+a visible deterministic gate in the promoted worktree. Promotion reports gate
+results as `deterministic_gates[]` using
+`homeboy/agent-task-gate-report/v1`. Failed visible gates set promotion
+`status: "gate_failed"`, exit nonzero, and include
 `failure_evidence.agent_feedback` plus stdout/stderr tails so the next cook-loop
 agent task can receive exact failure context instead of a generic shell error.
+
+Use `--private-verify <command>` for orchestrator-only completion gates that
+should decide completion without exposing hidden evaluator details to the next
+agent attempt. Private gate reports still appear in the promotion report for
+human/orchestrator evidence, but `agent-task gate-feedback` applies
+`--private-gate-reveal <policy>` before building the follow-up request. Supported
+policies are `summary-only` (default), `redacted`, `no-detail`, and
+`full-evidence`. Visible gate failures continue to provide full deterministic
+evidence to the agent.
 
 `agent-task gate-feedback` converts a promotion report and the original
 `AgentTaskRequest` into a provider-neutral cook-loop decision:

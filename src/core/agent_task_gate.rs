@@ -1,6 +1,7 @@
 use std::path::Path;
 use std::process::Command;
 
+use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 
 use crate::core::{Error, Result};
@@ -12,6 +13,10 @@ pub struct AgentTaskGateReport {
     #[serde(default = "gate_report_schema")]
     pub schema: String,
     pub id: String,
+    #[serde(default)]
+    pub visibility: AgentTaskGateVisibility,
+    #[serde(default)]
+    pub reveal_policy: AgentTaskGateRevealPolicy,
     pub status: AgentTaskGateStatus,
     pub command: Vec<String>,
     pub exit_code: i32,
@@ -21,6 +26,24 @@ pub struct AgentTaskGateReport {
     pub stderr: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_evidence: Option<AgentTaskGateFailureEvidence>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, ValueEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentTaskGateVisibility {
+    #[default]
+    Visible,
+    Private,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, ValueEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentTaskGateRevealPolicy {
+    #[default]
+    FullEvidence,
+    SummaryOnly,
+    Redacted,
+    NoDetail,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -47,6 +70,22 @@ pub(crate) fn run_gate_command(
     index: usize,
     command: &str,
 ) -> Result<AgentTaskGateReport> {
+    run_gate_command_with_policy(
+        cwd,
+        index,
+        command,
+        AgentTaskGateVisibility::Visible,
+        AgentTaskGateRevealPolicy::FullEvidence,
+    )
+}
+
+pub(crate) fn run_gate_command_with_policy(
+    cwd: &Path,
+    index: usize,
+    command: &str,
+    visibility: AgentTaskGateVisibility,
+    reveal_policy: AgentTaskGateRevealPolicy,
+) -> Result<AgentTaskGateReport> {
     let command_vec = vec!["sh".to_string(), "-lc".to_string(), command.to_string()];
     let mut process = Command::new(&command_vec[0]);
     process.args(&command_vec[1..]).current_dir(cwd);
@@ -70,6 +109,8 @@ pub(crate) fn run_gate_command(
     Ok(AgentTaskGateReport {
         schema: AGENT_TASK_GATE_REPORT_SCHEMA.to_string(),
         id: format!("gate-{index}"),
+        visibility,
+        reveal_policy,
         status,
         command: command_vec,
         exit_code,
@@ -124,6 +165,11 @@ mod tests {
 
         assert_eq!(report.schema, AGENT_TASK_GATE_REPORT_SCHEMA);
         assert_eq!(report.id, "gate-1");
+        assert_eq!(report.visibility, AgentTaskGateVisibility::Visible);
+        assert_eq!(
+            report.reveal_policy,
+            AgentTaskGateRevealPolicy::FullEvidence
+        );
         assert_eq!(report.status, AgentTaskGateStatus::Succeeded);
         assert_eq!(report.exit_code, 0);
         assert_eq!(report.stdout, "ok");
@@ -152,5 +198,24 @@ mod tests {
         assert_eq!(evidence.stderr_tail, "boom");
         assert!(evidence.summary.contains("deterministic gate failed"));
         assert!(evidence.agent_feedback.contains("Fix the code"));
+    }
+
+    #[test]
+    fn gate_command_records_private_visibility_and_reveal_policy() {
+        let temp = tempfile::tempdir().expect("tempdir");
+
+        let report = run_gate_command_with_policy(
+            temp.path(),
+            3,
+            "printf 'hidden failure'; exit 1",
+            AgentTaskGateVisibility::Private,
+            AgentTaskGateRevealPolicy::SummaryOnly,
+        )
+        .expect("gate report");
+
+        assert_eq!(report.status, AgentTaskGateStatus::Failed);
+        assert_eq!(report.visibility, AgentTaskGateVisibility::Private);
+        assert_eq!(report.reveal_policy, AgentTaskGateRevealPolicy::SummaryOnly);
+        assert_eq!(report.stdout, "hidden failure");
     }
 }

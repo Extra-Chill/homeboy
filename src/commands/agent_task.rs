@@ -1,4 +1,5 @@
 use clap::{Args, Subcommand};
+use homeboy::core::agent_task_gate::AgentTaskGateRevealPolicy;
 use serde_json::Value;
 
 use homeboy::core::agent_task::AgentTaskRequest;
@@ -141,6 +142,18 @@ pub struct PromoteArgs {
     /// Verification command to run in the promoted worktree after apply.
     #[arg(long = "verify", value_name = "COMMAND")]
     pub verify: Vec<String>,
+
+    /// Private verification command to run after apply without exposing full failure details to follow-up agents.
+    #[arg(long = "private-verify", value_name = "COMMAND")]
+    pub private_verify: Vec<String>,
+
+    /// Feedback policy for failed private gates.
+    #[arg(
+        long = "private-gate-reveal",
+        default_value = "summary-only",
+        value_name = "POLICY"
+    )]
+    pub private_gate_reveal: AgentTaskGateRevealPolicy,
 }
 
 #[derive(Args, Debug)]
