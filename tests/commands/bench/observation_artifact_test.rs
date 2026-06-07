@@ -25,6 +25,7 @@ fn bench_observation_reports_missing_and_blocked_artifacts() {
                 kind: Some("json".to_string()),
                 label: Some("Missing".to_string()),
                 observation_artifact_id: None,
+                ..BenchArtifact::default()
             },
         );
         results.scenarios[0].artifacts.insert(
@@ -36,6 +37,7 @@ fn bench_observation_reports_missing_and_blocked_artifacts() {
                 kind: Some("json".to_string()),
                 label: Some("Escape".to_string()),
                 observation_artifact_id: None,
+                ..BenchArtifact::default()
             },
         );
         let mut workflow = BenchRunWorkflowResult {

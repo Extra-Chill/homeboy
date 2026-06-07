@@ -46,11 +46,11 @@ pub struct TransformRule {
     /// Backslash escapes are collapsed before the template is handed to the
     /// regex engine: `\\` → one literal backslash, `\n` → newline, `\t` → tab,
     /// `\r` → CR, `\0` → nul, `\"` → `"`, `\'` → `'`. Unknown escapes pass
-    /// through verbatim. This means that to emit a PHP fully-qualified name
-    /// like `\WP_Foo` on disk, write `\\WP_Foo` in JSON (which decodes to
-    /// `\WP_Foo` in memory — the literal `\` you want). See #1277.
+    /// through verbatim. This means that to emit a fully-qualified name like
+    /// `\Example_Name` on disk, write `\\Example_Name` in JSON (which decodes
+    /// to `\Example_Name` in memory — the literal `\` you want). See #1277.
     pub replace: String,
-    /// Glob pattern for files to apply to (e.g., `tests/**/*.php`).
+    /// Glob pattern for files to apply to (e.g., `tests/**/*.txt`).
     #[serde(default = "default_files_glob")]
     pub files: String,
     /// Match context: "line" (default) or "file" (whole-file regex, for multi-line).

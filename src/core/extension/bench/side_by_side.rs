@@ -1,5 +1,6 @@
 use serde::Serialize;
 
+use super::artifact::BenchPreviewLifecycleMetadata;
 use super::parsing::BenchResults;
 use super::report::{comparison_metrics, BenchArtifactRef, RigBenchEntry};
 
@@ -23,6 +24,8 @@ pub struct BenchSideBySideRigReport {
     pub key_metrics: Vec<BenchSideBySideMetric>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub artifacts: Vec<BenchSideBySideArtifact>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub preview_links: Vec<BenchSideBySidePreviewLink>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure_reason: Option<String>,
 }
@@ -50,6 +53,22 @@ pub struct BenchSideBySideArtifact {
     pub label: Option<String>,
 }
 
+#[derive(Serialize, Debug, PartialEq)]
+pub struct BenchSideBySidePreviewLink {
+    pub role: String,
+    pub scenario_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_index: Option<usize>,
+    pub name: String,
+    pub url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(flatten)]
+    pub preview_lifecycle: BenchPreviewLifecycleMetadata,
+}
+
 pub(super) fn build_side_by_side_report(
     component: &str,
     iterations: u64,
@@ -59,11 +78,15 @@ pub(super) fn build_side_by_side_report(
         report: "side_by_side",
         component: component.to_string(),
         iterations,
-        rigs: entries.iter().map(side_by_side_rig_report).collect(),
+        rigs: entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| side_by_side_rig_report(index, entry))
+            .collect(),
     }
 }
 
-fn side_by_side_rig_report(entry: &RigBenchEntry) -> BenchSideBySideRigReport {
+fn side_by_side_rig_report(index: usize, entry: &RigBenchEntry) -> BenchSideBySideRigReport {
     let key_metrics = entry
         .results
         .as_ref()
@@ -78,6 +101,11 @@ fn side_by_side_rig_report(entry: &RigBenchEntry) -> BenchSideBySideRigReport {
         elapsed_ms: entry.results.as_ref().and_then(total_elapsed_ms),
         key_metrics,
         artifacts: entry.artifacts.iter().map(side_by_side_artifact).collect(),
+        preview_links: entry
+            .artifacts
+            .iter()
+            .filter_map(|artifact| side_by_side_preview_link(index, artifact))
+            .collect(),
         failure_reason: failure_reason(entry),
     }
 }
@@ -124,6 +152,58 @@ fn side_by_side_artifact(artifact: &BenchArtifactRef) -> BenchSideBySideArtifact
             .or_else(|| artifact.path.as_deref().and_then(url_from_artifact_path)),
         kind: artifact.kind.clone(),
         label: artifact.label.clone(),
+    }
+}
+
+fn side_by_side_preview_link(
+    rig_index: usize,
+    artifact: &BenchArtifactRef,
+) -> Option<BenchSideBySidePreviewLink> {
+    let url = artifact
+        .preview_url
+        .clone()
+        .or_else(|| artifact.public_url.clone())
+        .or_else(|| artifact.url.clone())
+        .or_else(|| artifact.path.as_deref().and_then(url_from_artifact_path))?;
+
+    if !is_preview_artifact(artifact) {
+        return None;
+    }
+
+    Some(BenchSideBySidePreviewLink {
+        role: artifact
+            .role
+            .clone()
+            .unwrap_or_else(|| inferred_role(rig_index).to_string()),
+        scenario_id: artifact.scenario_id.clone(),
+        run_index: artifact.run_index,
+        name: artifact.name.clone(),
+        url,
+        local_url: artifact.local_url.clone(),
+        status: artifact.status.clone(),
+        preview_lifecycle: artifact.preview_lifecycle.clone(),
+    })
+}
+
+fn is_preview_artifact(artifact: &BenchArtifactRef) -> bool {
+    artifact.preview_url.is_some()
+        || artifact.public_url.is_some()
+        || artifact.local_url.is_some()
+        || artifact.status.is_some()
+        || artifact.preview_lifecycle.expires_at.is_some()
+        || artifact.preview_lifecycle.cleanup_status.is_some()
+        || artifact.preview_lifecycle.service_lifecycle.is_some()
+        || artifact.preview_lifecycle.browser_origin_evidence.is_some()
+        || artifact.kind.as_deref() == Some("preview")
+        || artifact.artifact_type.as_deref() == Some("preview")
+        || artifact.name == "preview"
+}
+
+fn inferred_role(rig_index: usize) -> &'static str {
+    match rig_index {
+        0 => "baseline",
+        1 => "candidate",
+        _ => "provider",
     }
 }
 
