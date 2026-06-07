@@ -50,6 +50,8 @@ pub enum AgentTaskCommand {
     Promote(PromoteArgs),
     /// Finalize a green cook run into a review-ready pull request.
     FinalizePr(FinalizePrArgs),
+    /// Convert deterministic gate results into a cook-loop retry or stop decision.
+    GateFeedback(GateFeedbackArgs),
     /// List extension-declared agent-task executor providers.
     Providers,
 }
@@ -191,6 +193,33 @@ pub struct FinalizePrArgs {
     pub ai_used_for: String,
 }
 
+#[derive(Args, Debug)]
+pub struct GateFeedbackArgs {
+    /// AgentTaskPromotionReport JSON file, @file, or - for stdin.
+    #[arg(long, value_name = "PATH")]
+    pub promotion: String,
+
+    /// Original AgentTaskRequest JSON file, @file, or - for stdin.
+    #[arg(long = "source-task", value_name = "PATH")]
+    pub source_task: String,
+
+    /// Current deterministic gate attempt number.
+    #[arg(long, default_value_t = 1, value_name = "N")]
+    pub attempt: u32,
+
+    /// Maximum deterministic gate attempts allowed for this cook loop.
+    #[arg(long = "max-attempts", default_value_t = 3, value_name = "N")]
+    pub max_attempts: u32,
+
+    /// Durable source run id to include in evidence refs.
+    #[arg(long = "source-run-id", value_name = "ID")]
+    pub source_run_id: Option<String>,
+
+    /// Current candidate diff/context as a string, @file, or - for stdin.
+    #[arg(long = "current-diff", value_name = "SPEC")]
+    pub current_diff: Option<String>,
+}
+
 pub fn run(args: AgentTaskArgs, global: &GlobalArgs) -> CmdResult<Value> {
     match args.command {
         AgentTaskCommand::Dispatch(dispatch_args) => dispatch(dispatch_args, global),
@@ -207,6 +236,7 @@ pub fn run(args: AgentTaskArgs, global: &GlobalArgs) -> CmdResult<Value> {
         AgentTaskCommand::Review(review_args) => review::review(review_args),
         AgentTaskCommand::Promote(promote_args) => review::promote_artifact(promote_args),
         AgentTaskCommand::FinalizePr(finalize_args) => review::finalize_pull_request(finalize_args),
+        AgentTaskCommand::GateFeedback(feedback_args) => review::gate_feedback(feedback_args),
         AgentTaskCommand::Providers => review::providers(),
     }
 }

@@ -106,7 +106,7 @@ fn gate_failure_evidence(
     }
 }
 
-fn text_tail(text: &str, max_lines: usize) -> String {
+pub(crate) fn text_tail(text: &str, max_lines: usize) -> String {
     let lines: Vec<&str> = text.lines().collect();
     let start = lines.len().saturating_sub(max_lines);
     lines[start..].join("\n")
