@@ -9,14 +9,14 @@ pub(crate) fn render_pr_body(
         "## Summary\n- Finalized Homeboy agent-task cook run `{}` into review-ready branch `{}`.\n\n## Source refs\n{}\n\n## Attempt summary\n{}\n\n## Gate results\n{}\n\n## Changed files\n{}\n\n## Artifact refs\n{}\n\n## Final status\n- **Status:** review-ready\n- **Base:** `{}`\n- **Head:** `{}`\n- **Merge/deploy:** not performed\n\n## AI assistance\n- **AI assistance:** Yes\n- **Tool(s):** {}\n- **Used for:** {}\n",
         options.run_id,
         head,
-        bullets(&options.evidence.source_refs),
-        options.evidence.attempt_summary,
+        bullets(&options.source_refs),
+        options.attempt_summary,
         gate_bullets(&options.gate_results),
         bullets(changed_files),
-        bullets(&options.evidence.artifact_refs),
+        bullets(&options.artifact_refs),
         options.base,
         head,
-        options.evidence.ai_tool,
+        options.ai_tool,
         options.ai_used_for
     )
 }
