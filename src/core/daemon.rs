@@ -13,7 +13,8 @@ use crate::core::http_api::{self, AnalysisJobRunner, HttpMethod, UnsupportedAnal
 use crate::core::paths;
 use crate::core::process::pid_is_running;
 use crate::core::runner::{
-    execute_runner_process_until_cancelled, prepare_daemon_local_process, RunnerProcessRequest,
+    execute_runner_process_until_cancelled, prepare_daemon_local_process, Runner,
+    RunnerProcessRequest,
 };
 use crate::core::source_snapshot::SourceSnapshot;
 use crate::core::upgrade::VERSION;
@@ -70,6 +71,8 @@ pub struct HttpResponse {
 #[derive(Debug, Clone, Deserialize)]
 struct ExecRequest {
     runner_id: String,
+    #[serde(default)]
+    runner: Option<Runner>,
     #[serde(default)]
     project_id: Option<String>,
     #[serde(default)]
@@ -335,6 +338,7 @@ fn enqueue_exec_job(
         })?;
     let plan = prepare_daemon_local_process(RunnerProcessRequest {
         runner_id: request.runner_id,
+        runner: request.runner,
         cwd: request.cwd,
         project_id: request.project_id,
         command: request.command,

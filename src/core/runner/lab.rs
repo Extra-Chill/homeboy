@@ -445,6 +445,8 @@ fn run_lab_offload_inner(
     let synced_rig_dependencies = rig_materialization::sync_lab_offload_rig_component_dependencies(
         runner_id,
         &changed_since_preflight.args,
+        &synced.local_path,
+        &remote_cwd,
     )?;
     if !synced_rig_dependencies.is_empty() {
         for dependency in &synced_rig_dependencies {

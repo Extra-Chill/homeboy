@@ -99,8 +99,13 @@ pub(super) fn sync_lab_offload_rigs(
 pub(super) fn sync_lab_offload_rig_component_dependencies(
     runner_id: &str,
     args: &[String],
+    primary_local_path: &str,
+    primary_remote_path: &str,
 ) -> Result<Vec<RunnerGitDependencyMaterializationOutput>> {
-    let dependencies = lab_offload_rig_component_dependencies(args)?;
+    let dependencies = lab_offload_rig_component_dependencies(
+        args,
+        Some((primary_local_path, primary_remote_path)),
+    )?;
     if dependencies.is_empty() {
         return Ok(Vec::new());
     }
@@ -109,6 +114,9 @@ pub(super) fn sync_lab_offload_rig_component_dependencies(
     let mut synced = Vec::new();
     let mut seen = HashSet::new();
     for dependency in dependencies {
+        if !should_materialize_dependency(&dependency, primary_remote_path) {
+            continue;
+        }
         if !seen.insert(dependency.remote_checkout_root.clone()) {
             continue;
         }
@@ -128,6 +136,7 @@ pub(super) fn sync_lab_offload_rig_component_dependencies(
 
 pub(super) fn lab_offload_rig_component_dependencies(
     args: &[String],
+    primary_workspace: Option<(&str, &str)>,
 ) -> Result<Vec<RigComponentDependency>> {
     let mut dependencies = Vec::new();
     for rig_id in lab_offload_rig_ids(args) {
@@ -148,8 +157,11 @@ pub(super) fn lab_offload_rig_component_dependencies(
             dependencies.push(RigComponentDependency {
                 rig_id: rig_id.clone(),
                 component_id: component_id.clone(),
+                remote_checkout_root: remote_checkout_root_for_local(
+                    &local_checkout_root,
+                    primary_workspace,
+                ),
                 local_checkout_root,
-                remote_checkout_root: checkout_root.to_string(),
                 required_subpath,
                 remote_url: component.remote_url.clone(),
             });
@@ -160,6 +172,28 @@ pub(super) fn lab_offload_rig_component_dependencies(
 
 fn expanded_local_path(spec: &rig::RigSpec, value: &str) -> String {
     rig::expand::expand_vars(spec, value)
+}
+
+fn remote_checkout_root_for_local(
+    local_checkout_root: &str,
+    primary_workspace: Option<(&str, &str)>,
+) -> String {
+    let Some((primary_local_path, primary_remote_path)) = primary_workspace else {
+        return local_checkout_root.to_string();
+    };
+    if normalize_path_for_prefix(Path::new(local_checkout_root))
+        == normalize_path_for_prefix(Path::new(primary_local_path))
+    {
+        return primary_remote_path.to_string();
+    }
+    local_checkout_root.to_string()
+}
+
+fn should_materialize_dependency(
+    dependency: &RigComponentDependency,
+    primary_remote_path: &str,
+) -> bool {
+    dependency.remote_checkout_root != primary_remote_path
 }
 
 fn required_component_subpath(
@@ -300,12 +334,15 @@ mod tests {
             )
             .expect("save rig");
 
-            let dependencies = lab_offload_rig_component_dependencies(&[
-                "homeboy".to_string(),
-                "bench".to_string(),
-                "--rig".to_string(),
-                "woocommerce-performance".to_string(),
-            ])
+            let dependencies = lab_offload_rig_component_dependencies(
+                &[
+                    "homeboy".to_string(),
+                    "bench".to_string(),
+                    "--rig".to_string(),
+                    "woocommerce-performance".to_string(),
+                ],
+                None,
+            )
             .expect("dependencies");
 
             assert_eq!(dependencies.len(), 1);
@@ -323,6 +360,94 @@ mod tests {
                 Some("plugins/woocommerce")
             );
         });
+    }
+
+    #[test]
+    fn expands_package_root_for_remote_component_dependency_root() {
+        crate::test_support::with_isolated_home(|home| {
+            let checkout = home.path().join("Developer/studio-web");
+            std::fs::create_dir_all(checkout.join("rigs/studio-web-product-matrix"))
+                .expect("rig package");
+            let rig_dir = crate::core::paths::rigs().expect("rig dir");
+            std::fs::create_dir_all(&rig_dir).expect("create rig dir");
+            std::fs::write(
+                rig_dir.join("studio-web-product-matrix.json"),
+                serde_json::json!({
+                    "id": "studio-web-product-matrix",
+                    "components": {
+                        "studio-web": {
+                            "path": "${package.root}",
+                            "remote_url": "https://github.a8c.com/chubes4/studio-web.git"
+                        }
+                    }
+                })
+                .to_string(),
+            )
+            .expect("save rig");
+            std::fs::create_dir_all(crate::core::paths::rig_sources().expect("rig sources"))
+                .expect("create rig sources");
+            crate::core::rig::install::write_source_metadata(
+                "studio-web-product-matrix",
+                &crate::core::rig::install::RigSourceMetadata {
+                    source: checkout.display().to_string(),
+                    package_path: checkout.display().to_string(),
+                    rig_path: checkout
+                        .join("rigs/studio-web-product-matrix/rig.json")
+                        .display()
+                        .to_string(),
+                    discovery_path: Some(checkout.display().to_string()),
+                    source_revision: None,
+                    linked: true,
+                },
+            )
+            .expect("source metadata");
+
+            let dependencies = lab_offload_rig_component_dependencies(
+                &[
+                    "homeboy".to_string(),
+                    "bench".to_string(),
+                    "--rig".to_string(),
+                    "studio-web-product-matrix".to_string(),
+                ],
+                Some((
+                    &checkout.display().to_string(),
+                    "/home/chubes/Developer/_lab_workspaces/studio-web-snapshot",
+                )),
+            )
+            .expect("dependencies");
+
+            assert_eq!(dependencies.len(), 1);
+            assert_eq!(
+                dependencies[0].local_checkout_root,
+                checkout.display().to_string()
+            );
+            assert_eq!(
+                dependencies[0].remote_checkout_root,
+                "/home/chubes/Developer/_lab_workspaces/studio-web-snapshot"
+            );
+            assert!(!dependencies[0]
+                .remote_checkout_root
+                .contains("${package.root}"));
+        });
+    }
+
+    #[test]
+    fn primary_workspace_dependency_is_not_materialized_again() {
+        let primary_remote_path = "/home/chubes/Developer/_lab_workspaces/studio-web-snapshot";
+        let dependencies = vec![RigComponentDependency {
+            rig_id: "studio-web-product-matrix".to_string(),
+            component_id: "studio-web".to_string(),
+            local_checkout_root: "/Users/chubes/Developer/studio-web".to_string(),
+            remote_checkout_root: primary_remote_path.to_string(),
+            required_subpath: None,
+            remote_url: Some("https://github.a8c.com/chubes4/studio-web.git".to_string()),
+        }];
+
+        assert!(dependencies
+            .into_iter()
+            .filter(|dependency| should_materialize_dependency(dependency, primary_remote_path))
+            .collect::<Vec<_>>()
+            .is_empty());
     }
 
     #[test]
