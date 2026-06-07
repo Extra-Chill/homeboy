@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.222.11] - 2026-06-07
+
+### Changed
+- Clean up gate evidence import
+- Extract agent-task gate reporting module
+- Add deterministic agent-task gate evidence
+
 ## [0.222.10] - 2026-06-07
 
 ### Changed
