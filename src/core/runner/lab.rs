@@ -500,6 +500,7 @@ fn run_lab_offload_inner(
             source_snapshot: Some(source_snapshot),
             capability_preflight,
             required_extensions: contract.required_extensions,
+            require_paths: Vec::new(),
         },
     );
     let (exec_output, exit_code) = match exec_result {

@@ -125,6 +125,7 @@ mod tests {
             })),
             metrics: None,
             capture: None,
+            diagnostics: None,
         };
 
         let output = apply_lab_offload_patch(&exec_output)
@@ -185,6 +186,7 @@ mod tests {
             })),
             metrics: None,
             capture: None,
+            diagnostics: None,
         };
 
         let output = apply_lab_offload_patch(&exec_output)

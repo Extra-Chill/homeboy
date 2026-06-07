@@ -37,6 +37,7 @@ pub struct RunnerExecOptions {
     pub source_snapshot: Option<SourceSnapshot>,
     pub capability_preflight: Option<RunnerCapabilityPreflight>,
     pub required_extensions: Vec<String>,
+    pub require_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -74,6 +75,20 @@ pub struct RunnerExecOutput {
     pub metrics: Option<RunnerResourceMetrics>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capture: Option<CommandCaptureMetadata>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnostics: Option<RunnerExecDiagnostics>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RunnerExecDiagnostics {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runner_workspace_root: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_snapshot_remote_path: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub required_paths: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub hints: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -86,6 +101,8 @@ pub(crate) struct RunnerProcessRequest {
     pub capture_patch: bool,
     pub raw_exec: bool,
     pub source_snapshot: Option<SourceSnapshot>,
+    pub require_paths: Vec<String>,
+    pub validate_require_paths_on_host: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -95,6 +112,7 @@ pub(crate) struct RunnerProcessPlan {
     pub command: Vec<String>,
     pub env: HashMap<String, String>,
     pub source_snapshot: SourceSnapshot,
+    pub require_paths: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -123,6 +141,8 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
         capture_patch: options.capture_patch,
         raw_exec: options.raw_exec,
         source_snapshot: options.source_snapshot.clone(),
+        require_paths: options.require_paths.clone(),
+        validate_require_paths_on_host: false,
     })?;
     let runner = plan.runner.clone();
     let cwd = plan.cwd.clone();
@@ -150,6 +170,7 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
                     request_env,
                     options.capture_patch,
                     Some(plan.source_snapshot),
+                    options.require_paths,
                 );
             }
             if session.mode == RunnerTunnelMode::Reverse {
@@ -163,6 +184,7 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
                         request_env,
                         options.capture_patch,
                         Some(plan.source_snapshot),
+                        options.require_paths,
                     );
                 }
             }
@@ -177,7 +199,7 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
                 options.capability_preflight.as_ref(),
                 &request_env,
             )?;
-            exec_diagnostic_ssh(&runner, cwd, options.command, request_env)
+            exec_diagnostic_ssh(&runner, cwd, options.command, request_env, options.require_paths)
         }
         RunnerKind::Ssh => Err(Error::validation_invalid_argument(
             "runner",
@@ -200,6 +222,7 @@ fn exec_via_reverse_broker(
     env: HashMap<String, String>,
     capture_patch: bool,
     source_snapshot_override: Option<SourceSnapshot>,
+    require_paths: Vec<String>,
 ) -> Result<(RunnerExecOutput, i32)> {
     let client = Client::builder()
         .timeout(Duration::from_secs(10))
@@ -220,6 +243,7 @@ fn exec_via_reverse_broker(
         metadata: Some(json!({
             "transport": "reverse_broker",
         })),
+        require_paths: require_paths.clone(),
     };
     let data = broker_http::post_json(
         &client,
@@ -287,7 +311,7 @@ fn exec_via_reverse_broker(
             exit_code,
             stdout,
             stderr,
-            source_snapshot: Some(source_snapshot),
+            source_snapshot: Some(source_snapshot.clone()),
             job_id: Some(job.id.to_string()),
             job: Some(job),
             job_events: Some(events),
@@ -295,6 +319,7 @@ fn exec_via_reverse_broker(
             patch: None,
             metrics,
             capture: None,
+            diagnostics: runner_exec_diagnostics(runner, Some(&source_snapshot), &require_paths),
         },
         exit_code,
     ))
@@ -309,6 +334,7 @@ fn exec_via_daemon(
     env: HashMap<String, String>,
     capture_patch: bool,
     source_snapshot_override: Option<SourceSnapshot>,
+    require_paths: Vec<String>,
 ) -> Result<(RunnerExecOutput, i32)> {
     let client = Client::builder()
         .timeout(Duration::from_secs(10))
@@ -326,7 +352,8 @@ fn exec_via_daemon(
             "command": command,
             "env": env,
             "capture_patch": capture_patch,
-            "source_snapshot": source_snapshot,
+            "source_snapshot": source_snapshot.clone(),
+            "require_paths": require_paths.clone(),
         }))
         .send()
         .map_err(|err| {
@@ -404,7 +431,7 @@ fn exec_via_daemon(
             exit_code,
             stdout,
             stderr,
-            source_snapshot: Some(source_snapshot),
+            source_snapshot: Some(source_snapshot.clone()),
             job_id: Some(job.id.to_string()),
             job: Some(job),
             job_events: Some(events),
@@ -412,6 +439,7 @@ fn exec_via_daemon(
             patch,
             metrics,
             capture: None,
+            diagnostics: runner_exec_diagnostics(runner, Some(&source_snapshot), &require_paths),
         },
         exit_code,
     ))
@@ -519,6 +547,7 @@ fn exec_local(plan: RunnerProcessPlan) -> Result<(RunnerExecOutput, i32)> {
         plan.command,
         output,
         Some(plan.source_snapshot),
+        plan.require_paths,
     ))
 }
 
@@ -527,6 +556,7 @@ fn exec_diagnostic_ssh(
     cwd: String,
     command: Vec<String>,
     env: HashMap<String, String>,
+    require_paths: Vec<String>,
 ) -> Result<(RunnerExecOutput, i32)> {
     let server_id = runner.server_id.as_deref().ok_or_else(|| {
         Error::validation_invalid_argument(
@@ -540,6 +570,7 @@ fn exec_diagnostic_ssh(
     let mut client = SshClient::from_server(&server, server_id)?;
     client.env.extend(runner.env.clone());
     client.env.extend(env);
+    validate_remote_required_paths(&mut client, &require_paths)?;
     let command_line = format!(
         "cd {} && {}",
         shell::quote_arg(&cwd),
@@ -565,6 +596,7 @@ fn exec_diagnostic_ssh(
             capture: None,
         },
         Some(source_snapshot),
+        require_paths,
     ))
 }
 
@@ -623,6 +655,11 @@ pub(crate) fn prepare_runner_process(request: RunnerProcessRequest) -> Result<Ru
                 SourceSnapshot::existing_remote(&runner.id, &cwd, runner.workspace_root.as_deref())
             }
         });
+    validate_required_paths(
+        &runner,
+        &request.require_paths,
+        request.validate_require_paths_on_host,
+    )?;
 
     Ok(RunnerProcessPlan {
         runner,
@@ -630,7 +667,68 @@ pub(crate) fn prepare_runner_process(request: RunnerProcessRequest) -> Result<Ru
         command: request.command,
         env,
         source_snapshot,
+        require_paths: request.require_paths,
     })
+}
+
+fn validate_required_paths(
+    runner: &Runner,
+    required_paths: &[String],
+    validate_on_host: bool,
+) -> Result<()> {
+    for path in required_paths {
+        if !Path::new(path).is_absolute() {
+            return Err(Error::validation_invalid_argument(
+                "require_path",
+                "runner exec --require-path expects absolute paths on the runner",
+                Some(path.to_string()),
+                Some(vec![
+                    "Pass the path as it exists on the runner, not the controller.".to_string(),
+                ]),
+            ));
+        }
+        if (validate_on_host || runner.kind == RunnerKind::Local) && !Path::new(path).exists() {
+            return Err(missing_required_path_error(runner, path));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_remote_required_paths(client: &mut SshClient, required_paths: &[String]) -> Result<()> {
+    for path in required_paths {
+        let output = client.execute(&format!("test -e {}", shell::quote_arg(path)));
+        if output.exit_code != 0 {
+            return Err(Error::validation_invalid_argument(
+                "require_path",
+                "required runner path does not exist",
+                Some(path.to_string()),
+                Some(vec![
+                    "Use the generated _lab_workspaces/... snapshot path when the controller worktree path was synced into a lab snapshot.".to_string(),
+                    "Run an explicit workspace sync/adopt step before referencing controller worktree paths on the runner.".to_string(),
+                ]),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn missing_required_path_error(runner: &Runner, path: &str) -> Error {
+    Error::validation_invalid_argument(
+        "require_path",
+        "required runner path does not exist",
+        Some(path.to_string()),
+        Some(vec![
+            format!(
+                "Runner `{}` workspace_root is {}.",
+                runner.id,
+                runner.workspace_root.as_deref().unwrap_or("not configured")
+            ),
+            "Use the generated _lab_workspaces/... snapshot path when the controller worktree path was synced into a lab snapshot.".to_string(),
+            "Run an explicit workspace sync/adopt step before referencing controller worktree paths on the runner.".to_string(),
+        ]),
+    )
 }
 
 fn validate_runner_process_cwd(runner: &Runner, cwd: &str) -> Result<()> {
@@ -688,6 +786,7 @@ fn exec_output(
     command: Vec<String>,
     output: ProcessOutput,
     source_snapshot: Option<SourceSnapshot>,
+    require_paths: Vec<String>,
 ) -> (RunnerExecOutput, i32) {
     let exit_code = output.exit_code;
     (
@@ -700,7 +799,7 @@ fn exec_output(
             exit_code,
             stdout: output.stdout,
             stderr: output.stderr,
-            source_snapshot,
+            source_snapshot: source_snapshot.clone(),
             job: None,
             job_id: None,
             job_events: None,
@@ -708,9 +807,30 @@ fn exec_output(
             patch: None,
             metrics: output.metrics,
             capture: output.capture,
+            diagnostics: runner_exec_diagnostics(runner, source_snapshot.as_ref(), &require_paths),
         },
         exit_code,
     )
+}
+
+fn runner_exec_diagnostics(
+    runner: &Runner,
+    source_snapshot: Option<&SourceSnapshot>,
+    required_paths: &[String],
+) -> Option<RunnerExecDiagnostics> {
+    if required_paths.is_empty() {
+        return None;
+    }
+
+    Some(RunnerExecDiagnostics {
+        runner_workspace_root: runner.workspace_root.clone(),
+        source_snapshot_remote_path: source_snapshot.and_then(|snapshot| snapshot.remote_path.clone()),
+        required_paths: required_paths.to_vec(),
+        hints: vec![
+            "Use the generated _lab_workspaces/... snapshot path when the controller worktree path was synced into a lab snapshot.".to_string(),
+            "Use --require-path to preflight paths that a command will reference before running it.".to_string(),
+        ],
+    })
 }
 
 fn resolve_cwd(runner: &Runner, cwd: Option<&str>) -> Result<String> {
@@ -845,6 +965,7 @@ mod tests {
                     source_snapshot: None,
                     capability_preflight: None,
                     required_extensions: Vec::new(),
+                    require_paths: Vec::new(),
                 },
             )
             .expect("exec local runner");
@@ -870,6 +991,100 @@ mod tests {
             assert_eq!(source_snapshot.sync_mode, "existing_remote");
             assert!(source_snapshot.snapshot_hash.starts_with("sha256:"));
             assert!(output.job_id.is_none());
+        });
+    }
+
+    #[test]
+    fn test_exec_rejects_missing_required_local_runner_path() {
+        crate::test_support::with_isolated_home(|_| {
+            let workspace = tempfile::tempdir().expect("workspace");
+            super::super::create(
+                &format!(
+                    r#"{{"id":"lab-local","kind":"local","workspace_root":"{}"}}"#,
+                    workspace.path().display()
+                ),
+                false,
+            )
+            .expect("create local runner");
+            let missing = workspace.path().join("missing-worktree");
+
+            let err = exec(
+                "lab-local",
+                RunnerExecOptions {
+                    cwd: None,
+                    project_id: None,
+                    allow_diagnostic_ssh: false,
+                    command: vec![
+                        "sh".to_string(),
+                        "-c".to_string(),
+                        "printf nope".to_string(),
+                    ],
+                    env: Default::default(),
+                    capture_patch: false,
+                    raw_exec: false,
+                    source_snapshot: None,
+                    capability_preflight: None,
+                    required_extensions: Vec::new(),
+                    require_paths: vec![missing.display().to_string()],
+                },
+            )
+            .expect_err("missing required path rejects before command");
+
+            assert_eq!(err.code.as_str(), "validation.invalid_argument");
+            assert_eq!(err.details["field"], "require_path");
+            assert!(err.message.contains("required runner path"));
+            assert!(err.details["tried"].to_string().contains("_lab_workspaces"));
+        });
+    }
+
+    #[test]
+    fn test_exec_reports_required_path_diagnostics() {
+        crate::test_support::with_isolated_home(|_| {
+            let workspace = tempfile::tempdir().expect("workspace");
+            let required_path = workspace.path().join("project");
+            std::fs::create_dir(&required_path).expect("required path");
+            super::super::create(
+                &format!(
+                    r#"{{"id":"lab-local","kind":"local","workspace_root":"{}"}}"#,
+                    workspace.path().display()
+                ),
+                false,
+            )
+            .expect("create local runner");
+
+            let (output, exit_code) = exec(
+                "lab-local",
+                RunnerExecOptions {
+                    cwd: None,
+                    project_id: None,
+                    allow_diagnostic_ssh: false,
+                    command: vec!["sh".to_string(), "-c".to_string(), "printf ok".to_string()],
+                    env: Default::default(),
+                    capture_patch: false,
+                    raw_exec: false,
+                    source_snapshot: None,
+                    capability_preflight: None,
+                    required_extensions: Vec::new(),
+                    require_paths: vec![required_path.display().to_string()],
+                },
+            )
+            .expect("exec with required path");
+
+            assert_eq!(exit_code, 0);
+            let diagnostics = output.diagnostics.expect("diagnostics");
+            assert_eq!(
+                diagnostics.runner_workspace_root,
+                Some(workspace.path().display().to_string())
+            );
+            assert_eq!(
+                diagnostics.required_paths,
+                vec![required_path.display().to_string()]
+            );
+            assert!(diagnostics.source_snapshot_remote_path.is_some());
+            assert!(diagnostics
+                .hints
+                .iter()
+                .any(|hint| hint.contains("_lab_workspaces")));
         });
     }
 
@@ -901,6 +1116,7 @@ mod tests {
                     source_snapshot: None,
                     capability_preflight: None,
                     required_extensions: Vec::new(),
+                    require_paths: Vec::new(),
                 },
             )
             .expect_err("disconnected ssh runner needs daemon or diagnostic fallback");
@@ -956,6 +1172,7 @@ mod tests {
             source_snapshot: None,
             capability_preflight: None,
             required_extensions: Vec::new(),
+            require_paths: Vec::new(),
         };
 
         let err = validate_runner_policy(&runner, "/srv/homeboy/project", policy_request(&options))
@@ -988,6 +1205,7 @@ mod tests {
             source_snapshot: None,
             capability_preflight: None,
             required_extensions: Vec::new(),
+            require_paths: Vec::new(),
         };
         validate_runner_policy(
             &runner,
@@ -1134,6 +1352,7 @@ mod tests {
                 Default::default(),
                 false,
                 None,
+                Vec::new(),
             )
             .expect("reverse broker exec");
             worker.join().expect("worker joins");

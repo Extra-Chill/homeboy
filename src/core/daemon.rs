@@ -81,6 +81,8 @@ struct ExecRequest {
     raw_exec: bool,
     #[serde(default)]
     source_snapshot: Option<SourceSnapshot>,
+    #[serde(default)]
+    require_paths: Vec<String>,
 }
 
 pub fn parse_bind_addr(addr: &str) -> Result<SocketAddr> {
@@ -338,6 +340,8 @@ fn enqueue_exec_job(
         capture_patch: request.capture_patch,
         raw_exec: request.raw_exec,
         source_snapshot: request.source_snapshot,
+        require_paths: request.require_paths,
+        validate_require_paths_on_host: true,
     })?;
     let source_snapshot = Some(plan.source_snapshot.clone());
 
