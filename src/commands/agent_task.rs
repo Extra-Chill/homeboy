@@ -3,7 +3,7 @@ use serde_json::Value;
 
 use homeboy::core::agent_task::{AgentTaskAggregateReport, AgentTaskRequest};
 use homeboy::core::agent_task_finalization::{
-    finalize_pr, AgentTaskGateResult, AgentTaskPrFinalizationOptions,
+    finalize_pr, AgentTaskGateResult, AgentTaskPrEvidence, AgentTaskPrFinalizationOptions,
 };
 use homeboy::core::agent_task_lifecycle;
 use homeboy::core::agent_task_promotion::{promote, AgentTaskPromotionOptions};
@@ -536,12 +536,14 @@ fn finalize_pull_request(args: FinalizePrArgs) -> CmdResult<Value> {
         head: args.head,
         title: args.title,
         commit_message: args.commit_message,
-        attempt_summary: args.attempt_summary,
-        source_refs: args.source_refs,
-        artifact_refs: args.artifact_refs,
         gate_results,
         changed_files: args.changed_files,
-        ai_tool: args.ai_tool,
+        evidence: AgentTaskPrEvidence {
+            source_refs: args.source_refs,
+            artifact_refs: args.artifact_refs,
+            attempt_summary: args.attempt_summary,
+            ai_tool: args.ai_tool,
+        },
         ai_used_for: args.ai_used_for,
         protected_branches: args.protected_branches,
     })?;

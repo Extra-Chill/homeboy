@@ -31,6 +31,12 @@ pub struct AgentTaskPrFinalizationReport {
     pub pr_url: Option<String>,
     pub changed_files: Vec<String>,
     pub gate_results: Vec<AgentTaskGateResult>,
+    #[serde(flatten)]
+    pub evidence: AgentTaskPrEvidence,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskPrEvidence {
     pub source_refs: Vec<String>,
     pub artifact_refs: Vec<String>,
     pub attempt_summary: String,
@@ -45,12 +51,9 @@ pub struct AgentTaskPrFinalizationOptions {
     pub head: Option<String>,
     pub title: String,
     pub commit_message: String,
-    pub attempt_summary: String,
-    pub source_refs: Vec<String>,
-    pub artifact_refs: Vec<String>,
     pub gate_results: Vec<AgentTaskGateResult>,
     pub changed_files: Vec<String>,
-    pub ai_tool: String,
+    pub evidence: AgentTaskPrEvidence,
     pub ai_used_for: String,
     pub protected_branches: Vec<String>,
 }
@@ -339,14 +342,14 @@ fn render_pr_body(
         "## Summary\n- Finalized Homeboy agent-task cook run `{}` into review-ready branch `{}`.\n\n## Source refs\n{}\n\n## Attempt summary\n{}\n\n## Gate results\n{}\n\n## Changed files\n{}\n\n## Artifact refs\n{}\n\n## Final status\n- **Status:** review-ready\n- **Base:** `{}`\n- **Head:** `{}`\n- **Merge/deploy:** not performed\n\n## AI assistance\n- **AI assistance:** Yes\n- **Tool(s):** {}\n- **Used for:** {}\n",
         options.run_id,
         head,
-        bullets(&options.source_refs),
-        options.attempt_summary,
+        bullets(&options.evidence.source_refs),
+        options.evidence.attempt_summary,
         gate_bullets(&options.gate_results),
         bullets(changed_files),
-        bullets(&options.artifact_refs),
+        bullets(&options.evidence.artifact_refs),
         options.base,
         head,
-        options.ai_tool,
+        options.evidence.ai_tool,
         options.ai_used_for
     )
 }
@@ -396,10 +399,7 @@ fn report(
         pr_url,
         changed_files,
         gate_results: options.gate_results.clone(),
-        source_refs: options.source_refs.clone(),
-        artifact_refs: options.artifact_refs.clone(),
-        attempt_summary: options.attempt_summary.clone(),
-        ai_tool: options.ai_tool.clone(),
+        evidence: options.evidence.clone(),
     }
 }
 
@@ -592,16 +592,18 @@ mod tests {
             head: None,
             title: "Cook issue #3678".to_string(),
             commit_message: "finalize cook loop PR plumbing".to_string(),
-            attempt_summary: "attempt 1 passed deterministic gates".to_string(),
-            source_refs: vec!["https://github.com/Extra-Chill/homeboy/issues/3678".to_string()],
-            artifact_refs: vec!["artifact://aggregate.json".to_string()],
             gate_results: vec![AgentTaskGateResult {
                 name: "cargo test".to_string(),
                 status: "passed".to_string(),
                 detail: Some("targeted".to_string()),
             }],
             changed_files: Vec::new(),
-            ai_tool: "OpenCode (GPT-5.5)".to_string(),
+            evidence: AgentTaskPrEvidence {
+                source_refs: vec!["https://github.com/Extra-Chill/homeboy/issues/3678".to_string()],
+                artifact_refs: vec!["artifact://aggregate.json".to_string()],
+                attempt_summary: "attempt 1 passed deterministic gates".to_string(),
+                ai_tool: "OpenCode (GPT-5.5)".to_string(),
+            },
             ai_used_for: "Drafted implementation and tests; Chris reviews and owns the change."
                 .to_string(),
             protected_branches: vec![
