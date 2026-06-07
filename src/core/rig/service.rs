@@ -65,7 +65,7 @@ pub fn log_path(rig_id: &str, service_id: &str) -> Result<std::path::PathBuf> {
 /// process matches — both callers treat that as "nothing to do."
 ///
 /// Implementation: shells out to `ps -axo pid=,lstart=,args=` and filters
-/// in Rust. We pick the newest match (largest start-time) so a stale +
+/// the output locally. We pick the newest match (largest start-time) so a stale +
 /// fresh pair surfaces the fresh one to consumers (the rig wants to know
 /// "is the live daemon stale?").
 pub fn discover_newest(pattern: &str) -> Result<Option<DiscoveredProcess>> {
