@@ -189,14 +189,14 @@ function normalizeBlockQualityOptions(options = {}) {
  if (!isPlainObject(options)) {
   throw new TypeError('WordPress block quality probe options must be an object');
  }
-  return {
-   post_types: normalizeStringList(options.postTypes, DEFAULT_POST_TYPES),
-   post_statuses: normalizeStringList(options.postStatuses, DEFAULT_POST_STATUSES),
-   fallback_option_names: normalizeStringList(options.fallbackOptionNames, []),
-   target_post_ids: normalizePositiveIntegerList(options.targetPostIds),
-   target_post_titles: normalizeStringList(options.targetPostTitles, []),
-   include_front_page_target: Boolean(options.includeFrontPageTarget),
-  };
+ return {
+  post_types: normalizeStringList(options.postTypes, DEFAULT_POST_TYPES),
+  post_statuses: normalizeStringList(options.postStatuses, DEFAULT_POST_STATUSES),
+  fallback_option_names: normalizeStringList(options.fallbackOptionNames, []),
+  target_post_ids: normalizePositiveIntegerList(options.targetPostIds),
+  target_post_titles: normalizeStringList(options.targetPostTitles, []),
+  include_front_page_target: Boolean(options.includeFrontPageTarget),
+ };
 }
 
 function normalizeStringList(value, defaultValue) {
