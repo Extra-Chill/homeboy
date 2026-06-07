@@ -591,11 +591,16 @@ fn write_http_response(mut stream: TcpStream, response: HttpResponse) -> std::io
         return artifact_download::write_response(stream, response.status_code, artifact);
     }
 
-    let body = serde_json::to_string_pretty(&json!({
-        "success": (200..300).contains(&response.status_code),
+    let success = (200..300).contains(&response.status_code);
+    let mut envelope = json!({
+        "success": success,
         "data": response.body,
-    }))
-    .unwrap_or_else(|_| "{\"success\":false}".to_string());
+    });
+    if !success {
+        envelope["error"] = envelope["data"].clone();
+    }
+    let body = serde_json::to_string_pretty(&envelope)
+        .unwrap_or_else(|_| "{\"success\":false}".to_string());
     let status_text = match response.status_code {
         200 => "OK",
         400 => "Bad Request",

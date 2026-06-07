@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use homeboy::core::runner::{self, Runner, RunnerKind};
+use homeboy::core::runner::{self, Runner, RunnerKind, RunnerTunnelMode};
 use homeboy::core::server::{self, Server, SshClient};
 use serde::Serialize;
 
@@ -535,6 +535,11 @@ mod remote {
             "Create the artifact root or configure HOMEBOY_ARTIFACT_ROOT to a writable directory",
         ));
 
+        checks.extend(probes::connected_daemon_exec_checks(
+            runner_id,
+            &workspace_root,
+        ));
+
         for extension_id in normalized_extension_ids(&options.extensions) {
             checks.push(extension_parity::remote_check(
                 client,
@@ -603,7 +608,7 @@ mod remote {
 
 mod probes {
     use super::*;
-    use types::{DiskProbe, MemoryProbe, RunnerCapabilities, ToolProbe};
+    use types::{DiskProbe, MemoryProbe, RunnerCapabilities, RunnerCheck, ToolProbe};
 
     #[derive(Clone, Copy)]
     pub struct ToolSpec {
@@ -915,6 +920,127 @@ mod probes {
                 common::shell_word(path)
             ))
             .success
+    }
+
+    pub fn connected_daemon_exec_checks(runner_id: &str, workspace_root: &str) -> Vec<RunnerCheck> {
+        let Ok(status) = runner::status(runner_id) else {
+            return Vec::new();
+        };
+        if !status.connected {
+            return Vec::new();
+        }
+        let Some(session) = status.session else {
+            return Vec::new();
+        };
+        if session.mode != RunnerTunnelMode::DirectSsh {
+            return Vec::new();
+        }
+        let Some(local_url) = session.local_url else {
+            return vec![checks::error(
+                "daemon.exec",
+                "Connected direct runner session is missing its local daemon URL".to_string(),
+                Some(format!(
+                    "Reconnect runner `{runner_id}` with `homeboy runner connect {runner_id}`"
+                )),
+                BTreeMap::new(),
+            )];
+        };
+
+        vec![daemon_exec_check(runner_id, workspace_root, &local_url)]
+    }
+
+    pub(super) fn daemon_exec_check(
+        runner_id: &str,
+        workspace_root: &str,
+        local_url: &str,
+    ) -> RunnerCheck {
+        let mut details = BTreeMap::new();
+        details.insert("url".to_string(), local_url.to_string());
+        details.insert("cwd".to_string(), workspace_root.to_string());
+        let client = match reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+        {
+            Ok(client) => client,
+            Err(err) => {
+                details.insert("error".to_string(), err.to_string());
+                return checks::error(
+                    "daemon.exec",
+                    "Could not build daemon exec probe HTTP client".to_string(),
+                    None,
+                    details,
+                );
+            }
+        };
+        let response = client
+            .post(format!("{}/exec", local_url.trim_end_matches('/')))
+            .json(&serde_json::json!({
+                "runner_id": runner_id,
+                "cwd": workspace_root,
+                "command": ["homeboy", "--version"],
+                "capture_patch": false
+            }))
+            .send();
+        let response = match response {
+            Ok(response) => response,
+            Err(err) => {
+                details.insert("error".to_string(), err.to_string());
+                return checks::error(
+                    "daemon.exec",
+                    "Connected runner daemon did not accept the exec probe".to_string(),
+                    Some(format!(
+                        "Reconnect runner `{runner_id}` with `homeboy runner connect {runner_id}` before retrying Lab offload"
+                    )),
+                    details,
+                );
+            }
+        };
+        let status_code = response.status().as_u16();
+        let body: serde_json::Value = match response.json() {
+            Ok(body) => body,
+            Err(err) => {
+                details.insert("status".to_string(), status_code.to_string());
+                details.insert("error".to_string(), err.to_string());
+                return checks::error(
+                    "daemon.exec",
+                    "Connected runner daemon returned an invalid exec probe response".to_string(),
+                    Some(format!(
+                        "Reconnect runner `{runner_id}` with `homeboy runner connect {runner_id}` before retrying Lab offload"
+                    )),
+                    details,
+                );
+            }
+        };
+        details.insert("status".to_string(), status_code.to_string());
+        if let Some(job_id) = body
+            .pointer("/data/body/job/id")
+            .and_then(serde_json::Value::as_str)
+        {
+            details.insert("job_id".to_string(), job_id.to_string());
+        }
+        if status_code < 400
+            && body.get("success").and_then(serde_json::Value::as_bool) == Some(true)
+        {
+            return checks::ok_with_details(
+                "daemon.exec",
+                "Connected runner daemon accepted a lightweight exec probe".to_string(),
+                details,
+            );
+        }
+
+        let error_payload = body
+            .get("error")
+            .or_else(|| body.get("data"))
+            .unwrap_or(&body);
+        details.insert("response".to_string(), error_payload.to_string());
+        checks::error(
+            "daemon.exec",
+            "Connected runner daemon failed the lightweight exec probe".to_string(),
+            Some(format!(
+                "Reconnect runner `{runner_id}` with `homeboy runner connect {runner_id}` before retrying Lab offload"
+            )),
+            details,
+        )
     }
 
     fn memory_from_proc_meminfo() -> Option<MemoryProbe> {
@@ -1384,6 +1510,54 @@ mod tests {
             .remediation
             .as_deref()
             .is_some_and(|value| value.contains("homeboy ssh lab -- homeboy upgrade")));
+    }
+
+    #[test]
+    fn daemon_exec_probe_reports_structured_failure() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let addr = listener.local_addr().expect("addr");
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut buffer = [0; 4096];
+            let _ = std::io::Read::read(&mut stream, &mut buffer).expect("read request");
+            let body = serde_json::json!({
+                "success": false,
+                "data": {
+                    "error": "validation.invalid_argument",
+                    "message": "Invalid argument 'runner': stale daemon session"
+                },
+                "error": {
+                    "error": "validation.invalid_argument",
+                    "message": "Invalid argument 'runner': stale daemon session"
+                }
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            std::io::Write::write_all(&mut stream, response.as_bytes()).expect("write response");
+        });
+
+        let check = probes::daemon_exec_check(
+            "homeboy-lab",
+            "/home/chubes/Developer",
+            &format!("http://{addr}"),
+        );
+
+        assert_eq!(check.id, "daemon.exec");
+        assert_eq!(check.status, RunnerDoctorStatus::Error);
+        assert!(check.message.contains("failed the lightweight exec probe"));
+        assert!(check
+            .details
+            .get("response")
+            .expect("response detail")
+            .contains("validation.invalid_argument"));
+        assert!(check
+            .remediation
+            .expect("remediation")
+            .contains("homeboy runner connect homeboy-lab"));
     }
 
     #[test]

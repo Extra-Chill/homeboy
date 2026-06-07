@@ -337,6 +337,35 @@ fn routes_remote_runner_job_broker_lifecycle() {
 }
 
 #[test]
+fn daemon_http_error_envelope_includes_error_payload() {
+    let _home = HomeGuard::new();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+    let addr = listener.local_addr().expect("addr");
+    std::thread::spawn(move || {
+        let _ = serve_listener(listener);
+    });
+
+    let response: serde_json::Value = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .expect("client")
+        .post(format!("http://{addr}/exec"))
+        .json(&serde_json::json!({}))
+        .send()
+        .expect("response")
+        .json()
+        .expect("json");
+
+    assert_eq!(response["success"], false);
+    assert_eq!(response["data"]["error"], "validation.invalid_argument");
+    assert_eq!(response["error"]["error"], "validation.invalid_argument");
+    assert!(response["error"]["message"]
+        .as_str()
+        .expect("message")
+        .contains("invalid exec request body"));
+}
+
+#[test]
 fn routes_remote_runner_session_registration() {
     let _home = HomeGuard::new();
     crate::core::runner::create(

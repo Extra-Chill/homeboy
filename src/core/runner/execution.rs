@@ -342,7 +342,7 @@ fn exec_via_daemon(
     if status_code >= 400 || !envelope.success {
         return Err(Error::internal_unexpected(format!(
             "daemon exec request failed: {}",
-            envelope.error.unwrap_or(Value::Null)
+            daemon_failure_message(status_code, &envelope)
         )));
     }
 
@@ -783,6 +783,26 @@ fn string_field(value: &Value, key: &str) -> String {
         .to_string()
 }
 
+fn daemon_failure_message(status_code: u16, envelope: &DaemonEnvelope) -> String {
+    let payload = envelope
+        .error
+        .as_ref()
+        .or(envelope.data.as_ref())
+        .filter(|value| !value.is_null());
+    let Some(payload) = payload else {
+        return format!("HTTP {status_code} without error payload");
+    };
+
+    let code = payload.get("error").and_then(Value::as_str);
+    let message = payload.get("message").and_then(Value::as_str);
+    match (code, message) {
+        (Some(code), Some(message)) => format!("{code}: {message}"),
+        (Some(code), None) => code.to_string(),
+        (None, Some(message)) => message.to_string(),
+        (None, None) => payload.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1149,5 +1169,47 @@ mod tests {
                 .iter()
                 .any(|event| { event.kind == crate::core::api_jobs::JobEventKind::Progress }));
         });
+    }
+
+    #[test]
+    fn daemon_exec_failure_without_error_field_is_actionable() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let addr = listener.local_addr().expect("addr");
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut buffer = [0; 4096];
+            let _ = std::io::Read::read(&mut stream, &mut buffer).expect("read request");
+            let body = serde_json::json!({
+                "success": false,
+                "data": {
+                    "error": "validation.invalid_argument",
+                    "message": "Invalid argument 'cwd': runner exec requires an absolute cwd"
+                }
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            std::io::Write::write_all(&mut stream, response.as_bytes()).expect("write response");
+        });
+
+        let err = exec_via_daemon(
+            &ssh_runner(),
+            &format!("http://{addr}"),
+            "/srv/homeboy/project".to_string(),
+            None,
+            vec!["homeboy".to_string(), "--version".to_string()],
+            Default::default(),
+            false,
+            None,
+        )
+        .expect_err("daemon exec failure");
+
+        assert!(err.message.contains("daemon exec request failed"));
+        assert!(err.message.contains("validation.invalid_argument"));
+        assert!(err.message.contains("runner exec requires an absolute cwd"));
+        assert!(!err.message.contains(": null"));
     }
 }
