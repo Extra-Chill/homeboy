@@ -26,6 +26,7 @@ jobs:
     with:
       component: homeboy
       commands: audit,lint,test
+      differential-gating: true
       build-command: cargo build --release
       build-artifact-path: target/release/homeboy
     secrets: inherit
