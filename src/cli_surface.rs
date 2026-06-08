@@ -1152,7 +1152,11 @@ mod tests {
             ),
             (
                 parsed_command(&["homeboy", "agent-task", "dispatch", "--prompt", "cook"]),
-                "agent-task dispatch",
+                "agent-task dispatch/cook",
+            ),
+            (
+                parsed_command(&["homeboy", "agent-task", "cook", "--prompt", "cook"]),
+                "agent-task dispatch/cook",
             ),
         ];
 

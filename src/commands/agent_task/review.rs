@@ -16,7 +16,7 @@ use homeboy::core::config;
 use homeboy::core::gate::HomeboyGateResult;
 
 use super::super::CmdResult;
-use super::{FinalizePrArgs, GateFeedbackArgs, PromoteArgs, ReviewArgs};
+use super::{FinalizePrArgs, GateFeedbackArgs, PromoteArgs, ProvidersArgs, ReviewArgs};
 
 #[derive(Args, Debug)]
 pub struct FinalizePrEvidenceArgs {
@@ -198,10 +198,14 @@ pub(crate) fn gate_feedback(args: GateFeedbackArgs) -> CmdResult<Value> {
     Ok((serde_json::to_value(report).unwrap_or(Value::Null), 0))
 }
 
-pub(crate) fn providers() -> CmdResult<Value> {
+pub(crate) fn providers(args: ProvidersArgs) -> CmdResult<Value> {
     let executor = ExtensionProviderAgentTaskExecutor::discover();
     Ok((
-        serde_json::to_value(executor.providers()).unwrap_or(Value::Null),
+        serde_json::json!({
+            "schema": "homeboy/agent-task-providers/v1",
+            "providers": executor.providers(),
+            "secret_env": homeboy::core::agent_task_secrets::secret_env_status(&args.secret_env),
+        }),
         0,
     ))
 }

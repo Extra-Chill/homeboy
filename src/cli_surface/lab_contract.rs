@@ -47,10 +47,11 @@ impl Commands {
             Commands::AgentTask(args)
                 if matches!(
                     args.command,
-                    super::agent_task::AgentTaskCommand::Dispatch(_)
+                    super::agent_task::AgentTaskCommand::Cook(_)
+                        | super::agent_task::AgentTaskCommand::Dispatch(_)
                 ) =>
             {
-                lab_portable_contract("agent-task dispatch", None, true, LAB_NO_EXTRA_TOOLS)
+                lab_portable_contract("agent-task dispatch/cook", None, true, LAB_NO_EXTRA_TOOLS)
             }
             Commands::Audit(args) if args.changed_since.is_some() => {
                 lab_local_only_contract("audit", AUDIT_CHANGED_SINCE_LAB_UNSUPPORTED_REASON)

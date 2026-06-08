@@ -13,10 +13,52 @@ pub struct AgentTaskSecretResolutionError {
     pub message: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskSecretEnvStatus {
+    pub name: String,
+    pub configured: bool,
+    pub source: String,
+}
+
 pub fn resolve_secret_env(
     names: &[String],
 ) -> Result<Vec<(String, String)>, AgentTaskSecretResolutionError> {
     resolve_secret_env_with_config(names, &AgentTaskSecretConfig::load())
+}
+
+pub fn secret_env_status(names: &[String]) -> Vec<AgentTaskSecretEnvStatus> {
+    secret_env_status_with_config(names, &AgentTaskSecretConfig::load())
+}
+
+pub fn validate_secret_env(names: &[String]) -> Result<(), AgentTaskSecretResolutionError> {
+    resolve_secret_env(names).map(|_| ())
+}
+
+fn secret_env_status_with_config(
+    names: &[String],
+    config: &AgentTaskSecretConfig,
+) -> Vec<AgentTaskSecretEnvStatus> {
+    names
+        .iter()
+        .map(|name| {
+            if env::var(name).is_ok() {
+                return AgentTaskSecretEnvStatus {
+                    name: name.clone(),
+                    configured: true,
+                    source: "env".to_string(),
+                };
+            }
+
+            let source = config.secrets.get(name);
+            AgentTaskSecretEnvStatus {
+                name: name.clone(),
+                configured: source.is_some_and(|source| source.resolve(name).is_some()),
+                source: source
+                    .map(|source| source.source.clone())
+                    .unwrap_or_else(|| "missing".to_string()),
+            }
+        })
+        .collect()
 }
 
 fn resolve_secret_env_with_config(
@@ -137,6 +179,27 @@ mod tests {
         assert_eq!(error.missing_secret_env, vec![name.clone()]);
         assert!(error.message.contains(&name));
         assert!(!error.message.contains("secret-value"));
+    }
+
+    #[test]
+    fn reports_redacted_secret_readiness() {
+        let present = unique_env("READY_SECRET");
+        let missing = unique_env("NOT_READY_SECRET");
+        std::env::set_var(&present, "secret-value");
+        std::env::remove_var(&missing);
+        let names = vec![present.clone(), missing.clone()];
+
+        let status = secret_env_status_with_config(&names, &AgentTaskSecretConfig::default());
+
+        assert_eq!(status[0].name, present);
+        assert!(status[0].configured);
+        assert_eq!(status[0].source, "env");
+        assert_eq!(status[1].name, missing);
+        assert!(!status[1].configured);
+        assert_eq!(status[1].source, "missing");
+        let serialized = serde_json::to_string(&status).expect("status json");
+        assert!(!serialized.contains("secret-value"));
+        std::env::remove_var(present);
     }
 
     #[test]
