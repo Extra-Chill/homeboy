@@ -62,7 +62,7 @@ JSON
                 stale: false,
                 force: false,
                 canonical: false,
-                allow_local_toolchain: false,
+                allow_local_toolchain: true,
             },
             &GlobalArgs {},
         )

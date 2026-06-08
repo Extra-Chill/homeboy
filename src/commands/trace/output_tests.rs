@@ -328,7 +328,7 @@ fn trace_compare_exits_nonzero_for_guardrail_failures() {
         stale: false,
         force: false,
         canonical: false,
-        allow_local_toolchain: false,
+        allow_local_toolchain: true,
     })
     .expect("compare should run");
 

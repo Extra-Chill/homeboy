@@ -194,9 +194,11 @@ pub struct TraceArgs {
     #[arg(long)]
     pub keep_overlay: bool,
 
+    /// Require canonical evidence. This is the default; retained for explicit command logs.
     #[arg(long, alias = "proof")]
     pub canonical: bool,
-    #[arg(long)]
+    /// Allow intentionally local/development evidence. The output is marked non-canonical.
+    #[arg(long, alias = "allow-local-evidence")]
     pub allow_local_toolchain: bool,
 
     /// Clean only stale trace overlay locks.

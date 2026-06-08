@@ -186,6 +186,7 @@ fn run_trace_workflow_with_component_script(
             canonicality.metadata(TraceCanonicalPolicy::Canonical),
         ));
     }
+    let evidence = canonicality.metadata(args.canonical_policy);
     let (mut toolchain, components) = trace_provenance(None, &component_path);
     mark_non_canonical(
         &mut toolchain,
@@ -228,7 +229,7 @@ fn run_trace_workflow_with_component_script(
         if parsed.rig.is_none() {
             parsed.rig = rig_state;
         }
-        parsed.evidence = Some(canonicality.metadata(args.canonical_policy));
+        parsed.evidence = Some(evidence.clone());
         Some(parsed)
     } else {
         None
@@ -281,7 +282,7 @@ fn run_trace_workflow_with_component_script(
         status,
         component: args.component_label,
         exit_code,
-        evidence: canonicality.metadata(args.canonical_policy),
+        evidence: evidence.clone(),
         results,
         failure,
         overlays: applied_overlays
@@ -296,10 +297,14 @@ fn run_trace_workflow_with_component_script(
             })
             .collect(),
         baseline_comparison: None,
-        hints: Some(vec![
+        hints: Some({
+            let mut hints = non_canonical_evidence_hints(&evidence);
+            hints.push(
             "Component scripts use the extension runner env contract without extension resolution."
                 .to_string(),
-        ]),
+            );
+            hints
+        }),
         toolchain: Some(toolchain),
         components: Some(components),
     })
@@ -328,6 +333,7 @@ fn run_trace_workflow_with_context(
             canonicality.metadata(TraceCanonicalPolicy::Canonical),
         ));
     }
+    let evidence = canonicality.metadata(args.canonical_policy);
     let (toolchain, components) = trace_provenance(execution_context, &component_path);
     let _overlay_locks = if args.overlays.is_empty() {
         None
@@ -379,7 +385,7 @@ fn run_trace_workflow_with_context(
         if parsed.rig.is_none() {
             parsed.rig = rig_state;
         }
-        parsed.evidence = Some(canonicality.metadata(args.canonical_policy));
+        parsed.evidence = Some(evidence.clone());
         Some(parsed)
     } else {
         None
@@ -424,7 +430,7 @@ fn run_trace_workflow_with_context(
     let baseline_root = resolve_trace_baseline_root(&component_path, rig_id)?;
     let mut baseline_comparison = None;
     let mut baseline_exit_override = None;
-    let mut hints = Vec::new();
+    let mut hints = non_canonical_evidence_hints(&evidence);
     let has_baseline_items = results
         .as_ref()
         .is_some_and(|parsed| !parsed.span_results.is_empty() || !parsed.assertions.is_empty());
@@ -493,7 +499,7 @@ fn run_trace_workflow_with_context(
         status,
         component: args.component_label,
         exit_code,
-        evidence: canonicality.metadata(args.canonical_policy),
+        evidence,
         results,
         failure,
         overlays: applied_overlays
@@ -512,6 +518,16 @@ fn run_trace_workflow_with_context(
         toolchain: Some(toolchain),
         components: Some(components),
     })
+}
+
+fn non_canonical_evidence_hints(evidence: &TraceEvidenceMetadata) -> Vec<String> {
+    if evidence.canonical {
+        return Vec::new();
+    }
+    vec![format!(
+        "Non-canonical local evidence mode `{}` is active; do not use this run as reviewer-facing proof until the reported canonicality reasons are fixed.",
+        evidence.mode
+    )]
 }
 
 fn trace_provenance(
