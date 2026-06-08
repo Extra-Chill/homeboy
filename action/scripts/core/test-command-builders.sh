@@ -55,7 +55,7 @@ COMPONENT="data-machine"
 OUTPUT_JSON="/tmp/workspace/out.json"
 
 # ── Unscoped (full mode) ──
-unset SCOPE_MODE SCOPE_BASE_REF EXTRA_ARGS || true
+unset GITHUB_ACTIONS SCOPE_MODE SCOPE_BASE_REF EXTRA_ARGS || true
 SCOPE_MODE="full"
 assert_equals \
   "homeboy lint data-machine --path /tmp/workspace" \
@@ -80,6 +80,19 @@ assert_equals \
   "homeboy --output /tmp/workspace/out.json lint data-machine --path /tmp/workspace --changed-since origin/main" \
   "$(build_run_command "lint" "${COMPONENT}" "${WORKSPACE}" "${OUTPUT_JSON}")" \
   "lint keeps output path with changed-since"
+
+GITHUB_ACTIONS="true"
+assert_equals \
+  "homeboy --force-hot --allow-local-hot --output /tmp/workspace/out.json lint data-machine --path /tmp/workspace --changed-since origin/main" \
+  "$(build_run_command "lint" "${COMPONENT}" "${WORKSPACE}" "${OUTPUT_JSON}")" \
+  "GitHub Actions lint opts into hot-runner execution"
+
+assert_equals \
+  "homeboy --force-hot --allow-local-hot test data-machine --path /tmp/workspace --changed-since origin/main" \
+  "$(build_run_command "test" "${COMPONENT}" "${WORKSPACE}")" \
+  "GitHub Actions test opts into hot-runner execution"
+
+unset GITHUB_ACTIONS
 
 assert_equals \
   "homeboy test data-machine --path /tmp/workspace --changed-since origin/main" \

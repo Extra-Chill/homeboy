@@ -727,19 +727,31 @@ settings_json_flags() {
   done < <(printf '%s' "${raw}" | jq -r 'to_entries[] | [.key, (.value | tojson)] | @tsv')
 }
 
+homeboy_global_flags() {
+  local output_file="${1:-}"
+  local flags=""
+
+  if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
+    flags="${flags}--force-hot --allow-local-hot "
+  fi
+
+  # --output is a global flag and must appear before the subcommand
+  # (clap global args don't propagate when placed after positional args)
+  if [ -n "${output_file}" ]; then
+    flags="${flags}--output ${output_file} "
+  fi
+
+  printf '%s' "${flags}"
+}
+
 build_run_command() {
   local cmd="$1"
   local component_id="$2"
   local workspace="$3"
   local output_file="${4:-}"
   local full_cmd
-  local global_flags=""
-
-  # --output is a global flag and must appear before the subcommand
-  # (clap global args don't propagate when placed after positional args)
-  if [ -n "${output_file}" ]; then
-    global_flags="--output ${output_file} "
-  fi
+  local global_flags
+  global_flags="$(homeboy_global_flags "${output_file}")"
 
   if [[ "${cmd}" == refactor* ]]; then
     full_cmd="homeboy ${global_flags}refactor ${component_id} ${cmd#refactor } --path ${workspace}"
@@ -828,12 +840,8 @@ build_autofix_command() {
   local workspace="$3"
   local output_file="${4:-}"
   local full_cmd
-  local global_flags=""
-
-  # --output is a global flag and must appear before the subcommand
-  if [ -n "${output_file}" ]; then
-    global_flags="--output ${output_file} "
-  fi
+  local global_flags
+  global_flags="$(homeboy_global_flags "${output_file}")"
 
   if [[ "${fix_cmd}" == refactor* ]]; then
     full_cmd="homeboy ${global_flags}refactor ${component_id} ${fix_cmd#refactor } --path ${workspace}"
