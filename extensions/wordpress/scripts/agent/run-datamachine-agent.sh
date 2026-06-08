@@ -162,9 +162,9 @@ PHP
         --arg datamachine "$data_machine_path" \
         --arg code "$data_machine_code_path" \
         '[
-            {source: $agents, slug: "agents-api", activate: true},
-            {source: $datamachine, slug: "data-machine", activate: true},
-            {source: $code, slug: "data-machine-code", activate: true}
+            {source: $agents, slug: "agents-api", activate: false, loadAs: "mu-plugin"},
+            {source: $datamachine, slug: "data-machine", activate: false, loadAs: "mu-plugin"},
+            {source: $code, slug: "data-machine-code", activate: false, loadAs: "mu-plugin"}
         ]')
     mounts_json=$(jq -nc --arg source "$EXTENSION_PATH" '[{type: "directory", source: $source, target: "/homeboy-extension", mode: "readonly"}]')
     provider_slugs_csv=""
