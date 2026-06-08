@@ -21,8 +21,14 @@ pub struct CheckoutHygieneSnapshot {
 }
 
 impl CheckoutHygieneSnapshot {
+    fn missing_required_git_metadata(&self) -> bool {
+        self.role == "validation_dependency" && (self.head.is_none() || self.dirty.is_none())
+    }
+
     fn is_stale_or_dirty(&self) -> bool {
-        self.dirty == Some(true) || self.behind.unwrap_or(0) > 0
+        self.missing_required_git_metadata()
+            || self.dirty == Some(true)
+            || self.behind.unwrap_or(0) > 0
     }
 }
 
@@ -36,7 +42,17 @@ pub fn require_dependency_hygiene_for_source(
     extension_path: Option<&Path>,
     options: DependencyHygieneOptions,
 ) -> Result<Vec<CheckoutHygieneSnapshot>> {
+    require_dependency_hygiene_for_source_with_settings(source_path, extension_path, &[], options)
+}
+
+pub fn require_dependency_hygiene_for_source_with_settings(
+    source_path: &Path,
+    extension_path: Option<&Path>,
+    settings: &[(String, serde_json::Value)],
+    options: DependencyHygieneOptions,
+) -> Result<Vec<CheckoutHygieneSnapshot>> {
     let mut checkouts = dependency_checkouts_for_source(source_path)?;
+    checkouts.extend(dependency_checkouts_for_settings(source_path, settings)?);
     if let Some(extension_path) = extension_path {
         checkouts.push(DependencyCheckout {
             id: "extension".to_string(),
@@ -104,6 +120,42 @@ fn dependency_checkouts_for_source(source_path: &Path) -> Result<Vec<DependencyC
                 path,
             })
         })
+        .collect()
+}
+
+fn dependency_checkouts_for_settings(
+    source_path: &Path,
+    settings: &[(String, serde_json::Value)],
+) -> Result<Vec<DependencyCheckout>> {
+    let ids = settings
+        .iter()
+        .filter(|(key, _)| key == "validation_dependencies")
+        .flat_map(|(_, value)| validation_dependency_ids_from_value(value))
+        .collect::<Vec<_>>();
+
+    ids.into_iter()
+        .map(|id| {
+            let path = resolve_validation_dependency_path(source_path, &id)?;
+            Ok(DependencyCheckout {
+                id,
+                role: "validation_dependency".to_string(),
+                path,
+            })
+        })
+        .collect()
+}
+
+fn validation_dependency_ids_from_value(value: &serde_json::Value) -> Vec<String> {
+    let Some(dependencies) = value.as_array() else {
+        return Vec::new();
+    };
+
+    dependencies
+        .iter()
+        .filter_map(|item| item.as_str())
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(str::to_string)
         .collect()
 }
 
@@ -201,6 +253,9 @@ fn checkout_hygiene_snapshot(
 
 fn hygiene_failure_message(snapshot: &CheckoutHygieneSnapshot) -> String {
     let mut problems = Vec::new();
+    if snapshot.missing_required_git_metadata() {
+        problems.push("missing git metadata".to_string());
+    }
     if snapshot.dirty == Some(true) {
         problems.push("dirty".to_string());
     }
@@ -327,6 +382,28 @@ mod tests {
     }
 
     #[test]
+    fn dependency_hygiene_fails_when_git_metadata_is_missing() {
+        let dependency = tempfile::tempdir().unwrap();
+        fs::write(dependency.path().join("README.md"), "snapshot\n").unwrap();
+
+        let err = require_checkout_hygiene(
+            vec![DependencyCheckout {
+                id: "snapshot-dep".to_string(),
+                role: "validation_dependency".to_string(),
+                path: dependency.path().to_path_buf(),
+            }],
+            DependencyHygieneOptions { allow_stale: false },
+        )
+        .expect_err("dependency without git metadata should fail");
+
+        assert_eq!(err.code, ErrorCode::ValidationMultipleErrors);
+        assert!(err.details["errors"][0]["problem"]
+            .as_str()
+            .unwrap()
+            .contains("missing git metadata"));
+    }
+
+    #[test]
     fn dependency_hygiene_fails_when_declared_dependency_is_missing() {
         let source = tempfile::tempdir().unwrap();
         fs::write(
@@ -352,5 +429,28 @@ mod tests {
 
         assert_eq!(err.details["field"], "validation_dependencies");
         assert!(err.message.contains("missing-dep"));
+    }
+
+    #[test]
+    fn dependency_hygiene_reads_validation_dependencies_from_runtime_settings() {
+        let source = tempfile::tempdir().unwrap();
+        let dependency = tempfile::tempdir().unwrap();
+        init_repo(dependency.path());
+        fs::write(dependency.path().join("dirty.txt"), "dirty\n").unwrap();
+
+        let settings = vec![(
+            "validation_dependencies".to_string(),
+            serde_json::json!([dependency.path().to_str().unwrap()]),
+        )];
+        let err = require_dependency_hygiene_for_source_with_settings(
+            source.path(),
+            None,
+            &settings,
+            DependencyHygieneOptions { allow_stale: false },
+        )
+        .expect_err("dirty dependency from settings should fail");
+
+        assert_eq!(err.code, ErrorCode::ValidationMultipleErrors);
+        assert_eq!(err.details["checkouts"][0]["dirty"].as_bool(), Some(true));
     }
 }

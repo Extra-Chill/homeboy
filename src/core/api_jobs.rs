@@ -439,8 +439,31 @@ fn read_durable_store(path: &Path) -> Result<DurableJobStore> {
 
     let content = fs::read_to_string(path)
         .map_err(|e| Error::internal_io(e.to_string(), Some(format!("read {}", path.display()))))?;
-    serde_json::from_str(&content)
-        .map_err(|e| Error::config_invalid_json(path.display().to_string(), e))
+    match serde_json::from_str(&content) {
+        Ok(store) => Ok(store),
+        Err(err) => {
+            let quarantine_path = path.with_file_name(format!(
+                "{}.corrupt-{}",
+                path.file_name()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or("jobs.json"),
+                timestamp_ms()
+            ));
+            fs::rename(path, &quarantine_path).map_err(|rename_err| {
+                Error::config_invalid_json(path.display().to_string(), err).with_hint(format!(
+                    "Homeboy could not quarantine the corrupt durable job store to {}: {}",
+                    quarantine_path.display(),
+                    rename_err
+                ))
+            })?;
+            eprintln!(
+                "Homeboy quarantined corrupt daemon job store {} to {} and started with an empty queue",
+                path.display(),
+                quarantine_path.display()
+            );
+            Ok(DurableJobStore::default())
+        }
+    }
 }
 
 fn write_durable_store(path: &Path, durable: &DurableJobStore) -> Result<()> {
@@ -945,6 +968,25 @@ mod tests {
         assert!(events
             .iter()
             .any(|event| event.kind == JobEventKind::Result));
+    }
+
+    #[test]
+    fn open_quarantines_corrupt_durable_store() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("jobs.json");
+        fs::write(&path, b"{").expect("corrupt store");
+
+        let store = JobStore::open(&path).expect("corrupt store is quarantined");
+        assert!(store.list().is_empty());
+        assert!(path.exists());
+
+        let quarantined = fs::read_dir(temp.path())
+            .expect("read temp dir")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .filter(|name| name.starts_with("jobs.json.corrupt-"))
+            .collect::<Vec<_>>();
+        assert_eq!(quarantined.len(), 1);
     }
 
     #[test]

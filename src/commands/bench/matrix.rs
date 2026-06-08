@@ -490,9 +490,10 @@ fn run_component_with_rig_context(
     resolve_options.extension_overrides = args.extension_override.extensions.clone();
 
     let ctx = execution_context::resolve_with_component(&resolve_options, component_override)?;
-    homeboy::core::hygiene::require_dependency_hygiene_for_source(
+    homeboy::core::hygiene::require_dependency_hygiene_for_source_with_settings(
         &ctx.source_path,
         ctx.extension_path.as_deref(),
+        &ctx.settings,
         homeboy::core::hygiene::DependencyHygieneOptions {
             allow_stale: args.allow_stale_dependencies,
         },
