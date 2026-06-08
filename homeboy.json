@@ -423,8 +423,8 @@
   "baselines": {
     "audit": {
       "context_id": "homeboy",
-      "created_at": "2026-06-08T16:01:14Z",
-      "item_count": 636,
+      "created_at": "2026-06-08T18:46:12Z",
+      "item_count": 639,
       "known_fingerprints": [
         "Runs (Tests)::src/commands/runs/corpus_tests.rs::MissingMethod",
         "artifact_portability::artifact_portability/local_artifact_path/$.run_dir::NonPortableArtifactPath",
@@ -1031,6 +1031,7 @@
         "dead_code::src/core/agent_task_fanout.rs::UnreferencedExport",
         "dead_code::src/core/fleet/exec.rs::UnreferencedExport",
         "dead_code::src/core/hygiene.rs::UnreferencedExport",
+        "intra-method-duplication::src/commands/trace.rs::IntraMethodDuplicate",
         "intra-method-duplication::src/core/runner/lab.rs::IntraMethodDuplicate",
         "intra-method-duplication::src/core/runner/validation_dependencies.rs::IntraMethodDuplicate",
         "output_capture::src/core/agent_task_promotion.rs::UnboundedOutputCapture",
@@ -1043,6 +1044,8 @@
         "structural::src/commands/bench/tests.rs::HighItemCount",
         "structural::src/commands/runner/doctor.rs::GodFile",
         "structural::src/commands/runs/gh_actions.rs::HighItemCount",
+        "structural::src/commands/trace.rs::GodFile",
+        "structural::src/commands/trace/tests.rs::GodFile",
         "structural::src/commands::DirectorySprawl",
         "structural::src/core/agent_task_lifecycle.rs::HighItemCount",
         "structural::src/core/agent_task_scheduler.rs::GodFile",
