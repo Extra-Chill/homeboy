@@ -269,7 +269,7 @@ mod tests {
         let remote = tempfile::tempdir().unwrap();
         let writer = tempfile::tempdir().unwrap();
         init_repo(local.path());
-        git(remote.path(), &["init", "--bare"]);
+        git(remote.path(), &["init", "--bare", "-b", "main"]);
         git(
             local.path(),
             &["remote", "add", "origin", remote.path().to_str().unwrap()],
@@ -277,7 +277,7 @@ mod tests {
         git(local.path(), &["push", "-u", "origin", "main"]);
         git(
             writer.path(),
-            &["clone", remote.path().to_str().unwrap(), "."],
+            &["clone", "--branch", "main", remote.path().to_str().unwrap(), "."],
         );
         git(writer.path(), &["config", "user.email", "test@example.com"]);
         git(writer.path(), &["config", "user.name", "Homeboy Test"]);
