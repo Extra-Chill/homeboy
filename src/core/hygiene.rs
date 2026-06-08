@@ -381,7 +381,9 @@ fn git_status(path: &Path, args: &[&str]) -> bool {
 fn run_validation_dependency_snapshot_lifecycle(snapshot: &CheckoutHygieneSnapshot) -> Result<()> {
     let path = Path::new(&snapshot.path);
     let mut component =
-        component::resolve_effective(Some(&snapshot.id), Some(&snapshot.path), None)?;
+        component::resolve_effective(None, Some(&snapshot.path), None).or_else(|_| {
+            component::resolve_effective(Some(&snapshot.id), Some(&snapshot.path), None)
+        })?;
     component.local_path = snapshot.path.clone();
 
     run_validation_dependency_lifecycle_isolated(&component, path)
@@ -733,6 +735,39 @@ mod tests {
             let status =
                 git_output(&dependency, &["status", "--porcelain=v1"]).expect("dependency status");
             assert_eq!(status, "");
+        });
+    }
+
+    #[test]
+    fn dependency_hygiene_uses_manifest_id_for_runtime_path_dependency_lifecycle() {
+        crate::test_support::with_isolated_home(|_| {
+            let source = tempfile::tempdir().unwrap();
+            let dependency = tempfile::tempdir().unwrap();
+            fs::write(
+                dependency.path().join(PORTABLE_CONFIG_FILE),
+                serde_json::json!({
+                    "id": "dep",
+                    "scripts": {
+                        "build": ["sh -c 'test \"$HOMEBOY_COMPONENT_ID\" = dep'"]
+                    }
+                })
+                .to_string(),
+            )
+            .unwrap();
+            let _remote = init_repo_with_upstream(dependency.path());
+
+            let settings = vec![(
+                "validation_dependencies".to_string(),
+                serde_json::json!([dependency.path().to_str().unwrap()]),
+            )];
+
+            require_dependency_hygiene_for_source_with_settings(
+                source.path(),
+                None,
+                &settings,
+                DependencyHygieneOptions { allow_stale: false },
+            )
+            .expect("runtime path dependency lifecycle should use portable manifest id");
         });
     }
 }
