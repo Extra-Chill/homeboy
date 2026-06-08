@@ -98,7 +98,7 @@ fn materialize_git_dependency_command(
         .unwrap_or_default();
 
     format!(
-        r#"raw={raw}; case "$raw" in '~') dest="$HOME" ;; '~/'*) dest="$HOME/${{raw#~/}}" ;; *) dest="$raw" ;; esac; parent=$(dirname "$dest"); mkdir -p "$parent" && if [ ! -e "$dest" ]; then git clone {url} "$dest" && git -C "$dest" fetch --prune origin '+refs/heads/*:refs/remotes/origin/*' && git -C "$dest" checkout --detach {head} && echo cloned; elif [ ! -d "$dest/.git" ]; then echo "dependency path exists but is not a git checkout: $dest" >&2; exit 20; else actual_url=$(git -C "$dest" config --get remote.origin.url || true); if [ "$actual_url" != {url} ]; then echo "dependency checkout remote mismatch at $dest: expected {url}, found $actual_url" >&2; exit 21; fi; git -C "$dest" fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'; actual_head=$(git -C "$dest" rev-parse HEAD); if [ "$actual_head" != {head} ]; then echo "dependency checkout freshness mismatch at $dest: expected {head}, found $actual_head" >&2; exit 22; fi; echo reused; fi{required_subpath_check}"#,
+        r#"raw={raw}; case "$raw" in '~') dest="$HOME" ;; [~]/*) suffix=${{raw#\~/}}; dest="$HOME/$suffix" ;; *) dest="$raw" ;; esac; parent=$(dirname "$dest"); mkdir -p "$parent" && if [ ! -e "$dest" ]; then git clone {url} "$dest" && git -C "$dest" fetch --prune origin '+refs/heads/*:refs/remotes/origin/*' && git -C "$dest" checkout --detach {head} && echo cloned; elif [ ! -d "$dest/.git" ]; then echo "dependency path exists but is not a git checkout: $dest" >&2; exit 20; else actual_url=$(git -C "$dest" config --get remote.origin.url || true); if [ "$actual_url" != {url} ]; then echo "dependency checkout remote mismatch at $dest: expected {url}, found $actual_url" >&2; exit 21; fi; git -C "$dest" fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'; actual_head=$(git -C "$dest" rev-parse HEAD); if [ "$actual_head" != {head} ]; then echo "dependency checkout freshness mismatch at $dest: expected {head}, found $actual_head" >&2; exit 22; fi; echo reused; fi{required_subpath_check}"#,
         raw = shell::quote_arg(remote_path),
         url = shell::quote_arg(remote_url),
         head = shell::quote_arg(head),
@@ -177,6 +177,7 @@ mod tests {
         );
 
         assert!(command.contains("case \"$raw\" in '~')"));
-        assert!(command.contains("'~/'*) dest=\"$HOME/${raw#~/}\""));
+        assert!(command.contains("[~]/*) suffix=${raw#\\~/}; dest=\"$HOME/$suffix\""));
+        assert!(!command.contains("$HOME/~/"));
     }
 }
