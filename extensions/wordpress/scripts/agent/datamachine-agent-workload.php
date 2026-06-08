@@ -795,14 +795,17 @@ if ( ! function_exists( 'homeboy_datamachine_agent_pr_opened' ) ) {
             homeboy_datamachine_agent_runner_publications( $engine_data, $config )
         );
 
-        foreach ( $tool_results as $tool_result ) {
-            if ( ! is_array( $tool_result ) || empty( $tool_result['success'] ) ) {
-                continue;
-            }
+		foreach ( $tool_results as $tool_result ) {
+			if ( ! is_array( $tool_result ) || empty( $tool_result['success'] ) ) {
+				continue;
+			}
+			if ( 'create_github_pull_request' === (string) ( $tool_result['tool_name'] ?? '' ) ) {
+				return true;
+			}
 
-            $url = homeboy_datamachine_agent_first_url( $tool_result );
-            if ( str_contains( $url, '/pull/' ) ) {
-                return true;
+			$url = homeboy_datamachine_agent_first_url( $tool_result );
+			if ( str_contains( $url, '/pull/' ) ) {
+				return true;
             }
         }
 
