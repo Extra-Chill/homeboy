@@ -277,7 +277,13 @@ mod tests {
         git(local.path(), &["push", "-u", "origin", "main"]);
         git(
             writer.path(),
-            &["clone", "--branch", "main", remote.path().to_str().unwrap(), "."],
+            &[
+                "clone",
+                "--branch",
+                "main",
+                remote.path().to_str().unwrap(),
+                ".",
+            ],
         );
         git(writer.path(), &["config", "user.email", "test@example.com"]);
         git(writer.path(), &["config", "user.name", "Homeboy Test"]);
