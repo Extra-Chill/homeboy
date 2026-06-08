@@ -2,6 +2,70 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.116.0] - 2026-06-08
+
+### Added
+- add WordPress bench query profiler
+
+### Changed
+- Route WordPress tests by file type; drop test_backend toggle
+- Add post-agent verify gate and real-WordPress smoke backend
+- Document Codebox Codex profile boundary
+- Configure WP Codebox core module during setup
+- Use Codebox Codex overlay profile
+- Add WordPress route latency summaries
+- Use Codebox recipe run summaries
+- Promote WordPress fidelity comparison helpers
+- Add WordPress materialized site quality helper
+- Add WordPress admin scale sweep normalization
+- Preserve Codebox runtime task inputs
+- Tidy block quality option formatting
+- Add target block quality metrics
+- Defer WP Codebox WordPress defaults
+- Restore latest WP Codebox bench runtime
+- Use stable WP Codebox bench runtime
+- Adopt WP Codebox artifact primitives
+- Adopt Codebox agent task result normalizer
+- Add WordPress helper consumer summaries
+- Remove bundled Codebox recipe fallback
+- Keep bench artifacts out of tmpfs by default
+- Keep WP Codebox bench scratch files with artifacts
+- Share runtime helper fallbacks
+
+### Fixed
+- pass WP Codebox core module setting to tests
+- preserve wp codebox json failure evidence
+- support wp codebox core module for phpunit
+- preserve wp codebox validation evidence
+- support bench extra plugin settings
+- pass bench extra plugins to WP Codebox
+- configure WP Codebox core bench module
+- infer agent task runtime components
+- emit component_contracts for WP Codebox 0.8.0 runtime components
+- mount agent task runtime plugins
+- count PR execution summaries
+- count successful PR creation tools
+- count recorded PR tool URLs
+- load agent runtime components as mu-plugins
+- parse WP Codebox agent artifact transcripts
+- expose writable workspace tools for read-write Codebox agent tasks
+- keep WP Codebox secretEnv recipe key
+- use WP Codebox recipe input keys
+- use DMC workspace abilities in agent runner
+- re-derive WP Codebox core module from disk on cold-cache CI runs
+- Fix WP Codebox bench dependency plugin paths
+- Fix WP Codebox CLI release fallback
+- wire Codebox fanout to Codex subscription
+- require explicit Codebox model default
+- enable Codebox workspace inspection tools by default
+- default Codebox agent task model
+- default Codebox provider from plugin path
+- avoid default seedless Codebox workspaces
+- resolve bundled Agents API path
+- default codebox repo cooking runtime
+- add WordPress page matrix profiler primitive
+- Fix WP Codebox bench default runtime
+
 ## [2.115.46] - 2026-06-06
 
 ### Changed
