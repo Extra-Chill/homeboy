@@ -186,7 +186,7 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestCommandOutput>
             },
             changed_since: args.changed_since.clone(),
             json_summary: args.json_summary,
-            ci_env: ci_profile::ci_job_env(ci_job.as_ref()),
+            ci_env: test_runner_ci_env(ci_job.as_ref()),
             passthrough_args: passthrough_args.clone(),
         },
         runner.run_dir(),
@@ -206,6 +206,18 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestCommandOutput>
 
 fn ci_job_passthrough_args(job: Option<&CiResolvedJob>) -> Vec<String> {
     job.map(|job| job.spec.args.clone()).unwrap_or_default()
+}
+
+fn test_runner_ci_env(job: Option<&CiResolvedJob>) -> Vec<(String, String)> {
+    let mut env = ci_profile::ci_job_env(job);
+
+    for key in ["GITHUB_ACTIONS", "RELEASE_BLOCKING_COMMANDS"] {
+        if let Ok(value) = std::env::var(key) {
+            env.push((key.to_string(), value));
+        }
+    }
+
+    env
 }
 
 struct TestObservation(ActiveObservation);
