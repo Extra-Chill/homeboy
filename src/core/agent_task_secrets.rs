@@ -1,11 +1,13 @@
 use std::collections::HashMap;
 use std::env;
 use std::fs;
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
 use crate::core::keychain;
 use crate::core::paths;
+use crate::core::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentTaskSecretResolutionError {
@@ -28,6 +30,77 @@ pub fn resolve_secret_env(
 
 pub fn secret_env_status(names: &[String]) -> Vec<AgentTaskSecretEnvStatus> {
     secret_env_status_with_config(names, &AgentTaskSecretConfig::load())
+}
+
+pub fn map_secret_to_env(
+    name: &str,
+    env_var: Option<&str>,
+) -> crate::core::Result<AgentTaskSecretEnvStatus> {
+    let mut config = AgentTaskSecretConfig::load();
+    config.secrets.insert(
+        name.to_string(),
+        AgentTaskSecretSource {
+            source: "env".to_string(),
+            env_var: env_var.map(str::to_string),
+            scope: None,
+            name: None,
+        },
+    );
+    config.save()?;
+    Ok(secret_env_status_with_config(&[name.to_string()], &config)
+        .into_iter()
+        .next()
+        .expect("single status"))
+}
+
+pub fn set_keychain_secret(
+    name: &str,
+    value: &str,
+    scope: Option<&str>,
+    keychain_name: Option<&str>,
+) -> crate::core::Result<AgentTaskSecretEnvStatus> {
+    let scope = scope.unwrap_or("agent-task");
+    let keychain_name = keychain_name.unwrap_or(name);
+    keychain::set(scope, keychain_name, value)?;
+
+    let mut config = AgentTaskSecretConfig::load();
+    config.secrets.insert(
+        name.to_string(),
+        AgentTaskSecretSource {
+            source: "keychain".to_string(),
+            env_var: None,
+            scope: Some(scope.to_string()),
+            name: Some(keychain_name.to_string()),
+        },
+    );
+    config.save()?;
+    Ok(secret_env_status_with_config(&[name.to_string()], &config)
+        .into_iter()
+        .next()
+        .expect("single status"))
+}
+
+pub fn remove_secret_mapping(
+    name: &str,
+    remove_keychain: bool,
+) -> crate::core::Result<AgentTaskSecretEnvStatus> {
+    let mut config = AgentTaskSecretConfig::load();
+    let source = config.secrets.remove(name);
+    config.save()?;
+
+    if remove_keychain {
+        if let Some(source) = source.filter(|source| source.source == "keychain") {
+            keychain::remove(
+                source.scope.as_deref().unwrap_or("agent-task"),
+                source.name.as_deref().unwrap_or(name),
+            )?;
+        }
+    }
+
+    Ok(secret_env_status_with_config(&[name.to_string()], &config)
+        .into_iter()
+        .next()
+        .expect("single status"))
 }
 
 pub fn validate_secret_env(names: &[String]) -> Result<(), AgentTaskSecretResolutionError> {
@@ -109,13 +182,45 @@ struct AgentTaskSecretConfig {
 
 impl AgentTaskSecretConfig {
     fn load() -> Self {
-        let Ok(path) = paths::homeboy().map(|root| root.join("agent-task-secrets.json")) else {
+        let Ok(path) = Self::path() else {
             return Self::default();
         };
         let Ok(raw) = fs::read_to_string(path) else {
             return Self::default();
         };
         serde_json::from_str(&raw).unwrap_or_default()
+    }
+
+    fn path() -> crate::core::Result<PathBuf> {
+        paths::homeboy().map(|root| root.join("agent-task-secrets.json"))
+    }
+
+    fn save(&self) -> crate::core::Result<()> {
+        let path = Self::path()?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some(format!(
+                        "create agent-task secret config dir {}",
+                        parent.display()
+                    )),
+                )
+            })?;
+        }
+        let raw = serde_json::to_string_pretty(self).map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("serialize agent-task secret config".to_string()),
+            )
+        })?;
+        fs::write(&path, format!("{raw}\n")).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!("write agent-task secret config {}", path.display())),
+            )
+        })?;
+        Ok(())
     }
 }
 
@@ -229,5 +334,47 @@ mod tests {
             vec![(configured_name, "configured-secret-value".to_string())]
         );
         std::env::remove_var(source_name);
+    }
+
+    #[test]
+    fn maps_declared_secret_to_env_source_file() {
+        crate::test_support::with_isolated_home(|_| {
+            let configured_name = unique_env("MAPPED_SECRET");
+            let source_name = unique_env("MAPPED_SOURCE");
+            std::env::remove_var(&configured_name);
+            std::env::set_var(&source_name, "mapped-secret-value");
+
+            let status = map_secret_to_env(&configured_name, Some(&source_name))
+                .expect("secret mapping saved");
+
+            assert_eq!(status.name, configured_name);
+            assert!(status.configured);
+            assert_eq!(status.source, "env");
+
+            let resolved = resolve_secret_env(std::slice::from_ref(&status.name))
+                .expect("mapped secret resolves");
+            assert_eq!(
+                resolved,
+                vec![(status.name, "mapped-secret-value".to_string())]
+            );
+            std::env::remove_var(source_name);
+        });
+    }
+
+    #[test]
+    fn removes_declared_secret_mapping() {
+        crate::test_support::with_isolated_home(|_| {
+            let configured_name = unique_env("REMOVED_SECRET");
+            let source_name = unique_env("REMOVED_SOURCE");
+            std::env::set_var(&source_name, "removed-secret-value");
+            map_secret_to_env(&configured_name, Some(&source_name)).expect("secret mapping saved");
+
+            let status = remove_secret_mapping(&configured_name, false).expect("mapping removed");
+
+            assert_eq!(status.name, configured_name);
+            assert!(!status.configured);
+            assert_eq!(status.source, "missing");
+            std::env::remove_var(source_name);
+        });
     }
 }
