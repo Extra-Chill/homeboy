@@ -262,6 +262,19 @@ function runtimeComponentExtraPlugins(input) {
   });
 }
 
+function componentContracts(input) {
+  // Translate the runtime component paths (agents-api, data-machine,
+  // data-machine-code) into the WP Codebox 0.8.0 `component_contracts` shape:
+  // `{ slug, path, loadAs, activate }`. WP Codebox mounts these as mu-plugins so
+  // Data Machine loads its own vendored Agents API and registers agents/chat.
+  return runtimeComponentExtraPlugins(input).map((plugin) => ({
+    slug: plugin.slug,
+    path: plugin.source,
+    loadAs: plugin.loadAs || 'mu-plugin',
+    activate: Boolean(plugin.activate),
+  }));
+}
+
 function extraPlugins(input) {
   const explicit = input.parent_request?.extra_plugins || input.parent_request?.extraPlugins || [];
   const plugins = [...runtimeComponentExtraPlugins(input), ...(Array.isArray(explicit) ? explicit : [])];
@@ -294,6 +307,11 @@ function stableTaskInput(input) {
     model: input.model,
     provider_plugin_paths: input.provider_plugin_paths || [],
     extra_plugins: extraPlugins(input),
+    // WP Codebox 0.8.0 reads runtime component plugins (agents-api, data-machine,
+    // data-machine-code) from `component_contracts`, not the legacy
+    // `runtime_component_paths` / `data_machine_path` fields. Without this the
+    // components never mount and agents/chat is unavailable in the sandbox.
+    component_contracts: componentContracts(input),
     runtime_overlay_profiles: input.runtime_overlay_profiles || [],
     secret_env: secretEnv,
     mounts: input.mounts || [],

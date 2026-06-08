@@ -195,6 +195,13 @@ try {
   assert.equal(captured.input.extra_plugins.find((plugin) => plugin.slug === 'data-machine-code').source, '/components/data-machine-code');
   assert.equal(captured.input.extra_plugins.find((plugin) => plugin.slug === 'data-machine').loadAs, 'mu-plugin');
   assert.equal(captured.input.extra_plugins.find((plugin) => plugin.slug === 'data-machine-code').activate, false);
+  // WP Codebox 0.8.0 mounts runtime components from `component_contracts`
+  // ({ slug, path }), not the legacy `runtime_component_paths` fields.
+  assert.equal(captured.input.component_contracts.find((contract) => contract.slug === 'agents-api').path, '/components/agents-api');
+  assert.equal(captured.input.component_contracts.find((contract) => contract.slug === 'data-machine').path, '/components/data-machine');
+  assert.equal(captured.input.component_contracts.find((contract) => contract.slug === 'data-machine-code').path, '/components/data-machine-code');
+  assert.equal(captured.input.component_contracts.find((contract) => contract.slug === 'data-machine').loadAs, 'mu-plugin');
+  assert.equal(captured.input.component_contracts.find((contract) => contract.slug === 'data-machine-code').activate, false);
   assert(!JSON.stringify(captured.input).includes('redacted-test-key'));
 
   const runtimeTaskCapturePath = path.join(root, 'capture-runtime-task.json');
