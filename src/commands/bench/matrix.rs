@@ -490,6 +490,13 @@ fn run_component_with_rig_context(
     resolve_options.extension_overrides = args.extension_override.extensions.clone();
 
     let ctx = execution_context::resolve_with_component(&resolve_options, component_override)?;
+    homeboy::core::hygiene::require_dependency_hygiene_for_source(
+        &ctx.source_path,
+        ctx.extension_path.as_deref(),
+        homeboy::core::hygiene::DependencyHygieneOptions {
+            allow_stale: args.allow_stale_dependencies,
+        },
+    )?;
     let ci_profile_job =
         resolve_ci_profile_job(args.ci_profile.as_deref(), ctx.extension_id.as_deref())?;
 
@@ -724,6 +731,7 @@ mod tests {
             profile: None,
             ci_profile: None,
             ignore_default_baseline: false,
+            allow_stale_dependencies: false,
         }
     }
 

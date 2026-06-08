@@ -167,6 +167,10 @@ pub fn run_trace_workflow(
     )
 }
 
+fn allow_stale_dependencies_from_env() -> bool {
+    std::env::var_os("HOMEBOY_ALLOW_STALE_DEPENDENCIES").is_some()
+}
+
 fn run_trace_workflow_with_component_script(
     component: &Component,
     mut args: TraceRunWorkflowArgs,
@@ -177,7 +181,10 @@ fn run_trace_workflow_with_component_script(
         .path_override
         .clone()
         .unwrap_or_else(|| component.local_path.clone());
-    let dependency_provenance = preflight_trace_dependencies(&args.runner_inputs.dependencies)?;
+    let dependency_provenance = preflight_trace_dependencies(
+        &args.runner_inputs.dependencies,
+        allow_stale_dependencies_from_env(),
+    )?;
     preflight_trace_runner_capabilities(None, &args.runner_inputs.runner_capabilities)?;
     let canonicality = evaluate_trace_canonicality(None, component, &args)?;
     if args.canonical_policy.refuses_non_canonical() && !canonicality.is_canonical() {
@@ -316,7 +323,10 @@ fn run_trace_workflow_with_context(
         .path_override
         .clone()
         .unwrap_or_else(|| component.local_path.clone());
-    let dependency_provenance = preflight_trace_dependencies(&args.runner_inputs.dependencies)?;
+    let dependency_provenance = preflight_trace_dependencies(
+        &args.runner_inputs.dependencies,
+        allow_stale_dependencies_from_env(),
+    )?;
     preflight_trace_runner_capabilities(
         execution_context,
         &args.runner_inputs.runner_capabilities,
