@@ -217,6 +217,10 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     runtime_overlay_profiles: config.runtime_overlay_profiles || config.runtimeOverlayProfiles || options.runtimeOverlayProfiles || defaults.runtimeOverlayProfiles || [],
     runtime_overlays: config.runtime_overlays || options.runtimeOverlays || [],
     secret_env: config.secret_env || options.secretEnv || defaults.secretEnv || [],
+    // Post-agent verification gate (recipe workflow.after). Supplied as WP
+    // Codebox recipe steps; a non-zero exit fails the run so the orchestrator
+    // refuses to report success until the gates are green.
+    verify_steps: inputs.verify_steps || config.verify_steps || options.verifySteps || [],
     mounts,
     workspaces: inputs.workspaces || config.workspaces || options.workspaces || defaults.workspaces || [],
     agents_api_path: components.agents_api || config.agents_api || config.agents_api_path || options.agentsApi || '',

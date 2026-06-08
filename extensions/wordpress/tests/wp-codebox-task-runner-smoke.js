@@ -141,6 +141,7 @@ try {
     runtime_stack_mounts: [{ source: '/components/php-ai-client', target: '/wordpress/wp-includes/php-ai-client', mode: 'readonly' }],
     runtime_overlays: [{ kind: 'bundled-library', library: 'php-ai-client' }],
     secret_env: ['OPENCODE_API_KEY'],
+    verify_steps: [{ command: 'wordpress.phpunit', args: ['plugin-slug=data-machine'] }],
     orchestrator: { agent_task_id: 'agent-task-123', run_id: 'run-123' },
   };
 
@@ -202,6 +203,12 @@ try {
   assert.equal(captured.input.component_contracts.find((contract) => contract.slug === 'data-machine-code').path, '/components/data-machine-code');
   assert.equal(captured.input.component_contracts.find((contract) => contract.slug === 'data-machine').loadAs, 'mu-plugin');
   assert.equal(captured.input.component_contracts.find((contract) => contract.slug === 'data-machine-code').activate, false);
+
+  // Verification gate flows through to the agent-task-run input so WP Codebox
+  // can emit it as a recipe workflow.after step and fail the run if it is red.
+  assert.equal(captured.input.verify_steps.length, 1);
+  assert.equal(captured.input.verify_steps[0].command, 'wordpress.phpunit');
+  assert.deepEqual(captured.input.verify_steps[0].args, ['plugin-slug=data-machine']);
   assert(!JSON.stringify(captured.input).includes('redacted-test-key'));
 
   const runtimeTaskCapturePath = path.join(root, 'capture-runtime-task.json');

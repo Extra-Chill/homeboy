@@ -275,6 +275,24 @@ function componentContracts(input) {
   }));
 }
 
+function verifySteps(input) {
+  // Verification gates can come from the request directly or from the parent
+  // request/task. Each entry is a WP Codebox recipe step (e.g.
+  // `{ command: 'wordpress.phpunit', args: ['plugin-slug=data-machine'] }`)
+  // that runs after the agent finishes; a non-zero exit fails the run.
+  const candidates = [
+    input.verify_steps,
+    input.parent_request?.verify_steps,
+    input.parent_request?.task?.verify_steps,
+  ];
+  for (const candidate of candidates) {
+    if (Array.isArray(candidate) && candidate.length > 0) {
+      return candidate.filter((step) => step && typeof step === 'object' && typeof step.command === 'string' && step.command !== '');
+    }
+  }
+  return [];
+}
+
 function extraPlugins(input) {
   const explicit = input.parent_request?.extra_plugins || input.parent_request?.extraPlugins || [];
   const plugins = [...runtimeComponentExtraPlugins(input), ...(Array.isArray(explicit) ? explicit : [])];
@@ -312,6 +330,11 @@ function stableTaskInput(input) {
     // `runtime_component_paths` / `data_machine_path` fields. Without this the
     // components never mount and agents/chat is unavailable in the sandbox.
     component_contracts: componentContracts(input),
+    // Post-agent verification gate. WP Codebox emits these as recipe
+    // `workflow.after` steps that run once the agent finishes editing; any
+    // non-zero exit fails the whole run, so the orchestrator cannot report
+    // success until the supplied gates (e.g. the repo's smoke/test suite) pass.
+    verify_steps: verifySteps(input),
     runtime_overlay_profiles: input.runtime_overlay_profiles || [],
     secret_env: secretEnv,
     mounts: input.mounts || [],
