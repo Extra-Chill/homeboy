@@ -949,7 +949,7 @@ jq -n \
         options: ({
             blueprint: $blueprint,
             mounts: $mounts,
-            extraPlugins: $extraPlugins,
+            extra_plugins: $extraPlugins,
             componentId: $component,
             pluginSlug: $slug,
             iterations: $iterations,
