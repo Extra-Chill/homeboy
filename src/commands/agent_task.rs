@@ -111,9 +111,13 @@ pub struct ReviewArgs {
     /// Durable run id returned by `agent-task submit`, `dispatch`, or `run-plan --record-run-id`.
     pub run_id: String,
 
-    /// Managed DMC worktree handle to include in generated promotion commands.
+    /// Target workspace handle to include in generated promotion commands.
     #[arg(long, value_name = "HANDLE")]
     pub to_worktree: Option<String>,
+
+    /// External workspace provider command to include in generated promotion commands.
+    #[arg(long, value_name = "COMMAND")]
+    pub provider_command: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -122,9 +126,13 @@ pub struct PromoteArgs {
     #[arg(value_name = "SOURCE")]
     pub source: String,
 
-    /// Managed DMC worktree handle to apply into, e.g. repo@branch-slug.
+    /// Target workspace handle to apply into.
     #[arg(long, value_name = "HANDLE")]
     pub to_worktree: String,
+
+    /// External workspace provider command. When omitted, HOMEBOY_AGENT_TASK_PROMOTION_COMMAND is used.
+    #[arg(long, value_name = "COMMAND")]
+    pub provider_command: Option<String>,
 
     /// Outcome task id to select when SOURCE is an aggregate.
     #[arg(long, value_name = "TASK_ID")]
@@ -789,6 +797,7 @@ mod tests {
             let (value, exit_code) = review::review(ReviewArgs {
                 run_id: "run-review-queued".to_string(),
                 to_worktree: None,
+                provider_command: None,
             })
             .expect("review loaded");
 
@@ -819,6 +828,7 @@ mod tests {
             let (value, exit_code) = review::review(ReviewArgs {
                 run_id: "run-review-completed".to_string(),
                 to_worktree: Some("homeboy@fix-review-flow".to_string()),
+                provider_command: None,
             })
             .expect("review loaded");
 
@@ -835,7 +845,7 @@ mod tests {
                     "homeboy",
                     "agent-task",
                     "promote",
-                    "run-review-completed",
+                    value["aggregate_path"].as_str().expect("aggregate path"),
                     "--task-id",
                     "task-a",
                     "--artifact-id",
