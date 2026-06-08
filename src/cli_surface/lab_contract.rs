@@ -35,21 +35,26 @@ pub enum LabCommandRequiredTool {
 
 pub const LAB_TRACE_EXTRA_TOOLS: &[LabCommandRequiredTool] = &[LabCommandRequiredTool::Playwright];
 const LAB_NO_EXTRA_TOOLS: &[LabCommandRequiredTool] = &[];
+const AUDIT_CHANGED_SINCE_LAB_UNSUPPORTED_REASON: &str = "`audit --changed-since` is not Lab-portable yet because changed-since audit depends on git base refs that the current Lab workspace sync may not have fetched.";
+const LINT_CHANGED_SCOPE_LAB_UNSUPPORTED_REASON: &str = "Changed-scope lint runs stay local because changed-file scopes are not represented in the current Lab portability contract yet.";
+const TEST_CHANGED_SINCE_LAB_UNSUPPORTED_REASON: &str = "`test --changed-since` is not Lab-portable yet because changed-since test selection depends on git base refs that the current Lab workspace sync may not have fetched.";
 const RIG_UP_LAB_UNSUPPORTED_REASON: &str = "`rig up` stays local because rig pipelines manage local services, leases, ports, and declared filesystem paths that the current single-workspace Lab snapshot cannot safely mirror.";
 const FLEET_EXEC_LAB_UNSUPPORTED_REASON: &str = "`fleet exec` stays local because it depends on local fleet, project, and server configuration before opening SSH sessions to each project; runner-side config parity is not guaranteed.";
 
 impl Commands {
     pub fn lab_contract(&self) -> Option<LabCommandContract> {
         let contract = match self {
-            Commands::Audit(args) if args.changed_since.is_none() && !args.conventions => {
-                lab_portable_contract(
-                    "audit",
-                    (args.baseline_args.baseline || args.baseline_args.ratchet)
-                        .then_some("--baseline/--ratchet"),
-                    true,
-                    LAB_NO_EXTRA_TOOLS,
-                )
+            Commands::Audit(args) if args.changed_since.is_some() => {
+                lab_local_only_contract("audit", AUDIT_CHANGED_SINCE_LAB_UNSUPPORTED_REASON)
             }
+            Commands::Audit(args) if args.conventions => return None,
+            Commands::Audit(args) => lab_portable_contract(
+                "audit",
+                (args.baseline_args.baseline || args.baseline_args.ratchet)
+                    .then_some("--baseline/--ratchet"),
+                true,
+                LAB_NO_EXTRA_TOOLS,
+            ),
             Commands::Bench(args) if args.is_lab_offload_command() => lab_portable_contract(
                 "bench",
                 args.lab_offload_writes_local_state()
@@ -66,6 +71,9 @@ impl Commands {
                 true,
                 LAB_NO_EXTRA_TOOLS,
             ),
+            Commands::Lint(args) if args.changed_since.is_some() || args.changed_only => {
+                lab_local_only_contract("lint", LINT_CHANGED_SCOPE_LAB_UNSUPPORTED_REASON)
+            }
             Commands::Refactor(args) if args.is_hot_resource_command() => lab_portable_contract(
                 "refactor",
                 args.lab_offload_writes_local_state()
@@ -82,6 +90,9 @@ impl Commands {
                 true,
                 LAB_NO_EXTRA_TOOLS,
             ),
+            Commands::Test(_) => {
+                lab_local_only_contract("test", TEST_CHANGED_SINCE_LAB_UNSUPPORTED_REASON)
+            }
             Commands::Trace(args) => lab_portable_workload_contract(
                 "trace",
                 args.keep_overlay.then_some("--keep-overlay"),

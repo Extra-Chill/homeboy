@@ -106,9 +106,21 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
             );
             return Err(unsupported_runner_error(runner_id, message));
         }
+        let reason = contract
+            .unsupported_reason
+            .unwrap_or("command is local-only");
+        plan = disabled_select_runner_plan(plan, reason);
         return Ok(LabOffloadOutcome::RunLocal {
-            plan: disabled_select_runner_plan(plan, "command is local-only"),
-            metadata: None,
+            metadata: Some(lab_offload_metadata(
+                &plan,
+                "automatic",
+                None,
+                None,
+                "skipped",
+                None,
+                Some(reason),
+            )),
+            plan,
             messages: Vec::new(),
         });
     }

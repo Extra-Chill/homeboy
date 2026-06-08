@@ -178,6 +178,17 @@ mod tests {
                 _guard: guard,
             }
         }
+
+        fn remove(name: &'static str) -> Self {
+            let guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+            let previous = std::env::var(name).ok();
+            std::env::remove_var(name);
+            Self {
+                name,
+                previous,
+                _guard: guard,
+            }
+        }
     }
 
     fn env_lock() -> &'static Mutex<()> {
@@ -201,6 +212,70 @@ mod tests {
         let outcome = route_after_parse(&cli, &["homeboy".into(), "status".into()], None).unwrap();
 
         assert_eq!(outcome, None);
+    }
+
+    #[test]
+    fn hot_local_only_command_records_lab_plan_metadata() {
+        let _env = EnvGuard::remove(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV);
+        let cli = Cli::parse_from(["homeboy", "lint", "--changed-since", "origin/main"]);
+
+        let outcome = route_after_parse(
+            &cli,
+            &[
+                "homeboy".into(),
+                "lint".into(),
+                "--changed-since".into(),
+                "origin/main".into(),
+            ],
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(outcome, None);
+        let raw = std::env::var(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV)
+            .expect("Lab routing metadata captured");
+        let metadata: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(metadata["status"], "skipped");
+        assert_eq!(metadata["source"], "automatic");
+        assert!(metadata["plan_id"]
+            .as_str()
+            .unwrap()
+            .contains("lab_offload"));
+        assert!(metadata["fallback_reason"]
+            .as_str()
+            .unwrap()
+            .contains("Changed-scope lint runs stay local"));
+    }
+
+    #[test]
+    fn explicit_runner_for_local_only_hot_command_errors_from_lab_plan_path() {
+        let _env = EnvGuard::remove(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV);
+        let cli = Cli::parse_from([
+            "homeboy",
+            "--runner",
+            "homeboy-lab",
+            "test",
+            "--changed-since",
+            "origin/main",
+        ]);
+
+        let err = route_after_parse(
+            &cli,
+            &[
+                "homeboy".into(),
+                "--runner".into(),
+                "homeboy-lab".into(),
+                "test".into(),
+                "--changed-since".into(),
+                "origin/main".into(),
+            ],
+            None,
+        )
+        .expect_err("local-only hot command rejects explicit runner");
+
+        assert_eq!(err.code.as_str(), "validation.invalid_argument");
+        assert!(err.message.contains("--runner is unavailable"));
+        assert!(err.message.contains("test --changed-since"));
     }
 
     #[test]
