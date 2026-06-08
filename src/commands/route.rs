@@ -16,6 +16,7 @@ pub fn route_after_parse(
         normalized_args,
         explicit_runner: cli.runner.as_deref(),
         force_hot: cli.force_hot,
+        allow_local_hot: cli.allow_local_hot,
         allow_local_fallback: cli.allow_local_fallback,
         capture_patch: cli.command.lab_offload_mutation_flag().is_some(),
     })? {

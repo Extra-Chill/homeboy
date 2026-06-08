@@ -311,20 +311,28 @@ pub(super) fn resolve_lab_runner_selection(
     command: &LabOffloadCommand,
     explicit_runner: Option<&str>,
     force_hot: bool,
+    allow_local_hot: bool,
 ) -> Result<Option<LabRunnerSelection>> {
-    let default_runner = if explicit_runner.is_none() && !force_hot && command.portable {
+    let default_runner = if explicit_runner.is_none() && command.portable {
         super::resolve_default_lab_runner()?
     } else {
         None
     };
 
-    resolve_lab_runner_selection_from_default(command, explicit_runner, force_hot, default_runner)
+    resolve_lab_runner_selection_from_default(
+        command,
+        explicit_runner,
+        force_hot,
+        allow_local_hot,
+        default_runner,
+    )
 }
 
 pub(super) fn resolve_lab_runner_selection_from_default(
     command: &LabOffloadCommand,
     explicit_runner: Option<&str>,
     force_hot: bool,
+    allow_local_hot: bool,
     default_runner: Option<String>,
 ) -> Result<Option<LabRunnerSelection>> {
     if let Some(runner_id) = explicit_runner {
@@ -346,6 +354,22 @@ pub(super) fn resolve_lab_runner_selection_from_default(
             source: LabRunnerSelectionSource::Explicit,
             mode: runner_status_tunnel_mode(runner_id),
         }));
+    }
+
+    if force_hot && command.portable && default_runner.is_some() && !allow_local_hot {
+        let runner_id = default_runner.expect("checked above");
+        return Err(Error::validation_invalid_argument(
+            "force_hot",
+            format!(
+                "--force-hot would run portable hot command `{}` locally, but default Lab runner `{runner_id}` is available",
+                command.hot_label
+            ),
+            Some(runner_id),
+            Some(vec![
+                "Omit --force-hot or pass --runner to offload the command to Lab.".to_string(),
+                "Pass --force-hot --allow-local-hot only when you intentionally want this portable hot command to run on the controller machine.".to_string(),
+            ]),
+        ));
     }
 
     if force_hot || !command.portable {

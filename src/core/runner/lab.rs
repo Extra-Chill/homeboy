@@ -38,6 +38,7 @@ pub struct LabOffloadRequest<'a> {
     pub normalized_args: &'a [String],
     pub explicit_runner: Option<&'a str>,
     pub force_hot: bool,
+    pub allow_local_hot: bool,
     pub allow_local_fallback: bool,
     pub capture_patch: bool,
 }
@@ -112,10 +113,16 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
         });
     }
 
-    let selection =
-        resolve_lab_runner_selection(&contract, request.explicit_runner, request.force_hot)?;
+    let selection = resolve_lab_runner_selection(
+        &contract,
+        request.explicit_runner,
+        request.force_hot,
+        request.allow_local_hot,
+    )?;
     let Some(selection) = selection else {
-        let reason = if request.force_hot {
+        let reason = if request.force_hot && request.allow_local_hot {
+            "force_hot_local_override"
+        } else if request.force_hot {
             "force_hot"
         } else {
             "no_default_runner"
@@ -928,6 +935,24 @@ mod tests {
             &command,
             Some("lab-explicit"),
             false,
+            false,
+            Some("lab-default".to_string()),
+        )
+        .expect("selection")
+        .expect("explicit runner selected");
+
+        assert_eq!(selection.runner_id, "lab-explicit");
+        assert_eq!(selection.source, LabRunnerSelectionSource::Explicit);
+    }
+
+    #[test]
+    fn lab_runner_selection_force_hot_keeps_explicit_runner_precedence() {
+        let command = portable_lab_command("test");
+        let selection = resolve_lab_runner_selection_from_default(
+            &command,
+            Some("lab-explicit"),
+            true,
+            false,
             Some("lab-default".to_string()),
         )
         .expect("selection")
@@ -944,6 +969,7 @@ mod tests {
             &command,
             None,
             false,
+            false,
             Some("lab-default".to_string()),
         )
         .expect("selection")
@@ -958,21 +984,57 @@ mod tests {
         let command = portable_lab_command("test");
 
         assert!(
-            resolve_lab_runner_selection_from_default(&command, None, false, None)
+            resolve_lab_runner_selection_from_default(&command, None, false, false, None)
                 .expect("selection")
                 .is_none()
         );
     }
 
     #[test]
-    fn lab_runner_selection_force_hot_is_local_escape_hatch() {
+    fn lab_runner_selection_force_hot_refuses_local_when_default_runner_exists() {
+        let command = portable_lab_command("test");
+
+        let err = resolve_lab_runner_selection_from_default(
+            &command,
+            None,
+            true,
+            false,
+            Some("lab-default".to_string()),
+        )
+        .expect_err("force-hot should require explicit local override");
+
+        assert_eq!(err.code.as_str(), "validation.invalid_argument");
+        assert!(err
+            .message
+            .contains("--force-hot would run portable hot command"));
+        assert!(err.message.contains("lab-default"));
+        let tried = err.details["tried"].as_array().expect("tried");
+        assert!(tried.iter().any(|hint| hint
+            .as_str()
+            .is_some_and(|hint| hint.contains("--allow-local-hot"))));
+    }
+
+    #[test]
+    fn lab_runner_selection_force_hot_runs_locally_without_default_runner() {
+        let command = portable_lab_command("test");
+
+        assert!(
+            resolve_lab_runner_selection_from_default(&command, None, true, false, None)
+                .expect("selection")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn lab_runner_selection_allow_local_hot_overrides_default_runner_gate() {
         let command = portable_lab_command("test");
 
         assert!(resolve_lab_runner_selection_from_default(
             &command,
             None,
             true,
-            Some("lab-default".to_string())
+            true,
+            Some("lab-default".to_string()),
         )
         .expect("selection")
         .is_none());
@@ -983,6 +1045,7 @@ mod tests {
         let err = resolve_lab_runner_selection_from_default(
             &local_only_lab_command("current single-workspace Lab snapshot cannot safely mirror"),
             Some("lab-explicit"),
+            false,
             false,
             Some("lab-default".to_string()),
         )
@@ -1118,6 +1181,7 @@ mod tests {
             normalized_args: &["homeboy".to_string(), "test".to_string()],
             explicit_runner: None,
             force_hot: true,
+            allow_local_hot: true,
             allow_local_fallback: false,
             capture_patch: false,
         })
