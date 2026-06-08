@@ -28,10 +28,21 @@ const PROVIDER_CAPABILITIES = [
   'recipe_probe_artifacts',
 ];
 
-const DEFAULT_WORKSPACE_ALLOWED_TOOLS = [
+const DEFAULT_WORKSPACE_READONLY_TOOLS = [
   'workspace_ls',
   'workspace_read',
   'workspace_git_status',
+];
+
+// Additional workspace tools exposed when the repo workspace is mounted
+// read-write, so a coding task can actually edit files instead of only
+// inspecting them. These ids are registered by the data-machine-code runtime.
+const DEFAULT_WORKSPACE_WRITE_TOOLS = [
+  'workspace_write',
+  'workspace_edit',
+  'workspace_apply_patch',
+  'workspace_delete',
+  'workspace_git_add',
 ];
 
 const CODEX_SECRET_ENV = [
@@ -292,8 +303,8 @@ function defaultCodeboxRuntimeConfig(request, config, inputs, options = {}) {
     runtimeOverlayProfiles: defaultRuntimeOverlayProfiles(provider),
     mounts: defaultWorkspaceMounts(workspaceRoot, request, config, inputs, options),
     workspaces: defaultWorkspaces(config, inputs, options),
-    allowedTools: defaultWorkspaceAllowedTools(workspaceRoot),
-    sandboxToolPolicy: defaultWorkspaceSandboxToolPolicy(workspaceRoot),
+    allowedTools: defaultWorkspaceAllowedTools(workspaceRoot, workspaceMode(request, config, inputs)),
+    sandboxToolPolicy: defaultWorkspaceSandboxToolPolicy(workspaceRoot, workspaceMode(request, config, inputs)),
   };
 }
 
@@ -427,18 +438,28 @@ function readJsonFile(filePath) {
   }
 }
 
-function defaultWorkspaceAllowedTools(workspaceRoot) {
-  return workspaceRoot ? DEFAULT_WORKSPACE_ALLOWED_TOOLS : [];
+function defaultWorkspaceToolIds(workspaceRoot, workspaceModeValue) {
+  if (!workspaceRoot) {
+    return [];
+  }
+  if (workspaceModeValue === 'readwrite') {
+    return [...DEFAULT_WORKSPACE_READONLY_TOOLS, ...DEFAULT_WORKSPACE_WRITE_TOOLS];
+  }
+  return [...DEFAULT_WORKSPACE_READONLY_TOOLS];
 }
 
-function defaultWorkspaceSandboxToolPolicy(workspaceRoot) {
+function defaultWorkspaceAllowedTools(workspaceRoot, workspaceModeValue) {
+  return defaultWorkspaceToolIds(workspaceRoot, workspaceModeValue);
+}
+
+function defaultWorkspaceSandboxToolPolicy(workspaceRoot, workspaceModeValue) {
   if (!workspaceRoot) {
     return undefined;
   }
   return {
     schema: 'wp-codebox/sandbox-tool-policy/v1',
     version: 1,
-    tools: DEFAULT_WORKSPACE_ALLOWED_TOOLS.map((tool) => ({
+    tools: defaultWorkspaceToolIds(workspaceRoot, workspaceModeValue).map((tool) => ({
       id: tool,
       runtime_tool_id: tool,
       execution_location: 'sandbox',
