@@ -461,6 +461,10 @@ impl Commands {
     pub fn output_file_mode(&self, has_output_file: bool) -> CommandOutputFileMode {
         self.descriptor(has_output_file).output_file_mode
     }
+
+    pub fn consumes_output_file_as_command_arg(&self) -> bool {
+        matches!(self, Commands::Runs(args) if args.is_artifact_get())
+    }
 }
 
 fn raw_ops_descriptor(
@@ -1075,6 +1079,23 @@ mod tests {
                 output_file: CommandOutputFileMode::TraceJsonSummaryArtifact,
             }
         );
+    }
+
+    #[test]
+    fn artifact_get_output_flag_is_command_payload_destination() {
+        assert!(parsed_command(&[
+            "homeboy",
+            "runs",
+            "artifact",
+            "get",
+            "run-1",
+            "artifact-1",
+            "-o",
+            "artifact.bin",
+        ])
+        .consumes_output_file_as_command_arg());
+
+        assert!(!parsed_command(&["homeboy", "status"]).consumes_output_file_as_command_arg());
     }
 
     #[test]
