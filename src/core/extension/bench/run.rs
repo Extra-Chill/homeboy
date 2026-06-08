@@ -358,6 +358,56 @@ fn failure_scenario_id(scenario_ids: &[String]) -> Option<String> {
     }
 }
 
+fn workload_status_failures(results: &BenchResults) -> Vec<String> {
+    results
+        .scenarios
+        .iter()
+        .filter_map(|scenario| {
+            if !scenario.passed {
+                return Some(format!(
+                    "bench scenario `{}` reported passed=false",
+                    scenario.id
+                ));
+            }
+
+            let failed = scenario.metrics.get("failed_count").unwrap_or(0.0);
+            let unsupported = scenario.metrics.get("unsupported_count").unwrap_or(0.0);
+            let passed = scenario.metrics.get("passed_count");
+            let total = scenario.metrics.get("adapter_count");
+
+            if failed > 0.0 || unsupported > 0.0 {
+                return Some(format!(
+                    "bench scenario `{}` reported failed_count={} unsupported_count={} passed_count={}",
+                    scenario.id,
+                    format_count(failed),
+                    format_count(unsupported),
+                    passed
+                        .map(format_count)
+                        .unwrap_or_else(|| "<unknown>".to_string())
+                ));
+            }
+
+            if passed == Some(0.0) && total.is_some_and(|count| count > 0.0) {
+                return Some(format!(
+                    "bench scenario `{}` reported no passing children out of adapter_count={}",
+                    scenario.id,
+                    format_count(total.unwrap_or(0.0))
+                ));
+            }
+
+            None
+        })
+        .collect()
+}
+
+fn format_count(value: f64) -> String {
+    if value.fract() == 0.0 {
+        format!("{}", value as i64)
+    } else {
+        value.to_string()
+    }
+}
+
 fn discover_bench_scenarios(
     execution_context: &ExtensionExecutionContext,
     component: &Component,
@@ -629,10 +679,13 @@ pub fn run_main_bench_workflow(
         );
     }
 
-    let gate_failures = parsed
+    let mut gate_failures = parsed
         .as_mut()
         .map(super::gate::evaluate_gates)
         .unwrap_or_default();
+    if let Some(results) = parsed.as_ref() {
+        gate_failures.extend(workload_status_failures(results));
+    }
     let gate_results = parsed
         .as_ref()
         .map(super::gate::normalized_gate_results)
@@ -1139,6 +1192,57 @@ mod tests {
                 PathBuf::from("/tmp/bench/WpAdminLoad.php"),
             ]
         );
+    }
+
+    #[test]
+    fn workload_status_failures_catches_failed_and_unsupported_children() {
+        let results = parsing::parse_bench_results_str(
+            r#"{
+                "component_id": "studio-web",
+                "iterations": 1,
+                "scenarios": [{
+                    "id": "workflow-bench",
+                    "iterations": 1,
+                    "metrics": {
+                        "adapter_count": 2,
+                        "passed_count": 0,
+                        "failed_count": 1,
+                        "unsupported_count": 1
+                    }
+                }]
+            }"#,
+        )
+        .expect("parse bench results");
+
+        let failures = workload_status_failures(&results);
+
+        assert_eq!(failures.len(), 1);
+        assert!(failures[0].contains("workflow-bench"));
+        assert!(failures[0].contains("failed_count=1"));
+        assert!(failures[0].contains("unsupported_count=1"));
+    }
+
+    #[test]
+    fn workload_status_failures_allows_clean_child_counters() {
+        let results = parsing::parse_bench_results_str(
+            r#"{
+                "component_id": "studio-web",
+                "iterations": 1,
+                "scenarios": [{
+                    "id": "workflow-bench",
+                    "iterations": 1,
+                    "metrics": {
+                        "adapter_count": 2,
+                        "passed_count": 2,
+                        "failed_count": 0,
+                        "unsupported_count": 0
+                    }
+                }]
+            }"#,
+        )
+        .expect("parse bench results");
+
+        assert!(workload_status_failures(&results).is_empty());
     }
 
     #[test]
