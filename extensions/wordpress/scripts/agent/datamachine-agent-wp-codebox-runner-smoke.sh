@@ -93,8 +93,8 @@ if (recipe.inputs?.extra_plugins?.some((plugin) => plugin.slug === 'php-ai-clien
   throw new Error('WP AI Client is provided by WordPress core and must not be mounted as a WP Codebox extra plugin')
 }
 for (const slug of ['agents-api', 'data-machine', 'data-machine-code']) {
-  if (!recipe.inputs?.extra_plugins?.some((plugin) => plugin.slug === slug && plugin.activate === true)) {
-    throw new Error(`expected ${slug} to be activated before the agent workload runs`)
+  if (!recipe.inputs?.extra_plugins?.some((plugin) => plugin.slug === slug && plugin.activate === false && plugin.loadAs === 'mu-plugin')) {
+    throw new Error(`expected ${slug} to load as a runtime mu-plugin before the agent workload runs`)
   }
 }
 if (!recipe.inputs?.secretEnv?.includes('HOMEBOY_DATAMACHINE_AGENT_CONFIG')) {
