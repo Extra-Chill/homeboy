@@ -224,6 +224,35 @@ function runnerInput(request, artifacts) {
   }).filter(([, value]) => value !== '' && value !== undefined && !(Array.isArray(value) && value.length === 0)));
 }
 
+function runtimeComponentExtraPlugins(input) {
+  const components = {
+    agents_api: input.agents_api_path,
+    ...(input.runtime_component_paths || {}),
+  };
+  return [
+    { key: 'agents_api', slug: 'agents-api' },
+    { key: 'agent_runtime', slug: 'data-machine' },
+    { key: 'agent_runtime_tools', slug: 'data-machine-code' },
+  ].flatMap(({ key, slug }) => {
+    const source = components[key];
+    return source ? [{ source, slug, loadAs: 'mu-plugin', activate: false }] : [];
+  });
+}
+
+function extraPlugins(input) {
+  const explicit = input.parent_request?.extra_plugins || input.parent_request?.extraPlugins || [];
+  const plugins = [...runtimeComponentExtraPlugins(input), ...(Array.isArray(explicit) ? explicit : [])];
+  const seen = new Set();
+  return plugins.filter((plugin) => {
+    const key = `${plugin.slug || ''}:${plugin.source || ''}`;
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
+}
+
 function stableTaskInput(input) {
   const allowedTools = input.parent_request?.allowed_tools || input.parent_request?.task?.allowed_tools || [];
   const secretEnv = input.secret_env || [];
@@ -241,6 +270,7 @@ function stableTaskInput(input) {
     provider: input.provider,
     model: input.model,
     provider_plugin_paths: input.provider_plugin_paths || [],
+    extra_plugins: extraPlugins(input),
     runtime_overlay_profiles: input.runtime_overlay_profiles || [],
     secret_env: secretEnv,
     mounts: input.mounts || [],
