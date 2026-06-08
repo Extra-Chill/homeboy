@@ -145,6 +145,7 @@ pub(super) fn finish_error(
         "resource_summary",
         run_dir.step_file(run_dir::files::RESOURCE_SUMMARY),
     );
+    record_memory_timeline_artifacts(&observation, run_dir);
     let metadata = merge_metadata(
         observation.0.initial_metadata().clone(),
         serde_json::json!({
@@ -375,6 +376,7 @@ fn record_bench_observation_artifacts(
         "resource_summary",
         run_dir.step_file(run_dir::files::RESOURCE_SUMMARY),
     );
+    record_memory_timeline_artifacts(observation, run_dir);
 
     let Some(results) = workflow.results.as_ref() else {
         return;
@@ -387,6 +389,25 @@ fn record_bench_observation_artifacts(
 
 fn record_if_exists(observation: &BenchObservation, kind: &str, path: PathBuf) {
     observation.0.record_artifact_if_file(kind, &path);
+}
+
+fn record_memory_timeline_artifacts(observation: &BenchObservation, run_dir: &RunDir) {
+    let Ok(entries) = fs::read_dir(run_dir.path()) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if name.starts_with("bench-memory-timeline")
+            && (name.ends_with(".json") || name.ends_with(".csv"))
+        {
+            observation
+                .0
+                .record_artifact_if_file("bench_memory_timeline", &path);
+        }
+    }
 }
 
 fn persist_bench_result_artifact_paths(

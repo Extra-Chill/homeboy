@@ -1,6 +1,7 @@
 //! Bench main workflow: invoke extension runner, load JSON, apply baseline.
 
 use std::collections::BTreeMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread;
@@ -10,14 +11,21 @@ use serde::Serialize;
 use crate::core::component::Component;
 use crate::core::engine::baseline::BaselineFlags;
 use crate::core::engine::invocation::InvocationRequirements;
+use crate::core::engine::resource::ExtensionChildResourceSummary;
 use crate::core::engine::run_dir::{self, RunDir};
 use crate::core::error::{Error, Result};
 use crate::core::extension::bench::aggregate_runs;
+use crate::core::extension::bench::artifact::BenchArtifact;
 use crate::core::extension::bench::baseline::{self, BenchBaselineComparison};
 use crate::core::extension::bench::diagnostic::{self, BenchDiagnostic};
 use crate::core::extension::bench::failure_diagnostic::bench_failure_stderr_tail;
 use crate::core::extension::bench::parsing::{
     self, BenchResults, BenchRunExecution, BenchRunMetadata, BenchRunnerMetadata, BenchScenario,
+};
+use crate::core::extension::bench::phase_events::BenchPhaseFailureClassification;
+use crate::core::extension::bench::responsiveness::{
+    memory_sample, read_responsiveness_summary, BenchFailureMemorySample,
+    BenchResponsivenessSummary,
 };
 use crate::core::extension::bench::run_metadata::stamp_run_metadata;
 use crate::core::extension::{
@@ -101,6 +109,12 @@ pub struct BenchRunFailure {
     pub scenario_id: Option<String>,
     pub exit_code: i32,
     pub stderr_tail: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_classification: Option<BenchPhaseFailureClassification>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub responsiveness: Option<BenchResponsivenessSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_sample: Option<BenchFailureMemorySample>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub diagnostics: Vec<BenchDiagnostic>,
 }
@@ -529,6 +543,7 @@ pub fn run_main_bench_workflow(
     }
 
     if component.has_script(ExtensionCapability::Bench) {
+        clear_responsiveness_file(run_dir)?;
         let script_output =
             crate::core::extension::component_script::run_component_scripts_with_run_dir(
                 component,
@@ -539,6 +554,7 @@ pub fn run_main_bench_workflow(
                 &bench_component_script_env(&args),
                 &args.passthrough_args,
             )?;
+        preserve_memory_timeline_artifacts(script_output.child_resource.as_ref(), run_dir, None)?;
         let results_file = run_dir.step_file(run_dir::files::BENCH_RESULTS);
         let mut parsed = if results_file.exists() {
             parse_execution_results_file(
@@ -571,6 +587,22 @@ pub fn run_main_bench_workflow(
                 }),
                 diagnostics: Vec::new(),
             });
+            attach_memory_timeline_artifacts(
+                results,
+                script_output.child_resource.as_ref(),
+                run_dir,
+                None,
+            )?;
+        }
+        let responsiveness = read_responsiveness_summary(
+            &run_dir.step_file(run_dir::files::BENCH_RESPONSIVENESS),
+            script_output
+                .child_resource
+                .as_ref()
+                .map(|resource| resource.duration_ms),
+        )?;
+        if let Some(results) = parsed.as_mut() {
+            results.responsiveness = responsiveness.clone();
         }
         let gate_failures = parsed
             .as_mut()
@@ -586,12 +618,26 @@ pub fn run_main_bench_workflow(
         } else {
             "failed"
         };
+        let failure_classification = classify_bench_failure(
+            script_output.success,
+            script_output.exit_code,
+            &script_output.stderr,
+            responsiveness.as_ref(),
+        );
+        if let Some(results) = parsed.as_mut() {
+            if !script_output.success && results.failure_classification.is_none() {
+                results.failure_classification = failure_classification.clone();
+            }
+        }
         let failure = (!script_output.success).then(|| BenchRunFailure {
             component_id: args.component_id.clone(),
             component_path: Some(source_path.to_string_lossy().to_string()),
             scenario_id: failure_scenario_id(&args.scenario_ids),
             exit_code: script_output.exit_code,
             stderr_tail: bench_failure_stderr_tail(&script_output.stderr, &args),
+            failure_classification,
+            responsiveness,
+            memory_sample: None,
             diagnostics: Vec::new(),
         });
         let exit_code = if script_output.exit_code != 0 {
@@ -632,44 +678,72 @@ pub fn run_main_bench_workflow(
             filter_extra_workloads_by_scenario_ids(&args.extra_workloads, &args.scenario_ids);
     }
 
-    let (mut parsed, runner_success, runner_exit_code, failure_stderr_tail) =
-        if execution_args.execution.runs > 1 {
-            run_sequential_runs(&execution_context, component, &execution_args, run_dir)?
-        } else if execution_args.execution.concurrency <= 1 {
-            let results_file = run_dir.step_file(run_dir::files::BENCH_RESULTS);
-            let runner_output = build_runner(
-                &execution_context,
-                component,
-                &execution_args,
+    clear_responsiveness_file(run_dir)?;
+    let (
+        mut parsed,
+        runner_success,
+        runner_exit_code,
+        failure_stderr_tail,
+        failure_memory_sample,
+        responsiveness_observed_elapsed_ms,
+    ) = if execution_args.execution.runs > 1 {
+        run_sequential_runs(&execution_context, component, &execution_args, run_dir)?
+    } else if execution_args.execution.concurrency <= 1 {
+        let results_file = run_dir.step_file(run_dir::files::BENCH_RESULTS);
+        let runner_output = build_runner(
+            &execution_context,
+            component,
+            &execution_args,
+            run_dir,
+            None,
+        )?
+        .run()?;
+        preserve_memory_timeline_artifacts(runner_output.child_resource.as_ref(), run_dir, None)?;
+        let parsed = parse_execution_results_file(
+            &results_file,
+            &execution_args.scenario_ids,
+            runner_output.success,
+            execution_args.rig_id.as_deref(),
+        )?;
+        let mut parsed = parsed;
+        if let Some(results) = parsed.as_mut() {
+            attach_memory_timeline_artifacts(
+                results,
+                runner_output.child_resource.as_ref(),
                 run_dir,
                 None,
-            )?
-            .run()?;
-            let parsed = parse_execution_results_file(
-                &results_file,
-                &execution_args.scenario_ids,
-                runner_output.success,
-                execution_args.rig_id.as_deref(),
             )?;
-            let failure_stderr_tail = if !runner_output.success {
-                Some(bench_failure_stderr_tail(
-                    &runner_output.stderr,
-                    &execution_args,
-                ))
-            } else {
-                None
-            };
-            (
-                parsed,
-                runner_output.success,
-                runner_output.exit_code,
-                failure_stderr_tail,
-            )
+        }
+        let failure_stderr_tail = if !runner_output.success {
+            Some(bench_failure_stderr_tail(
+                &runner_output.stderr,
+                &execution_args,
+            ))
         } else {
-            run_concurrent_instances(&execution_context, component, &execution_args, run_dir)?
+            None
         };
+        (
+            parsed,
+            runner_output.success,
+            runner_output.exit_code,
+            failure_stderr_tail,
+            memory_sample(runner_output.child_resource.as_ref()),
+            runner_output
+                .child_resource
+                .as_ref()
+                .map(|resource| resource.duration_ms),
+        )
+    } else {
+        run_concurrent_instances(&execution_context, component, &execution_args, run_dir)?
+    };
+
+    let responsiveness = read_responsiveness_summary(
+        &run_dir.step_file(run_dir::files::BENCH_RESPONSIVENESS),
+        responsiveness_observed_elapsed_ms,
+    )?;
 
     if let Some(results) = parsed.as_mut() {
+        results.responsiveness = responsiveness.clone();
         stamp_run_metadata(
             results,
             &execution_context,
@@ -696,6 +770,18 @@ pub fn run_main_bench_workflow(
     if let Some(results) = parsed.as_mut() {
         if let Some(metadata) = results.run_metadata.as_mut() {
             metadata.diagnostics = diagnostics.clone();
+        }
+    }
+
+    let failure_classification = classify_bench_failure(
+        runner_success,
+        runner_exit_code,
+        failure_stderr_tail.as_deref().unwrap_or_default(),
+        responsiveness.as_ref(),
+    );
+    if let Some(results) = parsed.as_mut() {
+        if !runner_success && results.failure_classification.is_none() {
+            results.failure_classification = failure_classification.clone();
         }
     }
 
@@ -785,6 +871,9 @@ pub fn run_main_bench_workflow(
             scenario_id: failure_scenario_id(&execution_args.scenario_ids),
             exit_code: runner_exit_code,
             stderr_tail,
+            failure_classification,
+            responsiveness,
+            memory_sample: failure_memory_sample,
             diagnostics: diagnostics.clone(),
         })
     } else {
@@ -817,6 +906,10 @@ fn bench_component_script_env(args: &BenchRunWorkflowArgs) -> Vec<(String, Strin
             args.warmup_iterations.unwrap_or(0).to_string(),
         ),
         (
+            "HOMEBOY_BENCH_RESPONSIVENESS_MISSED_MS".to_string(),
+            crate::core::extension::bench::responsiveness::missed_ping_window_ms().to_string(),
+        ),
+        (
             "HOMEBOY_BENCH_SCENARIOS".to_string(),
             args.scenario_ids.join(","),
         ),
@@ -837,18 +930,33 @@ fn run_sequential_runs(
     component: &Component,
     args: &BenchRunWorkflowArgs,
     run_dir: &RunDir,
-) -> Result<(Option<BenchResults>, bool, i32, Option<String>)> {
+) -> Result<(
+    Option<BenchResults>,
+    bool,
+    i32,
+    Option<String>,
+    Option<BenchFailureMemorySample>,
+    Option<u128>,
+)> {
     let mut parsed_runs = Vec::new();
     let mut all_success = true;
     let mut first_failure_exit: Option<i32> = None;
     let mut first_failure_stderr_tail: Option<String> = None;
+    let mut first_failure_memory_sample: Option<BenchFailureMemorySample> = None;
+    let mut observed_elapsed_ms: Option<u128> = None;
 
     for _ in 0..args.execution.runs {
-        let (parsed, success, exit_code, stderr_tail) = if args.execution.concurrency <= 1 {
-            run_single_dispatcher(execution_context, component, args, run_dir)?
-        } else {
-            run_concurrent_instances(execution_context, component, args, run_dir)?
-        };
+        let (parsed, success, exit_code, stderr_tail, memory_sample, run_elapsed_ms) =
+            if args.execution.concurrency <= 1 {
+                run_single_dispatcher(execution_context, component, args, run_dir)?
+            } else {
+                run_concurrent_instances(execution_context, component, args, run_dir)?
+            };
+        observed_elapsed_ms = Some(
+            observed_elapsed_ms
+                .unwrap_or_default()
+                .max(run_elapsed_ms.unwrap_or_default()),
+        );
         if !success {
             all_success = false;
             if first_failure_exit.is_none() {
@@ -856,6 +964,9 @@ fn run_sequential_runs(
             }
             if first_failure_stderr_tail.is_none() {
                 first_failure_stderr_tail = stderr_tail;
+            }
+            if first_failure_memory_sample.is_none() {
+                first_failure_memory_sample = memory_sample;
             }
         }
         if let Some(result) = parsed {
@@ -874,7 +985,14 @@ fn run_sequential_runs(
         first_failure_exit.unwrap_or(1)
     };
 
-    Ok((merged, all_success, exit_code, first_failure_stderr_tail))
+    Ok((
+        merged,
+        all_success,
+        exit_code,
+        first_failure_stderr_tail,
+        first_failure_memory_sample,
+        observed_elapsed_ms,
+    ))
 }
 
 fn run_single_dispatcher(
@@ -882,7 +1000,14 @@ fn run_single_dispatcher(
     component: &Component,
     args: &BenchRunWorkflowArgs,
     run_dir: &RunDir,
-) -> Result<(Option<BenchResults>, bool, i32, Option<String>)> {
+) -> Result<(
+    Option<BenchResults>,
+    bool,
+    i32,
+    Option<String>,
+    Option<BenchFailureMemorySample>,
+    Option<u128>,
+)> {
     let results_file = run_dir.step_file(run_dir::files::BENCH_RESULTS);
     if results_file.exists() {
         std::fs::remove_file(&results_file).map_err(|e| {
@@ -914,6 +1039,11 @@ fn run_single_dispatcher(
         runner_output.success,
         runner_output.exit_code,
         failure_stderr_tail,
+        memory_sample(runner_output.child_resource.as_ref()),
+        runner_output
+            .child_resource
+            .as_ref()
+            .map(|resource| resource.duration_ms),
     ))
 }
 
@@ -958,6 +1088,10 @@ fn build_runner(
         invocation_requirements: args.invocation_requirements.clone(),
     })?
     .env("HOMEBOY_BENCH_ITERATIONS", &args.iterations.to_string())
+    .env(
+        "HOMEBOY_BENCH_RESPONSIVENESS_MISSED_MS",
+        &crate::core::extension::bench::responsiveness::missed_ping_window_ms().to_string(),
+    )
     .env("HOMEBOY_BENCH_PROGRESS", bench_progress_env_value())
     .env("HOMEBOY_BENCH_PROGRESS_STREAM", "stderr")
     .script_args(&args.passthrough_args)
@@ -997,6 +1131,71 @@ fn build_runner(
     Ok(runner)
 }
 
+fn clear_responsiveness_file(run_dir: &RunDir) -> Result<()> {
+    let path = run_dir.step_file(run_dir::files::BENCH_RESPONSIVENESS);
+    if path.exists() {
+        std::fs::remove_file(&path).map_err(|e| {
+            Error::internal_io(
+                format!(
+                    "Failed to clear previous bench responsiveness file {}: {}",
+                    path.display(),
+                    e
+                ),
+                Some("bench.run.responsiveness_file".to_string()),
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn classify_bench_failure(
+    success: bool,
+    exit_code: i32,
+    stderr: &str,
+    responsiveness: Option<&BenchResponsivenessSummary>,
+) -> Option<BenchPhaseFailureClassification> {
+    if success {
+        return None;
+    }
+
+    if responsiveness.is_some_and(BenchResponsivenessSummary::responsiveness_lost) {
+        return Some(classification(
+            "responsiveness_loss",
+            "responsiveness",
+            "missed_ping",
+            responsiveness.and_then(|summary| {
+                summary.last_ping_at.as_ref().map(|last| {
+                    format!(
+                        "UI responsiveness ping gap exceeded {}ms; last ping at {}",
+                        summary.missed_ping_window_ms, last
+                    )
+                })
+            }),
+        ));
+    }
+
+    let stderr_lower = stderr.to_ascii_lowercase();
+    if exit_code == 124 || stderr_lower.contains("timeout") || stderr_lower.contains("timed out") {
+        return Some(classification("timeout", "bench", "timeout", None));
+    }
+
+    Some(classification("assertion_failure", "bench", "failed", None))
+}
+
+fn classification(
+    kind: &str,
+    phase: &str,
+    status: &str,
+    message: Option<String>,
+) -> BenchPhaseFailureClassification {
+    BenchPhaseFailureClassification {
+        kind: kind.to_string(),
+        phase: phase.to_string(),
+        status: status.to_string(),
+        message,
+    }
+}
+
 fn bench_progress_enabled() -> bool {
     match std::env::var("HOMEBOY_BENCH_PROGRESS") {
         Ok(value) => matches!(
@@ -1027,7 +1226,14 @@ fn run_concurrent_instances(
     component: &Component,
     args: &BenchRunWorkflowArgs,
     run_dir: &RunDir,
-) -> Result<(Option<BenchResults>, bool, i32, Option<String>)> {
+) -> Result<(
+    Option<BenchResults>,
+    bool,
+    i32,
+    Option<String>,
+    Option<BenchFailureMemorySample>,
+    Option<u128>,
+)> {
     let concurrency = args.execution.concurrency;
     let execution_context = Arc::new(execution_context.clone());
     let component = Arc::new(component.clone());
@@ -1063,7 +1269,18 @@ fn run_concurrent_instances(
     let mut all_success = true;
     let mut first_failure_exit: Option<i32> = None;
     let mut first_failure_stderr_tail: Option<String> = None;
+    let mut first_failure_memory_sample: Option<BenchFailureMemorySample> = None;
+    let mut observed_elapsed_ms: Option<u128> = None;
     for (_, output) in &per_instance {
+        observed_elapsed_ms = Some(
+            observed_elapsed_ms.unwrap_or_default().max(
+                output
+                    .child_resource
+                    .as_ref()
+                    .map(|resource| resource.duration_ms)
+                    .unwrap_or_default(),
+            ),
+        );
         if !output.success {
             all_success = false;
             if first_failure_exit.is_none() {
@@ -1071,6 +1288,9 @@ fn run_concurrent_instances(
             }
             if first_failure_stderr_tail.is_none() {
                 first_failure_stderr_tail = Some(bench_failure_stderr_tail(&output.stderr, args));
+            }
+            if first_failure_memory_sample.is_none() {
+                first_failure_memory_sample = memory_sample(output.child_resource.as_ref());
             }
         }
     }
@@ -1090,6 +1310,15 @@ fn run_concurrent_instances(
 
     for (instance_id, _) in &per_instance {
         let path = run_dir.step_file(&instance_results_filename(*instance_id));
+        let child_resource = per_instance
+            .iter()
+            .find(|(output_instance_id, _)| output_instance_id == instance_id)
+            .and_then(|(_, output)| output.child_resource.as_ref());
+        preserve_memory_timeline_artifacts(
+            child_resource,
+            &run_dir,
+            Some(&format!("i{}", instance_id)),
+        )?;
         if !path.exists() {
             continue;
         }
@@ -1099,7 +1328,15 @@ fn run_concurrent_instances(
         )
         .and_then(|results| apply_scenario_filter(results, &args.scenario_ids))
         {
-            Ok(p) => p,
+            Ok(mut p) => {
+                attach_memory_timeline_artifacts(
+                    &mut p,
+                    child_resource,
+                    &run_dir,
+                    Some(&format!("i{}", instance_id)),
+                )?;
+                p
+            }
             Err(_) => continue,
         };
         if component_id_seen.is_none() {
@@ -1133,6 +1370,7 @@ fn run_concurrent_instances(
             phase_events: Vec::new(),
             phase_summaries: Vec::new(),
             failure_classification: None,
+            responsiveness: None,
             budget_findings,
             scenarios: merged_scenarios,
             metric_policies: metric_policies_seen,
@@ -1140,12 +1378,212 @@ fn run_concurrent_instances(
         })
     };
 
-    Ok((merged, all_success, exit_code, first_failure_stderr_tail))
+    Ok((
+        merged,
+        all_success,
+        exit_code,
+        first_failure_stderr_tail,
+        first_failure_memory_sample,
+        observed_elapsed_ms,
+    ))
+}
+
+fn attach_memory_timeline_artifacts(
+    results: &mut BenchResults,
+    child_resource: Option<&ExtensionChildResourceSummary>,
+    run_dir: &RunDir,
+    suffix: Option<&str>,
+) -> Result<()> {
+    let Some(child_resource) = child_resource else {
+        return Ok(());
+    };
+    let Some((
+        json_filename,
+        csv_filename,
+        peak_rss_bytes,
+        peak_rss_mb,
+        sample_count,
+        peak_child_count,
+        peak_at_ms,
+    )) = preserve_memory_timeline_artifacts(Some(child_resource), run_dir, suffix)?
+    else {
+        return Ok(());
+    };
+
+    let memory_metadata = serde_json::json!({
+        "peak_rss_bytes": peak_rss_bytes,
+        "peak_rss_mb": peak_rss_mb,
+        "peak_at_ms": peak_at_ms,
+        "peak_child_count": peak_child_count,
+        "sample_count": sample_count,
+        "timeline_json": json_filename,
+        "timeline_csv": csv_filename,
+    });
+    results
+        .metadata
+        .insert("memory_timeline".to_string(), memory_metadata);
+    results
+        .metric_groups
+        .entry("memory".to_string())
+        .or_default()
+        .extend([
+            ("peak_rss_mb".to_string(), peak_rss_mb),
+            ("peak_child_count".to_string(), peak_child_count as f64),
+            ("sample_count".to_string(), sample_count as f64),
+            ("peak_at_ms".to_string(), peak_at_ms as f64),
+        ]);
+
+    for scenario in &mut results.scenarios {
+        scenario
+            .metrics
+            .values
+            .insert("peak_rss_mb".to_string(), peak_rss_mb);
+        scenario
+            .metrics
+            .values
+            .insert("peak_child_count".to_string(), peak_child_count as f64);
+        scenario
+            .metrics
+            .values
+            .insert("memory_sample_count".to_string(), sample_count as f64);
+        scenario.artifacts.insert(
+            "memory_timeline_json".to_string(),
+            BenchArtifact {
+                path: Some(json_filename.clone()),
+                artifact_type: Some("file".to_string()),
+                kind: Some("bench_memory_timeline".to_string()),
+                label: Some("Bench memory timeline (JSON)".to_string()),
+                ..BenchArtifact::default()
+            },
+        );
+        scenario.artifacts.insert(
+            "memory_timeline_csv".to_string(),
+            BenchArtifact {
+                path: Some(csv_filename.clone()),
+                artifact_type: Some("file".to_string()),
+                kind: Some("bench_memory_timeline".to_string()),
+                label: Some("Bench memory timeline (CSV)".to_string()),
+                ..BenchArtifact::default()
+            },
+        );
+    }
+
+    Ok(())
+}
+
+type MemoryTimelineArtifacts = (String, String, u64, f64, usize, usize, u128);
+
+fn preserve_memory_timeline_artifacts(
+    child_resource: Option<&ExtensionChildResourceSummary>,
+    run_dir: &RunDir,
+    suffix: Option<&str>,
+) -> Result<Option<MemoryTimelineArtifacts>> {
+    let Some(child_resource) = child_resource else {
+        return Ok(None);
+    };
+    if child_resource.samples.is_empty() {
+        return Ok(None);
+    }
+
+    let artifact_stem = match suffix {
+        Some(suffix) => format!("bench-memory-timeline-{suffix}"),
+        None => "bench-memory-timeline".to_string(),
+    };
+    let json_filename = format!("{artifact_stem}.json");
+    let csv_filename = format!("{artifact_stem}.csv");
+    let json_path = run_dir.step_file(&json_filename);
+    let csv_path = run_dir.step_file(&csv_filename);
+
+    let peak_rss_bytes = child_resource.sampled_peak_rss_bytes.unwrap_or(0);
+    let peak_rss_mb = bytes_to_mb(peak_rss_bytes);
+    let sample_count = child_resource.samples.len();
+    let peak_child_count = child_resource.sampled_peak_child_count.unwrap_or(0);
+    let peak_at_ms = child_resource.sampled_peak_at_ms.unwrap_or(0);
+
+    let json = serde_json::to_vec_pretty(&serde_json::json!({
+        "schema": "homeboy/bench-memory-timeline/v1",
+        "root_pid": child_resource.child.root_pid,
+        "command_label": child_resource.child.command_label,
+        "started_at": child_resource.started_at,
+        "finished_at": child_resource.finished_at,
+        "duration_ms": child_resource.duration_ms,
+        "peak_rss_bytes": peak_rss_bytes,
+        "peak_rss_mb": peak_rss_mb,
+        "peak_at_ms": peak_at_ms,
+        "peak_child_count": peak_child_count,
+        "sample_count": sample_count,
+        "samples": child_resource.samples,
+    }))
+    .map_err(|e| {
+        Error::internal_json(
+            e.to_string(),
+            Some("serialize bench memory timeline".to_string()),
+        )
+    })?;
+    fs::write(&json_path, json).map_err(|e| {
+        Error::internal_io(
+            format!(
+                "Failed to write bench memory timeline {}: {}",
+                json_path.display(),
+                e
+            ),
+            Some("bench.memory_timeline".to_string()),
+        )
+    })?;
+
+    fs::write(&csv_path, memory_timeline_csv(child_resource)).map_err(|e| {
+        Error::internal_io(
+            format!(
+                "Failed to write bench memory timeline CSV {}: {}",
+                csv_path.display(),
+                e
+            ),
+            Some("bench.memory_timeline".to_string()),
+        )
+    })?;
+
+    Ok(Some((
+        json_filename,
+        csv_filename,
+        peak_rss_bytes,
+        peak_rss_mb,
+        sample_count,
+        peak_child_count,
+        peak_at_ms,
+    )))
+}
+
+fn bytes_to_mb(bytes: u64) -> f64 {
+    bytes as f64 / 1024.0 / 1024.0
+}
+
+fn memory_timeline_csv(child_resource: &ExtensionChildResourceSummary) -> String {
+    let mut csv = String::from(
+        "timestamp,elapsed_ms,root_pid,rss_bytes,rss_mb,cpu_percent,child_count,process_count\n",
+    );
+    for sample in &child_resource.samples {
+        csv.push_str(&format!(
+            "{},{},{},{},{:.6},{:.3},{},{}\n",
+            sample.timestamp,
+            sample.elapsed_ms,
+            sample.root_pid,
+            sample.rss_bytes,
+            bytes_to_mb(sample.rss_bytes),
+            sample.cpu_percent,
+            sample.child_count,
+            sample.processes.len(),
+        ));
+    }
+    csv
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::engine::resource::{
+        ChildProcessIdentity, ExtensionChildProcessSample, ExtensionChildResourceSample,
+        ExtensionChildResourceSummary,
+    };
     use crate::core::extension::path_list_env_value;
     use std::collections::BTreeMap;
 
@@ -1243,6 +1681,125 @@ mod tests {
         .expect("parse bench results");
 
         assert!(workload_status_failures(&results).is_empty());
+    }
+
+    #[test]
+    fn attach_memory_timeline_adds_metrics_and_artifacts() {
+        let run_dir = RunDir::create().expect("run dir");
+        let mut results = BenchResults {
+            component_id: "homeboy".to_string(),
+            iterations: 1,
+            run_metadata: None,
+            metadata: BTreeMap::new(),
+            metric_groups: BTreeMap::new(),
+            timeline: Vec::new(),
+            span_definitions: BTreeMap::new(),
+            diagnostics: Vec::new(),
+            phase_events: Vec::new(),
+            phase_summaries: Vec::new(),
+            failure_classification: None,
+            responsiveness: None,
+            budget_findings: Vec::new(),
+            scenarios: vec![BenchScenario {
+                id: "cold-start".to_string(),
+                file: None,
+                source: None,
+                default_iterations: None,
+                tags: Vec::new(),
+                iterations: 1,
+                metrics: parsing::BenchMetrics::default(),
+                metric_groups: BTreeMap::new(),
+                timeline: Vec::new(),
+                span_definitions: Vec::new(),
+                span_results: Vec::new(),
+                gates: Vec::new(),
+                gate_results: Vec::new(),
+                metadata: BTreeMap::new(),
+                passed: true,
+                memory: None,
+                artifacts: BTreeMap::new(),
+                diagnostics: Vec::new(),
+                runs: None,
+                runs_summary: None,
+            }],
+            metric_policies: BTreeMap::new(),
+            metric_policy_presets: BTreeMap::new(),
+        };
+        let child = ExtensionChildResourceSummary {
+            child: ChildProcessIdentity {
+                root_pid: 42,
+                command_label: "bench fixture".to_string(),
+            },
+            started_at: "2026-06-08T00:00:00Z".to_string(),
+            finished_at: "2026-06-08T00:00:01Z".to_string(),
+            duration_ms: 1000,
+            sampled_peak_rss_bytes: Some(2 * 1024 * 1024),
+            sampled_peak_cpu_percent: Some(3.5),
+            sampled_peak_at_ms: Some(100),
+            sampled_peak_child_count: Some(1),
+            samples: vec![ExtensionChildResourceSample {
+                elapsed_ms: 100,
+                timestamp: "2026-06-08T00:00:00.100Z".to_string(),
+                root_pid: 42,
+                rss_bytes: 2 * 1024 * 1024,
+                cpu_percent: 3.5,
+                child_count: 1,
+                processes: vec![ExtensionChildProcessSample {
+                    pid: 42,
+                    parent_pid: 1,
+                    rss_bytes: 2 * 1024 * 1024,
+                    cpu_percent: 3.5,
+                    command: "bench".to_string(),
+                }],
+            }],
+            warnings: Vec::new(),
+        };
+
+        attach_memory_timeline_artifacts(&mut results, Some(&child), &run_dir, None)
+            .expect("attach memory timeline");
+
+        assert_eq!(results.metric_groups["memory"]["peak_rss_mb"], 2.0);
+        assert_eq!(results.scenarios[0].metrics.values["peak_rss_mb"], 2.0);
+        assert!(results.scenarios[0]
+            .artifacts
+            .contains_key("memory_timeline_json"));
+        assert!(run_dir.step_file("bench-memory-timeline.json").is_file());
+        assert!(run_dir.step_file("bench-memory-timeline.csv").is_file());
+
+        run_dir.cleanup();
+    }
+
+    #[test]
+    fn classifies_failed_run_with_missed_pings_as_responsiveness_loss() {
+        let responsiveness = BenchResponsivenessSummary {
+            missed_ping_count: 2,
+            max_ping_gap_ms: 15_000,
+            last_ping_at: Some("2026-06-08T00:00:00Z".to_string()),
+            ping_count: 3,
+            missed_ping_window_ms: 5_000,
+        };
+
+        let classification =
+            classify_bench_failure(false, 1, "", Some(&responsiveness)).expect("classification");
+
+        assert_eq!(classification.kind, "responsiveness_loss");
+        assert_eq!(classification.phase, "responsiveness");
+        assert_eq!(classification.status, "missed_ping");
+        assert!(classification
+            .message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("last ping"));
+    }
+
+    #[test]
+    fn classifies_timeout_and_assertion_failures() {
+        let timeout = classify_bench_failure(false, 124, "", None).expect("timeout");
+        assert_eq!(timeout.kind, "timeout");
+
+        let assertion = classify_bench_failure(false, 1, "expected button to be visible", None)
+            .expect("assertion");
+        assert_eq!(assertion.kind, "assertion_failure");
     }
 
     #[test]
