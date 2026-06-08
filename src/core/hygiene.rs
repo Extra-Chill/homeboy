@@ -3,8 +3,10 @@ use std::process::{Command, Stdio};
 
 use serde::{Deserialize, Serialize};
 
-use crate::core::component;
+use crate::core::component::{self, Component};
 use crate::core::error::{Error, ErrorCode, Result, ValidationErrorItem};
+use crate::core::extension::{build, ExtensionCapability};
+use crate::extensions::deps_provider;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CheckoutHygieneSnapshot {
@@ -22,7 +24,8 @@ pub struct CheckoutHygieneSnapshot {
 
 impl CheckoutHygieneSnapshot {
     fn missing_required_git_metadata(&self) -> bool {
-        self.role == "validation_dependency" && (self.head.is_none() || self.dirty.is_none())
+        self.role == "validation_dependency"
+            && (self.head.is_none() || self.dirty.is_none() || self.upstream.is_none())
     }
 
     fn is_stale_or_dirty(&self) -> bool {
@@ -84,6 +87,45 @@ pub fn require_checkout_hygiene(
         .collect::<Vec<_>>();
 
     if failures.is_empty() {
+        for snapshot in snapshots
+            .iter()
+            .filter(|snapshot| snapshot.role == "validation_dependency")
+        {
+            run_validation_dependency_lifecycle(snapshot)?;
+        }
+        let lifecycle_failures = snapshots
+            .iter()
+            .filter(|snapshot| snapshot.role == "validation_dependency")
+            .map(|snapshot| {
+                checkout_hygiene_snapshot(
+                    DependencyCheckout {
+                        id: snapshot.id.clone(),
+                        role: snapshot.role.clone(),
+                        path: PathBuf::from(&snapshot.path),
+                    },
+                    snapshot.allowed,
+                )
+            })
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .filter(|snapshot| !snapshot.allowed && snapshot.is_stale_or_dirty())
+            .map(|snapshot| ValidationErrorItem {
+                field: "dependency_hygiene".to_string(),
+                problem: hygiene_failure_message(&snapshot),
+                context: Some(serde_json::to_value(snapshot).unwrap_or(serde_json::Value::Null)),
+            })
+            .collect::<Vec<_>>();
+        if !lifecycle_failures.is_empty() {
+            return Err(Error::new(
+                ErrorCode::ValidationMultipleErrors,
+                "Dependency hygiene preflight failed after lifecycle preparation",
+                serde_json::json!({
+                    "errors": lifecycle_failures,
+                    "checkouts": snapshots,
+                }),
+            )
+            .with_hint("Dependency lifecycle preparation must leave validation dependencies clean and current before expensive evidence workflows."));
+        }
         return Ok(snapshots);
     }
 
@@ -272,6 +314,9 @@ fn hygiene_failure_message(snapshot: &CheckoutHygieneSnapshot) -> String {
     if snapshot.missing_required_git_metadata() {
         problems.push("missing git metadata".to_string());
     }
+    if snapshot.role == "validation_dependency" && snapshot.upstream.is_none() {
+        problems.push("missing upstream".to_string());
+    }
     if snapshot.dirty == Some(true) {
         problems.push("dirty".to_string());
     }
@@ -315,6 +360,58 @@ fn git_status(path: &Path, args: &[&str]) -> bool {
         .is_ok_and(|status| status.success())
 }
 
+fn run_validation_dependency_lifecycle(snapshot: &CheckoutHygieneSnapshot) -> Result<()> {
+    let path = Path::new(&snapshot.path);
+    let mut component =
+        component::resolve_effective(Some(&snapshot.id), Some(&snapshot.path), None)?;
+    component.local_path = snapshot.path.clone();
+
+    run_dependency_install_lifecycle(&component, path)?;
+    run_dependency_build_lifecycle(&component, path)
+}
+
+fn run_dependency_install_lifecycle(component: &Component, path: &Path) -> Result<()> {
+    let providers = match deps_provider::resolve_dependency_providers(component, path) {
+        Ok(providers) => providers,
+        Err(_) => return Ok(()),
+    };
+
+    for provider in providers {
+        provider.install(component, path)?;
+    }
+    Ok(())
+}
+
+fn run_dependency_build_lifecycle(component: &Component, path: &Path) -> Result<()> {
+    if !component.has_script(ExtensionCapability::Build)
+        && build::resolve_build_command(component).is_err()
+    {
+        return Ok(());
+    }
+
+    let (result, exit_code) = build::run_component(component)?;
+    if exit_code == 0 {
+        return Ok(());
+    }
+
+    Err(Error::validation_invalid_argument(
+        "validation_dependencies",
+        format!(
+            "Validation dependency `{}` build lifecycle failed with status {exit_code}",
+            component.id
+        ),
+        Some(path.display().to_string()),
+        Some(vec![
+            format!(
+                "Run manually: homeboy build {} --path {}",
+                component.id,
+                path.display()
+            ),
+            serde_json::to_string(&result).unwrap_or_default(),
+        ]),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -343,6 +440,18 @@ mod tests {
         fs::write(path.join("README.md"), "initial\n").unwrap();
         git(path, &["add", "."]);
         git(path, &["commit", "-m", "initial"]);
+    }
+
+    fn init_repo_with_upstream(path: &Path) -> tempfile::TempDir {
+        let remote = tempfile::tempdir().unwrap();
+        init_repo(path);
+        git(remote.path(), &["init", "--bare", "-b", "main"]);
+        git(
+            path,
+            &["remote", "add", "origin", remote.path().to_str().unwrap()],
+        );
+        git(path, &["push", "-u", "origin", "main"]);
+        remote
     }
 
     #[test]
@@ -522,5 +631,57 @@ mod tests {
 
         assert_eq!(err.code, ErrorCode::ValidationMultipleErrors);
         assert_eq!(err.details["checkouts"][0]["dirty"].as_bool(), Some(true));
+    }
+
+    #[test]
+    fn dependency_hygiene_runs_validation_dependency_lifecycle() {
+        crate::test_support::with_isolated_home(|_| {
+            let workspace_parent = tempfile::tempdir().unwrap();
+            let source = workspace_parent.path().join("source");
+            let dependency = workspace_parent.path().join("dep");
+            fs::create_dir_all(&source).unwrap();
+            fs::create_dir_all(&dependency).unwrap();
+            fs::write(
+                source.join(PORTABLE_CONFIG_FILE),
+                serde_json::json!({
+                    "id": "source",
+                    "extensions": {
+                        "example": {
+                            "settings": { "validation_dependencies": ["dep"] }
+                        }
+                    }
+                })
+                .to_string(),
+            )
+            .unwrap();
+            fs::write(
+                dependency.join(PORTABLE_CONFIG_FILE),
+                serde_json::json!({
+                    "id": "dep",
+                    "scripts": {
+                        "deps": ["sh -c 'printf install > deps-installed.txt'"],
+                        "build": ["sh -c 'printf build > build-built.txt'"]
+                    }
+                })
+                .to_string(),
+            )
+            .unwrap();
+            fs::write(
+                dependency.join(".gitignore"),
+                "deps-installed.txt\nbuild-built.txt\n",
+            )
+            .unwrap();
+            let _remote = init_repo_with_upstream(&dependency);
+
+            require_dependency_hygiene_for_source(
+                &source,
+                None,
+                DependencyHygieneOptions { allow_stale: false },
+            )
+            .expect("validation dependency lifecycle should run after hygiene passes");
+
+            assert!(dependency.join("deps-installed.txt").exists());
+            assert!(dependency.join("build-built.txt").exists());
+        });
     }
 }
