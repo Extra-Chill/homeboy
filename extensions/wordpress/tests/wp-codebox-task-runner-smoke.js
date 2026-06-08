@@ -115,8 +115,13 @@ try {
   const fixtureWpCodebox = createFixtureWpCodebox(root);
   const providerPluginPath = path.join(root, 'example-provider@feature-branch');
   const workspaceRoot = path.join(root, 'wp-coding-agents@proof-homeboy-fanout-a');
+  const defaultDataMachinePath = path.join(root, 'data-machine');
+  const defaultAgentsApiPath = path.join(defaultDataMachinePath, 'vendor', 'wordpress', 'agents-api');
+  const defaultDataMachineCodePath = path.join(root, 'data-machine-code');
   fs.mkdirSync(providerPluginPath, { recursive: true });
   fs.mkdirSync(workspaceRoot, { recursive: true });
+  fs.mkdirSync(defaultAgentsApiPath, { recursive: true });
+  fs.mkdirSync(defaultDataMachineCodePath, { recursive: true });
 
   const request = {
     schema: 'wp-codebox/task-input/v1',
@@ -257,6 +262,24 @@ try {
   assert.equal(codexInput.provider_plugin_paths[0], '/components/ai-provider-for-openai');
   assert(!JSON.stringify(codexInput).includes('access-token-value'));
   assert(!JSON.stringify(codexInput).includes('refresh-token-value'));
+
+  const implicitRuntimeRequest = { ...request };
+  delete implicitRuntimeRequest.runtime_component_paths;
+  const implicitRuntimeCapturePath = path.join(root, 'capture-implicit-runtime-stack.json');
+  const implicitRuntimeResult = spawnSync(process.execPath, [
+    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-wp-codebox-task-runner.cjs'),
+    '--wp-codebox-bin', fixtureWpCodebox,
+    '--mount', `${workspaceRoot}:/workspace/wp-coding-agents:readwrite`,
+  ], {
+    encoding: 'utf8',
+    input: JSON.stringify(implicitRuntimeRequest),
+    env: { ...process.env, FIXTURE_WP_CODEBOX_CAPTURE: implicitRuntimeCapturePath, OPENCODE_API_KEY: 'redacted-test-key' },
+  });
+  assert.equal(implicitRuntimeResult.status, 0, implicitRuntimeResult.stderr || implicitRuntimeResult.stdout);
+  const implicitRuntimeInput = readJson(implicitRuntimeCapturePath).input;
+  assert.equal(implicitRuntimeInput.extra_plugins.find((plugin) => plugin.slug === 'agents-api').source, defaultAgentsApiPath);
+  assert.equal(implicitRuntimeInput.extra_plugins.find((plugin) => plugin.slug === 'data-machine').source, defaultDataMachinePath);
+  assert.equal(implicitRuntimeInput.extra_plugins.find((plugin) => plugin.slug === 'data-machine-code').source, defaultDataMachineCodePath);
 
   const sourceRoot = path.join(root, 'source-plugin');
   fs.mkdirSync(sourceRoot, { recursive: true });
