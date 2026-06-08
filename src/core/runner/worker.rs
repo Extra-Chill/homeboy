@@ -299,6 +299,7 @@ fn run_once_output(
                         "error": err.to_string(),
                     })),
                     artifacts: Vec::new(),
+                    metrics: None,
                 },
             )?;
             let exit_code = 1;
@@ -628,6 +629,7 @@ mod tests {
                     env: Default::default(),
                     capture_patch: false,
                     source_snapshot: None,
+                    require_paths: Vec::new(),
                     metadata: None,
                 })
                 .expect("submit job");
@@ -665,6 +667,7 @@ mod tests {
                     env: Default::default(),
                     capture_patch: false,
                     source_snapshot: None,
+                    require_paths: Vec::new(),
                     metadata: None,
                 })
                 .expect("submit job");
