@@ -743,6 +743,20 @@ if [ -n "$DEPENDENCY_PATHS" ]; then
     done <<< "$DEPENDENCY_PATHS"
 fi
 
+WP_CODEBOX_EXTRA_PLUGINS_JSON="[]"
+if [ "$settings_json" != "{}" ]; then
+    WP_CODEBOX_EXTRA_PLUGINS_JSON=$(printf '%s' "$settings_json" | jq -c '.wp_codebox_extra_plugins // []' 2>/dev/null || echo "[]")
+fi
+if printf '%s' "$WP_CODEBOX_EXTRA_PLUGINS_JSON" | jq -e 'type == "array" and all(.[]; type == "object" and (.source | type == "string" and . != ""))' >/dev/null 2>&1; then
+    EXTRA_PLUGINS_JSON=$(jq -nc --argjson plugins "$EXTRA_PLUGINS_JSON" --argjson extra "$WP_CODEBOX_EXTRA_PLUGINS_JSON" '$plugins + $extra')
+elif printf '%s' "$WP_CODEBOX_EXTRA_PLUGINS_JSON" | jq -e 'type == "array" and length == 0' >/dev/null 2>&1; then
+    :
+else
+    echo "Error: wp_codebox_extra_plugins must be an array of plugin objects with non-empty source strings." >&2
+    FAILED_STEP="WP Codebox extra plugin setup"
+    exit 1
+fi
+
 PLUGIN_DB_PHP="${PLUGIN_PATH}/db.php"
 if [ -f "$PLUGIN_DB_PHP" ]; then
     MOUNTS_JSON=$(jq -nc --argjson mounts "$MOUNTS_JSON" --arg source "$PLUGIN_DB_PHP" '$mounts + [{source: $source, target: "/wordpress/wp-content/db.php", mode: "readonly"}]')

@@ -67,6 +67,9 @@ homeboy_require_bash_version() { :; }
   const settings = {
     validation_dependencies: [dependencyPath],
     wp_codebox_core_module: fixtureCoreModule,
+    wp_codebox_extra_plugins: [
+      { source: '/tmp/runtime-prerequisite', slug: 'runtime-prerequisite', activate: true },
+    ],
     wp_codebox_bootstrap_steps: [
       { command: 'wordpress.wp-cli', args: ['command=option update generic_dependency_bootstrap yes'] },
     ],
@@ -97,6 +100,7 @@ homeboy_require_bash_version() { :; }
   assert.equal(successResult.status, 0, successResult.stderr || successResult.stdout);
   const recipe = JSON.parse(fs.readFileSync(successCaptureFile, 'utf8'));
   assert.equal(recipe.inputs.extra_plugins.some((plugin) => plugin.slug === 'generic-dependency'), true);
+  assert.deepEqual(recipe.inputs.extra_plugins.find((plugin) => plugin.slug === 'runtime-prerequisite'), settings.wp_codebox_extra_plugins[0]);
   assert.deepEqual(recipe.inputs.pluginRuntime.setup, settings.wp_codebox_bootstrap_steps);
   assert.equal(recipe.workflow.steps[0].command, 'wordpress.bench');
 
