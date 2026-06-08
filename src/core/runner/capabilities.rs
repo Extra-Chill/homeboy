@@ -1,8 +1,9 @@
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashMap};
 
 use crate::core::engine::shell;
 use crate::core::error::{Error, Result};
+use crate::core::gate::{HomeboyGateKind, HomeboyGateResult, HomeboyGateStatus};
 use crate::core::server::{self, SshClient};
 
 use super::Runner;
@@ -489,9 +490,52 @@ impl RunnerRequiredTool {
     }
 }
 
+impl From<LabRunnerGateDecision> for HomeboyGateResult {
+    fn from(decision: LabRunnerGateDecision) -> Self {
+        match decision {
+            LabRunnerGateDecision::Eligible => HomeboyGateResult::new(
+                "lab.capability_preflight",
+                "lab.capability_preflight",
+                HomeboyGateKind::Capability,
+                HomeboyGateStatus::Passed,
+            )
+            .summary("lab runner capability preflight passed")
+            .retryable(false)
+            .provenance(json!({
+                "source_type": "LabRunnerGateDecision",
+            })),
+            LabRunnerGateDecision::Missing {
+                runner_id,
+                command,
+                missing_tools,
+                reason,
+                remediation,
+            } => HomeboyGateResult::new(
+                "lab.capability_preflight",
+                "lab.capability_preflight",
+                HomeboyGateKind::Capability,
+                HomeboyGateStatus::Blocked,
+            )
+            .summary(reason)
+            .evidence(json!({
+                "runner_id": runner_id,
+                "command": command,
+                "missing_tools": missing_tools.iter().map(|tool| tool.id()).collect::<Vec<_>>(),
+                "remediation": remediation,
+            }))
+            .retryable(false)
+            .agent_feedback("Select a capable lab runner, install the missing runner tools, or use the configured fallback policy before retrying this command.")
+            .provenance(json!({
+                "source_type": "LabRunnerGateDecision",
+            })),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::gate::HOMEBOY_GATE_RESULT_SCHEMA;
     use crate::core::runner::RunnerKind;
     use crate::core::server::{RunnerPolicy, RunnerSettings};
 
@@ -628,6 +672,40 @@ mod tests {
         assert!(remediation
             .iter()
             .any(|item| item.contains("omit --runner")));
+    }
+
+    #[test]
+    fn lab_runner_gate_decision_normalizes_to_homeboy_gate_result() {
+        let result: HomeboyGateResult = LabRunnerGateDecision::Missing {
+            runner_id: "lab".to_string(),
+            command: "test",
+            missing_tools: vec![RunnerRequiredTool::Pnpm],
+            reason: concat!("lab runner is missing p", "n", "pm").to_string(),
+            remediation: vec![concat!("install p", "n", "pm").to_string()],
+        }
+        .into();
+
+        assert_eq!(result.schema, HOMEBOY_GATE_RESULT_SCHEMA);
+        assert_eq!(result.id, "lab.capability_preflight");
+        assert_eq!(result.kind, HomeboyGateKind::Capability);
+        assert_eq!(result.status, HomeboyGateStatus::Blocked);
+        assert_eq!(result.retryable, Some(false));
+        assert_eq!(result.evidence["runner_id"], "lab");
+        assert_eq!(result.evidence["missing_tools"][0], concat!("p", "n", "pm"));
+        assert!(result.agent_feedback.contains("capable lab runner"));
+    }
+
+    #[test]
+    fn eligible_lab_runner_gate_decision_normalizes_to_passed_gate_result() {
+        let result: HomeboyGateResult = LabRunnerGateDecision::Eligible.into();
+
+        assert_eq!(result.schema, HOMEBOY_GATE_RESULT_SCHEMA);
+        assert_eq!(result.id, "lab.capability_preflight");
+        assert_eq!(result.kind, HomeboyGateKind::Capability);
+        assert_eq!(result.status, HomeboyGateStatus::Passed);
+        assert_eq!(result.retryable, Some(false));
+        assert_eq!(result.provenance["source_type"], "LabRunnerGateDecision");
+        assert!(result.summary.contains("preflight passed"));
     }
 
     #[test]

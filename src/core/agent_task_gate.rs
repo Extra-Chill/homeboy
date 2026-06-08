@@ -3,7 +3,12 @@ use std::process::Command;
 
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
+use crate::core::gate::{
+    HomeboyGateKind, HomeboyGateResult, HomeboyGateRevealPolicy, HomeboyGateStatus,
+    HomeboyGateVisibility,
+};
 use crate::core::{Error, Result};
 
 pub const AGENT_TASK_GATE_REPORT_SCHEMA: &str = "homeboy/agent-task-gate-report/v1";
@@ -153,6 +158,144 @@ pub(crate) fn text_tail(text: &str, max_lines: usize) -> String {
     lines[start..].join("\n")
 }
 
+impl From<AgentTaskGateReport> for HomeboyGateResult {
+    fn from(report: AgentTaskGateReport) -> Self {
+        let status = match report.status {
+            AgentTaskGateStatus::Succeeded => HomeboyGateStatus::Passed,
+            AgentTaskGateStatus::Failed => HomeboyGateStatus::Failed,
+        };
+        let command = report.command.join(" ");
+        let summary = gate_result_summary(&report, &command);
+        let agent_feedback = gate_result_agent_feedback(&report);
+        let evidence = gate_result_evidence(&report);
+
+        HomeboyGateResult::new(
+            report.id.clone(),
+            report.id.clone(),
+            HomeboyGateKind::Command,
+            status,
+        )
+        .summary(summary)
+        .evidence(evidence)
+        .visibility(report.visibility.into())
+        .reveal_policy(report.reveal_policy.into())
+        .retryable(status == HomeboyGateStatus::Failed)
+        .agent_feedback(agent_feedback)
+        .provenance(json!({
+            "source_schema": report.schema,
+            "source_type": "AgentTaskGateReport",
+        }))
+    }
+}
+
+fn gate_result_summary(report: &AgentTaskGateReport, command: &str) -> String {
+    if report.status == AgentTaskGateStatus::Failed
+        && report.visibility == AgentTaskGateVisibility::Private
+    {
+        match report.reveal_policy {
+            AgentTaskGateRevealPolicy::SummaryOnly => {
+                return format!(
+                    "private deterministic gate {} failed; detailed evidence is withheld by policy",
+                    report.id
+                );
+            }
+            AgentTaskGateRevealPolicy::Redacted => {
+                return "private deterministic gate failed; evidence redacted".to_string();
+            }
+            AgentTaskGateRevealPolicy::NoDetail => {
+                return "private deterministic gate failed".to_string();
+            }
+            AgentTaskGateRevealPolicy::FullEvidence => {}
+        }
+    }
+
+    report
+        .failure_evidence
+        .as_ref()
+        .map(|evidence| evidence.summary.clone())
+        .unwrap_or_else(|| format!("deterministic gate passed: {command}"))
+}
+
+fn gate_result_agent_feedback(report: &AgentTaskGateReport) -> String {
+    if report.status == AgentTaskGateStatus::Failed
+        && report.visibility == AgentTaskGateVisibility::Private
+    {
+        match report.reveal_policy {
+            AgentTaskGateRevealPolicy::SummaryOnly => {
+                return "A private deterministic verification gate failed. Generalize the fix against the public objective and visible evidence; hidden evaluator details are withheld.".to_string();
+            }
+            AgentTaskGateRevealPolicy::Redacted => {
+                return "A private deterministic verification gate failed. Details are redacted; continue from the public task objective and visible gate evidence.".to_string();
+            }
+            AgentTaskGateRevealPolicy::NoDetail => {
+                return "A private deterministic verification gate failed.".to_string();
+            }
+            AgentTaskGateRevealPolicy::FullEvidence => {}
+        }
+    }
+
+    report
+        .failure_evidence
+        .as_ref()
+        .map(|evidence| evidence.agent_feedback.clone())
+        .unwrap_or_default()
+}
+
+fn gate_result_evidence(report: &AgentTaskGateReport) -> serde_json::Value {
+    if report.visibility == AgentTaskGateVisibility::Private {
+        match report.reveal_policy {
+            AgentTaskGateRevealPolicy::SummaryOnly => {
+                return json!({
+                    "exit_code": report.exit_code,
+                    "withheld": true,
+                    "reason": "summary_only",
+                });
+            }
+            AgentTaskGateRevealPolicy::Redacted => {
+                return json!({
+                    "exit_code": report.exit_code,
+                    "redacted": true,
+                });
+            }
+            AgentTaskGateRevealPolicy::NoDetail => {
+                return json!({
+                    "withheld": true,
+                    "reason": "no_detail",
+                });
+            }
+            AgentTaskGateRevealPolicy::FullEvidence => {}
+        }
+    }
+
+    json!({
+        "command": report.command,
+        "exit_code": report.exit_code,
+        "stdout": report.stdout,
+        "stderr": report.stderr,
+        "failure_evidence": report.failure_evidence,
+    })
+}
+
+impl From<AgentTaskGateVisibility> for HomeboyGateVisibility {
+    fn from(visibility: AgentTaskGateVisibility) -> Self {
+        match visibility {
+            AgentTaskGateVisibility::Visible => Self::Visible,
+            AgentTaskGateVisibility::Private => Self::Private,
+        }
+    }
+}
+
+impl From<AgentTaskGateRevealPolicy> for HomeboyGateRevealPolicy {
+    fn from(reveal_policy: AgentTaskGateRevealPolicy) -> Self {
+        match reveal_policy {
+            AgentTaskGateRevealPolicy::FullEvidence => Self::FullEvidence,
+            AgentTaskGateRevealPolicy::SummaryOnly => Self::SummaryOnly,
+            AgentTaskGateRevealPolicy::Redacted => Self::Redacted,
+            AgentTaskGateRevealPolicy::NoDetail => Self::NoDetail,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -217,5 +360,77 @@ mod tests {
         assert_eq!(report.visibility, AgentTaskGateVisibility::Private);
         assert_eq!(report.reveal_policy, AgentTaskGateRevealPolicy::SummaryOnly);
         assert_eq!(report.stdout, "hidden failure");
+    }
+
+    #[test]
+    fn agent_task_gate_report_normalizes_to_homeboy_gate_result() {
+        let temp = tempfile::tempdir().expect("tempdir");
+
+        let report = run_gate_command_with_policy(
+            temp.path(),
+            4,
+            "printf 'hidden failure'; exit 1",
+            AgentTaskGateVisibility::Private,
+            AgentTaskGateRevealPolicy::SummaryOnly,
+        )
+        .expect("gate report");
+        let result: HomeboyGateResult = report.into();
+
+        assert_eq!(result.schema, crate::core::gate::HOMEBOY_GATE_RESULT_SCHEMA);
+        assert_eq!(result.id, "gate-4");
+        assert_eq!(result.kind, HomeboyGateKind::Command);
+        assert_eq!(result.status, HomeboyGateStatus::Failed);
+        assert_eq!(result.visibility, HomeboyGateVisibility::Private);
+        assert_eq!(result.reveal_policy, HomeboyGateRevealPolicy::SummaryOnly);
+        assert_eq!(result.retryable, Some(true));
+        assert!(result.summary.contains("detailed evidence is withheld"));
+        assert!(result
+            .agent_feedback
+            .contains("hidden evaluator details are withheld"));
+        assert_eq!(result.evidence["exit_code"], 1);
+        assert_eq!(result.evidence["withheld"], true);
+        assert_eq!(result.evidence.get("stdout"), None);
+        assert_eq!(result.evidence.get("stderr"), None);
+        assert_eq!(result.provenance["source_type"], "AgentTaskGateReport");
+    }
+
+    #[test]
+    fn private_redacted_agent_task_gate_result_omits_command_and_output_evidence() {
+        let temp = tempfile::tempdir().expect("tempdir");
+
+        let report = run_gate_command_with_policy(
+            temp.path(),
+            6,
+            "printf 'secret stdout'; printf 'secret stderr' >&2; exit 1",
+            AgentTaskGateVisibility::Private,
+            AgentTaskGateRevealPolicy::Redacted,
+        )
+        .expect("gate report");
+        let result: HomeboyGateResult = report.into();
+
+        assert_eq!(result.status, HomeboyGateStatus::Failed);
+        assert_eq!(result.reveal_policy, HomeboyGateRevealPolicy::Redacted);
+        assert_eq!(result.evidence["redacted"], true);
+        assert_eq!(result.evidence.get("command"), None);
+        assert_eq!(result.evidence.get("stdout"), None);
+        assert_eq!(result.evidence.get("stderr"), None);
+        assert!(result.summary.contains("evidence redacted"));
+    }
+
+    #[test]
+    fn successful_agent_task_gate_report_normalizes_to_passed_gate_result() {
+        let temp = tempfile::tempdir().expect("tempdir");
+
+        let report = run_gate_command(temp.path(), 5, "printf 'ok'").expect("gate report");
+        let result: HomeboyGateResult = report.into();
+
+        assert_eq!(result.id, "gate-5");
+        assert_eq!(result.kind, HomeboyGateKind::Command);
+        assert_eq!(result.status, HomeboyGateStatus::Passed);
+        assert_eq!(result.retryable, Some(false));
+        assert_eq!(result.evidence["exit_code"], 0);
+        assert_eq!(result.evidence["stdout"], "ok");
+        assert!(result.agent_feedback.is_empty());
+        assert!(result.summary.contains("deterministic gate passed"));
     }
 }
