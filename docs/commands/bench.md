@@ -164,10 +164,12 @@ job are rejected for command-native bench reproduction; use `homeboy ci run
 `homeboy bench` is resource-policy aware. If the current machine is already warm
 or hot according to `homeboy doctor resources`, Homeboy prints a stderr warning
 before running because the extra load can skew benchmark results. Use global
-`--force-hot` when running under load is intentional:
+`--force-hot` when running under load is intentional. When a default Lab runner is
+available for portable bench runs, `--force-hot` is not a local bypass by itself;
+add `--allow-local-hot` only when controller-machine execution is intentional:
 
 ```bash
-homeboy --force-hot bench my-component
+homeboy --force-hot --allow-local-hot bench my-component
 ```
 
 ## Observation History

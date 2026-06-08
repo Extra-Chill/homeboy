@@ -48,14 +48,15 @@ After this, `<runner-id>` is both the server ID and the runner ID.
 Commands that are both resource-policy hot and portable for Lab offload (`audit`, full `lint`, `test`, `bench run`, and `trace`) auto-select a default runner when `--runner` is omitted. Selection is conservative:
 
 - `--runner <id>` always wins.
-- `--force-hot` keeps the command local.
+- `--force-hot` only suppresses the resource-policy warning. If a default Lab runner is available for a portable hot command, Homeboy refuses to use `--force-hot` as an implicit local bypass.
+- `--force-hot --allow-local-hot` keeps a portable hot command local even when a default Lab runner is available. Use it only when controller-machine execution is intentional.
 - `lab.preferred_runner` is used when it names an SSH runner, even if that runner is not connected yet.
 - Without `lab.preferred_runner`, Homeboy auto-selects only when exactly one SSH runner is configured or exactly one SSH runner is already connected.
 - Local runners are never auto-selected.
 - If the auto-selected runner is disconnected, Homeboy attempts a short bounded `runner connect` before execution. Connection failure prints the reason and falls back to local execution.
 - Explicit `--runner <id>` also attempts to connect a disconnected runner, but connection failure remains a command error instead of falling back silently.
 
-Observation metadata records the routing decision under `metadata.lab_offload` when an observed run is created. The stable contract is `schema: "homeboy/lab-offload/v1"` and keeps the existing top-level compatibility fields: `source` is `automatic` or `explicit`; `status` is `offloaded`, `skipped`, or `fallback`; successful offloads include `runner_id` plus `remote_workspace`; local fallback records the runner and `fallback_reason`; skipped local execution records why no automatic offload was used, such as `force_hot` or `no_default_runner`. The same object also carries `plan_id` and plan-derived phase fields including `sync_mode`, `capability_preflight`, `extension_parity`, and `patch_captured`.
+Observation metadata records the routing decision under `metadata.lab_offload` when an observed run is created. The stable contract is `schema: "homeboy/lab-offload/v1"` and keeps the existing top-level compatibility fields: `source` is `automatic` or `explicit`; `status` is `offloaded`, `skipped`, or `fallback`; successful offloads include `runner_id` plus `remote_workspace`; local fallback records the runner and `fallback_reason`; skipped local execution records why no automatic offload was used, such as `force_hot`, `force_hot_local_override`, or `no_default_runner`. The same object also carries `plan_id` and plan-derived phase fields including `sync_mode`, `capability_preflight`, `extension_parity`, and `patch_captured`.
 
 Lab offload support is intentionally command-specific:
 

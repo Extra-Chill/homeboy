@@ -31,6 +31,10 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub force_hot: bool,
 
+    /// Allow --force-hot portable Lab commands to stay local even when a default Lab runner exists.
+    #[arg(long, global = true)]
+    pub allow_local_hot: bool,
+
     /// Directory where persisted run artifacts are copied.
     /// Overrides HOMEBOY_ARTIFACT_ROOT and global config /artifact_root.
     #[arg(long, global = true, value_name = "DIR")]
@@ -1101,6 +1105,11 @@ mod tests {
         ]);
         assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
         assert!(cli.allow_local_fallback);
+
+        let cli = parsed_cli(&["homeboy", "--force-hot", "--allow-local-hot", "bench"]);
+        assert!(cli.force_hot);
+        assert!(cli.allow_local_hot);
+        assert!(cli.command.supports_lab_runner());
     }
 
     #[test]
