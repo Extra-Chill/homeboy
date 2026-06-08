@@ -593,6 +593,7 @@ Configure per-component in the component's homeboy/component config under
 | `bench_env` | object | `{}` | `NAME => value` env vars forwarded into the runtime (workloads/fixtures read via `getenv()`) |
 | `wp_codebox_core_module` | string | `""` | Host-side ESM module path or package specifier that exports WP Codebox recipe builders for bench recipe generation |
 | `wp_codebox_blueprint` | object | `{}` | Runtime blueprint merged into the generated WP Codebox bench recipe |
+| `wp_codebox_extra_plugins` | array | `[]` | Additional WP Codebox extra plugin entries for runtime prerequisites that are not Homeboy validation dependencies |
 | `wp_codebox_workloads` | array | `[]` | Declared bench workloads passed to `wordpress.bench` through the generated recipe after deps and component load |
 | `wp_codebox_file_mounts` | array | `[]` | Files from the component or validation dependencies mounted into explicit WordPress runtime paths |
 | `bench_browser_target` | object | `{}` | Browser bench target descriptor (see Bench runner above) |

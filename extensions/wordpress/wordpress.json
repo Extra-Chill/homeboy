@@ -1027,6 +1027,13 @@
       "description": "Runtime blueprint merged into the generated WP Codebox bench recipe. Empty object means stock WordPress."
     },
     {
+      "id": "wp_codebox_extra_plugins",
+      "label": "WP Codebox extra plugins",
+      "type": "array",
+      "default": [],
+      "description": "Additional WP Codebox extra plugin entries for bench recipes. Use for runtime prerequisites that must be installed or activated but should not be treated as Homeboy validation dependencies."
+    },
+    {
       "id": "wp_codebox_workloads",
       "label": "Bench workloads",
       "type": "array",
