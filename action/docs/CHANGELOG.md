@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.7.10] - 2026-06-08
+
+### Fixed
+- allow GitHub Actions hot-runner checks
+
 ## [2.7.9] - 2026-06-04
 
 ### Fixed
