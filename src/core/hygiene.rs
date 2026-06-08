@@ -71,6 +71,21 @@ pub fn require_checkout_hygiene(
     checkouts: Vec<DependencyCheckout>,
     options: DependencyHygieneOptions,
 ) -> Result<Vec<CheckoutHygieneSnapshot>> {
+    require_checkout_hygiene_inner(checkouts, options, true)
+}
+
+pub(crate) fn require_checkout_hygiene_without_lifecycle(
+    checkouts: Vec<DependencyCheckout>,
+    options: DependencyHygieneOptions,
+) -> Result<Vec<CheckoutHygieneSnapshot>> {
+    require_checkout_hygiene_inner(checkouts, options, false)
+}
+
+fn require_checkout_hygiene_inner(
+    checkouts: Vec<DependencyCheckout>,
+    options: DependencyHygieneOptions,
+    run_lifecycle: bool,
+) -> Result<Vec<CheckoutHygieneSnapshot>> {
     let snapshots = checkouts
         .into_iter()
         .map(|checkout| checkout_hygiene_snapshot(checkout, options.allow_stale))
@@ -87,11 +102,14 @@ pub fn require_checkout_hygiene(
         .collect::<Vec<_>>();
 
     if failures.is_empty() {
+        if !run_lifecycle {
+            return Ok(snapshots);
+        }
         for snapshot in snapshots
             .iter()
             .filter(|snapshot| snapshot.role == "validation_dependency")
         {
-            run_validation_dependency_lifecycle(snapshot)?;
+            run_validation_dependency_snapshot_lifecycle(snapshot)?;
         }
         let lifecycle_failures = snapshots
             .iter()
@@ -360,14 +378,44 @@ fn git_status(path: &Path, args: &[&str]) -> bool {
         .is_ok_and(|status| status.success())
 }
 
-fn run_validation_dependency_lifecycle(snapshot: &CheckoutHygieneSnapshot) -> Result<()> {
+fn run_validation_dependency_snapshot_lifecycle(snapshot: &CheckoutHygieneSnapshot) -> Result<()> {
     let path = Path::new(&snapshot.path);
     let mut component =
         component::resolve_effective(Some(&snapshot.id), Some(&snapshot.path), None)?;
     component.local_path = snapshot.path.clone();
 
-    run_dependency_install_lifecycle(&component, path)?;
-    run_dependency_build_lifecycle(&component, path)
+    run_validation_dependency_lifecycle_isolated(&component, path)
+}
+
+pub(crate) fn run_validation_dependency_lifecycle(
+    component: &Component,
+    path: &Path,
+) -> Result<()> {
+    run_dependency_install_lifecycle(component, path)?;
+    run_dependency_build_lifecycle(component, path)
+}
+
+fn run_validation_dependency_lifecycle_isolated(component: &Component, path: &Path) -> Result<()> {
+    let tempdir = tempfile::tempdir().map_err(|err| {
+        Error::internal_io(
+            err.to_string(),
+            Some(format!(
+                "create validation dependency lifecycle workspace {}",
+                component.id
+            )),
+        )
+    })?;
+    let prepared_path = tempdir.path().join("dependency");
+    let excludes = [".git", ".git/**", "node_modules", "node_modules/**"]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    crate::core::runner::copy_snapshot_to_directory(path, &prepared_path, &excludes)?;
+
+    let mut prepared = component.clone();
+    prepared.local_path = prepared_path.display().to_string();
+
+    run_validation_dependency_lifecycle(&prepared, &prepared_path)
 }
 
 fn run_dependency_install_lifecycle(component: &Component, path: &Path) -> Result<()> {
@@ -680,8 +728,11 @@ mod tests {
             )
             .expect("validation dependency lifecycle should run after hygiene passes");
 
-            assert!(dependency.join("deps-installed.txt").exists());
-            assert!(dependency.join("build-built.txt").exists());
+            assert!(!dependency.join("deps-installed.txt").exists());
+            assert!(!dependency.join("build-built.txt").exists());
+            let status =
+                git_output(&dependency, &["status", "--porcelain=v1"]).expect("dependency status");
+            assert_eq!(status, "");
         });
     }
 }

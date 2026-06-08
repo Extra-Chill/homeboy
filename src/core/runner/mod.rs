@@ -37,6 +37,7 @@ mod validation_dependencies;
 pub(crate) use validation_dependencies::validation_dependency_ids;
 mod worker;
 mod workspace;
+pub(crate) use workspace::copy_snapshot_to_directory;
 
 pub use apply::{
     apply_change_artifact, apply_workspace_patch, RunnerWorkspaceApplyOptions,

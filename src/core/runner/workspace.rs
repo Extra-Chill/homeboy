@@ -453,6 +453,24 @@ pub(super) fn materialize_snapshot(
     }
 }
 
+pub(crate) fn copy_snapshot_to_directory(
+    local_path: &Path,
+    destination: &Path,
+    excludes: &[String],
+) -> Result<()> {
+    materialize_snapshot_piped(
+        local_path,
+        &format!(
+            "sh -c {}",
+            shell::quote_arg(&snapshot_install_command(
+                &destination.display().to_string()
+            ))
+        ),
+        excludes,
+        "prepare local workspace snapshot",
+    )
+}
+
 fn materialize_snapshot_piped(
     local_path: &Path,
     target_command: &str,

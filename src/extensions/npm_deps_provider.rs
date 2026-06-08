@@ -98,9 +98,50 @@ impl NpmDependencyProvider {
     pub(crate) fn install(
         &self,
         _component: &Component,
-        _path: &Path,
+        path: &Path,
     ) -> Result<Option<DependencyCommandResult>> {
-        Ok(None)
+        let args = if path.join("package-lock.json").is_file() {
+            vec!["ci".to_string()]
+        } else {
+            vec!["install".to_string()]
+        };
+        let output = Command::new("npm")
+            .args(&args)
+            .current_dir(path)
+            .output()
+            .map_err(|e| {
+                Error::internal_io(e.to_string(), Some("run dependency provider".to_string()))
+            })?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let status = output.status.code();
+        if !output.status.success() {
+            return Err(Error::validation_invalid_argument(
+                "dependency_provider",
+                format!(
+                    "Dependency provider install failed with status {}: {}",
+                    output.status,
+                    first_non_empty_line(&stderr)
+                        .or_else(|| first_non_empty_line(&stdout))
+                        .unwrap_or("no output")
+                ),
+                None,
+                Some(vec![format!(
+                    "Run manually in {}: npm {}",
+                    path.display(),
+                    args.join(" ")
+                )]),
+            ));
+        }
+
+        Ok(Some(DependencyCommandResult {
+            command: std::iter::once("npm".to_string()).chain(args).collect(),
+            skipped: false,
+            status,
+            stdout,
+            stderr,
+        }))
     }
 }
 
@@ -261,4 +302,43 @@ fn read_optional_json_file(path: &Path) -> Result<Option<Value>> {
 
 fn first_non_empty_line(output: &str) -> Option<&str> {
     output.lines().find(|line| !line.trim().is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn npm_install_installs_full_dependency_tree_for_build_lifecycle() {
+        let _guard = crate::test_support::home_env_guard();
+        let old_path = std::env::var("PATH").unwrap_or_default();
+        let bin = tempfile::tempdir().expect("bin tempdir");
+        let project = tempfile::tempdir().expect("project tempdir");
+        let npm = bin.path().join("npm");
+        std::fs::write(&npm, "#!/bin/sh\nprintf '%s\n' \"$@\" > npm-args.txt\n").expect("fake npm");
+        let mode = std::fs::metadata(&npm)
+            .expect("fake npm metadata")
+            .permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut mode = mode;
+            mode.set_mode(0o755);
+            std::fs::set_permissions(&npm, mode).expect("chmod fake npm");
+        }
+        std::env::set_var("PATH", format!("{}:{old_path}", bin.path().display()));
+        std::fs::write(project.path().join("package.json"), "{}").expect("package json");
+
+        let result = NpmDependencyProvider
+            .install(&Component::default(), project.path())
+            .expect("npm install");
+
+        std::env::set_var("PATH", old_path);
+        let result = result.expect("install result");
+        assert_eq!(result.command, vec!["npm", "install"]);
+        assert_eq!(
+            std::fs::read_to_string(project.path().join("npm-args.txt")).unwrap(),
+            "install\n"
+        );
+    }
 }
