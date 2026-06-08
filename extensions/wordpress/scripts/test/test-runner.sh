@@ -10,6 +10,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUNNER_PRELUDE="${HOMEBOY_RUNTIME_RUNNER_PRELUDE:-${SCRIPT_DIR}/../lib/runner-prelude.sh}"
 
 HOST_SMOKE_RUNNER="${HOMEBOY_RUNTIME_TEST_RUNNER_HOST_SMOKE:-${SCRIPT_DIR}/test-runner-host-smoke.sh}"
+HOST_SMOKE_WP_RUNNER="${HOMEBOY_RUNTIME_TEST_RUNNER_HOST_SMOKE_WP:-${SCRIPT_DIR}/test-runner-host-smoke-wp.sh}"
 WP_CODEBOX_RUNNER="${HOMEBOY_RUNTIME_TEST_RUNNER_WP_CODEBOX:-${SCRIPT_DIR}/test-runner-wp-codebox.sh}"
 CORE_WP_CODEBOX_RUNNER="${HOMEBOY_RUNTIME_TEST_RUNNER_CORE_WP_CODEBOX:-${SCRIPT_DIR}/test-runner-core-dev-wp-codebox.sh}"
 
@@ -226,9 +227,21 @@ homeboy_wordpress_is_shell_smoke_file() {
     esac
 }
 
+# Select the smoke backend: bare-PHP host-smoke by default, or the real-WordPress
+# smoke runner when test_backend is "host-smoke-wp". Real-WP smokes boot
+# WordPress in the WP Codebox sandbox so smokes use real WP functions instead of
+# faking them with per-file shims.
+resolve_smoke_runner() {
+    if [ "$TEST_BACKEND" = "host-smoke-wp" ]; then
+        printf '%s\n' "$HOST_SMOKE_WP_RUNNER"
+    else
+        printf '%s\n' "$HOST_SMOKE_RUNNER"
+    fi
+}
+
 if [ -z "$TARGET_FILE" ] && [ "${HOMEBOY_TEST_SCOPE_KIND:-}" = "exclusive_env" ]; then
     if [ "${HOMEBOY_TEST_SCOPE_ENV_NAME:-}" = "HOMEBOY_WORDPRESS_HOST_SMOKE_FILES" ] && [ -n "${HOMEBOY_TEST_SCOPE_ENV_VALUE:-}" ]; then
-        HOMEBOY_WORDPRESS_HOST_SMOKE_FILES="$HOMEBOY_TEST_SCOPE_ENV_VALUE" exec bash "$HOST_SMOKE_RUNNER" "${PASSTHROUGH_ARGS[@]}"
+        HOMEBOY_WORDPRESS_HOST_SMOKE_FILES="$HOMEBOY_TEST_SCOPE_ENV_VALUE" exec bash "$(resolve_smoke_runner)" "${PASSTHROUGH_ARGS[@]}"
     fi
 fi
 
@@ -289,7 +302,7 @@ if [ -n "$TARGET_FILE" ]; then
         tests/*.php|tests/*/*.php|tests/*/*/*.php|tests/*/*/*/*.php)
             case "$target_base" in
                 *-smoke.php)
-                    HOMEBOY_WORDPRESS_HOST_SMOKE_FILE="$target_rel" exec bash "$HOST_SMOKE_RUNNER" "${PASSTHROUGH_ARGS[@]}"
+                    HOMEBOY_WORDPRESS_HOST_SMOKE_FILE="$target_rel" exec bash "$(resolve_smoke_runner)" "${PASSTHROUGH_ARGS[@]}"
                     ;;
                 *Test.php|test-*.php)
                     HOMEBOY_WORDPRESS_PHPUNIT_TEST_FILE="$target_rel" exec bash "$WP_CODEBOX_RUNNER" "${PASSTHROUGH_ARGS[@]}"
@@ -313,12 +326,15 @@ case "$TEST_BACKEND" in
     host-smoke)
         exec bash "$HOST_SMOKE_RUNNER" "${PASSTHROUGH_ARGS[@]}"
         ;;
+    host-smoke-wp)
+        exec bash "$HOST_SMOKE_WP_RUNNER" "${PASSTHROUGH_ARGS[@]}"
+        ;;
     ""|wp-codebox)
         exec bash "$WP_CODEBOX_RUNNER" "${PASSTHROUGH_ARGS[@]}"
         ;;
     *)
         echo "ERROR: Unsupported WordPress test backend: ${TEST_BACKEND}" >&2
-        echo "Supported backends: wp-codebox, host-smoke" >&2
+        echo "Supported backends: wp-codebox, host-smoke, host-smoke-wp" >&2
         exit 2
         ;;
 esac

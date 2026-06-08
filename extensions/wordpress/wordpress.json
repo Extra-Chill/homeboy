@@ -920,7 +920,7 @@
   },
   "testing": {
     "backend": "wp-codebox",
-    "description": "Plugin/theme PHPUnit runs through WP Codebox by default. Use the host-smoke backend only for standalone tests/**/*-smoke.php scripts that run under host PHP without WordPress bootstrap."
+      "description": "Plugin/theme PHPUnit runs through WP Codebox by default. Use the host-smoke backend for standalone tests/**/*-smoke.php scripts that run under bare host PHP without WordPress, or host-smoke-wp to run those smoke scripts against real WordPress booted in the WP Codebox sandbox."
   },
   "ci": {
     "profiles": {
@@ -975,7 +975,7 @@
       "label": "Test backend",
       "type": "string",
       "default": "wp-codebox",
-      "description": "WordPress test backend. Use 'wp-codebox' for default PHPUnit execution, or 'host-smoke' for standalone tests/**/*-smoke.php scripts that run under host PHP without WordPress bootstrap."
+      "description": "WordPress test backend. Use 'wp-codebox' for default PHPUnit execution, 'host-smoke' for standalone tests/**/*-smoke.php scripts that run under bare host PHP without WordPress, or 'host-smoke-wp' to run those same smoke scripts against real WordPress booted in the WP Codebox sandbox (so smokes use real WP functions instead of per-file shims)."
     },
     {
       "id": "validation_dependencies",
