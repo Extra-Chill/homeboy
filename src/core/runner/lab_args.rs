@@ -1,8 +1,125 @@
 use std::path::PathBuf;
 
+use serde_json::Value;
+
+use crate::core::config::read_json_spec_to_string;
 use crate::core::{Error, Result};
 
 pub(super) const EXPLICIT_PASSTHROUGH_SENTINEL: &str = "__homeboy_explicit_passthrough__";
+
+/// A local -> remote path pair produced by Lab workspace sync, used to remap
+/// controller-side absolute paths embedded in a `--provider-config` payload to
+/// the synced locations on the runner.
+#[derive(Debug, Clone)]
+pub(super) struct LabPathRemap {
+    pub local: String,
+    pub remote: String,
+}
+
+/// Rewrite controller-local absolute paths inside a `--provider-config` value to
+/// their synced remote equivalents, and inline the result so the runner does not
+/// need to read a controller-local file.
+///
+/// A hand-authored provider-config embeds absolute paths that only exist on the
+/// controller (`mounts[].source`, `workspace_root`, `runtime_component_paths.*`,
+/// `provider_plugin_paths[]`, ...). Lab offload syncs those directories and
+/// records local->remote pairs, but without rewriting the config the remote
+/// sandbox cannot find them. This walks the JSON and replaces every string that
+/// begins with a known local path prefix with the matching remote path, then
+/// returns the config as inline JSON so it travels with the offloaded command.
+pub(super) fn remap_provider_config_in_args(args: &[String], mappings: &[LabPathRemap]) -> Vec<String> {
+    if mappings.is_empty() {
+        return args.to_vec();
+    }
+
+    // Longest local prefix first so nested paths remap against the most specific
+    // workspace (e.g. a dependency under the primary checkout).
+    let mut ordered: Vec<&LabPathRemap> = mappings.iter().collect();
+    ordered.sort_by(|a, b| b.local.len().cmp(&a.local.len()));
+
+    let mut out = Vec::with_capacity(args.len());
+    let mut iter = args.iter().peekable();
+    let mut passthrough = false;
+    while let Some(arg) = iter.next() {
+        if passthrough {
+            out.push(arg.clone());
+            continue;
+        }
+        if arg == "--" {
+            passthrough = true;
+            out.push(arg.clone());
+            continue;
+        }
+        if arg == "--provider-config" {
+            out.push(arg.clone());
+            if let Some(spec) = iter.next() {
+                out.push(remap_provider_config_spec(spec, &ordered));
+            }
+            continue;
+        }
+        if let Some(spec) = arg.strip_prefix("--provider-config=") {
+            out.push(format!("--provider-config={}", remap_provider_config_spec(spec, &ordered)));
+            continue;
+        }
+        out.push(arg.clone());
+    }
+    out
+}
+
+/// Resolve a provider-config spec (inline JSON / `@file` / `-`), remap its
+/// embedded local paths, and return inline JSON. Falls back to the original spec
+/// if it cannot be read or parsed so behavior is never worse than today.
+fn remap_provider_config_spec(spec: &str, mappings: &[&LabPathRemap]) -> String {
+    let raw = match read_json_spec_to_string(spec) {
+        Ok(raw) => raw,
+        Err(_) => return spec.to_string(),
+    };
+    let mut value: Value = match serde_json::from_str(&raw) {
+        Ok(value) => value,
+        Err(_) => return spec.to_string(),
+    };
+    remap_paths_in_value(&mut value, mappings);
+    serde_json::to_string(&value).unwrap_or_else(|_| spec.to_string())
+}
+
+fn remap_paths_in_value(value: &mut Value, mappings: &[&LabPathRemap]) {
+    match value {
+        Value::String(text) => {
+            if let Some(remapped) = remap_local_path(text, mappings) {
+                *text = remapped;
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                remap_paths_in_value(item, mappings);
+            }
+        }
+        Value::Object(map) => {
+            for (_, item) in map.iter_mut() {
+                remap_paths_in_value(item, mappings);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Replace a leading known local path with its remote equivalent. Matches whole
+/// path or path-prefix boundaries (so `/a/b` does not match `/a/bc`).
+fn remap_local_path(text: &str, mappings: &[&LabPathRemap]) -> Option<String> {
+    for mapping in mappings {
+        if mapping.local.is_empty() {
+            continue;
+        }
+        if text == mapping.local {
+            return Some(mapping.remote.clone());
+        }
+        let prefix = format!("{}/", mapping.local.trim_end_matches('/'));
+        if let Some(rest) = text.strip_prefix(&prefix) {
+            return Some(format!("{}/{}", mapping.remote.trim_end_matches('/'), rest));
+        }
+    }
+    None
+}
 
 pub(super) fn lab_offload_source_path(args: &[String]) -> Result<PathBuf> {
     let mut iter = args.iter().skip(1).peekable();
@@ -108,6 +225,92 @@ mod tests {
             lab_offload_source_path(&args).expect("source path"),
             PathBuf::from("/Users/chubes/Developer/wp-site-generator")
         );
+    }
+
+    #[test]
+    fn remap_inlines_and_rewrites_provider_config_local_paths() {
+        let mappings = vec![
+            LabPathRemap {
+                local: "/Users/chubes/Developer/data-machine@cook".to_string(),
+                remote: "/home/chubes/_lab_workspaces/data-machine@cook-abc".to_string(),
+            },
+            LabPathRemap {
+                local: "/Users/chubes/Developer/data-machine-code".to_string(),
+                remote: "/home/chubes/_lab_workspaces/data-machine-code-def".to_string(),
+            },
+        ];
+        let config = serde_json::json!({
+            "workspace_root": "/Users/chubes/Developer/data-machine@cook",
+            "mounts": [{ "source": "/Users/chubes/Developer/data-machine@cook", "target": "/workspace/data-machine" }],
+            "runtime_component_paths": { "agent_runtime_tools": "/Users/chubes/Developer/data-machine-code" },
+            "provider_plugin_paths": ["/Users/chubes/Developer/data-machine@cook/vendor/provider"],
+            "model": "claude-opus-4-8"
+        })
+        .to_string();
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--provider-config".to_string(),
+            config,
+            "--prompt".to_string(),
+            "fix it".to_string(),
+        ];
+
+        let out = remap_provider_config_in_args(&args, &mappings);
+        let cfg_idx = out.iter().position(|a| a == "--provider-config").unwrap() + 1;
+        let remapped: serde_json::Value = serde_json::from_str(&out[cfg_idx]).expect("inline json");
+
+        assert_eq!(remapped["workspace_root"], "/home/chubes/_lab_workspaces/data-machine@cook-abc");
+        assert_eq!(remapped["mounts"][0]["source"], "/home/chubes/_lab_workspaces/data-machine@cook-abc");
+        assert_eq!(remapped["mounts"][0]["target"], "/workspace/data-machine");
+        assert_eq!(remapped["runtime_component_paths"]["agent_runtime_tools"], "/home/chubes/_lab_workspaces/data-machine-code-def");
+        assert_eq!(remapped["provider_plugin_paths"][0], "/home/chubes/_lab_workspaces/data-machine@cook-abc/vendor/provider");
+        assert_eq!(remapped["model"], "claude-opus-4-8");
+        // unrelated args preserved
+        assert!(out.iter().any(|a| a == "--prompt"));
+        assert!(out.iter().any(|a| a == "fix it"));
+    }
+
+    #[test]
+    fn remap_handles_provider_config_equals_form_and_no_mappings() {
+        let mappings = vec![LabPathRemap {
+            local: "/local/repo".to_string(),
+            remote: "/remote/repo".to_string(),
+        }];
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--provider-config={\"workspace_root\":\"/local/repo\"}".to_string(),
+        ];
+        let out = remap_provider_config_in_args(&args, &mappings);
+        let val = out.iter().find(|a| a.starts_with("--provider-config=")).unwrap();
+        assert!(val.contains("/remote/repo"));
+        assert!(!val.contains("/local/repo"));
+
+        // No mappings -> untouched
+        let unchanged = remap_provider_config_in_args(&args, &[]);
+        assert_eq!(unchanged, args);
+    }
+
+    #[test]
+    fn remap_does_not_match_sibling_path_prefixes() {
+        let mappings = vec![LabPathRemap {
+            local: "/a/b".to_string(),
+            remote: "/x/y".to_string(),
+        }];
+        let args = vec![
+            "homeboy".to_string(),
+            "cook".to_string(),
+            "--provider-config".to_string(),
+            serde_json::json!({ "p": "/a/bc/keep", "q": "/a/b/move" }).to_string(),
+        ];
+        let out = remap_provider_config_in_args(&args, &mappings);
+        let idx = out.iter().position(|a| a == "--provider-config").unwrap() + 1;
+        let v: serde_json::Value = serde_json::from_str(&out[idx]).unwrap();
+        assert_eq!(v["p"], "/a/bc/keep"); // sibling prefix untouched
+        assert_eq!(v["q"], "/x/y/move"); // real prefix remapped
     }
 
     #[test]

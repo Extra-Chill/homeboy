@@ -24,6 +24,16 @@ pub(super) struct LabWorkspaceMappingEntry {
     snapshot_identity: String,
 }
 
+impl LabWorkspaceMappingEntry {
+    pub(super) fn local_path(&self) -> &str {
+        &self.local_path
+    }
+
+    pub(super) fn remote_path(&self) -> &str {
+        &self.remote_path
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ExtraLabWorkspace {
     role: String,
@@ -111,6 +121,110 @@ pub(super) fn lab_extra_workspaces(source_path: &Path) -> Result<Vec<ExtraLabWor
     let mut workspaces = accepted_extra_lab_workspaces()?;
     workspaces.extend(discovered_validation_dependency_workspaces(source_path)?);
     Ok(workspaces)
+}
+
+/// Discover controller-local directories referenced by a `--provider-config` in
+/// the offloaded args (runtime component paths, provider plugin paths, mount
+/// sources, workspace root) so they are synced to the runner and remappable.
+///
+/// Directories under `source_path` are skipped because the primary workspace
+/// sync already covers them. Non-existent or non-directory paths are ignored;
+/// they will simply not be remapped.
+pub(super) fn provider_config_extra_workspaces(
+    args: &[String],
+    source_path: &Path,
+) -> Result<Vec<ExtraLabWorkspace>> {
+    let Some(spec) = provider_config_spec(args) else {
+        return Ok(Vec::new());
+    };
+    let raw = match crate::core::config::read_json_spec_to_string(&spec) {
+        Ok(raw) => raw,
+        Err(_) => return Ok(Vec::new()),
+    };
+    let value: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(value) => value,
+        Err(_) => return Ok(Vec::new()),
+    };
+
+    let source_canon = source_path
+        .canonicalize()
+        .unwrap_or_else(|_| source_path.to_path_buf());
+
+    let mut seen = std::collections::BTreeSet::new();
+    let mut workspaces = Vec::new();
+    for candidate in provider_config_candidate_paths(&value) {
+        let expanded = shellexpand::tilde(&candidate).to_string();
+        let path = Path::new(&expanded);
+        if !path.is_dir() {
+            continue;
+        }
+        let canon = match path.canonicalize() {
+            Ok(canon) => canon,
+            Err(_) => continue,
+        };
+        // The primary workspace (and paths inside it) are already synced.
+        if canon == source_canon || canon.starts_with(&source_canon) {
+            continue;
+        }
+        if !seen.insert(canon.clone()) {
+            continue;
+        }
+        workspaces.push(ExtraLabWorkspace {
+            role: "provider_config".to_string(),
+            path: canon,
+        });
+    }
+    Ok(workspaces)
+}
+
+fn provider_config_spec(args: &[String]) -> Option<String> {
+    let mut iter = args.iter().peekable();
+    while let Some(arg) = iter.next() {
+        if arg == "--" {
+            break;
+        }
+        if arg == "--provider-config" {
+            return iter.next().cloned();
+        }
+        if let Some(value) = arg.strip_prefix("--provider-config=") {
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
+fn provider_config_candidate_paths(value: &serde_json::Value) -> Vec<String> {
+    let mut paths = Vec::new();
+    if let Some(root) = value.get("workspace_root").and_then(|v| v.as_str()) {
+        paths.push(root.to_string());
+    }
+    if let Some(mounts) = value.get("mounts").and_then(|v| v.as_array()) {
+        for mount in mounts {
+            if let Some(src) = mount.get("source").and_then(|v| v.as_str()) {
+                paths.push(src.to_string());
+            }
+        }
+    }
+    if let Some(components) = value.get("runtime_component_paths").and_then(|v| v.as_object()) {
+        for component in components.values() {
+            if let Some(path) = component.as_str() {
+                paths.push(path.to_string());
+            }
+        }
+    }
+    if let Some(plugins) = value.get("provider_plugin_paths").and_then(|v| v.as_array()) {
+        for plugin in plugins {
+            if let Some(path) = plugin.as_str() {
+                paths.push(path.to_string());
+            }
+        }
+    }
+    for key in ["agents_api", "agents_api_path", "homeboy_extensions", "homeboy_extensions_path"] {
+        if let Some(path) = value.get(key).and_then(|v| v.as_str()) {
+            paths.push(path.to_string());
+        }
+    }
+    paths
 }
 
 fn accepted_extra_lab_workspaces() -> Result<Vec<ExtraLabWorkspace>> {
