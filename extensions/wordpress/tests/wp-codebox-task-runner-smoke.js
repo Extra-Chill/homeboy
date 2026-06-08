@@ -185,6 +185,11 @@ try {
   assert.equal(captured.input.data_machine_code_path, '/components/data-machine-code');
   assert.equal(captured.input.runtime_component_paths.agent_runtime, '/components/data-machine');
   assert.equal(captured.input.runtime_component_paths.agent_runtime_tools, '/components/data-machine-code');
+  assert.equal(captured.input.extra_plugins.find((plugin) => plugin.slug === 'agents-api').source, '/components/agents-api');
+  assert.equal(captured.input.extra_plugins.find((plugin) => plugin.slug === 'data-machine').source, '/components/data-machine');
+  assert.equal(captured.input.extra_plugins.find((plugin) => plugin.slug === 'data-machine-code').source, '/components/data-machine-code');
+  assert.equal(captured.input.extra_plugins.find((plugin) => plugin.slug === 'data-machine').loadAs, 'mu-plugin');
+  assert.equal(captured.input.extra_plugins.find((plugin) => plugin.slug === 'data-machine-code').activate, false);
   assert(!JSON.stringify(captured.input).includes('redacted-test-key'));
 
   const runtimeTaskCapturePath = path.join(root, 'capture-runtime-task.json');
