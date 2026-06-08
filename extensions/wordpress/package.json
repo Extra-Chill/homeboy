@@ -48,6 +48,7 @@
     "test:wp-codebox-apply-adapter": "node tests/wp-codebox-apply-adapter-smoke.js",
     "test:wp-codebox-browser-metrics": "node tests/wp-codebox-browser-metrics-smoke.js",
     "test:wordpress-bench-state-sampling": "php tests/wordpress-bench-state-sampling-helper-smoke.php",
+    "test:wordpress-db-query-profiler": "php scripts/bench/wordpress-db-query-profiler-smoke.php",
     "test:audit-wp-codebox-fanout": "node tests/audit-wp-codebox-fanout-smoke.js",
     "test:audit-wp-codebox-execute": "node tests/audit-wp-codebox-fanout-smoke.js",
     "test:wp-codebox-task-runner": "node tests/wp-codebox-task-runner-smoke.js",
