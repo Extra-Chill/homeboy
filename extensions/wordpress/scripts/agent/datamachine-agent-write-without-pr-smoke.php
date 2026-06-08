@@ -170,6 +170,21 @@ namespace {
         exit( 1 );
     }
 
+    $pr_tool_opened = array(
+        'github_tool_results' => array(
+            array(
+                'tool_name' => 'create_github_pull_request',
+                'success'   => true,
+                'head'      => 'agent/no-url-branch',
+            ),
+        ),
+    );
+
+    if ( ! homeboy_datamachine_agent_pr_opened( $pr_tool_opened, $config ) ) {
+        fwrite( STDERR, "Expected successful pull-request tool result to count as pr_opened without a URL.\n" );
+        exit( 1 );
+    }
+
     if ( 'agent/change-branch' !== homeboy_datamachine_agent_pr_head_branch( $pr_opened, $config ) ) {
         fwrite( STDERR, "Expected pull-request tool result to expose the PR head branch.\n" );
         exit( 1 );
