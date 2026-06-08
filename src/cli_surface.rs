@@ -1091,6 +1091,14 @@ mod tests {
         );
         assert!(!parsed_command(&["homeboy", "status"]).supports_lab_runner());
         assert!(!parsed_command(&["homeboy", "bench", "list"]).supports_lab_runner());
+        assert!(
+            !parsed_command(&["homeboy", "lint", "--changed-since", "origin/main"])
+                .supports_lab_runner()
+        );
+        assert!(
+            !parsed_command(&["homeboy", "test", "--changed-since", "origin/main"])
+                .supports_lab_runner()
+        );
 
         let cli = parsed_cli(&["homeboy", "lint", "--runner", "lab-a"]);
         assert_eq!(cli.runner.as_deref(), Some("lab-a"));
@@ -1224,6 +1232,18 @@ mod tests {
                 .lab_runner_unsupported_reason()
                 .expect("fleet exec reason")
                 .contains("config parity")
+        );
+        assert!(
+            parsed_command(&["homeboy", "lint", "--changed-since", "origin/main"])
+                .lab_runner_unsupported_reason()
+                .expect("changed-scope lint reason")
+                .contains("Changed-scope lint runs stay local")
+        );
+        assert!(
+            parsed_command(&["homeboy", "test", "--changed-since", "origin/main"])
+                .lab_runner_unsupported_reason()
+                .expect("changed-since test reason")
+                .contains("test --changed-since")
         );
         assert!(parsed_command(&["homeboy", "status"])
             .lab_runner_unsupported_reason()
