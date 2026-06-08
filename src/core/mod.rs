@@ -39,6 +39,7 @@ pub(crate) mod expand;
 pub mod extension;
 pub mod finding;
 pub mod fleet;
+pub mod gate;
 pub mod git;
 pub mod http_api;
 pub(crate) mod http_probe;

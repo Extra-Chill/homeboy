@@ -8,6 +8,8 @@
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::HashMap;
 
+use crate::core::gate::HomeboyGateResult;
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct PlanValues {
     values: HashMap<String, serde_json::Value>,
@@ -420,6 +422,14 @@ impl PlanStepBuilder {
         self
     }
 
+    pub(crate) fn gate_result(mut self, gate_result: impl Into<HomeboyGateResult>) -> Self {
+        self.step.outputs.insert(
+            "gate_result".to_string(),
+            serde_json::to_value(gate_result.into()).unwrap_or(serde_json::Value::Null),
+        );
+        self
+    }
+
     pub(crate) fn missing(mut self, missing: impl IntoIterator<Item = String>) -> Self {
         self.step.missing.extend(missing);
         self
@@ -533,6 +543,8 @@ fn slug_fragment(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use crate::core::gate::{HomeboyGateKind, HomeboyGateResult, HomeboyGateStatus};
+
     use super::{
         HomeboyPlan, PlanBuilder, PlanKind, PlanStep, PlanStepStatus, PlanSummary, PlanValues,
     };
@@ -774,6 +786,30 @@ mod tests {
         assert_eq!(items, Some(vec!["first".to_string(), "second".to_string()]));
         assert_eq!(missing, None);
         assert_eq!(wrong_type, None);
+    }
+
+    #[test]
+    fn test_gate_result_output() {
+        let step = PlanStep::ready("verify.tests", "gate.command")
+            .gate_result(HomeboyGateResult::new(
+                "gate-1",
+                "cargo test",
+                HomeboyGateKind::Command,
+                HomeboyGateStatus::Passed,
+            ))
+            .build();
+
+        let gate_result: HomeboyGateResult = serde_json::from_value(
+            step.outputs
+                .get("gate_result")
+                .expect("gate result output")
+                .clone(),
+        )
+        .expect("deserialize gate result output");
+
+        assert_eq!(gate_result.id, "gate-1");
+        assert_eq!(gate_result.kind, HomeboyGateKind::Command);
+        assert_eq!(gate_result.status, HomeboyGateStatus::Passed);
     }
 
     #[test]

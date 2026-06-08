@@ -319,12 +319,14 @@ fn run_lab_offload_inner(
             Err(err) => return Err(err),
         };
 
+        let gate_result = decision.clone();
         match decision {
             LabRunnerGateDecision::Eligible => {
                 plan = with_step(
                     plan,
                     PlanStep::ready("lab.capability_preflight", "lab.capability_preflight")
                         .inputs(PlanValues::new().string("command", capability_plan.command))
+                        .gate_result(gate_result)
                         .build(),
                 );
             }
@@ -342,6 +344,7 @@ fn run_lab_offload_inner(
                             PlanStepStatus::Missing,
                         )
                         .skip_reason(reason.clone())
+                        .gate_result(gate_result)
                         .build(),
                     );
                     return automatic_capability_fallback_or_error(
