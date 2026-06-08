@@ -16,23 +16,33 @@ pub(super) fn sync_validation_dependency_workspaces(
     remote_path: &str,
     excludes: &[String],
 ) -> Result<()> {
-    for dependency in validation_dependency_workspaces(local_path)? {
+    for dependency in validation_dependency_workspaces(local_path, excludes)? {
         let remote_dependency_path = format!(
             "{}/{}",
             parent_remote_path(remote_path),
-            sanitize_path_segment(
-                dependency
-                    .file_name()
-                    .and_then(|value| value.to_str())
-                    .unwrap_or("dependency"),
-            )
+            sanitize_path_segment(&dependency.remote_name)
         );
-        materialize_snapshot(runner, &dependency, &remote_dependency_path, excludes)?;
+        materialize_snapshot(
+            runner,
+            &dependency.prepared_path,
+            &remote_dependency_path,
+            excludes,
+        )?;
     }
     Ok(())
 }
 
-fn validation_dependency_workspaces(local_path: &Path) -> Result<Vec<PathBuf>> {
+#[derive(Debug)]
+struct PreparedValidationDependencyWorkspace {
+    remote_name: String,
+    prepared_path: PathBuf,
+    _tempdir: tempfile::TempDir,
+}
+
+fn validation_dependency_workspaces(
+    local_path: &Path,
+    excludes: &[String],
+) -> Result<Vec<PreparedValidationDependencyWorkspace>> {
     let dependency_ids = validation_dependency_ids(local_path)?;
     if dependency_ids.is_empty() {
         return Ok(Vec::new());
@@ -44,7 +54,9 @@ fn validation_dependency_workspaces(local_path: &Path) -> Result<Vec<PathBuf>> {
 
     dependency_ids
         .into_iter()
-        .map(|dependency_id| prepare_validation_dependency_workspace(parent, &dependency_id))
+        .map(|dependency_id| {
+            prepare_validation_dependency_workspace(parent, &dependency_id, excludes)
+        })
         .collect()
 }
 
@@ -144,19 +156,44 @@ fn resolve_sibling_dependency_workspace(parent: &Path, dependency_id: &str) -> R
     ))
 }
 
-fn prepare_validation_dependency_workspace(parent: &Path, dependency_id: &str) -> Result<PathBuf> {
+fn prepare_validation_dependency_workspace(
+    parent: &Path,
+    dependency_id: &str,
+    excludes: &[String],
+) -> Result<PreparedValidationDependencyWorkspace> {
     let (mut component, path) = resolve_managed_dependency_workspace(parent, dependency_id)?;
     component.local_path = path.display().to_string();
 
     prepare_dependency_git_state(&component, &path)?;
 
-    path.canonicalize().map_err(|err| {
+    let tempdir = tempfile::tempdir().map_err(|err| {
+        Error::internal_io(
+            err.to_string(),
+            Some(format!(
+                "create validation dependency workspace {}",
+                component.id
+            )),
+        )
+    })?;
+    let prepared_path = tempdir.path().join(sanitize_path_segment(&component.id));
+    crate::core::runner::copy_snapshot_to_directory(&path, &prepared_path, excludes)?;
+
+    component.local_path = prepared_path.display().to_string();
+    run_dependency_lifecycle(&component, &prepared_path)?;
+
+    let prepared_path = prepared_path.canonicalize().map_err(|err| {
         Error::internal_io(
             err.to_string(),
             Some(format!(
                 "canonicalize validation dependency {dependency_id}"
             )),
         )
+    })?;
+
+    Ok(PreparedValidationDependencyWorkspace {
+        remote_name: component.id,
+        prepared_path,
+        _tempdir: tempdir,
     })
 }
 
@@ -165,11 +202,8 @@ fn resolve_managed_dependency_workspace(
     dependency_id: &str,
 ) -> Result<(Component, PathBuf)> {
     if let Ok(path) = resolve_sibling_dependency_workspace(parent, dependency_id) {
-        let mut component = component::resolve_effective(
-            Some(dependency_id),
-            Some(&path.display().to_string()),
-            None,
-        )?;
+        let mut component =
+            component::resolve_effective(None, Some(&path.display().to_string()), None)?;
         component.local_path = path.display().to_string();
         return Ok((component, path));
     }
@@ -309,7 +343,7 @@ fn read_standalone_dependency_config(dependency_id: &str) -> Result<Option<Compo
 }
 
 fn prepare_dependency_git_state(component: &Component, path: &Path) -> Result<()> {
-    crate::core::hygiene::require_checkout_hygiene(
+    crate::core::hygiene::require_checkout_hygiene_without_lifecycle(
         vec![crate::core::hygiene::DependencyCheckout {
             id: component.id.clone(),
             role: "validation_dependency".to_string(),
@@ -318,6 +352,10 @@ fn prepare_dependency_git_state(component: &Component, path: &Path) -> Result<()
         crate::core::hygiene::DependencyHygieneOptions { allow_stale: false },
     )?;
     Ok(())
+}
+
+fn run_dependency_lifecycle(component: &Component, path: &Path) -> Result<()> {
+    crate::core::hygiene::run_validation_dependency_lifecycle(component, path)
 }
 
 fn unresolvable_dependency_error(dependency_id: &str, reason: &str) -> Error {
@@ -519,6 +557,146 @@ mod tests {
             assert!(Path::new(&remote_parent)
                 .join("agents-api/build-built.txt")
                 .exists());
+            assert!(!dependency.join("deps-installed.txt").exists());
+            assert!(!dependency.join("build-built.txt").exists());
+        });
+    }
+
+    #[test]
+    fn sync_workspace_uses_manifest_id_for_absolute_validation_dependency() {
+        crate::test_support::with_isolated_home(|_| {
+            let workspace_parent = tempfile::tempdir().expect("workspace parent");
+            let source = workspace_parent.path().join("studio-web");
+            let dependency = workspace_parent.path().join("agents-api");
+            let runner_root = tempfile::tempdir().expect("runner root tempdir");
+            fs::create_dir_all(&source).expect("source dir");
+            fs::create_dir_all(&dependency).expect("dependency dir");
+            fs::write(
+                source.join("homeboy.json"),
+                serde_json::json!({
+                    "id": "studio-web",
+                    "extensions": {
+                        "wordpress": {
+                            "settings": {
+                                "validation_dependencies": [dependency.display().to_string()]
+                            }
+                        }
+                    }
+                })
+                .to_string(),
+            )
+            .expect("source manifest");
+            fs::write(
+                dependency.join("homeboy.json"),
+                serde_json::json!({
+                    "id": "agents-api",
+                    "scripts": {
+                        "build": ["sh -c 'printf \"$HOMEBOY_COMPONENT_ID\" > component-id.txt'"]
+                    }
+                })
+                .to_string(),
+            )
+            .expect("dependency manifest");
+            fs::write(dependency.join(".gitignore"), "component-id.txt\n")
+                .expect("dependency gitignore");
+            let _remote = init_checkout_with_upstream(&dependency);
+
+            super::super::create(
+                &format!(
+                    r#"{{"id":"lab-local-absolute-dependency","kind":"local","workspace_root":"{}"}}"#,
+                    runner_root.path().display()
+                ),
+                false,
+            )
+            .expect("create runner");
+
+            let (output, exit_code) = sync_workspace(
+                "lab-local-absolute-dependency",
+                RunnerWorkspaceSyncOptions {
+                    path: source.display().to_string(),
+                    mode: RunnerWorkspaceSyncMode::Snapshot,
+                    changed_since_base: None,
+                },
+            )
+            .expect("sync workspace");
+
+            assert_eq!(exit_code, 0);
+            let remote_parent = parent_remote_path(&output.remote_path);
+            let remote_dependency = Path::new(&remote_parent).join("agents-api");
+            assert!(remote_dependency.join("component-id.txt").exists());
+            assert_eq!(
+                fs::read_to_string(remote_dependency.join("component-id.txt")).unwrap(),
+                "agents-api"
+            );
+            assert!(!Path::new(&remote_parent).join("Users").exists());
+        });
+    }
+
+    #[test]
+    fn sync_workspace_failed_validation_dependency_build_keeps_source_clean() {
+        crate::test_support::with_isolated_home(|_| {
+            let workspace_parent = tempfile::tempdir().expect("workspace parent");
+            let source = workspace_parent.path().join("studio-web");
+            let dependency = workspace_parent.path().join("agents-api");
+            let runner_root = tempfile::tempdir().expect("runner root tempdir");
+            fs::create_dir_all(&source).expect("source dir");
+            fs::create_dir_all(&dependency).expect("dependency dir");
+            fs::write(
+                source.join("homeboy.json"),
+                serde_json::json!({
+                    "id": "studio-web",
+                    "extensions": {
+                        "wordpress": {
+                            "settings": {
+                                "validation_dependencies": ["agents-api"]
+                            }
+                        }
+                    }
+                })
+                .to_string(),
+            )
+            .expect("source manifest");
+            fs::write(
+                dependency.join("homeboy.json"),
+                serde_json::json!({
+                    "id": "agents-api",
+                    "scripts": {
+                        "build": ["sh -c 'mkdir .homeboy-build && printf dirty > .homeboy-build/state && exit 7'"]
+                    }
+                })
+                .to_string(),
+            )
+            .expect("dependency manifest");
+            let _remote = init_checkout_with_upstream(&dependency);
+
+            super::super::create(
+                &format!(
+                    r#"{{"id":"lab-local-failed-dependency","kind":"local","workspace_root":"{}"}}"#,
+                    runner_root.path().display()
+                ),
+                false,
+            )
+            .expect("create runner");
+
+            let err = sync_workspace(
+                "lab-local-failed-dependency",
+                RunnerWorkspaceSyncOptions {
+                    path: source.display().to_string(),
+                    mode: RunnerWorkspaceSyncMode::Snapshot,
+                    changed_since_base: None,
+                },
+            )
+            .expect_err("failed dependency build should fail sync");
+
+            assert!(err.message.contains("build lifecycle failed"));
+            assert!(!dependency.join(".homeboy-build").exists());
+            let output = Command::new("git")
+                .args(["status", "--porcelain=v1"])
+                .current_dir(&dependency)
+                .output()
+                .expect("git status");
+            assert!(output.status.success());
+            assert_eq!(String::from_utf8_lossy(&output.stdout), "");
         });
     }
 
@@ -590,7 +768,7 @@ mod tests {
             assert!(clone_target.join("lib/agents.php").exists());
             let remote_parent = parent_remote_path(&output.remote_path);
             assert!(Path::new(&remote_parent)
-                .join("agents-api-clone/lib/agents.php")
+                .join("agents-api/lib/agents.php")
                 .exists());
         });
     }
@@ -616,7 +794,7 @@ mod tests {
         )
         .expect("source manifest");
 
-        let err = validation_dependency_workspaces(&source).expect_err("missing dependency");
+        let err = validation_dependency_workspaces(&source, &[]).expect_err("missing dependency");
 
         assert_eq!(err.details["field"], "validation_dependencies");
         assert!(err.message.contains("agents-api"));
