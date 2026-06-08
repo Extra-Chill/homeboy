@@ -9,6 +9,7 @@ use crate::core::agent_task_gate::{
     AgentTaskGateVisibility,
 };
 use crate::core::agent_task_promotion::{AgentTaskPromotionReport, AgentTaskPromotionStatus};
+use crate::core::gate::{HomeboyGateResult, HomeboyGateStatus};
 
 pub const AGENT_TASK_COOK_LOOP_REPORT_SCHEMA: &str = "homeboy/agent-task-cook-loop-report/v1";
 
@@ -39,6 +40,8 @@ pub struct AgentTaskCookLoopReport {
     pub promotion_status: AgentTaskPromotionStatus,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failed_gates: Vec<AgentTaskCookLoopGateFailure>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failed_gate_results: Vec<HomeboyGateResult>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub follow_up_request: Option<AgentTaskRequest>,
     #[serde(default, skip_serializing_if = "Value::is_null")]
@@ -79,6 +82,10 @@ pub fn evaluate_cook_loop(options: AgentTaskCookLoopOptions) -> AgentTaskCookLoo
         .filter(|gate| gate.status == AgentTaskGateStatus::Failed)
         .map(gate_failure)
         .collect();
+    let failed_gate_results: Vec<HomeboyGateResult> =
+        normalized_promotion_gate_results(&options.promotion_report)
+            .filter(|gate| gate.status == HomeboyGateStatus::Failed)
+            .collect();
     let retry_budget_remaining = options.max_attempts.saturating_sub(options.attempt);
     let should_retry = options.promotion_report.status == AgentTaskPromotionStatus::GateFailed
         && !failed_gates.is_empty()
@@ -102,8 +109,45 @@ pub fn evaluate_cook_loop(options: AgentTaskCookLoopOptions) -> AgentTaskCookLoo
         source_run_id: options.source_run_id.clone(),
         promotion_status: options.promotion_report.status,
         failed_gates,
+        failed_gate_results,
         follow_up_request,
         metadata: options.metadata,
+    }
+}
+
+fn normalized_promotion_gate_results(
+    report: &AgentTaskPromotionReport,
+) -> impl Iterator<Item = HomeboyGateResult> + '_ {
+    if report.gate_results.is_empty() {
+        EitherGateResults::Legacy(
+            report
+                .deterministic_gates
+                .iter()
+                .cloned()
+                .map(HomeboyGateResult::from),
+        )
+    } else {
+        EitherGateResults::Normalized(report.gate_results.iter().cloned())
+    }
+}
+
+enum EitherGateResults<L, R> {
+    Legacy(L),
+    Normalized(R),
+}
+
+impl<T, L, R> Iterator for EitherGateResults<L, R>
+where
+    L: Iterator<Item = T>,
+    R: Iterator<Item = T>,
+{
+    type Item = T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Legacy(iter) => iter.next(),
+            Self::Normalized(iter) => iter.next(),
+        }
     }
 }
 
@@ -545,6 +589,7 @@ mod tests {
             changed_files: vec!["src/core/agent_task_gate.rs".to_string()],
             command_evidence: Vec::new(),
             deterministic_gates,
+            gate_results: Vec::new(),
             provenance: json!({ "worktree_path": "/tmp/homeboy@fix-3676" }),
         }
     }

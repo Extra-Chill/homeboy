@@ -15,6 +15,7 @@ use crate::core::agent_task_gate::{
 };
 use crate::core::agent_task_scheduler::{AgentTaskAggregate, AGENT_TASK_AGGREGATE_SCHEMA};
 use crate::core::agent_task_timeout_artifacts::is_actionable_patch_artifact;
+use crate::core::gate::HomeboyGateResult;
 use crate::core::{Error, Result};
 
 pub const AGENT_TASK_PROMOTION_REPORT_SCHEMA: &str = "homeboy/agent-task-promotion-report/v1";
@@ -53,6 +54,8 @@ pub struct AgentTaskPromotionReport {
     pub command_evidence: Vec<AgentTaskPromotionCommandReport>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deterministic_gates: Vec<AgentTaskGateReport>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gate_results: Vec<HomeboyGateResult>,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub provenance: Value,
 }
@@ -180,6 +183,11 @@ fn promote_with_provider(
     let has_gate_failure = deterministic_gates
         .iter()
         .any(|gate| gate.status == AgentTaskGateStatus::Failed);
+    let gate_results = deterministic_gates
+        .iter()
+        .cloned()
+        .map(HomeboyGateResult::from)
+        .collect();
 
     Ok(AgentTaskPromotionReport {
         schema: AGENT_TASK_PROMOTION_REPORT_SCHEMA.to_string(),
@@ -208,6 +216,7 @@ fn promote_with_provider(
         changed_files,
         command_evidence,
         deterministic_gates,
+        gate_results,
         provenance: json!({
             "source_schema": outcome.schema,
             "artifact_metadata": artifact.metadata,
@@ -1017,6 +1026,7 @@ mod tests {
                 "apply-patch",
             ])],
             deterministic_gates: Vec::new(),
+            gate_results: Vec::new(),
             provenance: Value::Null,
         };
 
