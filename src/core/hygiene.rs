@@ -330,7 +330,7 @@ mod tests {
         fs::write(writer.path().join("remote.txt"), "remote\n").unwrap();
         git(writer.path(), &["add", "."]);
         git(writer.path(), &["commit", "-m", "remote update"]);
-        git(writer.path(), &["push", "origin", "main"]);
+        git(writer.path(), &["push", "origin", "HEAD:main"]);
 
         let err = require_checkout_hygiene(
             vec![DependencyCheckout {
@@ -374,7 +374,7 @@ mod tests {
             serde_json::json!({
                 "id": "source",
                 "extensions": {
-                    "wordpress": {
+                    "example": {
                         "settings": { "validation_dependencies": ["missing-dep"] }
                     }
                 }
