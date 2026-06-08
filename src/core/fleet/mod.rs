@@ -11,7 +11,9 @@ pub mod exec;
 pub mod status;
 
 pub use check::{collect_check, FleetCheckSummary, FleetComponentCheck, FleetProjectCheck};
-pub use exec::{collect_exec, FleetExecProjectResult, FleetExecSummary};
+pub use exec::{
+    collect_exec, collect_exec_run, FleetExecProjectResult, FleetExecRun, FleetExecSummary,
+};
 pub use status::{
     collect_status, FleetComponentDrift, FleetComponentStatus, FleetComponentSummary,
     FleetProjectStatus, FleetProjectSummary, FleetServerSummary, FleetStatusResult,
