@@ -78,6 +78,7 @@ pub fn aggregate_runs(runs: &[BenchResults]) -> Result<BenchResults> {
         failure_classification: runs
             .iter()
             .find_map(|result| result.failure_classification.clone()),
+        responsiveness: runs.iter().find_map(|result| result.responsiveness.clone()),
         budget_findings: runs
             .iter()
             .flat_map(|result| result.budget_findings.clone())

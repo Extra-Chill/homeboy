@@ -348,6 +348,7 @@ mod tests {
             phase_events: Vec::new(),
             phase_summaries: Vec::new(),
             failure_classification: None,
+            responsiveness: None,
             budget_findings: Vec::new(),
             scenarios: vec![BenchScenario {
                 id: "scenario".to_string(),

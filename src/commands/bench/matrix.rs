@@ -334,6 +334,9 @@ fn merge_matrix_results(
             failure_classification: outputs
                 .iter()
                 .find_map(|output| output.results.as_ref()?.failure_classification.clone()),
+            responsiveness: outputs
+                .iter()
+                .find_map(|output| output.results.as_ref()?.responsiveness.clone()),
             budget_findings,
             scenarios: merged_scenarios,
             metric_policies: metric_policies_seen,

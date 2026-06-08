@@ -56,6 +56,47 @@ print(json.dumps(ref, separators=(',', ':')))
 PYTHON_BENCH_ARTIFACT_REF
 }
 
+homeboy_bench_responsiveness_ping() {
+    local label="${1:-}"
+    local file="${HOMEBOY_BENCH_RESPONSIVENESS_FILE:-}"
+
+    [ -n "$file" ] || return 0
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "homeboy_bench_responsiveness_ping: python3 is required" >&2
+        return 2
+    fi
+
+    if [ -z "${__homeboy_bench_responsiveness_started_ms:-}" ]; then
+        __homeboy_bench_responsiveness_started_ms="$(python3 - <<'PYTHON_BENCH_RESPONSIVENESS_START'
+from datetime import datetime, timezone
+print(int(datetime.now(timezone.utc).timestamp() * 1000))
+PYTHON_BENCH_RESPONSIVENESS_START
+)"
+    fi
+
+    mkdir -p "$(dirname "$file")"
+    HOMEBOY_BENCH_RESPONSIVENESS_STARTED_MS="$__homeboy_bench_responsiveness_started_ms" \
+    HOMEBOY_BENCH_RESPONSIVENESS_LABEL="$label" \
+    python3 - "$file" <<'PYTHON_BENCH_RESPONSIVENESS_PING'
+import json
+import os
+import sys
+from datetime import datetime, timezone
+
+now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+started_ms = int(os.environ['HOMEBOY_BENCH_RESPONSIVENESS_STARTED_MS'])
+ping = {
+    'at': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+    't_ms': max(0, now_ms - started_ms),
+}
+label = os.environ.get('HOMEBOY_BENCH_RESPONSIVENESS_LABEL') or ''
+if label:
+    ping['label'] = label
+with open(sys.argv[1], 'a', encoding='utf-8') as handle:
+    handle.write(json.dumps(ping, separators=(',', ':')) + '\n')
+PYTHON_BENCH_RESPONSIVENESS_PING
+}
+
 homeboy_write_empty_bench_results() {
     local component_id="${1:-${HOMEBOY_COMPONENT_ID:-}}"
     local iterations="${2:-0}"

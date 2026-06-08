@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use crate::core::component::Component;
 use crate::core::engine::invocation::{InvocationGuard, InvocationRequirements};
+use crate::core::engine::resource::ExtensionChildResourceSummary;
 use crate::core::engine::run_dir::RunDir;
 use crate::core::error::{Error, Result};
 use crate::core::extension::{
@@ -14,6 +15,7 @@ pub struct ComponentScriptOutput {
     pub success: bool,
     pub stdout: String,
     pub stderr: String,
+    pub child_resource: Option<ExtensionChildResourceSummary>,
 }
 
 impl From<RunnerOutput> for ComponentScriptOutput {
@@ -23,6 +25,7 @@ impl From<RunnerOutput> for ComponentScriptOutput {
             success: output.success,
             stdout: output.stdout,
             stderr: output.stderr,
+            child_resource: output.child_resource,
         }
     }
 }
@@ -34,7 +37,7 @@ impl From<ComponentScriptOutput> for RunnerOutput {
             success: output.success,
             stdout: output.stdout,
             stderr: output.stderr,
-            child_resource: None,
+            child_resource: output.child_resource,
         }
     }
 }
@@ -72,6 +75,7 @@ pub(crate) fn run_component_scripts_with_env(
 
     let mut stdout = String::new();
     let mut stderr = String::new();
+    let mut child_resource = None;
     let env = component_script_env(component, source_path, extra_env)?;
 
     for command in commands {
@@ -101,6 +105,7 @@ pub(crate) fn run_component_scripts_with_env(
 
         stdout.push_str(&output.stdout);
         stderr.push_str(&output.stderr);
+        child_resource = output.child_resource.clone();
 
         if !output.success {
             return Ok(ComponentScriptOutput {
@@ -108,6 +113,7 @@ pub(crate) fn run_component_scripts_with_env(
                 success: false,
                 stdout,
                 stderr,
+                child_resource,
             });
         }
     }
@@ -117,6 +123,7 @@ pub(crate) fn run_component_scripts_with_env(
         success: true,
         stdout,
         stderr,
+        child_resource,
     })
 }
 

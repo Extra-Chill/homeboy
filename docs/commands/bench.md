@@ -168,6 +168,22 @@ add `--allow-local-hot` only when controller-machine execution is intentional:
 homeboy --force-hot --allow-local-hot bench my-component
 ```
 
+## Memory Timeline Evidence
+
+Each bench runner invocation samples the runner process tree while the workload
+is active. Successful runs add memory metrics to `results.metric_groups.memory`
+and each scenario's metrics:
+
+- `peak_rss_mb`: peak sampled RSS for the runner process tree.
+- `peak_child_count`: number of descendant processes at the peak RSS sample.
+- `memory_sample_count`: number of retained timeline samples.
+
+Homeboy also writes `bench-memory-timeline.json` and
+`bench-memory-timeline.csv` in the run directory. Concurrent bench instances use
+`bench-memory-timeline-i<N>.json` and `.csv`. Observation runs record these as
+`bench_memory_timeline` artifacts, including failure runs that exit after samples
+were captured but before benchmark JSON is complete.
+
 ## Observation History
 
 Every `homeboy bench` run is persisted to the local observation store. The
@@ -820,6 +836,12 @@ variables:
 
 - `HOMEBOY_BENCH_RESULTS_FILE` — where to write JSON output.
 - `HOMEBOY_BENCH_ITERATIONS` — iteration count to use.
+- `HOMEBOY_BENCH_RESPONSIVENESS_FILE` — optional JSONL file for workload
+  responsiveness pings. Workloads opt in by appending pings such as
+  `{ "at": "2026-06-08T00:00:00Z", "t_ms": 1200 }`; Homeboy summarizes
+  `missed_ping_count`, `max_ping_gap_ms`, and `last_ping_at` in bench output.
+- `HOMEBOY_BENCH_RESPONSIVENESS_MISSED_MS` — ping gap threshold used to
+  classify missed responsiveness windows. Defaults to `10000`.
 - `HOMEBOY_RUN_DIR` — per-run directory (shared with test/lint/build).
 - `HOMEBOY_EXTENSION_ID`, `HOMEBOY_COMPONENT_ID`, `HOMEBOY_COMPONENT_PATH`,
   and the usual execution-context vars.
