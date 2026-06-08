@@ -10,6 +10,7 @@ use homeboy::core::agent_task_provider::ExtensionProviderAgentTaskExecutor;
 use homeboy::core::agent_task_scheduler::{
     AgentTaskExecutorAdapter, AgentTaskPlan, AgentTaskRetryPolicy, AgentTaskScheduler,
 };
+use homeboy::core::agent_task_secrets::validate_secret_env;
 use homeboy::core::config;
 use homeboy::core::worktree;
 
@@ -95,6 +96,7 @@ where
     E: AgentTaskExecutorAdapter,
 {
     let plan = build_dispatch_plan(&args)?;
+    preflight_dispatch_provider_secrets(&plan)?;
     let submitted = agent_task_lifecycle::submit_plan(&plan, args.run_id.as_deref())?;
     let run_id = submitted.run_id.clone();
 
@@ -285,6 +287,28 @@ fn build_dispatch_plan(args: &DispatchArgs) -> homeboy::core::Result<AgentTaskPl
     });
 
     Ok(plan)
+}
+
+fn preflight_dispatch_provider_secrets(plan: &AgentTaskPlan) -> homeboy::core::Result<()> {
+    let mut names = Vec::new();
+    for task in &plan.tasks {
+        for name in &task.executor.secret_env {
+            if !names.contains(name) {
+                names.push(name.clone());
+            }
+        }
+    }
+
+    validate_secret_env(&names).map_err(|error| {
+        homeboy::core::Error::validation_invalid_argument(
+            "secret_env",
+            error.message,
+            None,
+            Some(vec![
+                "Configure provider credentials with Homeboy's agent-task secret config or run `homeboy agent-task providers --secret-env <ENV>` to inspect redacted readiness.".to_string(),
+            ]),
+        )
+    })
 }
 
 fn resolve_dispatch_workspace(
@@ -718,6 +742,31 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_preflights_missing_secret_env_before_submitting() {
+        with_isolated_home(|_| {
+            let missing = format!(
+                "HOMEBOY_TEST_DISPATCH_MISSING_SECRET_{}",
+                std::process::id()
+            );
+            std::env::remove_var(&missing);
+
+            let err = dispatch_with_executor(
+                dispatch_args(DispatchArgOverrides {
+                    prompt: Some("Cook with missing provider auth.".to_string()),
+                    secret_env: vec![missing.clone()],
+                    run_id: Some("dispatch-missing-secret".to_string()),
+                    ..DispatchArgOverrides::default()
+                }),
+                NoopExecutor,
+            )
+            .expect_err("missing secret should fail before submit");
+
+            assert!(err.to_string().contains(&missing));
+            assert!(agent_task_lifecycle::status("dispatch-missing-secret").is_err());
+        });
+    }
+
+    #[test]
     fn resolves_workspace_path_without_specialized_coupling() {
         let worktree = tempfile::tempdir().expect("workspace");
 
@@ -841,6 +890,7 @@ mod tests {
         cwd: Option<String>,
         workspace: Option<String>,
         repo: Option<String>,
+        secret_env: Vec<String>,
         client_context: Option<String>,
         concurrency: usize,
         attempts: u32,
@@ -860,7 +910,7 @@ mod tests {
             backend: "fixture".to_string(),
             selector: None,
             model: None,
-            secret_env: Vec::new(),
+            secret_env: overrides.secret_env,
             provider_config: None,
             client_context: overrides.client_context,
             concurrency: if overrides.concurrency == 0 {

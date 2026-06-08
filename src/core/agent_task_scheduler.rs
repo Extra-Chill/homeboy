@@ -1010,7 +1010,7 @@ impl AgentTaskScheduleSupport {
 
     fn totals(total_tasks: usize, outcomes: &[AgentTaskOutcome]) -> AgentTaskAggregateTotals {
         let mut totals = AgentTaskAggregateTotals {
-            queued: total_tasks,
+            queued: total_tasks.saturating_sub(outcomes.len()),
             ..AgentTaskAggregateTotals::default()
         };
 
@@ -1227,6 +1227,7 @@ mod tests {
         let aggregate = scheduler.run(plan);
 
         assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+        assert_eq!(aggregate.totals.queued, 0);
         assert_eq!(aggregate.totals.succeeded, 4);
         assert!(max_seen.load(Ordering::SeqCst) <= 2);
         assert!(aggregate
@@ -1247,6 +1248,7 @@ mod tests {
         let aggregate = scheduler.run(plan);
 
         assert_eq!(aggregate.status, AgentTaskAggregateStatus::PartialFailure);
+        assert_eq!(aggregate.totals.queued, 0);
         assert_eq!(aggregate.totals.succeeded, 2);
         assert_eq!(aggregate.totals.failed, 1);
         let failed = aggregate
@@ -1255,6 +1257,21 @@ mod tests {
             .find(|outcome| outcome.task_id == "task-2")
             .expect("failed task outcome");
         assert_eq!(failed.evidence_refs[0].kind, "log");
+    }
+
+    #[test]
+    fn failed_single_task_is_not_also_counted_as_queued() {
+        let mut statuses = HashMap::new();
+        statuses.insert("task-1".to_string(), AgentTaskOutcomeStatus::Failed);
+        let scheduler =
+            AgentTaskScheduler::new(RecordingExecutor::new(statuses, Duration::from_millis(0)));
+
+        let aggregate = scheduler.run(plan_with_tasks(1));
+
+        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Failed);
+        assert_eq!(aggregate.totals.failed, 1);
+        assert_eq!(aggregate.totals.queued, 0);
+        assert_eq!(aggregate.queue.queued, 0);
     }
 
     #[test]

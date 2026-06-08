@@ -338,14 +338,14 @@ pub(super) fn resolve_lab_runner_selection_from_default(
     if let Some(runner_id) = explicit_runner {
         if !command.portable {
             let message = command.unsupported_reason.map_or_else(
-                || "--runner is only supported for hot Lab-offload commands: agent-task dispatch, lint, test, audit, bench, trace, and refactor source runs".to_string(),
+                || "--runner is only supported for hot Lab-offload commands: agent-task dispatch/cook, lint, test, audit, bench, trace, and refactor source runs".to_string(),
                 |reason| format!("--runner is unavailable for this hot command. {reason}"),
             );
             return Err(Error::validation_invalid_argument(
                 "runner",
                 message,
                 Some(runner_id.to_string()),
-                Some(vec!["Current Lab offload support: agent-task dispatch, audit, bench run, full lint, full test, trace, and refactor source runs.".to_string()]),
+                Some(vec!["Current Lab offload support: agent-task dispatch/cook, audit, bench run, full lint, full test, trace, and refactor source runs.".to_string()]),
             ));
         }
 

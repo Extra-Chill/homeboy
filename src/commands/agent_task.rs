@@ -23,6 +23,8 @@ pub struct AgentTaskArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum AgentTaskCommand {
+    /// Sync a workspace if --runner is supplied, dispatch a repo-cooking task, and return the durable run id.
+    Cook(DispatchArgs),
     /// Build and dispatch common repo-cooking agent tasks without hand-authored provider JSON.
     Dispatch(DispatchArgs),
     /// Run an agent-task plan through extension-declared executor providers.
@@ -53,8 +55,15 @@ pub enum AgentTaskCommand {
     FinalizePr(FinalizePrArgs),
     /// Convert deterministic gate results into a cook-loop retry or stop decision.
     GateFeedback(GateFeedbackArgs),
-    /// List extension-declared agent-task executor providers.
-    Providers,
+    /// List extension-declared agent-task executor providers and optional secret readiness.
+    Providers(ProvidersArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct ProvidersArgs {
+    /// Secret environment variable name to check without exposing its value. Repeatable.
+    #[arg(long = "secret-env", value_name = "ENV")]
+    pub secret_env: Vec<String>,
 }
 
 #[derive(Args, Debug)]
@@ -243,6 +252,7 @@ pub struct GateFeedbackArgs {
 
 pub fn run(args: AgentTaskArgs, global: &GlobalArgs) -> CmdResult<Value> {
     match args.command {
+        AgentTaskCommand::Cook(dispatch_args) => dispatch(dispatch_args, global),
         AgentTaskCommand::Dispatch(dispatch_args) => dispatch(dispatch_args, global),
         AgentTaskCommand::RunPlan(run_args) => run_plan(run_args),
         AgentTaskCommand::Run(status_args) => run_submitted(status_args),
@@ -258,7 +268,7 @@ pub fn run(args: AgentTaskArgs, global: &GlobalArgs) -> CmdResult<Value> {
         AgentTaskCommand::Promote(promote_args) => review::promote_artifact(promote_args),
         AgentTaskCommand::FinalizePr(finalize_args) => review::finalize_pull_request(finalize_args),
         AgentTaskCommand::GateFeedback(feedback_args) => review::gate_feedback(feedback_args),
-        AgentTaskCommand::Providers => review::providers(),
+        AgentTaskCommand::Providers(providers_args) => review::providers(providers_args),
     }
 }
 
