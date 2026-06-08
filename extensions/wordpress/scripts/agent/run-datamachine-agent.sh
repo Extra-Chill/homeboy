@@ -217,7 +217,7 @@ PHP
         '{
             schema: "wp-codebox/workspace-recipe/v1",
             runtime: ({blueprint: {steps: []}} + (if $wp == "" then {} else {wp: $wp} end)),
-            inputs: {extraPlugins: $extraPlugins, mounts: $mounts, secretEnv: $secretEnv},
+            inputs: {extra_plugins: $extraPlugins, mounts: $mounts, secret_env: $secretEnv},
             workflow: {steps: [{command: "wp-codebox.agent-sandbox-run", args: ["task=" + $task, "code-file=" + $codeFile, "provider-plugin-slugs=" + $providerSlugs]}]}
         }' >"$recipe_file"
 
