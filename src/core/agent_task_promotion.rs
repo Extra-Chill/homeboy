@@ -220,6 +220,7 @@ fn promote_with_provider(
         provenance: json!({
             "source_schema": outcome.schema,
             "artifact_metadata": artifact.metadata,
+            "worktree_path": applied_worktree_path,
         }),
     })
 }
@@ -942,6 +943,10 @@ mod tests {
 
         assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
         assert_eq!(report.changed_files, vec!["src/lib.rs"]);
+        assert_eq!(
+            report.provenance["worktree_path"].as_str(),
+            Some(worktree_path.to_str().expect("utf-8 temp path"))
+        );
         assert_eq!(provider.apply_calls.len(), 1);
         assert_eq!(
             provider.apply_calls[0].to_workspace,
