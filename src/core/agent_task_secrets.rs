@@ -4,6 +4,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::core::keychain;
 use crate::core::paths;
@@ -101,6 +102,35 @@ pub fn remove_secret_mapping(
         .into_iter()
         .next()
         .expect("single status"))
+}
+
+pub fn map_claude_code_to_opencode_anthropic() -> crate::core::Result<Vec<AgentTaskSecretEnvStatus>>
+{
+    let mut config = AgentTaskSecretConfig::load();
+    for (env_name, field_name) in [
+        ("AI_PROVIDER_CLAUDE_CODE_ACCESS_TOKEN", "access"),
+        ("AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN", "refresh"),
+        ("AI_PROVIDER_CLAUDE_CODE_EXPIRES_AT", "expires"),
+    ] {
+        config.secrets.insert(
+            env_name.to_string(),
+            AgentTaskSecretSource {
+                source: "opencode-anthropic-auth".to_string(),
+                env_var: None,
+                scope: None,
+                name: Some(field_name.to_string()),
+            },
+        );
+    }
+    config.save()?;
+    Ok(secret_env_status_with_config(
+        &[
+            "AI_PROVIDER_CLAUDE_CODE_ACCESS_TOKEN".to_string(),
+            "AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN".to_string(),
+            "AI_PROVIDER_CLAUDE_CODE_EXPIRES_AT".to_string(),
+        ],
+        &config,
+    ))
 }
 
 pub fn validate_secret_env(names: &[String]) -> Result<(), AgentTaskSecretResolutionError> {
@@ -246,9 +276,45 @@ impl AgentTaskSecretSource {
             )
             .ok()
             .flatten(),
+            "opencode-anthropic-auth" => {
+                opencode_anthropic_auth_value(self.name.as_deref().unwrap_or(requested_name))
+            }
             _ => None,
         }
     }
+}
+
+fn opencode_anthropic_auth_value(field_name: &str) -> Option<String> {
+    let path = opencode_auth_file_path()?;
+    let raw = fs::read_to_string(path).ok()?;
+    let data: Value = serde_json::from_str(&raw).ok()?;
+    let auth = data.get("anthropic")?;
+    if auth.get("type").and_then(Value::as_str) != Some("oauth") {
+        return None;
+    }
+
+    match field_name {
+        "access" | "refresh" => auth
+            .get(field_name)
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        "expires" => auth.get("expires").and_then(|value| {
+            value
+                .as_i64()
+                .map(|number| number.to_string())
+                .or_else(|| value.as_str().map(str::to_string))
+        }),
+        _ => None,
+    }
+}
+
+fn opencode_auth_file_path() -> Option<PathBuf> {
+    if let Ok(data_home) = env::var("XDG_DATA_HOME") {
+        return Some(PathBuf::from(data_home).join("opencode/auth.json"));
+    }
+    env::var("HOME")
+        .ok()
+        .map(|home| PathBuf::from(home).join(".local/share/opencode/auth.json"))
 }
 
 fn default_source() -> String {
@@ -375,6 +441,52 @@ mod tests {
             assert!(!status.configured);
             assert_eq!(status.source, "missing");
             std::env::remove_var(source_name);
+        });
+    }
+
+    #[test]
+    fn maps_claude_code_to_opencode_anthropic_auth_file() {
+        crate::test_support::with_isolated_home(|home| {
+            let auth_path = home.path().join(".local/share/opencode/auth.json");
+            std::fs::create_dir_all(auth_path.parent().expect("auth parent")).expect("mkdir auth");
+            std::fs::write(
+                &auth_path,
+                r#"{"anthropic":{"type":"oauth","access":"access-token","refresh":"refresh-token","expires":12345}}"#,
+            )
+            .expect("write auth");
+
+            let status = map_claude_code_to_opencode_anthropic().expect("mapping saved");
+
+            assert_eq!(status.len(), 3);
+            assert!(status.iter().all(|status| status.configured));
+            assert!(status
+                .iter()
+                .all(|status| status.source == "opencode-anthropic-auth"));
+
+            let resolved = resolve_secret_env(&[
+                "AI_PROVIDER_CLAUDE_CODE_ACCESS_TOKEN".to_string(),
+                "AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN".to_string(),
+                "AI_PROVIDER_CLAUDE_CODE_EXPIRES_AT".to_string(),
+            ])
+            .expect("mapped auth resolves");
+
+            assert_eq!(
+                resolved,
+                vec![
+                    (
+                        "AI_PROVIDER_CLAUDE_CODE_ACCESS_TOKEN".to_string(),
+                        "access-token".to_string()
+                    ),
+                    (
+                        "AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN".to_string(),
+                        "refresh-token".to_string()
+                    ),
+                    (
+                        "AI_PROVIDER_CLAUDE_CODE_EXPIRES_AT".to_string(),
+                        "12345".to_string()
+                    ),
+                ]
+            );
         });
     }
 }

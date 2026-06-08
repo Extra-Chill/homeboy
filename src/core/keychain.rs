@@ -50,6 +50,12 @@ pub fn get(project_id: &str, variable_name: &str) -> Result<Option<String>> {
 
 /// Removes a project API variable from the OS keychain.
 pub fn remove(project_id: &str, variable_name: &str) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        return macos::remove(project_id, variable_name);
+    }
+
+    #[cfg(not(target_os = "macos"))]
     match entry(project_id, variable_name)?.delete_credential() {
         Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
         Err(e) => Err(keyring_error(e)),
@@ -103,11 +109,15 @@ mod macos {
     use security_framework_sys::keychain::{
         SecKeychainAddGenericPassword, SecKeychainFindGenericPassword,
     };
-    use security_framework_sys::keychain_item::SecKeychainItemModifyAttributesAndData;
+    use security_framework_sys::keychain_item::{
+        SecKeychainItemDelete, SecKeychainItemModifyAttributesAndData,
+    };
     use std::ffi::CString;
     use std::os::raw::{c_char, c_void};
     use std::os::unix::ffi::OsStrExt;
     use std::ptr;
+
+    const ERR_SEC_NO_ACCESS_FOR_ITEM: OSStatus = -25320;
 
     enum OpaqueSecTrustedApplicationRef {}
     type SecTrustedApplicationRef = *mut OpaqueSecTrustedApplicationRef;
@@ -162,6 +172,29 @@ mod macos {
         set_current_exe_access(item)?;
         unsafe { CFRelease(item as CFTypeRef) };
         Ok(())
+    }
+
+    pub fn remove(project_id: &str, variable_name: &str) -> Result<()> {
+        let account = account_key(project_id, variable_name);
+        let item = match find_item(&account) {
+            Ok(item) => item,
+            Err(error)
+                if error
+                    .details
+                    .get("status")
+                    .and_then(|status| status.as_i64())
+                    == Some(-25300) =>
+            {
+                return Ok(())
+            }
+            Err(error) => return Err(error),
+        };
+        let result = cvt(
+            unsafe { SecKeychainItemDelete(item) },
+            "delete keychain item",
+        );
+        unsafe { CFRelease(item as CFTypeRef) };
+        result
     }
 
     fn find_item(account: &str) -> Result<SecKeychainItemRef> {
@@ -249,6 +282,9 @@ mod macos {
 
         let set_status = unsafe { SecKeychainItemSetAccess(item, access) };
         unsafe { CFRelease(access as CFTypeRef) };
+        if set_status == ERR_SEC_NO_ACCESS_FOR_ITEM {
+            return Ok(());
+        }
         cvt(set_status, "set keychain item access")
     }
 
