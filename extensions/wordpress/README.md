@@ -591,6 +591,7 @@ Configure per-component in the component's homeboy/component config under
 | `user` | string | `""` | WP-CLI user (email/login/ID); appended as `--user` when set |
 | `wp_config_defines` | object | `{}` | `CONSTANT_NAME => value` map appended to the runtime `wp-tests-config.php`; PHP type preserved via `var_export` |
 | `bench_env` | object | `{}` | `NAME => value` env vars forwarded into the runtime (workloads/fixtures read via `getenv()`) |
+| `wp_codebox_core_module` | string | `""` | Host-side ESM module path or package specifier that exports WP Codebox recipe builders for bench recipe generation |
 | `wp_codebox_blueprint` | object | `{}` | Runtime blueprint merged into the generated WP Codebox bench recipe |
 | `wp_codebox_workloads` | array | `[]` | Declared bench workloads passed to `wordpress.bench` through the generated recipe after deps and component load |
 | `wp_codebox_file_mounts` | array | `[]` | Files from the component or validation dependencies mounted into explicit WordPress runtime paths |

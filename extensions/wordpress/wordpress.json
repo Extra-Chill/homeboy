@@ -1006,6 +1006,13 @@
       "description": "Map of NAME => value forwarded into the WordPress runtime as environment variables. Workloads (bench) and test fixtures (test runner) read them via getenv() / $_ENV. Required because host shell env doesn't cross the sandbox boundary; without this seam, getenv('MY_KNOB') returns false regardless of what the parent shell set. Values are coerced to strings (via json_encode for non-scalars) per PHP env-var convention. Component declares static defaults; matrix drivers can synthesize HOMEBOY_SETTINGS_JSON inline to override per-cell."
     },
     {
+      "id": "wp_codebox_core_module",
+      "label": "WP Codebox core module",
+      "type": "string",
+      "default": "",
+      "description": "Host-side ESM module path or package specifier that exports WP Codebox recipe builders. Used by the bench recipe builder before sandbox launch; distinct from bench_env, which is forwarded into the WordPress runtime."
+    },
+    {
       "id": "phpunit_no_tests",
       "label": "No PHPUnit tests discovered",
       "type": "string",
