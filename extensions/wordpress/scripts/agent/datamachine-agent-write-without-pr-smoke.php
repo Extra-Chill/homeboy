@@ -185,6 +185,21 @@ namespace {
         exit( 1 );
     }
 
+    $pr_summary_opened = array(
+        'tool_execution_summary' => array(
+            array(
+                'tool_name' => 'create_github_pull_request',
+                'success'   => true,
+                'summary'   => 'Pull request #789 opened in owner/repo.',
+            ),
+        ),
+    );
+
+    if ( ! homeboy_datamachine_agent_pr_opened( $pr_summary_opened, $config ) ) {
+        fwrite( STDERR, "Expected successful pull-request execution summary to count as pr_opened.\n" );
+        exit( 1 );
+    }
+
     if ( 'agent/change-branch' !== homeboy_datamachine_agent_pr_head_branch( $pr_opened, $config ) ) {
         fwrite( STDERR, "Expected pull-request tool result to expose the PR head branch.\n" );
         exit( 1 );
