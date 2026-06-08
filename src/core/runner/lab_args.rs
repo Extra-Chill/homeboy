@@ -27,7 +27,10 @@ pub(super) struct LabPathRemap {
 /// sandbox cannot find them. This walks the JSON and replaces every string that
 /// begins with a known local path prefix with the matching remote path, then
 /// returns the config as inline JSON so it travels with the offloaded command.
-pub(super) fn remap_provider_config_in_args(args: &[String], mappings: &[LabPathRemap]) -> Vec<String> {
+pub(super) fn remap_provider_config_in_args(
+    args: &[String],
+    mappings: &[LabPathRemap],
+) -> Vec<String> {
     if mappings.is_empty() {
         return args.to_vec();
     }
@@ -35,7 +38,7 @@ pub(super) fn remap_provider_config_in_args(args: &[String], mappings: &[LabPath
     // Longest local prefix first so nested paths remap against the most specific
     // workspace (e.g. a dependency under the primary checkout).
     let mut ordered: Vec<&LabPathRemap> = mappings.iter().collect();
-    ordered.sort_by(|a, b| b.local.len().cmp(&a.local.len()));
+    ordered.sort_by_key(|mapping| std::cmp::Reverse(mapping.local.len()));
 
     let mut out = Vec::with_capacity(args.len());
     let mut iter = args.iter().peekable();
@@ -58,7 +61,10 @@ pub(super) fn remap_provider_config_in_args(args: &[String], mappings: &[LabPath
             continue;
         }
         if let Some(spec) = arg.strip_prefix("--provider-config=") {
-            out.push(format!("--provider-config={}", remap_provider_config_spec(spec, &ordered)));
+            out.push(format!(
+                "--provider-config={}",
+                remap_provider_config_spec(spec, &ordered)
+            ));
             continue;
         }
         out.push(arg.clone());
@@ -261,11 +267,23 @@ mod tests {
         let cfg_idx = out.iter().position(|a| a == "--provider-config").unwrap() + 1;
         let remapped: serde_json::Value = serde_json::from_str(&out[cfg_idx]).expect("inline json");
 
-        assert_eq!(remapped["workspace_root"], "/home/chubes/_lab_workspaces/data-machine@cook-abc");
-        assert_eq!(remapped["mounts"][0]["source"], "/home/chubes/_lab_workspaces/data-machine@cook-abc");
+        assert_eq!(
+            remapped["workspace_root"],
+            "/home/chubes/_lab_workspaces/data-machine@cook-abc"
+        );
+        assert_eq!(
+            remapped["mounts"][0]["source"],
+            "/home/chubes/_lab_workspaces/data-machine@cook-abc"
+        );
         assert_eq!(remapped["mounts"][0]["target"], "/workspace/data-machine");
-        assert_eq!(remapped["runtime_component_paths"]["agent_runtime_tools"], "/home/chubes/_lab_workspaces/data-machine-code-def");
-        assert_eq!(remapped["provider_plugin_paths"][0], "/home/chubes/_lab_workspaces/data-machine@cook-abc/vendor/provider");
+        assert_eq!(
+            remapped["runtime_component_paths"]["agent_runtime_tools"],
+            "/home/chubes/_lab_workspaces/data-machine-code-def"
+        );
+        assert_eq!(
+            remapped["provider_plugin_paths"][0],
+            "/home/chubes/_lab_workspaces/data-machine@cook-abc/vendor/provider"
+        );
         assert_eq!(remapped["model"], "claude-opus-4-8");
         // unrelated args preserved
         assert!(out.iter().any(|a| a == "--prompt"));
@@ -285,7 +303,10 @@ mod tests {
             "--provider-config={\"workspace_root\":\"/local/repo\"}".to_string(),
         ];
         let out = remap_provider_config_in_args(&args, &mappings);
-        let val = out.iter().find(|a| a.starts_with("--provider-config=")).unwrap();
+        let val = out
+            .iter()
+            .find(|a| a.starts_with("--provider-config="))
+            .unwrap();
         assert!(val.contains("/remote/repo"));
         assert!(!val.contains("/local/repo"));
 
