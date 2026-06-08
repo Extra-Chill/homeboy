@@ -800,7 +800,7 @@ if ( ! function_exists( 'homeboy_datamachine_agent_pr_opened' ) ) {
                 continue;
             }
 
-            $url = (string) ( $tool_result['url'] ?? '' );
+            $url = homeboy_datamachine_agent_first_url( $tool_result );
             if ( str_contains( $url, '/pull/' ) ) {
                 return true;
             }

@@ -209,7 +209,10 @@ namespace {
             'success'   => true,
             'repo'      => 'owner/repo',
             'head'      => 'agent/recorded-branch',
-            'url'       => 'https://github.com/owner/repo/pull/789',
+            'result'    => array(
+                'success'  => true,
+                'html_url' => 'https://github.com/owner/repo/pull/789',
+            ),
         ),
     ) );
     $merged_recorded_results = homeboy_datamachine_agent_merge_recorded_tool_results( array(), $config );
