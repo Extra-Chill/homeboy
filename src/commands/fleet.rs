@@ -1,7 +1,9 @@
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
+use homeboy::core::execution::ExecutionStepResult;
 use homeboy::core::fleet::{self, Fleet, FleetComponentDrift, FleetStatusResult};
+use homeboy::core::plan::HomeboyPlan;
 use homeboy::core::project::Project;
 use homeboy::core::EntityCrudOutput;
 
@@ -137,6 +139,10 @@ pub struct FleetExtra {
     pub exec: Option<Vec<homeboy::core::fleet::FleetExecProjectResult>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exec_summary: Option<homeboy::core::fleet::FleetExecSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exec_plan: Option<HomeboyPlan>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exec_steps: Option<Vec<ExecutionStepResult>>,
 }
 
 pub type FleetOutput = EntityCrudOutput<Fleet, FleetExtra>;
@@ -489,19 +495,21 @@ fn exec(
     check: bool,
     user: Option<String>,
 ) -> CmdResult<FleetOutput> {
-    let (results, summary, exit_code) = fleet::collect_exec(id, command, check, user)?;
+    let run = fleet::collect_exec_run(id, command, check, user)?;
 
     Ok((
         FleetOutput {
             command: "fleet.exec".to_string(),
             id: Some(id.to_string()),
             extra: FleetExtra {
-                exec: Some(results),
-                exec_summary: Some(summary),
+                exec: Some(run.results),
+                exec_summary: Some(run.summary),
+                exec_plan: Some(run.plan),
+                exec_steps: Some(run.steps),
                 ..Default::default()
             },
             ..Default::default()
         },
-        exit_code,
+        run.exit_code,
     ))
 }
