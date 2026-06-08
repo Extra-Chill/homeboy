@@ -806,11 +806,25 @@ if ( ! function_exists( 'homeboy_datamachine_agent_pr_opened' ) ) {
 			$url = homeboy_datamachine_agent_first_url( $tool_result );
 			if ( str_contains( $url, '/pull/' ) ) {
 				return true;
-            }
-        }
+			}
+		}
 
-        return false;
-    }
+		$sources    = array( $engine_data );
+		$engine_key = homeboy_datamachine_agent_scalar( $config, 'engine_key' );
+		if ( '' !== $engine_key && is_array( $engine_data[ $engine_key ] ?? null ) ) {
+			$sources[] = $engine_data[ $engine_key ];
+		}
+		foreach ( $sources as $source ) {
+			$summaries = is_array( $source['tool_execution_summary'] ?? null ) ? $source['tool_execution_summary'] : array();
+			foreach ( $summaries as $summary ) {
+				if ( is_array( $summary ) && ! empty( $summary['success'] ) && 'create_github_pull_request' === (string) ( $summary['tool_name'] ?? '' ) ) {
+					return true;
+				}
+			}
+		}
+
+		return false;
+	}
 }
 
 if ( ! function_exists( 'homeboy_datamachine_agent_file_written' ) ) {
