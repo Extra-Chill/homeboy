@@ -1080,6 +1080,8 @@ mod tests {
         .supports_lab_runner());
         assert!(parsed_command(&["homeboy", "bench", "history", "homeboy"]).supports_lab_runner());
         assert!(parsed_command(&["homeboy", "trace"]).supports_lab_runner());
+        assert!(parsed_command(&["homeboy", "agent-task", "dispatch", "--prompt", "cook"])
+            .supports_lab_runner());
         assert!(!parsed_command(&[
             "homeboy", "refactor", "rename", "--from", "old", "--to", "new",
         ])
@@ -1145,6 +1147,10 @@ mod tests {
             (
                 parsed_command(&["homeboy", "refactor", "--from", "audit"]),
                 "refactor",
+            ),
+            (
+                parsed_command(&["homeboy", "agent-task", "dispatch", "--prompt", "cook"]),
+                "agent-task dispatch",
             ),
         ];
 
