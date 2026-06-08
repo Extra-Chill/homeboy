@@ -4,6 +4,18 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.224.0] - 2026-06-08
+
+### Added
+- expose normalized bench gate results
+
+### Changed
+- Lab offload: sync runtime_overlays sources to the runner
+
+### Fixed
+- fix bench workload status aggregation
+- record clean trace toolchain provenance
+
 ## [0.223.1] - 2026-06-08
 
 ### Changed
