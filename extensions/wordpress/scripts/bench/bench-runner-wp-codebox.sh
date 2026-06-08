@@ -64,6 +64,14 @@ fi
 settings_json="${HOMEBOY_SETTINGS_JSON:-}"
 [ -n "$settings_json" ] || settings_json="{}"
 
+WP_CODEBOX_CORE_MODULE="${HOMEBOY_WP_CODEBOX_CORE_MODULE:-}"
+if [ -z "$WP_CODEBOX_CORE_MODULE" ] && [ "$settings_json" != "{}" ]; then
+    WP_CODEBOX_CORE_MODULE=$(printf '%s' "$settings_json" | jq -r '.wp_codebox_core_module // empty' 2>/dev/null || true)
+fi
+if [ -n "$WP_CODEBOX_CORE_MODULE" ]; then
+    export HOMEBOY_WP_CODEBOX_CORE_MODULE="$WP_CODEBOX_CORE_MODULE"
+fi
+
 homeboy_wp_codebox_resolve_host_path() {
     local base_dir="$1"
     local path_value="$2"

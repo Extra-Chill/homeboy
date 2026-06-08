@@ -12,6 +12,7 @@ try {
   const extensionPath = path.join(__dirname, '..');
   const componentPath = path.join(root, 'bootstrap-steps-fixture');
   const dependencyPath = path.join(root, 'generic-dependency');
+  const fixtureCoreModule = path.join(__dirname, 'fixtures', 'wp-codebox-core-bench-runner.mjs');
   const benchDir = path.join(componentPath, 'tests', 'bench');
   fs.mkdirSync(benchDir, { recursive: true });
   fs.mkdirSync(dependencyPath, { recursive: true });
@@ -65,6 +66,7 @@ homeboy_require_bash_version() { :; }
 
   const settings = {
     validation_dependencies: [dependencyPath],
+    wp_codebox_core_module: fixtureCoreModule,
     wp_codebox_bootstrap_steps: [
       { command: 'wordpress.wp-cli', args: ['command=option update generic_dependency_bootstrap yes'] },
     ],
