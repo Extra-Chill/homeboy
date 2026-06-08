@@ -162,6 +162,41 @@ fn install_multi_rig_package_can_select_id() {
 }
 
 #[test]
+fn install_id_skips_invalid_unrelated_rigs_in_package() {
+    let _home = HomeGuard::new();
+    let package = tempfile::tempdir().expect("package");
+    write_rig(package.path(), "alpha", &minimal_rig("alpha"));
+    let broken = package.path().join("rigs").join("broken");
+    fs::create_dir_all(&broken).expect("broken rig dir");
+    fs::write(
+        broken.join("rig.json"),
+        r#"{"id":"broken","bench_workloads":{"node":["legacy"]}}"#,
+    )
+    .expect("broken rig json");
+
+    let result = install(package.path().to_str().unwrap(), Some("alpha"), false).expect("install");
+
+    assert_eq!(result.installed.len(), 1);
+    assert_eq!(result.installed[0].id, "alpha");
+    assert!(crate::core::paths::rig_config("alpha").unwrap().exists());
+    assert!(!crate::core::paths::rig_config("broken").unwrap().exists());
+}
+
+#[test]
+fn install_id_missing_reports_requested_rig_not_found() {
+    let _home = HomeGuard::new();
+    let package = tempfile::tempdir().expect("package");
+    write_rig(package.path(), "alpha", &minimal_rig("alpha"));
+
+    let err = install(package.path().to_str().unwrap(), Some("missing"), false)
+        .expect_err("missing rig should error");
+
+    assert_eq!(err.details["field"], "id");
+    assert!(err.message.contains("missing"));
+    assert!(err.message.contains("not found"));
+}
+
+#[test]
 fn install_multi_rig_package_can_install_all() {
     let _home = HomeGuard::new();
     let package = tempfile::tempdir().expect("package");

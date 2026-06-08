@@ -1003,6 +1003,21 @@ mod tests {
     }
 
     #[test]
+    fn rig_check_supports_lab_runner_but_rig_up_stays_local_only() {
+        let rig_check = parsed_command(&["homeboy", "rig", "check", "studio"]);
+        let rig_check_descriptor = rig_check.descriptor(false);
+        assert!(rig_check_descriptor.supports_lab_runner);
+        assert!(rig_check_descriptor.lab_runner_unsupported_reason.is_none());
+
+        let rig_up = parsed_command(&["homeboy", "rig", "up", "studio"]);
+        let rig_up_descriptor = rig_up.descriptor(false);
+        assert!(!rig_up_descriptor.supports_lab_runner);
+        assert!(rig_up_descriptor
+            .lab_runner_unsupported_reason
+            .is_some_and(|reason| reason.contains("rig up")));
+    }
+
+    #[test]
     fn public_variant_contracts_have_discriminators_or_fixtures() {
         let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let fixtures = root.join("tests/fixtures/golden_json_contracts");

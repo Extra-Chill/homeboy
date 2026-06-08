@@ -89,6 +89,9 @@ impl Commands {
                 false,
                 LAB_NO_EXTRA_TOOLS,
             ),
+            Commands::Rig(args) if args.is_check_command() => {
+                lab_portable_workload_contract("rig check", None, false, LAB_NO_EXTRA_TOOLS)
+            }
             Commands::Rig(args) if args.is_hot_resource_command() => {
                 lab_local_only_contract("rig up", RIG_UP_LAB_UNSUPPORTED_REASON)
             }

@@ -24,7 +24,14 @@ pub struct RigArgs {
 
 impl RigArgs {
     pub fn is_hot_resource_command(&self) -> bool {
-        matches!(self.command, RigCommand::Up { .. })
+        matches!(
+            self.command,
+            RigCommand::Up { .. } | RigCommand::Check { .. }
+        )
+    }
+
+    pub fn is_check_command(&self) -> bool {
+        matches!(self.command, RigCommand::Check { .. })
     }
 }
 
