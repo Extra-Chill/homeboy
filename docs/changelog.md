@@ -4,6 +4,21 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.222.19] - 2026-06-08
+
+### Changed
+- Migrate agent task gates to normalized results
+- Add normalized gate result primitive
+- Plan local-only lab routing for scoped hot commands
+
+### Fixed
+- preserve release CI env in test gates
+- normalize validation dependency lifecycle ids
+- include tempfile in runtime dependencies
+- isolate validation dependency lifecycle
+- rewrite agent task cwd for lab offload
+- allow agent task dispatch lab runner
+
 ## [0.222.18] - 2026-06-08
 
 ### Changed
