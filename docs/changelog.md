@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.222.15] - 2026-06-08
+
+### Changed
+- support private agent-task completion gates
+- enable differential audit gating
+
+### Fixed
+- publish prepared release tags
+
 ## [0.222.14] - 2026-06-08
 
 ### Changed
