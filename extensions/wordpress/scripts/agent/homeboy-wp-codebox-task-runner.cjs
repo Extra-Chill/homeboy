@@ -81,6 +81,26 @@ function mountEntries(request) {
   ];
 }
 
+function firstExistingPath(...candidates) {
+  return candidates.find((candidate) => candidate && fs.existsSync(candidate)) || '';
+}
+
+function siblingPath(workspaceRoot, sibling) {
+  return workspaceRoot ? path.join(path.dirname(workspaceRoot), sibling) : '';
+}
+
+function workspaceRootFromMounts(mounts) {
+  const mountedWorkspace = mounts.find((mount) => mount?.metadata?.kind === 'homeboy-dmc-workspace') || mounts[0];
+  return mountedWorkspace?.source || '';
+}
+
+function bundledAgentsApiPath(dataMachinePath) {
+  return firstExistingPath(
+    path.join(dataMachinePath || '', 'vendor', 'wordpress', 'agents-api'),
+    path.join(dataMachinePath || '', 'vendor', 'automattic', 'agents-api'),
+  );
+}
+
 function runtimeStackMountEntries(request) {
   return [
     ...(request.runtime_stack_mounts || []),
@@ -181,20 +201,23 @@ function requestAgentBundle(request) {
   return {};
 }
 
-function requestRuntimeComponents(request) {
+function requestRuntimeComponents(request, mounts = []) {
   const explicit = request.runtime_component_paths && typeof request.runtime_component_paths === 'object'
     ? request.runtime_component_paths
     : {};
+  const workspaceRoot = workspaceRootFromMounts(mounts);
+  const dataMachinePath = explicit.agent_runtime || legacyValue(request) || firstExistingPath(siblingPath(workspaceRoot, 'data-machine'));
   return Object.fromEntries(Object.entries({
     ...explicit,
-    agents_api: explicit.agents_api || request.agents_api_path || request.agents_api,
-    agent_runtime: explicit.agent_runtime || legacyValue(request),
-    agent_runtime_tools: explicit.agent_runtime_tools || legacyValue(request, 'code'),
+    agents_api: explicit.agents_api || request.agents_api_path || request.agents_api || bundledAgentsApiPath(dataMachinePath),
+    agent_runtime: dataMachinePath,
+    agent_runtime_tools: explicit.agent_runtime_tools || legacyValue(request, 'code') || firstExistingPath(siblingPath(workspaceRoot, 'data-machine-code')),
   }).filter(([, value]) => value !== '' && value !== undefined));
 }
 
 function runnerInput(request, artifacts) {
-  const runtimeComponentPaths = requestRuntimeComponents(request);
+  const mounts = mountEntries(request);
+  const runtimeComponentPaths = requestRuntimeComponents(request, mounts);
   return Object.fromEntries(Object.entries({
     parent_request: request,
     agent: argValue('--agent') || request.agent || 'wp-codebox-sandbox',
@@ -204,7 +227,7 @@ function runnerInput(request, artifacts) {
     provider_plugin_paths: [...(request.provider_plugin_paths || []), ...argValues('--provider-plugin-path')],
     runtime_overlay_profiles: request.runtime_overlay_profiles || request.runtimeOverlayProfiles || [],
     secret_env: secretEnvNames(request),
-    mounts: mountEntries(request),
+    mounts,
     runtime_stack_mounts: runtimeStackMountEntries(request),
     runtime_overlays: runtimeOverlayEntries(request),
     max_turns: Number.parseInt(argValue('--max-turns') || request.max_turns || request.maxTurns || 0, 10) || undefined,
