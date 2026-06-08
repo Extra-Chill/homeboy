@@ -46,6 +46,7 @@ fn bench_observation_reports_missing_and_blocked_artifacts() {
             exit_code: 0,
             iterations: 10,
             results: Some(results),
+            gate_results: Vec::new(),
             gate_failures: Vec::new(),
             baseline_comparison: None,
             hints: None,

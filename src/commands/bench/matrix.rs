@@ -254,6 +254,7 @@ fn apply_declared_scenario_gates(
     }
 
     let failures = extension_bench::evaluate_gates(results);
+    workflow.gate_results = extension_bench::normalized_gate_results(results);
     if failures.is_empty() {
         return;
     }
@@ -406,6 +407,10 @@ pub(super) fn run_single_rig(
         .as_ref()
         .map(|results| results.budget_findings.clone())
         .unwrap_or_default();
+    let gate_results = merged_results
+        .as_ref()
+        .map(extension_bench::normalized_gate_results)
+        .unwrap_or_default();
 
     Ok((
         BenchCommandOutput {
@@ -417,6 +422,7 @@ pub(super) fn run_single_rig(
             artifacts,
             results: merged_results,
             budget_findings,
+            gate_results,
             gate_failures: outputs
                 .iter()
                 .flat_map(|output| output.gate_failures.clone())
@@ -1024,6 +1030,7 @@ mod tests {
                 .as_ref()
                 .map(|results| results.budget_findings.clone())
                 .unwrap_or_default(),
+            gate_results: Vec::new(),
             results,
             gate_failures: Vec::new(),
             baseline_comparison: None,

@@ -24,6 +24,7 @@ use crate::core::extension::{
     build_scenario_runner, resolve_execution_context, ExtensionCapability,
     ExtensionExecutionContext, ExtensionRunner, ScenarioRunnerOptions,
 };
+use crate::core::gate::HomeboyGateResult;
 
 #[derive(Debug, Clone)]
 pub struct BenchRunWorkflowArgs {
@@ -79,6 +80,8 @@ pub struct BenchRunWorkflowResult {
     pub exit_code: i32,
     pub iterations: u64,
     pub results: Option<BenchResults>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub gate_results: Vec<HomeboyGateResult>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub gate_failures: Vec<String>,
     pub baseline_comparison: Option<BenchBaselineComparison>,
@@ -519,7 +522,16 @@ pub fn run_main_bench_workflow(
                 diagnostics: Vec::new(),
             });
         }
-        let status = if script_output.success {
+        let gate_failures = parsed
+            .as_mut()
+            .map(super::gate::evaluate_gates)
+            .unwrap_or_default();
+        let gate_results = parsed
+            .as_ref()
+            .map(super::gate::normalized_gate_results)
+            .unwrap_or_default();
+        let gates_passed = gate_failures.is_empty();
+        let status = if script_output.success && gates_passed {
             "passed"
         } else {
             "failed"
@@ -532,15 +544,29 @@ pub fn run_main_bench_workflow(
             stderr_tail: bench_failure_stderr_tail(&script_output.stderr, &args),
             diagnostics: Vec::new(),
         });
+        let exit_code = if script_output.exit_code != 0 {
+            script_output.exit_code
+        } else if !gates_passed {
+            1
+        } else {
+            0
+        };
+        let mut hints = vec![
+            "Component scripts use the extension runner env contract without extension resolution."
+                .to_string(),
+        ];
+        hints.extend(gate_failures.iter().cloned());
+
         return Ok(BenchRunWorkflowResult {
             status: status.to_string(),
             component: args.component_label,
-            exit_code: script_output.exit_code,
+            exit_code,
             iterations: args.iterations,
             results: parsed,
-            gate_failures: Vec::new(),
+            gate_results,
+            gate_failures,
             baseline_comparison: None,
-            hints: Some(vec!["Component scripts use the extension runner env contract without extension resolution.".to_string()]),
+            hints: Some(hints),
             failure,
             diagnostics: Vec::new(),
         });
@@ -606,6 +632,10 @@ pub fn run_main_bench_workflow(
     let gate_failures = parsed
         .as_mut()
         .map(super::gate::evaluate_gates)
+        .unwrap_or_default();
+    let gate_results = parsed
+        .as_ref()
+        .map(super::gate::normalized_gate_results)
         .unwrap_or_default();
     let gates_passed = gate_failures.is_empty();
     let diagnostics = diagnostic::collect_diagnostics(parsed.as_ref());
@@ -714,6 +744,7 @@ pub fn run_main_bench_workflow(
         exit_code,
         iterations: args.iterations,
         results: parsed,
+        gate_results,
         gate_failures,
         baseline_comparison,
         hints,

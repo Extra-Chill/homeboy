@@ -52,7 +52,7 @@ pub use baseline::{
 };
 pub use diagnostic::{BenchDiagnostic, BenchDiagnosticSource};
 pub use distribution::BenchRunDistribution;
-pub use gate::{evaluate_gates, BenchGate, BenchGateOp, BenchGateResult};
+pub use gate::{evaluate_gates, normalized_gate_results, BenchGate, BenchGateOp, BenchGateResult};
 pub use metric_policy_preset::{BenchMetricPolicyPreset, BenchMetricPolicyPresetKind};
 pub use metrics::MetricDelta;
 pub use parsing::{

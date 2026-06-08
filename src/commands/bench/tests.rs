@@ -1396,6 +1396,7 @@ fn bench_output_single_serializes_with_tagged_payload() {
         artifacts: Vec::new(),
         results: None,
         budget_findings: Vec::new(),
+        gate_results: Vec::new(),
         gate_failures: Vec::new(),
         baseline_comparison: None,
         hints: None,
