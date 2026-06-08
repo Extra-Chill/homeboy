@@ -181,6 +181,17 @@ if [ "$WP_CODEBOX_BIN" = "wp-codebox" ] && ! command -v wp-codebox >/dev/null 2>
     exit 1
 fi
 
+settings_json="${HOMEBOY_SETTINGS_JSON:-}"
+[ -n "$settings_json" ] || settings_json="{}"
+
+WP_CODEBOX_CORE_MODULE="${HOMEBOY_WP_CODEBOX_CORE_MODULE:-}"
+if [ -z "$WP_CODEBOX_CORE_MODULE" ] && [ "$settings_json" != "{}" ]; then
+    WP_CODEBOX_CORE_MODULE=$(printf '%s' "$settings_json" | jq -r '.wp_codebox_core_module // empty' 2>/dev/null || true)
+fi
+if [ -n "$WP_CODEBOX_CORE_MODULE" ]; then
+    export HOMEBOY_WP_CODEBOX_CORE_MODULE="$WP_CODEBOX_CORE_MODULE"
+fi
+
 # Guard against a mis-resolved component path mounting the wrong directory.
 #
 # The recipe mounts PLUGIN_PATH wholesale into
