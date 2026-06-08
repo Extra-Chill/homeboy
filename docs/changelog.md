@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.222.21] - 2026-06-08
+
+### Changed
+- Add agent-task provider auth ownership
+
+### Fixed
+- require canonical trace evidence by default
+- allow managed parent-relative deploy paths
+
 ## [0.222.20] - 2026-06-08
 
 ### Fixed
