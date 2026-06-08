@@ -97,10 +97,6 @@ the other capabilities.
   parsing arbitrary provider YAML into runnable commands.
 - `--ignore-default-baseline`: Skip automatic single-rig expansion when
   the rig declares `bench.default_baseline_rig`.
-- `--allow-stale-dependencies`: Allow a bench run to proceed when a
-  validation dependency or extension runner checkout is dirty or behind
-  its upstream. By default, expensive bench runs fail during preflight so
-  stale dependency state cannot produce misleading evidence.
 
 Arguments after `--` are passed verbatim to the extension's bench runner
 script.

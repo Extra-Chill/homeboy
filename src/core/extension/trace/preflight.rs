@@ -9,7 +9,6 @@ use super::parsing::TraceDependencyProvenance;
 
 pub(super) fn preflight_trace_dependencies(
     dependencies: &[TraceDependencySpec],
-    allow_stale_dependencies: bool,
 ) -> Result<Vec<TraceDependencyProvenance>> {
     let provenance = dependencies
         .iter()
@@ -29,9 +28,7 @@ pub(super) fn preflight_trace_dependencies(
         .collect::<Vec<_>>();
     crate::core::hygiene::require_checkout_hygiene(
         checkouts,
-        crate::core::hygiene::DependencyHygieneOptions {
-            allow_stale: allow_stale_dependencies,
-        },
+        crate::core::hygiene::DependencyHygieneOptions { allow_stale: false },
     )?;
 
     Ok(provenance)
@@ -209,22 +206,19 @@ mod tests {
         std::fs::create_dir_all(plugin_root.join("vendor")).unwrap();
         std::fs::write(plugin_root.join("package/entrypoint.txt"), "entry").unwrap();
 
-        let provenance = preflight_trace_dependencies(
-            &[TraceDependencySpec {
-                id: "sample".to_string(),
-                kind: "package".to_string(),
-                source: "release-package-or-build-artifact".to_string(),
-                path: Some(plugin_root.to_string_lossy().to_string()),
-                plugin_file: Some("package/entrypoint.txt".to_string()),
-                requires_built_assets: true,
-                required_paths: vec!["vendor".to_string()],
-                source_url: Some("https://example.com/sample.zip".to_string()),
-                version: Some("10.0.0".to_string()),
-                r#ref: Some("v10.0.0".to_string()),
-                package_marker: Some("packaged-zip".to_string()),
-            }],
-            false,
-        )
+        let provenance = preflight_trace_dependencies(&[TraceDependencySpec {
+            id: "sample".to_string(),
+            kind: "package".to_string(),
+            source: "release-package-or-build-artifact".to_string(),
+            path: Some(plugin_root.to_string_lossy().to_string()),
+            plugin_file: Some("package/entrypoint.txt".to_string()),
+            requires_built_assets: true,
+            required_paths: vec!["vendor".to_string()],
+            source_url: Some("https://example.com/sample.zip".to_string()),
+            version: Some("10.0.0".to_string()),
+            r#ref: Some("v10.0.0".to_string()),
+            package_marker: Some("packaged-zip".to_string()),
+        }])
         .expect("packaged plugin dependency should pass preflight");
 
         assert_eq!(provenance.len(), 1);
@@ -246,22 +240,19 @@ mod tests {
         std::fs::create_dir_all(plugin_root.join("package")).unwrap();
         std::fs::write(plugin_root.join("package/entrypoint.txt"), "entry").unwrap();
 
-        let err = preflight_trace_dependencies(
-            &[TraceDependencySpec {
-                id: "sample".to_string(),
-                kind: "package".to_string(),
-                source: "release-package-or-build-artifact".to_string(),
-                path: Some(plugin_root.to_string_lossy().to_string()),
-                plugin_file: Some("package/entrypoint.txt".to_string()),
-                requires_built_assets: true,
-                required_paths: vec!["vendor".to_string()],
-                source_url: None,
-                version: None,
-                r#ref: None,
-                package_marker: None,
-            }],
-            false,
-        )
+        let err = preflight_trace_dependencies(&[TraceDependencySpec {
+            id: "sample".to_string(),
+            kind: "package".to_string(),
+            source: "release-package-or-build-artifact".to_string(),
+            path: Some(plugin_root.to_string_lossy().to_string()),
+            plugin_file: Some("package/entrypoint.txt".to_string()),
+            requires_built_assets: true,
+            required_paths: vec!["vendor".to_string()],
+            source_url: None,
+            version: None,
+            r#ref: None,
+            package_marker: None,
+        }])
         .expect_err("raw plugin checkout should fail dependency preflight");
 
         assert_eq!(err.code, ErrorCode::ValidationInvalidArgument);
