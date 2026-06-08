@@ -184,6 +184,7 @@ broker exposure.
 ```sh
 homeboy runner work <runner-id> --broker-url <url>
 homeboy runner work <runner-id> --broker-url <url> --project <project-id> --lease-ms 30000
+homeboy runner work <runner-id> --broker-url <url> --loop
 ```
 
 Claims one brokered reverse-runner job for the runner, executes it on the runner
@@ -195,6 +196,41 @@ broker and does not require inbound SSH or a public listening port on the lab.
 The command exits `0` when no job is available, with `claimed: false` in the JSON
 payload. When a job is claimed, the process exit code matches the executed
 command's exit code.
+
+Use `--loop` for a long-running reverse runner service. Loop mode emits one
+structured JSON status line per lifecycle event to stderr so systemd/journald can
+index startup, idle backoff, job completion, transient broker failures, and
+shutdown without mixing those events into the final stdout JSON payload. Empty
+queues use exponential backoff controlled by `--idle-backoff-ms` and
+`--max-idle-backoff-ms`, so workers do not hot-spin when no work is available.
+Transient broker failures sleep for `--broker-failure-backoff-ms` and exit
+non-zero after `--broker-retry-limit` consecutive failures. `SIGINT` and
+`SIGTERM` request graceful shutdown after the current claim attempt or job.
+
+Minimal Homeboy Lab systemd unit:
+
+```ini
+[Unit]
+Description=Homeboy reverse runner worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=chubes
+WorkingDirectory=/home/chubes
+ExecStart=/usr/local/bin/homeboy runner work homeboy-lab --broker-url https://controller.example.com --loop --idle-backoff-ms 1000 --max-idle-backoff-ms 30000 --broker-retry-limit 12
+Restart=on-failure
+RestartSec=10
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=multi-user.target
+```
+
+The unit intentionally leaves authentication out until the broker auth contract
+lands; configure the broker URL and any future auth material using the production
+mechanism for issue #2990 rather than embedding secrets in the unit file.
 
 ### `status`
 
