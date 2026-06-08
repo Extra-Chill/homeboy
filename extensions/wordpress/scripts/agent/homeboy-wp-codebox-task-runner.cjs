@@ -173,6 +173,176 @@ function writePreflightEvidence(artifacts, evidence) {
   }
 }
 
+function secretEnvValues(secretNames) {
+  return Object.fromEntries(secretNames
+    .filter((name) => typeof name === 'string' && name !== '' && process.env[name])
+    .map((name) => [name, process.env[name]]));
+}
+
+function redactString(value, secrets) {
+  return Object.entries(secrets).reduce((redacted, [name, secret]) => {
+    if (!secret) {
+      return redacted;
+    }
+    return redacted.split(secret).join(`[REDACTED:${name}]`);
+  }, String(value));
+}
+
+function redactedValue(value, secrets) {
+  if (typeof value === 'string') {
+    return redactString(value, secrets);
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => redactedValue(item, secrets));
+  }
+  if (plainObject(value)) {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => {
+      if (/secret|token|password|credential|api[_-]?key/i.test(key)) {
+        return [key, item ? '[REDACTED]' : item];
+      }
+      return [key, redactedValue(item, secrets)];
+    }));
+  }
+  return value;
+}
+
+function writeEvidenceFile(artifacts, fileName, contents) {
+  try {
+    fs.mkdirSync(artifacts, { recursive: true });
+    const filePath = path.join(artifacts, fileName);
+    fs.writeFileSync(filePath, contents);
+    return filePath;
+  } catch {
+    return '';
+  }
+}
+
+function readJsonIfAvailable(filePath) {
+  try {
+    return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function pathEvidenceCandidates(...texts) {
+  const candidates = new Set();
+  const pattern = /(?:[A-Za-z]:)?\/[^\s'"`]+(?:wp-codebox-agent-task-recipe|homeboy-wp-codebox-agent-task-input)[^\s'"`)]*/g;
+  for (const text of texts) {
+    for (const match of String(text || '').matchAll(pattern)) {
+      candidates.add(match[0].replace(/[.,;:]+$/, ''));
+    }
+  }
+  return [...candidates];
+}
+
+function copiedEvidencePathName(sourcePath, index) {
+  const parent = path.basename(path.dirname(sourcePath)).replace(/[^A-Za-z0-9_.-]+/g, '-');
+  const base = path.basename(sourcePath).replace(/[^A-Za-z0-9_.-]+/g, '-');
+  return `captured-wp-codebox-path-${index + 1}-${parent}-${base}`;
+}
+
+function copyGeneratedEvidencePaths(artifacts, candidates, secrets) {
+  const copied = [];
+  candidates.forEach((candidate, index) => {
+    try {
+      if (!fs.existsSync(candidate) || !fs.statSync(candidate).isFile()) {
+        return;
+      }
+      const parsed = candidate.endsWith('.json') ? readJsonIfAvailable(candidate) : null;
+      const contents = parsed
+        ? `${JSON.stringify(redactedValue(parsed, secrets), null, 2)}\n`
+        : redactString(fs.readFileSync(candidate, 'utf8'), secrets);
+      const target = writeEvidenceFile(artifacts, copiedEvidencePathName(candidate, index), contents);
+      if (target) {
+        copied.push({ source: candidate, path: target });
+      }
+    } catch {
+      // Best-effort evidence capture must not mask the actual WP Codebox failure.
+    }
+  });
+  return copied;
+}
+
+function preserveWpCodeboxFailureEvidence({ artifacts, inputPath, result, command, args, secretNames }) {
+  const secrets = secretEnvValues(secretNames);
+  const stdoutPath = result.stdout
+    ? writeEvidenceFile(artifacts, 'wp-codebox-command-stdout.txt', redactString(result.stdout, secrets))
+    : '';
+  const stderrPath = result.stderr
+    ? writeEvidenceFile(artifacts, 'wp-codebox-command-stderr.txt', redactString(result.stderr, secrets))
+    : '';
+  const stableInput = readJsonIfAvailable(inputPath);
+  const inputEvidencePath = stableInput
+    ? writeEvidenceFile(artifacts, 'wp-codebox-agent-task-input.redacted.json', `${JSON.stringify(redactedValue(stableInput, secrets), null, 2)}\n`)
+    : '';
+  const generatedPathCandidates = pathEvidenceCandidates(result.stdout, result.stderr);
+  const copiedGeneratedPaths = copyGeneratedEvidencePaths(artifacts, generatedPathCandidates, secrets);
+  const summary = {
+    schema: 'homeboy/wp-codebox-command-evidence/v1',
+    command,
+    args,
+    status: result.status,
+    signal: result.signal,
+    error: result.error ? result.error.message : '',
+    input_path: inputPath,
+    input_evidence_path: inputEvidencePath,
+    stdout_path: stdoutPath,
+    stderr_path: stderrPath,
+    generated_path_candidates: generatedPathCandidates,
+    copied_generated_paths: copiedGeneratedPaths,
+  };
+  const summaryPath = writeEvidenceFile(artifacts, 'wp-codebox-command-evidence.json', `${JSON.stringify(summary, null, 2)}\n`);
+  return {
+    ...summary,
+    summary_path: summaryPath,
+  };
+}
+
+function evidenceArtifacts(evidence) {
+  return [
+    { id: 'wp-codebox-command-evidence', kind: 'codebox-command-evidence', path: evidence.summary_path },
+    { id: 'wp-codebox-agent-task-input', kind: 'codebox-agent-task-input', path: evidence.input_evidence_path },
+    { id: 'wp-codebox-command-stdout', kind: 'codebox-command-log', path: evidence.stdout_path },
+    { id: 'wp-codebox-command-stderr', kind: 'codebox-command-log', path: evidence.stderr_path },
+    ...evidence.copied_generated_paths.map((item, index) => ({
+      id: `wp-codebox-generated-evidence-${index + 1}`,
+      kind: 'codebox-generated-input',
+      path: item.path,
+      metadata: { source: item.source },
+    })),
+  ].filter((artifact) => artifact.path);
+}
+
+function attachFailureEvidence(payload, evidence) {
+  const artifacts = evidenceArtifacts(evidence);
+  const diagnostics = evidence.summary_path ? [{
+    class: 'wp-codebox.command.evidence_preserved',
+    message: 'WP Codebox command stdout, stderr, and redacted task input were preserved for failure diagnosis.',
+    data: {
+      evidence_path: evidence.summary_path,
+      stdout_path: evidence.stdout_path,
+      stderr_path: evidence.stderr_path,
+      input_evidence_path: evidence.input_evidence_path,
+      generated_path_candidates: evidence.generated_path_candidates,
+      copied_generated_paths: evidence.copied_generated_paths,
+    },
+  }] : [];
+  return {
+    ...payload,
+    artifacts: Array.isArray(payload.artifacts) ? [...payload.artifacts, ...artifacts] : payload.artifacts,
+    evidence_refs: [
+      ...(Array.isArray(payload.evidence_refs) ? payload.evidence_refs : []),
+      ...artifacts.map((artifact) => ({ kind: artifact.kind, uri: artifact.path, label: artifact.kind.replace(/-/g, ' ') })),
+    ],
+    diagnostics: [...(Array.isArray(payload.diagnostics) ? payload.diagnostics : []), ...diagnostics],
+    metadata: {
+      ...(plainObject(payload.metadata) ? payload.metadata : {}),
+      wp_codebox_command_evidence: evidence.summary_path,
+    },
+  };
+}
+
 const LEGACY_RUNTIME_PREFIX = ['data', 'machine'].join('_');
 const WP_CODEBOX_RUNTIME_PATH_KEY = `${LEGACY_RUNTIME_PREFIX}_path`;
 const WP_CODEBOX_RUNTIME_TOOLS_PATH_KEY = `${LEGACY_RUNTIME_PREFIX}_code_path`;
@@ -752,6 +922,32 @@ function timeoutPayload(timeoutMs, artifacts, evidencePath, inputPath, command, 
   };
 }
 
+function commandFailurePayload(result, artifacts, evidence) {
+  const message = result.stderr || result.stdout || result.error?.message || 'WP Codebox agent-task-run failed.';
+  return attachFailureEvidence({
+    success: false,
+    status: 'failed',
+    summary: message.split('\n').find((line) => line.trim() !== '') || 'WP Codebox agent-task-run failed.',
+    artifacts: [],
+    evidence_refs: [],
+    diagnostics: [{
+      class: 'wp-codebox.agent_task_run_failed',
+      message: message.trim() || 'WP Codebox agent-task-run failed.',
+      data: {
+        status: result.status,
+        signal: result.signal,
+        error: result.error ? result.error.message : '',
+        artifacts,
+      },
+    }],
+    metadata: {
+      status: result.status,
+      signal: result.signal,
+      error: result.error ? result.error.message : '',
+    },
+  }, evidence);
+}
+
 function runWpCodeboxParentTask(request) {
   const explicitArtifacts = argValue('--artifacts') || request.artifacts_path || '';
   const artifacts = explicitArtifacts || fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-wp-codebox-artifacts-'));
@@ -800,6 +996,15 @@ function runWpCodeboxParentTask(request) {
     maxBuffer: 1024 * 1024 * 20,
     timeout: timeoutMs,
   });
+  const shouldPreserveEvidence = Boolean(result.error) || result.status !== 0;
+  const failureEvidence = shouldPreserveEvidence ? preserveWpCodeboxFailureEvidence({
+    artifacts,
+    inputPath,
+    result,
+    command: resolved.command,
+    args: resolved.args,
+    secretNames: input.secret_env || [],
+  }) : null;
 
   if (result.error && result.error.code === 'ETIMEDOUT') {
     process.stdout.write(`${JSON.stringify(timeoutPayload(timeoutMs, artifacts, evidencePath, inputPath, resolved.command, resolved.args), null, 2)}\n`);
@@ -809,13 +1014,22 @@ function runWpCodeboxParentTask(request) {
   if (result.stdout) {
     try {
       const payload = normalizeAgentTaskRun(input, JSON.parse(result.stdout));
-      process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+      const enrichedPayload = failureEvidence ? attachFailureEvidence(payload, failureEvidence) : payload;
+      process.stdout.write(`${JSON.stringify(enrichedPayload, null, 2)}\n`);
       return payload.success === false ? 1 : 0;
     } catch {
+      if (failureEvidence) {
+        process.stdout.write(`${JSON.stringify(commandFailurePayload(result, artifacts, failureEvidence), null, 2)}\n`);
+        return result.status ?? 1;
+      }
       process.stdout.write(result.stdout);
     }
   }
   if (result.stderr) {
+    if (failureEvidence) {
+      process.stdout.write(`${JSON.stringify(commandFailurePayload(result, artifacts, failureEvidence), null, 2)}\n`);
+      return result.status ?? 1;
+    }
     process.stderr.write(result.stderr);
   }
   if (result.error) {
