@@ -696,6 +696,19 @@ mod tests {
     }
 
     #[test]
+    fn eligible_lab_runner_gate_decision_normalizes_to_passed_gate_result() {
+        let result: HomeboyGateResult = LabRunnerGateDecision::Eligible.into();
+
+        assert_eq!(result.schema, HOMEBOY_GATE_RESULT_SCHEMA);
+        assert_eq!(result.id, "lab.capability_preflight");
+        assert_eq!(result.kind, HomeboyGateKind::Capability);
+        assert_eq!(result.status, HomeboyGateStatus::Passed);
+        assert_eq!(result.retryable, Some(false));
+        assert_eq!(result.provenance["source_type"], "LabRunnerGateDecision");
+        assert!(result.summary.contains("preflight passed"));
+    }
+
+    #[test]
     fn lab_runner_gate_reports_local_fallback_for_auto_runner() {
         let plan = LabRunnerCapabilityPlan {
             command: "trace",

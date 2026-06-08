@@ -313,4 +313,21 @@ mod tests {
         assert_eq!(result.evidence["exit_code"], 1);
         assert_eq!(result.provenance["source_type"], "AgentTaskGateReport");
     }
+
+    #[test]
+    fn successful_agent_task_gate_report_normalizes_to_passed_gate_result() {
+        let temp = tempfile::tempdir().expect("tempdir");
+
+        let report = run_gate_command(temp.path(), 5, "printf 'ok'").expect("gate report");
+        let result: HomeboyGateResult = report.into();
+
+        assert_eq!(result.id, "gate-5");
+        assert_eq!(result.kind, HomeboyGateKind::Command);
+        assert_eq!(result.status, HomeboyGateStatus::Passed);
+        assert_eq!(result.retryable, Some(false));
+        assert_eq!(result.evidence["exit_code"], 0);
+        assert_eq!(result.evidence["stdout"], "ok");
+        assert!(result.agent_feedback.is_empty());
+        assert!(result.summary.contains("deterministic gate passed"));
+    }
 }

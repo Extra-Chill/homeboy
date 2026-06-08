@@ -205,4 +205,24 @@ mod normalization_tests {
         assert_eq!(result.evidence["actual"], 140.0);
         assert_eq!(result.provenance["source_type"], "BenchGateResult");
     }
+
+    #[test]
+    fn successful_bench_gate_result_normalizes_to_passed_gate_result() {
+        let result: HomeboyGateResult = BenchGateResult {
+            metric: "success_rate".to_string(),
+            op: BenchGateOp::Gte,
+            expected: 1.0,
+            actual: Some(1.0),
+            passed: true,
+            reason: None,
+        }
+        .into();
+
+        assert_eq!(result.id, "bench.gate.success_rate");
+        assert_eq!(result.kind, HomeboyGateKind::Metric);
+        assert_eq!(result.status, HomeboyGateStatus::Passed);
+        assert_eq!(result.retryable, Some(false));
+        assert_eq!(result.evidence["passed"], true);
+        assert!(result.summary.contains("metric gate passed"));
+    }
 }
