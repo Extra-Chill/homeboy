@@ -105,6 +105,8 @@ mod types {
         pub docker: bool,
         pub playwright: bool,
         pub browser_ready: bool,
+        pub xvfb_ready: bool,
+        pub headed_browser_ready: bool,
         pub workspace_writable: bool,
         pub artifact_store_available: bool,
     }
@@ -332,7 +334,15 @@ mod local {
 
         let playwright = probes::tool_available(&tools, "playwright");
         let browser_ready = probes::local_browser_ready();
+        let display_ready = probes::local_display_ready();
+        let xvfb_ready = probes::local_xvfb_ready();
+        let headed_browser_ready = probes::headed_browser_ready(display_ready, xvfb_ready);
         checks.push(checks::playwright_check(playwright, browser_ready));
+        checks.push(checks::headed_browser_check(
+            headed_browser_ready,
+            display_ready,
+            xvfb_ready,
+        ));
 
         let workspace_writable = probes::local_path_writable(&workspace_root);
         checks.push(checks::path_writable_check(
@@ -365,6 +375,8 @@ mod local {
             false,
             playwright,
             browser_ready,
+            xvfb_ready,
+            headed_browser_ready,
             workspace_writable,
             artifact_store_available,
         );
@@ -529,7 +541,15 @@ mod remote {
 
         let playwright = probes::tool_available(&tools, "playwright");
         let browser_ready = probes::remote_browser_ready(client);
+        let display_ready = probes::remote_display_ready(client);
+        let xvfb_ready = probes::remote_xvfb_ready(client);
+        let headed_browser_ready = probes::headed_browser_ready(display_ready, xvfb_ready);
         checks.push(checks::playwright_check(playwright, browser_ready));
+        checks.push(checks::headed_browser_check(
+            headed_browser_ready,
+            display_ready,
+            xvfb_ready,
+        ));
 
         let workspace_writable = probes::remote_path_writable(client, &workspace_root);
         checks.push(checks::path_writable_check(
@@ -568,6 +588,8 @@ mod remote {
             true,
             playwright,
             browser_ready,
+            xvfb_ready,
+            headed_browser_ready,
             workspace_writable,
             artifact_store_available,
         );
@@ -716,6 +738,8 @@ mod probes {
         ssh_execution: bool,
         playwright: bool,
         browser_ready: bool,
+        xvfb_ready: bool,
+        headed_browser_ready: bool,
         workspace_writable: bool,
         artifact_store_available: bool,
     ) -> RunnerCapabilities {
@@ -732,6 +756,8 @@ mod probes {
             docker: tool_available(tools, "docker"),
             playwright,
             browser_ready,
+            xvfb_ready,
+            headed_browser_ready,
             workspace_writable,
             artifact_store_available,
         }
@@ -902,6 +928,27 @@ mod probes {
     pub fn remote_browser_ready(client: &SshClient) -> bool {
         let command = "for d in \"${PLAYWRIGHT_BROWSERS_PATH:-}\" \"$HOME/Library/Caches/ms-playwright\" \"$HOME/.cache/ms-playwright\"; do [ -n \"$d\" ] && [ -d \"$d\" ] && find \"$d\" -mindepth 1 -maxdepth 1 2>/dev/null | grep -q . && exit 0; done; exit 1";
         client.execute(command).success
+    }
+
+    pub fn headed_browser_ready(display_ready: bool, xvfb_ready: bool) -> bool {
+        display_ready || xvfb_ready
+    }
+
+    pub fn local_display_ready() -> bool {
+        env::var("DISPLAY").is_ok_and(|value| !value.trim().is_empty())
+    }
+
+    pub fn remote_display_ready(client: &SshClient) -> bool {
+        client.execute("[ -n \"${DISPLAY:-}\" ]").success
+    }
+
+    pub fn local_xvfb_ready() -> bool {
+        local_tool_probe("xvfb-run", &[]).available || local_tool_probe("Xvfb", &[]).available
+    }
+
+    pub fn remote_xvfb_ready(client: &SshClient) -> bool {
+        remote_tool_probe(client, "xvfb-run", &[]).available
+            || remote_tool_probe(client, "Xvfb", &[]).available
     }
 
     #[cfg(unix)]
@@ -1188,6 +1235,30 @@ mod checks {
                     "Install Playwright and browser binaries for browser-backed traces".to_string(),
                 ),
             ),
+        }
+    }
+
+    pub fn headed_browser_check(
+        headed_browser_ready: bool,
+        display_ready: bool,
+        xvfb_ready: bool,
+    ) -> RunnerCheck {
+        let mut details = BTreeMap::new();
+        details.insert("display_ready".to_string(), display_ready.to_string());
+        details.insert("xvfb_ready".to_string(), xvfb_ready.to_string());
+        if headed_browser_ready {
+            ok_with_details(
+                "browser.headed_ready",
+                "Display or Xvfb support is available for headed browser workloads".to_string(),
+                details,
+            )
+        } else {
+            warning_with_details(
+                "browser.headed_ready",
+                "No DISPLAY or Xvfb support was detected for headed browser workloads".to_string(),
+                Some("Install xvfb/xvfb-run on Linux runners or run Electron/Chromium workloads in headless/Ozone mode".to_string()),
+                details,
+            )
         }
     }
 

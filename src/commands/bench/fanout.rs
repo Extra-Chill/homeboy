@@ -2,7 +2,8 @@ use serde::Serialize;
 
 use homeboy::core::agent_task::{
     expand_agent_task_matrix, AgentTaskExecutor, AgentTaskMatrixAggregate, AgentTaskMatrixAxis,
-    AgentTaskRequest, AgentTaskWorkspace, AGENT_TASK_OUTCOME_SCHEMA, AGENT_TASK_REQUEST_SCHEMA,
+    AgentTaskOutcomeStatus, AgentTaskRequest, AgentTaskWorkspace, AGENT_TASK_OUTCOME_SCHEMA,
+    AGENT_TASK_REQUEST_SCHEMA,
 };
 use homeboy::core::agent_task_scheduler::{
     AgentTaskExecutionContext, AgentTaskPlan, AgentTaskScheduleOptions, AgentTaskScheduler,
@@ -86,6 +87,24 @@ pub(super) fn run_matrix_fanout(
     let scheduler_aggregate = scheduler.run(schedule);
     let matrix_aggregate =
         AgentTaskMatrixAggregate::from_outcomes(&matrix_plan, &scheduler_aggregate.outcomes);
+    let no_op_cells = scheduler_aggregate
+        .outcomes
+        .iter()
+        .filter(|outcome| matches!(outcome.status, AgentTaskOutcomeStatus::NoOp))
+        .count();
+    if no_op_cells > 0 {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "matrix",
+            format!(
+                "bench matrix executor produced {no_op_cells} no-op cell(s); no benchmark workload ran"
+            ),
+            Some(run_args.matrix.join(",")),
+            Some(vec![
+                "Use a bench matrix executor that returns completed workload outcomes with artifacts/metrics.".to_string(),
+                "Run explicit bench commands for each cell until matrix fan-out has a real workload executor.".to_string(),
+            ]),
+        ));
+    }
     let report = BenchMatrixFanoutReport {
         format: run_args.report.first().copied(),
         passed: matrix_aggregate.passed,
@@ -327,25 +346,13 @@ mod tests {
         args.matrix_max_queue_depth = Some(3);
         args.expected_artifact = vec!["bench-results".to_string()];
 
-        let output = run_matrix_fanout(&args).expect("matrix fan-out runs");
+        let err = match run_matrix_fanout(&args) {
+            Ok(_) => panic!("no-op matrix cells must fail"),
+            Err(err) => err,
+        };
 
-        assert_eq!(output.command, "bench.matrix");
-        assert_eq!(output.executor_backend, "local");
-        assert_eq!(output.scheduler.queue.max_concurrency, 2);
-        assert_eq!(output.scheduler.queue.max_queue_depth, Some(3));
-        assert_eq!(output.scheduler.totals.succeeded, 3);
-        assert_eq!(output.scheduler.totals.blocked, 1);
-        assert_eq!(output.scheduler.totals.failed, 0);
-        assert_eq!(output.matrix.cells.len(), 4);
-        assert!(!output.matrix.passed);
-        assert_eq!(output.report.cells, 4);
-        assert_eq!(output.report.succeeded, 3);
-        assert_eq!(output.report.blocked, 1);
-        assert_eq!(output.report.failed, 0);
-        assert!(output
-            .matrix
-            .cells
-            .iter()
-            .any(|cell| cell.axes["model"] == "kimi" && cell.axes["prompt"] == "site-b"));
+        assert_eq!(err.details["field"], "matrix");
+        assert!(err.message.contains("no-op cell"));
+        assert!(err.message.contains("no benchmark workload ran"));
     }
 }

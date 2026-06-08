@@ -87,7 +87,7 @@ pub struct StackSourceMetadata {
 
 pub fn install(source: &str, id: Option<&str>, all: bool) -> Result<RigInstallResult> {
     let prepared = prepare_source(source)?;
-    let discovered = discover_rigs(&prepared.discovery_path)?;
+    let discovered = discover_rigs_for_install(&prepared.discovery_path, id, all)?;
     let selected = select_rigs(discovered, id, all, source)?;
     let discovered_stacks = discover_stacks(&prepared.discovery_path)?;
 
@@ -375,6 +375,27 @@ fn prepare_local_source(source: &str) -> Result<PreparedSource> {
 }
 
 pub fn discover_rigs(package_path: &Path) -> Result<Vec<DiscoveredRig>> {
+    discover_rigs_matching(package_path, None)
+}
+
+fn discover_rigs_for_install(
+    package_path: &Path,
+    id: Option<&str>,
+    all: bool,
+) -> Result<Vec<DiscoveredRig>> {
+    if all {
+        return discover_rigs(package_path);
+    }
+    let Some(id) = id else {
+        return discover_rigs(package_path);
+    };
+    discover_rigs_matching(package_path, Some(&extension::slugify_id(id)?))
+}
+
+fn discover_rigs_matching(
+    package_path: &Path,
+    only_id: Option<&str>,
+) -> Result<Vec<DiscoveredRig>> {
     let mut rigs = Vec::new();
 
     let single = package_path.join("rig.json");
@@ -396,6 +417,16 @@ pub fn discover_rigs(package_path: &Path) -> Result<Vec<DiscoveredRig>> {
             }
             let rig_path = path.join("rig.json");
             if rig_path.is_file() {
+                if let Some(only_id) = only_id {
+                    let candidate = path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .map(extension::slugify_id)
+                        .transpose()?;
+                    if candidate.as_deref() != Some(only_id) {
+                        continue;
+                    }
+                }
                 rigs.push(discovered_from_path(&rig_path, path.file_name())?);
             }
         }
@@ -405,6 +436,9 @@ pub fn discover_rigs(package_path: &Path) -> Result<Vec<DiscoveredRig>> {
     rigs.dedup_by(|a, b| a.id == b.id);
 
     if rigs.is_empty() {
+        if only_id.is_some() {
+            return Ok(rigs);
+        }
         return Err(Error::validation_invalid_argument(
             "source",
             format!(
