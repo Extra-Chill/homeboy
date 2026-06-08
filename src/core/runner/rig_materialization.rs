@@ -8,6 +8,7 @@ use super::{
     exec, load, materialize_git_dependency, sync_workspace, RunnerExecOptions,
     RunnerGitDependencyMaterializationOptions, RunnerGitDependencyMaterializationOutput,
     RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
+    workspace::{parent_remote_path, sanitize_path_segment},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,6 +16,7 @@ pub(super) struct RigComponentDependency {
     pub rig_id: String,
     pub component_id: String,
     pub local_checkout_root: String,
+    pub declared_checkout_root: String,
     pub remote_checkout_root: String,
     pub required_subpath: Option<String>,
     pub remote_url: Option<String>,
@@ -158,10 +160,12 @@ pub(super) fn lab_offload_rig_component_dependencies(
                 rig_id: rig_id.clone(),
                 component_id: component_id.clone(),
                 remote_checkout_root: remote_checkout_root_for_local(
+                    checkout_root,
                     &local_checkout_root,
                     primary_workspace,
                 ),
                 local_checkout_root,
+                declared_checkout_root: checkout_root.to_string(),
                 required_subpath,
                 remote_url: component.remote_url.clone(),
             });
@@ -175,6 +179,7 @@ fn expanded_local_path(spec: &rig::RigSpec, value: &str) -> String {
 }
 
 fn remote_checkout_root_for_local(
+    declared_checkout_root: &str,
     local_checkout_root: &str,
     primary_workspace: Option<(&str, &str)>,
 ) -> String {
@@ -186,7 +191,22 @@ fn remote_checkout_root_for_local(
     {
         return primary_remote_path.to_string();
     }
-    local_checkout_root.to_string()
+    if is_portable_runner_path(declared_checkout_root) {
+        return declared_checkout_root.to_string();
+    }
+    let name = Path::new(local_checkout_root)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("dependency");
+    format!(
+        "{}/{}",
+        parent_remote_path(primary_remote_path),
+        sanitize_path_segment(name)
+    )
+}
+
+fn is_portable_runner_path(path: &str) -> bool {
+    path == "~" || path.starts_with("~/")
 }
 
 fn should_materialize_dependency(
@@ -348,6 +368,10 @@ mod tests {
                 checkout.display().to_string()
             );
             assert_eq!(
+                dependencies[0].declared_checkout_root,
+                checkout.display().to_string()
+            );
+            assert_eq!(
                 dependencies[0].remote_checkout_root,
                 checkout.display().to_string()
             );
@@ -428,12 +452,45 @@ mod tests {
     }
 
     #[test]
+    fn maps_non_primary_rig_dependency_to_runner_workspace_parent() {
+        let remote = remote_checkout_root_for_local(
+            "/Users/chubes/Developer/studio@fix-many-sites-memory",
+            "/Users/chubes/Developer/studio@fix-many-sites-memory",
+            Some((
+                "/Users/chubes/Developer/homeboy-rigs/Automattic/studio",
+                "/home/chubes/Developer/_lab_workspaces/studio-rigs-snapshot",
+            )),
+        );
+
+        assert_eq!(
+            remote,
+            "/home/chubes/Developer/_lab_workspaces/studio-fix-many-sites-memory"
+        );
+        assert!(!remote.contains("/Users/"));
+    }
+
+    #[test]
+    fn preserves_portable_declared_rig_dependency_path_for_runner() {
+        let remote = remote_checkout_root_for_local(
+            "~/Developer/studio@fix-many-sites-memory",
+            "/Users/chubes/Developer/studio@fix-many-sites-memory",
+            Some((
+                "/Users/chubes/Developer/homeboy-rigs/Automattic/studio",
+                "/home/chubes/Developer/_lab_workspaces/studio-rigs-snapshot",
+            )),
+        );
+
+        assert_eq!(remote, "~/Developer/studio@fix-many-sites-memory");
+    }
+
+    #[test]
     fn primary_workspace_dependency_is_not_materialized_again() {
         let primary_remote_path = "/home/chubes/Developer/_lab_workspaces/studio-web-snapshot";
         let dependencies = vec![RigComponentDependency {
             rig_id: "studio-web-product-matrix".to_string(),
             component_id: "studio-web".to_string(),
             local_checkout_root: "/Users/chubes/Developer/studio-web".to_string(),
+            declared_checkout_root: "/Users/chubes/Developer/studio-web".to_string(),
             remote_checkout_root: primary_remote_path.to_string(),
             required_subpath: None,
             remote_url: Some("https://github.a8c.com/chubes4/studio-web.git".to_string()),
