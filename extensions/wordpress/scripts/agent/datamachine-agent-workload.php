@@ -2407,9 +2407,9 @@ if ( ! function_exists( 'homeboy_datamachine_agent_provision_workspace' ) ) {
         }
 
         $required = array(
-            'datamachine/workspace-show',
-            'datamachine/workspace-clone',
-            'datamachine/workspace-worktree-add',
+            'datamachine-code/workspace-show',
+            'datamachine-code/workspace-clone',
+            'datamachine-code/workspace-worktree-add',
         );
         foreach ( $required as $ability_name ) {
             if ( ! wp_get_ability( $ability_name ) ) {
@@ -2417,7 +2417,7 @@ if ( ! function_exists( 'homeboy_datamachine_agent_provision_workspace' ) ) {
             }
         }
 
-        $show = wp_get_ability( 'datamachine/workspace-show' )->execute( array( 'name' => $repo ) );
+        $show = wp_get_ability( 'datamachine-code/workspace-show' )->execute( array( 'name' => $repo ) );
         if ( function_exists( 'is_wp_error' ) && is_wp_error( $show ) ) {
             $clone_url = isset( $workspace['clone_url'] ) && is_scalar( $workspace['clone_url'] ) ? trim( (string) $workspace['clone_url'] ) : '';
             if ( '' === $clone_url ) {
@@ -2433,7 +2433,7 @@ if ( ! function_exists( 'homeboy_datamachine_agent_provision_workspace' ) ) {
                 $clone_input['auth_token_env'] = $github_token_env;
             }
 
-            $clone = wp_get_ability( 'datamachine/workspace-clone' )->execute(
+            $clone = wp_get_ability( 'datamachine-code/workspace-clone' )->execute(
                 array_filter(
                     $clone_input,
                     static fn( $value ) => '' !== $value
@@ -2462,7 +2462,7 @@ if ( ! function_exists( 'homeboy_datamachine_agent_provision_workspace' ) ) {
             'force'          => homeboy_datamachine_agent_bool_config( $workspace, 'force', false ),
         );
 
-        $worktree = wp_get_ability( 'datamachine/workspace-worktree-add' )->execute( $input );
+        $worktree = wp_get_ability( 'datamachine-code/workspace-worktree-add' )->execute( $input );
         if ( function_exists( 'is_wp_error' ) && is_wp_error( $worktree ) ) {
             return array( 'enabled' => true, 'success' => false, 'error' => $worktree->get_error_message(), 'input' => $input );
         }
