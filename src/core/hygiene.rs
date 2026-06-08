@@ -1,5 +1,3 @@
-use std::collections::BTreeSet;
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -7,8 +5,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::component;
 use crate::core::error::{Error, ErrorCode, Result, ValidationErrorItem};
-
-const PORTABLE_CONFIG_FILE: &str = concat!("homeboy", ".json");
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CheckoutHygieneSnapshot {
@@ -25,7 +21,7 @@ pub struct CheckoutHygieneSnapshot {
 }
 
 impl CheckoutHygieneSnapshot {
-    pub fn is_stale_or_dirty(&self) -> bool {
+    fn is_stale_or_dirty(&self) -> bool {
         self.dirty == Some(true) || self.behind.unwrap_or(0) > 0
     }
 }
@@ -112,50 +108,7 @@ fn dependency_checkouts_for_source(source_path: &Path) -> Result<Vec<DependencyC
 }
 
 fn validation_dependency_ids(source_path: &Path) -> Result<Vec<String>> {
-    let manifest_path = source_path.join(PORTABLE_CONFIG_FILE);
-    let Ok(content) = fs::read_to_string(&manifest_path) else {
-        return Ok(Vec::new());
-    };
-    let manifest: serde_json::Value = serde_json::from_str(&content).map_err(|err| {
-        Error::validation_invalid_argument(
-            PORTABLE_CONFIG_FILE,
-            format!("failed to parse {}: {err}", manifest_path.display()),
-            None,
-            None,
-        )
-    })?;
-
-    let mut ids = BTreeSet::new();
-    if let Some(extensions) = manifest
-        .get("extensions")
-        .and_then(|value| value.as_object())
-    {
-        for extension in extensions.values() {
-            collect_validation_dependency_ids(extension, &mut ids);
-            if let Some(settings) = extension.get("settings") {
-                collect_validation_dependency_ids(settings, &mut ids);
-            }
-        }
-    }
-    Ok(ids.into_iter().collect())
-}
-
-fn collect_validation_dependency_ids(value: &serde_json::Value, ids: &mut BTreeSet<String>) {
-    let Some(dependencies) = value
-        .get("validation_dependencies")
-        .and_then(|value| value.as_array())
-    else {
-        return;
-    };
-
-    ids.extend(
-        dependencies
-            .iter()
-            .filter_map(|value| value.as_str())
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string),
-    );
+    crate::core::runner::validation_dependency_ids(source_path)
 }
 
 fn resolve_validation_dependency_path(source_path: &Path, dependency: &str) -> Result<PathBuf> {
@@ -223,7 +176,12 @@ fn checkout_hygiene_snapshot(
         &path,
         &["rev-list", "--left-right", "--count", "@{upstream}...HEAD"],
     )
-    .and_then(|value| parse_ahead_behind(&value))
+    .and_then(|value| {
+        let mut parts = value.split_whitespace();
+        let behind = parts.next()?.parse::<u32>().ok()?;
+        let ahead = parts.next()?.parse::<u32>().ok()?;
+        Some((Some(behind), Some(ahead)))
+    })
     .unwrap_or((None, None));
     let dirty = git_output(&path, &["status", "--porcelain=v1"]).map(|value| !value.is_empty());
 
@@ -275,16 +233,12 @@ fn git_output(path: &Path, args: &[&str]) -> Option<String> {
     Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-fn parse_ahead_behind(value: &str) -> Option<(Option<u32>, Option<u32>)> {
-    let mut parts = value.split_whitespace();
-    let behind = parts.next()?.parse::<u32>().ok()?;
-    let ahead = parts.next()?.parse::<u32>().ok()?;
-    Some((Some(behind), Some(ahead)))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+
+    const PORTABLE_CONFIG_FILE: &str = concat!("homeboy", ".json");
 
     fn git(path: &Path, args: &[&str]) {
         let output = Command::new("git")

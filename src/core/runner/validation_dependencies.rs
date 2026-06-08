@@ -46,7 +46,7 @@ fn validation_dependency_workspaces(local_path: &Path) -> Result<Vec<PathBuf>> {
         .collect()
 }
 
-fn validation_dependency_ids(local_path: &Path) -> Result<Vec<String>> {
+pub(crate) fn validation_dependency_ids(local_path: &Path) -> Result<Vec<String>> {
     let manifest_path = local_path.join(PORTABLE_CONFIG_FILE);
     let Ok(content) = fs::read_to_string(&manifest_path) else {
         return Ok(Vec::new());

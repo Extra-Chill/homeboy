@@ -34,6 +34,7 @@ mod rig_materialization;
 mod session;
 mod source_materialization;
 mod validation_dependencies;
+pub(crate) use validation_dependencies::validation_dependency_ids;
 mod worker;
 mod workspace;
 
