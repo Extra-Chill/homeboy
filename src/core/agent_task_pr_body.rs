@@ -1,4 +1,5 @@
-use crate::core::agent_task_finalization::{AgentTaskGateResult, AgentTaskPrFinalizationOptions};
+use crate::core::agent_task_finalization::AgentTaskPrFinalizationOptions;
+use crate::core::gate::{HomeboyGateResult, HomeboyGateStatus};
 
 pub(crate) fn render_pr_body(
     options: &AgentTaskPrFinalizationOptions,
@@ -11,7 +12,7 @@ pub(crate) fn render_pr_body(
         head,
         bullets(&options.evidence.source_refs),
         options.evidence.attempt_summary,
-        gate_bullets(&options.gate_results),
+        gate_bullets(&normalized_gate_results(options)),
         bullets(changed_files),
         bullets(&options.evidence.artifact_refs),
         options.base,
@@ -32,15 +33,28 @@ fn bullets(values: &[String]) -> String {
         .join("\n")
 }
 
-fn gate_bullets(gates: &[AgentTaskGateResult]) -> String {
+fn gate_bullets(gates: &[HomeboyGateResult]) -> String {
     gates
         .iter()
-        .map(|gate| match &gate.detail {
-            Some(detail) if !detail.trim().is_empty() => {
-                format!("- {}: {} ({})", gate.name, gate.status, detail)
-            }
-            _ => format!("- {}: {}", gate.name, gate.status),
+        .map(|gate| match gate.status {
+            HomeboyGateStatus::Passed => format!("- {}: passed", gate.name),
+            HomeboyGateStatus::Failed => format!("- {}: failed", gate.name),
+            HomeboyGateStatus::Skipped => format!("- {}: skipped", gate.name),
+            HomeboyGateStatus::Blocked => format!("- {}: blocked", gate.name),
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn normalized_gate_results(options: &AgentTaskPrFinalizationOptions) -> Vec<HomeboyGateResult> {
+    if !options.normalized_gate_results.is_empty() {
+        return options.normalized_gate_results.clone();
+    }
+
+    options
+        .gate_results
+        .iter()
+        .cloned()
+        .map(crate::core::agent_task_finalization::gate_result_from_legacy)
+        .collect()
 }

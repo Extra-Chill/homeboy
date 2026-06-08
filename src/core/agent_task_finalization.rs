@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 use crate::core::agent_task_pr_body::render_pr_body;
 use crate::core::error::{Error, Result};
+use crate::core::gate::{HomeboyGateKind, HomeboyGateResult, HomeboyGateStatus};
 use crate::core::git::{
     commit_at, get_uncommitted_changes, pr_create, pr_edit, pr_find, push_at, CommitOptions,
     PrCreateOptions, PrEditOptions, PrFindOptions, PrState, PushOptions,
@@ -17,7 +19,7 @@ pub struct AgentTaskGateResult {
     pub detail: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct AgentTaskPrFinalizationReport {
     pub schema: String,
     pub run_id: String,
@@ -32,6 +34,8 @@ pub struct AgentTaskPrFinalizationReport {
     pub pr_url: Option<String>,
     pub changed_files: Vec<String>,
     pub gate_results: Vec<AgentTaskGateResult>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub normalized_gate_results: Vec<HomeboyGateResult>,
     #[serde(flatten)]
     pub evidence: AgentTaskPrEvidence,
 }
@@ -53,6 +57,7 @@ pub struct AgentTaskPrFinalizationOptions {
     pub title: String,
     pub commit_message: String,
     pub gate_results: Vec<AgentTaskGateResult>,
+    pub normalized_gate_results: Vec<HomeboyGateResult>,
     pub changed_files: Vec<String>,
     pub evidence: AgentTaskPrEvidence,
     pub ai_used_for: String,
@@ -230,7 +235,8 @@ pub fn finalize_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
     options: AgentTaskPrFinalizationOptions,
     backend: &mut B,
 ) -> Result<AgentTaskPrFinalizationReport> {
-    validate_green_gates(&options.gate_results)?;
+    let normalized_gate_results = normalized_finalization_gates(&options);
+    validate_green_gates(&normalized_gate_results)?;
     let head = options
         .head
         .clone()
@@ -284,7 +290,7 @@ pub fn finalize_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
     ))
 }
 
-fn validate_green_gates(gates: &[AgentTaskGateResult]) -> Result<()> {
+fn validate_green_gates(gates: &[HomeboyGateResult]) -> Result<()> {
     if gates.is_empty() {
         return Err(Error::validation_invalid_argument(
             "gate_results",
@@ -295,8 +301,8 @@ fn validate_green_gates(gates: &[AgentTaskGateResult]) -> Result<()> {
     }
     let red: Vec<String> = gates
         .iter()
-        .filter(|gate| !is_green_status(&gate.status))
-        .map(|gate| format!("{}={}", gate.name, gate.status))
+        .filter(|gate| gate.status != HomeboyGateStatus::Passed)
+        .map(|gate| format!("{}={:?}", gate.name, gate.status))
         .collect();
     if !red.is_empty() {
         return Err(Error::validation_invalid_argument(
@@ -312,11 +318,65 @@ fn validate_green_gates(gates: &[AgentTaskGateResult]) -> Result<()> {
     Ok(())
 }
 
+fn normalized_finalization_gates(
+    options: &AgentTaskPrFinalizationOptions,
+) -> Vec<HomeboyGateResult> {
+    if !options.normalized_gate_results.is_empty() {
+        return options.normalized_gate_results.clone();
+    }
+
+    options
+        .gate_results
+        .iter()
+        .cloned()
+        .map(HomeboyGateResult::from)
+        .collect()
+}
+
 fn is_green_status(status: &str) -> bool {
     matches!(
         status.trim().to_ascii_lowercase().as_str(),
         "green" | "passed" | "pass" | "succeeded" | "success" | "ok"
     )
+}
+
+impl From<AgentTaskGateResult> for HomeboyGateResult {
+    fn from(gate: AgentTaskGateResult) -> Self {
+        gate_result_from_legacy(gate)
+    }
+}
+
+pub(crate) fn gate_result_from_legacy(gate: AgentTaskGateResult) -> HomeboyGateResult {
+    let status = if is_green_status(&gate.status) {
+        HomeboyGateStatus::Passed
+    } else {
+        HomeboyGateStatus::Failed
+    };
+    let summary = match gate
+        .detail
+        .as_deref()
+        .filter(|detail| !detail.trim().is_empty())
+    {
+        Some(detail) => format!("{}: {} ({detail})", gate.name, gate.status),
+        None => format!("{}: {}", gate.name, gate.status),
+    };
+
+    HomeboyGateResult::new(
+        format!("finalization.gate.{}", gate.name),
+        gate.name.clone(),
+        HomeboyGateKind::Command,
+        status,
+    )
+    .summary(summary)
+    .evidence(json!({
+        "name": gate.name,
+        "status": gate.status,
+        "detail": gate.detail,
+    }))
+    .retryable(status == HomeboyGateStatus::Failed)
+    .provenance(json!({
+        "source_type": "AgentTaskGateResult",
+    }))
 }
 
 fn refuse_protected_head(head: &str, protected_branches: &[String]) -> Result<()> {
@@ -343,6 +403,7 @@ fn report(
     pr_url: Option<String>,
     changed_files: Vec<String>,
 ) -> AgentTaskPrFinalizationReport {
+    let normalized_gate_results = normalized_finalization_gates(options);
     AgentTaskPrFinalizationReport {
         schema: AGENT_TASK_PR_FINALIZATION_SCHEMA.to_string(),
         run_id: options.run_id.clone(),
@@ -355,6 +416,7 @@ fn report(
         pr_url,
         changed_files,
         gate_results: options.gate_results.clone(),
+        normalized_gate_results,
         evidence: options.evidence.clone(),
     }
 }
@@ -553,6 +615,7 @@ mod tests {
                 status: "passed".to_string(),
                 detail: Some("targeted".to_string()),
             }],
+            normalized_gate_results: Vec::new(),
             changed_files: Vec::new(),
             evidence: AgentTaskPrEvidence {
                 source_refs: vec!["https://github.com/Extra-Chill/homeboy/issues/3678".to_string()],

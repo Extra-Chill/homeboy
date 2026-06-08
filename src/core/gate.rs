@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::core::plan::HomeboyPlan;
+
 pub const HOMEBOY_GATE_RESULT_SCHEMA: &str = "homeboy/gate-result/v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -133,6 +135,14 @@ impl HomeboyGateResult {
     }
 }
 
+pub fn collect_plan_gate_results(plan: &HomeboyPlan) -> Vec<HomeboyGateResult> {
+    plan.steps
+        .iter()
+        .filter_map(|step| step.outputs.get("gate_result"))
+        .filter_map(|value| serde_json::from_value(value.clone()).ok())
+        .collect()
+}
+
 fn gate_result_schema() -> String {
     HOMEBOY_GATE_RESULT_SCHEMA.to_string()
 }
@@ -159,5 +169,31 @@ mod tests {
         assert_eq!(value["kind"], "command");
         assert_eq!(value["status"], "passed");
         assert_eq!(value["retryable"], false);
+    }
+
+    #[test]
+    fn collect_plan_gate_results_reads_step_outputs() {
+        let plan = crate::core::plan::HomeboyPlan::builder_for_component(
+            crate::core::plan::PlanKind::Quality,
+            "fixture",
+        )
+        .steps(vec![crate::core::plan::PlanStep::ready(
+            "verify",
+            "gate.command",
+        )
+        .gate_result(HomeboyGateResult::new(
+            "gate-1",
+            "cargo test",
+            HomeboyGateKind::Command,
+            HomeboyGateStatus::Passed,
+        ))
+        .build()])
+        .build();
+
+        let results = collect_plan_gate_results(&plan);
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "gate-1");
+        assert_eq!(results[0].status, HomeboyGateStatus::Passed);
     }
 }

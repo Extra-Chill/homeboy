@@ -13,6 +13,7 @@ use homeboy::core::agent_task_promotion::{
 use homeboy::core::agent_task_provider::ExtensionProviderAgentTaskExecutor;
 use homeboy::core::agent_task_scheduler::AgentTaskAggregate;
 use homeboy::core::config;
+use homeboy::core::gate::HomeboyGateResult;
 
 use super::super::CmdResult;
 use super::{FinalizePrArgs, GateFeedbackArgs, PromoteArgs, ReviewArgs};
@@ -128,6 +129,11 @@ pub(crate) fn promote_artifact(args: PromoteArgs) -> CmdResult<Value> {
 
 pub(crate) fn finalize_pull_request(args: FinalizePrArgs) -> CmdResult<Value> {
     let gate_results = parse_gate_results(&args.gate_results)?;
+    let normalized_gate_results = gate_results
+        .iter()
+        .cloned()
+        .map(HomeboyGateResult::from)
+        .collect();
     let report = finalize_pr(AgentTaskPrFinalizationOptions {
         path: args.path,
         run_id: args.run_id,
@@ -136,6 +142,7 @@ pub(crate) fn finalize_pull_request(args: FinalizePrArgs) -> CmdResult<Value> {
         title: args.title,
         commit_message: args.commit_message,
         gate_results,
+        normalized_gate_results,
         changed_files: args.changed_files,
         evidence: args.evidence.into(),
         ai_used_for: args.ai_used_for,
