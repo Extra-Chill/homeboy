@@ -97,6 +97,12 @@ for (const slug of ['agents-api', 'data-machine', 'data-machine-code']) {
     throw new Error(`expected ${slug} to be activated before the agent workload runs`)
   }
 }
+if (!recipe.inputs?.secretEnv?.includes('HOMEBOY_DATAMACHINE_AGENT_CONFIG')) {
+  throw new Error('expected HOMEBOY_DATAMACHINE_AGENT_CONFIG to be exposed through recipe inputs.secretEnv')
+}
+if (recipe.inputs?.secret_env) {
+  throw new Error('WP Codebox recipes require camelCase inputs.secretEnv for secret names')
+}
 if (!recipe.inputs?.mounts?.some((mount) => mount.source.endsWith('/bundle') && mount.target === '/wordpress/wp-content/plugins/bundle' && mount.mode === 'readonly')) {
   throw new Error('missing bundle readonly mount in recipe')
 }
