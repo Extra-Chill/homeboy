@@ -20,13 +20,11 @@ pub enum TraceCanonicalPolicy {
 }
 
 impl TraceCanonicalPolicy {
-    pub fn from_flags(canonical: bool, allow_local_toolchain: bool) -> Self {
+    pub fn from_flags(_canonical: bool, allow_local_toolchain: bool) -> Self {
         if allow_local_toolchain {
             Self::AllowLocalToolchain
-        } else if canonical {
-            Self::Canonical
         } else {
-            Self::Development
+            Self::Canonical
         }
     }
 
@@ -126,7 +124,7 @@ pub(crate) fn refused_trace_result(
         overlays: Vec::new(),
         baseline_comparison: None,
         hints: Some(vec![
-            "Use --allow-local-toolchain for development-only trace runs; evidence will be marked non-canonical.".to_string(),
+            "Use --allow-local-evidence for development-only trace runs; evidence will be marked non-canonical.".to_string(),
         ]),
         toolchain: None,
         components: None,
@@ -377,6 +375,22 @@ mod tests {
     use crate::core::extension::trace::run::{run_trace_workflow, TraceRunnerInputs};
 
     #[test]
+    fn trace_canonical_policy_defaults_to_canonical() {
+        assert_eq!(
+            TraceCanonicalPolicy::from_flags(false, false),
+            TraceCanonicalPolicy::Canonical
+        );
+        assert_eq!(
+            TraceCanonicalPolicy::from_flags(true, false),
+            TraceCanonicalPolicy::Canonical
+        );
+        assert_eq!(
+            TraceCanonicalPolicy::from_flags(false, true),
+            TraceCanonicalPolicy::AllowLocalToolchain
+        );
+    }
+
+    #[test]
     fn canonical_trace_refuses_dirty_checkout_before_workload_execution() {
         let temp = tempfile::tempdir().unwrap();
         init_git_repo(temp.path());
@@ -513,6 +527,9 @@ mod tests {
         assert_eq!(result.exit_code, 3);
         assert!(!result.evidence.canonical);
         assert_eq!(result.evidence.mode, "allow-local-toolchain");
+        assert!(result.hints.as_ref().is_some_and(|hints| hints
+            .iter()
+            .any(|hint| hint.contains("Non-canonical local evidence mode"))));
         assert!(result.results.is_none());
         run_dir.cleanup();
     }

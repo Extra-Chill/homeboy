@@ -1,5 +1,7 @@
 use std::fs;
 
+use clap::Parser;
+
 use crate::test_support::with_isolated_home;
 
 use super::test_fixture::{
@@ -9,6 +11,21 @@ use super::test_fixture::{
     write_trace_rig_with_span_metadata, write_trace_rig_with_variant,
 };
 use super::*;
+
+#[derive(Parser)]
+struct TestCli {
+    #[command(flatten)]
+    trace: TraceArgs,
+}
+
+#[test]
+fn trace_accepts_allow_local_evidence_alias() {
+    let cli = TestCli::try_parse_from(["trace", "component", "scenario", "--allow-local-evidence"])
+        .expect("trace args parse");
+
+    assert!(cli.trace.allow_local_toolchain);
+}
+
 fn trace_args_for_rig(rig_id: &str, component_id: &str, scenario_id: &str) -> TraceArgs {
     TraceArgs {
         comp: PositionalComponentArgs {
@@ -49,7 +66,7 @@ fn trace_args_for_rig(rig_id: &str, component_id: &str, scenario_id: &str) -> Tr
         stale: false,
         force: false,
         canonical: false,
-        allow_local_toolchain: false,
+        allow_local_toolchain: true,
     }
 }
 
@@ -101,7 +118,7 @@ fn rig_trace_run_uses_rig_owned_workload_extension_without_component_link() {
                 stale: false,
                 force: false,
                 canonical: false,
-                allow_local_toolchain: false,
+                allow_local_toolchain: true,
             },
             &GlobalArgs {},
         )
@@ -197,7 +214,7 @@ fn trace_run_persists_observation_history() {
                 stale: false,
                 force: false,
                 canonical: false,
-                allow_local_toolchain: false,
+                allow_local_toolchain: true,
             },
             &GlobalArgs {},
         )
@@ -367,7 +384,7 @@ fn trace_repeat_aggregates_span_timings_and_preserves_artifacts() {
                 stale: false,
                 force: false,
                 canonical: false,
-                allow_local_toolchain: false,
+                allow_local_toolchain: true,
             },
             &GlobalArgs {},
         )
@@ -468,7 +485,7 @@ fn trace_repeat_loads_span_metadata_and_reports_unknown_ids() {
                 stale: false,
                 force: false,
                 canonical: false,
-                allow_local_toolchain: false,
+                allow_local_toolchain: true,
             },
             &GlobalArgs {},
         )
@@ -651,7 +668,7 @@ fn trace_repeat_reports_overlay_touched_files_at_top_level() {
                 stale: false,
                 force: false,
                 canonical: false,
-                allow_local_toolchain: false,
+                allow_local_toolchain: true,
             },
             &GlobalArgs {},
         )
@@ -734,7 +751,7 @@ fn trace_run_resolves_named_variants_and_reports_unknown_names() {
             stale: false,
             force: false,
             canonical: false,
-            allow_local_toolchain: false,
+            allow_local_toolchain: true,
         };
 
         let (output, exit_code) =
@@ -851,7 +868,7 @@ fn trace_compare_variant_writes_experiment_bundle() {
                 stale: false,
                 force: false,
                 canonical: false,
-                allow_local_toolchain: false,
+                allow_local_toolchain: true,
             },
             &GlobalArgs {},
         )
@@ -933,7 +950,7 @@ fn trace_compare_variant_resolves_named_variants() {
                 stale: false,
                 force: false,
                 canonical: false,
-                allow_local_toolchain: false,
+                allow_local_toolchain: true,
             },
             &GlobalArgs {},
         )
@@ -1030,7 +1047,7 @@ fn trace_compare_variant_reports_unknown_named_variants() {
                 stale: false,
                 force: false,
                 canonical: false,
-                allow_local_toolchain: false,
+                allow_local_toolchain: true,
             },
             &GlobalArgs {},
         ) {
@@ -1105,7 +1122,7 @@ fn trace_run_expands_phase_chain_into_adjacent_and_total_spans() {
                 stale: false,
                 force: false,
                 canonical: false,
-                allow_local_toolchain: false,
+                allow_local_toolchain: true,
             },
             &GlobalArgs {},
         )
@@ -1181,7 +1198,7 @@ fn trace_run_expands_named_workload_phase_preset() {
                 stale: false,
                 force: false,
                 canonical: false,
-                allow_local_toolchain: false,
+                allow_local_toolchain: true,
             },
             &GlobalArgs {},
         )
@@ -1257,7 +1274,7 @@ fn trace_aggregate_spans_uses_workload_default_phase_preset() {
                 stale: false,
                 force: false,
                 canonical: false,
-                allow_local_toolchain: false,
+                allow_local_toolchain: true,
             },
             &GlobalArgs {},
         )
@@ -1329,7 +1346,7 @@ fn trace_repeat_counts_failed_runs_as_span_failures() {
                 stale: false,
                 force: false,
                 canonical: false,
-                allow_local_toolchain: false,
+                allow_local_toolchain: true,
             },
             &GlobalArgs {},
         )
@@ -1405,7 +1422,7 @@ fn failed_trace_run_persists_observation_history() {
                 stale: false,
                 force: false,
                 canonical: false,
-                allow_local_toolchain: false,
+                allow_local_toolchain: true,
             },
             &GlobalArgs {},
         )
