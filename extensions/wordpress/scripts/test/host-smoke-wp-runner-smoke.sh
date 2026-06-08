@@ -110,15 +110,17 @@ if [ "$fail_exit" -eq 0 ]; then
 fi
 assert_contains "${TMPDIR}/direct-fail.out" "HOST_SMOKE_FAIL:tests/alpha-smoke.php"
 
-# --- Routing: test_backend=host-smoke-wp dispatches to this backend.
+# --- Routing: the dispatcher routes *-smoke.php to this real-WP smoke backend
+# purely by file type (no test_backend toggle). A --file smoke run goes straight
+# to the smoke backend; the PHPUnit backend is not involved.
 HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
 HOMEBOY_COMPONENT_ID="component" \
 HOMEBOY_COMPONENT_PATH="$component" \
 HOMEBOY_COMPONENT_SHAPE="plugin" \
 HOMEBOY_WP_CODEBOX_BIN="$FAKE_CODEBOX" \
 FAKE_CODEBOX_CAPTURE_DIR="$CAPTURE_DIR" \
-HOMEBOY_SETTINGS_JSON='{"test_backend":"host-smoke-wp"}' \
-    bash "${EXTENSION_PATH}/scripts/test/test-runner.sh" > "${TMPDIR}/router.out"
+    bash "${EXTENSION_PATH}/scripts/test/test-runner.sh" --file tests/alpha-smoke.php > "${TMPDIR}/router.out"
 assert_contains "${TMPDIR}/router.out" "Backend: host-smoke-wp"
+assert_contains "${TMPDIR}/router.out" "HOST_SMOKE_OK:tests/alpha-smoke.php"
 
 echo "Real-WordPress smoke runner smoke passed"

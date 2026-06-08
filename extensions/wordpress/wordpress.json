@@ -920,7 +920,7 @@
   },
   "testing": {
     "backend": "wp-codebox",
-      "description": "Plugin/theme PHPUnit runs through WP Codebox by default. Use the host-smoke backend for standalone tests/**/*-smoke.php scripts that run under bare host PHP without WordPress, or host-smoke-wp to run those smoke scripts against real WordPress booted in the WP Codebox sandbox."
+      "description": "WordPress tests always run through WP Codebox against real WordPress, routed by file type: tests/**/*Test.php and tests/**/test-*.php run as PHPUnit; tests/**/*-smoke.php standalone scripts run via wordpress.run-php with WordPress booted. There is no bare-host/no-WordPress backend."
   },
   "ci": {
     "profiles": {
@@ -947,8 +947,7 @@
         "check_names": ["DB activation PHPUnit smoke", "WP Codebox PHPUnit", "WordPress PHPUnit"],
         "command": "test",
         "env": {
-          "CI": "1",
-          "HOMEBOY_WORDPRESS_TEST_BACKEND": "wp-codebox"
+          "CI": "1"
         },
         "provider": "github-actions",
         "workflow": "wp-codebox-test-runtime-canary.yml",
@@ -970,13 +969,6 @@
     }
   },
   "settings": [
-    {
-      "id": "test_backend",
-      "label": "Test backend",
-      "type": "string",
-      "default": "wp-codebox",
-      "description": "WordPress test backend. Use 'wp-codebox' for default PHPUnit execution, 'host-smoke' for standalone tests/**/*-smoke.php scripts that run under bare host PHP without WordPress, or 'host-smoke-wp' to run those same smoke scripts against real WordPress booted in the WP Codebox sandbox (so smokes use real WP functions instead of per-file shims)."
-    },
     {
       "id": "validation_dependencies",
       "label": "Validation Dependencies",

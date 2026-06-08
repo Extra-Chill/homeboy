@@ -146,6 +146,34 @@ printf '{"success":true,"executions":[{"stdout":"OK (1 test, 1 assertion)\n","st
 SH
 chmod +x "${TMPDIR}/stubs/wp-codebox.sh"
 
+# Stub for the real-WordPress smoke runner. The real runner boots WordPress via
+# WP Codebox; for routing assertions we only need to confirm smoke files reach it
+# and the HOST_SMOKE marker contract, so this stub emits those markers for each
+# selected file without booting anything.
+cat > "${TMPDIR}/stubs/host-smoke-wp.sh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+PLUGIN_PATH="${HOMEBOY_COMPONENT_PATH:-$(pwd)}"
+files=()
+if [ -n "${HOMEBOY_WORDPRESS_HOST_SMOKE_FILES:-}" ]; then
+    while IFS= read -r f; do [ -n "$f" ] && files+=("$f"); done <<< "${HOMEBOY_WORDPRESS_HOST_SMOKE_FILES}"
+elif [ -n "${HOMEBOY_WORDPRESS_HOST_SMOKE_FILE:-}" ]; then
+    files=("${HOMEBOY_WORDPRESS_HOST_SMOKE_FILE}")
+else
+    while IFS= read -r f; do files+=("${f#"${PLUGIN_PATH}/"}"); done < <(find "${PLUGIN_PATH}/tests" -type f -name '*-smoke.php' | sort)
+fi
+echo "Backend: host-smoke-wp"
+passed=0
+for f in "${files[@]}"; do
+    echo "HOST_SMOKE_BEGIN:${f}"
+    echo "standalone smoke ran"
+    echo "HOST_SMOKE_OK:${f}"
+    passed=$((passed + 1))
+done
+echo "HOST_SMOKE_SUMMARY:passed=${passed} failed=0"
+SH
+chmod +x "${TMPDIR}/stubs/host-smoke-wp.sh"
+
 
 cat > "${TMPDIR}/stubs/composer" <<'SH'
 #!/usr/bin/env bash
@@ -162,6 +190,7 @@ HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
 HOMEBOY_COMPONENT_ID="component" \
 HOMEBOY_COMPONENT_PATH="$component" \
 HOMEBOY_COMPONENT_SHAPE="plugin" \
+HOMEBOY_RUNTIME_TEST_RUNNER_HOST_SMOKE_WP="${TMPDIR}/stubs/host-smoke-wp.sh" \
     bash "${EXTENSION_PATH}/scripts/test/test-runner.sh" --file tests/import-agent-ability-smoke.php > "${TMPDIR}/smoke-file.out"
 
 assert_contains "${TMPDIR}/smoke-file.out" "HOST_SMOKE_BEGIN:tests/import-agent-ability-smoke.php"
@@ -172,6 +201,7 @@ HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
 HOMEBOY_COMPONENT_ID="component" \
 HOMEBOY_COMPONENT_PATH="$component" \
 HOMEBOY_COMPONENT_SHAPE="plugin" \
+HOMEBOY_RUNTIME_TEST_RUNNER_HOST_SMOKE_WP="${TMPDIR}/stubs/host-smoke-wp.sh" \
 HOMEBOY_CHANGED_TEST_FILES=$'tests/import-agent-ability-smoke.php\ntests/queue-routing-smoke.php' \
 HOMEBOY_TEST_SCOPE_KIND="exclusive_env" \
 HOMEBOY_TEST_SCOPE_ENV_NAME="HOMEBOY_WORDPRESS_HOST_SMOKE_FILES" \
@@ -257,17 +287,22 @@ assert_contains "${TMPDIR}/phpunit-file.out" "WP_CODEBOX_STUB"
 assert_contains "${TMPDIR}/phpunit-file.out" "SELECTED=tests/Unit/ImportAgentAbilityTest.php"
 assert_contains "${TMPDIR}/phpunit-file.out" "ARGS=--filter ImportAgent"
 
+# A mixed smoke + PHPUnit changeset has no single exclusive scope, so the run
+# falls through to the full suite. Routed by file type, the full suite now runs
+# BOTH backends against real WordPress: PHPUnit (WP Codebox) and the real-WP
+# smoke runner, since the component carries both file types.
 HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
 HOMEBOY_COMPONENT_ID="component" \
 HOMEBOY_COMPONENT_PATH="$component" \
 HOMEBOY_COMPONENT_SHAPE="plugin" \
 HOMEBOY_RUNTIME_TEST_RUNNER_WP_CODEBOX="${TMPDIR}/stubs/wp-codebox.sh" \
+HOMEBOY_RUNTIME_TEST_RUNNER_HOST_SMOKE_WP="${TMPDIR}/stubs/host-smoke-wp.sh" \
 HOMEBOY_CHANGED_TEST_FILES=$'tests/import-agent-ability-smoke.php\ntests/Unit/ImportAgentAbilityTest.php' \
     bash "${EXTENSION_PATH}/scripts/test/test-runner.sh" > "${TMPDIR}/changed-mixed-files.out"
 
 assert_contains "${TMPDIR}/changed-mixed-files.out" "WP_CODEBOX_STUB"
 assert_contains "${TMPDIR}/changed-mixed-files.out" "CHANGED=tests/import-agent-ability-smoke.php"
-assert_not_contains "${TMPDIR}/changed-mixed-files.out" "HOST_SMOKE_BEGIN:tests/import-agent-ability-smoke.php"
+assert_contains "${TMPDIR}/changed-mixed-files.out" "HOST_SMOKE_BEGIN:tests/import-agent-ability-smoke.php"
 
 WP_CODEBOX_ARGS_FILE="${TMPDIR}/wp-codebox-args.txt" \
 HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
