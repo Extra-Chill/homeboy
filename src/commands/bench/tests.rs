@@ -1,5 +1,6 @@
 use super::*;
 use crate::test_support::with_isolated_home;
+use clap::error::ErrorKind;
 use clap::Parser;
 use homeboy::core::extension::bench::aggregate_comparison;
 use std::fs;
@@ -295,7 +296,6 @@ pub(super) fn run_args(
             profile: None,
             ci_profile: None,
             ignore_default_baseline: false,
-            allow_stale_dependencies: false,
         },
     }
 }
@@ -545,6 +545,16 @@ fn parses_rig_concurrency_flag() {
     .expect("bench --rig-concurrency should parse");
 
     assert_eq!(cli.bench.run.rig_concurrency, 2);
+}
+
+#[test]
+fn rejects_allow_stale_dependencies_flag() {
+    let err = match TestCli::try_parse_from(["bench", "homeboy", "--allow-stale-dependencies"]) {
+        Ok(_) => panic!("stale dependency bypass should not parse"),
+        Err(err) => err,
+    };
+
+    assert_eq!(err.kind(), ErrorKind::UnknownArgument);
 }
 
 #[test]

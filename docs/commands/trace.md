@@ -64,7 +64,7 @@ homeboy trace list --profiles --rig studio
 
 JSON run, summary, and aggregate outputs include a `profile` object with the resolved profile id, rig id, component, scenario, overlays, variants, and settings used for the invocation.
 
-Trace dependency preflight rejects stale or dirty dependency checkouts before running the expensive workflow. Set `HOMEBOY_ALLOW_STALE_DEPENDENCIES=1` only when intentionally collecting non-deterministic evidence from stale local dependencies.
+Trace dependency preflight rejects stale or dirty dependency checkouts before running the expensive workflow so stale local dependencies cannot produce misleading evidence.
 
 ## Baseline/Candidate Compare
 

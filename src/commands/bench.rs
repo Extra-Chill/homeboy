@@ -302,10 +302,6 @@ pub struct BenchRunArgs {
     /// auto-pairs, or to bench the candidate alone.
     #[arg(long)]
     ignore_default_baseline: bool,
-
-    /// Allow stale or dirty dependency/runner checkouts for this expensive bench run.
-    #[arg(long)]
-    allow_stale_dependencies: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]

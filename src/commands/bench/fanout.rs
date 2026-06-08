@@ -282,7 +282,6 @@ mod tests {
             profile: None,
             ci_profile: None,
             ignore_default_baseline: false,
-            allow_stale_dependencies: false,
         }
     }
 

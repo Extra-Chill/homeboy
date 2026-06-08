@@ -494,9 +494,7 @@ fn run_component_with_rig_context(
         &ctx.source_path,
         ctx.extension_path.as_deref(),
         &ctx.settings,
-        homeboy::core::hygiene::DependencyHygieneOptions {
-            allow_stale: args.allow_stale_dependencies,
-        },
+        homeboy::core::hygiene::DependencyHygieneOptions { allow_stale: false },
     )?;
     let ci_profile_job =
         resolve_ci_profile_job(args.ci_profile.as_deref(), ctx.extension_id.as_deref())?;
@@ -732,7 +730,6 @@ mod tests {
             profile: None,
             ci_profile: None,
             ignore_default_baseline: false,
-            allow_stale_dependencies: false,
         }
     }
 

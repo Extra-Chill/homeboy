@@ -95,7 +95,7 @@ pub fn require_checkout_hygiene(
             "checkouts": snapshots,
         }),
     )
-    .with_hint("Update the stale dependency checkout or rerun with --allow-stale-dependencies to accept non-deterministic evidence."))
+    .with_hint("Update the stale dependency checkout. Homeboy automatically fast-forwards clean validation dependencies, but dirty, non-Git, missing-upstream, or divergent checkouts must be fixed before running expensive evidence workflows."))
 }
 
 #[derive(Debug, Clone)]
@@ -218,23 +218,25 @@ fn checkout_hygiene_snapshot(
     allowed: bool,
 ) -> Result<CheckoutHygieneSnapshot> {
     let path = checkout.path;
-    let head = git_output(&path, &["rev-parse", "HEAD"]);
+    let mut head = git_output(&path, &["rev-parse", "HEAD"]);
     let branch = git_output(&path, &["rev-parse", "--abbrev-ref", "HEAD"]);
     let upstream = git_output(&path, &["rev-parse", "--abbrev-ref", "@{upstream}"]);
     if upstream.is_some() {
         let _ = git_output(&path, &["fetch", "--quiet"]);
     }
-    let (behind, ahead) = git_output(
-        &path,
-        &["rev-list", "--left-right", "--count", "@{upstream}...HEAD"],
-    )
-    .and_then(|value| {
-        let mut parts = value.split_whitespace();
-        let behind = parts.next()?.parse::<u32>().ok()?;
-        let ahead = parts.next()?.parse::<u32>().ok()?;
-        Some((Some(behind), Some(ahead)))
-    })
-    .unwrap_or((None, None));
+    let dirty = git_output(&path, &["status", "--porcelain=v1"]).map(|value| !value.is_empty());
+    let (mut behind, mut ahead) = git_ahead_behind(&path);
+    if checkout.role == "validation_dependency"
+        && !allowed
+        && upstream.is_some()
+        && dirty == Some(false)
+        && ahead.unwrap_or(0) == 0
+        && behind.unwrap_or(0) > 0
+        && git_status(&path, &["merge", "--ff-only", "@{upstream}"])
+    {
+        head = git_output(&path, &["rev-parse", "HEAD"]);
+        (behind, ahead) = git_ahead_behind(&path);
+    }
     let dirty = git_output(&path, &["status", "--porcelain=v1"]).map(|value| !value.is_empty());
 
     Ok(CheckoutHygieneSnapshot {
@@ -249,6 +251,20 @@ fn checkout_hygiene_snapshot(
         dirty,
         allowed,
     })
+}
+
+fn git_ahead_behind(path: &Path) -> (Option<u32>, Option<u32>) {
+    git_output(
+        &path,
+        &["rev-list", "--left-right", "--count", "@{upstream}...HEAD"],
+    )
+    .and_then(|value| {
+        let mut parts = value.split_whitespace();
+        let behind = parts.next()?.parse::<u32>().ok()?;
+        let ahead = parts.next()?.parse::<u32>().ok()?;
+        Some((Some(behind), Some(ahead)))
+    })
+    .unwrap_or((None, None))
 }
 
 fn hygiene_failure_message(snapshot: &CheckoutHygieneSnapshot) -> String {
@@ -288,6 +304,17 @@ fn git_output(path: &Path, args: &[&str]) -> Option<String> {
     Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+fn git_status(path: &Path, args: &[&str]) -> bool {
+    Command::new("git")
+        .args(args)
+        .current_dir(path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -319,7 +346,50 @@ mod tests {
     }
 
     #[test]
-    fn dependency_hygiene_fails_when_checkout_is_behind_upstream() {
+    fn dependency_hygiene_fast_forwards_validation_dependency_behind_upstream() {
+        let local = tempfile::tempdir().unwrap();
+        let remote = tempfile::tempdir().unwrap();
+        let writer = tempfile::tempdir().unwrap();
+        init_repo(local.path());
+        git(remote.path(), &["init", "--bare", "-b", "main"]);
+        git(
+            local.path(),
+            &["remote", "add", "origin", remote.path().to_str().unwrap()],
+        );
+        git(local.path(), &["push", "-u", "origin", "main"]);
+        git(
+            writer.path(),
+            &[
+                "clone",
+                "--branch",
+                "main",
+                remote.path().to_str().unwrap(),
+                ".",
+            ],
+        );
+        git(writer.path(), &["config", "user.email", "test@example.com"]);
+        git(writer.path(), &["config", "user.name", "Homeboy Test"]);
+        fs::write(writer.path().join("remote.txt"), "remote\n").unwrap();
+        git(writer.path(), &["add", "."]);
+        git(writer.path(), &["commit", "-m", "remote update"]);
+        git(writer.path(), &["push", "origin", "HEAD:main"]);
+
+        let snapshots = require_checkout_hygiene(
+            vec![DependencyCheckout {
+                id: "dep".to_string(),
+                role: "validation_dependency".to_string(),
+                path: local.path().to_path_buf(),
+            }],
+            DependencyHygieneOptions { allow_stale: false },
+        )
+        .expect("clean validation dependency should fast-forward");
+
+        assert_eq!(snapshots[0].behind, Some(0));
+        assert!(local.path().join("remote.txt").exists());
+    }
+
+    #[test]
+    fn dependency_hygiene_fails_when_trace_dependency_is_behind_upstream() {
         let local = tempfile::tempdir().unwrap();
         let remote = tempfile::tempdir().unwrap();
         let writer = tempfile::tempdir().unwrap();
@@ -350,12 +420,12 @@ mod tests {
         let err = require_checkout_hygiene(
             vec![DependencyCheckout {
                 id: "dep".to_string(),
-                role: "validation_dependency".to_string(),
+                role: "trace_dependency".to_string(),
                 path: local.path().to_path_buf(),
             }],
             DependencyHygieneOptions { allow_stale: false },
         )
-        .expect_err("behind checkout should fail");
+        .expect_err("behind trace dependency should fail");
 
         assert_eq!(err.code, ErrorCode::ValidationMultipleErrors);
         assert_eq!(err.details["checkouts"][0]["behind"].as_u64(), Some(1));
