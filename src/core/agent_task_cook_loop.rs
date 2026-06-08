@@ -4,7 +4,10 @@ use serde_json::{json, Value};
 use crate::core::agent_task::{
     AgentTaskRequest, AgentTaskSourceRef, AgentTaskWorkspaceMode, AGENT_TASK_REQUEST_SCHEMA,
 };
-use crate::core::agent_task_gate::{text_tail, AgentTaskGateReport, AgentTaskGateStatus};
+use crate::core::agent_task_gate::{
+    text_tail, AgentTaskGateReport, AgentTaskGateRevealPolicy, AgentTaskGateStatus,
+    AgentTaskGateVisibility,
+};
 use crate::core::agent_task_promotion::{AgentTaskPromotionReport, AgentTaskPromotionStatus};
 
 pub const AGENT_TASK_COOK_LOOP_REPORT_SCHEMA: &str = "homeboy/agent-task-cook-loop-report/v1";
@@ -53,6 +56,11 @@ pub enum AgentTaskCookLoopStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskCookLoopGateFailure {
     pub gate_id: String,
+    #[serde(default)]
+    pub visibility: AgentTaskGateVisibility,
+    #[serde(default)]
+    pub reveal_policy: AgentTaskGateRevealPolicy,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub command: String,
     pub exit_code: i32,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -105,13 +113,14 @@ fn build_follow_up_request(
 ) -> AgentTaskRequest {
     let mut request = options.source_request.clone();
     let next_attempt = options.attempt.saturating_add(1);
+    let agent_visible_failed_gates = agent_visible_gate_failures(failed_gates);
     request.schema = AGENT_TASK_REQUEST_SCHEMA.to_string();
     request.task_id = format!("{}-gate-fix-{}", request.task_id, next_attempt);
     request.parent_plan_id = request
         .parent_plan_id
         .clone()
         .or_else(|| options.source_run_id.clone());
-    request.instructions = follow_up_instructions(options, failed_gates);
+    request.instructions = follow_up_instructions(options, &agent_visible_failed_gates);
     request.inputs = json!({
         "cook_loop": {
             "source_run_id": options.source_run_id,
@@ -125,7 +134,7 @@ fn build_follow_up_request(
             "to_worktree": options.promotion_report.to_worktree,
             "changed_files": options.promotion_report.changed_files,
             "patch_artifact": options.promotion_report.patch_artifact,
-            "failed_gates": failed_gates,
+            "failed_gates": agent_visible_failed_gates,
             "current_diff": options.current_diff,
         }
     });
@@ -166,6 +175,7 @@ fn build_follow_up_request(
             "source_task_id": options.source_request.task_id,
             "source_run_id": options.source_run_id,
             "failed_gate_count": failed_gates.len(),
+            "private_failed_gate_count": failed_gates.iter().filter(|gate| gate.visibility == AgentTaskGateVisibility::Private).count(),
         }
     });
     request
@@ -209,12 +219,71 @@ fn gate_failure(gate: &AgentTaskGateReport) -> AgentTaskCookLoopGateFailure {
 
     AgentTaskCookLoopGateFailure {
         gate_id: gate.id.clone(),
+        visibility: gate.visibility,
+        reveal_policy: gate.reveal_policy,
         command,
         exit_code: gate.exit_code,
         stdout_tail,
         stderr_tail,
         summary,
         agent_feedback,
+    }
+}
+
+fn agent_visible_gate_failures(
+    failed_gates: &[AgentTaskCookLoopGateFailure],
+) -> Vec<AgentTaskCookLoopGateFailure> {
+    failed_gates
+        .iter()
+        .map(agent_visible_gate_failure)
+        .collect()
+}
+
+fn agent_visible_gate_failure(
+    failure: &AgentTaskCookLoopGateFailure,
+) -> AgentTaskCookLoopGateFailure {
+    if failure.visibility == AgentTaskGateVisibility::Visible {
+        return failure.clone();
+    }
+
+    match failure.reveal_policy {
+        AgentTaskGateRevealPolicy::FullEvidence => failure.clone(),
+        AgentTaskGateRevealPolicy::SummaryOnly => AgentTaskCookLoopGateFailure {
+            gate_id: failure.gate_id.clone(),
+            visibility: failure.visibility,
+            reveal_policy: failure.reveal_policy,
+            command: String::new(),
+            exit_code: failure.exit_code,
+            stdout_tail: String::new(),
+            stderr_tail: String::new(),
+            summary: format!(
+                "private deterministic gate {} failed; detailed evidence is withheld by policy",
+                failure.gate_id
+            ),
+            agent_feedback: "A private deterministic verification gate failed. Generalize the fix against the public objective and visible evidence; hidden evaluator details are withheld.".to_string(),
+        },
+        AgentTaskGateRevealPolicy::Redacted => AgentTaskCookLoopGateFailure {
+            gate_id: failure.gate_id.clone(),
+            visibility: failure.visibility,
+            reveal_policy: failure.reveal_policy,
+            command: String::new(),
+            exit_code: failure.exit_code,
+            stdout_tail: String::new(),
+            stderr_tail: String::new(),
+            summary: "private deterministic gate failed; evidence redacted".to_string(),
+            agent_feedback: "A private deterministic verification gate failed. Details are redacted; continue from the public task objective and visible gate evidence.".to_string(),
+        },
+        AgentTaskGateRevealPolicy::NoDetail => AgentTaskCookLoopGateFailure {
+            gate_id: failure.gate_id.clone(),
+            visibility: failure.visibility,
+            reveal_policy: failure.reveal_policy,
+            command: String::new(),
+            exit_code: failure.exit_code,
+            stdout_tail: String::new(),
+            stderr_tail: String::new(),
+            summary: "private deterministic gate failed".to_string(),
+            agent_feedback: "A private deterministic verification gate failed.".to_string(),
+        },
     }
 }
 
@@ -225,9 +294,14 @@ fn follow_up_instructions(
     let gate_list = failed_gates
         .iter()
         .map(|failure| {
+            let gate_label = if failure.command.is_empty() {
+                failure.gate_id.as_str()
+            } else {
+                failure.command.as_str()
+            };
             format!(
                 "- `{}` exited {}: {}",
-                failure.command, failure.exit_code, failure.summary
+                gate_label, failure.exit_code, failure.summary
             )
         })
         .collect::<Vec<_>>()
@@ -347,6 +421,83 @@ mod tests {
         assert!(report.follow_up_request.is_none());
     }
 
+    #[test]
+    fn visible_gate_failure_keeps_full_agent_feedback_evidence() {
+        let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
+            source_request: source_request(),
+            promotion_report: promotion_report(
+                AgentTaskPromotionStatus::GateFailed,
+                vec![failed_gate()],
+            ),
+            attempt: 1,
+            max_attempts: 3,
+            source_run_id: Some("run-3688".to_string()),
+            current_diff: String::new(),
+            metadata: Value::Null,
+        });
+
+        let request = report.follow_up_request.expect("follow-up request");
+        let feedback = request.inputs.to_string();
+        assert!(feedback.contains("cargo test agent_task_gate"));
+        assert!(feedback.contains("boom"));
+        assert!(request.instructions.contains("cargo test agent_task_gate"));
+    }
+
+    #[test]
+    fn private_summary_only_gate_does_not_leak_command_or_output_to_follow_up_request() {
+        let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
+            source_request: source_request(),
+            promotion_report: promotion_report(
+                AgentTaskPromotionStatus::GateFailed,
+                vec![private_failed_gate(AgentTaskGateRevealPolicy::SummaryOnly)],
+            ),
+            attempt: 1,
+            max_attempts: 3,
+            source_run_id: Some("run-3688".to_string()),
+            current_diff: String::new(),
+            metadata: Value::Null,
+        });
+
+        assert_eq!(
+            report.failed_gates[0].command,
+            "./hidden-heldout-check --fixture secret"
+        );
+        assert_eq!(
+            report.failed_gates[0].stdout_tail,
+            "secret fixture mismatch"
+        );
+        let request = report.follow_up_request.expect("follow-up request");
+        let agent_context = format!("{}\n{}", request.instructions, request.inputs);
+
+        assert!(agent_context.contains("private deterministic gate gate-1 failed"));
+        assert!(agent_context.contains("hidden evaluator details are withheld"));
+        assert!(!agent_context.contains("./hidden-heldout-check"));
+        assert!(!agent_context.contains("secret fixture mismatch"));
+        assert!(!agent_context.contains("private evaluator stack trace"));
+    }
+
+    #[test]
+    fn private_full_evidence_policy_can_reveal_agent_feedback_details() {
+        let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
+            source_request: source_request(),
+            promotion_report: promotion_report(
+                AgentTaskPromotionStatus::GateFailed,
+                vec![private_failed_gate(AgentTaskGateRevealPolicy::FullEvidence)],
+            ),
+            attempt: 1,
+            max_attempts: 3,
+            source_run_id: Some("run-3688".to_string()),
+            current_diff: String::new(),
+            metadata: Value::Null,
+        });
+
+        let request = report.follow_up_request.expect("follow-up request");
+        let agent_context = format!("{}\n{}", request.instructions, request.inputs);
+
+        assert!(agent_context.contains("./hidden-heldout-check"));
+        assert!(agent_context.contains("secret fixture mismatch"));
+    }
+
     fn source_request() -> AgentTaskRequest {
         AgentTaskRequest {
             schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
@@ -402,6 +553,8 @@ mod tests {
         AgentTaskGateReport {
             schema: AGENT_TASK_GATE_REPORT_SCHEMA.to_string(),
             id: "gate-1".to_string(),
+            visibility: AgentTaskGateVisibility::Visible,
+            reveal_policy: AgentTaskGateRevealPolicy::FullEvidence,
             status: AgentTaskGateStatus::Failed,
             command: vec![
                 "sh".to_string(),
@@ -423,10 +576,38 @@ mod tests {
         }
     }
 
+    fn private_failed_gate(reveal_policy: AgentTaskGateRevealPolicy) -> AgentTaskGateReport {
+        AgentTaskGateReport {
+            schema: AGENT_TASK_GATE_REPORT_SCHEMA.to_string(),
+            id: "gate-1".to_string(),
+            visibility: AgentTaskGateVisibility::Private,
+            reveal_policy,
+            status: AgentTaskGateStatus::Failed,
+            command: vec![
+                "sh".to_string(),
+                "-lc".to_string(),
+                "./hidden-heldout-check --fixture secret".to_string(),
+            ],
+            exit_code: 7,
+            stdout: "secret fixture mismatch".to_string(),
+            stderr: "private evaluator stack trace".to_string(),
+            failure_evidence: Some(AgentTaskGateFailureEvidence {
+                summary: "secret fixture mismatch on randomized private corpus".to_string(),
+                command: "./hidden-heldout-check --fixture secret".to_string(),
+                exit_code: 7,
+                stdout_tail: "secret fixture mismatch".to_string(),
+                stderr_tail: "private evaluator stack trace".to_string(),
+                agent_feedback: "Fix the randomized secret fixture mismatch.".to_string(),
+            }),
+        }
+    }
+
     fn green_gate() -> AgentTaskGateReport {
         AgentTaskGateReport {
             schema: AGENT_TASK_GATE_REPORT_SCHEMA.to_string(),
             id: "gate-1".to_string(),
+            visibility: AgentTaskGateVisibility::Visible,
+            reveal_policy: AgentTaskGateRevealPolicy::FullEvidence,
             status: AgentTaskGateStatus::Succeeded,
             command: vec![
                 "sh".to_string(),

@@ -9,7 +9,10 @@ use sha2::{Digest, Sha256};
 use crate::core::agent_task::{
     AgentTaskArtifact, AgentTaskOutcome, AgentTaskOutcomeStatus, AGENT_TASK_OUTCOME_SCHEMA,
 };
-use crate::core::agent_task_gate::{run_gate_command, AgentTaskGateReport, AgentTaskGateStatus};
+use crate::core::agent_task_gate::{
+    run_gate_command, run_gate_command_with_policy, AgentTaskGateReport, AgentTaskGateRevealPolicy,
+    AgentTaskGateStatus, AgentTaskGateVisibility,
+};
 use crate::core::agent_task_scheduler::{AgentTaskAggregate, AGENT_TASK_AGGREGATE_SCHEMA};
 use crate::core::agent_task_timeout_artifacts::is_actionable_patch_artifact;
 use crate::core::{Error, Result};
@@ -28,6 +31,10 @@ pub struct AgentTaskPromotionOptions {
     pub dry_run: bool,
     #[serde(default)]
     pub verify: Vec<String>,
+    #[serde(default)]
+    pub private_verify: Vec<String>,
+    #[serde(default = "default_private_gate_reveal")]
+    pub private_gate_reveal: AgentTaskGateRevealPolicy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_command: Option<String>,
 }
@@ -141,7 +148,7 @@ fn promote_with_provider(
     }
 
     let mut deterministic_gates = Vec::new();
-    if !options.dry_run && !options.verify.is_empty() {
+    if !options.dry_run && (!options.verify.is_empty() || !options.private_verify.is_empty()) {
         let worktree_path = applied_worktree_path.as_deref().ok_or_else(|| {
             Error::validation_invalid_argument(
                 "to_worktree",
@@ -151,7 +158,23 @@ fn promote_with_provider(
             )
         })?;
         for (index, command) in options.verify.iter().enumerate() {
-            deterministic_gates.push(provider.verify(worktree_path, index + 1, command)?);
+            deterministic_gates.push(provider.verify(
+                worktree_path,
+                index + 1,
+                command,
+                AgentTaskGateVisibility::Visible,
+                AgentTaskGateRevealPolicy::FullEvidence,
+            )?);
+        }
+        let private_offset = deterministic_gates.len();
+        for (index, command) in options.private_verify.iter().enumerate() {
+            deterministic_gates.push(provider.verify(
+                worktree_path,
+                private_offset + index + 1,
+                command,
+                AgentTaskGateVisibility::Private,
+                options.private_gate_reveal,
+            )?);
         }
     }
     let has_gate_failure = deterministic_gates
@@ -225,7 +248,14 @@ trait AgentTaskPromotionWorkspaceProvider {
         &mut self,
         request: AgentTaskPromotionApplyRequest,
     ) -> Result<AgentTaskPromotionWorkspace>;
-    fn verify(&mut self, cwd: &Path, index: usize, command: &str) -> Result<AgentTaskGateReport>;
+    fn verify(
+        &mut self,
+        cwd: &Path,
+        index: usize,
+        command: &str,
+        visibility: AgentTaskGateVisibility,
+        reveal_policy: AgentTaskGateRevealPolicy,
+    ) -> Result<AgentTaskGateReport>;
 }
 
 struct ExternalPromotionWorkspaceProvider {
@@ -261,13 +291,30 @@ impl AgentTaskPromotionWorkspaceProvider for ExternalPromotionWorkspaceProvider 
         run_provider_command(command, &request)
     }
 
-    fn verify(&mut self, cwd: &Path, index: usize, command: &str) -> Result<AgentTaskGateReport> {
-        run_gate_command(cwd, index, command)
+    fn verify(
+        &mut self,
+        cwd: &Path,
+        index: usize,
+        command: &str,
+        visibility: AgentTaskGateVisibility,
+        reveal_policy: AgentTaskGateRevealPolicy,
+    ) -> Result<AgentTaskGateReport> {
+        if visibility == AgentTaskGateVisibility::Visible
+            && reveal_policy == AgentTaskGateRevealPolicy::FullEvidence
+        {
+            return run_gate_command(cwd, index, command);
+        }
+
+        run_gate_command_with_policy(cwd, index, command, visibility, reveal_policy)
     }
 }
 
 fn promotion_report_schema() -> String {
     AGENT_TASK_PROMOTION_REPORT_SCHEMA.to_string()
+}
+
+fn default_private_gate_reveal() -> AgentTaskGateRevealPolicy {
+    AgentTaskGateRevealPolicy::SummaryOnly
 }
 
 fn select_outcome(source: Value, task_id: Option<&str>) -> Result<(String, AgentTaskOutcome)> {
@@ -605,7 +652,12 @@ mod tests {
     struct FakePromotionWorkspaceProvider {
         workspace_path: Option<PathBuf>,
         apply_calls: Vec<AgentTaskPromotionApplyRequest>,
-        verify_calls: Vec<(PathBuf, String)>,
+        verify_calls: Vec<(
+            PathBuf,
+            String,
+            AgentTaskGateVisibility,
+            AgentTaskGateRevealPolicy,
+        )>,
     }
 
     impl AgentTaskPromotionWorkspaceProvider for FakePromotionWorkspaceProvider {
@@ -637,12 +689,20 @@ mod tests {
             cwd: &Path,
             index: usize,
             command: &str,
+            visibility: AgentTaskGateVisibility,
+            reveal_policy: AgentTaskGateRevealPolicy,
         ) -> Result<AgentTaskGateReport> {
-            self.verify_calls
-                .push((cwd.to_path_buf(), command.to_string()));
+            self.verify_calls.push((
+                cwd.to_path_buf(),
+                command.to_string(),
+                visibility,
+                reveal_policy,
+            ));
             Ok(AgentTaskGateReport {
                 schema: crate::core::agent_task_gate::AGENT_TASK_GATE_REPORT_SCHEMA.to_string(),
                 id: format!("gate-{index}"),
+                visibility,
+                reveal_policy,
                 status: AgentTaskGateStatus::Succeeded,
                 command: vec!["sh".to_string(), "-lc".to_string(), command.to_string()],
                 exit_code: 0,
@@ -830,6 +890,8 @@ mod tests {
             artifact_id: None,
             dry_run: true,
             verify: Vec::new(),
+            private_verify: Vec::new(),
+            private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
             provider_command: None,
         })
         .expect("dry-run promotion report");
@@ -861,6 +923,8 @@ mod tests {
                 artifact_id: None,
                 dry_run: false,
                 verify: vec!["cargo test --lib agent_task_promotion".to_string()],
+                private_verify: vec!["cargo test --lib hidden".to_string()],
+                private_gate_reveal: AgentTaskGateRevealPolicy::SummaryOnly,
                 provider_command: None,
             },
             &mut provider,
@@ -880,18 +944,32 @@ mod tests {
         assert_eq!(provider.apply_calls[0].changed_files, vec!["src/lib.rs"]);
         assert_eq!(
             provider.verify_calls,
-            vec![(
-                worktree_path,
-                "cargo test --lib agent_task_promotion".to_string()
-            )]
+            vec![
+                (
+                    worktree_path.clone(),
+                    "cargo test --lib agent_task_promotion".to_string(),
+                    AgentTaskGateVisibility::Visible,
+                    AgentTaskGateRevealPolicy::FullEvidence,
+                ),
+                (
+                    worktree_path,
+                    "cargo test --lib hidden".to_string(),
+                    AgentTaskGateVisibility::Private,
+                    AgentTaskGateRevealPolicy::SummaryOnly,
+                )
+            ]
         );
         assert_eq!(report.command_evidence.len(), 1);
         assert_eq!(
             report.command_evidence[0].command[0],
             "fake-workspace-provider"
         );
-        assert_eq!(report.deterministic_gates.len(), 1);
+        assert_eq!(report.deterministic_gates.len(), 2);
         assert_eq!(report.deterministic_gates[0].id, "gate-1");
+        assert_eq!(
+            report.deterministic_gates[1].visibility,
+            AgentTaskGateVisibility::Private
+        );
     }
 
     #[test]
@@ -907,6 +985,8 @@ mod tests {
             artifact_id: None,
             dry_run: false,
             verify: Vec::new(),
+            private_verify: Vec::new(),
+            private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
             provider_command: None,
         })
         .expect_err("missing provider rejected");
