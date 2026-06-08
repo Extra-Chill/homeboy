@@ -416,11 +416,21 @@ fn persist_bench_result_artifact_paths(
     run_dir: &RunDir,
 ) -> Vec<BenchDiagnostic> {
     let mut diagnostics = Vec::new();
+    let shared_state = results
+        .run_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.shared_state.as_deref());
     for scenario in &mut results.scenarios {
         for (name, artifact) in &mut scenario.artifacts {
-            if let Some(diagnostic) =
-                persist_bench_artifact(observation, &scenario.id, None, name, artifact, run_dir)
-            {
+            if let Some(diagnostic) = persist_bench_artifact(
+                observation,
+                &scenario.id,
+                None,
+                name,
+                artifact,
+                run_dir,
+                shared_state,
+            ) {
                 diagnostics.push(diagnostic);
             }
         }
@@ -434,6 +444,7 @@ fn persist_bench_result_artifact_paths(
                         name,
                         artifact,
                         run_dir,
+                        shared_state,
                     ) {
                         diagnostics.push(diagnostic);
                     }
@@ -451,6 +462,7 @@ fn persist_bench_artifact(
     name: &str,
     artifact: &mut homeboy::core::extension::bench::BenchArtifact,
     run_dir: &RunDir,
+    shared_state: Option<&str>,
 ) -> Option<BenchDiagnostic> {
     let kind = artifact.kind.clone().unwrap_or_else(|| name.to_string());
     let metadata = bench_artifact_metadata(scenario_id, run_index, name, artifact);
@@ -491,7 +503,7 @@ fn persist_bench_artifact(
         ));
     }
 
-    let path = resolve_bench_artifact_path(&original_path, run_dir);
+    let path = resolve_bench_artifact_path(&original_path, run_dir, shared_state);
     let record = if path.is_file() {
         observation.0.store().record_artifact_with_metadata(
             observation.run_id(),
@@ -605,12 +617,20 @@ fn rewrite_bench_results_file(results: &BenchResults, run_dir: &RunDir) {
     let _ = fs::write(run_dir.step_file(run_dir::files::BENCH_RESULTS), json);
 }
 
-fn resolve_bench_artifact_path(path: &str, run_dir: &RunDir) -> PathBuf {
+fn resolve_bench_artifact_path(
+    path: &str,
+    run_dir: &RunDir,
+    shared_state: Option<&str>,
+) -> PathBuf {
     let artifact_path = PathBuf::from(path);
     if artifact_path.exists() {
         return artifact_path;
     }
     if artifact_path.is_absolute() {
+        if let Some(shared_state_path) = resolve_shared_state_artifact(&artifact_path, shared_state)
+        {
+            return shared_state_path;
+        }
         if let Some(preserved_path) = resolve_preserved_invocation_artifact(&artifact_path, run_dir)
         {
             return preserved_path;
@@ -622,6 +642,16 @@ fn resolve_bench_artifact_path(path: &str, run_dir: &RunDir) -> PathBuf {
         return run_dir_path;
     }
     artifact_path
+}
+
+fn resolve_shared_state_artifact(path: &Path, shared_state: Option<&str>) -> Option<PathBuf> {
+    let shared_state = shared_state?;
+    let relative = path.strip_prefix("/bench-shared-state").ok()?;
+    let candidate = Path::new(shared_state).join(relative);
+    if candidate.exists() {
+        return Some(candidate);
+    }
+    None
 }
 
 fn resolve_preserved_invocation_artifact(path: &Path, run_dir: &RunDir) -> Option<PathBuf> {
