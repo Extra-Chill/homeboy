@@ -26,6 +26,57 @@ fn trace_accepts_allow_local_evidence_alias() {
     assert!(cli.trace.allow_local_toolchain);
 }
 
+#[test]
+fn lab_dispatch_observation_persists_trace_run_before_remote_execution() {
+    with_isolated_home(|home| {
+        let component_dir = tempfile::TempDir::new().expect("component dir");
+        write_trace_rig(home, "studio-rig", "studio", component_dir.path());
+        let args = trace_args_for_rig("studio-rig", "studio", "studio-app-create-site");
+        let normalized = vec![
+            "homeboy".to_string(),
+            "trace".to_string(),
+            "--rig".to_string(),
+            "studio-rig".to_string(),
+            "studio".to_string(),
+            "studio-app-create-site".to_string(),
+        ];
+
+        let observation = start_lab_dispatch_observation(&args, &normalized, Some("homeboy-lab"))
+            .expect("dispatch observation");
+        let trace_run = observation
+            .store
+            .get_trace_run(&observation.run_id)
+            .expect("read trace run")
+            .expect("trace run exists before remote execution");
+        assert_eq!(trace_run.status, "running");
+        assert_eq!(trace_run.component_id, "studio");
+        assert_eq!(trace_run.scenario_id, "studio-app-create-site");
+        assert_eq!(
+            trace_run.metadata_json["lab_dispatch"]["phase"],
+            "route_before_lab_dispatch"
+        );
+
+        let run_id = observation.run_id.clone();
+        let store = ObservationStore::open_initialized().expect("store");
+        finish_lab_dispatch_observation(
+            Some(observation),
+            RunStatus::Error,
+            serde_json::json!({
+                "lab_dispatch": {
+                    "phase": "route_lab_dispatch",
+                    "status": "timeout"
+                }
+            }),
+        );
+        let trace_run = store
+            .get_trace_run(&run_id)
+            .expect("read trace run")
+            .expect("trace run remains present");
+        assert_eq!(trace_run.status, "error");
+        assert_eq!(trace_run.metadata_json["lab_dispatch"]["status"], "timeout");
+    });
+}
+
 fn trace_args_for_rig(rig_id: &str, component_id: &str, scenario_id: &str) -> TraceArgs {
     TraceArgs {
         comp: PositionalComponentArgs {
