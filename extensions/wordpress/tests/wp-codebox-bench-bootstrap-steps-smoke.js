@@ -96,7 +96,7 @@ homeboy_require_bash_version() { :; }
 
   assert.equal(successResult.status, 0, successResult.stderr || successResult.stdout);
   const recipe = JSON.parse(fs.readFileSync(successCaptureFile, 'utf8'));
-  assert.equal(recipe.inputs.extraPlugins.some((plugin) => plugin.slug === 'generic-dependency'), true);
+  assert.equal(recipe.inputs.extra_plugins.some((plugin) => plugin.slug === 'generic-dependency'), true);
   assert.deepEqual(recipe.inputs.pluginRuntime.setup, settings.wp_codebox_bootstrap_steps);
   assert.equal(recipe.workflow.steps[0].command, 'wordpress.bench');
 
