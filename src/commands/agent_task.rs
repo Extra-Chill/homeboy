@@ -1,6 +1,7 @@
 use clap::{Args, Subcommand};
 use homeboy::core::agent_task_gate::AgentTaskGateRevealPolicy;
 use serde_json::Value;
+use std::io::Read;
 
 use homeboy::core::agent_task::AgentTaskRequest;
 use homeboy::core::agent_task_lifecycle;
@@ -8,10 +9,12 @@ use homeboy::core::agent_task_provider::ExtensionProviderAgentTaskExecutor;
 use homeboy::core::agent_task_scheduler::{
     AgentTaskExecutorAdapter, AgentTaskPlan, AgentTaskScheduler,
 };
+use homeboy::core::agent_task_secrets;
 use homeboy::core::config;
 
 use super::agent_task_dispatch::{run as dispatch, DispatchArgs};
 use super::{CmdResult, GlobalArgs};
+use crate::commands::utils::tty::prompt_password;
 
 pub mod review;
 
@@ -57,6 +60,80 @@ pub enum AgentTaskCommand {
     GateFeedback(GateFeedbackArgs),
     /// List extension-declared agent-task executor providers and optional secret readiness.
     Providers(ProvidersArgs),
+    /// Configure and inspect agent-task provider authentication secrets.
+    Auth(AgentTaskAuthArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct AgentTaskAuthArgs {
+    #[command(subcommand)]
+    pub command: AgentTaskAuthCommand,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum AgentTaskAuthCommand {
+    /// Show redacted readiness for provider secret environment variables.
+    Status(AgentTaskAuthStatusArgs),
+    /// Store a provider secret in the OS keychain and map it to a required env name.
+    SetKeychain(AgentTaskAuthSetKeychainArgs),
+    /// Map a required provider env name to another process env var.
+    MapEnv(AgentTaskAuthMapEnvArgs),
+    /// Map Claude Code provider secrets to Kimaki/OpenCode's active Anthropic OAuth auth file.
+    MapClaudeCodeKimaki,
+    /// Remove a provider secret source mapping.
+    Remove(AgentTaskAuthRemoveArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct AgentTaskAuthStatusArgs {
+    /// Secret environment variable name to check without exposing its value. Repeatable.
+    #[arg(long = "secret-env", value_name = "ENV")]
+    pub secret_env: Vec<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct AgentTaskAuthSetKeychainArgs {
+    /// Required provider environment variable name to satisfy.
+    #[arg(value_name = "ENV")]
+    pub secret_env: String,
+
+    /// Secret value. Omit to prompt securely.
+    #[arg(value_name = "VALUE")]
+    pub value: Option<String>,
+
+    /// Read the secret value from stdin.
+    #[arg(long)]
+    pub value_stdin: bool,
+
+    /// Keychain scope. Defaults to agent-task.
+    #[arg(long, value_name = "SCOPE")]
+    pub scope: Option<String>,
+
+    /// Keychain entry name. Defaults to ENV.
+    #[arg(long = "name", value_name = "NAME")]
+    pub keychain_name: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct AgentTaskAuthMapEnvArgs {
+    /// Required provider environment variable name to satisfy.
+    #[arg(value_name = "ENV")]
+    pub secret_env: String,
+
+    /// Source process environment variable. Defaults to ENV.
+    #[arg(long = "from", value_name = "ENV")]
+    pub source_env: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct AgentTaskAuthRemoveArgs {
+    /// Required provider environment variable name whose mapping should be removed.
+    #[arg(value_name = "ENV")]
+    pub secret_env: String,
+
+    /// Also remove the mapped keychain entry when the mapping points at keychain.
+    #[arg(long)]
+    pub keychain: bool,
 }
 
 #[derive(Args, Debug)]
@@ -269,6 +346,97 @@ pub fn run(args: AgentTaskArgs, global: &GlobalArgs) -> CmdResult<Value> {
         AgentTaskCommand::FinalizePr(finalize_args) => review::finalize_pull_request(finalize_args),
         AgentTaskCommand::GateFeedback(feedback_args) => review::gate_feedback(feedback_args),
         AgentTaskCommand::Providers(providers_args) => review::providers(providers_args),
+        AgentTaskCommand::Auth(auth_args) => auth(auth_args),
+    }
+}
+
+fn auth(args: AgentTaskAuthArgs) -> CmdResult<Value> {
+    match args.command {
+        AgentTaskAuthCommand::Status(status_args) => Ok((
+            serde_json::json!({
+                "schema": "homeboy/agent-task-auth-status/v1",
+                "secret_env": agent_task_secrets::secret_env_status(&status_args.secret_env),
+            }),
+            0,
+        )),
+        AgentTaskAuthCommand::SetKeychain(set_args) => {
+            let value = read_agent_task_secret_value(set_args.value, set_args.value_stdin)?;
+            let status = agent_task_secrets::set_keychain_secret(
+                &set_args.secret_env,
+                &value,
+                set_args.scope.as_deref(),
+                set_args.keychain_name.as_deref(),
+            )?;
+            Ok((
+                serde_json::json!({
+                    "schema": "homeboy/agent-task-auth-configured/v1",
+                    "secret_env": status,
+                }),
+                0,
+            ))
+        }
+        AgentTaskAuthCommand::MapEnv(map_args) => {
+            let status = agent_task_secrets::map_secret_to_env(
+                &map_args.secret_env,
+                map_args.source_env.as_deref(),
+            )?;
+            Ok((
+                serde_json::json!({
+                    "schema": "homeboy/agent-task-auth-configured/v1",
+                    "secret_env": status,
+                }),
+                0,
+            ))
+        }
+        AgentTaskAuthCommand::MapClaudeCodeKimaki => {
+            let status = agent_task_secrets::map_claude_code_to_opencode_anthropic()?;
+            Ok((
+                serde_json::json!({
+                    "schema": "homeboy/agent-task-auth-configured/v1",
+                    "secret_env": status,
+                }),
+                0,
+            ))
+        }
+        AgentTaskAuthCommand::Remove(remove_args) => {
+            let status = agent_task_secrets::remove_secret_mapping(
+                &remove_args.secret_env,
+                remove_args.keychain,
+            )?;
+            Ok((
+                serde_json::json!({
+                    "schema": "homeboy/agent-task-auth-configured/v1",
+                    "secret_env": status,
+                }),
+                0,
+            ))
+        }
+    }
+}
+
+fn read_agent_task_secret_value(
+    value: Option<String>,
+    value_stdin: bool,
+) -> homeboy::core::Result<String> {
+    match (value, value_stdin) {
+        (Some(_), true) => Err(homeboy::core::Error::validation_invalid_argument(
+            "value-stdin",
+            "cannot combine VALUE with --value-stdin",
+            None,
+            None,
+        )),
+        (Some(value), false) => Ok(value),
+        (None, true) => {
+            let mut raw = String::new();
+            std::io::stdin().read_to_string(&mut raw).map_err(|error| {
+                homeboy::core::Error::internal_io(
+                    error.to_string(),
+                    Some("read agent-task secret value from stdin".to_string()),
+                )
+            })?;
+            Ok(raw.trim_end_matches(['\r', '\n']).to_string())
+        }
+        (None, false) => prompt_password("Secret value: "),
     }
 }
 

@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use crate::core::agent_task_secrets;
 use crate::core::observation::{PREVIEW_METADATA_ENV, PREVIEW_PUBLIC_URL_ENV};
 use crate::core::plan::{HomeboyPlan, PlanStep, PlanStepStatus, PlanValues};
 use crate::core::source_snapshot::SourceSnapshot;
@@ -529,6 +530,8 @@ fn run_lab_offload_inner(
     forward_env_if_present(&mut env, PREVIEW_METADATA_ENV);
     forward_env_if_present(&mut env, PREVIEW_PUBLIC_URL_ENV);
     forward_release_ci_env(&mut env);
+    let agent_task_secret_env = hydrate_agent_task_secret_env(&command, &mut env)?;
+    lab_metadata["agent_task_secret_env"] = agent_task_secret_env;
     lab_metadata["settings_env"] = settings_env_diagnostics(&changed_since_preflight.args, &env);
     lab_metadata["rig_sync"] = serde_json::json!({
         "step": "lab.sync_rigs",
@@ -539,6 +542,7 @@ fn run_lab_offload_inner(
     forward_env_if_present(&mut env, PREVIEW_METADATA_ENV);
     forward_env_if_present(&mut env, PREVIEW_PUBLIC_URL_ENV);
     forward_release_ci_env(&mut env);
+    hydrate_agent_task_secret_env(&command, &mut env)?;
     let exec_result = exec(
         runner_id,
         RunnerExecOptions {
@@ -658,6 +662,60 @@ fn run_lab_offload_inner(
         stderr,
         exit_code,
     })
+}
+
+fn hydrate_agent_task_secret_env(
+    args: &[String],
+    env: &mut std::collections::HashMap<String, String>,
+) -> Result<serde_json::Value> {
+    let names = declared_agent_task_secret_env(args);
+    if names.is_empty() {
+        return Ok(serde_json::json!({
+            "schema": "homeboy/lab-agent-task-secret-env/v1",
+            "secret_env": [],
+        }));
+    }
+
+    let resolved = agent_task_secrets::resolve_secret_env(&names).map_err(|error| {
+        Error::validation_invalid_argument(
+            "secret-env",
+            error.message,
+            None,
+            Some(vec![
+                "Configure provider secrets with `homeboy agent-task auth status` and `homeboy agent-task auth map-claude-code-kimaki`.".to_string(),
+            ]),
+        )
+    })?;
+    for (name, value) in resolved {
+        env.insert(name, value);
+    }
+
+    Ok(serde_json::json!({
+        "schema": "homeboy/lab-agent-task-secret-env/v1",
+        "secret_env": agent_task_secrets::secret_env_status(&names),
+    }))
+}
+
+fn declared_agent_task_secret_env(args: &[String]) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--secret-env" {
+            if let Some(name) = args.get(index + 1) {
+                names.push(name.clone());
+            }
+            index += 2;
+            continue;
+        }
+        if let Some(name) = arg.strip_prefix("--secret-env=") {
+            names.push(name.to_string());
+        }
+        index += 1;
+    }
+    names.sort();
+    names.dedup();
+    names
 }
 
 fn automatic_capability_fallback(
@@ -945,6 +1003,28 @@ mod tests {
         .expect("parse lab offload metadata");
 
         assert_eq!(parsed["workspace_mapping"], mapping);
+    }
+
+    #[test]
+    fn declared_agent_task_secret_env_parses_repeated_and_equals_args() {
+        let names = declared_agent_task_secret_env(&[
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "dispatch".to_string(),
+            "--secret-env".to_string(),
+            "AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN".to_string(),
+            "--secret-env=AI_PROVIDER_CLAUDE_CODE_ACCESS_TOKEN".to_string(),
+            "--secret-env".to_string(),
+            "AI_PROVIDER_CLAUDE_CODE_ACCESS_TOKEN".to_string(),
+        ]);
+
+        assert_eq!(
+            names,
+            vec![
+                "AI_PROVIDER_CLAUDE_CODE_ACCESS_TOKEN".to_string(),
+                "AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN".to_string(),
+            ]
+        );
     }
 
     #[test]
