@@ -61,7 +61,15 @@ pub(crate) fn review(args: ReviewArgs) -> CmdResult<Value> {
         .map(|aggregate| AgentTaskAggregateReport::from(aggregate.outcomes.clone()));
     let promotion_candidates = aggregate_review
         .as_ref()
-        .map(|review| promotion_candidates(&args.run_id, args.to_worktree.as_deref(), review))
+        .map(|review| {
+            let promotion_source = record.aggregate_path.as_deref().unwrap_or(&args.run_id);
+            promotion_candidates(
+                promotion_source,
+                args.to_worktree.as_deref(),
+                args.provider_command.as_deref(),
+                review,
+            )
+        })
         .unwrap_or_default();
     let next_actions = review_next_actions(
         &record.state,
@@ -102,6 +110,7 @@ pub(crate) fn promote_artifact(args: PromoteArgs) -> CmdResult<Value> {
         artifact_id: args.artifact_id,
         dry_run: args.dry_run,
         verify: args.verify,
+        provider_command: args.provider_command,
     })?;
     let exit_code = if report.status == AgentTaskPromotionStatus::GateFailed {
         1
@@ -211,8 +220,9 @@ fn completed_run_aggregate(run_id: &str) -> Option<homeboy::core::Result<AgentTa
 }
 
 fn promotion_candidates(
-    run_id: &str,
+    source: &str,
     to_worktree: Option<&str>,
+    provider_command: Option<&str>,
     review: &AgentTaskAggregateReport,
 ) -> Vec<Value> {
     review
@@ -224,7 +234,7 @@ fn promotion_candidates(
                     "homeboy".to_string(),
                     "agent-task".to_string(),
                     "promote".to_string(),
-                    run_id.to_string(),
+                    source.to_string(),
                     "--task-id".to_string(),
                     candidate.task_id.clone(),
                     "--artifact-id".to_string(),
@@ -233,6 +243,10 @@ fn promotion_candidates(
                 if let Some(to_worktree) = to_worktree {
                     command.push("--to-worktree".to_string());
                     command.push(to_worktree.to_string());
+                }
+                if let Some(provider_command) = provider_command {
+                    command.push("--provider-command".to_string());
+                    command.push(provider_command.to_string());
                 }
 
                 serde_json::json!({
