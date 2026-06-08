@@ -295,6 +295,7 @@ pub(super) fn run_args(
             profile: None,
             ci_profile: None,
             ignore_default_baseline: false,
+            allow_stale_dependencies: false,
         },
     }
 }

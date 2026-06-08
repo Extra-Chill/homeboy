@@ -68,6 +68,7 @@ fn make_args(
             profile: None,
             ci_profile: None,
             ignore_default_baseline,
+            allow_stale_dependencies: false,
         },
     }
 }
