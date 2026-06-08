@@ -74,6 +74,7 @@ pub struct LintSummaryOutput {
 struct ScopedLintRun {
     glob: String,
     step: Option<String>,
+    changed_files: Vec<String>,
 }
 
 /// Run the main lint workflow.
@@ -111,8 +112,8 @@ pub fn run_main_lint_workflow(
     }
 
     // Run lint
-    let output = if let Some(runs) = scoped_runs {
-        run_scoped_lint_runs(component, &args, run_dir, &runs)?
+    let output = if let Some(ref runs) = scoped_runs {
+        run_scoped_lint_runs(component, &args, run_dir, runs)?
     } else {
         let runner = build_lint_runner(
             component,
@@ -144,10 +145,13 @@ pub fn run_main_lint_workflow(
 
     let lint_findings_file = run_dir.step_file(run_dir::files::LINT_FINDINGS);
     let lint_producers_file = run_dir.step_file(run_dir::files::LINT_PRODUCERS);
-    let raw_lint_findings = lint_baseline::parse_findings_file(&lint_findings_file)?;
+    let parsed_lint_findings = lint_baseline::parse_findings_file(&lint_findings_file)?;
+    let scoped_filter_removed_findings = scoped_runs.is_some() && !parsed_lint_findings.is_empty();
+    let raw_lint_findings =
+        filter_findings_to_scoped_files(parsed_lint_findings, scoped_runs.as_deref());
     let lint_findings = filter_lint_findings(raw_lint_findings, &args);
     let declared_producers = parse_lint_producer_summaries_file(&lint_producers_file)?;
-    let producer_summaries = build_lint_producer_summaries(
+    let mut producer_summaries = build_lint_producer_summaries(
         &lint_findings,
         &lint_findings_file,
         &lint_producers_file,
@@ -156,6 +160,9 @@ pub fn run_main_lint_workflow(
         output.exit_code,
         None,
     );
+    if scoped_filter_removed_findings && lint_findings.is_empty() && output.exit_code == 1 {
+        mark_zero_finding_producers_passed(&mut producer_summaries);
+    }
 
     let mut hints = Vec::new();
 
@@ -260,6 +267,32 @@ fn filter_lint_findings(
                 && !excluded_sniffs
                     .iter()
                     .any(|excluded| finding_matches_sniff(finding, excluded))
+        })
+        .collect()
+}
+
+fn filter_findings_to_scoped_files(
+    findings: Vec<HomeboyFinding>,
+    scoped_runs: Option<&[ScopedLintRun]>,
+) -> Vec<HomeboyFinding> {
+    let Some(scoped_runs) = scoped_runs else {
+        return findings;
+    };
+    let scoped_files: std::collections::BTreeSet<&str> = scoped_runs
+        .iter()
+        .flat_map(|run| run.changed_files.iter().map(String::as_str))
+        .collect();
+    if scoped_files.is_empty() {
+        return findings;
+    }
+    findings
+        .into_iter()
+        .filter(|finding| {
+            finding
+                .location
+                .file
+                .as_deref()
+                .is_some_and(|file| scoped_files.contains(file))
         })
         .collect()
 }
@@ -406,6 +439,14 @@ fn parse_lint_producer_summaries_file(
     }
 
     serde_json::from_str(&content).map_err(|e| json_error(path, e))
+}
+
+fn mark_zero_finding_producers_passed(producer_summaries: &mut [FindingProducerSummary]) {
+    for summary in producer_summaries {
+        if summary.finding_count == 0 && (summary.status == "failed" || summary.status == "error") {
+            summary.status = "passed".to_string();
+        }
+    }
 }
 
 fn normalize_empty_finding_exit_code(
@@ -706,6 +747,7 @@ fn build_changed_lint_runs_with_routes(
         return vec![ScopedLintRun {
             glob: glob_for_files(&component.local_path, changed_files),
             step: None,
+            changed_files: changed_files.to_vec(),
         }];
     }
 
@@ -721,6 +763,7 @@ fn build_changed_lint_runs_with_routes(
             runs.push(ScopedLintRun {
                 glob: glob_for_files(&component.local_path, &matched_files),
                 step: Some(route.step.clone()),
+                changed_files: matched_files,
             });
         }
     }
@@ -1028,6 +1071,30 @@ mod tests {
     }
 
     #[test]
+    fn filtered_scoped_findings_normalize_synthetic_zero_finding_producer() {
+        let mut summaries = build_lint_producer_summaries(
+            &[],
+            Path::new("lint-findings.json"),
+            Path::new("lint-producers.json"),
+            Vec::new(),
+            false,
+            1,
+            None,
+        );
+
+        assert_eq!(summaries[0].status, "error");
+
+        mark_zero_finding_producers_passed(&mut summaries);
+
+        assert_eq!(summaries[0].finding_count, 0);
+        assert_eq!(summaries[0].status, "passed");
+        assert_eq!(
+            normalize_empty_finding_exit_code(1, false, &[], &summaries),
+            0
+        );
+    }
+
+    #[test]
     fn filter_lint_findings_keeps_requested_category_only() {
         let mut args = lint_args();
         args.category = Some("security".to_string());
@@ -1133,6 +1200,7 @@ mod tests {
             vec![ScopedLintRun {
                 glob: "{/repo/data-machine.php,/repo/inc/Foo.php}".to_string(),
                 step: Some("phpcs,phpstan".to_string()),
+                changed_files: vec!["data-machine.php".to_string(), "inc/Foo.php".to_string()],
             }]
         );
     }
@@ -1172,10 +1240,12 @@ mod tests {
                 ScopedLintRun {
                     glob: "/repo/inc/Foo.php".to_string(),
                     step: Some("phpcs,phpstan".to_string()),
+                    changed_files: vec!["inc/Foo.php".to_string()],
                 },
                 ScopedLintRun {
                     glob: "{/repo/assets/app.js,/repo/assets/view.tsx}".to_string(),
                     step: Some("eslint".to_string()),
+                    changed_files: vec!["assets/app.js".to_string(), "assets/view.tsx".to_string()],
                 },
             ]
         );
@@ -1200,6 +1270,7 @@ mod tests {
             vec![ScopedLintRun {
                 glob: "/repo/assets/css/admin.css".to_string(),
                 step: Some("stylelint".to_string()),
+                changed_files: vec!["assets/css/admin.css".to_string()],
             }]
         );
     }
@@ -1242,8 +1313,27 @@ mod tests {
             vec![ScopedLintRun {
                 glob: "{/repo/src/main.rs,/repo/README.md}".to_string(),
                 step: None,
+                changed_files: vec!["src/main.rs".to_string(), "README.md".to_string()],
             }]
         );
+    }
+
+    #[test]
+    fn scoped_lint_filters_findings_to_changed_files() {
+        let runs = vec![ScopedLintRun {
+            glob: "/repo/src/changed.rs".to_string(),
+            step: None,
+            changed_files: vec!["src/changed.rs".to_string()],
+        }];
+        let mut changed = lint_finding("changed", "correctness", "clippy");
+        changed.location.file = Some("src/changed.rs".to_string());
+        let mut unrelated = lint_finding("unrelated", "correctness", "clippy");
+        unrelated.location.file = Some("src/unrelated.rs".to_string());
+
+        let filtered =
+            filter_findings_to_scoped_files(vec![changed.clone(), unrelated], Some(&runs));
+
+        assert_eq!(filtered, vec![changed]);
     }
 
     fn lint_finding(id: &str, category: &str, rule: &str) -> HomeboyFinding {

@@ -19,7 +19,9 @@ use super::daemon_health::runner_daemon_health_failure;
 use super::lab_apply::apply_lab_offload_patch;
 #[cfg(test)]
 use super::lab_args::EXPLICIT_PASSTHROUGH_SENTINEL;
-use super::lab_args::{lab_offload_source_path, rewrite_lab_offload_args};
+use super::lab_args::{
+    lab_offload_source_path, remap_provider_config_in_args, rewrite_lab_offload_args, LabPathRemap,
+};
 use super::lab_capabilities::lab_runner_capability_contract;
 use super::lab_command::lab_offload_command_prefix;
 use super::lab_env::{
@@ -32,8 +34,8 @@ use super::lab_selection::{
     LabRunnerPreparation, LabRunnerSelection,
 };
 use super::lab_workspaces::{
-    lab_extra_workspaces, lab_workspace_mapping_metadata, sync_extra_lab_workspaces,
-    workspace_mapping_entry, workspace_mapping_entry_for_git_dependency,
+    lab_extra_workspaces, lab_workspace_mapping_metadata, provider_config_extra_workspaces,
+    sync_extra_lab_workspaces, workspace_mapping_entry, workspace_mapping_entry_for_git_dependency,
 };
 
 pub struct LabOffloadRequest<'a> {
@@ -397,7 +399,14 @@ fn run_lab_offload_inner(
     } else {
         preflight_lab_offload_changed_since(request.normalized_args, sync_mode)?
     };
-    let extra_workspaces = lab_extra_workspaces(&source_path)?;
+    let mut extra_workspaces = lab_extra_workspaces(&source_path)?;
+    // Sync any controller-local directories referenced by --provider-config
+    // (runtime components, provider plugins, extra mount sources) so the cook
+    // config's paths resolve on the runner after remapping.
+    extra_workspaces.extend(provider_config_extra_workspaces(
+        &changed_since_preflight.args,
+        &source_path,
+    )?);
     let synced = sync_workspace(
         runner_id,
         RunnerWorkspaceSyncOptions {
@@ -496,9 +505,23 @@ fn run_lab_offload_inner(
         );
     }
 
+    // Remap controller-local absolute paths embedded in --provider-config
+    // (mounts, workspace_root, runtime_component_paths, provider_plugin_paths)
+    // to their synced remote locations, using every local->remote pair recorded
+    // during workspace sync. Without this the remote sandbox cannot resolve the
+    // workspace or runtime components a hand-authored cook config references.
+    let path_remaps: Vec<LabPathRemap> = workspace_mapping
+        .iter()
+        .map(|entry| LabPathRemap {
+            local: entry.local_path().to_string(),
+            remote: entry.remote_path().to_string(),
+        })
+        .collect();
+    let remapped_args = remap_provider_config_in_args(&changed_since_preflight.args, &path_remaps);
+
     let mut command = command_prefix.argv;
     command.extend(
-        rewrite_lab_offload_args(&changed_since_preflight.args, &remote_cwd)
+        rewrite_lab_offload_args(&remapped_args, &remote_cwd)
             .into_iter()
             .skip(1),
     );
