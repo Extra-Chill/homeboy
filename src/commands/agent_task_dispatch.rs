@@ -16,7 +16,7 @@ use homeboy::core::worktree;
 
 use super::{CmdResult, GlobalArgs};
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone)]
 pub struct DispatchArgs {
     /// Inline prompt, @file, or - for stdin. Repeat --task for waves.
     #[arg(long, value_name = "PROMPT")]
@@ -91,7 +91,7 @@ pub fn run(args: DispatchArgs, _global: &GlobalArgs) -> CmdResult<Value> {
     dispatch_with_executor(args, ExtensionProviderAgentTaskExecutor::discover())
 }
 
-fn dispatch_with_executor<E>(args: DispatchArgs, executor: E) -> CmdResult<Value>
+pub(crate) fn dispatch_with_executor<E>(args: DispatchArgs, executor: E) -> CmdResult<Value>
 where
     E: AgentTaskExecutorAdapter,
 {

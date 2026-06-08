@@ -1,5 +1,15 @@
 use clap::{Args, Subcommand};
+use homeboy::core::agent_task_cook_loop::{
+    evaluate_cook_loop, AgentTaskCookLoopOptions, AgentTaskCookLoopStatus,
+};
+use homeboy::core::agent_task_finalization::{
+    finalize_pr, AgentTaskPrEvidence, AgentTaskPrFinalizationOptions,
+};
 use homeboy::core::agent_task_gate::AgentTaskGateRevealPolicy;
+use homeboy::core::agent_task_promotion::{
+    promote, AgentTaskPromotionOptions, AgentTaskPromotionReport, AgentTaskPromotionStatus,
+};
+use serde::Serialize;
 use serde_json::Value;
 use std::io::Read;
 
@@ -12,7 +22,7 @@ use homeboy::core::agent_task_scheduler::{
 use homeboy::core::agent_task_secrets;
 use homeboy::core::config;
 
-use super::agent_task_dispatch::{run as dispatch, DispatchArgs};
+use super::agent_task_dispatch::{dispatch_with_executor, run as dispatch, DispatchArgs};
 use super::{CmdResult, GlobalArgs};
 use crate::commands::utils::tty::prompt_password;
 
@@ -28,6 +38,8 @@ pub struct AgentTaskArgs {
 pub enum AgentTaskCommand {
     /// Sync a workspace if --runner is supplied, dispatch a repo-cooking task, and return the durable run id.
     Cook(DispatchArgs),
+    /// Run a durable repo cook loop: dispatch, promote, verify, retry red gates, and finalize.
+    Loop(AgentTaskLoopArgs),
     /// Build and dispatch common repo-cooking agent tasks without hand-authored provider JSON.
     Dispatch(DispatchArgs),
     /// Run an agent-task plan through extension-declared executor providers.
@@ -141,6 +153,76 @@ pub struct ProvidersArgs {
     /// Secret environment variable name to check without exposing its value. Repeatable.
     #[arg(long = "secret-env", value_name = "ENV")]
     pub secret_env: Vec<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct AgentTaskLoopArgs {
+    #[command(flatten)]
+    pub dispatch: DispatchArgs,
+
+    /// Repo-cooking goal. Alias for the dispatch prompt when --prompt is omitted.
+    #[arg(long, value_name = "TEXT")]
+    pub goal: Option<String>,
+
+    /// Target managed worktree handle where candidate patches are promoted.
+    #[arg(long, value_name = "HANDLE")]
+    pub to_worktree: String,
+
+    /// External workspace provider command. When omitted, HOMEBOY_AGENT_TASK_PROMOTION_COMMAND is used.
+    #[arg(long, value_name = "COMMAND")]
+    pub provider_command: Option<String>,
+
+    /// Deterministic verification command to run after each promotion.
+    #[arg(long = "verify", value_name = "COMMAND")]
+    pub verify: Vec<String>,
+
+    /// Private deterministic verification command to run after each promotion.
+    #[arg(long = "private-verify", value_name = "COMMAND")]
+    pub private_verify: Vec<String>,
+
+    /// Feedback policy for failed private gates.
+    #[arg(
+        long = "private-gate-reveal",
+        default_value = "summary-only",
+        value_name = "POLICY"
+    )]
+    pub private_gate_reveal: AgentTaskGateRevealPolicy,
+
+    /// Maximum cook-loop gate attempts, including the first candidate.
+    #[arg(long = "max-attempts", default_value_t = 3, value_name = "N")]
+    pub max_attempts: u32,
+
+    /// PR base branch used by finalization.
+    #[arg(long, default_value = "main", value_name = "BRANCH")]
+    pub base: String,
+
+    /// PR head branch. Defaults to the current branch in the promoted worktree.
+    #[arg(long, value_name = "BRANCH")]
+    pub head: Option<String>,
+
+    /// PR title. Defaults to a title derived from --repo or --task-url.
+    #[arg(long, value_name = "TEXT")]
+    pub title: Option<String>,
+
+    /// Commit message for the verified candidate changes.
+    #[arg(long, value_name = "TEXT")]
+    pub commit_message: Option<String>,
+
+    /// Protected branch that may not be finalized directly. Repeatable.
+    #[arg(long = "protected-branch", default_values_t = review::default_protected_branches(), value_name = "BRANCH")]
+    pub protected_branches: Vec<String>,
+
+    /// AI tool disclosure line for the PR body.
+    #[arg(long, default_value = "OpenCode (GPT-5.5)", value_name = "TEXT")]
+    pub ai_tool: String,
+
+    /// AI assistance scope for the PR body.
+    #[arg(
+        long,
+        default_value = "Drafted implementation and tests; Chris reviews and owns the change.",
+        value_name = "TEXT"
+    )]
+    pub ai_used_for: String,
 }
 
 #[derive(Args, Debug)]
@@ -330,6 +412,7 @@ pub struct GateFeedbackArgs {
 pub fn run(args: AgentTaskArgs, global: &GlobalArgs) -> CmdResult<Value> {
     match args.command {
         AgentTaskCommand::Cook(dispatch_args) => dispatch(dispatch_args, global),
+        AgentTaskCommand::Loop(loop_args) => run_loop(loop_args),
         AgentTaskCommand::Dispatch(dispatch_args) => dispatch(dispatch_args, global),
         AgentTaskCommand::RunPlan(run_args) => run_plan(run_args),
         AgentTaskCommand::Run(status_args) => run_submitted(status_args),
@@ -438,6 +521,351 @@ fn read_agent_task_secret_value(
         }
         (None, false) => prompt_password("Secret value: "),
     }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct AgentTaskLoopReport {
+    schema: &'static str,
+    loop_id: String,
+    status: String,
+    attempts: Vec<AgentTaskLoopAttemptReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    finalization: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stop_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct AgentTaskLoopAttemptReport {
+    attempt: u32,
+    run_id: String,
+    run_state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    aggregate_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    promotion: Option<AgentTaskPromotionReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    feedback: Option<homeboy::core::agent_task_cook_loop::AgentTaskCookLoopReport>,
+}
+
+fn run_loop(args: AgentTaskLoopArgs) -> CmdResult<Value> {
+    run_loop_with_executor(args, ExtensionProviderAgentTaskExecutor::discover())
+}
+
+fn run_loop_with_executor<E>(args: AgentTaskLoopArgs, executor: E) -> CmdResult<Value>
+where
+    E: AgentTaskExecutorAdapter + Clone,
+{
+    if args.verify.is_empty() && args.private_verify.is_empty() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "verify",
+            "agent-task loop requires at least one deterministic --verify or --private-verify gate",
+            None,
+            None,
+        ));
+    }
+
+    let max_attempts = args.max_attempts.max(1);
+    let mut attempts = Vec::new();
+    let mut dispatch_args = args.dispatch.clone();
+    if dispatch_args.prompt.is_none() {
+        dispatch_args.prompt = args.goal.clone();
+    }
+    dispatch_args.queue_only = false;
+    let (dispatch_value, _dispatch_exit) = dispatch_with_executor(dispatch_args, executor.clone())?;
+    let mut run_id = dispatch_value["run_id"]
+        .as_str()
+        .ok_or_else(|| {
+            homeboy::core::Error::internal_unexpected(
+                "agent-task dispatch did not return a run_id".to_string(),
+            )
+        })?
+        .to_string();
+    let loop_id = run_id.clone();
+
+    for attempt in 1..=max_attempts {
+        let record = agent_task_lifecycle::status(&run_id)?;
+        let plan = agent_task_lifecycle::load_plan(&run_id)?;
+        let Some(source_request) = plan.tasks.first().cloned() else {
+            return Ok(loop_report(
+                loop_id,
+                "policy_failure",
+                attempts,
+                None,
+                Some("agent-task loop requires a plan with one source task".to_string()),
+                1,
+            ));
+        };
+        if plan.tasks.len() != 1 {
+            return Ok(loop_report(
+                loop_id,
+                "policy_failure",
+                attempts,
+                None,
+                Some("agent-task loop currently supports one task per cook attempt".to_string()),
+                1,
+            ));
+        }
+
+        if !matches!(
+            record.state,
+            agent_task_lifecycle::AgentTaskRunState::Succeeded
+        ) {
+            attempts.push(AgentTaskLoopAttemptReport {
+                attempt,
+                run_id: run_id.clone(),
+                run_state: format!("{:?}", record.state),
+                aggregate_path: record.aggregate_path,
+                promotion: None,
+                feedback: None,
+            });
+            return Ok(loop_report(
+                loop_id,
+                "provider_failure",
+                attempts,
+                None,
+                Some(format!(
+                    "agent-task run {run_id} ended in state {:?}",
+                    record.state
+                )),
+                1,
+            ));
+        }
+
+        let promotion = match promote_attempt(&args, &run_id) {
+            Ok(report) => report,
+            Err(error) => {
+                attempts.push(AgentTaskLoopAttemptReport {
+                    attempt,
+                    run_id: run_id.clone(),
+                    run_state: format!("{:?}", record.state),
+                    aggregate_path: record.aggregate_path,
+                    promotion: None,
+                    feedback: None,
+                });
+                return Ok(loop_report(
+                    loop_id,
+                    "policy_failure",
+                    attempts,
+                    None,
+                    Some(error.to_string()),
+                    1,
+                ));
+            }
+        };
+
+        let feedback = evaluate_cook_loop(AgentTaskCookLoopOptions {
+            source_request,
+            promotion_report: promotion.clone(),
+            attempt,
+            max_attempts,
+            source_run_id: Some(run_id.clone()),
+            current_diff: String::new(),
+            metadata: Value::Null,
+        });
+        let feedback_status = feedback.status;
+        let follow_up_request = feedback.follow_up_request.clone();
+        attempts.push(AgentTaskLoopAttemptReport {
+            attempt,
+            run_id: run_id.clone(),
+            run_state: format!("{:?}", record.state),
+            aggregate_path: record.aggregate_path,
+            promotion: Some(promotion.clone()),
+            feedback: Some(feedback.clone()),
+        });
+
+        match feedback_status {
+            AgentTaskCookLoopStatus::GreenCompleted => {
+                let finalization = finalize_loop_pr(&args, &loop_id, &promotion)?;
+                let final_status = finalization["status"]
+                    .as_str()
+                    .unwrap_or("unknown")
+                    .to_string();
+                let exit_code = if matches!(final_status.as_str(), "review_ready" | "no_changes") {
+                    0
+                } else {
+                    1
+                };
+                return Ok(loop_report(
+                    loop_id,
+                    &final_status,
+                    attempts,
+                    Some(finalization),
+                    None,
+                    exit_code,
+                ));
+            }
+            AgentTaskCookLoopStatus::RetryRequested => {
+                let Some(follow_up_request) = follow_up_request else {
+                    return Ok(loop_report(
+                        loop_id,
+                        "policy_failure",
+                        attempts,
+                        None,
+                        Some(
+                            "cook-loop feedback requested retry without a follow-up request"
+                                .to_string(),
+                        ),
+                        1,
+                    ));
+                };
+                let next_run_id = format!("{loop_id}-attempt-{}", attempt + 1);
+                let follow_up_plan = AgentTaskPlan::new(
+                    format!("{loop_id}-cook-loop-attempt-{}", attempt + 1),
+                    vec![follow_up_request],
+                );
+                run_loaded_plan(follow_up_plan, Some(&next_run_id), executor.clone())?;
+                run_id = next_run_id;
+            }
+            AgentTaskCookLoopStatus::RetriesExhausted => {
+                return Ok(loop_report(
+                    loop_id,
+                    "retries_exhausted",
+                    attempts,
+                    None,
+                    Some(
+                        "deterministic gates stayed red after the configured attempt budget"
+                            .to_string(),
+                    ),
+                    1,
+                ));
+            }
+        }
+    }
+
+    Ok(loop_report(
+        loop_id,
+        "retries_exhausted",
+        attempts,
+        None,
+        Some("cook-loop attempt budget exhausted".to_string()),
+        1,
+    ))
+}
+
+fn promote_attempt(
+    args: &AgentTaskLoopArgs,
+    run_id: &str,
+) -> homeboy::core::Result<AgentTaskPromotionReport> {
+    let (source, source_path) = review::read_promotion_source(run_id)?;
+    promote(AgentTaskPromotionOptions {
+        source,
+        source_path,
+        to_worktree: args.to_worktree.clone(),
+        task_id: None,
+        artifact_id: None,
+        dry_run: false,
+        verify: args.verify.clone(),
+        private_verify: args.private_verify.clone(),
+        private_gate_reveal: args.private_gate_reveal,
+        provider_command: args.provider_command.clone(),
+    })
+}
+
+fn finalize_loop_pr(
+    args: &AgentTaskLoopArgs,
+    loop_id: &str,
+    promotion: &AgentTaskPromotionReport,
+) -> homeboy::core::Result<Value> {
+    if promotion.status != AgentTaskPromotionStatus::Applied {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "promotion",
+            "agent-task loop finalization requires an applied promotion with green gates",
+            None,
+            None,
+        ));
+    }
+    let path = promotion
+        .provenance
+        .get("worktree_path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            homeboy::core::Error::validation_invalid_argument(
+                "promotion.provenance.worktree_path",
+                "promotion provider did not report the applied worktree path",
+                None,
+                None,
+            )
+        })?
+        .to_string();
+    let title = args
+        .title
+        .clone()
+        .unwrap_or_else(|| default_loop_title(args));
+    let commit_message = args
+        .commit_message
+        .clone()
+        .unwrap_or_else(|| default_loop_commit_message(args));
+    let source_refs = args
+        .dispatch
+        .task_url
+        .iter()
+        .cloned()
+        .chain(std::iter::once(format!(
+            "homeboy://agent-task/run/{loop_id}"
+        )))
+        .collect();
+    let artifact_refs = std::iter::once(promotion.patch_artifact.path.clone()).collect();
+    let report = finalize_pr(AgentTaskPrFinalizationOptions {
+        path,
+        run_id: loop_id.to_string(),
+        base: args.base.clone(),
+        head: args.head.clone(),
+        title,
+        commit_message,
+        gate_results: Vec::new(),
+        normalized_gate_results: promotion.gate_results.clone(),
+        changed_files: promotion.changed_files.clone(),
+        evidence: AgentTaskPrEvidence {
+            source_refs,
+            artifact_refs,
+            attempt_summary: format!(
+                "{} deterministic cook-loop gate attempt(s) completed green",
+                promotion.deterministic_gates.len()
+            ),
+            ai_tool: args.ai_tool.clone(),
+        },
+        ai_used_for: args.ai_used_for.clone(),
+        protected_branches: args.protected_branches.clone(),
+    })?;
+    Ok(serde_json::to_value(report).unwrap_or(Value::Null))
+}
+
+fn default_loop_title(args: &AgentTaskLoopArgs) -> String {
+    let target = args
+        .dispatch
+        .repo
+        .as_deref()
+        .or(args.dispatch.task_url.as_deref())
+        .unwrap_or("agent task");
+    format!("Cook {target}")
+}
+
+fn default_loop_commit_message(args: &AgentTaskLoopArgs) -> String {
+    let target = args.dispatch.repo.as_deref().unwrap_or("agent task");
+    format!("fix: cook {target}")
+}
+
+fn loop_report(
+    loop_id: String,
+    status: &str,
+    attempts: Vec<AgentTaskLoopAttemptReport>,
+    finalization: Option<Value>,
+    stop_reason: Option<String>,
+    exit_code: i32,
+) -> (Value, i32) {
+    let report = AgentTaskLoopReport {
+        schema: "homeboy/agent-task-loop/v1",
+        loop_id,
+        status: status.to_string(),
+        attempts,
+        finalization,
+        stop_reason,
+    };
+    (
+        serde_json::to_value(report).unwrap_or(Value::Null),
+        exit_code,
+    )
 }
 
 fn run_plan(args: RunPlanArgs) -> CmdResult<Value> {
@@ -1049,6 +1477,63 @@ mod tests {
                 .as_str()
                 .expect("next action")
                 .contains("promotion_candidates"));
+        });
+    }
+
+    #[test]
+    fn loop_returns_durable_id_when_promotion_provider_is_missing() {
+        with_temp_home(|| {
+            let (value, exit_code) = run_loop_with_executor(
+                AgentTaskLoopArgs {
+                    dispatch: DispatchArgs {
+                        prompt: None,
+                        tasks: Vec::new(),
+                        tasks_json: None,
+                        cwd: None,
+                        workspace: None,
+                        repo: Some("homeboy".to_string()),
+                        task_url: Some(
+                            "https://github.com/Extra-Chill/homeboy/issues/3675".to_string(),
+                        ),
+                        backend: "fixture".to_string(),
+                        selector: None,
+                        model: None,
+                        secret_env: Vec::new(),
+                        provider_config: None,
+                        client_context: None,
+                        concurrency: 1,
+                        attempts: 1,
+                        run_id: Some("cook-loop-missing-provider".to_string()),
+                        queue_only: false,
+                    },
+                    goal: Some("cook fixture".to_string()),
+                    to_worktree: "homeboy@fix-agent-task-runner-cook".to_string(),
+                    provider_command: None,
+                    verify: vec!["cargo test --lib".to_string()],
+                    private_verify: Vec::new(),
+                    private_gate_reveal: AgentTaskGateRevealPolicy::SummaryOnly,
+                    max_attempts: 2,
+                    base: "main".to_string(),
+                    head: None,
+                    title: None,
+                    commit_message: None,
+                    protected_branches: review::default_protected_branches(),
+                    ai_tool: "OpenCode (GPT-5.5)".to_string(),
+                    ai_used_for: "test".to_string(),
+                },
+                ExtensionProviderAgentTaskExecutor::default(),
+            )
+            .expect("loop reported controlled failure");
+
+            assert_eq!(exit_code, 1);
+            assert_eq!(value["schema"], "homeboy/agent-task-loop/v1");
+            assert_eq!(value["loop_id"], "cook-loop-missing-provider");
+            assert_eq!(value["status"], "policy_failure");
+            assert_eq!(value["attempts"][0]["run_id"], "cook-loop-missing-provider");
+            assert!(value["stop_reason"]
+                .as_str()
+                .expect("stop reason")
+                .contains("workspace provider command"));
         });
     }
 
