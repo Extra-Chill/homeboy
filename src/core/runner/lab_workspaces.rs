@@ -225,6 +225,16 @@ fn provider_config_candidate_paths(value: &serde_json::Value) -> Vec<String> {
             }
         }
     }
+    // Runtime overlay sources (e.g. a bundled-library php-ai-client build that
+    // supplies provider-request-auth APIs) are controller-local directories the
+    // sandbox mounts; sync them so the overlay resolves on the runner.
+    if let Some(overlays) = value.get("runtime_overlays").and_then(|v| v.as_array()) {
+        for overlay in overlays {
+            if let Some(src) = overlay.get("source").and_then(|v| v.as_str()) {
+                paths.push(src.to_string());
+            }
+        }
+    }
     for key in [
         "agents_api",
         "agents_api_path",
@@ -351,4 +361,51 @@ fn canonical_existing_dir(path: &str, field: &str) -> Result<PathBuf> {
             Some("canonicalize runner workspace path".to_string()),
         )
     })
+}
+
+#[cfg(test)]
+mod provider_config_candidate_paths_tests {
+    use super::provider_config_candidate_paths;
+
+    #[test]
+    fn extracts_all_local_path_sources_including_runtime_overlays() {
+        let value = serde_json::json!({
+            "workspace_root": "/local/data-machine@cook",
+            "mounts": [{ "source": "/local/data-machine@cook", "target": "/workspace/data-machine" }],
+            "runtime_component_paths": {
+                "agent_runtime": "/local/data-machine",
+                "agent_runtime_tools": "/local/data-machine-code"
+            },
+            "provider_plugin_paths": ["/local/ai-provider-for-claude-code"],
+            "runtime_overlays": [
+                { "kind": "bundled-library", "library": "php-ai-client", "source": "/local/php-ai-client@custom-provider-auth", "target": "/wordpress/wp-includes/php-ai-client" }
+            ],
+            "agents_api": "/local/agents-api",
+            "model": "claude-opus-4-8"
+        });
+
+        let paths = provider_config_candidate_paths(&value);
+
+        for expected in [
+            "/local/data-machine@cook",
+            "/local/data-machine",
+            "/local/data-machine-code",
+            "/local/ai-provider-for-claude-code",
+            "/local/php-ai-client@custom-provider-auth",
+            "/local/agents-api",
+        ] {
+            assert!(
+                paths.iter().any(|p| p == expected),
+                "missing candidate path: {expected}"
+            );
+        }
+        // Non-path scalars are not collected.
+        assert!(!paths.iter().any(|p| p == "claude-opus-4-8"));
+    }
+
+    #[test]
+    fn empty_config_yields_no_candidates() {
+        let value = serde_json::json!({ "model": "x" });
+        assert!(provider_config_candidate_paths(&value).is_empty());
+    }
 }
