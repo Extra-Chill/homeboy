@@ -205,21 +205,32 @@ fn provider_config_candidate_paths(value: &serde_json::Value) -> Vec<String> {
             }
         }
     }
-    if let Some(components) = value.get("runtime_component_paths").and_then(|v| v.as_object()) {
+    if let Some(components) = value
+        .get("runtime_component_paths")
+        .and_then(|v| v.as_object())
+    {
         for component in components.values() {
             if let Some(path) = component.as_str() {
                 paths.push(path.to_string());
             }
         }
     }
-    if let Some(plugins) = value.get("provider_plugin_paths").and_then(|v| v.as_array()) {
+    if let Some(plugins) = value
+        .get("provider_plugin_paths")
+        .and_then(|v| v.as_array())
+    {
         for plugin in plugins {
             if let Some(path) = plugin.as_str() {
                 paths.push(path.to_string());
             }
         }
     }
-    for key in ["agents_api", "agents_api_path", "homeboy_extensions", "homeboy_extensions_path"] {
+    for key in [
+        "agents_api",
+        "agents_api_path",
+        "homeboy_extensions",
+        "homeboy_extensions_path",
+    ] {
         if let Some(path) = value.get(key).and_then(|v| v.as_str()) {
             paths.push(path.to_string());
         }
