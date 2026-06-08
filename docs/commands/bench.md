@@ -230,9 +230,17 @@ Supported operators are `eq`, `gte`, and `lte`:
 }
 ```
 
-Failed gates add `gate_results`, set the scenario's `passed` field to
-`false`, and add top-level `gate_failures` plus `budget_findings` to the bench
-output.
+Evaluated gates add scenario-level `gate_results`. Failed gates set the
+scenario's `passed` field to `false` and add top-level `gate_failures` plus
+`budget_findings` to the bench output.
+
+Bench output also exposes a top-level `gate_results` array using the shared
+`homeboy/gate-result/v1` schema consumed by cook loops and PR finalization.
+IDs include the scenario id and metric name, for example
+`bench.gate.studio-agent-loop.success_rate`, so multiple scenarios can gate on
+the same metric without collisions. Failed normalized gates are marked
+`retryable: true` and include agent feedback plus metric evidence for the next
+candidate iteration.
 
 ## Budget Findings
 
