@@ -64,9 +64,25 @@ namespace {
 
     if ( ! function_exists( 'wp_get_ability' ) ) {
         function wp_get_ability( string $ability_name ): object {
-            return new class {
+            $GLOBALS['homeboy_forced_parameters_ability_names'][] = $ability_name;
+            return new class( $ability_name ) {
+                private string $ability_name;
+
+                public function __construct( string $ability_name ) {
+                    $this->ability_name = $ability_name;
+                }
+
                 public function execute( array $args ): array {
                     $GLOBALS['homeboy_forced_parameters_args'] = $args;
+                    if ( 'datamachine-code/workspace-worktree-add' === $this->ability_name ) {
+                        return array(
+                            'success' => true,
+                            'handle'  => $args['repo'] . '@' . str_replace( '/', '-', (string) $args['branch'] ),
+                            'branch'  => (string) $args['branch'],
+                            'path'    => '/tmp/' . $args['repo'],
+                            'args'    => $args,
+                        );
+                    }
                     return array(
                         'success' => true,
                         'args'    => $args,
@@ -376,6 +392,39 @@ namespace {
     if ( '.agent-workspace/current-project/plugins/sample.php' !== ( $scoped_parameters['path'] ?? null ) ) {
         fwrite( STDERR, "Expected alias runner workspace mode to scope workspace file paths before dispatch.\n" );
         exit( 1 );
+    }
+
+    $GLOBALS['homeboy_forced_parameters_ability_names'] = array();
+    $provisioned_workspace = homeboy_datamachine_agent_provision_workspace(
+        array(
+            'runner_workspace' => array(
+                'enabled'       => true,
+                'repo'          => 'html-to-blocks-converter',
+                'branch'        => 'agent/iterator-repair',
+                'allow_stale'   => true,
+                'rebase_base'   => true,
+                'clone_url'     => 'https://github.com/chubes4/html-to-blocks-converter.git',
+            ),
+        )
+    );
+
+    if ( empty( $provisioned_workspace['success'] ) || 'html-to-blocks-converter@agent-iterator-repair' !== ( $provisioned_workspace['handle'] ?? null ) ) {
+        fwrite( STDERR, "Expected runner workspace provisioning to create a DMC worktree.\n" );
+        exit( 1 );
+    }
+
+    foreach ( array( 'datamachine-code/workspace-show', 'datamachine-code/workspace-clone', 'datamachine-code/workspace-worktree-add' ) as $expected_ability ) {
+        if ( ! in_array( $expected_ability, $GLOBALS['homeboy_forced_parameters_ability_names'], true ) ) {
+            fwrite( STDERR, "Expected runner workspace provisioning to resolve {$expected_ability}.\n" );
+            exit( 1 );
+        }
+    }
+
+    foreach ( $GLOBALS['homeboy_forced_parameters_ability_names'] as $ability_name ) {
+        if ( str_starts_with( $ability_name, 'datamachine/workspace-' ) ) {
+            fwrite( STDERR, "Runner workspace provisioning used stale workspace ability namespace.\n" );
+            exit( 1 );
+        }
     }
 
     $sanitized_response = homeboy_datamachine_agent_sanitize_runner_workspace_alias_result(
