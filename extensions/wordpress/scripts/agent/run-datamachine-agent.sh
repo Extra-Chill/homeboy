@@ -267,14 +267,23 @@ PHP
     local wp_codebox_review_input="$RUNTIME_DIR/wp-codebox-review.json"
     local wp_codebox_changed_files_input="$RUNTIME_DIR/wp-codebox-changed-files.json"
     local wp_codebox_runtime_reference_manifest_input="$RUNTIME_DIR/wp-codebox-runtime-reference-manifest.json"
+    local wp_codebox_transcript_input="$RUNTIME_DIR/wp-codebox-transcript.json"
+    local wp_codebox_agent_result_input="$RUNTIME_DIR/wp-codebox-agent-result.json"
+    local wp_codebox_completion_outcome_input="$RUNTIME_DIR/wp-codebox-completion-outcome.json"
     local wp_codebox_artifacts_json="$RUNTIME_DIR/wp-codebox-artifacts.json"
     printf 'null\n' >"$wp_codebox_review_input"
     printf 'null\n' >"$wp_codebox_changed_files_input"
     printf 'null\n' >"$wp_codebox_runtime_reference_manifest_input"
+    printf 'null\n' >"$wp_codebox_transcript_input"
+    printf 'null\n' >"$wp_codebox_agent_result_input"
+    printf 'null\n' >"$wp_codebox_completion_outcome_input"
 
     local wp_codebox_review_path
     local wp_codebox_changed_files_path
     local wp_codebox_runtime_reference_manifest_path
+    local wp_codebox_transcript_path
+    local wp_codebox_agent_result_path
+    local wp_codebox_completion_outcome_path
     wp_codebox_review_path=$(jq -r '.artifacts.reviewPath // empty' "$wp_codebox_output")
     wp_codebox_changed_files_path=$(jq -r '.artifacts.changedFilesPath // empty' "$wp_codebox_output")
     wp_codebox_runtime_reference_manifest_path=$(jq -r '
@@ -288,6 +297,32 @@ PHP
             .artifacts.runtime.referenceManifestPath?
         ] | map(select(type == "string" and . != "")) | first // empty
     ' "$wp_codebox_output")
+    wp_codebox_transcript_path=$(jq -r '.artifacts.transcriptPath // .agentResult.transcript.artifact // empty' "$wp_codebox_output")
+    wp_codebox_agent_result_path=$(jq -r '.artifacts.agentResultPath // empty' "$wp_codebox_output")
+    wp_codebox_completion_outcome_path=$(jq -r '.artifacts.completionOutcomePath // empty' "$wp_codebox_output")
+    if [ -n "$wp_codebox_artifact_bundle" ]; then
+        case "$wp_codebox_transcript_path" in
+            ""|/*) ;;
+            *) wp_codebox_transcript_path="$wp_codebox_artifact_bundle/$wp_codebox_transcript_path" ;;
+        esac
+        case "$wp_codebox_agent_result_path" in
+            ""|/*) ;;
+            *) wp_codebox_agent_result_path="$wp_codebox_artifact_bundle/$wp_codebox_agent_result_path" ;;
+        esac
+        case "$wp_codebox_completion_outcome_path" in
+            ""|/*) ;;
+            *) wp_codebox_completion_outcome_path="$wp_codebox_artifact_bundle/$wp_codebox_completion_outcome_path" ;;
+        esac
+    fi
+    if [ -z "$wp_codebox_transcript_path" ] && [ -n "$wp_codebox_artifact_bundle" ]; then
+        wp_codebox_transcript_path="$wp_codebox_artifact_bundle/files/transcript.json"
+    fi
+    if [ -z "$wp_codebox_agent_result_path" ] && [ -n "$wp_codebox_artifact_bundle" ]; then
+        wp_codebox_agent_result_path="$wp_codebox_artifact_bundle/files/agent-result.json"
+    fi
+    if [ -z "$wp_codebox_completion_outcome_path" ] && [ -n "$wp_codebox_artifact_bundle" ]; then
+        wp_codebox_completion_outcome_path="$wp_codebox_artifact_bundle/files/completion-outcome.json"
+    fi
     if [ -n "$wp_codebox_review_path" ] && [ -f "$wp_codebox_review_path" ]; then
         cp "$wp_codebox_review_path" "$wp_codebox_review_input"
     fi
@@ -297,12 +332,24 @@ PHP
     if [ -n "$wp_codebox_runtime_reference_manifest_path" ] && [ -f "$wp_codebox_runtime_reference_manifest_path" ]; then
         cp "$wp_codebox_runtime_reference_manifest_path" "$wp_codebox_runtime_reference_manifest_input"
     fi
+    if [ -n "$wp_codebox_transcript_path" ] && [ -f "$wp_codebox_transcript_path" ]; then
+        cp "$wp_codebox_transcript_path" "$wp_codebox_transcript_input"
+    fi
+    if [ -n "$wp_codebox_agent_result_path" ] && [ -f "$wp_codebox_agent_result_path" ]; then
+        cp "$wp_codebox_agent_result_path" "$wp_codebox_agent_result_input"
+    fi
+    if [ -n "$wp_codebox_completion_outcome_path" ] && [ -f "$wp_codebox_completion_outcome_path" ]; then
+        cp "$wp_codebox_completion_outcome_path" "$wp_codebox_completion_outcome_input"
+    fi
 
     jq -n \
         --slurpfile run "$wp_codebox_output" \
         --slurpfile review "$wp_codebox_review_input" \
         --slurpfile changedFiles "$wp_codebox_changed_files_input" \
         --slurpfile runtimeReferenceManifest "$wp_codebox_runtime_reference_manifest_input" \
+        --slurpfile transcript "$wp_codebox_transcript_input" \
+        --slurpfile agentResult "$wp_codebox_agent_result_input" \
+        --slurpfile completionOutcome "$wp_codebox_completion_outcome_input" \
         --slurpfile verifier "$artifact_verifier_result" \
         --slurpfile policy "$workspace_policy_result" \
         '
@@ -339,6 +386,9 @@ PHP
             review_payload: ($review[0] // null),
             changed_files: ($changedFiles[0] // null),
             runtime_reference_manifest: (($runtimeReferenceManifest[0] // null) | redact),
+            transcript: ($transcript[0] // null),
+            agent_result: ($agentResult[0] // null),
+            completion_outcome: ($completionOutcome[0] // null),
             artifact_verifier_result: ($verifier[0] // null),
             workspace_policy_result: ($policy[0] // null)
         }
@@ -351,9 +401,28 @@ PHP
         --slurpfile run "$wp_codebox_output" \
         --slurpfile wpCodeboxArtifacts "$wp_codebox_artifacts_json" \
         '
+        def workload_from_record($record):
+            if ($record | type) != "object" then {}
+            elif (($record.metrics? // null) != null) or (($record.metadata? // null) != null) then $record
+            elif ($record.output? | type) == "string" then (($record.output | fromjson? // {}) | workload_from_record(.))
+            elif ($record.output? | type) == "object" then workload_from_record($record.output)
+            elif ($record.result? | type) == "object" then workload_from_record($record.result)
+            else {}
+            end;
         def parsed_workload:
-            (($run[0].executions // [])[-1].stdout? // "{}" | fromjson? // {}) as $outer
-            | ($outer.output? // "{}" | fromjson? // {});
+            ($wpCodeboxArtifacts[0].transcript // {}) as $transcript
+            | [
+                (($run[0].executions // [])[]?.stdout? | fromjson? // {}),
+                ($run[0].agentTaskResult // {}),
+                ($run[0].agentTaskResult.raw.result // {}),
+                ($run[0].agentTaskResult.outputs // {}),
+                ($wpCodeboxArtifacts[0].agent_result // {}),
+                ($wpCodeboxArtifacts[0].completion_outcome // {}),
+                ($transcript.executions[]?.parsed? // {})
+            ]
+            | map(workload_from_record(.))
+            | map(select(((.metrics? // null) != null) or ((.metadata? // null) != null)))
+            | first // {};
         def artifact_entry($path; $kind; $label):
             { path: $path, kind: $kind, label: $label };
         parsed_workload as $workload

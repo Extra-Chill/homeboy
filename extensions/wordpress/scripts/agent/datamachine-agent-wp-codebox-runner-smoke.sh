@@ -176,6 +176,35 @@ const output = {
     },
   },
 }
+const transcript = {
+  schema: 'wp-codebox/agent-transcript/v1',
+  executions: [{
+    executionIndex: 0,
+    command: 'wordpress.run-php',
+    recipeCommand: 'wp-codebox.agent-sandbox-run',
+    exitCode: 0,
+    stdout: JSON.stringify({ output: JSON.stringify(output) }),
+    stderr: '',
+    parsed: { output: JSON.stringify(output) },
+  }],
+}
+const agentResult = {
+  schema: 'wp-codebox/agent-result/v1',
+  status: 'completed',
+  actionable: true,
+  summary: 'Agent sandbox produced 1 changed file and a patch.',
+  transcript: { artifact: 'files/transcript.json', executionCount: 1 },
+}
+const completionOutcome = {
+  schema: 'wp-codebox/sandbox-completion-outcome/v1',
+  status: 'succeeded',
+  summary: agentResult.summary,
+  nextAction: 'promote',
+}
+
+fs.writeFileSync(path.join(filesRoot, 'transcript.json'), JSON.stringify(transcript, null, 2) + '\n')
+fs.writeFileSync(path.join(filesRoot, 'agent-result.json'), JSON.stringify(agentResult, null, 2) + '\n')
+fs.writeFileSync(path.join(filesRoot, 'completion-outcome.json'), JSON.stringify(completionOutcome, null, 2) + '\n')
 
 process.stdout.write(JSON.stringify({
   success: true,
@@ -185,8 +214,11 @@ process.stdout.write(JSON.stringify({
   },
   executions: [{
     command: 'wordpress.run-php',
-    stdout: JSON.stringify({ output: JSON.stringify(output) }),
+    recipeCommand: 'wp-codebox.agent-sandbox-run',
+    stdout: 'WP Codebox captured canonical agent artifacts. Structured output is in files/transcript.json.',
   }],
+  agentResult,
+  completionOutcome,
   artifacts: {
     directory: artifactRoot,
     manifestPath: path.join(artifactRoot, 'manifest.json'),
@@ -197,6 +229,9 @@ process.stdout.write(JSON.stringify({
     changedFilesPath: path.join(filesRoot, 'changed-files.json'),
     patchPath: path.join(filesRoot, 'patch.diff'),
     reviewPath: path.join(filesRoot, 'review.json'),
+    transcriptPath: path.join(filesRoot, 'transcript.json'),
+    agentResultPath: path.join(filesRoot, 'agent-result.json'),
+    completionOutcomePath: path.join(filesRoot, 'completion-outcome.json'),
   },
 }) + '\n')
 NODE
