@@ -1,5 +1,6 @@
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -17,6 +18,7 @@ use crate::core::agent_task_timeout_artifacts::is_actionable_patch_artifact;
 use crate::core::{Error, Result};
 
 pub const AGENT_TASK_PROMOTION_REPORT_SCHEMA: &str = "homeboy/agent-task-promotion-report/v1";
+const PROMOTION_PROVIDER_COMMAND_ENV: &str = "HOMEBOY_AGENT_TASK_PROMOTION_COMMAND";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskPromotionOptions {
@@ -33,6 +35,8 @@ pub struct AgentTaskPromotionOptions {
     pub private_verify: Vec<String>,
     #[serde(default = "default_private_gate_reveal")]
     pub private_gate_reveal: AgentTaskGateRevealPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_command: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -46,7 +50,7 @@ pub struct AgentTaskPromotionReport {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub changed_files: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub dmc_commands: Vec<AgentTaskPromotionCommandReport>,
+    pub command_evidence: Vec<AgentTaskPromotionCommandReport>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deterministic_gates: Vec<AgentTaskGateReport>,
     #[serde(default, skip_serializing_if = "Value::is_null")]
@@ -89,14 +93,15 @@ pub struct AgentTaskPromotionCommandReport {
 }
 
 pub fn promote(options: AgentTaskPromotionOptions) -> Result<AgentTaskPromotionReport> {
-    promote_with_runner(options, &mut DmcPromotionRunner)
+    let mut provider = ExternalPromotionWorkspaceProvider::from_options(&options);
+    promote_with_provider(options, &mut provider)
 }
 
-fn promote_with_runner(
+fn promote_with_provider(
     options: AgentTaskPromotionOptions,
-    runner: &mut impl AgentTaskPromotionRunner,
+    provider: &mut impl AgentTaskPromotionWorkspaceProvider,
 ) -> Result<AgentTaskPromotionReport> {
-    validate_worktree_handle(&options.to_worktree)?;
+    validate_workspace_handle(&options.to_worktree)?;
     let source_value: Value = serde_json::from_str(&options.source).map_err(|error| {
         Error::validation_invalid_json(
             error,
@@ -129,28 +134,17 @@ fn promote_with_runner(
     validate_artifact_content(&artifact, &patch)?;
     let changed_files = validate_patch(&patch)?;
 
-    let mut dmc_commands = Vec::new();
+    let mut command_evidence = Vec::new();
     let mut applied_worktree_path = None;
     if !options.dry_run {
-        let worktree_path = match runner.worktree_path(&options.to_worktree)? {
-            Some(path) => path,
-            None => {
-                dmc_commands.append(&mut runner.ensure_worktree(&options.to_worktree)?);
-                runner.worktree_path(&options.to_worktree)?.ok_or_else(|| {
-                    Error::validation_invalid_argument(
-                        "to_worktree",
-                        format!(
-                            "managed worktree {} was not found after creation",
-                            options.to_worktree
-                        ),
-                        None,
-                        None,
-                    )
-                })?
-            }
-        };
-        dmc_commands.push(runner.apply_patch(&options.to_worktree, &patch_path)?);
-        applied_worktree_path = Some(worktree_path);
+        let target = provider.apply_patch(AgentTaskPromotionApplyRequest {
+            schema: AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA.to_string(),
+            to_workspace: options.to_worktree.clone(),
+            patch_path: patch_path.display().to_string(),
+            changed_files: changed_files.clone(),
+        })?;
+        command_evidence.extend(target.command_evidence);
+        applied_worktree_path = Some(target.path);
     }
 
     let mut deterministic_gates = Vec::new();
@@ -164,7 +158,7 @@ fn promote_with_runner(
             )
         })?;
         for (index, command) in options.verify.iter().enumerate() {
-            deterministic_gates.push(runner.verify(
+            deterministic_gates.push(provider.verify(
                 worktree_path,
                 index + 1,
                 command,
@@ -174,7 +168,7 @@ fn promote_with_runner(
         }
         let private_offset = deterministic_gates.len();
         for (index, command) in options.private_verify.iter().enumerate() {
-            deterministic_gates.push(runner.verify(
+            deterministic_gates.push(provider.verify(
                 worktree_path,
                 private_offset + index + 1,
                 command,
@@ -212,7 +206,7 @@ fn promote_with_runner(
             sha256: artifact.sha256,
         },
         changed_files,
-        dmc_commands,
+        command_evidence,
         deterministic_gates,
         provenance: json!({
             "source_schema": outcome.schema,
@@ -221,14 +215,39 @@ fn promote_with_runner(
     })
 }
 
-trait AgentTaskPromotionRunner {
-    fn worktree_path(&mut self, handle: &str) -> Result<Option<PathBuf>>;
-    fn ensure_worktree(&mut self, handle: &str) -> Result<Vec<AgentTaskPromotionCommandReport>>;
+const AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA: &str =
+    "homeboy/agent-task-promotion-apply-request/v1";
+const AGENT_TASK_PROMOTION_APPLY_RESPONSE_SCHEMA: &str =
+    "homeboy/agent-task-promotion-apply-response/v1";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct AgentTaskPromotionApplyRequest {
+    schema: String,
+    to_workspace: String,
+    patch_path: String,
+    changed_files: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct AgentTaskPromotionApplyResponse {
+    #[serde(default)]
+    schema: String,
+    workspace_path: String,
+    #[serde(default)]
+    command_evidence: Vec<AgentTaskPromotionCommandReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AgentTaskPromotionWorkspace {
+    path: PathBuf,
+    command_evidence: Vec<AgentTaskPromotionCommandReport>,
+}
+
+trait AgentTaskPromotionWorkspaceProvider {
     fn apply_patch(
         &mut self,
-        handle: &str,
-        patch_path: &Path,
-    ) -> Result<AgentTaskPromotionCommandReport>;
+        request: AgentTaskPromotionApplyRequest,
+    ) -> Result<AgentTaskPromotionWorkspace>;
     fn verify(
         &mut self,
         cwd: &Path,
@@ -239,23 +258,37 @@ trait AgentTaskPromotionRunner {
     ) -> Result<AgentTaskGateReport>;
 }
 
-struct DmcPromotionRunner;
+struct ExternalPromotionWorkspaceProvider {
+    command: Option<String>,
+}
 
-impl AgentTaskPromotionRunner for DmcPromotionRunner {
-    fn worktree_path(&mut self, handle: &str) -> Result<Option<PathBuf>> {
-        dmc_worktree_path(handle)
+impl ExternalPromotionWorkspaceProvider {
+    fn from_options(options: &AgentTaskPromotionOptions) -> Self {
+        Self {
+            command: options
+                .provider_command
+                .clone()
+                .or_else(|| std::env::var(PROMOTION_PROVIDER_COMMAND_ENV).ok()),
+        }
     }
+}
 
-    fn ensure_worktree(&mut self, handle: &str) -> Result<Vec<AgentTaskPromotionCommandReport>> {
-        ensure_worktree(handle)
-    }
-
+impl AgentTaskPromotionWorkspaceProvider for ExternalPromotionWorkspaceProvider {
     fn apply_patch(
         &mut self,
-        handle: &str,
-        patch_path: &Path,
-    ) -> Result<AgentTaskPromotionCommandReport> {
-        apply_patch_with_dmc(handle, patch_path)
+        request: AgentTaskPromotionApplyRequest,
+    ) -> Result<AgentTaskPromotionWorkspace> {
+        let command = self.command.as_deref().ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "promotion_provider",
+                format!(
+                    "agent-task promotion requires a workspace provider command; pass --provider-command or set {PROMOTION_PROVIDER_COMMAND_ENV}"
+                ),
+                None,
+                None,
+            )
+        })?;
+        run_provider_command(command, &request)
     }
 
     fn verify(
@@ -489,12 +522,11 @@ fn validate_patch_path(path: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_worktree_handle(handle: &str) -> Result<()> {
-    let (repo, branch) = split_worktree_handle(handle)?;
-    if repo.is_empty() || branch.is_empty() {
+fn validate_workspace_handle(handle: &str) -> Result<()> {
+    if handle.trim().is_empty() {
         return Err(Error::validation_invalid_argument(
             "to_worktree",
-            "worktree handle must use <repo>@<branch-slug>",
+            "target workspace handle must not be empty",
             None,
             None,
         ));
@@ -502,112 +534,55 @@ fn validate_worktree_handle(handle: &str) -> Result<()> {
     Ok(())
 }
 
-fn split_worktree_handle(handle: &str) -> Result<(&str, &str)> {
-    handle.split_once('@').ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "to_worktree",
-            "worktree handle must use <repo>@<branch-slug>",
-            None,
-            None,
-        )
-    })
-}
-
-fn ensure_worktree(handle: &str) -> Result<Vec<AgentTaskPromotionCommandReport>> {
-    if dmc_worktree_path(handle)?.is_some() {
-        return Ok(Vec::new());
-    }
-
-    let (repo, branch) = split_worktree_handle(handle)?;
-    let command = vec![
-        "studio".to_string(),
-        "wp".to_string(),
-        "datamachine-code".to_string(),
-        "workspace".to_string(),
-        "worktree".to_string(),
-        "add".to_string(),
-        repo.to_string(),
-        branch.to_string(),
-    ];
-    Ok(vec![run_command(command, None)?])
-}
-
-fn apply_patch_with_dmc(
-    handle: &str,
-    patch_path: &Path,
-) -> Result<AgentTaskPromotionCommandReport> {
-    run_command(
-        vec![
-            "studio".to_string(),
-            "wp".to_string(),
-            "datamachine-code".to_string(),
-            "workspace".to_string(),
-            "patch".to_string(),
-            "apply".to_string(),
-            handle.to_string(),
-            format!("--patch=@{}", patch_path.display()),
-            "--format=json".to_string(),
-        ],
-        None,
-    )
-}
-
-fn dmc_worktree_path(handle: &str) -> Result<Option<PathBuf>> {
-    let (repo, _) = split_worktree_handle(handle)?;
-    let report = run_command(
-        vec![
-            "studio".to_string(),
-            "wp".to_string(),
-            "datamachine-code".to_string(),
-            "workspace".to_string(),
-            "worktree".to_string(),
-            "list".to_string(),
-            repo.to_string(),
-            "--format=json".to_string(),
-        ],
-        None,
-    )?;
-    let rows: Value = serde_json::from_str(&report.stdout).map_err(|error| {
+fn run_provider_command(
+    command: &str,
+    request: &AgentTaskPromotionApplyRequest,
+) -> Result<AgentTaskPromotionWorkspace> {
+    let request_json = serde_json::to_vec(request).map_err(|error| {
         Error::validation_invalid_json(
             error,
-            Some("datamachine-code worktree list output".to_string()),
-            Some(report.stdout.clone()),
-        )
-    })?;
-    let rows = rows.as_array().ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "datamachine-code worktree list output",
-            "expected a JSON array of worktree rows",
+            Some("agent-task promotion provider request".to_string()),
             None,
-            Some(vec![report.stdout.clone()]),
         )
     })?;
-
-    Ok(rows
-        .iter()
-        .find(|row| row.get("handle").and_then(Value::as_str) == Some(handle))
-        .and_then(|row| row.get("path").and_then(Value::as_str))
-        .map(PathBuf::from))
-}
-
-fn run_command(
-    command: Vec<String>,
-    cwd: Option<&Path>,
-) -> Result<AgentTaskPromotionCommandReport> {
-    let mut process = Command::new(&command[0]);
-    process.args(&command[1..]);
-    if let Some(cwd) = cwd {
-        process.current_dir(cwd);
-    }
-    let output = process.output().map_err(|error| {
+    let mut process = Command::new("sh")
+        .arg("-lc")
+        .arg(command)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("start agent-task promotion provider command".to_string()),
+            )
+        })?;
+    process
+        .stdin
+        .as_mut()
+        .ok_or_else(|| {
+            Error::internal_io(
+                "provider command stdin was not available".to_string(),
+                Some("write agent-task promotion provider request".to_string()),
+            )
+        })?
+        .write_all(&request_json)
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("write agent-task promotion provider request".to_string()),
+            )
+        })?;
+    let output = process.wait_with_output().map_err(|error| {
         Error::internal_io(
             error.to_string(),
-            Some(format!("run {}", command.join(" "))),
+            Some("run agent-task promotion provider command".to_string()),
         )
     })?;
     let exit_code = output.status.code().unwrap_or(1);
     let report = AgentTaskPromotionCommandReport {
-        command,
+        command: vec!["sh".to_string(), "-lc".to_string(), command.to_string()],
         exit_code,
         stdout: String::from_utf8_lossy(&output.stdout).to_string(),
         stderr: String::from_utf8_lossy(&output.stderr).to_string(),
@@ -616,7 +591,7 @@ fn run_command(
         return Err(Error::validation_invalid_argument(
             "command",
             format!(
-                "promotion command failed with exit code {}: {}",
+                "promotion provider command failed with exit code {}: {}",
                 exit_code,
                 report.command.join(" ")
             ),
@@ -624,7 +599,43 @@ fn run_command(
             Some(vec![report.stderr.clone()]),
         ));
     }
-    Ok(report)
+    let response: AgentTaskPromotionApplyResponse =
+        serde_json::from_str(&report.stdout).map_err(|error| {
+            Error::validation_invalid_json(
+                error,
+                Some("agent-task promotion provider response".to_string()),
+                Some(report.stdout.clone()),
+            )
+        })?;
+    if !response.schema.is_empty() && response.schema != AGENT_TASK_PROMOTION_APPLY_RESPONSE_SCHEMA
+    {
+        return Err(Error::validation_invalid_argument(
+            "promotion_provider.response.schema",
+            format!(
+                "expected {}, got {}",
+                AGENT_TASK_PROMOTION_APPLY_RESPONSE_SCHEMA, response.schema
+            ),
+            None,
+            None,
+        ));
+    }
+    if response.workspace_path.trim().is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "promotion_provider.response.workspace_path",
+            "promotion provider response must include a workspace_path",
+            None,
+            None,
+        ));
+    }
+
+    let mut command_evidence = response.command_evidence;
+    if command_evidence.is_empty() {
+        command_evidence.push(report);
+    }
+    Ok(AgentTaskPromotionWorkspace {
+        path: PathBuf::from(response.workspace_path),
+        command_evidence,
+    })
 }
 
 #[cfg(test)]
@@ -638,11 +649,9 @@ mod tests {
     const VALID_PATCH: &str = "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n";
 
     #[derive(Debug, Default)]
-    struct FakePromotionRunner {
-        worktree_path: Option<PathBuf>,
-        ensure_creates_worktree: bool,
-        ensure_calls: Vec<String>,
-        apply_calls: Vec<(String, PathBuf)>,
+    struct FakePromotionWorkspaceProvider {
+        workspace_path: Option<PathBuf>,
+        apply_calls: Vec<AgentTaskPromotionApplyRequest>,
         verify_calls: Vec<(
             PathBuf,
             String,
@@ -651,47 +660,28 @@ mod tests {
         )>,
     }
 
-    impl AgentTaskPromotionRunner for FakePromotionRunner {
-        fn worktree_path(&mut self, _handle: &str) -> Result<Option<PathBuf>> {
-            Ok(self.worktree_path.clone())
-        }
-
-        fn ensure_worktree(
-            &mut self,
-            handle: &str,
-        ) -> Result<Vec<AgentTaskPromotionCommandReport>> {
-            self.ensure_calls.push(handle.to_string());
-            if self.ensure_creates_worktree {
-                self.worktree_path = Some(PathBuf::from("/tmp/homeboy-controlled-worktree"));
-            }
-            Ok(vec![command_report(vec![
-                "studio",
-                "wp",
-                "datamachine-code",
-                "workspace",
-                "worktree",
-                "add",
-                "repo",
-                "controlled-worktree",
-            ])])
-        }
-
+    impl AgentTaskPromotionWorkspaceProvider for FakePromotionWorkspaceProvider {
         fn apply_patch(
             &mut self,
-            handle: &str,
-            patch_path: &Path,
-        ) -> Result<AgentTaskPromotionCommandReport> {
-            self.apply_calls
-                .push((handle.to_string(), patch_path.to_path_buf()));
-            Ok(command_report(vec![
-                "studio",
-                "wp",
-                "datamachine-code",
-                "workspace",
-                "patch",
-                "apply",
-                handle,
-            ]))
+            request: AgentTaskPromotionApplyRequest,
+        ) -> Result<AgentTaskPromotionWorkspace> {
+            self.apply_calls.push(request.clone());
+            let path = self.workspace_path.clone().ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "to_worktree",
+                    "fake workspace provider could not resolve the requested workspace",
+                    None,
+                    None,
+                )
+            })?;
+            Ok(AgentTaskPromotionWorkspace {
+                path,
+                command_evidence: vec![command_report(vec![
+                    "fake-workspace-provider",
+                    "apply-patch",
+                    request.to_workspace.as_str(),
+                ])],
+            })
         }
 
         fn verify(
@@ -888,7 +878,7 @@ mod tests {
     }
 
     #[test]
-    fn promote_dry_run_reports_selected_patch_without_dmc_mutation() {
+    fn promote_dry_run_reports_selected_patch_without_provider_mutation() {
         let temp = tempfile::tempdir().expect("tempdir");
         let (source_path, source) = write_patch_source(&temp);
 
@@ -902,6 +892,7 @@ mod tests {
             verify: Vec::new(),
             private_verify: Vec::new(),
             private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
+            provider_command: None,
         })
         .expect("dry-run promotion report");
 
@@ -909,21 +900,21 @@ mod tests {
         assert_eq!(report.source.task_id, "task-1");
         assert_eq!(report.patch_artifact.id, "patch");
         assert_eq!(report.changed_files, vec!["src/lib.rs"]);
-        assert!(report.dmc_commands.is_empty());
+        assert!(report.command_evidence.is_empty());
         assert!(report.deterministic_gates.is_empty());
     }
 
     #[test]
-    fn promote_applies_patch_into_existing_controlled_worktree() {
+    fn promote_applies_patch_with_fake_workspace_provider() {
         let temp = tempfile::tempdir().expect("tempdir");
         let worktree_path = temp.path().join("controlled-worktree");
         let (source_path, source) = write_patch_source(&temp);
-        let mut runner = FakePromotionRunner {
-            worktree_path: Some(worktree_path.clone()),
+        let mut provider = FakePromotionWorkspaceProvider {
+            workspace_path: Some(worktree_path.clone()),
             ..Default::default()
         };
 
-        let report = promote_with_runner(
+        let report = promote_with_provider(
             AgentTaskPromotionOptions {
                 source,
                 source_path: Some(source_path),
@@ -934,35 +925,45 @@ mod tests {
                 verify: vec!["cargo test --lib agent_task_promotion".to_string()],
                 private_verify: vec!["cargo test --lib hidden".to_string()],
                 private_gate_reveal: AgentTaskGateRevealPolicy::SummaryOnly,
+                provider_command: None,
             },
-            &mut runner,
+            &mut provider,
         )
         .expect("applied promotion report");
 
         assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
         assert_eq!(report.changed_files, vec!["src/lib.rs"]);
-        assert!(runner.ensure_calls.is_empty());
-        assert_eq!(runner.apply_calls.len(), 1);
-        assert_eq!(runner.apply_calls[0].0, "repo@controlled-worktree");
-        assert!(runner.apply_calls[0].1.ends_with("changes.patch"));
+        assert_eq!(provider.apply_calls.len(), 1);
         assert_eq!(
-            runner.verify_calls,
+            provider.apply_calls[0].to_workspace,
+            "repo@controlled-worktree"
+        );
+        assert!(provider.apply_calls[0]
+            .patch_path
+            .ends_with("changes.patch"));
+        assert_eq!(provider.apply_calls[0].changed_files, vec!["src/lib.rs"]);
+        assert_eq!(
+            provider.verify_calls,
             vec![
                 (
-                    worktree_path,
+                    worktree_path.clone(),
                     "cargo test --lib agent_task_promotion".to_string(),
                     AgentTaskGateVisibility::Visible,
                     AgentTaskGateRevealPolicy::FullEvidence,
                 ),
                 (
-                    runner.verify_calls[1].0.clone(),
+                    worktree_path,
                     "cargo test --lib hidden".to_string(),
                     AgentTaskGateVisibility::Private,
                     AgentTaskGateRevealPolicy::SummaryOnly,
                 )
             ]
         );
-        assert_eq!(report.dmc_commands.len(), 1);
+        assert_eq!(report.command_evidence.len(), 1);
+        assert_eq!(
+            report.command_evidence[0].command[0],
+            "fake-workspace-provider"
+        );
         assert_eq!(report.deterministic_gates.len(), 2);
         assert_eq!(report.deterministic_gates[0].id, "gate-1");
         assert_eq!(
@@ -972,32 +973,92 @@ mod tests {
     }
 
     #[test]
-    fn promote_creates_missing_worktree_before_apply() {
+    fn promote_requires_provider_for_apply() {
         let temp = tempfile::tempdir().expect("tempdir");
         let (source_path, source) = write_patch_source(&temp);
-        let mut runner = FakePromotionRunner {
-            ensure_creates_worktree: true,
-            ..Default::default()
+
+        let err = promote(AgentTaskPromotionOptions {
+            source,
+            source_path: Some(source_path),
+            to_worktree: "repo@controlled-worktree".to_string(),
+            task_id: None,
+            artifact_id: None,
+            dry_run: false,
+            verify: Vec::new(),
+            private_verify: Vec::new(),
+            private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
+            provider_command: None,
+        })
+        .expect_err("missing provider rejected");
+
+        assert!(err.message.contains("workspace provider command"));
+    }
+
+    #[test]
+    fn promotion_report_serializes_generic_command_evidence() {
+        let report = AgentTaskPromotionReport {
+            schema: AGENT_TASK_PROMOTION_REPORT_SCHEMA.to_string(),
+            status: AgentTaskPromotionStatus::Applied,
+            source: AgentTaskPromotionSource {
+                kind: "outcome".to_string(),
+                task_id: "task-1".to_string(),
+                path: None,
+            },
+            to_worktree: "repo@controlled-worktree".to_string(),
+            patch_artifact: AgentTaskPromotionArtifactRef {
+                id: "patch".to_string(),
+                kind: "patch".to_string(),
+                path: "changes.patch".to_string(),
+                sha256: None,
+            },
+            changed_files: vec!["src/lib.rs".to_string()],
+            command_evidence: vec![command_report(vec![
+                "fake-workspace-provider",
+                "apply-patch",
+            ])],
+            deterministic_gates: Vec::new(),
+            provenance: Value::Null,
         };
 
-        let report = promote_with_runner(
-            AgentTaskPromotionOptions {
-                source,
-                source_path: Some(source_path),
-                to_worktree: "repo@controlled-worktree".to_string(),
-                task_id: None,
-                artifact_id: None,
-                dry_run: false,
-                verify: Vec::new(),
-                private_verify: Vec::new(),
-                private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
-            },
-            &mut runner,
-        )
-        .expect("applied promotion report");
+        let value = serde_json::to_value(report).expect("serialize report");
 
-        assert_eq!(runner.ensure_calls, vec!["repo@controlled-worktree"]);
-        assert_eq!(runner.apply_calls.len(), 1);
-        assert_eq!(report.dmc_commands.len(), 2);
+        assert_eq!(
+            value["command_evidence"][0]["command"][0].as_str(),
+            Some("fake-workspace-provider")
+        );
+    }
+
+    #[test]
+    fn provider_command_response_supplies_workspace_and_evidence() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let response_path = temp.path().join("response.json");
+        std::fs::write(
+            &response_path,
+            serde_json::json!({
+                "schema": AGENT_TASK_PROMOTION_APPLY_RESPONSE_SCHEMA,
+                "workspace_path": temp.path().join("workspace").display().to_string(),
+                "command_evidence": [{
+                    "command": ["provider", "apply"],
+                    "exit_code": 0
+                }]
+            })
+            .to_string(),
+        )
+        .expect("write response");
+
+        let request = AgentTaskPromotionApplyRequest {
+            schema: AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA.to_string(),
+            to_workspace: "target-workspace".to_string(),
+            patch_path: temp.path().join("changes.patch").display().to_string(),
+            changed_files: vec!["src/lib.rs".to_string()],
+        };
+        let workspace = run_provider_command(&format!("cat {}", response_path.display()), &request)
+            .expect("provider response");
+
+        assert!(workspace.path.ends_with("workspace"));
+        assert_eq!(
+            workspace.command_evidence[0].command,
+            vec!["provider", "apply"]
+        );
     }
 }

@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.222.14] - 2026-06-08
+
+### Changed
+- Guard force-hot local Lab bypass
+- project fleet exec into core plans
+- remove built-in promotion workspace backend
+- refactor agent task promotion workspace seam
+
 ## [0.222.13] - 2026-06-07
 
 ### Changed

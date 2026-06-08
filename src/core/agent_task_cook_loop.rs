@@ -543,7 +543,7 @@ mod tests {
                 sha256: Some("abc123".to_string()),
             },
             changed_files: vec!["src/core/agent_task_gate.rs".to_string()],
-            dmc_commands: Vec::new(),
+            command_evidence: Vec::new(),
             deterministic_gates,
             provenance: json!({ "worktree_path": "/tmp/homeboy@fix-3676" }),
         }

@@ -163,6 +163,8 @@ jobs:
       - gate-build
     if: needs.check.outputs.should-release == 'true'
     runs-on: ubuntu-latest
+    outputs:
+      audit-result: ${{ steps.audit.outcome }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -183,7 +185,10 @@ jobs:
           app-id: ${{ secrets.HOMEBOY_APP_ID }}
           private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
 
-      - uses: Extra-Chill/homeboy-action@v2
+      - name: Run advisory audit
+        id: audit
+        uses: Extra-Chill/homeboy-action@v2
+        continue-on-error: true
         with:
           binary-path: .homeboy-bin/homeboy
           commands: audit
@@ -331,7 +336,7 @@ jobs:
       - name: Enforce release-blocking commands
         env:
           BLOCKING_COMMANDS: ${{ env.RELEASE_BLOCKING_COMMANDS }}
-          AUDIT_RESULT: ${{ needs.gate-audit.result }}
+          AUDIT_RESULT: ${{ needs.gate-audit.outputs.audit-result || needs.gate-audit.result }}
           LINT_RESULT: ${{ needs.gate-lint.result }}
           TEST_RESULT: ${{ needs.gate-test.result }}
           REFACTOR_RESULT: ${{ needs.gate-refactor.result }}
@@ -382,6 +387,7 @@ jobs:
     outputs:
       release-version: ${{ steps.recovery.outputs.release-version || steps.release.outputs.release-version }}
       release-tag: ${{ steps.recovery.outputs.release-tag || steps.release.outputs.release-tag }}
+      prepared: ${{ steps.recovery.outputs.prepared || steps.prepared.outputs.prepared }}
       released: ${{ steps.recovery.outputs.released || steps.release.outputs.released }}
     steps:
       - name: Generate GitHub App token
@@ -417,6 +423,13 @@ jobs:
           release-skip-github-release: 'true'
           app-token: ${{ steps.app-token.outputs.token || '' }}
 
+      - name: Mark prepared release for downstream publish
+        id: prepared
+        if: inputs.release_tag == '' && steps.release.outputs.release-tag != ''
+        run: |
+          echo "prepared=true" >> "$GITHUB_OUTPUT"
+          echo "::notice::Prepared ${{ steps.release.outputs.release-tag }}; downstream jobs will publish it in this run"
+
       - name: Use existing release tag
         id: recovery
         if: inputs.release_tag != ''
@@ -426,6 +439,7 @@ jobs:
 
           echo "release-version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "release-tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "prepared=true" >> "$GITHUB_OUTPUT"
           echo "released=true" >> "$GITHUB_OUTPUT"
           echo "::notice::Skipping release preparation; downstream jobs will publish existing tag ${TAG}"
 
@@ -433,7 +447,7 @@ jobs:
   plan:
     name: Plan Build Matrix
     needs: prepare
-    if: needs.prepare.outputs.released == 'true'
+    if: needs.prepare.outputs.prepared == 'true' && needs.prepare.outputs.release-tag != ''
     runs-on: ubuntu-22.04
     outputs:
       val: ${{ steps.plan.outputs.manifest }}
