@@ -34,6 +34,31 @@ if (process.env.FIXTURE_WP_CODEBOX_VALIDATION_FAILURE) {
   process.stderr.write('Generated recipe: ' + generatedRecipePath + '\\n');
   process.exit(1);
 }
+if (process.env.FIXTURE_WP_CODEBOX_JSON_VALIDATION_FAILURE) {
+  const generatedRoot = fs.mkdtempSync(require('node:path').join(require('node:os').tmpdir(), 'wp-codebox-agent-task-recipe-'));
+  const generatedRecipePath = require('node:path').join(generatedRoot, 'recipe.json');
+  fs.writeFileSync(generatedRecipePath, JSON.stringify({
+    schema: 'wp-codebox/recipe/v1',
+    secret: process.env.OPENCODE_API_KEY,
+    workflow: { steps: [{ command: '', args: [] }] }
+  }, null, 2));
+  fs.writeFileSync(out, JSON.stringify({ argv: process.argv.slice(2), input }, null, 2));
+  process.stdout.write(JSON.stringify({
+    success: false,
+    schema: 'wp-codebox/agent-task-run/v1',
+    status: 'failed',
+    summary: 'WP Codebox agent task failed.',
+    diagnostics: [{ class: 'wp-codebox.agent_task_run_failed', message: 'Recipe validation failed with 2 issues.', data: { exit_code: 1 } }],
+    artifacts: input.artifacts_path,
+    metadata: {
+      run: {
+        error: { name: 'RecipeValidationError', message: 'Recipe validation failed with 2 issues.' },
+        replay: { recipePath: generatedRecipePath }
+      }
+    }
+  }));
+  process.exit(0);
+}
 const isAgentBundle = Boolean(input.agent_bundle && Object.keys(input.agent_bundle).length);
 const bundleRun = isAgentBundle && process.env.FIXTURE_WP_CODEBOX_BUNDLE_RUN
   ? {
@@ -641,6 +666,34 @@ try {
   assert.match(fs.readFileSync(evidence.stderr_path, 'utf8'), /workflow\.steps\[0\]\.command is required/);
   assert(!fs.readFileSync(evidence.input_evidence_path, 'utf8').includes('super-secret-validation-key'));
   assert(!fs.readFileSync(evidence.copied_generated_paths[0].path, 'utf8').includes('super-secret-validation-key'));
+
+  const jsonValidationArtifacts = path.join(root, 'json-validation-failure-artifacts');
+  const jsonValidationCapturePath = path.join(root, 'capture-json-validation-failure.json');
+  const jsonValidationFailureResult = spawnSync(process.execPath, [
+    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-wp-codebox-task-runner.cjs'),
+    '--wp-codebox-bin', fixtureWpCodebox,
+    '--artifacts', jsonValidationArtifacts,
+  ], {
+    encoding: 'utf8',
+    input: JSON.stringify(request),
+    env: {
+      ...process.env,
+      FIXTURE_WP_CODEBOX_CAPTURE: jsonValidationCapturePath,
+      FIXTURE_WP_CODEBOX_JSON_VALIDATION_FAILURE: '1',
+      OPENCODE_API_KEY: 'super-secret-json-validation-key',
+    },
+  });
+  assert.equal(jsonValidationFailureResult.status, 1, jsonValidationFailureResult.stderr || jsonValidationFailureResult.stdout);
+  const jsonValidationOutput = JSON.parse(jsonValidationFailureResult.stdout);
+  assert.equal(jsonValidationOutput.success, false);
+  assert.equal(jsonValidationOutput.diagnostics.some((diagnostic) => diagnostic.class === 'wp-codebox.command.evidence_preserved'), true);
+  const jsonEvidence = readJson(path.join(jsonValidationArtifacts, 'wp-codebox-command-evidence.json'));
+  assert.equal(fs.existsSync(jsonEvidence.stdout_path), true);
+  assert.equal(fs.existsSync(jsonEvidence.input_evidence_path), true);
+  assert.equal(jsonEvidence.copied_generated_paths.length, 1);
+  assert.match(fs.readFileSync(jsonEvidence.stdout_path, 'utf8'), /RecipeValidationError/);
+  assert(!fs.readFileSync(jsonEvidence.stdout_path, 'utf8').includes('super-secret-json-validation-key'));
+  assert(!fs.readFileSync(jsonEvidence.copied_generated_paths[0].path, 'utf8').includes('super-secret-json-validation-key'));
 
   const missingSecretResult = spawnSync(process.execPath, [
     path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-wp-codebox-task-runner.cjs'),

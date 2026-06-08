@@ -1014,7 +1014,16 @@ function runWpCodeboxParentTask(request) {
   if (result.stdout) {
     try {
       const payload = normalizeAgentTaskRun(input, JSON.parse(result.stdout));
-      const enrichedPayload = failureEvidence ? attachFailureEvidence(payload, failureEvidence) : payload;
+      const payloadFailed = payload.success === false || payload.status === 'failed' || payload.session?.status === 'failed';
+      const payloadEvidence = failureEvidence || (payloadFailed ? preserveWpCodeboxFailureEvidence({
+        artifacts,
+        inputPath,
+        result,
+        command: resolved.command,
+        args: resolved.args,
+        secretNames: input.secret_env || [],
+      }) : null);
+      const enrichedPayload = payloadEvidence ? attachFailureEvidence(payload, payloadEvidence) : payload;
       process.stdout.write(`${JSON.stringify(enrichedPayload, null, 2)}\n`);
       return payload.success === false ? 1 : 0;
     } catch {
