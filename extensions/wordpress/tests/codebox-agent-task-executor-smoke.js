@@ -464,15 +464,50 @@ try {
   assert.equal(bareOpenAiDefaultedRequest.provider, 'openai');
   assert.equal(bareOpenAiDefaultedRequest.model, '');
   assert.deepEqual(bareOpenAiDefaultedRequest.secret_env, ['OPENAI_API_KEY']);
-  assert.deepEqual(bareOpenAiDefaultedRequest.allowed_tools, ['workspace_ls', 'workspace_read', 'workspace_git_status']);
+  // A bare repo workspace defaults to a read-write mount, so coding-capable
+  // workspace tools must be exposed alongside the read-only inspection tools.
+  const writableWorkspaceTools = [
+    'workspace_ls',
+    'workspace_read',
+    'workspace_git_status',
+    'workspace_write',
+    'workspace_edit',
+    'workspace_apply_patch',
+    'workspace_delete',
+    'workspace_git_add',
+  ];
+  assert.deepEqual(bareOpenAiDefaultedRequest.allowed_tools, writableWorkspaceTools);
   assert.equal(bareOpenAiDefaultedRequest.sandbox_tool_policy.schema, 'wp-codebox/sandbox-tool-policy/v1');
   assert.deepEqual(
     bareOpenAiDefaultedRequest.sandbox_tool_policy.tools.map((tool) => tool.runtime_tool_id),
-    ['workspace_ls', 'workspace_read', 'workspace_git_status'],
+    writableWorkspaceTools,
   );
   assert.deepEqual(
     bareOpenAiDefaultedRequest.sandbox_tool_policy.tools.map((tool) => tool.runtime.environment),
-    ['runtime_local', 'runtime_local', 'runtime_local'],
+    writableWorkspaceTools.map(() => 'runtime_local'),
+  );
+
+  // A read-only repo workspace must remain restricted to inspection tools.
+  const readonlyWorkspaceRequest = codeboxTaskRequestFromAgentTaskRequest({
+    ...request,
+    task_id: 'readonly-workspace-task-123',
+    executor: {
+      backend: 'codebox',
+      config: {},
+    },
+    inputs: {
+      target: { root: workspaceRoot, mode: 'readonly' },
+    },
+  }, {
+    settings: { wp_codebox_codex_enabled: false },
+  });
+  assert.deepEqual(
+    readonlyWorkspaceRequest.allowed_tools,
+    ['workspace_ls', 'workspace_read', 'workspace_git_status'],
+  );
+  assert.deepEqual(
+    readonlyWorkspaceRequest.sandbox_tool_policy.tools.map((tool) => tool.runtime_tool_id),
+    ['workspace_ls', 'workspace_read', 'workspace_git_status'],
   );
 
   const settingsModelRequest = codeboxTaskRequestFromAgentTaskRequest({
