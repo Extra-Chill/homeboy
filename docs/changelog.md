@@ -4,6 +4,17 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.225.0] - 2026-06-09
+
+### Added
+- add Homeboy proof envelope
+
+### Changed
+- keep Lab workspace fixtures generic
+
+### Fixed
+- make agent-task proof provenance explicit
+
 ## [0.224.1] - 2026-06-09
 
 ### Changed
