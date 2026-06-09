@@ -412,9 +412,13 @@ fn exec_via_daemon(
             ));
         }
         std::thread::sleep(Duration::from_millis(200));
-        job = fetch_daemon_job(&client, local_url, &job.id.to_string())?;
+        let job_id = job.id.to_string();
+        job = fetch_daemon_job(&client, local_url, &job_id)
+            .map_err(|err| daemon_job_context_error(&runner.id, &job_id, err))?;
     }
-    let events = fetch_daemon_events(&client, local_url, &job.id.to_string())?;
+    let job_id = job.id.to_string();
+    let events = fetch_daemon_events(&client, local_url, &job_id)
+        .map_err(|err| daemon_job_context_error(&runner.id, &job_id, err))?;
 
     let result = result_event_data(&events).unwrap_or_else(|| json!({}));
     let stdout = string_field(&result, "stdout");
@@ -490,6 +494,21 @@ fn fetch_daemon_events(client: &Client, local_url: &str, job_id: &str) -> Result
     serde_json::from_value(body["events"].clone()).map_err(|err| {
         Error::internal_json(err.to_string(), Some("parse daemon job events".to_string()))
     })
+}
+
+fn daemon_job_context_error(runner_id: &str, job_id: &str, err: Error) -> Error {
+    let mut with_context = Error::new(
+        err.code,
+        err.message,
+        json!({
+            "runner_id": runner_id,
+            "job_id": job_id,
+            "source": err.details,
+        }),
+    );
+    with_context.hints = err.hints;
+    with_context.retryable = err.retryable.or(Some(true));
+    with_context
 }
 
 fn cancel_daemon_job_after_timeout(
@@ -1096,6 +1115,7 @@ fn daemon_failure_message(status_code: u16, envelope: &DaemonEnvelope) -> String
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::error::ErrorCode;
     use crate::core::server::{self, RunnerPolicy, RunnerSettings};
 
     fn ssh_runner() -> Runner {
@@ -1121,6 +1141,23 @@ mod tests {
             capture_patch: options.capture_patch,
             raw_exec: options.raw_exec,
         }
+    }
+
+    #[test]
+    fn daemon_job_context_error_preserves_in_flight_job_details() {
+        let source = Error::internal_unexpected(
+            "query runner daemon: error sending request for url (http://127.0.0.1:63203/jobs/job-123)",
+        )
+        .with_hint("original hint");
+
+        let err = daemon_job_context_error("homeboy-lab", "job-123", source);
+
+        assert_eq!(err.code, ErrorCode::InternalUnexpected);
+        assert_eq!(err.retryable, Some(true));
+        assert_eq!(err.details["runner_id"], "homeboy-lab");
+        assert_eq!(err.details["job_id"], "job-123");
+        assert_eq!(err.hints[0].message, "original hint");
+        assert!(err.message.contains("query runner daemon"));
     }
 
     #[test]

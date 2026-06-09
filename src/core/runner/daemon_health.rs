@@ -1,6 +1,13 @@
 use crate::core::error::{Error, ErrorCode};
 
-pub(super) fn runner_daemon_health_failure(err: &Error) -> Option<String> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct RunnerDaemonHealthFailure {
+    pub reason: String,
+    pub runner_id: Option<String>,
+    pub job_id: Option<String>,
+}
+
+pub(super) fn runner_daemon_health_failure(err: &Error) -> Option<RunnerDaemonHealthFailure> {
     if !matches!(
         err.code,
         ErrorCode::InternalUnexpected | ErrorCode::InternalJsonError
@@ -14,7 +21,19 @@ pub(super) fn runner_daemon_health_failure(err: &Error) -> Option<String> {
         || message.contains("parse daemon exec response")
         || message.contains("daemon exec request failed");
     if daemon_transport_failure {
-        Some(format!("runner daemon health check failed: {message}"))
+        Some(RunnerDaemonHealthFailure {
+            reason: format!("runner daemon health check failed: {message}"),
+            runner_id: err
+                .details
+                .get("runner_id")
+                .and_then(|value| value.as_str())
+                .map(ToString::to_string),
+            job_id: err
+                .details
+                .get("job_id")
+                .and_then(|value| value.as_str())
+                .map(ToString::to_string),
+        })
     } else {
         None
     }
@@ -32,10 +51,34 @@ mod tests {
 
         assert_eq!(
             runner_daemon_health_failure(&err),
-            Some(
-                "runner daemon health check failed: query runner daemon: error sending request for url (http://127.0.0.1:63534/jobs/id)"
-                    .to_string()
-            )
+            Some(RunnerDaemonHealthFailure {
+                reason: "runner daemon health check failed: query runner daemon: error sending request for url (http://127.0.0.1:63534/jobs/id)"
+                    .to_string(),
+                runner_id: None,
+                job_id: None,
+            })
+        );
+    }
+
+    #[test]
+    fn includes_in_flight_daemon_job_context() {
+        let err = Error::new(
+            ErrorCode::InternalUnexpected,
+            "query runner daemon: error sending request for url (http://127.0.0.1:63534/jobs/id)",
+            serde_json::json!({
+                "runner_id": "homeboy-lab",
+                "job_id": "job-123",
+            }),
+        );
+
+        assert_eq!(
+            runner_daemon_health_failure(&err),
+            Some(RunnerDaemonHealthFailure {
+                reason: "runner daemon health check failed: query runner daemon: error sending request for url (http://127.0.0.1:63534/jobs/id)"
+                    .to_string(),
+                runner_id: Some("homeboy-lab".to_string()),
+                job_id: Some("job-123".to_string()),
+            })
         );
     }
 
