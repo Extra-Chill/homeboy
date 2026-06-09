@@ -1120,20 +1120,18 @@ mod tests {
             parsed_command(&["homeboy", "agent-task", "dispatch", "--prompt", "cook"])
                 .supports_lab_runner()
         );
-        assert!(
-            parsed_command(&[
-                "homeboy",
-                "agent-task",
-                "loop",
-                "--to-worktree",
-                "homeboy@smoke",
-                "--verify",
-                "true",
-                "--prompt",
-                "cook"
-            ])
-            .supports_lab_runner()
-        );
+        assert!(parsed_command(&[
+            "homeboy",
+            "agent-task",
+            "loop",
+            "--to-worktree",
+            "homeboy@smoke",
+            "--verify",
+            "true",
+            "--prompt",
+            "cook"
+        ])
+        .supports_lab_runner());
         assert!(!parsed_command(&[
             "homeboy", "refactor", "rename", "--from", "old", "--to", "new",
         ])
