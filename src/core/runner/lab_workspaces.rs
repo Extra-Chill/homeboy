@@ -101,7 +101,7 @@ pub(super) fn workspace_mapping_entry_for_git_dependency(
         role: role.into(),
         local_path: dependency.local_path.clone(),
         remote_path: dependency.remote_path.clone(),
-        sync_mode: "git".to_string(),
+        sync_mode: dependency.sync_mode.label().to_string(),
         snapshot_identity: dependency.head.clone(),
     }
 }
@@ -676,7 +676,9 @@ mod provider_config_candidate_paths_tests {
     use super::{
         agent_task_plan_extra_workspaces, preflight_provider_config_source_cli_dependencies,
         provider_config_candidate_paths, provider_config_extra_workspaces,
+        workspace_mapping_entry_for_git_dependency,
     };
+    use crate::core::runner::{RunnerGitDependencyMaterializationOutput, RunnerWorkspaceSyncMode};
 
     fn git(path: &Path, args: &[&str]) {
         let output = Command::new("git")
@@ -954,6 +956,28 @@ mod provider_config_candidate_paths_tests {
             .snapshot_includes
             .contains(&"packages/cli/dist/**".to_string()));
         assert!(workspaces[0].bootstrap_node_dependencies);
+    }
+
+    #[test]
+    fn rig_dependency_workspace_mapping_uses_dependency_sync_mode() {
+        let dependency = RunnerGitDependencyMaterializationOutput {
+            local_path: "/local/playground-site-sync".to_string(),
+            remote_path: "/remote/playground-site-sync".to_string(),
+            remote_url: "git@github.a8c.com:Automattic/playground-site-sync.git".to_string(),
+            head: "snapshot:abc".to_string(),
+            status: "snapshotted".to_string(),
+            sync_mode: RunnerWorkspaceSyncMode::Snapshot,
+            files: 7,
+            bytes: 42,
+        };
+
+        let entry =
+            workspace_mapping_entry_for_git_dependency("rig_component_dependency", &dependency);
+
+        assert_eq!(entry.local_path, "/local/playground-site-sync");
+        assert_eq!(entry.remote_path, "/remote/playground-site-sync");
+        assert_eq!(entry.sync_mode, "snapshot");
+        assert_eq!(entry.snapshot_identity, "snapshot:abc");
     }
 
     #[test]

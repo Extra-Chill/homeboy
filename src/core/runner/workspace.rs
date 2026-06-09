@@ -186,9 +186,9 @@ pub fn sync_workspace(
     }
 }
 
-struct SnapshotStats {
-    files: usize,
-    bytes: u64,
+pub(super) struct SnapshotStats {
+    pub(super) files: usize,
+    pub(super) bytes: u64,
 }
 
 struct GitSnapshot {
@@ -242,7 +242,7 @@ fn deterministic_remote_path(workspace_root: &str, local_path: &Path, snapshot: 
     )
 }
 
-fn snapshot_identity(
+pub(super) fn snapshot_identity(
     local_path: &Path,
     excludes: &[String],
     includes: &[String],
@@ -323,7 +323,7 @@ pub(super) fn git_output(local_path: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-fn local_snapshot_stats(
+pub(super) fn local_snapshot_stats(
     path: &Path,
     excludes: &[String],
     includes: &[String],
@@ -512,7 +512,10 @@ fn materialize_snapshot_piped(
     run_shell_command(&command, action)
 }
 
-fn effective_snapshot_excludes(excludes: Vec<String>, includes: &[String]) -> Vec<String> {
+pub(super) fn effective_snapshot_excludes(
+    excludes: Vec<String>,
+    includes: &[String],
+) -> Vec<String> {
     if includes.is_empty() {
         return excludes;
     }
