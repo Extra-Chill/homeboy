@@ -1120,6 +1120,20 @@ mod tests {
             parsed_command(&["homeboy", "agent-task", "dispatch", "--prompt", "cook"])
                 .supports_lab_runner()
         );
+        assert!(
+            parsed_command(&[
+                "homeboy",
+                "agent-task",
+                "loop",
+                "--to-worktree",
+                "homeboy@smoke",
+                "--verify",
+                "true",
+                "--prompt",
+                "cook"
+            ])
+            .supports_lab_runner()
+        );
         assert!(!parsed_command(&[
             "homeboy", "refactor", "rename", "--from", "old", "--to", "new",
         ])
@@ -1188,11 +1202,25 @@ mod tests {
             ),
             (
                 parsed_command(&["homeboy", "agent-task", "dispatch", "--prompt", "cook"]),
-                "agent-task dispatch/cook",
+                "agent-task dispatch/cook/loop",
             ),
             (
                 parsed_command(&["homeboy", "agent-task", "cook", "--prompt", "cook"]),
-                "agent-task dispatch/cook",
+                "agent-task dispatch/cook/loop",
+            ),
+            (
+                parsed_command(&[
+                    "homeboy",
+                    "agent-task",
+                    "loop",
+                    "--to-worktree",
+                    "homeboy@smoke",
+                    "--verify",
+                    "true",
+                    "--prompt",
+                    "cook",
+                ]),
+                "agent-task dispatch/cook/loop",
             ),
         ];
 
