@@ -234,12 +234,6 @@ fn lab_offload_command(
             )
         }),
         infer_source_path_tools: contract.infer_source_path_tools,
-        requires_wp_codebox_bench_recipe: contract.extra_required_tools.iter().any(|tool| {
-            matches!(
-                tool,
-                homeboy::cli_surface::LabCommandRequiredTool::WpCodeboxBenchRecipe
-            )
-        }),
     }))
 }
 
@@ -485,16 +479,6 @@ mod tests {
         assert!(command.portable);
         assert!(command.unsupported_reason.is_none());
         assert!(command.requires_extension_parity);
-    }
-
-    #[test]
-    fn bench_lab_command_requires_wp_codebox_bench_recipe_export() {
-        let cli = Cli::parse_from(["homeboy", "bench"]);
-
-        let command = lab_offload_command(&cli.command).unwrap().unwrap();
-
-        assert_eq!(command.hot_label, "bench");
-        assert!(command.requires_wp_codebox_bench_recipe);
     }
 
     #[test]

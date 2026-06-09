@@ -31,12 +31,9 @@ pub enum LabWorkspaceModePolicy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LabCommandRequiredTool {
     Playwright,
-    WpCodeboxBenchRecipe,
 }
 
 pub const LAB_TRACE_EXTRA_TOOLS: &[LabCommandRequiredTool] = &[LabCommandRequiredTool::Playwright];
-const LAB_BENCH_EXTRA_TOOLS: &[LabCommandRequiredTool] =
-    &[LabCommandRequiredTool::WpCodeboxBenchRecipe];
 const LAB_NO_EXTRA_TOOLS: &[LabCommandRequiredTool] = &[];
 const AUDIT_CHANGED_SINCE_LAB_UNSUPPORTED_REASON: &str = "`audit --changed-since` is not Lab-portable yet because changed-since audit depends on git base refs that the current Lab workspace sync may not have fetched.";
 const LINT_CHANGED_SCOPE_LAB_UNSUPPORTED_REASON: &str = "Changed-scope lint runs stay local because changed-file scopes are not represented in the current Lab portability contract yet.";
@@ -78,7 +75,7 @@ impl Commands {
                 args.lab_offload_writes_local_state()
                     .then_some("--baseline/--ratchet"),
                 true,
-                LAB_BENCH_EXTRA_TOOLS,
+                LAB_NO_EXTRA_TOOLS,
             ),
             Commands::Fleet(args) if args.is_hot_resource_command() => {
                 lab_local_only_contract("fleet exec", FLEET_EXEC_LAB_UNSUPPORTED_REASON)

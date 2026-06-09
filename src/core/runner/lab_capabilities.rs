@@ -36,10 +36,6 @@ pub(super) fn lab_runner_capability_contract(
         }
     }
 
-    if command.requires_wp_codebox_bench_recipe {
-        push_unique(&mut required_tools, RunnerRequiredTool::Node);
-    }
-
     Some(LabRunnerCapabilityContract {
         command: command.hot_label,
         required_tools,

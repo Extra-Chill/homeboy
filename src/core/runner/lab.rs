@@ -1,10 +1,8 @@
 use std::path::Path;
 
 use crate::core::agent_task_secrets;
-use crate::core::engine::shell;
 use crate::core::observation::{PREVIEW_METADATA_ENV, PREVIEW_PUBLIC_URL_ENV};
 use crate::core::plan::{HomeboyPlan, PlanStep, PlanStepStatus, PlanValues};
-use crate::core::server::{self, SshClient};
 use crate::core::source_snapshot::SourceSnapshot;
 use crate::core::{Error, Result};
 
@@ -61,7 +59,6 @@ pub struct LabOffloadCommand {
     pub required_extensions: Vec<String>,
     pub requires_playwright: bool,
     pub infer_source_path_tools: bool,
-    pub requires_wp_codebox_bench_recipe: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -389,17 +386,6 @@ fn run_lab_offload_inner(
         }
     }
 
-    if contract.requires_wp_codebox_bench_recipe {
-        preflight_wp_codebox_bench_recipe(&runner)?;
-        plan = with_step(
-            plan,
-            PlanStep::ready(
-                "lab.wp_codebox_runtime_preflight",
-                "lab.wp_codebox_runtime_preflight",
-            )
-            .build(),
-        );
-    }
     let capability_preflight: Option<RunnerCapabilityPreflight> = capability_plan.map(Into::into);
     let sync_mode = match contract.workspace_mode_policy {
         LabOffloadWorkspaceModePolicy::ChangedSinceGitElseSnapshot => {
@@ -708,73 +694,6 @@ fn run_lab_offload_inner(
     })
 }
 
-fn preflight_wp_codebox_bench_recipe(runner: &super::Runner) -> Result<()> {
-    let workspace_root = runner.workspace_root.as_deref().ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "workspace_root",
-            "Lab offload requires runner.workspace_root so WP Codebox runtime-core can be preflighted",
-            Some(runner.id.clone()),
-            None,
-        )
-    })?;
-    let server_id = runner.server_id.as_deref().ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "server_id",
-            "SSH runners require server_id",
-            Some(runner.id.clone()),
-            None,
-        )
-    })?;
-    let server = server::load(server_id)?;
-    let mut client = SshClient::from_server(&server, server_id)?;
-    client.env.extend(runner.env.clone());
-    let default_module = format!("{workspace_root}/wp-codebox/packages/runtime-core/dist/index.js");
-    let script = r#"const modulePath = process.env.HOMEBOY_WP_CODEBOX_CORE_MODULE || process.argv[1];
-import(modulePath).then((module) => {
-  if (typeof module.buildWordPressBenchRecipe !== 'function') {
-    console.error(`missing buildWordPressBenchRecipe export in ${modulePath}`);
-    process.exit(2);
-  }
-  console.log(modulePath);
-}).catch((error) => {
-  console.error(error && error.message ? error.message : String(error));
-  process.exit(1);
-});"#;
-    let command = format!(
-        "node --input-type=module -e {} {}",
-        shell::quote_arg(script),
-        shell::quote_arg(&default_module)
-    );
-    let output = client.execute(&command);
-    if output.success {
-        return Ok(());
-    }
-
-    let observed = output.stderr.trim();
-    let detail = if observed.is_empty() {
-        "node preflight produced no stderr".to_string()
-    } else {
-        observed.to_string()
-    };
-
-    Err(Error::validation_invalid_argument(
-        "wp_codebox_core_module",
-        format!(
-            "Lab offload runner `{}` is missing a WP Codebox runtime-core module that exports buildWordPressBenchRecipe at `{}`: {}",
-            runner.id, default_module, detail
-        ),
-        Some(default_module.clone()),
-        Some(vec![
-            format!(
-                "On runner `{}`, provision a fresh WP Codebox checkout at `{workspace_root}/wp-codebox`, then run `npm ci` and `npm run build`.",
-                runner.id
-            ),
-            "Alternatively set HOMEBOY_WP_CODEBOX_CORE_MODULE on the runner to a built runtime-core ESM entrypoint that exports buildWordPressBenchRecipe.".to_string(),
-            "Remote bench execution was not started; fix the runner prerequisite and retry Lab offload.".to_string(),
-        ]),
-    ))
-}
-
 fn hydrate_agent_task_secret_env(
     args: &[String],
     env: &mut std::collections::HashMap<String, String>,
@@ -949,7 +868,6 @@ mod tests {
             required_extensions: Vec::new(),
             requires_playwright: false,
             infer_source_path_tools: true,
-            requires_wp_codebox_bench_recipe: false,
         }
     }
 
@@ -963,7 +881,6 @@ mod tests {
             required_extensions: Vec::new(),
             requires_playwright: false,
             infer_source_path_tools: false,
-            requires_wp_codebox_bench_recipe: false,
         }
     }
 

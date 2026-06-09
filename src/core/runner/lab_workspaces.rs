@@ -185,7 +185,10 @@ pub(super) fn provider_config_extra_workspaces(
             continue;
         }
         if !seen.insert(canon.clone()) {
-            if let Some(existing) = workspaces.iter_mut().find(|workspace| workspace.path == canon) {
+            if let Some(existing) = workspaces
+                .iter_mut()
+                .find(|workspace| workspace.path == canon)
+            {
                 for include in snapshot_includes {
                     if !existing.snapshot_includes.contains(&include) {
                         existing.snapshot_includes.push(include);
