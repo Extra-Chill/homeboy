@@ -1,6 +1,7 @@
 use crate::core::execution_contract::EXECUTION_CONTRACT;
-use crate::core::gate::collect_plan_gate_results;
+use crate::core::gate::{collect_plan_gate_results, HomeboyGateResult};
 use crate::core::plan::{HomeboyPlan, PlanStepStatus};
+use crate::core::proof::{HomeboyProof, HomeboyProofProvenance, HomeboyProofRunner};
 
 pub const LAB_OFFLOAD_METADATA_SCHEMA: &str = EXECUTION_CONTRACT.lab_offload.metadata_schema;
 
@@ -38,6 +39,18 @@ pub fn lab_offload_metadata_with_workspace_mapping(
 ) -> serde_json::Value {
     let sync_mode = plan_step_input_string(plan, "lab.sync_workspace", "mode");
     let gate_results = collect_plan_gate_results(plan);
+    let proof = plan.proof.clone().or_else(|| {
+        lab_offload_proof(
+            plan,
+            &gate_results,
+            source,
+            runner_id,
+            runner_mode,
+            status,
+            remote_workspace,
+            fallback_reason,
+        )
+    });
     serde_json::json!({
         "schema": LAB_OFFLOAD_METADATA_SCHEMA,
         "plan_id": plan.id,
@@ -51,9 +64,58 @@ pub fn lab_offload_metadata_with_workspace_mapping(
         "capability_preflight": plan_step_status(plan, "lab.capability_preflight"),
         "extension_parity": plan_step_status(plan, "lab.extension_parity"),
         "gate_results": gate_results,
+        "proof": proof,
         "patch_captured": plan_has_step(plan, "lab.apply_patch"),
         "workspace_mapping": workspace_mapping,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lab_offload_proof(
+    plan: &HomeboyPlan,
+    gate_results: &[HomeboyGateResult],
+    source: &str,
+    runner_id: Option<&str>,
+    runner_mode: Option<&str>,
+    status: &str,
+    remote_workspace: Option<&str>,
+    fallback_reason: Option<&str>,
+) -> Option<HomeboyProof> {
+    if gate_results.is_empty() {
+        return None;
+    }
+
+    let mut notes = vec![
+        format!("lab_offload_source={source}"),
+        format!("status={status}"),
+    ];
+    if let Some(runner_id) = runner_id {
+        notes.push(format!("runner_id={runner_id}"));
+    }
+    if let Some(runner_mode) = runner_mode {
+        notes.push(format!("runner_mode={runner_mode}"));
+    }
+    if let Some(remote_workspace) = remote_workspace {
+        notes.push(format!("remote_workspace={remote_workspace}"));
+    }
+    if let Some(fallback_reason) = fallback_reason {
+        notes.push(format!("fallback_reason={fallback_reason}"));
+    }
+
+    Some(
+        HomeboyProof::new(
+            format!("{}.lab_offload", plan.id),
+            HomeboyProofProvenance {
+                runner: HomeboyProofRunner::Homeboy,
+                run_id: None,
+                task_id: None,
+                source_refs: vec![plan.id.clone()],
+                notes,
+            },
+        )
+        .gates(gate_results.iter().cloned())
+        .with_ci_equivalent_gap_if_missing(),
+    )
 }
 
 fn plan_step_status(plan: &HomeboyPlan, step_id: &str) -> Option<&'static str> {
@@ -99,6 +161,7 @@ mod tests {
     };
     use crate::core::gate::{HomeboyGateKind, HomeboyGateResult, HomeboyGateStatus};
     use crate::core::plan::{HomeboyPlan, PlanKind, PlanStep, PlanStepStatus, PlanValues};
+    use crate::core::proof::{HomeboyProof, HomeboyProofProvenance};
 
     fn lab_plan() -> HomeboyPlan {
         let mut plan = HomeboyPlan::builder_for_description(PlanKind::LabOffload, "test")
@@ -162,6 +225,22 @@ mod tests {
             "lab.capability_preflight"
         );
         assert_eq!(explicit["gate_results"][0]["status"], "passed");
+        assert_eq!(explicit["proof"]["schema"], "homeboy/proof/v1");
+        assert_eq!(explicit["proof"]["id"], "lab_offload.test.lab_offload");
+        assert_eq!(explicit["proof"]["scope"], "targeted");
+        assert_eq!(
+            explicit["proof"]["gates"][0]["id"],
+            "lab.capability_preflight"
+        );
+        assert_eq!(explicit["proof"]["provenance"]["runner"], "homeboy");
+        assert_eq!(
+            explicit["proof"]["provenance"]["source_refs"][0],
+            "lab_offload.test"
+        );
+        assert_eq!(
+            explicit["proof"]["gaps"][0]["kind"],
+            "ci_equivalent_not_recorded"
+        );
         assert_eq!(explicit["extension_parity"], "ready");
         assert_eq!(explicit["patch_captured"], true);
         assert!(explicit["workspace_mapping"].is_null());
@@ -227,5 +306,28 @@ mod tests {
         );
 
         assert_eq!(metadata["workspace_mapping"], mapping);
+    }
+
+    #[test]
+    fn lab_offload_metadata_prefers_plan_proof_when_present() {
+        let proof = HomeboyProof::new(
+            "explicit-proof",
+            HomeboyProofProvenance::homeboy_run("run-1"),
+        );
+        let mut plan = lab_plan();
+        plan.proof = Some(proof);
+
+        let metadata = lab_offload_metadata(
+            &plan,
+            "automatic",
+            Some("lab"),
+            Some("direct_ssh"),
+            "fallback",
+            None,
+            Some("runner connect timed out after 3s"),
+        );
+
+        assert_eq!(metadata["proof"]["id"], "explicit-proof");
+        assert_eq!(metadata["proof"]["provenance"]["run_id"], "run-1");
     }
 }
