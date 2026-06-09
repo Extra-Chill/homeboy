@@ -1270,6 +1270,7 @@ mod tests {
                         root_pid: 4242,
                         command_label: "wp-codebox recipe-run recipes/stripe-ece.yml".to_string(),
                     },
+                    phase: None,
                     started_at: "2026-06-06T00:00:00Z".to_string(),
                     finished_at: "2026-06-06T00:00:01Z".to_string(),
                     duration_ms: 1000,

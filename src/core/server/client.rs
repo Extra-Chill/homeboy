@@ -906,6 +906,7 @@ impl ChildResourceMonitor {
 
         ExtensionChildResourceSummary {
             child: self.child,
+            phase: None,
             started_at: self.started_at,
             finished_at: Utc::now().to_rfc3339(),
             duration_ms: self.started_instant.elapsed().as_millis(),
@@ -995,6 +996,7 @@ fn probe_child_resources(
         elapsed_ms: 0,
         timestamp: Utc::now().to_rfc3339(),
         root_pid,
+        phase: None,
         rss_bytes,
         cpu_percent,
         child_count: selected.len().saturating_sub(1),

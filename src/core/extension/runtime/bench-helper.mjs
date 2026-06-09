@@ -1,4 +1,5 @@
 import { appendFile, mkdir, writeFile } from 'node:fs/promises';
+import { execFileSync, spawn } from 'node:child_process';
 import { basename, dirname } from 'node:path';
 
 const homeboyBenchProgressStart = Date.now();
@@ -147,6 +148,183 @@ export async function homeboyBenchResponsivenessPing(event = {}) {
     };
     await mkdir(dirname(file), { recursive: true });
     await appendFile(file, `${JSON.stringify(ping)}\n`);
+}
+
+export async function homeboyRunBenchPhase(phase, command, args = [], options = {}) {
+    if (!phase || typeof phase !== 'string') throw new Error('homeboyRunBenchPhase requires a phase label');
+    if (!command || typeof command !== 'string') throw new Error('homeboyRunBenchPhase requires a command');
+
+    const started = Date.now();
+    const startedAt = new Date().toISOString();
+    const child = spawn(command, args, {
+        cwd: options.cwd || process.cwd(),
+        env: { ...process.env, ...(options.env || {}) },
+        stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let settled = false;
+    let stdout = '';
+    let stderr = '';
+    const samples = [];
+    const warnings = [];
+    const sampleIntervalMs = Number.isFinite(options.sampleIntervalMs)
+        ? options.sampleIntervalMs
+        : homeboyBenchIntEnv('HOMEBOY_BENCH_PHASE_MEMORY_SAMPLE_INTERVAL_MS', 1000);
+
+    const sampleMemory = () => {
+        const sample = homeboyBenchProcessTreeSample(child.pid, phase, started);
+        if (sample) samples.push(sample);
+    };
+    sampleMemory();
+    const memoryTimer = setInterval(sampleMemory, sampleIntervalMs);
+    const timeoutMs = options.timeoutMs;
+    const timer = timeoutMs
+        ? setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            child.kill('SIGKILL');
+        }, timeoutMs)
+        : undefined;
+
+    child.stdout.on('data', (chunk) => {
+        stdout += String(chunk);
+        if (options.stdout === 'inherit') process.stdout.write(chunk);
+    });
+    child.stderr.on('data', (chunk) => {
+        stderr += String(chunk);
+        if (options.stderr === 'inherit') process.stderr.write(chunk);
+    });
+
+    const result = await new Promise((resolve, reject) => {
+        child.on('error', reject);
+        child.on('close', (code, signal) => {
+            if (timer) clearTimeout(timer);
+            clearInterval(memoryTimer);
+            sampleMemory();
+            const durationMs = Date.now() - started;
+            resolve({ code, signal, stdout, stderr, elapsedMs: durationMs });
+        });
+    });
+
+    await homeboyWriteBenchPhaseResource({
+        phase,
+        commandLabel: [command, ...args].join(' '),
+        rootPid: child.pid,
+        startedAt,
+        finishedAt: new Date().toISOString(),
+        durationMs: result.elapsedMs,
+        samples,
+        warnings,
+    });
+
+    return {
+        ...result,
+        phase,
+        phaseEvents: [
+            { phase, status: 'started', t_ms: 0, started_at: startedAt },
+            {
+                phase,
+                status: result.code === 0 ? 'completed' : 'failed',
+                t_ms: result.elapsedMs,
+                ended_at: new Date().toISOString(),
+                duration_ms: result.elapsedMs,
+                message: result.code === 0 ? undefined : `${command} exited with ${result.code ?? result.signal}`,
+            },
+        ],
+    };
+}
+
+async function homeboyWriteBenchPhaseResource({
+    phase,
+    commandLabel,
+    rootPid,
+    startedAt,
+    finishedAt,
+    durationMs,
+    samples,
+    warnings,
+}) {
+    const runDir = process.env.HOMEBOY_RUN_DIR;
+    if (!runDir || !rootPid) return;
+    const dir = `${runDir}/extension-children`;
+    await mkdir(dir, { recursive: true });
+    const peak = samples.reduce((current, sample) => {
+        if (!current || sample.rss_bytes > current.rss_bytes) return sample;
+        return current;
+    }, null);
+    const summary = {
+        root_pid: rootPid,
+        command_label: commandLabel,
+        phase,
+        started_at: startedAt,
+        finished_at: finishedAt,
+        duration_ms: durationMs,
+        sampled_peak_rss_bytes: peak?.rss_bytes,
+        sampled_peak_cpu_percent: samples.reduce((value, sample) => Math.max(value, sample.cpu_percent || 0), 0),
+        sampled_peak_at_ms: peak?.elapsed_ms,
+        sampled_peak_child_count: peak?.child_count,
+        samples,
+        warnings,
+    };
+    const safePhase = phase.replace(/[^a-z0-9]+/gi, '-').replace(/^-+|-+$/g, '') || 'phase';
+    await writeFile(`${dir}/${rootPid}-${Date.now()}-${safePhase}.json`, JSON.stringify(summary, null, 2));
+}
+
+function homeboyBenchProcessTreeSample(rootPid, phase, started) {
+    if (!rootPid || process.platform === 'win32') return null;
+    let rows = [];
+    try {
+        rows = execFileSync('ps', ['-axo', 'pid=,ppid=,rss=,pcpu=,comm='], { encoding: 'utf8' })
+            .trim()
+            .split('\n')
+            .map((line) => {
+                const match = line.trim().match(/^(\d+)\s+(\d+)\s+(\d+)\s+([0-9.]+)\s+(.+)$/);
+                if (!match) return null;
+                return {
+                    pid: Number.parseInt(match[1], 10),
+                    parent_pid: Number.parseInt(match[2], 10),
+                    rss_bytes: Number.parseInt(match[3], 10) * 1024,
+                    cpu_percent: Number.parseFloat(match[4]),
+                    command: match[5],
+                };
+            })
+            .filter(Boolean);
+    } catch {
+        return null;
+    }
+    const children = new Map();
+    for (const row of rows) {
+        const list = children.get(row.parent_pid) || [];
+        list.push(row.pid);
+        children.set(row.parent_pid, list);
+    }
+    const seen = new Set([rootPid]);
+    const queue = [rootPid];
+    while (queue.length) {
+        const pid = queue.shift();
+        for (const childPid of children.get(pid) || []) {
+            if (!seen.has(childPid)) {
+                seen.add(childPid);
+                queue.push(childPid);
+            }
+        }
+    }
+    const processes = rows.filter((row) => seen.has(row.pid)).sort((a, b) => a.pid - b.pid);
+    if (!processes.length) return null;
+    return {
+        elapsed_ms: Date.now() - started,
+        timestamp: new Date().toISOString(),
+        root_pid: rootPid,
+        phase,
+        rss_bytes: processes.reduce((sum, row) => sum + row.rss_bytes, 0),
+        cpu_percent: processes.reduce((sum, row) => sum + row.cpu_percent, 0),
+        child_count: Math.max(0, processes.length - 1),
+        processes,
+    };
+}
+
+function homeboyBenchIntEnv(name, defaultValue) {
+    const value = Number.parseInt(process.env[name] || '', 10);
+    return Number.isFinite(value) && value > 0 ? value : defaultValue;
 }
 
 function homeboyBenchProgressEnabled() {
