@@ -231,6 +231,14 @@ pub fn gate_status_label(status: HomeboyGateStatus) -> &'static str {
     }
 }
 
+pub fn gate_scope_label(gate: &HomeboyGateResult) -> &'static str {
+    if is_ci_equivalent_gate(gate) {
+        "CI-equivalent"
+    } else {
+        "targeted"
+    }
+}
+
 fn proof_schema() -> String {
     HOMEBOY_PROOF_SCHEMA.to_string()
 }
@@ -261,6 +269,8 @@ mod tests {
 
         assert_eq!(proof.scope, HomeboyProofScope::Mixed);
         assert!(proof.has_ci_equivalent_gate());
+        assert_eq!(gate_scope_label(&proof.gates[0]), "targeted");
+        assert_eq!(gate_scope_label(&proof.gates[1]), "CI-equivalent");
     }
 
     #[test]
