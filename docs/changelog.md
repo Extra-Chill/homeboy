@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.227.5] - 2026-06-09
+
+### Fixed
+- remap run-plan payload paths for Lab offload
+- forward run-plan secrets for Lab offload
+- surface in-flight lab daemon disconnects
+- stage run-plan files for Lab offload
+
 ## [0.227.4] - 2026-06-09
 
 ### Fixed
