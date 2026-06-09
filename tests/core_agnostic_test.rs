@@ -330,6 +330,7 @@ const TEST_CONTENT_BASELINE: &[ViolationKey] = &[
 ];
 
 const TEST_CONTENT_BASELINE_OCCURRENCES: usize = 103;
+const CORE_AGNOSTIC_REPAIR_DIRECTIVE: &str = "This is a boundary violation, not a baseline chore. Do not add these findings to the baseline unless explicitly approved by a maintainer. Move platform-specific behavior into the owning extension or replace it with a generic core contract that extensions can populate.";
 
 #[test]
 fn core_owned_source_stays_language_and_framework_agnostic() {
@@ -403,7 +404,7 @@ fn core_owned_source_stays_language_and_framework_agnostic() {
     }
     assert!(
         new_policy_findings.is_empty(),
-        "core-owned source contains non-baselined ecosystem-specific behavior. Core changes should ship generic, universally useful capabilities rather than framework-specific defaults. New audit findings:\n{}",
+        "core-owned source contains non-baselined ecosystem-specific behavior. Core changes should ship generic, universally useful capabilities rather than framework-specific defaults. {CORE_AGNOSTIC_REPAIR_DIRECTIVE}\nNew audit findings:\n{}",
         new_policy_findings.join("\n")
     );
     assert!(
@@ -411,6 +412,13 @@ fn core_owned_source_stays_language_and_framework_agnostic() {
         "core-owned source agnostic audit baseline contains stale entries. Ratchet baselines.audit after cleanup:\n{}",
         stale_policy_findings.join("\n")
     );
+}
+
+#[test]
+fn core_agnostic_failure_message_directs_extension_boundary_repair() {
+    assert!(CORE_AGNOSTIC_REPAIR_DIRECTIVE.contains("not a baseline chore"));
+    assert!(CORE_AGNOSTIC_REPAIR_DIRECTIVE.contains("owning extension"));
+    assert!(CORE_AGNOSTIC_REPAIR_DIRECTIVE.contains("generic core contract"));
 }
 
 fn release_ci_tracks_audit_without_blocking() -> bool {
