@@ -28,7 +28,7 @@ use homeboy::core::extension::{
     VerificationPhase,
 };
 use homeboy::core::finding::{FindingProducerSummary, FindingSource, HomeboyFinding};
-use homeboy::core::plan::HomeboyPlan;
+use homeboy::core::plan::{HomeboyPlan, HomeboyProof};
 use serde::Serialize;
 use serde_json::{json, Value};
 
@@ -515,10 +515,12 @@ fn normalize_provider_fanout_fixture(task_id: &str, provider_payload: &Value) ->
         outputs: json!({ "fanout_id": fanout_id }),
         workflow: Some(AgentTaskWorkflowEvidence {
             schema: AGENT_TASK_WORKFLOW_SCHEMA.to_string(),
-            id: fanout_id.to_string(),
-            label: Some("Provider fanout".to_string()),
-            steps: workflow_steps,
-            metadata: json!({ "provider": "runtime-provider" }),
+            proof: HomeboyProof {
+                id: fanout_id.to_string(),
+                label: Some("Provider fanout".to_string()),
+                steps: workflow_steps,
+                metadata: json!({ "provider": "runtime-provider" }),
+            },
         }),
         follow_up: None,
         metadata: json!({

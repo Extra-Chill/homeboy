@@ -262,9 +262,7 @@ mod tests {
         AgentTaskExecutor, AgentTaskLimits, AgentTaskPolicy, AgentTaskWorkspace,
         AGENT_TASK_REQUEST_SCHEMA,
     };
-    use crate::core::agent_task_gate::{
-        AgentTaskGateFailureEvidence, AGENT_TASK_GATE_REPORT_SCHEMA,
-    };
+    use crate::core::agent_task_gate::AgentTaskGateFailureEvidence;
     use crate::core::agent_task_promotion::{
         AgentTaskPromotionArtifactRef, AgentTaskPromotionSource, AGENT_TASK_PROMOTION_REPORT_SCHEMA,
     };
@@ -399,19 +397,17 @@ mod tests {
     }
 
     fn failed_gate() -> AgentTaskGateReport {
-        AgentTaskGateReport {
-            schema: AGENT_TASK_GATE_REPORT_SCHEMA.to_string(),
-            id: "gate-1".to_string(),
-            status: AgentTaskGateStatus::Failed,
-            command: vec![
+        AgentTaskGateReport::new(
+            "gate-1",
+            vec![
                 "sh".to_string(),
                 "-lc".to_string(),
                 "cargo test agent_task_gate".to_string(),
             ],
-            exit_code: 101,
-            stdout: "running tests".to_string(),
-            stderr: "boom".to_string(),
-            failure_evidence: Some(AgentTaskGateFailureEvidence {
+            101,
+            "running tests",
+            "boom",
+            Some(AgentTaskGateFailureEvidence {
                 summary: "agent_task_gate failed".to_string(),
                 command: "cargo test agent_task_gate".to_string(),
                 exit_code: 101,
@@ -420,23 +416,21 @@ mod tests {
                 agent_feedback: "Update the patch so cargo test agent_task_gate passes."
                     .to_string(),
             }),
-        }
+        )
     }
 
     fn green_gate() -> AgentTaskGateReport {
-        AgentTaskGateReport {
-            schema: AGENT_TASK_GATE_REPORT_SCHEMA.to_string(),
-            id: "gate-1".to_string(),
-            status: AgentTaskGateStatus::Succeeded,
-            command: vec![
+        AgentTaskGateReport::new(
+            "gate-1",
+            vec![
                 "sh".to_string(),
                 "-lc".to_string(),
                 "cargo test".to_string(),
             ],
-            exit_code: 0,
-            stdout: "ok".to_string(),
-            stderr: String::new(),
-            failure_evidence: None,
-        }
+            0,
+            "ok",
+            String::new(),
+            None,
+        )
     }
 }

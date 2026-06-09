@@ -76,6 +76,8 @@ pub struct HomeboyPlan {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifacts: Vec<PlanArtifact>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub proof: Option<HomeboyProof>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<PlanSummary>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
@@ -98,6 +100,7 @@ impl HomeboyPlan {
             policy: HashMap::new(),
             steps: Vec::new(),
             artifacts: Vec::new(),
+            proof: None,
             summary: None,
             warnings: Vec::new(),
             hints: Vec::new(),
@@ -118,6 +121,7 @@ impl HomeboyPlan {
             policy: HashMap::new(),
             steps: Vec::new(),
             artifacts: Vec::new(),
+            proof: None,
             summary: None,
             warnings: Vec::new(),
             hints: Vec::new(),
@@ -137,6 +141,103 @@ impl HomeboyPlan {
     ) -> PlanBuilder {
         PlanBuilder::from_plan(Self::for_description(kind, description))
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HomeboyProof<Step = HomeboyProofStep> {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<Step>,
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub metadata: serde_json::Value,
+}
+
+impl<Step> HomeboyProof<Step> {
+    pub fn new(id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            label: None,
+            steps: Vec::new(),
+            metadata: serde_json::Value::Null,
+        }
+    }
+}
+
+impl<Step> Default for HomeboyProof<Step> {
+    fn default() -> Self {
+        Self::new("unspecified")
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct HomeboyProofStep {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    pub status: HomeboyProofStepStatus,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub depends_on: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub metrics: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_refs: Vec<HomeboyProofEvidenceRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<HomeboyProofDiagnostic>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub suggestions: Vec<HomeboyProofStepSuggestion>,
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub metadata: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HomeboyProofStepStatus {
+    Pending,
+    Running,
+    Succeeded,
+    Failed,
+    Skipped,
+    Cancelled,
+}
+
+impl Default for HomeboyProofStepStatus {
+    fn default() -> Self {
+        Self::Pending
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HomeboyProofEvidenceRef {
+    pub kind: String,
+    pub uri: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HomeboyProofDiagnostic {
+    pub class: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub data: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HomeboyProofStepSuggestion {
+    pub kind: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uri: Option<String>,
 }
 
 impl Default for HomeboyPlan {

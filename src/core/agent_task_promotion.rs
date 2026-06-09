@@ -650,16 +650,14 @@ mod tests {
         ) -> Result<AgentTaskGateReport> {
             self.verify_calls
                 .push((cwd.to_path_buf(), command.to_string()));
-            Ok(AgentTaskGateReport {
-                schema: crate::core::agent_task_gate::AGENT_TASK_GATE_REPORT_SCHEMA.to_string(),
-                id: format!("gate-{index}"),
-                status: AgentTaskGateStatus::Succeeded,
-                command: vec!["sh".to_string(), "-lc".to_string(), command.to_string()],
-                exit_code: 0,
-                stdout: String::new(),
-                stderr: String::new(),
-                failure_evidence: None,
-            })
+            Ok(AgentTaskGateReport::new(
+                format!("gate-{index}"),
+                vec!["sh".to_string(), "-lc".to_string(), command.to_string()],
+                0,
+                String::new(),
+                String::new(),
+                None,
+            ))
         }
     }
 
