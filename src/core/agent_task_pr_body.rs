@@ -1,8 +1,8 @@
 use crate::core::agent_task_finalization::AgentTaskPrFinalizationOptions;
 use crate::core::gate::{HomeboyGateResult, HomeboyGateStatus};
 use crate::core::proof::{
-    gate_scope_label, gate_status_label, is_ci_equivalent_gate, HomeboyProof, HomeboyProofGapKind,
-    HomeboyProofRunner,
+    gate_scope_label, gate_status_label, is_ci_equivalent_gate, proof_runner_label, HomeboyProof,
+    HomeboyProofGapKind, HomeboyProofRunner,
 };
 
 pub(crate) fn render_pr_body(
@@ -56,15 +56,6 @@ fn proof_provenance(proof: &HomeboyProof) -> String {
         lines.push("- **Stable evidence:** see artifact refs below".to_string());
     }
     lines.join("\n")
-}
-
-fn proof_runner_label(runner: HomeboyProofRunner) -> &'static str {
-    match runner {
-        HomeboyProofRunner::Homeboy => "Homeboy agent-task cook loop",
-        HomeboyProofRunner::Manual => "manual",
-        HomeboyProofRunner::ExternalCi => "external CI",
-        HomeboyProofRunner::Unknown => "unknown",
-    }
 }
 
 fn bullets(values: &[String]) -> String {
