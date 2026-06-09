@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.116.5] - 2026-06-09
+
+### Fixed
+- include runtime metadata in Codebox tool policy
+
 ## [2.116.4] - 2026-06-09
 
 ### Fixed
