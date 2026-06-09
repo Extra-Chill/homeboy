@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use crate::core::agent_task_secrets;
 use crate::core::observation::{PREVIEW_METADATA_ENV, PREVIEW_PUBLIC_URL_ENV};
 use crate::core::plan::{HomeboyPlan, PlanStep, PlanStepStatus, PlanValues};
 use crate::core::source_snapshot::SourceSnapshot;
@@ -18,10 +19,14 @@ use super::daemon_health::runner_daemon_health_failure;
 use super::lab_apply::apply_lab_offload_patch;
 #[cfg(test)]
 use super::lab_args::EXPLICIT_PASSTHROUGH_SENTINEL;
-use super::lab_args::{lab_offload_source_path, rewrite_lab_offload_args};
+use super::lab_args::{
+    lab_offload_source_path, remap_provider_config_in_args, rewrite_lab_offload_args, LabPathRemap,
+};
 use super::lab_capabilities::lab_runner_capability_contract;
 use super::lab_command::lab_offload_command_prefix;
-use super::lab_env::{build_lab_offload_env, forward_env_if_present, settings_env_diagnostics};
+use super::lab_env::{
+    build_lab_offload_env, forward_env_if_present, forward_release_ci_env, settings_env_diagnostics,
+};
 use super::lab_plan::{base_lab_plan, disabled_select_runner_plan, with_step};
 pub use super::lab_selection::LabRunnerSelectionSource;
 use super::lab_selection::{
@@ -29,8 +34,9 @@ use super::lab_selection::{
     LabRunnerPreparation, LabRunnerSelection,
 };
 use super::lab_workspaces::{
-    lab_extra_workspaces, lab_workspace_mapping_metadata, sync_extra_lab_workspaces,
-    workspace_mapping_entry, workspace_mapping_entry_for_git_dependency,
+    lab_extra_workspaces, lab_workspace_mapping_metadata,
+    preflight_provider_config_source_cli_dependencies, provider_config_extra_workspaces,
+    sync_extra_lab_workspaces, workspace_mapping_entry, workspace_mapping_entry_for_git_dependency,
 };
 
 pub struct LabOffloadRequest<'a> {
@@ -38,6 +44,7 @@ pub struct LabOffloadRequest<'a> {
     pub normalized_args: &'a [String],
     pub explicit_runner: Option<&'a str>,
     pub force_hot: bool,
+    pub allow_local_hot: bool,
     pub allow_local_fallback: bool,
     pub capture_patch: bool,
 }
@@ -79,7 +86,7 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
             "runner",
             message,
             Some(runner_id.to_string()),
-            Some(vec!["Current Lab offload support: audit, bench run, full lint, full test, trace, and refactor source runs.".to_string()]),
+            Some(vec!["Current Lab offload support: agent-task dispatch/cook/loop, audit, bench run, full lint, full test, trace, and refactor source runs.".to_string()]),
         )
     };
     let mut plan = base_lab_plan(request.command.as_ref());
@@ -87,7 +94,7 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
         if let Some(runner_id) = request.explicit_runner {
             return Err(unsupported_runner_error(
                 runner_id,
-                "--runner is only supported for commands with portable Lab offload support: lint, test, audit, bench, trace, and refactor source runs".to_string(),
+                "--runner is only supported for commands with portable Lab offload support: agent-task dispatch/cook/loop, lint, test, audit, bench, trace, and refactor source runs".to_string(),
             ));
         }
         return Ok(LabOffloadOutcome::RunLocal {
@@ -100,22 +107,40 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
     if !contract.portable {
         if let Some(runner_id) = request.explicit_runner {
             let message = contract.unsupported_reason.map_or_else(
-                || "--runner is only supported for commands with portable Lab offload support: lint, test, audit, bench, trace, and refactor source runs".to_string(),
+                || "--runner is only supported for commands with portable Lab offload support: agent-task dispatch/cook/loop, lint, test, audit, bench, trace, and refactor source runs".to_string(),
                 |reason| format!("--runner is unavailable for this local-only resource-pressure command. {reason}"),
             );
             return Err(unsupported_runner_error(runner_id, message));
         }
+        let reason = contract
+            .unsupported_reason
+            .unwrap_or("command is local-only");
+        plan = disabled_select_runner_plan(plan, reason);
         return Ok(LabOffloadOutcome::RunLocal {
-            plan: disabled_select_runner_plan(plan, "command is local-only"),
-            metadata: None,
+            metadata: Some(lab_offload_metadata(
+                &plan,
+                "automatic",
+                None,
+                None,
+                "skipped",
+                None,
+                Some(reason),
+            )),
+            plan,
             messages: Vec::new(),
         });
     }
 
-    let selection =
-        resolve_lab_runner_selection(&contract, request.explicit_runner, request.force_hot)?;
+    let selection = resolve_lab_runner_selection(
+        &contract,
+        request.explicit_runner,
+        request.force_hot,
+        request.allow_local_hot,
+    )?;
     let Some(selection) = selection else {
-        let reason = if request.force_hot {
+        let reason = if request.force_hot && request.allow_local_hot {
+            "force_hot_local_override"
+        } else if request.force_hot {
             "force_hot"
         } else {
             "no_default_runner"
@@ -312,12 +337,14 @@ fn run_lab_offload_inner(
             Err(err) => return Err(err),
         };
 
+        let gate_result = decision.clone();
         match decision {
             LabRunnerGateDecision::Eligible => {
                 plan = with_step(
                     plan,
                     PlanStep::ready("lab.capability_preflight", "lab.capability_preflight")
                         .inputs(PlanValues::new().string("command", capability_plan.command))
+                        .gate_result(gate_result)
                         .build(),
                 );
             }
@@ -335,6 +362,7 @@ fn run_lab_offload_inner(
                             PlanStepStatus::Missing,
                         )
                         .skip_reason(reason.clone())
+                        .gate_result(gate_result)
                         .build(),
                     );
                     return automatic_capability_fallback_or_error(
@@ -372,7 +400,14 @@ fn run_lab_offload_inner(
     } else {
         preflight_lab_offload_changed_since(request.normalized_args, sync_mode)?
     };
-    let extra_workspaces = lab_extra_workspaces(&source_path)?;
+    let mut extra_workspaces = lab_extra_workspaces(&source_path)?;
+    // Sync any controller-local directories referenced by --provider-config
+    // (runtime components, provider plugins, extra mount sources) so the cook
+    // config's paths resolve on the runner after remapping.
+    extra_workspaces.extend(provider_config_extra_workspaces(
+        &changed_since_preflight.args,
+        &source_path,
+    )?);
     let synced = sync_workspace(
         runner_id,
         RunnerWorkspaceSyncOptions {
@@ -471,9 +506,27 @@ fn run_lab_offload_inner(
         );
     }
 
+    // Remap controller-local absolute paths embedded in --provider-config
+    // (mounts, workspace_root, runtime_component_paths, provider_plugin_paths)
+    // to their synced remote locations, using every local->remote pair recorded
+    // during workspace sync. Without this the remote sandbox cannot resolve the
+    // workspace or runtime components a hand-authored cook config references.
+    let path_remaps: Vec<LabPathRemap> = workspace_mapping
+        .iter()
+        .map(|entry| LabPathRemap {
+            local: entry.local_path().to_string(),
+            remote: entry.remote_path().to_string(),
+        })
+        .collect();
+    preflight_provider_config_source_cli_dependencies(
+        &changed_since_preflight.args,
+        &synced.excludes,
+    )?;
+    let remapped_args = remap_provider_config_in_args(&changed_since_preflight.args, &path_remaps);
+
     let mut command = command_prefix.argv;
     command.extend(
-        rewrite_lab_offload_args(&changed_since_preflight.args, &remote_cwd)
+        rewrite_lab_offload_args(&remapped_args, &remote_cwd)
             .into_iter()
             .skip(1),
     );
@@ -504,6 +557,9 @@ fn run_lab_offload_inner(
     let mut env = build_lab_offload_env(&lab_metadata);
     forward_env_if_present(&mut env, PREVIEW_METADATA_ENV);
     forward_env_if_present(&mut env, PREVIEW_PUBLIC_URL_ENV);
+    forward_release_ci_env(&mut env);
+    let agent_task_secret_env = hydrate_agent_task_secret_env(&command, &mut env)?;
+    lab_metadata["agent_task_secret_env"] = agent_task_secret_env;
     lab_metadata["settings_env"] = settings_env_diagnostics(&changed_since_preflight.args, &env);
     lab_metadata["rig_sync"] = serde_json::json!({
         "step": "lab.sync_rigs",
@@ -513,6 +569,8 @@ fn run_lab_offload_inner(
     env = build_lab_offload_env(&lab_metadata);
     forward_env_if_present(&mut env, PREVIEW_METADATA_ENV);
     forward_env_if_present(&mut env, PREVIEW_PUBLIC_URL_ENV);
+    forward_release_ci_env(&mut env);
+    hydrate_agent_task_secret_env(&command, &mut env)?;
     let exec_result = exec(
         runner_id,
         RunnerExecOptions {
@@ -632,6 +690,60 @@ fn run_lab_offload_inner(
         stderr,
         exit_code,
     })
+}
+
+fn hydrate_agent_task_secret_env(
+    args: &[String],
+    env: &mut std::collections::HashMap<String, String>,
+) -> Result<serde_json::Value> {
+    let names = declared_agent_task_secret_env(args);
+    if names.is_empty() {
+        return Ok(serde_json::json!({
+            "schema": "homeboy/lab-agent-task-secret-env/v1",
+            "secret_env": [],
+        }));
+    }
+
+    let resolved = agent_task_secrets::resolve_secret_env(&names).map_err(|error| {
+        Error::validation_invalid_argument(
+            "secret-env",
+            error.message,
+            None,
+            Some(vec![
+                "Configure provider secrets with `homeboy agent-task auth status` and `homeboy agent-task auth map-claude-code-kimaki`.".to_string(),
+            ]),
+        )
+    })?;
+    for (name, value) in resolved {
+        env.insert(name, value);
+    }
+
+    Ok(serde_json::json!({
+        "schema": "homeboy/lab-agent-task-secret-env/v1",
+        "secret_env": agent_task_secrets::secret_env_status(&names),
+    }))
+}
+
+fn declared_agent_task_secret_env(args: &[String]) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--secret-env" {
+            if let Some(name) = args.get(index + 1) {
+                names.push(name.clone());
+            }
+            index += 2;
+            continue;
+        }
+        if let Some(name) = arg.strip_prefix("--secret-env=") {
+            names.push(name.to_string());
+        }
+        index += 1;
+    }
+    names.sort();
+    names.dedup();
+    names
 }
 
 fn automatic_capability_fallback(
@@ -867,6 +979,7 @@ mod tests {
             files: 3,
             bytes: 12,
             excludes: Vec::new(),
+            includes: Vec::new(),
         };
         let git = RunnerWorkspaceSyncOutput {
             command: "runner.workspace.sync",
@@ -878,6 +991,7 @@ mod tests {
             files: 0,
             bytes: 0,
             excludes: Vec::new(),
+            includes: Vec::new(),
         };
 
         let entries = vec![
@@ -922,11 +1036,51 @@ mod tests {
     }
 
     #[test]
+    fn declared_agent_task_secret_env_parses_repeated_and_equals_args() {
+        let names = declared_agent_task_secret_env(&[
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "dispatch".to_string(),
+            "--secret-env".to_string(),
+            "AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN".to_string(),
+            "--secret-env=AI_PROVIDER_CLAUDE_CODE_ACCESS_TOKEN".to_string(),
+            "--secret-env".to_string(),
+            "AI_PROVIDER_CLAUDE_CODE_ACCESS_TOKEN".to_string(),
+        ]);
+
+        assert_eq!(
+            names,
+            vec![
+                "AI_PROVIDER_CLAUDE_CODE_ACCESS_TOKEN".to_string(),
+                "AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN".to_string(),
+            ]
+        );
+    }
+
+    #[test]
     fn lab_runner_selection_keeps_explicit_runner_precedence() {
         let command = portable_lab_command("test");
         let selection = resolve_lab_runner_selection_from_default(
             &command,
             Some("lab-explicit"),
+            false,
+            false,
+            Some("lab-default".to_string()),
+        )
+        .expect("selection")
+        .expect("explicit runner selected");
+
+        assert_eq!(selection.runner_id, "lab-explicit");
+        assert_eq!(selection.source, LabRunnerSelectionSource::Explicit);
+    }
+
+    #[test]
+    fn lab_runner_selection_force_hot_keeps_explicit_runner_precedence() {
+        let command = portable_lab_command("test");
+        let selection = resolve_lab_runner_selection_from_default(
+            &command,
+            Some("lab-explicit"),
+            true,
             false,
             Some("lab-default".to_string()),
         )
@@ -944,6 +1098,7 @@ mod tests {
             &command,
             None,
             false,
+            false,
             Some("lab-default".to_string()),
         )
         .expect("selection")
@@ -958,21 +1113,57 @@ mod tests {
         let command = portable_lab_command("test");
 
         assert!(
-            resolve_lab_runner_selection_from_default(&command, None, false, None)
+            resolve_lab_runner_selection_from_default(&command, None, false, false, None)
                 .expect("selection")
                 .is_none()
         );
     }
 
     #[test]
-    fn lab_runner_selection_force_hot_is_local_escape_hatch() {
+    fn lab_runner_selection_force_hot_refuses_local_when_default_runner_exists() {
+        let command = portable_lab_command("test");
+
+        let err = resolve_lab_runner_selection_from_default(
+            &command,
+            None,
+            true,
+            false,
+            Some("lab-default".to_string()),
+        )
+        .expect_err("force-hot should require explicit local override");
+
+        assert_eq!(err.code.as_str(), "validation.invalid_argument");
+        assert!(err
+            .message
+            .contains("--force-hot would run portable hot command"));
+        assert!(err.message.contains("lab-default"));
+        let tried = err.details["tried"].as_array().expect("tried");
+        assert!(tried.iter().any(|hint| hint
+            .as_str()
+            .is_some_and(|hint| hint.contains("--allow-local-hot"))));
+    }
+
+    #[test]
+    fn lab_runner_selection_force_hot_runs_locally_without_default_runner() {
+        let command = portable_lab_command("test");
+
+        assert!(
+            resolve_lab_runner_selection_from_default(&command, None, true, false, None)
+                .expect("selection")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn lab_runner_selection_allow_local_hot_overrides_default_runner_gate() {
         let command = portable_lab_command("test");
 
         assert!(resolve_lab_runner_selection_from_default(
             &command,
             None,
             true,
-            Some("lab-default".to_string())
+            true,
+            Some("lab-default".to_string()),
         )
         .expect("selection")
         .is_none());
@@ -983,6 +1174,7 @@ mod tests {
         let err = resolve_lab_runner_selection_from_default(
             &local_only_lab_command("current single-workspace Lab snapshot cannot safely mirror"),
             Some("lab-explicit"),
+            false,
             false,
             Some("lab-default".to_string()),
         )
@@ -1118,6 +1310,7 @@ mod tests {
             normalized_args: &["homeboy".to_string(), "test".to_string()],
             explicit_runner: None,
             force_hot: true,
+            allow_local_hot: true,
             allow_local_fallback: false,
             capture_patch: false,
         })

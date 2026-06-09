@@ -6,7 +6,10 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use crate::core::engine::invocation;
-use crate::core::engine::resource::{ChildProcessIdentity, ExtensionChildResourceSummary};
+use crate::core::engine::resource::{
+    ChildProcessIdentity, ExtensionChildProcessSample, ExtensionChildResourceSample,
+    ExtensionChildResourceSummary,
+};
 use crate::core::engine::shell;
 use crate::core::error::{Error, Result};
 use crate::core::runner::{quote_runner_env_value, remote_shell_path_preamble};
@@ -866,6 +869,9 @@ struct ChildResourceMonitor {
 struct ChildProbeState {
     peak_rss_bytes: Option<u64>,
     peak_cpu_percent: Option<f64>,
+    peak_at_ms: Option<u128>,
+    peak_child_count: Option<usize>,
+    samples: Vec<ExtensionChildResourceSample>,
     warnings: Vec<String>,
 }
 
@@ -905,6 +911,9 @@ impl ChildResourceMonitor {
             duration_ms: self.started_instant.elapsed().as_millis(),
             sampled_peak_rss_bytes: state.peak_rss_bytes,
             sampled_peak_cpu_percent: state.peak_cpu_percent,
+            sampled_peak_at_ms: state.peak_at_ms,
+            sampled_peak_child_count: state.peak_child_count,
+            samples: state.samples,
             warnings: state.warnings,
         }
     }
@@ -912,20 +921,31 @@ impl ChildResourceMonitor {
 
 fn sample_child_until_stopped(root_pid: u32, stop: Arc<AtomicBool>) -> ChildProbeState {
     let mut state = ChildProbeState::default();
+    let started = Instant::now();
 
     loop {
         match probe_child_resources(root_pid) {
-            Ok(Some((rss_bytes, cpu_percent))) => {
+            Ok(Some(mut sample)) => {
+                sample.elapsed_ms = started.elapsed().as_millis();
+                let rss_bytes = sample.rss_bytes;
+                let cpu_percent = sample.cpu_percent;
+                let child_count = sample.child_count;
+                let peak_changed = state.peak_rss_bytes.map_or(true, |peak| rss_bytes > peak);
                 state.peak_rss_bytes = Some(
                     state
                         .peak_rss_bytes
                         .map_or(rss_bytes, |peak| peak.max(rss_bytes)),
                 );
+                if peak_changed {
+                    state.peak_at_ms = Some(sample.elapsed_ms);
+                    state.peak_child_count = Some(child_count);
+                }
                 state.peak_cpu_percent = Some(
                     state
                         .peak_cpu_percent
                         .map_or(cpu_percent, |peak| peak.max(cpu_percent)),
                 );
+                state.samples.push(sample);
             }
             Ok(None) => {}
             Err(warning) => state.warnings.push(warning),
@@ -940,9 +960,11 @@ fn sample_child_until_stopped(root_pid: u32, stop: Arc<AtomicBool>) -> ChildProb
     state
 }
 
-fn probe_child_resources(root_pid: u32) -> std::result::Result<Option<(u64, f64)>, String> {
+fn probe_child_resources(
+    root_pid: u32,
+) -> std::result::Result<Option<ExtensionChildResourceSample>, String> {
     let output = Command::new("ps")
-        .args(["-o", "rss=", "-o", "%cpu=", "-p", &root_pid.to_string()])
+        .args(["-axo", "pid=,ppid=,rss=,%cpu=,comm="])
         .output()
         .map_err(|_| "extension_child_probe_unsupported".to_string())?;
 
@@ -951,18 +973,63 @@ fn probe_child_resources(root_pid: u32) -> std::result::Result<Option<(u64, f64)
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let Some(line) = stdout.lines().find(|line| !line.trim().is_empty()) else {
+    let rows = parse_process_rows(&stdout)?;
+    let Some(root) = rows.iter().find(|row| row.pid == root_pid) else {
         return Ok(None);
     };
-    let mut parts = line.split_whitespace();
-    let Some(rss_kb) = parts.next().and_then(|value| value.parse::<u64>().ok()) else {
-        return Err("extension_child_rss_probe_unsupported".to_string());
-    };
-    let Some(cpu_percent) = parts.next().and_then(|value| value.parse::<f64>().ok()) else {
-        return Err("extension_child_cpu_probe_unsupported".to_string());
-    };
+    let mut selected = vec![root.clone()];
+    let mut index = 0;
+    while index < selected.len() {
+        let parent_pid = selected[index].pid;
+        for row in rows.iter().filter(|row| row.parent_pid == parent_pid) {
+            selected.push(row.clone());
+        }
+        index += 1;
+    }
 
-    Ok(Some((rss_kb.saturating_mul(1024), cpu_percent)))
+    selected.sort_by_key(|row| row.pid);
+    let rss_bytes = selected.iter().map(|row| row.rss_bytes).sum::<u64>();
+    let cpu_percent = selected.iter().map(|row| row.cpu_percent).sum::<f64>();
+
+    Ok(Some(ExtensionChildResourceSample {
+        elapsed_ms: 0,
+        timestamp: Utc::now().to_rfc3339(),
+        root_pid,
+        rss_bytes,
+        cpu_percent,
+        child_count: selected.len().saturating_sub(1),
+        processes: selected,
+    }))
+}
+
+fn parse_process_rows(
+    stdout: &str,
+) -> std::result::Result<Vec<ExtensionChildProcessSample>, String> {
+    let mut rows = Vec::new();
+    for line in stdout.lines().filter(|line| !line.trim().is_empty()) {
+        let mut parts = line.split_whitespace();
+        let Some(pid) = parts.next().and_then(|value| value.parse::<u32>().ok()) else {
+            return Err("extension_child_pid_probe_unsupported".to_string());
+        };
+        let Some(parent_pid) = parts.next().and_then(|value| value.parse::<u32>().ok()) else {
+            return Err("extension_child_ppid_probe_unsupported".to_string());
+        };
+        let Some(rss_kb) = parts.next().and_then(|value| value.parse::<u64>().ok()) else {
+            return Err("extension_child_rss_probe_unsupported".to_string());
+        };
+        let Some(cpu_percent) = parts.next().and_then(|value| value.parse::<f64>().ok()) else {
+            return Err("extension_child_cpu_probe_unsupported".to_string());
+        };
+        let command = parts.collect::<Vec<_>>().join(" ");
+        rows.push(ExtensionChildProcessSample {
+            pid,
+            parent_pid,
+            rss_bytes: rss_kb.saturating_mul(1024),
+            cpu_percent,
+            command,
+        });
+    }
+    Ok(rows)
 }
 
 /// Check if a host address refers to the local machine.
@@ -1112,6 +1179,11 @@ mod tests {
             child.sampled_peak_rss_bytes.is_some() || !child.warnings.is_empty(),
             "resource probes should either sample RSS or explain why they could not"
         );
+        if child.sampled_peak_rss_bytes.is_some() {
+            assert!(!child.samples.is_empty());
+            assert!(child.sampled_peak_at_ms.is_some());
+            assert!(child.sampled_peak_child_count.is_some());
+        }
     }
 
     #[test]

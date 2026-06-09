@@ -160,11 +160,29 @@ job are rejected for command-native bench reproduction; use `homeboy ci run
 `homeboy bench` is resource-policy aware. If the current machine is already warm
 or hot according to `homeboy doctor resources`, Homeboy prints a stderr warning
 before running because the extra load can skew benchmark results. Use global
-`--force-hot` when running under load is intentional:
+`--force-hot` when running under load is intentional. When a default Lab runner is
+available for portable bench runs, `--force-hot` is not a local bypass by itself;
+add `--allow-local-hot` only when controller-machine execution is intentional:
 
 ```bash
-homeboy --force-hot bench my-component
+homeboy --force-hot --allow-local-hot bench my-component
 ```
+
+## Memory Timeline Evidence
+
+Each bench runner invocation samples the runner process tree while the workload
+is active. Successful runs add memory metrics to `results.metric_groups.memory`
+and each scenario's metrics:
+
+- `peak_rss_mb`: peak sampled RSS for the runner process tree.
+- `peak_child_count`: number of descendant processes at the peak RSS sample.
+- `memory_sample_count`: number of retained timeline samples.
+
+Homeboy also writes `bench-memory-timeline.json` and
+`bench-memory-timeline.csv` in the run directory. Concurrent bench instances use
+`bench-memory-timeline-i<N>.json` and `.csv`. Observation runs record these as
+`bench_memory_timeline` artifacts, including failure runs that exit after samples
+were captured but before benchmark JSON is complete.
 
 ## Observation History
 
@@ -228,9 +246,17 @@ Supported operators are `eq`, `gte`, and `lte`:
 }
 ```
 
-Failed gates add `gate_results`, set the scenario's `passed` field to
-`false`, and add top-level `gate_failures` plus `budget_findings` to the bench
-output.
+Evaluated gates add scenario-level `gate_results`. Failed gates set the
+scenario's `passed` field to `false` and add top-level `gate_failures` plus
+`budget_findings` to the bench output.
+
+Bench output also exposes a top-level `gate_results` array using the shared
+`homeboy/gate-result/v1` schema consumed by cook loops and PR finalization.
+IDs include the scenario id and metric name, for example
+`bench.gate.studio-agent-loop.success_rate`, so multiple scenarios can gate on
+the same metric without collisions. Failed normalized gates are marked
+`retryable: true` and include agent feedback plus metric evidence for the next
+candidate iteration.
 
 ## Budget Findings
 
@@ -810,6 +836,12 @@ variables:
 
 - `HOMEBOY_BENCH_RESULTS_FILE` — where to write JSON output.
 - `HOMEBOY_BENCH_ITERATIONS` — iteration count to use.
+- `HOMEBOY_BENCH_RESPONSIVENESS_FILE` — optional JSONL file for workload
+  responsiveness pings. Workloads opt in by appending pings such as
+  `{ "at": "2026-06-08T00:00:00Z", "t_ms": 1200 }`; Homeboy summarizes
+  `missed_ping_count`, `max_ping_gap_ms`, and `last_ping_at` in bench output.
+- `HOMEBOY_BENCH_RESPONSIVENESS_MISSED_MS` — ping gap threshold used to
+  classify missed responsiveness windows. Defaults to `10000`.
 - `HOMEBOY_RUN_DIR` — per-run directory (shared with test/lint/build).
 - `HOMEBOY_EXTENSION_ID`, `HOMEBOY_COMPONENT_ID`, `HOMEBOY_COMPONENT_PATH`,
   and the usual execution-context vars.

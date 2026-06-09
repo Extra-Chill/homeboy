@@ -10,10 +10,28 @@ use super::parsing::TraceDependencyProvenance;
 pub(super) fn preflight_trace_dependencies(
     dependencies: &[TraceDependencySpec],
 ) -> Result<Vec<TraceDependencyProvenance>> {
-    dependencies
+    let provenance = dependencies
         .iter()
         .map(preflight_trace_dependency)
-        .collect()
+        .collect::<Result<Vec<_>>>()?;
+
+    let checkouts = dependencies
+        .iter()
+        .filter_map(|dependency| {
+            let path = dependency.path.as_deref().filter(|path| !path.is_empty())?;
+            Some(crate::core::hygiene::DependencyCheckout {
+                id: dependency.id.clone(),
+                role: "trace_dependency".to_string(),
+                path: Path::new(path).to_path_buf(),
+            })
+        })
+        .collect::<Vec<_>>();
+    crate::core::hygiene::require_checkout_hygiene(
+        checkouts,
+        crate::core::hygiene::DependencyHygieneOptions { allow_stale: false },
+    )?;
+
+    Ok(provenance)
 }
 
 fn preflight_trace_dependency(

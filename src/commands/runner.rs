@@ -289,6 +289,26 @@ enum RunnerCommand {
         /// Claim lease duration in milliseconds
         #[arg(long, default_value_t = 30_000)]
         lease_ms: u64,
+
+        /// Keep claiming jobs until SIGINT/SIGTERM instead of exiting after one claim
+        #[arg(long)]
+        r#loop: bool,
+
+        /// Initial sleep after an empty claim in loop mode
+        #[arg(long, default_value_t = 1_000)]
+        idle_backoff_ms: u64,
+
+        /// Maximum sleep after repeated empty claims in loop mode
+        #[arg(long, default_value_t = 30_000)]
+        max_idle_backoff_ms: u64,
+
+        /// Sleep after transient broker failures in loop mode
+        #[arg(long, default_value_t = 5_000)]
+        broker_failure_backoff_ms: u64,
+
+        /// Consecutive broker failures allowed before the worker exits non-zero
+        #[arg(long, default_value_t = 5)]
+        broker_retry_limit: u32,
     },
     /// Materialize local workspaces on a configured runner
     Workspace {
@@ -446,11 +466,21 @@ pub fn run(
             broker_url,
             project,
             lease_ms,
+            r#loop,
+            idle_backoff_ms,
+            max_idle_backoff_ms,
+            broker_failure_backoff_ms,
+            broker_retry_limit,
         } => map_worker(runner::run_reverse_worker(ReverseRunnerWorkerOptions {
             runner_id,
             broker_url,
             project_id: project,
             lease_ms,
+            loop_mode: r#loop,
+            idle_backoff_ms,
+            max_idle_backoff_ms,
+            broker_failure_backoff_ms,
+            broker_retry_limit,
         })),
         RunnerCommand::Workspace { command } => workspace::run(command)
             .map(|(output, exit_code)| (RunnerCommandOutput::Workspace(output), exit_code)),

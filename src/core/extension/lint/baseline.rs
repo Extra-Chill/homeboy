@@ -66,12 +66,24 @@ pub fn parse_findings_file(path: &Path) -> crate::core::error::Result<Vec<Homebo
         return Ok(Vec::new());
     }
 
-    let findings: Vec<HomeboyFinding> = serde_json::from_str(&content).map_err(|e| {
+    let mut raw_findings: Vec<serde_json::Value> = serde_json::from_str(&content).map_err(|e| {
         crate::core::Error::internal_io(
             format!("Malformed lint findings JSON in {}: {}", path.display(), e),
             Some("lint.baseline.parse".to_string()),
         )
     })?;
+
+    for finding in &mut raw_findings {
+        normalize_legacy_lint_finding(finding);
+    }
+
+    let findings: Vec<HomeboyFinding> =
+        serde_json::from_value(serde_json::Value::Array(raw_findings)).map_err(|e| {
+            crate::core::Error::internal_io(
+                format!("Malformed lint findings JSON in {}: {}", path.display(), e),
+                Some("lint.baseline.parse".to_string()),
+            )
+        })?;
 
     Ok(findings
         .into_iter()
@@ -119,6 +131,39 @@ fn normalize_sidecar_finding(mut finding: HomeboyFinding, path: &Path) -> Homebo
         .entry("source_sidecar_path".to_string())
         .or_insert_with(|| serde_json::json!(path.display().to_string()));
     finding
+}
+
+fn normalize_legacy_lint_finding(finding: &mut serde_json::Value) {
+    let Some(object) = finding.as_object_mut() else {
+        return;
+    };
+    let source_kind = object
+        .get("source")
+        .and_then(|source| source.as_str())
+        .map(str::to_string);
+    if let Some(kind) = &source_kind {
+        object.insert("source".to_string(), serde_json::json!({ "kind": kind }));
+    }
+    if !object.contains_key("tool") {
+        let tool = source_kind
+            .or_else(|| {
+                object
+                    .get("code")
+                    .and_then(|code| code.as_str())
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| "lint".to_string());
+        object.insert("tool".to_string(), serde_json::json!(tool));
+    }
+    if !object.contains_key("rule") {
+        if let Some(code) = object
+            .get("code")
+            .and_then(|code| code.as_str())
+            .map(str::to_string)
+        {
+            object.insert("rule".to_string(), serde_json::json!(code));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -211,5 +256,24 @@ mod tests {
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].location.file.as_deref(), Some("src/lib.rs"));
         assert_eq!(findings[0].fingerprint.as_deref(), Some("id-1"));
+    }
+
+    #[test]
+    fn test_parse_findings_file_accepts_legacy_string_source() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("lint-findings.json");
+        std::fs::write(
+            &path,
+            r#"[{"source":"clippy","code":"clippy","message":"message","category":"lint","fingerprint":"id-1","file":"src/lib.rs"}]"#,
+        )
+        .expect("findings file written");
+
+        let findings = parse_findings_file(&path).expect("findings parsed");
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].tool, "clippy");
+        assert_eq!(findings[0].rule.as_deref(), Some("clippy"));
+        assert_eq!(findings[0].source.as_ref().unwrap().kind, "clippy");
+        assert_eq!(findings[0].metadata["source_sidecar"], "lint-findings");
     }
 }

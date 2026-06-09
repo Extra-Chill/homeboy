@@ -186,6 +186,7 @@ fn run_trace_workflow_with_component_script(
             canonicality.metadata(TraceCanonicalPolicy::Canonical),
         ));
     }
+    let evidence = canonicality.metadata(args.canonical_policy);
     let (mut toolchain, components) = trace_provenance(None, &component_path);
     mark_non_canonical(
         &mut toolchain,
@@ -228,7 +229,7 @@ fn run_trace_workflow_with_component_script(
         if parsed.rig.is_none() {
             parsed.rig = rig_state;
         }
-        parsed.evidence = Some(canonicality.metadata(args.canonical_policy));
+        parsed.evidence = Some(evidence.clone());
         Some(parsed)
     } else {
         None
@@ -281,7 +282,7 @@ fn run_trace_workflow_with_component_script(
         status,
         component: args.component_label,
         exit_code,
-        evidence: canonicality.metadata(args.canonical_policy),
+        evidence: evidence.clone(),
         results,
         failure,
         overlays: applied_overlays
@@ -296,10 +297,14 @@ fn run_trace_workflow_with_component_script(
             })
             .collect(),
         baseline_comparison: None,
-        hints: Some(vec![
+        hints: Some({
+            let mut hints = non_canonical_evidence_hints(&evidence);
+            hints.push(
             "Component scripts use the extension runner env contract without extension resolution."
                 .to_string(),
-        ]),
+            );
+            hints
+        }),
         toolchain: Some(toolchain),
         components: Some(components),
     })
@@ -328,6 +333,7 @@ fn run_trace_workflow_with_context(
             canonicality.metadata(TraceCanonicalPolicy::Canonical),
         ));
     }
+    let evidence = canonicality.metadata(args.canonical_policy);
     let (toolchain, components) = trace_provenance(execution_context, &component_path);
     let _overlay_locks = if args.overlays.is_empty() {
         None
@@ -379,7 +385,7 @@ fn run_trace_workflow_with_context(
         if parsed.rig.is_none() {
             parsed.rig = rig_state;
         }
-        parsed.evidence = Some(canonicality.metadata(args.canonical_policy));
+        parsed.evidence = Some(evidence.clone());
         Some(parsed)
     } else {
         None
@@ -424,7 +430,7 @@ fn run_trace_workflow_with_context(
     let baseline_root = resolve_trace_baseline_root(&component_path, rig_id)?;
     let mut baseline_comparison = None;
     let mut baseline_exit_override = None;
-    let mut hints = Vec::new();
+    let mut hints = non_canonical_evidence_hints(&evidence);
     let has_baseline_items = results
         .as_ref()
         .is_some_and(|parsed| !parsed.span_results.is_empty() || !parsed.assertions.is_empty());
@@ -493,7 +499,7 @@ fn run_trace_workflow_with_context(
         status,
         component: args.component_label,
         exit_code,
-        evidence: canonicality.metadata(args.canonical_policy),
+        evidence,
         results,
         failure,
         overlays: applied_overlays
@@ -514,13 +520,23 @@ fn run_trace_workflow_with_context(
     })
 }
 
+fn non_canonical_evidence_hints(evidence: &TraceEvidenceMetadata) -> Vec<String> {
+    if evidence.canonical {
+        return Vec::new();
+    }
+    vec![format!(
+        "Non-canonical local evidence mode `{}` is active; do not use this run as reviewer-facing proof until the reported canonicality reasons are fixed.",
+        evidence.mode
+    )]
+}
+
 fn trace_provenance(
     execution_context: Option<&ExtensionExecutionContext>,
     component_path: &str,
 ) -> (TraceToolchainProvenance, TraceComponentsProvenance) {
     let homeboy = homeboy_git_provenance();
     let target = git_provenance(Path::new(component_path), Some("target"));
-    let env_wp_codebox_bin = std::env::var("HOMEBOY_WP_CODEBOX_BIN").ok();
+    let env_wp_codebox_bin = wp_codebox_bin_env();
     let wp_codebox_path = execution_context
         .filter(|context| {
             context.extension_id.contains("wp-codebox")
@@ -530,26 +546,27 @@ fn trace_provenance(
                     .contains("wp-codebox")
         })
         .map(|context| context.extension_path.as_path())
-        .or_else(|| env_wp_codebox_bin.as_deref().map(Path::new));
+        .or_else(|| {
+            env_wp_codebox_bin
+                .as_ref()
+                .map(|(_, value)| Path::new(value.as_str()))
+        });
     let mut reasons = Vec::new();
     let mut wp_codebox = wp_codebox_path.map(|path| git_provenance(path, Some("wp_codebox")));
 
-    if env_wp_codebox_bin.is_some() {
-        reasons.push("HOMEBOY_WP_CODEBOX_BIN selected a local WP Codebox runner path".to_string());
+    if let Some((key, _)) = env_wp_codebox_bin.as_ref() {
         if let Some(provenance) = wp_codebox.as_mut() {
-            provenance.source = Some("env:HOMEBOY_WP_CODEBOX_BIN".to_string());
+            provenance.source = Some(format!("env:{key}"));
         }
     }
     if execution_context.is_none() {
         reasons.push("trace runner used generic local workload discovery".to_string());
     }
     for (label, provenance) in [("homeboy", &homeboy), ("target", &target)] {
-        if provenance.sha.is_none() || provenance.dirty.is_none() {
-            reasons.push(format!(
-                "{label} checkout git provenance is incomplete for {}",
-                provenance.path
-            ));
-        }
+        push_git_provenance_reasons(label, provenance, &mut reasons);
+    }
+    if let Some(provenance) = wp_codebox.as_ref() {
+        push_git_provenance_reasons("WP Codebox", provenance, &mut reasons);
     }
     if wp_codebox.is_none() {
         reasons.push("WP Codebox checkout was not resolved for this trace run".to_string());
@@ -583,6 +600,34 @@ fn trace_provenance(
     )
 }
 
+fn push_git_provenance_reasons(
+    label: &str,
+    provenance: &TraceGitProvenance,
+    reasons: &mut Vec<String>,
+) {
+    if provenance.sha.is_none() || provenance.dirty.is_none() {
+        reasons.push(format!(
+            "{label} checkout git provenance is incomplete for {}",
+            provenance.path
+        ));
+    } else if provenance.dirty == Some(true) {
+        reasons.push(format!(
+            "{label} checkout is dirty for trace toolchain provenance: {}",
+            provenance.path
+        ));
+    }
+}
+
+fn wp_codebox_bin_env() -> Option<(String, String)> {
+    ["HOMEBOY_WP_CODEBOX_BIN", "HOMEBOY_SETTINGS_WP_CODEBOX_BIN"]
+        .into_iter()
+        .find_map(|key| {
+            std::env::var(key)
+                .ok()
+                .map(|value| (key.to_string(), value))
+        })
+}
+
 fn mark_non_canonical(toolchain: &mut TraceToolchainProvenance, reason: &str) {
     toolchain.canonical = false;
     toolchain.mode = "development".to_string();
@@ -592,17 +637,27 @@ fn mark_non_canonical(toolchain: &mut TraceToolchainProvenance, reason: &str) {
 }
 
 fn git_provenance(path: &Path, source: Option<&str>) -> TraceGitProvenance {
-    let git_root = crate::core::git::get_git_root(&path.to_string_lossy())
+    let probe_path = git_probe_path(path);
+    let git_root = crate::core::git::get_git_root(&probe_path.to_string_lossy())
         .ok()
         .map(PathBuf::from)
-        .unwrap_or_else(|| path.to_path_buf());
+        .unwrap_or(probe_path);
     TraceGitProvenance {
         path: git_root.to_string_lossy().to_string(),
         sha: git_stdout(&git_root, &["rev-parse", "HEAD"]),
         branch: crate::core::git::current_branch(&git_root),
-        dirty: git_stdout(&git_root, &["status", "--porcelain=v1"])
-            .map(|status| !status.trim().is_empty()),
+        dirty: git_dirty_state(&git_root),
         source: source.map(ToString::to_string),
+    }
+}
+
+fn git_probe_path(path: &Path) -> PathBuf {
+    if path.is_file() {
+        path.parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| path.to_path_buf())
+    } else {
+        path.to_path_buf()
     }
 }
 
@@ -622,6 +677,16 @@ fn git_stdout(path: &Path, args: &[&str]) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn git_dirty_state(path: &Path) -> Option<bool> {
+    crate::core::git::run_git(
+        path,
+        &["status", "--porcelain=v1"],
+        "trace provenance git status",
+    )
+    .ok()
+    .map(|status| !status.trim().is_empty())
 }
 
 fn command_version(command: &str, args: &[&str]) -> Option<String> {
@@ -1210,6 +1275,9 @@ mod tests {
                     duration_ms: 1000,
                     sampled_peak_rss_bytes: None,
                     sampled_peak_cpu_percent: None,
+                    sampled_peak_at_ms: None,
+                    sampled_peak_child_count: None,
+                    samples: Vec::new(),
                     warnings: Vec::new(),
                 },
             ),
@@ -1402,6 +1470,85 @@ mod tests {
                 path: "/tmp/auth.json".to_string(),
                 interval_ms: None,
             }]
+        );
+    }
+
+    #[test]
+    fn git_dirty_state_reports_clean_checkout_as_known_clean() {
+        let temp = tempfile::tempdir().unwrap();
+        let init = Command::new("git")
+            .args(["init"])
+            .current_dir(temp.path())
+            .output()
+            .expect("git init runs");
+        assert!(init.status.success());
+
+        assert_eq!(git_dirty_state(temp.path()), Some(false));
+
+        std::fs::write(temp.path().join("untracked.txt"), "changed").unwrap();
+
+        assert_eq!(git_dirty_state(temp.path()), Some(true));
+    }
+
+    #[test]
+    fn git_provenance_resolves_file_paths_to_checkout_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let init = Command::new("git")
+            .args(["init"])
+            .current_dir(temp.path())
+            .output()
+            .expect("git init runs");
+        assert!(init.status.success());
+        Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(temp.path())
+            .output()
+            .expect("git config user.email runs");
+        Command::new("git")
+            .args(["config", "user.name", "Homeboy Test"])
+            .current_dir(temp.path())
+            .output()
+            .expect("git config user.name runs");
+        let bin = temp.path().join("packages/cli/dist/index.js");
+        std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        std::fs::write(&bin, "#!/usr/bin/env node\n").unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(temp.path())
+            .output()
+            .expect("git add runs");
+        Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(temp.path())
+            .output()
+            .expect("git commit runs");
+
+        let provenance = git_provenance(&bin, Some("wp_codebox"));
+
+        assert_eq!(
+            provenance.path,
+            temp.path().canonicalize().unwrap().to_string_lossy()
+        );
+        assert!(provenance.sha.is_some());
+        assert_eq!(provenance.dirty, Some(false));
+    }
+
+    #[test]
+    fn dirty_git_provenance_makes_toolchain_non_canonical() {
+        let mut reasons = Vec::new();
+        let provenance = TraceGitProvenance {
+            path: "/tmp/homeboy".to_string(),
+            sha: Some("abc123".to_string()),
+            branch: Some("main".to_string()),
+            dirty: Some(true),
+            source: Some("homeboy".to_string()),
+        };
+
+        push_git_provenance_reasons("homeboy", &provenance, &mut reasons);
+
+        assert_eq!(
+            reasons,
+            vec!["homeboy checkout is dirty for trace toolchain provenance: /tmp/homeboy"]
         );
     }
 

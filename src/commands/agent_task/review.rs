@@ -5,6 +5,7 @@ use homeboy::core::agent_task::{AgentTaskAggregateReport, AgentTaskRequest};
 use homeboy::core::agent_task_cook_loop::{evaluate_cook_loop, AgentTaskCookLoopOptions};
 use homeboy::core::agent_task_finalization::{
     finalize_pr, AgentTaskGateResult, AgentTaskPrEvidence, AgentTaskPrFinalizationOptions,
+    AgentTaskPrRuntimeGuardrails, AgentTaskPrSourceRelationship, AgentTaskPrVerification,
 };
 use homeboy::core::agent_task_lifecycle;
 use homeboy::core::agent_task_promotion::{
@@ -13,9 +14,10 @@ use homeboy::core::agent_task_promotion::{
 use homeboy::core::agent_task_provider::ExtensionProviderAgentTaskExecutor;
 use homeboy::core::agent_task_scheduler::AgentTaskAggregate;
 use homeboy::core::config;
+use homeboy::core::gate::HomeboyGateResult;
 
 use super::super::CmdResult;
-use super::{FinalizePrArgs, GateFeedbackArgs, PromoteArgs, ReviewArgs};
+use super::{FinalizePrArgs, GateFeedbackArgs, PromoteArgs, ProvidersArgs, ReviewArgs};
 
 #[derive(Args, Debug)]
 pub struct FinalizePrEvidenceArgs {
@@ -38,6 +40,58 @@ pub struct FinalizePrEvidenceArgs {
     /// AI tool disclosure line for the PR body.
     #[arg(long, default_value = "OpenCode (GPT-5.5)", value_name = "TEXT")]
     pub ai_tool: String,
+
+    /// Actual model identifier for AI disclosure. Use "not recorded" only when provider metadata is missing.
+    #[arg(long, value_name = "MODEL")]
+    pub ai_model: Option<String>,
+
+    /// Source finding id shared by sibling generated PRs.
+    #[arg(long, value_name = "ID")]
+    pub related_finding_id: Option<String>,
+
+    /// Source validation packet id shared by sibling generated PRs.
+    #[arg(long, value_name = "ID")]
+    pub source_packet_id: Option<String>,
+
+    /// Generated change kind, e.g. evidence-only, runtime-fix, or test-only.
+    #[arg(long, value_name = "KIND")]
+    pub change_kind: Option<String>,
+
+    /// Generated PR or artifact this PR supersedes. Repeatable.
+    #[arg(long, value_name = "REF")]
+    pub supersedes: Vec<String>,
+
+    /// Generated PR or artifact this PR depends on. Repeatable.
+    #[arg(long, value_name = "REF")]
+    pub depends_on: Vec<String>,
+
+    /// Targeted verification command that ran before finalization. Repeatable.
+    #[arg(long = "targeted-check-run", value_name = "COMMAND")]
+    pub targeted_checks_run: Vec<String>,
+
+    /// Exact backend limitation when targeted checks could not be run.
+    #[arg(long, value_name = "TEXT")]
+    pub targeted_checks_unavailable: Option<String>,
+
+    /// CI check expected to run after push. Repeatable.
+    #[arg(long = "ci-expected", value_name = "CHECK")]
+    pub ci_expected: Vec<String>,
+
+    /// Manual reviewer verification requested when targeted checks/CI do not cover behavior.
+    #[arg(long, value_name = "TEXT")]
+    pub manual_reviewer_check: Option<String>,
+
+    /// Runtime-fix evidence bound for generated predicates/semantics.
+    #[arg(long, value_name = "TEXT")]
+    pub why_not_broader_than_packet: Option<String>,
+
+    /// Evidence-specific discriminator preserved by the runtime fix. Repeatable.
+    #[arg(long = "evidence-discriminator", value_name = "TEXT")]
+    pub evidence_discriminators: Vec<String>,
+
+    /// Nearby predicate/contract preserved by the runtime fix. Repeatable.
+    #[arg(long = "nearby-contract-preserved", value_name = "TEXT")]
+    pub nearby_contracts_preserved: Vec<String>,
 }
 
 impl From<FinalizePrEvidenceArgs> for AgentTaskPrEvidence {
@@ -47,6 +101,25 @@ impl From<FinalizePrEvidenceArgs> for AgentTaskPrEvidence {
             artifact_refs: args.artifact_refs,
             attempt_summary: args.attempt_summary,
             ai_tool: args.ai_tool,
+            ai_model: args.ai_model,
+            source_relationship: AgentTaskPrSourceRelationship {
+                related_finding_id: args.related_finding_id,
+                source_packet_id: args.source_packet_id,
+                change_kind: args.change_kind,
+                supersedes: args.supersedes,
+                depends_on: args.depends_on,
+            },
+            verification: AgentTaskPrVerification {
+                targeted_checks_run: args.targeted_checks_run,
+                targeted_checks_unavailable: args.targeted_checks_unavailable,
+                ci_expected: args.ci_expected,
+                manual_reviewer_check: args.manual_reviewer_check,
+            },
+            runtime_guardrails: AgentTaskPrRuntimeGuardrails {
+                why_not_broader_than_packet: args.why_not_broader_than_packet,
+                evidence_discriminators: args.evidence_discriminators,
+                nearby_contracts_preserved: args.nearby_contracts_preserved,
+            },
         }
     }
 }
@@ -61,7 +134,15 @@ pub(crate) fn review(args: ReviewArgs) -> CmdResult<Value> {
         .map(|aggregate| AgentTaskAggregateReport::from(aggregate.outcomes.clone()));
     let promotion_candidates = aggregate_review
         .as_ref()
-        .map(|review| promotion_candidates(&args.run_id, args.to_worktree.as_deref(), review))
+        .map(|review| {
+            let promotion_source = record.aggregate_path.as_deref().unwrap_or(&args.run_id);
+            promotion_candidates(
+                promotion_source,
+                args.to_worktree.as_deref(),
+                args.provider_command.as_deref(),
+                review,
+            )
+        })
         .unwrap_or_default();
     let next_actions = review_next_actions(
         &record.state,
@@ -102,6 +183,9 @@ pub(crate) fn promote_artifact(args: PromoteArgs) -> CmdResult<Value> {
         artifact_id: args.artifact_id,
         dry_run: args.dry_run,
         verify: args.verify,
+        private_verify: args.private_verify,
+        private_gate_reveal: args.private_gate_reveal,
+        provider_command: args.provider_command,
     })?;
     let exit_code = if report.status == AgentTaskPromotionStatus::GateFailed {
         1
@@ -117,6 +201,11 @@ pub(crate) fn promote_artifact(args: PromoteArgs) -> CmdResult<Value> {
 
 pub(crate) fn finalize_pull_request(args: FinalizePrArgs) -> CmdResult<Value> {
     let gate_results = parse_gate_results(&args.gate_results)?;
+    let normalized_gate_results = gate_results
+        .iter()
+        .cloned()
+        .map(HomeboyGateResult::from)
+        .collect();
     let report = finalize_pr(AgentTaskPrFinalizationOptions {
         path: args.path,
         run_id: args.run_id,
@@ -125,6 +214,7 @@ pub(crate) fn finalize_pull_request(args: FinalizePrArgs) -> CmdResult<Value> {
         title: args.title,
         commit_message: args.commit_message,
         gate_results,
+        normalized_gate_results,
         changed_files: args.changed_files,
         evidence: args.evidence.into(),
         ai_used_for: args.ai_used_for,
@@ -180,10 +270,14 @@ pub(crate) fn gate_feedback(args: GateFeedbackArgs) -> CmdResult<Value> {
     Ok((serde_json::to_value(report).unwrap_or(Value::Null), 0))
 }
 
-pub(crate) fn providers() -> CmdResult<Value> {
+pub(crate) fn providers(args: ProvidersArgs) -> CmdResult<Value> {
     let executor = ExtensionProviderAgentTaskExecutor::discover();
     Ok((
-        serde_json::to_value(executor.providers()).unwrap_or(Value::Null),
+        serde_json::json!({
+            "schema": "homeboy/agent-task-providers/v1",
+            "providers": executor.providers(),
+            "secret_env": homeboy::core::agent_task_secrets::secret_env_status(&args.secret_env),
+        }),
         0,
     ))
 }
@@ -211,8 +305,9 @@ fn completed_run_aggregate(run_id: &str) -> Option<homeboy::core::Result<AgentTa
 }
 
 fn promotion_candidates(
-    run_id: &str,
+    source: &str,
     to_worktree: Option<&str>,
+    provider_command: Option<&str>,
     review: &AgentTaskAggregateReport,
 ) -> Vec<Value> {
     review
@@ -224,7 +319,7 @@ fn promotion_candidates(
                     "homeboy".to_string(),
                     "agent-task".to_string(),
                     "promote".to_string(),
-                    run_id.to_string(),
+                    source.to_string(),
                     "--task-id".to_string(),
                     candidate.task_id.clone(),
                     "--artifact-id".to_string(),
@@ -233,6 +328,10 @@ fn promotion_candidates(
                 if let Some(to_worktree) = to_worktree {
                     command.push("--to-worktree".to_string());
                     command.push(to_worktree.to_string());
+                }
+                if let Some(provider_command) = provider_command {
+                    command.push("--provider-command".to_string());
+                    command.push(provider_command.to_string());
                 }
 
                 serde_json::json!({

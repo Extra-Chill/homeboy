@@ -31,6 +31,10 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub force_hot: bool,
 
+    /// Allow --force-hot portable Lab commands to stay local even when a default Lab runner exists.
+    #[arg(long, global = true)]
+    pub allow_local_hot: bool,
+
     /// Directory where persisted run artifacts are copied.
     /// Overrides HOMEBOY_ARTIFACT_ROOT and global config /artifact_root.
     #[arg(long, global = true, value_name = "DIR")]
@@ -456,6 +460,10 @@ impl Commands {
 
     pub fn output_file_mode(&self, has_output_file: bool) -> CommandOutputFileMode {
         self.descriptor(has_output_file).output_file_mode
+    }
+
+    pub fn consumes_output_file_as_command_arg(&self) -> bool {
+        matches!(self, Commands::Runs(args) if args.is_artifact_get())
     }
 }
 
@@ -999,6 +1007,21 @@ mod tests {
     }
 
     #[test]
+    fn rig_check_supports_lab_runner_but_rig_up_stays_local_only() {
+        let rig_check = parsed_command(&["homeboy", "rig", "check", "studio"]);
+        let rig_check_descriptor = rig_check.descriptor(false);
+        assert!(rig_check_descriptor.supports_lab_runner);
+        assert!(rig_check_descriptor.lab_runner_unsupported_reason.is_none());
+
+        let rig_up = parsed_command(&["homeboy", "rig", "up", "studio"]);
+        let rig_up_descriptor = rig_up.descriptor(false);
+        assert!(!rig_up_descriptor.supports_lab_runner);
+        assert!(rig_up_descriptor
+            .lab_runner_unsupported_reason
+            .is_some_and(|reason| reason.contains("rig up")));
+    }
+
+    #[test]
     fn public_variant_contracts_have_discriminators_or_fixtures() {
         let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let fixtures = root.join("tests/fixtures/golden_json_contracts");
@@ -1059,6 +1082,23 @@ mod tests {
     }
 
     #[test]
+    fn artifact_get_output_flag_is_command_payload_destination() {
+        assert!(parsed_command(&[
+            "homeboy",
+            "runs",
+            "artifact",
+            "get",
+            "run-1",
+            "artifact-1",
+            "-o",
+            "artifact.bin",
+        ])
+        .consumes_output_file_as_command_arg());
+
+        assert!(!parsed_command(&["homeboy", "status"]).consumes_output_file_as_command_arg());
+    }
+
+    #[test]
     fn test_supports_lab_runner() {
         assert!(parsed_command(&["homeboy", "lint"]).supports_lab_runner());
         assert!(parsed_command(&["homeboy", "test"]).supports_lab_runner());
@@ -1076,6 +1116,22 @@ mod tests {
         .supports_lab_runner());
         assert!(parsed_command(&["homeboy", "bench", "history", "homeboy"]).supports_lab_runner());
         assert!(parsed_command(&["homeboy", "trace"]).supports_lab_runner());
+        assert!(
+            parsed_command(&["homeboy", "agent-task", "dispatch", "--prompt", "cook"])
+                .supports_lab_runner()
+        );
+        assert!(parsed_command(&[
+            "homeboy",
+            "agent-task",
+            "loop",
+            "--to-worktree",
+            "homeboy@smoke",
+            "--verify",
+            "true",
+            "--prompt",
+            "cook"
+        ])
+        .supports_lab_runner());
         assert!(!parsed_command(&[
             "homeboy", "refactor", "rename", "--from", "old", "--to", "new",
         ])
@@ -1087,6 +1143,14 @@ mod tests {
         );
         assert!(!parsed_command(&["homeboy", "status"]).supports_lab_runner());
         assert!(!parsed_command(&["homeboy", "bench", "list"]).supports_lab_runner());
+        assert!(
+            !parsed_command(&["homeboy", "lint", "--changed-since", "origin/main"])
+                .supports_lab_runner()
+        );
+        assert!(
+            !parsed_command(&["homeboy", "test", "--changed-since", "origin/main"])
+                .supports_lab_runner()
+        );
 
         let cli = parsed_cli(&["homeboy", "lint", "--runner", "lab-a"]);
         assert_eq!(cli.runner.as_deref(), Some("lab-a"));
@@ -1101,6 +1165,11 @@ mod tests {
         ]);
         assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
         assert!(cli.allow_local_fallback);
+
+        let cli = parsed_cli(&["homeboy", "--force-hot", "--allow-local-hot", "bench"]);
+        assert!(cli.force_hot);
+        assert!(cli.allow_local_hot);
+        assert!(cli.command.supports_lab_runner());
     }
 
     #[test]
@@ -1128,6 +1197,28 @@ mod tests {
             (
                 parsed_command(&["homeboy", "refactor", "--from", "audit"]),
                 "refactor",
+            ),
+            (
+                parsed_command(&["homeboy", "agent-task", "dispatch", "--prompt", "cook"]),
+                "agent-task dispatch/cook/loop",
+            ),
+            (
+                parsed_command(&["homeboy", "agent-task", "cook", "--prompt", "cook"]),
+                "agent-task dispatch/cook/loop",
+            ),
+            (
+                parsed_command(&[
+                    "homeboy",
+                    "agent-task",
+                    "loop",
+                    "--to-worktree",
+                    "homeboy@smoke",
+                    "--verify",
+                    "true",
+                    "--prompt",
+                    "cook",
+                ]),
+                "agent-task dispatch/cook/loop",
             ),
         ];
 
@@ -1173,12 +1264,35 @@ mod tests {
             LabCommandPortability::LocalOnly(reason) if reason.contains("config parity")
         ));
 
+        for args in [
+            ["homeboy", "audit", "--changed-since", "origin/main"].as_slice(),
+            ["homeboy", "lint", "--changed-since", "origin/main"].as_slice(),
+            ["homeboy", "lint", "--changed-only"].as_slice(),
+            ["homeboy", "test", "--changed-since", "origin/main"].as_slice(),
+        ] {
+            let contract = parsed_command(args)
+                .lab_contract()
+                .expect("scoped hot command should have a Lab plan contract");
+            assert!(matches!(
+                contract.portability,
+                LabCommandPortability::LocalOnly(_)
+            ));
+        }
+
         assert!(parsed_command(&["homeboy", "status"])
             .lab_contract()
             .is_none());
         assert!(parsed_command(&["homeboy", "bench", "list"])
             .lab_contract()
             .is_none());
+        assert!(parsed_command(&["homeboy", "audit", "--conventions"])
+            .lab_contract()
+            .is_none());
+        assert!(
+            parsed_command(&["homeboy", "lint", "--file", "src/main.rs"])
+                .lab_contract()
+                .is_none()
+        );
     }
 
     #[test]
@@ -1192,6 +1306,18 @@ mod tests {
                 .lab_runner_unsupported_reason()
                 .expect("fleet exec reason")
                 .contains("config parity")
+        );
+        assert!(
+            parsed_command(&["homeboy", "lint", "--changed-since", "origin/main"])
+                .lab_runner_unsupported_reason()
+                .expect("changed-scope lint reason")
+                .contains("Changed-scope lint runs stay local")
+        );
+        assert!(
+            parsed_command(&["homeboy", "test", "--changed-since", "origin/main"])
+                .lab_runner_unsupported_reason()
+                .expect("changed-since test reason")
+                .contains("test --changed-since")
         );
         assert!(parsed_command(&["homeboy", "status"])
             .lab_runner_unsupported_reason()

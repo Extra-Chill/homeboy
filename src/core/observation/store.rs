@@ -693,6 +693,13 @@ impl ObservationStore {
                     baseline_status,
                     metadata_json
                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                ON CONFLICT(run_id) DO UPDATE SET
+                    component_id = excluded.component_id,
+                    rig_id = excluded.rig_id,
+                    scenario_id = excluded.scenario_id,
+                    status = excluded.status,
+                    baseline_status = excluded.baseline_status,
+                    metadata_json = excluded.metadata_json
                 "#,
                 params![
                     record.run_id,

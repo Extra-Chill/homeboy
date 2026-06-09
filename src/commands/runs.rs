@@ -343,6 +343,15 @@ impl RunsArgs {
     pub fn is_bundle_export(&self) -> bool {
         matches!(self.command, RunsCommand::Export(_))
     }
+
+    pub fn is_artifact_get(&self) -> bool {
+        matches!(
+            self.command,
+            RunsCommand::Artifact(RunsArtifactArgs {
+                command: RunsArtifactCommand::Get(_),
+            })
+        )
+    }
 }
 
 pub fn run_markdown(args: RunsArgs, _global: &GlobalArgs) -> CmdResult<String> {

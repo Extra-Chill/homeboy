@@ -254,6 +254,7 @@ fn apply_declared_scenario_gates(
     }
 
     let failures = extension_bench::evaluate_gates(results);
+    workflow.gate_results = extension_bench::normalized_gate_results(results);
     if failures.is_empty() {
         return;
     }
@@ -333,6 +334,9 @@ fn merge_matrix_results(
             failure_classification: outputs
                 .iter()
                 .find_map(|output| output.results.as_ref()?.failure_classification.clone()),
+            responsiveness: outputs
+                .iter()
+                .find_map(|output| output.results.as_ref()?.responsiveness.clone()),
             budget_findings,
             scenarios: merged_scenarios,
             metric_policies: metric_policies_seen,
@@ -406,6 +410,10 @@ pub(super) fn run_single_rig(
         .as_ref()
         .map(|results| results.budget_findings.clone())
         .unwrap_or_default();
+    let gate_results = merged_results
+        .as_ref()
+        .map(extension_bench::normalized_gate_results)
+        .unwrap_or_default();
 
     Ok((
         BenchCommandOutput {
@@ -417,6 +425,7 @@ pub(super) fn run_single_rig(
             artifacts,
             results: merged_results,
             budget_findings,
+            gate_results,
             gate_failures: outputs
                 .iter()
                 .flat_map(|output| output.gate_failures.clone())
@@ -490,6 +499,12 @@ fn run_component_with_rig_context(
     resolve_options.extension_overrides = args.extension_override.extensions.clone();
 
     let ctx = execution_context::resolve_with_component(&resolve_options, component_override)?;
+    homeboy::core::hygiene::require_dependency_hygiene_for_source_with_settings(
+        &ctx.source_path,
+        ctx.extension_path.as_deref(),
+        &ctx.settings,
+        homeboy::core::hygiene::DependencyHygieneOptions { allow_stale: false },
+    )?;
     let ci_profile_job =
         resolve_ci_profile_job(args.ci_profile.as_deref(), ctx.extension_id.as_deref())?;
 
@@ -1018,6 +1033,7 @@ mod tests {
                 .as_ref()
                 .map(|results| results.budget_findings.clone())
                 .unwrap_or_default(),
+            gate_results: Vec::new(),
             results,
             gate_failures: Vec::new(),
             baseline_comparison: None,

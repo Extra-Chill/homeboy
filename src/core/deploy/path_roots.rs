@@ -28,7 +28,11 @@ pub(super) fn resolve_effective_remote_path(
         return base_path::join_remote_path(Some(fallback_base_path), &remote_path);
     }
 
-    reject_relative_parent_traversal(component, &remote_path)?;
+    let parent_relative_managed_path = parent_relative_managed_path(component, &remote_path)?;
+
+    if parent_relative_managed_path.is_none() {
+        reject_relative_parent_traversal(component, &remote_path)?;
+    }
 
     if let Some(resolved) =
         resolve_with_project_root(project, component, fallback_base_path, &remote_path)?
@@ -36,7 +40,59 @@ pub(super) fn resolve_effective_remote_path(
         return Ok(resolved);
     }
 
+    if let Some(managed_path) = parent_relative_managed_path.as_deref() {
+        if let Some(resolved) =
+            resolve_optional_project_root(project, component, fallback_base_path, managed_path)?
+        {
+            return Ok(resolved);
+        }
+
+        return base_path::join_remote_path(Some(fallback_base_path), &remote_path);
+    }
+
     base_path::join_remote_path(Some(fallback_base_path), &remote_path)
+}
+
+fn parent_relative_managed_path(
+    component: &Component,
+    remote_path: &str,
+) -> Result<Option<String>> {
+    let trimmed = remote_path.trim();
+    let mut saw_parent = false;
+    let mut suffix_segments = Vec::new();
+
+    for segment in trimmed.split('/') {
+        let segment = segment.trim();
+        if segment.is_empty() || segment == "." {
+            continue;
+        }
+
+        if segment == ".." {
+            if suffix_segments.is_empty() {
+                saw_parent = true;
+                continue;
+            }
+
+            reject_relative_parent_traversal(component, remote_path)?;
+        }
+
+        suffix_segments.push(segment);
+    }
+
+    if !saw_parent {
+        return Ok(None);
+    }
+
+    let suffix = suffix_segments.join("/");
+    if suffix.is_empty()
+        || !component_remote_path_root_rules(component)
+            .iter()
+            .any(|rule| path_matches_prefix(&suffix, &rule.path_prefix))
+    {
+        reject_relative_parent_traversal(component, remote_path)?;
+    }
+
+    Ok(Some(suffix))
 }
 
 fn reject_relative_parent_traversal(component: &Component, remote_path: &str) -> Result<()> {
@@ -130,6 +186,39 @@ fn resolve_with_project_root(
                     ),
                 ]),
             ));
+        };
+
+        let path = if rule.strip_prefix {
+            strip_path_prefix(remote_path, &rule.path_prefix)
+        } else {
+            remote_path
+        };
+
+        let resolved_root = base_path::join_remote_path(Some(fallback_base_path), root)?;
+
+        if path.is_empty() {
+            return Ok(Some(resolved_root));
+        }
+
+        return base_path::join_remote_path(Some(&resolved_root), path).map(Some);
+    }
+
+    Ok(None)
+}
+
+fn resolve_optional_project_root(
+    project: &Project,
+    component: &Component,
+    fallback_base_path: &str,
+    remote_path: &str,
+) -> Result<Option<String>> {
+    for rule in component_remote_path_root_rules(component) {
+        if !path_matches_prefix(remote_path, &rule.path_prefix) {
+            continue;
+        }
+
+        let Some(root) = project.path_roots.get(&rule.root) else {
+            return Ok(None);
         };
 
         let path = if rule.strip_prefix {
@@ -315,18 +404,38 @@ mod tests {
     }
 
     #[test]
-    fn parent_relative_content_paths_are_rejected() {
+    fn parent_relative_content_paths_resolve_against_base_path() {
         with_isolated_home(|_| {
             install_extension();
 
-            let err = resolve_effective_remote_path(
-                &project_with_root(),
+            let resolved = resolve_effective_remote_path(
+                &Project {
+                    id: "site".to_string(),
+                    base_path: Some("/srv/site".to_string()),
+                    ..Project::default()
+                },
                 &component("../wp-content/plugins/foo"),
                 "/srv/site",
             )
-            .expect_err("parent traversal should fail");
+            .expect("parent-relative content path should resolve");
 
-            assert!(err.to_string().contains("escapes the project base_path"));
+            assert_eq!(resolved, "/srv/site/../wp-content/plugins/foo");
+        });
+    }
+
+    #[test]
+    fn parent_relative_content_paths_use_configured_root_when_available() {
+        with_isolated_home(|_| {
+            install_extension();
+
+            let resolved = resolve_effective_remote_path(
+                &project_with_root(),
+                &component("../wp-content/plugins/foo"),
+                "/htdocs/__wp__",
+            )
+            .expect("parent-relative content path should resolve through root");
+
+            assert_eq!(resolved, "/htdocs/wp-content/plugins/foo");
         });
     }
 
@@ -341,6 +450,22 @@ mod tests {
                 "/srv/site",
             )
             .expect_err("parent traversal should fail");
+
+            assert!(err.to_string().contains("escapes the project base_path"));
+        });
+    }
+
+    #[test]
+    fn parent_segments_after_managed_prefix_are_rejected() {
+        with_isolated_home(|_| {
+            install_extension();
+
+            let err = resolve_effective_remote_path(
+                &project_with_root(),
+                &component("../wp-content/../secrets/foo"),
+                "/srv/site",
+            )
+            .expect_err("internal parent traversal should fail");
 
             assert!(err.to_string().contains("escapes the project base_path"));
         });

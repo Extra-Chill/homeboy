@@ -136,3 +136,33 @@ function homeboy_write_bench_scenario_inventory(string $results_path, string $co
         throw new RuntimeException("failed to write $results_path");
     }
 }
+
+function homeboy_bench_responsiveness_ping(array $event = []): void {
+    static $started_at = null;
+    if ($started_at === null) {
+        $started_at = microtime(true);
+    }
+    $file = getenv('HOMEBOY_BENCH_RESPONSIVENESS_FILE') ?: '';
+    if ($file === '') {
+        return;
+    }
+
+    $ping = array_merge(
+        [
+            'at' => gmdate('Y-m-d\TH:i:s\Z'),
+            't_ms' => (int) round((microtime(true) - $started_at) * 1000),
+        ],
+        $event
+    );
+    $dir = dirname($file);
+    if (!is_dir($dir) && !mkdir($dir, 0777, true) && !is_dir($dir)) {
+        throw new RuntimeException("failed to create $dir");
+    }
+    $json = json_encode($ping, JSON_UNESCAPED_SLASHES);
+    if ($json === false) {
+        throw new RuntimeException('json_encode failed: ' . json_last_error_msg());
+    }
+    if (file_put_contents($file, $json . "\n", FILE_APPEND | LOCK_EX) === false) {
+        throw new RuntimeException("failed to append $file");
+    }
+}

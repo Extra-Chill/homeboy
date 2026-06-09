@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::core::plan::{HomeboyProof, HomeboyProofStepStatus};
 #[cfg(test)]
 use crate::core::redaction::RedactionPolicy;
 
@@ -406,34 +405,30 @@ pub struct AgentTaskFollowUp {
 pub struct AgentTaskWorkflowEvidence {
     #[serde(default = "workflow_schema")]
     pub schema: String,
-    #[serde(flatten)]
-    pub proof: HomeboyProof<AgentTaskWorkflowStepEvidence>,
-}
-
-impl std::ops::Deref for AgentTaskWorkflowEvidence {
-    type Target = HomeboyProof<AgentTaskWorkflowStepEvidence>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.proof
-    }
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<AgentTaskWorkflowStepEvidence>,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub metadata: Value,
 }
 
 #[cfg(test)]
 impl AgentTaskWorkflowEvidence {
     fn redacted_with(mut self, policy: &RedactionPolicy) -> Self {
-        self.proof.label = self.proof.label.map(|value| policy.redact_string(&value));
-        self.proof.steps = self
-            .proof
+        self.label = self.label.map(|value| policy.redact_string(&value));
+        self.steps = self
             .steps
             .into_iter()
             .map(|step| step.redacted_with(policy))
             .collect();
-        self.proof.metadata = policy.redact_json(&self.proof.metadata);
+        self.metadata = policy.redact_json(&self.metadata);
         self
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgentTaskWorkflowStepEvidence {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -479,7 +474,16 @@ impl AgentTaskWorkflowStepEvidence {
     }
 }
 
-pub type AgentTaskWorkflowStepStatus = HomeboyProofStepStatus;
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentTaskWorkflowStepStatus {
+    Pending,
+    Running,
+    Succeeded,
+    Failed,
+    Skipped,
+    Cancelled,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskWorkflowStepSuggestion {
@@ -682,54 +686,52 @@ mod tests {
             outputs: Value::Null,
             workflow: Some(AgentTaskWorkflowEvidence {
                 schema: AGENT_TASK_WORKFLOW_SCHEMA.to_string(),
-                proof: HomeboyProof {
-                    id: "site-build".to_string(),
-                    label: Some("Site build".to_string()),
-                    steps: vec![
-                        AgentTaskWorkflowStepEvidence {
-                            id: "generate".to_string(),
-                            label: Some("Generate artifact".to_string()),
-                            status: AgentTaskWorkflowStepStatus::Succeeded,
-                            depends_on: Vec::new(),
-                            started_at: Some("2026-05-31T23:00:00Z".to_string()),
-                            finished_at: Some("2026-05-31T23:00:03Z".to_string()),
-                            duration_ms: Some(3_000),
-                            metrics: json!({ "tokens": 1200 }),
-                            artifact_refs: Vec::new(),
-                            diagnostics: Vec::new(),
-                            suggestions: Vec::new(),
-                            metadata: json!({}),
-                        },
-                        AgentTaskWorkflowStepEvidence {
-                            id: "diagnose".to_string(),
-                            label: Some("Diagnose imported site".to_string()),
-                            status: AgentTaskWorkflowStepStatus::Failed,
-                            depends_on: vec!["generate".to_string(), "screenshot".to_string()],
-                            started_at: Some("2026-05-31T23:00:04Z".to_string()),
-                            finished_at: Some("2026-05-31T23:00:05Z".to_string()),
-                            duration_ms: Some(1_000),
-                            metrics: json!({ "fallback_blocks": 2 }),
-                            artifact_refs: vec![AgentTaskEvidenceRef {
-                                kind: "artifact".to_string(),
-                                uri: "artifact://screenshot-1".to_string(),
-                                label: Some("Desktop screenshot".to_string()),
-                            }],
-                            diagnostics: vec![AgentTaskDiagnostic {
-                                class: "visual_regression".to_string(),
-                                message: "fallback blocks remain".to_string(),
-                                data: json!({ "count": 2 }),
-                            }],
-                            suggestions: vec![AgentTaskWorkflowStepSuggestion {
-                                kind: "repair".to_string(),
-                                title: "Run import repair".to_string(),
-                                body: Some("Repair unsupported fallback blocks.".to_string()),
-                                uri: Some("homeboy://tasks/model-kimi-site-a/repair".to_string()),
-                            }],
-                            metadata: json!({ "phase": "diagnostics" }),
-                        },
-                    ],
-                    metadata: json!({ "executor": "wp-codebox" }),
-                },
+                id: "site-build".to_string(),
+                label: Some("Site build".to_string()),
+                steps: vec![
+                    AgentTaskWorkflowStepEvidence {
+                        id: "generate".to_string(),
+                        label: Some("Generate artifact".to_string()),
+                        status: AgentTaskWorkflowStepStatus::Succeeded,
+                        depends_on: Vec::new(),
+                        started_at: Some("2026-05-31T23:00:00Z".to_string()),
+                        finished_at: Some("2026-05-31T23:00:03Z".to_string()),
+                        duration_ms: Some(3_000),
+                        metrics: json!({ "tokens": 1200 }),
+                        artifact_refs: Vec::new(),
+                        diagnostics: Vec::new(),
+                        suggestions: Vec::new(),
+                        metadata: json!({}),
+                    },
+                    AgentTaskWorkflowStepEvidence {
+                        id: "diagnose".to_string(),
+                        label: Some("Diagnose imported site".to_string()),
+                        status: AgentTaskWorkflowStepStatus::Failed,
+                        depends_on: vec!["generate".to_string(), "screenshot".to_string()],
+                        started_at: Some("2026-05-31T23:00:04Z".to_string()),
+                        finished_at: Some("2026-05-31T23:00:05Z".to_string()),
+                        duration_ms: Some(1_000),
+                        metrics: json!({ "fallback_blocks": 2 }),
+                        artifact_refs: vec![AgentTaskEvidenceRef {
+                            kind: "artifact".to_string(),
+                            uri: "artifact://screenshot-1".to_string(),
+                            label: Some("Desktop screenshot".to_string()),
+                        }],
+                        diagnostics: vec![AgentTaskDiagnostic {
+                            class: "visual_regression".to_string(),
+                            message: "fallback blocks remain".to_string(),
+                            data: json!({ "count": 2 }),
+                        }],
+                        suggestions: vec![AgentTaskWorkflowStepSuggestion {
+                            kind: "repair".to_string(),
+                            title: "Run import repair".to_string(),
+                            body: Some("Repair unsupported fallback blocks.".to_string()),
+                            uri: Some("homeboy://tasks/model-kimi-site-a/repair".to_string()),
+                        }],
+                        metadata: json!({ "phase": "diagnostics" }),
+                    },
+                ],
+                metadata: json!({ "executor": "wp-codebox" }),
             }),
             follow_up: None,
             metadata: json!({}),
@@ -813,34 +815,32 @@ mod tests {
             }],
             workflow: Some(AgentTaskWorkflowEvidence {
                 schema: AGENT_TASK_WORKFLOW_SCHEMA.to_string(),
-                proof: HomeboyProof {
-                    id: "secret-workflow".to_string(),
-                    label: Some("Use token=abc123".to_string()),
-                    steps: vec![AgentTaskWorkflowStepEvidence {
-                        id: "diagnose".to_string(),
-                        label: Some("Inspect password=hunter2".to_string()),
-                        status: AgentTaskWorkflowStepStatus::Failed,
-                        depends_on: Vec::new(),
-                        started_at: None,
-                        finished_at: None,
-                        duration_ms: None,
-                        metrics: json!({ "api_key": "secret-value" }),
-                        artifact_refs: Vec::new(),
-                        diagnostics: vec![AgentTaskDiagnostic {
-                            class: "workflow".to_string(),
-                            message: "Authorization: Bearer abc123".to_string(),
-                            data: json!({ "password": "hunter2" }),
-                        }],
-                        suggestions: vec![AgentTaskWorkflowStepSuggestion {
-                            kind: "repair".to_string(),
-                            title: "Use token=abc123".to_string(),
-                            body: Some("password=hunter2".to_string()),
-                            uri: Some("https://example.test/repair?token=abc123".to_string()),
-                        }],
-                        metadata: json!({ "refresh_token": "secret-refresh" }),
+                id: "secret-workflow".to_string(),
+                label: Some("Use token=abc123".to_string()),
+                steps: vec![AgentTaskWorkflowStepEvidence {
+                    id: "diagnose".to_string(),
+                    label: Some("Inspect password=hunter2".to_string()),
+                    status: AgentTaskWorkflowStepStatus::Failed,
+                    depends_on: Vec::new(),
+                    started_at: None,
+                    finished_at: None,
+                    duration_ms: None,
+                    metrics: json!({ "api_key": "secret-value" }),
+                    artifact_refs: Vec::new(),
+                    diagnostics: vec![AgentTaskDiagnostic {
+                        class: "workflow".to_string(),
+                        message: "Authorization: Bearer abc123".to_string(),
+                        data: json!({ "password": "hunter2" }),
                     }],
-                    metadata: json!({ "client_secret": "secret" }),
-                },
+                    suggestions: vec![AgentTaskWorkflowStepSuggestion {
+                        kind: "repair".to_string(),
+                        title: "Use token=abc123".to_string(),
+                        body: Some("password=hunter2".to_string()),
+                        uri: Some("https://example.test/repair?token=abc123".to_string()),
+                    }],
+                    metadata: json!({ "refresh_token": "secret-refresh" }),
+                }],
+                metadata: json!({ "client_secret": "secret" }),
             }),
             follow_up: None,
             outputs: json!({ "api_key": "secret-value", "safe": "value" }),

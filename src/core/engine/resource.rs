@@ -53,7 +53,33 @@ pub struct ExtensionChildResourceSummary {
     pub duration_ms: u128,
     pub sampled_peak_rss_bytes: Option<u64>,
     pub sampled_peak_cpu_percent: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sampled_peak_at_ms: Option<u128>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sampled_peak_child_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub samples: Vec<ExtensionChildResourceSample>,
     pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExtensionChildResourceSample {
+    pub elapsed_ms: u128,
+    pub timestamp: String,
+    pub root_pid: u32,
+    pub rss_bytes: u64,
+    pub cpu_percent: f64,
+    pub child_count: usize,
+    pub processes: Vec<ExtensionChildProcessSample>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExtensionChildProcessSample {
+    pub pid: u32,
+    pub parent_pid: u32,
+    pub rss_bytes: u64,
+    pub cpu_percent: f64,
+    pub command: String,
 }
 
 trait ResourceProbe {
@@ -399,6 +425,9 @@ mod tests {
                     duration_ms: 10,
                     sampled_peak_rss_bytes: Some(2048),
                     sampled_peak_cpu_percent: Some(12.5),
+                    sampled_peak_at_ms: Some(5),
+                    sampled_peak_child_count: Some(1),
+                    samples: Vec::new(),
                     warnings: Vec::new(),
                 }],
             );
@@ -454,6 +483,9 @@ mod tests {
                 duration_ms: 100,
                 sampled_peak_rss_bytes: Some(4096),
                 sampled_peak_cpu_percent: Some(1.5),
+                sampled_peak_at_ms: Some(50),
+                sampled_peak_child_count: Some(0),
+                samples: Vec::new(),
                 warnings: vec!["probe_warning".to_string()],
             };
 

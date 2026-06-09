@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, writeFile } from 'node:fs/promises';
 import { basename, dirname } from 'node:path';
 
 const homeboyBenchProgressStart = Date.now();
@@ -134,6 +134,19 @@ export function homeboyBenchProgress(event = {}) {
     } else {
         process.stderr.write(line);
     }
+}
+
+export async function homeboyBenchResponsivenessPing(event = {}) {
+    const file = process.env.HOMEBOY_BENCH_RESPONSIVENESS_FILE;
+    if (!file) return;
+
+    const ping = {
+        at: new Date().toISOString(),
+        t_ms: Date.now() - homeboyBenchProgressStart,
+        ...event,
+    };
+    await mkdir(dirname(file), { recursive: true });
+    await appendFile(file, `${JSON.stringify(ping)}\n`);
 }
 
 function homeboyBenchProgressEnabled() {

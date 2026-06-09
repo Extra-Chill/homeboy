@@ -4,6 +4,137 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.225.1] - 2026-06-09
+
+### Fixed
+- remap lab provider config file paths
+
+## [0.225.0] - 2026-06-09
+
+### Added
+- add Homeboy proof envelope
+
+### Changed
+- keep Lab workspace fixtures generic
+
+### Fixed
+- make agent-task proof provenance explicit
+
+## [0.224.1] - 2026-06-09
+
+### Changed
+- keep lab workspace fixtures generic
+
+### Fixed
+- support dotted bench setting overrides
+- tighten Lab cook loop discovery
+- keep agent task PR guardrails generic
+- report iterator PR guardrails
+- allow agent-task loop Lab offload
+- resolve bench shared-state artifacts
+- preserve artifact get output bytes
+- capture bench memory and responsiveness evidence
+
+## [0.224.0] - 2026-06-08
+
+### Added
+- expose normalized bench gate results
+
+### Changed
+- Lab offload: sync runtime_overlays sources to the runner
+
+### Fixed
+- fix bench workload status aggregation
+- record clean trace toolchain provenance
+
+## [0.223.1] - 2026-06-08
+
+### Changed
+- Lab offload: sync + remap provider-config local paths to the runner
+
+## [0.223.0] - 2026-06-08
+
+### Added
+- add agent-task cook loop controller
+- add reverse runner worker loop
+
+### Fixed
+- align reverse worker with broker result fields
+
+## [0.222.23] - 2026-06-08
+
+### Fixed
+- expand runner dependency tilde paths
+
+## [0.222.22] - 2026-06-08
+
+### Fixed
+- persist Lab trace dispatch records
+
+## [0.222.21] - 2026-06-08
+
+### Changed
+- Add agent-task provider auth ownership
+
+### Fixed
+- require canonical trace evidence by default
+- allow managed parent-relative deploy paths
+
+## [0.222.20] - 2026-06-08
+
+### Fixed
+- Fix Lab rig dependency root mapping
+- tighten rig runner diagnostics
+- tighten agent-task runner cook lifecycle
+
+## [0.222.19] - 2026-06-08
+
+### Changed
+- Migrate agent task gates to normalized results
+- Add normalized gate result primitive
+- Plan local-only lab routing for scoped hot commands
+
+### Fixed
+- preserve release CI env in test gates
+- normalize validation dependency lifecycle ids
+- include tempfile in runtime dependencies
+- isolate validation dependency lifecycle
+- rewrite agent task cwd for lab offload
+- allow agent task dispatch lab runner
+
+## [0.222.18] - 2026-06-08
+
+### Changed
+- Manage lab validation dependency lifecycle
+- Block stale lab dependency bypasses
+
+## [0.222.17] - 2026-06-08
+
+### Changed
+- Fail closed for bench validation dependencies
+
+## [0.222.16] - 2026-06-08
+
+### Changed
+- Gate bench dependency hygiene
+
+## [0.222.15] - 2026-06-08
+
+### Changed
+- support private agent-task completion gates
+- enable differential audit gating
+
+### Fixed
+- publish prepared release tags
+
+## [0.222.14] - 2026-06-08
+
+### Changed
+- Guard force-hot local Lab bypass
+- project fleet exec into core plans
+- remove built-in promotion workspace backend
+- refactor agent task promotion workspace seam
+
 ## [0.222.13] - 2026-06-07
 
 ### Changed

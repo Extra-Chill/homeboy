@@ -189,6 +189,11 @@ fn main() -> std::process::ExitCode {
         output_file = None;
     }
 
+    if cli.command.consumes_output_file_as_command_arg() {
+        // This command owns `--output/-o`; it is not the global JSON envelope.
+        output_file = None;
+    }
+
     if let Some(hot_command) = resource_policy::hot_command(&cli.command) {
         if let Ok((resources, _)) = homeboy::commands::doctor::resources::run(
             homeboy::commands::doctor::resources::ResourcesArgs {},

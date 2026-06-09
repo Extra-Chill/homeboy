@@ -12,6 +12,12 @@ pub(super) fn forward_env_if_present(env: &mut HashMap<String, String>, name: &s
     }
 }
 
+pub(super) fn forward_release_ci_env(env: &mut HashMap<String, String>) {
+    for name in ["GITHUB_ACTIONS", "RELEASE_BLOCKING_COMMANDS"] {
+        forward_env_if_present(env, name);
+    }
+}
+
 pub(super) fn build_lab_offload_env(lab_metadata: &serde_json::Value) -> HashMap<String, String> {
     HashMap::from([(
         LAB_OFFLOAD_METADATA_ENV.to_string(),
@@ -161,6 +167,28 @@ fn redacted_value_preview(value: &str, redacted: bool) -> String {
 mod tests {
     use super::*;
 
+    struct EnvVarGuard {
+        name: &'static str,
+        prior: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(name: &'static str, value: &str) -> Self {
+            let prior = std::env::var(name).ok();
+            std::env::set_var(name, value);
+            Self { name, prior }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.prior {
+                Some(value) => std::env::set_var(self.name, value),
+                None => std::env::remove_var(self.name),
+            }
+        }
+    }
+
     #[test]
     fn parsed_setting_args_reads_split_and_equals_forms() {
         let args = vec![
@@ -239,6 +267,21 @@ mod tests {
         assert_eq!(
             diagnostics["forwarded_environment"][0]["value_preview"],
             "<redacted>"
+        );
+    }
+
+    #[test]
+    fn forward_release_ci_env_preserves_release_gate_context() {
+        let _github_actions = EnvVarGuard::set("GITHUB_ACTIONS", "true");
+        let _blocking = EnvVarGuard::set("RELEASE_BLOCKING_COMMANDS", "lint,test");
+        let mut env = HashMap::new();
+
+        forward_release_ci_env(&mut env);
+
+        assert_eq!(env.get("GITHUB_ACTIONS").map(String::as_str), Some("true"));
+        assert_eq!(
+            env.get("RELEASE_BLOCKING_COMMANDS").map(String::as_str),
+            Some("lint,test")
         );
     }
 }

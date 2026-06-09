@@ -10,12 +10,13 @@ use homeboy::core::agent_task_provider::ExtensionProviderAgentTaskExecutor;
 use homeboy::core::agent_task_scheduler::{
     AgentTaskExecutorAdapter, AgentTaskPlan, AgentTaskRetryPolicy, AgentTaskScheduler,
 };
+use homeboy::core::agent_task_secrets::validate_secret_env;
 use homeboy::core::config;
 use homeboy::core::worktree;
 
 use super::{CmdResult, GlobalArgs};
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone)]
 pub struct DispatchArgs {
     /// Inline prompt, @file, or - for stdin. Repeat --task for waves.
     #[arg(long, value_name = "PROMPT")]
@@ -90,11 +91,12 @@ pub fn run(args: DispatchArgs, _global: &GlobalArgs) -> CmdResult<Value> {
     dispatch_with_executor(args, ExtensionProviderAgentTaskExecutor::discover())
 }
 
-fn dispatch_with_executor<E>(args: DispatchArgs, executor: E) -> CmdResult<Value>
+pub(crate) fn dispatch_with_executor<E>(args: DispatchArgs, executor: E) -> CmdResult<Value>
 where
     E: AgentTaskExecutorAdapter,
 {
     let plan = build_dispatch_plan(&args)?;
+    preflight_dispatch_provider_secrets(&plan)?;
     let submitted = agent_task_lifecycle::submit_plan(&plan, args.run_id.as_deref())?;
     let run_id = submitted.run_id.clone();
 
@@ -191,7 +193,10 @@ fn build_dispatch_plan(args: &DispatchArgs) -> homeboy::core::Result<AgentTaskPl
         dispatch_provider_config(args, &repo, workspace_target.as_ref(), &client_context)?;
     let mut tasks = Vec::new();
     for (index, prompt_spec) in prompt_specs.iter().enumerate() {
-        let instructions = read_text_spec(prompt_spec, "prompt")?;
+        let instructions = dispatch_instructions(
+            read_text_spec(prompt_spec, "prompt")?,
+            args.task_url.as_deref(),
+        );
         let task_id = dispatch_task_id(repo.as_deref(), index);
         let mut source_refs = Vec::new();
         if let Some(task_url) = &args.task_url {
@@ -285,6 +290,38 @@ fn build_dispatch_plan(args: &DispatchArgs) -> homeboy::core::Result<AgentTaskPl
     });
 
     Ok(plan)
+}
+
+fn preflight_dispatch_provider_secrets(plan: &AgentTaskPlan) -> homeboy::core::Result<()> {
+    let mut names = Vec::new();
+    for task in &plan.tasks {
+        for name in &task.executor.secret_env {
+            if !names.contains(name) {
+                names.push(name.clone());
+            }
+        }
+    }
+
+    validate_secret_env(&names).map_err(|error| {
+        homeboy::core::Error::validation_invalid_argument(
+            "secret_env",
+            error.message,
+            None,
+            Some(vec![
+                "Configure provider credentials with Homeboy's agent-task secret config or run `homeboy agent-task providers --secret-env <ENV>` to inspect redacted readiness.".to_string(),
+            ]),
+        )
+    })
+}
+
+fn dispatch_instructions(instructions: String, task_url: Option<&str>) -> String {
+    if task_url.is_none() || instructions.contains("Generated change guardrails") {
+        return instructions;
+    }
+
+    format!(
+        "{instructions}\n\nGenerated change guardrails:\n- First look for nearby existing predicates, contracts, or implementation families that already cover the requested behavior.\n- Keep generated changes bounded to the source evidence and task scope; preserve evidence-specific discriminators unless the task explicitly asks for broader behavior.\n- If existing behavior plus evidence/test coverage already resolves the task, prefer evidence-only or test-only output over a broader runtime change.\n- In PR evidence, report source relationship, change kind, verification capability, and why any runtime change is not broader than the source evidence."
+    )
 }
 
 fn resolve_dispatch_workspace(
@@ -690,6 +727,24 @@ mod tests {
     }
 
     #[test]
+    fn tracker_backed_dispatch_adds_generated_change_guardrails() {
+        let plan = build_dispatch_plan(&dispatch_args(DispatchArgOverrides {
+            prompt: Some("Fix the finding.".to_string()),
+            repo: Some("homeboy".to_string()),
+            task_url: Some("https://github.com/Extra-Chill/homeboy/issues/3810".to_string()),
+            ..DispatchArgOverrides::default()
+        }))
+        .expect("dispatch plan");
+
+        assert!(plan.tasks[0]
+            .instructions
+            .contains("Generated change guardrails"));
+        assert!(plan.tasks[0]
+            .instructions
+            .contains("bounded to the source evidence"));
+    }
+
+    #[test]
     fn queue_only_returns_durable_run_without_executing() {
         with_isolated_home(|_| {
             let workspace = tempfile::tempdir().expect("workspace");
@@ -714,6 +769,31 @@ mod tests {
                 .as_str()
                 .expect("plan path")
                 .ends_with("plan.json"));
+        });
+    }
+
+    #[test]
+    fn dispatch_preflights_missing_secret_env_before_submitting() {
+        with_isolated_home(|_| {
+            let missing = format!(
+                "HOMEBOY_TEST_DISPATCH_MISSING_SECRET_{}",
+                std::process::id()
+            );
+            std::env::remove_var(&missing);
+
+            let err = dispatch_with_executor(
+                dispatch_args(DispatchArgOverrides {
+                    prompt: Some("Cook with missing provider auth.".to_string()),
+                    secret_env: vec![missing.clone()],
+                    run_id: Some("dispatch-missing-secret".to_string()),
+                    ..DispatchArgOverrides::default()
+                }),
+                NoopExecutor,
+            )
+            .expect_err("missing secret should fail before submit");
+
+            assert!(err.to_string().contains(&missing));
+            assert!(agent_task_lifecycle::status("dispatch-missing-secret").is_err());
         });
     }
 
@@ -841,6 +921,8 @@ mod tests {
         cwd: Option<String>,
         workspace: Option<String>,
         repo: Option<String>,
+        task_url: Option<String>,
+        secret_env: Vec<String>,
         client_context: Option<String>,
         concurrency: usize,
         attempts: u32,
@@ -856,11 +938,11 @@ mod tests {
             cwd: overrides.cwd,
             workspace: overrides.workspace,
             repo: overrides.repo,
-            task_url: None,
+            task_url: overrides.task_url,
             backend: "fixture".to_string(),
             selector: None,
             model: None,
-            secret_env: Vec::new(),
+            secret_env: overrides.secret_env,
             provider_config: None,
             client_context: overrides.client_context,
             concurrency: if overrides.concurrency == 0 {

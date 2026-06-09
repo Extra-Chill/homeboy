@@ -36,6 +36,7 @@ pub mod files {
     pub const COVERAGE: &str = "coverage.json";
     pub const FIX_RESULTS: &str = "fix-results.json";
     pub const BENCH_RESULTS: &str = "bench-results.json";
+    pub const BENCH_RESPONSIVENESS: &str = "bench-responsiveness.jsonl";
     pub const TRACE_RESULTS: &str = "trace.json";
     pub const RESOURCE_SUMMARY: &str = "resource-summary.json";
     pub const EXTENSION_CHILDREN_DIR: &str = "extension-children";
@@ -149,6 +150,13 @@ impl RunDir {
             (
                 crate::core::product_identity::PRODUCT_IDENTITY.env_var("BENCH_RESULTS_FILE"),
                 self.step_file(files::BENCH_RESULTS)
+                    .to_string_lossy()
+                    .to_string(),
+            ),
+            (
+                crate::core::product_identity::PRODUCT_IDENTITY
+                    .env_var("BENCH_RESPONSIVENESS_FILE"),
+                self.step_file(files::BENCH_RESPONSIVENESS)
                     .to_string_lossy()
                     .to_string(),
             ),

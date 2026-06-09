@@ -48,23 +48,27 @@ After this, `<runner-id>` is both the server ID and the runner ID.
 Commands that are both resource-policy hot and portable for Lab offload (`audit`, full `lint`, `test`, `bench run`, and `trace`) auto-select a default runner when `--runner` is omitted. Selection is conservative:
 
 - `--runner <id>` always wins.
-- `--force-hot` keeps the command local.
+- `--force-hot` only suppresses the resource-policy warning. If a default Lab runner is available for a portable hot command, Homeboy refuses to use `--force-hot` as an implicit local bypass.
+- `--force-hot --allow-local-hot` keeps a portable hot command local even when a default Lab runner is available. Use it only when controller-machine execution is intentional.
 - `lab.preferred_runner` is used when it names an SSH runner, even if that runner is not connected yet.
 - Without `lab.preferred_runner`, Homeboy auto-selects only when exactly one SSH runner is configured or exactly one SSH runner is already connected.
 - Local runners are never auto-selected.
 - If the auto-selected runner is disconnected, Homeboy attempts a short bounded `runner connect` before execution. Connection failure prints the reason and falls back to local execution.
 - Explicit `--runner <id>` also attempts to connect a disconnected runner, but connection failure remains a command error instead of falling back silently.
 
-Observation metadata records the routing decision under `metadata.lab_offload` when an observed run is created. The stable contract is `schema: "homeboy/lab-offload/v1"` and keeps the existing top-level compatibility fields: `source` is `automatic` or `explicit`; `status` is `offloaded`, `skipped`, or `fallback`; successful offloads include `runner_id` plus `remote_workspace`; local fallback records the runner and `fallback_reason`; skipped local execution records why no automatic offload was used, such as `force_hot` or `no_default_runner`. The same object also carries `plan_id` and plan-derived phase fields including `sync_mode`, `capability_preflight`, `extension_parity`, and `patch_captured`.
+Observation metadata records the routing decision under `metadata.lab_offload` when an observed run is created. The stable contract is `schema: "homeboy/lab-offload/v1"` and keeps the existing top-level compatibility fields: `source` is `automatic` or `explicit`; `status` is `offloaded`, `skipped`, or `fallback`; successful offloads include `runner_id` plus `remote_workspace`; local fallback records the runner and `fallback_reason`; skipped local execution records why no automatic offload was used, such as `force_hot`, `force_hot_local_override`, or `no_default_runner`. The same object also carries `plan_id` and plan-derived phase fields including `sync_mode`, `capability_preflight`, `extension_parity`, and `patch_captured`.
 
 Lab offload support is intentionally command-specific:
 
 | Command | Auto offload | Explicit `--runner` | Decision |
 |---|---:|---:|---|
 | `audit` full workspace | Yes | Yes | Safe single-workspace replay after snapshot sync. |
+| `audit --changed-since` | No | No | Runs locally for now because changed-since audit depends on git base refs that Lab sync may not have fetched. The Lab plan records the skipped local-only decision. |
 | `bench run` / default bench run | Yes | Yes | Safe single-workspace replay; local baseline/ratchet writes are treated as mutation flags. |
 | `lint` full workspace | Yes | Yes | Safe single-workspace replay; `--fix` is treated as a mutation flag. |
+| `lint --changed-since` / `lint --changed-only` | No | No | Runs locally for now because changed-file scopes are not represented in the Lab portability contract yet. The Lab plan records the skipped local-only decision. |
 | `test` full workspace | Yes | Yes | Safe single-workspace replay with runner extension parity preflight. |
+| `test --changed-since` | No | No | Runs locally for now because changed-since test selection depends on git base refs that Lab sync may not have fetched. The Lab plan records the skipped local-only decision. |
 | `trace` | Yes | Yes | Safe single-workspace replay with Playwright/browser capability gate. |
 | `rig up` | No | No | Stays local because rig pipelines manage local services, leases, ports, and declared filesystem paths that the current single-workspace snapshot cannot safely mirror. |
 | `fleet exec` | No | No | Stays local because fleet execution depends on local fleet/project/server config before opening SSH sessions to each project; runner-side config parity is not guaranteed. |
@@ -180,6 +184,7 @@ broker exposure.
 ```sh
 homeboy runner work <runner-id> --broker-url <url>
 homeboy runner work <runner-id> --broker-url <url> --project <project-id> --lease-ms 30000
+homeboy runner work <runner-id> --broker-url <url> --loop
 ```
 
 Claims one brokered reverse-runner job for the runner, executes it on the runner
@@ -191,6 +196,41 @@ broker and does not require inbound SSH or a public listening port on the lab.
 The command exits `0` when no job is available, with `claimed: false` in the JSON
 payload. When a job is claimed, the process exit code matches the executed
 command's exit code.
+
+Use `--loop` for a long-running reverse runner service. Loop mode emits one
+structured JSON status line per lifecycle event to stderr so systemd/journald can
+index startup, idle backoff, job completion, transient broker failures, and
+shutdown without mixing those events into the final stdout JSON payload. Empty
+queues use exponential backoff controlled by `--idle-backoff-ms` and
+`--max-idle-backoff-ms`, so workers do not hot-spin when no work is available.
+Transient broker failures sleep for `--broker-failure-backoff-ms` and exit
+non-zero after `--broker-retry-limit` consecutive failures. `SIGINT` and
+`SIGTERM` request graceful shutdown after the current claim attempt or job.
+
+Minimal Homeboy Lab systemd unit:
+
+```ini
+[Unit]
+Description=Homeboy reverse runner worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=chubes
+WorkingDirectory=/home/chubes
+ExecStart=/usr/local/bin/homeboy runner work homeboy-lab --broker-url https://controller.example.com --loop --idle-backoff-ms 1000 --max-idle-backoff-ms 30000 --broker-retry-limit 12
+Restart=on-failure
+RestartSec=10
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=multi-user.target
+```
+
+The unit intentionally leaves authentication out until the broker auth contract
+lands; configure the broker URL and any future auth material using the production
+mechanism for issue #2990 rather than embedding secrets in the unit file.
 
 ### `status`
 

@@ -315,9 +315,11 @@ fn primary_reason(resources: &DoctorOutput) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli_surface::Cli;
     use crate::commands::doctor::resources::{
         LoadSummary, MemorySummary, ProcessSummary, RigLeaseSummary,
     };
+    use clap::Parser;
     fn resources(recommendation: ResourceRecommendation) -> DoctorOutput {
         DoctorOutput {
             command: "doctor.resources",
@@ -392,6 +394,21 @@ mod tests {
         assert!(warning.message.contains("`rig up` stays local"));
         assert!(warning.message.contains("--force-hot"));
         assert!(!warning.message.contains("--runner <id>"));
+    }
+
+    #[test]
+    fn changed_scope_commands_are_hot_but_file_scoped_lint_is_not() {
+        let changed_lint = Cli::parse_from(["homeboy", "lint", "--changed-since", "origin/main"]);
+        let hot = hot_command(&changed_lint.command).expect("changed-scope lint is hot");
+        assert_eq!(hot.label, "lint");
+        assert!(!hot.lab_offload_supported);
+        assert!(hot
+            .lab_offload_unsupported_reason
+            .expect("unsupported reason")
+            .contains("Changed-scope lint runs stay local"));
+
+        let file_lint = Cli::parse_from(["homeboy", "lint", "--file", "src/main.rs"]);
+        assert!(hot_command(&file_lint.command).is_none());
     }
 
     #[test]

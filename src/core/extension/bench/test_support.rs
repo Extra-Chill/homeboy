@@ -56,6 +56,7 @@ pub(crate) fn results_with_scenarios(
         phase_events: Vec::new(),
         phase_summaries: Vec::new(),
         failure_classification: None,
+        responsiveness: None,
         budget_findings: Vec::new(),
         scenarios,
         metric_policies: BTreeMap::new(),

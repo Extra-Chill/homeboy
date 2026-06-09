@@ -1,4 +1,5 @@
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -7,8 +8,8 @@ use crate::core::component::{self, TargetSpec};
 use crate::core::{Error, Result};
 
 use super::{
-    sync_workspace, RunnerGitDependencyMaterializationOutput, RunnerWorkspaceSyncMode,
-    RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
+    sync_workspace, workspace::git_output, RunnerGitDependencyMaterializationOutput,
+    RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
 };
 
 const LAB_EXTRA_WORKSPACES_ENV: &str = concat!("HOME", "BOY_LAB_EXTRA_WORKSPACES");
@@ -22,6 +23,16 @@ pub(super) struct LabWorkspaceMappingEntry {
     remote_path: String,
     sync_mode: String,
     snapshot_identity: String,
+}
+
+impl LabWorkspaceMappingEntry {
+    pub(super) fn local_path(&self) -> &str {
+        &self.local_path
+    }
+
+    pub(super) fn remote_path(&self) -> &str {
+        &self.remote_path
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,6 +122,245 @@ pub(super) fn lab_extra_workspaces(source_path: &Path) -> Result<Vec<ExtraLabWor
     let mut workspaces = accepted_extra_lab_workspaces()?;
     workspaces.extend(discovered_validation_dependency_workspaces(source_path)?);
     Ok(workspaces)
+}
+
+/// Discover controller-local directories referenced by a `--provider-config` in
+/// the offloaded args (runtime component paths, provider plugin paths, mount
+/// sources, workspace root) so they are synced to the runner and remappable.
+///
+/// Directories under `source_path` are skipped because the primary workspace
+/// sync already covers them. Existing files are mapped to their containing git
+/// checkout when available, falling back to their parent directory.
+pub(super) fn provider_config_extra_workspaces(
+    args: &[String],
+    source_path: &Path,
+) -> Result<Vec<ExtraLabWorkspace>> {
+    let Some(spec) = provider_config_spec(args) else {
+        return Ok(Vec::new());
+    };
+    let raw = match crate::core::config::read_json_spec_to_string(&spec) {
+        Ok(raw) => raw,
+        Err(_) => return Ok(Vec::new()),
+    };
+    let value: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(value) => value,
+        Err(_) => return Ok(Vec::new()),
+    };
+
+    let source_canon = source_path
+        .canonicalize()
+        .unwrap_or_else(|_| source_path.to_path_buf());
+
+    let mut seen = BTreeSet::new();
+    let mut workspaces = Vec::new();
+    for candidate in provider_config_candidate_paths(&value) {
+        let expanded = shellexpand::tilde(&candidate).to_string();
+        let path = Path::new(&expanded);
+        let workspace_path = if path.is_dir() {
+            path.to_path_buf()
+        } else if path.is_file() {
+            containing_checkout_or_parent(path)?
+        } else {
+            continue;
+        };
+        let canon = match workspace_path.canonicalize() {
+            Ok(canon) => canon,
+            Err(_) => continue,
+        };
+        // The primary workspace (and paths inside it) are already synced.
+        if canon == source_canon || canon.starts_with(&source_canon) {
+            continue;
+        }
+        if !seen.insert(canon.clone()) {
+            continue;
+        }
+        workspaces.push(ExtraLabWorkspace {
+            role: "provider_config".to_string(),
+            path: canon,
+        });
+    }
+    Ok(workspaces)
+}
+
+pub(super) fn preflight_provider_config_source_cli_dependencies(
+    args: &[String],
+    snapshot_excludes: &[String],
+) -> Result<()> {
+    if !snapshot_excludes
+        .iter()
+        .any(|exclude| exclude == "node_modules" || exclude == "node_modules/**")
+    {
+        return Ok(());
+    }
+
+    let Some(spec) = provider_config_spec(args) else {
+        return Ok(());
+    };
+    let raw = match crate::core::config::read_json_spec_to_string(&spec) {
+        Ok(raw) => raw,
+        Err(_) => return Ok(()),
+    };
+    let value: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(value) => value,
+        Err(_) => return Ok(()),
+    };
+
+    for file in provider_config_source_cli_files(&value) {
+        let content = match fs::read_to_string(&file) {
+            Ok(content) => content,
+            Err(_) => continue,
+        };
+        let imports = bare_module_imports(&content);
+        if let Some(package) = imports.iter().next() {
+            return Err(Error::validation_invalid_argument(
+                "provider_config",
+                format!(
+                    "Lab offload cannot preflight source-built CLI `{}` because it imports package `{}` while node_modules is excluded from the synced snapshot",
+                    file.display(),
+                    package
+                ),
+                Some(file.display().to_string()),
+                Some(vec![
+                    format!(
+                        "Materialize `{}` on the runner before execution, bundle it into the CLI artifact, or adjust runner snapshot policy to include the dependency path.",
+                        package
+                    ),
+                    "Use runner policy snapshot_includes for generated CLI outputs that must travel with the snapshot.".to_string(),
+                ]),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn provider_config_spec(args: &[String]) -> Option<String> {
+    let mut iter = args.iter().peekable();
+    while let Some(arg) = iter.next() {
+        if arg == "--" {
+            break;
+        }
+        if arg == "--provider-config" {
+            return iter.next().cloned();
+        }
+        if let Some(value) = arg.strip_prefix("--provider-config=") {
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
+fn provider_config_candidate_paths(value: &serde_json::Value) -> Vec<String> {
+    let mut paths = Vec::new();
+    collect_provider_config_candidate_paths(value, &mut paths);
+    paths
+}
+
+fn collect_provider_config_candidate_paths(value: &serde_json::Value, paths: &mut Vec<String>) {
+    match value {
+        serde_json::Value::String(text) => {
+            if is_controller_path_like(text) {
+                paths.push(text.to_string());
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_provider_config_candidate_paths(item, paths);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for item in map.values() {
+                collect_provider_config_candidate_paths(item, paths);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_controller_path_like(value: &str) -> bool {
+    value.starts_with('/') || value.starts_with("~/")
+}
+
+fn provider_config_source_cli_files(value: &serde_json::Value) -> Vec<PathBuf> {
+    provider_config_candidate_paths(value)
+        .into_iter()
+        .map(|candidate| shellexpand::tilde(&candidate).to_string())
+        .map(PathBuf::from)
+        .filter(|path| path.is_file() && is_node_cli_file(path))
+        .collect()
+}
+
+fn is_node_cli_file(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|ext| ext.to_str()),
+        Some("js" | "mjs" | "cjs")
+    )
+}
+
+fn containing_checkout_or_parent(path: &Path) -> Result<PathBuf> {
+    let dir = path.parent().unwrap_or(path);
+    if let Ok(root) = git_output(dir, &["rev-parse", "--show-toplevel"]) {
+        return Ok(PathBuf::from(root));
+    }
+    canonical_existing_dir(&dir.display().to_string(), "provider_config")
+}
+
+fn bare_module_imports(content: &str) -> BTreeSet<String> {
+    let mut imports = BTreeSet::new();
+    for marker in [
+        "from '",
+        "from \"",
+        "require('",
+        "require(\"",
+        "import('",
+        "import(\"",
+    ] {
+        collect_imports_after_marker(content, marker, &mut imports);
+    }
+    imports
+        .into_iter()
+        .filter(|specifier| {
+            !specifier.starts_with('.')
+                && !specifier.starts_with('/')
+                && !is_builtin_module_specifier(specifier)
+        })
+        .collect()
+}
+
+fn is_builtin_module_specifier(specifier: &str) -> bool {
+    let specifier = specifier.strip_prefix("node:").unwrap_or(specifier);
+    matches!(
+        specifier,
+        "assert"
+            | "buffer"
+            | "child_process"
+            | "crypto"
+            | "events"
+            | "fs"
+            | "http"
+            | "https"
+            | "module"
+            | "os"
+            | "path"
+            | "process"
+            | "stream"
+            | "url"
+            | "util"
+    )
+}
+
+fn collect_imports_after_marker(content: &str, marker: &str, imports: &mut BTreeSet<String>) {
+    let quote = marker.chars().last().unwrap_or('\'');
+    let mut rest = content;
+    while let Some(index) = rest.find(marker) {
+        let after = &rest[index + marker.len()..];
+        if let Some(end) = after.find(quote) {
+            imports.insert(after[..end].to_string());
+            rest = &after[end + 1..];
+        } else {
+            break;
+        }
+    }
 }
 
 fn accepted_extra_lab_workspaces() -> Result<Vec<ExtraLabWorkspace>> {
@@ -226,4 +476,131 @@ fn canonical_existing_dir(path: &str, field: &str) -> Result<PathBuf> {
             Some("canonicalize runner workspace path".to_string()),
         )
     })
+}
+
+#[cfg(test)]
+mod provider_config_candidate_paths_tests {
+    use std::path::Path;
+    use std::process::Command;
+
+    use super::{
+        preflight_provider_config_source_cli_dependencies, provider_config_candidate_paths,
+        provider_config_extra_workspaces,
+    };
+
+    fn git(path: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn extracts_all_local_path_sources_including_runtime_overlays() {
+        let value = serde_json::json!({
+            "workspace_root": "/local/data-machine@cook",
+            "mounts": [{ "source": "/local/data-machine@cook", "target": "/workspace/data-machine" }],
+            "runtime_component_paths": {
+                "agent_runtime": "/local/data-machine",
+                "agent_runtime_tools": "/local/data-machine-code"
+            },
+            "provider_plugin_paths": ["/local/ai-provider-for-claude-code"],
+            "runtime_overlays": [
+                { "kind": "bundled-library", "library": "portable-ai-client", "source": "/local/portable-ai-client@custom-provider-auth", "target": "/runtime/includes/portable-ai-client" }
+            ],
+            "agents_api": "/local/agents-api",
+            "source_cli": "/local/provider/packages/cli/dist/index.js",
+            "model": "claude-opus-4-8"
+        });
+
+        let paths = provider_config_candidate_paths(&value);
+
+        for expected in [
+            "/local/data-machine@cook",
+            "/local/data-machine",
+            "/local/data-machine-code",
+            "/local/ai-provider-for-claude-code",
+            "/local/portable-ai-client@custom-provider-auth",
+            "/local/agents-api",
+            "/local/provider/packages/cli/dist/index.js",
+        ] {
+            assert!(
+                paths.iter().any(|p| p == expected),
+                "missing candidate path: {expected}"
+            );
+        }
+        // Non-path scalars are not collected.
+        assert!(!paths.iter().any(|p| p == "claude-opus-4-8"));
+    }
+
+    #[test]
+    fn empty_config_yields_no_candidates() {
+        let value = serde_json::json!({ "model": "x" });
+        assert!(provider_config_candidate_paths(&value).is_empty());
+    }
+
+    #[test]
+    fn provider_config_file_path_syncs_containing_checkout() {
+        let controller = tempfile::tempdir().expect("controller");
+        let source = controller.path().join("primary");
+        let provider = controller.path().join("provider-cli");
+        let cli = provider.join("packages/cli/dist/index.js");
+        std::fs::create_dir_all(&source).expect("source dir");
+        std::fs::create_dir_all(cli.parent().unwrap()).expect("cli dist dir");
+        std::fs::write(&cli, "#!/usr/bin/env node\n").expect("cli file");
+        git(&provider, &["init", "-b", "main"]);
+        git(&provider, &["config", "user.email", "test@example.com"]);
+        git(&provider, &["config", "user.name", "Homeboy Test"]);
+        git(&provider, &["add", "."]);
+        git(&provider, &["commit", "-m", "initial"]);
+
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "dispatch".to_string(),
+            "--provider-config".to_string(),
+            serde_json::json!({ "source_cli": cli }).to_string(),
+        ];
+
+        let workspaces = provider_config_extra_workspaces(&args, &source).expect("workspaces");
+
+        assert_eq!(workspaces.len(), 1);
+        assert_eq!(workspaces[0].path, provider.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn source_cli_preflight_names_missing_workspace_package_and_importer() {
+        let provider = tempfile::tempdir().expect("provider checkout");
+        let cli = provider.path().join("packages/cli/dist/index.js");
+        std::fs::create_dir_all(cli.parent().unwrap()).expect("cli dist dir");
+        std::fs::write(
+            &cli,
+            "import { run } from '@example/provider-core';\nrun();\n",
+        )
+        .expect("cli file");
+        git(provider.path(), &["init", "-b", "main"]);
+
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "dispatch".to_string(),
+            "--provider-config".to_string(),
+            serde_json::json!({ "source_cli": cli }).to_string(),
+        ];
+        let excludes = vec!["node_modules".to_string(), "node_modules/**".to_string()];
+
+        let err = preflight_provider_config_source_cli_dependencies(&args, &excludes)
+            .expect_err("workspace package import should fail preflight");
+
+        assert_eq!(err.details["field"], "provider_config");
+        assert!(err.message.contains("@example/provider-core"));
+        assert!(err.message.contains("index.js"));
+    }
 }

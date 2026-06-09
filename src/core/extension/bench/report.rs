@@ -9,6 +9,7 @@ use super::parsing::BenchResults;
 use super::run::{BenchRunFailure, BenchRunWorkflowResult};
 use crate::core::ci_profile::CiContext;
 use crate::core::finding::HomeboyFinding;
+use crate::core::gate::HomeboyGateResult;
 use crate::core::rig::RigStateSnapshot;
 use crate::core::runner::reportable_artifact_evidence_path;
 
@@ -30,6 +31,8 @@ pub struct BenchCommandOutput {
     pub results: Option<BenchResults>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub budget_findings: Vec<HomeboyFinding>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub gate_results: Vec<HomeboyGateResult>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub gate_failures: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -90,6 +93,7 @@ pub fn from_main_workflow_with_rig_and_ci_context(
                 .unwrap_or_default(),
             results: result.results,
             budget_findings,
+            gate_results: result.gate_results,
             gate_failures: result.gate_failures,
             baseline_comparison: result.baseline_comparison,
             hints: result.hints,

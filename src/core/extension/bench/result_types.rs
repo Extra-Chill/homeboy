@@ -13,6 +13,7 @@ use super::distribution::BenchRunDistribution;
 use super::gate::{BenchGate, BenchGateResult};
 use super::metric_policy_preset::BenchMetricPolicyPreset;
 use super::phase_events::{BenchPhaseEvent, BenchPhaseFailureClassification, BenchPhaseSummary};
+use super::responsiveness::BenchResponsivenessSummary;
 
 fn default_true() -> bool {
     true
@@ -50,6 +51,8 @@ pub struct BenchResults {
     pub phase_summaries: Vec<BenchPhaseSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_classification: Option<BenchPhaseFailureClassification>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub responsiveness: Option<BenchResponsivenessSummary>,
     #[serde(
         default,
         deserialize_with = "super::budget_findings::deserialize_budget_findings",

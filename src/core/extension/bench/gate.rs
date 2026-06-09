@@ -1,4 +1,7 @@
 use serde::{Deserialize, Serialize};
+use serde_json::json;
+
+use crate::core::gate::{HomeboyGateKind, HomeboyGateResult, HomeboyGateStatus};
 
 use super::budget_findings;
 use super::parsing::{BenchMetrics, BenchResults};
@@ -134,4 +137,201 @@ pub fn evaluate_gates(results: &mut BenchResults) -> Vec<String> {
     failures.sort();
     failures.dedup();
     failures
+}
+
+pub fn normalized_gate_results(results: &BenchResults) -> Vec<HomeboyGateResult> {
+    results
+        .scenarios
+        .iter()
+        .flat_map(|scenario| {
+            scenario
+                .gate_results
+                .iter()
+                .cloned()
+                .map(|result| normalized_gate_result_for_scenario(&scenario.id, result))
+        })
+        .collect()
+}
+
+fn normalized_gate_result_for_scenario(
+    scenario_id: &str,
+    result: BenchGateResult,
+) -> HomeboyGateResult {
+    let status = if result.passed {
+        HomeboyGateStatus::Passed
+    } else {
+        HomeboyGateStatus::Failed
+    };
+    let summary = result.reason.clone().unwrap_or_else(|| {
+        format!(
+            "scenario `{}` metric gate passed: {} {} {}",
+            scenario_id,
+            result.metric,
+            result.op.as_str(),
+            result.expected
+        )
+    });
+
+    HomeboyGateResult::new(
+        format!("bench.gate.{}.{}", scenario_id, result.metric),
+        format!("{}.{}", scenario_id, result.metric),
+        HomeboyGateKind::Metric,
+        status,
+    )
+    .summary(summary)
+    .evidence(json!({
+        "scenario_id": scenario_id,
+        "metric": result.metric,
+        "op": result.op,
+        "expected": result.expected,
+        "actual": result.actual,
+        "passed": result.passed,
+        "reason": result.reason,
+    }))
+    .retryable(status == HomeboyGateStatus::Failed)
+    .agent_feedback(if status == HomeboyGateStatus::Failed {
+        format!(
+            "Bench gate `{}` failed for scenario `{}`. Use the metric evidence to adjust the candidate while preserving the benchmark target.",
+            result.metric, scenario_id
+        )
+    } else {
+        String::new()
+    })
+    .provenance(json!({
+        "source_type": "BenchGateResult",
+        "scenario_id": scenario_id,
+    }))
+}
+
+impl From<BenchGateResult> for HomeboyGateResult {
+    fn from(result: BenchGateResult) -> Self {
+        let status = if result.passed {
+            HomeboyGateStatus::Passed
+        } else {
+            HomeboyGateStatus::Failed
+        };
+        let summary = result.reason.clone().unwrap_or_else(|| {
+            format!(
+                "metric gate passed: {} {} {}",
+                result.metric,
+                result.op.as_str(),
+                result.expected
+            )
+        });
+
+        HomeboyGateResult::new(
+            format!("bench.gate.{}", result.metric),
+            result.metric.clone(),
+            HomeboyGateKind::Metric,
+            status,
+        )
+        .summary(summary)
+        .evidence(json!({
+            "metric": result.metric,
+            "op": result.op,
+            "expected": result.expected,
+            "actual": result.actual,
+            "passed": result.passed,
+            "reason": result.reason,
+        }))
+        .retryable(status == HomeboyGateStatus::Failed)
+        .provenance(json!({
+            "source_type": "BenchGateResult",
+        }))
+    }
+}
+
+#[cfg(test)]
+mod normalization_tests {
+    use super::*;
+    use crate::core::gate::HOMEBOY_GATE_RESULT_SCHEMA;
+
+    #[test]
+    fn bench_gate_result_normalizes_to_homeboy_gate_result() {
+        let result: HomeboyGateResult = BenchGateResult {
+            metric: "p95_ms".to_string(),
+            op: BenchGateOp::Lte,
+            expected: 120.0,
+            actual: Some(140.0),
+            passed: false,
+            reason: Some(
+                "scenario `homepage` gate failed: p95_ms lte 120 (actual 140)".to_string(),
+            ),
+        }
+        .into();
+
+        assert_eq!(result.schema, HOMEBOY_GATE_RESULT_SCHEMA);
+        assert_eq!(result.id, "bench.gate.p95_ms");
+        assert_eq!(result.kind, HomeboyGateKind::Metric);
+        assert_eq!(result.status, HomeboyGateStatus::Failed);
+        assert_eq!(result.retryable, Some(true));
+        assert_eq!(result.evidence["metric"], "p95_ms");
+        assert_eq!(result.evidence["actual"], 140.0);
+        assert_eq!(result.provenance["source_type"], "BenchGateResult");
+    }
+
+    #[test]
+    fn successful_bench_gate_result_normalizes_to_passed_gate_result() {
+        let result: HomeboyGateResult = BenchGateResult {
+            metric: "success_rate".to_string(),
+            op: BenchGateOp::Gte,
+            expected: 1.0,
+            actual: Some(1.0),
+            passed: true,
+            reason: None,
+        }
+        .into();
+
+        assert_eq!(result.id, "bench.gate.success_rate");
+        assert_eq!(result.kind, HomeboyGateKind::Metric);
+        assert_eq!(result.status, HomeboyGateStatus::Passed);
+        assert_eq!(result.retryable, Some(false));
+        assert_eq!(result.evidence["passed"], true);
+        assert!(result.summary.contains("metric gate passed"));
+    }
+
+    #[test]
+    fn normalized_gate_results_are_scenario_scoped_and_agent_actionable() {
+        let mut results = crate::core::extension::bench::parsing::parse_bench_results_str(
+            r#"{
+                "component_id": "homeboy",
+                "iterations": 1,
+                "scenarios": [
+                    {
+                        "id": "baseline",
+                        "iterations": 1,
+                        "metrics": { "success_rate": 1.0 },
+                        "gates": [
+                            { "metric": "success_rate", "op": "eq", "value": 1.0 }
+                        ]
+                    },
+                    {
+                        "id": "candidate",
+                        "iterations": 1,
+                        "metrics": { "success_rate": 0.0 },
+                        "gates": [
+                            { "metric": "success_rate", "op": "eq", "value": 1.0 }
+                        ]
+                    }
+                ]
+            }"#,
+        )
+        .expect("bench results");
+
+        let failures = evaluate_gates(&mut results);
+        assert_eq!(failures.len(), 1);
+
+        let normalized = normalized_gate_results(&results);
+        assert_eq!(normalized.len(), 2);
+        assert_eq!(normalized[0].id, "bench.gate.baseline.success_rate");
+        assert_eq!(normalized[1].id, "bench.gate.candidate.success_rate");
+        assert_eq!(normalized[0].status, HomeboyGateStatus::Passed);
+        assert_eq!(normalized[1].status, HomeboyGateStatus::Failed);
+        assert_eq!(normalized[1].retryable, Some(true));
+        assert!(normalized[1]
+            .agent_feedback
+            .contains("Bench gate `success_rate` failed"));
+        assert_eq!(normalized[1].evidence["scenario_id"], "candidate");
+        assert_eq!(normalized[1].evidence["actual"], 0.0);
+    }
 }

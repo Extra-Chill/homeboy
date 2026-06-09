@@ -1,4 +1,10 @@
 use homeboy::cli_surface::{Cli, Commands};
+use homeboy::core::observation::RunStatus;
+use serde_json::json;
+use std::time::Duration;
+
+const DEFAULT_LAB_TRACE_DISPATCH_TIMEOUT_SECS: u64 = 9 * 60;
+const LAB_TRACE_DISPATCH_TIMEOUT_ENV: &str = "HOMEBOY_LAB_TRACE_DISPATCH_TIMEOUT_SECS";
 
 pub fn route_after_parse(
     cli: &Cli,
@@ -11,41 +17,171 @@ pub fn route_after_parse(
 
     let lab_command = lab_offload_command(&cli.command)?;
 
-    match homeboy::core::runner::execute_lab_offload(homeboy::core::runner::LabOffloadRequest {
-        command: lab_command,
-        normalized_args,
-        explicit_runner: cli.runner.as_deref(),
-        force_hot: cli.force_hot,
-        allow_local_fallback: cli.allow_local_fallback,
-        capture_patch: cli.command.lab_offload_mutation_flag().is_some(),
-    })? {
-        homeboy::core::runner::LabOffloadOutcome::RunLocal {
-            metadata, messages, ..
-        } => {
-            if let Some(metadata) = metadata {
-                homeboy::core::runner::capture_lab_offload_subprocess_metadata(metadata);
-            }
-            for message in messages {
-                eprintln!("{message}");
-            }
-            Ok(None)
+    let trace_runner_id = if matches!(cli.command, Commands::Trace(_)) {
+        cli.runner.clone().or_else(|| {
+            homeboy::core::runner::resolve_default_lab_runner()
+                .ok()
+                .flatten()
+        })
+    } else {
+        None
+    };
+
+    let trace_observation = match &cli.command {
+        Commands::Trace(args) => crate::commands::trace::start_lab_dispatch_observation(
+            args,
+            normalized_args,
+            trace_runner_id.as_deref(),
+        ),
+        _ => None,
+    };
+
+    let lab_result = if matches!(cli.command, Commands::Trace(_)) {
+        execute_trace_lab_offload_with_timeout(
+            lab_command,
+            normalized_args.to_vec(),
+            cli.runner.clone(),
+            cli.force_hot,
+            cli.allow_local_hot,
+            cli.allow_local_fallback,
+            cli.command.lab_offload_mutation_flag().is_some(),
+            lab_trace_dispatch_timeout(),
+        )
+    } else {
+        homeboy::core::runner::execute_lab_offload(homeboy::core::runner::LabOffloadRequest {
+            command: lab_command,
+            normalized_args,
+            explicit_runner: cli.runner.as_deref(),
+            force_hot: cli.force_hot,
+            allow_local_hot: cli.allow_local_hot,
+            allow_local_fallback: cli.allow_local_fallback,
+            capture_patch: cli.command.lab_offload_mutation_flag().is_some(),
+        })
+    };
+
+    match lab_result {
+        Err(err) => {
+            crate::commands::trace::finish_lab_dispatch_observation(
+                trace_observation,
+                RunStatus::Error,
+                json!({
+                    "lab_dispatch": {
+                        "phase": "route_lab_dispatch",
+                        "runner_id": trace_runner_id,
+                        "status": "error",
+                        "error": {
+                            "code": err.code.as_str(),
+                            "message": err.message,
+                            "details": err.details,
+                            "hints": err.hints,
+                        }
+                    }
+                }),
+            );
+            return Err(err);
         }
-        homeboy::core::runner::LabOffloadOutcome::Offloaded {
-            stdout,
-            stderr,
-            exit_code,
-            ..
-        } => {
-            if !stderr.is_empty() {
-                eprint!("{stderr}");
+        Ok(outcome) => match outcome {
+            homeboy::core::runner::LabOffloadOutcome::RunLocal {
+                metadata, messages, ..
+            } => {
+                crate::commands::trace::finish_lab_dispatch_observation(
+                    trace_observation,
+                    RunStatus::Skipped,
+                    json!({
+                        "lab_dispatch": {
+                            "phase": "route_lab_dispatch",
+                            "runner_id": trace_runner_id,
+                            "status": "run_local",
+                            "metadata": metadata,
+                            "messages": messages,
+                        }
+                    }),
+                );
+                if let Some(metadata) = metadata {
+                    homeboy::core::runner::capture_lab_offload_subprocess_metadata(metadata);
+                }
+                for message in messages {
+                    eprintln!("{message}");
+                }
+                Ok(None)
             }
-            if let Some(path) = output_file {
-                write_offloaded_stdout(path, &stdout)?;
+            homeboy::core::runner::LabOffloadOutcome::Offloaded {
+                stdout,
+                stderr,
+                exit_code,
+                ..
+            } => {
+                crate::commands::trace::finish_lab_dispatch_observation(
+                    trace_observation,
+                    if exit_code == 0 {
+                        RunStatus::Pass
+                    } else {
+                        RunStatus::Fail
+                    },
+                    json!({
+                        "lab_dispatch": {
+                            "phase": "route_lab_dispatch",
+                            "runner_id": trace_runner_id,
+                            "status": "offloaded_complete",
+                            "exit_code": exit_code,
+                        }
+                    }),
+                );
+                if !stderr.is_empty() {
+                    eprint!("{stderr}");
+                }
+                if let Some(path) = output_file {
+                    write_offloaded_stdout(path, &stdout)?;
+                }
+                print!("{stdout}");
+                Ok(Some(exit_code))
             }
-            print!("{stdout}");
-            Ok(Some(exit_code))
-        }
+        },
     }
+}
+
+fn execute_trace_lab_offload_with_timeout(
+    command: Option<homeboy::core::runner::LabOffloadCommand>,
+    normalized_args: Vec<String>,
+    explicit_runner: Option<String>,
+    force_hot: bool,
+    allow_local_hot: bool,
+    allow_local_fallback: bool,
+    capture_patch: bool,
+    timeout: Duration,
+) -> homeboy::core::Result<homeboy::core::runner::LabOffloadOutcome> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result =
+            homeboy::core::runner::execute_lab_offload(homeboy::core::runner::LabOffloadRequest {
+                command,
+                normalized_args: &normalized_args,
+                explicit_runner: explicit_runner.as_deref(),
+                force_hot,
+                allow_local_hot,
+                allow_local_fallback,
+                capture_patch,
+            });
+        let _ = tx.send(result);
+    });
+
+    rx.recv_timeout(timeout).map_err(|_| {
+        homeboy::core::Error::internal_unexpected(format!(
+            "Lab trace dispatch did not finish before timeout after {}s",
+            timeout.as_secs()
+        ))
+        .with_hint("Inspect the controller trace run record for the last Lab dispatch phase.".to_string())
+        .with_hint("Run `homeboy runner doctor <runner-id>` and retry after the runner is healthy.".to_string())
+        .with_hint("Use `--force-hot --allow-local-hot` only for development-only investigation while fixing Lab routing.".to_string())
+    })?
+}
+
+fn lab_trace_dispatch_timeout() -> Duration {
+    std::env::var(LAB_TRACE_DISPATCH_TIMEOUT_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| Duration::from_secs(DEFAULT_LAB_TRACE_DISPATCH_TIMEOUT_SECS))
 }
 
 fn is_lab_offload_subprocess() -> bool {
@@ -177,6 +313,17 @@ mod tests {
                 _guard: guard,
             }
         }
+
+        fn remove(name: &'static str) -> Self {
+            let guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+            let previous = std::env::var(name).ok();
+            std::env::remove_var(name);
+            Self {
+                name,
+                previous,
+                _guard: guard,
+            }
+        }
     }
 
     fn env_lock() -> &'static Mutex<()> {
@@ -200,6 +347,70 @@ mod tests {
         let outcome = route_after_parse(&cli, &["homeboy".into(), "status".into()], None).unwrap();
 
         assert_eq!(outcome, None);
+    }
+
+    #[test]
+    fn hot_local_only_command_records_lab_plan_metadata() {
+        let _env = EnvGuard::remove(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV);
+        let cli = Cli::parse_from(["homeboy", "lint", "--changed-since", "origin/main"]);
+
+        let outcome = route_after_parse(
+            &cli,
+            &[
+                "homeboy".into(),
+                "lint".into(),
+                "--changed-since".into(),
+                "origin/main".into(),
+            ],
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(outcome, None);
+        let raw = std::env::var(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV)
+            .expect("Lab routing metadata captured");
+        let metadata: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(metadata["status"], "skipped");
+        assert_eq!(metadata["source"], "automatic");
+        assert!(metadata["plan_id"]
+            .as_str()
+            .unwrap()
+            .contains("lab_offload"));
+        assert!(metadata["fallback_reason"]
+            .as_str()
+            .unwrap()
+            .contains("Changed-scope lint runs stay local"));
+    }
+
+    #[test]
+    fn explicit_runner_for_local_only_hot_command_errors_from_lab_plan_path() {
+        let _env = EnvGuard::remove(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV);
+        let cli = Cli::parse_from([
+            "homeboy",
+            "--runner",
+            "homeboy-lab",
+            "test",
+            "--changed-since",
+            "origin/main",
+        ]);
+
+        let err = route_after_parse(
+            &cli,
+            &[
+                "homeboy".into(),
+                "--runner".into(),
+                "homeboy-lab".into(),
+                "test".into(),
+                "--changed-since".into(),
+                "origin/main".into(),
+            ],
+            None,
+        )
+        .expect_err("local-only hot command rejects explicit runner");
+
+        assert_eq!(err.code.as_str(), "validation.invalid_argument");
+        assert!(err.message.contains("--runner is unavailable"));
+        assert!(err.message.contains("test --changed-since"));
     }
 
     #[test]
@@ -232,6 +443,13 @@ mod tests {
         let outcome = route_after_parse(&cli, &normalized, None).unwrap();
 
         assert_eq!(outcome, None);
+    }
+
+    #[test]
+    fn trace_lab_dispatch_timeout_reads_env_override() {
+        let _env = EnvGuard::set(LAB_TRACE_DISPATCH_TIMEOUT_ENV, "7");
+
+        assert_eq!(lab_trace_dispatch_timeout(), Duration::from_secs(7));
     }
 
     #[test]

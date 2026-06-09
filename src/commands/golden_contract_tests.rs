@@ -52,6 +52,7 @@ fn bench_command_json_contract_matches_golden_fixture() {
                     artifacts: Vec::new(),
                     results: None,
                     budget_findings: Vec::new(),
+                    gate_results: Vec::new(),
                     gate_failures: Vec::new(),
                     baseline_comparison: None,
                     hints: None,

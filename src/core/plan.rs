@@ -8,6 +8,9 @@
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::HashMap;
 
+use crate::core::gate::HomeboyGateResult;
+use crate::core::proof::HomeboyProof;
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct PlanValues {
     values: HashMap<String, serde_json::Value>,
@@ -141,103 +144,6 @@ impl HomeboyPlan {
     ) -> PlanBuilder {
         PlanBuilder::from_plan(Self::for_description(kind, description))
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct HomeboyProof<Step = HomeboyProofStep> {
-    pub id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub steps: Vec<Step>,
-    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
-    pub metadata: serde_json::Value,
-}
-
-impl<Step> HomeboyProof<Step> {
-    pub fn new(id: impl Into<String>) -> Self {
-        Self {
-            id: id.into(),
-            label: None,
-            steps: Vec::new(),
-            metadata: serde_json::Value::Null,
-        }
-    }
-}
-
-impl<Step> Default for HomeboyProof<Step> {
-    fn default() -> Self {
-        Self::new("unspecified")
-    }
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct HomeboyProofStep {
-    pub id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
-    pub status: HomeboyProofStepStatus,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub depends_on: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub started_at: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub finished_at: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub duration_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
-    pub metrics: serde_json::Value,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub artifact_refs: Vec<HomeboyProofEvidenceRef>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub diagnostics: Vec<HomeboyProofDiagnostic>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub suggestions: Vec<HomeboyProofStepSuggestion>,
-    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
-    pub metadata: serde_json::Value,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum HomeboyProofStepStatus {
-    Pending,
-    Running,
-    Succeeded,
-    Failed,
-    Skipped,
-    Cancelled,
-}
-
-impl Default for HomeboyProofStepStatus {
-    fn default() -> Self {
-        Self::Pending
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct HomeboyProofEvidenceRef {
-    pub kind: String,
-    pub uri: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct HomeboyProofDiagnostic {
-    pub class: String,
-    pub message: String,
-    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
-    pub data: serde_json::Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct HomeboyProofStepSuggestion {
-    pub kind: String,
-    pub title: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub body: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub uri: Option<String>,
 }
 
 impl Default for HomeboyPlan {
@@ -521,6 +427,14 @@ impl PlanStepBuilder {
         self
     }
 
+    pub(crate) fn gate_result(mut self, gate_result: impl Into<HomeboyGateResult>) -> Self {
+        self.step.outputs.insert(
+            "gate_result".to_string(),
+            serde_json::to_value(gate_result.into()).unwrap_or(serde_json::Value::Null),
+        );
+        self
+    }
+
     pub(crate) fn missing(mut self, missing: impl IntoIterator<Item = String>) -> Self {
         self.step.missing.extend(missing);
         self
@@ -634,6 +548,8 @@ fn slug_fragment(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use crate::core::gate::{HomeboyGateKind, HomeboyGateResult, HomeboyGateStatus};
+
     use super::{
         HomeboyPlan, PlanBuilder, PlanKind, PlanStep, PlanStepStatus, PlanSummary, PlanValues,
     };
@@ -875,6 +791,30 @@ mod tests {
         assert_eq!(items, Some(vec!["first".to_string(), "second".to_string()]));
         assert_eq!(missing, None);
         assert_eq!(wrong_type, None);
+    }
+
+    #[test]
+    fn test_gate_result_output() {
+        let step = PlanStep::ready("verify.tests", "gate.command")
+            .gate_result(HomeboyGateResult::new(
+                "gate-1",
+                "cargo test",
+                HomeboyGateKind::Command,
+                HomeboyGateStatus::Passed,
+            ))
+            .build();
+
+        let gate_result: HomeboyGateResult = serde_json::from_value(
+            step.outputs
+                .get("gate_result")
+                .expect("gate result output")
+                .clone(),
+        )
+        .expect("deserialize gate result output");
+
+        assert_eq!(gate_result.id, "gate-1");
+        assert_eq!(gate_result.kind, HomeboyGateKind::Command);
+        assert_eq!(gate_result.status, HomeboyGateStatus::Passed);
     }
 
     #[test]

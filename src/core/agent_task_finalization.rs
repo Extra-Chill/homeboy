@@ -1,10 +1,16 @@
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 use crate::core::agent_task_pr_body::render_pr_body;
 use crate::core::error::{Error, Result};
+use crate::core::gate::{HomeboyGateKind, HomeboyGateResult, HomeboyGateStatus};
 use crate::core::git::{
     commit_at, get_uncommitted_changes, pr_create, pr_edit, pr_find, push_at, CommitOptions,
     PrCreateOptions, PrEditOptions, PrFindOptions, PrState, PushOptions,
+};
+use crate::core::proof::{
+    HomeboyProof, HomeboyProofArtifactRef, HomeboyProofEnvironmentDisposition,
+    HomeboyProofEnvironmentVariable, HomeboyProofProvenance,
 };
 
 pub const AGENT_TASK_PR_FINALIZATION_SCHEMA: &str = "homeboy/agent-task-pr-finalization/v1";
@@ -17,7 +23,7 @@ pub struct AgentTaskGateResult {
     pub detail: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct AgentTaskPrFinalizationReport {
     pub schema: String,
     pub run_id: String,
@@ -32,6 +38,9 @@ pub struct AgentTaskPrFinalizationReport {
     pub pr_url: Option<String>,
     pub changed_files: Vec<String>,
     pub gate_results: Vec<AgentTaskGateResult>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub normalized_gate_results: Vec<HomeboyGateResult>,
+    pub proof: HomeboyProof,
     #[serde(flatten)]
     pub evidence: AgentTaskPrEvidence,
 }
@@ -42,6 +51,83 @@ pub struct AgentTaskPrEvidence {
     pub artifact_refs: Vec<String>,
     pub attempt_summary: String,
     pub ai_tool: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai_model: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "AgentTaskPrSourceRelationship::is_empty"
+    )]
+    pub source_relationship: AgentTaskPrSourceRelationship,
+    #[serde(default, skip_serializing_if = "AgentTaskPrVerification::is_empty")]
+    pub verification: AgentTaskPrVerification,
+    #[serde(
+        default,
+        skip_serializing_if = "AgentTaskPrRuntimeGuardrails::is_empty"
+    )]
+    pub runtime_guardrails: AgentTaskPrRuntimeGuardrails,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskPrSourceRelationship {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub related_finding_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_packet_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub supersedes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub depends_on: Vec<String>,
+}
+
+impl AgentTaskPrSourceRelationship {
+    pub fn is_empty(&self) -> bool {
+        self.related_finding_id.is_none()
+            && self.source_packet_id.is_none()
+            && self.change_kind.is_none()
+            && self.supersedes.is_empty()
+            && self.depends_on.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskPrVerification {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub targeted_checks_run: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub targeted_checks_unavailable: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ci_expected: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manual_reviewer_check: Option<String>,
+}
+
+impl AgentTaskPrVerification {
+    pub fn is_empty(&self) -> bool {
+        self.targeted_checks_run.is_empty()
+            && self.targeted_checks_unavailable.is_none()
+            && self.ci_expected.is_empty()
+            && self.manual_reviewer_check.is_none()
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskPrRuntimeGuardrails {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why_not_broader_than_packet: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence_discriminators: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nearby_contracts_preserved: Vec<String>,
+}
+
+impl AgentTaskPrRuntimeGuardrails {
+    pub fn is_empty(&self) -> bool {
+        self.why_not_broader_than_packet.is_none()
+            && self.evidence_discriminators.is_empty()
+            && self.nearby_contracts_preserved.is_empty()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -53,6 +139,7 @@ pub struct AgentTaskPrFinalizationOptions {
     pub title: String,
     pub commit_message: String,
     pub gate_results: Vec<AgentTaskGateResult>,
+    pub normalized_gate_results: Vec<HomeboyGateResult>,
     pub changed_files: Vec<String>,
     pub evidence: AgentTaskPrEvidence,
     pub ai_used_for: String,
@@ -230,7 +317,9 @@ pub fn finalize_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
     options: AgentTaskPrFinalizationOptions,
     backend: &mut B,
 ) -> Result<AgentTaskPrFinalizationReport> {
-    validate_green_gates(&options.gate_results)?;
+    let normalized_gate_results = normalized_finalization_gates(&options);
+    validate_green_gates(&normalized_gate_results)?;
+    let proof = build_finalization_proof(&options, normalized_gate_results.clone());
     let head = options
         .head
         .clone()
@@ -255,12 +344,13 @@ pub fn finalize_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
             None,
             None,
             changed_files,
+            Some(proof),
         ));
     }
 
     backend.commit_all(&options.path, &options.commit_message)?;
     backend.push_branch(&options.path, &head)?;
-    let body = render_pr_body(&options, &head, &changed_files);
+    let body = render_pr_body(&options, &proof, &head, &changed_files);
     let existing = backend.find_open_pr(&options.path, &options.base, &head)?;
     let (action, pr) = match existing {
         Some(existing) => (
@@ -281,10 +371,11 @@ pub fn finalize_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
         Some(pr.number),
         Some(pr.url),
         changed_files,
+        Some(proof),
     ))
 }
 
-fn validate_green_gates(gates: &[AgentTaskGateResult]) -> Result<()> {
+fn validate_green_gates(gates: &[HomeboyGateResult]) -> Result<()> {
     if gates.is_empty() {
         return Err(Error::validation_invalid_argument(
             "gate_results",
@@ -295,8 +386,8 @@ fn validate_green_gates(gates: &[AgentTaskGateResult]) -> Result<()> {
     }
     let red: Vec<String> = gates
         .iter()
-        .filter(|gate| !is_green_status(&gate.status))
-        .map(|gate| format!("{}={}", gate.name, gate.status))
+        .filter(|gate| gate.status != HomeboyGateStatus::Passed)
+        .map(|gate| format!("{}={:?}", gate.name, gate.status))
         .collect();
     if !red.is_empty() {
         return Err(Error::validation_invalid_argument(
@@ -312,11 +403,65 @@ fn validate_green_gates(gates: &[AgentTaskGateResult]) -> Result<()> {
     Ok(())
 }
 
+fn normalized_finalization_gates(
+    options: &AgentTaskPrFinalizationOptions,
+) -> Vec<HomeboyGateResult> {
+    if !options.normalized_gate_results.is_empty() {
+        return options.normalized_gate_results.clone();
+    }
+
+    options
+        .gate_results
+        .iter()
+        .cloned()
+        .map(HomeboyGateResult::from)
+        .collect()
+}
+
 fn is_green_status(status: &str) -> bool {
     matches!(
         status.trim().to_ascii_lowercase().as_str(),
         "green" | "passed" | "pass" | "succeeded" | "success" | "ok"
     )
+}
+
+impl From<AgentTaskGateResult> for HomeboyGateResult {
+    fn from(gate: AgentTaskGateResult) -> Self {
+        gate_result_from_legacy(gate)
+    }
+}
+
+pub(crate) fn gate_result_from_legacy(gate: AgentTaskGateResult) -> HomeboyGateResult {
+    let status = if is_green_status(&gate.status) {
+        HomeboyGateStatus::Passed
+    } else {
+        HomeboyGateStatus::Failed
+    };
+    let summary = match gate
+        .detail
+        .as_deref()
+        .filter(|detail| !detail.trim().is_empty())
+    {
+        Some(detail) => format!("{}: {} ({detail})", gate.name, gate.status),
+        None => format!("{}: {}", gate.name, gate.status),
+    };
+
+    HomeboyGateResult::new(
+        format!("finalization.gate.{}", gate.name),
+        gate.name.clone(),
+        HomeboyGateKind::Command,
+        status,
+    )
+    .summary(summary)
+    .evidence(json!({
+        "name": gate.name,
+        "status": gate.status,
+        "detail": gate.detail,
+    }))
+    .retryable(status == HomeboyGateStatus::Failed)
+    .provenance(json!({
+        "source_type": "AgentTaskGateResult",
+    }))
 }
 
 fn refuse_protected_head(head: &str, protected_branches: &[String]) -> Result<()> {
@@ -342,7 +487,11 @@ fn report(
     pr_number: Option<u64>,
     pr_url: Option<String>,
     changed_files: Vec<String>,
+    proof: Option<HomeboyProof>,
 ) -> AgentTaskPrFinalizationReport {
+    let normalized_gate_results = normalized_finalization_gates(options);
+    let proof =
+        proof.unwrap_or_else(|| build_finalization_proof(options, normalized_gate_results.clone()));
     AgentTaskPrFinalizationReport {
         schema: AGENT_TASK_PR_FINALIZATION_SCHEMA.to_string(),
         run_id: options.run_id.clone(),
@@ -355,8 +504,81 @@ fn report(
         pr_url,
         changed_files,
         gate_results: options.gate_results.clone(),
+        normalized_gate_results,
+        proof,
         evidence: options.evidence.clone(),
     }
+}
+
+fn build_finalization_proof(
+    options: &AgentTaskPrFinalizationOptions,
+    gates: Vec<HomeboyGateResult>,
+) -> HomeboyProof {
+    let provenance = HomeboyProofProvenance::homeboy_run(options.run_id.clone())
+        .source_refs(options.evidence.source_refs.clone());
+    let artifacts = options
+        .evidence
+        .artifact_refs
+        .iter()
+        .cloned()
+        .map(HomeboyProofArtifactRef::uri);
+    let environment = proof_environment_from_gates(&gates);
+
+    HomeboyProof::new(
+        format!("agent-task-finalization:{}", options.run_id),
+        provenance,
+    )
+    .gates(gates)
+    .artifacts(artifacts)
+    .environment(environment)
+    .with_ci_equivalent_gap_if_missing()
+}
+
+fn proof_environment_from_gates(
+    gates: &[HomeboyGateResult],
+) -> Vec<HomeboyProofEnvironmentVariable> {
+    let mut environment = Vec::new();
+    for gate in gates {
+        let Some(gate_environment) = gate.evidence.get("environment") else {
+            continue;
+        };
+        environment.extend(proof_environment_variables(
+            gate_environment.get("inherited"),
+            HomeboyProofEnvironmentDisposition::Inherited,
+        ));
+        environment.extend(proof_environment_variables(
+            gate_environment.get("sanitized"),
+            HomeboyProofEnvironmentDisposition::Sanitized,
+        ));
+    }
+    environment.sort_by(|left, right| {
+        left.name
+            .cmp(&right.name)
+            .then(left.value.cmp(&right.value))
+            .then(format!("{:?}", left.disposition).cmp(&format!("{:?}", right.disposition)))
+    });
+    environment.dedup();
+    environment
+}
+
+fn proof_environment_variables(
+    variables: Option<&serde_json::Value>,
+    disposition: HomeboyProofEnvironmentDisposition,
+) -> Vec<HomeboyProofEnvironmentVariable> {
+    variables
+        .and_then(|value| value.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|variable| {
+            let name = variable.get("name")?.as_str()?;
+            let value = variable.get("value")?.as_str()?;
+            Some(HomeboyProofEnvironmentVariable {
+                name: name.to_string(),
+                value: value.to_string(),
+                disposition,
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -459,8 +681,89 @@ mod tests {
         assert!(backend.pushed);
         assert!(backend.created);
         assert!(backend.last_body.contains("## AI assistance"));
+        assert!(backend.last_body.contains("## Proof provenance"));
+        assert!(backend
+            .last_body
+            .contains("**Proof runner:** Homeboy agent-task cook loop"));
+        assert!(backend
+            .last_body
+            .contains("**Homeboy run ID:** `cook-3678`"));
         assert!(backend.last_body.contains("## Gate results"));
+        assert!(backend.last_body.contains("## CI-equivalent coverage"));
+        assert!(backend
+            .last_body
+            .contains("CI-equivalent required gate was not recorded"));
         assert!(backend.last_body.contains("review-ready"));
+    }
+
+    #[test]
+    fn pr_body_labels_ci_equivalent_gates() {
+        let mut backend = MockBackend {
+            changed_files: vec!["src/lib.rs".to_string()],
+            ..Default::default()
+        };
+        let mut options = options();
+        options.normalized_gate_results = vec![HomeboyGateResult::new(
+            "gate-1",
+            "required project gate",
+            HomeboyGateKind::Command,
+            HomeboyGateStatus::Passed,
+        )
+        .evidence(json!({
+            "command": ["sh", "-lc", "project verify"],
+            "exit_code": 0,
+            "ci_equivalent": true,
+        }))];
+
+        finalize_pr_with_backend(options, &mut backend).expect("finalized");
+
+        assert!(backend
+            .last_body
+            .contains("required project gate: passed (CI-equivalent)"));
+        assert!(backend.last_body.contains("required project gate: passed"));
+        assert!(!backend.last_body.contains("not recorded by Homeboy"));
+    }
+
+    #[test]
+    fn pr_body_reports_iterator_evidence_metadata() {
+        let mut backend = MockBackend {
+            changed_files: vec!["src/lib.rs".to_string()],
+            ..Default::default()
+        };
+        let mut options = options();
+        options.evidence.source_relationship = AgentTaskPrSourceRelationship {
+            related_finding_id: Some("finding-123".to_string()),
+            source_packet_id: Some("packet-456".to_string()),
+            change_kind: Some("runtime-fix".to_string()),
+            supersedes: vec!["https://github.com/org/repo/pull/1".to_string()],
+            depends_on: vec!["https://github.com/org/repo/pull/2".to_string()],
+        };
+        options.evidence.verification = AgentTaskPrVerification {
+            targeted_checks_run: vec!["cargo test pr_body".to_string()],
+            targeted_checks_unavailable: None,
+            ci_expected: vec!["Homeboy CI".to_string()],
+            manual_reviewer_check: None,
+        };
+        options.evidence.runtime_guardrails = AgentTaskPrRuntimeGuardrails {
+            why_not_broader_than_packet: Some("Preserves class and href gates.".to_string()),
+            evidence_discriminators: vec!["class=brand".to_string(), "href=#top".to_string()],
+            nearby_contracts_preserved: vec!["is_branded_inline_anchor".to_string()],
+        };
+
+        finalize_pr_with_backend(options, &mut backend).expect("finalized");
+
+        assert!(backend.last_body.contains("## Source relationship"));
+        assert!(backend.last_body.contains("finding-123"));
+        assert!(backend.last_body.contains("## Verification capability"));
+        assert!(backend
+            .last_body
+            .contains("`targeted_checks_run`: `cargo test pr_body`"));
+        assert!(backend.last_body.contains("## Runtime guardrails"));
+        assert!(backend
+            .last_body
+            .contains("Preserves class and href gates."));
+        assert!(backend.last_body.contains("## Sibling PR relationship"));
+        assert!(backend.last_body.contains("- **Model:** GPT-5.5"));
     }
 
     #[test]
@@ -549,16 +852,21 @@ mod tests {
             title: "Cook issue #3678".to_string(),
             commit_message: "finalize cook loop PR plumbing".to_string(),
             gate_results: vec![AgentTaskGateResult {
-                name: "cargo test".to_string(),
+                name: "focused project check".to_string(),
                 status: "passed".to_string(),
                 detail: Some("targeted".to_string()),
             }],
+            normalized_gate_results: Vec::new(),
             changed_files: Vec::new(),
             evidence: AgentTaskPrEvidence {
                 source_refs: vec!["https://github.com/Extra-Chill/homeboy/issues/3678".to_string()],
                 artifact_refs: vec!["artifact://aggregate.json".to_string()],
                 attempt_summary: "attempt 1 passed deterministic gates".to_string(),
                 ai_tool: "OpenCode (GPT-5.5)".to_string(),
+                ai_model: Some("GPT-5.5".to_string()),
+                source_relationship: AgentTaskPrSourceRelationship::default(),
+                verification: AgentTaskPrVerification::default(),
+                runtime_guardrails: AgentTaskPrRuntimeGuardrails::default(),
             },
             ai_used_for: "Drafted implementation and tests; Chris reviews and owns the change."
                 .to_string(),

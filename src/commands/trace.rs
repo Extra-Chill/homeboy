@@ -194,9 +194,11 @@ pub struct TraceArgs {
     #[arg(long)]
     pub keep_overlay: bool,
 
+    /// Require canonical evidence. This is the default; retained for explicit command logs.
     #[arg(long, alias = "proof")]
     pub canonical: bool,
-    #[arg(long)]
+    /// Allow intentionally local/development evidence. The output is marked non-canonical.
+    #[arg(long, alias = "allow-local-evidence")]
     pub allow_local_toolchain: bool,
 
     /// Clean only stale trace overlay locks.
@@ -1255,6 +1257,114 @@ struct ActiveTraceObservation {
     component_id: String,
     rig_id: Option<String>,
     scenario_id: String,
+}
+
+pub(super) struct LabTraceDispatchObservation {
+    store: ObservationStore,
+    run_id: String,
+    component_id: String,
+    rig_id: Option<String>,
+    scenario_id: String,
+}
+
+pub(super) fn start_lab_dispatch_observation(
+    args: &TraceArgs,
+    normalized_args: &[String],
+    runner_id: Option<&str>,
+) -> Option<LabTraceDispatchObservation> {
+    let mut resolved = args.clone();
+    resolve_trace_profile_args(&mut resolved).ok()?;
+    let scenario_id = trace_scenario(&resolved).ok()?;
+    if scenario_id == "list" {
+        return None;
+    }
+    let scenario_id = scenario_id.to_string();
+    let rig_context = load_rig_context(resolved.rig.as_deref()).ok()?;
+    let component_id = resolve_component_id(
+        &resolved.comp,
+        rig_context.as_ref().map(|context| &context.rig_spec),
+    )
+    .ok()?;
+    let component_path = resolved.comp.path.clone().or_else(|| {
+        rig_context
+            .as_ref()
+            .and_then(|context| rig_component_path(&context.rig_spec, &component_id))
+    });
+    let store = ObservationStore::open_initialized().ok()?;
+    let cwd = std::env::current_dir().ok();
+    let run =
+        store
+            .start_run(
+                NewRunRecord::builder("trace")
+                    .component_id(component_id.clone())
+                    .command(normalized_args.join(" "))
+                    .optional_cwd_path(cwd.as_deref())
+                    .current_homeboy_version()
+                    .git_sha(component_path.as_deref().and_then(|path| {
+                        homeboy::core::git::short_head_revision_at(Path::new(path))
+                    }))
+                    .optional_rig_id(resolved.rig.clone())
+                    .metadata(serde_json::json!({
+                        "scenario_id": scenario_id,
+                        "component_path": component_path,
+                        "lab_dispatch": {
+                            "phase": "route_before_lab_dispatch",
+                            "runner_id": runner_id,
+                            "status": "running"
+                        }
+                    }))
+                    .build(),
+            )
+            .ok()?;
+    let observation = LabTraceDispatchObservation {
+        store,
+        run_id: run.id,
+        component_id,
+        rig_id: resolved.rig.clone(),
+        scenario_id,
+    };
+    let _ = observation.store.record_trace_run(
+        NewTraceRunRecord::builder(
+            &observation.run_id,
+            &observation.component_id,
+            &observation.scenario_id,
+            RunStatus::Running.as_str(),
+        )
+        .trace_rig_id(observation.rig_id.as_deref())
+        .metadata(serde_json::json!({
+            "lab_dispatch": {
+                "phase": "route_before_lab_dispatch",
+                "runner_id": runner_id,
+                "status": "running"
+            }
+        }))
+        .build(),
+    );
+    Some(observation)
+}
+
+pub(super) fn finish_lab_dispatch_observation(
+    observation: Option<LabTraceDispatchObservation>,
+    status: RunStatus,
+    metadata: serde_json::Value,
+) {
+    let Some(observation) = observation else {
+        return;
+    };
+    let _ = observation.store.record_trace_run(
+        NewTraceRunRecord::builder(
+            &observation.run_id,
+            &observation.component_id,
+            &observation.scenario_id,
+            status.as_str(),
+        )
+        .trace_rig_id(observation.rig_id.as_deref())
+        .metadata(metadata.clone())
+        .build(),
+    );
+    let _ = observation
+        .store
+        .finish_run(&observation.run_id, status, Some(metadata));
 }
 
 fn persist_trace_workflow_result(

@@ -20,13 +20,11 @@ pub enum TraceCanonicalPolicy {
 }
 
 impl TraceCanonicalPolicy {
-    pub fn from_flags(canonical: bool, allow_local_toolchain: bool) -> Self {
+    pub fn from_flags(_canonical: bool, allow_local_toolchain: bool) -> Self {
         if allow_local_toolchain {
             Self::AllowLocalToolchain
-        } else if canonical {
-            Self::Canonical
         } else {
-            Self::Development
+            Self::Canonical
         }
     }
 
@@ -126,14 +124,15 @@ pub(crate) fn refused_trace_result(
         overlays: Vec::new(),
         baseline_comparison: None,
         hints: Some(vec![
-            "Use --allow-local-toolchain for development-only trace runs; evidence will be marked non-canonical.".to_string(),
+            "Use --allow-local-evidence for development-only trace runs; evidence will be marked non-canonical.".to_string(),
         ]),
         toolchain: None,
         components: None,
     }
 }
 
-const LOCAL_TOOLCHAIN_ENV_KEYS: &[&str] = &["HOMEBOY_WP_CODEBOX_BIN"];
+const WP_CODEBOX_BIN_ENV_KEYS: &[&str] =
+    &["HOMEBOY_WP_CODEBOX_BIN", "HOMEBOY_SETTINGS_WP_CODEBOX_BIN"];
 
 pub(crate) fn evaluate_trace_canonicality(
     execution_context: Option<&ExtensionExecutionContext>,
@@ -184,19 +183,32 @@ pub(crate) fn evaluate_trace_canonicality(
         ));
     }
 
-    for key in LOCAL_TOOLCHAIN_ENV_KEYS {
+    for key in WP_CODEBOX_BIN_ENV_KEYS {
         let explicit = args.runner_inputs.env.iter().any(|(name, _)| name == key);
-        let inherited = std::env::var_os(key).is_some();
-        if explicit || inherited {
+        let inherited = std::env::var_os(key);
+        if explicit || inherited.is_some() {
             let source = if explicit {
                 "trace runner env"
             } else {
                 "process env"
             };
-            reasons.push(format!(
-                "arbitrary local toolchain override `{}` is set via {}",
-                key, source
-            ));
+            let value = args
+                .runner_inputs
+                .env
+                .iter()
+                .find_map(|(name, value)| (name == key).then_some(value.as_str()))
+                .or_else(|| inherited.as_deref().and_then(|value| value.to_str()));
+            match value {
+                Some(path) if !path.trim().is_empty() => checks.push(check_git_checkout(
+                    &format!("toolchain:wp-codebox ({key}, {source})"),
+                    &git_probe_path(Path::new(path)),
+                    &mut reasons,
+                )),
+                _ => reasons.push(format!(
+                    "WP Codebox toolchain path `{}` is empty via {}",
+                    key, source
+                )),
+            }
         }
     }
 
@@ -205,6 +217,16 @@ pub(crate) fn evaluate_trace_canonicality(
         reasons,
         checks,
     })
+}
+
+fn git_probe_path(path: &Path) -> std::path::PathBuf {
+    if path.is_file() {
+        path.parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| path.to_path_buf())
+    } else {
+        path.to_path_buf()
+    }
 }
 
 fn canonical_paths_equal(left: &str, right: &str) -> bool {
@@ -377,6 +399,22 @@ mod tests {
     use crate::core::extension::trace::run::{run_trace_workflow, TraceRunnerInputs};
 
     #[test]
+    fn trace_canonical_policy_defaults_to_canonical() {
+        assert_eq!(
+            TraceCanonicalPolicy::from_flags(false, false),
+            TraceCanonicalPolicy::Canonical
+        );
+        assert_eq!(
+            TraceCanonicalPolicy::from_flags(true, false),
+            TraceCanonicalPolicy::Canonical
+        );
+        assert_eq!(
+            TraceCanonicalPolicy::from_flags(false, true),
+            TraceCanonicalPolicy::AllowLocalToolchain
+        );
+    }
+
+    #[test]
     fn canonical_trace_refuses_dirty_checkout_before_workload_execution() {
         let temp = tempfile::tempdir().unwrap();
         init_git_repo(temp.path());
@@ -474,7 +512,7 @@ mod tests {
     }
 
     #[test]
-    fn canonical_trace_refuses_arbitrary_local_runner_env() {
+    fn canonical_trace_refuses_missing_wp_codebox_runner_env() {
         let temp = tempfile::tempdir().unwrap();
         init_git_repo(temp.path());
         let component = test_component(temp.path());
@@ -490,8 +528,62 @@ mod tests {
 
         assert_eq!(result.exit_code, 1);
         assert!(result.evidence.reasons.iter().any(|reason| {
-            reason.contains("arbitrary local toolchain override `HOMEBOY_WP_CODEBOX_BIN`")
+            reason.contains("toolchain:wp-codebox (HOMEBOY_WP_CODEBOX_BIN, trace runner env) checkout path is missing")
         }));
+        run_dir.cleanup();
+    }
+
+    #[test]
+    fn canonical_trace_accepts_clean_wp_codebox_runner_env() {
+        let component_dir = tempfile::tempdir().unwrap();
+        let component_remote = tempfile::tempdir().unwrap();
+        let codebox_dir = tempfile::tempdir().unwrap();
+        let codebox_remote = tempfile::tempdir().unwrap();
+        init_git_repo(component_dir.path());
+        init_bare_repo(component_remote.path());
+        git(
+            component_dir.path(),
+            &[
+                "remote",
+                "add",
+                "origin",
+                component_remote.path().to_str().unwrap(),
+            ],
+        );
+        git(component_dir.path(), &["push", "-u", "origin", "main"]);
+        init_git_repo(codebox_dir.path());
+        init_bare_repo(codebox_remote.path());
+        git(
+            codebox_dir.path(),
+            &[
+                "remote",
+                "add",
+                "origin",
+                codebox_remote.path().to_str().unwrap(),
+            ],
+        );
+        git(codebox_dir.path(), &["push", "-u", "origin", "main"]);
+        let bin = codebox_dir.path().join("packages/cli/dist/index.js");
+        std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        std::fs::write(&bin, "#!/usr/bin/env node\n").unwrap();
+        git(codebox_dir.path(), &["add", "."]);
+        git(codebox_dir.path(), &["commit", "-m", "add cli bin"]);
+        git(codebox_dir.path(), &["push", "origin", "main"]);
+
+        let component = test_component(component_dir.path());
+        let run_dir = RunDir::create().unwrap();
+        let mut args = test_run_args(component_dir.path());
+        args.canonical_policy = TraceCanonicalPolicy::Canonical;
+        args.runner_inputs.env.push((
+            "HOMEBOY_WP_CODEBOX_BIN".to_string(),
+            bin.to_string_lossy().to_string(),
+        ));
+
+        let result = run_trace_workflow(&component, args, &run_dir, None).unwrap();
+
+        assert_eq!(result.exit_code, 3);
+        assert!(result.evidence.canonical);
+        assert!(result.evidence.reasons.is_empty());
         run_dir.cleanup();
     }
 
@@ -513,6 +605,9 @@ mod tests {
         assert_eq!(result.exit_code, 3);
         assert!(!result.evidence.canonical);
         assert_eq!(result.evidence.mode, "allow-local-toolchain");
+        assert!(result.hints.as_ref().is_some_and(|hints| hints
+            .iter()
+            .any(|hint| hint.contains("Non-canonical local evidence mode"))));
         assert!(result.results.is_none());
         run_dir.cleanup();
     }
