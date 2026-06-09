@@ -974,6 +974,7 @@ mod tests {
             files: 3,
             bytes: 12,
             excludes: Vec::new(),
+            includes: Vec::new(),
         };
         let git = RunnerWorkspaceSyncOutput {
             command: "runner.workspace.sync",
@@ -985,6 +986,7 @@ mod tests {
             files: 0,
             bytes: 0,
             excludes: Vec::new(),
+            includes: Vec::new(),
         };
 
         let entries = vec![
