@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.116.2] - 2026-06-09
+
+### Fixed
+- explain missing WP Codebox core module
+
 ## [2.116.1] - 2026-06-09
 
 ### Fixed
