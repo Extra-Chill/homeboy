@@ -5,6 +5,9 @@ use crate::core::proof::{
     HomeboyProofGapKind, HomeboyProofRunner,
 };
 
+const NONE_RECORDED: &str = "none recorded";
+const NONE_RECORDED_BULLET: &str = "- none recorded";
+
 pub(crate) fn render_pr_body(
     options: &AgentTaskPrFinalizationOptions,
     proof: &HomeboyProof,
@@ -60,7 +63,7 @@ fn proof_provenance(proof: &HomeboyProof) -> String {
 
 fn bullets(values: &[String]) -> String {
     if values.is_empty() {
-        return "- none recorded".to_string();
+        return NONE_RECORDED_BULLET.to_string();
     }
     values
         .iter()
@@ -71,7 +74,7 @@ fn bullets(values: &[String]) -> String {
 
 fn gate_bullets(gates: &[HomeboyGateResult]) -> String {
     if gates.is_empty() {
-        return "- none recorded".to_string();
+        return NONE_RECORDED_BULLET.to_string();
     }
 
     gates
@@ -180,20 +183,20 @@ fn supersession_note(options: &AgentTaskPrFinalizationOptions) -> String {
 fn option_value(value: Option<&str>) -> String {
     value
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or("none recorded")
+        .unwrap_or(NONE_RECORDED)
         .to_string()
 }
 
 fn inline_list(values: &[String]) -> String {
     if values.is_empty() {
-        return "none recorded".to_string();
+        return NONE_RECORDED.to_string();
     }
     values.join(", ")
 }
 
 fn inline_code_list(values: &[String]) -> String {
     if values.is_empty() {
-        return "none recorded".to_string();
+        return NONE_RECORDED.to_string();
     }
     values
         .iter()
