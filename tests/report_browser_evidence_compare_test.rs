@@ -240,3 +240,96 @@ fn compares_browser_evidence_across_multiple_run_dirs() {
 
     let _ = fs::remove_dir_all(&root);
 }
+
+#[test]
+fn promotes_wp_codebox_browser_summary_metrics() {
+    let root = tmp_dir("wp-codebox-summary");
+    write_fixture_file(
+        &root.join("baseline"),
+        "summary.json",
+        r#"{
+            "schema":"wp-codebox/browser-probe/v1",
+            "summary": {
+                "assertions": {"total": 1, "passed": 1, "failed": 0, "skipped": 0},
+                "consoleMessages": 0,
+                "errors": 0,
+                "networkEvents": 12,
+                "metrics": {
+                    "browser_lcp_ms": 1200,
+                    "browser_peak_used_js_heap_bytes": 64000,
+                    "browser_transfer_size_bytes": 100000,
+                    "browser_dom_node_count": 320
+                }
+            },
+            "files": {
+                "summary": "files/browser/summary.json",
+                "performance": "files/browser/performance.json",
+                "memory": "files/browser/memory.json",
+                "screenshot": "files/browser/screenshot.png"
+            }
+        }"#,
+    );
+    write_fixture_file(
+        &root.join("candidate"),
+        "summary.json",
+        r#"{
+            "schema":"wp-codebox/browser-probe/v1",
+            "summary": {
+                "assertions": {"total": 1, "passed": 1, "failed": 0, "skipped": 0},
+                "consoleMessages": 1,
+                "errors": 1,
+                "networkEvents": 14,
+                "metrics": {
+                    "browser_lcp_ms": 1500,
+                    "browser_peak_used_js_heap_bytes": 96000,
+                    "browser_transfer_size_bytes": 140000,
+                    "browser_dom_node_count": 400
+                }
+            },
+            "files": {
+                "summary": "files/browser/summary.json",
+                "performance": "files/browser/performance.json",
+                "memory": "files/browser/memory.json",
+                "screenshot": "files/browser/screenshot.png"
+            }
+        }"#,
+    );
+
+    let report = browser_evidence_compare_from_args(&args(&root, false)).expect("report renders");
+    let variant = report.variants.first().expect("variant should exist");
+
+    assert_eq!(report.totals.baseline_samples, 1);
+    assert_eq!(report.totals.candidate_samples, 1);
+    assert_eq!(variant.assertions.pass_delta, 0);
+    assert_eq!(variant.request_totals.median_delta, Some(2.0));
+    assert_eq!(variant.console_errors.median_delta, None);
+    assert_eq!(variant.page_errors.median_delta, Some(1.0));
+    assert_eq!(
+        variant.browser_metrics["browser_lcp_ms"].median_delta,
+        Some(300.0)
+    );
+    assert_eq!(
+        variant.browser_metrics["browser_peak_used_js_heap_bytes"].median_delta,
+        Some(32000.0)
+    );
+    assert_eq!(
+        variant.browser_metrics["browser_console_message_count"].median_delta,
+        Some(1.0)
+    );
+    assert_eq!(
+        variant.browser_metrics["browser_network_event_count"].median_delta,
+        Some(2.0)
+    );
+    assert!(variant
+        .artifacts
+        .baseline
+        .iter()
+        .any(|artifact| artifact.label == "performance"));
+    assert!(variant
+        .artifacts
+        .candidate
+        .iter()
+        .any(|artifact| artifact.target == "files/browser/screenshot.png"));
+
+    let _ = fs::remove_dir_all(&root);
+}
