@@ -61,6 +61,9 @@ const diagnosticResult = spawnSync(process.execPath, [script], {
 
 assert.notEqual(diagnosticResult.status, 0);
 assert.match(diagnosticResult.stderr, /WP Codebox recipe builder export buildWordPressBenchRecipe is unavailable/);
+assert.match(diagnosticResult.stderr, /--setting wp_codebox_core_module=\/path\/to\/wp-codebox\/packages\/runtime-core\/dist\/index\.js/);
+assert.match(diagnosticResult.stderr, /HOMEBOY_WP_CODEBOX_CORE_MODULE/);
+assert.match(diagnosticResult.stderr, /HOMEBOY_WP_CODEBOX_BIN \/ wp_codebox_bin/);
 assert.match(diagnosticResult.stderr, /no longer falls back to bundled WP Codebox recipe builders/);
 assert.match(diagnosticResult.stderr, /\/missing\/wp-codebox-core\.mjs/);
 
