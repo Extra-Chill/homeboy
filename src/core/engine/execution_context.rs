@@ -272,11 +272,10 @@ pub fn resolve_with_component(
         )
     } else {
         // No extension context — only CLI overrides, wrapped as JSON strings.
-        let settings = options
-            .settings_overrides
-            .iter()
-            .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
-            .collect();
+        let mut settings = Vec::new();
+        for (key, value) in &options.settings_overrides {
+            merge_string_setting_override(&mut settings, key, value);
+        }
         (None, None, settings)
     };
 
@@ -289,6 +288,62 @@ pub fn resolve_with_component(
         extension_path,
         settings,
     })
+}
+
+fn merge_string_setting_override(
+    settings: &mut Vec<(String, serde_json::Value)>,
+    key: &str,
+    value: &str,
+) {
+    let Some((root, child_path)) = key.split_once('.') else {
+        settings.retain(|(k, _)| k != key);
+        settings.push((
+            key.to_string(),
+            serde_json::Value::String(value.to_string()),
+        ));
+        return;
+    };
+
+    if root.is_empty() || child_path.is_empty() || child_path.split('.').any(str::is_empty) {
+        settings.retain(|(k, _)| k != key);
+        settings.push((
+            key.to_string(),
+            serde_json::Value::String(value.to_string()),
+        ));
+        return;
+    }
+
+    let mut root_value = settings
+        .iter()
+        .find(|(k, _)| k == root)
+        .map(|(_, v)| v.clone())
+        .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+    if !root_value.is_object() {
+        root_value = serde_json::Value::Object(serde_json::Map::new());
+    }
+
+    let mut current = root_value.as_object_mut().expect("root setting is object");
+    let mut parts = child_path.split('.').peekable();
+    while let Some(part) = parts.next() {
+        if parts.peek().is_none() {
+            current.insert(
+                part.to_string(),
+                serde_json::Value::String(value.to_string()),
+            );
+            break;
+        }
+
+        let child = current
+            .entry(part.to_string())
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+        if !child.is_object() {
+            *child = serde_json::Value::Object(serde_json::Map::new());
+        }
+        current = child.as_object_mut().expect("nested setting is object");
+    }
+
+    settings.retain(|(k, _)| k != root);
+    settings.push((root.to_string(), root_value));
 }
 
 impl ExecutionContext {
@@ -949,5 +1004,27 @@ mod tests {
             .settings
             .iter()
             .any(|(k, v)| k == "mode" && v == "strict"));
+    }
+
+    #[test]
+    fn dotted_settings_merge_into_object_settings() {
+        let mut settings = vec![(
+            "bench_env".to_string(),
+            serde_json::json!({ "EXISTING": "yes" }),
+        )];
+
+        merge_string_setting_override(&mut settings, "bench_env.WC_REST_BATCH_IMPORT_ITEMS", "100");
+
+        assert_eq!(settings.len(), 1);
+        assert_eq!(
+            settings[0],
+            (
+                "bench_env".to_string(),
+                serde_json::json!({
+                    "EXISTING": "yes",
+                    "WC_REST_BATCH_IMPORT_ITEMS": "100"
+                })
+            )
+        );
     }
 }

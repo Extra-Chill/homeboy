@@ -570,7 +570,13 @@ pub struct DryRunArgs {
 /// strictly more expressive and was specified later in the merge order).
 #[derive(Args, Debug, Clone, Default)]
 pub struct SettingArgs {
-    #[arg(long, value_parser = crate::commands::parse_key_val)]
+    /// String setting override. Repeatable.
+    ///
+    /// Format: `--setting key=value`. Use dotted keys such as
+    /// `--setting bench_env.FOO=bar` to merge string fields into object
+    /// settings. Use `--setting-json bench_env='{"FOO":"bar"}'` when an
+    /// entire object, array, or typed scalar is needed.
+    #[arg(long, value_name = "KEY=VALUE", value_parser = crate::commands::parse_key_val)]
     pub setting: Vec<(String, String)>,
 
     /// Typed-JSON setting override. Repeatable.
