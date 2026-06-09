@@ -1062,10 +1062,10 @@
     },
     {
       "id": "wp_codebox_prepare_steps",
-      "label": "WP Codebox bench prepare steps",
+      "label": "WP Codebox prepare steps",
       "type": "array",
       "default": [],
-      "description": "Explicit host-side commands to run before WP Codebox mounts and loads the plugin for wordpress.bench. Each step is an object with command, optional string args, and optional component-relative cwd. Use this for bounded source-checkout generation such as WooCommerce feature config files; no package scripts run implicitly."
+      "description": "Explicit host-side commands to run before WP Codebox mounts and loads the plugin for wordpress.bench or wordpress.phpunit. Each step is an object with command, optional string args, and optional component-relative cwd. Use this for bounded source-checkout generation such as WooCommerce feature config files; no package scripts run implicitly."
     },
     {
       "id": "wp_codebox_scenario_manifests",
