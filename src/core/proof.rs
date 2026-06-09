@@ -239,6 +239,15 @@ pub fn gate_scope_label(gate: &HomeboyGateResult) -> &'static str {
     }
 }
 
+pub fn proof_runner_label(runner: HomeboyProofRunner) -> &'static str {
+    match runner {
+        HomeboyProofRunner::Homeboy => "Homeboy agent-task cook loop",
+        HomeboyProofRunner::Manual => "manual",
+        HomeboyProofRunner::ExternalCi => "external CI",
+        HomeboyProofRunner::Unknown => "unknown",
+    }
+}
+
 fn proof_schema() -> String {
     HOMEBOY_PROOF_SCHEMA.to_string()
 }
@@ -271,6 +280,10 @@ mod tests {
         assert!(proof.has_ci_equivalent_gate());
         assert_eq!(gate_scope_label(&proof.gates[0]), "targeted");
         assert_eq!(gate_scope_label(&proof.gates[1]), "CI-equivalent");
+        assert_eq!(
+            proof_runner_label(proof.provenance.runner),
+            "Homeboy agent-task cook loop"
+        );
     }
 
     #[test]
