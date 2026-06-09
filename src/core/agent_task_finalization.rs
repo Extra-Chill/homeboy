@@ -8,6 +8,10 @@ use crate::core::git::{
     commit_at, get_uncommitted_changes, pr_create, pr_edit, pr_find, push_at, CommitOptions,
     PrCreateOptions, PrEditOptions, PrFindOptions, PrState, PushOptions,
 };
+use crate::core::proof::{
+    HomeboyProof, HomeboyProofArtifactRef, HomeboyProofEnvironmentDisposition,
+    HomeboyProofEnvironmentVariable, HomeboyProofProvenance,
+};
 
 pub const AGENT_TASK_PR_FINALIZATION_SCHEMA: &str = "homeboy/agent-task-pr-finalization/v1";
 
@@ -36,6 +40,7 @@ pub struct AgentTaskPrFinalizationReport {
     pub gate_results: Vec<AgentTaskGateResult>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub normalized_gate_results: Vec<HomeboyGateResult>,
+    pub proof: HomeboyProof,
     #[serde(flatten)]
     pub evidence: AgentTaskPrEvidence,
 }
@@ -314,6 +319,7 @@ pub fn finalize_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
 ) -> Result<AgentTaskPrFinalizationReport> {
     let normalized_gate_results = normalized_finalization_gates(&options);
     validate_green_gates(&normalized_gate_results)?;
+    let proof = build_finalization_proof(&options, normalized_gate_results.clone());
     let head = options
         .head
         .clone()
@@ -338,12 +344,13 @@ pub fn finalize_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
             None,
             None,
             changed_files,
+            Some(proof),
         ));
     }
 
     backend.commit_all(&options.path, &options.commit_message)?;
     backend.push_branch(&options.path, &head)?;
-    let body = render_pr_body(&options, &head, &changed_files);
+    let body = render_pr_body(&options, &proof, &head, &changed_files);
     let existing = backend.find_open_pr(&options.path, &options.base, &head)?;
     let (action, pr) = match existing {
         Some(existing) => (
@@ -364,6 +371,7 @@ pub fn finalize_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
         Some(pr.number),
         Some(pr.url),
         changed_files,
+        Some(proof),
     ))
 }
 
@@ -479,8 +487,11 @@ fn report(
     pr_number: Option<u64>,
     pr_url: Option<String>,
     changed_files: Vec<String>,
+    proof: Option<HomeboyProof>,
 ) -> AgentTaskPrFinalizationReport {
     let normalized_gate_results = normalized_finalization_gates(options);
+    let proof =
+        proof.unwrap_or_else(|| build_finalization_proof(options, normalized_gate_results.clone()));
     AgentTaskPrFinalizationReport {
         schema: AGENT_TASK_PR_FINALIZATION_SCHEMA.to_string(),
         run_id: options.run_id.clone(),
@@ -494,8 +505,80 @@ fn report(
         changed_files,
         gate_results: options.gate_results.clone(),
         normalized_gate_results,
+        proof,
         evidence: options.evidence.clone(),
     }
+}
+
+fn build_finalization_proof(
+    options: &AgentTaskPrFinalizationOptions,
+    gates: Vec<HomeboyGateResult>,
+) -> HomeboyProof {
+    let provenance = HomeboyProofProvenance::homeboy_run(options.run_id.clone())
+        .source_refs(options.evidence.source_refs.clone());
+    let artifacts = options
+        .evidence
+        .artifact_refs
+        .iter()
+        .cloned()
+        .map(HomeboyProofArtifactRef::uri);
+    let environment = proof_environment_from_gates(&gates);
+
+    HomeboyProof::new(
+        format!("agent-task-finalization:{}", options.run_id),
+        provenance,
+    )
+    .gates(gates)
+    .artifacts(artifacts)
+    .environment(environment)
+    .with_ci_equivalent_gap_if_missing()
+}
+
+fn proof_environment_from_gates(
+    gates: &[HomeboyGateResult],
+) -> Vec<HomeboyProofEnvironmentVariable> {
+    let mut environment = Vec::new();
+    for gate in gates {
+        let Some(gate_environment) = gate.evidence.get("environment") else {
+            continue;
+        };
+        environment.extend(proof_environment_variables(
+            gate_environment.get("inherited"),
+            HomeboyProofEnvironmentDisposition::Inherited,
+        ));
+        environment.extend(proof_environment_variables(
+            gate_environment.get("sanitized"),
+            HomeboyProofEnvironmentDisposition::Sanitized,
+        ));
+    }
+    environment.sort_by(|left, right| {
+        left.name
+            .cmp(&right.name)
+            .then(left.value.cmp(&right.value))
+            .then(format!("{:?}", left.disposition).cmp(&format!("{:?}", right.disposition)))
+    });
+    environment.dedup();
+    environment
+}
+
+fn proof_environment_variables(
+    variables: Option<&serde_json::Value>,
+    disposition: HomeboyProofEnvironmentDisposition,
+) -> Vec<HomeboyProofEnvironmentVariable> {
+    variables
+        .and_then(|value| value.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|variable| {
+            let name = variable.get("name")?.as_str()?;
+            let value = variable.get("value")?.as_str()?;
+            Some(HomeboyProofEnvironmentVariable {
+                name: name.to_string(),
+                value: value.to_string(),
+                disposition,
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -598,8 +681,47 @@ mod tests {
         assert!(backend.pushed);
         assert!(backend.created);
         assert!(backend.last_body.contains("## AI assistance"));
+        assert!(backend.last_body.contains("## Proof provenance"));
+        assert!(backend
+            .last_body
+            .contains("**Proof runner:** Homeboy agent-task cook loop"));
+        assert!(backend
+            .last_body
+            .contains("**Homeboy run ID:** `cook-3678`"));
         assert!(backend.last_body.contains("## Gate results"));
+        assert!(backend.last_body.contains("## CI-equivalent coverage"));
+        assert!(backend
+            .last_body
+            .contains("CI-equivalent required gate was not recorded"));
         assert!(backend.last_body.contains("review-ready"));
+    }
+
+    #[test]
+    fn pr_body_labels_ci_equivalent_gates() {
+        let mut backend = MockBackend {
+            changed_files: vec!["src/lib.rs".to_string()],
+            ..Default::default()
+        };
+        let mut options = options();
+        options.normalized_gate_results = vec![HomeboyGateResult::new(
+            "gate-1",
+            "required project gate",
+            HomeboyGateKind::Command,
+            HomeboyGateStatus::Passed,
+        )
+        .evidence(json!({
+            "command": ["sh", "-lc", "project verify"],
+            "exit_code": 0,
+            "ci_equivalent": true,
+        }))];
+
+        finalize_pr_with_backend(options, &mut backend).expect("finalized");
+
+        assert!(backend
+            .last_body
+            .contains("required project gate: passed (CI-equivalent)"));
+        assert!(backend.last_body.contains("required project gate: passed"));
+        assert!(!backend.last_body.contains("not recorded by Homeboy"));
     }
 
     #[test]
@@ -730,7 +852,7 @@ mod tests {
             title: "Cook issue #3678".to_string(),
             commit_message: "finalize cook loop PR plumbing".to_string(),
             gate_results: vec![AgentTaskGateResult {
-                name: "cargo test".to_string(),
+                name: "focused project check".to_string(),
                 status: "passed".to_string(),
                 detail: Some("targeted".to_string()),
             }],

@@ -381,7 +381,7 @@ mod tests {
         AGENT_TASK_REQUEST_SCHEMA,
     };
     use crate::core::agent_task_gate::{
-        AgentTaskGateFailureEvidence, AGENT_TASK_GATE_REPORT_SCHEMA,
+        AgentTaskGateEnvironment, AgentTaskGateFailureEvidence, AGENT_TASK_GATE_REPORT_SCHEMA,
     };
     use crate::core::agent_task_promotion::{
         AgentTaskPromotionArtifactRef, AgentTaskPromotionSource, AGENT_TASK_PROMOTION_REPORT_SCHEMA,
@@ -618,6 +618,7 @@ mod tests {
                 agent_feedback: "Update the patch so cargo test agent_task_gate passes."
                     .to_string(),
             }),
+            environment: AgentTaskGateEnvironment::default(),
         }
     }
 
@@ -644,6 +645,7 @@ mod tests {
                 stderr_tail: "private evaluator stack trace".to_string(),
                 agent_feedback: "Fix the randomized secret fixture mismatch.".to_string(),
             }),
+            environment: AgentTaskGateEnvironment::default(),
         }
     }
 
@@ -663,6 +665,7 @@ mod tests {
             stdout: "ok".to_string(),
             stderr: String::new(),
             failure_evidence: None,
+            environment: AgentTaskGateEnvironment::default(),
         }
     }
 }

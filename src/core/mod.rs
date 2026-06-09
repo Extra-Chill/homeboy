@@ -54,6 +54,7 @@ pub mod plan;
 pub mod process;
 pub mod product_identity;
 pub mod project;
+pub mod proof;
 pub mod quality;
 pub mod redaction;
 pub mod refactor;

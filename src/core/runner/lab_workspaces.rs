@@ -225,8 +225,8 @@ fn provider_config_candidate_paths(value: &serde_json::Value) -> Vec<String> {
             }
         }
     }
-    // Runtime overlay sources (e.g. a bundled-library php-ai-client build that
-    // supplies provider-request-auth APIs) are controller-local directories the
+    // Runtime overlay sources (e.g. a bundled helper library build that
+    // supplies provider APIs) are controller-local directories the
     // sandbox mounts; sync them so the overlay resolves on the runner.
     if let Some(overlays) = value.get("runtime_overlays").and_then(|v| v.as_array()) {
         for overlay in overlays {
