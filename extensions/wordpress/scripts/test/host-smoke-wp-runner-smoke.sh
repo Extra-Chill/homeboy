@@ -73,6 +73,7 @@ FAKE_CODEBOX_CAPTURE_DIR="$CAPTURE_DIR" \
 
 assert_contains "${TMPDIR}/direct.out" "Backend: host-smoke-wp"
 assert_contains "${TMPDIR}/direct.out" "HOST_SMOKE_BEGIN:tests/alpha-smoke.php"
+assert_contains "${TMPDIR}/direct.out" "HOST_SMOKE_PROGRESS:tests/alpha-smoke.php:phase=recipe-created"
 assert_contains "${TMPDIR}/direct.out" "HOST_SMOKE_OK:tests/alpha-smoke.php"
 assert_contains "${TMPDIR}/direct.out" "HOST_SMOKE_SUMMARY:passed=1 failed=0"
 
@@ -109,6 +110,37 @@ if [ "$fail_exit" -eq 0 ]; then
     exit 1
 fi
 assert_contains "${TMPDIR}/direct-fail.out" "HOST_SMOKE_FAIL:tests/alpha-smoke.php"
+assert_contains "${TMPDIR}/direct-fail.out" "HOST_SMOKE_OUTPUT_BEGIN:tests/alpha-smoke.php"
+assert_contains "${TMPDIR}/direct-fail.out" "smoke threw"
+assert_contains "${TMPDIR}/direct-fail.out" "HOST_SMOKE_OUTPUT_END:tests/alpha-smoke.php:artifacts="
+
+# --- Timeout diagnostics: a hung recipe-run is bounded per file and reports the
+# phase/artifact directory before returning the conventional timeout status.
+FAKE_CODEBOX_HANG="${TMPDIR}/fake-wp-codebox-hang.cjs"
+cat > "$FAKE_CODEBOX_HANG" <<'JS'
+#!/usr/bin/env node
+'use strict';
+setTimeout(() => {}, 10000);
+JS
+
+set +e
+HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
+HOMEBOY_COMPONENT_ID="component" \
+HOMEBOY_COMPONENT_PATH="$component" \
+HOMEBOY_WP_CODEBOX_BIN="$FAKE_CODEBOX_HANG" \
+HOMEBOY_WORDPRESS_HOST_SMOKE_TIMEOUT_SECONDS=1 \
+FAKE_CODEBOX_CAPTURE_DIR="$CAPTURE_DIR" \
+    bash "${EXTENSION_PATH}/scripts/test/test-runner-host-smoke-wp.sh" > "${TMPDIR}/direct-timeout.out" 2>&1
+timeout_exit=$?
+set -e
+if [ "$timeout_exit" -ne 124 ]; then
+    echo "Expected real-WP smoke runner to exit 124 on timeout, got ${timeout_exit}" >&2
+    sed 's/^/  /' "${TMPDIR}/direct-timeout.out" >&2
+    exit 1
+fi
+assert_contains "${TMPDIR}/direct-timeout.out" "HOST_SMOKE_TIMEOUT:tests/alpha-smoke.php:phase=wp-codebox-recipe-run"
+assert_contains "${TMPDIR}/direct-timeout.out" "HOST_SMOKE_FAIL:tests/alpha-smoke.php:exit=124"
+assert_contains "${TMPDIR}/direct-timeout.out" "artifacts="
 
 # --- Routing: the dispatcher routes *-smoke.php to this real-WP smoke backend
 # purely by file type (no test_backend toggle). A --file smoke run goes straight
