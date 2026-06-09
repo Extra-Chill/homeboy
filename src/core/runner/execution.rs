@@ -24,6 +24,9 @@ use super::resource_metrics::{
 };
 use super::{load, status, Runner, RunnerCapabilityPreflight, RunnerKind, RunnerTunnelMode};
 
+const DEFAULT_RUNNER_EXEC_WAIT_TIMEOUT_SECS: u64 = 20 * 60;
+const RUNNER_EXEC_WAIT_TIMEOUT_ENV: &str = "HOMEBOY_RUNNER_EXEC_WAIT_TIMEOUT_SECS";
+
 mod extension_parity;
 mod policy;
 use extension_parity::{required_extensions_for_command, validate_runner_extension_parity};
@@ -273,16 +276,19 @@ fn exec_via_reverse_broker(
         )
     })?;
 
-    let deadline = Instant::now() + Duration::from_secs(60 * 60);
+    let deadline = Instant::now() + runner_exec_wait_timeout();
     while !matches!(
         job.status,
         JobStatus::Succeeded | JobStatus::Failed | JobStatus::Cancelled
     ) {
         if Instant::now() >= deadline {
-            return Err(Error::internal_unexpected(format!(
-                "reverse runner job {} did not finish before timeout",
-                job.id
-            )));
+            return Err(cancel_daemon_job_after_timeout(
+                &client,
+                broker_url,
+                &runner.id,
+                &job.id.to_string(),
+                "reverse runner job",
+            ));
         }
         std::thread::sleep(Duration::from_millis(200));
         job = fetch_daemon_job(&client, broker_url, &job.id.to_string())?;
@@ -391,16 +397,19 @@ fn exec_via_daemon(
         Error::internal_json(err.to_string(), Some("parse daemon exec job".to_string()))
     })?;
 
-    let deadline = Instant::now() + Duration::from_secs(60 * 60);
+    let deadline = Instant::now() + runner_exec_wait_timeout();
     while !matches!(
         job.status,
         JobStatus::Succeeded | JobStatus::Failed | JobStatus::Cancelled
     ) {
         if Instant::now() >= deadline {
-            return Err(Error::internal_unexpected(format!(
-                "runner daemon job {} did not finish before timeout",
-                job.id
-            )));
+            return Err(cancel_daemon_job_after_timeout(
+                &client,
+                local_url,
+                &runner.id,
+                &job.id.to_string(),
+                "runner daemon job",
+            ));
         }
         std::thread::sleep(Duration::from_millis(200));
         job = fetch_daemon_job(&client, local_url, &job.id.to_string())?;
@@ -481,6 +490,63 @@ fn fetch_daemon_events(client: &Client, local_url: &str, job_id: &str) -> Result
     serde_json::from_value(body["events"].clone()).map_err(|err| {
         Error::internal_json(err.to_string(), Some("parse daemon job events".to_string()))
     })
+}
+
+fn cancel_daemon_job_after_timeout(
+    client: &Client,
+    local_url: &str,
+    runner_id: &str,
+    job_id: &str,
+    label: &str,
+) -> Error {
+    match cancel_daemon_job(client, local_url, job_id) {
+        Ok(()) => Error::internal_unexpected(format!(
+            "{label} {job_id} on runner {runner_id} did not finish before timeout; cancellation was requested"
+        ))
+        .with_hint(format!(
+            "Confirm cleanup with `homeboy http get {}/jobs/{job_id}`.",
+            local_url.trim_end_matches('/')
+        )),
+        Err(err) => Error::internal_unexpected(format!(
+            "{label} {job_id} on runner {runner_id} did not finish before timeout; automatic cancellation failed: {}",
+            err.message
+        ))
+        .with_hint(format!(
+            "Run `homeboy http request POST {}/jobs/{job_id}/cancel` to cancel the remote job.",
+            local_url.trim_end_matches('/')
+        )),
+    }
+}
+
+fn cancel_daemon_job(client: &Client, local_url: &str, job_id: &str) -> Result<()> {
+    let response = client
+        .post(format!(
+            "{}/jobs/{job_id}/cancel",
+            local_url.trim_end_matches('/')
+        ))
+        .send()
+        .map_err(|err| Error::internal_unexpected(format!("cancel runner daemon job: {err}")))?;
+    let envelope: DaemonEnvelope = response.json().map_err(|err| {
+        Error::internal_json(
+            err.to_string(),
+            Some("parse daemon job cancellation response".to_string()),
+        )
+    })?;
+    if !envelope.success {
+        return Err(Error::internal_unexpected(format!(
+            "daemon job cancellation failed: {}",
+            envelope.error.unwrap_or(Value::Null)
+        )));
+    }
+    Ok(())
+}
+
+fn runner_exec_wait_timeout() -> Duration {
+    std::env::var(RUNNER_EXEC_WAIT_TIMEOUT_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| Duration::from_secs(DEFAULT_RUNNER_EXEC_WAIT_TIMEOUT_SECS))
 }
 
 pub(crate) fn canonical_daemon_body<'a>(data: &'a Value, context: &str) -> Result<&'a Value> {
@@ -1432,6 +1498,63 @@ mod tests {
         let data = json!({ "body": { "job": { "id": "job-1" } } });
         let body = canonical_daemon_body(&data, "daemon exec response").expect("body");
         assert_eq!(body["job"]["id"], "job-1");
+    }
+
+    #[test]
+    fn runner_exec_wait_timeout_defaults_to_controller_timeout_budget() {
+        std::env::remove_var(RUNNER_EXEC_WAIT_TIMEOUT_ENV);
+        assert_eq!(runner_exec_wait_timeout(), Duration::from_secs(20 * 60));
+    }
+
+    #[test]
+    fn timeout_cleanup_requests_remote_job_cancellation() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let addr = listener.local_addr().expect("addr");
+        let seen_path = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let server_seen_path = seen_path.clone();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut buffer = [0; 4096];
+            let bytes = std::io::Read::read(&mut stream, &mut buffer).expect("read request");
+            let request = String::from_utf8_lossy(&buffer[..bytes]);
+            let request_line = request.lines().next().expect("request line");
+            *server_seen_path.lock().expect("seen path") = request_line.to_string();
+            let body = serde_json::json!({
+                "success": true,
+                "data": { "body": { "job": { "status": "cancelled" } } }
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            std::io::Write::write_all(&mut stream, response.as_bytes()).expect("write response");
+        });
+
+        let client = Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .expect("client");
+        let err = cancel_daemon_job_after_timeout(
+            &client,
+            &format!("http://{addr}"),
+            "homeboy-lab",
+            "job-123",
+            "runner daemon job",
+        );
+
+        assert!(err.message.contains("runner daemon job job-123"));
+        assert!(err.message.contains("homeboy-lab"));
+        assert!(err.message.contains("cancellation was requested"));
+        assert!(err
+            .hints
+            .iter()
+            .any(|hint| hint.message.contains("homeboy http get http://")));
+        assert_eq!(
+            seen_path.lock().expect("seen path").as_str(),
+            "POST /jobs/job-123/cancel HTTP/1.1"
+        );
     }
 
     #[test]
