@@ -48,6 +48,8 @@ pub struct ChildProcessIdentity {
 pub struct ExtensionChildResourceSummary {
     #[serde(flatten)]
     pub child: ChildProcessIdentity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
     pub started_at: String,
     pub finished_at: String,
     pub duration_ms: u128,
@@ -67,6 +69,8 @@ pub struct ExtensionChildResourceSample {
     pub elapsed_ms: u128,
     pub timestamp: String,
     pub root_pid: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
     pub rss_bytes: u64,
     pub cpu_percent: f64,
     pub child_count: usize,
@@ -220,7 +224,7 @@ pub fn record_extension_child_resource(
     })
 }
 
-fn read_extension_child_resources(run_dir: &RunDir) -> Vec<ExtensionChildResourceSummary> {
+pub fn read_extension_child_resources(run_dir: &RunDir) -> Vec<ExtensionChildResourceSummary> {
     let dir = run_dir.step_file(run_dir::files::EXTENSION_CHILDREN_DIR);
     let mut summaries = Vec::new();
 
@@ -420,6 +424,7 @@ mod tests {
                         root_pid: 99,
                         command_label: "runner".to_string(),
                     },
+                    phase: None,
                     started_at: Utc::now().to_rfc3339(),
                     finished_at: Utc::now().to_rfc3339(),
                     duration_ms: 10,
@@ -478,6 +483,7 @@ mod tests {
                     root_pid: 123,
                     command_label: "extension-runner".to_string(),
                 },
+                phase: Some("install".to_string()),
                 started_at: "2026-04-30T00:00:00+00:00".to_string(),
                 finished_at: "2026-04-30T00:00:00.100+00:00".to_string(),
                 duration_ms: 100,
@@ -496,6 +502,10 @@ mod tests {
                 .expect("write resource summary");
 
             assert_eq!(summary.extension_children, vec![child]);
+            assert_eq!(
+                summary.extension_children[0].phase.as_deref(),
+                Some("install")
+            );
             let output = run_dir
                 .read_step_output(run_dir::files::RESOURCE_SUMMARY)
                 .expect("resource summary json");

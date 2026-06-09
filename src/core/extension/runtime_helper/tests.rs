@@ -584,6 +584,53 @@ await homeboyWriteBenchScenarioInventory('{results}', 'demo', 9, [
 }
 
 #[test]
+fn bench_js_helper_records_phase_resource_summary() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let helper_path = dir.path().join("bench-helper.mjs");
+    let runner_path = dir.path().join("runner.mjs");
+    let run_dir = dir.path().join("run");
+    std::fs::create_dir_all(&run_dir).expect("run dir");
+    std::fs::write(&helper_path, assets::BENCH_HELPER_JS).expect("write helper");
+    std::fs::write(
+        &runner_path,
+        r#"import { homeboyRunBenchPhase } from './bench-helper.mjs';
+
+const result = await homeboyRunBenchPhase('install', process.execPath, ['-e', 'setTimeout(() => {}, 25)'], {
+    sampleIntervalMs: 10,
+});
+if (result.code !== 0) throw new Error(`phase command failed: ${result.code}`);
+"#,
+    )
+    .expect("write runner");
+
+    let output = std::process::Command::new("node")
+        .arg(&runner_path)
+        .env("HOMEBOY_RUN_DIR", &run_dir)
+        .output()
+        .expect("run node");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let children_dir = run_dir.join("extension-children");
+    let child_file = std::fs::read_dir(&children_dir)
+        .expect("children dir")
+        .flatten()
+        .find(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("json"))
+        .expect("phase resource file")
+        .path();
+    let value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(child_file).expect("read child resource"))
+            .expect("json");
+    assert_eq!(value["phase"], "install");
+    assert_eq!(value["command_label"].as_str().is_some(), true);
+    assert!(value["samples"].as_array().is_some_and(|samples| !samples.is_empty()));
+    assert_eq!(value["samples"][0]["phase"], "install");
+}
+
+#[test]
 fn bench_php_helper_documents_inventory_selection_and_artifact_helpers() {
     assert!(assets::BENCH_HELPER_PHP.contains("function homeboy_bench_scenario_selected"));
     assert!(assets::BENCH_HELPER_PHP.contains("function homeboy_bench_scenario_inventory_envelope"));
