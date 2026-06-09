@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.227.3] - 2026-06-09
+
+### Changed
+- name PR verification labels
+- name PR body AI model fallback
+- clarify PR verification bullets
+- centralize PR body empty labels
+- reuse proof gate status labels
+- remove stale corpus import
+
 ## [0.227.2] - 2026-06-09
 
 ### Changed
