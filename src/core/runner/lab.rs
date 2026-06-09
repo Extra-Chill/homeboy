@@ -34,7 +34,8 @@ use super::lab_selection::{
     LabRunnerPreparation, LabRunnerSelection,
 };
 use super::lab_workspaces::{
-    lab_extra_workspaces, lab_workspace_mapping_metadata, provider_config_extra_workspaces,
+    lab_extra_workspaces, lab_workspace_mapping_metadata,
+    preflight_provider_config_source_cli_dependencies, provider_config_extra_workspaces,
     sync_extra_lab_workspaces, workspace_mapping_entry, workspace_mapping_entry_for_git_dependency,
 };
 
@@ -517,6 +518,10 @@ fn run_lab_offload_inner(
             remote: entry.remote_path().to_string(),
         })
         .collect();
+    preflight_provider_config_source_cli_dependencies(
+        &changed_since_preflight.args,
+        &synced.excludes,
+    )?;
     let remapped_args = remap_provider_config_in_args(&changed_since_preflight.args, &path_remaps);
 
     let mut command = command_prefix.argv;
