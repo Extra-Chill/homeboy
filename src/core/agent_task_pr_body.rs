@@ -7,6 +7,7 @@ use crate::core::proof::{
 
 const NONE_RECORDED: &str = "none recorded";
 const NONE_RECORDED_BULLET: &str = "- none recorded";
+const AI_MODEL_NOT_RECORDED: &str = "not recorded by provider metadata";
 
 pub(crate) fn render_pr_body(
     options: &AgentTaskPrFinalizationOptions,
@@ -36,7 +37,7 @@ pub(crate) fn render_pr_body(
             .evidence
             .ai_model
             .as_deref()
-            .unwrap_or("not recorded by provider metadata"),
+            .unwrap_or(AI_MODEL_NOT_RECORDED),
         options.ai_used_for
     )
 }
