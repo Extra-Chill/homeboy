@@ -414,6 +414,7 @@ fn run_lab_offload_inner(
             path: source_path.display().to_string(),
             mode: sync_mode,
             changed_since_base: changed_since_preflight.resolved_base.clone(),
+            snapshot_includes: Vec::new(),
         },
     )?
     .0;

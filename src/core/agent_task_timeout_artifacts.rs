@@ -253,6 +253,7 @@ pub(crate) fn is_empty_patch_artifact(artifact: &AgentTaskArtifact) -> bool {
 fn artifact_has_patch_shape(artifact: &AgentTaskArtifact) -> bool {
     artifact.kind == "patch"
         || artifact.kind == "diff"
+        || artifact.kind == "codebox-patch"
         || artifact.mime.as_deref() == Some("text/x-patch")
         || artifact.mime.as_deref() == Some("text/x-diff")
         || artifact.metadata.get("role").and_then(Value::as_str) == Some("patch")

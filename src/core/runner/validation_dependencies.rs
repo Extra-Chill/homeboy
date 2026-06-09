@@ -474,6 +474,7 @@ mod tests {
                     path: source.display().to_string(),
                     mode: RunnerWorkspaceSyncMode::Snapshot,
                     changed_since_base: None,
+                    snapshot_includes: Vec::new(),
                 },
             )
             .expect("sync workspace");
@@ -545,6 +546,7 @@ mod tests {
                     path: source.display().to_string(),
                     mode: RunnerWorkspaceSyncMode::Snapshot,
                     changed_since_base: None,
+                    snapshot_includes: Vec::new(),
                 },
             )
             .expect("sync workspace");
@@ -616,6 +618,7 @@ mod tests {
                     path: source.display().to_string(),
                     mode: RunnerWorkspaceSyncMode::Snapshot,
                     changed_since_base: None,
+                    snapshot_includes: Vec::new(),
                 },
             )
             .expect("sync workspace");
@@ -684,6 +687,7 @@ mod tests {
                     path: source.display().to_string(),
                     mode: RunnerWorkspaceSyncMode::Snapshot,
                     changed_since_base: None,
+                    snapshot_includes: Vec::new(),
                 },
             )
             .expect_err("failed dependency build should fail sync");
@@ -760,6 +764,7 @@ mod tests {
                     path: source.display().to_string(),
                     mode: RunnerWorkspaceSyncMode::Snapshot,
                     changed_since_base: None,
+                    snapshot_includes: Vec::new(),
                 },
             )
             .expect("sync workspace");

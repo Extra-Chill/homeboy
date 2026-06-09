@@ -54,6 +54,7 @@ pub(super) fn sync_lab_offload_rigs(
                 path: metadata.package_path,
                 mode: RunnerWorkspaceSyncMode::Snapshot,
                 changed_since_base: None,
+                snapshot_includes: Vec::new(),
             },
         )?
         .0;
