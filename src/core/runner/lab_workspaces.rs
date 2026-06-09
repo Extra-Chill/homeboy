@@ -161,49 +161,13 @@ pub(super) fn provider_config_extra_workspaces(
     let mut seen = BTreeSet::new();
     let mut workspaces: Vec<ExtraLabWorkspace> = Vec::new();
     for candidate in provider_config_candidate_paths(&value) {
-        let expanded = shellexpand::tilde(&candidate).to_string();
-        let path = Path::new(&expanded);
-        let (workspace_path, snapshot_includes, bootstrap_node_dependencies) = if path.is_dir() {
-            (path.to_path_buf(), Vec::new(), false)
-        } else if path.is_file() {
-            let workspace_path = containing_checkout_or_parent(path)?;
-            let snapshot_includes = provider_config_file_snapshot_includes(&workspace_path, path);
-            (
-                workspace_path,
-                snapshot_includes,
-                is_node_cli_file(path) && source_cli_workspace_has_package_lock(path),
-            )
-        } else {
-            continue;
-        };
-        let canon = match workspace_path.canonicalize() {
-            Ok(canon) => canon,
-            Err(_) => continue,
-        };
-        // The primary workspace (and paths inside it) are already synced.
-        if canon == source_canon || canon.starts_with(&source_canon) {
-            continue;
-        }
-        if !seen.insert(canon.clone()) {
-            if let Some(existing) = workspaces
-                .iter_mut()
-                .find(|workspace| workspace.path == canon)
-            {
-                for include in snapshot_includes {
-                    if !existing.snapshot_includes.contains(&include) {
-                        existing.snapshot_includes.push(include);
-                    }
-                }
-                existing.bootstrap_node_dependencies |= bootstrap_node_dependencies;
-            }
-            continue;
-        }
-        workspaces.push(ExtraLabWorkspace {
-            role: "provider_config".to_string(),
-            path: canon,
-            snapshot_includes,
-            bootstrap_node_dependencies,
-        });
+        add_candidate_extra_workspace(
+            &candidate,
+            "provider_config",
+            &source_canon,
+            &mut seen,
+            &mut workspaces,
+        )?;
     }
     Ok(workspaces)
 }
@@ -218,33 +182,50 @@ pub(super) fn agent_task_plan_extra_workspaces(
     let Some(spec) = agent_task_plan_spec(args) else {
         return Ok(Vec::new());
     };
-    let Some(path) = spec.strip_prefix('@') else {
-        return Ok(Vec::new());
-    };
-    let expanded = shellexpand::tilde(path).to_string();
-    let path = Path::new(&expanded);
-    if !path.is_file() {
-        return Ok(Vec::new());
-    }
-
-    let workspace_path = containing_checkout_or_parent(path)?;
     let source_canon = source_path
         .canonicalize()
         .unwrap_or_else(|_| source_path.to_path_buf());
-    let canon = match workspace_path.canonicalize() {
-        Ok(canon) => canon,
-        Err(_) => return Ok(Vec::new()),
-    };
-    if canon == source_canon || canon.starts_with(&source_canon) {
-        return Ok(Vec::new());
+    let mut seen = BTreeSet::new();
+    let mut workspaces = Vec::new();
+
+    if let Some(path) = spec.strip_prefix('@') {
+        let expanded = shellexpand::tilde(path).to_string();
+        let path = Path::new(&expanded);
+        if path.is_file() {
+            let workspace_path = containing_checkout_or_parent(path)?;
+            if let Ok(canon) = workspace_path.canonicalize() {
+                if canon != source_canon && !canon.starts_with(&source_canon) {
+                    seen.insert(canon.clone());
+                    workspaces.push(ExtraLabWorkspace {
+                        role: "agent_task_plan".to_string(),
+                        path: canon,
+                        snapshot_includes: Vec::new(),
+                        bootstrap_node_dependencies: false,
+                    });
+                }
+            }
+        }
     }
 
-    Ok(vec![ExtraLabWorkspace {
-        role: "agent_task_plan".to_string(),
-        path: canon,
-        snapshot_includes: Vec::new(),
-        bootstrap_node_dependencies: false,
-    }])
+    let raw = match crate::core::config::read_json_spec_to_string(&spec) {
+        Ok(raw) => raw,
+        Err(_) => return Ok(workspaces),
+    };
+    let value: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(value) => value,
+        Err(_) => return Ok(workspaces),
+    };
+    for candidate in provider_config_candidate_paths(&value) {
+        add_candidate_extra_workspace(
+            &candidate,
+            "agent_task_plan_config",
+            &source_canon,
+            &mut seen,
+            &mut workspaces,
+        )?;
+    }
+
+    Ok(workspaces)
 }
 
 pub(super) fn preflight_provider_config_source_cli_dependencies(
@@ -341,6 +322,59 @@ fn provider_config_candidate_paths(value: &serde_json::Value) -> Vec<String> {
     let mut paths = Vec::new();
     collect_provider_config_candidate_paths(value, &mut paths);
     paths
+}
+
+fn add_candidate_extra_workspace(
+    candidate: &str,
+    role: &str,
+    source_canon: &Path,
+    seen: &mut BTreeSet<PathBuf>,
+    workspaces: &mut Vec<ExtraLabWorkspace>,
+) -> Result<()> {
+    let expanded = shellexpand::tilde(candidate).to_string();
+    let path = Path::new(&expanded);
+    let (workspace_path, snapshot_includes, bootstrap_node_dependencies) = if path.is_dir() {
+        (path.to_path_buf(), Vec::new(), false)
+    } else if path.is_file() {
+        let workspace_path = containing_checkout_or_parent(path)?;
+        let snapshot_includes = provider_config_file_snapshot_includes(&workspace_path, path);
+        (
+            workspace_path,
+            snapshot_includes,
+            is_node_cli_file(path) && source_cli_workspace_has_package_lock(path),
+        )
+    } else {
+        return Ok(());
+    };
+    let canon = match workspace_path.canonicalize() {
+        Ok(canon) => canon,
+        Err(_) => return Ok(()),
+    };
+    // The primary workspace (and paths inside it) are already synced.
+    if canon == source_canon || canon.starts_with(source_canon) {
+        return Ok(());
+    }
+    if !seen.insert(canon.clone()) {
+        if let Some(existing) = workspaces
+            .iter_mut()
+            .find(|workspace| workspace.path == canon)
+        {
+            for include in snapshot_includes {
+                if !existing.snapshot_includes.contains(&include) {
+                    existing.snapshot_includes.push(include);
+                }
+            }
+            existing.bootstrap_node_dependencies |= bootstrap_node_dependencies;
+        }
+        return Ok(());
+    }
+    workspaces.push(ExtraLabWorkspace {
+        role: role.to_string(),
+        path: canon,
+        snapshot_includes,
+        bootstrap_node_dependencies,
+    });
+    Ok(())
 }
 
 fn collect_provider_config_candidate_paths(value: &serde_json::Value, paths: &mut Vec<String>) {
@@ -778,12 +812,32 @@ mod provider_config_candidate_paths_tests {
         let controller = tempfile::tempdir().expect("controller");
         let source = controller.path().join("primary");
         let planner = controller.path().join("plan-owner");
+        let codebox = controller.path().join("wp-codebox");
+        let codebox_bin = codebox.join("packages/cli/dist/index.js");
         let plan = planner.join(".ci/site-generation-loop.agent-task-plan.json");
         std::fs::create_dir_all(&source).expect("source dir");
         std::fs::create_dir_all(plan.parent().unwrap()).expect("plan dir");
+        std::fs::create_dir_all(codebox_bin.parent().unwrap()).expect("codebox cli dir");
+        std::fs::write(&codebox_bin, "#!/usr/bin/env node\n").expect("codebox bin");
+        std::fs::write(codebox.join("package-lock.json"), "{}\n").expect("package lock");
         std::fs::write(
             &plan,
-            "{\"schema\":\"homeboy/agent-task-plan/v1\",\"tasks\":[]}\n",
+            serde_json::json!({
+                "schema": "homeboy/agent-task-plan/v1",
+                "plan_id": "site-generation-loop",
+                "tasks": [{
+                    "task_id": "task-1",
+                    "executor": {
+                        "backend": "wp-codebox",
+                        "config": {
+                            "wp_codebox_bin": codebox_bin,
+                            "artifact_root": planner.join("artifacts")
+                        }
+                    },
+                    "instructions": "test"
+                }]
+            })
+            .to_string(),
         )
         .expect("plan file");
         git(&planner, &["init", "-b", "main"]);
@@ -791,6 +845,11 @@ mod provider_config_candidate_paths_tests {
         git(&planner, &["config", "user.name", "Homeboy Test"]);
         git(&planner, &["add", "."]);
         git(&planner, &["commit", "-m", "initial"]);
+        git(&codebox, &["init", "-b", "main"]);
+        git(&codebox, &["config", "user.email", "test@example.com"]);
+        git(&codebox, &["config", "user.name", "Homeboy Test"]);
+        git(&codebox, &["add", "."]);
+        git(&codebox, &["commit", "-m", "initial"]);
 
         let args = vec![
             "homeboy".to_string(),
@@ -802,11 +861,17 @@ mod provider_config_candidate_paths_tests {
 
         let workspaces = agent_task_plan_extra_workspaces(&args, &source).expect("workspaces");
 
-        assert_eq!(workspaces.len(), 1);
+        assert_eq!(workspaces.len(), 2);
         assert_eq!(workspaces[0].role, "agent_task_plan");
         assert_eq!(workspaces[0].path, planner.canonicalize().unwrap());
         assert!(workspaces[0].snapshot_includes.is_empty());
         assert!(!workspaces[0].bootstrap_node_dependencies);
+        assert_eq!(workspaces[1].role, "agent_task_plan_config");
+        assert_eq!(workspaces[1].path, codebox.canonicalize().unwrap());
+        assert!(workspaces[1]
+            .snapshot_includes
+            .contains(&"packages/cli/dist/**".to_string()));
+        assert!(workspaces[1].bootstrap_node_dependencies);
     }
 
     #[test]
