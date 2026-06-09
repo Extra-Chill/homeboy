@@ -46,6 +46,83 @@ pub struct AgentTaskPrEvidence {
     pub artifact_refs: Vec<String>,
     pub attempt_summary: String,
     pub ai_tool: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai_model: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "AgentTaskPrSourceRelationship::is_empty"
+    )]
+    pub source_relationship: AgentTaskPrSourceRelationship,
+    #[serde(default, skip_serializing_if = "AgentTaskPrVerification::is_empty")]
+    pub verification: AgentTaskPrVerification,
+    #[serde(
+        default,
+        skip_serializing_if = "AgentTaskPrRuntimeGuardrails::is_empty"
+    )]
+    pub runtime_guardrails: AgentTaskPrRuntimeGuardrails,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskPrSourceRelationship {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub related_finding_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_packet_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub supersedes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub depends_on: Vec<String>,
+}
+
+impl AgentTaskPrSourceRelationship {
+    pub fn is_empty(&self) -> bool {
+        self.related_finding_id.is_none()
+            && self.source_packet_id.is_none()
+            && self.change_kind.is_none()
+            && self.supersedes.is_empty()
+            && self.depends_on.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskPrVerification {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub targeted_checks_run: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub targeted_checks_unavailable: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ci_expected: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manual_reviewer_check: Option<String>,
+}
+
+impl AgentTaskPrVerification {
+    pub fn is_empty(&self) -> bool {
+        self.targeted_checks_run.is_empty()
+            && self.targeted_checks_unavailable.is_none()
+            && self.ci_expected.is_empty()
+            && self.manual_reviewer_check.is_none()
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskPrRuntimeGuardrails {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why_not_broader_than_packet: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence_discriminators: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nearby_contracts_preserved: Vec<String>,
+}
+
+impl AgentTaskPrRuntimeGuardrails {
+    pub fn is_empty(&self) -> bool {
+        self.why_not_broader_than_packet.is_none()
+            && self.evidence_discriminators.is_empty()
+            && self.nearby_contracts_preserved.is_empty()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -526,6 +603,48 @@ mod tests {
     }
 
     #[test]
+    fn pr_body_reports_iterator_evidence_metadata() {
+        let mut backend = MockBackend {
+            changed_files: vec!["src/lib.rs".to_string()],
+            ..Default::default()
+        };
+        let mut options = options();
+        options.evidence.source_relationship = AgentTaskPrSourceRelationship {
+            related_finding_id: Some("finding-123".to_string()),
+            source_packet_id: Some("packet-456".to_string()),
+            change_kind: Some("runtime-fix".to_string()),
+            supersedes: vec!["https://github.com/org/repo/pull/1".to_string()],
+            depends_on: vec!["https://github.com/org/repo/pull/2".to_string()],
+        };
+        options.evidence.verification = AgentTaskPrVerification {
+            targeted_checks_run: vec!["cargo test pr_body".to_string()],
+            targeted_checks_unavailable: None,
+            ci_expected: vec!["Homeboy CI".to_string()],
+            manual_reviewer_check: None,
+        };
+        options.evidence.runtime_guardrails = AgentTaskPrRuntimeGuardrails {
+            why_not_broader_than_packet: Some("Preserves class and href gates.".to_string()),
+            evidence_discriminators: vec!["class=brand".to_string(), "href=#top".to_string()],
+            nearby_contracts_preserved: vec!["is_branded_inline_anchor".to_string()],
+        };
+
+        finalize_pr_with_backend(options, &mut backend).expect("finalized");
+
+        assert!(backend.last_body.contains("## Source relationship"));
+        assert!(backend.last_body.contains("finding-123"));
+        assert!(backend.last_body.contains("## Verification capability"));
+        assert!(backend
+            .last_body
+            .contains("`targeted_checks_run`: `cargo test pr_body`"));
+        assert!(backend.last_body.contains("## Runtime guardrails"));
+        assert!(backend
+            .last_body
+            .contains("Preserves class and href gates."));
+        assert!(backend.last_body.contains("## Sibling PR relationship"));
+        assert!(backend.last_body.contains("- **Model:** GPT-5.5"));
+    }
+
+    #[test]
     fn updates_existing_pr_for_same_branch() {
         let mut backend = MockBackend {
             changed_files: vec!["src/lib.rs".to_string()],
@@ -622,6 +741,10 @@ mod tests {
                 artifact_refs: vec!["artifact://aggregate.json".to_string()],
                 attempt_summary: "attempt 1 passed deterministic gates".to_string(),
                 ai_tool: "OpenCode (GPT-5.5)".to_string(),
+                ai_model: Some("GPT-5.5".to_string()),
+                source_relationship: AgentTaskPrSourceRelationship::default(),
+                verification: AgentTaskPrVerification::default(),
+                runtime_guardrails: AgentTaskPrRuntimeGuardrails::default(),
             },
             ai_used_for: "Drafted implementation and tests; Chris reviews and owns the change."
                 .to_string(),
