@@ -407,6 +407,8 @@ mod implementation {
             "browser_metrics",
             "lifecycle_metrics",
             "dom_lifecycle",
+            "summary",
+            "files",
             "console_errors",
             "page_errors",
             "errors",
@@ -438,7 +440,12 @@ mod implementation {
             source_artifact: Some(source.clone()),
             ..BrowserEvidenceSample::default()
         };
-        sample.assertions = assertion_stats(object.get("assertions"));
+        sample.assertions = assertion_stats(object.get("assertions").or_else(|| {
+            object
+                .get("summary")
+                .and_then(Value::as_object)
+                .and_then(|summary| summary.get("assertions"))
+        }));
         collect_requests(object, &mut sample);
         collect_metric_object(
             object.get("browser_metrics"),
@@ -447,6 +454,14 @@ mod implementation {
         );
         collect_metric_object(
             object.get("metrics"),
+            &mut sample.browser_metrics,
+            &browser_metric_names(),
+        );
+        collect_metric_object(
+            object
+                .get("summary")
+                .and_then(Value::as_object)
+                .and_then(|summary| summary.get("metrics")),
             &mut sample.browser_metrics,
             &browser_metric_names(),
         );
@@ -466,9 +481,17 @@ mod implementation {
             &mut sample.lifecycle_metrics,
             &lifecycle_metric_names(),
         );
-        sample.console_errors = error_count(object, &["console_errors", "consoleErrors"]);
-        sample.page_errors = error_count(object, &["page_errors", "pageErrors", "errors"]);
+        if let Some(summary) = object.get("summary").and_then(Value::as_object) {
+            collect_wp_codebox_summary(summary, &mut sample);
+        }
+        sample.console_errors = sample
+            .console_errors
+            .or_else(|| error_count(object, &["console_errors", "consoleErrors"]));
+        sample.page_errors = sample
+            .page_errors
+            .or_else(|| error_count(object, &["page_errors", "pageErrors", "errors"]));
         collect_artifacts(object, &mut sample.artifacts);
+        collect_wp_codebox_files(object.get("files"), &mut sample.artifacts);
         if sample.browser_metrics.is_empty() && sample.lifecycle_metrics.is_empty() {
             sample
                 .notes
@@ -809,6 +832,27 @@ mod implementation {
         }
     }
 
+    fn collect_wp_codebox_summary(
+        summary: &Map<String, Value>,
+        sample: &mut BrowserEvidenceSample,
+    ) {
+        if sample.request_total.is_none() {
+            sample.request_total = first_number(summary, &["networkEvents"]);
+        }
+        sample.page_errors = sample
+            .page_errors
+            .or_else(|| first_number(summary, &["errors"]));
+        for (metric, keys) in [
+            ("browser_console_message_count", ["consoleMessages"]),
+            ("browser_page_error_count", ["errors"]),
+            ("browser_network_event_count", ["networkEvents"]),
+        ] {
+            if let Some(value) = first_number(summary, &keys) {
+                sample.browser_metrics.insert(metric.to_string(), value);
+            }
+        }
+    }
+
     fn collect_artifacts(object: &Map<String, Value>, artifacts: &mut BTreeSet<ArtifactRef>) {
         let Some(values) = object.get("artifacts").and_then(Value::as_array) else {
             return;
@@ -819,6 +863,35 @@ mod implementation {
             let target = first_value_string(artifact, &["url", "href", "path", "target"]);
             if let Some(target) = target {
                 artifacts.insert(ArtifactRef { label, target });
+            }
+        }
+    }
+
+    fn collect_wp_codebox_files(value: Option<&Value>, artifacts: &mut BTreeSet<ArtifactRef>) {
+        let Some(files) = value.and_then(Value::as_object) else {
+            return;
+        };
+        for (label, value) in files {
+            match value {
+                Value::String(target) if !target.is_empty() => {
+                    artifacts.insert(ArtifactRef {
+                        label: label.clone(),
+                        target: target.clone(),
+                    });
+                }
+                Value::Array(values) => {
+                    for target in values
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .filter(|target| !target.is_empty())
+                    {
+                        artifacts.insert(ArtifactRef {
+                            label: label.clone(),
+                            target: target.to_string(),
+                        });
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -944,6 +1017,13 @@ mod implementation {
                 out.insert((*name).to_string(), value);
             }
         }
+        for (name, value) in object {
+            if name.starts_with("browser_") {
+                if let Some(value) = value.as_f64() {
+                    out.insert(name.clone(), value);
+                }
+            }
+        }
     }
 
     fn collect_count_map(value: Option<&Value>, out: &mut BTreeMap<String, f64>) {
@@ -1064,6 +1144,34 @@ mod implementation {
             "load_ms",
             "duration_ms",
             "ready_ms",
+            "browser_peak_used_js_heap_bytes",
+            "browser_final_used_js_heap_bytes",
+            "browser_checkpoint_count",
+            "browser_dom_node_count",
+            "browser_iframe_count",
+            "browser_resource_count",
+            "browser_transfer_size_bytes",
+            "browser_nav_duration_ms",
+            "browser_dom_content_loaded_ms",
+            "browser_load_event_ms",
+            "browser_response_start_ms",
+            "browser_response_end_ms",
+            "browser_request_start_ms",
+            "browser_ttfb_ms",
+            "browser_redirect_ms",
+            "browser_first_paint_ms",
+            "browser_fcp_ms",
+            "browser_lcp_ms",
+            "browser_lcp_size",
+            "browser_long_task_count",
+            "browser_long_task_total_ms",
+            "browser_cls",
+            "browser_layout_shift_count",
+            "browser_layout_shift_max",
+            "browser_evidence_summary_present",
+            "browser_console_message_count",
+            "browser_page_error_count",
+            "browser_network_event_count",
         ]
     }
 
