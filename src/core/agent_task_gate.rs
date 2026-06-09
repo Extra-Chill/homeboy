@@ -9,15 +9,18 @@ use crate::core::gate::{
     HomeboyGateKind, HomeboyGateResult, HomeboyGateRevealPolicy, HomeboyGateStatus,
     HomeboyGateVisibility,
 };
+use crate::core::plan::{PlanStep, PlanStepStatus, PlanValues};
 use crate::core::{Error, Result};
 
 pub const AGENT_TASK_GATE_REPORT_SCHEMA: &str = "homeboy/agent-task-gate-report/v1";
 const TASK_AFFECTING_ENV_VARS: &[&str] = &["STUDIO_RUNTIME"];
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgentTaskGateReport {
     #[serde(default = "gate_report_schema")]
     pub schema: String,
+    #[serde(skip, default = "default_gate_step")]
+    pub step: PlanStep,
     pub id: String,
     #[serde(default)]
     pub visibility: AgentTaskGateVisibility,
@@ -93,6 +96,66 @@ pub struct AgentTaskGateFailureEvidence {
     pub agent_feedback: String,
 }
 
+impl AgentTaskGateReport {
+    pub fn new(
+        id: impl Into<String>,
+        command: Vec<String>,
+        exit_code: i32,
+        stdout: impl Into<String>,
+        stderr: impl Into<String>,
+        failure_evidence: Option<AgentTaskGateFailureEvidence>,
+        visibility: AgentTaskGateVisibility,
+        reveal_policy: AgentTaskGateRevealPolicy,
+        environment: AgentTaskGateEnvironment,
+    ) -> Self {
+        let id = id.into();
+        let status = if exit_code == 0 {
+            AgentTaskGateStatus::Succeeded
+        } else {
+            AgentTaskGateStatus::Failed
+        };
+        let gate_result = HomeboyGateResult::new(
+            id.clone(),
+            id.clone(),
+            HomeboyGateKind::Command,
+            match status {
+                AgentTaskGateStatus::Succeeded => HomeboyGateStatus::Passed,
+                AgentTaskGateStatus::Failed => HomeboyGateStatus::Failed,
+            },
+        )
+        .visibility(visibility.into())
+        .reveal_policy(reveal_policy.into())
+        .retryable(status == AgentTaskGateStatus::Failed);
+        let step = PlanStep::builder(
+            id.clone(),
+            "agent_task.gate",
+            match status {
+                AgentTaskGateStatus::Succeeded => PlanStepStatus::Success,
+                AgentTaskGateStatus::Failed => PlanStepStatus::Failed,
+            },
+        )
+        .inputs(PlanValues::new().json("command", &command))
+        .output_value("exit_code", serde_json::json!(exit_code))
+        .gate_result(gate_result)
+        .build();
+
+        Self {
+            schema: AGENT_TASK_GATE_REPORT_SCHEMA.to_string(),
+            step,
+            id,
+            visibility,
+            reveal_policy,
+            status,
+            command,
+            exit_code,
+            stdout: stdout.into(),
+            stderr: stderr.into(),
+            failure_evidence,
+            environment,
+        }
+    }
+}
+
 pub(crate) fn run_gate_command(
     cwd: &Path,
     index: usize,
@@ -130,27 +193,20 @@ pub(crate) fn run_gate_command_with_policy(
     let exit_code = output.status.code().unwrap_or(1);
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    let status = if output.status.success() {
-        AgentTaskGateStatus::Succeeded
-    } else {
-        AgentTaskGateStatus::Failed
-    };
-    let failure_evidence = (status == AgentTaskGateStatus::Failed)
+    let failure_evidence = (!output.status.success())
         .then(|| gate_failure_evidence(command, exit_code, &stdout, &stderr));
 
-    Ok(AgentTaskGateReport {
-        schema: AGENT_TASK_GATE_REPORT_SCHEMA.to_string(),
-        id: format!("gate-{index}"),
-        visibility,
-        reveal_policy,
-        status,
-        command: command_vec,
+    Ok(AgentTaskGateReport::new(
+        format!("gate-{index}"),
+        command_vec,
         exit_code,
         stdout,
         stderr,
         failure_evidence,
+        visibility,
+        reveal_policy,
         environment,
-    })
+    ))
 }
 
 fn selected_gate_environment(command: &str) -> AgentTaskGateEnvironment {
@@ -178,6 +234,10 @@ fn command_mentions_env(command: &str, name: &str) -> bool {
 
 fn gate_report_schema() -> String {
     AGENT_TASK_GATE_REPORT_SCHEMA.to_string()
+}
+
+fn default_gate_step() -> PlanStep {
+    PlanStep::builder("gate", "agent_task.gate", PlanStepStatus::Skipped).build()
 }
 
 fn gate_failure_evidence(
@@ -384,7 +444,7 @@ mod tests {
             "printf 'line one\nline two\n'; printf 'boom\n' >&2; exit 42",
         )
         .expect("gate report");
-        let evidence = report.failure_evidence.expect("failure evidence");
+        let evidence = report.failure_evidence.as_ref().expect("failure evidence");
 
         assert_eq!(report.status, AgentTaskGateStatus::Failed);
         assert_eq!(report.exit_code, 42);

@@ -708,19 +708,17 @@ mod tests {
                 visibility,
                 reveal_policy,
             ));
-            Ok(AgentTaskGateReport {
-                schema: crate::core::agent_task_gate::AGENT_TASK_GATE_REPORT_SCHEMA.to_string(),
-                id: format!("gate-{index}"),
+            Ok(AgentTaskGateReport::new(
+                format!("gate-{index}"),
+                vec!["sh".to_string(), "-lc".to_string(), command.to_string()],
+                0,
+                String::new(),
+                String::new(),
+                None,
                 visibility,
                 reveal_policy,
-                status: AgentTaskGateStatus::Succeeded,
-                command: vec!["sh".to_string(), "-lc".to_string(), command.to_string()],
-                exit_code: 0,
-                stdout: String::new(),
-                stderr: String::new(),
-                failure_evidence: None,
-                environment: crate::core::agent_task_gate::AgentTaskGateEnvironment::default(),
-            })
+                crate::core::agent_task_gate::AgentTaskGateEnvironment::default(),
+            ))
         }
     }
 

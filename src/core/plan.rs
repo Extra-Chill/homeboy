@@ -9,6 +9,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::core::gate::HomeboyGateResult;
+use crate::core::proof::HomeboyProof;
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct PlanValues {
@@ -78,6 +79,8 @@ pub struct HomeboyPlan {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifacts: Vec<PlanArtifact>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub proof: Option<HomeboyProof>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<PlanSummary>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
@@ -100,6 +103,7 @@ impl HomeboyPlan {
             policy: HashMap::new(),
             steps: Vec::new(),
             artifacts: Vec::new(),
+            proof: None,
             summary: None,
             warnings: Vec::new(),
             hints: Vec::new(),
@@ -120,6 +124,7 @@ impl HomeboyPlan {
             policy: HashMap::new(),
             steps: Vec::new(),
             artifacts: Vec::new(),
+            proof: None,
             summary: None,
             warnings: Vec::new(),
             hints: Vec::new(),

@@ -380,9 +380,7 @@ mod tests {
         AgentTaskExecutor, AgentTaskLimits, AgentTaskPolicy, AgentTaskWorkspace,
         AGENT_TASK_REQUEST_SCHEMA,
     };
-    use crate::core::agent_task_gate::{
-        AgentTaskGateEnvironment, AgentTaskGateFailureEvidence, AGENT_TASK_GATE_REPORT_SCHEMA,
-    };
+    use crate::core::agent_task_gate::{AgentTaskGateEnvironment, AgentTaskGateFailureEvidence};
     use crate::core::agent_task_promotion::{
         AgentTaskPromotionArtifactRef, AgentTaskPromotionSource, AGENT_TASK_PROMOTION_REPORT_SCHEMA,
     };
@@ -595,21 +593,17 @@ mod tests {
     }
 
     fn failed_gate() -> AgentTaskGateReport {
-        AgentTaskGateReport {
-            schema: AGENT_TASK_GATE_REPORT_SCHEMA.to_string(),
-            id: "gate-1".to_string(),
-            visibility: AgentTaskGateVisibility::Visible,
-            reveal_policy: AgentTaskGateRevealPolicy::FullEvidence,
-            status: AgentTaskGateStatus::Failed,
-            command: vec![
+        AgentTaskGateReport::new(
+            "gate-1",
+            vec![
                 "sh".to_string(),
                 "-lc".to_string(),
                 "cargo test agent_task_gate".to_string(),
             ],
-            exit_code: 101,
-            stdout: "running tests".to_string(),
-            stderr: "boom".to_string(),
-            failure_evidence: Some(AgentTaskGateFailureEvidence {
+            101,
+            "running tests",
+            "boom",
+            Some(AgentTaskGateFailureEvidence {
                 summary: "agent_task_gate failed".to_string(),
                 command: "cargo test agent_task_gate".to_string(),
                 exit_code: 101,
@@ -618,26 +612,42 @@ mod tests {
                 agent_feedback: "Update the patch so cargo test agent_task_gate passes."
                     .to_string(),
             }),
-            environment: AgentTaskGateEnvironment::default(),
-        }
+            AgentTaskGateVisibility::Visible,
+            AgentTaskGateRevealPolicy::FullEvidence,
+            AgentTaskGateEnvironment::default(),
+        )
+    }
+
+    fn green_gate() -> AgentTaskGateReport {
+        AgentTaskGateReport::new(
+            "gate-1",
+            vec![
+                "sh".to_string(),
+                "-lc".to_string(),
+                "cargo test".to_string(),
+            ],
+            0,
+            "ok",
+            String::new(),
+            None,
+            AgentTaskGateVisibility::Visible,
+            AgentTaskGateRevealPolicy::FullEvidence,
+            AgentTaskGateEnvironment::default(),
+        )
     }
 
     fn private_failed_gate(reveal_policy: AgentTaskGateRevealPolicy) -> AgentTaskGateReport {
-        AgentTaskGateReport {
-            schema: AGENT_TASK_GATE_REPORT_SCHEMA.to_string(),
-            id: "gate-1".to_string(),
-            visibility: AgentTaskGateVisibility::Private,
-            reveal_policy,
-            status: AgentTaskGateStatus::Failed,
-            command: vec![
+        AgentTaskGateReport::new(
+            "gate-1",
+            vec![
                 "sh".to_string(),
                 "-lc".to_string(),
                 "./hidden-heldout-check --fixture secret".to_string(),
             ],
-            exit_code: 7,
-            stdout: "secret fixture mismatch".to_string(),
-            stderr: "private evaluator stack trace".to_string(),
-            failure_evidence: Some(AgentTaskGateFailureEvidence {
+            7,
+            "secret fixture mismatch",
+            "private evaluator stack trace",
+            Some(AgentTaskGateFailureEvidence {
                 summary: "secret fixture mismatch on randomized private corpus".to_string(),
                 command: "./hidden-heldout-check --fixture secret".to_string(),
                 exit_code: 7,
@@ -645,27 +655,9 @@ mod tests {
                 stderr_tail: "private evaluator stack trace".to_string(),
                 agent_feedback: "Fix the randomized secret fixture mismatch.".to_string(),
             }),
-            environment: AgentTaskGateEnvironment::default(),
-        }
-    }
-
-    fn green_gate() -> AgentTaskGateReport {
-        AgentTaskGateReport {
-            schema: AGENT_TASK_GATE_REPORT_SCHEMA.to_string(),
-            id: "gate-1".to_string(),
-            visibility: AgentTaskGateVisibility::Visible,
-            reveal_policy: AgentTaskGateRevealPolicy::FullEvidence,
-            status: AgentTaskGateStatus::Succeeded,
-            command: vec![
-                "sh".to_string(),
-                "-lc".to_string(),
-                "cargo test".to_string(),
-            ],
-            exit_code: 0,
-            stdout: "ok".to_string(),
-            stderr: String::new(),
-            failure_evidence: None,
-            environment: AgentTaskGateEnvironment::default(),
-        }
+            AgentTaskGateVisibility::Private,
+            reveal_policy,
+            AgentTaskGateEnvironment::default(),
+        )
     }
 }
