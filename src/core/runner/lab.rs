@@ -36,7 +36,7 @@ use super::lab_selection::{
     LabRunnerPreparation, LabRunnerSelection,
 };
 use super::lab_workspaces::{
-    lab_extra_workspaces, lab_workspace_mapping_metadata,
+    agent_task_plan_extra_workspaces, lab_extra_workspaces, lab_workspace_mapping_metadata,
     preflight_provider_config_source_cli_dependencies, provider_config_extra_workspaces,
     sync_extra_lab_workspaces, workspace_mapping_entry, workspace_mapping_entry_for_git_dependency,
 };
@@ -408,6 +408,10 @@ fn run_lab_offload_inner(
     // (runtime components, provider plugins, extra mount sources) so the cook
     // config's paths resolve on the runner after remapping.
     extra_workspaces.extend(provider_config_extra_workspaces(
+        &changed_since_preflight.args,
+        &source_path,
+    )?);
+    extra_workspaces.extend(agent_task_plan_extra_workspaces(
         &changed_since_preflight.args,
         &source_path,
     )?);

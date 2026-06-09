@@ -208,6 +208,45 @@ pub(super) fn provider_config_extra_workspaces(
     Ok(workspaces)
 }
 
+/// Discover a controller-local `agent-task run-plan --plan @file` checkout so
+/// Lab offload can remap the plan path instead of asking the runner to read a
+/// controller-only filesystem path.
+pub(super) fn agent_task_plan_extra_workspaces(
+    args: &[String],
+    source_path: &Path,
+) -> Result<Vec<ExtraLabWorkspace>> {
+    let Some(spec) = agent_task_plan_spec(args) else {
+        return Ok(Vec::new());
+    };
+    let Some(path) = spec.strip_prefix('@') else {
+        return Ok(Vec::new());
+    };
+    let expanded = shellexpand::tilde(path).to_string();
+    let path = Path::new(&expanded);
+    if !path.is_file() {
+        return Ok(Vec::new());
+    }
+
+    let workspace_path = containing_checkout_or_parent(path)?;
+    let source_canon = source_path
+        .canonicalize()
+        .unwrap_or_else(|_| source_path.to_path_buf());
+    let canon = match workspace_path.canonicalize() {
+        Ok(canon) => canon,
+        Err(_) => return Ok(Vec::new()),
+    };
+    if canon == source_canon || canon.starts_with(&source_canon) {
+        return Ok(Vec::new());
+    }
+
+    Ok(vec![ExtraLabWorkspace {
+        role: "agent_task_plan".to_string(),
+        path: canon,
+        snapshot_includes: Vec::new(),
+        bootstrap_node_dependencies: false,
+    }])
+}
+
 pub(super) fn preflight_provider_config_source_cli_dependencies(
     args: &[String],
     snapshot_excludes: &[String],
@@ -270,6 +309,28 @@ fn provider_config_spec(args: &[String]) -> Option<String> {
             return iter.next().cloned();
         }
         if let Some(value) = arg.strip_prefix("--provider-config=") {
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
+fn agent_task_plan_spec(args: &[String]) -> Option<String> {
+    if args.get(1).map(String::as_str) != Some("agent-task")
+        || args.get(2).map(String::as_str) != Some("run-plan")
+    {
+        return None;
+    }
+
+    let mut iter = args.iter().skip(3).peekable();
+    while let Some(arg) = iter.next() {
+        if arg == "--" {
+            break;
+        }
+        if arg == "--plan" {
+            return iter.next().cloned();
+        }
+        if let Some(value) = arg.strip_prefix("--plan=") {
             return Some(value.to_string());
         }
     }
@@ -579,8 +640,8 @@ mod provider_config_candidate_paths_tests {
     use std::process::Command;
 
     use super::{
-        preflight_provider_config_source_cli_dependencies, provider_config_candidate_paths,
-        provider_config_extra_workspaces,
+        agent_task_plan_extra_workspaces, preflight_provider_config_source_cli_dependencies,
+        provider_config_candidate_paths, provider_config_extra_workspaces,
     };
 
     fn git(path: &Path, args: &[&str]) {
@@ -710,6 +771,66 @@ mod provider_config_candidate_paths_tests {
             .snapshot_includes
             .contains(&"packages/cli/dist/**".to_string()));
         assert!(workspaces[0].bootstrap_node_dependencies);
+    }
+
+    #[test]
+    fn agent_task_run_plan_file_path_syncs_containing_checkout() {
+        let controller = tempfile::tempdir().expect("controller");
+        let source = controller.path().join("primary");
+        let planner = controller.path().join("plan-owner");
+        let plan = planner.join(".ci/site-generation-loop.agent-task-plan.json");
+        std::fs::create_dir_all(&source).expect("source dir");
+        std::fs::create_dir_all(plan.parent().unwrap()).expect("plan dir");
+        std::fs::write(
+            &plan,
+            "{\"schema\":\"homeboy/agent-task-plan/v1\",\"tasks\":[]}\n",
+        )
+        .expect("plan file");
+        git(&planner, &["init", "-b", "main"]);
+        git(&planner, &["config", "user.email", "test@example.com"]);
+        git(&planner, &["config", "user.name", "Homeboy Test"]);
+        git(&planner, &["add", "."]);
+        git(&planner, &["commit", "-m", "initial"]);
+
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "run-plan".to_string(),
+            "--plan".to_string(),
+            format!("@{}", plan.display()),
+        ];
+
+        let workspaces = agent_task_plan_extra_workspaces(&args, &source).expect("workspaces");
+
+        assert_eq!(workspaces.len(), 1);
+        assert_eq!(workspaces[0].role, "agent_task_plan");
+        assert_eq!(workspaces[0].path, planner.canonicalize().unwrap());
+        assert!(workspaces[0].snapshot_includes.is_empty());
+        assert!(!workspaces[0].bootstrap_node_dependencies);
+    }
+
+    #[test]
+    fn agent_task_run_plan_file_inside_primary_workspace_needs_no_extra_sync() {
+        let controller = tempfile::tempdir().expect("controller");
+        let source = controller.path().join("primary");
+        let plan = source.join(".ci/site-generation-loop.agent-task-plan.json");
+        std::fs::create_dir_all(plan.parent().unwrap()).expect("plan dir");
+        std::fs::write(
+            &plan,
+            "{\"schema\":\"homeboy/agent-task-plan/v1\",\"tasks\":[]}\n",
+        )
+        .expect("plan file");
+
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "run-plan".to_string(),
+            format!("--plan=@{}", plan.display()),
+        ];
+
+        let workspaces = agent_task_plan_extra_workspaces(&args, &source).expect("workspaces");
+
+        assert!(workspaces.is_empty());
     }
 
     #[test]
