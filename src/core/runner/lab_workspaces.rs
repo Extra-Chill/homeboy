@@ -378,7 +378,7 @@ mod provider_config_candidate_paths_tests {
             },
             "provider_plugin_paths": ["/local/ai-provider-for-claude-code"],
             "runtime_overlays": [
-                { "kind": "bundled-library", "library": "php-ai-client", "source": "/local/php-ai-client@custom-provider-auth", "target": "/wordpress/wp-includes/php-ai-client" }
+                { "kind": "bundled-library", "library": "portable-ai-client", "source": "/local/portable-ai-client@custom-provider-auth", "target": "/runtime/includes/portable-ai-client" }
             ],
             "agents_api": "/local/agents-api",
             "model": "claude-opus-4-8"
@@ -391,7 +391,7 @@ mod provider_config_candidate_paths_tests {
             "/local/data-machine",
             "/local/data-machine-code",
             "/local/ai-provider-for-claude-code",
-            "/local/php-ai-client@custom-provider-auth",
+            "/local/portable-ai-client@custom-provider-auth",
             "/local/agents-api",
         ] {
             assert!(
