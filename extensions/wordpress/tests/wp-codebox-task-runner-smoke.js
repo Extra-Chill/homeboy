@@ -219,6 +219,8 @@ try {
   assert.equal(captured.input.sandbox_tool_policy.version, 1);
   assert.equal(captured.input.sandbox_tool_policy.tools[0].id, 'homeboy/no-runtime-tools');
   assert.equal(captured.input.sandbox_tool_policy.tools[0].allowed, false);
+  assert.equal(captured.input.sandbox_tool_policy.tools[0].runtime.environment, 'control_plane');
+  assert.equal(captured.input.sandbox_tool_policy.tools[0].runtime.capability_scope, 'control_plane');
   assert.equal(captured.input.provider, 'opencode');
   assert.equal(captured.input.model, 'opencode-go/kimi-k2.6');
   assert.deepEqual(captured.input.secret_env, ['OPENCODE_API_KEY']);
@@ -382,6 +384,8 @@ try {
   assert.equal(agentBundleCapture.input.sandbox_tool_policy.tools.length, 1);
   assert.equal(agentBundleCapture.input.sandbox_tool_policy.tools[0].id, 'homeboy/no-runtime-tools');
   assert.equal(agentBundleCapture.input.sandbox_tool_policy.tools[0].allowed, false);
+  assert.equal(agentBundleCapture.input.sandbox_tool_policy.tools[0].runtime.environment, 'control_plane');
+  assert.equal(agentBundleCapture.input.sandbox_tool_policy.tools[0].runtime.capability_scope, 'control_plane');
   assert.equal(agentBundleCapture.input.agent_bundle.engine_data_outputs.issue_number, 'metadata.engine_data.store_idea_agent.issue_number');
   assert.equal(agentBundleCapture.input.runtime_task.ability, 'datamachine/run-agent-bundle');
   assert.equal(agentBundleCapture.input.runtime_task.input.source, '/workspace/wp-site-generator/bundles/store-idea-agent');
