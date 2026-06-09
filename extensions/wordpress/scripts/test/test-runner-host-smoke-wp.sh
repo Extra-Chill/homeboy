@@ -39,6 +39,8 @@ TEST_DIR="${PLUGIN_PATH}/tests"
 PLUGIN_SLUG="${COMPONENT_ID:-$(basename "$PLUGIN_PATH")}"
 TARGET_SMOKE_FILE="${HOMEBOY_WORDPRESS_HOST_SMOKE_FILE:-}"
 TARGET_SMOKE_FILES="${HOMEBOY_WORDPRESS_HOST_SMOKE_FILES:-}"
+HOST_SMOKE_TIMEOUT_SECONDS="${HOMEBOY_WORDPRESS_HOST_SMOKE_TIMEOUT_SECONDS:-120}"
+HOST_SMOKE_EXCERPT_BYTES="${HOMEBOY_WORDPRESS_HOST_SMOKE_EXCERPT_BYTES:-65536}"
 
 homeboy_wordpress_host_smoke_abs() {
     local raw_path="$1"
@@ -148,14 +150,16 @@ run_one_smoke() {
     local smoke_file="$1"
     local rel_path="${smoke_file#"${PLUGIN_PATH}/"}"
     local sandbox_smoke_path="/wordpress/wp-content/plugins/${PLUGIN_SLUG}/${rel_path}"
-    local wrapper_file recipe_file output_file artifacts_dir status
+    local wrapper_file recipe_file output_file stderr_file artifacts_dir status started_at elapsed
 
-    wrapper_file="$(mktemp "${TMPDIR:-/tmp}/homeboy-wp-smoke-wrapper.XXXXXX")"
-    recipe_file="$(mktemp "${TMPDIR:-/tmp}/homeboy-wp-smoke-recipe.XXXXXX")"
-    output_file="$(mktemp "${TMPDIR:-/tmp}/homeboy-wp-smoke-output.XXXXXX")"
     artifacts_dir="$(mktemp -d "${TMPDIR:-/tmp}/homeboy-wp-smoke-artifacts.XXXXXX")"
+    wrapper_file="${artifacts_dir}/wrapper.php"
+    recipe_file="${artifacts_dir}/recipe.json"
+    output_file="${artifacts_dir}/recipe-run.json"
+    stderr_file="${artifacts_dir}/wp-codebox.stderr"
 
     homeboy_wordpress_smoke_wrapper "$sandbox_smoke_path" > "$wrapper_file"
+    echo "HOST_SMOKE_PROGRESS:${rel_path}:phase=wrapper-created artifacts=${artifacts_dir}"
 
     jq -n \
         --arg wp "$WP_VERSION" \
@@ -167,24 +171,104 @@ run_one_smoke() {
             inputs: {mounts: $mounts},
             workflow: {steps: [{command: "wordpress.run-php", args: ["code-file=" + $codeFile]}]}
         }' > "$recipe_file"
+    echo "HOST_SMOKE_PROGRESS:${rel_path}:phase=recipe-created artifacts=${artifacts_dir}"
 
     set +e
-    "${WP_CODEBOX_COMMAND[@]}" recipe-run --recipe "$recipe_file" --artifacts "$artifacts_dir" --json > "$output_file" 2>/dev/null
+    started_at="$(date +%s)"
+    echo "HOST_SMOKE_PROGRESS:${rel_path}:phase=wp-codebox-recipe-run timeout=${HOST_SMOKE_TIMEOUT_SECONDS}s artifacts=${artifacts_dir}"
+    homeboy_wordpress_smoke_run_with_timeout "$output_file" "$stderr_file" \
+        "${WP_CODEBOX_COMMAND[@]}" recipe-run --recipe "$recipe_file" --artifacts "$artifacts_dir" --json
     status=$?
+    elapsed=$(( $(date +%s) - started_at ))
     set -e
+    echo "HOST_SMOKE_PROGRESS:${rel_path}:phase=output-parsing exit=${status} elapsed=${elapsed}s artifacts=${artifacts_dir}"
 
-    # Surface the smoke's own stdout (the OK / failure text) for the operator.
-    jq -r '(.executions // [])[-1].stdout // empty' "$output_file" 2>/dev/null || true
+    if [ "$status" -eq 124 ]; then
+        echo "HOST_SMOKE_TIMEOUT:${rel_path}:phase=wp-codebox-recipe-run elapsed=${elapsed}s timeout=${HOST_SMOKE_TIMEOUT_SECONDS}s artifacts=${artifacts_dir}"
+        homeboy_wordpress_smoke_print_failure_output "$rel_path" "$output_file" "$stderr_file" "$artifacts_dir"
+        return 124
+    fi
+
     if [ "$status" -eq 0 ] && ! jq -e '.success == true' "$output_file" >/dev/null 2>&1; then
         status=1
     fi
     if [ "$status" -ne 0 ]; then
-        jq -r '(.executions // [])[-1].stderr // empty' "$output_file" 2>/dev/null >&2 || true
+        homeboy_wordpress_smoke_print_failure_output "$rel_path" "$output_file" "$stderr_file" "$artifacts_dir"
+    else
+        jq -r '(.executions // [])[-1].stdout // empty' "$output_file" 2>/dev/null || true
+        rm -rf "$artifacts_dir"
     fi
 
-    rm -f "$wrapper_file" "$recipe_file" "$output_file"
-    rm -rf "$artifacts_dir"
     return "$status"
+}
+
+homeboy_wordpress_smoke_run_with_timeout() {
+    local output_file="$1"
+    local stderr_file="$2"
+    shift 2
+
+    node -e '
+        const fs = require("node:fs");
+        const { spawnSync } = require("node:child_process");
+        const [timeoutSeconds, stdoutFile, stderrFile, ...command] = process.argv.slice(1);
+        const result = spawnSync(command[0], command.slice(1), {
+            encoding: "utf8",
+            maxBuffer: 50 * 1024 * 1024,
+            timeout: Number(timeoutSeconds) * 1000,
+        });
+        fs.writeFileSync(stdoutFile, result.stdout || "");
+        fs.writeFileSync(stderrFile, result.stderr || "");
+        if (result.error && result.error.code === "ETIMEDOUT") {
+            process.exit(124);
+        }
+        if (result.error) {
+            fs.appendFileSync(stderrFile, `${result.error.message}\n`);
+            process.exit(1);
+        }
+        process.exit(result.status === null ? 1 : result.status);
+    ' "$HOST_SMOKE_TIMEOUT_SECONDS" "$output_file" "$stderr_file" "$@"
+}
+
+homeboy_wordpress_smoke_print_failure_output() {
+    local rel_path="$1"
+    local output_file="$2"
+    local stderr_file="$3"
+    local artifacts_dir="$4"
+    local smoke_stdout="${artifacts_dir}/smoke.stdout.txt"
+    local smoke_stderr="${artifacts_dir}/smoke.stderr.txt"
+
+    jq -r '(.executions // [])[-1].stdout // empty' "$output_file" > "$smoke_stdout" 2>/dev/null || true
+    jq -r '(.executions // [])[-1].stderr // empty' "$output_file" > "$smoke_stderr" 2>/dev/null || true
+
+    echo "HOST_SMOKE_OUTPUT_BEGIN:${rel_path}"
+    homeboy_wordpress_smoke_print_excerpt "stdout" "$smoke_stdout"
+    homeboy_wordpress_smoke_print_excerpt "stderr" "$smoke_stderr"
+    homeboy_wordpress_smoke_print_excerpt "wp-codebox-stderr" "$stderr_file"
+    if [ ! -s "$smoke_stdout" ] && [ ! -s "$smoke_stderr" ] && [ -s "$output_file" ]; then
+        homeboy_wordpress_smoke_print_excerpt "wp-codebox-json" "$output_file"
+    fi
+    echo "HOST_SMOKE_OUTPUT_END:${rel_path}:artifacts=${artifacts_dir}"
+}
+
+homeboy_wordpress_smoke_print_excerpt() {
+    local label="$1"
+    local file="$2"
+
+    [ -s "$file" ] || return 0
+    echo "--- ${label} (${file}) ---"
+    python3 - "$file" "$HOST_SMOKE_EXCERPT_BYTES" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+limit = int(sys.argv[2])
+data = path.read_bytes()
+sys.stdout.buffer.write(data[:limit])
+if data and not data.endswith(b"\n"):
+    sys.stdout.write("\n")
+if len(data) > limit:
+    sys.stdout.write(f"[truncated {len(data) - limit} bytes; full output retained at {path}]\n")
+PY
 }
 
 echo "Running real-WordPress smoke tests..."
@@ -233,6 +317,7 @@ RECIPE_MOUNTS="$(homeboy_wordpress_smoke_recipe_mounts)"
 
 echo "  Files: ${#smoke_files[@]}"
 echo "  WordPress: ${WP_VERSION:-default}"
+echo "  Per-file timeout: ${HOST_SMOKE_TIMEOUT_SECONDS}s"
 echo ""
 
 passed=0

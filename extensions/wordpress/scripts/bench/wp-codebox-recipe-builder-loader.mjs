@@ -1,14 +1,16 @@
 /**
  * External dependencies
  */
-import { resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { existsSync, readdirSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const DEFAULT_CODEBOX_CORE_MODULE = '@automattic/wp-codebox-core';
+const RUNTIME_CORE_ENTRY = 'packages/runtime-core/dist/index.js';
 
 export async function loadCodeboxRecipeBuilder(requiredExport) {
 	const configuredModule = process.env.HOMEBOY_WP_CODEBOX_CORE_MODULE;
-	const candidates = configuredModule ? [configuredModule] : [DEFAULT_CODEBOX_CORE_MODULE];
+	const candidates = configuredModule ? [configuredModule] : discoverCodeboxCoreModuleCandidates();
 	const errors = [];
 
 	for (const candidate of candidates) {
@@ -27,10 +29,57 @@ export async function loadCodeboxRecipeBuilder(requiredExport) {
 
 	throw new Error([
 		`WP Codebox recipe builder export ${requiredExport} is unavailable.`,
-		`Install a WP Codebox core module that exports ${requiredExport}, or set HOMEBOY_WP_CODEBOX_CORE_MODULE to its built ESM entrypoint.`,
+		`Install/build a WP Codebox runtime-core module that exports ${requiredExport}.`,
+		`Fallback: set HOMEBOY_WP_CODEBOX_CORE_MODULE to the built ESM entrypoint, for example /path/to/wp-codebox/${RUNTIME_CORE_ENTRY}.`,
 		'Homeboy Extensions no longer falls back to bundled WP Codebox recipe builders because that stale local copy can drift from the Codebox recipe contract.',
+		`Tried ${candidates.length} candidate(s):`,
 		...errors.map((error) => `- ${error}`),
 	].join('\n'));
+}
+
+function discoverCodeboxCoreModuleCandidates() {
+	const candidates = [DEFAULT_CODEBOX_CORE_MODULE];
+	const roots = workspaceRoots();
+
+	for (const root of roots) {
+		for (const repoPath of codeboxRepoCandidates(root)) {
+			const runtimeCore = resolve(repoPath, RUNTIME_CORE_ENTRY);
+			if (existsSync(runtimeCore) && !candidates.includes(runtimeCore)) {
+				candidates.push(runtimeCore);
+			}
+		}
+	}
+
+	return candidates;
+}
+
+function workspaceRoots() {
+	const scriptDir = dirname(fileURLToPath(import.meta.url));
+	const repoRoot = resolve(scriptDir, '../../..');
+	const roots = [
+		process.env.HOMEBOY_WORKSPACE_ROOT,
+		process.env.HOMEBOY_DEVELOPER_WORKSPACE,
+		dirname(repoRoot),
+	];
+
+	return [...new Set(roots.filter(Boolean))];
+}
+
+function codeboxRepoCandidates(root) {
+	const exact = resolve(root, 'wp-codebox');
+	const candidates = existsSync(exact) ? [exact] : [];
+
+	try {
+		const siblingWorktrees = readdirSync(root, { withFileTypes: true })
+			.filter((entry) => entry.isDirectory() && entry.name.startsWith('wp-codebox@'))
+			.map((entry) => resolve(root, entry.name))
+			.sort();
+		candidates.push(...siblingWorktrees);
+	} catch {
+		// A missing or unreadable workspace root simply contributes no candidates.
+	}
+
+	return candidates;
 }
 
 async function importModule(specifier) {
