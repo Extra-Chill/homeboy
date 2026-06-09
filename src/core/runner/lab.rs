@@ -385,6 +385,7 @@ fn run_lab_offload_inner(
             },
         }
     }
+
     let capability_preflight: Option<RunnerCapabilityPreflight> = capability_plan.map(Into::into);
     let sync_mode = match contract.workspace_mode_policy {
         LabOffloadWorkspaceModePolicy::ChangedSinceGitElseSnapshot => {
