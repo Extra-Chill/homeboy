@@ -127,23 +127,24 @@ fn verification_bullets(options: &AgentTaskPrFinalizationOptions) -> String {
         return "- `targeted_checks_run`: see gate results above".to_string();
     }
 
-    let mut lines = Vec::new();
-    lines.push(format!(
-        "- `targeted_checks_run`: {}",
-        inline_code_list(&verification.targeted_checks_run)
-    ));
-    lines.push(format!(
-        "- `targeted_checks_unavailable`: {}",
-        option_value(verification.targeted_checks_unavailable.as_deref())
-    ));
-    lines.push(format!(
-        "- `ci_expected`: {}",
-        inline_code_list(&verification.ci_expected)
-    ));
-    lines.push(format!(
-        "- `manual_reviewer_check`: {}",
-        option_value(verification.manual_reviewer_check.as_deref())
-    ));
+    let lines = vec![
+        format!(
+            "- `targeted_checks_run`: {}",
+            inline_code_list(&verification.targeted_checks_run)
+        ),
+        format!(
+            "- `targeted_checks_unavailable`: {}",
+            option_value(verification.targeted_checks_unavailable.as_deref())
+        ),
+        format!(
+            "- `ci_expected`: {}",
+            inline_code_list(&verification.ci_expected)
+        ),
+        format!(
+            "- `manual_reviewer_check`: {}",
+            option_value(verification.manual_reviewer_check.as_deref())
+        ),
+    ];
     lines.join("\n")
 }
 
