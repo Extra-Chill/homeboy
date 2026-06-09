@@ -13,6 +13,7 @@ use super::artifact_index::{self, RigRunArtifactIndex};
 
 use super::expand::{expand_resources, expand_vars};
 use super::lease::acquire_active_run_lease;
+use super::lint::run_package_lint;
 use super::pipeline::{
     cleanup_shared_paths, run_pipeline, run_pipeline_check_groups, PipelineOutcome,
 };
@@ -185,7 +186,9 @@ pub fn run_check(rig: &RigSpec) -> Result<CheckReport> {
     let observer = RigRunObserver::start(rig, "check");
 
     let mut result = (|| {
-        let outcome = run_pipeline(rig, "check", false)?;
+        let package_lint = run_package_lint(rig)?;
+        let check_outcome = run_pipeline(rig, "check", false)?;
+        let outcome = merge_check_outcomes(package_lint, check_outcome);
 
         let mut state = RigState::load(&rig.id)?;
         state.last_check = Some(now_rfc3339());
@@ -213,6 +216,27 @@ pub fn run_check(rig: &RigSpec) -> Result<CheckReport> {
         report.artifact_index = artifact_index;
     }
     result
+}
+
+fn merge_check_outcomes(
+    package_lint: PipelineOutcome,
+    check_outcome: PipelineOutcome,
+) -> PipelineOutcome {
+    if package_lint.steps.is_empty() {
+        return check_outcome;
+    }
+    if check_outcome.steps.is_empty() {
+        return package_lint;
+    }
+
+    let mut steps = package_lint.steps;
+    steps.extend(check_outcome.steps);
+    PipelineOutcome {
+        name: check_outcome.name,
+        passed: package_lint.passed + check_outcome.passed,
+        failed: package_lint.failed + check_outcome.failed,
+        steps,
+    }
 }
 
 /// Run only the grouped check-pipeline steps required by a workload command.

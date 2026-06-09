@@ -83,6 +83,12 @@ pub struct RigSpec {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub trace_workloads: HashMap<String, Vec<WorkloadSpec>>,
 
+    /// Extension-scoped defaults applied to every trace workload entry for the
+    /// same extension id. Defaults only fill omitted scalar fields and prepend
+    /// collection/map fields so per-workload declarations remain authoritative.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub trace_workload_defaults: HashMap<String, WorkloadDefaultsSpec>,
+
     /// Named trace variants that can apply overlays across rig components.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub trace_variants: HashMap<String, TraceVariantSpec>,
@@ -337,6 +343,90 @@ pub struct WorkloadSpec {
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub runner_capabilities: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct WorkloadDefaultsSpec {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_preview: Option<TracePublicPreviewSpec>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check_groups: Option<Vec<String>>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port_range_size: Option<u16>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub named_leases: Vec<String>,
+
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub trace_phase_presets: HashMap<String, Vec<String>>,
+
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub trace_span_metadata: HashMap<String, TraceSpanMetadata>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_default_phase_preset: Option<String>,
+
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub trace_variants: HashMap<String, TraceVariantSpec>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trace_guardrails: Vec<TraceGuardrailSpec>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trace_probes: Vec<TraceProbeConfig>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependencies: Vec<TraceDependencySpec>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runner_capabilities: Vec<String>,
+}
+
+impl WorkloadSpec {
+    pub fn apply_defaults(&mut self, defaults: &WorkloadDefaultsSpec) {
+        if self.public_preview.is_none() {
+            self.public_preview = defaults.public_preview.clone();
+        }
+        if self.check_groups.is_none() {
+            self.check_groups = defaults.check_groups.clone();
+        }
+        if self.port_range_size.is_none() {
+            self.port_range_size = defaults.port_range_size;
+        }
+        if self.trace_default_phase_preset.is_none() {
+            self.trace_default_phase_preset = defaults.trace_default_phase_preset.clone();
+        }
+
+        prepend_missing(&mut self.named_leases, &defaults.named_leases);
+        prepend_missing(&mut self.trace_guardrails, &defaults.trace_guardrails);
+        prepend_missing(&mut self.trace_probes, &defaults.trace_probes);
+        prepend_missing(&mut self.dependencies, &defaults.dependencies);
+        prepend_missing(&mut self.runner_capabilities, &defaults.runner_capabilities);
+        merge_defaults_map(&mut self.trace_phase_presets, &defaults.trace_phase_presets);
+        merge_defaults_map(&mut self.trace_span_metadata, &defaults.trace_span_metadata);
+        merge_defaults_map(&mut self.trace_variants, &defaults.trace_variants);
+    }
+}
+
+fn prepend_missing<T: Clone + PartialEq>(target: &mut Vec<T>, defaults: &[T]) {
+    if defaults.is_empty() {
+        return;
+    }
+    let mut merged = defaults.to_vec();
+    for item in target.iter() {
+        if !merged.contains(item) {
+            merged.push(item.clone());
+        }
+    }
+    *target = merged;
+}
+
+fn merge_defaults_map<T: Clone>(target: &mut HashMap<String, T>, defaults: &HashMap<String, T>) {
+    for (key, value) in defaults {
+        target.entry(key.clone()).or_insert_with(|| value.clone());
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

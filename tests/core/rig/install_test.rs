@@ -2,7 +2,7 @@
 
 use crate::core::rig::{
     declared_id, discover_rigs, install, list, list_ids, load, read_source_metadata,
-    read_stack_source_metadata,
+    read_stack_source_metadata, run_check,
 };
 use crate::test_support::HomeGuard;
 use std::fs;
@@ -132,6 +132,85 @@ fn install_package_with_sibling_stacks_installs_stack_specs() {
     let metadata = read_stack_source_metadata("studio-combined").expect("stack metadata");
     assert!(metadata.linked);
     assert_eq!(metadata.stack_path, stack_path.to_string_lossy());
+}
+
+#[test]
+fn installed_rig_check_reports_package_lint_failures() {
+    let _home = HomeGuard::new();
+    let package = tempfile::tempdir().expect("package");
+    write_rig(package.path(), "lint-fixture", &minimal_rig("lint-fixture"));
+    fs::write(package.path().join("conflicted.txt"), "<<<<<<< ours\n").expect("conflict fixture");
+
+    install(package.path().to_str().unwrap(), None, false).expect("install");
+    let rig = load("lint-fixture").expect("load rig");
+    let report = run_check(&rig).expect("check report");
+
+    assert!(
+        !report.success,
+        "package conflict marker should fail rig check"
+    );
+    assert!(report.pipeline.steps.iter().any(|step| {
+        step.kind == "rig-package-lint"
+            && step.status == "fail"
+            && step
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("conflicted.txt")
+    }));
+}
+
+#[test]
+fn installed_rig_load_applies_trace_workload_defaults() {
+    let _home = HomeGuard::new();
+    let package = tempfile::tempdir().expect("package");
+    write_rig(
+        package.path(),
+        "trace-defaults",
+        r#"{
+            "id": "trace-defaults",
+            "trace_workload_defaults": {
+                "trace-runner": {
+                    "check_groups": [],
+                    "port_range_size": 1,
+                    "trace_default_phase_preset": "browser-waterfall",
+                    "trace_phase_presets": {
+                        "browser-waterfall": ["start:scenario.start", "done:scenario.done"]
+                    },
+                    "trace_span_metadata": {
+                        "phase.start_to_done": { "category": "runtime_setup", "blocking": true }
+                    }
+                }
+            },
+            "trace_workloads": {
+                "trace-runner": [
+                    { "path": "${package.root}/bench/a.trace.mjs" },
+                    { "path": "${package.root}/bench/b.trace.mjs", "port_range_size": 2 }
+                ]
+            }
+        }"#,
+    );
+
+    install(package.path().to_str().unwrap(), None, false).expect("install");
+    let rig = load("trace-defaults").expect("load rig");
+    let workloads = rig
+        .trace_workloads
+        .get("trace-runner")
+        .expect("trace workloads");
+
+    assert_eq!(workloads[0].check_groups(), Some([].as_slice()));
+    assert_eq!(workloads[0].port_range_size(), Some(1));
+    assert_eq!(workloads[1].port_range_size(), Some(2));
+    assert_eq!(
+        workloads[0].trace_default_phase_preset(),
+        Some("browser-waterfall")
+    );
+    assert!(workloads[0]
+        .trace_phase_preset("browser-waterfall")
+        .is_some());
+    assert!(workloads[0]
+        .trace_span_metadata()
+        .contains_key("phase.start_to_done"));
 }
 
 #[test]
