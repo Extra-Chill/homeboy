@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.116.1] - 2026-06-09
+
+### Fixed
+- improve host smoke diagnostics
+
 ## [2.116.0] - 2026-06-08
 
 ### Added
