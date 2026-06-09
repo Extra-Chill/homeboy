@@ -512,10 +512,9 @@ fn build_finalization_proof(
         format!("agent-task-finalization:{}", options.run_id),
         provenance,
     )
-    .gates(gates)
+    .gates_requiring_ci_equivalent(gates)
     .artifacts(artifacts)
     .environment(environment)
-    .with_ci_equivalent_gap_if_missing()
 }
 
 fn proof_environment_from_gates(

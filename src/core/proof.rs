@@ -117,6 +117,13 @@ impl HomeboyProof {
         self
     }
 
+    pub fn gates_requiring_ci_equivalent(
+        self,
+        gates: impl IntoIterator<Item = HomeboyGateResult>,
+    ) -> Self {
+        self.gates(gates).with_ci_equivalent_gap_if_missing()
+    }
+
     pub fn artifacts(
         mut self,
         artifacts: impl IntoIterator<Item = HomeboyProofArtifactRef>,
@@ -259,13 +266,12 @@ mod tests {
     #[test]
     fn proof_records_ci_equivalent_gap_when_missing() {
         let proof = HomeboyProof::new("proof-1", HomeboyProofProvenance::homeboy_run("run-1"))
-            .gates([HomeboyGateResult::new(
+            .gates_requiring_ci_equivalent([HomeboyGateResult::new(
                 "gate-1",
                 "focused check",
                 HomeboyGateKind::Command,
                 HomeboyGateStatus::Passed,
-            )])
-            .with_ci_equivalent_gap_if_missing();
+            )]);
 
         assert_eq!(proof.scope, HomeboyProofScope::Targeted);
         assert_eq!(proof.gaps.len(), 1);

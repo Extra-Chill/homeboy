@@ -113,8 +113,7 @@ fn lab_offload_proof(
                 notes,
             },
         )
-        .gates(gate_results.iter().cloned())
-        .with_ci_equivalent_gap_if_missing(),
+        .gates_requiring_ci_equivalent(gate_results.iter().cloned()),
     )
 }
 
