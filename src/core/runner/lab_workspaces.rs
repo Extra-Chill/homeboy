@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -8,8 +8,9 @@ use crate::core::component::{self, TargetSpec};
 use crate::core::{Error, Result};
 
 use super::{
-    sync_workspace, workspace::git_output, RunnerGitDependencyMaterializationOutput,
-    RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
+    exec, sync_workspace, workspace::git_output, RunnerExecOptions,
+    RunnerGitDependencyMaterializationOutput, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
+    RunnerWorkspaceSyncOutput,
 };
 
 const LAB_EXTRA_WORKSPACES_ENV: &str = concat!("HOME", "BOY_LAB_EXTRA_WORKSPACES");
@@ -39,6 +40,8 @@ impl LabWorkspaceMappingEntry {
 pub(super) struct ExtraLabWorkspace {
     role: String,
     path: PathBuf,
+    snapshot_includes: Vec<String>,
+    bootstrap_node_dependencies: bool,
 }
 
 pub(super) fn sync_extra_lab_workspaces(
@@ -62,10 +65,14 @@ pub(super) fn sync_extra_lab_workspaces(
                 path: local_path.display().to_string(),
                 mode: RunnerWorkspaceSyncMode::Snapshot,
                 changed_since_base: None,
+                snapshot_includes: extra.snapshot_includes.clone(),
             },
         )?
         .0;
         let entry = workspace_mapping_entry(&extra.role, &synced);
+        if extra.bootstrap_node_dependencies {
+            bootstrap_source_cli_node_dependencies(runner_id, &synced.remote_path)?;
+        }
         workspace_mapping.push(entry.clone());
         synced_entries.push(entry);
     }
@@ -152,14 +159,20 @@ pub(super) fn provider_config_extra_workspaces(
         .unwrap_or_else(|_| source_path.to_path_buf());
 
     let mut seen = BTreeSet::new();
-    let mut workspaces = Vec::new();
+    let mut workspaces: Vec<ExtraLabWorkspace> = Vec::new();
     for candidate in provider_config_candidate_paths(&value) {
         let expanded = shellexpand::tilde(&candidate).to_string();
         let path = Path::new(&expanded);
-        let workspace_path = if path.is_dir() {
-            path.to_path_buf()
+        let (workspace_path, snapshot_includes, bootstrap_node_dependencies) = if path.is_dir() {
+            (path.to_path_buf(), Vec::new(), false)
         } else if path.is_file() {
-            containing_checkout_or_parent(path)?
+            let workspace_path = containing_checkout_or_parent(path)?;
+            let snapshot_includes = provider_config_file_snapshot_includes(&workspace_path, path);
+            (
+                workspace_path,
+                snapshot_includes,
+                is_node_cli_file(path) && source_cli_workspace_has_package_lock(path),
+            )
         } else {
             continue;
         };
@@ -172,11 +185,21 @@ pub(super) fn provider_config_extra_workspaces(
             continue;
         }
         if !seen.insert(canon.clone()) {
+            if let Some(existing) = workspaces.iter_mut().find(|workspace| workspace.path == canon) {
+                for include in snapshot_includes {
+                    if !existing.snapshot_includes.contains(&include) {
+                        existing.snapshot_includes.push(include);
+                    }
+                }
+                existing.bootstrap_node_dependencies |= bootstrap_node_dependencies;
+            }
             continue;
         }
         workspaces.push(ExtraLabWorkspace {
             role: "provider_config".to_string(),
             path: canon,
+            snapshot_includes,
+            bootstrap_node_dependencies,
         });
     }
     Ok(workspaces)
@@ -394,6 +417,8 @@ fn accepted_extra_lab_workspaces() -> Result<Vec<ExtraLabWorkspace>> {
             Ok(ExtraLabWorkspace {
                 role: "extra".to_string(),
                 path: canonical_existing_dir(&path, "extra_workspace")?,
+                snapshot_includes: Vec::new(),
+                bootstrap_node_dependencies: false,
             })
         })
         .collect()
@@ -430,6 +455,8 @@ fn discovered_validation_dependency_workspaces(
             workspaces.push(ExtraLabWorkspace {
                 role: "dependency".to_string(),
                 path,
+                snapshot_includes: Vec::new(),
+                bootstrap_node_dependencies: false,
             });
         }
     }
@@ -476,6 +503,71 @@ fn canonical_existing_dir(path: &str, field: &str) -> Result<PathBuf> {
             Some("canonicalize runner workspace path".to_string()),
         )
     })
+}
+
+fn provider_config_file_snapshot_includes(workspace_path: &Path, file_path: &Path) -> Vec<String> {
+    let workspace_path = workspace_path
+        .canonicalize()
+        .unwrap_or_else(|_| workspace_path.to_path_buf());
+    let file_path = file_path
+        .canonicalize()
+        .unwrap_or_else(|_| file_path.to_path_buf());
+    let Ok(relative) = file_path.strip_prefix(&workspace_path) else {
+        return Vec::new();
+    };
+    let Some(parent) = relative.parent() else {
+        return Vec::new();
+    };
+    let parent = parent.display().to_string();
+    if parent.is_empty() {
+        return Vec::new();
+    }
+    vec![parent.clone(), format!("{parent}/**")]
+}
+
+fn source_cli_workspace_has_package_lock(file_path: &Path) -> bool {
+    containing_checkout_or_parent(file_path)
+        .ok()
+        .is_some_and(|workspace| workspace.join("package-lock.json").is_file())
+}
+
+fn bootstrap_source_cli_node_dependencies(runner_id: &str, remote_path: &str) -> Result<()> {
+    let (output, exit_code) = exec(
+        runner_id,
+        RunnerExecOptions {
+            cwd: Some(remote_path.to_string()),
+            project_id: None,
+            allow_diagnostic_ssh: false,
+            command: vec![
+                "npm".to_string(),
+                "ci".to_string(),
+                "--omit=dev".to_string(),
+                "--ignore-scripts".to_string(),
+            ],
+            env: HashMap::new(),
+            capture_patch: false,
+            raw_exec: true,
+            source_snapshot: None,
+            capability_preflight: None,
+            required_extensions: Vec::new(),
+            require_paths: Vec::new(),
+        },
+    )?;
+    if exit_code == 0 {
+        return Ok(());
+    }
+
+    Err(Error::validation_invalid_argument(
+        "provider_config",
+        format!(
+            "Lab offload could not install production dependencies for source-built CLI workspace `{remote_path}`"
+        ),
+        Some(remote_path.to_string()),
+        Some(vec![
+            format!("npm ci stderr: {}", output.stderr.trim()),
+            "Build or package the CLI as a self-contained artifact, or make the source-built workspace installable on the runner.".to_string(),
+        ]),
+    ))
 }
 
 #[cfg(test)]
@@ -555,6 +647,7 @@ mod provider_config_candidate_paths_tests {
         std::fs::create_dir_all(&source).expect("source dir");
         std::fs::create_dir_all(cli.parent().unwrap()).expect("cli dist dir");
         std::fs::write(&cli, "#!/usr/bin/env node\n").expect("cli file");
+        std::fs::write(provider.join("package-lock.json"), "{}\n").expect("package lock");
         git(&provider, &["init", "-b", "main"]);
         git(&provider, &["config", "user.email", "test@example.com"]);
         git(&provider, &["config", "user.name", "Homeboy Test"]);
@@ -573,6 +666,47 @@ mod provider_config_candidate_paths_tests {
 
         assert_eq!(workspaces.len(), 1);
         assert_eq!(workspaces[0].path, provider.canonicalize().unwrap());
+        assert!(workspaces[0]
+            .snapshot_includes
+            .contains(&"packages/cli/dist/**".to_string()));
+        assert!(workspaces[0].bootstrap_node_dependencies);
+    }
+
+    #[test]
+    fn provider_config_file_path_merges_snapshot_includes_for_duplicate_checkout() {
+        let controller = tempfile::tempdir().expect("controller");
+        let source = controller.path().join("primary");
+        let provider = controller.path().join("provider-cli");
+        let cli = provider.join("packages/cli/dist/index.js");
+        std::fs::create_dir_all(&source).expect("source dir");
+        std::fs::create_dir_all(cli.parent().unwrap()).expect("cli dist dir");
+        std::fs::write(&cli, "#!/usr/bin/env node\n").expect("cli file");
+        std::fs::write(provider.join("package-lock.json"), "{}\n").expect("package lock");
+        git(&provider, &["init", "-b", "main"]);
+        git(&provider, &["config", "user.email", "test@example.com"]);
+        git(&provider, &["config", "user.name", "Homeboy Test"]);
+        git(&provider, &["add", "."]);
+        git(&provider, &["commit", "-m", "initial"]);
+
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "dispatch".to_string(),
+            "--provider-config".to_string(),
+            serde_json::json!({
+                "provider_root": provider,
+                "source_cli": cli,
+            })
+            .to_string(),
+        ];
+
+        let workspaces = provider_config_extra_workspaces(&args, &source).expect("workspaces");
+
+        assert_eq!(workspaces.len(), 1);
+        assert!(workspaces[0]
+            .snapshot_includes
+            .contains(&"packages/cli/dist/**".to_string()));
+        assert!(workspaces[0].bootstrap_node_dependencies);
     }
 
     #[test]

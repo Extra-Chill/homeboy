@@ -62,6 +62,7 @@ pub struct RunnerWorkspaceSyncOptions {
     pub path: String,
     pub mode: RunnerWorkspaceSyncMode,
     pub changed_since_base: Option<String>,
+    pub snapshot_includes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -105,7 +106,12 @@ pub fn sync_workspace(
             excludes.push(pattern.clone());
         }
     }
-    let includes = runner.policy.snapshot_includes.clone();
+    let mut includes = runner.policy.snapshot_includes.clone();
+    for pattern in options.snapshot_includes {
+        if !includes.contains(&pattern) {
+            includes.push(pattern);
+        }
+    }
     let excludes = effective_snapshot_excludes(excludes, &includes);
 
     match options.mode {
@@ -789,6 +795,7 @@ mod tests {
                     path: source.path().display().to_string(),
                     mode: RunnerWorkspaceSyncMode::Snapshot,
                     changed_since_base: None,
+                    snapshot_includes: Vec::new(),
                 },
             )
             .expect("sync workspace");
@@ -831,6 +838,7 @@ mod tests {
                     path: source.path().display().to_string(),
                     mode: RunnerWorkspaceSyncMode::Snapshot,
                     changed_since_base: None,
+                    snapshot_includes: Vec::new(),
                 },
             )
             .expect("sync workspace");
@@ -889,6 +897,7 @@ mod tests {
                     path: source.path().display().to_string(),
                     mode: RunnerWorkspaceSyncMode::Snapshot,
                     changed_since_base: None,
+                    snapshot_includes: Vec::new(),
                 },
             )
             .expect("sync workspace");
@@ -938,6 +947,7 @@ mod tests {
                 path: source.path().display().to_string(),
                 mode: RunnerWorkspaceSyncMode::Snapshot,
                 changed_since_base: None,
+                snapshot_includes: Vec::new(),
             };
             let (first, _) = sync_workspace("lab-local", options.clone()).expect("first sync");
             let remote_path = Path::new(&first.remote_path);
