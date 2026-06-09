@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.116.3] - 2026-06-09
+
+### Fixed
+- pass agent-task secret env to Codebox
+
 ## [2.116.2] - 2026-06-09
 
 ### Fixed
