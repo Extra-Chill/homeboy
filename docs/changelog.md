@@ -4,6 +4,21 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.224.1] - 2026-06-09
+
+### Changed
+- keep lab workspace fixtures generic
+
+### Fixed
+- support dotted bench setting overrides
+- tighten Lab cook loop discovery
+- keep agent task PR guardrails generic
+- report iterator PR guardrails
+- allow agent-task loop Lab offload
+- resolve bench shared-state artifacts
+- preserve artifact get output bytes
+- capture bench memory and responsiveness evidence
+
 ## [0.224.0] - 2026-06-08
 
 ### Added
