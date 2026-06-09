@@ -8,6 +8,10 @@ use crate::core::proof::{
 const NONE_RECORDED: &str = "none recorded";
 const NONE_RECORDED_BULLET: &str = "- none recorded";
 const AI_MODEL_NOT_RECORDED: &str = "not recorded by provider metadata";
+const TARGETED_CHECKS_RUN_LABEL: &str = "targeted_checks_run";
+const TARGETED_CHECKS_UNAVAILABLE_LABEL: &str = "targeted_checks_unavailable";
+const CI_EXPECTED_LABEL: &str = "ci_expected";
+const MANUAL_REVIEWER_CHECK_LABEL: &str = "manual_reviewer_check";
 
 pub(crate) fn render_pr_body(
     options: &AgentTaskPrFinalizationOptions,
@@ -125,24 +129,24 @@ fn runtime_guardrails_section(options: &AgentTaskPrFinalizationOptions) -> Strin
 fn verification_bullets(options: &AgentTaskPrFinalizationOptions) -> String {
     let verification = &options.evidence.verification;
     if verification.is_empty() {
-        return "- `targeted_checks_run`: see gate results above".to_string();
+        return format!("- `{TARGETED_CHECKS_RUN_LABEL}`: see gate results above");
     }
 
     let lines = vec![
         format!(
-            "- `targeted_checks_run`: {}",
+            "- `{TARGETED_CHECKS_RUN_LABEL}`: {}",
             inline_code_list(&verification.targeted_checks_run)
         ),
         format!(
-            "- `targeted_checks_unavailable`: {}",
+            "- `{TARGETED_CHECKS_UNAVAILABLE_LABEL}`: {}",
             option_value(verification.targeted_checks_unavailable.as_deref())
         ),
         format!(
-            "- `ci_expected`: {}",
+            "- `{CI_EXPECTED_LABEL}`: {}",
             inline_code_list(&verification.ci_expected)
         ),
         format!(
-            "- `manual_reviewer_check`: {}",
+            "- `{MANUAL_REVIEWER_CHECK_LABEL}`: {}",
             option_value(verification.manual_reviewer_check.as_deref())
         ),
     ];
