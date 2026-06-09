@@ -100,17 +100,36 @@ pub(super) fn remap_agent_task_plan_in_args(
         if arg == "--plan" {
             out.push(arg.clone());
             if let Some(spec) = iter.next() {
-                out.push(remap_at_file_spec(spec, &ordered));
+                out.push(remap_agent_task_plan_spec(spec, &ordered));
             }
             continue;
         }
         if let Some(spec) = arg.strip_prefix("--plan=") {
-            out.push(format!("--plan={}", remap_at_file_spec(spec, &ordered)));
+            out.push(format!(
+                "--plan={}",
+                remap_agent_task_plan_spec(spec, &ordered)
+            ));
             continue;
         }
         out.push(arg.clone());
     }
     out
+}
+
+/// Resolve an agent-task plan spec, remap every controller-local path embedded
+/// in the JSON, and inline the result so the runner never reads stale local
+/// paths from a synced-but-unmodified plan file.
+fn remap_agent_task_plan_spec(spec: &str, mappings: &[&LabPathRemap]) -> String {
+    let raw = match read_json_spec_to_string(spec) {
+        Ok(raw) => raw,
+        Err(_) => return remap_at_file_spec(spec, mappings),
+    };
+    let mut value: Value = match serde_json::from_str(&raw) {
+        Ok(value) => value,
+        Err(_) => return remap_at_file_spec(spec, mappings),
+    };
+    remap_paths_in_value(&mut value, mappings);
+    serde_json::to_string(&value).unwrap_or_else(|_| remap_at_file_spec(spec, mappings))
 }
 
 fn remap_at_file_spec(spec: &str, mappings: &[&LabPathRemap]) -> String {
@@ -424,7 +443,29 @@ mod tests {
     }
 
     #[test]
-    fn remap_agent_task_run_plan_absolute_file_spec() {
+    fn remap_agent_task_run_plan_inlines_remapped_plan_json() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let plan = temp.path().join("plan.json");
+        std::fs::write(
+            &plan,
+            serde_json::json!({
+                "schema": "homeboy/agent-task-plan/v1",
+                "plan_id": "plan-1",
+                "tasks": [{
+                    "task_id": "task-1",
+                    "executor": {
+                        "backend": "wp-codebox",
+                        "config": {
+                            "wp_codebox_bin": "/Users/chubes/Developer/wp-site-generator/.ci/wp-codebox/packages/cli/dist/index.js",
+                            "artifact_root": "/Users/chubes/Developer/wp-site-generator/artifacts"
+                        }
+                    },
+                    "instructions": "test"
+                }]
+            })
+            .to_string(),
+        )
+        .expect("write plan");
         let mappings = vec![LabPathRemap {
             local: "/Users/chubes/Developer/wp-site-generator".to_string(),
             remote: "/home/chubes/Developer/wp-site-generator".to_string(),
@@ -434,20 +475,43 @@ mod tests {
             "agent-task".to_string(),
             "run-plan".to_string(),
             "--plan".to_string(),
-            "@/Users/chubes/Developer/wp-site-generator/.ci/plan.json".to_string(),
+            format!("@{}", plan.display()),
             "--record-run-id=loop-1".to_string(),
         ];
 
+        let out = remap_agent_task_plan_in_args(&args, &mappings);
+        let plan_idx = out.iter().position(|a| a == "--plan").unwrap() + 1;
+        let remapped: serde_json::Value =
+            serde_json::from_str(&out[plan_idx]).expect("inline plan");
+
         assert_eq!(
-            remap_agent_task_plan_in_args(&args, &mappings),
-            vec![
-                "homeboy".to_string(),
-                "agent-task".to_string(),
-                "run-plan".to_string(),
-                "--plan".to_string(),
-                "@/home/chubes/Developer/wp-site-generator/.ci/plan.json".to_string(),
-                "--record-run-id=loop-1".to_string(),
-            ]
+            remapped["tasks"][0]["executor"]["config"]["wp_codebox_bin"],
+            "/home/chubes/Developer/wp-site-generator/.ci/wp-codebox/packages/cli/dist/index.js"
+        );
+        assert_eq!(
+            remapped["tasks"][0]["executor"]["config"]["artifact_root"],
+            "/home/chubes/Developer/wp-site-generator/artifacts"
+        );
+        assert!(out.iter().any(|a| a == "--record-run-id=loop-1"));
+    }
+
+    #[test]
+    fn remap_agent_task_run_plan_absolute_file_spec_when_plan_unreadable() {
+        let mappings = vec![LabPathRemap {
+            local: "/Users/chubes/Developer/wp-site-generator".to_string(),
+            remote: "/home/chubes/Developer/wp-site-generator".to_string(),
+        }];
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "run-plan".to_string(),
+            "--plan".to_string(),
+            "@/Users/chubes/Developer/wp-site-generator/.ci/missing.json".to_string(),
+        ];
+
+        assert_eq!(
+            remap_agent_task_plan_in_args(&args, &mappings)[4],
+            "@/home/chubes/Developer/wp-site-generator/.ci/missing.json"
         );
     }
 
