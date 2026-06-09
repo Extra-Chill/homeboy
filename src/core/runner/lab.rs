@@ -567,7 +567,8 @@ fn run_lab_offload_inner(
     forward_env_if_present(&mut env, PREVIEW_METADATA_ENV);
     forward_env_if_present(&mut env, PREVIEW_PUBLIC_URL_ENV);
     forward_release_ci_env(&mut env);
-    let agent_task_secret_env = hydrate_agent_task_secret_env(&command, &mut env)?;
+    let agent_task_secret_env =
+        hydrate_agent_task_secret_env(&changed_since_preflight.args, &mut env)?;
     lab_metadata["agent_task_secret_env"] = agent_task_secret_env;
     lab_metadata["settings_env"] = settings_env_diagnostics(&changed_since_preflight.args, &env);
     lab_metadata["rig_sync"] = serde_json::json!({
@@ -579,7 +580,7 @@ fn run_lab_offload_inner(
     forward_env_if_present(&mut env, PREVIEW_METADATA_ENV);
     forward_env_if_present(&mut env, PREVIEW_PUBLIC_URL_ENV);
     forward_release_ci_env(&mut env);
-    hydrate_agent_task_secret_env(&command, &mut env)?;
+    hydrate_agent_task_secret_env(&changed_since_preflight.args, &mut env)?;
     let exec_result = exec(
         runner_id,
         RunnerExecOptions {
@@ -856,9 +857,66 @@ fn declared_agent_task_secret_env(args: &[String]) -> Vec<String> {
         }
         index += 1;
     }
+    names.extend(declared_agent_task_run_plan_secret_env(args));
     names.sort();
     names.dedup();
     names
+}
+
+fn declared_agent_task_run_plan_secret_env(args: &[String]) -> Vec<String> {
+    let Some(plan_spec) = agent_task_run_plan_plan_spec(args) else {
+        return Vec::new();
+    };
+    if plan_spec == "-" {
+        return Vec::new();
+    }
+    let raw = match config::read_json_spec_to_string(&plan_spec) {
+        Ok(raw) => raw,
+        Err(_) => return Vec::new(),
+    };
+    let plan: AgentTaskPlan = match serde_json::from_str(&raw) {
+        Ok(plan) => plan,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut names = Vec::new();
+    for request in plan.tasks {
+        names.extend(request.executor.secret_env);
+        names.extend(
+            request
+                .executor
+                .config
+                .get("secret_env")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_string),
+        );
+    }
+    names
+}
+
+fn agent_task_run_plan_plan_spec(args: &[String]) -> Option<String> {
+    if args.get(1).map(String::as_str) != Some("agent-task")
+        || args.get(2).map(String::as_str) != Some("run-plan")
+    {
+        return None;
+    }
+
+    let mut iter = args.iter().skip(3);
+    while let Some(arg) = iter.next() {
+        if arg == "--" {
+            break;
+        }
+        if arg == "--plan" {
+            return iter.next().cloned();
+        }
+        if let Some(value) = arg.strip_prefix("--plan=") {
+            return Some(value.to_string());
+        }
+    }
+    None
 }
 
 fn automatic_capability_fallback(
@@ -1202,6 +1260,99 @@ mod tests {
                 "AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn declared_agent_task_secret_env_includes_run_plan_task_secrets() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let plan_path = temp.path().join("plan.json");
+        std::fs::write(
+            &plan_path,
+            serde_json::json!({
+                "schema": "homeboy/agent-task-plan/v1",
+                "plan_id": "secret-env-plan",
+                "tasks": [
+                    {
+                        "schema": "homeboy/agent-task-request/v1",
+                        "task_id": "idea",
+                        "executor": {
+                            "backend": "codebox",
+                            "secret_env": ["OPENAI_API_KEY"],
+                            "config": {
+                                "secret_env": ["GITHUB_TOKEN"]
+                            }
+                        },
+                        "instructions": "Generate an idea."
+                    },
+                    {
+                        "schema": "homeboy/agent-task-request/v1",
+                        "task_id": "design",
+                        "executor": {
+                            "backend": "codebox",
+                            "secret_env": ["OPENAI_API_KEY"]
+                        },
+                        "instructions": "Design the idea."
+                    }
+                ]
+            })
+            .to_string(),
+        )
+        .expect("write plan");
+
+        let names = declared_agent_task_secret_env(&[
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "run-plan".to_string(),
+            "--plan".to_string(),
+            format!("@{}", plan_path.display()),
+            "--record-run-id".to_string(),
+            "site-generation-loop".to_string(),
+        ]);
+
+        assert_eq!(
+            names,
+            vec!["GITHUB_TOKEN".to_string(), "OPENAI_API_KEY".to_string()]
+        );
+    }
+
+    #[test]
+    fn declared_agent_task_secret_env_dedupes_cli_and_run_plan_task_secrets() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let plan_path = temp.path().join("plan.json");
+        std::fs::write(
+            &plan_path,
+            serde_json::json!({
+                "schema": "homeboy/agent-task-plan/v1",
+                "plan_id": "secret-env-plan",
+                "tasks": [
+                    {
+                        "schema": "homeboy/agent-task-request/v1",
+                        "task_id": "idea",
+                        "executor": {
+                            "backend": "codebox",
+                            "secret_env": ["GITHUB_TOKEN"]
+                        },
+                        "instructions": "Generate an idea."
+                    }
+                ]
+            })
+            .to_string(),
+        )
+        .expect("write plan");
+
+        let names = declared_agent_task_secret_env(&[
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "run-plan".to_string(),
+            "--secret-env".to_string(),
+            "GITHUB_TOKEN".to_string(),
+            "--plan".to_string(),
+            format!("@{}", plan_path.display()),
+            "--record-run-id".to_string(),
+            "site-generation-loop".to_string(),
+        ]);
+
+        assert_eq!(names, vec!["GITHUB_TOKEN".to_string()]);
     }
 
     #[test]
