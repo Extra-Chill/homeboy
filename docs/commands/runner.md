@@ -49,9 +49,10 @@ Commands that are both resource-policy hot and portable for Lab offload (`audit`
 
 - `--runner <id>` always wins.
 - `--force-hot` only suppresses the resource-policy warning. If a default Lab runner is available for a portable hot command, Homeboy refuses to use `--force-hot` as an implicit local bypass.
-- `--force-hot --allow-local-hot` keeps a portable hot command local even when a default Lab runner is available. Use it only when controller-machine execution is intentional.
+- `--force-hot --allow-local-hot` keeps a portable hot command local even when a default Lab runner is available, unless a command-specific host policy denies local execution. For benchmarks, `homeboy config set /bench/local_execution '"denied"'` makes local `homeboy bench` execution fail closed until the global config is changed back.
 - `lab.preferred_runner` is used when it names an SSH runner, even if that runner is not connected yet.
 - Without `lab.preferred_runner`, Homeboy auto-selects only when exactly one SSH runner is configured or exactly one SSH runner is already connected.
+- With a preferred or uniquely configured Lab runner, `homeboy bench <component>` routes to Lab directly; `--runner <id>` is only needed to override an ambiguous or non-default runner selection.
 - Local runners are never auto-selected.
 - If the auto-selected runner is disconnected, Homeboy attempts a short bounded `runner connect` before execution. Connection failure prints the reason and falls back to local execution.
 - Explicit `--runner <id>` also attempts to connect a disconnected runner, but connection failure remains a command error instead of falling back silently.

@@ -313,6 +313,10 @@ pub(super) fn resolve_lab_runner_selection(
     force_hot: bool,
     allow_local_hot: bool,
 ) -> Result<Option<LabRunnerSelection>> {
+    let deny_local_bench = crate::core::defaults::load_config()
+        .bench
+        .local_execution
+        .is_denied();
     let default_runner = if explicit_runner.is_none() && command.portable {
         super::resolve_default_lab_runner()?
     } else {
@@ -324,6 +328,7 @@ pub(super) fn resolve_lab_runner_selection(
         explicit_runner,
         force_hot,
         allow_local_hot,
+        deny_local_bench,
         default_runner,
     )
 }
@@ -333,6 +338,7 @@ pub(super) fn resolve_lab_runner_selection_from_default(
     explicit_runner: Option<&str>,
     force_hot: bool,
     allow_local_hot: bool,
+    deny_local_bench: bool,
     default_runner: Option<String>,
 ) -> Result<Option<LabRunnerSelection>> {
     if let Some(runner_id) = explicit_runner {
@@ -373,7 +379,12 @@ pub(super) fn resolve_lab_runner_selection_from_default(
     }
 
     if force_hot || !command.portable {
+        fail_if_local_bench_denied(command, deny_local_bench)?;
         return Ok(None);
+    }
+
+    if default_runner.is_none() {
+        fail_if_local_bench_denied(command, deny_local_bench)?;
     }
 
     default_runner
@@ -385,6 +396,25 @@ pub(super) fn resolve_lab_runner_selection_from_default(
             })
         })
         .transpose()
+}
+
+fn fail_if_local_bench_denied(command: &LabOffloadCommand, denied: bool) -> Result<()> {
+    if !denied || command.hot_label != "bench" {
+        return Ok(());
+    }
+
+    let config_path = crate::core::defaults::config_path()
+        .unwrap_or_else(|_| "the global Homeboy config".to_string());
+    Err(Error::validation_invalid_argument(
+        "bench.local_execution",
+        "Refusing to run `homeboy bench` locally because global config `/bench/local_execution` is `denied`",
+        Some("denied".to_string()),
+        Some(vec![
+            "Configure `lab.preferred_runner`, or keep exactly one SSH Lab runner configured, then run `homeboy bench <component>` so Homeboy auto-routes the benchmark to Lab.".to_string(),
+            "Use `--runner <runner-id>` only to override an ambiguous or non-default Lab selection.".to_string(),
+            format!("Change `/bench/local_execution` in {config_path} to `allowed` before intentionally re-enabling local benchmark execution."),
+        ]),
+    ))
 }
 
 fn runner_status_tunnel_mode(runner_id: &str) -> RunnerTunnelMode {

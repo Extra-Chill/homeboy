@@ -16,6 +16,9 @@ pub struct HomeboyConfig {
     pub defaults: Defaults,
 
     #[serde(default)]
+    pub bench: BenchConfig,
+
+    #[serde(default)]
     pub lab: LabConfig,
 
     #[serde(default)]
@@ -39,6 +42,7 @@ impl Default for HomeboyConfig {
     fn default() -> Self {
         Self {
             defaults: Defaults::default(),
+            bench: BenchConfig::default(),
             lab: LabConfig::default(),
             triage: TriageConfig::default(),
             artifact_root: None,
@@ -49,6 +53,39 @@ impl Default for HomeboyConfig {
 
 pub fn default_true() -> bool {
     true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BenchConfig {
+    #[serde(default)]
+    pub local_execution: BenchLocalExecutionPolicy,
+}
+
+impl Default for BenchConfig {
+    fn default() -> Self {
+        Self {
+            local_execution: BenchLocalExecutionPolicy::Allowed,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BenchLocalExecutionPolicy {
+    Allowed,
+    Denied,
+}
+
+impl Default for BenchLocalExecutionPolicy {
+    fn default() -> Self {
+        Self::Allowed
+    }
+}
+
+impl BenchLocalExecutionPolicy {
+    pub fn is_denied(self) -> bool {
+        matches!(self, Self::Denied)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

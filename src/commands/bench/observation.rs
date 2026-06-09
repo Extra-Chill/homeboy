@@ -121,8 +121,20 @@ pub(super) fn history_hints(summary: &BenchObservationSummary) -> Vec<String> {
     vec![
         format!("Persisted benchmark run ID: {}", summary.run_id),
         format!("View this run: homeboy runs show {}", summary.run_id),
+        format!("List artifacts: homeboy runs artifacts {}", summary.run_id),
+        format!(
+            "Fetch an artifact: homeboy runs artifact get {} <artifact-name> --to <path>",
+            summary.run_id
+        ),
         format!("List related bench runs: {list_command}"),
-        format!("Observation store: {}", summary.store_path),
+        format!(
+            "Query persisted bench metadata: homeboy runs query --component {} --since 24h",
+            summary.component_id
+        ),
+        format!(
+            "Observation store: {} (debug path; prefer `homeboy runs ...` commands above)",
+            summary.store_path
+        ),
     ]
 }
 

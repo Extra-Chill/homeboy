@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use crate::commands::{
     agent_task, api, audit, audit_baseline, auth, bench, build, changelog, changes, ci, cleanup,
     component, config, daemon, db, deploy, deps, doctor, extension, file, fleet, git, http, issues,
-    lint, logs, observe, project, refactor, refs, release, report, review, rig, runner, runs,
+    lab, lint, logs, observe, project, refactor, refs, release, report, review, rig, runner, runs,
     runtime, self_cmd, server, ssh, stack, status, test, trace, triage, tunnel, undo, upgrade,
     version, worktree,
 };
@@ -136,6 +136,8 @@ pub enum Commands {
     Rig(rig::RigArgs),
     /// Manage local and SSH execution runners
     Runner(runner::RunnerArgs),
+    /// Discover Lab routing and benchmark offload commands
+    Lab(lab::LabArgs),
     /// Inspect core-owned runtime helper assets
     Runtime(runtime::RuntimeArgs),
     /// Manage component-backed task worktrees
@@ -368,6 +370,7 @@ impl Commands {
             | Commands::Changes(_)
             | Commands::Release(_)
             | Commands::Report(_)
+            | Commands::Lab(_)
             | Commands::Runner(_)
             | Commands::Runtime(_)
             | Commands::Worktree(_)

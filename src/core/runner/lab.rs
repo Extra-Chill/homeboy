@@ -1066,6 +1066,7 @@ mod tests {
             Some("lab-explicit"),
             false,
             false,
+            false,
             Some("lab-default".to_string()),
         )
         .expect("selection")
@@ -1082,6 +1083,7 @@ mod tests {
             &command,
             Some("lab-explicit"),
             true,
+            false,
             false,
             Some("lab-default".to_string()),
         )
@@ -1100,6 +1102,7 @@ mod tests {
             None,
             false,
             false,
+            false,
             Some("lab-default".to_string()),
         )
         .expect("selection")
@@ -1113,11 +1116,11 @@ mod tests {
     fn lab_runner_selection_runs_locally_without_default_runner() {
         let command = portable_lab_command("test");
 
-        assert!(
-            resolve_lab_runner_selection_from_default(&command, None, false, false, None)
-                .expect("selection")
-                .is_none()
-        );
+        assert!(resolve_lab_runner_selection_from_default(
+            &command, None, false, false, false, None
+        )
+        .expect("selection")
+        .is_none());
     }
 
     #[test]
@@ -1128,6 +1131,7 @@ mod tests {
             &command,
             None,
             true,
+            false,
             false,
             Some("lab-default".to_string()),
         )
@@ -1148,11 +1152,11 @@ mod tests {
     fn lab_runner_selection_force_hot_runs_locally_without_default_runner() {
         let command = portable_lab_command("test");
 
-        assert!(
-            resolve_lab_runner_selection_from_default(&command, None, true, false, None)
-                .expect("selection")
-                .is_none()
-        );
+        assert!(resolve_lab_runner_selection_from_default(
+            &command, None, true, false, false, None
+        )
+        .expect("selection")
+        .is_none());
     }
 
     #[test]
@@ -1164,6 +1168,7 @@ mod tests {
             None,
             true,
             true,
+            false,
             Some("lab-default".to_string()),
         )
         .expect("selection")
@@ -1177,12 +1182,29 @@ mod tests {
             Some("lab-explicit"),
             false,
             false,
+            false,
             Some("lab-default".to_string()),
         )
         .expect_err("rig up rejects explicit runner");
 
         assert_eq!(err.code.as_str(), "validation.invalid_argument");
         assert!(err.message.contains("single-workspace Lab snapshot"));
+    }
+
+    #[test]
+    fn lab_runner_selection_denies_local_bench_when_host_policy_requires_lab() {
+        let command = portable_lab_command("bench");
+
+        let err = resolve_lab_runner_selection_from_default(&command, None, true, true, true, None)
+            .expect_err("bench local execution should be denied by config policy");
+
+        assert_eq!(err.code.as_str(), "validation.invalid_argument");
+        assert!(err.message.contains("/bench/local_execution"));
+        assert!(err.message.contains("denied"));
+        let tried = err.details["tried"].as_array().expect("tried");
+        assert!(tried.iter().any(|hint| hint
+            .as_str()
+            .is_some_and(|hint| hint.contains("--runner <runner-id>"))));
     }
 
     #[test]
