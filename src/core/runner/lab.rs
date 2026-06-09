@@ -1,10 +1,11 @@
 use std::path::Path;
 
-use crate::core::agent_task_secrets;
+use crate::core::agent_task_lifecycle;
+use crate::core::agent_task_scheduler::{AgentTaskAggregate, AgentTaskPlan};
 use crate::core::observation::{PREVIEW_METADATA_ENV, PREVIEW_PUBLIC_URL_ENV};
 use crate::core::plan::{HomeboyPlan, PlanStep, PlanStepStatus, PlanValues};
 use crate::core::source_snapshot::SourceSnapshot;
-use crate::core::{Error, Result};
+use crate::core::{agent_task_secrets, config, Error, Result};
 
 use super::{
     evaluate_lab_runner_capabilities_for_runner, exec, lab_offload_changed_since_ref,
@@ -20,7 +21,8 @@ use super::lab_apply::apply_lab_offload_patch;
 #[cfg(test)]
 use super::lab_args::EXPLICIT_PASSTHROUGH_SENTINEL;
 use super::lab_args::{
-    lab_offload_source_path, remap_provider_config_in_args, rewrite_lab_offload_args, LabPathRemap,
+    lab_offload_source_path, remap_agent_task_plan_in_args, remap_provider_config_in_args,
+    rewrite_lab_offload_args, LabPathRemap,
 };
 use super::lab_capabilities::lab_runner_capability_contract;
 use super::lab_command::lab_offload_command_prefix;
@@ -86,7 +88,7 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
             "runner",
             message,
             Some(runner_id.to_string()),
-            Some(vec!["Current Lab offload support: agent-task dispatch/cook/loop, audit, bench run, full lint, full test, trace, and refactor source runs.".to_string()]),
+            Some(vec!["Current Lab offload support: agent-task dispatch/cook/loop/run-plan, audit, bench run, full lint, full test, trace, and refactor source runs.".to_string()]),
         )
     };
     let mut plan = base_lab_plan(request.command.as_ref());
@@ -94,7 +96,7 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
         if let Some(runner_id) = request.explicit_runner {
             return Err(unsupported_runner_error(
                 runner_id,
-                "--runner is only supported for commands with portable Lab offload support: agent-task dispatch/cook/loop, lint, test, audit, bench, trace, and refactor source runs".to_string(),
+                "--runner is only supported for commands with portable Lab offload support: agent-task dispatch/cook/loop/run-plan, lint, test, audit, bench, trace, and refactor source runs".to_string(),
             ));
         }
         return Ok(LabOffloadOutcome::RunLocal {
@@ -107,7 +109,7 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
     if !contract.portable {
         if let Some(runner_id) = request.explicit_runner {
             let message = contract.unsupported_reason.map_or_else(
-                || "--runner is only supported for commands with portable Lab offload support: agent-task dispatch/cook/loop, lint, test, audit, bench, trace, and refactor source runs".to_string(),
+                || "--runner is only supported for commands with portable Lab offload support: agent-task dispatch/cook/loop/run-plan, lint, test, audit, bench, trace, and refactor source runs".to_string(),
                 |reason| format!("--runner is unavailable for this local-only resource-pressure command. {reason}"),
             );
             return Err(unsupported_runner_error(runner_id, message));
@@ -525,6 +527,7 @@ fn run_lab_offload_inner(
         &synced.excludes,
     )?;
     let remapped_args = remap_provider_config_in_args(&changed_since_preflight.args, &path_remaps);
+    let remapped_args = remap_agent_task_plan_in_args(&remapped_args, &path_remaps);
 
     let mut command = command_prefix.argv;
     command.extend(
@@ -678,6 +681,7 @@ fn run_lab_offload_inner(
             ));
         }
     }
+    mirror_agent_task_run_plan_lifecycle(request.normalized_args, &exec_output.stdout)?;
 
     let mut stderr = String::new();
     for message in messages {
@@ -692,6 +696,73 @@ fn run_lab_offload_inner(
         stderr,
         exit_code,
     })
+}
+
+fn mirror_agent_task_run_plan_lifecycle(args: &[String], stdout: &str) -> Result<()> {
+    let Some((plan_spec, run_id)) = agent_task_run_plan_recording_args(args) else {
+        return Ok(());
+    };
+    if plan_spec == "-" {
+        return Ok(());
+    }
+    let envelope: serde_json::Value = serde_json::from_str(stdout).map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("parse offloaded agent-task run-plan output".to_string()),
+        )
+    })?;
+    let Some(aggregate_value) = envelope.get("data").cloned() else {
+        return Ok(());
+    };
+    let raw_plan = config::read_json_spec_to_string(&plan_spec)?;
+    let plan: AgentTaskPlan = serde_json::from_str(&raw_plan).map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some(format!("read agent-task plan {plan_spec}")),
+        )
+    })?;
+    let aggregate: AgentTaskAggregate =
+        serde_json::from_value(aggregate_value).map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("parse offloaded agent-task aggregate".to_string()),
+            )
+        })?;
+
+    agent_task_lifecycle::submit_plan(&plan, Some(&run_id))?;
+    agent_task_lifecycle::mark_running(&run_id)?;
+    agent_task_lifecycle::record_run_aggregate(&run_id, &plan, &aggregate)?;
+    Ok(())
+}
+
+fn agent_task_run_plan_recording_args(args: &[String]) -> Option<(String, String)> {
+    if args.get(1).map(String::as_str) != Some("agent-task")
+        || args.get(2).map(String::as_str) != Some("run-plan")
+    {
+        return None;
+    }
+
+    let mut plan = None;
+    let mut record_run_id = None;
+    let mut iter = args.iter().skip(3);
+    while let Some(arg) = iter.next() {
+        if arg == "--" {
+            break;
+        }
+        match arg.as_str() {
+            "--plan" => plan = iter.next().cloned(),
+            "--record-run-id" => record_run_id = iter.next().cloned(),
+            _ => {
+                if let Some(value) = arg.strip_prefix("--plan=") {
+                    plan = Some(value.to_string());
+                } else if let Some(value) = arg.strip_prefix("--record-run-id=") {
+                    record_run_id = Some(value.to_string());
+                }
+            }
+        }
+    }
+
+    Some((plan?, record_run_id?))
 }
 
 fn hydrate_agent_task_secret_env(

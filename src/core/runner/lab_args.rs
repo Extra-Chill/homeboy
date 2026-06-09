@@ -73,6 +73,55 @@ pub(super) fn remap_provider_config_in_args(
     out
 }
 
+pub(super) fn remap_agent_task_plan_in_args(
+    args: &[String],
+    mappings: &[LabPathRemap],
+) -> Vec<String> {
+    if mappings.is_empty() {
+        return args.to_vec();
+    }
+
+    let mut ordered: Vec<&LabPathRemap> = mappings.iter().collect();
+    ordered.sort_by_key(|mapping| std::cmp::Reverse(mapping.local.len()));
+
+    let mut out = Vec::with_capacity(args.len());
+    let mut iter = args.iter().peekable();
+    let mut passthrough = false;
+    while let Some(arg) = iter.next() {
+        if passthrough {
+            out.push(arg.clone());
+            continue;
+        }
+        if arg == "--" {
+            passthrough = true;
+            out.push(arg.clone());
+            continue;
+        }
+        if arg == "--plan" {
+            out.push(arg.clone());
+            if let Some(spec) = iter.next() {
+                out.push(remap_at_file_spec(spec, &ordered));
+            }
+            continue;
+        }
+        if let Some(spec) = arg.strip_prefix("--plan=") {
+            out.push(format!("--plan={}", remap_at_file_spec(spec, &ordered)));
+            continue;
+        }
+        out.push(arg.clone());
+    }
+    out
+}
+
+fn remap_at_file_spec(spec: &str, mappings: &[&LabPathRemap]) -> String {
+    let Some(path) = spec.strip_prefix('@') else {
+        return spec.to_string();
+    };
+    remap_local_path(path, mappings)
+        .map(|remapped| format!("@{remapped}"))
+        .unwrap_or_else(|| spec.to_string())
+}
+
 /// Resolve a provider-config spec (inline JSON / `@file` / `-`), remap its
 /// embedded local paths, and return inline JSON. Falls back to the original spec
 /// if it cannot be read or parsed so behavior is never worse than today.
@@ -372,6 +421,34 @@ mod tests {
         // No mappings -> untouched
         let unchanged = remap_provider_config_in_args(&args, &[]);
         assert_eq!(unchanged, args);
+    }
+
+    #[test]
+    fn remap_agent_task_run_plan_absolute_file_spec() {
+        let mappings = vec![LabPathRemap {
+            local: "/Users/chubes/Developer/wp-site-generator".to_string(),
+            remote: "/home/chubes/Developer/wp-site-generator".to_string(),
+        }];
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "run-plan".to_string(),
+            "--plan".to_string(),
+            "@/Users/chubes/Developer/wp-site-generator/.ci/plan.json".to_string(),
+            "--record-run-id=loop-1".to_string(),
+        ];
+
+        assert_eq!(
+            remap_agent_task_plan_in_args(&args, &mappings),
+            vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "run-plan".to_string(),
+                "--plan".to_string(),
+                "@/home/chubes/Developer/wp-site-generator/.ci/plan.json".to_string(),
+                "--record-run-id=loop-1".to_string(),
+            ]
+        );
     }
 
     #[test]

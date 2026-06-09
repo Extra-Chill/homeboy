@@ -1123,6 +1123,10 @@ mod tests {
             parsed_command(&["homeboy", "agent-task", "dispatch", "--prompt", "cook"])
                 .supports_lab_runner()
         );
+        assert!(
+            parsed_command(&["homeboy", "agent-task", "run-plan", "--plan", "@plan.json"])
+                .supports_lab_runner()
+        );
         assert!(parsed_command(&[
             "homeboy",
             "agent-task",
@@ -1203,11 +1207,11 @@ mod tests {
             ),
             (
                 parsed_command(&["homeboy", "agent-task", "dispatch", "--prompt", "cook"]),
-                "agent-task dispatch/cook/loop",
+                "agent-task dispatch/cook/loop/run-plan",
             ),
             (
                 parsed_command(&["homeboy", "agent-task", "cook", "--prompt", "cook"]),
-                "agent-task dispatch/cook/loop",
+                "agent-task dispatch/cook/loop/run-plan",
             ),
             (
                 parsed_command(&[
@@ -1221,7 +1225,11 @@ mod tests {
                     "--prompt",
                     "cook",
                 ]),
-                "agent-task dispatch/cook/loop",
+                "agent-task dispatch/cook/loop/run-plan",
+            ),
+            (
+                parsed_command(&["homeboy", "agent-task", "run-plan", "--plan", "@plan.json"]),
+                "agent-task dispatch/cook/loop/run-plan",
             ),
         ];
 

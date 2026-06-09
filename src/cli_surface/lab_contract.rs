@@ -50,10 +50,11 @@ impl Commands {
                     super::agent_task::AgentTaskCommand::Cook(_)
                         | super::agent_task::AgentTaskCommand::Dispatch(_)
                         | super::agent_task::AgentTaskCommand::Loop(_)
+                        | super::agent_task::AgentTaskCommand::RunPlan(_)
                 ) =>
             {
                 lab_portable_contract(
-                    "agent-task dispatch/cook/loop",
+                    "agent-task dispatch/cook/loop/run-plan",
                     None,
                     true,
                     LAB_NO_EXTRA_TOOLS,
