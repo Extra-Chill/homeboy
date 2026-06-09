@@ -72,3 +72,23 @@ fn scenario_and_profile_conflict() {
 
     assert!(err.to_string().contains("cannot be used with"));
 }
+
+#[test]
+fn parses_dotted_setting_override_for_nested_bench_env() {
+    let cli = TestCli::try_parse_from([
+        "bench",
+        "--rig",
+        "woocommerce-performance",
+        "--setting",
+        "bench_env.WC_REST_BATCH_IMPORT_ITEMS=100",
+    ])
+    .expect("bench dotted --setting should parse");
+
+    assert_eq!(
+        cli.bench.run.setting_args.setting,
+        vec![(
+            "bench_env.WC_REST_BATCH_IMPORT_ITEMS".to_string(),
+            "100".to_string()
+        )]
+    );
+}
