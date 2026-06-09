@@ -1,5 +1,5 @@
 use crate::core::agent_task_finalization::AgentTaskPrFinalizationOptions;
-use crate::core::gate::{HomeboyGateResult, HomeboyGateStatus};
+use crate::core::gate::HomeboyGateResult;
 use crate::core::proof::{
     gate_scope_label, gate_status_label, is_ci_equivalent_gate, proof_runner_label, HomeboyProof,
     HomeboyProofGapKind, HomeboyProofRunner,
@@ -76,19 +76,13 @@ fn gate_bullets(gates: &[HomeboyGateResult]) -> String {
 
     gates
         .iter()
-        .map(|gate| match gate.status {
-            HomeboyGateStatus::Passed => {
-                format!("- {}: passed ({})", gate.name, gate_scope_label(gate))
-            }
-            HomeboyGateStatus::Failed => {
-                format!("- {}: failed ({})", gate.name, gate_scope_label(gate))
-            }
-            HomeboyGateStatus::Skipped => {
-                format!("- {}: skipped ({})", gate.name, gate_scope_label(gate))
-            }
-            HomeboyGateStatus::Blocked => {
-                format!("- {}: blocked ({})", gate.name, gate_scope_label(gate))
-            }
+        .map(|gate| {
+            format!(
+                "- {}: {} ({})",
+                gate.name,
+                gate_status_label(gate.status),
+                gate_scope_label(gate)
+            )
         })
         .collect::<Vec<_>>()
         .join("\n")
