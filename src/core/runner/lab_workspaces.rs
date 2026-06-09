@@ -225,8 +225,8 @@ fn provider_config_candidate_paths(value: &serde_json::Value) -> Vec<String> {
             }
         }
     }
-    // Runtime overlay sources (e.g. a bundled-library php-ai-client build that
-    // supplies provider-request-auth APIs) are controller-local directories the
+    // Runtime overlay sources (e.g. a bundled helper library build that
+    // supplies provider APIs) are controller-local directories the
     // sandbox mounts; sync them so the overlay resolves on the runner.
     if let Some(overlays) = value.get("runtime_overlays").and_then(|v| v.as_array()) {
         for overlay in overlays {
@@ -378,7 +378,7 @@ mod provider_config_candidate_paths_tests {
             },
             "provider_plugin_paths": ["/local/ai-provider-for-claude-code"],
             "runtime_overlays": [
-                { "kind": "bundled-library", "library": "php-ai-client", "source": "/local/php-ai-client@custom-provider-auth", "target": "/wordpress/wp-includes/php-ai-client" }
+                { "kind": "bundled-library", "library": "client-library", "source": "/local/client-library@custom-provider-auth", "target": "/workspace/vendor/client-library" }
             ],
             "agents_api": "/local/agents-api",
             "model": "claude-opus-4-8"
@@ -391,7 +391,7 @@ mod provider_config_candidate_paths_tests {
             "/local/data-machine",
             "/local/data-machine-code",
             "/local/ai-provider-for-claude-code",
-            "/local/php-ai-client@custom-provider-auth",
+            "/local/client-library@custom-provider-auth",
             "/local/agents-api",
         ] {
             assert!(
