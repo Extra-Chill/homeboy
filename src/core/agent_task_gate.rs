@@ -1,7 +1,6 @@
 use std::path::Path;
 use std::process::Command;
 
-use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -14,6 +13,9 @@ use crate::core::{Error, Result};
 
 pub const AGENT_TASK_GATE_REPORT_SCHEMA: &str = "homeboy/agent-task-gate-report/v1";
 const TASK_AFFECTING_ENV_VARS: &[&str] = &["STUDIO_RUNTIME"];
+
+pub type AgentTaskGateVisibility = HomeboyGateVisibility;
+pub type AgentTaskGateRevealPolicy = HomeboyGateRevealPolicy;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgentTaskGateReport {
@@ -57,24 +59,6 @@ impl AgentTaskGateEnvironment {
     fn is_empty(&self) -> bool {
         self.inherited.is_empty() && self.sanitized.is_empty()
     }
-}
-
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, ValueEnum)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentTaskGateVisibility {
-    #[default]
-    Visible,
-    Private,
-}
-
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, ValueEnum)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentTaskGateRevealPolicy {
-    #[default]
-    FullEvidence,
-    SummaryOnly,
-    Redacted,
-    NoDetail,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -123,8 +107,8 @@ impl AgentTaskGateReport {
                 AgentTaskGateStatus::Failed => HomeboyGateStatus::Failed,
             },
         )
-        .visibility(visibility.into())
-        .reveal_policy(reveal_policy.into())
+        .visibility(visibility)
+        .reveal_policy(reveal_policy)
         .retryable(status == AgentTaskGateStatus::Failed);
         let step = PlanStep::builder(
             id.clone(),
@@ -288,8 +272,8 @@ impl From<AgentTaskGateReport> for HomeboyGateResult {
         )
         .summary(summary)
         .evidence(evidence)
-        .visibility(report.visibility.into())
-        .reveal_policy(report.reveal_policy.into())
+        .visibility(report.visibility)
+        .reveal_policy(report.reveal_policy)
         .retryable(status == HomeboyGateStatus::Failed)
         .agent_feedback(agent_feedback)
         .provenance(json!({
@@ -386,26 +370,6 @@ fn gate_result_evidence(report: &AgentTaskGateReport) -> serde_json::Value {
         "failure_evidence": report.failure_evidence,
         "environment": report.environment,
     })
-}
-
-impl From<AgentTaskGateVisibility> for HomeboyGateVisibility {
-    fn from(visibility: AgentTaskGateVisibility) -> Self {
-        match visibility {
-            AgentTaskGateVisibility::Visible => Self::Visible,
-            AgentTaskGateVisibility::Private => Self::Private,
-        }
-    }
-}
-
-impl From<AgentTaskGateRevealPolicy> for HomeboyGateRevealPolicy {
-    fn from(reveal_policy: AgentTaskGateRevealPolicy) -> Self {
-        match reveal_policy {
-            AgentTaskGateRevealPolicy::FullEvidence => Self::FullEvidence,
-            AgentTaskGateRevealPolicy::SummaryOnly => Self::SummaryOnly,
-            AgentTaskGateRevealPolicy::Redacted => Self::Redacted,
-            AgentTaskGateRevealPolicy::NoDetail => Self::NoDetail,
-        }
-    }
 }
 
 #[cfg(test)]

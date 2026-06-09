@@ -317,9 +317,8 @@ pub fn finalize_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
     options: AgentTaskPrFinalizationOptions,
     backend: &mut B,
 ) -> Result<AgentTaskPrFinalizationReport> {
-    let normalized_gate_results = normalized_finalization_gates(&options);
-    validate_green_gates(&normalized_gate_results)?;
-    let proof = build_finalization_proof(&options, normalized_gate_results.clone());
+    validate_green_gates(&options.normalized_gate_results)?;
+    let proof = build_finalization_proof(&options, options.normalized_gate_results.clone());
     let head = options
         .head
         .clone()
@@ -403,21 +402,6 @@ fn validate_green_gates(gates: &[HomeboyGateResult]) -> Result<()> {
     Ok(())
 }
 
-fn normalized_finalization_gates(
-    options: &AgentTaskPrFinalizationOptions,
-) -> Vec<HomeboyGateResult> {
-    if !options.normalized_gate_results.is_empty() {
-        return options.normalized_gate_results.clone();
-    }
-
-    options
-        .gate_results
-        .iter()
-        .cloned()
-        .map(HomeboyGateResult::from)
-        .collect()
-}
-
 fn is_green_status(status: &str) -> bool {
     matches!(
         status.trim().to_ascii_lowercase().as_str(),
@@ -489,7 +473,7 @@ fn report(
     changed_files: Vec<String>,
     proof: Option<HomeboyProof>,
 ) -> AgentTaskPrFinalizationReport {
-    let normalized_gate_results = normalized_finalization_gates(options);
+    let normalized_gate_results = options.normalized_gate_results.clone();
     let proof =
         proof.unwrap_or_else(|| build_finalization_proof(options, normalized_gate_results.clone()));
     AgentTaskPrFinalizationReport {
@@ -836,6 +820,8 @@ mod tests {
         };
         let mut options = options();
         options.gate_results[0].status = "failed".to_string();
+        options.normalized_gate_results[0] =
+            HomeboyGateResult::from(options.gate_results[0].clone());
 
         let error = finalize_pr_with_backend(options, &mut backend).expect_err("blocked");
 
@@ -844,6 +830,17 @@ mod tests {
     }
 
     fn options() -> AgentTaskPrFinalizationOptions {
+        let gate_results = vec![AgentTaskGateResult {
+            name: "focused project check".to_string(),
+            status: "passed".to_string(),
+            detail: Some("targeted".to_string()),
+        }];
+        let normalized_gate_results = gate_results
+            .iter()
+            .cloned()
+            .map(HomeboyGateResult::from)
+            .collect();
+
         AgentTaskPrFinalizationOptions {
             path: "/repo".to_string(),
             run_id: "cook-3678".to_string(),
@@ -851,12 +848,8 @@ mod tests {
             head: None,
             title: "Cook issue #3678".to_string(),
             commit_message: "finalize cook loop PR plumbing".to_string(),
-            gate_results: vec![AgentTaskGateResult {
-                name: "focused project check".to_string(),
-                status: "passed".to_string(),
-                detail: Some("targeted".to_string()),
-            }],
-            normalized_gate_results: Vec::new(),
+            gate_results,
+            normalized_gate_results,
             changed_files: Vec::new(),
             evidence: AgentTaskPrEvidence {
                 source_refs: vec!["https://github.com/Extra-Chill/homeboy/issues/3678".to_string()],

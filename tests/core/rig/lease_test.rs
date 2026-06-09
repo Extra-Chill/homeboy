@@ -19,6 +19,7 @@ fn rig(id: &str, resources: RigResourcesSpec) -> RigSpec {
         bench: None,
         bench_workloads: Default::default(),
         trace_workloads: Default::default(),
+        trace_workload_defaults: Default::default(),
         trace_variants: Default::default(),
         trace_profiles: Default::default(),
         trace_experiments: Default::default(),

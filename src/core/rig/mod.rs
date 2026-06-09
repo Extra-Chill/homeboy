@@ -24,6 +24,7 @@ pub mod expand;
 pub mod install;
 mod json_config;
 pub mod lease;
+pub mod lint;
 pub mod pipeline;
 pub mod runner;
 pub mod service;
@@ -114,9 +115,21 @@ fn read_config(id: &str) -> Result<(RigSpec, Option<String>)> {
             Some(content.chars().take(200).collect()),
         )
     })?;
+    apply_trace_workload_defaults(&mut spec);
     let declared_id = (!spec.id.is_empty() && spec.id != id).then(|| spec.id.clone());
     spec.id = id.to_string();
     Ok((spec, declared_id))
+}
+
+fn apply_trace_workload_defaults(spec: &mut RigSpec) {
+    for (extension_id, defaults) in spec.trace_workload_defaults.clone() {
+        let Some(workloads) = spec.trace_workloads.get_mut(&extension_id) else {
+            continue;
+        };
+        for workload in workloads {
+            workload.apply_defaults(&defaults);
+        }
+    }
 }
 
 fn stale_source_error(id: &str, config_path: &Path) -> Option<Error> {
