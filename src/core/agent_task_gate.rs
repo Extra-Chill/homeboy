@@ -12,6 +12,7 @@ use crate::core::gate::{
 use crate::core::{Error, Result};
 
 pub const AGENT_TASK_GATE_REPORT_SCHEMA: &str = "homeboy/agent-task-gate-report/v1";
+const TASK_AFFECTING_ENV_VARS: &[&str] = &["STUDIO_RUNTIME"];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskGateReport {
@@ -31,6 +32,28 @@ pub struct AgentTaskGateReport {
     pub stderr: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_evidence: Option<AgentTaskGateFailureEvidence>,
+    #[serde(default, skip_serializing_if = "AgentTaskGateEnvironment::is_empty")]
+    pub environment: AgentTaskGateEnvironment,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskGateEnvironment {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inherited: Vec<AgentTaskGateEnvironmentVariable>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sanitized: Vec<AgentTaskGateEnvironmentVariable>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskGateEnvironmentVariable {
+    pub name: String,
+    pub value: String,
+}
+
+impl AgentTaskGateEnvironment {
+    fn is_empty(&self) -> bool {
+        self.inherited.is_empty() && self.sanitized.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, ValueEnum)]
@@ -94,6 +117,10 @@ pub(crate) fn run_gate_command_with_policy(
     let command_vec = vec!["sh".to_string(), "-lc".to_string(), command.to_string()];
     let mut process = Command::new(&command_vec[0]);
     process.args(&command_vec[1..]).current_dir(cwd);
+    let environment = selected_gate_environment(command);
+    for variable in &environment.sanitized {
+        process.env_remove(&variable.name);
+    }
     let output = process.output().map_err(|error| {
         Error::internal_io(
             error.to_string(),
@@ -122,7 +149,31 @@ pub(crate) fn run_gate_command_with_policy(
         stdout,
         stderr,
         failure_evidence,
+        environment,
     })
+}
+
+fn selected_gate_environment(command: &str) -> AgentTaskGateEnvironment {
+    let mut environment = AgentTaskGateEnvironment::default();
+    for name in TASK_AFFECTING_ENV_VARS {
+        let Ok(value) = std::env::var(name) else {
+            continue;
+        };
+        let variable = AgentTaskGateEnvironmentVariable {
+            name: (*name).to_string(),
+            value,
+        };
+        if command_mentions_env(command, name) {
+            environment.inherited.push(variable);
+        } else {
+            environment.sanitized.push(variable);
+        }
+    }
+    environment
+}
+
+fn command_mentions_env(command: &str, name: &str) -> bool {
+    command.contains(&format!("{name}="))
 }
 
 fn gate_report_schema() -> String {
@@ -273,6 +324,7 @@ fn gate_result_evidence(report: &AgentTaskGateReport) -> serde_json::Value {
         "stdout": report.stdout,
         "stderr": report.stderr,
         "failure_evidence": report.failure_evidence,
+        "environment": report.environment,
     })
 }
 
@@ -299,6 +351,9 @@ impl From<AgentTaskGateRevealPolicy> for HomeboyGateRevealPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     #[test]
     fn gate_command_reports_success_without_failure_evidence() {
@@ -432,5 +487,42 @@ mod tests {
         assert_eq!(result.evidence["stdout"], "ok");
         assert!(result.agent_feedback.is_empty());
         assert!(result.summary.contains("deterministic gate passed"));
+    }
+
+    #[test]
+    fn gate_command_sanitizes_inherited_runtime_selectors_by_default() {
+        let _guard = ENV_MUTEX.lock().expect("env lock");
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::env::set_var("STUDIO_RUNTIME", "runtime-a");
+
+        let report = run_gate_command(temp.path(), 7, "printf \"%s\" \"${STUDIO_RUNTIME:-unset}\"")
+            .expect("gate report");
+
+        std::env::remove_var("STUDIO_RUNTIME");
+
+        assert_eq!(report.stdout, "unset");
+        assert_eq!(report.environment.sanitized.len(), 1);
+        assert_eq!(report.environment.sanitized[0].name, "STUDIO_RUNTIME");
+        assert_eq!(report.environment.sanitized[0].value, "runtime-a");
+    }
+
+    #[test]
+    fn gate_command_preserves_runtime_selector_when_command_requests_it() {
+        let _guard = ENV_MUTEX.lock().expect("env lock");
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::env::set_var("STUDIO_RUNTIME", "runtime-a");
+
+        let report = run_gate_command(
+            temp.path(),
+            8,
+            "STUDIO_RUNTIME=runtime-a; printf \"%s\" \"$STUDIO_RUNTIME\"",
+        )
+        .expect("gate report");
+
+        std::env::remove_var("STUDIO_RUNTIME");
+
+        assert_eq!(report.stdout, "runtime-a");
+        assert_eq!(report.environment.inherited.len(), 1);
+        assert_eq!(report.environment.inherited[0].name, "STUDIO_RUNTIME");
     }
 }

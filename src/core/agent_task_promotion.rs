@@ -719,6 +719,7 @@ mod tests {
                 stdout: String::new(),
                 stderr: String::new(),
                 failure_evidence: None,
+                environment: crate::core::agent_task_gate::AgentTaskGateEnvironment::default(),
             })
         }
     }

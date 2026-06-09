@@ -521,8 +521,45 @@ mod tests {
         assert!(backend.pushed);
         assert!(backend.created);
         assert!(backend.last_body.contains("## AI assistance"));
+        assert!(backend.last_body.contains("## Proof provenance"));
+        assert!(backend
+            .last_body
+            .contains("**Proof runner:** Homeboy agent-task cook loop"));
+        assert!(backend
+            .last_body
+            .contains("**Homeboy run ID:** `cook-3678`"));
         assert!(backend.last_body.contains("## Gate results"));
+        assert!(backend.last_body.contains("## CI-equivalent coverage"));
+        assert!(backend.last_body.contains("not recorded by Homeboy"));
         assert!(backend.last_body.contains("review-ready"));
+    }
+
+    #[test]
+    fn pr_body_labels_ci_equivalent_gates() {
+        let mut backend = MockBackend {
+            changed_files: vec!["src/lib.rs".to_string()],
+            ..Default::default()
+        };
+        let mut options = options();
+        options.normalized_gate_results = vec![HomeboyGateResult::new(
+            "gate-1",
+            "required project gate",
+            HomeboyGateKind::Command,
+            HomeboyGateStatus::Passed,
+        )
+        .evidence(json!({
+            "command": ["sh", "-lc", "project verify"],
+            "exit_code": 0,
+            "ci_equivalent": true,
+        }))];
+
+        finalize_pr_with_backend(options, &mut backend).expect("finalized");
+
+        assert!(backend
+            .last_body
+            .contains("required project gate: passed (CI-equivalent)"));
+        assert!(backend.last_body.contains("required project gate: passed"));
+        assert!(!backend.last_body.contains("not recorded by Homeboy"));
     }
 
     #[test]
@@ -611,7 +648,7 @@ mod tests {
             title: "Cook issue #3678".to_string(),
             commit_message: "finalize cook loop PR plumbing".to_string(),
             gate_results: vec![AgentTaskGateResult {
-                name: "cargo test".to_string(),
+                name: "focused project check".to_string(),
                 status: "passed".to_string(),
                 detail: Some("targeted".to_string()),
             }],
