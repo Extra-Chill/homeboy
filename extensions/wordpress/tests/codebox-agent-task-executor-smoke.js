@@ -253,6 +253,31 @@ assert.equal(codeboxRequest.orchestrator.agent_task_id, 'task-123');
 assert.equal(codeboxRequest.context.audit_findings[0].id, 'finding-1');
 assert.deepEqual(codeboxRequest.agent_bundle, {});
 
+const executorSecretEnvRequest = codeboxTaskRequestFromAgentTaskRequest({
+  ...request,
+  task_id: 'executor-secret-env-task-123',
+  executor: {
+    backend: 'codebox',
+    model: 'claude-sonnet-4-6',
+    secret_env: [
+      'AI_PROVIDER_CLAUDE_CODE_ACCESS_TOKEN',
+      'AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN',
+      'AI_PROVIDER_CLAUDE_CODE_EXPIRES_AT',
+    ],
+    config: {
+      provider: 'claude-code',
+      wp: '7.0',
+      provider_plugin_paths: ['/providers/claude-code'],
+    },
+  },
+});
+assert.deepEqual(executorSecretEnvRequest.secret_env, [
+  'AI_PROVIDER_CLAUDE_CODE_ACCESS_TOKEN',
+  'AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN',
+  'AI_PROVIDER_CLAUDE_CODE_EXPIRES_AT',
+]);
+assert.equal(executorSecretEnvRequest.wp, '7.0');
+
 const runtimeTaskRequest = codeboxTaskRequestFromAgentTaskRequest({
   ...request,
   task_id: 'runtime-task-123',

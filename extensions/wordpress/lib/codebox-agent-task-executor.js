@@ -181,6 +181,11 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
   const runtimeTask = inputs.runtime_task || inputs.runtimeTask || config.runtime_task || config.runtimeTask || options.runtimeTask;
   const sandboxToolPolicy = firstDefined(inputs.sandbox_tool_policy, inputs.sandboxToolPolicy, config.sandbox_tool_policy, config.sandboxToolPolicy, options.sandboxToolPolicy, defaults.sandboxToolPolicy);
   const allowedTools = firstDefined(inputs.allowed_tools, inputs.allowedTools, config.allowed_tools, config.allowedTools, options.allowedTools, defaults.allowedTools);
+  const explicitSecretEnv = [
+    ...normalizeArray(request.executor?.secret_env),
+    ...normalizeArray(config.secret_env),
+    ...normalizeArray(options.secretEnv),
+  ];
   const timeoutSeconds = request.limits?.task_timeout_seconds || request.limits?.taskTimeoutSeconds;
   const timeoutMs = request.limits?.timeout_ms || request.limits?.max_runtime_ms;
   const timeoutFromMs = timeoutMs ? Math.ceil(timeoutMs / 1000) : undefined;
@@ -216,7 +221,7 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     runtime_stack_mounts: config.runtime_stack_mounts || options.runtimeStackMounts || [],
     runtime_overlay_profiles: config.runtime_overlay_profiles || config.runtimeOverlayProfiles || options.runtimeOverlayProfiles || defaults.runtimeOverlayProfiles || [],
     runtime_overlays: config.runtime_overlays || options.runtimeOverlays || [],
-    secret_env: config.secret_env || options.secretEnv || defaults.secretEnv || [],
+    secret_env: explicitSecretEnv.length > 0 ? Array.from(new Set(explicitSecretEnv)) : defaults.secretEnv || [],
     // Post-agent verification gate (recipe workflow.after). Supplied as WP
     // Codebox recipe steps; a non-zero exit fails the run so the orchestrator
     // refuses to report success until the gates are green.
@@ -230,7 +235,7 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     homeboy_path: config.homeboy || config.homeboy_path || options.homeboy || '',
     homeboy_extensions_path: config.homeboy_extensions || config.homeboy_extensions_path || options.homeboyExtensions || '',
     wp_codebox_bin: config.wp_codebox_bin || options.wpCodeboxBin || '',
-    wp: config.wp_codebox_wordpress_version || config.wpCodeboxWordpressVersion || options.wpCodeboxWordpressVersion || '',
+    wp: config.wp_codebox_wordpress_version || config.wpCodeboxWordpressVersion || config.wp || config.wordpress_version || options.wpCodeboxWordpressVersion || '',
     artifacts_path: config.artifacts || config.artifacts_path || options.artifacts || '',
     max_turns: config.max_turns || options.maxTurns,
     task_timeout_seconds: config.task_timeout_seconds || timeoutSeconds || timeoutFromMs || options.taskTimeoutSeconds,
