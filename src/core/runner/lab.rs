@@ -1,3 +1,4 @@
+use std::fs;
 use std::path::Path;
 
 use crate::core::agent_task_lifecycle;
@@ -532,6 +533,20 @@ fn run_lab_offload_inner(
     )?;
     let remapped_args = remap_provider_config_in_args(&changed_since_preflight.args, &path_remaps);
     let remapped_args = remap_agent_task_plan_in_args(&remapped_args, &path_remaps);
+    let (remapped_args, synced_remapped_plan) =
+        materialize_inline_agent_task_plan_arg(runner_id, &remapped_args)?;
+    if let Some(entry) = synced_remapped_plan {
+        workspace_mapping.push(entry.clone());
+        plan = with_step(
+            plan,
+            PlanStep::ready(
+                "lab.sync_remapped_agent_task_plan",
+                "lab.sync_remapped_agent_task_plan",
+            )
+            .inputs(PlanValues::new().json("workspace", &entry))
+            .build(),
+        );
+    }
 
     let mut command = command_prefix.argv;
     command.extend(
@@ -709,6 +724,108 @@ fn run_lab_offload_inner(
     })
 }
 
+fn materialize_inline_agent_task_plan_arg(
+    runner_id: &str,
+    args: &[String],
+) -> Result<(
+    Vec<String>,
+    Option<super::lab_workspaces::LabWorkspaceMappingEntry>,
+)> {
+    if args.get(1).map(String::as_str) != Some("agent-task")
+        || args.get(2).map(String::as_str) != Some("run-plan")
+    {
+        return Ok((args.to_vec(), None));
+    }
+
+    let mut out = Vec::with_capacity(args.len());
+    let mut iter = args.iter().peekable();
+    let mut passthrough = false;
+    while let Some(arg) = iter.next() {
+        if passthrough {
+            out.push(arg.clone());
+            continue;
+        }
+        if arg == "--" {
+            passthrough = true;
+            out.push(arg.clone());
+            continue;
+        }
+        if arg == "--plan" {
+            out.push(arg.clone());
+            if let Some(spec) = iter.next() {
+                if let Some((remapped_spec, entry)) = sync_inline_agent_task_plan(runner_id, spec)?
+                {
+                    out.push(remapped_spec);
+                    out.extend(iter.cloned());
+                    return Ok((out, Some(entry)));
+                }
+                out.push(spec.clone());
+            }
+            continue;
+        }
+        if let Some(spec) = arg.strip_prefix("--plan=") {
+            if let Some((remapped_spec, entry)) = sync_inline_agent_task_plan(runner_id, spec)? {
+                out.push(format!("--plan={remapped_spec}"));
+                out.extend(iter.cloned());
+                return Ok((out, Some(entry)));
+            }
+        }
+        out.push(arg.clone());
+    }
+
+    Ok((out, None))
+}
+
+fn sync_inline_agent_task_plan(
+    runner_id: &str,
+    spec: &str,
+) -> Result<Option<(String, super::lab_workspaces::LabWorkspaceMappingEntry)>> {
+    if spec == "-" || spec.starts_with('@') || !looks_like_inline_json(spec) {
+        return Ok(None);
+    }
+    serde_json::from_str::<serde_json::Value>(spec).map_err(|err| {
+        Error::internal_json(
+            err.to_string(),
+            Some("parse remapped agent-task plan".to_string()),
+        )
+    })?;
+
+    let temp = tempfile::tempdir().map_err(|err| {
+        Error::internal_io(
+            err.to_string(),
+            Some("create remapped agent-task plan workspace".to_string()),
+        )
+    })?;
+    let plan_file = temp.path().join("agent-task-plan.json");
+    fs::write(&plan_file, spec).map_err(|err| {
+        Error::internal_io(
+            err.to_string(),
+            Some("write remapped agent-task plan".to_string()),
+        )
+    })?;
+    let synced = sync_workspace(
+        runner_id,
+        RunnerWorkspaceSyncOptions {
+            path: temp.path().display().to_string(),
+            mode: RunnerWorkspaceSyncMode::Snapshot,
+            changed_since_base: None,
+            snapshot_includes: Vec::new(),
+        },
+    )?
+    .0;
+    let remote_spec = format!(
+        "@{}/agent-task-plan.json",
+        synced.remote_path.trim_end_matches('/')
+    );
+    let entry = workspace_mapping_entry("agent_task_plan_remapped", &synced);
+    Ok(Some((remote_spec, entry)))
+}
+
+fn looks_like_inline_json(spec: &str) -> bool {
+    let trimmed = spec.trim_start();
+    trimmed.starts_with('{') || trimmed.starts_with('[')
+}
+
 fn in_flight_daemon_disconnect_error(
     runner_id: &str,
     job_id: &str,
@@ -748,12 +865,7 @@ fn mirror_agent_task_run_plan_lifecycle(args: &[String], stdout: &str) -> Result
     if plan_spec == "-" {
         return Ok(());
     }
-    let envelope: serde_json::Value = serde_json::from_str(stdout).map_err(|error| {
-        Error::internal_json(
-            error.to_string(),
-            Some("parse offloaded agent-task run-plan output".to_string()),
-        )
-    })?;
+    let envelope = parse_offloaded_run_plan_envelope(stdout)?;
     let Some(aggregate_value) = envelope.get("data").cloned() else {
         return Ok(());
     };
@@ -776,6 +888,26 @@ fn mirror_agent_task_run_plan_lifecycle(args: &[String], stdout: &str) -> Result
     agent_task_lifecycle::mark_running(&run_id)?;
     agent_task_lifecycle::record_run_aggregate(&run_id, &plan, &aggregate)?;
     Ok(())
+}
+
+fn parse_offloaded_run_plan_envelope(stdout: &str) -> Result<serde_json::Value> {
+    if let Ok(value) = serde_json::from_str(stdout) {
+        return Ok(value);
+    }
+
+    for (index, _) in stdout.match_indices('{') {
+        let mut stream = serde_json::Deserializer::from_str(&stdout[index..]).into_iter();
+        if let Some(Ok(value)) = stream.next() {
+            return Ok(value);
+        }
+    }
+
+    serde_json::from_str(stdout).map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("parse offloaded agent-task run-plan output".to_string()),
+        )
+    })
 }
 
 fn agent_task_run_plan_recording_args(args: &[String]) -> Option<(String, String)> {
@@ -1238,6 +1370,21 @@ mod tests {
         .expect("parse lab offload metadata");
 
         assert_eq!(parsed["workspace_mapping"], mapping);
+    }
+
+    #[test]
+    fn offloaded_run_plan_envelope_parser_tolerates_extension_stdout_chatter() {
+        let stdout = concat!(
+            "Setting up WordPress extension...\n",
+            "Installing npm dependencies...\n",
+            "{\"success\":false,\"data\":{\"status\":\"failed\"}}\n",
+            "trailing diagnostic\n"
+        );
+
+        let parsed = parse_offloaded_run_plan_envelope(stdout).expect("parse mixed stdout");
+
+        assert_eq!(parsed["success"], false);
+        assert_eq!(parsed["data"]["status"], "failed");
     }
 
     #[test]
