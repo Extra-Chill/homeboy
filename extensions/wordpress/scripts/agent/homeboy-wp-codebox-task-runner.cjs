@@ -557,6 +557,7 @@ function sandboxToolPolicy(input, allowedTools) {
             execution_location: 'sandbox',
             transport_visibility: 'sandbox',
             allowed: true,
+            runtime: { environment: 'runtime_local', capability_scope: 'runtime_local' },
             metadata: { source: 'homeboy_allowed_tools' },
           };
         })
@@ -566,6 +567,7 @@ function sandboxToolPolicy(input, allowedTools) {
           execution_location: 'external',
           transport_visibility: 'hidden',
           allowed: false,
+          runtime: { environment: 'control_plane', capability_scope: 'control_plane' },
           metadata: { source: 'homeboy_default_empty_policy' },
         }],
     metadata: { source: 'homeboy-wp-codebox-task-runner' },
