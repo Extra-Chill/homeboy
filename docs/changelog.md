@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.227.2] - 2026-06-09
+
+### Changed
+- centralize proof runner labels
+- centralize proof gate scope labels
+- centralize CI-required proof gates
+- surface lab offload proof metadata
+
 ## [0.227.1] - 2026-06-09
 
 ### Fixed
