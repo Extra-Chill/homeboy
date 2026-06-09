@@ -3,7 +3,8 @@ use homeboy::core::agent_task_cook_loop::{
     evaluate_cook_loop, AgentTaskCookLoopOptions, AgentTaskCookLoopStatus,
 };
 use homeboy::core::agent_task_finalization::{
-    finalize_pr, AgentTaskPrEvidence, AgentTaskPrFinalizationOptions,
+    finalize_pr, AgentTaskPrEvidence, AgentTaskPrFinalizationOptions, AgentTaskPrRuntimeGuardrails,
+    AgentTaskPrSourceRelationship, AgentTaskPrVerification,
 };
 use homeboy::core::agent_task_gate::AgentTaskGateRevealPolicy;
 use homeboy::core::agent_task_promotion::{
@@ -824,11 +825,43 @@ fn finalize_loop_pr(
                 promotion.deterministic_gates.len()
             ),
             ai_tool: args.ai_tool.clone(),
+            ai_model: args
+                .dispatch
+                .model
+                .clone()
+                .or_else(|| ai_model_from_tool(&args.ai_tool)),
+            source_relationship: AgentTaskPrSourceRelationship {
+                related_finding_id: args.dispatch.task_url.clone(),
+                source_packet_id: None,
+                change_kind: Some("runtime-fix".to_string()),
+                supersedes: Vec::new(),
+                depends_on: Vec::new(),
+            },
+            verification: AgentTaskPrVerification {
+                targeted_checks_run: args.verify.clone(),
+                targeted_checks_unavailable: None,
+                ci_expected: vec!["Homeboy CI after push".to_string()],
+                manual_reviewer_check: None,
+            },
+            runtime_guardrails: AgentTaskPrRuntimeGuardrails {
+                why_not_broader_than_packet: Some(
+                    "Generated runtime fixes must stay bounded to the source task/finding evidence and preserve nearby predicates or contracts unless the prompt explicitly requests broader behavior.".to_string(),
+                ),
+                evidence_discriminators: Vec::new(),
+                nearby_contracts_preserved: Vec::new(),
+            },
         },
         ai_used_for: args.ai_used_for.clone(),
         protected_branches: args.protected_branches.clone(),
     })?;
     Ok(serde_json::to_value(report).unwrap_or(Value::Null))
+}
+
+fn ai_model_from_tool(ai_tool: &str) -> Option<String> {
+    let start = ai_tool.find('(')?;
+    let end = ai_tool[start + 1..].find(')')? + start + 1;
+    let model = ai_tool[start + 1..end].trim();
+    (!model.is_empty()).then(|| model.to_string())
 }
 
 fn default_loop_title(args: &AgentTaskLoopArgs) -> String {

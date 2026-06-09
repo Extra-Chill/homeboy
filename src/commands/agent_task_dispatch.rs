@@ -193,7 +193,10 @@ fn build_dispatch_plan(args: &DispatchArgs) -> homeboy::core::Result<AgentTaskPl
         dispatch_provider_config(args, &repo, workspace_target.as_ref(), &client_context)?;
     let mut tasks = Vec::new();
     for (index, prompt_spec) in prompt_specs.iter().enumerate() {
-        let instructions = read_text_spec(prompt_spec, "prompt")?;
+        let instructions = dispatch_instructions(
+            read_text_spec(prompt_spec, "prompt")?,
+            args.task_url.as_deref(),
+        );
         let task_id = dispatch_task_id(repo.as_deref(), index);
         let mut source_refs = Vec::new();
         if let Some(task_url) = &args.task_url {
@@ -309,6 +312,16 @@ fn preflight_dispatch_provider_secrets(plan: &AgentTaskPlan) -> homeboy::core::R
             ]),
         )
     })
+}
+
+fn dispatch_instructions(instructions: String, task_url: Option<&str>) -> String {
+    if task_url.is_none() || instructions.contains("Iterator runtime-fix guardrails") {
+        return instructions;
+    }
+
+    format!(
+        "{instructions}\n\nIterator runtime-fix guardrails:\n- Before adding a new runtime predicate or transform, search for nearby existing predicates and transform families that already cover the finding shape.\n- Keep generated runtime changes bounded to the source finding evidence; preserve evidence-specific discriminators such as class, href, role, text, or DOM shape unless the task explicitly asks for broader behavior.\n- If existing behavior plus evidence/test coverage already resolves the finding, prefer evidence-only or test-only output over a broader runtime change.\n- In the PR evidence, report source relationship, change kind, verification capability, and why any runtime change is not broader than the packet evidence."
+    )
 }
 
 fn resolve_dispatch_workspace(
@@ -714,6 +727,24 @@ mod tests {
     }
 
     #[test]
+    fn tracker_backed_dispatch_adds_runtime_fix_guardrails() {
+        let plan = build_dispatch_plan(&dispatch_args(DispatchArgOverrides {
+            prompt: Some("Fix the finding.".to_string()),
+            repo: Some("homeboy".to_string()),
+            task_url: Some("https://github.com/Extra-Chill/homeboy/issues/3810".to_string()),
+            ..DispatchArgOverrides::default()
+        }))
+        .expect("dispatch plan");
+
+        assert!(plan.tasks[0]
+            .instructions
+            .contains("Iterator runtime-fix guardrails"));
+        assert!(plan.tasks[0]
+            .instructions
+            .contains("bounded to the source finding evidence"));
+    }
+
+    #[test]
     fn queue_only_returns_durable_run_without_executing() {
         with_isolated_home(|_| {
             let workspace = tempfile::tempdir().expect("workspace");
@@ -890,6 +921,7 @@ mod tests {
         cwd: Option<String>,
         workspace: Option<String>,
         repo: Option<String>,
+        task_url: Option<String>,
         secret_env: Vec<String>,
         client_context: Option<String>,
         concurrency: usize,
@@ -906,7 +938,7 @@ mod tests {
             cwd: overrides.cwd,
             workspace: overrides.workspace,
             repo: overrides.repo,
-            task_url: None,
+            task_url: overrides.task_url,
             backend: "fixture".to_string(),
             selector: None,
             model: None,

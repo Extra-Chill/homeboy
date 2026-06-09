@@ -5,6 +5,7 @@ use homeboy::core::agent_task::{AgentTaskAggregateReport, AgentTaskRequest};
 use homeboy::core::agent_task_cook_loop::{evaluate_cook_loop, AgentTaskCookLoopOptions};
 use homeboy::core::agent_task_finalization::{
     finalize_pr, AgentTaskGateResult, AgentTaskPrEvidence, AgentTaskPrFinalizationOptions,
+    AgentTaskPrRuntimeGuardrails, AgentTaskPrSourceRelationship, AgentTaskPrVerification,
 };
 use homeboy::core::agent_task_lifecycle;
 use homeboy::core::agent_task_promotion::{
@@ -39,6 +40,58 @@ pub struct FinalizePrEvidenceArgs {
     /// AI tool disclosure line for the PR body.
     #[arg(long, default_value = "OpenCode (GPT-5.5)", value_name = "TEXT")]
     pub ai_tool: String,
+
+    /// Actual model identifier for AI disclosure. Use "not recorded" only when provider metadata is missing.
+    #[arg(long, value_name = "MODEL")]
+    pub ai_model: Option<String>,
+
+    /// Source finding id shared by sibling generated PRs.
+    #[arg(long, value_name = "ID")]
+    pub related_finding_id: Option<String>,
+
+    /// Source validation packet id shared by sibling generated PRs.
+    #[arg(long, value_name = "ID")]
+    pub source_packet_id: Option<String>,
+
+    /// Generated change kind, e.g. evidence-only, runtime-fix, or test-only.
+    #[arg(long, value_name = "KIND")]
+    pub change_kind: Option<String>,
+
+    /// Generated PR or artifact this PR supersedes. Repeatable.
+    #[arg(long, value_name = "REF")]
+    pub supersedes: Vec<String>,
+
+    /// Generated PR or artifact this PR depends on. Repeatable.
+    #[arg(long, value_name = "REF")]
+    pub depends_on: Vec<String>,
+
+    /// Targeted verification command that ran before finalization. Repeatable.
+    #[arg(long = "targeted-check-run", value_name = "COMMAND")]
+    pub targeted_checks_run: Vec<String>,
+
+    /// Exact backend limitation when targeted checks could not be run.
+    #[arg(long, value_name = "TEXT")]
+    pub targeted_checks_unavailable: Option<String>,
+
+    /// CI check expected to run after push. Repeatable.
+    #[arg(long = "ci-expected", value_name = "CHECK")]
+    pub ci_expected: Vec<String>,
+
+    /// Manual reviewer verification requested when targeted checks/CI do not cover behavior.
+    #[arg(long, value_name = "TEXT")]
+    pub manual_reviewer_check: Option<String>,
+
+    /// Runtime-fix evidence bound for generated predicates/semantics.
+    #[arg(long, value_name = "TEXT")]
+    pub why_not_broader_than_packet: Option<String>,
+
+    /// Evidence-specific discriminator preserved by the runtime fix. Repeatable.
+    #[arg(long = "evidence-discriminator", value_name = "TEXT")]
+    pub evidence_discriminators: Vec<String>,
+
+    /// Nearby predicate/contract preserved by the runtime fix. Repeatable.
+    #[arg(long = "nearby-contract-preserved", value_name = "TEXT")]
+    pub nearby_contracts_preserved: Vec<String>,
 }
 
 impl From<FinalizePrEvidenceArgs> for AgentTaskPrEvidence {
@@ -48,6 +101,25 @@ impl From<FinalizePrEvidenceArgs> for AgentTaskPrEvidence {
             artifact_refs: args.artifact_refs,
             attempt_summary: args.attempt_summary,
             ai_tool: args.ai_tool,
+            ai_model: args.ai_model,
+            source_relationship: AgentTaskPrSourceRelationship {
+                related_finding_id: args.related_finding_id,
+                source_packet_id: args.source_packet_id,
+                change_kind: args.change_kind,
+                supersedes: args.supersedes,
+                depends_on: args.depends_on,
+            },
+            verification: AgentTaskPrVerification {
+                targeted_checks_run: args.targeted_checks_run,
+                targeted_checks_unavailable: args.targeted_checks_unavailable,
+                ci_expected: args.ci_expected,
+                manual_reviewer_check: args.manual_reviewer_check,
+            },
+            runtime_guardrails: AgentTaskPrRuntimeGuardrails {
+                why_not_broader_than_packet: args.why_not_broader_than_packet,
+                evidence_discriminators: args.evidence_discriminators,
+                nearby_contracts_preserved: args.nearby_contracts_preserved,
+            },
         }
     }
 }
