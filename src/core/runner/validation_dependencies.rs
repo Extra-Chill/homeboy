@@ -780,28 +780,31 @@ mod tests {
 
     #[test]
     fn validation_dependency_workspace_errors_when_sibling_missing() {
-        let workspace_parent = tempfile::tempdir().expect("workspace parent");
-        let source = workspace_parent.path().join("studio-web");
-        fs::create_dir_all(&source).expect("source dir");
-        fs::write(
-            source.join("homeboy.json"),
-            serde_json::json!({
-                "id": "studio-web",
-                "extensions": {
-                    "wordpress": {
-                        "settings": {
-                            "validation_dependencies": ["agents-api"]
+        crate::test_support::with_isolated_home(|_| {
+            let workspace_parent = tempfile::tempdir().expect("workspace parent");
+            let source = workspace_parent.path().join("studio-web");
+            fs::create_dir_all(&source).expect("source dir");
+            fs::write(
+                source.join("homeboy.json"),
+                serde_json::json!({
+                    "id": "studio-web",
+                    "extensions": {
+                        "wordpress": {
+                            "settings": {
+                                "validation_dependencies": ["agents-api"]
+                            }
                         }
                     }
-                }
-            })
-            .to_string(),
-        )
-        .expect("source manifest");
+                })
+                .to_string(),
+            )
+            .expect("source manifest");
 
-        let err = validation_dependency_workspaces(&source, &[]).expect_err("missing dependency");
+            let err =
+                validation_dependency_workspaces(&source, &[]).expect_err("missing dependency");
 
-        assert_eq!(err.details["field"], "validation_dependencies");
-        assert!(err.message.contains("agents-api"));
+            assert_eq!(err.details["field"], "validation_dependencies");
+            assert!(err.message.contains("agents-api"));
+        });
     }
 }

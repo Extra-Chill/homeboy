@@ -184,6 +184,56 @@ homeboy agent-task dispatch \
 External workspace managers should resolve their own handles to local paths and
 call dispatch with `--cwd <resolved-path>`.
 
+## Durable Loop Controllers
+
+`agent-task controller` stores domain-agnostic controller state for multi-day
+multi-agent loops. The controller record lives outside any single agent-task run
+and can reference runs, artifacts, gates, reviews, waits, and human-ready work by
+stable ids instead of copying every payload inline.
+
+Create and inspect a controller:
+
+```bash
+homeboy agent-task controller init transformer-loop \
+  --phase generate \
+  --config-version transformer-v1
+
+homeboy agent-task controller status transformer-loop
+homeboy agent-task controller list
+```
+
+Apply external events, such as CI completion, PR review, human merge, scheduled
+wakeups, or artifact availability:
+
+```bash
+homeboy agent-task controller apply-event transformer-loop \
+  --event-type github.pr.merged \
+  --event-key Extra-Chill/homeboy#123 \
+  --entity-id pr:123 \
+  --payload @event.json
+```
+
+The payload may include a `policy` object using
+`homeboy/agent-task-loop-controller/v1` action names such as `spawn_task`,
+`fan_out`, `join`, `retry`, `request_changes`, `run_gates`, `wait_for_event`,
+`mark_human_ready`, `complete`, `abandon`, and `escalate`. Actions with
+deterministic `dedupe_key` values are recorded once, so replaying a resumed
+controller does not duplicate already-open tasks or PR work.
+
+Mark work as explicitly ready for a human handoff:
+
+```bash
+homeboy agent-task controller mark-human-ready transformer-loop \
+  --entity-id pr:123 \
+  --reason "gates passed and review approved"
+```
+
+Gate bundles are represented as structured checks and results. Existing
+`--verify` command gates are compatible as the simplest `command` check type;
+long-running loops can reuse named bundles across repos and persist normalized
+`passed`, `failed`, or `warn` results against a loop, entity, PR, finding, or
+run.
+
 ## Fixture Backend
 
 The built-in `fixture` backend is intentionally narrow. It exists for smoke

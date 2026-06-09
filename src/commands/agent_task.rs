@@ -16,6 +16,7 @@ use std::io::Read;
 
 use homeboy::core::agent_task::AgentTaskRequest;
 use homeboy::core::agent_task_lifecycle;
+use homeboy::core::agent_task_loop_controller::{self, AgentTaskLoopExternalEvent};
 use homeboy::core::agent_task_provider::ExtensionProviderAgentTaskExecutor;
 use homeboy::core::agent_task_scheduler::{
     AgentTaskExecutorAdapter, AgentTaskPlan, AgentTaskScheduler,
@@ -75,12 +76,94 @@ pub enum AgentTaskCommand {
     Providers(ProvidersArgs),
     /// Configure and inspect agent-task provider authentication secrets.
     Auth(AgentTaskAuthArgs),
+    /// Create, inspect, and resume durable multi-agent loop controller state.
+    Controller(AgentTaskControllerArgs),
 }
 
 #[derive(Args, Debug)]
 pub struct AgentTaskAuthArgs {
     #[command(subcommand)]
     pub command: AgentTaskAuthCommand,
+}
+
+#[derive(Args, Debug)]
+pub struct AgentTaskControllerArgs {
+    #[command(subcommand)]
+    pub command: AgentTaskControllerCommand,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum AgentTaskControllerCommand {
+    /// Create a durable loop controller record.
+    Init(AgentTaskControllerInitArgs),
+    /// Read a durable loop controller record.
+    Status(AgentTaskControllerStatusArgs),
+    /// List durable loop controller records.
+    List,
+    /// Apply an external event and resume matching waits.
+    ApplyEvent(AgentTaskControllerApplyEventArgs),
+    /// Mark a tracked entity as human-ready work.
+    MarkHumanReady(AgentTaskControllerMarkHumanReadyArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct AgentTaskControllerInitArgs {
+    /// Durable loop id. Unsafe path characters are normalized for storage.
+    pub loop_id: String,
+
+    /// Initial controller phase.
+    #[arg(long, default_value = "init", value_name = "PHASE")]
+    pub phase: String,
+
+    /// Declared graph/config version for resume compatibility.
+    #[arg(long = "config-version", default_value = "v1", value_name = "VERSION")]
+    pub config_version: String,
+}
+
+#[derive(Args, Debug)]
+pub struct AgentTaskControllerStatusArgs {
+    /// Durable loop id returned by `agent-task controller init`.
+    pub loop_id: String,
+}
+
+#[derive(Args, Debug)]
+pub struct AgentTaskControllerApplyEventArgs {
+    /// Durable loop id returned by `agent-task controller init`.
+    pub loop_id: String,
+
+    /// External event type, for example github.pr.merged or task.completed.
+    #[arg(long = "event-type", value_name = "TYPE")]
+    pub event_type: String,
+
+    /// Stable event id. Generated from the loop history length when omitted.
+    #[arg(long = "event-id", value_name = "ID")]
+    pub event_id: Option<String>,
+
+    /// Optional deterministic event key, such as repo#pr or a check-suite id.
+    #[arg(long = "event-key", value_name = "KEY")]
+    pub event_key: Option<String>,
+
+    /// Optional target entity id for wait matching and lineage.
+    #[arg(long = "entity-id", value_name = "ID")]
+    pub entity_id: Option<String>,
+
+    /// Event payload JSON, @file, or - for stdin. May contain a `policy` object to evaluate.
+    #[arg(long, value_name = "JSON")]
+    pub payload: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct AgentTaskControllerMarkHumanReadyArgs {
+    /// Durable loop id returned by `agent-task controller init`.
+    pub loop_id: String,
+
+    /// Entity id to mark human-ready.
+    #[arg(long = "entity-id", value_name = "ID")]
+    pub entity_id: String,
+
+    /// Operator-visible reason stored in loop history.
+    #[arg(long, value_name = "TEXT")]
+    pub reason: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -435,7 +518,82 @@ pub fn run(args: AgentTaskArgs, global: &GlobalArgs) -> CmdResult<Value> {
         AgentTaskCommand::GateFeedback(feedback_args) => review::gate_feedback(feedback_args),
         AgentTaskCommand::Providers(providers_args) => review::providers(providers_args),
         AgentTaskCommand::Auth(auth_args) => auth(auth_args),
+        AgentTaskCommand::Controller(controller_args) => controller(controller_args),
     }
+}
+
+fn controller(args: AgentTaskControllerArgs) -> CmdResult<Value> {
+    match args.command {
+        AgentTaskControllerCommand::Init(init_args) => Ok((
+            command_json_value(agent_task_loop_controller::create_controller(
+                &init_args.loop_id,
+                &init_args.phase,
+                &init_args.config_version,
+            )?)?,
+            0,
+        )),
+        AgentTaskControllerCommand::Status(status_args) => Ok((
+            command_json_value(agent_task_loop_controller::load_controller(
+                &status_args.loop_id,
+            )?)?,
+            0,
+        )),
+        AgentTaskControllerCommand::List => Ok((
+            serde_json::json!({
+                "schema": "homeboy/agent-task-loop-controller-list/v1",
+                "controllers": agent_task_loop_controller::list_controllers()?,
+            }),
+            0,
+        )),
+        AgentTaskControllerCommand::ApplyEvent(event_args) => apply_controller_event(event_args),
+        AgentTaskControllerCommand::MarkHumanReady(ready_args) => {
+            let mut record = agent_task_loop_controller::load_controller(&ready_args.loop_id)?;
+            record.mark_human_ready(&ready_args.entity_id, ready_args.reason)?;
+            agent_task_loop_controller::write_controller(&record)?;
+            Ok((command_json_value(record)?, 0))
+        }
+    }
+}
+
+fn command_json_value<T: Serialize>(value: T) -> homeboy::core::Result<Value> {
+    serde_json::to_value(value)
+        .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))
+}
+
+fn apply_controller_event(args: AgentTaskControllerApplyEventArgs) -> CmdResult<Value> {
+    let mut record = agent_task_loop_controller::load_controller(&args.loop_id)?;
+    let payload = match args.payload {
+        Some(spec) => {
+            serde_json::from_str(&config::read_json_spec_to_string(&spec)?).map_err(|error| {
+                homeboy::core::Error::validation_invalid_argument(
+                    "payload",
+                    error.to_string(),
+                    Some(spec),
+                    None,
+                )
+            })?
+        }
+        None => Value::Null,
+    };
+    let event_id = args
+        .event_id
+        .unwrap_or_else(|| format!("event-{}", record.history.len() + 1));
+    let actions = record.apply_event(AgentTaskLoopExternalEvent {
+        event_id,
+        event_type: args.event_type,
+        event_key: args.event_key,
+        entity_id: args.entity_id,
+        payload,
+    });
+    agent_task_loop_controller::write_controller(&record)?;
+    Ok((
+        serde_json::json!({
+            "schema": "homeboy/agent-task-loop-controller-event-result/v1",
+            "controller": record,
+            "actions": actions,
+        }),
+        0,
+    ))
 }
 
 fn auth(args: AgentTaskAuthArgs) -> CmdResult<Value> {

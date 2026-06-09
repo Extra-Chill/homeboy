@@ -8,6 +8,7 @@ pub mod agent_task_fanout;
 pub mod agent_task_finalization;
 pub mod agent_task_gate;
 pub mod agent_task_lifecycle;
+pub mod agent_task_loop_controller;
 mod agent_task_pr_body;
 pub mod agent_task_promotion;
 pub mod agent_task_provider;
