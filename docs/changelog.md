@@ -4,6 +4,21 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.226.0] - 2026-06-09
+
+### Added
+- add rig package checks and workload defaults
+
+### Changed
+- surface plan gate results in lab metadata
+- normalize gate result plumbing
+
+### Fixed
+- keep lab prerequisites extension-owned
+- add bench phase memory attribution
+- preflight lab bench runtime prerequisites
+- make bench lab routing fail closed
+
 ## [0.225.2] - 2026-06-09
 
 ### Changed
