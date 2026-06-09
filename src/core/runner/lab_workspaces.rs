@@ -899,6 +899,64 @@ mod provider_config_candidate_paths_tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn agent_task_run_plan_syncs_symlinked_dependency_target_inside_primary_workspace() {
+        let controller = tempfile::tempdir().expect("controller");
+        let source = controller.path().join("primary");
+        let codebox = controller.path().join("wp-codebox");
+        let codebox_bin = codebox.join("packages/cli/dist/index.js");
+        let symlink = source.join(".ci/wp-codebox");
+        let plan = source.join(".ci/site-generation-loop.agent-task-plan.json");
+        std::fs::create_dir_all(symlink.parent().unwrap()).expect("ci dir");
+        std::fs::create_dir_all(codebox_bin.parent().unwrap()).expect("codebox cli dir");
+        std::fs::write(&codebox_bin, "#!/usr/bin/env node\n").expect("codebox bin");
+        std::fs::write(codebox.join("package-lock.json"), "{}\n").expect("package lock");
+        std::os::unix::fs::symlink(&codebox, &symlink).expect("codebox symlink");
+        std::fs::write(
+            &plan,
+            serde_json::json!({
+                "schema": "homeboy/agent-task-plan/v1",
+                "plan_id": "site-generation-loop",
+                "tasks": [{
+                    "task_id": "task-1",
+                    "executor": {
+                        "backend": "wp-codebox",
+                        "config": {
+                            "wp_codebox_bin": symlink.join("packages/cli/dist/index.js")
+                        }
+                    },
+                    "instructions": "test"
+                }]
+            })
+            .to_string(),
+        )
+        .expect("plan file");
+        git(&codebox, &["init", "-b", "main"]);
+        git(&codebox, &["config", "user.email", "test@example.com"]);
+        git(&codebox, &["config", "user.name", "Homeboy Test"]);
+        git(&codebox, &["add", "."]);
+        git(&codebox, &["commit", "-m", "initial"]);
+
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "run-plan".to_string(),
+            "--plan".to_string(),
+            format!("@{}", plan.display()),
+        ];
+
+        let workspaces = agent_task_plan_extra_workspaces(&args, &source).expect("workspaces");
+
+        assert_eq!(workspaces.len(), 1);
+        assert_eq!(workspaces[0].role, "agent_task_plan_config");
+        assert_eq!(workspaces[0].path, codebox.canonicalize().unwrap());
+        assert!(workspaces[0]
+            .snapshot_includes
+            .contains(&"packages/cli/dist/**".to_string()));
+        assert!(workspaces[0].bootstrap_node_dependencies);
+    }
+
+    #[test]
     fn source_cli_preflight_names_missing_workspace_package_and_importer() {
         let provider = tempfile::tempdir().expect("provider checkout");
         let cli = provider.path().join("packages/cli/dist/index.js");

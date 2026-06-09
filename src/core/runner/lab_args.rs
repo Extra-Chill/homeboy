@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::path::PathBuf;
 
 use serde_json::Value;
@@ -181,6 +182,10 @@ fn remap_paths_in_value(value: &mut Value, mappings: &[&LabPathRemap]) {
 /// Replace a leading known local path with its remote equivalent. Matches whole
 /// path or path-prefix boundaries (so `/a/b` does not match `/a/bc`).
 fn remap_local_path(text: &str, mappings: &[&LabPathRemap]) -> Option<String> {
+    if let Some(remapped) = remap_existing_canonical_path(text, mappings) {
+        return Some(remapped);
+    }
+
     for mapping in mappings {
         if mapping.local.is_empty() {
             continue;
@@ -194,6 +199,29 @@ fn remap_local_path(text: &str, mappings: &[&LabPathRemap]) -> Option<String> {
         }
     }
     None
+}
+
+fn remap_existing_canonical_path(text: &str, mappings: &[&LabPathRemap]) -> Option<String> {
+    if !is_controller_path_like(text) {
+        return None;
+    }
+    let expanded = shellexpand::tilde(text).to_string();
+    let canonical = Path::new(&expanded).canonicalize().ok()?;
+    let canonical = canonical.to_string_lossy().to_string();
+    for mapping in mappings {
+        if canonical == mapping.local {
+            return Some(mapping.remote.clone());
+        }
+        let prefix = format!("{}/", mapping.local.trim_end_matches('/'));
+        if let Some(rest) = canonical.strip_prefix(&prefix) {
+            return Some(format!("{}/{}", mapping.remote.trim_end_matches('/'), rest));
+        }
+    }
+    None
+}
+
+fn is_controller_path_like(value: &str) -> bool {
+    value.starts_with('/') || value.starts_with("~/")
 }
 
 pub(super) fn lab_offload_source_path(args: &[String]) -> Result<PathBuf> {
@@ -493,6 +521,67 @@ mod tests {
             "/home/chubes/Developer/wp-site-generator/artifacts"
         );
         assert!(out.iter().any(|a| a == "--record-run-id=loop-1"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn remap_agent_task_run_plan_prefers_canonical_symlink_target() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let primary = temp.path().join("wp-site-generator");
+        let codebox = temp.path().join("wp-codebox");
+        let codebox_bin = codebox.join("packages/cli/dist/index.js");
+        let symlink = primary.join(".ci/wp-codebox");
+        let plan = primary.join(".ci/site-generation-loop.agent-task-plan.json");
+        std::fs::create_dir_all(symlink.parent().unwrap()).expect("ci dir");
+        std::fs::create_dir_all(codebox_bin.parent().unwrap()).expect("codebox bin dir");
+        std::fs::write(&codebox_bin, "#!/usr/bin/env node\n").expect("codebox bin");
+        std::os::unix::fs::symlink(&codebox, &symlink).expect("codebox symlink");
+        let symlinked_bin = symlink.join("packages/cli/dist/index.js");
+        std::fs::write(
+            &plan,
+            serde_json::json!({
+                "schema": "homeboy/agent-task-plan/v1",
+                "plan_id": "plan-1",
+                "tasks": [{
+                    "task_id": "task-1",
+                    "executor": {
+                        "backend": "wp-codebox",
+                        "config": { "wp_codebox_bin": symlinked_bin }
+                    },
+                    "instructions": "test"
+                }]
+            })
+            .to_string(),
+        )
+        .expect("write plan");
+
+        let mappings = vec![
+            LabPathRemap {
+                local: primary.canonicalize().unwrap().display().to_string(),
+                remote: "/home/chubes/_lab_workspaces/wp-site-generator".to_string(),
+            },
+            LabPathRemap {
+                local: codebox.canonicalize().unwrap().display().to_string(),
+                remote: "/home/chubes/_lab_workspaces/wp-codebox".to_string(),
+            },
+        ];
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "run-plan".to_string(),
+            "--plan".to_string(),
+            format!("@{}", plan.display()),
+        ];
+
+        let out = remap_agent_task_plan_in_args(&args, &mappings);
+        let plan_idx = out.iter().position(|a| a == "--plan").unwrap() + 1;
+        let remapped: serde_json::Value =
+            serde_json::from_str(&out[plan_idx]).expect("inline plan");
+
+        assert_eq!(
+            remapped["tasks"][0]["executor"]["config"]["wp_codebox_bin"],
+            "/home/chubes/_lab_workspaces/wp-codebox/packages/cli/dist/index.js"
+        );
     }
 
     #[test]
