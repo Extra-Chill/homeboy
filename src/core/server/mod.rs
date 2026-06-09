@@ -86,6 +86,8 @@ pub struct RunnerPolicy {
     pub artifact_policy: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub snapshot_excludes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub snapshot_includes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -112,6 +114,7 @@ impl RunnerPolicy {
             && self.workspace_roots.is_empty()
             && self.artifact_policy.is_none()
             && self.snapshot_excludes.is_empty()
+            && self.snapshot_includes.is_empty()
     }
 }
 

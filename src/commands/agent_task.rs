@@ -3,7 +3,8 @@ use homeboy::core::agent_task_cook_loop::{
     evaluate_cook_loop, AgentTaskCookLoopOptions, AgentTaskCookLoopStatus,
 };
 use homeboy::core::agent_task_finalization::{
-    finalize_pr, AgentTaskPrEvidence, AgentTaskPrFinalizationOptions,
+    finalize_pr, AgentTaskPrEvidence, AgentTaskPrFinalizationOptions, AgentTaskPrRuntimeGuardrails,
+    AgentTaskPrSourceRelationship, AgentTaskPrVerification,
 };
 use homeboy::core::agent_task_gate::AgentTaskGateRevealPolicy;
 use homeboy::core::agent_task_promotion::{
@@ -191,6 +192,10 @@ pub struct AgentTaskLoopArgs {
     /// Maximum cook-loop gate attempts, including the first candidate.
     #[arg(long = "max-attempts", default_value_t = 3, value_name = "N")]
     pub max_attempts: u32,
+
+    /// Stop after the first green promotion without committing, pushing, or opening/updating a PR.
+    #[arg(long = "no-finalize")]
+    pub no_finalize: bool,
 
     /// PR base branch used by finalization.
     #[arg(long, default_value = "main", value_name = "BRANCH")]
@@ -676,6 +681,19 @@ where
 
         match feedback_status {
             AgentTaskCookLoopStatus::GreenCompleted => {
+                if args.no_finalize {
+                    return Ok(loop_report(
+                        loop_id,
+                        "green_no_finalize",
+                        attempts,
+                        None,
+                        Some(
+                            "deterministic gates completed green; --no-finalize skipped commit, push, and PR finalization"
+                                .to_string(),
+                        ),
+                        0,
+                    ));
+                }
                 let finalization = finalize_loop_pr(&args, &loop_id, &promotion)?;
                 let final_status = finalization["status"]
                     .as_str()
@@ -824,11 +842,31 @@ fn finalize_loop_pr(
                 promotion.deterministic_gates.len()
             ),
             ai_tool: args.ai_tool.clone(),
+            ai_model: args
+                .dispatch
+                .model
+                .clone()
+                .or_else(|| ai_model_from_tool(&args.ai_tool)),
+            source_relationship: AgentTaskPrSourceRelationship::default(),
+            verification: AgentTaskPrVerification {
+                targeted_checks_run: args.verify.clone(),
+                targeted_checks_unavailable: None,
+                ci_expected: vec!["Homeboy CI after push".to_string()],
+                manual_reviewer_check: None,
+            },
+            runtime_guardrails: AgentTaskPrRuntimeGuardrails::default(),
         },
         ai_used_for: args.ai_used_for.clone(),
         protected_branches: args.protected_branches.clone(),
     })?;
     Ok(serde_json::to_value(report).unwrap_or(Value::Null))
+}
+
+fn ai_model_from_tool(ai_tool: &str) -> Option<String> {
+    let start = ai_tool.find('(')?;
+    let end = ai_tool[start + 1..].find(')')? + start + 1;
+    let model = ai_tool[start + 1..end].trim();
+    (!model.is_empty()).then(|| model.to_string())
 }
 
 fn default_loop_title(args: &AgentTaskLoopArgs) -> String {
@@ -1513,6 +1551,7 @@ mod tests {
                     private_verify: Vec::new(),
                     private_gate_reveal: AgentTaskGateRevealPolicy::SummaryOnly,
                     max_attempts: 2,
+                    no_finalize: false,
                     base: "main".to_string(),
                     head: None,
                     title: None,
