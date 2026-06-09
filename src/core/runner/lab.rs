@@ -5,7 +5,7 @@ use crate::core::agent_task_scheduler::{AgentTaskAggregate, AgentTaskPlan};
 use crate::core::observation::{PREVIEW_METADATA_ENV, PREVIEW_PUBLIC_URL_ENV};
 use crate::core::plan::{HomeboyPlan, PlanStep, PlanStepStatus, PlanValues};
 use crate::core::source_snapshot::SourceSnapshot;
-use crate::core::{agent_task_secrets, config, Error, Result};
+use crate::core::{agent_task_secrets, config, Error, ErrorCode, Result};
 
 use super::{
     evaluate_lab_runner_capabilities_for_runner, exec, lab_offload_changed_since_ref,
@@ -599,13 +599,19 @@ fn run_lab_offload_inner(
     let (exec_output, exit_code) = match exec_result {
         Ok(output) => output,
         Err(err) => {
-            if let Some(reason) = runner_daemon_health_failure(&err) {
+            if let Some(health) = runner_daemon_health_failure(&err) {
+                let reason = health.reason.clone();
                 plan = with_step(
                     plan,
                     PlanStep::builder("lab.exec", "lab.exec", PlanStepStatus::Failed)
                         .skip_reason(reason.clone())
                         .build(),
                 );
+                if let Some(job_id) = health.job_id.as_deref() {
+                    return Err(in_flight_daemon_disconnect_error(
+                        runner_id, job_id, &reason, &err,
+                    ));
+                }
                 return match selection.source {
                     LabRunnerSelectionSource::Default => {
                         if !request.allow_local_fallback {
@@ -700,6 +706,38 @@ fn run_lab_offload_inner(
         stderr,
         exit_code,
     })
+}
+
+fn in_flight_daemon_disconnect_error(
+    runner_id: &str,
+    job_id: &str,
+    reason: &str,
+    err: &Error,
+) -> Error {
+    let mut disconnected = Error::new(
+        ErrorCode::InternalUnexpected,
+        format!(
+            "Lab offload controller disconnected while runner `{runner_id}` daemon job `{job_id}` was still in flight: {}",
+            err.message
+        ),
+        serde_json::json!({
+            "runner_id": runner_id,
+            "job_id": job_id,
+            "reason": reason,
+            "source": err.details,
+        }),
+    )
+    .with_hint(format!(
+        "Do not retry until checking the remote run; inspect running records with `homeboy runs list --runner {runner_id} --status running --limit 20`."
+    ))
+    .with_hint(format!(
+        "If daemon polling is unavailable, inspect from the runner with `homeboy runner exec {runner_id} -- homeboy runs list --status running --limit 20`."
+    ))
+    .with_hint(format!(
+        "Runner daemon job id `{job_id}` was already dispatched; use runner/job logs to decide whether to wait, cancel, or clean up."
+    ));
+    disconnected.retryable = Some(false);
+    disconnected
 }
 
 fn mirror_agent_task_run_plan_lifecycle(args: &[String], stdout: &str) -> Result<()> {
@@ -957,6 +995,38 @@ mod tests {
             requires_playwright: false,
             infer_source_path_tools: false,
         }
+    }
+
+    #[test]
+    fn in_flight_daemon_disconnect_error_surfaces_inspection_commands() {
+        let source = Error::new(
+            ErrorCode::InternalUnexpected,
+            "query runner daemon: error sending request for url (http://127.0.0.1:63203/jobs/job-123)",
+            serde_json::json!({
+                "runner_id": "homeboy-lab",
+                "job_id": "job-123",
+            }),
+        );
+
+        let err = in_flight_daemon_disconnect_error(
+            "homeboy-lab",
+            "job-123",
+            "runner daemon health check failed",
+            &source,
+        );
+
+        assert_eq!(err.code, ErrorCode::InternalUnexpected);
+        assert_eq!(err.retryable, Some(false));
+        assert_eq!(err.details["runner_id"], "homeboy-lab");
+        assert_eq!(err.details["job_id"], "job-123");
+        assert!(err.message.contains("still in flight"));
+        assert!(err.hints.iter().any(|hint| hint
+            .message
+            .contains("homeboy runs list --runner homeboy-lab")));
+        assert!(err
+            .hints
+            .iter()
+            .any(|hint| hint.message.contains("homeboy runner exec homeboy-lab")));
     }
 
     fn reverse_status(runner_id: &str) -> RunnerStatusReport {
