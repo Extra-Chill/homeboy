@@ -12,6 +12,11 @@ const TARGETED_CHECKS_RUN_LABEL: &str = "targeted_checks_run";
 const TARGETED_CHECKS_UNAVAILABLE_LABEL: &str = "targeted_checks_unavailable";
 const CI_EXPECTED_LABEL: &str = "ci_expected";
 const MANUAL_REVIEWER_CHECK_LABEL: &str = "manual_reviewer_check";
+const RELATED_FINDING_ID_LABEL: &str = "Related finding ID";
+const SOURCE_PACKET_ID_LABEL: &str = "Source packet ID";
+const CHANGE_KIND_LABEL: &str = "Change kind";
+const SUPERSEDES_LABEL: &str = "Supersedes";
+const DEPENDS_ON_LABEL: &str = "Depends on";
 
 pub(crate) fn render_pr_body(
     options: &AgentTaskPrFinalizationOptions,
@@ -103,7 +108,7 @@ fn source_relationship_section(options: &AgentTaskPrFinalizationOptions) -> Stri
     }
 
     format!(
-        "## Source relationship\n- **Related finding ID:** {}\n- **Source packet ID:** {}\n- **Change kind:** {}\n- **Supersedes:** {}\n- **Depends on:** {}\n\n",
+        "## Source relationship\n- **{RELATED_FINDING_ID_LABEL}:** {}\n- **{SOURCE_PACKET_ID_LABEL}:** {}\n- **{CHANGE_KIND_LABEL}:** {}\n- **{SUPERSEDES_LABEL}:** {}\n- **{DEPENDS_ON_LABEL}:** {}\n\n",
         option_value(relationship.related_finding_id.as_deref()),
         option_value(relationship.source_packet_id.as_deref()),
         option_value(relationship.change_kind.as_deref()),
