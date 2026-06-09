@@ -830,26 +830,14 @@ fn finalize_loop_pr(
                 .model
                 .clone()
                 .or_else(|| ai_model_from_tool(&args.ai_tool)),
-            source_relationship: AgentTaskPrSourceRelationship {
-                related_finding_id: args.dispatch.task_url.clone(),
-                source_packet_id: None,
-                change_kind: Some("runtime-fix".to_string()),
-                supersedes: Vec::new(),
-                depends_on: Vec::new(),
-            },
+            source_relationship: AgentTaskPrSourceRelationship::default(),
             verification: AgentTaskPrVerification {
                 targeted_checks_run: args.verify.clone(),
                 targeted_checks_unavailable: None,
                 ci_expected: vec!["Homeboy CI after push".to_string()],
                 manual_reviewer_check: None,
             },
-            runtime_guardrails: AgentTaskPrRuntimeGuardrails {
-                why_not_broader_than_packet: Some(
-                    "Generated runtime fixes must stay bounded to the source task/finding evidence and preserve nearby predicates or contracts unless the prompt explicitly requests broader behavior.".to_string(),
-                ),
-                evidence_discriminators: Vec::new(),
-                nearby_contracts_preserved: Vec::new(),
-            },
+            runtime_guardrails: AgentTaskPrRuntimeGuardrails::default(),
         },
         ai_used_for: args.ai_used_for.clone(),
         protected_branches: args.protected_branches.clone(),

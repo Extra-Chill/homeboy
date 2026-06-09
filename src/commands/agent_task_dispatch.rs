@@ -315,12 +315,12 @@ fn preflight_dispatch_provider_secrets(plan: &AgentTaskPlan) -> homeboy::core::R
 }
 
 fn dispatch_instructions(instructions: String, task_url: Option<&str>) -> String {
-    if task_url.is_none() || instructions.contains("Iterator runtime-fix guardrails") {
+    if task_url.is_none() || instructions.contains("Generated change guardrails") {
         return instructions;
     }
 
     format!(
-        "{instructions}\n\nIterator runtime-fix guardrails:\n- Before adding a new runtime predicate or transform, search for nearby existing predicates and transform families that already cover the finding shape.\n- Keep generated runtime changes bounded to the source finding evidence; preserve evidence-specific discriminators such as class, href, role, text, or DOM shape unless the task explicitly asks for broader behavior.\n- If existing behavior plus evidence/test coverage already resolves the finding, prefer evidence-only or test-only output over a broader runtime change.\n- In the PR evidence, report source relationship, change kind, verification capability, and why any runtime change is not broader than the packet evidence."
+        "{instructions}\n\nGenerated change guardrails:\n- First look for nearby existing predicates, contracts, or implementation families that already cover the requested behavior.\n- Keep generated changes bounded to the source evidence and task scope; preserve evidence-specific discriminators unless the task explicitly asks for broader behavior.\n- If existing behavior plus evidence/test coverage already resolves the task, prefer evidence-only or test-only output over a broader runtime change.\n- In PR evidence, report source relationship, change kind, verification capability, and why any runtime change is not broader than the source evidence."
     )
 }
 
@@ -727,7 +727,7 @@ mod tests {
     }
 
     #[test]
-    fn tracker_backed_dispatch_adds_runtime_fix_guardrails() {
+    fn tracker_backed_dispatch_adds_generated_change_guardrails() {
         let plan = build_dispatch_plan(&dispatch_args(DispatchArgOverrides {
             prompt: Some("Fix the finding.".to_string()),
             repo: Some("homeboy".to_string()),
@@ -738,10 +738,10 @@ mod tests {
 
         assert!(plan.tasks[0]
             .instructions
-            .contains("Iterator runtime-fix guardrails"));
+            .contains("Generated change guardrails"));
         assert!(plan.tasks[0]
             .instructions
-            .contains("bounded to the source finding evidence"));
+            .contains("bounded to the source evidence"));
     }
 
     #[test]
