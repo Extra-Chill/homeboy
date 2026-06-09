@@ -192,6 +192,10 @@ pub struct AgentTaskLoopArgs {
     #[arg(long = "max-attempts", default_value_t = 3, value_name = "N")]
     pub max_attempts: u32,
 
+    /// Stop after the first green promotion without committing, pushing, or opening/updating a PR.
+    #[arg(long = "no-finalize")]
+    pub no_finalize: bool,
+
     /// PR base branch used by finalization.
     #[arg(long, default_value = "main", value_name = "BRANCH")]
     pub base: String,
@@ -676,6 +680,19 @@ where
 
         match feedback_status {
             AgentTaskCookLoopStatus::GreenCompleted => {
+                if args.no_finalize {
+                    return Ok(loop_report(
+                        loop_id,
+                        "green_no_finalize",
+                        attempts,
+                        None,
+                        Some(
+                            "deterministic gates completed green; --no-finalize skipped commit, push, and PR finalization"
+                                .to_string(),
+                        ),
+                        0,
+                    ));
+                }
                 let finalization = finalize_loop_pr(&args, &loop_id, &promotion)?;
                 let final_status = finalization["status"]
                     .as_str()
@@ -1513,6 +1530,7 @@ mod tests {
                     private_verify: Vec::new(),
                     private_gate_reveal: AgentTaskGateRevealPolicy::SummaryOnly,
                     max_attempts: 2,
+                    no_finalize: false,
                     base: "main".to_string(),
                     head: None,
                     title: None,

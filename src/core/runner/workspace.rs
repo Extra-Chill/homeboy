@@ -75,6 +75,7 @@ pub struct RunnerWorkspaceSyncOutput {
     pub files: usize,
     pub bytes: u64,
     pub excludes: Vec<String>,
+    pub includes: Vec<String>,
 }
 
 pub fn sync_workspace(
@@ -104,15 +105,17 @@ pub fn sync_workspace(
             excludes.push(pattern.clone());
         }
     }
+    let includes = runner.policy.snapshot_includes.clone();
+    let excludes = effective_snapshot_excludes(excludes, &includes);
 
     match options.mode {
         RunnerWorkspaceSyncMode::Snapshot => {
-            let snapshot = snapshot_identity(&local_path, &excludes)?;
+            let snapshot = snapshot_identity(&local_path, &excludes, &includes)?;
             let remote_path = temp::unique_name(
                 &deterministic_remote_path(workspace_root, &local_path, &snapshot),
                 "",
             );
-            let stats = local_snapshot_stats(&local_path, &excludes)?;
+            let stats = local_snapshot_stats(&local_path, &excludes, &includes)?;
             materialize_snapshot(&runner, &local_path, &remote_path, &excludes)?;
             super::validation_dependencies::sync_validation_dependency_workspaces(
                 &runner,
@@ -131,6 +134,7 @@ pub fn sync_workspace(
                     files: stats.files,
                     bytes: stats.bytes,
                     excludes,
+                    includes,
                 },
                 0,
             ))
@@ -168,6 +172,7 @@ pub fn sync_workspace(
                     files: 0,
                     bytes: 0,
                     excludes,
+                    includes,
                 },
                 0,
             ))
@@ -231,7 +236,11 @@ fn deterministic_remote_path(workspace_root: &str, local_path: &Path, snapshot: 
     )
 }
 
-fn snapshot_identity(local_path: &Path, excludes: &[String]) -> Result<String> {
+fn snapshot_identity(
+    local_path: &Path,
+    excludes: &[String],
+    includes: &[String],
+) -> Result<String> {
     let head =
         git_output(local_path, &["rev-parse", "HEAD"]).unwrap_or_else(|_| "nogit".to_string());
     let status = git_output(local_path, &["status", "--porcelain=v1"])
@@ -245,7 +254,7 @@ fn snapshot_identity(local_path: &Path, excludes: &[String]) -> Result<String> {
     hasher.update(status.as_bytes());
     hasher.update(diff.as_bytes());
     hasher.update(staged.as_bytes());
-    hash_snapshot_tree(local_path, local_path, excludes, &mut hasher)?;
+    hash_snapshot_tree(local_path, local_path, excludes, includes, &mut hasher)?;
     Ok(format!("snapshot:{}", hex_prefix(&hasher.finalize(), 16)))
 }
 
@@ -308,9 +317,13 @@ pub(super) fn git_output(local_path: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-fn local_snapshot_stats(path: &Path, excludes: &[String]) -> Result<SnapshotStats> {
+fn local_snapshot_stats(
+    path: &Path,
+    excludes: &[String],
+    includes: &[String],
+) -> Result<SnapshotStats> {
     let mut stats = SnapshotStats { files: 0, bytes: 0 };
-    collect_stats(path, path, excludes, &mut stats)?;
+    collect_stats(path, path, excludes, includes, &mut stats)?;
     Ok(stats)
 }
 
@@ -318,6 +331,7 @@ fn hash_snapshot_tree(
     root: &Path,
     path: &Path,
     excludes: &[String],
+    includes: &[String],
     hasher: &mut Sha256,
 ) -> Result<()> {
     let mut entries = fs::read_dir(path)
@@ -335,7 +349,7 @@ fn hash_snapshot_tree(
 
     for entry in entries {
         let entry_path = entry.path();
-        if is_excluded(root, &entry_path, excludes) {
+        if is_excluded(root, &entry_path, excludes, includes) {
             continue;
         }
         let metadata = entry.metadata().map_err(|err| {
@@ -348,7 +362,7 @@ fn hash_snapshot_tree(
         hasher.update(rel.as_bytes());
         if metadata.is_dir() {
             hasher.update(b"/dir");
-            hash_snapshot_tree(root, &entry_path, excludes, hasher)?;
+            hash_snapshot_tree(root, &entry_path, excludes, includes, hasher)?;
         } else if metadata.is_file() {
             hasher.update(b"/file");
             hasher.update(metadata.len().to_le_bytes());
@@ -365,6 +379,7 @@ fn collect_stats(
     root: &Path,
     path: &Path,
     excludes: &[String],
+    includes: &[String],
     stats: &mut SnapshotStats,
 ) -> Result<()> {
     for entry in fs::read_dir(path).map_err(|err| {
@@ -377,14 +392,14 @@ fn collect_stats(
             )
         })?;
         let entry_path = entry.path();
-        if is_excluded(root, &entry_path, excludes) {
+        if is_excluded(root, &entry_path, excludes, includes) {
             continue;
         }
         let metadata = entry.metadata().map_err(|err| {
             Error::internal_io(err.to_string(), Some("read sync file metadata".to_string()))
         })?;
         if metadata.is_dir() {
-            collect_stats(root, &entry_path, excludes, stats)?;
+            collect_stats(root, &entry_path, excludes, includes, stats)?;
         } else if metadata.is_file() {
             stats.files += 1;
             stats.bytes = stats.bytes.saturating_add(metadata.len());
@@ -393,13 +408,18 @@ fn collect_stats(
     Ok(())
 }
 
-fn is_excluded(root: &Path, path: &Path, excludes: &[String]) -> bool {
+fn is_excluded(root: &Path, path: &Path, excludes: &[String], includes: &[String]) -> bool {
     let rel = path.strip_prefix(root).unwrap_or(path).to_string_lossy();
     let rel = rel.trim_start_matches('/');
     let name = path
         .file_name()
         .and_then(|value| value.to_str())
         .unwrap_or("");
+    if includes.iter().any(|pattern| {
+        pattern == rel || pattern == name || glob_match(pattern, rel) || glob_match(pattern, name)
+    }) {
+        return false;
+    }
     excludes.iter().any(|pattern| {
         pattern == rel || pattern == name || glob_match(pattern, rel) || glob_match(pattern, name)
     })
@@ -484,6 +504,34 @@ fn materialize_snapshot_piped(
         target_command = target_command,
     );
     run_shell_command(&command, action)
+}
+
+fn effective_snapshot_excludes(excludes: Vec<String>, includes: &[String]) -> Vec<String> {
+    if includes.is_empty() {
+        return excludes;
+    }
+
+    excludes
+        .into_iter()
+        .filter(|exclude| !includes_override_exclude(includes, exclude))
+        .collect()
+}
+
+fn includes_override_exclude(includes: &[String], exclude: &str) -> bool {
+    let excluded_name = exclude
+        .trim_start_matches("./")
+        .trim_end_matches("/**")
+        .trim_end_matches('/');
+    if excluded_name.is_empty() || excluded_name.contains('*') || excluded_name.contains('/') {
+        return false;
+    }
+
+    includes.iter().any(|include| {
+        include
+            .trim_start_matches("./")
+            .split('/')
+            .any(|segment| segment == excluded_name)
+    })
 }
 
 fn snapshot_install_command(remote_path: &str) -> String {
@@ -679,29 +727,81 @@ mod tests {
         assert!(is_excluded(
             root,
             Path::new("/repo/node_modules/pkg/index.js"),
-            &excludes
+            &excludes,
+            &[]
         ));
-        assert!(is_excluded(root, Path::new("/repo/.env.local"), &excludes));
+        assert!(is_excluded(
+            root,
+            Path::new("/repo/.env.local"),
+            &excludes,
+            &[]
+        ));
         assert!(is_excluded(
             root,
             Path::new("/repo/target/debug/homeboy"),
-            &excludes
+            &excludes,
+            &[]
         ));
         assert!(is_excluded(
             root,
             Path::new("/repo/src/__tests__/._index.js"),
-            &excludes
+            &excludes,
+            &[]
         ));
         assert!(!is_excluded(
             root,
             Path::new("/repo/src/main.rs"),
-            &excludes
+            &excludes,
+            &[]
         ));
         assert!(!is_excluded(
             root,
             Path::new("/repo/vendor/autoload.php"),
-            &excludes
+            &excludes,
+            &[]
         ));
+    }
+
+    #[test]
+    fn runner_snapshot_includes_override_generated_output_excludes() {
+        crate::test_support::with_isolated_home(|_| {
+            let source = tempfile::tempdir().expect("source tempdir");
+            let runner_root = tempfile::tempdir().expect("runner root tempdir");
+            fs::create_dir_all(source.path().join("packages/cli/dist")).expect("dist dir");
+            fs::write(
+                source.path().join("packages/cli/dist/homeboy.js"),
+                "built\n",
+            )
+            .expect("built output");
+
+            super::super::create(
+                &format!(
+                    r#"{{"id":"lab-local-includes","kind":"local","workspace_root":"{}","policy":{{"snapshot_includes":["packages/cli/dist","packages/cli/dist/**"]}}}}"#,
+                    runner_root.path().display()
+                ),
+                false,
+            )
+            .expect("create runner");
+
+            let (output, exit_code) = sync_workspace(
+                "lab-local-includes",
+                RunnerWorkspaceSyncOptions {
+                    path: source.path().display().to_string(),
+                    mode: RunnerWorkspaceSyncMode::Snapshot,
+                    changed_since_base: None,
+                },
+            )
+            .expect("sync workspace");
+
+            assert_eq!(exit_code, 0);
+            assert!(output
+                .includes
+                .contains(&"packages/cli/dist/**".to_string()));
+            assert!(!output.excludes.contains(&"dist".to_string()));
+            assert!(Path::new(&output.remote_path)
+                .join("packages/cli/dist/homeboy.js")
+                .exists());
+        });
     }
 
     #[test]

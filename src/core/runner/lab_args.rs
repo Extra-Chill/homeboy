@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use serde_json::Value;
 
 use crate::core::config::read_json_spec_to_string;
+use crate::core::worktree;
 use crate::core::{Error, Result};
 
 pub(super) const EXPLICIT_PASSTHROUGH_SENTINEL: &str = "__homeboy_explicit_passthrough__";
@@ -145,11 +146,25 @@ pub(super) fn lab_offload_source_path(args: &[String]) -> Result<PathBuf> {
             })?;
             return Ok(PathBuf::from(shellexpand::tilde(value).to_string()));
         }
+        if arg == "--to-worktree" {
+            let value = iter.next().ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "to_worktree",
+                    "--to-worktree requires a value before Lab offload can sync the target worktree",
+                    None,
+                    None,
+                )
+            })?;
+            return worktree::resolve(value).map(|record| PathBuf::from(record.worktree_path));
+        }
         if let Some(value) = arg.strip_prefix("--path=") {
             return Ok(PathBuf::from(shellexpand::tilde(value).to_string()));
         }
         if let Some(value) = arg.strip_prefix("--cwd=") {
             return Ok(PathBuf::from(shellexpand::tilde(value).to_string()));
+        }
+        if let Some(value) = arg.strip_prefix("--to-worktree=") {
+            return worktree::resolve(value).map(|record| PathBuf::from(record.worktree_path));
         }
     }
 
@@ -231,6 +246,50 @@ mod tests {
             lab_offload_source_path(&args).expect("source path"),
             PathBuf::from("/Users/chubes/Developer/wp-site-generator")
         );
+    }
+
+    #[test]
+    fn lab_source_path_uses_agent_task_loop_to_worktree() {
+        crate::test_support::with_isolated_home(|home| {
+            let store = crate::core::paths::homeboy_data()
+                .expect("homeboy data")
+                .join("task-worktrees");
+            std::fs::create_dir_all(&store).expect("worktree store");
+            let worktree_path = home.path().join("homeboy@smoke");
+            std::fs::create_dir_all(&worktree_path).expect("worktree path");
+            std::fs::write(
+                store.join("homeboy_smoke.json"),
+                serde_json::json!({
+                    "id": "homeboy@smoke",
+                    "component_id": "homeboy",
+                    "source_checkout": home.path().join("homeboy").display().to_string(),
+                    "worktree_path": worktree_path.display().to_string(),
+                    "branch": "smoke",
+                    "base_ref": "HEAD",
+                    "cleanup_policy": "preserve_on_failure",
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "state": "active"
+                })
+                .to_string(),
+            )
+            .expect("worktree record");
+            let args = vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "loop".to_string(),
+                "--to-worktree".to_string(),
+                "homeboy@smoke".to_string(),
+                "--verify".to_string(),
+                "true".to_string(),
+                "--prompt".to_string(),
+                "cook".to_string(),
+            ];
+
+            assert_eq!(
+                lab_offload_source_path(&args).expect("source path"),
+                worktree_path
+            );
+        });
     }
 
     #[test]

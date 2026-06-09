@@ -519,27 +519,7 @@ fn show(id: Option<&str>, path: Option<&str>) -> CmdResult<ComponentOutput> {
         ComponentOutput {
             command: "component.show".to_string(),
             id: Some(resolved_id.clone()),
-            entity: Some({
-                let mut value = serde_json::to_value(&component).map_err(|error| {
-                    homeboy::core::Error::validation_invalid_argument(
-                        "component",
-                        "Failed to serialize component",
-                        Some(error.to_string()),
-                        None,
-                    )
-                })?;
-                if let Value::Object(ref mut map) = value {
-                    map.insert("id".to_string(), Value::String(resolved_id));
-                    // Computed: extension-declared lockfiles + component
-                    // extras + the audit baseline. Consumed by
-                    // homeboy-action to scope direct-push drift.
-                    map.insert(
-                        "drift_files".to_string(),
-                        Value::Array(drift_files.into_iter().map(Value::String).collect()),
-                    );
-                }
-                value
-            }),
+            entity: Some(component_discovery_value(&component, Some(drift_files))?),
             ..Default::default()
         },
         0,
@@ -1010,24 +990,7 @@ fn rename(id: &str, new_id: &str) -> CmdResult<ComponentOutput> {
 fn list() -> CmdResult<ComponentOutput> {
     let components: Vec<Value> = component::inventory()?
         .into_iter()
-        .map(|component| {
-            let mut value = serde_json::to_value(&component).map_err(|error| {
-                homeboy::core::Error::validation_invalid_argument(
-                    "component",
-                    "Failed to serialize component",
-                    Some(error.to_string()),
-                    None,
-                )
-            })?;
-            if let Value::Object(ref mut map) = value {
-                map.insert("id".to_string(), Value::String(component.id.clone()));
-                // Always surface remote_owner so missing config is visible (#602).
-                // Serde skips None fields, but for list output we want explicit null
-                // so users can audit which components are missing this critical config.
-                map.entry("remote_owner".to_string()).or_insert(Value::Null);
-            }
-            Ok(value)
-        })
+        .map(|component| component_discovery_value(&component, None))
         .collect::<homeboy::core::Result<Vec<Value>>>()?;
 
     Ok((
@@ -1038,6 +1001,87 @@ fn list() -> CmdResult<ComponentOutput> {
         },
         0,
     ))
+}
+
+fn component_discovery_value(
+    component: &Component,
+    drift_files: Option<Vec<String>>,
+) -> homeboy::core::Result<Value> {
+    let mut value = serde_json::to_value(component).map_err(|error| {
+        homeboy::core::Error::validation_invalid_argument(
+            "component",
+            "Failed to serialize component",
+            Some(error.to_string()),
+            None,
+        )
+    })?;
+    if let Value::Object(ref mut map) = value {
+        map.insert("id".to_string(), Value::String(component.id.clone()));
+        // Always surface remote_owner so missing config is visible (#602).
+        map.entry("remote_owner".to_string()).or_insert(Value::Null);
+        summarize_large_component_metadata(map);
+        if let Some(drift_files) = drift_files {
+            // Computed: extension-declared lockfiles + component extras + the
+            // audit baseline. Consumed by homeboy-action to scope direct-push drift.
+            map.insert(
+                "drift_files".to_string(),
+                Value::Array(drift_files.into_iter().map(Value::String).collect()),
+            );
+        }
+    }
+    Ok(value)
+}
+
+fn summarize_large_component_metadata(map: &mut serde_json::Map<String, Value>) {
+    let baselines = map.remove("baselines");
+    let audit_rules = map.remove("audit_rules");
+    let mut summary = serde_json::Map::new();
+
+    if let Some(Value::Object(baselines)) = baselines {
+        summary.insert(
+            "baseline_keys".to_string(),
+            Value::Array(baselines.keys().cloned().map(Value::String).collect()),
+        );
+        if let Some(audit) = baselines.get("audit") {
+            summary.insert("audit_baseline".to_string(), audit_baseline_summary(audit));
+        }
+    }
+
+    if let Some(audit_rules) = audit_rules {
+        summary.insert("audit_rules".to_string(), value_shape_summary(&audit_rules));
+    }
+
+    if !summary.is_empty() {
+        map.insert("metadata_summary".to_string(), Value::Object(summary));
+    }
+}
+
+fn audit_baseline_summary(value: &Value) -> Value {
+    let mut summary = serde_json::Map::new();
+    if let Some(object) = value.as_object() {
+        for (key, value) in object {
+            if key == "known_fingerprints" {
+                summary.insert(
+                    "known_fingerprints_count".to_string(),
+                    Value::from(value.as_array().map_or(0, Vec::len)),
+                );
+            } else {
+                summary.insert(key.clone(), value_shape_summary(value));
+            }
+        }
+    }
+    Value::Object(summary)
+}
+
+fn value_shape_summary(value: &Value) -> Value {
+    match value {
+        Value::Array(items) => serde_json::json!({ "type": "array", "count": items.len() }),
+        Value::Object(object) => serde_json::json!({
+            "type": "object",
+            "keys": object.keys().cloned().collect::<Vec<_>>()
+        }),
+        _ => value.clone(),
+    }
 }
 
 fn projects(id: &str) -> CmdResult<ComponentOutput> {
@@ -1236,6 +1280,40 @@ mod tests {
 
         assert!(err.message.contains("unsupported legacy build_command"));
         assert!(err.message.contains("Use scripts.build instead"));
+    }
+
+    #[test]
+    fn component_discovery_value_summarizes_large_metadata() {
+        let mut component = Component::new(
+            "homeboy".to_string(),
+            "/repo/homeboy".to_string(),
+            "wp-content/plugins/homeboy".to_string(),
+            None,
+        );
+        component.baselines = Some(std::collections::HashMap::from([(
+            "audit".to_string(),
+            serde_json::json!({
+                "known_fingerprints": ["a", "b", "c"],
+                "item_count": 3
+            }),
+        )]));
+        component.audit_rules = Some(serde_json::json!({
+            "layer_rules": [{"id":"one"}],
+            "source_policies": [{"id":"two"}]
+        }));
+
+        let value = component_discovery_value(&component, None).expect("discovery value");
+
+        assert!(value.get("baselines").is_none());
+        assert!(value.get("audit_rules").is_none());
+        assert_eq!(
+            value["metadata_summary"]["audit_baseline"]["known_fingerprints_count"],
+            3
+        );
+        assert_eq!(
+            value["metadata_summary"]["baseline_keys"],
+            serde_json::json!(["audit"])
+        );
     }
 
     #[test]
