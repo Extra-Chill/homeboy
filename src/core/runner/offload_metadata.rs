@@ -1,4 +1,5 @@
 use crate::core::execution_contract::EXECUTION_CONTRACT;
+use crate::core::gate::collect_plan_gate_results;
 use crate::core::plan::{HomeboyPlan, PlanStepStatus};
 
 pub const LAB_OFFLOAD_METADATA_SCHEMA: &str = EXECUTION_CONTRACT.lab_offload.metadata_schema;
@@ -36,6 +37,7 @@ pub fn lab_offload_metadata_with_workspace_mapping(
     workspace_mapping: Option<&serde_json::Value>,
 ) -> serde_json::Value {
     let sync_mode = plan_step_input_string(plan, "lab.sync_workspace", "mode");
+    let gate_results = collect_plan_gate_results(plan);
     serde_json::json!({
         "schema": LAB_OFFLOAD_METADATA_SCHEMA,
         "plan_id": plan.id,
@@ -48,6 +50,7 @@ pub fn lab_offload_metadata_with_workspace_mapping(
         "fallback_reason": fallback_reason,
         "capability_preflight": plan_step_status(plan, "lab.capability_preflight"),
         "extension_parity": plan_step_status(plan, "lab.extension_parity"),
+        "gate_results": gate_results,
         "patch_captured": plan_has_step(plan, "lab.apply_patch"),
         "workspace_mapping": workspace_mapping,
     })
@@ -94,6 +97,7 @@ mod tests {
         lab_offload_metadata, lab_offload_metadata_with_workspace_mapping,
         LAB_OFFLOAD_METADATA_SCHEMA,
     };
+    use crate::core::gate::{HomeboyGateKind, HomeboyGateResult, HomeboyGateStatus};
     use crate::core::plan::{HomeboyPlan, PlanKind, PlanStep, PlanStepStatus, PlanValues};
 
     fn lab_plan() -> HomeboyPlan {
@@ -111,6 +115,12 @@ mod tests {
                 "lab.capability_preflight",
                 PlanStepStatus::Success,
             )
+            .gate_result(HomeboyGateResult::new(
+                "lab.capability_preflight",
+                "Lab capability preflight",
+                HomeboyGateKind::Capability,
+                HomeboyGateStatus::Passed,
+            ))
             .build(),
         );
         plan.steps
@@ -147,6 +157,11 @@ mod tests {
         assert_eq!(explicit["remote_workspace"], "/srv/homeboy/project");
         assert_eq!(explicit["sync_mode"], "snapshot");
         assert_eq!(explicit["capability_preflight"], "success");
+        assert_eq!(
+            explicit["gate_results"][0]["id"],
+            "lab.capability_preflight"
+        );
+        assert_eq!(explicit["gate_results"][0]["status"], "passed");
         assert_eq!(explicit["extension_parity"], "ready");
         assert_eq!(explicit["patch_captured"], true);
         assert!(explicit["workspace_mapping"].is_null());
