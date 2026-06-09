@@ -15,6 +15,10 @@ pub fn route_after_parse(
         return Ok(None);
     }
 
+    if let (Some(runner_id), Commands::Runs(args)) = (cli.runner.as_deref(), &cli.command) {
+        return Err(crate::commands::runs::global_runner_error(args, runner_id));
+    }
+
     let lab_command = lab_offload_command(&cli.command)?;
 
     let trace_runner_id = if matches!(cli.command, Commands::Trace(_)) {
@@ -230,6 +234,12 @@ fn lab_offload_command(
             )
         }),
         infer_source_path_tools: contract.infer_source_path_tools,
+        requires_wp_codebox_bench_recipe: contract.extra_required_tools.iter().any(|tool| {
+            matches!(
+                tool,
+                homeboy::cli_surface::LabCommandRequiredTool::WpCodeboxBenchRecipe
+            )
+        }),
     }))
 }
 
@@ -475,6 +485,47 @@ mod tests {
         assert!(command.portable);
         assert!(command.unsupported_reason.is_none());
         assert!(command.requires_extension_parity);
+    }
+
+    #[test]
+    fn bench_lab_command_requires_wp_codebox_bench_recipe_export() {
+        let cli = Cli::parse_from(["homeboy", "bench"]);
+
+        let command = lab_offload_command(&cli.command).unwrap().unwrap();
+
+        assert_eq!(command.hot_label, "bench");
+        assert!(command.requires_wp_codebox_bench_recipe);
+    }
+
+    #[test]
+    fn global_runner_for_runs_show_has_local_mirror_guidance() {
+        let _env = EnvGuard::remove(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV);
+        let cli = Cli::parse_from([
+            "homeboy",
+            "--runner",
+            "homeboy-lab",
+            "runs",
+            "show",
+            "run-123",
+        ]);
+
+        let err = route_after_parse(
+            &cli,
+            &[
+                "homeboy".into(),
+                "--runner".into(),
+                "homeboy-lab".into(),
+                "runs".into(),
+                "show".into(),
+                "run-123".into(),
+            ],
+            None,
+        )
+        .expect_err("runs show rejects global runner with guidance");
+
+        assert_eq!(err.code.as_str(), "validation.invalid_argument");
+        assert!(err.message.contains("homeboy runs show run-123"));
+        assert!(err.message.contains("without --runner"));
     }
 
     #[test]

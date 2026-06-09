@@ -335,6 +335,11 @@ pub fn run(args: RunsArgs, _global: &GlobalArgs) -> CmdResult<RunsOutput> {
     }
 }
 
+pub fn global_runner_error(args: &RunsArgs, runner_id: &str) -> Error {
+    let (message, hints) = args.global_runner_guidance(runner_id);
+    Error::validation_invalid_argument("runner", message, Some(runner_id.to_string()), Some(hints))
+}
+
 impl RunsArgs {
     pub fn is_markdown_mode(&self) -> bool {
         matches!(self.command, RunsCommand::Compare(ref compare) if compare::is_table_mode(compare))
@@ -351,6 +356,46 @@ impl RunsArgs {
                 command: RunsArtifactCommand::Get(_),
             })
         )
+    }
+
+    fn global_runner_guidance(&self, runner_id: &str) -> (String, Vec<String>) {
+        match &self.command {
+            RunsCommand::List(_) => (
+                format!(
+                    "Use the runs-list runner option after the subcommand: `homeboy runs list --runner {runner_id}`."
+                ),
+                vec![
+                    "The top-level --runner flag is reserved for Lab offload commands, not observation-store queries.".to_string(),
+                    format!("Run `homeboy runs list --runner {runner_id}` to query the connected runner daemon."),
+                ],
+            ),
+            RunsCommand::Show { run_id }
+            | RunsCommand::Evidence { run_id }
+            | RunsCommand::Artifacts { run_id } => (
+                format!(
+                    "Lab-offloaded run records are mirrored locally; inspect run `{run_id}` with `homeboy runs show {run_id}` without --runner."
+                ),
+                vec![
+                    format!("Run `homeboy runs show {run_id}` to inspect the mirrored local run record."),
+                    format!("Run `homeboy runs artifacts {run_id}` to list mirrored artifact records."),
+                    "Use `homeboy runs artifact get <run-id> <artifact-id>` for retrievable runner artifacts recorded in the local observation store.".to_string(),
+                ],
+            ),
+            RunsCommand::Artifact(_) => (
+                "Runner artifact commands use the local mirrored observation store; rerun without top-level --runner.".to_string(),
+                vec![
+                    "Run `homeboy runs artifacts <run-id>` without --runner to find the artifact id.".to_string(),
+                    "Run `homeboy runs artifact get <run-id> <artifact-id>` without --runner to retrieve a recorded runner artifact.".to_string(),
+                ],
+            ),
+            _ => (
+                "The top-level --runner flag is reserved for Lab offload commands; runs queries inspect the local observation store unless a subcommand documents its own --runner option.".to_string(),
+                vec![
+                    "Omit top-level --runner for local mirrored run records.".to_string(),
+                    "Use `homeboy runs list --runner <id>` only when listing runs from a connected runner daemon.".to_string(),
+                ],
+            ),
+        }
     }
 }
 
