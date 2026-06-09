@@ -320,7 +320,7 @@ fn dispatch_instructions(instructions: String, task_url: Option<&str>) -> String
     }
 
     format!(
-        "{instructions}\n\nGenerated change guardrails:\n- First look for nearby existing predicates, contracts, or implementation families that already cover the requested behavior.\n- Keep generated changes bounded to the source evidence and task scope; preserve evidence-specific discriminators unless the task explicitly asks for broader behavior.\n- If existing behavior plus evidence/test coverage already resolves the task, prefer evidence-only or test-only output over a broader runtime change.\n- In PR evidence, report source relationship, change kind, verification capability, and why any runtime change is not broader than the source evidence."
+        "{instructions}\n\nGenerated change guardrails:\n- First look for nearby existing predicates, contracts, or implementation families that already cover the requested behavior.\n- Keep generated changes bounded to the source evidence and task scope; preserve evidence-specific discriminators unless the task explicitly asks for broader behavior.\n- If dependency freshness, lifecycle, or validation gates fail, update and verify the relevant dependency checkout or declared component reference; do not bypass, disable, or skip the gate to reach a PR.\n- If existing behavior plus evidence/test coverage already resolves the task, prefer evidence-only or test-only output over a broader runtime change.\n- In PR evidence, report source relationship, change kind, verification capability, and why any runtime change is not broader than the source evidence."
     )
 }
 
@@ -742,6 +742,9 @@ mod tests {
         assert!(plan.tasks[0]
             .instructions
             .contains("bounded to the source evidence"));
+        assert!(plan.tasks[0]
+            .instructions
+            .contains("do not bypass, disable, or skip the gate"));
     }
 
     #[test]
