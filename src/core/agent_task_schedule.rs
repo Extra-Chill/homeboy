@@ -19,6 +19,8 @@ pub struct AgentTaskPlan {
     pub tasks: Vec<AgentTaskRequest>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub output_dependencies: HashMap<String, AgentTaskOutputDependencies>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub artifact_outputs: HashMap<String, Vec<AgentTaskArtifactOutputDeclaration>>,
     #[serde(default)]
     pub options: AgentTaskScheduleOptions,
     #[serde(default, skip_serializing_if = "Value::is_null")]
@@ -33,6 +35,7 @@ impl AgentTaskPlan {
             group_key: None,
             tasks,
             output_dependencies: HashMap::new(),
+            artifact_outputs: HashMap::new(),
             options: AgentTaskScheduleOptions::default(),
             metadata: Value::Null,
         }
@@ -51,11 +54,37 @@ pub struct AgentTaskOutputDependencies {
 pub struct AgentTaskOutputBinding {
     pub task_id: String,
     /// JSON Pointer into the prior `homeboy/agent-task-outcome/v1` object.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact: Option<AgentTaskArtifactBinding>,
     #[serde(default = "default_required_output")]
     pub required: bool,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub default: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskArtifactOutputDeclaration {
+    pub name: String,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskArtifactBinding {
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -137,8 +166,29 @@ pub struct AgentTaskAggregate {
     pub outcomes: Vec<AgentTaskOutcome>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub events: Vec<AgentTaskProgressEvent>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_lineage: Vec<AgentTaskArtifactLineage>,
     #[serde(default)]
     pub queue: AgentTaskQueueStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentTaskArtifactLineage {
+    pub task_id: String,
+    pub name: String,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub payload: Value,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

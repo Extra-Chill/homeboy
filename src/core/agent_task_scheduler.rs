@@ -6,11 +6,12 @@ use std::time::{Duration, Instant};
 use serde_json::{Map, Value};
 
 use crate::core::agent_task::{
-    AgentTaskDiagnostic, AgentTaskEvidenceRef, AgentTaskFailureClassification, AgentTaskOutcome,
-    AgentTaskOutcomeStatus, AgentTaskRequest, AGENT_TASK_OUTCOME_SCHEMA,
+    AgentTaskArtifact, AgentTaskDiagnostic, AgentTaskEvidenceRef, AgentTaskFailureClassification,
+    AgentTaskOutcome, AgentTaskOutcomeStatus, AgentTaskRequest, AGENT_TASK_OUTCOME_SCHEMA,
 };
 pub use crate::core::agent_task_schedule::{
     AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
+    AgentTaskArtifactBinding, AgentTaskArtifactLineage, AgentTaskArtifactOutputDeclaration,
     AgentTaskBackpressureStatus, AgentTaskCancellationToken, AgentTaskExecutionContext,
     AgentTaskOutputBinding, AgentTaskOutputDependencies, AgentTaskPlan, AgentTaskProgressEvent,
     AgentTaskQueueStatus, AgentTaskResourceBudget, AgentTaskResourceBudgetStatus,
@@ -341,6 +342,9 @@ where
             }
         }
 
+        let artifact_lineage =
+            AgentTaskScheduleSupport::artifact_lineage(&outcomes, &plan.artifact_outputs);
+
         AgentTaskAggregate {
             schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
             plan_id: plan.plan_id,
@@ -360,6 +364,7 @@ where
             ),
             outcomes,
             events,
+            artifact_lineage,
         }
     }
 }
@@ -565,6 +570,63 @@ impl AgentTaskScheduleSupport {
             ));
         };
 
+        if let Some(artifact_binding) = &binding.artifact {
+            let Some(artifact) = outcome.artifacts.iter().find(|artifact| {
+                artifact.kind == artifact_binding.kind
+                    && artifact_binding
+                        .artifact_id
+                        .as_ref()
+                        .map(|artifact_id| artifact.id == *artifact_id)
+                        .unwrap_or(true)
+                    && artifact_binding
+                        .schema
+                        .as_ref()
+                        .map(|schema| {
+                            artifact
+                                .metadata
+                                .get("payload_schema")
+                                .and_then(Value::as_str)
+                                == Some(schema.as_str())
+                        })
+                        .unwrap_or(true)
+            }) else {
+                if !binding.default.is_null() {
+                    return Ok(binding.default.clone());
+                }
+                if binding.required {
+                    return Err(format!(
+                        "task '{}' skipped because required artifact binding '{}' with kind '{}' was missing from task '{}'",
+                        request.task_id, name, artifact_binding.kind, binding.task_id
+                    ));
+                }
+                return Ok(Value::String(String::new()));
+            };
+
+            let artifact_value = serde_json::to_value(artifact).unwrap_or(Value::Null);
+            if let Some(payload_path) = &artifact_binding.payload_path {
+                if let Some(value) = artifact
+                    .metadata
+                    .get("payload")
+                    .and_then(|payload| payload.pointer(payload_path))
+                    .or_else(|| artifact_value.pointer(payload_path))
+                {
+                    return Ok(value.clone());
+                }
+                if !binding.default.is_null() {
+                    return Ok(binding.default.clone());
+                }
+                if binding.required {
+                    return Err(format!(
+                        "task '{}' skipped because required artifact binding '{}' payload was missing at '{}' from task '{}'",
+                        request.task_id, name, payload_path, binding.task_id
+                    ));
+                }
+                return Ok(Value::String(String::new()));
+            }
+
+            return Ok(artifact_value);
+        }
+
         let outcome_value = serde_json::to_value(outcome).unwrap_or(Value::Null);
         if let Some(value) = outcome_value.pointer(&binding.path) {
             return Ok(value.clone());
@@ -607,6 +669,53 @@ impl AgentTaskScheduleSupport {
             follow_up: None,
             metadata: serde_json::json!({ "skipped": true, "skip_reason": "output_dependency_missing" }),
         }
+    }
+
+    fn artifact_lineage(
+        outcomes: &[AgentTaskOutcome],
+        declarations_by_task: &HashMap<String, Vec<AgentTaskArtifactOutputDeclaration>>,
+    ) -> Vec<AgentTaskArtifactLineage> {
+        let mut lineage = Vec::new();
+        for outcome in outcomes {
+            let Some(declarations) = declarations_by_task.get(&outcome.task_id) else {
+                continue;
+            };
+            for declaration in declarations {
+                if let Some(artifact) = outcome.artifacts.iter().find(|artifact| {
+                    artifact.kind == declaration.kind
+                        && declaration
+                            .artifact_id
+                            .as_ref()
+                            .map(|artifact_id| artifact.id == *artifact_id)
+                            .unwrap_or(true)
+                }) {
+                    let payload = declaration
+                        .payload_path
+                        .as_ref()
+                        .and_then(|payload_path| select_artifact_payload(artifact, payload_path))
+                        .unwrap_or(Value::Null);
+
+                    lineage.push(AgentTaskArtifactLineage {
+                        task_id: outcome.task_id.clone(),
+                        name: declaration.name.clone(),
+                        kind: artifact.kind.clone(),
+                        schema: declaration.schema.clone().or_else(|| {
+                            artifact
+                                .metadata
+                                .get("payload_schema")
+                                .and_then(Value::as_str)
+                                .map(str::to_string)
+                        }),
+                        artifact_id: Some(artifact.id.clone()),
+                        path: artifact.path.clone(),
+                        url: artifact.url.clone(),
+                        sha256: artifact.sha256.clone(),
+                        payload,
+                    });
+                }
+            }
+        }
+        lineage
     }
 
     fn backpressure_kind(
@@ -1046,6 +1155,19 @@ impl AgentTaskScheduleSupport {
 
         totals
     }
+}
+
+fn select_artifact_payload(artifact: &AgentTaskArtifact, payload_path: &str) -> Option<Value> {
+    artifact
+        .metadata
+        .get("payload")
+        .and_then(|payload| payload.pointer(payload_path))
+        .cloned()
+        .or_else(|| {
+            serde_json::to_value(artifact)
+                .ok()
+                .and_then(|artifact_value| artifact_value.pointer(payload_path).cloned())
+        })
 }
 
 fn executor_key(request: &AgentTaskRequest) -> String {
@@ -1694,6 +1816,7 @@ mod tests {
                     AgentTaskOutputBinding {
                         task_id: "idea".to_string(),
                         path: "/outputs/issue_number".to_string(),
+                        artifact: None,
                         required: true,
                         default: Value::Null,
                     },
@@ -1732,6 +1855,159 @@ mod tests {
     }
 
     #[test]
+    fn binds_typed_artifact_payload_into_downstream_task_request() {
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let scheduler = AgentTaskScheduler::new(OutputTemplateExecutor {
+            observed: Arc::clone(&observed),
+            include_issue_number: true,
+        });
+        let mut plan = AgentTaskPlan::new(
+            "plan-artifact-dag",
+            vec![request("idea"), request("design")],
+        );
+        plan.options.max_concurrency = 2;
+        plan.tasks[1].inputs = json!({ "packet": "{{outputs.concept_packet}}" });
+        plan.artifact_outputs.insert(
+            "idea".to_string(),
+            vec![AgentTaskArtifactOutputDeclaration {
+                name: "concept_packet".to_string(),
+                kind: "concept_packet".to_string(),
+                schema: Some("example/concept-packet/v1".to_string()),
+                artifact_id: None,
+                payload_path: Some("/title".to_string()),
+            }],
+        );
+        plan.output_dependencies.insert(
+            "design".to_string(),
+            AgentTaskOutputDependencies {
+                depends_on: Vec::new(),
+                bindings: HashMap::from([(
+                    "concept_packet".to_string(),
+                    AgentTaskOutputBinding {
+                        task_id: "idea".to_string(),
+                        path: String::new(),
+                        artifact: Some(AgentTaskArtifactBinding {
+                            kind: "concept_packet".to_string(),
+                            schema: Some("example/concept-packet/v1".to_string()),
+                            artifact_id: Some("concept".to_string()),
+                            payload_path: Some("/title".to_string()),
+                        }),
+                        required: true,
+                        default: Value::Null,
+                    },
+                )]),
+            },
+        );
+
+        let aggregate = scheduler.run(plan);
+        let observed = observed.lock().expect("observed requests");
+        let design = observed
+            .iter()
+            .find(|request| request.task_id == "design")
+            .expect("design request dispatched");
+
+        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+        assert_eq!(design.inputs["packet"], json!("Demo concept"));
+        assert_eq!(aggregate.artifact_lineage.len(), 1);
+        assert_eq!(aggregate.artifact_lineage[0].name, "concept_packet");
+        assert_eq!(aggregate.artifact_lineage[0].payload, json!("Demo concept"));
+    }
+
+    #[test]
+    fn skips_required_typed_artifact_binding_when_artifact_is_missing() {
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let scheduler = AgentTaskScheduler::new(OutputTemplateExecutor {
+            observed: Arc::clone(&observed),
+            include_issue_number: false,
+        });
+        let mut plan = AgentTaskPlan::new(
+            "plan-artifact-skip",
+            vec![request("idea"), request("design")],
+        );
+        plan.output_dependencies.insert(
+            "design".to_string(),
+            AgentTaskOutputDependencies {
+                depends_on: Vec::new(),
+                bindings: HashMap::from([(
+                    "finding_packet".to_string(),
+                    AgentTaskOutputBinding {
+                        task_id: "idea".to_string(),
+                        path: String::new(),
+                        artifact: Some(AgentTaskArtifactBinding {
+                            kind: "finding_packet".to_string(),
+                            schema: None,
+                            artifact_id: None,
+                            payload_path: None,
+                        }),
+                        required: true,
+                        default: Value::Null,
+                    },
+                )]),
+            },
+        );
+
+        let aggregate = scheduler.run(plan);
+        let observed = observed.lock().expect("observed requests");
+
+        assert_eq!(aggregate.status, AgentTaskAggregateStatus::PartialFailure);
+        assert!(observed.iter().all(|request| request.task_id != "design"));
+        let skipped = aggregate
+            .outcomes
+            .iter()
+            .find(|outcome| outcome.task_id == "design")
+            .expect("skipped outcome");
+        assert!(skipped.diagnostics.iter().any(|diagnostic| {
+            diagnostic.class == "output_dependency_missing"
+                && diagnostic.message.contains("required artifact binding")
+        }));
+    }
+
+    #[test]
+    fn optional_typed_artifact_binding_uses_default() {
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let scheduler = AgentTaskScheduler::new(OutputTemplateExecutor {
+            observed: Arc::clone(&observed),
+            include_issue_number: false,
+        });
+        let mut plan = AgentTaskPlan::new(
+            "plan-artifact-default",
+            vec![request("idea"), request("design")],
+        );
+        plan.tasks[1].inputs = json!({ "packet": "{{outputs.finding_packet}}" });
+        plan.output_dependencies.insert(
+            "design".to_string(),
+            AgentTaskOutputDependencies {
+                depends_on: Vec::new(),
+                bindings: HashMap::from([(
+                    "finding_packet".to_string(),
+                    AgentTaskOutputBinding {
+                        task_id: "idea".to_string(),
+                        path: String::new(),
+                        artifact: Some(AgentTaskArtifactBinding {
+                            kind: "finding_packet".to_string(),
+                            schema: None,
+                            artifact_id: None,
+                            payload_path: None,
+                        }),
+                        required: false,
+                        default: json!({ "findings": [] }),
+                    },
+                )]),
+            },
+        );
+
+        let aggregate = scheduler.run(plan);
+        let observed = observed.lock().expect("observed requests");
+        let design = observed
+            .iter()
+            .find(|request| request.task_id == "design")
+            .expect("design request dispatched");
+
+        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+        assert_eq!(design.inputs["packet"], json!({ "findings": [] }));
+    }
+
+    #[test]
     fn skips_downstream_task_when_required_output_is_missing() {
         let observed = Arc::new(Mutex::new(Vec::new()));
         let scheduler = AgentTaskScheduler::new(OutputTemplateExecutor {
@@ -1751,6 +2027,7 @@ mod tests {
                     AgentTaskOutputBinding {
                         task_id: "idea".to_string(),
                         path: "/outputs/issue_number".to_string(),
+                        artifact: None,
                         required: true,
                         default: Value::Null,
                     },
@@ -1884,13 +2161,33 @@ mod tests {
                 Value::Null
             };
 
+            let artifacts = if request.task_id == "idea" && self.include_issue_number {
+                vec![AgentTaskArtifact {
+                    schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+                    id: "concept".to_string(),
+                    kind: "concept_packet".to_string(),
+                    name: Some("concept.json".to_string()),
+                    path: Some("artifacts/concept.json".to_string()),
+                    url: None,
+                    mime: Some("application/json".to_string()),
+                    size_bytes: None,
+                    sha256: Some("sha256:concept".to_string()),
+                    metadata: json!({
+                        "payload_schema": "example/concept-packet/v1",
+                        "payload": { "title": "Demo concept" }
+                    }),
+                }]
+            } else {
+                Vec::new()
+            };
+
             AgentTaskOutcome {
                 schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
                 task_id: request.task_id,
                 status: AgentTaskOutcomeStatus::Succeeded,
                 summary: Some("ok".to_string()),
                 failure_classification: None,
-                artifacts: Vec::new(),
+                artifacts,
                 evidence_refs: Vec::new(),
                 diagnostics: Vec::new(),
                 outputs,
