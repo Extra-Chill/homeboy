@@ -224,6 +224,9 @@ fn lab_offload_command(
             homeboy::cli_surface::LabWorkspaceModePolicy::ChangedSinceGitElseSnapshot => {
                 homeboy::core::runner::LabOffloadWorkspaceModePolicy::ChangedSinceGitElseSnapshot
             }
+            homeboy::cli_surface::LabWorkspaceModePolicy::Git => {
+                homeboy::core::runner::LabOffloadWorkspaceModePolicy::Git
+            }
         },
         requires_extension_parity: contract.requires_extension_parity,
         required_extensions,

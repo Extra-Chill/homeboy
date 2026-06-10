@@ -26,6 +26,7 @@ pub enum LabSourcePathMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LabWorkspaceModePolicy {
     ChangedSinceGitElseSnapshot,
+    Git,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,12 +113,18 @@ impl Commands {
             Commands::Test(_) => {
                 lab_local_only_contract("test", TEST_CHANGED_SINCE_LAB_UNSUPPORTED_REASON)
             }
-            Commands::Trace(args) => lab_portable_workload_contract(
-                "trace",
-                args.keep_overlay.then_some("--keep-overlay"),
-                false,
-                LAB_TRACE_EXTRA_TOOLS,
-            ),
+            Commands::Trace(args) => {
+                let mut contract = lab_portable_workload_contract(
+                    "trace",
+                    args.keep_overlay.then_some("--keep-overlay"),
+                    false,
+                    LAB_TRACE_EXTRA_TOOLS,
+                );
+                if args.is_compare_target_run() {
+                    contract.workspace_mode_policy = LabWorkspaceModePolicy::Git;
+                }
+                contract
+            }
             _ => return None,
         };
 
