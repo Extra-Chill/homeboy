@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.228.3] - 2026-06-10
+
+### Fixed
+- preserve git refs for lab trace compare
+- fail stale lab dependency worktrees
+
 ## [0.228.2] - 2026-06-10
 
 ### Changed
