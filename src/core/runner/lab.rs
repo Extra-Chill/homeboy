@@ -477,12 +477,19 @@ fn run_lab_offload_inner(
         homeboy_path,
         &remote_cwd,
         &changed_since_preflight.args,
+        &synced.local_path,
+        &remote_cwd,
     )?;
-    if synced_rigs > 0 {
+    if !synced_rigs.is_empty() {
         plan = with_step(
             plan,
             PlanStep::ready("lab.sync_rigs", "lab.sync_rigs")
-                .inputs(PlanValues::new().json("count", synced_rigs))
+                .inputs(
+                    PlanValues::new()
+                        .json("count", synced_rigs.len())
+                        .string("source_snapshot_remote_path", &remote_cwd)
+                        .json("rigs", &synced_rigs),
+                )
                 .build(),
         );
     }
@@ -531,7 +538,11 @@ fn run_lab_offload_inner(
         &changed_since_preflight.args,
         &synced.excludes,
     )?;
-    let remapped_args = remap_provider_config_in_args(&changed_since_preflight.args, &path_remaps);
+    let remapped_args = rig_materialization::remap_bench_rig_default_component_to_primary_snapshot(
+        &changed_since_preflight.args,
+        &remote_cwd,
+    );
+    let remapped_args = remap_provider_config_in_args(&remapped_args, &path_remaps);
     let remapped_args = remap_agent_task_plan_in_args(&remapped_args, &path_remaps);
     let (remapped_args, synced_remapped_plan) =
         materialize_inline_agent_task_plan_arg(runner_id, &remapped_args)?;
@@ -588,7 +599,9 @@ fn run_lab_offload_inner(
     lab_metadata["settings_env"] = settings_env_diagnostics(&changed_since_preflight.args, &env);
     lab_metadata["rig_sync"] = serde_json::json!({
         "step": "lab.sync_rigs",
-        "synced_count": synced_rigs,
+        "synced_count": synced_rigs.len(),
+        "source_snapshot_remote_path": remote_cwd,
+        "rigs": synced_rigs,
         "selected_before_remote_settings_resolution": true,
     });
     env = build_lab_offload_env(&lab_metadata);

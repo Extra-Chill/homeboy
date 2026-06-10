@@ -22,42 +22,70 @@ pub(super) struct RigComponentDependency {
     pub remote_url: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub(super) struct LabOffloadRigSync {
+    pub rig_id: String,
+    pub source: String,
+    pub source_kind: LabOffloadRigSyncSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum LabOffloadRigSyncSource {
+    PrimarySnapshot,
+    InstalledMetadata,
+}
+
 pub(super) fn sync_lab_offload_rigs(
     runner_id: &str,
     command_path: &str,
     remote_cwd: &str,
     args: &[String],
-) -> Result<usize> {
+    primary_local_path: &str,
+    primary_remote_path: &str,
+) -> Result<Vec<LabOffloadRigSync>> {
     let rig_ids = lab_offload_rig_ids(args);
     if rig_ids.is_empty() {
-        return Ok(0);
+        return Ok(Vec::new());
     }
 
+    let primary_rig_ids = primary_source_rig_ids(primary_local_path)?;
+    let mut synced_rigs = Vec::new();
     for rig_id in &rig_ids {
-        let metadata = rig::read_source_metadata(rig_id).ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "rig",
-                format!(
-                    "runner dispatch cannot materialize rig `{rig_id}` because it has no installed source metadata"
-                ),
-                Some(rig_id.clone()),
-                Some(vec![
-                    format!("Reinstall rig `{rig_id}` from a rig package before using --runner."),
-                    "Run the rig sources command to inspect installed rig sources.".to_string(),
-                ]),
+        let (source, source_kind) = if primary_rig_ids.contains(rig_id) {
+            (
+                primary_remote_path.to_string(),
+                LabOffloadRigSyncSource::PrimarySnapshot,
             )
-        })?;
-
-        let synced = sync_workspace(
-            runner_id,
-            RunnerWorkspaceSyncOptions {
-                path: metadata.package_path,
-                mode: RunnerWorkspaceSyncMode::Snapshot,
-                changed_since_base: None,
-                snapshot_includes: Vec::new(),
-            },
-        )?
-        .0;
+        } else {
+            let metadata = rig::read_source_metadata(rig_id).ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "rig",
+                    format!(
+                        "runner dispatch cannot materialize rig `{rig_id}` because it has no installed source metadata"
+                    ),
+                    Some(rig_id.clone()),
+                    Some(vec![
+                        format!("Reinstall rig `{rig_id}` from a rig package before using --runner."),
+                        "Run the rig sources command to inspect installed rig sources.".to_string(),
+                    ]),
+                )
+            })?;
+            let synced = sync_workspace(
+                runner_id,
+                RunnerWorkspaceSyncOptions {
+                    path: metadata.package_path,
+                    mode: RunnerWorkspaceSyncMode::Snapshot,
+                    changed_since_base: None,
+                    snapshot_includes: Vec::new(),
+                },
+            )?
+            .0;
+            (
+                synced.remote_path,
+                LabOffloadRigSyncSource::InstalledMetadata,
+            )
+        };
 
         let (output, exit_code) = exec(
             runner_id,
@@ -69,7 +97,7 @@ pub(super) fn sync_lab_offload_rigs(
                     command_path.to_string(),
                     "rig".to_string(),
                     "install".to_string(),
-                    synced.remote_path,
+                    source.clone(),
                     "--id".to_string(),
                     rig_id.clone(),
                 ],
@@ -91,12 +119,81 @@ pub(super) fn sync_lab_offload_rigs(
                 Some(vec![
                     output.stderr.trim().to_string(),
                     "Run the command with --force-hot to execute locally while investigating runner rig setup.".to_string(),
+                    format!("Lab source snapshot remote path: {primary_remote_path}"),
+                    format!("Selected rig install source: {source}"),
                 ]),
             ));
         }
+
+        synced_rigs.push(LabOffloadRigSync {
+            rig_id: rig_id.clone(),
+            source,
+            source_kind,
+        });
     }
 
-    Ok(rig_ids.len())
+    Ok(synced_rigs)
+}
+
+pub(super) fn remap_bench_rig_default_component_to_primary_snapshot(
+    args: &[String],
+    primary_remote_path: &str,
+) -> Vec<String> {
+    if !is_bench_rig_run(args) || has_path_arg(args) {
+        return args.to_vec();
+    }
+
+    let mut out = Vec::with_capacity(args.len() + 2);
+    let mut inserted = false;
+    let mut passthrough = false;
+    for arg in args {
+        if !inserted && !passthrough && arg == "--" {
+            out.push("--path".to_string());
+            out.push(primary_remote_path.to_string());
+            inserted = true;
+        }
+        if arg == "--" {
+            passthrough = true;
+        }
+        out.push(arg.clone());
+    }
+    if !inserted {
+        out.push("--path".to_string());
+        out.push(primary_remote_path.to_string());
+    }
+    out
+}
+
+fn primary_source_rig_ids(primary_local_path: &str) -> Result<HashSet<String>> {
+    let path = Path::new(primary_local_path);
+    if !path.join("rig.json").is_file() && !path.join("rigs").is_dir() {
+        return Ok(HashSet::new());
+    }
+    Ok(rig::discover_rigs(path)?
+        .into_iter()
+        .map(|discovered| discovered.id)
+        .collect())
+}
+
+fn is_bench_rig_run(args: &[String]) -> bool {
+    matches!(args.get(1).map(String::as_str), Some("bench"))
+        && !lab_offload_rig_ids(args).is_empty()
+}
+
+fn has_path_arg(args: &[String]) -> bool {
+    let mut iter = args.iter().skip(1);
+    while let Some(arg) = iter.next() {
+        if arg == "--" {
+            return false;
+        }
+        if arg == "--path" {
+            return true;
+        }
+        if arg.starts_with("--path=") {
+            return true;
+        }
+    }
+    false
 }
 
 pub(super) fn sync_lab_offload_rig_component_dependencies(
@@ -450,6 +547,107 @@ mod tests {
                 .remote_checkout_root
                 .contains("${package.root}"));
         });
+    }
+
+    #[test]
+    fn primary_source_rig_ids_discovers_rigs_from_current_source_tree() {
+        crate::test_support::with_isolated_home(|home| {
+            let checkout = home.path().join("Developer/studio-web-release-clean");
+            let rig_dir = checkout.join("rigs/studio-web-product-matrix");
+            std::fs::create_dir_all(&rig_dir).expect("rig dir");
+            std::fs::write(
+                rig_dir.join("rig.json"),
+                serde_json::json!({
+                    "id": "studio-web-product-matrix",
+                    "components": {},
+                    "bench": { "default_component": "studio-web" }
+                })
+                .to_string(),
+            )
+            .expect("rig spec");
+
+            let rig_ids =
+                primary_source_rig_ids(&checkout.display().to_string()).expect("primary rigs");
+
+            assert!(rig_ids.contains("studio-web-product-matrix"));
+        });
+    }
+
+    #[test]
+    fn bench_rig_default_component_args_receive_primary_snapshot_path() {
+        let args = vec![
+            "homeboy".to_string(),
+            "bench".to_string(),
+            "--rig".to_string(),
+            "studio-web-product-matrix".to_string(),
+            "--scenario".to_string(),
+            "editable_preview_ready".to_string(),
+        ];
+
+        let rewritten = remap_bench_rig_default_component_to_primary_snapshot(
+            &args,
+            "/home/chubes/Developer/_lab_workspaces/studio-web-release-clean-abc",
+        );
+
+        assert_eq!(
+            rewritten,
+            vec![
+                "homeboy",
+                "bench",
+                "--rig",
+                "studio-web-product-matrix",
+                "--scenario",
+                "editable_preview_ready",
+                "--path",
+                "/home/chubes/Developer/_lab_workspaces/studio-web-release-clean-abc",
+            ]
+        );
+    }
+
+    #[test]
+    fn bench_rig_path_injection_preserves_passthrough_boundary() {
+        let args = vec![
+            "homeboy".to_string(),
+            "bench".to_string(),
+            "--rig=studio-web-product-matrix".to_string(),
+            "--".to_string(),
+            "--runner-owned".to_string(),
+        ];
+
+        let rewritten = remap_bench_rig_default_component_to_primary_snapshot(
+            &args,
+            "/home/chubes/Developer/_lab_workspaces/studio-web-release-clean-abc",
+        );
+
+        assert_eq!(
+            rewritten,
+            vec![
+                "homeboy",
+                "bench",
+                "--rig=studio-web-product-matrix",
+                "--path",
+                "/home/chubes/Developer/_lab_workspaces/studio-web-release-clean-abc",
+                "--",
+                "--runner-owned",
+            ]
+        );
+    }
+
+    #[test]
+    fn bench_rig_path_injection_keeps_explicit_path() {
+        let args = vec![
+            "homeboy".to_string(),
+            "bench".to_string(),
+            "--rig".to_string(),
+            "studio-web-product-matrix".to_string(),
+            "--path".to_string(),
+            "/custom/source".to_string(),
+        ];
+
+        assert_eq!(
+            remap_bench_rig_default_component_to_primary_snapshot(&args, "/snapshot"),
+            args
+        );
     }
 
     #[test]
