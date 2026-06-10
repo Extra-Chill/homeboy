@@ -292,7 +292,7 @@ pub fn collect_refactor_sources(
         // Format generated/modified files so subsequent stages (especially lint)
         // see properly formatted code.
         if stage.summary.files_modified > 0 {
-            format_changed_files(&request.root, &stage.summary.changed_files, &mut warnings);
+            format_changed_files(&request.root, &stage.summary.changed_files)?;
         }
 
         accumulator.extend(stage.fix_results.clone());
@@ -321,18 +321,10 @@ pub fn collect_refactor_sources(
     if applied {
         let abs_changed: Vec<PathBuf> =
             changed_files.iter().map(|f| request.root.join(f)).collect();
-        match crate::core::engine::format_write::format_after_write(&request.root, &abs_changed) {
-            Ok(fmt) => {
-                if let Some(cmd) = &fmt.command {
-                    if !fmt.success {
-                        warnings.push(format!("Formatter ({}) exited non-zero", cmd));
-                    }
-                }
-            }
-            Err(e) => {
-                crate::log_status!("format", "Warning: post-write format failed: {}", e);
-            }
-        }
+        require_successful_format(
+            crate::core::engine::format_write::format_after_write(&request.root, &abs_changed)?,
+            "post-write formatter",
+        )?;
     }
 
     for stage in &mut stage_summaries {
@@ -433,41 +425,94 @@ pub(crate) fn normalize_sources(sources: &[String]) -> crate::core::Result<Vec<S
 /// `cargo fmt --check` fails on unformatted auto-generated code — blocking
 /// the pipeline on problems it didn't create.
 ///
-/// Uses the same `format_after_write` as the post-write step. Non-fatal:
-/// if formatting fails, it logs a warning and continues.
-fn format_changed_files(root: &Path, changed_files: &[String], warnings: &mut Vec<String>) {
+/// Uses the same `format_after_write` as the post-write step. Formatter
+/// failures are fatal in write mode so the command never returns an
+/// applied-success payload for a partially formatted worktree.
+fn format_changed_files(root: &Path, changed_files: &[String]) -> crate::core::Result<()> {
     if changed_files.is_empty() {
-        return;
+        return Ok(());
     }
 
     let abs_changed: Vec<PathBuf> = changed_files.iter().map(|f| root.join(f)).collect();
 
-    match crate::core::engine::format_write::format_after_write(root, &abs_changed) {
-        Ok(fmt) => {
-            if let Some(cmd) = &fmt.command {
-                if fmt.success {
-                    crate::log_status!(
-                        "format",
-                        "Formatted {} file(s) via {} (inter-stage)",
-                        abs_changed.len(),
-                        cmd
-                    );
-                } else {
-                    warnings.push(format!(
-                        "Inter-stage formatter ({}) exited non-zero (continuing)",
-                        cmd
-                    ));
-                }
-            }
-        }
-        Err(e) => {
+    let fmt = crate::core::engine::format_write::format_after_write(root, &abs_changed)?;
+    if let Some(cmd) = &fmt.command {
+        if fmt.success {
             crate::log_status!(
                 "format",
-                "Warning: inter-stage format failed (continuing): {}",
-                e
+                "Formatted {} file(s) via {} (inter-stage)",
+                abs_changed.len(),
+                cmd
             );
         }
     }
+
+    require_successful_format(fmt, "inter-stage formatter")
+}
+
+fn require_successful_format(
+    fmt: crate::core::engine::format_write::FormatResult,
+    label: &str,
+) -> crate::core::Result<()> {
+    if fmt.success {
+        return Ok(());
+    }
+
+    let command = fmt
+        .command
+        .unwrap_or_else(|| "unknown formatter".to_string());
+    let output = fmt.output.unwrap_or_default();
+    let problem = if output.trim().is_empty() {
+        format!("{} ({}) exited non-zero", label, command)
+    } else {
+        format!("{} ({}) exited non-zero: {}", label, command, output.trim())
+    };
+
+    Err(Error::validation_invalid_argument(
+        "write",
+        problem,
+        None,
+        Some(vec![
+            "The worktree may be partially formatted; inspect the formatter output before continuing".to_string(),
+            "Fix the formatter failure and rerun the write command".to_string(),
+        ]),
+    ))
+}
+
+fn reject_remaining_lint_fix_findings(
+    findings: &[crate::core::finding::HomeboyFinding],
+) -> crate::core::Result<()> {
+    if findings.is_empty() {
+        return Ok(());
+    }
+
+    let examples = findings
+        .iter()
+        .take(5)
+        .map(|finding| {
+            let location = finding
+                .location
+                .file
+                .clone()
+                .unwrap_or_else(|| "unknown file".to_string());
+            let rule = finding.rule.clone().unwrap_or_else(|| finding.tool.clone());
+            format!("{}: {} ({})", location, finding.message, rule)
+        })
+        .collect::<Vec<_>>();
+
+    Err(Error::validation_invalid_argument(
+        "fix",
+        format!(
+            "Lint fix left {} finding(s) after applying fixes: {}",
+            findings.len(),
+            examples.join("; ")
+        ),
+        None,
+        Some(vec![
+            "The worktree may be partially fixed; inspect the remaining lint findings before continuing".to_string(),
+            "Rerun homeboy lint without --fix to see the current diagnostics".to_string(),
+        ]),
+    ))
 }
 
 fn plan_audit_stage(request: AuditStageRequest<'_>) -> crate::core::Result<PlannedStage> {
@@ -773,6 +818,13 @@ fn run_lint_stage(
             &release_owned,
         )?;
         reject_unsafe_lint_autofix_changes(root, &scope_outcome.changed_files)?;
+
+        if !scope_outcome.changed_files.is_empty() {
+            build_lint_runner(fix_glob.as_deref())?.run()?;
+            let remaining_findings =
+                crate::core::extension::lint::baseline::parse_findings_file(&findings_file)?;
+            reject_remaining_lint_fix_findings(&remaining_findings)?;
+        }
 
         let fix_results = fix_sidecars.consume_fix_results();
         (
@@ -1189,6 +1241,45 @@ mod tests {
         assert!(stage.fix_results.is_empty());
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn formatter_failure_is_a_write_failure() {
+        let result = require_successful_format(
+            crate::core::engine::format_write::FormatResult {
+                success: false,
+                command: Some("format.sh src/file.php".to_string()),
+                output: Some("phpcbf failed".to_string()),
+                files_in_scope: 1,
+            },
+            "inter-stage formatter",
+        );
+
+        let err = result.expect_err("formatter failure should fail write mode");
+        assert!(err.to_string().contains("inter-stage formatter"));
+        assert!(err.to_string().contains("phpcbf failed"));
+    }
+
+    #[test]
+    fn lint_fix_validation_rejects_remaining_findings() {
+        let findings =
+            vec![
+                crate::core::finding::HomeboyFinding::builder("lint", "Tabs must be used")
+                    .rule("WordPress.WhiteSpace.DisallowSpaceIndent")
+                    .file("inc/Demo.php")
+                    .fixable(true)
+                    .build(),
+            ];
+
+        let err = reject_remaining_lint_fix_findings(&findings)
+            .expect_err("remaining lint findings should fail fix mode");
+        assert!(err.to_string().contains("Lint fix left 1 finding"));
+        assert!(err.to_string().contains("inc/Demo.php"));
+    }
+
+    #[test]
+    fn lint_fix_validation_accepts_clean_followup_diagnostics() {
+        reject_remaining_lint_fix_findings(&[]).expect("clean follow-up diagnostics should pass");
     }
 
     #[test]
