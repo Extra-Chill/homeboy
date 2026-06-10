@@ -253,10 +253,33 @@ fn lab_required_extensions(command: &Commands) -> homeboy::core::Result<Vec<Stri
             extension_ids.extend(args.extension_override.extensions.clone());
             extension_ids.extend(test_lab_extension_ids(args)?);
         }
+        Commands::AgentTask(args) => extension_ids.extend(agent_task_lab_extension_ids(args)?),
         _ => {}
     }
 
     Ok(extension_ids.into_iter().collect())
+}
+
+fn agent_task_lab_extension_ids(
+    args: &homeboy::commands::agent_task::AgentTaskArgs,
+) -> homeboy::core::Result<Vec<String>> {
+    let homeboy::commands::agent_task::AgentTaskCommand::RunPlan(run_plan) = &args.command else {
+        return Ok(Vec::new());
+    };
+    if run_plan.plan.trim() == "-" {
+        return Ok(Vec::new());
+    }
+    let raw = homeboy::core::config::read_json_spec_to_string(&run_plan.plan)?;
+    let plan: homeboy::core::agent_task_scheduler::AgentTaskPlan = serde_json::from_str(&raw)
+        .map_err(|error| {
+            homeboy::core::Error::validation_invalid_json(
+                error,
+                Some("agent-task run-plan Lab extension inference".to_string()),
+                Some(raw.clone()),
+            )
+        })?;
+
+    Ok(homeboy::core::agent_task_provider::required_extension_ids_for_plan(&plan))
 }
 
 fn test_lab_extension_ids(

@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -10,7 +11,9 @@ use crate::core::agent_task::{
     AgentTaskOutcome, AgentTaskOutcomeStatus, AgentTaskRequest, AGENT_TASK_ARTIFACT_SCHEMA,
     AGENT_TASK_OUTCOME_SCHEMA,
 };
-use crate::core::agent_task_scheduler::{AgentTaskExecutionContext, AgentTaskExecutorAdapter};
+use crate::core::agent_task_scheduler::{
+    AgentTaskExecutionContext, AgentTaskExecutorAdapter, AgentTaskPlan,
+};
 use crate::core::agent_task_secrets::{resolve_secret_env, AgentTaskSecretResolutionError};
 use crate::core::agent_task_timeout::timeout_with_grace;
 use crate::core::extension::load_all_extensions;
@@ -53,6 +56,14 @@ impl ExtensionProviderAgentTaskExecutor {
     pub fn providers(&self) -> &[AgentTaskExecutorProvider] {
         &self.providers
     }
+
+    pub fn required_extension_ids_for_plan(&self, plan: &AgentTaskPlan) -> Vec<String> {
+        required_extension_ids_for_plan_with_providers(plan, &self.providers)
+    }
+}
+
+pub fn required_extension_ids_for_plan(plan: &AgentTaskPlan) -> Vec<String> {
+    ExtensionProviderAgentTaskExecutor::discover().required_extension_ids_for_plan(plan)
 }
 
 impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
@@ -312,6 +323,22 @@ fn select_provider<'a>(
                 .as_ref()
                 .is_none_or(|selector| provider.id == *selector)
     })
+}
+
+fn required_extension_ids_for_plan_with_providers(
+    plan: &AgentTaskPlan,
+    providers: &[AgentTaskExecutorProvider],
+) -> Vec<String> {
+    let mut extension_ids = BTreeSet::new();
+    for request in &plan.tasks {
+        if let Some(extension_id) = select_provider(providers, request)
+            .and_then(|provider| provider.extension_id.as_ref())
+            .filter(|extension_id| !extension_id.trim().is_empty())
+        {
+            extension_ids.insert(extension_id.clone());
+        }
+    }
+    extension_ids.into_iter().collect()
 }
 
 fn run_provider_command(
@@ -590,6 +617,26 @@ mod tests {
             metadata: Value::Null,
         };
         (request, provider)
+    }
+
+    #[test]
+    fn required_extension_ids_follow_selected_agent_task_providers() {
+        let (request_a, mut provider_a) = request("task-a", "node provider-a.js".to_string());
+        provider_a.id = "provider-a".to_string();
+        provider_a.extension_id = Some("extension-a".to_string());
+        let (mut request_b, mut provider_b) = request("task-b", "node provider-b.js".to_string());
+        request_b.executor.selector = Some("provider-b".to_string());
+        provider_b.id = "provider-b".to_string();
+        provider_b.extension_id = Some("extension-b".to_string());
+        let executor =
+            ExtensionProviderAgentTaskExecutor::with_providers(vec![provider_a, provider_b]);
+
+        let extension_ids = executor.required_extension_ids_for_plan(&AgentTaskPlan::new(
+            "plan-a",
+            vec![request_a, request_b],
+        ));
+
+        assert_eq!(extension_ids, vec!["extension-a", "extension-b"]);
     }
 
     #[test]
