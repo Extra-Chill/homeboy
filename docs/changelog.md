@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.228.5] - 2026-06-10
+
+### Fixed
+- infer Lab extension parity from agent-task providers
+- reject stale Lab extension revisions
+
 ## [0.228.4] - 2026-06-10
 
 ### Fixed
