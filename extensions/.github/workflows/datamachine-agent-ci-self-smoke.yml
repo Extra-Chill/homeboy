@@ -4,7 +4,7 @@ name: Data Machine Agent CI self-smoke
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   pull-requests: write
   issues: write
 
@@ -17,6 +17,11 @@ jobs:
       pipeline_slug: self-smoke-pipeline
       flow_slug: self-smoke-flow
       target_repo: Extra-Chill/homeboy-extensions
+      context_repositories: |
+        [
+          {"repo":"Automattic/studio","ref":"trunk"},
+          {"repo":"WordPress/agent-skills","ref":"trunk"}
+        ]
       prompt: Acknowledge this self-smoke run with a single line and stop. Do not call any GitHub tools.
       success_requires_pr: false
       dry_run: true
