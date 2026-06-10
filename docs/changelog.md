@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.228.0] - 2026-06-10
+
+### Added
+- add agent task artifact loop primitives
+
 ## [0.227.9] - 2026-06-10
 
 ### Fixed
