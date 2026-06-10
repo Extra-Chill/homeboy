@@ -24,6 +24,7 @@ const PROVIDER_CAPABILITIES = [
   'screenshots',
   'structured_outcome',
   'agent_bundle_execution',
+  'typed_bundle_outputs',
   'external_recipe_packs',
   'recipe_probe_artifacts',
 ];
@@ -949,6 +950,116 @@ function sanitizePublicMetadata(value) {
   }));
 }
 
+function normalizeTypedArtifactEntry(name, artifact) {
+  if (!artifact || typeof artifact !== 'object' || Array.isArray(artifact)) {
+    return null;
+  }
+  const artifactName = artifact.name || name;
+  if (!artifactName) {
+    return null;
+  }
+  const fileRefs = typedArtifactOutputFileRefs(artifact);
+  return sanitizePublicMetadata(Object.fromEntries(Object.entries({
+    schema: 'homeboy/agent-task-typed-artifact/v1',
+    name: artifactName,
+    type: artifact.type || artifact.kind || artifact.artifact_type || artifact.artifactType,
+    artifact_schema: artifact.artifact_schema || artifact.artifactSchema || artifact.schema,
+    payload: artifact.payload !== undefined ? artifact.payload : artifact.data,
+    provenance: artifact.provenance && typeof artifact.provenance === 'object' && !Array.isArray(artifact.provenance) ? artifact.provenance : {},
+    file_refs: fileRefs,
+    metadata: artifact.metadata && typeof artifact.metadata === 'object' && !Array.isArray(artifact.metadata) ? artifact.metadata : {},
+  }).filter(([, value]) => value !== undefined && value !== '' && !(Array.isArray(value) && value.length === 0))));
+}
+
+function typedArtifactOutputFileRefs(artifact) {
+  if (Array.isArray(artifact.file_refs)) {
+    return artifact.file_refs;
+  }
+  if (Array.isArray(artifact.fileRefs)) {
+    return artifact.fileRefs;
+  }
+  return [];
+}
+
+function normalizeTypedArtifacts(value) {
+  if (Array.isArray(value)) {
+    return Object.fromEntries(value
+      .map((artifact, index) => normalizeTypedArtifactEntry(artifact?.name || artifact?.id || `artifact_${index + 1}`, artifact))
+      .filter(Boolean)
+      .map((artifact) => [artifact.name, artifact]));
+  }
+  if (!value || typeof value !== 'object') {
+    return {};
+  }
+  return Object.fromEntries(Object.entries(value)
+    .map(([name, artifact]) => normalizeTypedArtifactEntry(name, artifact))
+    .filter(Boolean)
+    .map((artifact) => [artifact.name, artifact]));
+}
+
+function typedArtifactsFromResult(result) {
+  const workload = agentRuntimeWorkload(result) || {};
+  const scenarios = Array.isArray(workload.scenarios) ? workload.scenarios : [];
+  const candidates = [
+    result.outputs?.typed_artifacts,
+    result.outputs?.typedArtifacts,
+    result.run?.agentResult?.typed_artifacts,
+    result.run?.agentResult?.typedArtifacts,
+    result.run?.agentResult?.outputs?.typed_artifacts,
+    result.run?.agentResult?.outputs?.typedArtifacts,
+    result.agentResult?.outputs?.typed_artifacts,
+    result.agentResult?.outputs?.typedArtifacts,
+    result.agent_result?.outputs?.typed_artifacts,
+    result.agent_result?.outputs?.typedArtifacts,
+    result.metadata?.agent_runtime?.result?.typed_artifacts,
+    result.metadata?.agent_runtime?.result?.typedArtifacts,
+    result.metadata?.agent_runtime?.result?.outputs?.typed_artifacts,
+    result.metadata?.agent_runtime?.result?.outputs?.typedArtifacts,
+    workload.typed_artifacts,
+    workload.typedArtifacts,
+    workload.outputs?.typed_artifacts,
+    workload.outputs?.typedArtifacts,
+    ...scenarios.map((scenario) => scenario?.typed_artifacts),
+    ...scenarios.map((scenario) => scenario?.typedArtifacts),
+    ...scenarios.map((scenario) => scenario?.metadata?.typed_artifacts),
+    ...scenarios.map((scenario) => scenario?.metadata?.typedArtifacts),
+  ];
+  return Object.assign({}, ...candidates.map(normalizeTypedArtifacts));
+}
+
+function typedArtifactFileRefs(typedArtifact) {
+  const refs = Array.isArray(typedArtifact.file_refs) ? typedArtifact.file_refs : [];
+  const directRefs = [typedArtifact.path, typedArtifact.url, typedArtifact.file, typedArtifact.directory].filter(Boolean);
+  return [
+    ...directRefs.map((ref) => ({ path: ref })),
+    ...refs,
+  ];
+}
+
+function typedBundleOutputArtifacts(result) {
+  return Object.values(typedArtifactsFromResult(result)).flatMap((typedArtifact) => typedArtifactFileRefs(typedArtifact).map((ref, index) => {
+    const fileRef = typeof ref === 'string' ? { path: ref } : ref;
+    if (!fileRef || typeof fileRef !== 'object') {
+      return null;
+    }
+    return {
+      id: fileRef.id || `${typedArtifact.name}-${index + 1}`,
+      kind: 'typed-bundle-output',
+      name: typedArtifact.name,
+      path: fileRef.path || fileRef.file || fileRef.directory,
+      url: fileRef.url,
+      mime: fileRef.mime,
+      sha256: fileRef.sha256,
+      metadata: {
+        type: typedArtifact.type,
+        artifact_schema: typedArtifact.artifact_schema,
+        provenance: typedArtifact.provenance,
+        file_ref: fileRef,
+      },
+    };
+  }).filter(Boolean));
+}
+
 function artifactFromCodeboxArtifact(artifact, index) {
   const id = artifact.id || artifact.sha256 || artifact.path || artifact.url || `codebox-artifact-${index + 1}`;
   return {
@@ -971,14 +1082,24 @@ function pathValue(source, dottedPath) {
 
 function normalizeOutputs(result) {
   const workload = agentRuntimeWorkload(result) || {};
-  if (workload.outputs && typeof workload.outputs === 'object' && !Array.isArray(workload.outputs)) {
-    return sanitizePublicMetadata(workload.outputs);
-  }
+  const typedArtifacts = typedArtifactsFromResult(result);
+  const appendTypedArtifacts = (outputs) => Object.keys(typedArtifacts).length > 0
+    ? {
+        ...outputs,
+        typed_artifacts: {
+          ...(outputs.typed_artifacts && typeof outputs.typed_artifacts === 'object' && !Array.isArray(outputs.typed_artifacts) ? outputs.typed_artifacts : {}),
+          ...typedArtifacts,
+        },
+      }
+    : outputs;
 
   const bundle = result.metadata?.agent_runtime?.bundle || result.task_input?.agent_bundle || {};
   const configuredOutputs = bundle.engine_data_outputs && typeof bundle.engine_data_outputs === 'object' ? bundle.engine_data_outputs : {};
+  if (Object.keys(configuredOutputs).length === 0 && workload.outputs && typeof workload.outputs === 'object' && !Array.isArray(workload.outputs)) {
+    return sanitizePublicMetadata(appendTypedArtifacts(workload.outputs));
+  }
   if (Object.keys(configuredOutputs).length === 0 && result.outputs && typeof result.outputs === 'object' && !Array.isArray(result.outputs)) {
-    return sanitizePublicMetadata(result.outputs);
+    return sanitizePublicMetadata(appendTypedArtifacts(result.outputs));
   }
   const scenarios = Array.isArray(workload.scenarios) ? workload.scenarios : [];
   const configuredOutputSources = [
@@ -1006,7 +1127,10 @@ function normalizeOutputs(result) {
       }
     }
   }
-  return sanitizePublicMetadata(Object.keys(outputs).length > 0 ? outputs : result.outputs || {});
+  const fallbackOutputs = workload.outputs && typeof workload.outputs === 'object' && !Array.isArray(workload.outputs)
+    ? workload.outputs
+    : result.outputs || {};
+  return sanitizePublicMetadata(appendTypedArtifacts(Object.keys(outputs).length > 0 ? outputs : fallbackOutputs));
 }
 
 function outputEvidenceRefs(outputs) {
@@ -1080,6 +1204,9 @@ function normalizeArtifacts(result, runSummary = null, recipeSummary = null) {
     for (const artifact of agentRuntimeBundleArtifacts(result)) {
       appendUniqueArtifact(artifacts, artifact);
     }
+    for (const artifact of typedBundleOutputArtifacts(result)) {
+      appendUniqueArtifact(artifacts, artifact);
+    }
     if (!recipeSummary) {
       for (const artifact of recipeRunArtifacts(result)) {
         appendUniqueArtifact(artifacts, artifact);
@@ -1121,6 +1248,13 @@ function normalizeEvidenceRefs(result, runSummary = null, recipeSummary = null) 
         kind: artifact.kind,
         uri: artifact.path || artifact.url,
         label: artifact.kind.replace(/^agent-runtime-/, 'Agent runtime ').replace(/-/g, ' '),
+      });
+    }
+    for (const artifact of typedBundleOutputArtifacts(result)) {
+      appendUniqueEvidenceRef(refs, {
+        kind: artifact.kind,
+        uri: artifact.path || artifact.url,
+        label: `Typed bundle output ${artifact.name || ''}`.trim(),
       });
     }
     if (!recipeSummary) {
@@ -1275,6 +1409,10 @@ function agentTaskOutcomeFromCodeboxResult(request, result = {}, options = {}) {
       codebox_recipe_run_summary: recipeSummary ? sanitizePublicMetadata(recipeSummary) : undefined,
       integration_contract: 'wp-codebox-cli/agent-task-run',
       decision_evidence: sanitizePublicMetadata(codeboxDecisionEvidence(result, runSummary, recipeSummary)),
+      sandbox_policy: sanitizePublicMetadata({
+        policy: result.task_input?.policy,
+        sandbox_tool_policy: result.task_input?.sandbox_tool_policy,
+      }),
       recipe_failed_phase: recipeFailedPhase || undefined,
     },
   };
