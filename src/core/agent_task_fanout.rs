@@ -216,6 +216,7 @@ mod tests {
                     AgentTaskOutputBinding {
                         task_id: "generate".to_string(),
                         path: "/outputs/artifact_id".to_string(),
+                        artifact: None,
                         required: true,
                         default: Value::Null,
                     },

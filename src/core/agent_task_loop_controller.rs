@@ -175,6 +175,20 @@ pub enum AgentTaskLoopPolicyAction {
         #[serde(default, skip_serializing_if = "Value::is_null")]
         request_template: Value,
     },
+    RouteFinding {
+        finding: AgentTaskLoopFindingPacket,
+        dedupe_key: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        entity_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Value::is_null")]
+        request_template: Value,
+    },
+    ValidateCandidatePatch {
+        candidate: AgentTaskLoopCandidatePatch,
+        validation: AgentTaskLoopCandidateValidation,
+        #[serde(default)]
+        limits: AgentTaskLoopCandidateLoopLimits,
+    },
     Join {
         wait_key: String,
     },
@@ -218,6 +232,68 @@ pub struct AgentTaskLoopPolicyActionRecord {
     pub created_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dedupe_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentTaskLoopFindingPacket {
+    pub finding_id: String,
+    pub severity: String,
+    pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_transformer: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reproduction_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lineage: Vec<AgentTaskLoopArtifactRef>,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub payload: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentTaskLoopCandidatePatch {
+    pub candidate_id: String,
+    pub patch: AgentTaskLoopArtifactRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finding_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<String>,
+    #[serde(default)]
+    pub attempt: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lineage: Vec<AgentTaskLoopArtifactRef>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentTaskLoopCandidateValidation {
+    pub validation_id: String,
+    pub status: AgentTaskLoopCandidateValidationStatus,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<AgentTaskLoopArtifactRef>,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub details: Value,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentTaskLoopCandidateValidationStatus {
+    Passed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskLoopCandidateLoopLimits {
+    #[serde(default = "default_candidate_max_attempts")]
+    pub max_attempts: u32,
+}
+
+impl Default for AgentTaskLoopCandidateLoopLimits {
+    fn default() -> Self {
+        Self {
+            max_attempts: default_candidate_max_attempts(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -636,6 +712,101 @@ impl AgentTaskLoopControllerRecord {
         Ok(())
     }
 
+    pub fn route_finding_packet(
+        &mut self,
+        finding: AgentTaskLoopFindingPacket,
+        request_template: Value,
+    ) -> AgentTaskLoopPolicyActionRecord {
+        let dedupe_key = format!(
+            "finding:{}",
+            finding
+                .reproduction_key
+                .as_deref()
+                .unwrap_or(&finding.finding_id)
+        );
+        if self.dedupe_keys.contains_key(&dedupe_key) {
+            return self.record_action(
+                AgentTaskLoopPolicyAction::RouteFinding {
+                    finding,
+                    dedupe_key,
+                    entity_id: None,
+                    request_template,
+                },
+                "finding packet route already satisfied",
+            );
+        }
+
+        let entity_id = self.upsert_entity(
+            "finding",
+            finding
+                .reproduction_key
+                .as_deref()
+                .unwrap_or(&finding.finding_id),
+            Vec::new(),
+            json!({
+                "severity": finding.severity.clone(),
+                "owner": finding.owner.clone(),
+                "source_transformer": finding.source_transformer.clone(),
+            }),
+        );
+        if let Some(entity) = self.entities.get_mut(&entity_id) {
+            entity.artifact_refs.extend(finding.lineage.clone());
+            entity
+                .provenance
+                .extend(finding.lineage.iter().map(|artifact| {
+                    AgentTaskLoopProvenanceRef {
+                        kind: artifact
+                            .kind
+                            .clone()
+                            .unwrap_or_else(|| "artifact".to_string()),
+                        uri: artifact.uri.clone(),
+                        caused_by: Some(finding.finding_id.clone()),
+                    }
+                }));
+        }
+        self.record_action(
+            AgentTaskLoopPolicyAction::RouteFinding {
+                finding,
+                dedupe_key,
+                entity_id: Some(entity_id),
+                request_template,
+            },
+            "finding packet routed to follow-up task",
+        )
+    }
+
+    pub fn record_candidate_patch_validation(
+        &mut self,
+        candidate: AgentTaskLoopCandidatePatch,
+        validation: AgentTaskLoopCandidateValidation,
+        limits: AgentTaskLoopCandidateLoopLimits,
+    ) -> AgentTaskLoopPolicyActionRecord {
+        let entity_id = self.upsert_entity(
+            "candidate_patch",
+            &candidate.candidate_id,
+            candidate.finding_id.clone().into_iter().collect(),
+            json!({
+                "worktree": candidate.worktree.clone(),
+                "attempt": candidate.attempt,
+                "finding_id": candidate.finding_id.clone(),
+            }),
+        );
+        if let Some(entity) = self.entities.get_mut(&entity_id) {
+            entity.artifact_refs.push(candidate.patch.clone());
+            entity.artifact_refs.extend(candidate.lineage.clone());
+            entity.artifact_refs.extend(validation.evidence.clone());
+        }
+
+        self.record_action(
+            AgentTaskLoopPolicyAction::ValidateCandidatePatch {
+                candidate,
+                validation,
+                limits,
+            },
+            "candidate patch validation recorded",
+        )
+    }
+
     fn apply_action_side_effects(
         &mut self,
         action: &AgentTaskLoopPolicyAction,
@@ -645,6 +816,42 @@ impl AgentTaskLoopControllerRecord {
             return;
         }
         match action {
+            AgentTaskLoopPolicyAction::RouteFinding { entity_id, .. } => {
+                if let Some(entity_id) = entity_id {
+                    if let Some(entity) = self.entities.get_mut(entity_id) {
+                        entity.state = Some("routed".to_string());
+                    }
+                }
+            }
+            AgentTaskLoopPolicyAction::ValidateCandidatePatch {
+                candidate,
+                validation,
+                limits,
+            } => {
+                let entity_id = format!(
+                    "candidate_patch:{}",
+                    sanitize_loop_id(&candidate.candidate_id)
+                );
+                if let Some(entity) = self.entities.get_mut(&entity_id) {
+                    match validation.status {
+                        AgentTaskLoopCandidateValidationStatus::Passed => {
+                            entity.state = Some("validated".to_string());
+                            entity.human_ready = true;
+                            self.state = AgentTaskLoopControllerState::HumanReady;
+                        }
+                        AgentTaskLoopCandidateValidationStatus::Failed
+                            if candidate.attempt >= limits.max_attempts =>
+                        {
+                            entity.state = Some("retry_limit_reached".to_string());
+                            entity.human_ready = true;
+                            self.state = AgentTaskLoopControllerState::HumanReady;
+                        }
+                        AgentTaskLoopCandidateValidationStatus::Failed => {
+                            entity.state = Some("needs_retry".to_string());
+                        }
+                    }
+                }
+            }
             AgentTaskLoopPolicyAction::WaitForEvent(wait) => {
                 self.state = AgentTaskLoopControllerState::Waiting;
                 if !self
@@ -771,7 +978,16 @@ fn controllers_root() -> Result<PathBuf> {
 fn action_dedupe_key(action: &AgentTaskLoopPolicyAction) -> Option<String> {
     match action {
         AgentTaskLoopPolicyAction::SpawnTask { dedupe_key, .. }
-        | AgentTaskLoopPolicyAction::FanOut { dedupe_key, .. } => Some(dedupe_key.clone()),
+        | AgentTaskLoopPolicyAction::FanOut { dedupe_key, .. }
+        | AgentTaskLoopPolicyAction::RouteFinding { dedupe_key, .. } => Some(dedupe_key.clone()),
+        AgentTaskLoopPolicyAction::ValidateCandidatePatch {
+            candidate,
+            validation,
+            ..
+        } => Some(format!(
+            "candidate-validation:{}:{}",
+            candidate.candidate_id, validation.validation_id
+        )),
         AgentTaskLoopPolicyAction::WaitForEvent(wait) => Some(format!("wait:{}", wait.wait_key)),
         AgentTaskLoopPolicyAction::RunGates {
             bundle_id,
@@ -805,6 +1021,7 @@ fn jsonpath_match_is_truthy(value: &Value) -> bool {
 fn action_entity_id(action: &AgentTaskLoopPolicyAction) -> Option<String> {
     match action {
         AgentTaskLoopPolicyAction::SpawnTask { entity_id, .. }
+        | AgentTaskLoopPolicyAction::RouteFinding { entity_id, .. }
         | AgentTaskLoopPolicyAction::RunGates { entity_id, .. } => entity_id.clone(),
         AgentTaskLoopPolicyAction::MarkHumanReady { entity_id, .. } => Some(entity_id.clone()),
         _ => None,
@@ -815,6 +1032,8 @@ fn action_name(action: &AgentTaskLoopPolicyAction) -> &'static str {
     match action {
         AgentTaskLoopPolicyAction::SpawnTask { .. } => "spawn_task",
         AgentTaskLoopPolicyAction::FanOut { .. } => "fan_out",
+        AgentTaskLoopPolicyAction::RouteFinding { .. } => "route_finding",
+        AgentTaskLoopPolicyAction::ValidateCandidatePatch { .. } => "validate_candidate_patch",
         AgentTaskLoopPolicyAction::Join { .. } => "join",
         AgentTaskLoopPolicyAction::Retry { .. } => "retry",
         AgentTaskLoopPolicyAction::RequestChanges { .. } => "request_changes",
@@ -841,6 +1060,10 @@ fn controller_schema() -> String {
 
 fn open_wait_status() -> AgentTaskLoopWaitStatus {
     AgentTaskLoopWaitStatus::Open
+}
+
+fn default_candidate_max_attempts() -> u32 {
+    3
 }
 
 fn now_timestamp() -> String {
@@ -983,6 +1206,120 @@ mod tests {
     }
 
     #[test]
+    fn finding_packets_route_once_with_lineage() {
+        let mut record = AgentTaskLoopControllerRecord::new("loop", "validate", "v1");
+        let finding = AgentTaskLoopFindingPacket {
+            finding_id: "finding-1".to_string(),
+            severity: "high".to_string(),
+            summary: "layout drift".to_string(),
+            owner: Some("transformer".to_string()),
+            source_transformer: Some("hero".to_string()),
+            reproduction_key: Some("page:/#hero".to_string()),
+            lineage: vec![AgentTaskLoopArtifactRef {
+                uri: "artifact://candidate/site".to_string(),
+                kind: Some("static_site_candidate".to_string()),
+                label: Some("candidate".to_string()),
+            }],
+            payload: json!({ "selector": ".hero" }),
+        };
+
+        let first = record.route_finding_packet(
+            finding.clone(),
+            json!({ "task": "iterate-transformer", "finding": finding }),
+        );
+        let second = record.route_finding_packet(
+            AgentTaskLoopFindingPacket {
+                finding_id: "finding-1b".to_string(),
+                reproduction_key: Some("page:/#hero".to_string()),
+                ..match first.action.clone() {
+                    AgentTaskLoopPolicyAction::RouteFinding { finding, .. } => finding,
+                    _ => unreachable!("route finding action"),
+                }
+            },
+            json!({ "task": "iterate-transformer" }),
+        );
+
+        assert_eq!(first.status, AgentTaskLoopActionStatus::Pending);
+        assert_eq!(second.status, AgentTaskLoopActionStatus::AlreadySatisfied);
+        assert_eq!(first.dedupe_key.as_deref(), Some("finding:page:/#hero"));
+        let entity = record.entities.get("finding:page___hero").expect("entity");
+        assert_eq!(entity.state.as_deref(), Some("routed"));
+        assert_eq!(entity.artifact_refs.len(), 1);
+        assert_eq!(entity.provenance[0].uri, "artifact://candidate/site");
+    }
+
+    #[test]
+    fn candidate_patch_validation_promotes_passes_to_human_ready() {
+        let mut record = AgentTaskLoopControllerRecord::new("loop", "repair", "v1");
+        let action = record.record_candidate_patch_validation(
+            candidate_patch(1),
+            AgentTaskLoopCandidateValidation {
+                validation_id: "validation-1".to_string(),
+                status: AgentTaskLoopCandidateValidationStatus::Passed,
+                evidence: vec![artifact_ref("artifact://validation/report")],
+                details: json!({ "passed": true }),
+            },
+            AgentTaskLoopCandidateLoopLimits { max_attempts: 2 },
+        );
+
+        assert_eq!(action.status, AgentTaskLoopActionStatus::Pending);
+        assert_eq!(record.state, AgentTaskLoopControllerState::HumanReady);
+        let entity = record
+            .entities
+            .get("candidate_patch:candidate-1")
+            .expect("candidate entity");
+        assert_eq!(entity.state.as_deref(), Some("validated"));
+        assert!(entity.human_ready);
+        assert_eq!(entity.artifact_refs.len(), 3);
+    }
+
+    #[test]
+    fn candidate_patch_validation_marks_retry_limit_stop_condition() {
+        let mut record = AgentTaskLoopControllerRecord::new("loop", "repair", "v1");
+        record.record_candidate_patch_validation(
+            candidate_patch(2),
+            AgentTaskLoopCandidateValidation {
+                validation_id: "validation-2".to_string(),
+                status: AgentTaskLoopCandidateValidationStatus::Failed,
+                evidence: vec![artifact_ref("artifact://validation/failure")],
+                details: json!({ "passed": false }),
+            },
+            AgentTaskLoopCandidateLoopLimits { max_attempts: 2 },
+        );
+
+        assert_eq!(record.state, AgentTaskLoopControllerState::HumanReady);
+        let entity = record
+            .entities
+            .get("candidate_patch:candidate-1")
+            .expect("candidate entity");
+        assert_eq!(entity.state.as_deref(), Some("retry_limit_reached"));
+        assert!(entity.human_ready);
+    }
+
+    #[test]
+    fn candidate_patch_validation_keeps_failed_candidate_retryable() {
+        let mut record = AgentTaskLoopControllerRecord::new("loop", "repair", "v1");
+        record.record_candidate_patch_validation(
+            candidate_patch(1),
+            AgentTaskLoopCandidateValidation {
+                validation_id: "validation-1".to_string(),
+                status: AgentTaskLoopCandidateValidationStatus::Failed,
+                evidence: vec![artifact_ref("artifact://validation/failure")],
+                details: json!({ "passed": false }),
+            },
+            AgentTaskLoopCandidateLoopLimits { max_attempts: 2 },
+        );
+
+        assert_eq!(record.state, AgentTaskLoopControllerState::Running);
+        let entity = record
+            .entities
+            .get("candidate_patch:candidate-1")
+            .expect("candidate entity");
+        assert_eq!(entity.state.as_deref(), Some("needs_retry"));
+        assert!(!entity.human_ready);
+    }
+
+    #[test]
     fn verify_commands_are_reusable_gate_bundle_checks() {
         let bundle = AgentTaskGateBundle::from_verify_commands(
             "candidate-gates",
@@ -993,5 +1330,24 @@ mod tests {
         assert_eq!(bundle.checks[0].kind, AgentTaskGateBundleCheckKind::Command);
         assert_eq!(bundle.checks[0].input["command"], json!("cargo test --lib"));
         assert!(bundle.checks[0].retryable);
+    }
+
+    fn candidate_patch(attempt: u32) -> AgentTaskLoopCandidatePatch {
+        AgentTaskLoopCandidatePatch {
+            candidate_id: "candidate-1".to_string(),
+            patch: artifact_ref("artifact://patch/fix.diff"),
+            finding_id: Some("finding-1".to_string()),
+            worktree: Some("/tmp/homeboy-candidate".to_string()),
+            attempt,
+            lineage: vec![artifact_ref("artifact://finding/finding-1")],
+        }
+    }
+
+    fn artifact_ref(uri: &str) -> AgentTaskLoopArtifactRef {
+        AgentTaskLoopArtifactRef {
+            uri: uri.to_string(),
+            kind: Some("artifact".to_string()),
+            label: None,
+        }
     }
 }

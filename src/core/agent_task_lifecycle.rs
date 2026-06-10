@@ -803,6 +803,7 @@ mod tests {
                     attempt: 1,
                     message: Some("ok".to_string()),
                 }],
+                artifact_lineage: Vec::new(),
                 queue: Default::default(),
             };
 
@@ -988,6 +989,7 @@ mod tests {
                     metadata: Value::Null,
                 }],
                 events: Vec::new(),
+                artifact_lineage: Vec::new(),
                 queue: Default::default(),
             };
             record_completed_run(&plan, &aggregate, Some("run-source")).expect("recorded");
@@ -1139,6 +1141,7 @@ mod tests {
                 attempt: 1,
                 message: Some("ok".to_string()),
             }],
+            artifact_lineage: Vec::new(),
             queue: Default::default(),
         }
     }
