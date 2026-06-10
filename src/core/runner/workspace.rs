@@ -62,6 +62,7 @@ pub struct RunnerWorkspaceSyncOptions {
     pub path: String,
     pub mode: RunnerWorkspaceSyncMode,
     pub changed_since_base: Option<String>,
+    pub git_fetch_refs: Vec<String>,
     pub snapshot_includes: Vec<String>,
 }
 
@@ -146,7 +147,11 @@ pub fn sync_workspace(
             ))
         }
         RunnerWorkspaceSyncMode::Git => {
-            let git = git_snapshot(&local_path, options.changed_since_base.as_deref())?;
+            let git = git_snapshot(
+                &local_path,
+                options.changed_since_base.as_deref(),
+                options.git_fetch_refs,
+            )?;
             if runner.kind != RunnerKind::Local {
                 super::source_materialization::validate_runner_git_materialization(
                     &git.remote_url,
@@ -160,6 +165,7 @@ pub fn sync_workspace(
                 &git.remote_url,
                 &git.head,
                 git.changed_since_base.as_deref(),
+                &git.git_fetch_refs,
             )?;
             super::validation_dependencies::sync_validation_dependency_workspaces(
                 &runner,
@@ -195,6 +201,7 @@ struct GitSnapshot {
     remote_url: String,
     head: String,
     changed_since_base: Option<String>,
+    git_fetch_refs: Vec<String>,
 }
 
 pub(super) fn canonical_workspace_path(path: &str) -> Result<PathBuf> {
@@ -264,7 +271,11 @@ pub(super) fn snapshot_identity(
     Ok(format!("snapshot:{}", hex_prefix(&hasher.finalize(), 16)))
 }
 
-fn git_snapshot(local_path: &Path, changed_since_base: Option<&str>) -> Result<GitSnapshot> {
+fn git_snapshot(
+    local_path: &Path,
+    changed_since_base: Option<&str>,
+    git_fetch_refs: Vec<String>,
+) -> Result<GitSnapshot> {
     let status = git_output(local_path, &["status", "--porcelain=v1"])?;
     if !status.trim().is_empty() {
         if changed_since_base.is_some() {
@@ -304,6 +315,7 @@ fn git_snapshot(local_path: &Path, changed_since_base: Option<&str>) -> Result<G
         remote_url,
         head,
         changed_since_base: changed_since_base.map(str::to_string),
+        git_fetch_refs,
     })
 }
 
@@ -557,8 +569,15 @@ fn materialize_git(
     remote_url: &str,
     head: &str,
     changed_since_base: Option<&str>,
+    git_fetch_refs: &[String],
 ) -> Result<()> {
-    let command = materialize_git_command(remote_path, remote_url, head, changed_since_base);
+    let command = materialize_git_command(
+        remote_path,
+        remote_url,
+        head,
+        changed_since_base,
+        git_fetch_refs,
+    );
     match runner.kind {
         RunnerKind::Local => run_shell_command(&command, "materialize local git workspace"),
         RunnerKind::Ssh => {
@@ -588,6 +607,7 @@ fn materialize_git_command(
     remote_url: &str,
     head: &str,
     changed_since_base: Option<&str>,
+    git_fetch_refs: &[String],
 ) -> String {
     let dest = shell::quote_arg(remote_path);
     let fetch_changed_since = changed_since_base
@@ -599,14 +619,24 @@ fn materialize_git_command(
             )
         })
         .unwrap_or_default();
+    let fetch_extra_refs = git_fetch_refs
+        .iter()
+        .map(|git_ref| {
+            format!(
+                " && git -C {dest} fetch origin {}",
+                shell::quote_arg(git_ref)
+            )
+        })
+        .collect::<String>();
 
     format!(
-        "mkdir -p {parent} && if [ -d {dest}/.git ]; then git -C {dest} reset --hard && git -C {dest} clean -ffdqx && git -C {dest} fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'; else rm -rf {dest} && git clone {url} {dest} && git -C {dest} fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'; fi{fetch_changed_since} && git -C {dest} checkout --detach {head} && git -C {dest} reset --hard {head} && git -C {dest} clean -ffdqx",
+        "mkdir -p {parent} && if [ -d {dest}/.git ]; then git -C {dest} reset --hard && git -C {dest} clean -ffdqx && git -C {dest} fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'; else rm -rf {dest} && git clone {url} {dest} && git -C {dest} fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'; fi{fetch_changed_since}{fetch_extra_refs} && git -C {dest} checkout --detach {head} && git -C {dest} reset --hard {head} && git -C {dest} clean -ffdqx",
         parent = shell::quote_arg(parent_remote_path(remote_path).as_str()),
         dest = dest,
         url = shell::quote_arg(remote_url),
         head = shell::quote_arg(head),
         fetch_changed_since = fetch_changed_since,
+        fetch_extra_refs = fetch_extra_refs,
     )
 }
 
@@ -798,6 +828,7 @@ mod tests {
                     path: source.path().display().to_string(),
                     mode: RunnerWorkspaceSyncMode::Snapshot,
                     changed_since_base: None,
+                    git_fetch_refs: Vec::new(),
                     snapshot_includes: Vec::new(),
                 },
             )
@@ -841,6 +872,7 @@ mod tests {
                     path: source.path().display().to_string(),
                     mode: RunnerWorkspaceSyncMode::Snapshot,
                     changed_since_base: None,
+                    git_fetch_refs: Vec::new(),
                     snapshot_includes: Vec::new(),
                 },
             )
@@ -900,6 +932,7 @@ mod tests {
                     path: source.path().display().to_string(),
                     mode: RunnerWorkspaceSyncMode::Snapshot,
                     changed_since_base: None,
+                    git_fetch_refs: Vec::new(),
                     snapshot_includes: Vec::new(),
                 },
             )
@@ -950,6 +983,7 @@ mod tests {
                 path: source.path().display().to_string(),
                 mode: RunnerWorkspaceSyncMode::Snapshot,
                 changed_since_base: None,
+                git_fetch_refs: Vec::new(),
                 snapshot_includes: Vec::new(),
             };
             let (first, _) = sync_workspace("lab-local", options.clone()).expect("first sync");
@@ -975,6 +1009,7 @@ mod tests {
             "https://github.com/Extra-Chill/homeboy.git",
             "abc123",
             Some("def456"),
+            &[],
         );
 
         assert!(command.contains("fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'"));
@@ -986,10 +1021,24 @@ mod tests {
     }
 
     #[test]
+    fn git_materialization_fetches_extra_refs_before_checkout() {
+        let command = materialize_git_command(
+            "/srv/homeboy/_lab_workspaces/homeboy-abc",
+            "https://github.com/Extra-Chill/homeboy.git",
+            "abc123",
+            None,
+            &["refs/pull/5530/head".to_string()],
+        );
+
+        assert!(command.contains("fetch origin refs/pull/5530/head"));
+        assert!(command.contains("checkout --detach abc123"));
+    }
+
+    #[test]
     fn dirty_git_sync_without_changed_since_suggests_snapshot_mode() {
         let source = dirty_git_repo();
 
-        let err = match git_snapshot(source.path(), None) {
+        let err = match git_snapshot(source.path(), None, Vec::new()) {
             Ok(_) => panic!("dirty git sync should fail"),
             Err(err) => err,
         };
@@ -1001,7 +1050,7 @@ mod tests {
     fn dirty_changed_since_git_sync_explains_snapshot_is_unavailable() {
         let source = dirty_git_repo();
 
-        let err = match git_snapshot(source.path(), Some("abc123")) {
+        let err = match git_snapshot(source.path(), Some("abc123"), Vec::new()) {
             Ok(_) => panic!("dirty changed-since git sync should fail"),
             Err(err) => err,
         };

@@ -1250,6 +1250,28 @@ mod tests {
         assert_eq!(trace.extra_required_tools, LAB_TRACE_EXTRA_TOOLS);
         assert!(!trace.requires_extension_parity);
         assert!(!trace.infer_source_path_tools);
+        assert_eq!(
+            trace.workspace_mode_policy,
+            LabWorkspaceModePolicy::ChangedSinceGitElseSnapshot
+        );
+
+        let trace_compare_refs = parsed_command(&[
+            "homeboy",
+            "trace",
+            "compare",
+            "woocommerce-gateway-stripe",
+            "ece-product-page-waterfall",
+            "--baseline-target",
+            "origin/develop",
+            "--candidate",
+            "32f68bb07ac0efa1d754f78e2adc8de115ddca6f",
+        ])
+        .lab_contract()
+        .expect("trace compare contract");
+        assert_eq!(
+            trace_compare_refs.workspace_mode_policy,
+            LabWorkspaceModePolicy::Git
+        );
 
         let lint = parsed_command(&["homeboy", "lint"])
             .lab_contract()

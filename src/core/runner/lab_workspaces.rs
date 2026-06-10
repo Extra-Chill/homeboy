@@ -65,6 +65,7 @@ pub(super) fn sync_extra_lab_workspaces(
                 path: local_path.display().to_string(),
                 mode: RunnerWorkspaceSyncMode::Snapshot,
                 changed_since_base: None,
+                git_fetch_refs: Vec::new(),
                 snapshot_includes: extra.snapshot_includes.clone(),
             },
         )?

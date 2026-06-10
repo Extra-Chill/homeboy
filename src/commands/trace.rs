@@ -210,6 +210,13 @@ pub struct TraceArgs {
     pub force: bool,
 }
 
+impl TraceArgs {
+    pub fn is_compare_target_run(&self) -> bool {
+        self.comp.component.as_deref() == Some("compare")
+            && (self.baseline_target.is_some() || self.candidate.is_some())
+    }
+}
+
 pub fn is_markdown_mode(args: &TraceArgs) -> bool {
     args.report.as_deref() == Some("markdown")
 }
