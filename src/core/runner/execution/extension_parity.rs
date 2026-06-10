@@ -1,6 +1,9 @@
 use crate::core::engine::shell;
 use crate::core::error::{Error, Result};
+use crate::core::extension;
 use crate::core::server::{self, SshClient};
+
+use serde_json::Value;
 
 use super::{Runner, RunnerKind};
 
@@ -73,6 +76,7 @@ fn validate_runner_extension(
     };
 
     if output.success {
+        validate_runner_extension_revision(runner_id, homeboy_path, extension_id, &output.stdout)?;
         return Ok(());
     }
 
@@ -90,6 +94,92 @@ fn validate_runner_extension(
             extension_parity_diagnostic_tail(&output.stderr, &output.stdout),
         ]),
     ))
+}
+
+fn validate_runner_extension_revision(
+    runner_id: &str,
+    homeboy_path: &str,
+    extension_id: &str,
+    remote_stdout: &str,
+) -> Result<()> {
+    let local_revision = extension::read_source_revision(extension_id);
+    let remote_revision = remote_extension_source_revision(remote_stdout);
+    let Some(local_revision) = local_revision.filter(|revision| !revision.trim().is_empty()) else {
+        return Ok(());
+    };
+    let Some(remote_revision) = remote_revision.filter(|revision| !revision.trim().is_empty())
+    else {
+        return Ok(());
+    };
+
+    if local_revision == remote_revision {
+        return Ok(());
+    }
+
+    Err(Error::validation_invalid_argument(
+        "runner_extension",
+        format!(
+            "Runner '{runner_id}' has stale extension parity for '{extension_id}' before command execution"
+        ),
+        Some(extension_id.to_string()),
+        Some(vec![
+            format!("Local extension source_revision: {local_revision}"),
+            format!("Runner extension source_revision: {remote_revision}"),
+            format!(
+                "Relink or update the extension on the runner before dispatch: {homeboy_path} extension relink {extension_id} <source>"
+            ),
+        ]),
+    ))
+}
+
+fn remote_extension_source_revision(stdout: &str) -> Option<String> {
+    let value: Value = serde_json::from_str(stdout.trim()).ok()?;
+    value
+        .get("data")
+        .and_then(|data| data.get("extension"))
+        .and_then(|extension| extension.get("source_revision"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{remote_extension_source_revision, validate_runner_extension_revision};
+    use crate::test_support::with_isolated_home;
+
+    use std::fs;
+
+    #[test]
+    fn remote_extension_source_revision_reads_extension_show_output() {
+        let stdout = r#"{"success":true,"data":{"extension":{"id":"wordpress","source_revision":"abc1234"}}}"#;
+
+        assert_eq!(
+            remote_extension_source_revision(stdout).as_deref(),
+            Some("abc1234")
+        );
+    }
+
+    #[test]
+    fn revision_parity_rejects_stale_runner_extension() {
+        with_isolated_home(|home| {
+            let extension_dir = home.path().join(".config/homeboy/extensions/wordpress");
+            fs::create_dir_all(&extension_dir).expect("extension dir");
+            fs::write(extension_dir.join(".source-revision"), "local123\n").expect("revision");
+            let remote_stdout = r#"{"success":true,"data":{"extension":{"id":"wordpress","source_revision":"remote456"}}}"#;
+
+            let err = validate_runner_extension_revision(
+                "homeboy-lab",
+                "homeboy",
+                "wordpress",
+                remote_stdout,
+            )
+            .expect_err("stale runner extension should fail parity");
+
+            assert!(err.to_string().contains("stale extension parity"));
+            assert!(err.details["tried"].to_string().contains("local123"));
+            assert!(err.details["tried"].to_string().contains("remote456"));
+        });
+    }
 }
 
 fn ssh_client_for_runner_extension_parity(runner: &Runner) -> Result<SshClient> {
