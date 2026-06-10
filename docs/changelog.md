@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.228.1] - 2026-06-10
+
+### Changed
+- remove daemon listener race
+
+### Fixed
+- prefer Lab snapshots for rig bench offload
+
 ## [0.228.0] - 2026-06-10
 
 ### Added
