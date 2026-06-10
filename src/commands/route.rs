@@ -253,10 +253,41 @@ fn lab_required_extensions(command: &Commands) -> homeboy::core::Result<Vec<Stri
             extension_ids.extend(args.extension_override.extensions.clone());
             extension_ids.extend(test_lab_extension_ids(args)?);
         }
+        Commands::AgentTask(args) => extension_ids.extend(agent_task_lab_extension_ids(args)?),
         _ => {}
     }
 
     Ok(extension_ids.into_iter().collect())
+}
+
+fn agent_task_lab_extension_ids(
+    args: &homeboy::commands::agent_task::AgentTaskArgs,
+) -> homeboy::core::Result<Vec<String>> {
+    let homeboy::commands::agent_task::AgentTaskCommand::RunPlan(run_plan) = &args.command else {
+        return Ok(Vec::new());
+    };
+    if run_plan.plan.trim() == "-" {
+        return Ok(Vec::new());
+    }
+    let raw = homeboy::core::config::read_json_spec_to_string(&run_plan.plan)?;
+    let plan: homeboy::core::agent_task_scheduler::AgentTaskPlan = serde_json::from_str(&raw)
+        .map_err(|error| {
+            homeboy::core::Error::validation_invalid_json(
+                error,
+                Some("agent-task run-plan Lab extension inference".to_string()),
+                Some(raw.clone()),
+            )
+        })?;
+
+    if plan
+        .tasks
+        .iter()
+        .any(|task| task.executor.backend == "codebox")
+    {
+        Ok(vec!["wordpress".to_string()])
+    } else {
+        Ok(Vec::new())
+    }
 }
 
 fn test_lab_extension_ids(
@@ -482,6 +513,33 @@ mod tests {
         assert!(command.portable);
         assert!(command.unsupported_reason.is_none());
         assert!(command.requires_extension_parity);
+    }
+
+    #[test]
+    fn agent_task_run_plan_requires_wordpress_extension_for_codebox_backend() {
+        let dir = tempdir().unwrap();
+        let plan_path = dir.path().join("agent-task-plan.json");
+        std::fs::write(
+            &plan_path,
+            r#"{
+                "schema":"homeboy/agent-task-plan/v1",
+                "plan_id":"codebox-plan",
+                "tasks":[{
+                    "schema":"homeboy/agent-task-request/v1",
+                    "task_id":"task-1",
+                    "executor":{"backend":"codebox"},
+                    "instructions":"Run Codebox task."
+                }]
+            }"#,
+        )
+        .unwrap();
+        let plan_spec = format!("@{}", plan_path.display());
+        let cli = Cli::parse_from(["homeboy", "agent-task", "run-plan", "--plan", &plan_spec]);
+
+        let command = lab_offload_command(&cli.command).unwrap().unwrap();
+
+        assert!(command.requires_extension_parity);
+        assert_eq!(command.required_extensions, vec!["wordpress".to_string()]);
     }
 
     #[test]
