@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.117.2] - 2026-06-10
+
+### Fixed
+- preserve Codebox failure evidence refs
+
 ## [2.117.1] - 2026-06-10
 
 ### Fixed
