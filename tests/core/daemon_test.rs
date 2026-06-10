@@ -88,10 +88,9 @@ fn test_serve_writes_state_and_routes_health_requests() {
     let _home = HomeGuard::new();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
     let addr = listener.local_addr().expect("addr");
-    drop(listener);
 
     std::thread::spawn(move || {
-        let _ = serve(addr);
+        let _ = serve_listener(listener);
     });
 
     let mut stream = None;
