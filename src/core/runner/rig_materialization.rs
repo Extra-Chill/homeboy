@@ -20,6 +20,7 @@ pub(super) struct RigComponentDependency {
     pub remote_checkout_root: String,
     pub required_subpath: Option<String>,
     pub remote_url: Option<String>,
+    pub pinned_ref: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -227,6 +228,7 @@ pub(super) fn sync_lab_offload_rig_component_dependencies(
                 remote_path: dependency.remote_checkout_root,
                 remote_url: dependency.remote_url,
                 required_subpath: dependency.required_subpath,
+                pinned_ref: dependency.pinned_ref,
             },
         )?);
     }
@@ -266,6 +268,7 @@ pub(super) fn lab_offload_rig_component_dependencies(
                 declared_checkout_root: checkout_root.to_string(),
                 required_subpath,
                 remote_url: component.remote_url.clone(),
+                pinned_ref: component.r#ref.clone(),
             });
         }
     }
@@ -693,6 +696,7 @@ mod tests {
             remote_checkout_root: primary_remote_path.to_string(),
             required_subpath: None,
             remote_url: Some("https://github.a8c.com/chubes4/studio-web.git".to_string()),
+            pinned_ref: None,
         }];
 
         assert!(dependencies

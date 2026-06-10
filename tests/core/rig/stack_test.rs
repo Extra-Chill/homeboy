@@ -17,6 +17,7 @@ fn component(path: &str, stack: Option<&str>) -> ComponentSpec {
         triage_remote_url: None,
         stack: stack.map(str::to_string),
         branch: None,
+        r#ref: None,
         extensions: None,
     }
 }

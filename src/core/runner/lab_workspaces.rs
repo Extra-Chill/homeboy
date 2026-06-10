@@ -24,6 +24,8 @@ pub(super) struct LabWorkspaceMappingEntry {
     remote_path: String,
     sync_mode: String,
     snapshot_identity: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dependency_freshness: Option<serde_json::Value>,
 }
 
 impl LabWorkspaceMappingEntry {
@@ -90,6 +92,7 @@ pub(super) fn workspace_mapping_entry(
         remote_path: synced.remote_path.clone(),
         sync_mode: synced.sync_mode.label().to_string(),
         snapshot_identity: synced.snapshot_identity.clone(),
+        dependency_freshness: None,
     }
 }
 
@@ -103,6 +106,17 @@ pub(super) fn workspace_mapping_entry_for_git_dependency(
         remote_path: dependency.remote_path.clone(),
         sync_mode: dependency.sync_mode.label().to_string(),
         snapshot_identity: dependency.head.clone(),
+        dependency_freshness: Some(serde_json::json!({
+            "local_path": dependency.local_path.as_str(),
+            "remote": dependency.remote_url.as_str(),
+            "before_sha": dependency.before_sha.as_deref(),
+            "after_sha": dependency.after_sha.as_deref(),
+            "upstream_sha": dependency.upstream_sha.as_deref(),
+            "upstream": dependency.upstream.as_deref(),
+            "status": dependency.status.as_str(),
+            "pinned_ref": dependency.pinned_ref.as_deref(),
+            "used_pinned_ref": dependency.used_pinned_ref,
+        })),
     }
 }
 
@@ -966,6 +980,13 @@ mod provider_config_candidate_paths_tests {
             remote_url: "git@github.a8c.com:Automattic/playground-site-sync.git".to_string(),
             head: "snapshot:abc".to_string(),
             status: "snapshotted".to_string(),
+            branch: Some("main".to_string()),
+            before_sha: Some("abc".to_string()),
+            after_sha: Some("abc".to_string()),
+            upstream_sha: Some("abc".to_string()),
+            upstream: Some("origin/main".to_string()),
+            pinned_ref: None,
+            used_pinned_ref: false,
             sync_mode: RunnerWorkspaceSyncMode::Snapshot,
             files: 7,
             bytes: 42,
@@ -978,6 +999,14 @@ mod provider_config_candidate_paths_tests {
         assert_eq!(entry.remote_path, "/remote/playground-site-sync");
         assert_eq!(entry.sync_mode, "snapshot");
         assert_eq!(entry.snapshot_identity, "snapshot:abc");
+        assert_eq!(
+            entry.dependency_freshness.as_ref().unwrap()["upstream"],
+            "origin/main"
+        );
+        assert_eq!(
+            entry.dependency_freshness.as_ref().unwrap()["after_sha"],
+            "abc"
+        );
     }
 
     #[test]

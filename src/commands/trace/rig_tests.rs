@@ -136,6 +136,7 @@ fn rig_component_path_and_trace_env_are_threaded() {
             triage_remote_url: None,
             stack: None,
             branch: None,
+            r#ref: None,
             extensions: Some(extensions),
         },
     );

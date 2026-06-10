@@ -711,6 +711,7 @@ fn test_snapshot_state() {
             triage_remote_url: None,
             stack: None,
             branch: None,
+            r#ref: None,
             extensions: None,
         },
     );
@@ -723,6 +724,7 @@ fn test_snapshot_state() {
             triage_remote_url: None,
             stack: None,
             branch: None,
+            r#ref: None,
             extensions: None,
         },
     );

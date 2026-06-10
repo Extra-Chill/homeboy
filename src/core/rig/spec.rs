@@ -967,6 +967,12 @@ pub struct ComponentSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
 
+    /// Explicit pinned ref for Lab dependency materialization. When set,
+    /// Homeboy records the checkout as intentionally pinned instead of trying
+    /// to prove latest-branch freshness for detached or non-upstream checkouts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub r#ref: Option<String>,
+
     /// Optional extension config for rig-owned bench dispatch.
     ///
     /// This is intentionally narrower than the global component registry: rigs
