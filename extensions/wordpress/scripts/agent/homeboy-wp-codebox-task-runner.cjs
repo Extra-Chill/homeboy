@@ -535,6 +535,67 @@ function plainObject(value) {
   return value && typeof value === 'object' && !Array.isArray(value);
 }
 
+function normalizeTypedArtifactEntry(name, artifact) {
+  if (!plainObject(artifact)) {
+    return null;
+  }
+  const artifactName = artifact.name || name;
+  if (!artifactName) {
+    return null;
+  }
+  const fileRefs = typedArtifactFileRefs(artifact);
+  return Object.fromEntries(Object.entries({
+    schema: 'homeboy/agent-task-typed-artifact/v1',
+    name: artifactName,
+    type: artifact.type || artifact.kind || artifact.artifact_type || artifact.artifactType,
+    artifact_schema: artifact.artifact_schema || artifact.artifactSchema || artifact.schema,
+    payload: artifact.payload !== undefined ? artifact.payload : artifact.data,
+    provenance: plainObject(artifact.provenance) ? artifact.provenance : {},
+    file_refs: fileRefs,
+    metadata: plainObject(artifact.metadata) ? artifact.metadata : {},
+  }).filter(([, value]) => value !== undefined && value !== '' && !(Array.isArray(value) && value.length === 0)));
+}
+
+function typedArtifactFileRefs(artifact) {
+  if (Array.isArray(artifact.file_refs)) {
+    return artifact.file_refs;
+  }
+  if (Array.isArray(artifact.fileRefs)) {
+    return artifact.fileRefs;
+  }
+  return [];
+}
+
+function normalizeTypedArtifacts(value) {
+  if (Array.isArray(value)) {
+    return Object.fromEntries(value
+      .map((artifact, index) => normalizeTypedArtifactEntry(artifact?.name || artifact?.id || `artifact_${index + 1}`, artifact))
+      .filter(Boolean)
+      .map((artifact) => [artifact.name, artifact]));
+  }
+  if (!plainObject(value)) {
+    return {};
+  }
+  return Object.fromEntries(Object.entries(value)
+    .map(([name, artifact]) => normalizeTypedArtifactEntry(name, artifact))
+    .filter(Boolean)
+    .map((artifact) => [artifact.name, artifact]));
+}
+
+function mergeTypedArtifactOutputs(outputs, ...candidates) {
+  const typedArtifacts = Object.assign({}, ...candidates.map(normalizeTypedArtifacts));
+  if (Object.keys(typedArtifacts).length === 0) {
+    return outputs;
+  }
+  return {
+    ...outputs,
+    typed_artifacts: {
+      ...(plainObject(outputs.typed_artifacts) ? outputs.typed_artifacts : {}),
+      ...typedArtifacts,
+    },
+  };
+}
+
 function sandboxToolPolicy(input, allowedTools) {
   const explicit = input.parent_request?.sandbox_tool_policy
     || input.parent_request?.sandboxToolPolicy
@@ -727,6 +788,7 @@ function agentRuntimeWorkloadFromSingleResult(workload, config) {
   } else if (plainObject(workload.output)) {
     outputs = workload.output;
   }
+  outputs = mergeTypedArtifactOutputs(outputs, workload.typed_artifacts, workload.typedArtifacts, outputs.typed_artifacts, outputs.typedArtifacts);
   return Object.fromEntries(Object.entries({
     id: config.workload_id || config.agent_slug || config.flow_slug || 'agent-bundle',
     success: workload.success,
@@ -742,10 +804,10 @@ function agentRuntimeWorkloadFromSingleResult(workload, config) {
 function agentRuntimeWorkloadFromBundleRun(bundleRun, config) {
   const bundle = bundleRun.bundle && typeof bundleRun.bundle === 'object' ? bundleRun.bundle : {};
   const workflowSteps = Array.isArray(bundleRun.workflow?.steps) ? bundleRun.workflow.steps : [];
-  const outputs = {
+  const outputs = mergeTypedArtifactOutputs({
     ...(plainObject(bundleRun.outputs) ? bundleRun.outputs : {}),
     ...toolRecorderOutputs(bundleRun.engine_data, config),
-  };
+  }, bundleRun.typed_artifacts, bundleRun.typedArtifacts, bundleRun.outputs?.typed_artifacts, bundleRun.outputs?.typedArtifacts);
   return {
     outputs,
     scenarios: [{

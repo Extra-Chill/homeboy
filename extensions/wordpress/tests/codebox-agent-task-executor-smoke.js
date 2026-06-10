@@ -220,6 +220,7 @@ assert.equal(provider.capabilities.includes('workspace_tools'), true);
 assert.equal(provider.capabilities.includes('patch_artifacts'), true);
 assert.equal(provider.capabilities.includes('cleanup_observability'), true);
 assert.equal(provider.capabilities.includes('agent_bundle_execution'), true);
+assert.equal(provider.capabilities.includes('typed_bundle_outputs'), true);
 assert.equal(provider.capabilities.includes('external_recipe_packs'), true);
 assert.equal(provider.capabilities.includes('recipe_probe_artifacts'), true);
 assert.deepEqual(provider.runtime_gap_trackers, []);
@@ -889,10 +890,29 @@ const agentBundleOutcome = agentTaskOutcomeFromCodeboxResult({
   success: true,
   schema: 'wp-codebox/agent-task-run/v1',
   artifacts: '/tmp/wp-codebox-artifacts',
+  task_input: {
+    policy: { write: 'sandbox', apply: 'review' },
+    sandbox_tool_policy: {
+      schema: 'wp-codebox/sandbox-tool-policy/v1',
+      tools: [{ id: 'homeboy/no-runtime-tools', allowed: false }],
+    },
+  },
   metadata: {
     agent_runtime: {
       bundle: agentBundleRequest.agent_bundle,
       workload: {
+        outputs: {
+          typed_artifacts: {
+            static_site_candidate: {
+              schema: 'homeboy/agent-task-typed-artifact/v1',
+              type: 'StaticSiteCandidate',
+              artifact_schema: 'static-site-importer/static-site-candidate/v1',
+              payload: { slug: 'issue-1222-transformer-loop', import_ready: true },
+              provenance: { bundle_slug: 'static-site-agent', task_id: 'agent-bundle-task-123' },
+              file_refs: [{ path: '/tmp/wp-codebox-artifacts/static-site-candidate.json', mime: 'application/json' }],
+            },
+          },
+        },
         scenarios: [{
           id: 'agent-bundle',
           metadata: {
@@ -908,9 +928,16 @@ const agentBundleOutcome = agentTaskOutcomeFromCodeboxResult({
 assert.equal(agentBundleOutcome.schema, 'homeboy/agent-task-outcome/v1');
 assert.equal(agentBundleOutcome.status, 'succeeded');
 assert.equal(agentBundleOutcome.outputs.static_site_pr_url, 'https://github.com/chubes4/wp-site-generator/pull/123');
+assert.equal(agentBundleOutcome.outputs.typed_artifacts.static_site_candidate.type, 'StaticSiteCandidate');
+assert.equal(agentBundleOutcome.outputs.typed_artifacts.static_site_candidate.artifact_schema, 'static-site-importer/static-site-candidate/v1');
+assert.equal(agentBundleOutcome.outputs.typed_artifacts.static_site_candidate.payload.import_ready, true);
+assert.equal(agentBundleOutcome.artifacts.some((artifact) => artifact.kind === 'typed-bundle-output' && artifact.name === 'static_site_candidate' && artifact.path === '/tmp/wp-codebox-artifacts/static-site-candidate.json'), true);
 assert.equal(agentBundleOutcome.artifacts.some((artifact) => artifact.kind === 'agent-runtime-transcript' && artifact.path === '/tmp/transcript.json'), true);
 assert.equal(agentBundleOutcome.artifacts.some((artifact) => artifact.kind === 'agent-runtime-replay-bundle' && artifact.path === '/tmp/replay-bundle'), true);
 assert.equal(agentBundleOutcome.evidence_refs.some((ref) => ref.uri === 'https://github.com/chubes4/wp-site-generator/pull/123'), true);
+assert.equal(agentBundleOutcome.evidence_refs.some((ref) => ref.uri === '/tmp/wp-codebox-artifacts/static-site-candidate.json'), true);
+assert.equal(agentBundleOutcome.metadata.sandbox_policy.policy.apply, 'review');
+assert.equal(agentBundleOutcome.metadata.sandbox_policy.sandbox_tool_policy.tools[0].allowed, false);
 assert.equal(upstreamRunnerOutcome.artifacts[1].kind, 'codebox-session-artifacts');
 assert.equal(upstreamRunnerOutcome.evidence_refs[0].uri, 'https://preview.example.test/sandbox-session-1');
 assert.equal(upstreamRunnerOutcome.evidence_refs[1].uri, '/tmp/wp-codebox-artifacts');

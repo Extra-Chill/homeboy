@@ -72,6 +72,15 @@ const bundleRun = isAgentBundle && process.env.FIXTURE_WP_CODEBOX_BUNDLE_RUN
         flow_slug: 'static-site-manual-flow',
         pipeline_slug: 'static-site-pipeline',
       },
+      typed_artifacts: {
+        static_site_candidate: {
+          schema: 'static-site-importer/static-site-candidate/v1',
+          type: 'StaticSiteCandidate',
+          payload: { slug: 'store-idea-agent', import_ready: true },
+          provenance: { bundle_slug: 'store-idea-agent', task_id: input.orchestrator.agent_task_id },
+          file_refs: [{ path: input.artifacts_path + '/static-site-candidate.json', mime: 'application/json' }]
+        }
+      },
       workflow: { steps: [{ step_type: 'ai' }] },
       wait_result: { success: true, terminal_state: 'completed' },
       engine_data: process.env.FIXTURE_WP_CODEBOX_BUNDLE_RUN_TOOL_RECORDERS
@@ -466,6 +475,9 @@ try {
   assert.equal(canonicalBundleRunOutput.run.agentResult.scenarios[0].metadata.engine_data.store_idea_agent.issue_number, 123);
   assert.equal(canonicalBundleRunOutput.run.agentResult.scenarios[0].metadata.dry_run, true);
   assert.equal(canonicalBundleRunOutput.run.agentResult.scenarios[0].metrics.workflow_step_count, 1);
+  assert.equal(canonicalBundleRunOutput.outputs.typed_artifacts.static_site_candidate.type, 'StaticSiteCandidate');
+  assert.equal(canonicalBundleRunOutput.outputs.typed_artifacts.static_site_candidate.artifact_schema, 'static-site-importer/static-site-candidate/v1');
+  assert.equal(canonicalBundleRunOutput.outputs.typed_artifacts.static_site_candidate.payload.import_ready, true);
 
   const recorderBundleRunCapturePath = path.join(root, 'capture-recorder-datamachine-bundle-run.json');
   const recorderBundleRunResult = spawnSync(process.execPath, [
