@@ -92,6 +92,7 @@ enum DependencyUpdateStatus {
     NoUpstreamSkipped,
     UpToDate,
     FastForwarded,
+    FetchFailedCachedUpToDate,
 }
 
 impl DependencyUpdateStatus {
@@ -102,6 +103,7 @@ impl DependencyUpdateStatus {
             Self::NoUpstreamSkipped => "snapshotted_no_upstream_dependency_not_updated",
             Self::UpToDate => "snapshotted_up_to_date",
             Self::FastForwarded => "snapshotted_fast_forwarded",
+            Self::FetchFailedCachedUpToDate => "snapshotted_fetch_failed_cached_up_to_date",
         }
     }
 }
@@ -129,7 +131,13 @@ fn auto_update_clean_git_dependency(local_path: &Path) -> Result<DependencyUpdat
     }
 
     let before = git_output(local_path, &["rev-parse", "HEAD"])?;
-    run_git(local_path, &["fetch", "--prune", remote])?;
+    let upstream_head = git_output(local_path, &["rev-parse", "@{u}"])?;
+    if let Err(err) = run_git(local_path, &["fetch", "--prune", remote]) {
+        if before == upstream_head {
+            return Ok(DependencyUpdateStatus::FetchFailedCachedUpToDate);
+        }
+        return Err(err);
+    }
     run_git(local_path, &["merge", "--ff-only", "@{u}"])?;
     let after = git_output(local_path, &["rev-parse", "HEAD"])?;
 
@@ -210,6 +218,31 @@ mod tests {
         let status = auto_update_clean_git_dependency(checkout.path()).expect("auto update");
 
         assert_eq!(status, DependencyUpdateStatus::DirtySkipped);
+        assert_eq!(git_output(checkout.path(), &["rev-parse", "HEAD"]), before);
+    }
+
+    #[test]
+    fn auto_update_fetch_failure_uses_cached_upstream_when_checkout_matches() {
+        let fixture = GitFixture::new();
+        fixture.commit_file("initial.txt", "initial");
+        fixture.push();
+
+        let checkout = fixture.clone_checkout();
+        let before = git_output(checkout.path(), &["rev-parse", "HEAD"]);
+        let missing_remote = checkout.path().join("missing-remote.git");
+        run_git(
+            checkout.path(),
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                missing_remote.to_str().expect("missing remote path"),
+            ],
+        );
+
+        let status = auto_update_clean_git_dependency(checkout.path()).expect("auto update");
+
+        assert_eq!(status, DependencyUpdateStatus::FetchFailedCachedUpToDate);
         assert_eq!(git_output(checkout.path(), &["rev-parse", "HEAD"]), before);
     }
 
