@@ -2,6 +2,14 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.117.0] - 2026-06-10
+
+### Added
+- add context repository inputs to agent CI
+
+### Fixed
+- expose typed Codebox bundle outputs
+
 ## [2.116.5] - 2026-06-09
 
 ### Fixed
