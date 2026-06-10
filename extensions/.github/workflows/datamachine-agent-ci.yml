@@ -819,7 +819,15 @@ jobs:
           verification_commands_json="$(normalize_command_list verification_commands "$VERIFICATION_COMMANDS")"
           drift_checks_json="$(normalize_command_list drift_checks "$DRIFT_CHECKS")"
           extra_wp_config_defines_json="$(validate_json_input extra_wp_config_defines object "$EXTRA_WP_CONFIG_DEFINES")"
-          extra_wp_codebox_mounts_json="$(validate_json_input extra_wp_codebox_mounts array "$EXTRA_WP_CODEBOX_MOUNTS")"
+          extra_wp_codebox_mounts_json="$(validate_json_input extra_wp_codebox_mounts array "$EXTRA_WP_CODEBOX_MOUNTS" | jq -c --arg workspace "$GITHUB_WORKSPACE" '
+            map(
+              if type == "object" and (.source? | type == "string") and (.source | startswith("/") | not) then
+                .source = ($workspace + "/" + .source)
+              else
+                .
+              end
+            )
+          ')"
           workload_run_before_json="$(validate_json_input workload_run_before array "$WORKLOAD_RUN_BEFORE")"
           workload_run_after_json="$(validate_json_input workload_run_after array "$WORKLOAD_RUN_AFTER")"
           extra_required_abilities_json="$(validate_json_input extra_required_abilities array "$EXTRA_REQUIRED_ABILITIES")"
