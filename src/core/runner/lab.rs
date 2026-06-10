@@ -866,6 +866,9 @@ fn mirror_agent_task_run_plan_lifecycle(args: &[String], stdout: &str) -> Result
         return Ok(());
     }
     let envelope = parse_offloaded_run_plan_envelope(stdout)?;
+    if !is_agent_task_run_plan_envelope(&envelope) {
+        return Ok(());
+    }
     let Some(aggregate_value) = envelope.get("data").cloned() else {
         return Ok(());
     };
@@ -891,15 +894,24 @@ fn mirror_agent_task_run_plan_lifecycle(args: &[String], stdout: &str) -> Result
 }
 
 fn parse_offloaded_run_plan_envelope(stdout: &str) -> Result<serde_json::Value> {
-    if let Ok(value) = serde_json::from_str(stdout) {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(stdout) {
         return Ok(value);
     }
 
+    let mut first_json = None;
     for (index, _) in stdout.match_indices('{') {
         let mut stream = serde_json::Deserializer::from_str(&stdout[index..]).into_iter();
         if let Some(Ok(value)) = stream.next() {
-            return Ok(value);
+            if is_agent_task_run_plan_envelope(&value) {
+                return Ok(value);
+            }
+            if first_json.is_none() {
+                first_json = Some(value);
+            }
         }
+    }
+    if let Some(value) = first_json {
+        return Ok(value);
     }
 
     serde_json::from_str(stdout).map_err(|error| {
@@ -908,6 +920,18 @@ fn parse_offloaded_run_plan_envelope(stdout: &str) -> Result<serde_json::Value> 
             Some("parse offloaded agent-task run-plan output".to_string()),
         )
     })
+}
+
+fn is_agent_task_run_plan_envelope(value: &serde_json::Value) -> bool {
+    value
+        .get("data")
+        .and_then(|data| data.get("schema"))
+        .and_then(serde_json::Value::as_str)
+        == Some("homeboy/agent-task-aggregate/v1")
+        || value
+            .get("data")
+            .and_then(|data| data.get("plan_id"))
+            .is_some()
 }
 
 fn agent_task_run_plan_recording_args(args: &[String]) -> Option<(String, String)> {
@@ -1385,6 +1409,36 @@ mod tests {
 
         assert_eq!(parsed["success"], false);
         assert_eq!(parsed["data"]["status"], "failed");
+    }
+
+    #[test]
+    fn offloaded_run_plan_envelope_parser_selects_aggregate_from_mixed_json() {
+        let stdout = concat!(
+            "{\"success\":true,\"data\":{\"command\":\"extension.setup\"}}\n",
+            "setup complete\n",
+            "{\"success\":true,\"data\":{\"schema\":\"homeboy/agent-task-aggregate/v1\",\"plan_id\":\"plan-1\",\"status\":\"succeeded\",\"totals\":{\"succeeded\":6}}}\n"
+        );
+
+        let parsed = parse_offloaded_run_plan_envelope(stdout).expect("parse aggregate envelope");
+
+        assert_eq!(parsed["data"]["plan_id"], "plan-1");
+        assert_eq!(parsed["data"]["totals"]["succeeded"], 6);
+    }
+
+    #[test]
+    fn non_aggregate_offloaded_run_plan_stdout_is_not_mirrored() {
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "run-plan".to_string(),
+            "--plan".to_string(),
+            "@/tmp/plan.json".to_string(),
+            "--record-run-id".to_string(),
+            "run-1".to_string(),
+        ];
+        let stdout = "{\"success\":true,\"data\":{\"command\":\"extension.setup\"}}";
+
+        mirror_agent_task_run_plan_lifecycle(&args, stdout).expect("ignore non-aggregate output");
     }
 
     #[test]
