@@ -765,6 +765,23 @@ assert.equal(upstreamRunnerOutcome.status, 'succeeded');
 assert.equal(upstreamRunnerOutcome.artifacts[0].kind, 'codebox-artifact-directory');
 assert.equal(upstreamRunnerOutcome.artifacts[0].path, '/tmp/wp-codebox-artifacts');
 
+const failedUpstreamRunnerOutcome = agentTaskOutcomeFromCodeboxResult(request, {
+  success: false,
+  schema: 'wp-codebox/agent-task-run/v1',
+  status: 'failed',
+  session: { id: 'sandbox-session-1', status: 'failed' },
+  evidence_refs: [{
+    kind: 'codebox-command-evidence',
+    uri: '/tmp/wp-codebox-artifacts/wp-codebox-command-evidence.json',
+    label: 'codebox command evidence',
+  }],
+});
+assert.equal(failedUpstreamRunnerOutcome.status, 'failed');
+assert.equal(
+  failedUpstreamRunnerOutcome.evidence_refs.some((ref) => ref.kind === 'codebox-command-evidence' && ref.uri === '/tmp/wp-codebox-artifacts/wp-codebox-command-evidence.json'),
+  true
+);
+
 const recipeProbeFailureOutcome = agentTaskOutcomeFromCodeboxResult(request, {
   success: true,
   schema: 'wp-codebox/agent-task-run/v1',

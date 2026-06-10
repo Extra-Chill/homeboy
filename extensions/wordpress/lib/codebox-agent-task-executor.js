@@ -1296,6 +1296,13 @@ function normalizeEvidenceRefs(result, runSummary = null, recipeSummary = null) 
     for (const ref of outputEvidenceRefs(normalizeOutputs(result))) {
       appendUniqueEvidenceRef(refs, ref);
     }
+    for (const ref of result?.evidence_refs || result?.evidence || []) {
+      appendUniqueEvidenceRef(refs, {
+        kind: ref.kind || ref.type || 'codebox_evidence',
+        uri: ref.uri || ref.url || ref.path,
+        label: ref.label || ref.name,
+      });
+    }
     return refs;
   }
   const evidenceRefs = result?.evidence_refs || result?.evidence || [];
