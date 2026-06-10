@@ -304,6 +304,28 @@ assert.equal(runtimeTaskRequest.sandbox_tool_policy.tools[0].id, 'homeboy-canary
 assert.equal(runtimeTaskRequest.runtime_task.ability, 'homeboy-canary/write-file');
 assert.equal(runtimeTaskRequest.workspaces[0].target, '/workspace/codebox-canary');
 
+const abilityBridgeRequest = codeboxTaskRequestFromAgentTaskRequest({
+  ...request,
+  task_id: 'ability-bridge-task-123',
+  executor: {
+    backend: 'codebox',
+    config: {
+      execution_kind: 'wp_codebox_ability',
+      ability: 'example/validate-artifact',
+      ability_input: { artifact: { slug: 'example-site' }, report: '/artifacts/import-report.json' },
+      output_mappings: {
+        validation_result: 'result.import_validation_result',
+      },
+      engine_data_outputs: {
+        validation_result: 'metadata.artifacts.ImportValidationResult',
+      },
+    },
+  },
+});
+assert.equal(abilityBridgeRequest.runtime_task.ability, 'example/validate-artifact');
+assert.deepEqual(abilityBridgeRequest.runtime_task.input, { artifact: { slug: 'example-site' }, report: '/artifacts/import-report.json' });
+assert.equal(abilityBridgeRequest.parent_request.executor.config.output_mappings.validation_result, 'result.import_validation_result');
+
 const recipePackRequest = codeboxTaskRequestFromAgentTaskRequest({
   ...request,
   task_id: 'recipe-task-123',

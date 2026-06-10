@@ -179,7 +179,7 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
   const recipe = recipeConfigFromAgentTaskRequest(request, config, inputs);
   const mounts = agentBundleMounts(agentBundle, config.mounts || defaults.mounts || options.mounts || []);
   const components = runtimeComponentPaths(config, { ...defaults, ...options });
-  const runtimeTask = inputs.runtime_task || inputs.runtimeTask || config.runtime_task || config.runtimeTask || options.runtimeTask;
+  const runtimeTask = inputs.runtime_task || inputs.runtimeTask || config.runtime_task || config.runtimeTask || abilityRuntimeTaskFromAgentTaskRequest(config, inputs) || options.runtimeTask;
   const sandboxToolPolicy = firstDefined(inputs.sandbox_tool_policy, inputs.sandboxToolPolicy, config.sandbox_tool_policy, config.sandboxToolPolicy, options.sandboxToolPolicy, defaults.sandboxToolPolicy);
   const allowedTools = firstDefined(inputs.allowed_tools, inputs.allowedTools, config.allowed_tools, config.allowedTools, options.allowedTools, defaults.allowedTools);
   const explicitSecretEnv = [
@@ -249,6 +249,19 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     agent_bundle: agentBundle,
     parent_request: request,
   };
+}
+
+function abilityRuntimeTaskFromAgentTaskRequest(config, inputs) {
+  const executionKind = firstValue(inputs.execution_kind, inputs.executionKind, config.execution_kind, config.executionKind);
+  if (!['wp_codebox_ability', 'wordpress_ability'].includes(executionKind)) {
+    return null;
+  }
+  const ability = firstValue(inputs.ability, inputs.ability_name, inputs.abilityName, config.ability, config.ability_name, config.abilityName);
+  if (!ability || typeof ability !== 'string') {
+    return null;
+  }
+  const input = firstObject(inputs.ability_input, inputs.abilityInput, inputs.input, config.ability_input, config.abilityInput, config.input) || {};
+  return { ability, input };
 }
 
 function runtimeComponentPaths(config, options = {}) {
