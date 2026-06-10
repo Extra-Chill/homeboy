@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.117.1] - 2026-06-10
+
+### Fixed
+- add generic WP Codebox ability bridge
+
 ## [2.117.0] - 2026-06-10
 
 ### Added
