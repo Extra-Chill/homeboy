@@ -12,6 +12,7 @@ fi
 RUNTIME_DIR=$(mktemp -d "${TMPDIR:-/tmp}/datamachine-agent-wp-codebox.XXXXXX")
 CONFIG_TMPFILE="$RUNTIME_DIR/config.json"
 RESULTS_TMPFILE="$RUNTIME_DIR/results.json"
+FALLBACK_RESULTS_TMPFILE="$RUNTIME_DIR/fallback-results.json"
 REPLAY_BUNDLE_DIR="$RUNTIME_DIR/replay-bundles"
 FAKE_WP_CODEBOX="$RUNTIME_DIR/wp-codebox.js"
 FAKE_ARGS_FILE="$RUNTIME_DIR/wp-codebox-args.txt"
@@ -115,6 +116,7 @@ if (!recipe.inputs?.mounts?.some((mount) => mount.type === 'directory' && mount.
 
 const artifactRoot = path.join(valueAfter('--artifacts'), 'runtime-smoke')
 const filesRoot = path.join(artifactRoot, 'files')
+const includeLegacyOutput = process.env.HOMEBOY_FAKE_LEGACY_OUTPUT !== '0'
 fs.mkdirSync(filesRoot, { recursive: true })
 
 const changedFiles = {
@@ -178,7 +180,7 @@ const output = {
 }
 const transcript = {
   schema: 'wp-codebox/agent-transcript/v1',
-  executions: [{
+  executions: includeLegacyOutput ? [{
     executionIndex: 0,
     command: 'wordpress.run-php',
     recipeCommand: 'wp-codebox.agent-sandbox-run',
@@ -186,7 +188,7 @@ const transcript = {
     stdout: JSON.stringify({ output: JSON.stringify(output) }),
     stderr: '',
     parsed: { output: JSON.stringify(output) },
-  }],
+  }] : [],
 }
 const agentResult = {
   schema: 'wp-codebox/agent-result/v1',
@@ -215,7 +217,7 @@ process.stdout.write(JSON.stringify({
   executions: [{
     command: 'wordpress.run-php',
     recipeCommand: 'wp-codebox.agent-sandbox-run',
-    stdout: 'WP Codebox captured canonical agent artifacts. Structured output is in files/transcript.json.',
+    stdout: includeLegacyOutput ? 'WP Codebox captured canonical agent artifacts. Structured output is in files/transcript.json.' : 'WP Codebox completed without legacy workload metrics.',
   }],
   agentResult,
   completionOutcome,
@@ -336,6 +338,20 @@ trace_gap=$(jq -r "$scenario | any(.metadata.evidence_references.compatibility_g
 if [ "$evidence_schema" != "homeboy/datamachine-agent-evidence-references/v1" ] || [ "$homeboy_result_path" != "$RESULTS_TMPFILE" ] || [ "$wp_codebox_bundle_available" != "true" ] || [ "$runtime_trace_available" != "true" ] || [ "$replay_bundle_available" != "true" ] || [ "$verifier_available" != "true" ] || [ "$policy_available" != "true" ] || [ "$runtime_manifest_available" != "true" ] || [ "$transcript_path" != "/tmp/wp-codebox-smoke-transcript.json" ] || [ "$pull_request_value" != "https://github.com/example/repo/pull/123" ] || [ "$workspace_branch_value" != "agent-artifacts/example" ] || [ "$workflow_run_path" != "https://github.com/example/repo/actions/runs/456" ] || [ "$trace_gap" != "false" ]; then
     echo "ERROR: stable evidence references missing or incomplete" >&2
     cat "$RESULTS_TMPFILE" >&2
+    exit 1
+fi
+
+HOMEBOY_FAKE_LEGACY_OUTPUT=0 \
+FAKE_WP_CODEBOX_ARGS_FILE="$FAKE_ARGS_FILE" \
+HOMEBOY_WP_CODEBOX_BIN="$FAKE_WP_CODEBOX" \
+HOMEBOY_DATAMACHINE_AGENT_RESULTS_FILE="$FALLBACK_RESULTS_TMPFILE" \
+    bash "$SCRIPT_DIR/run-datamachine-agent.sh" "$CONFIG_TMPFILE"
+
+fallback_config_present=$(jq -r "$scenario | .metrics.config_present_mean // \"missing\"" "$FALLBACK_RESULTS_TMPFILE")
+fallback_success_status=$(jq -r "$scenario | .metadata.success_status // \"missing\"" "$FALLBACK_RESULTS_TMPFILE")
+if [ "$fallback_config_present" != "1" ] || [ "$fallback_success_status" != "no_changes" ]; then
+    echo "ERROR: successful WP Codebox fallback result was not projected as complete" >&2
+    cat "$FALLBACK_RESULTS_TMPFILE" >&2
     exit 1
 fi
 

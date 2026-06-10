@@ -425,8 +425,21 @@ PHP
             | first // {};
         def artifact_entry($path; $kind; $label):
             { path: $path, kind: $kind, label: $label };
-        parsed_workload as $workload
-        | ($wpCodeboxArtifacts[0] // {}) as $wpArtifacts
+        ($wpCodeboxArtifacts[0] // {}) as $wpArtifacts
+        | parsed_workload as $parsedWorkload
+        | (if (($parsedWorkload.metrics? // null) != null) or (($parsedWorkload.metadata? // null) != null) then
+            $parsedWorkload
+          elif (($run[0].success // false) == true) and (($wpArtifacts.artifact_verifier_result.success // false) == true) then
+            {
+              metrics: {config_present: 1},
+              metadata: {
+                success_status: "no_changes",
+                completion_outcome_satisfied: false
+              }
+            }
+          else
+            {}
+          end) as $workload
         | ($wpArtifacts.paths // {}) as $wpPaths
         | {
             component_id: $component,
