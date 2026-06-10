@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.117.3] - 2026-06-10
+
+### Fixed
+- accept successful Codebox agent fallback
+
 ## [2.117.2] - 2026-06-10
 
 ### Fixed
