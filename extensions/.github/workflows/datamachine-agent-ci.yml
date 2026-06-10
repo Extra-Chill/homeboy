@@ -380,8 +380,9 @@ jobs:
           CONTEXT_REPOSITORIES: ${{ inputs.context_repositories }}
         run: |
           set -euo pipefail
-          context_repos="$(printf '%s' "$CONTEXT_REPOSITORIES" | jq -r '
-            if (gsub("^\\s+|\\s+$"; "") | length) == 0 then [] else fromjson end
+          context_repos="$(printf '%s' "$CONTEXT_REPOSITORIES" | jq -Rse '
+            gsub("^\\s+|\\s+$"; "")
+            | if length == 0 then [] else fromjson end
             | if type == "array" then . else error("context_repositories must be a JSON array") end
             | .[]
             | if type == "object" and (.repo? | type == "string") and (.repo | test("^[^/[:space:]]+/[^/[:space:]]+$")) then .repo else error("context_repositories entries require repo as OWNER/REPO") end
@@ -463,7 +464,7 @@ jobs:
             printf -- '- Target repository: `%s`\n' "$TARGET_REPO"
             printf -- '- Token scope: `%s`\n' "$token_scope"
             printf -- '- Homeboy App token repos input: `%s`\n' "${APP_TOKEN_REPOS_INPUT:-default target_repo}"
-            context_count="$(printf '%s' "$CONTEXT_REPOSITORIES" | jq -r 'if (gsub("^\\s+|\\s+$"; "") | length) == 0 then [] else fromjson end | length')"
+            context_count="$(printf '%s' "$CONTEXT_REPOSITORIES" | jq -Rse 'gsub("^\\s+|\\s+$"; "") | if length == 0 then [] else fromjson end | if type == "array" then length else error("context_repositories must be a JSON array") end')"
             printf -- '- Context repositories: `%s`\n' "$context_count"
             printf -- '- Require Homeboy App token: `%s`\n' "$REQUIRE_HOMEBOY_APP_TOKEN"
             printf -- '- Note: %s\n' "$token_note"
