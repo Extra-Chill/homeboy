@@ -115,6 +115,7 @@ enum DependencyUpdateStatus {
     UpToDate,
     FastForwarded,
     PinnedRef,
+    FetchFailedCachedUpToDate,
     FetchFailed,
     BehindAfterFetch,
 }
@@ -129,6 +130,7 @@ impl DependencyUpdateStatus {
             Self::UpToDate => "snapshotted_up_to_date",
             Self::FastForwarded => "snapshotted_fast_forwarded",
             Self::PinnedRef => "snapshotted_pinned_ref",
+            Self::FetchFailedCachedUpToDate => "snapshotted_fetch_failed_cached_up_to_date",
             Self::FetchFailed => "fetch_failed_cached",
             Self::BehindAfterFetch => "behind_after_fetch",
         }
@@ -257,6 +259,19 @@ fn ensure_git_dependency_fresh(
             &freshness,
             fetch_error,
         ));
+    }
+
+    if fetch_error.is_some() && upstream_head.as_deref() == Some(before.as_str()) {
+        return Ok(DependencyFreshness {
+            status: DependencyUpdateStatus::FetchFailedCachedUpToDate,
+            branch,
+            before_sha: Some(before.clone()),
+            after_sha: Some(before),
+            upstream_sha: upstream_head,
+            upstream: Some(upstream),
+            pinned_ref: None,
+            used_pinned_ref: false,
+        });
     }
 
     if fetch_error.is_some() {
@@ -472,7 +487,7 @@ mod tests {
     }
 
     #[test]
-    fn fetch_failure_is_terminal() {
+    fn fetch_failure_uses_cached_upstream_when_checkout_matches() {
         let fixture = GitFixture::new();
         fixture.commit_file("initial.txt", "initial");
         fixture.push();
@@ -490,8 +505,45 @@ mod tests {
             ],
         );
 
+        let freshness =
+            ensure_git_dependency_fresh(checkout.path(), None).expect("cached fallback");
+
+        assert_eq!(
+            freshness.status,
+            DependencyUpdateStatus::FetchFailedCachedUpToDate
+        );
+        assert_eq!(freshness.before_sha.as_deref(), Some(before.as_str()));
+        assert_eq!(freshness.after_sha.as_deref(), Some(before.as_str()));
+        assert_eq!(freshness.upstream_sha.as_deref(), Some(before.as_str()));
+        assert_eq!(git_output(checkout.path(), &["rev-parse", "HEAD"]), before);
+    }
+
+    #[test]
+    fn fetch_failure_is_terminal_when_cached_upstream_differs() {
+        let fixture = GitFixture::new();
+        fixture.commit_file("initial.txt", "initial");
+        fixture.push();
+        fixture.commit_file("next.txt", "next");
+        fixture.push();
+
+        let checkout = fixture.clone_checkout();
+        let upstream = git_output(checkout.path(), &["rev-parse", "@{u}"]);
+        run_git(checkout.path(), &["reset", "--hard", "HEAD~1"]);
+        let before = git_output(checkout.path(), &["rev-parse", "HEAD"]);
+        let missing_remote = checkout.path().join("missing-remote.git");
+        run_git(
+            checkout.path(),
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                missing_remote.to_str().expect("missing remote path"),
+            ],
+        );
+
         let err = ensure_git_dependency_fresh(checkout.path(), None).expect_err("fetch fails");
 
+        assert_ne!(before, upstream);
         assert!(err.message.contains("fetch_failed_cached"));
         assert_eq!(git_output(checkout.path(), &["rev-parse", "HEAD"]), before);
     }
