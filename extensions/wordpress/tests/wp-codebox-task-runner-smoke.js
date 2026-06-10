@@ -60,6 +60,7 @@ if (process.env.FIXTURE_WP_CODEBOX_JSON_VALIDATION_FAILURE) {
   process.exit(0);
 }
 const isAgentBundle = Boolean(input.agent_bundle && Object.keys(input.agent_bundle).length);
+const isRuntimeTask = Boolean(input.runtime_task && Object.keys(input.runtime_task).length && input.runtime_task.ability !== 'datamachine/run-agent-bundle');
 const bundleRun = isAgentBundle && process.env.FIXTURE_WP_CODEBOX_BUNDLE_RUN
   ? {
       schema: 'datamachine/agent-bundle-run/v1',
@@ -103,7 +104,32 @@ const bundleRun = isAgentBundle && process.env.FIXTURE_WP_CODEBOX_BUNDLE_RUN
         : { store_idea_agent: { issue_number: 123, issue_url: 'https://github.com/chubes4/wp-site-generator/issues/123' } }
     }
   : null;
-const agentResult = isAgentBundle && process.env.FIXTURE_WP_CODEBOX_FAILED_AGENT_BUNDLE
+const runtimeTaskResult = isRuntimeTask
+  ? {
+      agent_runtime: {
+        success: true,
+        input: input.runtime_task.input || {},
+        result: {
+          success: true,
+          import_validation_result: {
+            schema: 'example/import-validation-result/v1',
+            artifact_type: 'ImportValidationResult',
+            status: 'passed',
+            counts: { fallback_blocks: 0 }
+          },
+          finding_packets: {
+            schema: 'example/finding-packets/v1',
+            artifact_type: 'FindingPacketSet',
+            count: 0,
+            packets: []
+          }
+        }
+      }
+    }
+  : null;
+const agentResult = isRuntimeTask
+  ? runtimeTaskResult
+  : (isAgentBundle && process.env.FIXTURE_WP_CODEBOX_FAILED_AGENT_BUNDLE
   ? { scenarios: [{ id: 'agent-bundle', metadata: { error: 'Agent bundle child job 456 did not reach a terminal state after drain; current status is pending.' } }] }
   : (isAgentBundle && process.env.FIXTURE_WP_CODEBOX_BUNDLE_RUN
       ? {
@@ -124,7 +150,7 @@ const agentResult = isAgentBundle && process.env.FIXTURE_WP_CODEBOX_FAILED_AGENT
         }
   : (isAgentBundle && !process.env.FIXTURE_WP_CODEBOX_INCOMPLETE_AGENT_BUNDLE
       ? { metrics: { config_present: 1 }, metadata: { engine_data: { store_idea_agent: { issue_number: 123 } } } }
-      : { status: 'completed' })));
+      : { status: 'completed' }))));
 fs.writeFileSync(out, JSON.stringify({ argv: process.argv.slice(2), input }, null, 2));
 const execution = { recipeCommand: 'wp-codebox.agent-sandbox-run', exitCode: 0, stdout: JSON.stringify({ status: 'completed', output: JSON.stringify(agentResult) }) };
 const executions = [execution];
@@ -288,6 +314,75 @@ try {
   assert.equal(runtimeTaskCaptured.input.sandbox_tool_policy.tools[0].id, 'homeboy-canary/write-file');
   assert.equal(runtimeTaskCaptured.input.runtime_task.ability, 'homeboy-canary/write-file');
   assert.equal(runtimeTaskCaptured.input.workspaces[0].target, '/workspace/codebox-canary');
+
+  const abilityBridgeResult = spawnSync(process.execPath, [
+    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-wp-codebox-task-runner.cjs'),
+    '--wp-codebox-bin', fixtureWpCodebox,
+  ], {
+    encoding: 'utf8',
+    input: JSON.stringify({
+      ...request,
+      runtime_task: {
+        ability: 'example/validate-artifact',
+        input: { artifact: { slug: 'example-site' } },
+      },
+      parent_request: {
+        executor: {
+          config: {
+            ability: 'example/validate-artifact',
+            output_mappings: {
+              import_validation_result: 'result.import_validation_result',
+              finding_packets: 'result.finding_packets',
+            },
+            engine_data_outputs: {
+              import_validation_result: 'outputs.import_validation_result',
+              finding_packets: 'outputs.finding_packets',
+            },
+          },
+        },
+      },
+    }),
+    env: { ...process.env, FIXTURE_WP_CODEBOX_CAPTURE: path.join(root, 'capture-ability-bridge.json'), OPENCODE_API_KEY: 'redacted-test-key' },
+  });
+  assert.equal(abilityBridgeResult.status, 0, abilityBridgeResult.stderr || abilityBridgeResult.stdout);
+  const abilityBridgeOutput = JSON.parse(abilityBridgeResult.stdout);
+  assert.equal(abilityBridgeOutput.success, true);
+  assert.equal(abilityBridgeOutput.outputs.import_validation_result.status, 'passed');
+  assert.equal(abilityBridgeOutput.outputs.finding_packets.count, 0);
+  assert.equal(abilityBridgeOutput.outputs.typed_artifacts.import_validation_result.type, 'ImportValidationResult');
+  assert.equal(abilityBridgeOutput.outputs.typed_artifacts.finding_packets.artifact_schema, 'example/finding-packets/v1');
+
+  const missingRuntimeOutputResult = spawnSync(process.execPath, [
+    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-wp-codebox-task-runner.cjs'),
+    '--wp-codebox-bin', fixtureWpCodebox,
+  ], {
+    encoding: 'utf8',
+    input: JSON.stringify({
+      ...request,
+      runtime_task: {
+        ability: 'example/validate-artifact',
+        input: { artifact: { slug: 'example-site' } },
+      },
+      parent_request: {
+        executor: {
+          config: {
+            ability: 'example/validate-artifact',
+            output_mappings: {
+              import_validation_result: 'result.import_validation_result',
+            },
+            engine_data_outputs: {
+              missing_validation_output: 'outputs.missing_validation_output',
+            },
+          },
+        },
+      },
+    }),
+    env: { ...process.env, FIXTURE_WP_CODEBOX_CAPTURE: path.join(root, 'capture-missing-runtime-output.json'), OPENCODE_API_KEY: 'redacted-test-key' },
+  });
+  assert.equal(missingRuntimeOutputResult.status, 1, missingRuntimeOutputResult.stderr || missingRuntimeOutputResult.stdout);
+  const missingRuntimeOutput = JSON.parse(missingRuntimeOutputResult.stdout);
+  assert.equal(missingRuntimeOutput.success, false);
+  assert.equal(missingRuntimeOutput.diagnostics[0].class, 'runtime_task.outputs_missing');
 
   const codexCapturePath = path.join(root, 'capture-codex.json');
   const codexSecretEnv = [

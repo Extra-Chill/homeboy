@@ -649,6 +649,14 @@ function runtimeTask(input) {
   return undefined;
 }
 
+function parentAgentTaskConfig(input) {
+  return input.parent_request?.parent_request?.executor?.config || input.parent_request?.executor?.config || {};
+}
+
+function isRuntimeTask(input) {
+  return plainObject(input.runtime_task) || plainObject(input.parent_request?.runtime_task) || plainObject(input.parent_request?.runtimeTask);
+}
+
 function agentBundleConfig(input, bundleConfig = {}) {
   const runtimeComponentPaths = input.runtime_component_paths || {};
   return Object.fromEntries(Object.entries({
@@ -688,17 +696,17 @@ function resultExecutions(result) {
 }
 
 function normalizeAgentTaskRun(input, result) {
-  if (!isAgentBundle(input)) {
+  if (!isAgentBundle(input) && !isRuntimeTask(input)) {
     return result;
   }
 
   const executions = resultExecutions(result);
   const execution = executions.find((item) => item?.recipeCommand === 'wp-codebox.agent-sandbox-run') || executions[0] || null;
-  const agentBundle = agentBundleConfig(input, input.agent_bundle || {});
-  const stdoutWorkload = agentRuntimeWorkloadFromExecutionStdout(execution, agentBundle);
+  const config = isAgentBundle(input) ? agentBundleConfig(input, input.agent_bundle || {}) : parentAgentTaskConfig(input);
+  const stdoutWorkload = agentRuntimeWorkloadFromExecutionStdout(execution, config);
   const fallbackAgentResult = result.metadata?.agent_runtime?.workload || execution?.agentResult || result.run?.agentResult || result.agentResult || result.agent_result || {};
   const agentResult = hasSemanticWorkload(stdoutWorkload) ? stdoutWorkload : fallbackAgentResult;
-  const bundleValidation = validateAgentRuntimeWorkload(agentResult, agentBundle);
+  const bundleValidation = isAgentBundle(input) ? validateAgentRuntimeWorkload(agentResult, config) : validateRuntimeTaskWorkload(agentResult, config);
   const success = !bundleValidation;
   const diagnostics = [
     ...(result.diagnostics || []),
@@ -725,7 +733,8 @@ function normalizeAgentTaskRun(input, result) {
       ...(result.metadata || {}),
       agent_runtime: {
         ...(result.metadata?.agent_runtime || {}),
-        bundle: agentBundle,
+        bundle: isAgentBundle(input) ? config : undefined,
+        runtime_task: isRuntimeTask(input) ? runtimeTask(input) : undefined,
         workload: agentResult,
       },
     },
@@ -754,6 +763,9 @@ function agentRuntimeWorkloadFromExecutionStdout(execution, config) {
   if (bundleRun?.schema && String(bundleRun.schema).endsWith('/agent-bundle-run/v1')) {
     return agentRuntimeWorkloadFromBundleRun(bundleRun, config);
   }
+  if (plainObject(workload.agent_runtime)) {
+    return agentRuntimeWorkloadFromRuntimeTask(workload.agent_runtime, config);
+  }
   if (Array.isArray(workload.scenarios)) {
     return workload;
   }
@@ -770,6 +782,56 @@ function agentRuntimeWorkloadFromExecutionStdout(execution, config) {
     };
   }
   return null;
+}
+
+function agentRuntimeWorkloadFromRuntimeTask(agentRuntime, config) {
+  const outputs = outputMappingsFromSource(agentRuntime, config.output_mappings || config.outputMappings || {});
+  return Object.fromEntries(Object.entries({
+    id: config.workload_id || config.ability || config.ability_name || 'runtime-task',
+    success: agentRuntime.success,
+    status: agentRuntime.success === false ? 'failed' : 'completed',
+    summary: agentRuntime.success === false
+      ? (agentRuntime.error?.message || 'Runtime task failed.')
+      : 'Runtime task completed.',
+    outputs,
+    diagnostics: agentRuntime.error ? [{
+      class: agentRuntime.error.code || 'runtime_task.failed',
+      message: agentRuntime.error.message || 'Runtime task failed.',
+      data: agentRuntime.error.data || {},
+    }] : [],
+    metadata: {
+      input: agentRuntime.input,
+      result: agentRuntime.result,
+    },
+  }).filter(([, value]) => value !== undefined && !(Array.isArray(value) && value.length === 0)));
+}
+
+function outputMappingsFromSource(source, mappings) {
+  if (!plainObject(mappings)) {
+    return {};
+  }
+  const outputs = {};
+  const typedArtifacts = {};
+  for (const [name, dottedPath] of Object.entries(mappings)) {
+    if (typeof dottedPath !== 'string' || dottedPath === '') {
+      continue;
+    }
+    const value = pathValue(source, dottedPath);
+    if (value === undefined || value === null || value === '') {
+      continue;
+    }
+    outputs[name] = value;
+    if (plainObject(value) && (value.schema || value.artifact_type || value.artifactType)) {
+      typedArtifacts[name] = {
+        name,
+        type: value.artifact_type || value.artifactType || name,
+        artifact_schema: value.schema,
+        payload: value,
+        provenance: plainObject(value.provenance) ? value.provenance : {},
+      };
+    }
+  }
+  return mergeTypedArtifactOutputs(outputs, typedArtifacts);
 }
 
 function isSingleResultWorkload(workload) {
@@ -939,6 +1001,32 @@ function validateAgentRuntimeWorkload(workload, config) {
     };
   }
 
+  return null;
+}
+
+function validateRuntimeTaskWorkload(workload, config) {
+  if (workload?.success === false) {
+    return {
+      class: 'runtime_task.failed',
+      message: workload.summary || 'Runtime task failed.',
+      data: { reason: 'runtime_task_failed', diagnostics: workload.diagnostics || [] },
+    };
+  }
+  const outputs = config.engine_data_outputs && typeof config.engine_data_outputs === 'object' ? config.engine_data_outputs : {};
+  const missing = [];
+  for (const name of Object.keys(outputs)) {
+    if (workload?.outputs?.[name] !== undefined && workload.outputs[name] !== null && workload.outputs[name] !== '') {
+      continue;
+    }
+    missing.push(name);
+  }
+  if (missing.length > 0) {
+    return {
+      class: 'runtime_task.outputs_missing',
+      message: `Runtime task did not produce required outputs: ${missing.join(', ')}.`,
+      data: { reason: 'missing_runtime_task_outputs', missing },
+    };
+  }
   return null;
 }
 
