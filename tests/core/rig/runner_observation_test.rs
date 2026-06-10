@@ -198,6 +198,7 @@ fn test_run_up_persists_step_order_source_and_component_snapshot() {
                 triage_remote_url: None,
                 stack: None,
                 branch: None,
+                r#ref: None,
                 extensions: None,
             },
         );

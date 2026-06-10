@@ -335,6 +335,7 @@ mod dag {
                 triage_remote_url: None,
                 stack: Some(stack_id),
                 branch: None,
+                r#ref: None,
                 extensions: None,
             },
         );
@@ -378,6 +379,7 @@ mod dag {
                 triage_remote_url: None,
                 stack: None,
                 branch: None,
+                r#ref: None,
                 extensions: None,
             },
         );
@@ -390,6 +392,7 @@ mod dag {
                 triage_remote_url: None,
                 stack: None,
                 branch: None,
+                r#ref: None,
                 extensions: None,
             },
         );
@@ -461,6 +464,7 @@ mod git_steps {
                 triage_remote_url: None,
                 stack: None,
                 branch: None,
+                r#ref: None,
                 extensions: None,
             },
         );
@@ -580,6 +584,7 @@ mod extension_lifecycle {
                 triage_remote_url: None,
                 stack: None,
                 branch: None,
+                r#ref: None,
                 extensions: Some(extensions),
             },
         );
@@ -818,6 +823,7 @@ mod patch {
                 triage_remote_url: None,
                 stack: None,
                 branch: None,
+                r#ref: None,
                 extensions: None,
             },
         );

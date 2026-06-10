@@ -54,6 +54,7 @@ fn test_expand_vars_component_path() {
             triage_remote_url: None,
             stack: None,
             branch: None,
+            r#ref: None,
             extensions: None,
         },
     );
@@ -94,6 +95,7 @@ fn test_expand_vars_package_root_from_installed_source_metadata() {
                 triage_remote_url: None,
                 stack: None,
                 branch: None,
+                r#ref: None,
                 extensions: None,
             },
         );
@@ -149,6 +151,7 @@ fn test_expand_resources_expands_string_entries() {
                 triage_remote_url: None,
                 stack: None,
                 branch: None,
+                r#ref: None,
                 extensions: None,
             },
         );
