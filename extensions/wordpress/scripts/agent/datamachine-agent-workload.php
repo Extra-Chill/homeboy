@@ -467,16 +467,19 @@ if ( ! function_exists( 'homeboy_datamachine_agent_fingerprints' ) ) {
     }
 
     function homeboy_datamachine_agent_tool_policy_fingerprint( array $config ): array {
-        $policy = array(
-            'required_abilities'     => $config['required_abilities'] ?? array(),
-            'ability_tools'          => $config['ability_tools'] ?? array(),
-            'tool_recorders'         => $config['tool_recorders'] ?? array(),
-            'pipeline_step_patches'  => $config['pipeline_step_patches'] ?? array(),
-            'flow_step_patches'      => $config['flow_step_patches'] ?? array(),
-            'runner_workspace'       => $config['runner_workspace'] ?? array(),
-            'success_requires_pr'    => ! empty( $config['success_requires_pr'] ),
-            'success_completion_outcomes' => $config['success_completion_outcomes'] ?? array(),
-        );
+		$policy = array(
+			'required_abilities'     => $config['required_abilities'] ?? array(),
+			'ability_tools'          => $config['ability_tools'] ?? array(),
+			'tool_recorders'         => $config['tool_recorders'] ?? array(),
+			'pipeline_step_patches'  => $config['pipeline_step_patches'] ?? array(),
+			'flow_step_patches'      => $config['flow_step_patches'] ?? array(),
+			'runner_workspace'       => $config['runner_workspace'] ?? array(),
+			'context_repositories'   => $config['context_repositories'] ?? array(),
+			'verification_commands'  => $config['verification_commands'] ?? array(),
+			'drift_checks'           => $config['drift_checks'] ?? array(),
+			'success_requires_pr'    => ! empty( $config['success_requires_pr'] ),
+			'success_completion_outcomes' => $config['success_completion_outcomes'] ?? array(),
+		);
 
         return array(
             'sha256' => homeboy_datamachine_agent_json_sha256( $policy ),
@@ -491,6 +494,205 @@ if ( ! function_exists( 'homeboy_datamachine_agent_fingerprints' ) ) {
             'tool_policy' => homeboy_datamachine_agent_tool_policy_fingerprint( $config ),
         );
     }
+}
+
+if ( ! function_exists( 'homeboy_datamachine_agent_context_repositories' ) ) {
+	function homeboy_datamachine_agent_context_repositories( array $config ): array {
+		$repositories = is_array( $config['context_repositories'] ?? null ) ? $config['context_repositories'] : array();
+		$normalized   = array();
+
+		foreach ( $repositories as $repository ) {
+			if ( ! is_array( $repository ) ) {
+				continue;
+			}
+
+			$repo = isset( $repository['repo'] ) && is_scalar( $repository['repo'] ) ? trim( (string) $repository['repo'] ) : '';
+			if ( '' === $repo ) {
+				continue;
+			}
+
+			$alias = isset( $repository['alias'] ) && is_scalar( $repository['alias'] ) ? trim( (string) $repository['alias'] ) : '';
+			if ( '' === $alias ) {
+				$alias = basename( $repo );
+			}
+
+			$paths = array();
+			if ( is_array( $repository['paths'] ?? null ) ) {
+				foreach ( $repository['paths'] as $path ) {
+					if ( is_scalar( $path ) && '' !== trim( (string) $path ) ) {
+						$paths[] = trim( (string) $path );
+					}
+				}
+			}
+
+			$normalized[] = array(
+				'repo'  => $repo,
+				'ref'   => isset( $repository['ref'] ) && is_scalar( $repository['ref'] ) ? trim( (string) $repository['ref'] ) : '',
+				'alias' => $alias,
+				'paths' => $paths,
+			);
+		}
+
+		return $normalized;
+	}
+}
+
+if ( ! function_exists( 'homeboy_datamachine_agent_provision_context_repositories' ) ) {
+	function homeboy_datamachine_agent_provision_context_repositories( array $config, array $runner_workspace ): array {
+		$repositories = homeboy_datamachine_agent_context_repositories( $config );
+		if ( empty( $repositories ) ) {
+			return array( 'enabled' => false, 'repositories' => array() );
+		}
+
+		$api_ability = 'datamachine-code/workspace-context-repositories';
+		$input       = array(
+			'target_repo'     => homeboy_datamachine_agent_scalar( $config, 'target_repo' ),
+			'target_workspace' => (string) ( $runner_workspace['handle'] ?? '' ),
+			'repositories'     => $repositories,
+			'access'           => 'readonly',
+		);
+
+		$ability = function_exists( 'wp_get_ability' ) ? wp_get_ability( $api_ability ) : null;
+		if ( ! $ability ) {
+			return array(
+				'enabled'        => true,
+				'success'        => false,
+				'blocked'        => true,
+				'ability'        => $api_ability,
+				'upstream_issue' => 'https://github.com/Extra-Chill/data-machine-code/issues/617',
+				'error'          => 'DMC context repository API is not available; context_repositories is blocked on Extra-Chill/data-machine-code#617.',
+				'input'          => $input,
+				'repositories'   => $repositories,
+			);
+		}
+
+		$result = $ability->execute( $input );
+		if ( function_exists( 'is_wp_error' ) && is_wp_error( $result ) ) {
+			return array(
+				'enabled'      => true,
+				'success'      => false,
+				'ability'      => $api_ability,
+				'error'        => $result->get_error_message(),
+				'input'        => $input,
+				'repositories' => $repositories,
+			);
+		}
+
+		return array(
+			'enabled'      => true,
+			'success'      => is_array( $result ) ? ! empty( $result['success'] ) : false,
+			'ability'      => $api_ability,
+			'input'        => $input,
+			'result'       => $result,
+			'repositories' => $repositories,
+		);
+	}
+}
+
+if ( ! function_exists( 'homeboy_datamachine_agent_command_list' ) ) {
+	function homeboy_datamachine_agent_command_list( array $config, string $key ): array {
+		$commands = is_array( $config[ $key ] ?? null ) ? $config[ $key ] : array();
+		$normalized = array();
+
+		foreach ( $commands as $command_config ) {
+			if ( is_string( $command_config ) ) {
+				$command_config = array( 'command' => $command_config );
+			}
+			if ( ! is_array( $command_config ) ) {
+				continue;
+			}
+			$command = isset( $command_config['command'] ) && is_scalar( $command_config['command'] ) ? trim( (string) $command_config['command'] ) : '';
+			if ( '' === $command ) {
+				continue;
+			}
+			$normalized[] = array(
+				'command'     => $command,
+				'description' => isset( $command_config['description'] ) && is_scalar( $command_config['description'] ) ? trim( (string) $command_config['description'] ) : '',
+			);
+		}
+
+		return $normalized;
+	}
+}
+
+if ( ! function_exists( 'homeboy_datamachine_agent_run_shell_command' ) ) {
+	function homeboy_datamachine_agent_run_shell_command( string $command, string $cwd ): array {
+		$started = hrtime( true );
+		$descriptor_spec = array(
+			0 => array( 'pipe', 'r' ),
+			1 => array( 'pipe', 'w' ),
+			2 => array( 'pipe', 'w' ),
+		);
+
+		$process = proc_open( array( 'bash', '-lc', $command ), $descriptor_spec, $pipes, $cwd );
+		if ( ! is_resource( $process ) ) {
+			return array(
+				'command'    => $command,
+				'exit_code'  => 127,
+				'success'    => false,
+				'error'      => 'Unable to start command process.',
+				'elapsed_ms' => ( hrtime( true ) - $started ) / 1000000,
+			);
+		}
+
+		fclose( $pipes[0] );
+		$stdout = stream_get_contents( $pipes[1] );
+		$stderr = stream_get_contents( $pipes[2] );
+		fclose( $pipes[1] );
+		fclose( $pipes[2] );
+		$exit_code = proc_close( $process );
+
+		return array(
+			'command'    => $command,
+			'exit_code'  => $exit_code,
+			'success'    => 0 === $exit_code,
+			'stdout'     => is_string( $stdout ) ? trim( $stdout ) : '',
+			'stderr'     => is_string( $stderr ) ? trim( $stderr ) : '',
+			'elapsed_ms' => ( hrtime( true ) - $started ) / 1000000,
+		);
+	}
+}
+
+if ( ! function_exists( 'homeboy_datamachine_agent_run_command_checks' ) ) {
+	function homeboy_datamachine_agent_run_command_checks( array $config, array $runner_workspace, string $key ): array {
+		$commands = homeboy_datamachine_agent_command_list( $config, $key );
+		if ( empty( $commands ) ) {
+			return array( 'enabled' => false, 'checks' => array() );
+		}
+
+		$cwd = isset( $runner_workspace['path'] ) && is_scalar( $runner_workspace['path'] ) ? trim( (string) $runner_workspace['path'] ) : '';
+		if ( '' === $cwd || ! is_dir( $cwd ) ) {
+			return array(
+				'enabled' => true,
+				'success' => false,
+				'error'   => $key . ' requires a provisioned DMC target workspace path.',
+				'checks'  => $commands,
+			);
+		}
+
+		$results = array();
+		foreach ( $commands as $command_config ) {
+			$result = homeboy_datamachine_agent_run_shell_command( $command_config['command'], $cwd );
+			$result['description'] = $command_config['description'];
+			$results[] = $result;
+			if ( empty( $result['success'] ) ) {
+				return array(
+					'enabled' => true,
+					'success' => false,
+					'cwd'     => $cwd,
+					'checks'  => $results,
+					'error'   => $key . ' failed: ' . $command_config['command'],
+				);
+			}
+		}
+
+		return array(
+			'enabled' => true,
+			'success' => true,
+			'cwd'     => $cwd,
+			'checks'  => $results,
+		);
+	}
 }
 
 if ( ! function_exists( 'homeboy_datamachine_agent_path_value' ) ) {
@@ -2867,6 +3069,9 @@ if ( ! empty( $config['dry_run'] ) ) {
 			'provider'            => homeboy_datamachine_agent_scalar( $config, 'provider', 'openai' ),
 			'model'               => homeboy_datamachine_agent_scalar( $config, 'model', 'gpt-5.5' ),
 			'prompt'              => homeboy_datamachine_agent_scalar( $config, 'prompt' ),
+			'context_repositories' => homeboy_datamachine_agent_context_repositories( $config ),
+			'verification_commands' => homeboy_datamachine_agent_command_list( $config, 'verification_commands' ),
+			'drift_checks'        => homeboy_datamachine_agent_command_list( $config, 'drift_checks' ),
 			'tool_audit_events'   => is_array( $config['tool_audit_events'] ?? null ) ? $config['tool_audit_events'] : array(),
 			'datamachine_provenance' => is_array( $config['datamachine_provenance'] ?? null ) ? $config['datamachine_provenance'] : array(),
 			'datamachine_code_policy_attestation' => is_array( $config['datamachine_code_policy_attestation'] ?? null ) ? $config['datamachine_code_policy_attestation'] : array(),
@@ -2895,6 +3100,9 @@ $metadata = array(
 	'task_id'      => homeboy_datamachine_agent_scalar( $config, 'task_id', homeboy_datamachine_agent_scalar( $config, 'workload_id' ) ),
 	'task_label'   => homeboy_datamachine_agent_scalar( $config, 'task_label', homeboy_datamachine_agent_scalar( $config, 'workload_label' ) ),
 	'prompt'        => $prompt,
+	'context_repositories' => homeboy_datamachine_agent_context_repositories( $config ),
+	'verification_commands' => homeboy_datamachine_agent_command_list( $config, 'verification_commands' ),
+	'drift_checks'  => homeboy_datamachine_agent_command_list( $config, 'drift_checks' ),
 	'fingerprints'  => homeboy_datamachine_agent_fingerprints( $config, $prompt, $bundle_path ),
 	'runtime_versions' => homeboy_datamachine_agent_runtime_versions(),
 	'bundle_exists' => '' !== $bundle_path && is_dir( $bundle_path ),
@@ -2924,12 +3132,36 @@ if ( null !== $bootstrap_error ) {
 
 $runner_workspace = homeboy_datamachine_agent_provision_workspace( $config );
 if ( ! empty( $runner_workspace['enabled'] ) ) {
-    $metadata['runner_workspace'] = $runner_workspace;
-    if ( empty( $runner_workspace['success'] ) ) {
-        return homeboy_datamachine_agent_result( array( 'runner_workspace_provisioned' => 0 ), $metadata, (string) ( $runner_workspace['error'] ?? 'Runner workspace provisioning failed' ) );
-    }
-    $config['runner_workspace_result'] = $runner_workspace;
-    list( $config, $prompt ) = homeboy_datamachine_agent_apply_runner_workspace( $config, $prompt, $runner_workspace );
+	$metadata['runner_workspace'] = $runner_workspace;
+	if ( empty( $runner_workspace['success'] ) ) {
+		return homeboy_datamachine_agent_result( array( 'runner_workspace_provisioned' => 0 ), $metadata, (string) ( $runner_workspace['error'] ?? 'Runner workspace provisioning failed' ) );
+	}
+	$config['runner_workspace_result'] = $runner_workspace;
+	list( $config, $prompt ) = homeboy_datamachine_agent_apply_runner_workspace( $config, $prompt, $runner_workspace );
+}
+
+$context_repositories = homeboy_datamachine_agent_provision_context_repositories( $config, $runner_workspace );
+if ( ! empty( $context_repositories['enabled'] ) ) {
+	$metadata['context_repositories_result'] = $context_repositories;
+	if ( empty( $context_repositories['success'] ) ) {
+		return homeboy_datamachine_agent_result( array( 'context_repositories_provisioned' => 0 ), $metadata, (string) ( $context_repositories['error'] ?? 'Context repository provisioning failed' ) );
+	}
+
+	$repository_lines = array();
+	foreach ( homeboy_datamachine_agent_context_repositories( $config ) as $repository ) {
+		$line = '- `' . (string) $repository['alias'] . '` => `' . (string) $repository['repo'] . '`';
+		if ( '' !== (string) $repository['ref'] ) {
+			$line .= '@`' . (string) $repository['ref'] . '`';
+		}
+		if ( ! empty( $repository['paths'] ) ) {
+			$line .= ' paths: `' . implode( '`, `', array_map( 'strval', $repository['paths'] ) ) . '`';
+		}
+		$repository_lines[] = $line;
+	}
+	if ( ! empty( $repository_lines ) ) {
+		$context_prompt = "Read-only context repositories are available through the Data Machine Code context repository API. Treat them as evidence only; the target repository remains the only write and pull-request boundary.\n" . implode( "\n", $repository_lines );
+		$prompt = '' === trim( $prompt ) ? $context_prompt : $context_prompt . "\n\n" . $prompt;
+	}
 }
 
 $required_abilities = is_array( $config['required_abilities'] ?? null )
@@ -3152,6 +3384,15 @@ $runner_workspace_capture = homeboy_datamachine_agent_capture_runner_workspace( 
 if ( is_array( $runner_workspace_capture['engine_data'] ?? null ) ) {
 	$engine_data = $runner_workspace_capture['engine_data'];
 }
+$verification_results = homeboy_datamachine_agent_run_command_checks( $config, is_array( $config['runner_workspace_result'] ?? null ) ? $config['runner_workspace_result'] : array(), 'verification_commands' );
+$drift_check_results  = empty( $verification_results['enabled'] ) || ! empty( $verification_results['success'] )
+	? homeboy_datamachine_agent_run_command_checks( $config, is_array( $config['runner_workspace_result'] ?? null ) ? $config['runner_workspace_result'] : array(), 'drift_checks' )
+	: array( 'enabled' => false, 'checks' => array(), 'skipped_reason' => 'verification_commands_failed' );
+$engine_data['runner_verification_results'] = $verification_results;
+$engine_data['runner_drift_check_results']  = $drift_check_results;
+if ( isset( $context_repositories ) ) {
+	$engine_data['runner_context_repositories'] = $context_repositories;
+}
 $transcript_dir = homeboy_datamachine_agent_scalar( $config, 'transcript_dir' );
 $transcript_artifacts = homeboy_datamachine_agent_export_transcript( $job_id, $engine_data, $transcript_dir );
 $pr_opened = homeboy_datamachine_agent_pr_opened( $engine_data, $config );
@@ -3215,8 +3456,10 @@ $metadata += array(
     'success_status'        => $success_status,
     'success_requires_pr'   => $success_requires_pr,
     'fallback_pull_request' => $fallback_pull_request,
-    'runner_workspace_capture' => $runner_workspace_capture,
-    'completion_outcome_satisfied' => $completion_outcome_satisfied,
+	'runner_workspace_capture' => $runner_workspace_capture,
+	'verification_results' => $verification_results,
+	'drift_check_results' => $drift_check_results,
+	'completion_outcome_satisfied' => $completion_outcome_satisfied,
     'file_written'          => $file_written,
     'job_artifact_exports'    => $job_artifact_exports,
 );
@@ -3234,7 +3477,15 @@ if ( ! empty( $general_rule_failures ) ) {
 }
 
 if ( ! empty( $runner_workspace_capture['enabled'] ) && ! empty( $runner_workspace_capture['error'] ) && empty( $runner_workspace_capture['changed'] ) ) {
-    return homeboy_datamachine_agent_result( array( 'runner_workspace_captured' => 0 ), $metadata, (string) $runner_workspace_capture['error'] );
+	return homeboy_datamachine_agent_result( array( 'runner_workspace_captured' => 0 ), $metadata, (string) $runner_workspace_capture['error'] );
+}
+
+if ( ! empty( $verification_results['enabled'] ) && empty( $verification_results['success'] ) ) {
+	return homeboy_datamachine_agent_result( array( 'verification_commands_succeeded' => 0 ), $metadata, (string) ( $verification_results['error'] ?? 'verification_commands failed' ) );
+}
+
+if ( ! empty( $drift_check_results['enabled'] ) && empty( $drift_check_results['success'] ) ) {
+	return homeboy_datamachine_agent_result( array( 'drift_checks_succeeded' => 0 ), $metadata, (string) ( $drift_check_results['error'] ?? 'drift_checks failed' ) );
 }
 
 if ( $file_written && ! $pr_opened ) {
@@ -3269,7 +3520,10 @@ return homeboy_datamachine_agent_result(
 		'import_elapsed_ms'           => $import_elapsed_ms,
 		'agent_resolved'              => 1,
 		'runner_workspace_provisioned' => empty( $runner_workspace['enabled'] ) || ! empty( $runner_workspace['success'] ) ? 1 : 0,
+		'context_repositories_provisioned' => empty( $context_repositories['enabled'] ) || ! empty( $context_repositories['success'] ) ? 1 : 0,
 		'runner_workspace_captured'    => empty( $runner_workspace_capture['enabled'] ) || empty( $runner_workspace_capture['error'] ) ? 1 : 0,
+		'verification_commands_succeeded' => empty( $verification_results['enabled'] ) || ! empty( $verification_results['success'] ) ? 1 : 0,
+		'drift_checks_succeeded'       => empty( $drift_check_results['enabled'] ) || ! empty( $drift_check_results['success'] ) ? 1 : 0,
 		'pipeline_resolved'           => '' !== $execute_workflow_path || '' === $pipeline_slug || $pipeline_id > 0 ? 1 : 0,
 		'flow_resolved'               => 1,
 		'run_flow_succeeded'          => 1,

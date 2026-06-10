@@ -66,6 +66,18 @@ name: Data Machine Agent CI (reusable)
         description: Comma-separated additional OWNER/REPO or OWNER/REPO@REF entries checked out under .ci/<repo>. Entries without @REF use the repository default branch.
         type: string
         default: ""
+      context_repositories:
+        description: JSON array of read-only DMC context repositories. Each entry is {repo, ref, alias, paths} where paths is optional.
+        type: string
+        default: "[]"
+      verification_commands:
+        description: JSON array of deterministic shell commands to run in the target workspace after the agent run. Entries may be strings or {command, description} objects.
+        type: string
+        default: "[]"
+      drift_checks:
+        description: JSON array of generated-output drift checks to run in the target workspace after verification. Entries may be strings or {command, description} objects.
+        type: string
+        default: "[]"
       include_agent_runtime_dependencies:
         description: "Include the standard WordPress agent runtime stack: Agents API, Data Machine, and Data Machine Code."
         type: boolean
@@ -365,9 +377,19 @@ jobs:
         env:
           APP_TOKEN_REPOS: ${{ inputs.app_token_repos }}
           TARGET_REPO: ${{ inputs.target_repo }}
+          CONTEXT_REPOSITORIES: ${{ inputs.context_repositories }}
         run: |
           set -euo pipefail
+          context_repos="$(printf '%s' "$CONTEXT_REPOSITORIES" | jq -r '
+            if (gsub("^\\s+|\\s+$"; "") | length) == 0 then [] else fromjson end
+            | if type == "array" then . else error("context_repositories must be a JSON array") end
+            | .[]
+            | if type == "object" and (.repo? | type == "string") and (.repo | test("^[^/[:space:]]+/[^/[:space:]]+$")) then .repo else error("context_repositories entries require repo as OWNER/REPO") end
+          ' | paste -sd, -)"
           repos_input="${APP_TOKEN_REPOS:-$TARGET_REPO}"
+          if [ -z "$APP_TOKEN_REPOS" ] && [ -n "$context_repos" ]; then
+            repos_input="${repos_input},${context_repos}"
+          fi
           IFS=',' read -ra entries <<< "$repos_input"
           owner=""
           repositories=()
@@ -416,6 +438,7 @@ jobs:
           APP_TOKEN_REPOSITORIES: ${{ steps.token-scope.outputs.repositories }}
           APP_TOKEN_REPOS_INPUT: ${{ inputs.app_token_repos }}
           TARGET_REPO: ${{ inputs.target_repo }}
+          CONTEXT_REPOSITORIES: ${{ inputs.context_repositories }}
           REQUIRE_HOMEBOY_APP_TOKEN: ${{ inputs.require_homeboy_app_token }}
           DRY_RUN: ${{ inputs.dry_run }}
         run: |
@@ -440,6 +463,8 @@ jobs:
             printf -- '- Target repository: `%s`\n' "$TARGET_REPO"
             printf -- '- Token scope: `%s`\n' "$token_scope"
             printf -- '- Homeboy App token repos input: `%s`\n' "${APP_TOKEN_REPOS_INPUT:-default target_repo}"
+            context_count="$(printf '%s' "$CONTEXT_REPOSITORIES" | jq -r 'if (gsub("^\\s+|\\s+$"; "") | length) == 0 then [] else fromjson end | length')"
+            printf -- '- Context repositories: `%s`\n' "$context_count"
             printf -- '- Require Homeboy App token: `%s`\n' "$REQUIRE_HOMEBOY_APP_TOKEN"
             printf -- '- Note: %s\n' "$token_note"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -642,6 +667,9 @@ jobs:
           BUNDLE_REF: ${{ inputs.bundle_ref }}
           BUNDLE_PATH_IN_REPO: ${{ inputs.bundle_path_in_repo }}
           TARGET_REPO: ${{ inputs.target_repo }}
+          CONTEXT_REPOSITORIES: ${{ inputs.context_repositories }}
+          VERIFICATION_COMMANDS: ${{ inputs.verification_commands }}
+          DRIFT_CHECKS: ${{ inputs.drift_checks }}
           PROMPT: ${{ inputs.prompt }}
           PROVIDER: ${{ inputs.provider }}
           MODEL: ${{ inputs.model }}
@@ -756,6 +784,39 @@ jobs:
               return 1
             fi
           }
+          context_repositories_json="$(printf '%s' "$CONTEXT_REPOSITORIES" | jq -Rse '
+            if (gsub("^\\s+|\\s+$"; "") | length) == 0 then [] else fromjson end
+            | if type == "array" then . else error("expected array, got " + type) end
+            | map(
+                if type != "object" then error("context_repositories entries must be objects") else . end
+                | .repo as $repo
+                | if ($repo | type) != "string" or ($repo | test("^[^/[:space:]]+/[^/[:space:]]+$") | not) then error("context_repositories[].repo must be OWNER/REPO") else . end
+                | .alias as $alias
+                | if has("alias") and (($alias | type) != "string" or ($alias | test("^[A-Za-z0-9][A-Za-z0-9._-]*$") | not)) then error("context_repositories[].alias must be a stable slug") else . end
+                | .ref as $ref
+                | if has("ref") and (($ref | type) != "string" or ($ref | length) == 0) then error("context_repositories[].ref must be a non-empty string") else . end
+                | .paths as $paths
+                | if has("paths") and (($paths | type) != "array" or any($paths[]; type != "string" or length == 0)) then error("context_repositories[].paths must be an array of non-empty strings") else . end
+                | {repo, ref: (.ref // ""), alias: (.alias // (.repo | split("/")[1])), paths: (.paths // [])}
+              )
+          ')"
+          normalize_command_list() {
+            local name="$1"
+            local value="$2"
+            printf '%s' "$value" | jq -Rse --arg name "$name" '
+              if (gsub("^\\s+|\\s+$"; "") | length) == 0 then [] else fromjson end
+              | if type == "array" then . else error($name + " must be a JSON array") end
+              | map(
+                  if type == "string" then {command: ., description: ""}
+                  elif type == "object" then {command: (.command // ""), description: (.description // "")}
+                  else error($name + " entries must be strings or objects") end
+                  | if (.command | type) != "string" or (.command | length) == 0 then error($name + " entries require a non-empty command") else . end
+                  | if (.description | type) != "string" then error($name + " descriptions must be strings") else . end
+                )
+            '
+          }
+          verification_commands_json="$(normalize_command_list verification_commands "$VERIFICATION_COMMANDS")"
+          drift_checks_json="$(normalize_command_list drift_checks "$DRIFT_CHECKS")"
           extra_wp_config_defines_json="$(validate_json_input extra_wp_config_defines object "$EXTRA_WP_CONFIG_DEFINES")"
           extra_wp_codebox_mounts_json="$(validate_json_input extra_wp_codebox_mounts array "$EXTRA_WP_CODEBOX_MOUNTS")"
           workload_run_before_json="$(validate_json_input workload_run_before array "$WORKLOAD_RUN_BEFORE")"
@@ -800,6 +861,9 @@ jobs:
             --arg pipelineSlug "$PIPELINE_SLUG" \
             --arg flowSlug "$FLOW_SLUG" \
             --arg targetRepo "$TARGET_REPO" \
+            --argjson contextRepositories "$context_repositories_json" \
+            --argjson verificationCommands "$verification_commands_json" \
+            --argjson driftChecks "$drift_checks_json" \
             --arg prompt "$PROMPT" \
             --arg provider "$PROVIDER" \
             --arg model "$MODEL" \
@@ -889,6 +953,19 @@ jobs:
               github_repository_token_env: "GITHUB_TOKEN",
               github_profile_id: ($agentSlug + "-ci"),
               target_repo: $targetRepo,
+              context_repositories: $contextRepositories,
+              verification_commands: $verificationCommands,
+              drift_checks: $driftChecks,
+              datamachine_code_policy_attestation: {
+                schema: "homeboy/datamachine-agent-ci-dmc-policy/v1",
+                target_repo: $targetRepo,
+                write_boundary: $targetRepo,
+                context_repositories: $contextRepositories,
+                context_repository_api: {
+                  upstream_issue: "https://github.com/Extra-Chill/data-machine-code/issues/617",
+                  status: (if ($contextRepositories | length) > 0 then "blocked_until_available" else "not_requested" end)
+                }
+              },
               allowed_repos: (if ($allowedRepos | length) > 0 then $allowedRepos else [$targetRepo] end),
               engine_key: $engineKey,
               tool_results_key: $toolResultsKey,

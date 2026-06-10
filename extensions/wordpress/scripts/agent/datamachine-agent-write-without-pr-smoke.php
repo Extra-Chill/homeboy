@@ -704,5 +704,45 @@ namespace {
         exit( 1 );
     }
 
+    $context_config = array(
+        'target_repo'          => 'owner/repo',
+        'context_repositories' => array(
+            array(
+                'repo'  => 'owner/context',
+                'ref'   => 'main',
+                'alias' => 'context',
+                'paths' => array( 'docs/**' ),
+            ),
+        ),
+    );
+    $context_result = homeboy_datamachine_agent_provision_context_repositories( $context_config, array( 'handle' => 'repo@branch' ) );
+    if ( empty( $context_result['blocked'] ) || 'https://github.com/Extra-Chill/data-machine-code/issues/617' !== ( $context_result['upstream_issue'] ?? '' ) ) {
+        fwrite( STDERR, "Expected context repositories to report a DMC #617 blocked state when the API is unavailable.\n" );
+        exit( 1 );
+    }
+
+    $command_workspace = sys_get_temp_dir() . '/homeboy-command-check-' . uniqid();
+    mkdir( $command_workspace );
+    $verification_result = homeboy_datamachine_agent_run_command_checks(
+        array( 'verification_commands' => array( array( 'command' => 'printf ok > verification.txt', 'description' => 'Write verification marker' ) ) ),
+        array( 'path' => $command_workspace ),
+        'verification_commands'
+    );
+    if ( empty( $verification_result['success'] ) || ! is_file( $command_workspace . '/verification.txt' ) ) {
+        fwrite( STDERR, "Expected verification_commands to run in the target workspace.\n" );
+        exit( 1 );
+    }
+    $drift_result = homeboy_datamachine_agent_run_command_checks(
+        array( 'drift_checks' => array( array( 'command' => 'test -f verification.txt', 'description' => 'Generated outputs are present' ) ) ),
+        array( 'path' => $command_workspace ),
+        'drift_checks'
+    );
+    if ( empty( $drift_result['success'] ) ) {
+        fwrite( STDERR, "Expected drift_checks to run after verification in the target workspace.\n" );
+        exit( 1 );
+    }
+    unlink( $command_workspace . '/verification.txt' );
+    rmdir( $command_workspace );
+
     fwrite( STDOUT, "Data Machine agent write-without-PR smoke passed.\n" );
 }
