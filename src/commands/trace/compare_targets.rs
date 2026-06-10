@@ -10,9 +10,8 @@ use super::aggregate::{aggregate_span, TraceAggregateSpanSample};
 use super::matrix::{aggregate_to_compare_input, write_json_artifact};
 use super::output::compare_trace_aggregates_with_focus;
 use super::{
-    apply_command_target_component, attach_span_metadata, classification_summaries,
-    cli_span_definitions_for_args, plan_trace_run_order, run_trace_guardrails_for_args,
-    trace_span_metadata_for_args, TraceArgs,
+    attach_span_metadata, classification_summaries, cli_span_definitions_for_args,
+    plan_trace_run_order, run_trace_guardrails_for_args, trace_span_metadata_for_args, TraceArgs,
 };
 use crate::commands::CmdResult;
 
@@ -72,8 +71,14 @@ pub(super) fn run_compare_targets(args: TraceArgs) -> CmdResult<TraceCommandOutp
 
     let baseline_target = resolve_target("baseline", baseline, &base_component.local_path)?;
     let candidate_target = resolve_target("candidate", candidate, &base_component.local_path)?;
+    let mut proof_args = args.clone();
+    proof_args.comp.component = Some(component_id.clone());
+    proof_args.scenario = Some(scenario_id.clone());
+    proof_args.component_arg = None;
+    proof_args.scenario_arg = None;
+    proof_args.compare_after = None;
     let proof = run_target_proof_matrix(
-        &args,
+        &proof_args,
         &component_id,
         &scenario_id,
         &baseline_target.path,
@@ -215,7 +220,6 @@ fn execute_target_once(
     path: &Path,
 ) -> Result<super::TraceRunExecution, homeboy::core::Error> {
     let mut run_args = args.clone();
-    apply_command_target_component(&mut run_args);
     run_args.comp.component = Some(component_id.to_string());
     run_args.comp.path = Some(path.to_string_lossy().to_string());
     run_args.scenario = Some(scenario_id.to_string());
