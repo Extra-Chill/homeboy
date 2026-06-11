@@ -470,14 +470,16 @@ fn artifact_command(args: RunsArtifactArgs) -> CmdResult<RunsOutput> {
 fn artifact_get(args: RunsArtifactGetArgs) -> CmdResult<RunsOutput> {
     let store = ObservationStore::open_initialized()?;
     require_run(&store, &args.run_id)?;
-    let artifact = store.get_artifact(&args.artifact_id)?.ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "artifact_id",
-            format!("artifact record not found: {}", args.artifact_id),
-            Some(args.artifact_id.clone()),
-            None,
-        )
-    })?;
+    let artifact = store
+        .get_artifact_for_run_token(&args.run_id, &args.artifact_id)?
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "artifact_id",
+                format!("artifact record not found: {}", args.artifact_id),
+                Some(args.artifact_id.clone()),
+                None,
+            )
+        })?;
 
     if artifact.run_id != args.run_id {
         return Err(Error::validation_invalid_argument(

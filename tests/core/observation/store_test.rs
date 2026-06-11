@@ -623,6 +623,84 @@ fn test_record_artifact() {
 }
 
 #[test]
+fn publication_manifest_artifact_store_refs_are_indexed() {
+    with_isolated_home(|home| {
+        let _xdg = XdgGuard::unset();
+        let store = ObservationStore::open_initialized().expect("init store");
+        let run = store
+            .start_run(sample_run("bench", "homeboy"))
+            .expect("start run");
+        let locator = "homeboy/workflow-bench/runs/run-1/artifacts/scenario/adapter/attempt-1/blueprint.after.json";
+        let artifact_root = home.path().join(".local/share/homeboy/artifacts");
+        let nested_path = artifact_root.join(locator);
+        std::fs::create_dir_all(nested_path.parent().expect("nested parent"))
+            .expect("create artifact-store parent");
+        std::fs::write(&nested_path, br#"{"steps":[]}"#).expect("nested artifact");
+        let manifest_path = home.path().join("publication-manifest.json");
+        std::fs::write(
+            &manifest_path,
+            serde_json::json!({
+                "schema": "example/publication-manifest/v1",
+                "id": "publish-run-1",
+                "artifacts": [{
+                    "schema": "example/artifact-reference/v1",
+                    "id": "scenario/adapter/attempt-1/blueprint.after",
+                    "kind": "wordpress-playground-blueprint-after",
+                    "role": "output",
+                    "locator": {
+                        "type": "artifact-store",
+                        "value": locator,
+                    },
+                    "media_type": "application/json",
+                    "bytes": 12,
+                    "sha256": "abc123",
+                    "created_at": "2026-06-11T15:42:42Z"
+                }]
+            })
+            .to_string(),
+        )
+        .expect("manifest artifact");
+
+        let source = store
+            .record_artifact(&run.id, "publication_manifest", &manifest_path)
+            .expect("record manifest");
+        let artifacts = store.list_artifacts(&run.id).expect("list artifacts");
+        let nested = artifacts
+            .iter()
+            .find(|artifact| artifact.id != source.id)
+            .expect("nested artifact indexed");
+
+        assert_eq!(artifacts.len(), 2);
+        assert_eq!(nested.kind, "wordpress-playground-blueprint-after");
+        assert_eq!(nested.artifact_type, "file");
+        assert_eq!(nested.path, nested_path.to_string_lossy());
+        assert_eq!(nested.mime.as_deref(), Some("application/json"));
+        assert_eq!(nested.size_bytes, Some(12));
+        assert_eq!(nested.sha256.as_deref(), Some("abc123"));
+        assert_eq!(
+            nested.metadata_json["source_manifest_artifact_id"].as_str(),
+            Some(source.id.as_str())
+        );
+        assert_eq!(
+            nested.metadata_json["original_manifest_id"].as_str(),
+            Some("scenario/adapter/attempt-1/blueprint.after")
+        );
+        assert_eq!(
+            nested.metadata_json["name"].as_str(),
+            Some("blueprint.after")
+        );
+        assert_eq!(
+            store
+                .get_artifact_for_run_token(&run.id, "blueprint.after")
+                .expect("lookup by name")
+                .expect("artifact by name")
+                .id,
+            nested.id
+        );
+    });
+}
+
+#[test]
 fn test_record_directory_artifact() {
     with_isolated_home(|home| {
         let _xdg = XdgGuard::unset();
