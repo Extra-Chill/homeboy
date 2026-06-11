@@ -6,6 +6,7 @@ use homeboy::core::agent_task::{
     AgentTaskWorkspace, AgentTaskWorkspaceMode, AGENT_TASK_REQUEST_SCHEMA,
 };
 use homeboy::core::agent_task_lifecycle;
+use homeboy::core::agent_task_provider::provider_requires_cwd_git_checkout;
 use homeboy::core::agent_task_provider::ExtensionProviderAgentTaskExecutor;
 use homeboy::core::agent_task_scheduler::{
     AgentTaskExecutorAdapter, AgentTaskPlan, AgentTaskRetryPolicy, AgentTaskScheduler,
@@ -15,6 +16,8 @@ use homeboy::core::config;
 use homeboy::core::worktree;
 
 use super::{CmdResult, GlobalArgs};
+
+pub(crate) const DEFAULT_AGENT_TASK_BACKEND: &str = "codebox";
 
 #[derive(Args, Debug, Clone)]
 pub struct DispatchArgs {
@@ -46,8 +49,8 @@ pub struct DispatchArgs {
     #[arg(long, value_name = "URL")]
     pub task_url: Option<String>,
 
-    /// Executor backend to request. Defaults to the Codebox coding backend.
-    #[arg(long, default_value = "codebox", value_name = "BACKEND")]
+    /// Executor backend to request. Defaults to the configured coding backend.
+    #[arg(long, default_value = DEFAULT_AGENT_TASK_BACKEND, value_name = "BACKEND")]
     pub backend: String,
 
     /// Optional provider selector/id when more than one backend provider exists.
@@ -147,6 +150,13 @@ where
 }
 
 fn build_dispatch_plan(args: &DispatchArgs) -> homeboy::core::Result<AgentTaskPlan> {
+    build_dispatch_plan_with_provider_requirements(args, provider_requires_cwd_git_checkout)
+}
+
+fn build_dispatch_plan_with_provider_requirements(
+    args: &DispatchArgs,
+    provider_requires_cwd_git_checkout: impl Fn(&str, Option<&str>) -> bool,
+) -> homeboy::core::Result<AgentTaskPlan> {
     if args.prompt.is_none() && args.tasks.is_empty() && args.tasks_json.is_none() {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "prompt",
@@ -160,7 +170,11 @@ fn build_dispatch_plan(args: &DispatchArgs) -> homeboy::core::Result<AgentTaskPl
     }
 
     let workspace_target = resolve_dispatch_workspace(args)?;
-    validate_dispatch_workspace_target(args, workspace_target.as_ref())?;
+    validate_dispatch_workspace_target(
+        args,
+        workspace_target.as_ref(),
+        &provider_requires_cwd_git_checkout,
+    )?;
     let workspace_root = workspace_target.as_ref().map(|target| target.root.clone());
     let repo = args
         .repo
@@ -297,11 +311,14 @@ fn build_dispatch_plan(args: &DispatchArgs) -> homeboy::core::Result<AgentTaskPl
 fn validate_dispatch_workspace_target(
     args: &DispatchArgs,
     workspace: Option<&DispatchWorkspaceTarget>,
+    provider_requires_cwd_git_checkout: &impl Fn(&str, Option<&str>) -> bool,
 ) -> homeboy::core::Result<()> {
     let Some(workspace) = workspace else {
         return Ok(());
     };
-    if args.backend != "codebox" || workspace.kind.as_deref() != Some("cwd") {
+    if workspace.kind.as_deref() != Some("cwd")
+        || !provider_requires_cwd_git_checkout(&args.backend, args.selector.as_deref())
+    {
         return Ok(());
     }
     if is_git_checkout(&workspace.root) {
@@ -310,12 +327,12 @@ fn validate_dispatch_workspace_target(
 
     Err(homeboy::core::Error::validation_invalid_argument(
         "cwd",
-        "agent-task Codebox dispatch requires --cwd to be a git checkout so generated files can be returned as a patch artifact",
+        "selected agent-task provider requires --cwd to be a git checkout so generated files can be returned as a patch artifact",
         Some(workspace.root.display().to_string()),
         Some(vec![
-            "Use a Homeboy/Data Machine Code worktree for write-capable Codebox tasks.".to_string(),
+            "Use a Homeboy/Data Machine Code worktree for write-capable agent tasks.".to_string(),
             "Initialize the target as a git checkout before dispatching.".to_string(),
-            "Use a non-Codebox provider only if it has an explicit non-git apply-back artifact contract.".to_string(),
+            "Use a provider without a git-checkout materialization requirement only if it has an explicit non-git apply-back artifact contract.".to_string(),
         ]),
     ))
 }
@@ -849,12 +866,15 @@ mod tests {
     fn codebox_dispatch_rejects_non_git_cwd() {
         let workspace = tempfile::tempdir().expect("workspace");
 
-        let error = build_dispatch_plan(&dispatch_args(DispatchArgOverrides {
-            prompt: Some("Generate files here.".to_string()),
-            cwd: Some(workspace.path().display().to_string()),
-            backend: Some("codebox".to_string()),
-            ..DispatchArgOverrides::default()
-        }))
+        let error = build_dispatch_plan_with_provider_requirements(
+            &dispatch_args(DispatchArgOverrides {
+                prompt: Some("Generate files here.".to_string()),
+                cwd: Some(workspace.path().display().to_string()),
+                backend: Some("codebox".to_string()),
+                ..DispatchArgOverrides::default()
+            }),
+            |backend, _selector| backend == "codebox",
+        )
         .expect_err("non-git Codebox cwd should be rejected");
 
         assert!(error.to_string().contains("git checkout"));
@@ -866,12 +886,15 @@ mod tests {
         let workspace = tempfile::tempdir().expect("workspace");
         git(workspace.path(), &["init"]);
 
-        let plan = build_dispatch_plan(&dispatch_args(DispatchArgOverrides {
-            prompt: Some("Generate files here.".to_string()),
-            cwd: Some(workspace.path().display().to_string()),
-            backend: Some("codebox".to_string()),
-            ..DispatchArgOverrides::default()
-        }))
+        let plan = build_dispatch_plan_with_provider_requirements(
+            &dispatch_args(DispatchArgOverrides {
+                prompt: Some("Generate files here.".to_string()),
+                cwd: Some(workspace.path().display().to_string()),
+                backend: Some("codebox".to_string()),
+                ..DispatchArgOverrides::default()
+            }),
+            |backend, _selector| backend == "codebox",
+        )
         .expect("git Codebox cwd should be accepted");
 
         assert_eq!(

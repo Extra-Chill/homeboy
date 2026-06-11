@@ -31,9 +31,17 @@ pub struct AgentTaskExecutorProvider {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capabilities: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_materialization: Option<AgentTaskProviderWorkspaceMaterialization>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extension_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extension_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct AgentTaskProviderWorkspaceMaterialization {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -64,6 +72,26 @@ impl ExtensionProviderAgentTaskExecutor {
 
 pub fn required_extension_ids_for_plan(plan: &AgentTaskPlan) -> Vec<String> {
     ExtensionProviderAgentTaskExecutor::discover().required_extension_ids_for_plan(plan)
+}
+
+pub fn provider_requires_cwd_git_checkout(backend: &str, selector: Option<&str>) -> bool {
+    let providers = discover_agent_task_executor_providers();
+    provider_requires_cwd_git_checkout_with_providers(&providers, backend, selector)
+}
+
+fn provider_requires_cwd_git_checkout_with_providers(
+    providers: &[AgentTaskExecutorProvider],
+    backend: &str,
+    selector: Option<&str>,
+) -> bool {
+    providers
+        .iter()
+        .find(|provider| {
+            provider.backend == backend && selector.is_none_or(|selector| provider.id == selector)
+        })
+        .and_then(|provider| provider.workspace_materialization.as_ref())
+        .and_then(|materialization| materialization.cwd.as_deref())
+        == Some("git_checkout")
 }
 
 impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
@@ -591,6 +619,7 @@ mod tests {
             request_schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
             outcome_schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
             capabilities: vec!["structured_outcome".to_string()],
+            workspace_materialization: None,
             extension_id: None,
             extension_path: None,
         };
@@ -637,6 +666,34 @@ mod tests {
         ));
 
         assert_eq!(extension_ids, vec!["extension-a", "extension-b"]);
+    }
+
+    #[test]
+    fn provider_workspace_materialization_declares_cwd_git_checkout_requirement() {
+        let (_request, mut provider) = request("task-a", "node provider-a.js".to_string());
+        provider.workspace_materialization = Some(AgentTaskProviderWorkspaceMaterialization {
+            cwd: Some("git_checkout".to_string()),
+        });
+
+        assert!(provider_requires_cwd_git_checkout_with_providers(
+            &[provider],
+            "test",
+            None
+        ));
+    }
+
+    #[test]
+    fn provider_workspace_materialization_ignores_unselected_provider() {
+        let (_request, mut provider) = request("task-a", "node provider-a.js".to_string());
+        provider.workspace_materialization = Some(AgentTaskProviderWorkspaceMaterialization {
+            cwd: Some("git_checkout".to_string()),
+        });
+
+        assert!(!provider_requires_cwd_git_checkout_with_providers(
+            &[provider],
+            "other",
+            None
+        ));
     }
 
     #[test]
