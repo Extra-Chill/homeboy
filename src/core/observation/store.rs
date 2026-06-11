@@ -414,14 +414,17 @@ impl ObservationStore {
             )
             .map_err(sqlite_error("insert artifact record"))?;
 
-        self.list_artifacts(run_id)?
+        let artifact = self
+            .list_artifacts(run_id)?
             .into_iter()
             .find(|artifact| artifact.id == id)
             .ok_or_else(|| {
                 Error::internal_unexpected(format!(
                     "Inserted artifact record {id} but could not read it back"
                 ))
-            })
+            })?;
+        crate::core::publication_artifacts::index_published_artifact_refs(self, &artifact)?;
+        Ok(artifact)
     }
 
     pub fn record_directory_artifact(
@@ -611,6 +614,33 @@ impl ObservationStore {
             )
             .optional()
             .map_err(sqlite_error("read artifact record"))
+    }
+
+    pub fn get_artifact_for_run_token(
+        &self,
+        run_id: &str,
+        artifact_token: &str,
+    ) -> Result<Option<ArtifactRecord>> {
+        validate_required("run_id", run_id)?;
+        validate_required("artifact_token", artifact_token)?;
+        for artifact in self.list_artifacts(run_id)? {
+            if artifact.id == artifact_token
+                || artifact.kind == artifact_token
+                || artifact
+                    .metadata_json
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|value| value == artifact_token)
+                || artifact
+                    .metadata_json
+                    .get("original_manifest_id")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|value| value == artifact_token)
+            {
+                return Ok(Some(artifact));
+            }
+        }
+        Ok(None)
     }
 
     pub fn list_artifact_cleanup_candidates(

@@ -52,6 +52,8 @@ pub(crate) use command_path::{
     normalize_runner_command_env, quote_runner_env_value, remote_shell_path_preamble,
 };
 pub use connection::{connect, connect_reverse, disconnect, status, statuses};
+pub(crate) use evidence::artifact_store_locator_from_runner_artifact_id;
+pub use evidence::runner_artifact_store_token;
 pub use evidence::{
     download_remote_artifact, is_remote_runner_artifact_path, is_reportable_artifact_evidence_path,
     is_retrievable_runner_artifact, reportable_artifact_evidence_path, RemoteArtifactDownload,

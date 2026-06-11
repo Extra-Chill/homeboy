@@ -15,7 +15,7 @@ use crate::core::error::{Error, Result};
 use crate::core::observation::{
     running_status_note, FindingListFilter, ObservationStore, RunListFilter, RunRecord,
 };
-use crate::core::{component, git, rig, stack};
+use crate::core::{component, git, paths, rig, runner, stack};
 
 mod analysis_job_runner;
 mod sandbox_tools;
@@ -425,14 +425,9 @@ fn enqueue_sandbox_tool_job(
 fn artifact_content(run_id: &str, artifact_id: &str) -> Result<Value> {
     let store = ObservationStore::open_initialized()?;
     require_run(&store, run_id)?;
-    let artifact = store.get_artifact(artifact_id)?.ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "artifact_id",
-            format!("artifact record not found: {artifact_id}"),
-            Some(artifact_id.to_string()),
-            None,
-        )
-    })?;
+    let Some(artifact) = store.get_artifact(artifact_id)? else {
+        return artifact_store_content(run_id, artifact_id);
+    };
     if artifact.run_id != run_id {
         return Err(Error::validation_invalid_argument(
             "artifact_id",
@@ -473,6 +468,59 @@ fn artifact_content(run_id: &str, artifact_id: &str) -> Result<Value> {
         "sha256": artifact.sha256,
         "content_base64": base64::engine::general_purpose::STANDARD.encode(content),
     }))
+}
+
+fn artifact_store_content(run_id: &str, artifact_id: &str) -> Result<Value> {
+    let decoded_artifact_id = crate::core::execution_contract::decode_uri_component(artifact_id);
+    let locator = runner::artifact_store_locator_from_runner_artifact_id(&decoded_artifact_id)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "artifact_id",
+                format!("artifact record not found: {artifact_id}"),
+                Some(artifact_id.to_string()),
+                None,
+            )
+        })?;
+    let path = safe_artifact_store_path(&locator)?;
+    let content = std::fs::read(&path).map_err(|err| {
+        Error::internal_io(
+            err.to_string(),
+            Some(format!("read artifact-store locator {}", path.display())),
+        )
+    })?;
+    let filename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(artifact_id);
+    let size_bytes = i64::try_from(content.len()).ok();
+    let sha256 = crate::core::artifact_metadata::sha256_file(&path).ok();
+    Ok(json!({
+        "command": "api.runs.artifact.content",
+        "run_id": run_id,
+        "artifact_id": artifact_id,
+        "filename": filename,
+        "mime": crate::core::artifact_metadata::content_type_from_path(&path),
+        "size_bytes": size_bytes,
+        "sha256": sha256,
+        "content_base64": base64::engine::general_purpose::STANDARD.encode(content),
+    }))
+}
+
+fn safe_artifact_store_path(locator: &str) -> Result<std::path::PathBuf> {
+    let locator_path = std::path::PathBuf::from(locator);
+    if locator_path.is_absolute()
+        || locator_path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(Error::validation_invalid_argument(
+            "artifact_id",
+            "artifact-store locator must stay under the artifact root",
+            Some(locator.to_string()),
+            None,
+        ));
+    }
+    Ok(paths::artifact_root()?.join(locator_path))
 }
 
 fn path_segments(path: &str) -> Vec<String> {

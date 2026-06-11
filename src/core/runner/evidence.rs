@@ -19,6 +19,23 @@ pub fn is_remote_runner_artifact_path(path: &str) -> bool {
     EXECUTION_CONTRACT.artifacts.is_runner_artifact_ref(path)
 }
 
+pub fn runner_artifact_store_token(runner_id: &str, run_id: &str, locator: &str) -> String {
+    let encoded_locator = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(locator);
+    runner_artifact_token(
+        runner_id,
+        run_id,
+        &format!("artifact-store:{encoded_locator}"),
+    )
+}
+
+pub(crate) fn artifact_store_locator_from_runner_artifact_id(artifact_id: &str) -> Option<String> {
+    let encoded_locator = artifact_id.strip_prefix("artifact-store:")?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(encoded_locator)
+        .ok()?;
+    String::from_utf8(bytes).ok()
+}
+
 pub fn is_retrievable_runner_artifact(path: &str) -> bool {
     RemoteArtifactToken::parse(path).is_ok()
 }

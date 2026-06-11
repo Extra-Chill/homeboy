@@ -377,6 +377,45 @@ fn test_handle() {
 }
 
 #[test]
+fn artifact_content_serves_encoded_artifact_store_locator() {
+    with_isolated_home(|home| {
+        let _xdg = XdgGuard::unset();
+        let store = ObservationStore::open_initialized().expect("store");
+        let run = store
+            .start_run(sample_run("bench", "homeboy", "studio"))
+            .expect("bench run");
+        let locator = "homeboy/workflow-bench/runs/run-1/artifacts/blueprint.after.json";
+        let artifact_root = home.path().join(".local/share/homeboy/artifacts");
+        let path = artifact_root.join(locator);
+        std::fs::create_dir_all(path.parent().expect("artifact parent"))
+            .expect("create artifact parent");
+        std::fs::write(&path, br#"{"steps":[]}"#).expect("artifact-store file");
+        let token = homeboy::core::runner::runner_artifact_store_token("lab", &run.id, locator)
+            .rsplit('/')
+            .next()
+            .expect("artifact token")
+            .to_string();
+
+        let response = http_api::handle(HttpApiRequest {
+            method: HttpMethod::Get,
+            path: format!("/runs/{}/artifacts/{}/content", run.id, token),
+            body: None,
+        })
+        .expect("artifact-store content");
+
+        assert_eq!(response.endpoint, "runs.artifact.content");
+        assert_eq!(response.body["run_id"], run.id);
+        assert_eq!(response.body["filename"], "blueprint.after.json");
+        assert_eq!(response.body["mime"], "application/json");
+        assert_eq!(response.body["size_bytes"], 12);
+        assert_eq!(
+            response.body["content_base64"].as_str(),
+            Some("eyJzdGVwcyI6W119")
+        );
+    });
+}
+
+#[test]
 fn rejects_mutating_endpoint_shapes() {
     assert!(http_api::route(HttpMethod::Post, "/rigs/studio/up").is_err());
     assert!(http_api::route(HttpMethod::Post, "/stacks/studio/apply").is_err());
