@@ -333,3 +333,83 @@ fn promotes_wp_codebox_browser_summary_metrics() {
 
     let _ = fs::remove_dir_all(&root);
 }
+
+#[test]
+fn keeps_runtime_and_artifact_manifests_out_of_variant_matrix() {
+    let root = tmp_dir("artifact-manifests");
+    write_fixture_file(
+        &root.join("baseline"),
+        "browser-evidence.json",
+        r#"{
+            "scenario_id":"checkout-flow",
+            "profile":"desktop",
+            "browser_metrics":{"ready_ms":900},
+            "request_summary":{"total":4},
+            "artifacts":[{"label":"trace","path":"baseline/trace.zip"}]
+        }"#,
+    );
+    write_fixture_file(
+        &root.join("candidate"),
+        "browser-evidence.json",
+        r#"{
+            "scenario_id":"checkout-flow",
+            "profile":"desktop",
+            "browser_metrics":{"ready_ms":1100},
+            "request_summary":{"total":5},
+            "artifacts":[{"label":"trace","path":"candidate/trace.zip"}]
+        }"#,
+    );
+    for side in ["baseline", "candidate"] {
+        write_fixture_file(
+            &root.join(side),
+            "artifact-bundle-sha256-deadbeef.json",
+            r#"{
+                "id":"artifact-bundle-sha256-deadbeef",
+                "summary":{"sha256":"deadbeef","file_count":2},
+                "files":{
+                    "summary":"artifact-bundle/summary.json",
+                    "trace":"artifact-bundle/trace.zip"
+                }
+            }"#,
+        );
+        write_fixture_file(
+            &root.join(side),
+            "runtime-reference-manifest-sha256-cafebabe.json",
+            r#"{
+                "id":"runtime-reference-manifest-sha256-cafebabe",
+                "files":{
+                    "runtime_reference_manifest":"runtime/reference-manifest.json"
+                }
+            }"#,
+        );
+    }
+
+    let report = browser_evidence_compare_from_args(&args(&root, false)).expect("report renders");
+
+    assert_eq!(report.totals.baseline_samples, 1);
+    assert_eq!(report.totals.candidate_samples, 1);
+    assert_eq!(report.totals.variant_count, 1);
+    assert_eq!(report.variants[0].variant.scenario, "checkout-flow");
+    assert_eq!(report.variants[0].variant.profile, "desktop");
+    assert_eq!(
+        report.variants[0].browser_metrics["ready_ms"].median_delta,
+        Some(200.0)
+    );
+    assert!(report
+        .markdown
+        .contains("### Provenance / Artifact Records"));
+    assert!(report
+        .markdown
+        .contains("artifact-bundle-sha256-deadbeef.json"));
+    assert!(report
+        .markdown
+        .contains("runtime-reference-manifest-sha256-cafebabe.json"));
+    assert!(!report
+        .markdown
+        .contains("`artifact-bundle-sha256-deadbeef`"));
+    assert!(!report
+        .markdown
+        .contains("`runtime-reference-manifest-sha256-cafebabe`"));
+
+    let _ = fs::remove_dir_all(&root);
+}
