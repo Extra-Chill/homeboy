@@ -28,7 +28,7 @@ pub struct UpgradeArgs {
     pub skip_runners: bool,
 
     /// Upgrade only the named configured runner. Repeat to target multiple runners.
-    #[arg(long = "runner", value_name = "RUNNER_ID")]
+    #[arg(long = "upgrade-runner", value_name = "RUNNER_ID")]
     pub runners: Vec<String>,
 
     /// Override install method detection (homebrew|cargo|source|binary)
