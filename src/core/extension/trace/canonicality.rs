@@ -189,12 +189,7 @@ pub(crate) fn evaluate_trace_canonicality(
     }
 
     if let Some(context) = execution_context {
-        checks.push(check_git_checkout(
-            &format!("extension:{}", context.extension_id),
-            &context.extension_path,
-            None,
-            &mut reasons,
-        ));
+        checks.push(check_extension_checkout(context, &mut reasons));
     }
 
     for key in WP_CODEBOX_BIN_ENV_KEYS {
@@ -241,6 +236,53 @@ fn git_probe_path(path: &Path) -> std::path::PathBuf {
             .unwrap_or_else(|| path.to_path_buf())
     } else {
         path.to_path_buf()
+    }
+}
+
+fn check_extension_checkout(
+    context: &ExtensionExecutionContext,
+    reasons: &mut Vec<String>,
+) -> TraceCanonicalCheck {
+    let target = format!("extension:{}", context.extension_id);
+    if git_output(
+        &context.extension_path,
+        &["rev-parse", "--is-inside-work-tree"],
+    )
+    .as_deref()
+        == Some("true")
+    {
+        return check_git_checkout(&target, &context.extension_path, None, reasons);
+    }
+
+    let manifest_path = context
+        .extension_path
+        .join(format!("{}.json", context.extension_id));
+    if !context.extension_path.exists() {
+        reasons.push(format!(
+            "{} checkout path is missing: {}",
+            target,
+            context.extension_path.display()
+        ));
+        return empty_check(&target, &context.extension_path, "missing");
+    }
+    if !manifest_path.exists() {
+        reasons.push(format!(
+            "{} installed extension manifest is missing: {}",
+            target,
+            manifest_path.display()
+        ));
+        return empty_check(&target, &context.extension_path, "missing-manifest");
+    }
+
+    TraceCanonicalCheck {
+        target,
+        path: context.extension_path.to_string_lossy().to_string(),
+        status: "installed-extension".to_string(),
+        sha: None,
+        branch: None,
+        upstream: None,
+        commits_ahead: None,
+        commits_behind: None,
     }
 }
 
@@ -477,6 +519,7 @@ mod tests {
     use crate::core::engine::baseline::BaselineFlags;
     use crate::core::engine::run_dir::RunDir;
     use crate::core::extension::trace::run::{run_trace_workflow, TraceRunnerInputs};
+    use crate::core::extension::ExtensionCapability;
 
     #[test]
     fn trace_canonical_policy_defaults_to_canonical() {
@@ -779,6 +822,69 @@ mod tests {
             .reasons
             .iter()
             .any(|reason| reason.contains("no upstream branch")));
+    }
+
+    #[test]
+    fn canonical_trace_accepts_installed_extension_manifest_directory() {
+        let component_dir = tempfile::tempdir().unwrap();
+        let component_remote = tempfile::tempdir().unwrap();
+        let extension_dir = tempfile::tempdir().unwrap();
+        init_git_repo(component_dir.path());
+        init_bare_repo(component_remote.path());
+        git(
+            component_dir.path(),
+            &[
+                "remote",
+                "add",
+                "origin",
+                component_remote.path().to_str().unwrap(),
+            ],
+        );
+        git(component_dir.path(), &["push", "-u", "origin", "main"]);
+        std::fs::write(extension_dir.path().join("fixture-extension.json"), "{}\n").unwrap();
+        let component = test_component(component_dir.path());
+        let args = test_run_args(component_dir.path());
+        let context = ExtensionExecutionContext {
+            component: component.clone(),
+            capability: ExtensionCapability::Trace,
+            extension_id: "fixture-extension".to_string(),
+            extension_path: extension_dir.path().to_path_buf(),
+            script_path: "trace.js".to_string(),
+            settings: Vec::new(),
+        };
+
+        let report = evaluate_trace_canonicality(Some(&context), &component, &args).unwrap();
+
+        assert!(report.is_canonical());
+        assert!(report.reasons.is_empty());
+        assert!(report.checks.iter().any(|check| {
+            check.target == "extension:fixture-extension" && check.status == "installed-extension"
+        }));
+    }
+
+    #[test]
+    fn canonical_trace_refuses_installed_extension_without_manifest() {
+        let component_dir = tempfile::tempdir().unwrap();
+        let extension_dir = tempfile::tempdir().unwrap();
+        init_git_repo(component_dir.path());
+        let component = test_component(component_dir.path());
+        let args = test_run_args(component_dir.path());
+        let context = ExtensionExecutionContext {
+            component: component.clone(),
+            capability: ExtensionCapability::Trace,
+            extension_id: "fixture-extension".to_string(),
+            extension_path: extension_dir.path().to_path_buf(),
+            script_path: "trace.js".to_string(),
+            settings: Vec::new(),
+        };
+
+        let report = evaluate_trace_canonicality(Some(&context), &component, &args).unwrap();
+
+        assert!(!report.is_canonical());
+        assert!(report
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("installed extension manifest is missing")));
     }
 
     #[test]
