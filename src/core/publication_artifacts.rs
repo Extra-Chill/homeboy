@@ -3,16 +3,15 @@ use std::path::{Component, Path, PathBuf};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
+use crate::core::execution_contract::{decode_uri_component, EXECUTION_CONTRACT};
 use crate::core::observation::{ArtifactRecord, ObservationStore};
-use crate::core::{paths, Result};
+use crate::core::{paths, runner, Result};
 
 pub(crate) fn index_published_artifact_refs(
     store: &ObservationStore,
     source: &ArtifactRecord,
 ) -> Result<()> {
-    if source.artifact_type != "file"
-        || !source.mime.as_deref().unwrap_or_default().contains("json")
-    {
+    if source.artifact_type != "file" || !json_artifact(source) {
         return Ok(());
     }
 
@@ -26,23 +25,81 @@ pub(crate) fn index_published_artifact_refs(
     };
 
     let artifact_root = paths::artifact_root()?;
+    index_manifest_refs(store, source, &manifest, |locator| {
+        artifact_store_path(&artifact_root, locator).map(|path| {
+            if path.is_file() {
+                IndexedArtifactPath::Local(path)
+            } else {
+                IndexedArtifactPath::Missing
+            }
+        })
+    })
+}
+
+pub fn index_remote_published_artifact_refs_for_run(
+    store: &ObservationStore,
+    run_id: &str,
+) -> Result<()> {
+    for artifact in store.list_artifacts(run_id)? {
+        if !is_remote_publication_manifest_candidate(&artifact) {
+            continue;
+        }
+        let Ok(download) = runner::download_remote_artifact(&artifact.path, None) else {
+            continue;
+        };
+        let Ok(content) = std::fs::read_to_string(&download.output_path) else {
+            continue;
+        };
+        let Ok(manifest) = serde_json::from_str::<Value>(&content) else {
+            continue;
+        };
+        let Some((runner_id, remote_run_id)) = remote_artifact_runner_context(&artifact.path)
+        else {
+            continue;
+        };
+        index_manifest_refs(store, &artifact, &manifest, |locator| {
+            Some(IndexedArtifactPath::Remote(
+                runner::runner_artifact_store_token(&runner_id, &remote_run_id, locator),
+            ))
+        })?;
+    }
+
+    Ok(())
+}
+
+enum IndexedArtifactPath {
+    Local(PathBuf),
+    Remote(String),
+    Missing,
+}
+
+fn index_manifest_refs(
+    store: &ObservationStore,
+    source: &ArtifactRecord,
+    manifest: &Value,
+    mut resolve_path: impl FnMut(&str) -> Option<IndexedArtifactPath>,
+) -> Result<()> {
     let manifest_id = manifest
         .get("id")
         .and_then(Value::as_str)
         .map(str::to_string);
     let mut refs = Vec::new();
-    collect_artifact_store_refs(&manifest, &mut refs);
+    collect_artifact_store_refs(manifest, &mut refs);
 
     for reference in refs {
         let Some(locator) = artifact_store_locator(reference) else {
             continue;
         };
-        let Some(path) = artifact_store_path(&artifact_root, locator) else {
+        let Some(indexed_path) = resolve_path(locator) else {
             continue;
         };
-        if !path.is_file() {
-            continue;
-        }
+        let (artifact_type, path) = match indexed_path {
+            IndexedArtifactPath::Local(path) => {
+                ("file".to_string(), path.to_string_lossy().to_string())
+            }
+            IndexedArtifactPath::Remote(path) => ("remote_file".to_string(), path),
+            IndexedArtifactPath::Missing => continue,
+        };
         let original_manifest_id = reference
             .get("id")
             .and_then(Value::as_str)
@@ -62,7 +119,7 @@ pub(crate) fn index_published_artifact_refs(
             .or_else(|| reference.get("mime"))
             .and_then(Value::as_str)
             .map(str::to_string)
-            .or_else(|| crate::core::artifact_metadata::content_type_from_path(&path));
+            .or_else(|| crate::core::artifact_metadata::content_type_from_path(Path::new(&path)));
         let size_bytes = reference
             .get("bytes")
             .or_else(|| reference.get("size_bytes"))
@@ -100,8 +157,8 @@ pub(crate) fn index_published_artifact_refs(
             id,
             run_id: source.run_id.clone(),
             kind,
-            artifact_type: "file".to_string(),
-            path: path.to_string_lossy().to_string(),
+            artifact_type,
+            path,
             url: None,
             sha256,
             size_bytes,
@@ -151,6 +208,47 @@ fn artifact_store_path(root: &Path, locator: &str) -> Option<PathBuf> {
         return None;
     }
     Some(root.join(locator_path))
+}
+
+fn is_remote_publication_manifest_candidate(artifact: &ArtifactRecord) -> bool {
+    if artifact.artifact_type != "remote_file" || !json_artifact(artifact) {
+        return false;
+    }
+    artifact
+        .metadata_json
+        .get("name")
+        .and_then(Value::as_str)
+        .is_some_and(|name| name.contains("manifest"))
+        || artifact.kind.contains("manifest")
+        || artifact
+            .metadata_json
+            .get("original_path")
+            .and_then(Value::as_str)
+            .is_some_and(|path| path.ends_with("manifest.json"))
+}
+
+fn json_artifact(artifact: &ArtifactRecord) -> bool {
+    artifact
+        .mime
+        .as_deref()
+        .unwrap_or_default()
+        .contains("json")
+}
+
+fn remote_artifact_runner_context(path: &str) -> Option<(String, String)> {
+    let token = EXECUTION_CONTRACT
+        .artifacts
+        .strip_runner_artifact_scheme(path)?;
+    let mut parts = token.split('/');
+    let runner_id = parts.next()?;
+    let run_id = parts.next()?;
+    if runner_id.is_empty() || run_id.is_empty() {
+        return None;
+    }
+    Some((
+        decode_uri_component(runner_id),
+        decode_uri_component(run_id),
+    ))
 }
 
 fn published_artifact_id(source_artifact_id: &str, manifest_id: &str, locator: &str) -> String {

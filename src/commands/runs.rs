@@ -449,6 +449,9 @@ fn show_run(run_id: &str) -> CmdResult<RunsOutput> {
 pub fn artifacts(run_id: &str) -> CmdResult<RunsOutput> {
     let store = ObservationStore::open_initialized()?;
     require_run(&store, run_id)?;
+    homeboy::core::publication_artifacts::index_remote_published_artifact_refs_for_run(
+        &store, run_id,
+    )?;
     Ok((
         RunsOutput::Artifacts(RunsArtifactsOutput {
             command: "runs.artifacts",
@@ -470,6 +473,10 @@ fn artifact_command(args: RunsArtifactArgs) -> CmdResult<RunsOutput> {
 fn artifact_get(args: RunsArtifactGetArgs) -> CmdResult<RunsOutput> {
     let store = ObservationStore::open_initialized()?;
     require_run(&store, &args.run_id)?;
+    homeboy::core::publication_artifacts::index_remote_published_artifact_refs_for_run(
+        &store,
+        &args.run_id,
+    )?;
     let artifact = store
         .get_artifact_for_run_token(&args.run_id, &args.artifact_id)?
         .ok_or_else(|| {

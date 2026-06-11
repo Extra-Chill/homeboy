@@ -56,7 +56,7 @@ pub mod process;
 pub mod product_identity;
 pub mod project;
 pub mod proof;
-pub(crate) mod publication_artifacts;
+pub mod publication_artifacts;
 pub mod quality;
 pub mod redaction;
 pub mod refactor;
