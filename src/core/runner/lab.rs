@@ -915,6 +915,32 @@ fn run_lab_offload_inner(
     stderr.push_str(&exec_output.stderr);
     if exit_code != 0 {
         if let Some(run_id) = agent_task_dispatch_requested_run_id(request.normalized_args) {
+            if let Some(envelope) = parse_offloaded_dispatch_envelope(&exec_output.stdout)? {
+                if let Some(record) = agent_task_lifecycle::record_remote_dispatch_failure(
+                    agent_task_lifecycle::AgentTaskRemoteDispatchFailure {
+                        run_id: &run_id,
+                        local_command: request.normalized_args.to_vec(),
+                        remote_command: remote_command.clone(),
+                        runner_id,
+                        remote_workspace: &remote_cwd,
+                        stdout: &exec_output.stdout,
+                        stderr: &exec_output.stderr,
+                        exit_code,
+                    },
+                    &envelope,
+                )? {
+                    stderr.push_str(&format!(
+                        "Persisted remote agent-task dispatch failure evidence for run `{}`. Inspect with `homeboy agent-task status {}` and `homeboy agent-task logs {}`.\n",
+                        record.run_id, record.run_id, record.run_id
+                    ));
+                    return Ok(LabOffloadOutcome::Offloaded {
+                        plan,
+                        stdout: exec_output.stdout,
+                        stderr,
+                        exit_code,
+                    });
+                }
+            }
             let failure_message = lab_pre_dispatch_failure_message(&exec_output.stderr)
                 .or_else(|| lab_pre_dispatch_failure_message(&exec_output.stdout))
                 .unwrap_or_else(|| format!("offloaded agent-task command exited with {exit_code}"));
@@ -1155,6 +1181,35 @@ fn is_agent_task_run_plan_envelope(value: &serde_json::Value) -> bool {
             .get("data")
             .and_then(|data| data.get("plan_id"))
             .is_some()
+}
+
+fn parse_offloaded_dispatch_envelope(stdout: &str) -> Result<Option<serde_json::Value>> {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(stdout) {
+        return Ok(agent_task_dispatch_envelope_value(&value).cloned());
+    }
+
+    for (index, _) in stdout.match_indices('{') {
+        let mut stream = serde_json::Deserializer::from_str(&stdout[index..]).into_iter();
+        if let Some(Ok(value)) = stream.next() {
+            if let Some(envelope) = agent_task_dispatch_envelope_value(&value) {
+                return Ok(Some(envelope.clone()));
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+fn agent_task_dispatch_envelope_value(value: &serde_json::Value) -> Option<&serde_json::Value> {
+    if value.get("schema").and_then(serde_json::Value::as_str)
+        == Some("homeboy/agent-task-dispatch/v1")
+    {
+        return Some(value);
+    }
+    let data = value.get("data")?;
+    (data.get("schema").and_then(serde_json::Value::as_str)
+        == Some("homeboy/agent-task-dispatch/v1"))
+    .then_some(data)
 }
 
 fn agent_task_run_plan_recording_args(args: &[String]) -> Option<(String, String)> {
@@ -1848,6 +1903,22 @@ mod tests {
 
         assert_eq!(parsed["data"]["plan_id"], "plan-1");
         assert_eq!(parsed["data"]["totals"]["succeeded"], 6);
+    }
+
+    #[test]
+    fn offloaded_dispatch_envelope_parser_selects_structured_failure_from_mixed_stdout() {
+        let stdout = concat!(
+            "remote setup complete\n",
+            "{\"success\":true,\"data\":{\"command\":\"extension.setup\"}}\n",
+            "{\"success\":false,\"data\":{\"schema\":\"homeboy/agent-task-dispatch/v1\",\"run_id\":\"run-1\",\"state\":\"failed\",\"record\":{},\"aggregate\":{\"status\":\"failed\"}}}\n"
+        );
+
+        let parsed = parse_offloaded_dispatch_envelope(stdout)
+            .expect("parse dispatch stdout")
+            .expect("dispatch envelope found");
+
+        assert_eq!(parsed["run_id"], "run-1");
+        assert_eq!(parsed["aggregate"]["status"], "failed");
     }
 
     #[test]
