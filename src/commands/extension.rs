@@ -213,6 +213,12 @@ pub fn run(
     }
 }
 
+impl ExtensionArgs {
+    pub(crate) fn is_update_command(&self) -> bool {
+        matches!(self.command, ExtensionCommand::Update { .. })
+    }
+}
+
 #[derive(Serialize)]
 #[serde(tag = "command")]
 #[allow(clippy::large_enum_variant)]

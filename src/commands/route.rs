@@ -511,6 +511,42 @@ mod tests {
     }
 
     #[test]
+    fn extension_update_is_lab_portable_without_extension_parity() {
+        let cli = Cli::parse_from([
+            "homeboy",
+            "--runner",
+            "lab",
+            "extension",
+            "update",
+            "wordpress",
+        ]);
+
+        let command = lab_offload_command(&cli.command).unwrap().unwrap();
+
+        assert_eq!(command.hot_label, "extension update");
+        assert!(command.portable);
+        assert!(command.unsupported_reason.is_none());
+        assert!(!command.requires_extension_parity);
+        assert!(command.required_extensions.is_empty());
+        assert!(!command.infer_source_path_tools);
+    }
+
+    #[test]
+    fn other_extension_commands_stay_local_only() {
+        let cli = Cli::parse_from([
+            "homeboy",
+            "--runner",
+            "lab",
+            "extension",
+            "show",
+            "wordpress",
+        ]);
+
+        assert!(lab_offload_command(&cli.command).unwrap().is_none());
+        assert!(!cli.command.supports_lab_runner());
+    }
+
+    #[test]
     fn global_runner_for_runs_show_has_local_mirror_guidance() {
         let _env = EnvGuard::remove(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV);
         let cli = Cli::parse_from([
