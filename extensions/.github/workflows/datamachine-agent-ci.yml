@@ -882,6 +882,7 @@ jobs:
             --arg toolResultsKey "$TOOL_RESULTS_KEY" \
             --arg wpCodeboxWordPressVersion "$WP_CODEBOX_WORDPRESS_VERSION" \
             --arg homeboyExtensionsPath "${GITHUB_WORKSPACE}/.ci/homeboy-extensions" \
+            --arg transcriptHostDir "$transcript_host_dir" \
             --arg transcriptGuestDir "$transcript_guest_dir" \
             --arg githubAppToken "$GITHUB_APP_TOKEN_VALUE" \
             --arg githubRepositoryToken "$GITHUB_REPOSITORY_TOKEN_VALUE" \
@@ -1013,6 +1014,7 @@ jobs:
               } * $artifactExportConfig),
               dry_run: $dryRun,
               transcript_dir: $transcriptGuestDir,
+              transcript_host_dir: $transcriptHostDir,
               bench_env: ({
                 GITHUB_TOKEN: $githubRepositoryToken,
                 HOMEBOY_GITHUB_APP_TOKEN: $githubAppToken,
