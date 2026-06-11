@@ -266,92 +266,8 @@ namespace {
         exit( 1 );
     }
 
-    $GLOBALS['homeboy_datamachine_agent_fake_abilities'] = array(
-        'datamachine/list-github-pulls' => new Homeboy_Datamachine_Agent_Fake_Ability(
-            fn() => array(
-                'success' => true,
-                'pulls'   => array(
-                    array(
-                        'number'   => 321,
-                        'html_url' => 'https://github.com/owner/repo/pull/321',
-                        'head'     => 'agent/existing-pr-branch',
-                        'base'     => 'main',
-                    ),
-                ),
-            )
-        ),
-        'datamachine/create-github-pull-request' => new Homeboy_Datamachine_Agent_Fake_Ability(
-            function (): array {
-                fwrite( STDERR, "Did not expect fallback PR creation when an existing PR matches the head branch.\n" );
-                exit( 1 );
-            }
-        ),
-    );
-    $existing_fallback = homeboy_datamachine_agent_open_fallback_pr(
-        array(),
-        array(
-            'tool_results_key'      => 'github_tool_results',
-            'fallback_pull_request' => array(
-                'repo'  => 'owner/repo',
-                'title' => 'Fallback PR',
-                'head'  => 'agent/existing-pr-branch',
-                'base'  => 'main',
-            ),
-        )
-    );
-    if ( empty( $existing_fallback['opened'] ) || empty( $existing_fallback['reused'] ) ) {
-        fwrite( STDERR, "Expected fallback PR handling to reuse an existing open PR.\n" );
-        exit( 1 );
-    }
-    if ( ! empty( $existing_fallback['engine_data']['github_tool_results'] ?? array() ) ) {
-        fwrite( STDERR, "Did not expect runner-owned fallback PR reuse to be recorded as a task-facing tool result.\n" );
-        exit( 1 );
-    }
-    if ( ! homeboy_datamachine_agent_pr_opened( $existing_fallback['engine_data'] ?? array(), $config ) ) {
-        fwrite( STDERR, "Expected reused fallback PR to be recorded as pr_opened.\n" );
-        exit( 1 );
-    }
-
-    $fallback_pr_input = array();
-    $GLOBALS['homeboy_datamachine_agent_fake_abilities'] = array(
-        'datamachine/list-github-pulls' => new Homeboy_Datamachine_Agent_Fake_Ability(
-            fn() => array(
-                'success' => true,
-                'pulls'   => array(),
-            )
-        ),
-        'datamachine/create-github-pull-request' => new Homeboy_Datamachine_Agent_Fake_Ability(
-            function ( array $input ) use ( &$fallback_pr_input ): array {
-                $fallback_pr_input = $input;
-                return array(
-                    'success'  => true,
-                    'html_url' => 'https://github.com/owner/repo/pull/654',
-                );
-            }
-        ),
-    );
-    $created_fallback = homeboy_datamachine_agent_open_fallback_pr(
-        array(),
-        array(
-            'tool_results_key'      => 'github_tool_results',
-            'fallback_pull_request' => array(
-                'repo'  => 'owner/repo',
-                'title' => 'Fallback PR',
-                'head'  => 'agent/new-pr-branch',
-            ),
-        )
-    );
-    if ( empty( $created_fallback['opened'] ) ) {
-        fwrite( STDERR, "Expected fallback PR handling to create a PR when no existing PR matches.\n" );
-        exit( 1 );
-    }
-    if ( array_key_exists( 'base', $fallback_pr_input ) ) {
-        fwrite( STDERR, "Expected fallback PR creation to omit an empty base parameter.\n" );
-        exit( 1 );
-    }
-
     $runner_capture_calls = array();
-    $fallback_pr_input    = array();
+    $publication_input    = array();
     $GLOBALS['homeboy_datamachine_agent_fake_abilities'] = array(
         'datamachine/workspace-git-status' => new Homeboy_Datamachine_Agent_Fake_Ability(
             function ( array $input ) use ( &$runner_capture_calls ): array {
@@ -370,27 +286,14 @@ namespace {
                 'diff'    => "diff --git a/docs/generated.md b/docs/generated.md\n",
             )
         ),
-        'datamachine/workspace-git-add' => new Homeboy_Datamachine_Agent_Fake_Ability(
-            function ( array $input ) use ( &$runner_capture_calls ): array {
-                $runner_capture_calls[] = array( 'ability' => 'add', 'input' => $input );
-                return array( 'success' => true, 'paths' => $input['paths'] ?? array() );
-            }
-        ),
-        'datamachine/workspace-git-commit' => new Homeboy_Datamachine_Agent_Fake_Ability(
-            fn( array $input ) => array( 'success' => true, 'commit' => 'abc123', 'message' => $input['message'] ?? '' )
-        ),
-        'datamachine/workspace-git-push' => new Homeboy_Datamachine_Agent_Fake_Ability(
-            fn( array $input ) => array( 'success' => true, 'branch' => $input['branch'] ?? '', 'html_url' => 'https://github.com/owner/repo/tree/agent/hidden-run' )
-        ),
-        'datamachine/list-github-pulls' => new Homeboy_Datamachine_Agent_Fake_Ability(
-            fn() => array( 'success' => true, 'pulls' => array() )
-        ),
-        'datamachine/create-github-pull-request' => new Homeboy_Datamachine_Agent_Fake_Ability(
-            function ( array $input ) use ( &$fallback_pr_input ): array {
-                $fallback_pr_input = $input;
+        'datamachine-code/publish-runner-workspace' => new Homeboy_Datamachine_Agent_Fake_Ability(
+            function ( array $input ) use ( &$publication_input ): array {
+                $publication_input = $input;
                 return array(
-                    'success'  => true,
-                    'html_url' => 'https://github.com/owner/repo/pull/987',
+                    'success'     => true,
+                    'html_url'    => 'https://github.com/owner/repo/pull/987',
+                    'pull_number' => 987,
+                    'head'        => $input['head'] ?? '',
                 );
             }
         ),
@@ -434,8 +337,8 @@ namespace {
         $runner_config
     );
 
-    if ( ! empty( $fallback_pr_input ) ) {
-        fwrite( STDERR, "Did not expect runner workspace capture to open the fallback PR before artifact context is assembled.\n" );
+    if ( ! empty( $publication_input ) ) {
+        fwrite( STDERR, "Did not expect runner workspace capture to publish before artifact context is assembled.\n" );
         exit( 1 );
     }
     $runner_template_values = homeboy_datamachine_agent_artifact_pr_context(
@@ -450,87 +353,58 @@ namespace {
             'runner_workspace_capture' => $runner_capture,
         )
     );
-    $runner_capture_config = $runner_config;
-    $runner_capture_config['fallback_pull_request'] = homeboy_datamachine_agent_runner_workspace_fallback_config(
+    $runner_publication = homeboy_datamachine_agent_publish_runner_workspace(
+        $runner_engine_data,
         $runner_config,
         $runner_config['runner_workspace_result'],
-        $runner_template_values
+        $runner_template_values,
+        homeboy_datamachine_agent_runner_workspace_written_paths( $runner_capture )
     );
-    $runner_fallback = homeboy_datamachine_agent_open_fallback_pr( $runner_engine_data, $runner_capture_config );
 
-    if ( empty( $runner_capture['changed'] ) || empty( $runner_fallback['opened'] ) ) {
-        fwrite( STDERR, "Expected hidden runner workspace capture to commit, push, and open a fallback PR after context assembly.\n" );
+    if ( empty( $runner_capture['changed'] ) || empty( $runner_publication['opened'] ) ) {
+        fwrite( STDERR, "Expected hidden runner workspace capture to publish through the canonical DMC API after context assembly.\n" );
         exit( 1 );
     }
-    if ( 'agent/hidden-run' !== ( $fallback_pr_input['head'] ?? null ) || 'owner/repo' !== ( $fallback_pr_input['repo'] ?? null ) ) {
-        fwrite( STDERR, "Expected runner workspace capture fallback PR to use the captured branch.\n" );
+    if ( 'agent/hidden-run' !== ( $publication_input['head'] ?? null ) || 'owner/repo' !== ( $publication_input['repo'] ?? null ) || 'repo@hidden-run' !== ( $publication_input['workspace'] ?? null ) ) {
+        fwrite( STDERR, "Expected runner workspace publication to use the captured workspace and branch.\n" );
         exit( 1 );
     }
-    if ( '[runner-agent] runner-task - agent/hidden-run - completion_outcome_satisfied' !== ( $fallback_pr_input['title'] ?? '' ) ) {
-        fwrite( STDERR, "Expected runner workspace fallback PR to use the final artifact PR title context.\n" );
+    if ( '[runner-agent] runner-task - agent/hidden-run - completion_outcome_satisfied' !== ( $publication_input['title'] ?? '' ) ) {
+        fwrite( STDERR, "Expected runner workspace publication to use the final artifact PR title context.\n" );
         exit( 1 );
     }
-    foreach ( array( 'Branch: agent/hidden-run', 'Handle: repo@hidden-run', 'Status: runner-workspace-status', 'Custom: custom fallback value', 'runner_check', 'https://github.com/owner/repo/actions/runs/123456', 'artifacts/runner-transcript.json', 'docs/generated.md' ) as $expected_fallback_body_fragment ) {
-        if ( ! str_contains( (string) ( $fallback_pr_input['body'] ?? '' ), $expected_fallback_body_fragment ) ) {
-            fwrite( STDERR, "Expected runner workspace fallback PR body to include {$expected_fallback_body_fragment}.\n" );
+    foreach ( array( 'Branch: agent/hidden-run', 'Handle: repo@hidden-run', 'Status: runner-workspace-status', 'Custom: custom fallback value', 'runner_check', 'https://github.com/owner/repo/actions/runs/123456', 'artifacts/runner-transcript.json', 'docs/generated.md' ) as $expected_publication_body_fragment ) {
+        if ( ! str_contains( (string) ( $publication_input['body'] ?? '' ), $expected_publication_body_fragment ) ) {
+            fwrite( STDERR, "Expected runner workspace publication body to include {$expected_publication_body_fragment}.\n" );
             exit( 1 );
         }
     }
-    if ( 'repo@hidden-run' !== ( $runner_capture_calls[0]['input']['name'] ?? null ) || array( 'docs/generated.md' ) !== ( $runner_capture_calls[1]['input']['paths'] ?? null ) ) {
-        fwrite( STDERR, "Expected runner workspace capture to inspect and stage the provisioned handle.\n" );
+    if ( 'repo@hidden-run' !== ( $runner_capture_calls[0]['input']['name'] ?? null ) || ! empty( $runner_capture_calls[1] ?? null ) ) {
+        fwrite( STDERR, "Expected runner workspace capture to inspect the provisioned handle without staging changes locally.\n" );
         exit( 1 );
     }
 
-    $fallback_pr_input = array();
-    $explicit_runner_config = array(
-        'target_repo'              => 'owner/repo',
-        'tool_results_key'         => 'github_tool_results',
-        'fallback_pull_request'    => array(
-            'title' => 'Explicit fallback title',
-            'body'  => 'Explicit fallback body',
+    $GLOBALS['homeboy_datamachine_agent_fake_abilities'] = array(
+        'datamachine/workspace-git-status' => new Homeboy_Datamachine_Agent_Fake_Ability(
+            fn() => array(
+                'success' => true,
+                'dirty'   => 1,
+                'files'   => array( 'docs/generated.md' ),
+            )
         ),
-        'artifact_export'          => array(
-            'pr_title_template' => 'Templated {task_id}',
-            'pr_body_template'  => 'Templated {workspace_branch}',
-        ),
-        'runner_workspace'         => array(
-            'enabled'         => true,
-            'expose_to_agent' => false,
-        ),
-        'runner_workspace_result'  => array(
-            'success' => true,
-            'handle'  => 'repo@explicit-run',
-            'branch'  => 'agent/explicit-run',
+        'datamachine/workspace-git-diff' => new Homeboy_Datamachine_Agent_Fake_Ability(
+            fn() => array( 'success' => true, 'diff' => "diff --git a/docs/generated.md b/docs/generated.md\n" )
         ),
     );
-    $explicit_runner_capture = homeboy_datamachine_agent_capture_runner_workspace(
-        array(),
-        $explicit_runner_config
+    $unavailable_publication = homeboy_datamachine_agent_publish_runner_workspace(
+        $runner_engine_data,
+        $runner_config,
+        $runner_config['runner_workspace_result'],
+        $runner_template_values,
+        array( 'docs/generated.md' )
     );
-    $explicit_runner_template_values = homeboy_datamachine_agent_artifact_pr_context(
-        43,
-        $explicit_runner_config,
-        array(),
-        array(),
-        array(),
-        array(
-            'success_status'           => 'no_changes',
-            'runner_workspace_capture' => $explicit_runner_capture,
-        )
-    );
-    $explicit_runner_capture_config = $explicit_runner_config;
-    $explicit_runner_capture_config['fallback_pull_request'] = homeboy_datamachine_agent_runner_workspace_fallback_config(
-        $explicit_runner_config,
-        $explicit_runner_config['runner_workspace_result'],
-        $explicit_runner_template_values
-    );
-    $explicit_runner_fallback = homeboy_datamachine_agent_open_fallback_pr( array(), $explicit_runner_capture_config );
-    if ( empty( $explicit_runner_fallback['opened'] ) ) {
-        fwrite( STDERR, "Expected explicit runner workspace fallback PR to open.\n" );
-        exit( 1 );
-    }
-    if ( 'Explicit fallback title' !== ( $fallback_pr_input['title'] ?? '' ) || 'Explicit fallback body' !== ( $fallback_pr_input['body'] ?? '' ) ) {
-        fwrite( STDERR, "Expected explicit runner workspace fallback PR title/body to take precedence over artifact templates.\n" );
+    if ( empty( $unavailable_publication['error'] ) || 'https://github.com/Extra-Chill/data-machine-code/issues/625' !== ( $unavailable_publication['upstream_issue'] ?? '' ) ) {
+        fwrite( STDERR, "Expected missing DMC publication API to fail loudly with the DMC #625 integration point.\n" );
         exit( 1 );
     }
 
@@ -542,7 +416,7 @@ namespace {
                 return array( 'success' => true, 'html_url' => 'https://github.com/owner/repo/commit/artifact' );
             }
         ),
-        'datamachine/create-github-pull-request' => new Homeboy_Datamachine_Agent_Fake_Ability(
+        'datamachine-code/create-github-pull-request' => new Homeboy_Datamachine_Agent_Fake_Ability(
             function ( array $input ) use ( &$artifact_export_calls ): array {
                 $artifact_export_calls[] = array( 'ability' => 'pr', 'input' => $input );
                 return array( 'success' => true, 'html_url' => 'https://github.com/owner/repo/pull/988' );

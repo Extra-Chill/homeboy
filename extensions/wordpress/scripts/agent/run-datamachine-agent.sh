@@ -686,7 +686,7 @@ homeboy_datamachine_agent_attach_evidence_references() {
                 ($metadata.engine_data[]? | objects | .runner_publications? // [] | .[]?)
             ];
         def first_runner_publication_pr_url($metadata):
-            (runner_publications($metadata) | map(select(.tool_name == "create_github_pull_request" and .success == true and (.url // "") != "") | .url) | first) // "";
+            (runner_publications($metadata) | map(select(.success == true and (.url // "") != "") | .url) | first) // "";
         def runner_evidence($scenario):
             ($scenario.metadata // {}) as $metadata
             | ($metadata.wp_codebox.canonical_artifacts // {}) as $wpPaths
@@ -758,8 +758,8 @@ homeboy_datamachine_agent_attach_evidence_references() {
             ] | map(select(.tool_name == "create_github_pull_request" and .success == true and (.url // "") != "") | .url) | first) // "";
         def pr_url($metadata):
             first_field($metadata.job_artifact_exports; "pr_url")
-            // first_field($metadata.fallback_pull_request; "html_url")
-            // first_field($metadata.fallback_pull_request; "url")
+            // first_field($metadata.runner_workspace_publication; "html_url")
+            // first_field($metadata.runner_workspace_publication; "url")
             // first_runner_publication_pr_url($metadata)
             // first_tool_pr_url($metadata)
             // "";
@@ -767,7 +767,7 @@ homeboy_datamachine_agent_attach_evidence_references() {
             first_field($metadata.runner_workspace_capture; "branch")
             // first_field($metadata.runner_workspace; "branch")
             // first_field($metadata.job_artifact_exports; "branch")
-            // first_field($metadata.fallback_pull_request; "head")
+            // first_field($metadata.runner_workspace_publication; "head")
             // "";
         def eval_workflow_run_url($metadata):
             if ($metadata.eval_artifact.run? | type) == "object" then

@@ -69,8 +69,8 @@ if (!scenario) {
 }
 
 const metadata = scenario.metadata || {};
-const fallback = metadata.fallback_pull_request || {};
-const pullUrl = fallback.url || fallback.html_url || getPath(fallback, 'result.html_url') || getPath(fallback, 'result.url');
+const publication = metadata.runner_workspace_publication || {};
+const pullUrl = publication.url || publication.html_url || getPath(publication, 'result.html_url') || getPath(publication, 'result.url');
 if (!pullUrl) {
   console.log('No runner workspace pull request found to update.');
   process.exit(0);
@@ -157,7 +157,7 @@ const values = {
   grade_score: scalar(grade.score),
   grade_max_score: scalar(grade.max_score),
   workflow_run_url: workflowUrl,
-  workspace_branch: runnerStatus.branch || getPath(fallback, 'result.pull_request.head') || '',
+  workspace_branch: runnerStatus.branch || getPath(publication, 'result.pull_request.head') || getPath(publication, 'result.head') || '',
   workspace_handle: runnerStatus.handle || runnerStatus.name || '',
   workspace_changed: runnerCapture.changed ? 'yes' : 'no',
   changed_file_count: scalar(runnerStatus.dirty || (Array.isArray(runnerStatus.files) ? runnerStatus.files.length : '')),

@@ -138,8 +138,9 @@ The runner converts the agent config into a single WP Codebox sandbox run:
   consumer needs a different agent-facing tool name.
 - `pipeline_step_patches` and `flow_step_patches` can adjust imported bundle
   step configuration before execution.
-- `fallback_pull_request` can open a PR when files were written but the agent did
-  not explicitly call the PR tool.
+- Runner-owned workspace publication is handled by the canonical Data Machine
+  Code runner publication API. If that API is unavailable or publication fails,
+  the run fails as `write_without_pr` instead of composing fallback PR calls.
 
 The reusable workflow reports the selected GitHub token path as `auth_mode` and
 in the run summary. Same-repo consumers can use the repository-scoped
@@ -313,7 +314,7 @@ knobs to `run-datamachine-agent.sh`:
 - Agent limits: `max_turns`, `step_budget`, `time_budget_ms`.
 - Assertions and outputs: `success_requires_pr`, `success_completion_outcomes`, `engine_data_outputs`, `artifact_export_config`, `transcript_artifact_name`, `replay_bundle_artifact_name`.
 - Eval projection: `wp_gym_benchmark_mode` turns missing wp-gym replay/evidence references into errors.
-- Extension points: `extra_required_abilities`, `ability_tools`, `tool_recorders`, `enable_terminal_actions`, `wp_cli_tool_name`, `pipeline_step_patches`, `flow_step_patches`, `runner_workspace`, `fallback_pull_request`.
+- Extension points: `extra_required_abilities`, `ability_tools`, `tool_recorders`, `enable_terminal_actions`, `wp_cli_tool_name`, `pipeline_step_patches`, `flow_step_patches`, `runner_workspace`.
 
 `bundle_repo` is for cross-repo consumers. The shell runner clones the bundle
 repository, points `bundle_path` at the cloned bundle inside WP Codebox, and adds

@@ -152,7 +152,7 @@ jobs:
 - `app_token_repos` scopes the Homeboy GitHub App token and defaults to `target_repo`. Use it when the workflow needs app-token access to more than the target repository.
 - `require_homeboy_app_token` fails before agent setup when Homeboy App credentials are missing. Enable it for central, cross-repo, and private-target runs; leave it false for same-repo consumers that intentionally use `github.token` fallback.
 - `allowed_repos` is a JSON array of `OWNER/REPO` entries exposed to the injected GitHub profile. It defaults to `[target_repo]`.
-- `engine_key` and `tool_results_key` control where built-in GitHub tool captures and fallback PR data are written in `metadata.engine_data`.
+- `engine_key` and `tool_results_key` control where built-in GitHub tool captures are written in `metadata.engine_data`.
 - `dry_run` is intended for workflow smoke tests only; production consumers should leave it `false`.
 - `transcript_artifact_name` controls artifact upload. An empty value skips upload.
 - `extra_wp_config_defines` must be a JSON object and is merged into the runner config `wp_config_defines`.
@@ -161,9 +161,9 @@ jobs:
 - `ability_tools` adds WordPress ability-backed tools to the agent loop. It must be a JSON array.
 - `tool_recorders` configures tool-result projection, forced parameters, and engine-data capture. It must be a JSON array.
 - `pipeline_step_patches` and `flow_step_patches` modify imported bundle step config before the flow runs. They must be JSON arrays.
-- `runner_workspace` provisions a Data Machine Code worktree before the agent runs. By default it is agent-visible: the runner prepends the workspace handle and branch to the prompt and forces workspace tools to that handle. Set `expose_to_agent: false` for runner-owned capture mode; the natural prompt is preserved, workspace tools remain scoped when used, and the runner inspects, commits, pushes, and opens/reuses a fallback PR for captured workspace changes after completion.
+- `runner_workspace` provisions a Data Machine Code worktree before the agent runs. By default it is agent-visible: the runner prepends the workspace handle and branch to the prompt and forces workspace tools to that handle. Set `expose_to_agent: false` for runner-owned capture mode; the natural prompt is preserved, workspace tools remain scoped when used, and the runner publishes captured workspace changes through the canonical Data Machine Code runner publication API after completion.
 - `runner_workspace.capture_changes` defaults to `true` only when `expose_to_agent: false`; set it explicitly to disable hidden-mode publication or to enable runner-owned capture while still exposing the workspace handle.
-- `fallback_pull_request` opens or reuses a PR when files were written but the agent did not call the PR tool. It must be a JSON object.
+- If runner-owned workspace publication is unavailable or fails, the run fails as `write_without_pr`; Homeboy does not compose alternate PR fallback calls.
 
 ## External bundle and tool recording example
 
