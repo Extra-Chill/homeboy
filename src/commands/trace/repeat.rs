@@ -59,14 +59,10 @@ pub(super) fn run_repeat(args: TraceArgs) -> CmdResult<TraceCommandOutput> {
                     .to_string();
                 let mut seen_span_ids = BTreeSet::new();
                 if let Some(results) = execution.workflow.results.as_ref() {
-                    for (metric, value) in results
-                        .metrics
-                        .iter()
-                        .filter_map(|(metric, value)| value.as_f64().map(|value| (metric, value)))
-                    {
+                    for (metric, value) in &results.metrics {
                         metric_samples.entry(metric.clone()).or_default().push(
                             TraceAggregateMetricSample {
-                                value,
+                                value: *value,
                                 run_index: index,
                                 artifact_path: artifact_path.clone(),
                             },

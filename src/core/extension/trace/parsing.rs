@@ -76,6 +76,8 @@ pub struct TraceResults {
     pub span_results: Vec<TraceSpanResult>,
     #[serde(default)]
     pub assertions: Vec<TraceAssertion>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metrics: BTreeMap<String, f64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub temporal_assertions: Vec<TraceTemporalAssertionDefinition>,
     #[serde(default)]
@@ -370,7 +372,6 @@ mod tests {
         assert_eq!(parsed.span_definitions[0].id, "close_to_assertion");
         assert_eq!(parsed.assertions[0].id, "no-window-reopen");
         assert_eq!(parsed.metrics["assertion_count"], 1);
-        assert_eq!(parsed.metrics["producer"], "wp-codebox");
         assert_eq!(parsed.artifacts[0].path, "artifacts/main.log");
         assert_eq!(parsed.artifacts[0].kind.as_deref(), Some("log"));
     }

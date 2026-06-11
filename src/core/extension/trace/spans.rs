@@ -141,6 +141,7 @@ mod tests {
             toolchain: None,
             components: None,
             dependencies: Vec::new(),
+            metrics: Default::default(),
             preview: None,
         };
 
