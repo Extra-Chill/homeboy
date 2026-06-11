@@ -1,6 +1,7 @@
 use std::fs;
 
 use clap::Parser;
+use homeboy::core::ErrorCode;
 
 use crate::test_support::with_isolated_home;
 
@@ -24,6 +25,34 @@ fn trace_accepts_allow_local_evidence_alias() {
         .expect("trace args parse");
 
     assert!(cli.trace.allow_local_toolchain);
+}
+
+#[test]
+fn trace_rejects_target_compare_flags_without_compare_command() {
+    let cli = TestCli::try_parse_from([
+        "trace",
+        "--baseline-target",
+        "origin/develop",
+        "--candidate",
+        "HEAD",
+        "--repeat",
+        "3",
+        "woocommerce-gateway-stripe",
+        "ece-product-page-waterfall",
+    ])
+    .expect("trace args parse");
+
+    let err = match run(cli.trace, &GlobalArgs {}) {
+        Ok(_) => panic!("target compare flags should fail"),
+        Err(err) => err,
+    };
+
+    assert_eq!(err.code, ErrorCode::ValidationInvalidArgument);
+    assert_eq!(err.details["field"], "--baseline-target/--candidate");
+    assert!(
+        err.to_string().contains("homeboy trace compare <component> <scenario> --baseline-target <target> --candidate <target>"),
+        "unexpected diagnostic: {err}"
+    );
 }
 
 #[test]
