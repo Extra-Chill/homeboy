@@ -96,5 +96,84 @@ pub fn run(args: UpgradeArgs, _global: &GlobalArgs) -> CmdResult<Value> {
         homeboy::log_status!("upgrade", "Please restart homeboy to use the new version.");
     }
 
-    Ok((json, 0))
+    Ok((json, upgrade_exit_code(&result, !args.runners.is_empty())))
+}
+
+fn upgrade_exit_code(result: &upgrade::UpgradeResult, targeted_runner_upgrade: bool) -> i32 {
+    if targeted_runner_upgrade && result.runners_skipped.iter().any(|runner| !runner.success) {
+        return 1;
+    }
+
+    0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn targeted_runner_failures_return_non_zero_status() {
+        let mut result = base_upgrade_result();
+        result.runners_skipped.push(upgrade::RunnerUpgradeEntry {
+            runner_id: "homeboy-lab".to_string(),
+            homeboy_path: "/home/chubes/.cargo/bin/homeboy".to_string(),
+            success: false,
+            upgraded: true,
+            previous_version: Some("0.228.6".to_string()),
+            new_version: Some("0.228.7".to_string()),
+            bare_homeboy_version: Some("0.222.17".to_string()),
+            path_drift: Some("bare `homeboy` reports 0.222.17".to_string()),
+            recovery_commands: vec![
+                "homeboy upgrade --force --upgrade-runner homeboy-lab".to_string()
+            ],
+            extensions_synced: Vec::new(),
+            extensions_failed: Vec::new(),
+            stale_daemon: None,
+            exit_code: 0,
+            detail: "extension sync failed".to_string(),
+        });
+
+        assert_eq!(upgrade_exit_code(&result, true), 1);
+    }
+
+    #[test]
+    fn non_targeted_runner_failures_keep_best_effort_upgrade_status() {
+        let mut result = base_upgrade_result();
+        result.runners_skipped.push(upgrade::RunnerUpgradeEntry {
+            runner_id: "homeboy-lab".to_string(),
+            homeboy_path: "homeboy".to_string(),
+            success: false,
+            upgraded: false,
+            previous_version: None,
+            new_version: None,
+            bare_homeboy_version: None,
+            path_drift: None,
+            recovery_commands: vec![
+                "homeboy upgrade --force --upgrade-runner homeboy-lab".to_string()
+            ],
+            extensions_synced: Vec::new(),
+            extensions_failed: Vec::new(),
+            stale_daemon: None,
+            exit_code: 1,
+            detail: "runner unavailable".to_string(),
+        });
+
+        assert_eq!(upgrade_exit_code(&result, false), 0);
+    }
+
+    fn base_upgrade_result() -> upgrade::UpgradeResult {
+        upgrade::UpgradeResult {
+            command: "upgrade".to_string(),
+            install_method: upgrade::InstallMethod::Cargo,
+            previous_version: "0.228.6".to_string(),
+            new_version: Some("0.228.7".to_string()),
+            upgraded: true,
+            message: "Upgraded to 0.228.7".to_string(),
+            restart_required: false,
+            extensions_updated: Vec::new(),
+            extensions_skipped: Vec::new(),
+            runners_updated: Vec::new(),
+            runners_skipped: Vec::new(),
+        }
+    }
 }

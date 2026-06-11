@@ -718,6 +718,7 @@ fn trace_run_evidence_report_includes_refs_assertions_and_safe_artifacts() {
                     kind: None,
                 },
             ],
+            metrics: Default::default(),
             toolchain: None,
             components: None,
             dependencies: Vec::new(),

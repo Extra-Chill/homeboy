@@ -99,6 +99,7 @@ pub(crate) fn refused_trace_result(
             .collect(),
         temporal_assertions: Vec::new(),
         artifacts: Vec::new(),
+        metrics: Default::default(),
         toolchain: None,
         components: None,
         dependencies: Vec::new(),

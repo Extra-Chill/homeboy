@@ -20,7 +20,7 @@ fn rewrites_lab_offload_path_and_strips_runner_and_output_flags() {
     ]);
 
     assert_eq!(
-        rewrite_lab_offload_args(&input, "/home/chubes/Developer/project"),
+        rewrite_lab_offload_args(&input, "/home/chubes/Developer/project", &[]),
         args(&[
             "homeboy",
             "--force-hot",
@@ -45,7 +45,7 @@ fn leaves_passthrough_path_args_untouched() {
     ]);
 
     assert_eq!(
-        rewrite_lab_offload_args(&input, "/home/chubes/Developer/project"),
+        rewrite_lab_offload_args(&input, "/home/chubes/Developer/project", &[]),
         args(&[
             "homeboy",
             "--force-hot",
@@ -73,7 +73,7 @@ fn strips_internal_passthrough_sentinel_from_lab_offload_command() {
     ]);
 
     assert_eq!(
-        rewrite_lab_offload_args(&input, "/home/chubes/Developer/data-machine@fix"),
+        rewrite_lab_offload_args(&input, "/home/chubes/Developer/data-machine@fix", &[]),
         args(&[
             "homeboy",
             "--force-hot",
@@ -100,7 +100,7 @@ fn rewrite_lab_offload_args_does_not_duplicate_force_hot() {
     ]);
 
     assert_eq!(
-        rewrite_lab_offload_args(&input, "/home/chubes/Developer/project"),
+        rewrite_lab_offload_args(&input, "/home/chubes/Developer/project", &[]),
         args(&[
             "homeboy",
             "--force-hot",

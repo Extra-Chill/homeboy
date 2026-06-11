@@ -169,6 +169,7 @@ pub fn run(args: ObserveArgs, _global: &GlobalArgs) -> CmdResult<ObserveOutput> 
             path: trace_path.to_string_lossy().to_string(),
             kind: None,
         }],
+        metrics: Default::default(),
         toolchain: None,
         components: None,
         dependencies: Vec::new(),

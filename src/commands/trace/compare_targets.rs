@@ -13,8 +13,10 @@ use super::matrix::{aggregate_to_compare_input, write_json_artifact};
 use super::output::compare_trace_aggregates_with_focus;
 use super::{
     attach_span_metadata, classification_summaries, cli_span_definitions_for_args,
-    plan_trace_run_order, run_trace_guardrails_for_args, trace_span_metadata_for_args, TraceArgs,
+    load_rig_context, plan_trace_run_order, resolve_component_id, rig_component_for_trace,
+    run_trace_guardrails_for_args, trace_span_metadata_for_args, TraceArgs,
 };
+use crate::commands::utils::args::PositionalComponentArgs;
 use crate::commands::CmdResult;
 
 pub(super) fn run_compare_targets(args: TraceArgs) -> CmdResult<TraceCommandOutput> {
@@ -29,14 +31,7 @@ pub(super) fn run_compare_targets(args: TraceArgs) -> CmdResult<TraceCommandOutp
 
     let baseline = required_target(args.baseline_target.as_deref(), "--baseline-target")?;
     let candidate = required_target(args.candidate.as_deref(), "--candidate")?;
-    let component_id = args
-        .component_arg
-        .as_deref()
-        .or(args.scenario.as_deref())
-        .ok_or_else(|| {
-            homeboy::core::Error::validation_missing_argument(vec!["component".to_string()])
-        })?
-        .to_string();
+    let (component_id, base_component) = compare_target_component(&args)?;
     let scenario_id = args
         .scenario_arg
         .clone()
@@ -48,9 +43,6 @@ pub(super) fn run_compare_targets(args: TraceArgs) -> CmdResult<TraceCommandOutp
         .ok_or_else(|| {
             homeboy::core::Error::validation_missing_argument(vec!["trace scenario".to_string()])
         })?;
-    let base_component =
-        component::resolve_effective(Some(&component_id), args.comp.path.as_deref(), None)?;
-
     let output_dir = args.output_dir.clone().unwrap_or_else(|| {
         PathBuf::from(".homeboy")
             .join("trace-compare")
@@ -149,6 +141,27 @@ pub(super) fn run_compare_targets(args: TraceArgs) -> CmdResult<TraceCommandOutp
         TraceCommandOutput::Compare(compare),
         if failed { 1 } else { 0 },
     ))
+}
+
+fn compare_target_component(
+    args: &TraceArgs,
+) -> homeboy::core::Result<(String, component::Component)> {
+    let rig_context = load_rig_context(args.rig.as_deref())?;
+    let target_comp = PositionalComponentArgs {
+        component: args.component_arg.clone().or_else(|| args.scenario.clone()),
+        path: args.comp.path.clone(),
+    };
+    let component_id = resolve_component_id(
+        &target_comp,
+        rig_context.as_ref().map(|context| &context.rig_spec),
+    )?;
+    let rig_component = rig_context
+        .as_ref()
+        .and_then(|context| rig_component_for_trace(&context.rig_spec, &component_id));
+    let component = rig_component.map(Ok).unwrap_or_else(|| {
+        component::resolve_effective(Some(&component_id), args.comp.path.as_deref(), None)
+    })?;
+    Ok((component_id, component))
 }
 
 fn required_target<'a>(
@@ -684,5 +697,132 @@ impl Drop for TemporaryGitWorktree {
             "git worktree remove trace compare target",
         );
         let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::utils::args::{BaselineArgs, SettingArgs};
+    use homeboy::core::component::ScopedExtensionConfig;
+
+    fn compare_args_for_rig(rig_id: &str, component_id: Option<&str>) -> TraceArgs {
+        TraceArgs {
+            comp: PositionalComponentArgs {
+                component: Some("compare".to_string()),
+                path: None,
+            },
+            component_arg: component_id.map(str::to_string),
+            scenario: component_id.map(str::to_string),
+            scenario_arg: Some("scenario".to_string()),
+            compare_after: None,
+            baseline_target: Some("origin/main".to_string()),
+            candidate: Some("HEAD".to_string()),
+            rig: Some(rig_id.to_string()),
+            profile: None,
+            profiles: false,
+            setting_args: SettingArgs::default(),
+            json_summary: false,
+            report: None,
+            experiment: None,
+            repeat: 1,
+            aggregate: None,
+            schedule: super::super::TraceSchedule::Grouped,
+            focus_spans: Vec::new(),
+            metric_guardrails: Vec::new(),
+            spans: Vec::new(),
+            phases: Vec::new(),
+            attachments: Vec::new(),
+            phase_preset: None,
+            baseline_args: BaselineArgs::default(),
+            regression_threshold: extension_trace::baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT,
+            regression_min_delta_ms: extension_trace::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
+            overlays: Vec::new(),
+            variants: Vec::new(),
+            matrix: super::super::TraceVariantMatrixMode::None,
+            axes: Vec::new(),
+            matrix_env: Vec::new(),
+            output_dir: None,
+            keep_overlay: false,
+            canonical: false,
+            allow_local_toolchain: true,
+            stale: false,
+            force: false,
+            checkout_provenance: None,
+        }
+    }
+
+    #[test]
+    fn compare_target_component_uses_rig_declared_component() {
+        crate::test_support::with_isolated_home(|_| {
+            let component_dir = tempfile::TempDir::new().expect("component dir");
+            let rig_dir = homeboy::core::paths::rigs().expect("rig dir");
+            std::fs::create_dir_all(&rig_dir).expect("create rig dir");
+            std::fs::write(
+                rig_dir.join("trace-lab.json"),
+                serde_json::json!({
+                    "id": "trace-lab",
+                    "components": {
+                        "lab-component": {
+                            "path": component_dir.path().display().to_string(),
+                            "remote_url": "https://github.com/example/lab-component.git",
+                            "extensions": {
+                                "trace-extension": { "setting": "from-rig" }
+                            }
+                        }
+                    }
+                })
+                .to_string(),
+            )
+            .expect("write rig");
+
+            let (component_id, component) =
+                compare_target_component(&compare_args_for_rig("trace-lab", Some("lab-component")))
+                    .expect("rig component resolves");
+
+            assert_eq!(component_id, "lab-component");
+            assert_eq!(component.id, "lab-component");
+            assert_eq!(component.local_path, component_dir.path().to_string_lossy());
+            assert_eq!(
+                component.remote_url.as_deref(),
+                Some("https://github.com/example/lab-component.git")
+            );
+            assert_eq!(
+                component
+                    .extensions
+                    .as_ref()
+                    .and_then(|extensions| extensions.get("trace-extension"))
+                    .and_then(|config: &ScopedExtensionConfig| config.settings.get("setting"))
+                    .and_then(serde_json::Value::as_str),
+                Some("from-rig")
+            );
+        });
+    }
+
+    #[test]
+    fn compare_target_component_uses_single_rig_component_by_default() {
+        crate::test_support::with_isolated_home(|_| {
+            let component_dir = tempfile::TempDir::new().expect("component dir");
+            let rig_dir = homeboy::core::paths::rigs().expect("rig dir");
+            std::fs::create_dir_all(&rig_dir).expect("create rig dir");
+            std::fs::write(
+                rig_dir.join("single-trace-lab.json"),
+                serde_json::json!({
+                    "id": "single-trace-lab",
+                    "components": {
+                        "only-component": { "path": component_dir.path().display().to_string() }
+                    }
+                })
+                .to_string(),
+            )
+            .expect("write rig");
+
+            let (component_id, component) =
+                compare_target_component(&compare_args_for_rig("single-trace-lab", None))
+                    .expect("single rig component resolves");
+
+            assert_eq!(component_id, "only-component");
+            assert_eq!(component.local_path, component_dir.path().to_string_lossy());
+        });
     }
 }
