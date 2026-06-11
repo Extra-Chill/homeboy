@@ -342,8 +342,17 @@ PHP
         cp "$wp_codebox_completion_outcome_path" "$wp_codebox_completion_outcome_input"
     fi
 
+    local wp_codebox_transcript_evidence_path="$wp_codebox_transcript_path"
+    local transcript_host_dir
+    transcript_host_dir=$(jq -r '.transcript_host_dir // empty' "$CONFIG_PATH")
+    if [ -n "$transcript_host_dir" ] && [ -n "$wp_codebox_transcript_path" ] && [ -f "$wp_codebox_transcript_path" ]; then
+        mkdir -p "$transcript_host_dir"
+        wp_codebox_transcript_evidence_path="$transcript_host_dir/$(basename "$wp_codebox_transcript_path")"
+        cp "$wp_codebox_transcript_path" "$wp_codebox_transcript_evidence_path"
+    fi
+
     jq -n \
-        --arg transcriptPath "$wp_codebox_transcript_path" \
+        --arg transcriptPath "$wp_codebox_transcript_evidence_path" \
         --slurpfile run "$wp_codebox_output" \
         --slurpfile review "$wp_codebox_review_input" \
         --slurpfile changedFiles "$wp_codebox_changed_files_input" \
