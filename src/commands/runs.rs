@@ -934,6 +934,72 @@ mod tests {
     }
 
     #[test]
+    fn artifact_get_fetches_nested_publication_artifact_store_ref() {
+        with_isolated_home(|home| {
+            let _xdg = XdgGuard::unset();
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(sample_run("bench", "homeboy", "studio", Value::Null))
+                .expect("run");
+            let locator = "homeboy/workflow-bench/runs/run-1/artifacts/scenario/adapter/attempt-1/nested-result.json";
+            let package_root = home.path().join("publication-package");
+            let nested_source = package_root.join("scenario/adapter/attempt-1/nested-result.json");
+            std::fs::create_dir_all(nested_source.parent().expect("nested parent"))
+                .expect("create nested parent");
+            std::fs::write(&nested_source, br#"{"nested":true}"#).expect("nested bytes");
+            let manifest_path = package_root.join("manifest.json");
+            std::fs::write(
+                &manifest_path,
+                serde_json::json!({
+                    "id": "publication-run-1",
+                    "artifacts": [{
+                        "id": "scenario/adapter/attempt-1/nested-result",
+                        "kind": "nested-publication-artifact",
+                        "locator": {
+                            "type": "artifact-store",
+                            "value": locator,
+                        },
+                        "media_type": "application/json"
+                    }]
+                })
+                .to_string(),
+            )
+            .expect("manifest bytes");
+            let manifest_artifact = store
+                .record_artifact(&run.id, "publication_manifest", &manifest_path)
+                .expect("record manifest");
+            let artifact_root = home.path().join(".local/share/homeboy/artifacts");
+            let materialized = artifact_root.join(locator);
+
+            assert!(materialized.is_file());
+            let nested = store
+                .get_artifact_for_run_token(&run.id, "nested-result")
+                .expect("lookup nested")
+                .expect("nested artifact indexed");
+            assert_ne!(nested.id, manifest_artifact.id);
+            assert_eq!(nested.path, materialized.to_string_lossy());
+
+            let output_path = home.path().join("downloaded-nested.json");
+            let (output, _) = artifact_get(RunsArtifactGetArgs {
+                run_id: run.id.clone(),
+                artifact_id: "nested-result".to_string(),
+                output: Some(output_path.clone()),
+            })
+            .expect("get nested artifact");
+
+            let RunsOutput::ArtifactGet(output) = output else {
+                panic!("expected artifact get output");
+            };
+            assert_eq!(output.command, "runs.artifact.get");
+            assert_eq!(output.artifact_id, nested.id);
+            assert_eq!(
+                std::fs::read(&output_path).expect("downloaded nested"),
+                br#"{"nested":true}"#
+            );
+        });
+    }
+
+    #[test]
     fn findings_commands_list_and_show_records() {
         with_isolated_home(|_home| {
             let _xdg = XdgGuard::unset();

@@ -423,7 +423,11 @@ impl ObservationStore {
                     "Inserted artifact record {id} but could not read it back"
                 ))
             })?;
-        crate::core::publication_artifacts::index_published_artifact_refs(self, &artifact)?;
+        crate::core::publication_artifacts::index_published_artifact_refs(
+            self,
+            &artifact,
+            Some(path),
+        )?;
         Ok(artifact)
     }
 

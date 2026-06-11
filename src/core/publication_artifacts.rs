@@ -10,6 +10,7 @@ use crate::core::{paths, runner, Result};
 pub(crate) fn index_published_artifact_refs(
     store: &ObservationStore,
     source: &ArtifactRecord,
+    source_path: Option<&Path>,
 ) -> Result<()> {
     if source.artifact_type != "file" || !json_artifact(source) {
         return Ok(());
@@ -25,14 +26,20 @@ pub(crate) fn index_published_artifact_refs(
     };
 
     let artifact_root = paths::artifact_root()?;
+    let source_bases = source_path
+        .and_then(Path::parent)
+        .into_iter()
+        .map(Path::to_path_buf)
+        .collect::<Vec<_>>();
     index_manifest_refs(store, source, &manifest, |locator| {
-        artifact_store_path(&artifact_root, locator).map(|path| {
-            if path.is_file() {
-                IndexedArtifactPath::Local(path)
-            } else {
-                IndexedArtifactPath::Missing
-            }
-        })
+        let Some(path) = artifact_store_path(&artifact_root, locator) else {
+            return Ok(None);
+        };
+        if path.is_file() || materialize_artifact_store_path(&path, locator, &source_bases)? {
+            Ok(Some(IndexedArtifactPath::Local(path)))
+        } else {
+            Ok(Some(IndexedArtifactPath::Missing))
+        }
     })
 }
 
@@ -58,9 +65,9 @@ pub fn index_remote_published_artifact_refs_for_run(
             continue;
         };
         index_manifest_refs(store, &artifact, &manifest, |locator| {
-            Some(IndexedArtifactPath::Remote(
+            Ok(Some(IndexedArtifactPath::Remote(
                 runner::runner_artifact_store_token(&runner_id, &remote_run_id, locator),
-            ))
+            )))
         })?;
     }
 
@@ -77,7 +84,7 @@ fn index_manifest_refs(
     store: &ObservationStore,
     source: &ArtifactRecord,
     manifest: &Value,
-    mut resolve_path: impl FnMut(&str) -> Option<IndexedArtifactPath>,
+    mut resolve_path: impl FnMut(&str) -> Result<Option<IndexedArtifactPath>>,
 ) -> Result<()> {
     let manifest_id = manifest
         .get("id")
@@ -90,7 +97,7 @@ fn index_manifest_refs(
         let Some(locator) = artifact_store_locator(reference) else {
             continue;
         };
-        let Some(indexed_path) = resolve_path(locator) else {
+        let Some(indexed_path) = resolve_path(locator)? else {
             continue;
         };
         let (artifact_type, path) = match indexed_path {
@@ -208,6 +215,59 @@ fn artifact_store_path(root: &Path, locator: &str) -> Option<PathBuf> {
         return None;
     }
     Some(root.join(locator_path))
+}
+
+fn materialize_artifact_store_path(
+    destination: &Path,
+    locator: &str,
+    source_bases: &[PathBuf],
+) -> Result<bool> {
+    for source_base in source_bases {
+        for source in artifact_store_source_candidates(source_base, locator) {
+            if !source.is_file() {
+                continue;
+            }
+            if let Some(parent) = destination.parent() {
+                std::fs::create_dir_all(parent).map_err(|err| {
+                    crate::core::Error::internal_io(
+                        err.to_string(),
+                        Some(format!("create {}", parent.display())),
+                    )
+                })?;
+            }
+            std::fs::copy(&source, destination).map_err(|err| {
+                crate::core::Error::internal_io(
+                    err.to_string(),
+                    Some(format!(
+                        "copy publication artifact-store ref {} to {}",
+                        source.display(),
+                        destination.display()
+                    )),
+                )
+            })?;
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn artifact_store_source_candidates(source_base: &Path, locator: &str) -> Vec<PathBuf> {
+    let segments = PathBuf::from(locator)
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(segment) => Some(segment.to_os_string()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let mut candidates = Vec::new();
+    for index in 0..segments.len() {
+        let mut candidate = source_base.to_path_buf();
+        for segment in &segments[index..] {
+            candidate.push(segment);
+        }
+        candidates.push(candidate);
+    }
+    candidates
 }
 
 fn is_remote_publication_manifest_candidate(artifact: &ArtifactRecord) -> bool {
