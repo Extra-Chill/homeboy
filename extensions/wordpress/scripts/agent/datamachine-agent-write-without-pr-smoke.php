@@ -269,24 +269,22 @@ namespace {
     $runner_capture_calls = array();
     $publication_input    = array();
     $GLOBALS['homeboy_datamachine_agent_fake_abilities'] = array(
-        'datamachine/workspace-git-status' => new Homeboy_Datamachine_Agent_Fake_Ability(
+        'wp-codebox/capture-runner-workspace' => new Homeboy_Datamachine_Agent_Fake_Ability(
             function ( array $input ) use ( &$runner_capture_calls ): array {
-                $runner_capture_calls[] = array( 'ability' => 'status', 'input' => $input );
+                $runner_capture_calls[] = array( 'ability' => 'capture', 'input' => $input );
                 return array(
                     'success' => true,
-                    'dirty'   => 1,
-                    'files'   => array( 'docs/generated.md' ),
+                    'status'  => array(
+                        'dirty' => 1,
+                        'files' => array( 'docs/generated.md' ),
+                    ),
+                    'diff'    => array(
+                        'diff' => "diff --git a/docs/generated.md b/docs/generated.md\n",
+                    ),
                 );
             }
         ),
-        'datamachine/workspace-git-diff' => new Homeboy_Datamachine_Agent_Fake_Ability(
-            fn( array $input ) => array(
-                'success' => true,
-                'name'    => $input['name'] ?? '',
-                'diff'    => "diff --git a/docs/generated.md b/docs/generated.md\n",
-            )
-        ),
-        'datamachine-code/publish-runner-workspace' => new Homeboy_Datamachine_Agent_Fake_Ability(
+        'wp-codebox/publish-runner-workspace' => new Homeboy_Datamachine_Agent_Fake_Ability(
             function ( array $input ) use ( &$publication_input ): array {
                 $publication_input = $input;
                 return array(
@@ -362,7 +360,7 @@ namespace {
     );
 
     if ( empty( $runner_capture['changed'] ) || empty( $runner_publication['opened'] ) ) {
-        fwrite( STDERR, "Expected hidden runner workspace capture to publish through the canonical DMC API after context assembly.\n" );
+        fwrite( STDERR, "Expected hidden runner workspace capture to publish through the WP Codebox runner API after context assembly.\n" );
         exit( 1 );
     }
     if ( 'agent/hidden-run' !== ( $publication_input['head'] ?? null ) || 'owner/repo' !== ( $publication_input['repo'] ?? null ) || 'repo@hidden-run' !== ( $publication_input['workspace'] ?? null ) ) {
@@ -379,23 +377,12 @@ namespace {
             exit( 1 );
         }
     }
-    if ( 'repo@hidden-run' !== ( $runner_capture_calls[0]['input']['name'] ?? null ) || ! empty( $runner_capture_calls[1] ?? null ) ) {
-        fwrite( STDERR, "Expected runner workspace capture to inspect the provisioned handle without staging changes locally.\n" );
+    if ( 'repo@hidden-run' !== ( $runner_capture_calls[0]['input']['workspace'] ?? null ) || ! empty( $runner_capture_calls[1] ?? null ) ) {
+        fwrite( STDERR, "Expected runner workspace capture to use the WP Codebox capture API once.\n" );
         exit( 1 );
     }
 
-    $GLOBALS['homeboy_datamachine_agent_fake_abilities'] = array(
-        'datamachine/workspace-git-status' => new Homeboy_Datamachine_Agent_Fake_Ability(
-            fn() => array(
-                'success' => true,
-                'dirty'   => 1,
-                'files'   => array( 'docs/generated.md' ),
-            )
-        ),
-        'datamachine/workspace-git-diff' => new Homeboy_Datamachine_Agent_Fake_Ability(
-            fn() => array( 'success' => true, 'diff' => "diff --git a/docs/generated.md b/docs/generated.md\n" )
-        ),
-    );
+    $GLOBALS['homeboy_datamachine_agent_fake_abilities'] = array();
     $unavailable_publication = homeboy_datamachine_agent_publish_runner_workspace(
         $runner_engine_data,
         $runner_config,
@@ -403,8 +390,8 @@ namespace {
         $runner_template_values,
         array( 'docs/generated.md' )
     );
-    if ( empty( $unavailable_publication['error'] ) || 'https://github.com/Extra-Chill/data-machine-code/issues/625' !== ( $unavailable_publication['upstream_issue'] ?? '' ) ) {
-        fwrite( STDERR, "Expected missing DMC publication API to fail loudly with the DMC #625 integration point.\n" );
+    if ( empty( $unavailable_publication['error'] ) || 'https://github.com/Automattic/wp-codebox/issues/873' !== ( $unavailable_publication['upstream_issue'] ?? '' ) ) {
+        fwrite( STDERR, "Expected missing WP Codebox publication API to fail loudly with the WP Codebox #873 integration point.\n" );
         exit( 1 );
     }
 

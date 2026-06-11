@@ -114,18 +114,18 @@ The runner converts the agent config into a single WP Codebox sandbox run:
 - `workload_run_before` and `workload_run_after` attach setup and verifier hooks
   around the agent run inside the same sandbox scenario.
 - `transcript_dir` controls where exported conversation artifacts are written.
-- `success_requires_pr` can require the agent to open or reuse a pull request.
+- `success_requires_pr` can require a published pull request outcome.
 - `tool_recorders` can force tool parameters and project tool results into
   `metadata.engine_data`.
-- `engine_key` and `tool_results_key` control where built-in tool capture and
-  fallback pull request data are recorded.
-- `runner_workspace` can provision a Data Machine Code worktree. The default
+- `engine_key` and `tool_results_key` control where built-in tool capture is
+  recorded.
+- `runner_workspace` can provision a WP Codebox-managed runner workspace. The default
   mode prepends the workspace handle to the agent prompt so current consumers
-  can explicitly ask the agent to work in that checkout and open a PR.
+  can explicitly ask the agent to work in that checkout.
 - `runner_workspace.expose_to_agent: false` enables runner-owned capture
   mode. It preserves the natural task prompt, keeps workspace tool calls scoped
-  to the provisioned handle when those tools are used, then captures final git
-  status/diff, commits, pushes, and opens or reuses a fallback PR after the run.
+  to the provisioned handle when those tools are used, then asks WP Codebox to
+  capture and publish the final runner workspace after the run.
 - `ability_tools` can expose additional WordPress abilities as tools during the
   agent run.
 - `enable_terminal_actions` exposes terminal actions through the WordPress
