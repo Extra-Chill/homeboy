@@ -33,6 +33,7 @@ pub(crate) fn stamp_run_metadata(
         selected_scenarios: args.scenario_ids.clone(),
         env_overrides: bench_env_overrides(),
         workloads,
+        provenance: results.provenance.clone(),
         runner: Some(BenchRunnerMetadata {
             extension: execution_context.extension_id.clone(),
             path: execution_context
@@ -68,6 +69,7 @@ fn workload_metadata(
                 .as_ref()
                 .map(|path| path.to_string_lossy().to_string()),
             sha256: resolved.as_deref().and_then(sha256_file),
+            provenance: scenario.provenance.clone(),
         });
     }
 
@@ -85,6 +87,7 @@ fn workload_metadata(
             source: Some("rig".to_string()),
             path: Some(path_string),
             sha256: sha256_file(path),
+            provenance: Default::default(),
         });
     }
 
@@ -218,6 +221,7 @@ mod tests {
         let mut results = BenchResults {
             component_id: "homeboy".to_string(),
             iterations: 7,
+            provenance: Default::default(),
             run_metadata: None,
             metadata: BTreeMap::new(),
             metric_groups: BTreeMap::new(),
@@ -247,6 +251,7 @@ mod tests {
                 gates: Vec::new(),
                 gate_results: Vec::new(),
                 metadata: BTreeMap::new(),
+                provenance: Default::default(),
                 passed: true,
                 memory: None,
                 artifacts: BTreeMap::new(),
@@ -257,6 +262,19 @@ mod tests {
             metric_policies: BTreeMap::new(),
             metric_policy_presets: BTreeMap::new(),
         };
+        results
+            .provenance
+            .labels
+            .push("source: zendesk".to_string());
+        results.scenarios[0]
+            .provenance
+            .links
+            .push(parsing::BenchProvenanceLink {
+                url: "https://wordpress.org/support/topic/checkout-is-very-slow/".to_string(),
+                label: Some("Support thread".to_string()),
+                source: Some("wordpress.org".to_string()),
+                privacy: None,
+            });
 
         stamp_run_metadata(
             &mut results,
@@ -285,6 +303,14 @@ mod tests {
             Some(workload.to_string_lossy().as_ref())
         );
         assert_eq!(metadata.workloads[0].sha256.as_ref().unwrap().len(), 64);
+        assert_eq!(
+            metadata.provenance.labels,
+            vec!["source: zendesk".to_string()]
+        );
+        assert_eq!(
+            metadata.workloads[0].provenance.links[0].url,
+            "https://wordpress.org/support/topic/checkout-is-very-slow/"
+        );
     }
 
     #[test]

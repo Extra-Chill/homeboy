@@ -52,6 +52,8 @@ pub struct BenchComparisonSharedContext {
     pub settings: BTreeMap<String, Value>,
     pub selected_scenarios: Vec<String>,
     pub workloads: Vec<BenchWorkloadFingerprint>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub provenance: Vec<BenchProvenanceEntry>,
     pub iterations: Option<u64>,
     pub runs: Option<u64>,
     pub concurrency: Option<u64>,
@@ -62,6 +64,28 @@ pub struct BenchComparisonSharedContext {
 pub struct BenchWorkloadFingerprint {
     pub id: String,
     pub sha256: Option<String>,
+}
+
+#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+pub struct BenchProvenanceEntry {
+    pub scope: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scenario_id: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<BenchProvenanceLinkEntry>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
+}
+
+#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+pub struct BenchProvenanceLinkEntry {
+    pub url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub privacy: Option<String>,
 }
 
 #[derive(Serialize, Debug, Clone, PartialEq, Eq)]
@@ -278,6 +302,7 @@ fn shared_context(metadata: &Value) -> BenchComparisonSharedContext {
         .or_else(|| string_array(metadata.get("selected_scenarios")))
         .unwrap_or_default(),
         workloads: bench_workloads(run_metadata),
+        provenance: bench_provenance(metadata, run_metadata),
         iterations: run_metadata
             .and_then(|value| value.get("iterations"))
             .and_then(Value::as_u64)
@@ -293,6 +318,97 @@ fn shared_context(metadata: &Value) -> BenchComparisonSharedContext {
             .and_then(Value::as_str)
             .map(str::to_string),
     }
+}
+
+fn bench_provenance(metadata: &Value, run_metadata: Option<&Value>) -> Vec<BenchProvenanceEntry> {
+    let mut entries = Vec::new();
+    if let Some(entry) =
+        provenance_entry("run", None, run_metadata.and_then(|v| v.get("provenance")))
+    {
+        entries.push(entry);
+    }
+    if let Some(entry) = provenance_entry("run", None, metadata.get("provenance")) {
+        if !entries.contains(&entry) {
+            entries.push(entry);
+        }
+    }
+    if let Some(workloads) = run_metadata
+        .and_then(|value| value.get("workloads"))
+        .and_then(Value::as_array)
+    {
+        for workload in workloads {
+            let scenario_id = workload
+                .get("id")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            if let Some(entry) =
+                provenance_entry("workload", scenario_id, workload.get("provenance"))
+            {
+                entries.push(entry);
+            }
+        }
+    }
+    if let Some(scenarios) = metadata
+        .get("results")
+        .and_then(|results| results.get("scenarios"))
+        .and_then(Value::as_array)
+    {
+        for scenario in scenarios {
+            let scenario_id = scenario
+                .get("id")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            if let Some(entry) =
+                provenance_entry("scenario", scenario_id, scenario.get("provenance"))
+            {
+                if !entries.contains(&entry) {
+                    entries.push(entry);
+                }
+            }
+        }
+    }
+    entries
+}
+
+fn provenance_entry(
+    scope: &str,
+    scenario_id: Option<String>,
+    value: Option<&Value>,
+) -> Option<BenchProvenanceEntry> {
+    let value = value?;
+    let labels = string_array(value.get("labels")).unwrap_or_default();
+    let links = value
+        .get("links")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    Some(BenchProvenanceLinkEntry {
+                        url: item.get("url")?.as_str()?.to_string(),
+                        label: item
+                            .get("label")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                        source: item
+                            .get("source")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                        privacy: item
+                            .get("privacy")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    (!labels.is_empty() || !links.is_empty()).then(|| BenchProvenanceEntry {
+        scope: scope.to_string(),
+        scenario_id,
+        links,
+        labels,
+    })
 }
 
 fn bench_run_metadata(metadata: &Value) -> Option<&Value> {
@@ -399,6 +515,42 @@ fn render_bench_compare_markdown(
             "- **Scenarios:** `{}`\n",
             shared.selected_scenarios.join(", ")
         ));
+    }
+
+    if !shared.provenance.is_empty() {
+        out.push_str("\n## Provenance\n\n");
+        for entry in &shared.provenance {
+            let scope = match &entry.scenario_id {
+                Some(scenario_id) => format!("{} `{}`", entry.scope, scenario_id),
+                None => entry.scope.clone(),
+            };
+            for link in &entry.links {
+                let label = link
+                    .label
+                    .as_deref()
+                    .or(link.source.as_deref())
+                    .unwrap_or("reference");
+                let mut suffix = Vec::new();
+                if let Some(source) = &link.source {
+                    suffix.push(format!("source: {source}"));
+                }
+                if let Some(privacy) = &link.privacy {
+                    suffix.push(format!("privacy: {privacy}"));
+                }
+                let suffix = if suffix.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", suffix.join(", "))
+                };
+                out.push_str(&format!(
+                    "- **{}:** [{}]({}){}\n",
+                    scope, label, link.url, suffix
+                ));
+            }
+            for label in &entry.labels {
+                out.push_str(&format!("- **{}:** {}\n", scope, label));
+            }
+        }
     }
 
     out.push_str("\n| Scenario | Metric | Baseline | Candidate | Delta | Change |\n");
@@ -581,7 +733,27 @@ mod tests {
                             "runs": 1,
                             "concurrency": 1,
                             "shared_state": "/tmp/homeboy-bench-compare",
-                            "workloads": [{ "id": "cold", "sha256": "abc" }]
+                            "provenance": {
+                                "labels": ["source: zendesk"],
+                                "links": [{
+                                    "url": "https://automattic.zendesk.com/agent/tickets/9426116",
+                                    "label": "Zendesk ticket 9426116",
+                                    "source": "zendesk",
+                                    "privacy": "internal"
+                                }]
+                            },
+                            "workloads": [{
+                                "id": "cold",
+                                "sha256": "abc",
+                                "provenance": {
+                                    "labels": ["scenario: shortcode checkout place-order latency"],
+                                    "links": [{
+                                        "url": "https://wordpress.org/support/topic/checkout-is-very-slow/",
+                                        "label": "WordPress.org support thread",
+                                        "source": "wordpress.org"
+                                    }]
+                                }
+                            }]
                         },
                         "scenario_metrics": [{
                             "scenario_id": "cold",
@@ -623,6 +795,11 @@ mod tests {
             assert_eq!(output.candidate.run.id, to.id);
             assert_eq!(output.shared.selected_scenarios, vec!["cold".to_string()]);
             assert_eq!(output.shared.workloads[0].sha256.as_deref(), Some("abc"));
+            assert_eq!(output.shared.provenance.len(), 2);
+            assert_eq!(
+                output.shared.provenance[0].links[0].url,
+                "https://automattic.zendesk.com/agent/tickets/9426116"
+            );
             let p95 = output
                 .comparisons
                 .iter()
@@ -647,6 +824,13 @@ mod tests {
                 .reports
                 .markdown
                 .contains("| cold | p95_ms | 100 | 125 | 25 | 25% |"));
+            assert!(output.reports.markdown.contains("## Provenance"));
+            assert!(output.reports.markdown.contains(
+                "[Zendesk ticket 9426116](https://automattic.zendesk.com/agent/tickets/9426116)"
+            ));
+            assert!(output.reports.markdown.contains(
+                "[WordPress.org support thread](https://wordpress.org/support/topic/checkout-is-very-slow/)"
+            ));
 
             let (filtered, _) =
                 bench_compare(&from.id, &to.id, &["p95_ms".to_string()]).expect("filtered compare");

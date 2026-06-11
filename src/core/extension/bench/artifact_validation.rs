@@ -141,6 +141,7 @@ mod tests {
         let mut results = BenchResults {
             component_id: "studio".to_string(),
             iterations: 1,
+            provenance: Default::default(),
             run_metadata: None,
             metadata: BTreeMap::new(),
             metric_groups: BTreeMap::new(),
@@ -167,6 +168,7 @@ mod tests {
                 gates: Vec::new(),
                 gate_results: Vec::new(),
                 metadata: BTreeMap::new(),
+                provenance: Default::default(),
                 passed: true,
                 memory: None,
                 artifacts: BTreeMap::new(),

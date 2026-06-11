@@ -65,8 +65,8 @@ use super::phase_events::evaluate_phase_events;
 
 pub use super::result_types::{
     BenchMemory, BenchMetricDirection, BenchMetricPhase, BenchMetricPolicy, BenchMetrics,
-    BenchResults, BenchRunExecution, BenchRunMetadata, BenchRunSnapshot, BenchRunnerMetadata,
-    BenchScenario, BenchWorkloadMetadata, RegressionTest,
+    BenchProvenance, BenchProvenanceLink, BenchResults, BenchRunExecution, BenchRunMetadata,
+    BenchRunSnapshot, BenchRunnerMetadata, BenchScenario, BenchWorkloadMetadata, RegressionTest,
 };
 
 /// Derive scenario span results from the shared observation timeline contract.
@@ -122,7 +122,12 @@ fn parse_bench_results_str_with_artifact_context(
         object.remove("lifecycle");
         object.remove("reset_policy");
         object.remove("warmup_iterations");
-        object.remove("provenance");
+        if object
+            .get("provenance")
+            .is_some_and(|value| !is_bench_provenance_contract(value))
+        {
+            object.remove("provenance");
+        }
     }
     normalize_extension_sample_metrics(&mut value);
     let mut parsed: BenchResults = serde_json::from_value(value).map_err(|e| {
@@ -150,7 +155,12 @@ fn normalize_extension_sample_metrics(value: &mut serde_json::Value) {
 
     for scenario in scenarios {
         if let Some(object) = scenario.as_object_mut() {
-            object.remove("provenance");
+            if object
+                .get("provenance")
+                .is_some_and(|value| !is_bench_provenance_contract(value))
+            {
+                object.remove("provenance");
+            }
         }
         let Some(metrics) = scenario
             .get_mut("metrics")
@@ -189,6 +199,12 @@ fn normalize_extension_sample_metrics(value: &mut serde_json::Value) {
         }
         *metrics = normalized;
     }
+}
+
+fn is_bench_provenance_contract(value: &serde_json::Value) -> bool {
+    value
+        .as_object()
+        .is_some_and(|object| object.contains_key("links") || object.contains_key("labels"))
 }
 
 fn validate_unique_scenario_ids(results: &BenchResults) -> Result<()> {
@@ -541,6 +557,57 @@ mod tests {
         assert!(serialized.contains("\"artifacts\""));
         assert!(serialized.contains("artifacts/agent-loop/transcript.json"));
         assert!(serialized.contains("https://example.test/"));
+    }
+
+    #[test]
+    fn parses_top_level_and_scenario_provenance() {
+        let raw = r#"{
+            "component_id": "example",
+            "iterations": 1,
+            "provenance": {
+                "labels": ["source: zendesk", "privacy: internal"],
+                "links": [
+                    {
+                        "url": "https://automattic.zendesk.com/agent/tickets/9426116",
+                        "label": "Zendesk ticket 9426116",
+                        "source": "zendesk",
+                        "privacy": "internal"
+                    }
+                ]
+            },
+            "scenarios": [
+                {
+                    "id": "checkout_latency",
+                    "iterations": 1,
+                    "metrics": { "p95_ms": 250.0 },
+                    "provenance": {
+                        "labels": ["scenario: shortcode checkout place-order latency"],
+                        "links": [
+                            {
+                                "url": "https://wordpress.org/support/topic/checkout-is-very-slow/",
+                                "label": "WordPress.org support thread",
+                                "source": "wordpress.org"
+                            }
+                        ]
+                    }
+                }
+            ]
+        }"#;
+
+        let parsed = parse_bench_results_str(raw).unwrap();
+
+        assert_eq!(parsed.provenance.labels[0], "source: zendesk");
+        assert_eq!(
+            parsed.provenance.links[0].source.as_deref(),
+            Some("zendesk")
+        );
+        assert_eq!(
+            parsed.scenarios[0].provenance.links[0].url,
+            "https://wordpress.org/support/topic/checkout-is-very-slow/"
+        );
+        let serialized = serde_json::to_string(&parsed).unwrap();
+        assert!(serialized.contains("automattic.zendesk.com"));
+        assert!(serialized.contains("wordpress.org/support"));
     }
 
     #[test]

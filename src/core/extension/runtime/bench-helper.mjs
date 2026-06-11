@@ -64,6 +64,7 @@ export function homeboyBenchScenarioInventoryEntry({
     tags = [],
     metrics = {},
     metadata,
+    provenance,
     artifacts,
 }) {
     const scenario = {
@@ -76,6 +77,7 @@ export function homeboyBenchScenarioInventoryEntry({
     if (file) scenario.file = file;
     if (source) scenario.source = source;
     if (metadata && Object.keys(metadata).length > 0) scenario.metadata = metadata;
+    if (provenance && Object.keys(provenance).length > 0) scenario.provenance = provenance;
     if (artifacts && Object.keys(artifacts).length > 0) scenario.artifacts = artifacts;
     return scenario;
 }

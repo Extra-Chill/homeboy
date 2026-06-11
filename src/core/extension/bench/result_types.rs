@@ -27,12 +27,18 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
+fn provenance_is_empty(value: &BenchProvenance) -> bool {
+    value.is_empty()
+}
+
 /// Full bench run output from an extension script.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct BenchResults {
     pub component_id: String,
     pub iterations: u64,
+    #[serde(default, skip_serializing_if = "provenance_is_empty")]
+    pub provenance: BenchProvenance,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_metadata: Option<BenchRunMetadata>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -86,6 +92,8 @@ pub struct BenchRunMetadata {
     pub env_overrides: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub workloads: Vec<BenchWorkloadMetadata>,
+    #[serde(default, skip_serializing_if = "provenance_is_empty")]
+    pub provenance: BenchProvenance,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runner: Option<BenchRunnerMetadata>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -109,6 +117,35 @@ pub struct BenchWorkloadMetadata {
     pub path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "provenance_is_empty")]
+    pub provenance: BenchProvenance,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BenchProvenance {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<BenchProvenanceLink>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
+}
+
+impl BenchProvenance {
+    pub fn is_empty(&self) -> bool {
+        self.links.is_empty() && self.labels.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BenchProvenanceLink {
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub privacy: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -148,6 +185,8 @@ pub struct BenchScenario {
     pub gate_results: Vec<BenchGateResult>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub metadata: BTreeMap<String, serde_json::Value>,
+    #[serde(default, skip_serializing_if = "provenance_is_empty")]
+    pub provenance: BenchProvenance,
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub passed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
