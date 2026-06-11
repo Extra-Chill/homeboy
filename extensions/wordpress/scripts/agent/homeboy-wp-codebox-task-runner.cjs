@@ -54,6 +54,31 @@ function secretEnvNames(request) {
   return Array.from(new Set([...(request.secret_env || []), ...(request.recipe?.secret_env || []), ...argValues('--secret-env')].filter(Boolean)));
 }
 
+function claudeCodeRequiredSecretEnv() {
+  return ['AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN'];
+}
+
+function isClaudeCodeRequest(request) {
+  return request.provider === 'claude-code';
+}
+
+function assertClaudeCodeAuthPreflight(request) {
+  if (!isClaudeCodeRequest(request)) {
+    return;
+  }
+
+  const names = secretEnvNames(request);
+  const missingMapping = claudeCodeRequiredSecretEnv().filter((name) => !names.includes(name));
+  if (missingMapping.length > 0) {
+    throw new Error(`Claude Code provider auth preflight failed: missing required secret environment mapping: ${missingMapping.join(', ')}`);
+  }
+
+  const missing = claudeCodeRequiredSecretEnv().filter((name) => !process.env[name]);
+  if (missing.length > 0) {
+    throw new Error(`Claude Code provider auth preflight failed: missing required secret environment value: ${missing.join(', ')}`);
+  }
+}
+
 function assertRequiredSecretEnvAvailable(request) {
   const missing = secretEnvNames(request).filter((name) => !process.env[name]);
   if (missing.length > 0) {
@@ -1201,6 +1226,7 @@ function runWpCodeboxParentTask(request) {
 
 try {
   const request = readTaskRequest();
+  assertClaudeCodeAuthPreflight(request);
   assertRequiredSecretEnvAvailable(request);
   process.exitCode = runWpCodeboxParentTask(request);
 } catch (error) {
