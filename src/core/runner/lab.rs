@@ -246,6 +246,7 @@ fn lab_workspace_sync_mode(
     }
 
     if agent_task_codebox_cwd_requires_git_checkout(args) {
+        preflight_agent_task_codebox_cwd_git_checkout(source_path)?;
         return Ok(RunnerWorkspaceSyncMode::Git);
     }
 
@@ -256,6 +257,22 @@ fn lab_workspace_sync_mode(
     }
 
     Ok(requested)
+}
+
+fn preflight_agent_task_codebox_cwd_git_checkout(source_path: &Path) -> Result<()> {
+    if super::workspace::git_output(source_path, &["rev-parse", "--is-inside-work-tree"]).is_ok() {
+        return Ok(());
+    }
+
+    Err(Error::validation_invalid_argument(
+        "cwd",
+        "Lab offload cannot materialize agent-task Codebox --cwd as a git checkout because --cwd is not inside a git worktree",
+        Some(source_path.display().to_string()),
+        Some(vec![
+            "Pass --cwd <git-worktree> for Codebox cook tasks so Lab can rematerialize the checkout on the runner.".to_string(),
+            "Create an isolated Homeboy/Data Machine Code worktree before running agent-task cook --backend codebox.".to_string(),
+        ]),
+    ))
 }
 
 fn agent_task_codebox_cwd_requires_git_checkout(args: &[String]) -> bool {
@@ -1588,6 +1605,35 @@ mod tests {
         .expect("sync mode");
 
         assert_eq!(mode, RunnerWorkspaceSyncMode::Git);
+    }
+
+    #[test]
+    fn agent_task_cook_codebox_cwd_requires_git_checkout_before_lab_dispatch() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--cwd".to_string(),
+            dir.path().display().to_string(),
+            "--backend".to_string(),
+            "codebox".to_string(),
+            "--prompt".to_string(),
+            "prove it".to_string(),
+        ];
+
+        let err = lab_workspace_sync_mode(
+            LabOffloadWorkspaceModePolicy::ChangedSinceGitElseSnapshot,
+            &args,
+            dir.path(),
+        )
+        .expect_err("non-git cwd must fail before Lab dispatch");
+
+        assert_eq!(err.code, ErrorCode::ValidationInvalidArgument);
+        assert_eq!(err.details["field"], "cwd");
+        assert!(err
+            .message
+            .contains("cannot materialize agent-task Codebox --cwd as a git checkout"));
     }
 
     #[test]

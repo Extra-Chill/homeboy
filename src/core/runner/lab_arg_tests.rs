@@ -33,6 +33,80 @@ fn rewrites_lab_offload_path_and_strips_runner_and_output_flags() {
 }
 
 #[test]
+fn rewrites_agent_task_cook_codebox_cwd_to_materialized_checkout() {
+    let input = args(&[
+        "homeboy",
+        "agent-task",
+        "cook",
+        "--cwd",
+        "/Users/chubes/Developer/homeboy@fix-issue-4010-cook-cwd-materialization",
+        "--backend",
+        "codebox",
+        "--runner",
+        "lab",
+        "--prompt",
+        "fix issue 4010",
+    ]);
+
+    assert_eq!(
+        rewrite_lab_offload_args(
+            &input,
+            "/home/chubes/_lab_workspaces/homeboy@fix-issue-4010-cook-cwd-materialization-abc",
+            &[],
+        ),
+        args(&[
+            "homeboy",
+            "--force-hot",
+            "agent-task",
+            "cook",
+            "--cwd",
+            "/home/chubes/_lab_workspaces/homeboy@fix-issue-4010-cook-cwd-materialization-abc",
+            "--backend",
+            "codebox",
+            "--prompt",
+            "fix issue 4010",
+        ])
+    );
+}
+
+#[test]
+fn rewrites_agent_task_cook_codebox_cwd_equals_with_workspace_mapping() {
+    let input = args(&[
+        "homeboy",
+        "agent-task",
+        "cook",
+        "--cwd=/Users/chubes/Developer/homeboy@fix-issue-4010-cook-cwd-materialization/packages/demo",
+        "--backend=codebox",
+        "--prompt",
+        "fix issue 4010",
+    ]);
+    let mappings = vec![LabPathRemap {
+        local: "/Users/chubes/Developer/homeboy@fix-issue-4010-cook-cwd-materialization"
+            .to_string(),
+        remote: "/home/chubes/_lab_workspaces/homeboy@fix-issue-4010-cook-cwd-materialization-abc"
+            .to_string(),
+    }];
+
+    assert_eq!(
+        rewrite_lab_offload_args(
+            &input,
+            "/home/chubes/_lab_workspaces/homeboy@fix-issue-4010-cook-cwd-materialization-abc",
+            &mappings,
+        ),
+        args(&[
+            "homeboy",
+            "--force-hot",
+            "agent-task",
+            "cook",
+            "--cwd=/home/chubes/_lab_workspaces/homeboy@fix-issue-4010-cook-cwd-materialization-abc/packages/demo",
+            "--backend=codebox",
+            "--prompt",
+            "fix issue 4010",
+        ])
+    );
+}
+
+#[test]
 fn leaves_passthrough_path_args_untouched() {
     let input = args(&[
         "homeboy",
