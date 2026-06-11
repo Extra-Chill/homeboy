@@ -645,7 +645,7 @@ fn publication_manifest_artifact_store_refs_are_indexed() {
                 "artifacts": [{
                     "schema": "example/artifact-reference/v1",
                     "id": "scenario/adapter/attempt-1/blueprint.after",
-                    "kind": "wordpress-playground-blueprint-after",
+                    "kind": "published-blueprint-after",
                     "role": "output",
                     "locator": {
                         "type": "artifact-store",
@@ -671,7 +671,7 @@ fn publication_manifest_artifact_store_refs_are_indexed() {
             .expect("nested artifact indexed");
 
         assert_eq!(artifacts.len(), 2);
-        assert_eq!(nested.kind, "wordpress-playground-blueprint-after");
+        assert_eq!(nested.kind, "published-blueprint-after");
         assert_eq!(nested.artifact_type, "file");
         assert_eq!(nested.path, nested_path.to_string_lossy());
         assert_eq!(nested.mime.as_deref(), Some("application/json"));
