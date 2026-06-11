@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::Command;
 
@@ -98,6 +99,7 @@ pub(crate) fn refused_trace_result(
         toolchain: None,
         components: None,
         dependencies: Vec::new(),
+        metrics: BTreeMap::new(),
         preview: None,
     };
 

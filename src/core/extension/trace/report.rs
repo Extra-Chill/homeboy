@@ -837,10 +837,12 @@ mod tests {
                 artifacts: vec![TraceArtifact {
                     label: "main log".to_string(),
                     path: "artifacts/main.log".to_string(),
+                    kind: None,
                 }],
                 toolchain: None,
                 components: None,
                 dependencies: Vec::new(),
+                metrics: Default::default(),
                 preview: None,
             }),
             failure: None,
@@ -914,6 +916,7 @@ mod tests {
                 toolchain: None,
                 components: None,
                 dependencies: Vec::new(),
+                metrics: Default::default(),
                 preview: None,
             }),
             failure: None,
@@ -1025,6 +1028,7 @@ mod tests {
                 dependencies: Vec::new(),
             }),
             dependencies: Vec::new(),
+            metrics: Default::default(),
             preview: None,
         };
 
@@ -1071,15 +1075,18 @@ mod tests {
                 TraceArtifact {
                     label: "remote trace".to_string(),
                     path: "/srv/remote-only/trace.zip".to_string(),
+                    kind: None,
                 },
                 TraceArtifact {
                     label: "mirrored trace".to_string(),
                     path: "runner-artifact://lab/run-1/trace.zip".to_string(),
+                    kind: None,
                 },
             ],
             toolchain: None,
             components: None,
             dependencies: Vec::new(),
+            metrics: Default::default(),
             preview: None,
         };
 

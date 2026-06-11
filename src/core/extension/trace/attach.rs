@@ -380,6 +380,7 @@ pub(super) fn append_attach_observations(
     results.artifacts.push(TraceArtifact {
         label: "Trace attachments".to_string(),
         path: format!("artifacts/{TRACE_ATTACHMENTS_ARTIFACT}"),
+        kind: None,
     });
     Ok(())
 }
@@ -527,6 +528,7 @@ mod tests {
             toolchain: None,
             components: None,
             dependencies: Vec::new(),
+            metrics: BTreeMap::new(),
             preview: None,
         };
 

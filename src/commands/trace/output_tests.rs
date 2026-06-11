@@ -561,6 +561,7 @@ fn trace_run_evidence_report_includes_refs_assertions_and_safe_artifacts() {
         artifacts: vec![extension_trace::TraceArtifact {
             label: "Main log".to_string(),
             path: "artifacts/main.log".to_string(),
+            kind: None,
         }],
         results: Some(extension_trace::TraceResults {
             component_id: "studio".to_string(),
@@ -584,15 +585,18 @@ fn trace_run_evidence_report_includes_refs_assertions_and_safe_artifacts() {
                 extension_trace::TraceArtifact {
                     label: "Main log".to_string(),
                     path: "artifacts/main.log".to_string(),
+                    kind: None,
                 },
                 extension_trace::TraceArtifact {
                     label: "Trace zip".to_string(),
                     path: "/Users/chubes/private/trace.zip".to_string(),
+                    kind: None,
                 },
             ],
             toolchain: None,
             components: None,
             dependencies: Vec::new(),
+            metrics: Default::default(),
             preview: None,
         }),
         span_summaries: vec![extension_trace::TraceSpanSummaryOutput {
