@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.117.6] - 2026-06-11
+
+### Fixed
+- preflight Codebox agent task model config
+
 ## [2.117.5] - 2026-06-11
 
 ### Fixed
