@@ -25,7 +25,7 @@ use super::resource_metrics::{
 use super::{load, status, Runner, RunnerCapabilityPreflight, RunnerKind, RunnerTunnelMode};
 
 const DEFAULT_RUNNER_EXEC_WAIT_TIMEOUT_SECS: u64 = 20 * 60;
-const RUNNER_EXEC_WAIT_TIMEOUT_ENV: &str = "HOMEBOY_RUNNER_EXEC_WAIT_TIMEOUT_SECS";
+pub(crate) const RUNNER_EXEC_WAIT_TIMEOUT_ENV: &str = "HOMEBOY_RUNNER_EXEC_WAIT_TIMEOUT_SECS";
 
 mod extension_parity;
 mod policy;
@@ -518,6 +518,9 @@ fn cancel_daemon_job_after_timeout(
     job_id: &str,
     label: &str,
 ) -> Error {
+    let timeout_hint = format!(
+        "Set controller-side `{RUNNER_EXEC_WAIT_TIMEOUT_ENV}` before invoking homeboy to change this wait budget, e.g. `{RUNNER_EXEC_WAIT_TIMEOUT_ENV}=2400 homeboy ...`; workload settings are applied inside the remote job and cannot extend the controller wait."
+    );
     match cancel_daemon_job(client, local_url, job_id) {
         Ok(()) => Error::internal_unexpected(format!(
             "{label} {job_id} on runner {runner_id} did not finish before timeout; cancellation was requested"
@@ -525,7 +528,8 @@ fn cancel_daemon_job_after_timeout(
         .with_hint(format!(
             "Confirm cleanup with `homeboy http get {}/jobs/{job_id}`.",
             local_url.trim_end_matches('/')
-        )),
+        ))
+        .with_hint(timeout_hint),
         Err(err) => Error::internal_unexpected(format!(
             "{label} {job_id} on runner {runner_id} did not finish before timeout; automatic cancellation failed: {}",
             err.message
@@ -533,7 +537,8 @@ fn cancel_daemon_job_after_timeout(
         .with_hint(format!(
             "Run `homeboy http request POST {}/jobs/{job_id}/cancel` to cancel the remote job.",
             local_url.trim_end_matches('/')
-        )),
+        ))
+        .with_hint(timeout_hint),
     }
 }
 
@@ -1588,6 +1593,11 @@ mod tests {
             .hints
             .iter()
             .any(|hint| hint.message.contains("homeboy http get http://")));
+        assert!(err.hints.iter().any(|hint| {
+            hint.message.contains(RUNNER_EXEC_WAIT_TIMEOUT_ENV)
+                && hint.message.contains("controller-side")
+                && hint.message.contains("workload settings")
+        }));
         assert_eq!(
             seen_path.lock().expect("seen path").as_str(),
             "POST /jobs/job-123/cancel HTTP/1.1"

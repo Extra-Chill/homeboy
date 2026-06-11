@@ -29,7 +29,8 @@ use super::lab_args::{
 use super::lab_capabilities::lab_runner_capability_contract;
 use super::lab_command::lab_offload_command_prefix;
 use super::lab_env::{
-    build_lab_offload_env, forward_env_if_present, forward_release_ci_env, settings_env_diagnostics,
+    build_lab_offload_env, forward_env_if_present, forward_release_ci_env,
+    misplaced_runner_exec_wait_timeout_warning, settings_env_diagnostics,
 };
 use super::lab_plan::{base_lab_plan, disabled_select_runner_plan, with_step};
 pub use super::lab_selection::LabRunnerSelectionSource;
@@ -376,7 +377,7 @@ fn run_lab_offload_inner(
     selection: LabRunnerSelection,
     contract: LabOffloadCommand,
     mut plan: HomeboyPlan,
-    messages: Vec<String>,
+    mut messages: Vec<String>,
 ) -> Result<LabOffloadOutcome> {
     let runner_id = &selection.runner_id;
     let runner = load(runner_id)?;
@@ -435,6 +436,9 @@ fn run_lab_offload_inner(
     })?;
 
     let source_path = lab_offload_source_path(request.normalized_args)?;
+    if let Some(warning) = misplaced_runner_exec_wait_timeout_warning(request.normalized_args) {
+        messages.push(warning);
+    }
     let homeboy_path = runner.settings.homeboy_path.as_deref().unwrap_or("homeboy");
     let command_prefix = lab_offload_command_prefix(&source_path, homeboy_path);
     let capability_contract =
