@@ -744,7 +744,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_daemon_warning_includes_recovery_commands() {
+    fn stale_daemon_warning_includes_ordered_restart_recovery_commands() {
         let warning = RunnerStaleDaemonWarning::new(
             "homeboy-lab",
             "homeboy 0.201.3".to_string(),
@@ -754,10 +754,10 @@ mod tests {
         assert_eq!(warning.session_homeboy_version, "homeboy 0.201.3");
         assert_eq!(warning.current_homeboy_version, "homeboy 0.204.0");
         assert!(warning.message.contains("different Homeboy version"));
+        assert!(warning.message.contains("run recovery_commands in order"));
         assert_eq!(
             warning.recovery_commands,
             vec![
-                "homeboy runner connect homeboy-lab".to_string(),
                 "homeboy runner disconnect homeboy-lab".to_string(),
                 "homeboy runner connect homeboy-lab".to_string(),
             ]

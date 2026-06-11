@@ -397,13 +397,14 @@ fn runner_upgrade_final_detail(
     }
 
     if let Some(stale_daemon) = stale_daemon {
-        let remediation = stale_daemon
-            .recovery_commands
-            .first()
-            .cloned()
-            .unwrap_or_else(|| "homeboy runner connect <runner>".to_string());
+        let remediation = stale_daemon.recovery_commands.join(" && ");
+        let remediation = if remediation.is_empty() {
+            "homeboy runner disconnect <runner> && homeboy runner connect <runner>".to_string()
+        } else {
+            remediation
+        };
         parts.push(format!(
-            "connected runner daemon is stale: session reports {}, configured executable reports {}; refresh with `{}`",
+            "connected runner daemon is stale: session reports {}, configured executable reports {}; restart the active daemon with `{}`",
             stale_daemon.session_homeboy_version,
             stale_daemon.current_homeboy_version,
             remediation
