@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.117.8] - 2026-06-11
+
+### Fixed
+- fail fast when Codebox repo workspace is missing
+
 ## [2.117.7] - 2026-06-11
 
 ### Fixed
