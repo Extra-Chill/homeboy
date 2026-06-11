@@ -369,7 +369,7 @@ mod tests {
         assert_eq!(parsed.timeline[0].t_ms, 0);
         assert_eq!(parsed.span_definitions[0].id, "close_to_assertion");
         assert_eq!(parsed.assertions[0].id, "no-window-reopen");
-        assert_eq!(parsed.metrics["assertion_count"], serde_json::json!(1));
+        assert_eq!(parsed.metrics["assertion_count"], 1);
         assert_eq!(parsed.artifacts[0].path, "artifacts/main.log");
         assert_eq!(parsed.artifacts[0].kind.as_deref(), Some("log"));
     }
