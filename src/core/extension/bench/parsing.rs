@@ -89,6 +89,14 @@ pub fn parse_bench_results_file_with_artifact_context(
     path: &Path,
     rig_id: Option<&str>,
 ) -> Result<BenchResults> {
+    parse_bench_results_file_with_artifact_context_and_scenarios(path, rig_id, &[])
+}
+
+pub fn parse_bench_results_file_with_artifact_context_and_scenarios(
+    path: &Path,
+    rig_id: Option<&str>,
+    scenario_ids: &[String],
+) -> Result<BenchResults> {
     let content = std::fs::read_to_string(path).map_err(|e| {
         Error::internal_io(
             format!(
@@ -99,7 +107,7 @@ pub fn parse_bench_results_file_with_artifact_context(
             Some("bench.parsing.read".to_string()),
         )
     })?;
-    parse_bench_results_str_with_artifact_context(&content, rig_id)
+    parse_bench_results_str_with_artifact_context_and_scenarios(&content, rig_id, scenario_ids)
 }
 
 /// Parse a raw JSON string into a `BenchResults`.
@@ -110,6 +118,14 @@ pub fn parse_bench_results_str(raw: &str) -> Result<BenchResults> {
 fn parse_bench_results_str_with_artifact_context(
     raw: &str,
     rig_id: Option<&str>,
+) -> Result<BenchResults> {
+    parse_bench_results_str_with_artifact_context_and_scenarios(raw, rig_id, &[])
+}
+
+fn parse_bench_results_str_with_artifact_context_and_scenarios(
+    raw: &str,
+    rig_id: Option<&str>,
+    scenario_ids: &[String],
 ) -> Result<BenchResults> {
     let mut value: serde_json::Value = serde_json::from_str(raw).map_err(|e| {
         Error::internal_json(
@@ -129,6 +145,7 @@ fn parse_bench_results_str_with_artifact_context(
             object.remove("provenance");
         }
     }
+    filter_value_scenarios_by_ids(&mut value, scenario_ids);
     normalize_extension_sample_metrics(&mut value);
     let mut parsed: BenchResults = serde_json::from_value(value).map_err(|e| {
         Error::internal_json(
@@ -143,6 +160,26 @@ fn parse_bench_results_str_with_artifact_context(
     evaluate_spans(&mut parsed);
     artifact_validation::validate_artifact_paths(&parsed, rig_id)?;
     Ok(parsed)
+}
+
+fn filter_value_scenarios_by_ids(value: &mut serde_json::Value, scenario_ids: &[String]) {
+    if scenario_ids.is_empty() {
+        return;
+    }
+
+    let Some(scenarios) = value
+        .get_mut("scenarios")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return;
+    };
+
+    scenarios.retain(|scenario| {
+        scenario
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|id| scenario_ids.iter().any(|selected| selected == id))
+    });
 }
 
 fn normalize_extension_sample_metrics(value: &mut serde_json::Value) {
@@ -1103,6 +1140,82 @@ mod tests {
             err.details.get("id").and_then(|v| v.as_str()),
             Some("heavy")
         );
+    }
+
+    #[test]
+    fn selected_parse_ignores_unselected_duplicate_scenario_ids() {
+        let raw = r#"{
+            "component_id": "example",
+            "iterations": 1,
+            "scenarios": [
+                {
+                    "id": "target",
+                    "file": "tests/bench/target.php",
+                    "iterations": 1,
+                    "metrics": { "p95_ms": 5.0 }
+                },
+                {
+                    "id": "unrelated-duplicate",
+                    "file": "tests/bench/first.php",
+                    "iterations": 1,
+                    "metrics": { "p95_ms": 10.0 }
+                },
+                {
+                    "id": "unrelated-duplicate",
+                    "file": "tests/bench/second.php",
+                    "iterations": 1,
+                    "metrics": { "p95_ms": 20.0 }
+                }
+            ]
+        }"#;
+
+        let selected = vec!["target".to_string()];
+        let parsed = parse_bench_results_str_with_artifact_context_and_scenarios(
+            raw,
+            None,
+            &selected,
+        )
+        .unwrap();
+
+        assert_eq!(parsed.scenarios.len(), 1);
+        assert_eq!(parsed.scenarios[0].id, "target");
+    }
+
+    #[test]
+    fn selected_parse_still_rejects_selected_duplicate_scenario_ids() {
+        let raw = r#"{
+            "component_id": "example",
+            "iterations": 1,
+            "scenarios": [
+                {
+                    "id": "target",
+                    "file": "tests/bench/target-one.php",
+                    "iterations": 1,
+                    "metrics": { "p95_ms": 5.0 }
+                },
+                {
+                    "id": "target",
+                    "file": "tests/bench/target-two.php",
+                    "iterations": 1,
+                    "metrics": { "p95_ms": 10.0 }
+                }
+            ]
+        }"#;
+
+        let selected = vec!["target".to_string()];
+        let err = parse_bench_results_str_with_artifact_context_and_scenarios(
+            raw,
+            None,
+            &selected,
+        )
+        .unwrap_err();
+        let problem = err
+            .details
+            .get("problem")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        assert!(problem.contains("duplicate bench scenario id `target`"));
     }
 
     #[test]
