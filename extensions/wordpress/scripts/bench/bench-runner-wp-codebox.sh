@@ -419,7 +419,7 @@ homeboy_wp_codebox_filter_extra_bench_workloads() {
     export HOMEBOY_BENCH_EXTRA_WORKLOADS="$filtered_value"
 }
 
-homeboy_wp_codebox_fail_on_duplicate_selected_rig_workloads() {
+homeboy_wp_codebox_apply_selected_rig_workload_overlays() {
     local workloads_value="${HOMEBOY_BENCH_EXTRA_WORKLOADS:-}"
     local selected_value="${HOMEBOY_BENCH_SCENARIOS:-}"
     [ -n "$workloads_value" ] || return 0
@@ -428,7 +428,10 @@ homeboy_wp_codebox_fail_on_duplicate_selected_rig_workloads() {
     local bench_dir="${PLUGIN_PATH}/tests/bench"
     [ -d "$bench_dir" ] || return 0
 
-    local workload_path workload_name scenario_id component_workload
+    local overlay_path=""
+    local overlaid_ids=()
+    local remaining_paths=()
+    local workload_path workload_name scenario_id component_workload overlay_workload
     IFS=':' read -r -a workload_paths <<< "$workloads_value"
     for workload_path in "${workload_paths[@]}"; do
         [ -n "$workload_path" ] || continue
@@ -436,14 +439,35 @@ homeboy_wp_codebox_fail_on_duplicate_selected_rig_workloads() {
         scenario_id="$(homeboy_wp_codebox_workload_scenario_id "$workload_name")"
         component_workload="${bench_dir}/${scenario_id}.php"
         if [ -f "$component_workload" ]; then
-            echo "Error: duplicate WordPress bench scenario id '${scenario_id}' is selected from both a rig workload and an in-tree workload." >&2
+            if [ -z "$overlay_path" ]; then
+                overlay_path="${ARTIFACTS_DIR%/}/component-plugin-rig-workload-overlay"
+                mkdir -p "$overlay_path"
+                cp -R "${PLUGIN_PATH}/." "$overlay_path/"
+            fi
+            overlay_workload="${overlay_path}/tests/bench/${scenario_id}.php"
+            mkdir -p "$(dirname "$overlay_workload")"
+            cp "$workload_path" "$overlay_workload"
+            overlaid_ids+=("$scenario_id")
+            echo "Using selected rig workload '${scenario_id}' over duplicate in-tree workload." >&2
             echo "  Rig workload: ${workload_path}" >&2
             echo "  In-tree workload: ${component_workload}" >&2
-            echo "Rename one workload or select a unique scenario id so the rig workload cannot be shadowed." >&2
-            FAILED_STEP="WP Codebox bench workload setup"
-            exit 1
+        else
+            remaining_paths+=("$workload_path")
         fi
     done
+
+    if [ ${#overlaid_ids[@]} -gt 0 ]; then
+        PLUGIN_PATH="$overlay_path"
+        export PLUGIN_PATH
+        HOMEBOY_BENCH_RIG_OVERLAY_SCENARIOS=$(IFS=','; printf '%s' "${overlaid_ids[*]}")
+        export HOMEBOY_BENCH_RIG_OVERLAY_SCENARIOS
+
+        local remaining_value=""
+        if [ ${#remaining_paths[@]} -gt 0 ]; then
+            remaining_value=$(IFS=':'; printf '%s' "${remaining_paths[*]}")
+        fi
+        export HOMEBOY_BENCH_EXTRA_WORKLOADS="$remaining_value"
+    fi
 }
 
 homeboy_wp_codebox_extra_workload_scenarios_json() {
@@ -694,7 +718,6 @@ homeboy_wp_codebox_compile_bootstrap_files
 homeboy_wp_codebox_compile_bootstrap_steps
 homeboy_wp_codebox_compile_prepare_steps
 homeboy_wp_codebox_filter_extra_bench_workloads
-homeboy_wp_codebox_fail_on_duplicate_selected_rig_workloads
 
 WP_CODEBOX_WORDPRESS_VERSION=""
 if [ "$settings_json" != "{}" ]; then
@@ -731,6 +754,8 @@ if [ -z "$ARTIFACTS_DIR" ]; then
     ARTIFACTS_DIR=$(mktemp -d "${PLUGIN_PATH}/.homeboy/wp-codebox-bench-artifacts.XXXXXX")
 fi
 mkdir -p "$ARTIFACTS_DIR"
+
+homeboy_wp_codebox_apply_selected_rig_workload_overlays
 
 homeboy_wp_codebox_run_prepare_steps
 
@@ -1082,6 +1107,26 @@ fi
 
 mkdir -p "$(dirname "$RESULTS_FILE")"
 jq '.benchResults | del(.warmup_iterations)' "$WP_CODEBOX_TMPFILE" > "$RESULTS_FILE"
+
+if [ -n "${HOMEBOY_BENCH_RIG_OVERLAY_SCENARIOS:-}" ]; then
+    OVERLAY_RESULTS_FILE=$(mktemp "${TMPDIR:-/tmp}/homeboy-wp-codebox-rig-overlay-results.XXXXXX")
+    if jq --arg scenarios "$HOMEBOY_BENCH_RIG_OVERLAY_SCENARIOS" '
+        ($scenarios | split(",") | map(select(. != ""))) as $rigIds
+        | .scenarios = ((.scenarios // []) | map(
+            if (.id as $id | $rigIds | index($id)) then
+                .source = "rig"
+                | .provenance = ((.provenance // {}) + {source: "rig-overlay"})
+            else
+                .
+            end
+        ))
+    ' "$RESULTS_FILE" > "$OVERLAY_RESULTS_FILE"; then
+        mv "$OVERLAY_RESULTS_FILE" "$RESULTS_FILE"
+    else
+        rm -f "$OVERLAY_RESULTS_FILE"
+        echo "Warning: failed to mark selected rig overlay scenarios in bench results." >&2
+    fi
+fi
 
 PREPARED_DEPENDENCIES_METADATA_FILE="${ARTIFACTS_DIR%/}/prepared-bench-dependencies.json"
 if [ -f "$PREPARED_DEPENDENCIES_METADATA_FILE" ]; then
