@@ -101,6 +101,9 @@ impl Commands {
                 true,
                 LAB_NO_EXTRA_TOOLS,
             ),
+            Commands::Extension(args) if args.is_update_command() => {
+                lab_portable_workload_contract("extension update", None, false, LAB_NO_EXTRA_TOOLS)
+            }
             Commands::Fleet(args) if args.is_hot_resource_command() => {
                 lab_local_only_contract("fleet exec", FLEET_EXEC_LAB_UNSUPPORTED_REASON)
             }
