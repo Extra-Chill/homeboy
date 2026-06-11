@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.118.0] - 2026-06-11
+
+### Added
+- summarize webperf evidence artifacts
+
 ## [2.117.9] - 2026-06-11
 
 ### Fixed
