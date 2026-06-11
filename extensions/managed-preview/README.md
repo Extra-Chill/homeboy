@@ -4,6 +4,58 @@
 
 Homeboy core owns the generic lifecycle contract: start a local service, supervise an optional backend command, record logs, and expose a `homeboy/preview-url/v1` artifact. This extension owns provider command glue that can be used with Homeboy's generic `--public-tunnel-backend command` seam.
 
+## Browser Trace Public Preview Preflight
+
+Browser trace workloads that require a public HTTPS origin can use
+`scripts/public-preview-preflight.mjs` as the shared contract between the runtime,
+the tunnel operator, and the trace runner. The helper accepts or allocates a
+selected preview port, normalizes the local preview origin and public URL,
+preflights both routes, and writes redacted `homeboy/public-preview-preflight/v1`
+metadata for trace artifacts.
+
+Prepare a runtime port before the service starts:
+
+```sh
+node scripts/public-preview-preflight.mjs \
+  --allocate-port \
+  --prepare-only \
+  --metadata-file "$HOMEBOY_TRACE_ARTIFACT_DIR/public-preview-prepared.json"
+```
+
+The prepared metadata has `status: "prepared"`; pass its
+`local_preview.port` back into the runtime and tunnel command. Before browser
+launch, rerun the helper with the selected port and public URL so it can fail
+fast on routing mismatches.
+
+```sh
+node scripts/public-preview-preflight.mjs \
+  --preview-port 49822 \
+  --local-url http://127.0.0.1:49822 \
+  --public-url https://public-preview.example/runs/run-123 \
+  --tunnel-provider traforo \
+  --tunnel-session-id run-123 \
+  --preflight-path / \
+  --metadata-file "$HOMEBOY_TRACE_ARTIFACT_DIR/public-preview.json"
+```
+
+The helper fails before browser launch when:
+
+- the public URL is not HTTPS;
+- the selected preview port does not match the local runtime URL;
+- the local runtime is not reachable on the selected port;
+- the public URL does not return a successful preflight response; or
+- an expected status/text check does not match both local and public routes.
+
+The metadata intentionally records only redacted URLs, origins, port/session
+identifiers, response status, content type, body byte counts, and body hashes.
+Probe bodies, credentials, query strings, and fragments are not written.
+
+This helper does **not** own tunnel process lifecycle. Homeboy core, an operator
+wrapper, or a future tunnel provider is responsible for starting and keeping the
+SSH forward / Traforo / broker session alive. `managed-preview` owns the
+upstream-facing diagnostics contract so browser trace rigs can opt in without
+copying custom environment-variable glue.
+
 ## Hostname-Preserving Broker Backend
 
 Use the helper as Homeboy's backend command when a preview broker can create a reviewer-accessible session while preserving the browser-effective origin inside that session:
