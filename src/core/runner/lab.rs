@@ -213,6 +213,41 @@ fn is_full_hex_sha(value: &str) -> bool {
     value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+fn requested_lab_workspace_sync_mode(
+    policy: LabOffloadWorkspaceModePolicy,
+    args: &[String],
+) -> RunnerWorkspaceSyncMode {
+    match policy {
+        LabOffloadWorkspaceModePolicy::Git => RunnerWorkspaceSyncMode::Git,
+        LabOffloadWorkspaceModePolicy::ChangedSinceGitElseSnapshot => {
+            if lab_offload_changed_since_ref(args).is_some() {
+                RunnerWorkspaceSyncMode::Git
+            } else {
+                RunnerWorkspaceSyncMode::Snapshot
+            }
+        }
+    }
+}
+
+fn lab_workspace_sync_mode(
+    policy: LabOffloadWorkspaceModePolicy,
+    args: &[String],
+    source_path: &Path,
+) -> Result<RunnerWorkspaceSyncMode> {
+    let requested = requested_lab_workspace_sync_mode(policy, args);
+    if requested != RunnerWorkspaceSyncMode::Git {
+        return Ok(requested);
+    }
+
+    let remote_url =
+        super::workspace::git_output(source_path, &["config", "--get", "remote.origin.url"])?;
+    if super::source_materialization::requires_controller_routed_workspace_sync(&remote_url) {
+        return Ok(RunnerWorkspaceSyncMode::Snapshot);
+    }
+
+    Ok(requested)
+}
+
 pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadOutcome> {
     let unsupported_runner_error = |runner_id: &str, message: String| {
         Error::validation_invalid_argument(
@@ -523,16 +558,11 @@ fn run_lab_offload_inner(
     }
 
     let capability_preflight: Option<RunnerCapabilityPreflight> = capability_plan.map(Into::into);
-    let sync_mode = match contract.workspace_mode_policy {
-        LabOffloadWorkspaceModePolicy::Git => RunnerWorkspaceSyncMode::Git,
-        LabOffloadWorkspaceModePolicy::ChangedSinceGitElseSnapshot => {
-            if lab_offload_changed_since_ref(request.normalized_args).is_some() {
-                RunnerWorkspaceSyncMode::Git
-            } else {
-                RunnerWorkspaceSyncMode::Snapshot
-            }
-        }
-    };
+    let sync_mode = lab_workspace_sync_mode(
+        contract.workspace_mode_policy,
+        request.normalized_args,
+        &source_path,
+    )?;
     let changed_since_preflight = if sync_mode == RunnerWorkspaceSyncMode::Git {
         prepare_git_lab_offload_changed_since(request.normalized_args, &source_path)?
     } else {
@@ -1437,6 +1467,66 @@ mod tests {
         ]);
 
         assert_eq!(selected, Some("refs/pull/5530/head".to_string()));
+    }
+
+    #[test]
+    fn lab_git_workspace_sync_uses_snapshot_for_private_proxied_sources() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .status()
+            .expect("init git repo");
+        std::process::Command::new("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "git@github.a8c.com:Automattic/a8c-intelligence.git",
+            ])
+            .current_dir(dir.path())
+            .status()
+            .expect("add origin");
+
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+        ];
+        let mode = lab_workspace_sync_mode(LabOffloadWorkspaceModePolicy::Git, &args, dir.path())
+            .expect("sync mode");
+
+        assert_eq!(mode, RunnerWorkspaceSyncMode::Snapshot);
+    }
+
+    #[test]
+    fn lab_git_workspace_sync_keeps_git_for_public_sources() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .status()
+            .expect("init git repo");
+        std::process::Command::new("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/Extra-Chill/homeboy.git",
+            ])
+            .current_dir(dir.path())
+            .status()
+            .expect("add origin");
+
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+        ];
+        let mode = lab_workspace_sync_mode(LabOffloadWorkspaceModePolicy::Git, &args, dir.path())
+            .expect("sync mode");
+
+        assert_eq!(mode, RunnerWorkspaceSyncMode::Git);
     }
 
     #[test]
