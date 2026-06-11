@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.119.13] - 2026-06-11
+
+### Changed
+- Use WP Codebox runner workspace preparation
+
 ## [2.119.12] - 2026-06-11
 
 ### Fixed
