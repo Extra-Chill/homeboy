@@ -165,6 +165,8 @@ const output = {
     dry_run: 1,
   },
   metadata: {
+    success_status: 'write_without_pr',
+    file_written: true,
     provider: 'example-provider',
     model: 'example-model',
     agent_slug: 'wp-codebox-smoke-agent',
@@ -178,6 +180,7 @@ const output = {
     },
   },
 }
+const warningPrefixedOutput = '<br />\n<b>Warning</b>: fixture warning before JSON<br />\n' + JSON.stringify(output)
 const transcript = {
   schema: 'wp-codebox/agent-transcript/v1',
   executions: includeLegacyOutput ? [{
@@ -185,9 +188,9 @@ const transcript = {
     command: 'wordpress.run-php',
     recipeCommand: 'wp-codebox.agent-sandbox-run',
     exitCode: 0,
-    stdout: JSON.stringify({ output: JSON.stringify(output) }),
+    stdout: JSON.stringify({ output: warningPrefixedOutput }),
     stderr: '',
-    parsed: { output: JSON.stringify(output) },
+    parsed: { output: warningPrefixedOutput },
   }] : [],
 }
 const agentResult = {
@@ -309,7 +312,9 @@ runtime_manifest_artifact=$(jq -r "$scenario | .artifacts.wp_codebox_runtime_ref
 runtime_manifest_schema=$(jq -r "$scenario | .metadata.wp_codebox.runtime_reference_manifest.schema // \"missing\"" "$RESULTS_TMPFILE")
 runtime_manifest_secret=$(jq -r "$scenario | .metadata.wp_codebox.runtime_reference_manifest.apiToken // \"missing\"" "$RESULTS_TMPFILE")
 canonical_transcript_path=$(jq -r "$scenario | .metadata.wp_codebox.canonical_artifacts.transcript // \"\"" "$RESULTS_TMPFILE")
-if [ "$wp_codebox_success" != "true" ] || [ -z "$artifact_dir" ] || [ "$review_schema" != "wp-codebox/artifact-review/v1" ] || [ "$changed_files_schema" != "wp-codebox/changed-files/v1" ] || [ "$review_artifact" != "review" ] || [ "$patch_artifact" != "patch" ] || [ "$runtime_manifest_artifact" != "runtime-reference-manifest" ] || [ "$runtime_manifest_schema" != "wp-codebox/runtime-reference-manifest-fixture/v1" ] || [ "$runtime_manifest_secret" != "[redacted]" ] || [ "$canonical_transcript_path" != "$TRANSCRIPT_HOST_DIR/transcript.json" ]; then
+success_status=$(jq -r "$scenario | .metadata.success_status // \"missing\"" "$RESULTS_TMPFILE")
+file_written=$(jq -r "$scenario | .metadata.file_written // false" "$RESULTS_TMPFILE")
+if [ "$wp_codebox_success" != "true" ] || [ -z "$artifact_dir" ] || [ "$review_schema" != "wp-codebox/artifact-review/v1" ] || [ "$changed_files_schema" != "wp-codebox/changed-files/v1" ] || [ "$review_artifact" != "review" ] || [ "$patch_artifact" != "patch" ] || [ "$runtime_manifest_artifact" != "runtime-reference-manifest" ] || [ "$runtime_manifest_schema" != "wp-codebox/runtime-reference-manifest-fixture/v1" ] || [ "$runtime_manifest_secret" != "[redacted]" ] || [ "$canonical_transcript_path" != "$TRANSCRIPT_HOST_DIR/transcript.json" ] || [ "$success_status" != "write_without_pr" ] || [ "$file_written" != "true" ]; then
     echo "ERROR: wp_codebox metadata missing (success=$wp_codebox_success artifact_dir=$artifact_dir)" >&2
     cat "$RESULTS_TMPFILE" >&2
     exit 1
