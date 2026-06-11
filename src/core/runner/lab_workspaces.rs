@@ -121,6 +121,38 @@ pub(super) fn workspace_mapping_entry_for_git_dependency(
     }
 }
 
+pub(super) fn workspace_mapping_entries_for_git_dependency(
+    role: impl Into<String>,
+    dependency: &RunnerGitDependencyMaterializationOutput,
+) -> Vec<LabWorkspaceMappingEntry> {
+    let role = role.into();
+    let mut entries = vec![workspace_mapping_entry_for_git_dependency(
+        role.clone(),
+        dependency,
+    )];
+    if let Some(subpath) = dependency
+        .required_subpath
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        entries.push(LabWorkspaceMappingEntry {
+            role,
+            local_path: Path::new(&dependency.local_path)
+                .join(subpath)
+                .display()
+                .to_string(),
+            remote_path: Path::new(&dependency.remote_path)
+                .join(subpath)
+                .display()
+                .to_string(),
+            sync_mode: dependency.sync_mode.label().to_string(),
+            snapshot_identity: dependency.head.clone(),
+            dependency_freshness: None,
+        });
+    }
+    entries
+}
+
 pub(super) fn lab_workspace_mapping_metadata(
     workspace_mapping: &[LabWorkspaceMappingEntry],
 ) -> serde_json::Value {
@@ -743,7 +775,7 @@ mod provider_config_candidate_paths_tests {
         agent_task_plan_extra_workspaces, preflight_provider_config_source_cli_dependencies,
         provider_config_candidate_paths, provider_config_extra_workspaces,
         rig_component_path_env_extra_workspaces_from_entries,
-        workspace_mapping_entry_for_git_dependency,
+        workspace_mapping_entries_for_git_dependency,
     };
     use crate::core::runner::{RunnerGitDependencyMaterializationOutput, RunnerWorkspaceSyncMode};
 
@@ -1068,11 +1100,11 @@ mod provider_config_candidate_paths_tests {
     }
 
     #[test]
-    fn rig_dependency_workspace_mapping_uses_dependency_sync_mode() {
+    fn rig_dependency_workspace_mapping_uses_dependency_sync_mode_and_subpath() {
         let dependency = RunnerGitDependencyMaterializationOutput {
-            local_path: "/local/playground-site-sync".to_string(),
-            remote_path: "/remote/playground-site-sync".to_string(),
-            remote_url: "git@github.a8c.com:Automattic/playground-site-sync.git".to_string(),
+            local_path: "/local/example-repo".to_string(),
+            remote_path: "/remote/example-repo".to_string(),
+            remote_url: "https://example.test/example/repo.git".to_string(),
             head: "snapshot:abc".to_string(),
             status: "snapshotted".to_string(),
             branch: Some("main".to_string()),
@@ -1081,27 +1113,40 @@ mod provider_config_candidate_paths_tests {
             upstream_sha: Some("abc".to_string()),
             upstream: Some("origin/main".to_string()),
             pinned_ref: None,
+            required_subpath: Some("packages/component".to_string()),
             used_pinned_ref: false,
             sync_mode: RunnerWorkspaceSyncMode::Snapshot,
             files: 7,
             bytes: 42,
         };
 
-        let entry =
-            workspace_mapping_entry_for_git_dependency("rig_component_dependency", &dependency);
+        let entries =
+            workspace_mapping_entries_for_git_dependency("rig_component_dependency", &dependency);
 
-        assert_eq!(entry.local_path, "/local/playground-site-sync");
-        assert_eq!(entry.remote_path, "/remote/playground-site-sync");
-        assert_eq!(entry.sync_mode, "snapshot");
-        assert_eq!(entry.snapshot_identity, "snapshot:abc");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].local_path, "/local/example-repo");
+        assert_eq!(entries[0].remote_path, "/remote/example-repo");
+        assert_eq!(entries[0].sync_mode, "snapshot");
+        assert_eq!(entries[0].snapshot_identity, "snapshot:abc");
         assert_eq!(
-            entry.dependency_freshness.as_ref().unwrap()["upstream"],
+            entries[0].dependency_freshness.as_ref().unwrap()["upstream"],
             "origin/main"
         );
         assert_eq!(
-            entry.dependency_freshness.as_ref().unwrap()["after_sha"],
+            entries[0].dependency_freshness.as_ref().unwrap()["after_sha"],
             "abc"
         );
+        assert_eq!(
+            entries[1].local_path,
+            "/local/example-repo/packages/component"
+        );
+        assert_eq!(
+            entries[1].remote_path,
+            "/remote/example-repo/packages/component"
+        );
+        assert_eq!(entries[1].sync_mode, "snapshot");
+        assert_eq!(entries[1].snapshot_identity, "snapshot:abc");
+        assert!(entries[1].dependency_freshness.is_none());
     }
 
     #[test]

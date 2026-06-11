@@ -237,20 +237,87 @@ pub(super) fn sync_lab_offload_rig_component_dependencies(
     Ok(synced)
 }
 
+pub(super) fn lab_offload_rig_component_checkout_root(args: &[String]) -> Result<Option<PathBuf>> {
+    let Some(path_override) = component_path_override(args) else {
+        return Ok(None);
+    };
+    let rig_ids = lab_offload_rig_ids(args);
+    if rig_ids.len() != 1 {
+        return Ok(None);
+    }
+    let spec = rig::load(&rig_ids[0])?;
+    if spec.components.len() != 1 {
+        return Ok(None);
+    }
+    let Some((component_id, component)) = spec.components.iter().next() else {
+        return Ok(None);
+    };
+    let declared_checkout_root = component
+        .checkout_root
+        .as_deref()
+        .unwrap_or(component.path.as_str());
+    let declared_required_subpath = required_component_subpath(
+        Path::new(&expanded_local_path(&spec, declared_checkout_root)),
+        Path::new(&expanded_local_path(&spec, &component.path)),
+        &rig_ids[0],
+        component_id,
+    )?;
+    Ok(Some(PathBuf::from(
+        checkout_root_for_component_path_override(
+            &expanded_local_path(&spec, &path_override),
+            declared_required_subpath.as_deref(),
+        ),
+    )))
+}
+
 pub(super) fn lab_offload_rig_component_dependencies(
     args: &[String],
     primary_workspace: Option<(&str, &str)>,
 ) -> Result<Vec<RigComponentDependency>> {
     let mut dependencies = Vec::new();
+    let component_path_override = component_path_override(args);
     for rig_id in lab_offload_rig_ids(args) {
         let spec = rig::load(&rig_id)?;
+        let single_component = spec.components.len() == 1;
         for (component_id, component) in &spec.components {
-            let checkout_root = component
+            let declared_checkout_root = component
                 .checkout_root
                 .as_deref()
                 .unwrap_or(component.path.as_str());
-            let local_checkout_root = expanded_local_path(&spec, checkout_root);
-            let local_component_path = expanded_local_path(&spec, &component.path);
+            let declared_local_checkout_root = expanded_local_path(&spec, declared_checkout_root);
+            let declared_local_component_path = expanded_local_path(&spec, &component.path);
+            let declared_required_subpath = required_component_subpath(
+                Path::new(&declared_local_checkout_root),
+                Path::new(&declared_local_component_path),
+                &rig_id,
+                component_id,
+            )?;
+            let (checkout_root, local_checkout_root, local_component_path) = if single_component {
+                if let Some(path_override) = component_path_override.as_deref() {
+                    let local_component_path = expanded_local_path(&spec, path_override);
+                    let local_checkout_root = checkout_root_for_component_path_override(
+                        &local_component_path,
+                        declared_required_subpath.as_deref(),
+                    );
+                    (
+                        local_checkout_root.clone(),
+                        local_checkout_root,
+                        local_component_path,
+                    )
+                } else {
+                    (
+                        declared_checkout_root.to_string(),
+                        declared_local_checkout_root,
+                        declared_local_component_path,
+                    )
+                }
+            } else {
+                (
+                    declared_checkout_root.to_string(),
+                    declared_local_checkout_root,
+                    declared_local_component_path,
+                )
+            };
             let required_subpath = required_component_subpath(
                 Path::new(&local_checkout_root),
                 Path::new(&local_component_path),
@@ -261,7 +328,7 @@ pub(super) fn lab_offload_rig_component_dependencies(
                 rig_id: rig_id.clone(),
                 component_id: component_id.clone(),
                 remote_checkout_root: remote_checkout_root_for_local(
-                    checkout_root,
+                    &checkout_root,
                     &local_checkout_root,
                     primary_workspace,
                 ),
@@ -274,6 +341,35 @@ pub(super) fn lab_offload_rig_component_dependencies(
         }
     }
     Ok(dependencies)
+}
+
+fn component_path_override(args: &[String]) -> Option<String> {
+    let mut iter = args.iter().skip(1).peekable();
+    while let Some(arg) = iter.next() {
+        if arg == "--" {
+            return None;
+        }
+        if arg == "--path" {
+            return iter.next().cloned();
+        }
+        if let Some(path) = arg.strip_prefix("--path=") {
+            return Some(path.to_string());
+        }
+    }
+    None
+}
+
+fn checkout_root_for_component_path_override(
+    local_component_path: &str,
+    required_subpath: Option<&str>,
+) -> String {
+    let mut checkout_root = PathBuf::from(local_component_path);
+    if let Some(required_subpath) = required_subpath {
+        for _ in Path::new(required_subpath).components() {
+            checkout_root.pop();
+        }
+    }
+    checkout_root.display().to_string()
 }
 
 fn expanded_local_path(spec: &rig::RigSpec, value: &str) -> String {
@@ -481,6 +577,106 @@ mod tests {
                 dependencies[0].required_subpath.as_deref(),
                 Some("plugins/woocommerce")
             );
+        });
+    }
+
+    #[test]
+    fn bench_path_override_updates_single_component_dependency_checkout_root() {
+        crate::test_support::with_isolated_home(|home| {
+            let checkout = home.path().join("Developer/example-repo");
+            let override_checkout = home.path().join("Developer/example-repo@bench-evidence");
+            let override_component = override_checkout.join("packages/example-component");
+            std::fs::create_dir_all(checkout.join("packages/example-component")).expect("checkout");
+            std::fs::create_dir_all(&override_component).expect("override checkout");
+            let rig_dir = crate::core::paths::rigs().expect("rig dir");
+            std::fs::create_dir_all(&rig_dir).expect("create rig dir");
+            std::fs::write(
+                rig_dir.join("example-monorepo.json"),
+                serde_json::json!({
+                    "id": "example-monorepo",
+                    "components": {
+                        "example-component": {
+                            "path": format!("{}/packages/example-component", checkout.display()),
+                            "checkout_root": checkout.display().to_string(),
+                            "remote_url": "https://example.test/example/repo.git"
+                        }
+                    }
+                })
+                .to_string(),
+            )
+            .expect("save rig");
+
+            let dependencies = lab_offload_rig_component_dependencies(
+                &[
+                    "homeboy".to_string(),
+                    "bench".to_string(),
+                    "--rig".to_string(),
+                    "example-monorepo".to_string(),
+                    "--path".to_string(),
+                    override_component.display().to_string(),
+                ],
+                None,
+            )
+            .expect("dependencies");
+
+            assert_eq!(dependencies.len(), 1);
+            assert_eq!(dependencies[0].component_id, "example-component");
+            assert_eq!(
+                dependencies[0].local_checkout_root,
+                override_checkout.display().to_string()
+            );
+            assert_eq!(
+                dependencies[0].declared_checkout_root,
+                override_checkout.display().to_string()
+            );
+            assert_eq!(
+                dependencies[0].remote_checkout_root,
+                override_checkout.display().to_string()
+            );
+            assert_eq!(
+                dependencies[0].required_subpath.as_deref(),
+                Some("packages/example-component")
+            );
+        });
+    }
+
+    #[test]
+    fn bench_path_override_derives_lab_source_checkout_root() {
+        crate::test_support::with_isolated_home(|home| {
+            let checkout = home.path().join("Developer/example-repo");
+            let override_checkout = home.path().join("Developer/example-repo@bench-evidence");
+            let override_component = override_checkout.join("packages/example-component");
+            std::fs::create_dir_all(checkout.join("packages/example-component")).expect("checkout");
+            std::fs::create_dir_all(&override_component).expect("override checkout");
+            let rig_dir = crate::core::paths::rigs().expect("rig dir");
+            std::fs::create_dir_all(&rig_dir).expect("create rig dir");
+            std::fs::write(
+                rig_dir.join("example-monorepo.json"),
+                serde_json::json!({
+                    "id": "example-monorepo",
+                    "components": {
+                        "example-component": {
+                            "path": format!("{}/packages/example-component", checkout.display()),
+                            "checkout_root": checkout.display().to_string()
+                        }
+                    }
+                })
+                .to_string(),
+            )
+            .expect("save rig");
+
+            let source_path = lab_offload_rig_component_checkout_root(&[
+                "homeboy".to_string(),
+                "bench".to_string(),
+                "--rig".to_string(),
+                "example-monorepo".to_string(),
+                "--path".to_string(),
+                override_component.display().to_string(),
+            ])
+            .expect("source path")
+            .expect("rig source path");
+
+            assert_eq!(source_path, override_checkout);
         });
     }
 

@@ -32,6 +32,8 @@ pub(crate) struct RunnerGitDependencyMaterializationOutput {
     pub upstream: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pinned_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub required_subpath: Option<String>,
     pub used_pinned_ref: bool,
     pub sync_mode: RunnerWorkspaceSyncMode,
     pub files: usize,
@@ -99,6 +101,7 @@ pub(crate) fn materialize_git_dependency(
         upstream_sha: freshness.upstream_sha,
         upstream: freshness.upstream,
         pinned_ref: freshness.pinned_ref,
+        required_subpath: options.required_subpath,
         used_pinned_ref: freshness.used_pinned_ref,
         sync_mode: RunnerWorkspaceSyncMode::Snapshot,
         files: stats.files,

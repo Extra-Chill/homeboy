@@ -42,8 +42,8 @@ use super::lab_selection::{
 use super::lab_workspaces::{
     agent_task_plan_extra_workspaces, lab_extra_workspaces, lab_workspace_mapping_metadata,
     preflight_provider_config_source_cli_dependencies, provider_config_extra_workspaces,
-    rig_component_path_env_extra_workspaces, sync_extra_lab_workspaces, workspace_mapping_entry,
-    workspace_mapping_entry_for_git_dependency,
+    rig_component_path_env_extra_workspaces, sync_extra_lab_workspaces,
+    workspace_mapping_entries_for_git_dependency, workspace_mapping_entry,
 };
 
 pub struct LabOffloadRequest<'a> {
@@ -515,7 +515,9 @@ fn run_lab_offload_inner(
         )
     })?;
 
-    let source_path = lab_offload_source_path(request.normalized_args)?;
+    let source_path =
+        rig_materialization::lab_offload_rig_component_checkout_root(request.normalized_args)?
+            .unwrap_or(lab_offload_source_path(request.normalized_args)?);
     if let Some(warning) = misplaced_runner_exec_wait_timeout_warning(request.normalized_args) {
         messages.push(warning);
     }
@@ -717,7 +719,7 @@ fn run_lab_offload_inner(
     )?;
     if !synced_rig_dependencies.is_empty() {
         for dependency in &synced_rig_dependencies {
-            workspace_mapping.push(workspace_mapping_entry_for_git_dependency(
+            workspace_mapping.extend(workspace_mapping_entries_for_git_dependency(
                 "rig_component_dependency",
                 dependency,
             ));
@@ -776,7 +778,7 @@ fn run_lab_offload_inner(
 
     let mut command = command_prefix.argv;
     command.extend(
-        rewrite_lab_offload_args(&remapped_args, &remote_cwd)
+        rewrite_lab_offload_args(&remapped_args, &remote_cwd, &path_remaps)
             .into_iter()
             .skip(1),
     );
