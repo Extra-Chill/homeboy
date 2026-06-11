@@ -171,7 +171,6 @@ const output = {
     eval_artifact: {
       run: [{ workflow_run_url: 'https://github.com/example/repo/actions/runs/456' }],
     },
-    transcript_artifacts: [[{ json: '/tmp/wp-codebox-smoke-transcript.json', summary: 'Nested transcript fixture' }]],
     job_artifact_exports: [{ pr_url: 'https://github.com/example/repo/pull/123', branch: 'agent-artifacts/example' }],
     engine_data: {
       ok: true,
@@ -306,7 +305,8 @@ patch_artifact=$(jq -r "$scenario | .artifacts.wp_codebox_patch.kind // \"missin
 runtime_manifest_artifact=$(jq -r "$scenario | .artifacts.wp_codebox_runtime_reference_manifest.kind // \"missing\"" "$RESULTS_TMPFILE")
 runtime_manifest_schema=$(jq -r "$scenario | .metadata.wp_codebox.runtime_reference_manifest.schema // \"missing\"" "$RESULTS_TMPFILE")
 runtime_manifest_secret=$(jq -r "$scenario | .metadata.wp_codebox.runtime_reference_manifest.apiToken // \"missing\"" "$RESULTS_TMPFILE")
-if [ "$wp_codebox_success" != "true" ] || [ -z "$artifact_dir" ] || [ "$review_schema" != "wp-codebox/artifact-review/v1" ] || [ "$changed_files_schema" != "wp-codebox/changed-files/v1" ] || [ "$review_artifact" != "review" ] || [ "$patch_artifact" != "patch" ] || [ "$runtime_manifest_artifact" != "runtime-reference-manifest" ] || [ "$runtime_manifest_schema" != "wp-codebox/runtime-reference-manifest-fixture/v1" ] || [ "$runtime_manifest_secret" != "[redacted]" ]; then
+canonical_transcript_path=$(jq -r "$scenario | .metadata.wp_codebox.canonical_artifacts.transcript // \"\"" "$RESULTS_TMPFILE")
+if [ "$wp_codebox_success" != "true" ] || [ -z "$artifact_dir" ] || [ "$review_schema" != "wp-codebox/artifact-review/v1" ] || [ "$changed_files_schema" != "wp-codebox/changed-files/v1" ] || [ "$review_artifact" != "review" ] || [ "$patch_artifact" != "patch" ] || [ "$runtime_manifest_artifact" != "runtime-reference-manifest" ] || [ "$runtime_manifest_schema" != "wp-codebox/runtime-reference-manifest-fixture/v1" ] || [ "$runtime_manifest_secret" != "[redacted]" ] || [ "$canonical_transcript_path" != "$artifact_dir/files/transcript.json" ]; then
     echo "ERROR: wp_codebox metadata missing (success=$wp_codebox_success artifact_dir=$artifact_dir)" >&2
     cat "$RESULTS_TMPFILE" >&2
     exit 1
@@ -335,7 +335,7 @@ pull_request_value=$(jq -r "$scenario | .metadata.evidence_references.references
 workspace_branch_value=$(jq -r "$scenario | .metadata.evidence_references.references.workspace_branch.value // \"\"" "$RESULTS_TMPFILE")
 workflow_run_path=$(jq -r "$scenario | .metadata.evidence_references.references.workflow_run.path // \"\"" "$RESULTS_TMPFILE")
 trace_gap=$(jq -r "$scenario | any(.metadata.evidence_references.compatibility_gaps[]?; .field == \"runtime_episode_trace\")" "$RESULTS_TMPFILE")
-if [ "$evidence_schema" != "homeboy/datamachine-agent-evidence-references/v1" ] || [ "$homeboy_result_path" != "$RESULTS_TMPFILE" ] || [ "$wp_codebox_bundle_available" != "true" ] || [ "$runtime_trace_available" != "true" ] || [ "$replay_bundle_available" != "true" ] || [ "$verifier_available" != "true" ] || [ "$policy_available" != "true" ] || [ "$runtime_manifest_available" != "true" ] || [ "$transcript_path" != "/tmp/wp-codebox-smoke-transcript.json" ] || [ "$pull_request_value" != "https://github.com/example/repo/pull/123" ] || [ "$workspace_branch_value" != "agent-artifacts/example" ] || [ "$workflow_run_path" != "https://github.com/example/repo/actions/runs/456" ] || [ "$trace_gap" != "false" ]; then
+if [ "$evidence_schema" != "homeboy/datamachine-agent-evidence-references/v1" ] || [ "$homeboy_result_path" != "$RESULTS_TMPFILE" ] || [ "$wp_codebox_bundle_available" != "true" ] || [ "$runtime_trace_available" != "true" ] || [ "$replay_bundle_available" != "true" ] || [ "$verifier_available" != "true" ] || [ "$policy_available" != "true" ] || [ "$runtime_manifest_available" != "true" ] || [ "$transcript_path" != "$artifact_dir/files/transcript.json" ] || [ "$pull_request_value" != "https://github.com/example/repo/pull/123" ] || [ "$workspace_branch_value" != "agent-artifacts/example" ] || [ "$workflow_run_path" != "https://github.com/example/repo/actions/runs/456" ] || [ "$trace_gap" != "false" ]; then
     echo "ERROR: stable evidence references missing or incomplete" >&2
     cat "$RESULTS_TMPFILE" >&2
     exit 1
@@ -349,7 +349,10 @@ HOMEBOY_DATAMACHINE_AGENT_RESULTS_FILE="$FALLBACK_RESULTS_TMPFILE" \
 
 fallback_config_present=$(jq -r "$scenario | .metrics.config_present_mean // \"missing\"" "$FALLBACK_RESULTS_TMPFILE")
 fallback_success_status=$(jq -r "$scenario | .metadata.success_status // \"missing\"" "$FALLBACK_RESULTS_TMPFILE")
-if [ "$fallback_config_present" != "1" ] || [ "$fallback_success_status" != "no_changes" ]; then
+fallback_artifact_dir=$(jq -r "$scenario | .metadata.wp_codebox.artifacts.directory // \"\"" "$FALLBACK_RESULTS_TMPFILE")
+fallback_transcript_reference=$(jq -r "$scenario | .metadata.evidence_references.references.transcript_artifact.path // \"missing\"" "$FALLBACK_RESULTS_TMPFILE")
+fallback_legacy_transcript=$(jq -r "$scenario | .metadata.transcript_artifacts.json // \"\"" "$FALLBACK_RESULTS_TMPFILE")
+if [ "$fallback_config_present" != "1" ] || [ "$fallback_success_status" != "no_changes" ] || [ -z "$fallback_artifact_dir" ] || [ -n "$fallback_legacy_transcript" ] || [ "$fallback_transcript_reference" != "$fallback_artifact_dir/files/transcript.json" ]; then
     echo "ERROR: successful WP Codebox fallback result was not projected as complete" >&2
     cat "$FALLBACK_RESULTS_TMPFILE" >&2
     exit 1
