@@ -3,11 +3,12 @@ use regex::Regex;
 use crate::core::runner::{
     self, Runner, RunnerCapabilityPreflight, RunnerExecOptions, RunnerKind, RunnerRequiredTool,
 };
-use crate::core::upgrade::RunnerUpgradeEntry;
+use crate::core::upgrade::{ExtensionUpgradeEntry, RunnerUpgradeEntry};
 use crate::core::Result;
 
 pub(super) fn upgrade_configured_runners(
     runner_targets: &[String],
+    extension_updates: &[ExtensionUpgradeEntry],
 ) -> Result<(Vec<RunnerUpgradeEntry>, Vec<RunnerUpgradeEntry>)> {
     let runners = runner_upgrade_targets(runner_targets)?;
     if runners.is_empty() {
@@ -19,7 +20,11 @@ pub(super) fn upgrade_configured_runners(
         "Updating {} configured runner(s)...",
         runners.len()
     );
-    Ok(upgrade_runners_with_executor(&runners, runner::exec))
+    Ok(upgrade_runners_with_executor(
+        &runners,
+        extension_updates,
+        runner::exec,
+    ))
 }
 
 fn runner_upgrade_targets(runner_targets: &[String]) -> Result<Vec<Runner>> {
@@ -38,13 +43,14 @@ fn runner_upgrade_targets(runner_targets: &[String]) -> Result<Vec<Runner>> {
 
 fn upgrade_runners_with_executor(
     runners: &[Runner],
+    extension_updates: &[ExtensionUpgradeEntry],
     mut exec: impl FnMut(&str, RunnerExecOptions) -> Result<(runner::RunnerExecOutput, i32)>,
 ) -> (Vec<RunnerUpgradeEntry>, Vec<RunnerUpgradeEntry>) {
     let mut updated = Vec::new();
     let mut skipped = Vec::new();
 
     for runner in runners {
-        let entry = upgrade_runner_with_executor(runner, &mut exec);
+        let entry = upgrade_runner_with_executor(runner, extension_updates, &mut exec);
         if entry.success {
             crate::log_status!(
                 "upgrade",
@@ -64,6 +70,7 @@ fn upgrade_runners_with_executor(
 
 fn upgrade_runner_with_executor(
     runner: &Runner,
+    extension_updates: &[ExtensionUpgradeEntry],
     exec: &mut impl FnMut(&str, RunnerExecOptions) -> Result<(runner::RunnerExecOutput, i32)>,
 ) -> RunnerUpgradeEntry {
     let homeboy_path = runner
@@ -118,6 +125,18 @@ fn upgrade_runner_with_executor(
     let new_version = runner_homeboy_version(runner, &homeboy_path, exec)
         .ok()
         .flatten();
+    if let Err(detail) = sync_runner_extensions(runner, &homeboy_path, extension_updates, exec) {
+        return RunnerUpgradeEntry {
+            runner_id: runner.id.clone(),
+            homeboy_path,
+            success: false,
+            upgraded: false,
+            previous_version,
+            new_version,
+            exit_code: 1,
+            detail,
+        };
+    }
     let upgraded = match (previous_version.as_deref(), new_version.as_deref()) {
         (Some(previous), Some(new)) => new != previous,
         _ => false,
@@ -133,6 +152,64 @@ fn upgrade_runner_with_executor(
         exit_code,
         detail,
     }
+}
+
+fn sync_runner_extensions(
+    runner: &Runner,
+    homeboy_path: &str,
+    extension_updates: &[ExtensionUpgradeEntry],
+    exec: &mut impl FnMut(&str, RunnerExecOptions) -> Result<(runner::RunnerExecOutput, i32)>,
+) -> std::result::Result<(), String> {
+    for extension in extension_updates {
+        let Some(source_url) = extension.source_url.as_deref() else {
+            continue;
+        };
+        let Some(source_revision) = extension.source_revision.as_deref() else {
+            continue;
+        };
+
+        let command = vec![
+            homeboy_path.to_string(),
+            "extension".to_string(),
+            "install".to_string(),
+            source_url.to_string(),
+            "--id".to_string(),
+            extension.extension_id.clone(),
+            "--ref".to_string(),
+            source_revision.to_string(),
+            "--replace".to_string(),
+        ];
+
+        let result = exec(&runner.id, runner_exec_options(runner, command.clone()));
+        match result {
+            Ok((output, 0)) => {
+                crate::log_status!(
+                    "upgrade",
+                    "  {} extension {} synced at {}",
+                    runner.id,
+                    extension.extension_id,
+                    source_revision
+                );
+                let _ = output;
+            }
+            Ok((output, exit_code)) => {
+                return Err(format!(
+                    "extension {} sync failed with exit code {}: {}",
+                    extension.extension_id,
+                    exit_code,
+                    runner_upgrade_detail(&output)
+                ));
+            }
+            Err(err) => {
+                return Err(format!(
+                    "extension {} sync failed: {}",
+                    extension.extension_id, err.message
+                ));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn runner_homeboy_version(
@@ -220,20 +297,21 @@ mod tests {
     fn upgrades_configured_runner_with_homeboy_path_and_skip_runner_guard() {
         let runner = ssh_runner("lab", Some("/home/chubes/.local/bin/homeboy"));
         let mut commands = Vec::new();
-        let (updated, skipped) = upgrade_runners_with_executor(&[runner], |runner_id, options| {
-            commands.push((
-                runner_id.to_string(),
-                options.command.clone(),
-                options.allow_diagnostic_ssh,
-            ));
-            let stdout = match commands.len() {
-                1 => "homeboy 0.199.1\n",
-                2 => "{\"success\":true}\n",
-                3 => "homeboy 0.199.2\n",
-                _ => "",
-            };
-            Ok((exec_output(runner_id, options.command, stdout, "", 0), 0))
-        });
+        let (updated, skipped) =
+            upgrade_runners_with_executor(&[runner], &[], |runner_id, options| {
+                commands.push((
+                    runner_id.to_string(),
+                    options.command.clone(),
+                    options.allow_diagnostic_ssh,
+                ));
+                let stdout = match commands.len() {
+                    1 => "homeboy 0.199.1\n",
+                    2 => "{\"success\":true}\n",
+                    3 => "homeboy 0.199.2\n",
+                    _ => "",
+                };
+                Ok((exec_output(runner_id, options.command, stdout, "", 0), 0))
+            });
 
         assert!(skipped.is_empty());
         assert_eq!(updated.len(), 1);
@@ -265,33 +343,34 @@ mod tests {
     fn reports_runner_upgrade_failure_without_stopping_other_runners() {
         let runners = vec![ssh_runner("lab", None), ssh_runner("bench", None)];
         let mut calls = HashMap::<String, usize>::new();
-        let (updated, skipped) = upgrade_runners_with_executor(&runners, |runner_id, options| {
-            let count = calls.entry(runner_id.to_string()).or_default();
-            *count += 1;
-            match (runner_id, *count) {
-                ("lab", 1) => Ok((
-                    exec_output(runner_id, options.command, "homeboy 0.199.1\n", "", 0),
-                    0,
-                )),
-                ("lab", 2) => Ok((
-                    exec_output(runner_id, options.command, "", "download failed", 1),
-                    1,
-                )),
-                ("bench", 1) => Ok((
-                    exec_output(runner_id, options.command, "homeboy 0.199.1\n", "", 0),
-                    0,
-                )),
-                ("bench", 2) => Ok((
-                    exec_output(runner_id, options.command, "already latest", "", 0),
-                    0,
-                )),
-                ("bench", 3) => Ok((
-                    exec_output(runner_id, options.command, "homeboy 0.199.1\n", "", 0),
-                    0,
-                )),
-                _ => panic!("unexpected call {runner_id} {count}"),
-            }
-        });
+        let (updated, skipped) =
+            upgrade_runners_with_executor(&runners, &[], |runner_id, options| {
+                let count = calls.entry(runner_id.to_string()).or_default();
+                *count += 1;
+                match (runner_id, *count) {
+                    ("lab", 1) => Ok((
+                        exec_output(runner_id, options.command, "homeboy 0.199.1\n", "", 0),
+                        0,
+                    )),
+                    ("lab", 2) => Ok((
+                        exec_output(runner_id, options.command, "", "download failed", 1),
+                        1,
+                    )),
+                    ("bench", 1) => Ok((
+                        exec_output(runner_id, options.command, "homeboy 0.199.1\n", "", 0),
+                        0,
+                    )),
+                    ("bench", 2) => Ok((
+                        exec_output(runner_id, options.command, "already latest", "", 0),
+                        0,
+                    )),
+                    ("bench", 3) => Ok((
+                        exec_output(runner_id, options.command, "homeboy 0.199.1\n", "", 0),
+                        0,
+                    )),
+                    _ => panic!("unexpected call {runner_id} {count}"),
+                }
+            });
 
         assert_eq!(updated.len(), 1);
         assert_eq!(updated[0].runner_id, "bench");
@@ -301,6 +380,53 @@ mod tests {
         assert!(!skipped[0].success);
         assert_eq!(skipped[0].exit_code, 1);
         assert!(skipped[0].detail.contains("download failed"));
+    }
+
+    #[test]
+    fn syncs_extension_revisions_after_runner_upgrade() {
+        let runner = ssh_runner("lab", Some("/home/chubes/.cargo/bin/homeboy"));
+        let extension_updates = vec![ExtensionUpgradeEntry {
+            extension_id: "wordpress".to_string(),
+            old_version: "2.116.4".to_string(),
+            new_version: "2.117.2".to_string(),
+            linked: true,
+            source_path: Some("/Users/chubes/Developer/homeboy-extensions/wordpress".to_string()),
+            git_root: Some("/Users/chubes/Developer/homeboy-extensions".to_string()),
+            source_url: Some("https://github.com/Extra-Chill/homeboy-extensions.git".to_string()),
+            source_revision: Some("48517ac3".to_string()),
+            source_update: Default::default(),
+        }];
+        let mut commands = Vec::new();
+
+        let (updated, skipped) =
+            upgrade_runners_with_executor(&[runner], &extension_updates, |runner_id, options| {
+                commands.push(options.command.clone());
+                let stdout = match commands.len() {
+                    1 => "homeboy 0.228.4\n",
+                    2 => "{\"success\":true}\n",
+                    3 => "homeboy 0.228.5\n",
+                    4 => "{\"success\":true}\n",
+                    _ => "",
+                };
+                Ok((exec_output(runner_id, options.command, stdout, "", 0), 0))
+            });
+
+        assert!(skipped.is_empty());
+        assert_eq!(updated.len(), 1);
+        assert_eq!(
+            commands[3],
+            vec![
+                "/home/chubes/.cargo/bin/homeboy",
+                "extension",
+                "install",
+                "https://github.com/Extra-Chill/homeboy-extensions.git",
+                "--id",
+                "wordpress",
+                "--ref",
+                "48517ac3",
+                "--replace",
+            ]
+        );
     }
 
     fn ssh_runner(id: &str, homeboy_path: Option<&str>) -> Runner {
