@@ -4,6 +4,19 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.228.6] - 2026-06-11
+
+### Fixed
+- harden runner upgrade sync diagnostics
+- recompute trace exit after result processing
+- install missing runner extensions during upgrade
+- sync runners after same-version upgrade
+- bundle agent task keychain secrets
+- avoid upgrade runner flag collision
+- honor parsed trace result status
+- sync runner extensions during upgrade
+- reject missing Lab extension revisions
+
 ## [0.228.5] - 2026-06-10
 
 ### Fixed
