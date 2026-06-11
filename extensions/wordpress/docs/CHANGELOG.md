@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.119.6] - 2026-06-11
+
+### Fixed
+- load wp codebox plugin in agent runtime
+
 ## [2.119.5] - 2026-06-11
 
 ### Fixed
