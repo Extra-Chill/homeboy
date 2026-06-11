@@ -528,7 +528,6 @@ mod tests {
             toolchain: None,
             components: None,
             dependencies: Vec::new(),
-            metrics: BTreeMap::new(),
             preview: None,
         };
 

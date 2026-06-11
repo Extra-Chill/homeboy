@@ -320,16 +320,15 @@ impl TargetAggregateBuilder {
         let mut seen_span_ids = BTreeSet::new();
         if let Some(results) = execution.workflow.results.as_ref() {
             for (metric, value) in &results.metrics {
-                let Some(value) = value.as_f64() else {
-                    continue;
-                };
-                self.metric_samples.entry(metric.clone()).or_default().push(
-                    TraceAggregateMetricSample {
-                        value,
-                        run_index: index,
-                        artifact_path: artifact_path.clone(),
-                    },
-                );
+                if let Some(value) = value.as_f64() {
+                    self.metric_samples.entry(metric.clone()).or_default().push(
+                        TraceAggregateMetricSample {
+                            value,
+                            run_index: index,
+                            artifact_path: artifact_path.clone(),
+                        },
+                    );
+                }
             }
             for span in &results.span_results {
                 self.all_span_ids.insert(span.id.clone());

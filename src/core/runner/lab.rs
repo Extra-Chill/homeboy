@@ -30,7 +30,8 @@ use super::lab_capabilities::lab_runner_capability_contract;
 use super::lab_command::lab_offload_command_prefix;
 use super::lab_env::{
     build_lab_offload_env, forward_env_if_present, forward_release_ci_env,
-    misplaced_runner_exec_wait_timeout_warning, settings_env_diagnostics,
+    forward_rig_component_path_env, misplaced_runner_exec_wait_timeout_warning,
+    settings_env_diagnostics,
 };
 use super::lab_plan::{base_lab_plan, disabled_select_runner_plan, with_step};
 pub use super::lab_selection::LabRunnerSelectionSource;
@@ -41,7 +42,8 @@ use super::lab_selection::{
 use super::lab_workspaces::{
     agent_task_plan_extra_workspaces, lab_extra_workspaces, lab_workspace_mapping_metadata,
     preflight_provider_config_source_cli_dependencies, provider_config_extra_workspaces,
-    sync_extra_lab_workspaces, workspace_mapping_entry, workspace_mapping_entry_for_git_dependency,
+    rig_component_path_env_extra_workspaces, sync_extra_lab_workspaces, workspace_mapping_entry,
+    workspace_mapping_entry_for_git_dependency,
 };
 
 pub struct LabOffloadRequest<'a> {
@@ -580,6 +582,7 @@ fn run_lab_offload_inner(
         &changed_since_preflight.args,
         &source_path,
     )?);
+    extra_workspaces.extend(rig_component_path_env_extra_workspaces(&source_path)?);
     let synced = sync_workspace(
         runner_id,
         RunnerWorkspaceSyncOptions {
@@ -762,9 +765,11 @@ fn run_lab_offload_inner(
     forward_env_if_present(&mut env, PREVIEW_METADATA_ENV);
     forward_env_if_present(&mut env, PREVIEW_PUBLIC_URL_ENV);
     forward_release_ci_env(&mut env);
+    let rig_component_path_env = forward_rig_component_path_env(&mut env, &workspace_mapping)?;
     let agent_task_secret_env =
         hydrate_agent_task_secret_env(&changed_since_preflight.args, &mut env)?;
     lab_metadata["agent_task_secret_env"] = agent_task_secret_env;
+    lab_metadata["rig_component_path_env"] = rig_component_path_env;
     lab_metadata["settings_env"] = settings_env_diagnostics(&changed_since_preflight.args, &env);
     lab_metadata["rig_sync"] = serde_json::json!({
         "step": "lab.sync_rigs",
@@ -777,6 +782,7 @@ fn run_lab_offload_inner(
     forward_env_if_present(&mut env, PREVIEW_METADATA_ENV);
     forward_env_if_present(&mut env, PREVIEW_PUBLIC_URL_ENV);
     forward_release_ci_env(&mut env);
+    forward_rig_component_path_env(&mut env, &workspace_mapping)?;
     hydrate_agent_task_secret_env(&changed_since_preflight.args, &mut env)?;
     let exec_result = exec(
         runner_id,

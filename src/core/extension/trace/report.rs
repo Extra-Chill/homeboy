@@ -923,7 +923,6 @@ mod tests {
                 toolchain: None,
                 components: None,
                 dependencies: Vec::new(),
-                metrics: Default::default(),
                 preview: None,
             }),
             failure: None,
@@ -997,7 +996,6 @@ mod tests {
                 toolchain: None,
                 components: None,
                 dependencies: Vec::new(),
-                metrics: Default::default(),
                 preview: None,
             }),
             failure: None,
@@ -1109,7 +1107,6 @@ mod tests {
                 dependencies: Vec::new(),
             }),
             dependencies: Vec::new(),
-            metrics: Default::default(),
             preview: None,
         };
 
@@ -1167,7 +1164,6 @@ mod tests {
             toolchain: None,
             components: None,
             dependencies: Vec::new(),
-            metrics: Default::default(),
             preview: None,
         };
 

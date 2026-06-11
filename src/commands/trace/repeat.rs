@@ -60,16 +60,15 @@ pub(super) fn run_repeat(args: TraceArgs) -> CmdResult<TraceCommandOutput> {
                 let mut seen_span_ids = BTreeSet::new();
                 if let Some(results) = execution.workflow.results.as_ref() {
                     for (metric, value) in &results.metrics {
-                        let Some(value) = value.as_f64() else {
-                            continue;
-                        };
-                        metric_samples.entry(metric.clone()).or_default().push(
-                            TraceAggregateMetricSample {
-                                value,
-                                run_index: index,
-                                artifact_path: artifact_path.clone(),
-                            },
-                        );
+                        if let Some(value) = value.as_f64() {
+                            metric_samples.entry(metric.clone()).or_default().push(
+                                TraceAggregateMetricSample {
+                                    value,
+                                    run_index: index,
+                                    artifact_path: artifact_path.clone(),
+                                },
+                            );
+                        }
                     }
                     for span in &results.span_results {
                         all_span_ids.insert(span.id.clone());
