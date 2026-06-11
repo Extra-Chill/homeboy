@@ -412,10 +412,12 @@ PHP
         --slurpfile run "$wp_codebox_output" \
         --slurpfile wpCodeboxArtifacts "$wp_codebox_artifacts_json" \
         '
+        def workload_json_from_string:
+            (fromjson? // (capture("(?s)(?<json>\\{.*\\})").json | fromjson? // {}));
         def workload_from_record($record):
             if ($record | type) != "object" then {}
             elif (($record.metrics? // null) != null) or (($record.metadata? // null) != null) then $record
-            elif ($record.output? | type) == "string" then (($record.output | fromjson? // {}) | workload_from_record(.))
+            elif ($record.output? | type) == "string" then (($record.output | workload_json_from_string) | workload_from_record(.))
             elif ($record.output? | type) == "object" then workload_from_record($record.output)
             elif ($record.result? | type) == "object" then workload_from_record($record.result)
             else {}
@@ -423,7 +425,7 @@ PHP
         def parsed_workload:
             ($wpCodeboxArtifacts[0].transcript // {}) as $transcript
             | [
-                (($run[0].executions // [])[]?.stdout? | fromjson? // {}),
+                (($run[0].executions // [])[]?.stdout? | workload_json_from_string),
                 ($run[0].agentTaskResult // {}),
                 ($run[0].agentTaskResult.raw.result // {}),
                 ($run[0].agentTaskResult.outputs // {}),
