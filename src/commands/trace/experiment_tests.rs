@@ -31,6 +31,7 @@ fn trace_args_for_rig(rig_id: &str, scenario: &str) -> TraceArgs {
         aggregate: None,
         schedule: TraceSchedule::Grouped,
         focus_spans: Vec::new(),
+        metric_guardrails: Vec::new(),
         spans: Vec::new(),
         phases: Vec::new(),
         attachments: Vec::new(),

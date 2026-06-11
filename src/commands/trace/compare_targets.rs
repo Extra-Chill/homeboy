@@ -6,7 +6,9 @@ use homeboy::core::extension::trace as extension_trace;
 use homeboy::core::extension::trace::TraceCommandOutput;
 use homeboy::core::git;
 
-use super::aggregate::{aggregate_span, TraceAggregateSpanSample};
+use super::aggregate::{
+    aggregate_metric, aggregate_span, TraceAggregateMetricSample, TraceAggregateSpanSample,
+};
 use super::matrix::{aggregate_to_compare_input, write_json_artifact};
 use super::output::compare_trace_aggregates_with_focus;
 use super::{
@@ -102,6 +104,7 @@ pub(super) fn run_compare_targets(args: TraceArgs) -> CmdResult<TraceCommandOutp
         &args.focus_spans,
         args.regression_threshold,
         args.regression_min_delta_ms,
+        &args.metric_guardrails,
     );
     compare.before_target = Some(baseline_target.input.clone());
     compare.after_target = Some(candidate_target.input.clone());
@@ -140,7 +143,8 @@ pub(super) fn run_compare_targets(args: TraceArgs) -> CmdResult<TraceCommandOutp
     let failed = !baseline_aggregate.passed
         || !candidate_aggregate.passed
         || compare.focus_status.as_deref() == Some("fail")
-        || compare.guardrail_status.as_deref() == Some("fail");
+        || compare.guardrail_status.as_deref() == Some("fail")
+        || compare.metric_guardrail_status.as_deref() == Some("fail");
     Ok((
         TraceCommandOutput::Compare(compare),
         if failed { 1 } else { 0 },
@@ -248,6 +252,7 @@ struct TargetAggregateBuilder {
     group: String,
     runs: Vec<extension_trace::TraceAggregateRunOutput>,
     span_samples: BTreeMap<String, Vec<TraceAggregateSpanSample>>,
+    metric_samples: BTreeMap<String, Vec<TraceAggregateMetricSample>>,
     span_failures: BTreeMap<String, usize>,
     all_span_ids: BTreeSet<String>,
     failure_count: usize,
@@ -271,6 +276,7 @@ impl TargetAggregateBuilder {
             group: group.to_string(),
             runs: Vec::new(),
             span_samples: BTreeMap::new(),
+            metric_samples: BTreeMap::new(),
             span_failures: BTreeMap::new(),
             all_span_ids: declared_spans.into_iter().map(|span| span.id).collect(),
             failure_count: 0,
@@ -312,6 +318,15 @@ impl TargetAggregateBuilder {
             .to_string();
         let mut seen_span_ids = BTreeSet::new();
         if let Some(results) = execution.workflow.results.as_ref() {
+            for (metric, value) in &results.metrics {
+                self.metric_samples.entry(metric.clone()).or_default().push(
+                    TraceAggregateMetricSample {
+                        value: *value,
+                        run_index: index,
+                        artifact_path: artifact_path.clone(),
+                    },
+                );
+            }
             for span in &results.span_results {
                 self.all_span_ids.insert(span.id.clone());
                 seen_span_ids.insert(span.id.clone());
@@ -415,6 +430,11 @@ impl TargetAggregateBuilder {
                 aggregate_span(id, samples, failures)
             })
             .collect::<Vec<_>>();
+        let metrics = self
+            .metric_samples
+            .into_iter()
+            .map(|(id, samples)| aggregate_metric(id, samples))
+            .collect::<Vec<_>>();
         let unmatched_span_metadata_ids = attach_span_metadata(&mut spans, &span_metadata);
         let classification_summaries = classification_summaries(&spans);
         let guardrails = run_trace_guardrails_for_args(args)?;
@@ -453,6 +473,7 @@ impl TargetAggregateBuilder {
             overlays: self.overlays,
             runs: self.runs,
             spans,
+            metrics,
             guardrails,
             guardrail_failure_count,
             focus_span_ids: args.focus_spans.clone(),

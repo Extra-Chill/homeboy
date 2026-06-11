@@ -8,7 +8,7 @@ use super::output::{
     compare_trace_aggregates, compare_trace_aggregates_with_focus, parse_trace_aggregate_input,
     render_compare_markdown, render_trace_aggregate_evidence_markdown,
     render_trace_compare_evidence_markdown, render_trace_run_evidence_markdown, run_compare,
-    TraceAggregateInput, TraceAggregateSpanInput,
+    TraceAggregateInput, TraceAggregateMetricInput, TraceAggregateSpanInput,
 };
 use super::*;
 
@@ -28,6 +28,7 @@ fn trace_compare_reports_median_and_average_deltas() {
             span_input("large_regression", 5, Some(80), Some(80.0), 0),
             span_input("before_only", 5, Some(25), Some(25.0), 1),
         ],
+        metrics: Vec::new(),
         guardrails: Vec::new(),
         guardrail_failure_count: 0,
     };
@@ -45,6 +46,7 @@ fn trace_compare_reports_median_and_average_deltas() {
             span_input("large_regression", 5, Some(200), Some(200.0), 0),
             span_input("after_only", 3, Some(75), Some(80.0), 0),
         ],
+        metrics: Vec::new(),
         guardrails: Vec::new(),
         guardrail_failure_count: 0,
     };
@@ -106,6 +108,7 @@ fn trace_compare_focus_spans_report_independent_regression_status() {
             span_input("focused", 6, Some(100), Some(100.0), 0),
             span_input("unfocused", 6, Some(100), Some(100.0), 0),
         ],
+        metrics: Vec::new(),
         guardrails: Vec::new(),
         guardrail_failure_count: 0,
     };
@@ -121,6 +124,7 @@ fn trace_compare_focus_spans_report_independent_regression_status() {
             span_input("focused", 6, Some(130), Some(130.0), 0),
             span_input("unfocused", 6, Some(250), Some(250.0), 0),
         ],
+        metrics: Vec::new(),
         guardrails: Vec::new(),
         guardrail_failure_count: 0,
     };
@@ -133,6 +137,7 @@ fn trace_compare_focus_spans_report_independent_regression_status() {
         &["focused".to_string()],
         20.0,
         10,
+        &[],
     );
 
     assert_eq!(compare.span_count, 2);
@@ -168,6 +173,7 @@ fn trace_compare_includes_classification_summary_output() {
             metadata: Some(metadata.clone()),
             ..span_input("boot_to_ready", 5, Some(100), Some(100.0), 0)
         }],
+        metrics: Vec::new(),
         guardrail_failure_count: 0,
         guardrails: Vec::new(),
     };
@@ -183,6 +189,7 @@ fn trace_compare_includes_classification_summary_output() {
             metadata: Some(metadata),
             ..span_input("boot_to_ready", 5, Some(125), Some(125.0), 0)
         }],
+        metrics: Vec::new(),
         guardrails: Vec::new(),
         guardrail_failure_count: 0,
     };
@@ -216,6 +223,7 @@ fn trace_compare_reports_guardrail_failures() {
         overlays: Vec::new(),
         runs: Vec::new(),
         spans: vec![span_input("boot", 1, Some(100), Some(100.0), 0)],
+        metrics: Vec::new(),
         guardrails: vec![extension_trace::TraceGuardrailOutput {
             label: "baseline smoke".to_string(),
             source: "rig:baseline".to_string(),
@@ -234,6 +242,7 @@ fn trace_compare_reports_guardrail_failures() {
         overlays: Vec::new(),
         runs: Vec::new(),
         spans: vec![span_input("boot", 1, Some(90), Some(90.0), 0)],
+        metrics: Vec::new(),
         guardrails: vec![extension_trace::TraceGuardrailOutput {
             label: "behavior smoke".to_string(),
             source: "rig:variant".to_string(),
@@ -258,6 +267,116 @@ fn trace_compare_reports_guardrail_failures() {
     let markdown = render_compare_markdown(&compare);
     assert!(markdown.contains("## After Guardrails"));
     assert!(markdown.contains("assertion changed"));
+}
+
+#[test]
+fn trace_compare_reports_scalar_metric_deltas_and_passing_guardrails() {
+    let before = TraceAggregateInput {
+        component: Some("generic-app".to_string()),
+        scenario_id: Some("request-flow".to_string()),
+        phase_preset: None,
+        repeat: Some(3),
+        rig_state: None,
+        overlays: Vec::new(),
+        runs: Vec::new(),
+        spans: Vec::new(),
+        metrics: vec![metric_input("request_count", &[10.0, 10.0, 10.0])],
+        guardrails: Vec::new(),
+        guardrail_failure_count: 0,
+    };
+    let after = TraceAggregateInput {
+        component: Some("generic-app".to_string()),
+        scenario_id: Some("request-flow".to_string()),
+        phase_preset: None,
+        repeat: Some(3),
+        rig_state: None,
+        overlays: Vec::new(),
+        runs: Vec::new(),
+        spans: Vec::new(),
+        metrics: vec![metric_input("request_count", &[9.0, 10.0, 10.0])],
+        guardrails: Vec::new(),
+        guardrail_failure_count: 0,
+    };
+
+    let compare = compare_trace_aggregates_with_focus(
+        Path::new("before.json"),
+        before,
+        Path::new("after.json"),
+        after,
+        &[],
+        20.0,
+        10,
+        &[
+            super::output::parse_metric_guardrail("request_count:required").unwrap(),
+            super::output::parse_metric_guardrail("request_count:equal").unwrap(),
+            super::output::parse_metric_guardrail("request_count.max:lte").unwrap(),
+        ],
+    );
+
+    assert_eq!(compare.metrics.len(), 1);
+    assert_eq!(compare.metrics[0].id, "request_count");
+    assert_eq!(compare.metrics[0].before_min, Some(10.0));
+    assert_eq!(compare.metrics[0].after_min, Some(9.0));
+    assert_eq!(compare.metrics[0].median_delta, Some(0.0));
+    assert_eq!(compare.metrics[0].before_samples.len(), 3);
+    assert_eq!(compare.metric_guardrail_status.as_deref(), Some("pass"));
+    assert_eq!(compare.metric_guardrail_failure_count, 0);
+
+    let markdown = render_compare_markdown(&compare);
+    assert!(markdown.contains("## Metric Delta Summary"));
+    assert!(markdown.contains("## Metric Guardrails"));
+}
+
+#[test]
+fn trace_compare_fails_scalar_metric_guardrails() {
+    let before = TraceAggregateInput {
+        component: Some("generic-app".to_string()),
+        scenario_id: Some("request-flow".to_string()),
+        phase_preset: None,
+        repeat: Some(3),
+        rig_state: None,
+        overlays: Vec::new(),
+        runs: Vec::new(),
+        spans: Vec::new(),
+        metrics: vec![metric_input("page_errors", &[0.0, 0.0, 0.0])],
+        guardrails: Vec::new(),
+        guardrail_failure_count: 0,
+    };
+    let after = TraceAggregateInput {
+        component: Some("generic-app".to_string()),
+        scenario_id: Some("request-flow".to_string()),
+        phase_preset: None,
+        repeat: Some(3),
+        rig_state: None,
+        overlays: Vec::new(),
+        runs: Vec::new(),
+        spans: Vec::new(),
+        metrics: vec![metric_input("page_errors", &[0.0, 1.0, 2.0])],
+        guardrails: Vec::new(),
+        guardrail_failure_count: 0,
+    };
+
+    let compare = compare_trace_aggregates_with_focus(
+        Path::new("before.json"),
+        before,
+        Path::new("after.json"),
+        after,
+        &[],
+        20.0,
+        10,
+        &[
+            super::output::parse_metric_guardrail("page_errors:lte").unwrap(),
+            super::output::parse_metric_guardrail("page_errors:delta:0.5").unwrap(),
+            super::output::parse_metric_guardrail("missing_metric:required").unwrap(),
+        ],
+    );
+
+    assert_eq!(compare.metric_guardrail_status.as_deref(), Some("fail"));
+    assert_eq!(compare.metric_guardrail_failure_count, 3);
+    assert!(compare
+        .metric_guardrails
+        .iter()
+        .any(|guardrail| guardrail.metric == "missing_metric" && !guardrail.passed));
 }
 
 #[test]
@@ -311,6 +430,7 @@ fn trace_compare_exits_nonzero_for_guardrail_failures() {
         aggregate: None,
         schedule: TraceSchedule::Grouped,
         focus_spans: Vec::new(),
+        metric_guardrails: Vec::new(),
         spans: Vec::new(),
         phases: Vec::new(),
         attachments: Vec::new(),
@@ -401,6 +521,10 @@ fn trace_compare_markdown_and_experiment_bundle_render_artifacts() {
             before_failures: Some(0),
             after_failures: Some(0),
         }],
+        metrics: Vec::new(),
+        metric_guardrails: Vec::new(),
+        metric_guardrail_failure_count: 0,
+        metric_guardrail_status: None,
         focus_span_ids: Vec::new(),
         focus_spans: Vec::new(),
         focus_regression_count: 0,
@@ -579,6 +703,7 @@ fn trace_run_evidence_report_includes_refs_assertions_and_safe_artifacts() {
                 message: Some("Window reopened".to_string()),
                 details: None,
             }],
+            metrics: Default::default(),
             temporal_assertions: Vec::new(),
             artifacts: vec![
                 extension_trace::TraceArtifact {
@@ -694,6 +819,7 @@ fn trace_aggregate_evidence_report_summarizes_metrics_and_artifact_completeness(
             samples: Vec::new(),
             metadata: None,
         }],
+        metrics: Vec::new(),
         guardrails: vec![extension_trace::TraceGuardrailOutput {
             label: "startup guardrail".to_string(),
             source: "rig".to_string(),
@@ -760,6 +886,10 @@ fn trace_compare_evidence_report_redacts_local_paths_and_reports_assertion_statu
             before_failures: Some(0),
             after_failures: Some(1),
         }],
+        metrics: Vec::new(),
+        metric_guardrails: Vec::new(),
+        metric_guardrail_failure_count: 0,
+        metric_guardrail_status: None,
         focus_span_ids: vec!["boot".to_string()],
         focus_spans: Vec::new(),
         focus_regression_count: 1,
@@ -829,5 +959,38 @@ fn span_input(
         max_artifact_path: None,
         failures,
         metadata: None,
+    }
+}
+
+fn metric_input(id: &str, values: &[f64]) -> TraceAggregateMetricInput {
+    let mut sorted = values.to_vec();
+    sorted.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+    let median = if sorted.is_empty() {
+        None
+    } else {
+        let midpoint = sorted.len() / 2;
+        if sorted.len() % 2 == 1 {
+            Some(sorted[midpoint])
+        } else {
+            Some((sorted[midpoint - 1] + sorted[midpoint]) / 2.0)
+        }
+    };
+    TraceAggregateMetricInput {
+        id: id.to_string(),
+        n: values.len(),
+        min: sorted.first().copied(),
+        median,
+        max: sorted.last().copied(),
+        samples: values
+            .iter()
+            .enumerate()
+            .map(
+                |(index, value)| extension_trace::TraceAggregateMetricSampleOutput {
+                    run_index: index + 1,
+                    value: *value,
+                    artifact_path: format!("artifacts/run-{}.json", index + 1),
+                },
+            )
+            .collect(),
     }
 }

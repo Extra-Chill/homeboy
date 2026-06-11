@@ -3,7 +3,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use homeboy::core::extension::trace as extension_trace;
 use homeboy::core::extension::trace::TraceCommandOutput;
 
-use super::aggregate::{aggregate_span, TraceAggregateSpanSample};
+use super::aggregate::{
+    aggregate_metric, aggregate_span, TraceAggregateMetricSample, TraceAggregateSpanSample,
+};
 use super::{
     attach_span_metadata, classification_summaries, cli_span_definitions_for_args,
     execute_trace_run, plan_trace_run_order, resolved_profile_output_for_args,
@@ -17,6 +19,7 @@ pub(super) fn run_repeat(args: TraceArgs) -> CmdResult<TraceCommandOutput> {
     let mut runs = Vec::new();
     let mut overlays = Vec::new();
     let mut span_samples: BTreeMap<String, Vec<TraceAggregateSpanSample>> = BTreeMap::new();
+    let mut metric_samples: BTreeMap<String, Vec<TraceAggregateMetricSample>> = BTreeMap::new();
     let mut span_failures: BTreeMap<String, usize> = BTreeMap::new();
     let mut all_span_ids: BTreeSet<String> = cli_span_definitions_for_args(&args)?
         .into_iter()
@@ -56,6 +59,15 @@ pub(super) fn run_repeat(args: TraceArgs) -> CmdResult<TraceCommandOutput> {
                     .to_string();
                 let mut seen_span_ids = BTreeSet::new();
                 if let Some(results) = execution.workflow.results.as_ref() {
+                    for (metric, value) in &results.metrics {
+                        metric_samples.entry(metric.clone()).or_default().push(
+                            TraceAggregateMetricSample {
+                                value: *value,
+                                run_index: index,
+                                artifact_path: artifact_path.clone(),
+                            },
+                        );
+                    }
                     for span in &results.span_results {
                         all_span_ids.insert(span.id.clone());
                         seen_span_ids.insert(span.id.clone());
@@ -138,6 +150,10 @@ pub(super) fn run_repeat(args: TraceArgs) -> CmdResult<TraceCommandOutput> {
             aggregate_span(id, samples, failures)
         })
         .collect::<Vec<_>>();
+    let metrics = metric_samples
+        .into_iter()
+        .map(|(id, samples)| aggregate_metric(id, samples))
+        .collect::<Vec<_>>();
     let unmatched_span_metadata_ids = attach_span_metadata(&mut spans, &span_metadata);
     let classification_summaries = classification_summaries(&spans);
     let guardrails = run_trace_guardrails_for_args(&args)?;
@@ -175,6 +191,7 @@ pub(super) fn run_repeat(args: TraceArgs) -> CmdResult<TraceCommandOutput> {
         overlays,
         runs,
         spans,
+        metrics,
         guardrails,
         guardrail_failure_count,
         focus_span_ids: args.focus_spans.clone(),

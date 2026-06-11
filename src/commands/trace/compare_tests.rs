@@ -58,6 +58,7 @@ fn trace_compare_reports_median_and_average_deltas() {
                 metadata: None,
             },
         ],
+        metrics: Vec::new(),
         guardrails: Vec::new(),
         guardrail_failure_count: 0,
     };
@@ -115,6 +116,7 @@ fn trace_compare_reports_median_and_average_deltas() {
                 metadata: None,
             },
         ],
+        metrics: Vec::new(),
         guardrails: Vec::new(),
         guardrail_failure_count: 0,
     };

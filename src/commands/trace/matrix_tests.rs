@@ -101,6 +101,7 @@ fn trace_matrix_reports_failed_cells_and_cell_artifacts() {
             aggregate: None,
             schedule: TraceSchedule::Grouped,
             focus_spans: Vec::new(),
+            metric_guardrails: Vec::new(),
             spans: Vec::new(),
             phases: Vec::new(),
             attachments: Vec::new(),
