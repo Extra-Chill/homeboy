@@ -206,17 +206,18 @@ pub fn run_upgrade_with_method(
 
     // Execute the upgrade
     let (success, new_version) = execute_upgrade(install_method, source_path)?;
+    let upgrade_completed = should_sync_after_upgrade(new_version.as_deref());
 
-    // Auto-update all installed extensions after a successful upgrade.
+    // Auto-update all installed extensions after the upgrade command completes.
     // This prevents CI/local extension version drift that causes baseline
     // mismatches and inconsistent audit findings.
-    let (extensions_updated, extensions_skipped) = if success && !skip_extensions {
+    let (extensions_updated, extensions_skipped) = if upgrade_completed && !skip_extensions {
         update_all_extensions()
     } else {
         (vec![], vec![])
     };
 
-    let (runners_updated, runners_skipped) = if success && !skip_runners {
+    let (runners_updated, runners_skipped) = if upgrade_completed && !skip_runners {
         runners::upgrade_configured_runners(runner_targets, &extensions_updated)?
     } else {
         (vec![], vec![])
@@ -244,6 +245,10 @@ pub fn run_upgrade_with_method(
         runners_updated,
         runners_skipped,
     })
+}
+
+pub(crate) fn should_sync_after_upgrade(new_version: Option<&str>) -> bool {
+    new_version.is_some()
 }
 
 /// Update all installed extensions. Best-effort — failures are logged and
