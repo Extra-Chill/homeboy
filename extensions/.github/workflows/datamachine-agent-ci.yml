@@ -837,7 +837,7 @@ jobs:
           runner_workspace_json="$(validate_json_input runner_workspace object "$RUNNER_WORKSPACE_CONFIG")"
           runner_workspace_repo="${TARGET_REPO#*/}"
           runner_workspace_repo="${runner_workspace_repo%.git}"
-          runner_workspace_guest_root="/homeboy-runner-workspace"
+          runner_workspace_guest_root="/workspace"
           runner_workspace_guest_checkout="${runner_workspace_guest_root}/${runner_workspace_repo}"
           runner_workspace_mounts_json="[]"
           if jq -e '.enabled == true' <<< "$runner_workspace_json" >/dev/null; then
