@@ -395,6 +395,7 @@ fn collect_trace_experiment_artifacts(
         results.artifacts.push(extension_trace::TraceArtifact {
             label,
             path: relative.to_string_lossy().to_string(),
+            kind: None,
         });
     }
     Ok(())

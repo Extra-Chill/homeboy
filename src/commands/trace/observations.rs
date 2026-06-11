@@ -302,6 +302,7 @@ mod tests {
             toolchain: None,
             components: None,
             dependencies: Vec::new(),
+            metrics: Default::default(),
             preview: None,
         }
     }
@@ -329,6 +330,7 @@ mod tests {
             let results = sample_results(vec![TraceArtifact {
                 label: "WP Codebox browser probe".to_string(),
                 path: "artifacts/wp-codebox-artifacts/runtime-abc/files/browser".to_string(),
+                kind: None,
             }]);
 
             let outcome = record_trace_artifacts(&store, &run.id, &run_dir, Some(&results));
@@ -370,6 +372,7 @@ mod tests {
                 label: "network log".to_string(),
                 path: "artifacts/wp-codebox-artifacts/runtime-missing/files/browser/network.jsonl"
                     .to_string(),
+                kind: None,
             }]);
 
             let outcome = record_trace_artifacts(&store, &run.id, &run_dir, Some(&results));

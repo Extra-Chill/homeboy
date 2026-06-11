@@ -1155,6 +1155,7 @@ fn apply_trace_preview_metadata(
         results.artifacts.push(super::parsing::TraceArtifact {
             label: "Public preview metadata".to_string(),
             path: "artifacts/preview.json".to_string(),
+            kind: None,
         });
     }
     if preview.require_https {
@@ -1302,6 +1303,7 @@ mod tests {
             temporal_assertions: Vec::new(),
             artifacts: Vec::new(),
             dependencies: Vec::new(),
+            metrics: Default::default(),
             toolchain: None,
             components: None,
         };
@@ -1425,6 +1427,7 @@ mod tests {
             toolchain: None,
             components: None,
             dependencies: Vec::new(),
+            metrics: Default::default(),
             preview: None,
         };
 

@@ -167,10 +167,12 @@ pub fn run(args: ObserveArgs, _global: &GlobalArgs) -> CmdResult<ObserveOutput> 
         artifacts: vec![TraceArtifact {
             label: "observe timeline".to_string(),
             path: trace_path.to_string_lossy().to_string(),
+            kind: None,
         }],
         toolchain: None,
         components: None,
         dependencies: Vec::new(),
+        metrics: BTreeMap::new(),
         preview: None,
     };
 

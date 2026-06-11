@@ -82,6 +82,8 @@ pub struct TraceResults {
     pub artifacts: Vec<TraceArtifact>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dependencies: Vec<TraceDependencyProvenance>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metrics: BTreeMap<String, serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub toolchain: Option<TraceToolchainProvenance>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -270,6 +272,8 @@ pub enum TraceTemporalAssertionDefinition {
 pub struct TraceArtifact {
     pub label: String,
     pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -315,9 +319,16 @@ pub fn parse_trace_results_file(path: &Path) -> Result<TraceResults> {
 }
 
 fn parse_trace_results_str(raw: &str) -> Result<TraceResults> {
-    serde_json::from_str(raw).map_err(|e| {
+    let mut deserializer = serde_json::Deserializer::from_str(raw);
+    serde_path_to_error::deserialize(&mut deserializer).map_err(|e| {
+        let path = e.path().to_string();
+        let path = if path == "." { "$".to_string() } else { path };
         Error::internal_json(
-            format!("Failed to parse trace results JSON: {}", e),
+            format!(
+                "Failed to parse trace results JSON at `{}`: {}",
+                path,
+                e.inner()
+            ),
             Some("trace.parsing.deserialize".to_string()),
         )
     })
@@ -347,7 +358,8 @@ mod tests {
                 "timeline":[{"t_ms":0,"source":"desktop","event":"window.closed","data":{"id":1}}],
                 "span_definitions":[{"id":"close_to_assertion","from":"desktop.window.closed","to":"assertion.checked"}],
                 "assertions":[{"id":"no-window-reopen","status":"fail","message":"Window reopened"}],
-                "artifacts":[{"label":"main log","path":"artifacts/main.log"}]
+                "metrics":{"assertion_count":1,"producer":"wp-codebox"},
+                "artifacts":[{"label":"main log","path":"artifacts/main.log","kind":"log"}]
             }"#,
         )
         .expect("minimal trace envelope should parse");
@@ -357,7 +369,9 @@ mod tests {
         assert_eq!(parsed.timeline[0].t_ms, 0);
         assert_eq!(parsed.span_definitions[0].id, "close_to_assertion");
         assert_eq!(parsed.assertions[0].id, "no-window-reopen");
+        assert_eq!(parsed.metrics["assertion_count"], 1);
         assert_eq!(parsed.artifacts[0].path, "artifacts/main.log");
+        assert_eq!(parsed.artifacts[0].kind.as_deref(), Some("log"));
     }
 
     #[test]
@@ -382,7 +396,8 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(!err.message.is_empty());
+        let detail = err.details["error"].as_str().expect("JSON error detail");
+        assert!(detail.contains("`status`"), "{}", detail);
     }
 
     #[test]
@@ -392,7 +407,8 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(!err.message.is_empty());
+        let detail = err.details["error"].as_str().expect("JSON error detail");
+        assert!(detail.contains("`timeline[0]`"), "{}", detail);
     }
 
     #[test]
