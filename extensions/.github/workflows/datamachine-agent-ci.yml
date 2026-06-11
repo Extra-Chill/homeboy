@@ -180,7 +180,7 @@ name: Data Machine Agent CI (reusable)
         type: string
         default: "[]"
       engine_key:
-        description: Optional engine data key used by built-in tool result capture and fallback pull request recording.
+        description: Optional engine data key used by built-in tool result capture and runner publication metadata.
         type: string
         default: ""
       tool_results_key:

@@ -1920,13 +1920,13 @@ if ( ! function_exists( 'homeboy_datamachine_agent_runner_workspace_publication_
     }
 
     function homeboy_datamachine_agent_publish_runner_workspace( array $engine_data, array $config, array $runner_workspace, array $template_values, array $paths ): array {
-        $ability_name = 'datamachine-code/publish-runner-workspace';
+        $ability_name = 'wp-codebox/publish-runner-workspace';
         $input        = homeboy_datamachine_agent_runner_workspace_publication_input( $config, $runner_workspace, $template_values, $paths );
         if ( '' === (string) ( $input['workspace'] ?? '' ) || '' === (string) ( $input['repo'] ?? '' ) ) {
             return array(
                 'opened'         => false,
                 'ability'        => $ability_name,
-                'upstream_issue' => 'https://github.com/Extra-Chill/data-machine-code/issues/625',
+                'upstream_issue' => 'https://github.com/Automattic/wp-codebox/issues/873',
                 'error'          => 'Runner workspace publication requires a workspace handle and target repo.',
                 'input'          => $input,
             );
@@ -1937,8 +1937,8 @@ if ( ! function_exists( 'homeboy_datamachine_agent_runner_workspace_publication_
             return array(
                 'opened'         => false,
                 'ability'        => $ability_name,
-                'upstream_issue' => 'https://github.com/Extra-Chill/data-machine-code/issues/625',
-                'error'          => $ability_name . ' is not available; runner workspace publication is blocked on Extra-Chill/data-machine-code#625.',
+                'upstream_issue' => 'https://github.com/Automattic/wp-codebox/issues/873',
+                'error'          => $ability_name . ' is not available; runner workspace publication is blocked on Automattic/wp-codebox#873.',
                 'input'          => $input,
             );
         }
@@ -1992,10 +1992,28 @@ if ( ! function_exists( 'homeboy_datamachine_agent_capture_runner_workspace' ) )
             return array( 'enabled' => true, 'changed' => false, 'engine_data' => $engine_data, 'error' => 'Runner workspace capture requires a provisioned workspace handle.' );
         }
 
-        $status = homeboy_datamachine_agent_execute_workspace_ability( 'datamachine/workspace-git-status', array( 'name' => $handle ) );
-        if ( empty( $status['success'] ) ) {
-            return array( 'enabled' => true, 'changed' => false, 'engine_data' => $engine_data, 'status' => $status, 'error' => (string) ( $status['error'] ?? 'Workspace status failed.' ) );
+        $capture = homeboy_datamachine_agent_execute_workspace_ability(
+            'wp-codebox/capture-runner-workspace',
+            array(
+                'workspace'        => $handle,
+                'handle'           => $handle,
+                'repo'             => homeboy_datamachine_agent_scalar( $config, 'target_repo' ),
+                'runner_workspace' => $runner_workspace,
+            )
+        );
+        if ( empty( $capture['success'] ) ) {
+            return array(
+                'enabled'        => true,
+                'changed'        => true,
+                'engine_data'    => $engine_data,
+                'status'         => array( 'handle' => $handle, 'branch' => (string) ( $runner_workspace['branch'] ?? '' ) ),
+                'upstream_issue' => 'https://github.com/Automattic/wp-codebox/issues/873',
+                'error'          => (string) ( $capture['error'] ?? 'WP Codebox runner workspace capture API is unavailable.' ),
+                'capture'        => $capture,
+            );
         }
+
+        $status = is_array( $capture['status'] ?? null ) ? $capture['status'] : $capture;
         $status['branch'] = (string) ( $runner_workspace['branch'] ?? '' );
         $status['handle'] = $handle;
 
@@ -2004,7 +2022,7 @@ if ( ! function_exists( 'homeboy_datamachine_agent_capture_runner_workspace' ) )
             return array( 'enabled' => true, 'changed' => false, 'engine_data' => $engine_data, 'status' => $status );
         }
 
-        $diff = homeboy_datamachine_agent_execute_workspace_ability( 'datamachine/workspace-git-diff', array( 'name' => $handle ) );
+        $diff = is_array( $capture['diff'] ?? null ) ? $capture['diff'] : array();
 
         return array(
             'enabled'               => true,
@@ -2012,6 +2030,7 @@ if ( ! function_exists( 'homeboy_datamachine_agent_capture_runner_workspace' ) )
             'engine_data'           => $engine_data,
             'status'                => $status,
             'diff'                  => $diff,
+            'capture'               => $capture,
         );
     }
 }
