@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.119.14] - 2026-06-11
+
+### Fixed
+- mark rig bench workloads as explicit overrides
+
 ## [2.119.13] - 2026-06-11
 
 ### Changed
