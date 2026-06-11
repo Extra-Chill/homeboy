@@ -116,6 +116,14 @@ process.stdout.write(JSON.stringify({
     schema: 'homeboy/bench-results/v1',
     component_id: 'wp-site-generator',
     benchmarks: [],
+    scenarios: [{
+      id: 'rig-workload',
+      source: 'in_tree',
+      file: 'tests/bench/rig-workload.php',
+      iterations: 1,
+      metrics: {},
+      provenance: {workload_file: 'tests/bench/rig-workload.php'}
+    }],
     warmup_iterations: 1
   }
 }));
@@ -197,35 +205,32 @@ jq -e '
 ' "$SELECTED_CAPTURE_FILE" >/dev/null
 
 printf '<?php return function (): array { return array("metrics" => array("shadow" => 1)); };\n' > "${SOURCE_ROOT}/tests/bench/rig-workload.php"
-set +e
-DUPLICATE_OUTPUT=$(HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$RESOLVE_HELPER" \
+DUPLICATE_CAPTURE_FILE="${TMP_ROOT}/duplicate-capture.json"
+DUPLICATE_RESULTS_FILE="${TMP_ROOT}/duplicate-results.json"
+HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$RESOLVE_HELPER" \
 HOMEBOY_RUNTIME_BENCH_HELPER_SH="$BENCH_HELPER" \
 HOMEBOY_WORDPRESS_DEPENDENCY_HELPER="$DEPENDENCY_HELPER" \
 HOMEBOY_SMOKE_SOURCE_ROOT="$SOURCE_ROOT" \
-HOMEBOY_SMOKE_CAPTURE_FILE="${TMP_ROOT}/duplicate-capture.json" \
+HOMEBOY_SMOKE_CAPTURE_FILE="$DUPLICATE_CAPTURE_FILE" \
 HOMEBOY_SETTINGS_JSON="$SETTINGS_JSON" \
 HOMEBOY_BENCH_EXTRA_WORKLOADS="$EXTRA_WORKLOAD" \
 HOMEBOY_BENCH_SCENARIOS="rig-workload" \
 HOMEBOY_WP_CODEBOX_BIN="$WP_CODEBOX_BIN" \
 HOMEBOY_WP_CODEBOX_CORE_MODULE="$WP_CODEBOX_CORE_MODULE" \
-HOMEBOY_BENCH_RESULTS_FILE="${TMP_ROOT}/duplicate-results.json" \
+HOMEBOY_BENCH_RESULTS_FILE="$DUPLICATE_RESULTS_FILE" \
 HOMEBOY_WP_CODEBOX_ARTIFACTS_DIR="${TMP_ROOT}/duplicate-artifacts" \
 HOMEBOY_RUNTIME_FAILURE_TRAP="" \
 HOMEBOY_BENCH_ITERATIONS=1 \
 HOMEBOY_BENCH_WARMUP_ITERATIONS=0 \
-bash "$SCRIPT_DIR/bench-runner-wp-codebox.sh" 2>&1 >/dev/null)
-DUPLICATE_STATUS=$?
-set -e
+bash "$SCRIPT_DIR/bench-runner-wp-codebox.sh" >/dev/null
 rm -f "${SOURCE_ROOT}/tests/bench/rig-workload.php"
-if [ "$DUPLICATE_STATUS" -eq 0 ]; then
-    echo "Expected duplicate selected rig/in-tree workload ids to fail." >&2
-    exit 1
-fi
-if [[ "$DUPLICATE_OUTPUT" != *"duplicate WordPress bench scenario id 'rig-workload'"* ]]; then
-    echo "Expected duplicate selected rig/in-tree workload failure to name the scenario id." >&2
-    printf '%s\n' "$DUPLICATE_OUTPUT" >&2
-    exit 1
-fi
+jq -e --arg sourceRoot "$SOURCE_ROOT" '
+    (.recipe.inputs.mounts[] | select(.source | endswith("/component-plugin-rig-workload-overlay") and .target == "/wordpress/wp-content/plugins/wp-site-generator" and .mode == "readonly"))
+    and ([.recipe.inputs.mounts[] | select(.source | endswith("/rig-workloads/rig-workload.php"))] | length) == 0
+' "$DUPLICATE_CAPTURE_FILE" >/dev/null
+jq -e '
+    (.scenarios[] | select(.id == "rig-workload" and .source == "rig" and .provenance.source == "rig-overlay"))
+' "$DUPLICATE_RESULTS_FILE" >/dev/null
 
 LIST_RESULTS_FILE="${TMP_ROOT}/bench-list-results.json"
 HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$RESOLVE_HELPER" \
@@ -284,6 +289,36 @@ jq -e --arg sourceRoot "$PLUGIN_ROOT" '
     .recipe.inputs.extraPlugins == [{source: $sourceRoot, slug: "wp-site-generator", pluginFile: "wp-site-generator/plugin-main.php", activate: false}]
     and ([.recipe.inputs.mounts[] | select(.source == $sourceRoot and .target == "/wordpress/wp-content/plugins/wp-site-generator")] | length == 0)
 ' "$PLUGIN_CAPTURE_FILE" >/dev/null
+
+mkdir -p "${PLUGIN_ROOT}/tests/bench"
+printf '<?php return function (): array { return array("metrics" => array("shadow" => 1)); };\n' > "${PLUGIN_ROOT}/tests/bench/rig-workload.php"
+PLUGIN_DUPLICATE_CAPTURE_FILE="${TMP_ROOT}/plugin-duplicate-capture.json"
+PLUGIN_DUPLICATE_RESULTS_FILE="${TMP_ROOT}/plugin-duplicate-results.json"
+HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$RESOLVE_HELPER" \
+HOMEBOY_RUNTIME_BENCH_HELPER_SH="$BENCH_HELPER" \
+HOMEBOY_WORDPRESS_DEPENDENCY_HELPER="$DEPENDENCY_HELPER" \
+HOMEBOY_SMOKE_SOURCE_ROOT="$PLUGIN_ROOT" \
+HOMEBOY_SMOKE_CAPTURE_FILE="$PLUGIN_DUPLICATE_CAPTURE_FILE" \
+HOMEBOY_SETTINGS_JSON="$SETTINGS_JSON" \
+HOMEBOY_BENCH_EXTRA_WORKLOADS="$EXTRA_WORKLOAD" \
+HOMEBOY_BENCH_SCENARIOS="rig-workload" \
+HOMEBOY_WP_CODEBOX_BIN="$WP_CODEBOX_BIN" \
+HOMEBOY_WP_CODEBOX_CORE_MODULE="$WP_CODEBOX_CORE_MODULE" \
+HOMEBOY_BENCH_RESULTS_FILE="$PLUGIN_DUPLICATE_RESULTS_FILE" \
+HOMEBOY_WP_CODEBOX_ARTIFACTS_DIR="${TMP_ROOT}/plugin-duplicate-artifacts" \
+HOMEBOY_RUNTIME_FAILURE_TRAP="" \
+HOMEBOY_BENCH_ITERATIONS=1 \
+HOMEBOY_BENCH_WARMUP_ITERATIONS=0 \
+bash "$SCRIPT_DIR/bench-runner-wp-codebox.sh" >/dev/null
+
+jq -e '
+    (.recipe.inputs.extraPlugins[0].source | endswith("/component-plugin-rig-workload-overlay"))
+    and .recipe.inputs.extraPlugins[0].pluginFile == "wp-site-generator/plugin-main.php"
+    and ([.recipe.inputs.mounts[] | select(.source | endswith("/rig-workloads/rig-workload.php"))] | length) == 0
+' "$PLUGIN_DUPLICATE_CAPTURE_FILE" >/dev/null
+jq -e '
+    (.scenarios[] | select(.id == "rig-workload" and .source == "rig" and .provenance.source == "rig-overlay"))
+' "$PLUGIN_DUPLICATE_RESULTS_FILE" >/dev/null
 
 DEPENDENCY_ROOT="${TMP_ROOT}/wp-codebox-release-fixture"
 mkdir -p "${DEPENDENCY_ROOT}/packages/wordpress-plugin"
