@@ -112,6 +112,7 @@ fn upgrade_runner_with_executor(
                 new_version: None,
                 bare_homeboy_version: None,
                 path_drift: None,
+                recovery_commands: runner_upgrade_recovery_commands(&runner.id),
                 extensions_synced: Vec::new(),
                 extensions_failed: Vec::new(),
                 stale_daemon: None,
@@ -129,6 +130,7 @@ fn upgrade_runner_with_executor(
                 new_version: None,
                 bare_homeboy_version: None,
                 path_drift: None,
+                recovery_commands: runner_upgrade_recovery_commands(&runner.id),
                 extensions_synced: Vec::new(),
                 extensions_failed: Vec::new(),
                 stale_daemon: None,
@@ -149,6 +151,8 @@ fn upgrade_runner_with_executor(
         new_version.as_deref(),
         bare_homeboy_version.as_deref(),
     );
+    let recovery_commands =
+        runner_recovery_commands(&runner.id, &homeboy_path, path_drift.as_ref());
     let stale_daemon = runner_stale_daemon(runner, status);
     let upgraded = match (previous_version.as_deref(), new_version.as_deref()) {
         (Some(previous), Some(new)) => new != previous,
@@ -156,6 +160,7 @@ fn upgrade_runner_with_executor(
     };
     let success = new_version.is_some() && extensions_failed.is_empty() && stale_daemon.is_none();
     let detail = runner_upgrade_final_detail(
+        &runner.id,
         detail,
         path_drift.as_deref(),
         stale_daemon.as_ref(),
@@ -171,6 +176,7 @@ fn upgrade_runner_with_executor(
         new_version,
         bare_homeboy_version,
         path_drift,
+        recovery_commands,
         extensions_synced,
         extensions_failed,
         stale_daemon,
@@ -204,6 +210,7 @@ fn sync_runner_extensions(
                         source_revision: source_revision.to_string(),
                         synced: false,
                         detail: Some(detail),
+                        recovery_commands: runner_extension_recovery_commands(runner, homeboy_path),
                     });
                     continue;
                 }
@@ -238,6 +245,7 @@ fn sync_runner_extensions(
                     source_revision: source_revision.to_string(),
                     synced: true,
                     detail: None,
+                    recovery_commands: Vec::new(),
                 });
             }
             Ok((output, exit_code)) => {
@@ -250,6 +258,7 @@ fn sync_runner_extensions(
                         exit_code,
                         runner_upgrade_detail(&output)
                     )),
+                    recovery_commands: runner_exec_recovery_commands(runner, &command),
                 });
             }
             Err(err) => {
@@ -258,6 +267,7 @@ fn sync_runner_extensions(
                     source_revision: source_revision.to_string(),
                     synced: false,
                     detail: Some(format!("sync failed: {}", err.message)),
+                    recovery_commands: runner_exec_recovery_commands(runner, &command),
                 });
             }
         }
@@ -355,6 +365,71 @@ fn runner_path_drift(
     ))
 }
 
+fn runner_recovery_commands(
+    runner_id: &str,
+    homeboy_path: &str,
+    path_drift: Option<&String>,
+) -> Vec<String> {
+    let mut commands = runner_upgrade_recovery_commands(runner_id);
+    if path_drift.is_some() && homeboy_path != "homeboy" {
+        commands.push(format!(
+            "homeboy runner exec {} --ssh -- sh -lc {}",
+            shell_arg(runner_id),
+            shell_arg(&format!(
+                "ln -sf {} $(command -v homeboy)",
+                shell_arg(homeboy_path)
+            ))
+        ));
+    }
+    commands
+}
+
+fn runner_upgrade_recovery_commands(runner_id: &str) -> Vec<String> {
+    vec![format!(
+        "homeboy upgrade --force --upgrade-runner {}",
+        shell_arg(runner_id)
+    )]
+}
+
+fn runner_extension_recovery_commands(runner: &Runner, homeboy_path: &str) -> Vec<String> {
+    let command = vec![
+        homeboy_path.to_string(),
+        "extension".to_string(),
+        "list".to_string(),
+    ];
+    runner_exec_recovery_commands(runner, &command)
+}
+
+fn runner_exec_recovery_commands(runner: &Runner, command: &[String]) -> Vec<String> {
+    let mut args = vec![
+        "homeboy".to_string(),
+        "runner".to_string(),
+        "exec".to_string(),
+        runner.id.clone(),
+        "--ssh".to_string(),
+        "--".to_string(),
+    ];
+    args.extend(command.iter().cloned());
+    vec![args
+        .iter()
+        .map(|arg| shell_arg(arg))
+        .collect::<Vec<_>>()
+        .join(" ")]
+}
+
+fn shell_arg(arg: &str) -> String {
+    if !arg.is_empty()
+        && arg.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(byte, b'/' | b'.' | b'_' | b'-' | b':' | b'@' | b'=')
+        })
+    {
+        return arg.to_string();
+    }
+
+    format!("'{}'", arg.replace('\'', "'\\''"))
+}
+
 fn runner_stale_daemon(
     runner: &Runner,
     status: &impl Fn(&str) -> Result<RunnerStatusReport>,
@@ -368,6 +443,7 @@ fn runner_stale_daemon(
 }
 
 fn runner_upgrade_final_detail(
+    runner_id: &str,
     detail: String,
     path_drift: Option<&str>,
     stale_daemon: Option<&RunnerDaemonDriftEntry>,
@@ -389,6 +465,10 @@ fn runner_upgrade_final_detail(
                 ))
                 .collect::<Vec<_>>()
                 .join("; ")
+        ));
+        parts.push(format!(
+            "retry failed runner sync with `{}` or retry an individual failed extension using its recovery_commands entry",
+            runner_upgrade_recovery_commands(runner_id).join(" && ")
         ));
     }
 
@@ -723,9 +803,16 @@ mod tests {
         assert_eq!(skipped.len(), 1);
         assert_eq!(skipped[0].extensions_failed.len(), 1);
         assert_eq!(skipped[0].extensions_failed[0].extension_id, "swift");
+        assert_eq!(
+            skipped[0].extensions_failed[0].recovery_commands,
+            vec!["homeboy runner exec lab --ssh -- /home/chubes/.cargo/bin/homeboy extension install https://github.com/Extra-Chill/homeboy-extensions.git --id swift --ref 98a61eda --replace"]
+        );
         assert_eq!(skipped[0].extensions_synced.len(), 1);
         assert_eq!(skipped[0].extensions_synced[0].extension_id, "wordpress");
         assert!(skipped[0].detail.contains("swift@98a61eda"));
+        assert!(skipped[0]
+            .detail
+            .contains("homeboy upgrade --force --upgrade-runner lab"));
         assert!(commands
             .iter()
             .any(|command| command.contains(&"wordpress".to_string())));
@@ -761,6 +848,13 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("bare `homeboy` reports 0.228.4"));
+        assert!(updated[0]
+            .recovery_commands
+            .contains(&"homeboy upgrade --force --upgrade-runner lab".to_string()));
+        assert!(updated[0].recovery_commands.contains(&
+            "homeboy runner exec lab --ssh -- sh -lc 'ln -sf /home/chubes/.cargo/bin/homeboy $(command -v homeboy)'"
+                .to_string()
+        ));
         assert!(updated[0].detail.contains("runner PATH drift detected"));
     }
 

@@ -76,6 +76,8 @@ pub struct RunnerUpgradeEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path_drift: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub recovery_commands: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub extensions_synced: Vec<RunnerExtensionSyncEntry>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub extensions_failed: Vec<RunnerExtensionSyncEntry>,
@@ -92,6 +94,8 @@ pub struct RunnerExtensionSyncEntry {
     pub synced: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub recovery_commands: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
