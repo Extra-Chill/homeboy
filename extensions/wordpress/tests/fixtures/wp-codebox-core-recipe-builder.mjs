@@ -4,6 +4,7 @@ export function buildWordPressBenchRecipe(options = {}) {
 		inputs: {
 			mounts: normalizeRecipeMounts(options.mounts, 'readonly'),
 			extraPlugins: options.extraPlugins ?? [],
+			workloads: options.workloads ?? [],
 		},
 		runtime: {
 			blueprint: options.blueprint ?? {},

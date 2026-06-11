@@ -16,7 +16,10 @@ const input = {
 		env: { FIXTURE: '1' },
 		wpConfigDefines: { WP_DEBUG: true },
 		bootstrapFiles: ['/wordpress/wp-content/plugins/fixture-plugin/bootstrap.php'],
-		workloads: [{ id: 'fixture-workload', steps: [{ type: 'php', code: 'return [];' }] }],
+		workloads: [
+			{ id: 'fixture-workload', steps: [{ type: 'php', code: 'return [];' }] },
+			{ id: 'other-workload', steps: [{ type: 'php', code: 'return [];' }] },
+		],
 		lifecycle: { before: ['fixture'] },
 		resetPolicy: { mode: 'snapshot' },
 		pluginRuntime: {
@@ -42,6 +45,7 @@ const recipe = JSON.parse(result.stdout);
 assert.equal(recipe.schema, 'wp-codebox/workspace-recipe/v1');
 assert.equal(recipe.inputs.mounts[0].mode, 'readonly');
 assert.deepEqual(recipe.inputs.extraPlugins[0], { source: '/tmp/extra-plugin.zip', slug: 'extra-plugin', activate: true });
+assert.deepEqual(recipe.inputs.workloads.map((workload) => workload.id), ['fixture-workload', 'other-workload']);
 assert.deepEqual(recipe.inputs.pluginRuntime, input.options.pluginRuntime);
 assert.deepEqual(recipe.workflow.steps, [{
 	command: 'fixture.wordpress.bench',
@@ -51,6 +55,17 @@ assert.deepEqual(recipe.workflow.steps, [{
 		'reset-policy-json={"mode":"snapshot"}',
 	],
 }]);
+
+const filteredResult = spawnSync(process.execPath, [script], {
+	cwd: path.join(__dirname, '..'),
+	input: JSON.stringify(input),
+	encoding: 'utf8',
+	env: { ...process.env, HOMEBOY_WP_CODEBOX_CORE_MODULE: fixtureCoreModule, HOMEBOY_BENCH_SCENARIOS: 'fixture-workload' },
+});
+
+assert.equal(filteredResult.status, 0, filteredResult.stderr);
+const filteredRecipe = JSON.parse(filteredResult.stdout);
+assert.deepEqual(filteredRecipe.inputs.workloads.map((workload) => workload.id), ['fixture-workload']);
 
 const diagnosticResult = spawnSync(process.execPath, [script], {
 	cwd: path.join(__dirname, '..'),
