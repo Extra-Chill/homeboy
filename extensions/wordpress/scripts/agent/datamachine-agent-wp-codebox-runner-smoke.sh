@@ -17,6 +17,7 @@ REPLAY_BUNDLE_DIR="$RUNTIME_DIR/replay-bundles"
 FAKE_WP_CODEBOX="$RUNTIME_DIR/wp-codebox.js"
 FAKE_ARGS_FILE="$RUNTIME_DIR/wp-codebox-args.txt"
 BUNDLE_DIR="$RUNTIME_DIR/bundle"
+WP_CODEBOX_PLUGIN_DIR="$RUNTIME_DIR/wp-codebox/packages/wordpress-plugin"
 AGENTS_API_DIR="$RUNTIME_DIR/agents-api"
 DATA_MACHINE_DIR="$RUNTIME_DIR/data-machine"
 DATA_MACHINE_CODE_DIR="$RUNTIME_DIR/data-machine-code"
@@ -29,7 +30,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mkdir -p "$BUNDLE_DIR" "$AGENTS_API_DIR" "$DATA_MACHINE_DIR" "$DATA_MACHINE_CODE_DIR" "$DIR_MOUNT_PATH"
+mkdir -p "$BUNDLE_DIR" "$WP_CODEBOX_PLUGIN_DIR" "$AGENTS_API_DIR" "$DATA_MACHINE_DIR" "$DATA_MACHINE_CODE_DIR" "$DIR_MOUNT_PATH"
 printf '{"agent":{"slug":"wp-codebox-smoke-agent"}}\n' > "$BUNDLE_DIR/manifest.json"
 printf '{"ok":true}\n' > "$FILE_MOUNT_PATH"
 
@@ -86,7 +87,7 @@ const valueAfter = (name) => {
 const recipePath = valueAfter('--recipe')
 const recipe = JSON.parse(fs.readFileSync(recipePath, 'utf8'))
 const recipeText = JSON.stringify(recipe)
-for (const expected of ['wp-codebox.agent-sandbox-run', 'HOMEBOY_DATAMACHINE_AGENT_CONFIG', '/homeboy-extension', 'agents-api', 'data-machine', 'data-machine-code']) {
+for (const expected of ['wp-codebox.agent-sandbox-run', 'HOMEBOY_DATAMACHINE_AGENT_CONFIG', '/homeboy-extension', 'wp-codebox', 'agents-api', 'data-machine', 'data-machine-code']) {
   if (!recipeText.includes(expected)) {
     throw new Error(`missing expected wp-codebox recipe value: ${expected}`)
   }
@@ -94,7 +95,7 @@ for (const expected of ['wp-codebox.agent-sandbox-run', 'HOMEBOY_DATAMACHINE_AGE
 if (recipe.inputs?.extra_plugins?.some((plugin) => plugin.slug === 'php-ai-client')) {
   throw new Error('WP AI Client is provided by WordPress core and must not be mounted as a WP Codebox extra plugin')
 }
-for (const slug of ['agents-api', 'data-machine', 'data-machine-code']) {
+for (const slug of ['wp-codebox', 'agents-api', 'data-machine', 'data-machine-code']) {
   if (!recipe.inputs?.extra_plugins?.some((plugin) => plugin.slug === slug && plugin.activate === false && plugin.loadAs === 'mu-plugin')) {
     throw new Error(`expected ${slug} to load as a runtime mu-plugin before the agent workload runs`)
   }
@@ -244,6 +245,7 @@ chmod +x "$FAKE_WP_CODEBOX"
 
 jq -n \
     --arg bundle "$BUNDLE_DIR" \
+    --arg wpCodebox "$WP_CODEBOX_PLUGIN_DIR" \
     --arg agentsApi "$AGENTS_API_DIR" \
     --arg dataMachine "$DATA_MACHINE_DIR" \
     --arg dataMachineCode "$DATA_MACHINE_CODE_DIR" \
@@ -270,6 +272,7 @@ jq -n \
         transcript_host_dir: $transcriptHostDir,
         ability_tools: [{name: "fixture_tool", apiToken: "fixture-tool-secret"}],
         wp_codebox_components: {
+            wp_codebox: $wpCodebox,
             agents_api: $agentsApi,
             data_machine: $dataMachine,
             data_machine_code: $dataMachineCode
