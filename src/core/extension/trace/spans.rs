@@ -134,7 +134,6 @@ mod tests {
             timeline: vec![event(10, "runner", "start"), event(35, "runner", "done")],
             span_definitions: Vec::new(),
             span_results: Vec::new(),
-            metrics: Default::default(),
             assertions: Vec::<TraceAssertion>::new(),
             temporal_assertions: Vec::new(),
             artifacts: Vec::new(),
