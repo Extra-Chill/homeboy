@@ -46,6 +46,12 @@ mod tests {
     }
 
     #[test]
+    fn same_version_upgrade_completion_still_syncs_extensions_and_runners() {
+        assert!(helpers::should_sync_after_upgrade(Some("0.228.5")));
+        assert!(!helpers::should_sync_after_upgrade(None));
+    }
+
+    #[test]
     fn test_current_version() {
         let version = current_version();
         assert!(!version.is_empty());
