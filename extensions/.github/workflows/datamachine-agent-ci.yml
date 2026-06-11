@@ -270,10 +270,6 @@ name: Data Machine Agent CI (reusable)
         description: JSON object for runner-owned Data Machine Code workspace/worktree provisioning before the agent runs. Set agent_alias to expose an opaque project name instead of the real workspace handle.
         type: string
         default: "{}"
-      fallback_pull_request:
-        description: JSON object describing a fallback PR to open or reuse when files were written but the agent did not open a PR.
-        type: string
-        default: "{}"
       actions_artifact_downloads:
         description: JSON array of GitHub Actions artifacts to download before the agent run. Each item supports repo, run_id, name, and dir.
         type: string
@@ -705,7 +701,6 @@ jobs:
           PIPELINE_STEP_PATCHES: ${{ inputs.pipeline_step_patches }}
           FLOW_STEP_PATCHES: ${{ inputs.flow_step_patches }}
           RUNNER_WORKSPACE_CONFIG: ${{ inputs.runner_workspace }}
-          FALLBACK_PULL_REQUEST: ${{ inputs.fallback_pull_request }}
           EXECUTE_WORKFLOW_PATH: ${{ inputs.execute_workflow_path }}
           GITHUB_APP_TOKEN_VALUE: ${{ steps.app-token.outputs.token }}
           GITHUB_REPOSITORY_TOKEN_VALUE: ${{ github.token }}
@@ -840,7 +835,6 @@ jobs:
           pipeline_step_patches_json="$(validate_json_input pipeline_step_patches array "$PIPELINE_STEP_PATCHES")"
           flow_step_patches_json="$(validate_json_input flow_step_patches array "$FLOW_STEP_PATCHES")"
           runner_workspace_json="$(validate_json_input runner_workspace object "$RUNNER_WORKSPACE_CONFIG")"
-          fallback_pull_request_json="$(validate_json_input fallback_pull_request object "$FALLBACK_PULL_REQUEST")"
           rules_json="$(validate_json_input rules object "$RULES")"
           general_rules_json="$(validate_json_input general_rules array "$GENERAL_RULES")"
           task_rules_json="$(validate_json_input task_rules array "$TASK_RULES")"
@@ -916,7 +910,6 @@ jobs:
             --argjson pipelineStepPatches "$pipeline_step_patches_json" \
             --argjson flowStepPatches "$flow_step_patches_json" \
             --argjson runnerWorkspace "$runner_workspace_json" \
-            --argjson fallbackPullRequest "$fallback_pull_request_json" \
             --argjson rules "$rules_json" \
             --argjson generalRules "$general_rules_json" \
             --argjson taskRules "$task_rules_json" \
@@ -990,7 +983,6 @@ jobs:
               pipeline_step_patches: $pipelineStepPatches,
               flow_step_patches: $flowStepPatches,
               runner_workspace: $runnerWorkspace,
-              fallback_pull_request: $fallbackPullRequest,
               rules: $rules,
               general_rules: $generalRules,
               task_rules: $taskRules,

@@ -89,7 +89,6 @@ const AGENT_BUNDLE_CONFIG_FIELDS = [
   'replay_bundle_artifact_name',
   'replay_bundle_dir',
   'runner_workspace',
-  'fallback_pull_request',
   'extra_required_abilities',
   'enable_terminal_actions',
   'enable_wp_cli_tool',
@@ -1361,7 +1360,10 @@ function agentRuntimeBundleArtifacts(result) {
         metadata: { ...exported, scenario_id: scenario.id },
       });
     }
-    const pullRequestUrl = metadata.fallback_pull_request?.url || metadata.engine_data?.pull_request?.url || metadata.engine_data?.static_site_agent?.pr_url;
+    const runnerPublicationUrl = Array.isArray(metadata.engine_data?.runner_publications)
+      ? metadata.engine_data.runner_publications.find((publication) => publication?.url)?.url
+      : '';
+    const pullRequestUrl = metadata.runner_workspace_publication?.url || metadata.runner_workspace_publication?.html_url || metadata.runner_workspace_publication?.result?.url || metadata.runner_workspace_publication?.result?.html_url || runnerPublicationUrl || metadata.engine_data?.pull_request?.url || metadata.engine_data?.static_site_agent?.pr_url;
     appendUniqueArtifact(artifacts, {
       id: pullRequestUrl ? 'agent-runtime-pull-request' : '',
       kind: 'agent-runtime-pull-request',

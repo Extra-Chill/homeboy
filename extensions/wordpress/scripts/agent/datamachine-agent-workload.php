@@ -171,7 +171,7 @@ if ( ! function_exists( 'homeboy_datamachine_agent_eval_artifact' ) ) {
             'artifacts'       => array_filter(
                 array(
                     'job_artifact_exports' => $exports,
-                    'fallback_pull_request' => is_array( $metadata['fallback_pull_request'] ?? null ) ? $metadata['fallback_pull_request'] : array(),
+                    'runner_workspace_publication' => is_array( $metadata['runner_workspace_publication'] ?? null ) ? $metadata['runner_workspace_publication'] : array(),
                 )
             ),
         );
@@ -1502,7 +1502,7 @@ if ( ! function_exists( 'homeboy_datamachine_agent_export_job_artifacts' ) ) {
         }
 
         $file_ability = wp_get_ability( 'datamachine/create-or-update-github-file' );
-        $pr_ability   = wp_get_ability( 'datamachine/create-github-pull-request' );
+        $pr_ability   = wp_get_ability( 'datamachine-code/create-github-pull-request' );
         $get_ability  = wp_get_ability( 'datamachine/get-github-file' );
         if ( ! $file_ability || ! $pr_ability || ! $get_ability ) {
             return array( 'error' => 'GitHub file or pull request ability unavailable.' );
@@ -1632,155 +1632,6 @@ if ( ! function_exists( 'homeboy_datamachine_agent_export_job_artifacts' ) ) {
                 'engine_data' => homeboy_datamachine_agent_record_artifact_pr_result( $engine_data, $config, $pr_url, $branch, $written ),
             )
         );
-    }
-}
-
-if ( ! function_exists( 'homeboy_datamachine_agent_open_fallback_pr' ) ) {
-    function homeboy_datamachine_agent_record_pr_tool_result( array $engine_data, array $config, array $tool_result ): array {
-        $tool_results_key = homeboy_datamachine_agent_scalar( $config, 'tool_results_key', 'github_tool_results' );
-        $engine_key       = homeboy_datamachine_agent_scalar( $config, 'engine_key' );
-        if ( '' !== $engine_key ) {
-            if ( ! isset( $engine_data[ $engine_key ] ) || ! is_array( $engine_data[ $engine_key ] ) ) {
-                $engine_data[ $engine_key ] = array();
-            }
-            if ( ! isset( $engine_data[ $engine_key ][ $tool_results_key ] ) || ! is_array( $engine_data[ $engine_key ][ $tool_results_key ] ) ) {
-                $engine_data[ $engine_key ][ $tool_results_key ] = array();
-            }
-            $engine_data[ $engine_key ][ $tool_results_key ][] = $tool_result;
-            return $engine_data;
-        }
-
-        if ( ! isset( $engine_data[ $tool_results_key ] ) || ! is_array( $engine_data[ $tool_results_key ] ) ) {
-            $engine_data[ $tool_results_key ] = array();
-        }
-        $engine_data[ $tool_results_key ][] = $tool_result;
-
-        return $engine_data;
-    }
-
-    function homeboy_datamachine_agent_existing_fallback_pr( string $repo, string $head, string $base ): array {
-        $ability = function_exists( 'wp_get_ability' ) ? wp_get_ability( 'datamachine/list-github-pulls' ) : null;
-        if ( ! $ability ) {
-            return array();
-        }
-
-        $result = $ability->execute(
-            array(
-                'repo'     => $repo,
-                'state'    => 'open',
-                'per_page' => 100,
-            )
-        );
-        if ( function_exists( 'is_wp_error' ) && is_wp_error( $result ) ) {
-            return array();
-        }
-        if ( ! is_array( $result ) || empty( $result['success'] ) || ! is_array( $result['pulls'] ?? null ) ) {
-            return array();
-        }
-
-        foreach ( $result['pulls'] as $pull ) {
-            if ( ! is_array( $pull ) ) {
-                continue;
-            }
-            if ( $head !== (string) ( $pull['head'] ?? $pull['head_ref'] ?? '' ) ) {
-                continue;
-            }
-            if ( '' !== $base && $base !== (string) ( $pull['base'] ?? $pull['base_ref'] ?? '' ) ) {
-                continue;
-            }
-            if ( '' !== homeboy_datamachine_agent_first_url( $pull ) ) {
-                return $pull;
-            }
-        }
-
-        return array();
-    }
-
-    function homeboy_datamachine_agent_open_fallback_pr( array $engine_data, array $config ): array {
-        $fallback = is_array( $config['fallback_pull_request'] ?? null ) ? $config['fallback_pull_request'] : array();
-        if ( empty( $fallback ) ) {
-            return array( 'opened' => false );
-        }
-
-        $repo  = homeboy_datamachine_agent_scalar( $fallback, 'repo', homeboy_datamachine_agent_scalar( $config, 'target_repo' ) );
-        $title = homeboy_datamachine_agent_scalar( $fallback, 'title' );
-        $head  = homeboy_datamachine_agent_scalar( $fallback, 'head' );
-        if ( '' === $repo || '' === $title || '' === $head ) {
-            return array( 'opened' => false, 'error' => 'fallback_pull_request requires repo, title, and head.' );
-        }
-
-        $base        = homeboy_datamachine_agent_scalar( $fallback, 'base' );
-        $existing_pr = homeboy_datamachine_agent_existing_fallback_pr( $repo, $head, $base );
-        if ( ! empty( $existing_pr ) ) {
-            $tool_result = array(
-                'tool_name' => 'create_github_pull_request',
-                'source'    => 'runner_fallback_pull_request',
-                'success'   => true,
-                'repo'      => $repo,
-                'head'      => $head,
-                'base'      => $base,
-                'url'       => homeboy_datamachine_agent_first_url( $existing_pr ),
-                'result'    => array(
-                    'success'      => true,
-                    'pull_request' => $existing_pr,
-                    'pull_number'  => (int) ( $existing_pr['number'] ?? 0 ),
-                    'html_url'     => homeboy_datamachine_agent_first_url( $existing_pr ),
-                    'message'      => sprintf( 'Reused existing pull request #%d in %s.', (int) ( $existing_pr['number'] ?? 0 ), $repo ),
-                ),
-            );
-
-            return array(
-                'opened'      => true,
-                'reused'      => true,
-                'result'      => $tool_result['result'],
-                'input'       => array( 'repo' => $repo, 'title' => $title, 'head' => $head, 'base' => $base ),
-                'engine_data' => homeboy_datamachine_agent_record_runner_publication( $engine_data, $config, $tool_result ),
-            );
-        }
-
-        $ability = function_exists( 'wp_get_ability' ) ? wp_get_ability( 'datamachine/create-github-pull-request' ) : null;
-        if ( ! $ability ) {
-            return array( 'opened' => false, 'error' => 'datamachine/create-github-pull-request ability is not available.' );
-        }
-
-        $input = array(
-            'repo'                  => $repo,
-            'title'                 => $title,
-            'head'                  => $head,
-            'body'                  => (string) ( $fallback['body'] ?? '' ),
-            'draft'                 => ! empty( $fallback['draft'] ),
-            'maintainer_can_modify' => array_key_exists( 'maintainer_can_modify', $fallback ) ? (bool) $fallback['maintainer_can_modify'] : true,
-        );
-        if ( '' !== $base ) {
-            $input['base'] = $base;
-        }
-
-        $result = $ability->execute( $input );
-        if ( is_wp_error( $result ) ) {
-            return array( 'opened' => false, 'error' => $result->get_error_message(), 'input' => $input );
-        }
-        if ( ! is_array( $result ) || empty( $result['success'] ) ) {
-            $error = is_array( $result ) ? (string) ( $result['error'] ?? 'Fallback pull request creation failed.' ) : 'Fallback pull request creation failed.';
-            if ( is_array( $result ) && ! empty( $result['message'] ) && ! str_contains( $error, (string) $result['message'] ) ) {
-                $error .= ': ' . (string) $result['message'];
-            }
-            return array( 'opened' => false, 'error' => $error, 'input' => $input, 'result' => $result );
-        }
-
-        $tool_result = array(
-            'tool_name' => 'create_github_pull_request',
-            'source'    => 'runner_fallback_pull_request',
-            'success'   => true,
-            'repo'      => $repo,
-            'head'      => $head,
-            'base'      => (string) ( $input['base'] ?? '' ),
-            'url'       => (string) ( $result['html_url'] ?? '' ),
-            'result'    => $result,
-        );
-
-        $engine_data = homeboy_datamachine_agent_record_runner_publication( $engine_data, $config, $tool_result );
-
-        return array( 'opened' => true, 'result' => $result, 'input' => $input, 'engine_data' => $engine_data );
     }
 }
 
@@ -2027,30 +1878,105 @@ if ( ! function_exists( 'homeboy_datamachine_agent_execute_workspace_ability' ) 
     }
 }
 
-if ( ! function_exists( 'homeboy_datamachine_agent_runner_workspace_fallback_config' ) ) {
-    function homeboy_datamachine_agent_runner_workspace_fallback_config( array $config, array $runner_workspace, array $template_values = array() ): array {
-        $fallback = is_array( $config['fallback_pull_request'] ?? null ) ? $config['fallback_pull_request'] : array();
-        $repo     = homeboy_datamachine_agent_scalar( $fallback, 'repo', homeboy_datamachine_agent_scalar( $config, 'target_repo' ) );
-        $branch   = (string) ( $runner_workspace['branch'] ?? '' );
-
-        if ( '' === homeboy_datamachine_agent_scalar( $fallback, 'head' ) && '' !== $branch ) {
-            $fallback['head'] = $branch;
-        }
-        if ( '' === homeboy_datamachine_agent_scalar( $fallback, 'repo' ) && '' !== $repo ) {
-            $fallback['repo'] = $repo;
-        }
-        $export_config = is_array( $config['artifact_export'] ?? null ) ? $config['artifact_export'] : array();
-        if ( ! empty( $template_values ) && '' === homeboy_datamachine_agent_scalar( $fallback, 'title' ) && '' !== (string) ( $export_config['pr_title_template'] ?? '' ) ) {
-            $fallback['title'] = homeboy_datamachine_agent_template( (string) $export_config['pr_title_template'], $template_values );
-        }
-        if ( ! empty( $template_values ) && '' === homeboy_datamachine_agent_scalar( $fallback, 'body' ) && '' !== (string) ( $export_config['pr_body_template'] ?? '' ) ) {
-            $fallback['body'] = homeboy_datamachine_agent_template( (string) $export_config['pr_body_template'], $template_values );
-        }
-        if ( '' === homeboy_datamachine_agent_scalar( $fallback, 'title' ) ) {
-            $fallback['title'] = 'Persist Data Machine agent workspace changes';
+if ( ! function_exists( 'homeboy_datamachine_agent_runner_workspace_publication_input' ) ) {
+    function homeboy_datamachine_agent_runner_workspace_publication_input( array $config, array $runner_workspace, array $template_values = array(), array $paths = array() ): array {
+        $workspace_config = homeboy_datamachine_agent_runner_workspace_config( $config );
+        $export_config    = is_array( $config['artifact_export'] ?? null ) ? $config['artifact_export'] : array();
+        $message          = isset( $workspace_config['commit_message'] ) && is_scalar( $workspace_config['commit_message'] ) ? trim( (string) $workspace_config['commit_message'] ) : '';
+        if ( '' === $message ) {
+            $message = 'chore: persist Data Machine agent workspace changes';
         }
 
-        return $fallback;
+        $title = '';
+        if ( ! empty( $template_values ) && '' !== (string) ( $export_config['pr_title_template'] ?? '' ) ) {
+            $title = homeboy_datamachine_agent_template( (string) $export_config['pr_title_template'], $template_values );
+        }
+        if ( '' === $title ) {
+            $title = 'Persist Data Machine agent workspace changes';
+        }
+
+        $body = '';
+        if ( ! empty( $template_values ) && '' !== (string) ( $export_config['pr_body_template'] ?? '' ) ) {
+            $body = homeboy_datamachine_agent_template( (string) $export_config['pr_body_template'], $template_values );
+        }
+
+        return array_filter(
+            array(
+                'workspace'             => (string) ( $runner_workspace['handle'] ?? '' ),
+                'handle'                => (string) ( $runner_workspace['handle'] ?? '' ),
+                'repo'                  => homeboy_datamachine_agent_scalar( $config, 'target_repo' ),
+                'head'                  => (string) ( $runner_workspace['branch'] ?? '' ),
+                'base'                  => (string) ( $workspace_config['base'] ?? $workspace_config['base_branch'] ?? '' ),
+                'commit_message'        => $message,
+                'title'                 => $title,
+                'body'                  => $body,
+                'paths'                 => array_values( array_filter( $paths, 'is_string' ) ),
+                'draft'                 => ! empty( $workspace_config['draft'] ),
+                'maintainer_can_modify' => array_key_exists( 'maintainer_can_modify', $workspace_config ) ? (bool) $workspace_config['maintainer_can_modify'] : true,
+                'context'               => $template_values,
+            ),
+            static fn( $value ) => ! ( '' === $value || array() === $value || null === $value )
+        );
+    }
+
+    function homeboy_datamachine_agent_publish_runner_workspace( array $engine_data, array $config, array $runner_workspace, array $template_values, array $paths ): array {
+        $ability_name = 'datamachine-code/publish-runner-workspace';
+        $input        = homeboy_datamachine_agent_runner_workspace_publication_input( $config, $runner_workspace, $template_values, $paths );
+        if ( '' === (string) ( $input['workspace'] ?? '' ) || '' === (string) ( $input['repo'] ?? '' ) ) {
+            return array(
+                'opened'         => false,
+                'ability'        => $ability_name,
+                'upstream_issue' => 'https://github.com/Extra-Chill/data-machine-code/issues/625',
+                'error'          => 'Runner workspace publication requires a workspace handle and target repo.',
+                'input'          => $input,
+            );
+        }
+
+        $ability = function_exists( 'wp_get_ability' ) ? wp_get_ability( $ability_name ) : null;
+        if ( ! $ability ) {
+            return array(
+                'opened'         => false,
+                'ability'        => $ability_name,
+                'upstream_issue' => 'https://github.com/Extra-Chill/data-machine-code/issues/625',
+                'error'          => $ability_name . ' is not available; runner workspace publication is blocked on Extra-Chill/data-machine-code#625.',
+                'input'          => $input,
+            );
+        }
+
+        $result = $ability->execute( $input );
+        if ( function_exists( 'is_wp_error' ) && is_wp_error( $result ) ) {
+            return array( 'opened' => false, 'ability' => $ability_name, 'error' => $result->get_error_message(), 'input' => $input );
+        }
+        if ( ! is_array( $result ) || empty( $result['success'] ) ) {
+            return array(
+                'opened' => false,
+                'ability' => $ability_name,
+                'error'  => is_array( $result ) ? (string) ( $result['error'] ?? 'Runner workspace publication failed.' ) : 'Runner workspace publication failed.',
+                'input'  => $input,
+                'result' => $result,
+            );
+        }
+
+        $publication = array(
+            'tool_name' => 'publish_runner_workspace',
+            'ability'   => $ability_name,
+            'source'    => 'runner_workspace_publication',
+            'success'   => true,
+            'repo'      => (string) ( $input['repo'] ?? '' ),
+            'head'      => (string) ( $result['head'] ?? $result['branch'] ?? $input['head'] ?? '' ),
+            'base'      => (string) ( $result['base'] ?? $input['base'] ?? '' ),
+            'url'       => homeboy_datamachine_agent_first_url( $result ),
+            'result'    => $result,
+        );
+        $engine_data = homeboy_datamachine_agent_record_runner_publication( $engine_data, $config, $publication );
+
+        return array(
+            'opened'      => str_contains( (string) $publication['url'], '/pull/' ) || ! empty( $result['pull_number'] ) || ! empty( $result['pull_request'] ),
+            'ability'     => $ability_name,
+            'result'      => $result,
+            'input'       => $input,
+            'engine_data' => $engine_data,
+        );
     }
 }
 
@@ -2079,26 +2005,6 @@ if ( ! function_exists( 'homeboy_datamachine_agent_capture_runner_workspace' ) )
         }
 
         $diff = homeboy_datamachine_agent_execute_workspace_ability( 'datamachine/workspace-git-diff', array( 'name' => $handle ) );
-        $add  = homeboy_datamachine_agent_execute_workspace_ability( 'datamachine/workspace-git-add', array( 'name' => $handle, 'paths' => empty( $files ) ? array( '.' ) : $files ) );
-        if ( empty( $add['success'] ) ) {
-            return array( 'enabled' => true, 'changed' => true, 'engine_data' => $engine_data, 'status' => $status, 'diff' => $diff, 'add' => $add, 'error' => (string) ( $add['error'] ?? 'Workspace git add failed.' ) );
-        }
-
-        $workspace_config = homeboy_datamachine_agent_runner_workspace_config( $config );
-        $message          = isset( $workspace_config['commit_message'] ) && is_scalar( $workspace_config['commit_message'] ) ? trim( (string) $workspace_config['commit_message'] ) : '';
-        if ( '' === $message ) {
-            $message = 'chore: persist Data Machine agent workspace changes';
-        }
-
-        $commit = homeboy_datamachine_agent_execute_workspace_ability( 'datamachine/workspace-git-commit', array( 'name' => $handle, 'message' => $message ) );
-        if ( empty( $commit['success'] ) ) {
-            return array( 'enabled' => true, 'changed' => true, 'engine_data' => $engine_data, 'status' => $status, 'diff' => $diff, 'add' => $add, 'commit' => $commit, 'error' => (string) ( $commit['error'] ?? 'Workspace git commit failed.' ) );
-        }
-
-        $push = homeboy_datamachine_agent_execute_workspace_ability( 'datamachine/workspace-git-push', array( 'name' => $handle, 'branch' => (string) ( $runner_workspace['branch'] ?? '' ) ) );
-        if ( empty( $push['success'] ) ) {
-            return array( 'enabled' => true, 'changed' => true, 'engine_data' => $engine_data, 'status' => $status, 'diff' => $diff, 'add' => $add, 'commit' => $commit, 'push' => $push, 'error' => (string) ( $push['error'] ?? 'Workspace git push failed.' ) );
-        }
 
         return array(
             'enabled'               => true,
@@ -2106,9 +2012,6 @@ if ( ! function_exists( 'homeboy_datamachine_agent_capture_runner_workspace' ) )
             'engine_data'           => $engine_data,
             'status'                => $status,
             'diff'                  => $diff,
-            'add'                   => $add,
-            'commit'                => $commit,
-            'push'                  => $push,
         );
     }
 }
@@ -3415,15 +3318,8 @@ $transcript_dir = homeboy_datamachine_agent_scalar( $config, 'transcript_dir' );
 $transcript_artifacts = homeboy_datamachine_agent_export_transcript( $job_id, $engine_data, $transcript_dir );
 $pr_opened = homeboy_datamachine_agent_pr_opened( $engine_data, $config );
 $file_written = homeboy_datamachine_agent_file_written( $engine_data, $config ) || ! empty( $runner_workspace_capture['changed'] );
-$fallback_pull_request = array( 'opened' => false );
+$runner_workspace_publication = array( 'opened' => false );
 $success_requires_pr = ! empty( $config['success_requires_pr'] );
-if ( $file_written && ! $pr_opened && empty( $runner_workspace_capture['changed'] ) ) {
-    $fallback_pull_request = homeboy_datamachine_agent_open_fallback_pr( $engine_data, $config );
-    if ( ! empty( $fallback_pull_request['opened'] ) && is_array( $fallback_pull_request['engine_data'] ?? null ) ) {
-        $engine_data = $fallback_pull_request['engine_data'];
-        $pr_opened   = true;
-    }
-}
 $completion_outcome_satisfied = homeboy_datamachine_agent_completion_outcome_satisfied( $engine_data, $config );
 $success_status = homeboy_datamachine_agent_success_status( $pr_opened, $completion_outcome_satisfied, $file_written );
 $artifact_pr_context = array(
@@ -3431,7 +3327,7 @@ $artifact_pr_context = array(
     'success_requires_pr'      => $success_requires_pr,
     'transcript_artifacts'     => $transcript_artifacts,
     'runner_workspace_capture' => $runner_workspace_capture,
-    'fallback_pull_request'    => $fallback_pull_request,
+    'runner_workspace_publication' => $runner_workspace_publication,
     'error_message'            => (string) ( $engine_data['error_message'] ?? '' ),
 );
 if ( ! empty( $runner_workspace_capture['changed'] ) && ! $pr_opened ) {
@@ -3444,14 +3340,18 @@ if ( ! empty( $runner_workspace_capture['changed'] ) && ! $pr_opened ) {
         homeboy_datamachine_agent_runner_workspace_written_paths( $runner_workspace_capture ),
         $artifact_pr_context
     );
-    $capture_config                          = $config;
-    $capture_config['fallback_pull_request'] = homeboy_datamachine_agent_runner_workspace_fallback_config( $config, $runner_workspace, $template_values );
-    $fallback_pull_request                   = homeboy_datamachine_agent_open_fallback_pr( $engine_data, $capture_config );
-    if ( ! empty( $fallback_pull_request['opened'] ) && is_array( $fallback_pull_request['engine_data'] ?? null ) ) {
-        $engine_data = $fallback_pull_request['engine_data'];
+    $runner_workspace_publication = homeboy_datamachine_agent_publish_runner_workspace(
+        $engine_data,
+        $config,
+        $runner_workspace,
+        $template_values,
+        homeboy_datamachine_agent_runner_workspace_written_paths( $runner_workspace_capture )
+    );
+    if ( ! empty( $runner_workspace_publication['opened'] ) && is_array( $runner_workspace_publication['engine_data'] ?? null ) ) {
+        $engine_data = $runner_workspace_publication['engine_data'];
         $pr_opened   = true;
     }
-    $artifact_pr_context['fallback_pull_request'] = $fallback_pull_request;
+    $artifact_pr_context['runner_workspace_publication'] = $runner_workspace_publication;
 }
 $job_artifact_exports = homeboy_datamachine_agent_export_job_artifacts( $job_id, $config, $pr_opened, $engine_data, $artifact_pr_context );
 if ( is_array( $job_artifact_exports['engine_data'] ?? null ) ) {
@@ -3474,7 +3374,7 @@ $metadata += array(
     'error_message'         => (string) ( $engine_data['error_message'] ?? '' ),
     'success_status'        => $success_status,
     'success_requires_pr'   => $success_requires_pr,
-    'fallback_pull_request' => $fallback_pull_request,
+    'runner_workspace_publication' => $runner_workspace_publication,
 	'runner_workspace_capture' => $runner_workspace_capture,
 	'verification_results' => $verification_results,
 	'drift_check_results' => $drift_check_results,
@@ -3509,11 +3409,11 @@ if ( ! empty( $drift_check_results['enabled'] ) && empty( $drift_check_results['
 
 if ( $file_written && ! $pr_opened ) {
     $metadata['success_status'] = 'write_without_pr';
-    $fallback_error = is_array( $fallback_pull_request ) ? (string) ( $fallback_pull_request['error'] ?? '' ) : '';
+    $publication_error = is_array( $runner_workspace_publication ) ? (string) ( $runner_workspace_publication['error'] ?? '' ) : '';
     $capture_error  = is_array( $runner_workspace_capture ) ? (string) ( $runner_workspace_capture['error'] ?? '' ) : '';
     $error_message  = 'Agent wrote files without opening a pull request';
-    if ( '' !== $fallback_error ) {
-        $error_message .= ': ' . $fallback_error;
+    if ( '' !== $publication_error ) {
+        $error_message .= ': ' . $publication_error;
     } elseif ( '' !== $capture_error ) {
         $error_message .= ': ' . $capture_error;
     }
