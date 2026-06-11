@@ -97,6 +97,7 @@ export function buildWordPressBenchRecipe(options) {
         `env-json=${JSON.stringify(options.env || {})}`,
         `bootstrap-files-json=${JSON.stringify(options.bootstrapFiles || [])}`,
         `workloads-json=${JSON.stringify(options.workloads || [])}`,
+        `scenario-ids-json=${JSON.stringify(options.scenarioIds || [])}`,
       ],
     }]},
   };
@@ -109,6 +110,25 @@ const fs = require('node:fs');
 const recipeIndex = process.argv.indexOf('--recipe');
 const recipePath = recipeIndex >= 0 ? process.argv[recipeIndex + 1] : '';
 const recipe = recipePath ? JSON.parse(fs.readFileSync(recipePath, 'utf8')) : null;
+const args = recipe?.workflow?.steps?.[0]?.args || [];
+const workloadsArg = args.find((arg) => arg.startsWith('workloads-json='));
+const workloads = workloadsArg ? JSON.parse(workloadsArg.slice('workloads-json='.length)) : [];
+const scenarios = workloads.length > 0
+  ? workloads.map((workload, index) => ({
+    id: workload.id || `configured-${index}`,
+    source: workload.source || 'config',
+    iterations: 1,
+    metrics: {},
+    provenance: {workload_index: index},
+  }))
+  : [{
+    id: 'rig-workload',
+    source: 'in_tree',
+    file: 'tests/bench/rig-workload.php',
+    iterations: 1,
+    metrics: {},
+    provenance: {workload_file: 'tests/bench/rig-workload.php'}
+  }];
 fs.writeFileSync(process.env.HOMEBOY_SMOKE_CAPTURE_FILE, `${JSON.stringify({ argv: process.argv.slice(2), recipe }, null, 2)}\n`);
 process.stdout.write(JSON.stringify({
   success: true,
@@ -116,14 +136,7 @@ process.stdout.write(JSON.stringify({
     schema: 'homeboy/bench-results/v1',
     component_id: 'wp-site-generator',
     benchmarks: [],
-    scenarios: [{
-      id: 'rig-workload',
-      source: 'in_tree',
-      file: 'tests/bench/rig-workload.php',
-      iterations: 1,
-      metrics: {},
-      provenance: {workload_file: 'tests/bench/rig-workload.php'}
-    }],
+    scenarios,
     warmup_iterations: 1
   }
 }));
@@ -170,7 +183,7 @@ bash "$SCRIPT_DIR/bench-runner-wp-codebox.sh" >/dev/null
 jq -e --arg sourceRoot "$SOURCE_ROOT" '
     .recipe.inputs.extraPlugins == []
     and (.recipe.inputs.mounts[] | select(.source == $sourceRoot and .target == "/wordpress/wp-content/plugins/wp-site-generator" and .mode == "readonly"))
-    and (.recipe.inputs.mounts[] | select(.source | endswith("/rig-workloads/rig-workload.php")) | .target == "/wordpress/wp-content/plugins/wp-site-generator/tests/bench/rig-workload.php")
+    and (.recipe.inputs.mounts[] | select(.source | endswith("/rig-workloads/rig-workload.php")) | .target == "/wordpress/wp-content/plugins/wp-site-generator/.homeboy/bench-rig/rig-workload.php")
     and (.recipe.runtime.blueprint.steps[] | select(.step == "installPlugin" and .options.targetFolderName == "static-site-importer"))
     and (.recipe.runtime.blueprint.steps[] | select(.step == "defineWpConfigConsts" and .consts.HOMEBOY_FIXTURE_DEFINE == "yes"))
     and (.recipe.workflow.steps[0].args[] | select(startswith("env-json=") and contains("HOMEBOY_FIXTURE_ENV")))
@@ -202,6 +215,8 @@ jq -e '
     and ([.recipe.inputs.mounts[] | select(.source | endswith("/rig-workloads/unselected-crash.php"))] | length) == 0
     and ([.recipe.inputs.mounts[] | select(.target == "/wordpress/wp-content/plugins/wp-site-generator/tests/bench")] | length) == 0
     and ([.recipe.workflow.steps[0].args[] | select(startswith("workloads-json=") and contains("ssi-import"))] | length) == 0
+    and ([.recipe.workflow.steps[0].args[] | select(startswith("workloads-json=") and contains("\"source\":\"rig\"") and contains(".homeboy/bench-rig/rig-workload.php"))] | length) == 1
+    and ([.recipe.workflow.steps[0].args[] | select(startswith("scenario-ids-json=") and contains("rig-workload"))] | length) == 1
 ' "$SELECTED_CAPTURE_FILE" >/dev/null
 
 printf '<?php return function (): array { return array("metrics" => array("shadow" => 1)); };\n' > "${SOURCE_ROOT}/tests/bench/rig-workload.php"
@@ -225,11 +240,10 @@ HOMEBOY_BENCH_WARMUP_ITERATIONS=0 \
 bash "$SCRIPT_DIR/bench-runner-wp-codebox.sh" >/dev/null
 rm -f "${SOURCE_ROOT}/tests/bench/rig-workload.php"
 jq -e --arg sourceRoot "$SOURCE_ROOT" '
-    (.recipe.inputs.mounts[] | select(.source | endswith("/component-plugin-rig-workload-overlay") and .target == "/wordpress/wp-content/plugins/wp-site-generator" and .mode == "readonly"))
-    and ([.recipe.inputs.mounts[] | select(.source | endswith("/rig-workloads/rig-workload.php"))] | length) == 0
+    (.recipe.inputs.mounts[] | select(.source | endswith("/rig-workloads/rig-workload.php") and .target == "/wordpress/wp-content/plugins/wp-site-generator/.homeboy/bench-rig/rig-workload.php"))
 ' "$DUPLICATE_CAPTURE_FILE" >/dev/null
 jq -e '
-    (.scenarios[] | select(.id == "rig-workload" and .source == "rig" and .provenance.source == "rig-overlay"))
+    (.scenarios[] | select(.id == "rig-workload" and .source == "rig" and .provenance.workload_index == 0))
 ' "$DUPLICATE_RESULTS_FILE" >/dev/null
 
 LIST_RESULTS_FILE="${TMP_ROOT}/bench-list-results.json"
@@ -312,12 +326,13 @@ HOMEBOY_BENCH_WARMUP_ITERATIONS=0 \
 bash "$SCRIPT_DIR/bench-runner-wp-codebox.sh" >/dev/null
 
 jq -e '
-    (.recipe.inputs.extraPlugins[0].source | endswith("/component-plugin-rig-workload-overlay"))
-    and .recipe.inputs.extraPlugins[0].pluginFile == "wp-site-generator/plugin-main.php"
-    and ([.recipe.inputs.mounts[] | select(.source | endswith("/rig-workloads/rig-workload.php"))] | length) == 0
+    .recipe.inputs.extraPlugins[0].pluginFile == "wp-site-generator/plugin-main.php"
+    and (.recipe.inputs.mounts[] | select(.source | endswith("/rig-workloads/rig-workload.php") and .target == "/wordpress/wp-content/plugins/wp-site-generator/.homeboy/bench-rig/rig-workload.php"))
+    and ([.recipe.workflow.steps[0].args[] | select(startswith("workloads-json=") and contains("\"source\":\"rig\"") and contains(".homeboy/bench-rig/rig-workload.php"))] | length) == 1
+    and ([.recipe.workflow.steps[0].args[] | select(startswith("scenario-ids-json=") and contains("rig-workload"))] | length) == 1
 ' "$PLUGIN_DUPLICATE_CAPTURE_FILE" >/dev/null
 jq -e '
-    (.scenarios[] | select(.id == "rig-workload" and .source == "rig" and .provenance.source == "rig-overlay"))
+    (.scenarios[] | select(.id == "rig-workload" and .source == "rig" and .provenance.workload_index == 0))
 ' "$PLUGIN_DUPLICATE_RESULTS_FILE" >/dev/null
 
 DEPENDENCY_ROOT="${TMP_ROOT}/wp-codebox-release-fixture"

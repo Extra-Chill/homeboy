@@ -20,6 +20,9 @@ const selectedScenarioIds = (process.env.HOMEBOY_BENCH_SCENARIOS || '')
 	.split(',')
 	.map((id) => id.trim())
 	.filter(Boolean);
+if (selectedScenarioIds.length) {
+	options.scenarioIds = selectedScenarioIds;
+}
 if (selectedScenarioIds.length && Array.isArray(options.workloads)) {
 	const selected = new Set(selectedScenarioIds);
 	options.workloads = options.workloads.filter((workload) => selected.has(workload?.id));
