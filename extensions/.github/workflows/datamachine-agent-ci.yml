@@ -947,6 +947,7 @@ jobs:
               provider_credentials: $providerCredentials,
               wp_codebox_bin: $wpCodeboxBin,
               wp_codebox_components: ({
+                wp_codebox: ($componentPath + "/.ci/wp-codebox/packages/wordpress-plugin"),
                 agents_api: ($componentPath + "/.ci/agents-api"),
                 data_machine: ($componentPath + "/.ci/data-machine"),
                 data_machine_code: ($componentPath + "/.ci/data-machine-code")

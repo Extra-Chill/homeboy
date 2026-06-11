@@ -139,6 +139,10 @@ PHP
     local agents_api_path="${HOMEBOY_AGENTS_API_PATH:-${AGENTS_API_PATH:-}}"
     local data_machine_path="${HOMEBOY_DATA_MACHINE_PATH:-${DATA_MACHINE_PATH:-}}"
     local data_machine_code_path="${HOMEBOY_DATA_MACHINE_CODE_PATH:-${DATA_MACHINE_CODE_PATH:-}}"
+    local wp_codebox_plugin_path="${HOMEBOY_WP_CODEBOX_PLUGIN_PATH:-${WP_CODEBOX_PLUGIN_PATH:-}}"
+    if [ -z "$wp_codebox_plugin_path" ]; then
+        wp_codebox_plugin_path=$(jq -r '.wp_codebox_components.wp_codebox // .wp_codebox_plugin_path // empty' "$CONFIG_PATH")
+    fi
     if [ -z "$agents_api_path" ]; then
         agents_api_path=$(jq -r '.wp_codebox_components.agents_api // .wp_codebox_agents_api_path // empty' "$CONFIG_PATH")
     fi
@@ -152,6 +156,10 @@ PHP
         echo "ERROR: wp-codebox runtime requires Agents API, Data Machine, and Data Machine Code paths via env or config" >&2
         exit 1
     fi
+    if [ -z "$wp_codebox_plugin_path" ]; then
+        echo "ERROR: wp-codebox runtime requires the WP Codebox WordPress plugin path via env or config" >&2
+        exit 1
+    fi
 
     local recipe_file
     recipe_file=$(mktemp "${TMPDIR:-/tmp}/homeboy-wp-codebox-agent-recipe.XXXXXX")
@@ -161,7 +169,9 @@ PHP
         --arg agents "$agents_api_path" \
         --arg datamachine "$data_machine_path" \
         --arg code "$data_machine_code_path" \
+        --arg wpcodebox "$wp_codebox_plugin_path" \
         '[
+            {source: $wpcodebox, slug: "wp-codebox", activate: false, loadAs: "mu-plugin"},
             {source: $agents, slug: "agents-api", activate: false, loadAs: "mu-plugin"},
             {source: $datamachine, slug: "data-machine", activate: false, loadAs: "mu-plugin"},
             {source: $code, slug: "data-machine-code", activate: false, loadAs: "mu-plugin"}
