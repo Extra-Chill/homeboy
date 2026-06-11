@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.119.7] - 2026-06-11
+
+### Fixed
+- filter wordpress bench rig workloads
+
 ## [2.119.6] - 2026-06-11
 
 ### Fixed
