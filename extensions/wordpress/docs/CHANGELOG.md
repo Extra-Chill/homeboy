@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.119.1] - 2026-06-11
+
+### Fixed
+- parse prefixed WP Codebox workload output
+
 ## [2.119.0] - 2026-06-11
 
 ### Added
