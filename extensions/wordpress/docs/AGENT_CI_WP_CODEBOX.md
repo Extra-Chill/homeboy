@@ -126,6 +126,9 @@ The runner converts the agent config into a single WP Codebox sandbox run:
   mode. It preserves the natural task prompt, keeps workspace tool calls scoped
   to the provisioned handle when those tools are used, then asks WP Codebox to
   capture and publish the final runner workspace after the run.
+- `verification_commands` and `drift_checks` execute through the WP Codebox
+  runner workspace command API, preserving verification metadata without
+  requiring Homeboy to resolve backend-local workspace paths.
 - `ability_tools` can expose additional WordPress abilities as tools during the
   agent run.
 - `enable_terminal_actions` exposes terminal actions through the WordPress

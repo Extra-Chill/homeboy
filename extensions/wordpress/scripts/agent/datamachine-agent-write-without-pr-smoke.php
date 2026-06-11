@@ -592,28 +592,55 @@ namespace {
         exit( 1 );
     }
 
-    $command_workspace = sys_get_temp_dir() . '/homeboy-command-check-' . uniqid();
-    mkdir( $command_workspace );
+    $workspace_command_calls = array();
+    $workspace_files         = array();
+    $GLOBALS['homeboy_datamachine_agent_fake_abilities'] = array(
+        'wp-codebox/run-runner-workspace-command' => new Homeboy_Datamachine_Agent_Fake_Ability(
+            function ( array $input ) use ( &$workspace_command_calls, &$workspace_files ): array {
+                $workspace_command_calls[] = $input;
+                if ( 'repo@branch' !== ( $input['workspace'] ?? '' ) ) {
+                    return array( 'success' => false, 'error' => 'Unexpected workspace handle.' );
+                }
+                if ( 'printf ok > verification.txt' === ( $input['command'] ?? '' ) ) {
+                    $workspace_files['verification.txt'] = 'ok';
+                    return array( 'success' => true, 'exit_code' => 0, 'stdout' => '', 'stderr' => '' );
+                }
+                if ( 'test -f verification.txt' === ( $input['command'] ?? '' ) ) {
+                    return array( 'success' => isset( $workspace_files['verification.txt'] ), 'exit_code' => isset( $workspace_files['verification.txt'] ) ? 0 : 1 );
+                }
+                return array( 'success' => false, 'error' => 'Unexpected command.' );
+            }
+        ),
+    );
     $verification_result = homeboy_datamachine_agent_run_command_checks(
         array( 'verification_commands' => array( array( 'command' => 'printf ok > verification.txt', 'description' => 'Write verification marker' ) ) ),
-        array( 'path' => $command_workspace ),
+        array( 'handle' => 'repo@branch' ),
         'verification_commands'
     );
-    if ( empty( $verification_result['success'] ) || ! is_file( $command_workspace . '/verification.txt' ) ) {
-        fwrite( STDERR, "Expected verification_commands to run in the target workspace.\n" );
+    if ( empty( $verification_result['success'] ) || empty( $workspace_files['verification.txt'] ) || 'wp-codebox/run-runner-workspace-command' !== ( $verification_result['ability'] ?? '' ) ) {
+        fwrite( STDERR, "Expected verification_commands to run through the WP Codebox runner workspace API.\n" );
         exit( 1 );
     }
     $drift_result = homeboy_datamachine_agent_run_command_checks(
         array( 'drift_checks' => array( array( 'command' => 'test -f verification.txt', 'description' => 'Generated outputs are present' ) ) ),
-        array( 'path' => $command_workspace ),
+        array( 'handle' => 'repo@branch' ),
         'drift_checks'
     );
-    if ( empty( $drift_result['success'] ) ) {
-        fwrite( STDERR, "Expected drift_checks to run after verification in the target workspace.\n" );
+    if ( empty( $drift_result['success'] ) || 2 !== count( $workspace_command_calls ) ) {
+        fwrite( STDERR, "Expected drift_checks to run after verification through WP Codebox.\n" );
         exit( 1 );
     }
-    unlink( $command_workspace . '/verification.txt' );
-    rmdir( $command_workspace );
+
+    $GLOBALS['homeboy_datamachine_agent_fake_abilities'] = array();
+    $missing_verification_api = homeboy_datamachine_agent_run_command_checks(
+        array( 'verification_commands' => array( array( 'command' => 'pnpm verify', 'description' => 'Verify generated docs' ) ) ),
+        array( 'handle' => 'repo@branch' ),
+        'verification_commands'
+    );
+    if ( ! empty( $missing_verification_api['success'] ) || 'https://github.com/Automattic/wp-codebox/issues/873' !== ( $missing_verification_api['upstream_issue'] ?? '' ) ) {
+        fwrite( STDERR, "Expected missing WP Codebox verification API to fail loudly with the WP Codebox integration point.\n" );
+        exit( 1 );
+    }
 
     fwrite( STDOUT, "Data Machine agent write-without-PR smoke passed.\n" );
 }
