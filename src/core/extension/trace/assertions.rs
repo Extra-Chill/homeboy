@@ -648,7 +648,6 @@ mod tests {
             timeline,
             span_definitions: Vec::new(),
             span_results: Vec::new(),
-            metrics: Default::default(),
             assertions: Vec::new(),
             temporal_assertions,
             artifacts: Vec::new(),
