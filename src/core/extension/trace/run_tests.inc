@@ -373,6 +373,76 @@ JSON
     }
 
     #[test]
+    fn parsed_pass_result_overrides_noisy_runner_exit() {
+        let _home_env_guard = crate::test_support::home_env_guard();
+        let temp = tempfile::tempdir().unwrap();
+        let extension_dir = temp.path().join("extension");
+        let component_dir = temp.path().join("component");
+        fs::create_dir_all(&extension_dir).unwrap();
+        fs::create_dir_all(&component_dir).unwrap();
+        write_extension_manifest(&extension_dir);
+        let script = extension_dir.join("trace-runner.sh");
+        fs::write(
+            &script,
+            r#"#!/usr/bin/env bash
+cat > "$HOMEBOY_TRACE_RESULTS_FILE" <<JSON
+{"component_id":"example","scenario_id":"close-window","status":"pass","summary":"captured metrics","timeline":[],"assertions":[{"id":"trace-ok","status":"pass","message":"trace completed"}],"artifacts":[]}
+JSON
+printf 'runner envelope could not parse JSON\n' >&2
+exit 1
+"#,
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&script).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&script, perms).unwrap();
+        }
+
+        let component = component_with_extension("example", &component_dir);
+        let context = trace_context(&component, &extension_dir);
+        let run_dir = RunDir::create().unwrap();
+        let args = TraceRunWorkflowArgs {
+            component_label: "example".to_string(),
+            component_id: "example".to_string(),
+            path_override: Some(component_dir.to_string_lossy().to_string()),
+            settings: Vec::new(),
+            runner_inputs: TraceRunnerInputs::default(),
+            scenario_id: "close-window".to_string(),
+            json_summary: false,
+            rig_id: None,
+            overlays: Vec::new(),
+            keep_overlay: false,
+            span_definitions: Vec::new(),
+            baseline_flags: BaselineFlags {
+                baseline: false,
+                ignore_baseline: true,
+                ratchet: false,
+            },
+            regression_threshold_percent:
+                crate::core::extension::trace::baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT,
+            regression_min_delta_ms:
+                crate::core::extension::trace::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
+            canonical_policy: TraceCanonicalPolicy::Development,
+        };
+
+        let output =
+            run_trace_workflow_with_context(Some(&context), &component, args, &run_dir, None)
+                .expect("trace workflow");
+
+        assert_eq!(output.status, "pass");
+        assert_eq!(output.exit_code, 0);
+        assert!(output.failure.is_none());
+        assert_eq!(
+            output.results.as_ref().and_then(|results| results.summary.as_deref()),
+            Some("captured metrics")
+        );
+        run_dir.cleanup();
+    }
+
+    #[test]
     fn trace_attach_logfile_observes_without_owning_lifecycle() {
         let _home_env_guard = crate::test_support::home_env_guard();
         let temp = tempfile::tempdir().unwrap();
