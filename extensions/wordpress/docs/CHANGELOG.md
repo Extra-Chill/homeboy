@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.119.0] - 2026-06-11
+
+### Added
+- add WooCommerce bench fixture profiles
+
 ## [2.118.1] - 2026-06-11
 
 ### Fixed
