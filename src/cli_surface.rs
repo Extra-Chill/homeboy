@@ -1127,6 +1127,18 @@ mod tests {
             parsed_command(&["homeboy", "agent-task", "run-plan", "--plan", "@plan.json"])
                 .supports_lab_runner()
         );
+        assert!(
+            parsed_command(&["homeboy", "agent-task", "status", "agent-task-123"])
+                .supports_lab_runner()
+        );
+        assert!(
+            parsed_command(&["homeboy", "agent-task", "logs", "agent-task-123"])
+                .supports_lab_runner()
+        );
+        assert!(
+            parsed_command(&["homeboy", "agent-task", "artifacts", "agent-task-123"])
+                .supports_lab_runner()
+        );
         assert!(parsed_command(&[
             "homeboy",
             "agent-task",
@@ -1231,6 +1243,18 @@ mod tests {
                 parsed_command(&["homeboy", "agent-task", "run-plan", "--plan", "@plan.json"]),
                 "agent-task dispatch/cook/loop/run-plan",
             ),
+            (
+                parsed_command(&["homeboy", "agent-task", "status", "agent-task-123"]),
+                "agent-task status/logs/artifacts",
+            ),
+            (
+                parsed_command(&["homeboy", "agent-task", "logs", "agent-task-123"]),
+                "agent-task status/logs/artifacts",
+            ),
+            (
+                parsed_command(&["homeboy", "agent-task", "artifacts", "agent-task-123"]),
+                "agent-task status/logs/artifacts",
+            ),
         ];
 
         for (command, label) in supported {
@@ -1278,6 +1302,13 @@ mod tests {
             .expect("lint contract");
         assert!(lint.requires_extension_parity);
         assert!(lint.infer_source_path_tools);
+
+        let agent_task_status =
+            parsed_command(&["homeboy", "agent-task", "status", "agent-task-123"])
+                .lab_contract()
+                .expect("agent-task status contract");
+        assert!(!agent_task_status.requires_extension_parity);
+        assert!(!agent_task_status.infer_source_path_tools);
 
         let rig = parsed_command(&["homeboy", "rig", "up", "studio"])
             .lab_contract()

@@ -539,6 +539,24 @@ mod tests {
     }
 
     #[test]
+    fn agent_task_inspection_commands_are_read_only_lab_portable() {
+        for args in [
+            ["homeboy", "agent-task", "status", "agent-task-123"].as_slice(),
+            ["homeboy", "agent-task", "logs", "agent-task-123"].as_slice(),
+            ["homeboy", "agent-task", "artifacts", "agent-task-123"].as_slice(),
+        ] {
+            let cli = Cli::parse_from(args);
+            let command = lab_offload_command(&cli.command).unwrap().unwrap();
+
+            assert_eq!(command.hot_label, "agent-task status/logs/artifacts");
+            assert!(command.portable);
+            assert!(!command.requires_extension_parity);
+            assert!(command.required_extensions.is_empty());
+            assert!(!command.infer_source_path_tools);
+        }
+    }
+
+    #[test]
     fn lab_command_with_mutation_flag_stays_portable_for_patch_capture() {
         let cli = Cli::parse_from(["homeboy", "audit", "--baseline"]);
 
