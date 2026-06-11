@@ -651,6 +651,7 @@ mod tests {
             assertions: Vec::new(),
             temporal_assertions,
             artifacts: Vec::new(),
+            metrics: Default::default(),
             toolchain: None,
             components: None,
             dependencies: Vec::new(),
