@@ -71,6 +71,7 @@ fn write_trace_experiment_extension(home: &tempfile::TempDir, fail: bool) {
     .expect("write extension manifest");
 
     let exit_line = if fail { "exit 9" } else { "exit 0" };
+    let trace_status = if fail { "error" } else { "pass" };
     let script_path = extension_dir.join("trace-runner.sh");
     fs::write(
         &script_path,
@@ -89,7 +90,7 @@ test -f "$HOMEBOY_TRACE_COMPONENT_PATH/experiment-state.txt"
 case "$HOMEBOY_SETTINGS_JSON" in *TEMPLATE_PATH*) ;; *) exit 8 ;; esac
 printf '%s\n' "$HOMEBOY_SETTINGS_JSON" > "$HOMEBOY_TRACE_ARTIFACT_DIR/settings.json"
 cat > "$HOMEBOY_TRACE_RESULTS_FILE" <<JSON
-{{"component_id":"$HOMEBOY_COMPONENT_ID","scenario_id":"$HOMEBOY_TRACE_SCENARIO","status":"pass","timeline":[],"span_results":[],"assertions":[],"artifacts":[{{"label":"runner settings","path":"artifacts/settings.json"}}]}}
+{{"component_id":"$HOMEBOY_COMPONENT_ID","scenario_id":"$HOMEBOY_TRACE_SCENARIO","status":"{trace_status}","timeline":[],"span_results":[],"assertions":[],"artifacts":[{{"label":"runner settings","path":"artifacts/settings.json"}}]}}
 JSON
 {exit_line}
 "#
