@@ -433,7 +433,7 @@ homeboy_wp_codebox_append_extra_bench_workloads_configured_json() {
             --argjson workloads "$WP_CODEBOX_WORKLOADS_JSON" \
             --arg id "$scenario_id" \
             --arg file ".homeboy/bench-rig/${workload_name}" \
-            '$workloads + [{id: $id, source: "rig", run: [{type: "php", file: $file}], metadata: {homeboy_bench_workload_source: "rig"}}]')
+            '$workloads + [{id: $id, source: "rig", overridesDiscovered: true, run: [{type: "php", file: $file}], metadata: {homeboy_bench_workload_source: "rig"}}]')
     done
 }
 

@@ -215,7 +215,7 @@ jq -e '
     and ([.recipe.inputs.mounts[] | select(.source | endswith("/rig-workloads/unselected-crash.php"))] | length) == 0
     and ([.recipe.inputs.mounts[] | select(.target == "/wordpress/wp-content/plugins/wp-site-generator/tests/bench")] | length) == 0
     and ([.recipe.workflow.steps[0].args[] | select(startswith("workloads-json=") and contains("ssi-import"))] | length) == 0
-    and ([.recipe.workflow.steps[0].args[] | select(startswith("workloads-json=") and contains("\"source\":\"rig\"") and contains(".homeboy/bench-rig/rig-workload.php"))] | length) == 1
+    and ([.recipe.workflow.steps[0].args[] | select(startswith("workloads-json=") and contains("\"source\":\"rig\"") and contains("\"overridesDiscovered\":true") and contains(".homeboy/bench-rig/rig-workload.php"))] | length) == 1
     and ([.recipe.workflow.steps[0].args[] | select(startswith("scenario-ids-json=") and contains("rig-workload"))] | length) == 1
 ' "$SELECTED_CAPTURE_FILE" >/dev/null
 
@@ -328,7 +328,7 @@ bash "$SCRIPT_DIR/bench-runner-wp-codebox.sh" >/dev/null
 jq -e '
     .recipe.inputs.extraPlugins[0].pluginFile == "wp-site-generator/plugin-main.php"
     and (.recipe.inputs.mounts[] | select(.source | endswith("/rig-workloads/rig-workload.php") and .target == "/wordpress/wp-content/plugins/wp-site-generator/.homeboy/bench-rig/rig-workload.php"))
-    and ([.recipe.workflow.steps[0].args[] | select(startswith("workloads-json=") and contains("\"source\":\"rig\"") and contains(".homeboy/bench-rig/rig-workload.php"))] | length) == 1
+    and ([.recipe.workflow.steps[0].args[] | select(startswith("workloads-json=") and contains("\"source\":\"rig\"") and contains("\"overridesDiscovered\":true") and contains(".homeboy/bench-rig/rig-workload.php"))] | length) == 1
     and ([.recipe.workflow.steps[0].args[] | select(startswith("scenario-ids-json=") and contains("rig-workload"))] | length) == 1
 ' "$PLUGIN_DUPLICATE_CAPTURE_FILE" >/dev/null
 jq -e '
