@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.119.3] - 2026-06-11
+
+### Fixed
+- route runner publication through wp codebox boundary
+
 ## [2.119.2] - 2026-06-11
 
 ### Fixed
