@@ -285,20 +285,22 @@ function runtimeComponentPaths(config, options = {}) {
 
 function defaultCodeboxRuntimeConfig(request, config, inputs, options = {}) {
   const settings = firstObject(options.settings, parseJsonObject(process.env.HOMEBOY_SETTINGS_JSON)) || {};
+  const settingsRuntimePathKey = `wp_codebox_${LEGACY_RUNTIME_PREFIX}_path`;
+  const settingsRuntimeToolsPathKey = `wp_codebox_${LEGACY_RUNTIME_PREFIX}_code_path`;
   const workspaceRoot = resolveWorkspaceRoot(request, config, inputs, settings, options);
   const workspaceBase = workspaceRoot ? path.dirname(workspaceRoot) : process.cwd();
   const dataMachinePath = firstExistingPath(
     options.agentRuntime,
-    settings.wp_codebox_data_machine_path,
-    settings.data_machine_path,
+    settings[settingsRuntimePathKey],
+    settings[`${LEGACY_RUNTIME_PREFIX}_path`],
     process.env.HOMEBOY_DATA_MACHINE_PATH,
     activeSitePluginPath('data-machine'),
     siblingPath(workspaceBase, 'data-machine'),
   );
   const dataMachineCodePath = firstExistingPath(
     options.agentRuntimeTools,
-    settings.wp_codebox_data_machine_code_path,
-    settings.data_machine_code_path,
+    settings[settingsRuntimeToolsPathKey],
+    settings[`${LEGACY_RUNTIME_PREFIX}_code_path`],
     process.env.HOMEBOY_DATA_MACHINE_CODE_PATH,
     activeSitePluginPath('data-machine-code'),
     siblingPath(workspaceBase, 'data-machine-code'),
@@ -1217,6 +1219,9 @@ function normalizeArtifacts(result, runSummary = null, recipeSummary = null) {
         url: result.session.artifacts.preview_url,
         metadata: result.session.artifacts,
       });
+    }
+    if (Array.isArray(result.artifacts)) {
+      result.artifacts.map(artifactFromCodeboxArtifact).forEach((artifact) => appendUniqueArtifact(artifacts, artifact));
     }
     for (const artifact of codeboxBundleArtifacts(result)) {
       appendUniqueArtifact(artifacts, artifact);

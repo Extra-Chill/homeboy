@@ -353,9 +353,19 @@ function attachFailureEvidence(payload, evidence) {
       copied_generated_paths: evidence.copied_generated_paths,
     },
   }] : [];
+  let payloadArtifacts = [];
+  if (Array.isArray(payload.artifacts)) {
+    payloadArtifacts = payload.artifacts;
+  } else if (payload.artifacts) {
+    payloadArtifacts = [{
+      id: 'wp-codebox-artifacts',
+      kind: 'codebox-artifact-directory',
+      path: payload.artifacts,
+    }];
+  }
   return {
     ...payload,
-    artifacts: Array.isArray(payload.artifacts) ? [...payload.artifacts, ...artifacts] : payload.artifacts,
+    artifacts: [...payloadArtifacts, ...artifacts],
     evidence_refs: [
       ...(Array.isArray(payload.evidence_refs) ? payload.evidence_refs : []),
       ...artifacts.map((artifact) => ({ kind: artifact.kind, uri: artifact.path, label: artifact.kind.replace(/-/g, ' ') })),
@@ -522,7 +532,7 @@ function stableTaskInput(input) {
     extra_plugins: extraPlugins(input),
     // WP Codebox 0.8.0 reads runtime component plugins (agents-api, data-machine,
     // data-machine-code) from `component_contracts`, not the legacy
-    // `runtime_component_paths` / `data_machine_path` fields. Without this the
+    // `runtime_component_paths` / legacy runtime path fields. Without this the
     // components never mount and agents/chat is unavailable in the sandbox.
     component_contracts: componentContracts(input),
     // Post-agent verification gate. WP Codebox emits these as recipe
