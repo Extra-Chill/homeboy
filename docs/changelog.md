@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.228.11] - 2026-06-11
+
+### Changed
+- keep trace canonicality fixtures generic
+- declare cwd materialization by provider
+
+### Fixed
+- preserve generic dispatch cwd validation
+- accept installed trace extensions as canonical
+
 ## [0.228.10] - 2026-06-11
 
 ### Changed
