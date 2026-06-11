@@ -203,6 +203,30 @@ Omit `--rig <rig>` from the list command for unpinned bench runs.
 
 `homeboy bench compare --from-run <baseline-run-id> --to-run <candidate-run-id>` compares numeric metrics recorded in two persisted benchmark runs. It is the first useful baseline-vs-candidate comparison slice: it captures both run IDs, component state, shared bench context, selected metric deltas, and a Markdown table under `reports.markdown` in the JSON payload.
 
+Bench runners may attach generic tracker provenance to the top-level results
+envelope or to individual scenarios/workloads. Homeboy persists that metadata in
+the run record, keeps it in JSON artifacts/exports, and renders a `Provenance`
+section with clickable links in compare Markdown when present:
+
+```json
+{
+  "provenance": {
+    "labels": ["source: zendesk", "privacy: internal"],
+    "links": [
+      {
+        "url": "https://wordpress.org/support/topic/checkout-is-very-slow/",
+        "label": "WordPress.org support thread",
+        "source": "wordpress.org"
+      }
+    ]
+  }
+}
+```
+
+Use `labels` for non-public or freeform context that should stay as text, such
+as `source: zendesk`, `scenario: shortcode checkout place-order latency`, or
+`privacy: internal`. Use `links` for reviewer-clickable references.
+
 The command is read-only and exits successfully for a valid comparison even when the numbers regress. Repeat `--metric <name>` to keep the comparison focused; omit it to compare all shared numeric scenario metrics.
 
 Homeboy rejects comparisons when the stored shared benchmark context differs for settings, selected scenarios, workload fingerprints, iteration count, run count, or concurrency. This keeps manually-created baseline/candidate runs from being compared when they were not actually measuring the same scenario contract.

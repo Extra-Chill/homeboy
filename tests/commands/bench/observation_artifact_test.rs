@@ -116,6 +116,7 @@ fn bench_observation_resolves_shared_state_mount_artifacts() {
             selected_scenarios: Vec::new(),
             env_overrides: Default::default(),
             workloads: Vec::new(),
+            provenance: Default::default(),
             runner: None,
             diagnostics: Vec::new(),
         });

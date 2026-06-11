@@ -339,6 +339,7 @@ mod tests {
         BenchResults {
             component_id: "demo".to_string(),
             iterations: 10,
+            provenance: Default::default(),
             run_metadata: None,
             metadata: BTreeMap::new(),
             metric_groups: BTreeMap::new(),
@@ -368,6 +369,7 @@ mod tests {
                 gates: Vec::new(),
                 gate_results: Vec::new(),
                 metadata: BTreeMap::new(),
+                provenance: Default::default(),
                 passed: true,
                 memory: None,
                 artifacts: BTreeMap::new(),

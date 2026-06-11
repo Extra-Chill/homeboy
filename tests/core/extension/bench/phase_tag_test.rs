@@ -55,6 +55,7 @@ fn results_with(
     BenchResults {
         component_id: "demo".to_string(),
         iterations: 10,
+        provenance: Default::default(),
         run_metadata: None,
         metadata: BTreeMap::new(),
         metric_groups: BTreeMap::new(),

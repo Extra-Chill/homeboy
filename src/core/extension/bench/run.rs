@@ -601,6 +601,7 @@ pub fn run_main_bench_workflow(
                 selected_scenarios: args.scenario_ids.clone(),
                 env_overrides: BTreeMap::new(),
                 workloads: Vec::new(),
+                provenance: results.provenance.clone(),
                 runner: Some(BenchRunnerMetadata {
                     extension: "component-script".to_string(),
                     path: source_path.to_string_lossy().to_string(),
@@ -1382,6 +1383,7 @@ fn run_concurrent_instances(
         Some(BenchResults {
             component_id: component_id_seen.unwrap_or_else(|| args.component_id.clone()),
             iterations: iterations_seen.unwrap_or(args.iterations),
+            provenance: Default::default(),
             run_metadata: None,
             metadata: BTreeMap::new(),
             metric_groups: BTreeMap::new(),
@@ -1989,6 +1991,7 @@ mod tests {
         let mut results = BenchResults {
             component_id: "homeboy".to_string(),
             iterations: 1,
+            provenance: Default::default(),
             run_metadata: None,
             metadata: BTreeMap::new(),
             metric_groups: BTreeMap::new(),
@@ -2015,6 +2018,7 @@ mod tests {
                 gates: Vec::new(),
                 gate_results: Vec::new(),
                 metadata: BTreeMap::new(),
+                provenance: Default::default(),
                 passed: true,
                 memory: None,
                 artifacts: BTreeMap::new(),
@@ -2156,6 +2160,7 @@ mod tests {
                 gates: Vec::new(),
                 gate_results: Vec::new(),
                 metadata: BTreeMap::new(),
+                provenance: Default::default(),
                 passed: true,
                 memory: None,
                 artifacts: BTreeMap::new(),

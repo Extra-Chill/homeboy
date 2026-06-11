@@ -309,6 +309,7 @@ fn merge_matrix_results(
         Some(BenchResults {
             component_id: component_ids.join(","),
             iterations: iterations_seen.unwrap_or(0),
+            provenance: Default::default(),
             run_metadata: outputs
                 .iter()
                 .find_map(|output| output.results.as_ref()?.run_metadata.clone()),

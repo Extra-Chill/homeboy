@@ -80,7 +80,7 @@ function homeboy_bench_scenario_inventory_entry(array $scenario): array {
         $entry['default_iterations'] = (int) $scenario['default_iterations'];
     }
 
-    foreach (['file', 'source', 'metadata', 'artifacts'] as $key) {
+    foreach (['file', 'source', 'metadata', 'provenance', 'artifacts'] as $key) {
         if (isset($scenario[$key]) && $scenario[$key] !== [] && $scenario[$key] !== '') {
             $entry[$key] = $scenario[$key];
         }

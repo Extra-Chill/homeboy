@@ -30,6 +30,7 @@ pub(crate) fn scenario_with_iterations(
         gates: Vec::new(),
         gate_results: Vec::new(),
         metadata: BTreeMap::new(),
+        provenance: Default::default(),
         passed: true,
         memory: None,
         artifacts: BTreeMap::new(),
@@ -47,6 +48,7 @@ pub(crate) fn results_with_scenarios(
     BenchResults {
         component_id: component_id.to_string(),
         iterations,
+        provenance: Default::default(),
         run_metadata: None,
         metadata: BTreeMap::new(),
         metric_groups: BTreeMap::new(),

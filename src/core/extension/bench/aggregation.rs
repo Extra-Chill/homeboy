@@ -58,6 +58,7 @@ pub fn aggregate_runs(runs: &[BenchResults]) -> Result<BenchResults> {
     Ok(BenchResults {
         component_id: first.component_id.clone(),
         iterations: first.iterations,
+        provenance: first.provenance.clone(),
         run_metadata: first.run_metadata.clone(),
         metadata: first.metadata.clone(),
         metric_groups: first.metric_groups.clone(),
