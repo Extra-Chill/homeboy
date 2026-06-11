@@ -358,7 +358,7 @@ homeboy_wp_codebox_mount_extra_bench_workloads() {
     local workloads_value="${HOMEBOY_BENCH_EXTRA_WORKLOADS:-}"
     [ -n "$workloads_value" ] || return 0
 
-    local workload_path
+    local workload_path workload_name
     IFS=':' read -r -a workload_paths <<< "$workloads_value"
     for workload_path in "${workload_paths[@]}"; do
         [ -n "$workload_path" ] || continue
@@ -367,12 +367,56 @@ homeboy_wp_codebox_mount_extra_bench_workloads() {
             FAILED_STEP="WP Codebox bench workload setup"
             exit 1
         fi
+        workload_name="$(basename "$workload_path")"
         MOUNTS_JSON=$(jq -nc \
             --argjson mounts "$MOUNTS_JSON" \
-            --arg source "$(dirname "$workload_path")" \
-            --arg target "/wordpress/wp-content/plugins/${PLUGIN_SLUG}/tests/bench" \
+            --arg source "$workload_path" \
+            --arg target "/wordpress/wp-content/plugins/${PLUGIN_SLUG}/tests/bench/${workload_name}" \
             '$mounts + [{source: $source, target: $target, mode: "readonly"}]')
     done
+}
+
+homeboy_wp_codebox_workload_scenario_id() {
+    local workload_name="$1"
+    local scenario_id
+    if [[ "$workload_name" == *.bench.* ]]; then
+        scenario_id="${workload_name%%.bench.*}"
+    else
+        scenario_id="${workload_name%.*}"
+    fi
+    printf '%s\n' "$scenario_id"
+}
+
+homeboy_wp_codebox_filter_extra_bench_workloads() {
+    local workloads_value="${HOMEBOY_BENCH_EXTRA_WORKLOADS:-}"
+    local selected_value="${HOMEBOY_BENCH_SCENARIOS:-}"
+    [ -n "$workloads_value" ] || return 0
+    [ -n "$selected_value" ] || return 0
+
+    local filtered_paths=()
+    local selected_ids=()
+    local workload_path workload_name scenario_id selected_id
+    IFS=':' read -r -a workload_paths <<< "$workloads_value"
+    for workload_path in "${workload_paths[@]}"; do
+        [ -n "$workload_path" ] || continue
+        workload_name="$(basename "$workload_path")"
+        scenario_id="$(homeboy_wp_codebox_workload_scenario_id "$workload_name")"
+        IFS=',' read -r -a selected_ids <<< "$selected_value"
+        for selected_id in "${selected_ids[@]}"; do
+            selected_id="${selected_id#${selected_id%%[![:space:]]*}}"
+            selected_id="${selected_id%${selected_id##*[![:space:]]}}"
+            if [ "$scenario_id" = "$selected_id" ]; then
+                filtered_paths+=("$workload_path")
+                break
+            fi
+        done
+    done
+
+    local filtered_value=""
+    if [ ${#filtered_paths[@]} -gt 0 ]; then
+        filtered_value=$(IFS=':'; printf '%s' "${filtered_paths[*]}")
+    fi
+    export HOMEBOY_BENCH_EXTRA_WORKLOADS="$filtered_value"
 }
 
 homeboy_wp_codebox_extra_workload_scenarios_json() {
@@ -388,7 +432,7 @@ homeboy_wp_codebox_extra_workload_scenarios_json() {
     for workload_path in "${workload_paths[@]}"; do
         [ -n "$workload_path" ] || continue
         workload_name="$(basename "$workload_path")"
-        scenario_id="${workload_name%.*}"
+        scenario_id="$(homeboy_wp_codebox_workload_scenario_id "$workload_name")"
         scenarios=$(jq -nc \
             --argjson scenarios "$scenarios" \
             --arg id "$scenario_id" \
@@ -622,6 +666,7 @@ homeboy_wp_codebox_compile_scenario_manifests
 homeboy_wp_codebox_compile_bootstrap_files
 homeboy_wp_codebox_compile_bootstrap_steps
 homeboy_wp_codebox_compile_prepare_steps
+homeboy_wp_codebox_filter_extra_bench_workloads
 
 WP_CODEBOX_WORDPRESS_VERSION=""
 if [ "$settings_json" != "{}" ]; then
