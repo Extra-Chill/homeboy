@@ -5,11 +5,15 @@ use std::path::PathBuf;
 use uuid::Uuid;
 
 use crate::core::agent_task::{
-    AgentTaskArtifact, AgentTaskEvidenceRef, AgentTaskExecutionHandle, AgentTaskOutcome,
-    AgentTaskWorkflowEvidence,
+    AgentTaskArtifact, AgentTaskEvidenceRef, AgentTaskExecutionHandle, AgentTaskExecutor,
+    AgentTaskFailureClassification, AgentTaskLimits, AgentTaskOutcome, AgentTaskOutcomeStatus,
+    AgentTaskPolicy, AgentTaskRequest, AgentTaskSourceRef, AgentTaskWorkflowEvidence,
+    AgentTaskWorkspace, AgentTaskWorkspaceMode, AGENT_TASK_OUTCOME_SCHEMA,
+    AGENT_TASK_REQUEST_SCHEMA,
 };
 use crate::core::agent_task_scheduler::{
-    AgentTaskAggregate, AgentTaskPlan, AgentTaskProgressEvent, AgentTaskState,
+    AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals, AgentTaskPlan,
+    AgentTaskProgressEvent, AgentTaskQueueStatus, AgentTaskState, AGENT_TASK_AGGREGATE_SCHEMA,
 };
 use crate::core::{paths, Error, ErrorCode, Result};
 
@@ -342,6 +346,149 @@ pub fn record_run_aggregate(
 ) -> Result<AgentTaskRunRecord> {
     let mut record = store::read_record(&sanitize_run_id(run_id))?;
     record_aggregate(&mut record, plan, aggregate)
+}
+
+#[derive(Debug, Clone)]
+pub struct AgentTaskPreDispatchFailure<'a> {
+    pub run_id: &'a str,
+    pub local_command: Vec<String>,
+    pub remote_command: Vec<String>,
+    pub runner_id: &'a str,
+    pub remote_workspace: &'a str,
+    pub failure_message: &'a str,
+    pub stdout: &'a str,
+    pub stderr: &'a str,
+    pub exit_code: i32,
+}
+
+pub fn record_pre_dispatch_failure(
+    failure: AgentTaskPreDispatchFailure<'_>,
+) -> Result<AgentTaskRunRecord> {
+    let run_id = sanitize_run_id(failure.run_id);
+    if let Ok(record) = status(&run_id) {
+        return Ok(record);
+    }
+
+    let task_id = "agent-task-predispatch".to_string();
+    let metadata = json!({
+        "kind": "lab_offload_pre_dispatch_failure",
+        "runner_id": failure.runner_id,
+        "remote_workspace": failure.remote_workspace,
+        "local_command": failure.local_command,
+        "remote_command": failure.remote_command,
+        "exit_code": failure.exit_code,
+        "failure_message": failure.failure_message,
+    });
+    let plan = AgentTaskPlan::new(
+        format!("{run_id}.predispatch"),
+        vec![AgentTaskRequest {
+            schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
+            task_id: task_id.clone(),
+            group_key: Some("lab-offload".to_string()),
+            parent_plan_id: None,
+            executor: AgentTaskExecutor {
+                backend: "homeboy-lab".to_string(),
+                selector: None,
+                required_capabilities: Vec::new(),
+                secret_env: Vec::new(),
+                model: None,
+                config: Value::Null,
+            },
+            instructions: "Persist Lab offload pre-dispatch validation failure evidence."
+                .to_string(),
+            inputs: json!({
+                "local_command": failure.local_command,
+                "remote_command": failure.remote_command,
+                "runner_id": failure.runner_id,
+                "remote_workspace": failure.remote_workspace,
+                "failure": {
+                    "message": failure.failure_message,
+                    "exit_code": failure.exit_code,
+                    "stdout": failure.stdout,
+                    "stderr": failure.stderr,
+                }
+            }),
+            source_refs: vec![AgentTaskSourceRef {
+                kind: "lab-offload-run".to_string(),
+                uri: format!("homeboy://agent-task/run/{run_id}/lab-offload"),
+                revision: None,
+            }],
+            workspace: AgentTaskWorkspace {
+                mode: AgentTaskWorkspaceMode::Existing,
+                root: Some(failure.remote_workspace.to_string()),
+                slug: None,
+                kind: Some("lab-offload".to_string()),
+                component_id: None,
+                branch: None,
+                base_ref: None,
+                task_url: None,
+                cleanup: Some("preserve".to_string()),
+                materialization: metadata.clone(),
+            },
+            policy: AgentTaskPolicy::default(),
+            limits: AgentTaskLimits::default(),
+            expected_artifacts: Vec::new(),
+            metadata: metadata.clone(),
+        }],
+    );
+    submit_plan(&plan, Some(&run_id))?;
+    let aggregate = AgentTaskAggregate {
+        schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
+        plan_id: plan.plan_id.clone(),
+        status: AgentTaskAggregateStatus::Failed,
+        totals: AgentTaskAggregateTotals {
+            failed: 1,
+            ..AgentTaskAggregateTotals::default()
+        },
+        outcomes: vec![AgentTaskOutcome {
+            schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+            task_id: task_id.clone(),
+            status: AgentTaskOutcomeStatus::Failed,
+            summary: Some(failure.failure_message.to_string()),
+            failure_classification: Some(AgentTaskFailureClassification::InvalidInput),
+            artifacts: Vec::new(),
+            evidence_refs: vec![AgentTaskEvidenceRef {
+                kind: "lab-offload-pre-dispatch-failure".to_string(),
+                uri: format!("homeboy://agent-task/run/{run_id}/logs"),
+                label: Some("Lab offload pre-dispatch failure".to_string()),
+            }],
+            diagnostics: Vec::new(),
+            outputs: json!({
+                "schema": "homeboy/agent-task-predispatch-failure/v1",
+                "runner_id": failure.runner_id,
+                "remote_workspace": failure.remote_workspace,
+                "local_command": failure.local_command,
+                "remote_command": failure.remote_command,
+                "exit_code": failure.exit_code,
+                "stdout": failure.stdout,
+                "stderr": failure.stderr,
+            }),
+            workflow: None,
+            follow_up: None,
+            metadata,
+        }],
+        events: vec![
+            AgentTaskProgressEvent {
+                task_id: task_id.clone(),
+                state: AgentTaskState::Queued,
+                attempt: 1,
+                message: Some("Lab offload selected and remote command prepared".to_string()),
+            },
+            AgentTaskProgressEvent {
+                task_id,
+                state: AgentTaskState::Failed,
+                attempt: 1,
+                message: Some(failure.failure_message.to_string()),
+            },
+        ],
+        artifact_lineage: Vec::new(),
+        queue: AgentTaskQueueStatus {
+            max_concurrency: 1,
+            completed: 1,
+            ..AgentTaskQueueStatus::default()
+        },
+    };
+    record_run_aggregate(&run_id, &plan, &aggregate)
 }
 
 fn record_aggregate(
@@ -776,6 +923,50 @@ mod tests {
             assert_eq!(
                 loaded.tasks[0].provider_ref.as_deref(),
                 Some("test:fixture")
+            );
+        });
+    }
+
+    #[test]
+    fn pre_dispatch_failure_persists_failed_run_without_provider_handle() {
+        with_isolated_home(|_| {
+            let record = record_pre_dispatch_failure(AgentTaskPreDispatchFailure {
+                run_id: "cook-lab-predispatch",
+                local_command: vec![
+                    "homeboy".to_string(),
+                    "agent-task".to_string(),
+                    "cook".to_string(),
+                    "--run-id".to_string(),
+                    "cook-lab-predispatch".to_string(),
+                ],
+                remote_command: vec![
+                    "homeboy".to_string(),
+                    "agent-task".to_string(),
+                    "cook".to_string(),
+                    "--cwd".to_string(),
+                    "/runner/workspace/repo".to_string(),
+                ],
+                runner_id: "lab-a",
+                remote_workspace: "/runner/workspace/repo",
+                failure_message: "Invalid argument 'cwd': agent-task Codebox dispatch requires --cwd to be a git checkout",
+                stdout: "",
+                stderr: "Invalid argument 'cwd': agent-task Codebox dispatch requires --cwd to be a git checkout\n",
+                exit_code: 1,
+            })
+            .expect("pre-dispatch failure recorded");
+
+            let loaded = status("cook-lab-predispatch").expect("status loaded");
+            let log = logs("cook-lab-predispatch").expect("logs loaded");
+
+            assert_eq!(record.state, AgentTaskRunState::Failed);
+            assert_eq!(loaded.state, AgentTaskRunState::Failed);
+            assert_eq!(loaded.tasks[0].state, AgentTaskState::Failed);
+            assert!(loaded.provider_handles.is_empty());
+            assert_eq!(log.events[1].state, AgentTaskState::Failed);
+            assert_eq!(loaded.metadata["provider_run_ids"], serde_json::json!([]));
+            assert_eq!(
+                loaded.artifact_refs[0].kind,
+                "lab-offload-pre-dispatch-failure"
             );
         });
     }
