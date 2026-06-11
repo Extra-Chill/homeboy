@@ -7,8 +7,10 @@ TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/homeboy-wp-codebox-static-source-smoke.XX
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
 SOURCE_ROOT="${TMP_ROOT}/wp-site-generator"
-EXTRA_WORKLOAD="${TMP_ROOT}/rig-workload.php"
-mkdir -p "${SOURCE_ROOT}/static-sites/demo" "${SOURCE_ROOT}/.github/homeboy" "${SOURCE_ROOT}/tests/bench" "${SOURCE_ROOT}/scenarios"
+EXTRA_WORKLOAD_DIR="${TMP_ROOT}/rig-workloads"
+EXTRA_WORKLOAD="${EXTRA_WORKLOAD_DIR}/rig-workload.php"
+UNSELECTED_EXTRA_WORKLOAD="${EXTRA_WORKLOAD_DIR}/unselected-crash.php"
+mkdir -p "${SOURCE_ROOT}/static-sites/demo" "${SOURCE_ROOT}/.github/homeboy" "${SOURCE_ROOT}/tests/bench" "${SOURCE_ROOT}/scenarios" "$EXTRA_WORKLOAD_DIR"
 printf '<!doctype html><title>Demo</title>\n' > "${SOURCE_ROOT}/static-sites/demo/index.html"
 printf '<?php return array();\n' > "${SOURCE_ROOT}/.github/homeboy/ssi-import-diagnostics.php"
 printf '<?php return function (): array { return array(); };\n' > "${SOURCE_ROOT}/tests/bench/website-generation.php"
@@ -25,6 +27,7 @@ cat > "${SOURCE_ROOT}/scenarios/manifest.json" <<'JSON'
 }
 JSON
 printf '<?php return function (): array { return array(); };\n' > "$EXTRA_WORKLOAD"
+printf '<?php throw new RuntimeException("unselected workload executed");\n' > "$UNSELECTED_EXTRA_WORKLOAD"
 
 RESOLVE_HELPER="${TMP_ROOT}/resolve-context.sh"
 cat > "$RESOLVE_HELPER" <<'STUB'
@@ -159,7 +162,7 @@ bash "$SCRIPT_DIR/bench-runner-wp-codebox.sh" >/dev/null
 jq -e --arg sourceRoot "$SOURCE_ROOT" '
     .recipe.inputs.extraPlugins == []
     and (.recipe.inputs.mounts[] | select(.source == $sourceRoot and .target == "/wordpress/wp-content/plugins/wp-site-generator" and .mode == "readonly"))
-    and (.recipe.inputs.mounts[] | select(.source == ($sourceRoot | sub("/wp-site-generator$"; ""))) | .target == "/wordpress/wp-content/plugins/wp-site-generator/tests/bench")
+    and (.recipe.inputs.mounts[] | select(.source | endswith("/rig-workloads/rig-workload.php")) | .target == "/wordpress/wp-content/plugins/wp-site-generator/tests/bench/rig-workload.php")
     and (.recipe.runtime.blueprint.steps[] | select(.step == "installPlugin" and .options.targetFolderName == "static-site-importer"))
     and (.recipe.runtime.blueprint.steps[] | select(.step == "defineWpConfigConsts" and .consts.HOMEBOY_FIXTURE_DEFINE == "yes"))
     and (.recipe.workflow.steps[0].args[] | select(startswith("env-json=") and contains("HOMEBOY_FIXTURE_ENV")))
@@ -167,6 +170,31 @@ jq -e --arg sourceRoot "$SOURCE_ROOT" '
     and (.recipe.workflow.steps[0].args[] | select(startswith("workloads-json=") and contains("static-site-importer import-theme")))
     and (.recipe.workflow.steps[0].args[] | select(startswith("workloads-json=") and contains("manifest-navigation") and contains("scenario-manifest")))
 ' "$CAPTURE_FILE" >/dev/null
+
+SELECTED_CAPTURE_FILE="${TMP_ROOT}/selected-extra-workload-capture.json"
+HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$RESOLVE_HELPER" \
+HOMEBOY_RUNTIME_BENCH_HELPER_SH="$BENCH_HELPER" \
+HOMEBOY_WORDPRESS_DEPENDENCY_HELPER="$DEPENDENCY_HELPER" \
+HOMEBOY_SMOKE_SOURCE_ROOT="$SOURCE_ROOT" \
+HOMEBOY_SMOKE_CAPTURE_FILE="$SELECTED_CAPTURE_FILE" \
+HOMEBOY_SETTINGS_JSON="$SETTINGS_JSON" \
+HOMEBOY_BENCH_EXTRA_WORKLOADS="${EXTRA_WORKLOAD}:${UNSELECTED_EXTRA_WORKLOAD}" \
+HOMEBOY_BENCH_SCENARIOS="rig-workload" \
+HOMEBOY_WP_CODEBOX_BIN="$WP_CODEBOX_BIN" \
+HOMEBOY_WP_CODEBOX_CORE_MODULE="$WP_CODEBOX_CORE_MODULE" \
+HOMEBOY_BENCH_RESULTS_FILE="${TMP_ROOT}/selected-extra-workload-results.json" \
+HOMEBOY_WP_CODEBOX_ARTIFACTS_DIR="${TMP_ROOT}/selected-extra-workload-artifacts" \
+HOMEBOY_RUNTIME_FAILURE_TRAP="" \
+HOMEBOY_BENCH_ITERATIONS=1 \
+HOMEBOY_BENCH_WARMUP_ITERATIONS=0 \
+bash "$SCRIPT_DIR/bench-runner-wp-codebox.sh" >/dev/null
+
+jq -e '
+    ([.recipe.inputs.mounts[] | select(.source | endswith("/rig-workloads/rig-workload.php"))] | length) == 1
+    and ([.recipe.inputs.mounts[] | select(.source | endswith("/rig-workloads/unselected-crash.php"))] | length) == 0
+    and ([.recipe.inputs.mounts[] | select(.target == "/wordpress/wp-content/plugins/wp-site-generator/tests/bench")] | length) == 0
+    and ([.recipe.workflow.steps[0].args[] | select(startswith("workloads-json=") and contains("ssi-import"))] | length) == 0
+' "$SELECTED_CAPTURE_FILE" >/dev/null
 
 LIST_RESULTS_FILE="${TMP_ROOT}/bench-list-results.json"
 HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$RESOLVE_HELPER" \
