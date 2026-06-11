@@ -226,6 +226,7 @@ assert.deepEqual(provider.request_required_fields, ['schema', 'task_id', 'execut
 assert.deepEqual(provider.outcome_statuses, ['succeeded', 'failed', 'no_op', 'unable_to_remediate', 'timeout', 'provider_error']);
 assert.deepEqual(provider.failure_classifications, ['provider', 'timeout', 'execution_failed']);
 assert.deepEqual(provider.redacted_metadata_keys, ['secret_env_values', 'secretEnvValues', 'secrets']);
+assert.deepEqual(provider.workspace_materialization, { cwd: 'git_checkout' });
 assert.equal(provider.status, 'active');
 assert.equal(provider.integration_contract, 'wp-codebox-cli/agent-task-run');
 assert.equal(provider.capabilities.includes('browser_runtime'), true);
