@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.228.7] - 2026-06-11
+
+### Fixed
+- clarify Lab runner wait timeout ownership
+- clarify stale runner daemon recovery
+- report bench warning child counts
+- update bench artifact fetch hint
+- reject non-git Codebox dispatch cwd
+- allow lab agent-task inspection
+
 ## [0.228.6] - 2026-06-11
 
 ### Fixed
