@@ -329,6 +329,7 @@ fn trace_compare_exits_nonzero_for_guardrail_failures() {
         force: false,
         canonical: false,
         allow_local_toolchain: true,
+        checkout_provenance: None,
     })
     .expect("compare should run");
 

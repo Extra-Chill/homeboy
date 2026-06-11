@@ -63,6 +63,7 @@ JSON
                 force: false,
                 canonical: false,
                 allow_local_toolchain: true,
+                checkout_provenance: None,
             },
             &GlobalArgs {},
         )

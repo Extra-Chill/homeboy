@@ -46,6 +46,7 @@ fn trace_args_for_profile(profile: &str) -> TraceArgs {
         force: false,
         canonical: false,
         allow_local_toolchain: true,
+        checkout_provenance: None,
     }
 }
 
@@ -187,6 +188,7 @@ fn trace_list_profiles_lists_rig_profiles() {
             force: false,
             canonical: false,
             allow_local_toolchain: true,
+            checkout_provenance: None,
         })
         .expect("profile list should run");
 

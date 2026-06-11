@@ -60,7 +60,9 @@ pub use run::{
     resolve_declared_trace_artifact_path, run_trace_list_workflow, run_trace_workflow,
     trace_is_unclaimed, TraceListWorkflowArgs,
 };
-pub use run::{TraceRunWorkflowArgs, TraceRunWorkflowResult, TraceRunnerInputs};
+pub use run::{
+    TraceCheckoutProvenance, TraceRunWorkflowArgs, TraceRunWorkflowResult, TraceRunnerInputs,
+};
 pub use span_summary::{
     attach_span_summary_metadata, format_span_summary_metadata, format_span_summary_status,
     TraceSpanSummaryOutput,

@@ -118,6 +118,7 @@ fn trace_args_for_rig(rig_id: &str, component_id: &str, scenario_id: &str) -> Tr
         force: false,
         canonical: false,
         allow_local_toolchain: true,
+        checkout_provenance: None,
     }
 }
 
@@ -170,6 +171,7 @@ fn rig_trace_run_uses_rig_owned_workload_extension_without_component_link() {
                 force: false,
                 canonical: false,
                 allow_local_toolchain: true,
+                checkout_provenance: None,
             },
             &GlobalArgs {},
         )
@@ -266,6 +268,7 @@ fn trace_run_persists_observation_history() {
                 force: false,
                 canonical: false,
                 allow_local_toolchain: true,
+                checkout_provenance: None,
             },
             &GlobalArgs {},
         )
@@ -436,6 +439,7 @@ fn trace_repeat_aggregates_span_timings_and_preserves_artifacts() {
                 force: false,
                 canonical: false,
                 allow_local_toolchain: true,
+                checkout_provenance: None,
             },
             &GlobalArgs {},
         )
@@ -537,6 +541,7 @@ fn trace_repeat_loads_span_metadata_and_reports_unknown_ids() {
                 force: false,
                 canonical: false,
                 allow_local_toolchain: true,
+                checkout_provenance: None,
             },
             &GlobalArgs {},
         )
@@ -720,6 +725,7 @@ fn trace_repeat_reports_overlay_touched_files_at_top_level() {
                 force: false,
                 canonical: false,
                 allow_local_toolchain: true,
+                checkout_provenance: None,
             },
             &GlobalArgs {},
         )
@@ -803,6 +809,7 @@ fn trace_run_resolves_named_variants_and_reports_unknown_names() {
             force: false,
             canonical: false,
             allow_local_toolchain: true,
+            checkout_provenance: None,
         };
 
         let (output, exit_code) =
@@ -920,6 +927,7 @@ fn trace_compare_variant_writes_experiment_bundle() {
                 force: false,
                 canonical: false,
                 allow_local_toolchain: true,
+                checkout_provenance: None,
             },
             &GlobalArgs {},
         )
@@ -1002,6 +1010,7 @@ fn trace_compare_variant_resolves_named_variants() {
                 force: false,
                 canonical: false,
                 allow_local_toolchain: true,
+                checkout_provenance: None,
             },
             &GlobalArgs {},
         )
@@ -1099,6 +1108,7 @@ fn trace_compare_variant_reports_unknown_named_variants() {
                 force: false,
                 canonical: false,
                 allow_local_toolchain: true,
+                checkout_provenance: None,
             },
             &GlobalArgs {},
         ) {
@@ -1174,6 +1184,7 @@ fn trace_run_expands_phase_chain_into_adjacent_and_total_spans() {
                 force: false,
                 canonical: false,
                 allow_local_toolchain: true,
+                checkout_provenance: None,
             },
             &GlobalArgs {},
         )
@@ -1250,6 +1261,7 @@ fn trace_run_expands_named_workload_phase_preset() {
                 force: false,
                 canonical: false,
                 allow_local_toolchain: true,
+                checkout_provenance: None,
             },
             &GlobalArgs {},
         )
@@ -1326,6 +1338,7 @@ fn trace_aggregate_spans_uses_workload_default_phase_preset() {
                 force: false,
                 canonical: false,
                 allow_local_toolchain: true,
+                checkout_provenance: None,
             },
             &GlobalArgs {},
         )
@@ -1398,6 +1411,7 @@ fn trace_repeat_counts_failed_runs_as_span_failures() {
                 force: false,
                 canonical: false,
                 allow_local_toolchain: true,
+                checkout_provenance: None,
             },
             &GlobalArgs {},
         )
@@ -1474,6 +1488,7 @@ fn failed_trace_run_persists_observation_history() {
                 force: false,
                 canonical: false,
                 allow_local_toolchain: true,
+                checkout_provenance: None,
             },
             &GlobalArgs {},
         )

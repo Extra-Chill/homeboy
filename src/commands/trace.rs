@@ -9,8 +9,9 @@ use homeboy::core::engine::invocation::InvocationRequirements;
 use homeboy::core::engine::run_dir::RunDir;
 use homeboy::core::extension::trace as extension_trace;
 use homeboy::core::extension::trace::{
-    TraceAttachment, TraceCanonicalPolicy, TraceCommandOutput, TraceListWorkflowArgs,
-    TraceOverlayRequest, TraceRunWorkflowArgs, TraceRunnerInputs, TraceSpanDefinition,
+    TraceAttachment, TraceCanonicalPolicy, TraceCheckoutProvenance, TraceCommandOutput,
+    TraceListWorkflowArgs, TraceOverlayRequest, TraceRunWorkflowArgs, TraceRunnerInputs,
+    TraceSpanDefinition,
 };
 use homeboy::core::extension::ExtensionCapability;
 use homeboy::core::observation::{
@@ -208,6 +209,9 @@ pub struct TraceArgs {
     /// Remove stale trace overlay locks even when touched files are dirty.
     #[arg(long)]
     pub force: bool,
+
+    #[arg(skip)]
+    pub checkout_provenance: Option<TraceCheckoutProvenance>,
 }
 
 impl TraceArgs {
@@ -615,6 +619,7 @@ fn execute_trace_run(args: TraceArgs) -> homeboy::core::Result<TraceRunExecution
                 args.canonical,
                 args.allow_local_toolchain,
             ),
+            checkout_provenance: args.checkout_provenance,
         },
         &run_dir,
         rig_state.clone(),

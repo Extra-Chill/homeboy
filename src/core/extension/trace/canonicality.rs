@@ -9,7 +9,11 @@ use super::parsing::{
     TraceAssertion, TraceAssertionStatus, TraceCanonicalCheck, TraceEvidenceMetadata, TraceResults,
     TraceStatus,
 };
-use super::run::{TraceRunFailure, TraceRunWorkflowArgs, TraceRunWorkflowResult};
+use super::run::{
+    TraceCheckoutProvenance, TraceRunFailure, TraceRunWorkflowArgs, TraceRunWorkflowResult,
+};
+
+const HOMEBOY_TRACE_COMPARE_PROVENANCE_SOURCE: &str = "homeboy-trace-compare";
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum TraceCanonicalPolicy {
@@ -146,8 +150,15 @@ pub(crate) fn evaluate_trace_canonicality(
         .as_deref()
         .unwrap_or(component.local_path.as_str());
 
+    let checkout_provenance = args
+        .checkout_provenance
+        .as_ref()
+        .filter(|provenance| canonical_paths_equal(&provenance.path, component_path));
+
     if let Some(path_override) = args.path_override.as_deref() {
-        if !canonical_paths_equal(path_override, &component.local_path) {
+        if !canonical_paths_equal(path_override, &component.local_path)
+            && checkout_provenance.is_none()
+        {
             reasons.push(format!(
                 "component path resolved through local override `{}` instead of declared binding `{}`",
                 path_override, component.local_path
@@ -158,6 +169,7 @@ pub(crate) fn evaluate_trace_canonicality(
     checks.push(check_git_checkout(
         "component",
         Path::new(component_path),
+        checkout_provenance,
         &mut reasons,
     ));
     if let Some(artifact) = component.build_artifact.as_deref() {
@@ -179,6 +191,7 @@ pub(crate) fn evaluate_trace_canonicality(
         checks.push(check_git_checkout(
             &format!("extension:{}", context.extension_id),
             &context.extension_path,
+            None,
             &mut reasons,
         ));
     }
@@ -202,6 +215,7 @@ pub(crate) fn evaluate_trace_canonicality(
                 Some(path) if !path.trim().is_empty() => checks.push(check_git_checkout(
                     &format!("toolchain:wp-codebox ({key}, {source})"),
                     &git_probe_path(Path::new(path)),
+                    None,
                     &mut reasons,
                 )),
                 _ => reasons.push(format!(
@@ -235,7 +249,12 @@ fn canonical_paths_equal(left: &str, right: &str) -> bool {
     matches!((left, right), (Ok(left), Ok(right)) if left == right)
 }
 
-fn check_git_checkout(target: &str, path: &Path, reasons: &mut Vec<String>) -> TraceCanonicalCheck {
+fn check_git_checkout(
+    target: &str,
+    path: &Path,
+    provenance: Option<&TraceCheckoutProvenance>,
+    reasons: &mut Vec<String>,
+) -> TraceCanonicalCheck {
     if !path.exists() {
         reasons.push(format!(
             "{} checkout path is missing: {}",
@@ -269,6 +288,12 @@ fn check_git_checkout(target: &str, path: &Path, reasons: &mut Vec<String>) -> T
         })
         .and_then(|counts| parse_ahead_behind(&counts))
         .unwrap_or((None, None));
+    let trusted_exact_sha = match provenance {
+        Some(provenance) => {
+            validate_exact_sha_provenance(target, path, sha.as_deref(), provenance, reasons)
+        }
+        None => false,
+    };
 
     push_git_reasons(
         target,
@@ -278,19 +303,71 @@ fn check_git_checkout(target: &str, path: &Path, reasons: &mut Vec<String>) -> T
         upstream.as_deref(),
         ahead,
         behind,
+        trusted_exact_sha,
         reasons,
     );
 
     TraceCanonicalCheck {
         target: target.to_string(),
         path: path.to_string_lossy().to_string(),
-        status: checkout_status(dirty, branch.as_deref(), upstream.as_deref(), ahead, behind),
+        status: checkout_status(
+            dirty,
+            branch.as_deref(),
+            upstream.as_deref(),
+            ahead,
+            behind,
+            trusted_exact_sha,
+        ),
         sha,
         branch,
         upstream,
         commits_ahead: ahead,
         commits_behind: behind,
     }
+}
+
+fn validate_exact_sha_provenance(
+    target: &str,
+    path: &Path,
+    sha: Option<&str>,
+    provenance: &TraceCheckoutProvenance,
+    reasons: &mut Vec<String>,
+) -> bool {
+    if provenance.source != HOMEBOY_TRACE_COMPARE_PROVENANCE_SOURCE {
+        reasons.push(format!(
+            "{} checkout exact-SHA provenance source is not trusted: {}",
+            target, provenance.source
+        ));
+        return false;
+    }
+    if !canonical_paths_equal(&provenance.path, &path.to_string_lossy()) {
+        reasons.push(format!(
+            "{} checkout exact-SHA provenance path does not match checkout: {} != {}",
+            target,
+            provenance.path,
+            path.display()
+        ));
+        return false;
+    }
+    if provenance.requested_ref.trim().is_empty() || provenance.resolved_sha.trim().is_empty() {
+        reasons.push(format!(
+            "{} checkout exact-SHA provenance is incomplete for {}",
+            target,
+            path.display()
+        ));
+        return false;
+    }
+    if sha != Some(provenance.resolved_sha.as_str()) {
+        reasons.push(format!(
+            "{} checkout HEAD does not match recorded exact-SHA provenance for `{}`: expected {}, got {}",
+            target,
+            provenance.requested_ref,
+            provenance.resolved_sha,
+            sha.unwrap_or("unknown")
+        ));
+        return false;
+    }
+    true
 }
 
 fn empty_check(target: &str, path: &Path, status: &str) -> TraceCanonicalCheck {
@@ -314,19 +391,20 @@ fn push_git_reasons(
     upstream: Option<&str>,
     ahead: Option<u32>,
     behind: Option<u32>,
+    trusted_exact_sha: bool,
     reasons: &mut Vec<String>,
 ) {
     if dirty {
         reasons.push(format!("{} checkout is dirty: {}", target, path.display()));
     }
-    if branch == Some("HEAD") {
+    if branch == Some("HEAD") && !trusted_exact_sha {
         reasons.push(format!(
             "{} checkout is detached: {}",
             target,
             path.display()
         ));
     }
-    if upstream.is_none() {
+    if upstream.is_none() && !trusted_exact_sha {
         reasons.push(format!(
             "{} checkout has no upstream branch: {}",
             target,
@@ -357,10 +435,11 @@ fn checkout_status(
     upstream: Option<&str>,
     ahead: Option<u32>,
     behind: Option<u32>,
+    trusted_exact_sha: bool,
 ) -> String {
     if dirty
-        || branch == Some("HEAD")
-        || upstream.is_none()
+        || (branch == Some("HEAD") && !trusted_exact_sha)
+        || (upstream.is_none() && !trusted_exact_sha)
         || ahead.unwrap_or(0) > 0
         || behind.unwrap_or(0) > 0
     {
@@ -588,6 +667,120 @@ mod tests {
     }
 
     #[test]
+    fn canonical_trace_accepts_homeboy_compare_exact_sha_worktree() {
+        let source = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        init_git_repo(source.path());
+        let sha = git_stdout(source.path(), &["rev-parse", "HEAD"]).unwrap();
+        git(
+            source.path(),
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                target.path().to_str().unwrap(),
+                &sha,
+            ],
+        );
+        let component = test_component(source.path());
+        let mut args = test_run_args(target.path());
+        args.checkout_provenance = Some(TraceCheckoutProvenance {
+            source: HOMEBOY_TRACE_COMPARE_PROVENANCE_SOURCE.to_string(),
+            path: target.path().to_string_lossy().to_string(),
+            requested_ref: "main".to_string(),
+            resolved_sha: sha,
+        });
+
+        let report = evaluate_trace_canonicality(None, &component, &args).unwrap();
+
+        assert!(report.is_canonical());
+        assert!(report.reasons.is_empty());
+    }
+
+    #[test]
+    fn canonical_trace_refuses_arbitrary_detached_checkout() {
+        let source = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        init_git_repo(source.path());
+        let sha = git_stdout(source.path(), &["rev-parse", "HEAD"]).unwrap();
+        git(
+            source.path(),
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                target.path().to_str().unwrap(),
+                &sha,
+            ],
+        );
+        let component = test_component(source.path());
+        let args = test_run_args(target.path());
+
+        let report = evaluate_trace_canonicality(None, &component, &args).unwrap();
+
+        assert!(!report.is_canonical());
+        assert!(report
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("local override")));
+        assert!(report
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("checkout is detached")));
+        assert!(report
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("no upstream branch")));
+    }
+
+    #[test]
+    fn canonical_trace_refuses_dirty_homeboy_compare_exact_sha_worktree() {
+        let source = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        init_git_repo(source.path());
+        let sha = git_stdout(source.path(), &["rev-parse", "HEAD"]).unwrap();
+        git(
+            source.path(),
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                target.path().to_str().unwrap(),
+                &sha,
+            ],
+        );
+        std::fs::write(target.path().join("dirty.txt"), "dirty\n").unwrap();
+        let component = test_component(source.path());
+        let mut args = test_run_args(target.path());
+        args.checkout_provenance = Some(TraceCheckoutProvenance {
+            source: HOMEBOY_TRACE_COMPARE_PROVENANCE_SOURCE.to_string(),
+            path: target.path().to_string_lossy().to_string(),
+            requested_ref: "main".to_string(),
+            resolved_sha: sha,
+        });
+
+        let report = evaluate_trace_canonicality(None, &component, &args).unwrap();
+
+        assert!(!report.is_canonical());
+        assert_eq!(
+            report
+                .reasons
+                .iter()
+                .filter(|reason| reason.contains("checkout is dirty"))
+                .count(),
+            1
+        );
+        assert!(!report
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("checkout is detached")));
+        assert!(!report
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("no upstream branch")));
+    }
+
+    #[test]
     fn allow_local_toolchain_marks_result_non_canonical_without_refusing() {
         let temp = tempfile::tempdir().unwrap();
         init_git_repo(temp.path());
@@ -648,6 +841,18 @@ mod tests {
         );
     }
 
+    fn git_stdout(path: &std::path::Path, args: &[&str]) -> Option<String> {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .output()
+            .ok()?;
+        output
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+
     fn test_run_args(path: &std::path::Path) -> TraceRunWorkflowArgs {
         TraceRunWorkflowArgs {
             component_label: "example".to_string(),
@@ -671,6 +876,7 @@ mod tests {
             regression_min_delta_ms:
                 crate::core::extension::trace::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
             canonical_policy: TraceCanonicalPolicy::Development,
+            checkout_provenance: None,
         }
     }
 }

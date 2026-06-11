@@ -66,6 +66,7 @@ fn trace_args_for_rig(rig_id: &str, component_id: &str, scenario_id: &str) -> Tr
         force: false,
         canonical: false,
         allow_local_toolchain: true,
+        checkout_provenance: None,
     }
 }
 
