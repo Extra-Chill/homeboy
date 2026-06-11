@@ -17,6 +17,7 @@ cleanup() {
 trap cleanup EXIT
 
 RESULTS_FILE="${TMP_ROOT}/bench-results.json"
+BASELINE_RESULTS_FILE="${TMP_ROOT}/bench-baseline-results.json"
 
 cat > "$RESULTS_FILE" <<'JSON'
 {
@@ -81,11 +82,34 @@ cat > "$RESULTS_FILE" <<'JSON'
 }
 JSON
 
+cat > "$BASELINE_RESULTS_FILE" <<'JSON'
+{
+  "component_id": "wp-rl-fixture",
+  "iterations": 1,
+  "scenarios": [
+    {
+      "id": "block-markup/navigation-001",
+      "iterations": 1,
+      "metrics": { "mean_ms": 1400, "reward_mean": 1, "success_mean": 1, "turns_mean": 8 }
+    },
+    {
+      "id": "block-markup/query-002",
+      "iterations": 1,
+      "metrics": { "mean_ms": 500, "reward_mean": 0 }
+    }
+  ]
+}
+JSON
+
+HOMEBOY_BENCH_BASELINE_RESULTS_FILE="$BASELINE_RESULTS_FILE" \
+HOMEBOY_BENCH_WEBPERF_SUMMARY_METRICS_JSON='["mean_ms","reward_mean"]' \
 homeboy_wordpress_emit_bench_results_artifacts "$RESULTS_FILE"
 
 JSONL_FILE="${TMP_ROOT}/results.jsonl"
 LEADERBOARD_FILE="${TMP_ROOT}/leaderboard.md"
 SERIES_FILE="${TMP_ROOT}/series.json"
+WEBPERF_SUMMARY_JSON_FILE="${TMP_ROOT}/webperf-evidence-summary.json"
+WEBPERF_SUMMARY_MARKDOWN_FILE="${TMP_ROOT}/webperf-evidence-summary.md"
 
 if [ ! -s "$JSONL_FILE" ]; then
     echo "ERROR: missing results.jsonl artifact" >&2
@@ -97,6 +121,10 @@ if [ ! -s "$LEADERBOARD_FILE" ]; then
 fi
 if [ ! -s "$SERIES_FILE" ]; then
     echo "ERROR: missing series.json artifact" >&2
+    exit 1
+fi
+if [ ! -s "$WEBPERF_SUMMARY_JSON_FILE" ] || [ ! -s "$WEBPERF_SUMMARY_MARKDOWN_FILE" ]; then
+    echo "ERROR: missing webperf evidence summary artifacts" >&2
     exit 1
 fi
 
@@ -143,6 +171,22 @@ artifact_path=$(jq -r '.series[] | select(.scenario_id == "block-markup/query-00
 if [ "$series_schema" != "homeboy/wordpress-bench-step-series/v1" ] || [ "$series_count" -ne 2 ] || [ "$request_success" != "true" ] || [ "$option_failure" != "transient grew past budget" ] || [ "$artifact_path" != "artifacts/query-series.json" ]; then
     echo "ERROR: series.json did not preserve normalized step-series rows and artifact refs" >&2
     cat "$SERIES_FILE" >&2
+    exit 1
+fi
+
+webperf_schema=$(jq -r '.schema' "$WEBPERF_SUMMARY_JSON_FILE")
+webperf_verdict=$(jq -r '.verdict' "$WEBPERF_SUMMARY_JSON_FILE")
+webperf_row_count=$(jq -r '.measurement_rows | length' "$WEBPERF_SUMMARY_JSON_FILE")
+webperf_mean_result=$(jq -r '.measurement_rows[] | select(.scenario_id == "block-markup/navigation-001" and .metric == "mean_ms") | .verdict' "$WEBPERF_SUMMARY_JSON_FILE")
+
+if [ "$webperf_schema" != "homeboy/webperf-evidence-summary/v1" ] || [ "$webperf_verdict" != "improvement" ] || [ "$webperf_row_count" -ne 4 ] || [ "$webperf_mean_result" != "improvement" ]; then
+    echo "ERROR: webperf summary did not capture focused baseline/candidate measurements" >&2
+    cat "$WEBPERF_SUMMARY_JSON_FILE" >&2
+    exit 1
+fi
+if ! grep -q 'Web Performance Evidence Summary' "$WEBPERF_SUMMARY_MARKDOWN_FILE"; then
+    echo "ERROR: webperf markdown summary missing title" >&2
+    cat "$WEBPERF_SUMMARY_MARKDOWN_FILE" >&2
     exit 1
 fi
 
