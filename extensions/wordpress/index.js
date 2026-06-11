@@ -15,6 +15,7 @@ module.exports = {
 	...require('./lib/wordpress-helper-consumer'),
 	...require('./lib/fixture-setup'),
 	...require('./lib/codebox-memory-report'),
+	...require('./lib/webperf-evidence-summary'),
 	...require('./lib/agent-terminal-actions'),
 	...require('./lib/wp-codebox-apply-adapter'),
 };

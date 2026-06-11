@@ -156,6 +156,10 @@ homeboy_wordpress_emit_bench_results_artifacts() {
 	local baseline_results_file
 	local codebox_memory_report_file
 	local codebox_thresholds_json
+	local webperf_summary_json_file
+	local webperf_summary_markdown_file
+	local webperf_summary_metrics_json
+	local webperf_summary_scenarios_json
 
     if [ -z "$bench_results_file" ] || [ ! -s "$bench_results_file" ]; then
         return 0
@@ -168,6 +172,8 @@ homeboy_wordpress_emit_bench_results_artifacts() {
 	leaderboard_file="${artifact_dir}/leaderboard.md"
 	series_file="${artifact_dir}/series.json"
 	codebox_memory_report_file="${artifact_dir}/codebox-browser-memory-comparison.md"
+	webperf_summary_json_file="${artifact_dir}/webperf-evidence-summary.json"
+	webperf_summary_markdown_file="${artifact_dir}/webperf-evidence-summary.md"
 
     if ! homeboy_wordpress_bench_jsonl_filter < "$bench_results_file" > "$jsonl_file"; then
         echo "ERROR: failed to emit bench results JSONL artifact at $jsonl_file" >&2
@@ -195,6 +201,19 @@ homeboy_wordpress_emit_bench_results_artifacts() {
 			echo "ERROR: failed to emit Codebox browser memory comparison at $codebox_memory_report_file" >&2
 			return 1
 		fi
+
+		webperf_summary_metrics_json="${HOMEBOY_WEBPERF_SUMMARY_METRICS_JSON:-${HOMEBOY_BENCH_WEBPERF_SUMMARY_METRICS_JSON:-[]}}"
+		webperf_summary_scenarios_json="${HOMEBOY_WEBPERF_SUMMARY_SCENARIOS_JSON:-${HOMEBOY_BENCH_WEBPERF_SUMMARY_SCENARIOS_JSON:-[]}}"
+		if ! node "${SCRIPT_DIR}/../../lib/webperf-evidence-summary.js" \
+			--baseline "$baseline_results_file" \
+			--candidate "$bench_results_file" \
+			--metrics "$webperf_summary_metrics_json" \
+			--scenarios "$webperf_summary_scenarios_json" \
+			--output-json "$webperf_summary_json_file" \
+			--output-markdown "$webperf_summary_markdown_file"; then
+			echo "ERROR: failed to emit webperf evidence summary at $webperf_summary_json_file" >&2
+			return 1
+		fi
 	fi
 
 	if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
@@ -202,5 +221,6 @@ homeboy_wordpress_emit_bench_results_artifacts() {
 		echo "DEBUG: [bench] Leaderboard: $leaderboard_file"
 		echo "DEBUG: [bench] Step series: $series_file"
 		[ -s "$codebox_memory_report_file" ] && echo "DEBUG: [bench] Codebox browser memory comparison: $codebox_memory_report_file"
+		[ -s "$webperf_summary_json_file" ] && echo "DEBUG: [bench] Webperf evidence summary: $webperf_summary_json_file"
 	fi
 }
