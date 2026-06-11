@@ -20,6 +20,7 @@ const codexSecretEnv = [
   'AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID',
   'AI_PROVIDER_OPENAI_CODEX_FEDRAMP',
 ];
+const claudeCodeRefreshTokenEnv = 'AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN';
 
 function writeFixtureTaskRunner(root) {
   const fixture = path.join(root, 'fixture-task-runner.cjs');
@@ -278,6 +279,20 @@ assert.deepEqual(executorSecretEnvRequest.secret_env, [
   'AI_PROVIDER_CLAUDE_CODE_EXPIRES_AT',
 ]);
 assert.equal(executorSecretEnvRequest.wp, '7.0');
+
+const claudeCodeDefaultSecretEnvRequest = codeboxTaskRequestFromAgentTaskRequest({
+  ...request,
+  task_id: 'claude-code-default-secret-env-task-123',
+  executor: {
+    backend: 'codebox',
+    model: 'claude-sonnet-4-6',
+    config: {
+      provider: 'claude-code',
+      provider_plugin_paths: ['/providers/claude-code'],
+    },
+  },
+});
+assert.deepEqual(claudeCodeDefaultSecretEnvRequest.secret_env, [claudeCodeRefreshTokenEnv]);
 
 const runtimeTaskRequest = codeboxTaskRequestFromAgentTaskRequest({
   ...request,
@@ -1151,6 +1166,33 @@ assert(!serializedCodexOutcome.includes('diagnostic-access-token-value'));
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-codebox-agent-task-executor-'));
 try {
   const { fixture, capture } = writeFixtureTaskRunner(root);
+  const missingModelResult = spawnSync(process.execPath, [
+    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs'),
+    '--task-runner',
+    fixture,
+  ], {
+    encoding: 'utf8',
+    input: JSON.stringify({
+      ...request,
+      task_id: 'missing-model-cli-task-123',
+      executor: {
+        backend: 'codebox',
+        config: {
+          provider: 'claude-code',
+          provider_plugin_paths: ['/providers/claude-code'],
+        },
+      },
+    }),
+  });
+  assert.equal(missingModelResult.status, 1, missingModelResult.stderr || missingModelResult.stdout);
+  const missingModelOutcome = JSON.parse(missingModelResult.stdout);
+  assert.equal(missingModelOutcome.status, 'failed');
+  assert.equal(missingModelOutcome.failure_classification, 'provider');
+  assert.equal(missingModelOutcome.diagnostics[0].class, 'codebox.preflight.missing_model');
+  assert.match(missingModelOutcome.summary, /--model/);
+  assert.match(missingModelOutcome.summary, /provider-config\.model/);
+  assert.equal(fs.existsSync(capture), false);
+
   const result = spawnSync(process.execPath, [
     path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs'),
     '--task-runner',
@@ -1482,6 +1524,64 @@ try {
   assert.equal(missingWorkspaceOutcome.diagnostics[0].data.task_kind, 'repo-cooking');
   assert.equal(missingWorkspaceOutcome.diagnostics[0].data.mounts_count, 0);
   assert.equal(missingWorkspaceOutcome.metadata.codebox.missing_workspace, true);
+
+  const claudeCodeBaseRequest = {
+    ...request,
+    task_id: 'claude-code-preflight-task',
+    executor: {
+      backend: 'codebox',
+      model: 'claude-sonnet-4-6',
+      config: {
+        provider: 'claude-code',
+        provider_plugin_paths: ['/components/ai-provider-for-claude-code'],
+        wp_codebox_bin: '/bin/should-not-launch-wp-codebox',
+      },
+    },
+  };
+  const claudeMissingValueResult = spawnSync(process.execPath, [
+    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs'),
+  ], {
+    encoding: 'utf8',
+    input: JSON.stringify(claudeCodeBaseRequest),
+    env: {
+      ...process.env,
+      [claudeCodeRefreshTokenEnv]: '',
+    },
+  });
+  assert.equal(claudeMissingValueResult.status, 1, claudeMissingValueResult.stderr || claudeMissingValueResult.stdout);
+  const claudeMissingValueOutcome = JSON.parse(claudeMissingValueResult.stdout);
+  assert.equal(claudeMissingValueOutcome.status, 'failed');
+  assert.equal(claudeMissingValueOutcome.failure_classification, 'provider');
+  assert.equal(claudeMissingValueOutcome.diagnostics[0].class, 'codebox.preflight.claude_code_auth');
+  assert.deepEqual(claudeMissingValueOutcome.diagnostics[0].data.missing_env, [claudeCodeRefreshTokenEnv]);
+  assert(!JSON.stringify(claudeMissingValueOutcome).includes('claude-refresh-token-value'));
+
+  const claudeMissingMappingResult = spawnSync(process.execPath, [
+    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs'),
+  ], {
+    encoding: 'utf8',
+    input: JSON.stringify({
+      ...claudeCodeBaseRequest,
+      task_id: 'claude-code-missing-mapping-task',
+      executor: {
+        ...claudeCodeBaseRequest.executor,
+        secret_env: ['AI_PROVIDER_CLAUDE_CODE_ACCESS_TOKEN'],
+      },
+    }),
+    env: {
+      ...process.env,
+      AI_PROVIDER_CLAUDE_CODE_ACCESS_TOKEN: 'claude-access-token-value',
+      [claudeCodeRefreshTokenEnv]: 'claude-refresh-token-value',
+    },
+  });
+  assert.equal(claudeMissingMappingResult.status, 1, claudeMissingMappingResult.stderr || claudeMissingMappingResult.stdout);
+  const claudeMissingMappingOutcome = JSON.parse(claudeMissingMappingResult.stdout);
+  assert.equal(claudeMissingMappingOutcome.status, 'failed');
+  assert.equal(claudeMissingMappingOutcome.failure_classification, 'provider');
+  assert.equal(claudeMissingMappingOutcome.diagnostics[0].class, 'codebox.preflight.claude_code_auth');
+  assert.deepEqual(claudeMissingMappingOutcome.diagnostics[0].data.missing_env, [claudeCodeRefreshTokenEnv]);
+  assert(!JSON.stringify(claudeMissingMappingOutcome).includes('claude-access-token-value'));
+  assert(!JSON.stringify(claudeMissingMappingOutcome).includes('claude-refresh-token-value'));
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
 }

@@ -206,6 +206,21 @@ function aggregateMetadata(iterationMetadata) {
     return Object.assign({}, ...iterationMetadata);
 }
 
+function resultCountMetrics(metadata) {
+    const resultCounts = metadata.result_counts;
+    if (!resultCounts || typeof resultCounts !== 'object' || Array.isArray(resultCounts)) {
+        return {};
+    }
+
+    const metrics = {};
+    for (const [status, count] of Object.entries(resultCounts)) {
+        if (typeof count === 'number' && Number.isFinite(count)) {
+            metrics[`${status}_count`] = count;
+        }
+    }
+    return metrics;
+}
+
 async function discoverWorkloads(dir) {
     const found = [];
     async function walk(d) {
@@ -345,19 +360,20 @@ async function main() {
             max_ms: t[t.length - 1],
         };
 
+        const metadata = result.customMetadata;
         const scenario = {
             id,
             file: rel,
             source,
             iterations: t.length,
-            metrics: { ...timingMetrics, ...result.customMetrics },
+            metrics: { ...timingMetrics, ...resultCountMetrics(metadata), ...result.customMetrics },
             memory: { peak_bytes: result.peakRss },
         };
         if (Object.keys(result.customArtifacts).length > 0) {
             scenario.artifacts = result.customArtifacts;
         }
-        if (Object.keys(result.customMetadata).length > 0) {
-            scenario.metadata = result.customMetadata;
+        if (Object.keys(metadata).length > 0) {
+            scenario.metadata = metadata;
         }
         scenarios.push(scenario);
 

@@ -25,6 +25,7 @@ export default async function () {
             prompt_variant: 'studio-code',
             prompt_file: 'file:///tmp/prompts/site-build/studio-code.md',
             prompt_category: 'site-build',
+            result_counts: { warning: 1 },
         },
     };
 }
@@ -57,6 +58,12 @@ if (scenario.metadata?.prompt_category !== 'site-build') {
 }
 if (scenario.metrics?.custom_metric !== 7) {
     throw new Error(`custom metrics regressed: ${JSON.stringify(scenario.metrics)}`);
+}
+if (scenario.metrics?.warning_count !== 1) {
+    throw new Error(`warning result count was not surfaced as a metric: ${JSON.stringify(scenario.metrics)}`);
+}
+if (scenario.metadata?.result_counts?.warning !== 1) {
+    throw new Error(`result_counts metadata was not persisted: ${JSON.stringify(scenario.metadata)}`);
 }
 NODE
 

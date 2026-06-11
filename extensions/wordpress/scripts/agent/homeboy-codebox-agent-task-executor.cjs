@@ -316,7 +316,7 @@ function redactDiagnosticText(text) {
 }
 
 function missingSecretEnvNames(stderr) {
-  const match = String(stderr || '').match(/Required WP Codebox secret environment variable missing:\s*([^\n\r]+)/i);
+  const match = String(stderr || '').match(/(?:Required WP Codebox secret environment variable missing|Claude Code provider auth preflight failed: missing required secret environment (?:mapping|value)):\s*([^\n\r]+)/i);
   if (!match) {
     return [];
   }
@@ -326,14 +326,23 @@ function missingSecretEnvNames(stderr) {
     .filter((name) => /^[A-Z0-9_]+$/.test(name));
 }
 
+function preflightFailureClass(stderr, missingSecretEnv) {
+  if (/Claude Code provider auth preflight failed:/i.test(stderr)) {
+    return missingSecretEnv.length > 0
+      ? 'codebox.preflight.claude_code_auth'
+      : 'codebox.preflight.stderr';
+  }
+  return missingSecretEnv.length > 0
+    ? 'codebox.preflight.missing_secret_env'
+    : 'codebox.preflight.stderr';
+}
+
 function stderrFailurePayload(result) {
   const stderr = redactDiagnosticText(result.stderr || '');
   const missingSecretEnv = missingSecretEnvNames(stderr);
-  const diagnosticClass = missingSecretEnv.length > 0
-    ? 'codebox.preflight.missing_secret_env'
-    : 'codebox.preflight.stderr';
+  const diagnosticClass = preflightFailureClass(stderr, missingSecretEnv);
   const message = missingSecretEnv.length > 0
-    ? `WP Codebox task runner preflight is missing required secret environment variables: ${missingSecretEnv.join(', ')}.`
+    ? `WP Codebox task runner preflight is missing required secret environment variables for ${diagnosticClass === 'codebox.preflight.claude_code_auth' ? 'Claude Code provider auth' : 'the runtime'}: ${missingSecretEnv.join(', ')}.`
     : 'WP Codebox task runner failed before returning a JSON outcome.';
 
   return {
@@ -420,6 +429,34 @@ function missingWorkspacePayload(request, taskInput) {
   };
 }
 
+function missingModelPreflightPayload(taskInput) {
+  if (!taskInput?.provider || taskInput?.model) {
+    return null;
+  }
+
+  const message = `WP Codebox agent task requires an AI model for provider "${taskInput.provider}". Pass --model or set provider-config.model.`;
+  return {
+    success: false,
+    status: 'failed',
+    failure_classification: 'provider',
+    summary: message,
+    diagnostics: [{
+      class: 'codebox.preflight.missing_model',
+      message,
+      data: {
+        phase: 'codebox.preflight',
+        provider: taskInput.provider,
+        model_sources: ['--model', 'provider-config.model'],
+      },
+    }],
+    metadata: {
+      phase: 'codebox.preflight',
+      provider: taskInput.provider,
+      model_required: true,
+    },
+  };
+}
+
 async function loadCodeboxCoreNormalizers() {
   const configuredModule = process.env.HOMEBOY_WP_CODEBOX_CORE_MODULE;
   const candidates = configuredModule ? [configuredModule] : [DEFAULT_CODEBOX_CORE_MODULE];
@@ -453,6 +490,10 @@ async function runTaskRunner(request) {
   const runner = argValue('--task-runner') || `${__dirname}/homeboy-wp-codebox-task-runner.cjs`;
   const config = request.executor?.config || {};
   const taskInput = codeboxTaskRequestFromAgentTaskRequest(request);
+  const missingModelPayload = missingModelPreflightPayload(taskInput);
+  if (missingModelPayload) {
+    return agentTaskOutcomeFromCodeboxResult(request, missingModelPayload, { exitStatus: 1, ...coreNormalizers });
+  }
   const preflightPayload = missingWorkspacePayload(request, taskInput);
   if (preflightPayload) {
     return agentTaskOutcomeFromCodeboxResult(request, preflightPayload, { exitStatus: 1, ...coreNormalizers });
