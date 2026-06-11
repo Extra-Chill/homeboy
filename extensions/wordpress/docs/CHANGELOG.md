@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.119.8] - 2026-06-11
+
+### Fixed
+- accept zero exit runner workspace commands
+
 ## [2.119.7] - 2026-06-11
 
 ### Fixed
