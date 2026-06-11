@@ -666,11 +666,13 @@ if ( ! function_exists( 'homeboy_datamachine_agent_run_command_checks' ) ) {
 		}
 
 		$response = is_array( $result ) ? $result : array();
+		$exit_code = (int) ( $response['exit_code'] ?? $response['code'] ?? ( empty( $response['success'] ) ? 1 : 0 ) );
+		$completed = ! empty( $response['success'] ) || 0 === $exit_code || 'completed' === (string) ( $response['status'] ?? '' );
 		return array(
 			'command'        => $command_config['command'],
 			'description'    => $command_config['description'],
-			'exit_code'      => (int) ( $response['exit_code'] ?? $response['status'] ?? ( empty( $response['success'] ) ? 1 : 0 ) ),
-			'success'        => ! empty( $response['success'] ),
+			'exit_code'      => $exit_code,
+			'success'        => $completed,
 			'stdout'         => is_scalar( $response['stdout'] ?? null ) ? trim( (string) $response['stdout'] ) : '',
 			'stderr'         => is_scalar( $response['stderr'] ?? null ) ? trim( (string) $response['stderr'] ) : '',
 			'elapsed_ms'     => isset( $response['elapsed_ms'] ) ? (float) $response['elapsed_ms'] : ( hrtime( true ) - $started ) / 1000000,

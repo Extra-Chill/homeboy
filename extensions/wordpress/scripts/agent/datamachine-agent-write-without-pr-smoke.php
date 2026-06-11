@@ -601,10 +601,10 @@ namespace {
                 if ( 'repo@branch' !== ( $input['workspace'] ?? '' ) ) {
                     return array( 'success' => false, 'error' => 'Unexpected workspace handle.' );
                 }
-                if ( 'printf ok > verification.txt' === ( $input['command'] ?? '' ) ) {
-                    $workspace_files['verification.txt'] = 'ok';
-                    return array( 'success' => true, 'exit_code' => 0, 'stdout' => '', 'stderr' => '' );
-                }
+				if ( 'printf ok > verification.txt' === ( $input['command'] ?? '' ) ) {
+					$workspace_files['verification.txt'] = 'ok';
+					return array( 'status' => 'completed', 'exit_code' => 0, 'stdout' => '', 'stderr' => '' );
+				}
                 if ( 'test -f verification.txt' === ( $input['command'] ?? '' ) ) {
                     return array( 'success' => isset( $workspace_files['verification.txt'] ), 'exit_code' => isset( $workspace_files['verification.txt'] ) ? 0 : 1 );
                 }
