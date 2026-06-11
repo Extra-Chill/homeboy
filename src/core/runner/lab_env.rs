@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 
+use crate::core::{Error, Result};
+
 use super::execution::RUNNER_EXEC_WAIT_TIMEOUT_ENV;
+use super::lab_workspaces::{is_rig_component_path_env_name, LabWorkspaceMappingEntry};
 use crate::core::observation::LAB_OFFLOAD_METADATA_ENV;
 
 const SETTINGS_DIAGNOSTICS_SCHEMA: &str = "homeboy/lab-offload-settings-env/v1";
@@ -24,6 +27,90 @@ pub(super) fn build_lab_offload_env(lab_metadata: &serde_json::Value) -> HashMap
         LAB_OFFLOAD_METADATA_ENV.to_string(),
         serde_json::to_string(lab_metadata).unwrap_or_default(),
     )])
+}
+
+pub(super) fn forward_rig_component_path_env(
+    env: &mut HashMap<String, String>,
+    workspace_mapping: &[LabWorkspaceMappingEntry],
+) -> Result<serde_json::Value> {
+    forward_rig_component_path_env_entries(env, workspace_mapping, std::env::vars())
+}
+
+fn forward_rig_component_path_env_entries(
+    env: &mut HashMap<String, String>,
+    workspace_mapping: &[LabWorkspaceMappingEntry],
+    entries: impl IntoIterator<Item = (String, String)>,
+) -> Result<serde_json::Value> {
+    let mut forwarded = Vec::new();
+    let mut entries = entries
+        .into_iter()
+        .filter(|(name, value)| is_rig_component_path_env_name(name) && !value.trim().is_empty())
+        .collect::<Vec<_>>();
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+
+    for (name, value) in entries {
+        let Some(remote_value) = remap_rig_component_path_env_value(&value, workspace_mapping)
+        else {
+            return Err(Error::validation_invalid_argument(
+                name.clone(),
+                format!(
+                    "Lab offload cannot forward `{name}` because its controller-side path was not synced to the runner"
+                ),
+                Some(value.clone()),
+                Some(vec![
+                    format!("Controller-side value: {value}"),
+                    "Use an existing local checkout/component path so Lab can sync and translate it, unset the variable to use the rig default, or run with --force-hot to keep the check local.".to_string(),
+                ]),
+            ));
+        };
+        env.insert(name.clone(), remote_value.clone());
+        forwarded.push(serde_json::json!({
+            "name": name,
+            "forwarded_to_runner": true,
+            "translated": true,
+            "controller_value": value,
+            "runner_value": remote_value,
+        }));
+    }
+
+    Ok(serde_json::json!({
+        "schema": "homeboy/lab-offload-rig-component-path-env/v1",
+        "forwarded": forwarded,
+    }))
+}
+
+fn remap_rig_component_path_env_value(
+    value: &str,
+    workspace_mapping: &[LabWorkspaceMappingEntry],
+) -> Option<String> {
+    let expanded = shellexpand::tilde(value).to_string();
+    let canonical = std::path::Path::new(&expanded)
+        .canonicalize()
+        .ok()
+        .map(|path| path.to_string_lossy().to_string());
+
+    let mut ordered = workspace_mapping.iter().collect::<Vec<_>>();
+    ordered.sort_by_key(|entry| std::cmp::Reverse(entry.local_path().len()));
+    for entry in ordered {
+        let mut candidates = vec![value];
+        if let Some(canonical) = canonical.as_deref() {
+            candidates.insert(0, canonical);
+        }
+        for candidate in candidates {
+            if candidate == entry.local_path() {
+                return Some(entry.remote_path().to_string());
+            }
+            let prefix = format!("{}/", entry.local_path().trim_end_matches('/'));
+            if let Some(rest) = candidate.strip_prefix(&prefix) {
+                return Some(format!(
+                    "{}/{}",
+                    entry.remote_path().trim_end_matches('/'),
+                    rest
+                ));
+            }
+        }
+    }
+    None
 }
 
 pub(super) fn settings_env_diagnostics(
@@ -184,6 +271,8 @@ fn redacted_value_preview(value: &str, redacted: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::runner::lab_workspaces::workspace_mapping_entry;
+    use crate::core::runner::{RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOutput};
 
     struct EnvVarGuard {
         name: &'static str,
@@ -286,6 +375,64 @@ mod tests {
             diagnostics["forwarded_environment"][0]["value_preview"],
             "<redacted>"
         );
+    }
+
+    #[test]
+    fn rig_component_path_env_is_forwarded_with_runner_path() {
+        let mapping = vec![workspace_mapping_entry(
+            "rig_component_path_env",
+            &RunnerWorkspaceSyncOutput {
+                command: "runner.workspace.sync",
+                runner_id: "homeboy-lab".to_string(),
+                local_path: "/Users/chubes/Developer/woocommerce-gateway-stripe".to_string(),
+                remote_path: "/home/chubes/Developer/woocommerce-gateway-stripe".to_string(),
+                sync_mode: RunnerWorkspaceSyncMode::Snapshot,
+                snapshot_identity: "snapshot".to_string(),
+                files: 1,
+                bytes: 1,
+                excludes: Vec::new(),
+                includes: Vec::new(),
+            },
+        )];
+
+        let mut env = HashMap::new();
+        let metadata = forward_rig_component_path_env_entries(
+            &mut env,
+            &mapping,
+            [(
+                "HOMEBOY_TEST_COMPONENT_PATH".to_string(),
+                "/Users/chubes/Developer/woocommerce-gateway-stripe/includes".to_string(),
+            )],
+        )
+        .expect("forward env");
+
+        assert_eq!(
+            env.get("HOMEBOY_TEST_COMPONENT_PATH").map(String::as_str),
+            Some("/home/chubes/Developer/woocommerce-gateway-stripe/includes")
+        );
+        assert_eq!(
+            metadata["forwarded"][0]["runner_value"],
+            "/home/chubes/Developer/woocommerce-gateway-stripe/includes"
+        );
+    }
+
+    #[test]
+    fn rig_component_path_env_fails_when_path_was_not_synced() {
+        let mut env = HashMap::new();
+
+        let err = forward_rig_component_path_env_entries(
+            &mut env,
+            &[],
+            [(
+                "HOMEBOY_UNSYNCED_COMPONENT_PATH".to_string(),
+                "/Users/chubes/Developer/unsynced-component".to_string(),
+            )],
+        )
+        .expect_err("unsynced path");
+
+        assert_eq!(err.details["field"], "HOMEBOY_UNSYNCED_COMPONENT_PATH");
+        assert!(err.message.contains("was not synced to the runner"));
+        assert!(!env.contains_key("HOMEBOY_UNSYNCED_COMPONENT_PATH"));
     }
 
     #[test]
