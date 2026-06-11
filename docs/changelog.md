@@ -4,6 +4,18 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.228.8] - 2026-06-11
+
+### Changed
+- Add trace metric compare guardrails
+
+### Fixed
+- fix trace compare canonical provenance
+- fix trace parser producer fields
+- fix browser evidence artifact variants
+- fix agent-task failed provider evidence
+- sync private lab workspaces through controller
+
 ## [0.228.7] - 2026-06-11
 
 ### Fixed
