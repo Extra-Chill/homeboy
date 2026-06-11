@@ -705,7 +705,6 @@ fn trace_run_evidence_report_includes_refs_assertions_and_safe_artifacts() {
                 message: Some("Window reopened".to_string()),
                 details: None,
             }],
-            metrics: Default::default(),
             temporal_assertions: Vec::new(),
             artifacts: vec![
                 extension_trace::TraceArtifact {

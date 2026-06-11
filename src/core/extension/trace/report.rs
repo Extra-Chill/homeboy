@@ -913,7 +913,6 @@ mod tests {
                 timeline: Vec::new(),
                 span_definitions: Vec::new(),
                 span_results: Vec::new(),
-                metrics: Default::default(),
                 assertions: Vec::new(),
                 temporal_assertions: Vec::new(),
                 artifacts: vec![TraceArtifact {
@@ -992,7 +991,6 @@ mod tests {
                     message: None,
                 }],
                 assertions: Vec::new(),
-                metrics: Default::default(),
                 temporal_assertions: Vec::new(),
                 artifacts: Vec::new(),
                 toolchain: None,
@@ -1081,7 +1079,6 @@ mod tests {
                 message: None,
             }],
             assertions: Vec::new(),
-            metrics: Default::default(),
             temporal_assertions: Vec::new(),
             artifacts: Vec::new(),
             toolchain: Some(TraceToolchainProvenance {
@@ -1150,7 +1147,6 @@ mod tests {
             timeline: Vec::new(),
             span_definitions: Vec::new(),
             span_results: Vec::new(),
-            metrics: Default::default(),
             assertions: Vec::new(),
             temporal_assertions: Vec::new(),
             artifacts: vec![

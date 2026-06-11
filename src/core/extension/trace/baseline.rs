@@ -394,7 +394,6 @@ mod tests {
                 message: None,
             }],
             assertions: Vec::new(),
-            metrics: Default::default(),
             temporal_assertions: Vec::new(),
             artifacts: Vec::new(),
             toolchain: None,

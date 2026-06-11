@@ -162,7 +162,6 @@ pub fn run(args: ObserveArgs, _global: &GlobalArgs) -> CmdResult<ObserveOutput> 
         timeline,
         span_definitions: Vec::new(),
         span_results: Vec::new(),
-        metrics: Default::default(),
         assertions: Vec::new(),
         temporal_assertions: Vec::new(),
         artifacts: vec![TraceArtifact {
