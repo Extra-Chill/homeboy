@@ -123,7 +123,7 @@ pub(super) fn history_hints(summary: &BenchObservationSummary) -> Vec<String> {
         format!("View this run: homeboy runs show {}", summary.run_id),
         format!("List artifacts: homeboy runs artifacts {}", summary.run_id),
         format!(
-            "Fetch an artifact: homeboy runs artifact get {} <artifact-name> --to <path>",
+            "Fetch an artifact: homeboy runs artifact get {} <artifact-name> -o <path>",
             summary.run_id
         ),
         format!("List related bench runs: {list_command}"),
@@ -1363,6 +1363,9 @@ mod tests {
 
         assert!(hints.iter().any(|hint| hint
             == "List related bench runs: homeboy runs list --kind bench --component studio --rig studio-trunk"));
+        assert!(hints.iter().any(|hint| hint
+            == "Fetch an artifact: homeboy runs artifact get run-123 <artifact-name> -o <path>"));
+        assert!(!hints.iter().any(|hint| hint.contains("--to <path>")));
     }
 
     fn synthetic_resources(recommendation: ResourceRecommendation) -> DoctorOutput {
