@@ -841,13 +841,13 @@ mod tests {
             ],
         );
         git(component_dir.path(), &["push", "-u", "origin", "main"]);
-        std::fs::write(extension_dir.path().join("nodejs.json"), "{}\n").unwrap();
+        std::fs::write(extension_dir.path().join("fixture-extension.json"), "{}\n").unwrap();
         let component = test_component(component_dir.path());
         let args = test_run_args(component_dir.path());
         let context = ExtensionExecutionContext {
             component: component.clone(),
             capability: ExtensionCapability::Trace,
-            extension_id: "nodejs".to_string(),
+            extension_id: "fixture-extension".to_string(),
             extension_path: extension_dir.path().to_path_buf(),
             script_path: "trace.js".to_string(),
             settings: Vec::new(),
@@ -858,7 +858,7 @@ mod tests {
         assert!(report.is_canonical());
         assert!(report.reasons.is_empty());
         assert!(report.checks.iter().any(|check| {
-            check.target == "extension:nodejs" && check.status == "installed-extension"
+            check.target == "extension:fixture-extension" && check.status == "installed-extension"
         }));
     }
 
@@ -872,7 +872,7 @@ mod tests {
         let context = ExtensionExecutionContext {
             component: component.clone(),
             capability: ExtensionCapability::Trace,
-            extension_id: "nodejs".to_string(),
+            extension_id: "fixture-extension".to_string(),
             extension_path: extension_dir.path().to_path_buf(),
             script_path: "trace.js".to_string(),
             settings: Vec::new(),
