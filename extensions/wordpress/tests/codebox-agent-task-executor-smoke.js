@@ -1443,6 +1443,45 @@ try {
   assert.equal(missingSecretOutcome.diagnostics[0].data.phase, 'codebox.preflight');
   assert.equal(missingSecretOutcome.metadata.codebox.missing_env[0], 'AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN');
   assert(!JSON.stringify(missingSecretOutcome).includes('codex-access-token-value'));
+
+  const missingWorkspace = writeFixtureTaskRunner(root);
+  const missingWorkspaceRequest = {
+    ...request,
+    task_id: 'missing-workspace-task-123',
+    group_key: 'a8c-intelligence',
+    workspace: {
+      mode: 'existing',
+      slug: 'a8c-intelligence',
+      materialization: { repo: 'a8c-intelligence' },
+    },
+    executor: {
+      ...request.executor,
+      config: {
+        provider: 'openai',
+        task_kind: 'repo-cooking',
+        repo: 'a8c-intelligence',
+      },
+    },
+  };
+  fs.rmSync(missingWorkspace.capture, { force: true });
+  const missingWorkspaceResult = spawnSync(process.execPath, [
+    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs'),
+    '--task-runner',
+    missingWorkspace.fixture,
+  ], {
+    encoding: 'utf8',
+    input: JSON.stringify(missingWorkspaceRequest),
+  });
+  assert.equal(missingWorkspaceResult.status, 1, missingWorkspaceResult.stderr || missingWorkspaceResult.stdout);
+  assert.equal(fs.existsSync(missingWorkspace.capture), false, 'task runner should not be invoked without a workspace mount');
+  const missingWorkspaceOutcome = JSON.parse(missingWorkspaceResult.stdout);
+  assert.equal(missingWorkspaceOutcome.status, 'failed');
+  assert.equal(missingWorkspaceOutcome.failure_classification, 'execution_failed');
+  assert.equal(missingWorkspaceOutcome.diagnostics[0].class, 'codebox.preflight.missing_workspace');
+  assert.equal(missingWorkspaceOutcome.diagnostics[0].data.repo, 'a8c-intelligence');
+  assert.equal(missingWorkspaceOutcome.diagnostics[0].data.task_kind, 'repo-cooking');
+  assert.equal(missingWorkspaceOutcome.diagnostics[0].data.mounts_count, 0);
+  assert.equal(missingWorkspaceOutcome.metadata.codebox.missing_workspace, true);
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
 }
