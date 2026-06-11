@@ -65,6 +65,9 @@
         "structured_outcome",
         "agent_bundle_execution"
       ],
+      "workspace_materialization": {
+        "cwd": "git_checkout"
+      },
       "status": "active",
       "integration_contract": "wp-codebox-cli/agent-task-run",
       "runtime_gap_trackers": []

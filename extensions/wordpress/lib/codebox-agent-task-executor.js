@@ -168,6 +168,9 @@ function providerContract(options = {}) {
     failure_classifications: AGENT_TASK_FAILURE_CLASSIFICATIONS,
     redacted_metadata_keys: AGENT_TASK_REDACTED_METADATA_KEYS,
     capabilities: PROVIDER_CAPABILITIES,
+    workspace_materialization: {
+      cwd: 'git_checkout',
+    },
     status: 'active',
     integration_contract: 'wp-codebox-cli/agent-task-run',
     runtime_gap_trackers: WP_CODEBOX_RUNTIME_GAP_TRACKERS,
