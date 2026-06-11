@@ -615,82 +615,101 @@ if ( ! function_exists( 'homeboy_datamachine_agent_command_list' ) ) {
 	}
 }
 
-if ( ! function_exists( 'homeboy_datamachine_agent_run_shell_command' ) ) {
-	function homeboy_datamachine_agent_run_shell_command( string $command, string $cwd ): array {
-		$started = hrtime( true );
-		$descriptor_spec = array(
-			0 => array( 'pipe', 'r' ),
-			1 => array( 'pipe', 'w' ),
-			2 => array( 'pipe', 'w' ),
-		);
-
-		$process = proc_open( array( 'bash', '-lc', $command ), $descriptor_spec, $pipes, $cwd );
-		if ( ! is_resource( $process ) ) {
+if ( ! function_exists( 'homeboy_datamachine_agent_run_command_checks' ) ) {
+	function homeboy_datamachine_agent_run_workspace_command( array $runner_workspace, array $command_config, string $key ): array {
+		$ability_name = 'wp-codebox/run-runner-workspace-command';
+		$handle       = isset( $runner_workspace['handle'] ) && is_scalar( $runner_workspace['handle'] ) ? trim( (string) $runner_workspace['handle'] ) : '';
+		if ( '' === $handle ) {
 			return array(
-				'command'    => $command,
-				'exit_code'  => 127,
-				'success'    => false,
-				'error'      => 'Unable to start command process.',
-				'elapsed_ms' => ( hrtime( true ) - $started ) / 1000000,
+				'success'        => false,
+				'command'        => $command_config['command'],
+				'description'    => $command_config['description'],
+				'error'          => $key . ' requires a WP Codebox runner workspace handle.',
+				'ability'        => $ability_name,
+				'upstream_issue' => 'https://github.com/Automattic/wp-codebox/issues/873',
 			);
 		}
 
-		fclose( $pipes[0] );
-		$stdout = stream_get_contents( $pipes[1] );
-		$stderr = stream_get_contents( $pipes[2] );
-		fclose( $pipes[1] );
-		fclose( $pipes[2] );
-		$exit_code = proc_close( $process );
+		$ability = function_exists( 'wp_get_ability' ) ? wp_get_ability( $ability_name ) : null;
+		if ( ! $ability ) {
+			return array(
+				'success'        => false,
+				'command'        => $command_config['command'],
+				'description'    => $command_config['description'],
+				'workspace'      => $handle,
+				'error'          => $ability_name . ' is not available; runner workspace command execution is blocked on WP Codebox runner verification support.',
+				'ability'        => $ability_name,
+				'upstream_issue' => 'https://github.com/Automattic/wp-codebox/issues/873',
+			);
+		}
 
+		$started = hrtime( true );
+		$result  = $ability->execute(
+			array(
+				'workspace'   => $handle,
+				'handle'      => $handle,
+				'command'     => $command_config['command'],
+				'description' => $command_config['description'],
+				'kind'        => $key,
+			)
+		);
+		if ( function_exists( 'is_wp_error' ) && is_wp_error( $result ) ) {
+			return array(
+				'success'        => false,
+				'command'        => $command_config['command'],
+				'description'    => $command_config['description'],
+				'workspace'      => $handle,
+				'error'          => $result->get_error_message(),
+				'ability'        => $ability_name,
+				'upstream_issue' => 'https://github.com/Automattic/wp-codebox/issues/873',
+			);
+		}
+
+		$response = is_array( $result ) ? $result : array();
 		return array(
-			'command'    => $command,
-			'exit_code'  => $exit_code,
-			'success'    => 0 === $exit_code,
-			'stdout'     => is_string( $stdout ) ? trim( $stdout ) : '',
-			'stderr'     => is_string( $stderr ) ? trim( $stderr ) : '',
-			'elapsed_ms' => ( hrtime( true ) - $started ) / 1000000,
+			'command'        => $command_config['command'],
+			'description'    => $command_config['description'],
+			'exit_code'      => (int) ( $response['exit_code'] ?? $response['status'] ?? ( empty( $response['success'] ) ? 1 : 0 ) ),
+			'success'        => ! empty( $response['success'] ),
+			'stdout'         => is_scalar( $response['stdout'] ?? null ) ? trim( (string) $response['stdout'] ) : '',
+			'stderr'         => is_scalar( $response['stderr'] ?? null ) ? trim( (string) $response['stderr'] ) : '',
+			'elapsed_ms'     => isset( $response['elapsed_ms'] ) ? (float) $response['elapsed_ms'] : ( hrtime( true ) - $started ) / 1000000,
+			'workspace'      => $handle,
+			'ability'        => $ability_name,
+			'error'          => is_scalar( $response['error'] ?? null ) ? (string) $response['error'] : '',
+			'upstream_issue' => is_scalar( $response['upstream_issue'] ?? null ) ? (string) $response['upstream_issue'] : '',
 		);
 	}
-}
 
-if ( ! function_exists( 'homeboy_datamachine_agent_run_command_checks' ) ) {
 	function homeboy_datamachine_agent_run_command_checks( array $config, array $runner_workspace, string $key ): array {
 		$commands = homeboy_datamachine_agent_command_list( $config, $key );
 		if ( empty( $commands ) ) {
 			return array( 'enabled' => false, 'checks' => array() );
 		}
 
-		$cwd = isset( $runner_workspace['path'] ) && is_scalar( $runner_workspace['path'] ) ? trim( (string) $runner_workspace['path'] ) : '';
-		if ( '' === $cwd || ! is_dir( $cwd ) ) {
-			return array(
-				'enabled' => true,
-				'success' => false,
-				'error'   => $key . ' requires a provisioned DMC target workspace path.',
-				'checks'  => $commands,
-			);
-		}
-
 		$results = array();
 		foreach ( $commands as $command_config ) {
-			$result = homeboy_datamachine_agent_run_shell_command( $command_config['command'], $cwd );
-			$result['description'] = $command_config['description'];
+			$result    = homeboy_datamachine_agent_run_workspace_command( $runner_workspace, $command_config, $key );
 			$results[] = $result;
 			if ( empty( $result['success'] ) ) {
 				return array(
-					'enabled' => true,
-					'success' => false,
-					'cwd'     => $cwd,
-					'checks'  => $results,
-					'error'   => $key . ' failed: ' . $command_config['command'],
+					'enabled'        => true,
+					'success'        => false,
+					'workspace'      => is_scalar( $runner_workspace['handle'] ?? null ) ? (string) $runner_workspace['handle'] : '',
+					'checks'         => $results,
+					'error'          => '' !== (string) ( $result['error'] ?? '' ) ? (string) $result['error'] : $key . ' failed: ' . $command_config['command'],
+					'ability'        => (string) ( $result['ability'] ?? 'wp-codebox/run-runner-workspace-command' ),
+					'upstream_issue' => (string) ( $result['upstream_issue'] ?? '' ),
 				);
 			}
 		}
 
 		return array(
-			'enabled' => true,
-			'success' => true,
-			'cwd'     => $cwd,
-			'checks'  => $results,
+			'enabled'   => true,
+			'success'   => true,
+			'workspace' => is_scalar( $runner_workspace['handle'] ?? null ) ? (string) $runner_workspace['handle'] : '',
+			'ability'   => 'wp-codebox/run-runner-workspace-command',
+			'checks'    => $results,
 		);
 	}
 }
