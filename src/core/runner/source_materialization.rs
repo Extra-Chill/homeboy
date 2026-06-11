@@ -16,6 +16,10 @@ pub(super) fn validate_runner_git_materialization(remote_url: &str, runner_id: &
     Ok(())
 }
 
+pub(super) fn requires_controller_routed_workspace_sync(remote_url: &str) -> bool {
+    private_proxied_source_host(remote_url).is_some()
+}
+
 pub(super) fn validate_runner_exec_source_fetch(command: &[String], runner_id: &str) -> Result<()> {
     if !looks_like_git_fetch_command(command) {
         return Ok(());
@@ -123,6 +127,16 @@ mod tests {
         assert!(err.message.contains("--mode git"));
         assert!(err.message.contains("github.a8c.com"));
         assert!(err.message.contains("workspace sync"));
+    }
+
+    #[test]
+    fn identifies_sources_that_need_controller_routed_workspace_sync() {
+        assert!(requires_controller_routed_workspace_sync(
+            "git@github.a8c.com:Automattic/example.git"
+        ));
+        assert!(!requires_controller_routed_workspace_sync(
+            "https://github.com/Extra-Chill/homeboy.git"
+        ));
     }
 
     #[test]
