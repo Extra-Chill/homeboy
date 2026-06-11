@@ -1151,6 +1151,33 @@ assert(!serializedCodexOutcome.includes('diagnostic-access-token-value'));
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-codebox-agent-task-executor-'));
 try {
   const { fixture, capture } = writeFixtureTaskRunner(root);
+  const missingModelResult = spawnSync(process.execPath, [
+    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs'),
+    '--task-runner',
+    fixture,
+  ], {
+    encoding: 'utf8',
+    input: JSON.stringify({
+      ...request,
+      task_id: 'missing-model-cli-task-123',
+      executor: {
+        backend: 'codebox',
+        config: {
+          provider: 'claude-code',
+          provider_plugin_paths: ['/providers/claude-code'],
+        },
+      },
+    }),
+  });
+  assert.equal(missingModelResult.status, 1, missingModelResult.stderr || missingModelResult.stdout);
+  const missingModelOutcome = JSON.parse(missingModelResult.stdout);
+  assert.equal(missingModelOutcome.status, 'failed');
+  assert.equal(missingModelOutcome.failure_classification, 'provider');
+  assert.equal(missingModelOutcome.diagnostics[0].class, 'codebox.preflight.missing_model');
+  assert.match(missingModelOutcome.summary, /--model/);
+  assert.match(missingModelOutcome.summary, /provider-config\.model/);
+  assert.equal(fs.existsSync(capture), false);
+
   const result = spawnSync(process.execPath, [
     path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs'),
     '--task-runner',
