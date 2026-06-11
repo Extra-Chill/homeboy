@@ -2,6 +2,14 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.119.4] - 2026-06-11
+
+### Changed
+- declare codebox cwd materialization
+
+### Fixed
+- filter WP Codebox bench scenarios
+
 ## [2.119.3] - 2026-06-11
 
 ### Fixed
