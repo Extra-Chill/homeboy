@@ -746,6 +746,7 @@ fn run_lab_offload_inner(
             .into_iter()
             .skip(1),
     );
+    let remote_command = command.clone();
     plan = with_step(
         plan,
         PlanStep::ready("lab.rewrite_args", "lab.rewrite_args")
@@ -912,6 +913,30 @@ fn run_lab_offload_inner(
         stderr.push('\n');
     }
     stderr.push_str(&exec_output.stderr);
+    if exit_code != 0 {
+        if let Some(run_id) = agent_task_dispatch_requested_run_id(request.normalized_args) {
+            let failure_message = lab_pre_dispatch_failure_message(&exec_output.stderr)
+                .or_else(|| lab_pre_dispatch_failure_message(&exec_output.stdout))
+                .unwrap_or_else(|| format!("offloaded agent-task command exited with {exit_code}"));
+            let record = agent_task_lifecycle::record_pre_dispatch_failure(
+                agent_task_lifecycle::AgentTaskPreDispatchFailure {
+                    run_id: &run_id,
+                    local_command: request.normalized_args.to_vec(),
+                    remote_command: remote_command.clone(),
+                    runner_id,
+                    remote_workspace: &remote_cwd,
+                    failure_message: &failure_message,
+                    stdout: &exec_output.stdout,
+                    stderr: &exec_output.stderr,
+                    exit_code,
+                },
+            )?;
+            stderr.push_str(&format!(
+                "Persisted agent-task pre-dispatch failure evidence for run `{}`. Inspect with `homeboy agent-task status {}` and `homeboy agent-task logs {}`.\n",
+                record.run_id, record.run_id, record.run_id
+            ));
+        }
+    }
 
     Ok(LabOffloadOutcome::Offloaded {
         plan,
@@ -1160,6 +1185,37 @@ fn agent_task_run_plan_recording_args(args: &[String]) -> Option<(String, String
     }
 
     Some((plan?, record_run_id?))
+}
+
+fn agent_task_dispatch_requested_run_id(args: &[String]) -> Option<String> {
+    if args.get(1).map(String::as_str) != Some("agent-task")
+        || !matches!(args.get(2).map(String::as_str), Some("dispatch" | "cook"))
+    {
+        return None;
+    }
+
+    let mut iter = args.iter().skip(3);
+    while let Some(arg) = iter.next() {
+        if arg == "--" {
+            break;
+        }
+        if arg == "--run-id" {
+            return iter.next().cloned();
+        }
+        if let Some(value) = arg.strip_prefix("--run-id=") {
+            return (!value.is_empty()).then(|| value.to_string());
+        }
+    }
+
+    None
+}
+
+fn lab_pre_dispatch_failure_message(output: &str) -> Option<String> {
+    output
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(str::to_string)
 }
 
 fn hydrate_agent_task_secret_env(
@@ -1808,6 +1864,38 @@ mod tests {
         let stdout = "{\"success\":true,\"data\":{\"command\":\"extension.setup\"}}";
 
         mirror_agent_task_run_plan_lifecycle(&args, stdout).expect("ignore non-aggregate output");
+    }
+
+    #[test]
+    fn agent_task_dispatch_requested_run_id_accepts_cook_and_dispatch() {
+        assert_eq!(
+            agent_task_dispatch_requested_run_id(&[
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                "--run-id".to_string(),
+                "cook-run".to_string(),
+            ]),
+            Some("cook-run".to_string())
+        );
+        assert_eq!(
+            agent_task_dispatch_requested_run_id(&[
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "dispatch".to_string(),
+                "--run-id=dispatch-run".to_string(),
+            ]),
+            Some("dispatch-run".to_string())
+        );
+        assert_eq!(
+            agent_task_dispatch_requested_run_id(&[
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "status".to_string(),
+                "dispatch-run".to_string(),
+            ]),
+            None
+        );
     }
 
     #[test]
