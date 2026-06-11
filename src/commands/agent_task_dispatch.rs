@@ -160,6 +160,7 @@ fn build_dispatch_plan(args: &DispatchArgs) -> homeboy::core::Result<AgentTaskPl
     }
 
     let workspace_target = resolve_dispatch_workspace(args)?;
+    validate_dispatch_workspace_target(args, workspace_target.as_ref())?;
     let workspace_root = workspace_target.as_ref().map(|target| target.root.clone());
     let repo = args
         .repo
@@ -291,6 +292,42 @@ fn build_dispatch_plan(args: &DispatchArgs) -> homeboy::core::Result<AgentTaskPl
     });
 
     Ok(plan)
+}
+
+fn validate_dispatch_workspace_target(
+    args: &DispatchArgs,
+    workspace: Option<&DispatchWorkspaceTarget>,
+) -> homeboy::core::Result<()> {
+    let Some(workspace) = workspace else {
+        return Ok(());
+    };
+    if args.backend != "codebox" || workspace.kind.as_deref() != Some("cwd") {
+        return Ok(());
+    }
+    if is_git_checkout(&workspace.root) {
+        return Ok(());
+    }
+
+    Err(homeboy::core::Error::validation_invalid_argument(
+        "cwd",
+        "agent-task Codebox dispatch requires --cwd to be a git checkout so generated files can be returned as a patch artifact",
+        Some(workspace.root.display().to_string()),
+        Some(vec![
+            "Use a Homeboy/Data Machine Code worktree for write-capable Codebox tasks.".to_string(),
+            "Initialize the target as a git checkout before dispatching.".to_string(),
+            "Use a non-Codebox provider only if it has an explicit non-git apply-back artifact contract.".to_string(),
+        ]),
+    ))
+}
+
+fn is_git_checkout(path: &std::path::Path) -> bool {
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
 }
 
 fn preflight_dispatch_provider_secrets(plan: &AgentTaskPlan) -> homeboy::core::Result<()> {
@@ -809,6 +846,41 @@ mod tests {
     }
 
     #[test]
+    fn codebox_dispatch_rejects_non_git_cwd() {
+        let workspace = tempfile::tempdir().expect("workspace");
+
+        let error = build_dispatch_plan(&dispatch_args(DispatchArgOverrides {
+            prompt: Some("Generate files here.".to_string()),
+            cwd: Some(workspace.path().display().to_string()),
+            backend: Some("codebox".to_string()),
+            ..DispatchArgOverrides::default()
+        }))
+        .expect_err("non-git Codebox cwd should be rejected");
+
+        assert!(error.to_string().contains("git checkout"));
+        assert!(error.to_string().contains("patch artifact"));
+    }
+
+    #[test]
+    fn codebox_dispatch_accepts_git_cwd() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        git(workspace.path(), &["init"]);
+
+        let plan = build_dispatch_plan(&dispatch_args(DispatchArgOverrides {
+            prompt: Some("Generate files here.".to_string()),
+            cwd: Some(workspace.path().display().to_string()),
+            backend: Some("codebox".to_string()),
+            ..DispatchArgOverrides::default()
+        }))
+        .expect("git Codebox cwd should be accepted");
+
+        assert_eq!(
+            plan.tasks[0].workspace.root.as_deref(),
+            Some(workspace.path().to_str().expect("workspace utf8"))
+        );
+    }
+
+    #[test]
     fn dispatch_preflights_missing_secret_env_before_submitting() {
         with_isolated_home(|_| {
             let missing = format!(
@@ -992,6 +1064,7 @@ mod tests {
         attempts: u32,
         queue_only: bool,
         run_id: Option<String>,
+        backend: Option<String>,
     }
 
     fn dispatch_args(overrides: DispatchArgOverrides) -> DispatchArgs {
@@ -1003,7 +1076,7 @@ mod tests {
             workspace: overrides.workspace,
             repo: overrides.repo,
             task_url: overrides.task_url,
-            backend: "fixture".to_string(),
+            backend: overrides.backend.unwrap_or_else(|| "fixture".to_string()),
             selector: None,
             model: None,
             secret_env: overrides.secret_env,
@@ -1022,5 +1095,19 @@ mod tests {
             run_id: overrides.run_id,
             queue_only: overrides.queue_only,
         }
+    }
+
+    fn git(path: &std::path::Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }
