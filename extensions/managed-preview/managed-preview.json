@@ -7,11 +7,26 @@
   "author": "Extra Chill",
   "provides": {
     "file_extensions": ["json", "mjs", "sh"],
-    "capabilities": ["preview-backend"]
+    "capabilities": ["preview-backend", "public-preview-preflight"]
   },
   "scripts": {
     "validate": "tests/public-preview-backend-smoke.mjs"
   },
+  "browser_trace_helpers": [
+    {
+      "schema": "homeboy/public-preview-preflight-helper/v1",
+      "id": "managed-preview.public-preview-preflight",
+      "label": "Public preview preflight for browser trace workloads",
+      "command": "node {{extension_path}}/scripts/public-preview-preflight.mjs",
+      "contract": {
+        "accepts_env": ["HOMEBOY_LOCAL_PREVIEW_URL", "HOMEBOY_PUBLIC_PREVIEW_URL", "HOMEBOY_PUBLIC_PREVIEW_PORT", "HOMEBOY_TUNNEL_PUBLIC_URL", "HOMEBOY_TUNNEL_SESSION_ID"],
+        "records_metadata_schema": "homeboy/public-preview-preflight/v1",
+        "redacts_url_credentials_query_and_fragments": true,
+        "owns_tunnel_lifecycle": false
+      },
+      "capabilities": ["preview-port-selection", "public-url-preflight", "browser-trace-metadata"]
+    }
+  ],
   "preview_backends": [
     {
       "schema": "homeboy/managed-preview-backend-command/v1",
