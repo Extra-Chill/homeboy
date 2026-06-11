@@ -837,13 +837,12 @@ jobs:
           runner_workspace_json="$(validate_json_input runner_workspace object "$RUNNER_WORKSPACE_CONFIG")"
           runner_workspace_repo="${TARGET_REPO#*/}"
           runner_workspace_repo="${runner_workspace_repo%.git}"
-          datamachine_workspace_guest_root="/homeboy-datamachine-workspace"
-          datamachine_workspace_guest_primary="${datamachine_workspace_guest_root}/${runner_workspace_repo}"
+          runner_workspace_guest_root="/homeboy-runner-workspace"
+          runner_workspace_guest_checkout="${runner_workspace_guest_root}/${runner_workspace_repo}"
           runner_workspace_mounts_json="[]"
           if jq -e '.enabled == true' <<< "$runner_workspace_json" >/dev/null; then
-            runner_workspace_mounts_json="$(jq -nc --arg source "$GITHUB_WORKSPACE" --arg target "$datamachine_workspace_guest_primary" '[{type: "directory", source: $source, target: $target, mode: "readwrite"}]')"
-            runner_workspace_json="$(jq -c --arg seed "$datamachine_workspace_guest_primary" '. + {local_seed_path: $seed}' <<< "$runner_workspace_json")"
-            extra_wp_config_defines_json="$(jq -c --arg root "$datamachine_workspace_guest_root" '. + {DATAMACHINE_WORKSPACE_PATH: $root}' <<< "$extra_wp_config_defines_json")"
+            runner_workspace_mounts_json="$(jq -nc --arg source "$GITHUB_WORKSPACE" --arg target "$runner_workspace_guest_checkout" '[{type: "directory", source: $source, target: $target, mode: "readwrite"}]')"
+            runner_workspace_json="$(jq -c --arg checkout "$runner_workspace_guest_checkout" '. + {checkout_path: $checkout}' <<< "$runner_workspace_json")"
           fi
           rules_json="$(validate_json_input rules object "$RULES")"
           general_rules_json="$(validate_json_input general_rules array "$GENERAL_RULES")"

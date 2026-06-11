@@ -74,9 +74,10 @@ namespace {
 
                 public function execute( array $args ): array {
                     $GLOBALS['homeboy_forced_parameters_args'] = $args;
-                    if ( 'datamachine-code/workspace-worktree-add' === $this->ability_name ) {
+                    if ( 'wp-codebox/prepare-runner-workspace' === $this->ability_name ) {
                         return array(
                             'success' => true,
+                            'backend' => 'datamachine-code',
                             'handle'  => $args['repo'] . '@' . str_replace( '/', '-', (string) $args['branch'] ),
                             'branch'  => (string) $args['branch'],
                             'path'    => '/tmp/' . $args['repo'],
@@ -403,6 +404,7 @@ namespace {
                 'branch'        => 'agent/iterator-repair',
                 'allow_stale'   => true,
                 'rebase_base'   => true,
+                'checkout_path' => '/github/workspace/html-to-blocks-converter',
                 'clone_url'     => 'https://github.com/chubes4/html-to-blocks-converter.git',
             ),
         )
@@ -413,16 +415,21 @@ namespace {
         exit( 1 );
     }
 
-    foreach ( array( 'datamachine-code/workspace-show', 'datamachine-code/workspace-clone', 'datamachine-code/workspace-worktree-add' ) as $expected_ability ) {
+    foreach ( array( 'wp-codebox/prepare-runner-workspace' ) as $expected_ability ) {
         if ( ! in_array( $expected_ability, $GLOBALS['homeboy_forced_parameters_ability_names'], true ) ) {
             fwrite( STDERR, "Expected runner workspace provisioning to resolve {$expected_ability}.\n" );
             exit( 1 );
         }
     }
 
+    if ( 'wp-codebox/runner-workspace-prepare-request/v1' !== ( $GLOBALS['homeboy_forced_parameters_args']['schema'] ?? null ) || '/github/workspace/html-to-blocks-converter' !== ( $GLOBALS['homeboy_forced_parameters_args']['checkout_path'] ?? null ) ) {
+        fwrite( STDERR, "Expected runner workspace provisioning to call the WP Codebox preparation API with the mounted checkout path.\n" );
+        exit( 1 );
+    }
+
     foreach ( $GLOBALS['homeboy_forced_parameters_ability_names'] as $ability_name ) {
-        if ( str_starts_with( $ability_name, 'datamachine/workspace-' ) ) {
-            fwrite( STDERR, "Runner workspace provisioning used stale workspace ability namespace.\n" );
+        if ( str_starts_with( $ability_name, 'datamachine-code/workspace-' ) || str_starts_with( $ability_name, 'datamachine/workspace-' ) ) {
+            fwrite( STDERR, "Runner workspace provisioning used direct backend workspace ability namespace.\n" );
             exit( 1 );
         }
     }

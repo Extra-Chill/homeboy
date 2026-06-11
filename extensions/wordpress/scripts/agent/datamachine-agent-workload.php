@@ -2585,104 +2585,56 @@ if ( ! function_exists( 'homeboy_datamachine_agent_provision_workspace' ) ) {
             $repo = basename( $repo );
         }
         $repo = preg_replace( '/\.git$/', '', $repo ) ?? $repo;
-        if ( '' === $repo ) {
-            return array( 'enabled' => true, 'success' => false, 'error' => 'runner_workspace.repo is required' );
-        }
+		if ( '' === $repo ) {
+			return array( 'enabled' => true, 'success' => false, 'error' => 'runner_workspace.repo is required' );
+		}
 
-		$required = array(
-			'datamachine-code/workspace-show',
-			'datamachine-code/workspace-clone',
-			'datamachine-code/workspace-worktree-add',
+		$branch = isset( $workspace['branch'] ) && is_scalar( $workspace['branch'] ) ? trim( (string) $workspace['branch'] ) : '';
+		if ( '' === $branch ) {
+			$prefix = isset( $workspace['branch_prefix'] ) && is_scalar( $workspace['branch_prefix'] ) ? trim( (string) $workspace['branch_prefix'] ) : 'agent-run';
+			$seed   = homeboy_datamachine_agent_slug( homeboy_datamachine_agent_scalar( $config, 'workload_id', 'datamachine-agent' ) );
+			$branch = rtrim( $prefix, '/' ) . '/' . gmdate( 'Y-m-d-His' ) . ( '' !== $seed ? '-' . $seed : '' );
+		}
+
+		$ability_name = 'wp-codebox/prepare-runner-workspace';
+		$ability      = wp_get_ability( $ability_name );
+		if ( ! $ability || ! is_callable( array( $ability, 'execute' ) ) ) {
+			return array( 'enabled' => true, 'success' => false, 'error' => $ability_name . ' is not registered' );
+		}
+
+		$input = array(
+			'schema'                  => 'wp-codebox/runner-workspace-prepare-request/v1',
+			'repo'                    => $repo,
+			'target_repo'             => isset( $workspace['repo'] ) && is_scalar( $workspace['repo'] ) ? trim( (string) $workspace['repo'] ) : $repo,
+			'checkout_path'           => isset( $workspace['checkout_path'] ) && is_scalar( $workspace['checkout_path'] ) ? trim( (string) $workspace['checkout_path'] ) : '',
+			'clone_url'               => isset( $workspace['clone_url'] ) && is_scalar( $workspace['clone_url'] ) ? trim( (string) $workspace['clone_url'] ) : '',
+			'branch'                  => $branch,
+			'from'                    => isset( $workspace['from'] ) && is_scalar( $workspace['from'] ) ? trim( (string) $workspace['from'] ) : 'origin/HEAD',
+			'runner_workspace_config' => $workspace,
+			'github_token_env'        => homeboy_datamachine_agent_scalar( $config, 'github_token_env', 'GITHUB_TOKEN' ),
+			'workload_id'             => homeboy_datamachine_agent_scalar( $config, 'workload_id', 'datamachine-agent' ),
 		);
-		$local_seed_path = isset( $workspace['local_seed_path'] ) && is_scalar( $workspace['local_seed_path'] ) ? trim( (string) $workspace['local_seed_path'] ) : '';
-		if ( '' !== $local_seed_path ) {
-			$required[] = 'datamachine-code/workspace-adopt';
-		}
-		foreach ( $required as $ability_name ) {
-			if ( ! wp_get_ability( $ability_name ) ) {
-				return array( 'enabled' => true, 'success' => false, 'error' => $ability_name . ' is not registered' );
-			}
-		}
 
-		if ( '' !== $local_seed_path ) {
-			$adopt = wp_get_ability( 'datamachine-code/workspace-adopt' )->execute(
-				array(
-					'path' => $local_seed_path,
-					'name' => $repo,
-				)
-			);
-			if ( function_exists( 'is_wp_error' ) && is_wp_error( $adopt ) ) {
-				return array( 'enabled' => true, 'success' => false, 'error' => $adopt->get_error_message(), 'local_seed_path' => $local_seed_path );
-			}
-			if ( ! is_array( $adopt ) || empty( $adopt['success'] ) ) {
-				return array( 'enabled' => true, 'success' => false, 'error' => 'workspace-adopt did not succeed', 'local_seed_path' => $local_seed_path, 'result' => $adopt );
-			}
+		$prepared = $ability->execute( array_filter( $input, static fn( $value ) => '' !== $value && array() !== $value ) );
+		if ( function_exists( 'is_wp_error' ) && is_wp_error( $prepared ) ) {
+			return array( 'enabled' => true, 'success' => false, 'error' => $prepared->get_error_message(), 'input' => $input );
+		}
+		if ( ! is_array( $prepared ) || empty( $prepared['success'] ) ) {
+			return array( 'enabled' => true, 'success' => false, 'error' => is_array( $prepared['error'] ?? null ) ? (string) ( $prepared['error']['message'] ?? 'prepare-runner-workspace did not succeed' ) : 'prepare-runner-workspace did not succeed', 'input' => $input, 'result' => $prepared );
 		}
 
-		$show = wp_get_ability( 'datamachine-code/workspace-show' )->execute( array( 'name' => $repo ) );
-        if ( function_exists( 'is_wp_error' ) && is_wp_error( $show ) ) {
-            $clone_url = isset( $workspace['clone_url'] ) && is_scalar( $workspace['clone_url'] ) ? trim( (string) $workspace['clone_url'] ) : '';
-            if ( '' === $clone_url ) {
-                return array( 'enabled' => true, 'success' => false, 'error' => 'workspace primary missing and runner_workspace.clone_url is empty' );
-            }
-
-            $clone_input = array(
-                'url'  => $clone_url,
-                'name' => $repo,
-            );
-            $github_token_env = homeboy_datamachine_agent_scalar( $config, 'github_token_env', 'GITHUB_TOKEN' );
-            if ( '' !== $github_token_env && '' !== trim( (string) getenv( $github_token_env ) ) && preg_match( '#^https://github\.com/#', $clone_url ) ) {
-                $clone_input['auth_token_env'] = $github_token_env;
-            }
-
-            $clone = wp_get_ability( 'datamachine-code/workspace-clone' )->execute(
-                array_filter(
-                    $clone_input,
-                    static fn( $value ) => '' !== $value
-                )
-            );
-            if ( function_exists( 'is_wp_error' ) && is_wp_error( $clone ) ) {
-                return array( 'enabled' => true, 'success' => false, 'error' => $clone->get_error_message() );
-            }
-        }
-
-        $branch = isset( $workspace['branch'] ) && is_scalar( $workspace['branch'] ) ? trim( (string) $workspace['branch'] ) : '';
-        if ( '' === $branch ) {
-            $prefix = isset( $workspace['branch_prefix'] ) && is_scalar( $workspace['branch_prefix'] ) ? trim( (string) $workspace['branch_prefix'] ) : 'agent-run';
-            $seed   = homeboy_datamachine_agent_slug( homeboy_datamachine_agent_scalar( $config, 'workload_id', 'datamachine-agent' ) );
-            $branch = rtrim( $prefix, '/' ) . '/' . gmdate( 'Y-m-d-His' ) . ( '' !== $seed ? '-' . $seed : '' );
-        }
-
-        $input = array(
-            'repo'           => $repo,
-            'branch'         => $branch,
-            'from'           => isset( $workspace['from'] ) && is_scalar( $workspace['from'] ) ? trim( (string) $workspace['from'] ) : 'origin/HEAD',
-            'inject_context' => homeboy_datamachine_agent_bool_config( $workspace, 'inject_context', true ),
-            'bootstrap'      => homeboy_datamachine_agent_bool_config( $workspace, 'bootstrap', true ),
-            'allow_stale'    => homeboy_datamachine_agent_bool_config( $workspace, 'allow_stale', false ),
-            'rebase_base'    => homeboy_datamachine_agent_bool_config( $workspace, 'rebase_base', false ),
-            'force'          => homeboy_datamachine_agent_bool_config( $workspace, 'force', false ),
-        );
-
-        $worktree = wp_get_ability( 'datamachine-code/workspace-worktree-add' )->execute( $input );
-        if ( function_exists( 'is_wp_error' ) && is_wp_error( $worktree ) ) {
-            return array( 'enabled' => true, 'success' => false, 'error' => $worktree->get_error_message(), 'input' => $input );
-        }
-        if ( ! is_array( $worktree ) || empty( $worktree['success'] ) ) {
-            return array( 'enabled' => true, 'success' => false, 'error' => 'workspace-worktree-add did not succeed', 'input' => $input, 'result' => $worktree );
-        }
-
-        return array(
-            'enabled' => true,
-            'success' => true,
-            'repo'    => $repo,
-            'branch'  => (string) ( $worktree['branch'] ?? $branch ),
-            'handle'  => (string) ( $worktree['handle'] ?? '' ),
-            'path'    => (string) ( $worktree['path'] ?? '' ),
-            'input'   => $input,
-            'result'  => $worktree,
-        );
-    }
+		return array(
+			'enabled' => true,
+			'success' => true,
+			'repo'    => $repo,
+			'branch'  => (string) ( $prepared['branch'] ?? $branch ),
+			'handle'  => (string) ( $prepared['handle'] ?? '' ),
+			'path'    => (string) ( $prepared['path'] ?? '' ),
+			'backend' => (string) ( $prepared['backend'] ?? '' ),
+			'input'   => $input,
+			'result'  => $prepared,
+		);
+	}
 }
 
 if ( ! function_exists( 'homeboy_datamachine_agent_apply_runner_workspace' ) ) {
