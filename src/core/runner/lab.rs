@@ -1131,7 +1131,7 @@ fn hydrate_agent_task_secret_env(
             error.message,
             None,
             Some(vec![
-                "Configure provider secrets with `homeboy agent-task auth status` and `homeboy agent-task auth map-claude-code-kimaki`.".to_string(),
+                "Configure provider secrets with Homeboy's global agent-task secret config, for example `homeboy agent-task auth map-env` or `homeboy agent-task auth set-keychain`.".to_string(),
             ]),
         )
     })?;
@@ -1160,11 +1160,52 @@ fn declared_agent_task_secret_env(args: &[String]) -> Vec<String> {
         if let Some(name) = arg.strip_prefix("--secret-env=") {
             names.push(name.to_string());
         }
+        if arg == "--provider-config" {
+            if let Some(spec) = args.get(index + 1) {
+                names.extend(declared_provider_config_secret_env(spec));
+            }
+            index += 2;
+            continue;
+        }
+        if let Some(spec) = arg.strip_prefix("--provider-config=") {
+            names.extend(declared_provider_config_secret_env(spec));
+        }
         index += 1;
     }
     names.extend(declared_agent_task_run_plan_secret_env(args));
     names.sort();
     names.dedup();
+    names
+}
+
+fn declared_provider_config_secret_env(spec: &str) -> Vec<String> {
+    let raw = match config::read_json_spec_to_string(spec) {
+        Ok(raw) => raw,
+        Err(_) => return Vec::new(),
+    };
+    let value: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(value) => value,
+        Err(_) => return Vec::new(),
+    };
+    let Some(config) = value.as_object() else {
+        return Vec::new();
+    };
+
+    let mut names = Vec::new();
+    for key in ["secret_env", "secretEnv"] {
+        match config.get(key) {
+            Some(serde_json::Value::Array(items)) => {
+                names.extend(
+                    items
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .map(str::to_string),
+                );
+            }
+            Some(serde_json::Value::String(name)) => names.push(name.clone()),
+            _ => {}
+        }
+    }
     names
 }
 
@@ -1631,17 +1672,47 @@ mod tests {
             "agent-task".to_string(),
             "dispatch".to_string(),
             "--secret-env".to_string(),
-            "AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN".to_string(),
-            "--secret-env=AI_PROVIDER_CLAUDE_CODE_ACCESS_TOKEN".to_string(),
+            "HOMEBOY_TEST_REFRESH_TOKEN".to_string(),
+            "--secret-env=HOMEBOY_TEST_ACCESS_TOKEN".to_string(),
             "--secret-env".to_string(),
-            "AI_PROVIDER_CLAUDE_CODE_ACCESS_TOKEN".to_string(),
+            "HOMEBOY_TEST_ACCESS_TOKEN".to_string(),
         ]);
 
         assert_eq!(
             names,
             vec![
-                "AI_PROVIDER_CLAUDE_CODE_ACCESS_TOKEN".to_string(),
-                "AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN".to_string(),
+                "HOMEBOY_TEST_ACCESS_TOKEN".to_string(),
+                "HOMEBOY_TEST_REFRESH_TOKEN".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn declared_agent_task_secret_env_includes_provider_config_secrets() {
+        let names = declared_agent_task_secret_env(&[
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "dispatch".to_string(),
+            "--provider-config".to_string(),
+            serde_json::json!({
+                "provider": "example",
+                "secret_env": [
+                    "HOMEBOY_PROVIDER_ACCESS_TOKEN",
+                    "HOMEBOY_PROVIDER_REFRESH_TOKEN"
+                ],
+                "secretEnv": "HOMEBOY_PROVIDER_ACCOUNT_ID"
+            })
+            .to_string(),
+            "--secret-env=OPENAI_API_KEY".to_string(),
+        ]);
+
+        assert_eq!(
+            names,
+            vec![
+                "HOMEBOY_PROVIDER_ACCESS_TOKEN".to_string(),
+                "HOMEBOY_PROVIDER_ACCOUNT_ID".to_string(),
+                "HOMEBOY_PROVIDER_REFRESH_TOKEN".to_string(),
+                "OPENAI_API_KEY".to_string(),
             ]
         );
     }

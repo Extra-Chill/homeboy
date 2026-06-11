@@ -3,12 +3,11 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
-
 use crate::core::keychain;
 use crate::core::paths;
 use crate::core::Error;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentTaskSecretResolutionError {
@@ -45,6 +44,7 @@ pub fn map_secret_to_env(
             env_var: env_var.map(str::to_string),
             scope: None,
             name: None,
+            field: None,
         },
     );
     config.save()?;
@@ -72,6 +72,7 @@ pub fn set_keychain_secret(
             env_var: None,
             scope: Some(scope.to_string()),
             name: Some(keychain_name.to_string()),
+            field: None,
         },
     );
     config.save()?;
@@ -79,6 +80,52 @@ pub fn set_keychain_secret(
         .into_iter()
         .next()
         .expect("single status"))
+}
+
+pub fn set_keychain_bundle(
+    bundle: &str,
+    value: &str,
+    scope: Option<&str>,
+    keychain_name: Option<&str>,
+) -> crate::core::Result<String> {
+    let _: Value = serde_json::from_str(value).map_err(|error| {
+        Error::validation_invalid_argument(
+            "value",
+            format!("agent-task keychain bundle value must be JSON: {error}"),
+            None,
+            None,
+        )
+    })?;
+    let scope = scope.unwrap_or("agent-task");
+    let keychain_name = keychain_name.unwrap_or(bundle);
+    keychain::set(scope, keychain_name, value)?;
+    Ok(keychain_name.to_string())
+}
+
+pub fn map_secret_to_keychain_bundle(
+    name: &str,
+    bundle: &str,
+    field: &str,
+    scope: Option<&str>,
+    keychain_name: Option<&str>,
+) -> crate::core::Result<AgentTaskSecretEnvStatus> {
+    let mut config = AgentTaskSecretConfig::load();
+    config.secrets.insert(
+        name.to_string(),
+        AgentTaskSecretSource {
+            source: "keychain-bundle".to_string(),
+            env_var: None,
+            scope: Some(scope.unwrap_or("agent-task").to_string()),
+            name: Some(keychain_name.unwrap_or(bundle).to_string()),
+            field: Some(field.to_string()),
+        },
+    );
+    config.save()?;
+    Ok(AgentTaskSecretEnvStatus {
+        name: name.to_string(),
+        configured: true,
+        source: "keychain-bundle".to_string(),
+    })
 }
 
 pub fn remove_secret_mapping(
@@ -104,35 +151,6 @@ pub fn remove_secret_mapping(
         .expect("single status"))
 }
 
-pub fn map_claude_code_to_opencode_anthropic() -> crate::core::Result<Vec<AgentTaskSecretEnvStatus>>
-{
-    let mut config = AgentTaskSecretConfig::load();
-    for (env_name, field_name) in [
-        ("AI_PROVIDER_CLAUDE_CODE_ACCESS_TOKEN", "access"),
-        ("AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN", "refresh"),
-        ("AI_PROVIDER_CLAUDE_CODE_EXPIRES_AT", "expires"),
-    ] {
-        config.secrets.insert(
-            env_name.to_string(),
-            AgentTaskSecretSource {
-                source: "opencode-anthropic-auth".to_string(),
-                env_var: None,
-                scope: None,
-                name: Some(field_name.to_string()),
-            },
-        );
-    }
-    config.save()?;
-    Ok(secret_env_status_with_config(
-        &[
-            "AI_PROVIDER_CLAUDE_CODE_ACCESS_TOKEN".to_string(),
-            "AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN".to_string(),
-            "AI_PROVIDER_CLAUDE_CODE_EXPIRES_AT".to_string(),
-        ],
-        &config,
-    ))
-}
-
 pub fn validate_secret_env(names: &[String]) -> Result<(), AgentTaskSecretResolutionError> {
     resolve_secret_env(names).map(|_| ())
 }
@@ -141,6 +159,7 @@ fn secret_env_status_with_config(
     names: &[String],
     config: &AgentTaskSecretConfig,
 ) -> Vec<AgentTaskSecretEnvStatus> {
+    let mut bundle_cache = HashMap::new();
     names
         .iter()
         .map(|name| {
@@ -155,7 +174,9 @@ fn secret_env_status_with_config(
             let source = config.secrets.get(name);
             AgentTaskSecretEnvStatus {
                 name: name.clone(),
-                configured: source.is_some_and(|source| source.resolve(name).is_some()),
+                configured: source
+                    .and_then(|source| source.resolve(name, &mut bundle_cache))
+                    .is_some(),
                 source: source
                     .map(|source| source.source.clone())
                     .unwrap_or_else(|| "missing".to_string()),
@@ -174,6 +195,7 @@ fn resolve_secret_env_with_config(
 
     let mut resolved = Vec::new();
     let mut missing = Vec::new();
+    let mut bundle_cache = HashMap::new();
 
     for name in names {
         if let Ok(value) = env::var(name) {
@@ -184,7 +206,7 @@ fn resolve_secret_env_with_config(
         match config
             .secrets
             .get(name)
-            .and_then(|source| source.resolve(name))
+            .and_then(|source| source.resolve(name, &mut bundle_cache))
         {
             Some(value) => resolved.push((name.clone(), value)),
             None => missing.push(name.clone()),
@@ -264,10 +286,16 @@ struct AgentTaskSecretSource {
     scope: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    field: Option<String>,
 }
 
 impl AgentTaskSecretSource {
-    fn resolve(&self, requested_name: &str) -> Option<String> {
+    fn resolve(
+        &self,
+        requested_name: &str,
+        bundle_cache: &mut HashMap<String, Option<Value>>,
+    ) -> Option<String> {
         match self.source.as_str() {
             "env" => env::var(self.env_var.as_deref().unwrap_or(requested_name)).ok(),
             "keychain" => keychain::get(
@@ -276,45 +304,44 @@ impl AgentTaskSecretSource {
             )
             .ok()
             .flatten(),
-            "opencode-anthropic-auth" => {
-                opencode_anthropic_auth_value(self.name.as_deref().unwrap_or(requested_name))
-            }
+            "keychain-bundle" => self.resolve_keychain_bundle(requested_name, bundle_cache),
             _ => None,
         }
     }
+
+    fn resolve_keychain_bundle(
+        &self,
+        requested_name: &str,
+        bundle_cache: &mut HashMap<String, Option<Value>>,
+    ) -> Option<String> {
+        let scope = self.scope.as_deref().unwrap_or("agent-task");
+        let keychain_name = self.name.as_deref().unwrap_or(requested_name);
+        let cache_key = format!("{scope}\0{keychain_name}");
+        let bundle = bundle_cache
+            .entry(cache_key)
+            .or_insert_with(|| {
+                keychain::get(scope, keychain_name)
+                    .ok()
+                    .flatten()
+                    .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+            })
+            .as_ref()?;
+        let field = self.field.as_deref().unwrap_or(requested_name);
+        bundle_field_value(bundle, field)
+    }
 }
 
-fn opencode_anthropic_auth_value(field_name: &str) -> Option<String> {
-    let path = opencode_auth_file_path()?;
-    let raw = fs::read_to_string(path).ok()?;
-    let data: Value = serde_json::from_str(&raw).ok()?;
-    let auth = data.get("anthropic")?;
-    if auth.get("type").and_then(Value::as_str) != Some("oauth") {
-        return None;
+fn bundle_field_value(bundle: &Value, field: &str) -> Option<String> {
+    let mut value = bundle;
+    for part in field.split('.') {
+        value = value.get(part)?;
     }
-
-    match field_name {
-        "access" | "refresh" => auth
-            .get(field_name)
-            .and_then(Value::as_str)
-            .map(str::to_string),
-        "expires" => auth.get("expires").and_then(|value| {
-            value
-                .as_i64()
-                .map(|number| number.to_string())
-                .or_else(|| value.as_str().map(str::to_string))
-        }),
+    match value {
+        Value::String(text) => Some(text.clone()),
+        Value::Bool(flag) => Some(flag.to_string()),
+        Value::Number(number) => Some(number.to_string()),
         _ => None,
     }
-}
-
-fn opencode_auth_file_path() -> Option<PathBuf> {
-    if let Ok(data_home) = env::var("XDG_DATA_HOME") {
-        return Some(PathBuf::from(data_home).join("opencode/auth.json"));
-    }
-    env::var("HOME")
-        .ok()
-        .map(|home| PathBuf::from(home).join(".local/share/opencode/auth.json"))
 }
 
 fn default_source() -> String {
@@ -387,6 +414,7 @@ mod tests {
                 env_var: Some(source_name.clone()),
                 scope: None,
                 name: None,
+                field: None,
             },
         );
         let config = AgentTaskSecretConfig { secrets };
@@ -445,48 +473,74 @@ mod tests {
     }
 
     #[test]
-    fn maps_claude_code_to_opencode_anthropic_auth_file() {
-        crate::test_support::with_isolated_home(|home| {
-            let auth_path = home.path().join(".local/share/opencode/auth.json");
-            std::fs::create_dir_all(auth_path.parent().expect("auth parent")).expect("mkdir auth");
-            std::fs::write(
-                &auth_path,
-                r#"{"anthropic":{"type":"oauth","access":"access-token","refresh":"refresh-token","expires":12345}}"#,
+    fn resolves_keychain_bundle_fields_from_cached_bundle() {
+        let source = AgentTaskSecretSource {
+            source: "keychain-bundle".to_string(),
+            env_var: None,
+            scope: Some("agent-task".to_string()),
+            name: Some("provider-oauth".to_string()),
+            field: Some("tokens.access".to_string()),
+        };
+        let mut cache = HashMap::new();
+        cache.insert(
+            "agent-task\0provider-oauth".to_string(),
+            Some(serde_json::json!({
+                "tokens": {
+                    "access": "access-token",
+                    "expires": 12345,
+                    "fedramp": false
+                }
+            })),
+        );
+
+        assert_eq!(
+            source.resolve("PROVIDER_ACCESS_TOKEN", &mut cache),
+            Some("access-token".to_string())
+        );
+
+        let numeric_source = AgentTaskSecretSource {
+            field: Some("tokens.expires".to_string()),
+            ..source.clone()
+        };
+        assert_eq!(
+            numeric_source.resolve("PROVIDER_EXPIRES_AT", &mut cache),
+            Some("12345".to_string())
+        );
+
+        let bool_source = AgentTaskSecretSource {
+            field: Some("tokens.fedramp".to_string()),
+            ..source
+        };
+        assert_eq!(
+            bool_source.resolve("PROVIDER_FEDRAMP", &mut cache),
+            Some("false".to_string())
+        );
+    }
+
+    #[test]
+    fn maps_secret_to_keychain_bundle_without_reading_keychain() {
+        crate::test_support::with_isolated_home(|_| {
+            let status = map_secret_to_keychain_bundle(
+                "PROVIDER_ACCESS_TOKEN",
+                "provider-oauth",
+                "tokens.access",
+                None,
+                None,
             )
-            .expect("write auth");
+            .expect("bundle mapping saved");
 
-            let status = map_claude_code_to_opencode_anthropic().expect("mapping saved");
+            assert_eq!(status.name, "PROVIDER_ACCESS_TOKEN");
+            assert!(status.configured);
+            assert_eq!(status.source, "keychain-bundle");
 
-            assert_eq!(status.len(), 3);
-            assert!(status.iter().all(|status| status.configured));
-            assert!(status
-                .iter()
-                .all(|status| status.source == "opencode-anthropic-auth"));
-
-            let resolved = resolve_secret_env(&[
-                "AI_PROVIDER_CLAUDE_CODE_ACCESS_TOKEN".to_string(),
-                "AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN".to_string(),
-                "AI_PROVIDER_CLAUDE_CODE_EXPIRES_AT".to_string(),
-            ])
-            .expect("mapped auth resolves");
-
-            assert_eq!(
-                resolved,
-                vec![
-                    (
-                        "AI_PROVIDER_CLAUDE_CODE_ACCESS_TOKEN".to_string(),
-                        "access-token".to_string()
-                    ),
-                    (
-                        "AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN".to_string(),
-                        "refresh-token".to_string()
-                    ),
-                    (
-                        "AI_PROVIDER_CLAUDE_CODE_EXPIRES_AT".to_string(),
-                        "12345".to_string()
-                    ),
-                ]
-            );
+            let config = AgentTaskSecretConfig::load();
+            let source = config
+                .secrets
+                .get("PROVIDER_ACCESS_TOKEN")
+                .expect("mapping stored");
+            assert_eq!(source.source, "keychain-bundle");
+            assert_eq!(source.name.as_deref(), Some("provider-oauth"));
+            assert_eq!(source.field.as_deref(), Some("tokens.access"));
         });
     }
 }

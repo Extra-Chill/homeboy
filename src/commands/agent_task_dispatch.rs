@@ -191,6 +191,7 @@ fn build_dispatch_plan(args: &DispatchArgs) -> homeboy::core::Result<AgentTaskPl
     let client_context = dispatch_client_context(args)?;
     let provider_config =
         dispatch_provider_config(args, &repo, workspace_target.as_ref(), &client_context)?;
+    let secret_env = dispatch_secret_env(args, &provider_config);
     let mut tasks = Vec::new();
     for (index, prompt_spec) in prompt_specs.iter().enumerate() {
         let instructions = dispatch_instructions(
@@ -216,7 +217,7 @@ fn build_dispatch_plan(args: &DispatchArgs) -> homeboy::core::Result<AgentTaskPl
                 backend: args.backend.clone(),
                 selector: args.selector.clone(),
                 required_capabilities: Vec::new(),
-                secret_env: args.secret_env.clone(),
+                secret_env: secret_env.clone(),
                 model: args.model.clone(),
                 config: provider_config.clone(),
             },
@@ -524,6 +525,38 @@ fn dispatch_provider_config(
     Ok(config)
 }
 
+fn dispatch_secret_env(args: &DispatchArgs, provider_config: &Value) -> Vec<String> {
+    let mut names = args.secret_env.clone();
+    names.extend(provider_config_secret_env(provider_config));
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn provider_config_secret_env(provider_config: &Value) -> Vec<String> {
+    let Some(config) = provider_config.as_object() else {
+        return Vec::new();
+    };
+
+    let mut names = Vec::new();
+    for key in ["secret_env", "secretEnv"] {
+        match config.get(key) {
+            Some(Value::Array(items)) => {
+                names.extend(
+                    items
+                        .iter()
+                        .filter_map(|item| item.as_str().map(str::to_string)),
+                );
+            }
+            Some(Value::String(name)) => names.push(name.clone()),
+            _ => {}
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
 fn read_text_spec(spec: &str, label: &str) -> homeboy::core::Result<String> {
     config::read_json_spec_to_string(spec).map_err(|error| {
         homeboy::core::Error::internal_unexpected(format!(
@@ -801,6 +834,33 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_promotes_provider_config_secret_env() {
+        let plan = build_dispatch_plan(&dispatch_args(DispatchArgOverrides {
+            prompt: Some("Cook with provider-config auth.".to_string()),
+            provider_config: Some(
+                serde_json::json!({
+                    "provider": "example",
+                    "secret_env": ["HOMEBOY_PROVIDER_ACCESS_TOKEN"],
+                    "secretEnv": "HOMEBOY_PROVIDER_REFRESH_TOKEN"
+                })
+                .to_string(),
+            ),
+            secret_env: vec!["OPENAI_API_KEY".to_string()],
+            ..DispatchArgOverrides::default()
+        }))
+        .expect("dispatch plan");
+
+        assert_eq!(
+            plan.tasks[0].executor.secret_env,
+            vec![
+                "HOMEBOY_PROVIDER_ACCESS_TOKEN".to_string(),
+                "HOMEBOY_PROVIDER_REFRESH_TOKEN".to_string(),
+                "OPENAI_API_KEY".to_string(),
+            ]
+        );
+    }
+
+    #[test]
     fn resolves_workspace_path_without_specialized_coupling() {
         let worktree = tempfile::tempdir().expect("workspace");
 
@@ -926,6 +986,7 @@ mod tests {
         repo: Option<String>,
         task_url: Option<String>,
         secret_env: Vec<String>,
+        provider_config: Option<String>,
         client_context: Option<String>,
         concurrency: usize,
         attempts: u32,
@@ -946,7 +1007,7 @@ mod tests {
             selector: None,
             model: None,
             secret_env: overrides.secret_env,
-            provider_config: None,
+            provider_config: overrides.provider_config,
             client_context: overrides.client_context,
             concurrency: if overrides.concurrency == 0 {
                 1

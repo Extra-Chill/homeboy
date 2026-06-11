@@ -172,10 +172,12 @@ pub enum AgentTaskAuthCommand {
     Status(AgentTaskAuthStatusArgs),
     /// Store a provider secret in the OS keychain and map it to a required env name.
     SetKeychain(AgentTaskAuthSetKeychainArgs),
+    /// Store a JSON secret bundle in one OS keychain item.
+    SetKeychainBundle(AgentTaskAuthSetKeychainBundleArgs),
     /// Map a required provider env name to another process env var.
     MapEnv(AgentTaskAuthMapEnvArgs),
-    /// Map Claude Code provider secrets to Kimaki/OpenCode's active Anthropic OAuth auth file.
-    MapClaudeCodeKimaki,
+    /// Map a required provider env name to a field in a JSON keychain bundle.
+    MapKeychainBundle(AgentTaskAuthMapKeychainBundleArgs),
     /// Remove a provider secret source mapping.
     Remove(AgentTaskAuthRemoveArgs),
 }
@@ -211,6 +213,29 @@ pub struct AgentTaskAuthSetKeychainArgs {
 }
 
 #[derive(Args, Debug)]
+pub struct AgentTaskAuthSetKeychainBundleArgs {
+    /// Logical bundle id to store.
+    #[arg(value_name = "BUNDLE")]
+    pub bundle: String,
+
+    /// JSON bundle value. Omit to prompt securely.
+    #[arg(value_name = "JSON")]
+    pub value: Option<String>,
+
+    /// Read the JSON bundle value from stdin.
+    #[arg(long)]
+    pub value_stdin: bool,
+
+    /// Keychain scope. Defaults to agent-task.
+    #[arg(long, value_name = "SCOPE")]
+    pub scope: Option<String>,
+
+    /// Keychain entry name. Defaults to BUNDLE.
+    #[arg(long = "name", value_name = "NAME")]
+    pub keychain_name: Option<String>,
+}
+
+#[derive(Args, Debug)]
 pub struct AgentTaskAuthMapEnvArgs {
     /// Required provider environment variable name to satisfy.
     #[arg(value_name = "ENV")]
@@ -219,6 +244,29 @@ pub struct AgentTaskAuthMapEnvArgs {
     /// Source process environment variable. Defaults to ENV.
     #[arg(long = "from", value_name = "ENV")]
     pub source_env: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct AgentTaskAuthMapKeychainBundleArgs {
+    /// Required provider environment variable name to satisfy.
+    #[arg(value_name = "ENV")]
+    pub secret_env: String,
+
+    /// Logical bundle id to read.
+    #[arg(long, value_name = "BUNDLE")]
+    pub bundle: String,
+
+    /// Field path inside the JSON bundle, using dots for nested objects.
+    #[arg(long, value_name = "FIELD")]
+    pub field: String,
+
+    /// Keychain scope. Defaults to agent-task.
+    #[arg(long, value_name = "SCOPE")]
+    pub scope: Option<String>,
+
+    /// Keychain entry name. Defaults to BUNDLE.
+    #[arg(long = "name", value_name = "NAME")]
+    pub keychain_name: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -621,6 +669,24 @@ fn auth(args: AgentTaskAuthArgs) -> CmdResult<Value> {
                 0,
             ))
         }
+        AgentTaskAuthCommand::SetKeychainBundle(set_args) => {
+            let value = read_agent_task_secret_value(set_args.value, set_args.value_stdin)?;
+            let keychain_name = agent_task_secrets::set_keychain_bundle(
+                &set_args.bundle,
+                &value,
+                set_args.scope.as_deref(),
+                set_args.keychain_name.as_deref(),
+            )?;
+            Ok((
+                serde_json::json!({
+                    "schema": "homeboy/agent-task-auth-bundle-configured/v1",
+                    "bundle": set_args.bundle,
+                    "source": "keychain-bundle",
+                    "keychain_name": keychain_name,
+                }),
+                0,
+            ))
+        }
         AgentTaskAuthCommand::MapEnv(map_args) => {
             let status = agent_task_secrets::map_secret_to_env(
                 &map_args.secret_env,
@@ -634,8 +700,14 @@ fn auth(args: AgentTaskAuthArgs) -> CmdResult<Value> {
                 0,
             ))
         }
-        AgentTaskAuthCommand::MapClaudeCodeKimaki => {
-            let status = agent_task_secrets::map_claude_code_to_opencode_anthropic()?;
+        AgentTaskAuthCommand::MapKeychainBundle(map_args) => {
+            let status = agent_task_secrets::map_secret_to_keychain_bundle(
+                &map_args.secret_env,
+                &map_args.bundle,
+                &map_args.field,
+                map_args.scope.as_deref(),
+                map_args.keychain_name.as_deref(),
+            )?;
             Ok((
                 serde_json::json!({
                     "schema": "homeboy/agent-task-auth-configured/v1",
