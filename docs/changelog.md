@@ -4,6 +4,18 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.228.10] - 2026-06-11
+
+### Changed
+- surface tracker provenance
+
+### Fixed
+- preserve nested rig paths in Lab offload
+- initialize trace metrics in test results
+- initialize trace metrics in remaining results
+- repair trace metrics merge
+- materialize codebox cook cwd as git checkout
+
 ## [0.228.9] - 2026-06-11
 
 ### Fixed
