@@ -61,6 +61,21 @@ impl Commands {
                     LAB_NO_EXTRA_TOOLS,
                 )
             }
+            Commands::AgentTask(args)
+                if matches!(
+                    args.command,
+                    super::agent_task::AgentTaskCommand::Status(_)
+                        | super::agent_task::AgentTaskCommand::Logs(_)
+                        | super::agent_task::AgentTaskCommand::Artifacts(_)
+                ) =>
+            {
+                lab_portable_workload_contract(
+                    "agent-task status/logs/artifacts",
+                    None,
+                    false,
+                    LAB_NO_EXTRA_TOOLS,
+                )
+            }
             Commands::Audit(args) if args.changed_since.is_some() => {
                 lab_local_only_contract("audit", AUDIT_CHANGED_SINCE_LAB_UNSUPPORTED_REASON)
             }
