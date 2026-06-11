@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.117.7] - 2026-06-11
+
+### Fixed
+- preflight Claude Code Codebox auth
+
 ## [2.117.6] - 2026-06-11
 
 ### Fixed
