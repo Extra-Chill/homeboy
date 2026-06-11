@@ -103,6 +103,7 @@ JSON
             regression_min_delta_ms:
                 crate::core::extension::trace::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
             canonical_policy: TraceCanonicalPolicy::Development,
+            checkout_provenance: None,
         };
 
         let output =
@@ -177,6 +178,7 @@ JSON
             regression_min_delta_ms:
                 crate::core::extension::trace::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
             canonical_policy: TraceCanonicalPolicy::Development,
+            checkout_provenance: None,
         };
 
         let output = build_trace_runner(Some(&context), &component, &args, &run_dir, true).unwrap();
@@ -272,6 +274,7 @@ JSON
             regression_min_delta_ms:
                 crate::core::extension::trace::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
             canonical_policy: TraceCanonicalPolicy::Development,
+            checkout_provenance: None,
         };
         let output = RunnerOutput {
             success: false,
@@ -359,6 +362,7 @@ JSON
             regression_min_delta_ms:
                 crate::core::extension::trace::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
             canonical_policy: TraceCanonicalPolicy::Development,
+            checkout_provenance: None,
         };
 
         let output =
@@ -426,6 +430,7 @@ exit 1
             regression_min_delta_ms:
                 crate::core::extension::trace::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
             canonical_policy: TraceCanonicalPolicy::Development,
+            checkout_provenance: None,
         };
 
         let output =
@@ -517,7 +522,8 @@ JSON
                     crate::core::extension::trace::baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT,
                 regression_min_delta_ms:
                     crate::core::extension::trace::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
-            canonical_policy: TraceCanonicalPolicy::Development,
+                canonical_policy: TraceCanonicalPolicy::Development,
+                checkout_provenance: None,
             },
             &run_dir,
             None,
@@ -711,6 +717,7 @@ JSON
             regression_min_delta_ms:
                 crate::core::extension::trace::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
             canonical_policy: TraceCanonicalPolicy::Development,
+            checkout_provenance: None,
         };
         OverlayFixture {
             _temp: temp,

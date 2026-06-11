@@ -60,6 +60,15 @@ pub struct TraceRunWorkflowArgs {
     pub regression_threshold_percent: f64,
     pub regression_min_delta_ms: u64,
     pub canonical_policy: TraceCanonicalPolicy,
+    pub checkout_provenance: Option<TraceCheckoutProvenance>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraceCheckoutProvenance {
+    pub source: String,
+    pub path: String,
+    pub requested_ref: String,
+    pub resolved_sha: String,
 }
 
 #[derive(Debug, Clone)]
@@ -827,6 +836,7 @@ pub fn run_trace_list_workflow(
         regression_threshold_percent: super::baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT,
         regression_min_delta_ms: super::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
         canonical_policy: TraceCanonicalPolicy::Development,
+        checkout_provenance: None,
     };
     let output = build_trace_runner(
         execution_context.as_ref(),
@@ -1584,6 +1594,7 @@ mod tests {
                 super::super::baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT,
             regression_min_delta_ms: super::super::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
             canonical_policy: TraceCanonicalPolicy::Development,
+            checkout_provenance: None,
         }
     }
 }

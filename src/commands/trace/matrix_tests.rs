@@ -122,6 +122,7 @@ fn trace_matrix_reports_failed_cells_and_cell_artifacts() {
             force: false,
             canonical: false,
             allow_local_toolchain: true,
+            checkout_provenance: None,
         })
         .expect("matrix run");
 

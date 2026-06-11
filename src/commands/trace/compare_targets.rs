@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use homeboy::core::component;
 use homeboy::core::extension::trace as extension_trace;
-use homeboy::core::extension::trace::TraceCommandOutput;
+use homeboy::core::extension::trace::{TraceCheckoutProvenance, TraceCommandOutput};
 use homeboy::core::git;
 
 use super::aggregate::{aggregate_span, TraceAggregateSpanSample};
@@ -81,8 +81,8 @@ pub(super) fn run_compare_targets(args: TraceArgs) -> CmdResult<TraceCommandOutp
         &proof_args,
         &component_id,
         &scenario_id,
-        &baseline_target.path,
-        &candidate_target.path,
+        &baseline_target,
+        &candidate_target,
     )?;
     let baseline_aggregate = proof.baseline;
     let candidate_aggregate = proof.candidate;
@@ -164,8 +164,8 @@ fn run_target_proof_matrix(
     args: &TraceArgs,
     component_id: &str,
     scenario_id: &str,
-    baseline_path: &Path,
-    candidate_path: &Path,
+    baseline_target: &ResolvedCompareTarget,
+    candidate_target: &ResolvedCompareTarget,
 ) -> homeboy::core::Result<TargetProofMatrix> {
     let repeat = args.repeat.max(1);
     let plan = plan_trace_run_order(repeat, args.schedule, &["baseline", "candidate"]);
@@ -188,12 +188,12 @@ fn run_target_proof_matrix(
     let mut proof_run_order = Vec::new();
 
     for entry in plan {
-        let (path, builder) = if entry.group() == "baseline" {
-            (baseline_path, &mut baseline)
+        let (target, builder) = if entry.group() == "baseline" {
+            (baseline_target, &mut baseline)
         } else {
-            (candidate_path, &mut candidate)
+            (candidate_target, &mut candidate)
         };
-        let run = execute_target_once(args, component_id, scenario_id, path);
+        let run = execute_target_once(args, component_id, scenario_id, target);
         let proof_entry = builder.record(entry.index(), run);
         proof_run_order.push(extension_trace::TraceCompareRunOrderOutput {
             index: proof_entry.index,
@@ -217,11 +217,11 @@ fn execute_target_once(
     args: &TraceArgs,
     component_id: &str,
     scenario_id: &str,
-    path: &Path,
+    target: &ResolvedCompareTarget,
 ) -> Result<super::TraceRunExecution, homeboy::core::Error> {
     let mut run_args = args.clone();
     run_args.comp.component = Some(component_id.to_string());
-    run_args.comp.path = Some(path.to_string_lossy().to_string());
+    run_args.comp.path = Some(target.path.to_string_lossy().to_string());
     run_args.scenario = Some(scenario_id.to_string());
     run_args.compare_after = None;
     run_args.baseline_target = None;
@@ -229,6 +229,7 @@ fn execute_target_once(
     run_args.repeat = 1;
     run_args.aggregate = None;
     run_args.output_dir = None;
+    run_args.checkout_provenance = target.checkout_provenance.clone();
     super::execute_trace_run(run_args)
 }
 
@@ -557,6 +558,7 @@ struct ResolvedCompareTarget {
     input: String,
     path: PathBuf,
     git_sha: Option<String>,
+    checkout_provenance: Option<TraceCheckoutProvenance>,
     _worktree: Option<TemporaryGitWorktree>,
 }
 
@@ -578,6 +580,7 @@ fn resolve_target(
             input: input.to_string(),
             path,
             git_sha,
+            checkout_provenance: None,
             _worktree: None,
         });
     }
@@ -585,18 +588,36 @@ fn resolve_target(
     let source_root = git::get_git_root(source_path)?;
     let source_root = PathBuf::from(source_root);
     let component_prefix = git::get_component_path_prefix(source_path);
-    let worktree = TemporaryGitWorktree::add(role, &source_root, input)?;
+    let resolved_sha = resolve_git_ref_to_full_sha(&source_root, input)?;
+    let worktree = TemporaryGitWorktree::add(role, &source_root, &resolved_sha)?;
     let path = component_prefix
         .as_deref()
         .map(|prefix| worktree.path.join(prefix))
         .unwrap_or_else(|| worktree.path.clone());
     let git_sha = git::short_head_revision_at(&path);
+    let checkout_provenance = Some(TraceCheckoutProvenance {
+        source: "homeboy-trace-compare".to_string(),
+        path: path.to_string_lossy().to_string(),
+        requested_ref: input.to_string(),
+        resolved_sha,
+    });
     Ok(ResolvedCompareTarget {
         input: input.to_string(),
         path,
         git_sha,
+        checkout_provenance,
         _worktree: Some(worktree),
     })
+}
+
+fn resolve_git_ref_to_full_sha(source_root: &Path, git_ref: &str) -> homeboy::core::Result<String> {
+    let commit_ref = format!("{git_ref}^{{commit}}");
+    git::run_git(
+        source_root,
+        &["rev-parse", "--verify", &commit_ref],
+        "git rev-parse trace compare target",
+    )
+    .map(|sha| sha.trim().to_string())
 }
 
 struct TemporaryGitWorktree {

@@ -46,6 +46,7 @@ fn trace_args_for_rig(rig_id: &str) -> TraceArgs {
         force: false,
         canonical: false,
         allow_local_toolchain: true,
+        checkout_provenance: None,
     }
 }
 

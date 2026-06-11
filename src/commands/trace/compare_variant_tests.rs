@@ -75,6 +75,7 @@ fn trace_compare_variant_interleaves_run_order_and_reports_focus_spans() {
                 force: false,
                 canonical: false,
                 allow_local_toolchain: true,
+                checkout_provenance: None,
             },
             &GlobalArgs {},
         )
@@ -218,6 +219,7 @@ fn trace_compare_variant_uses_component_arg_for_multi_component_named_variants()
                 force: false,
                 canonical: false,
                 allow_local_toolchain: true,
+                checkout_provenance: None,
             },
             &GlobalArgs {},
         )
@@ -310,6 +312,7 @@ fn trace_compare_variant_reports_unknown_named_variant_for_component_arg() {
                 force: false,
                 canonical: false,
                 allow_local_toolchain: true,
+                checkout_provenance: None,
             },
             &GlobalArgs {},
         ) {
