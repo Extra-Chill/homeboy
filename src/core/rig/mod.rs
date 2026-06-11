@@ -77,7 +77,8 @@ pub use state::{
 pub use workloads::{
     check_groups_for_extension_workloads, extension_ids_for_workloads,
     invocation_requirements_for_extension_workloads, runner_capabilities_for_extension,
-    trace_dependencies_for_extension, workloads_for_extension, RigWorkloadKind,
+    trace_dependencies_for_extension, workload_path_expansions_for_extension,
+    workloads_for_extension, RigWorkloadKind, RigWorkloadPathExpansion,
 };
 
 use crate::core::error::{Error, Result};

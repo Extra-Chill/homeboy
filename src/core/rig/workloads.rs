@@ -13,6 +13,12 @@ pub enum RigWorkloadKind {
     Trace,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RigWorkloadPathExpansion {
+    pub declared_path: String,
+    pub expanded_path: PathBuf,
+}
+
 pub fn extension_ids_for_workloads(rig_spec: &RigSpec, kind: RigWorkloadKind) -> Vec<String> {
     let mut ids: Vec<String> = match kind {
         RigWorkloadKind::Bench => rig_spec.bench_workloads.keys().cloned().collect(),
@@ -28,6 +34,18 @@ pub fn workloads_for_extension(
     package_root: Option<&Path>,
     extension_id: &str,
 ) -> Vec<PathBuf> {
+    workload_path_expansions_for_extension(rig_spec, kind, package_root, extension_id)
+        .into_iter()
+        .map(|expansion| expansion.expanded_path)
+        .collect()
+}
+
+pub fn workload_path_expansions_for_extension(
+    rig_spec: &RigSpec,
+    kind: RigWorkloadKind,
+    package_root: Option<&Path>,
+    extension_id: &str,
+) -> Vec<RigWorkloadPathExpansion> {
     let workloads = match kind {
         RigWorkloadKind::Bench => &rig_spec.bench_workloads,
         RigWorkloadKind::Trace => &rig_spec.trace_workloads,
@@ -37,7 +55,10 @@ pub fn workloads_for_extension(
         .get(extension_id)
         .into_iter()
         .flat_map(|paths| paths.iter())
-        .map(|workload| expand_workload_path(rig_spec, package_root, workload.path()))
+        .map(|workload| RigWorkloadPathExpansion {
+            declared_path: workload.path().to_string(),
+            expanded_path: expand_workload_path(rig_spec, package_root, workload.path()),
+        })
         .collect()
 }
 

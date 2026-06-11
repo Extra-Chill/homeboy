@@ -229,6 +229,76 @@ fn rig_trace_list_uses_rig_default_component_and_workloads() {
 }
 
 #[test]
+fn rig_trace_workload_expansion_warns_when_executed_path_differs_from_rig_root() {
+    let rig_root = tempfile::TempDir::new().expect("rig root");
+    let component_dir = tempfile::TempDir::new().expect("component dir");
+    let trace_path = component_dir
+        .path()
+        .join("bench/ece-product-page-waterfall.trace.mjs");
+    fs::create_dir_all(trace_path.parent().expect("trace parent")).expect("trace dir");
+    fs::write(&trace_path, "export default {};").expect("trace workload");
+    let rig_spec: RigSpec = serde_json::from_str(&format!(
+        r#"{{
+            "id": "wc-stripe-trace",
+            "components": {{
+                "stripe": {{ "path": "{}" }}
+            }},
+            "trace_workloads": {{ "{TRACE_FIXTURE_EXTENSION_ID}": [
+                {{ "path": "${{components.stripe.path}}/bench/ece-product-page-waterfall.trace.mjs" }}
+            ] }}
+        }}"#,
+        component_dir.path().display()
+    ))
+    .expect("parse rig");
+    let context = TraceRigContext {
+        rig_spec,
+        rig_package_root: Some(rig_root.path().to_path_buf()),
+        rig_config_root: None,
+    };
+
+    let warnings = rig_owned_trace_workload_expansion_warnings(
+        Some(&context),
+        Some(TRACE_FIXTURE_EXTENSION_ID),
+    );
+
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].contains("wc-stripe-trace"));
+    assert!(warnings[0]
+        .contains("${components.stripe.path}/bench/ece-product-page-waterfall.trace.mjs"));
+    assert!(warnings[0].contains(&format!("Rig source root: `{}`", rig_root.path().display())));
+    assert!(warnings[0].contains(&format!(
+        "Executed extra workload path: `{}`",
+        trace_path.display()
+    )));
+    assert!(warnings[0].contains("refresh/reinstall the rig package"));
+}
+
+#[test]
+fn rig_trace_workload_expansion_is_quiet_inside_rig_root() {
+    let rig_root = tempfile::TempDir::new().expect("rig root");
+    let rig_spec: RigSpec = serde_json::from_str(&format!(
+        r#"{{
+            "id": "package-owned-trace",
+            "trace_workloads": {{ "{TRACE_FIXTURE_EXTENSION_ID}": [
+                {{ "path": "${{package.root}}/bench/create-site.trace.mjs" }}
+            ] }}
+        }}"#
+    ))
+    .expect("parse rig");
+    let context = TraceRigContext {
+        rig_spec,
+        rig_package_root: Some(rig_root.path().to_path_buf()),
+        rig_config_root: None,
+    };
+
+    assert!(rig_owned_trace_workload_expansion_warnings(
+        Some(&context),
+        Some(TRACE_FIXTURE_EXTENSION_ID),
+    )
+    .is_empty());
+}
+
+#[test]
 fn rig_trace_list_uses_scoped_workload_preflight() {
     let spec: RigSpec = serde_json::from_str(&format!(
         r#"{{
