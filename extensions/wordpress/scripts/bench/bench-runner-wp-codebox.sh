@@ -371,7 +371,7 @@ homeboy_wp_codebox_mount_extra_bench_workloads() {
         MOUNTS_JSON=$(jq -nc \
             --argjson mounts "$MOUNTS_JSON" \
             --arg source "$workload_path" \
-            --arg target "/wordpress/wp-content/plugins/${PLUGIN_SLUG}/tests/bench/${workload_name}" \
+            --arg target "/wordpress/wp-content/plugins/${PLUGIN_SLUG}/.homeboy/bench-rig/${workload_name}" \
             '$mounts + [{source: $source, target: $target, mode: "readonly"}]')
     done
 }
@@ -419,55 +419,22 @@ homeboy_wp_codebox_filter_extra_bench_workloads() {
     export HOMEBOY_BENCH_EXTRA_WORKLOADS="$filtered_value"
 }
 
-homeboy_wp_codebox_apply_selected_rig_workload_overlays() {
+homeboy_wp_codebox_append_extra_bench_workloads_configured_json() {
     local workloads_value="${HOMEBOY_BENCH_EXTRA_WORKLOADS:-}"
-    local selected_value="${HOMEBOY_BENCH_SCENARIOS:-}"
     [ -n "$workloads_value" ] || return 0
-    [ -n "$selected_value" ] || return 0
 
-    local bench_dir="${PLUGIN_PATH}/tests/bench"
-    [ -d "$bench_dir" ] || return 0
-
-    local overlay_path=""
-    local overlaid_ids=()
-    local remaining_paths=()
-    local workload_path workload_name scenario_id component_workload overlay_workload
+    local workload_path workload_name scenario_id
     IFS=':' read -r -a workload_paths <<< "$workloads_value"
     for workload_path in "${workload_paths[@]}"; do
         [ -n "$workload_path" ] || continue
         workload_name="$(basename "$workload_path")"
         scenario_id="$(homeboy_wp_codebox_workload_scenario_id "$workload_name")"
-        component_workload="${bench_dir}/${scenario_id}.php"
-        if [ -f "$component_workload" ]; then
-            if [ -z "$overlay_path" ]; then
-                overlay_path="${ARTIFACTS_DIR%/}/component-plugin-rig-workload-overlay"
-                mkdir -p "$overlay_path"
-                cp -R "${PLUGIN_PATH}/." "$overlay_path/"
-            fi
-            overlay_workload="${overlay_path}/tests/bench/${scenario_id}.php"
-            mkdir -p "$(dirname "$overlay_workload")"
-            cp "$workload_path" "$overlay_workload"
-            overlaid_ids+=("$scenario_id")
-            echo "Using selected rig workload '${scenario_id}' over duplicate in-tree workload." >&2
-            echo "  Rig workload: ${workload_path}" >&2
-            echo "  In-tree workload: ${component_workload}" >&2
-        else
-            remaining_paths+=("$workload_path")
-        fi
+        WP_CODEBOX_WORKLOADS_JSON=$(jq -nc \
+            --argjson workloads "$WP_CODEBOX_WORKLOADS_JSON" \
+            --arg id "$scenario_id" \
+            --arg file ".homeboy/bench-rig/${workload_name}" \
+            '$workloads + [{id: $id, source: "rig", run: [{type: "php", file: $file}], metadata: {homeboy_bench_workload_source: "rig"}}]')
     done
-
-    if [ ${#overlaid_ids[@]} -gt 0 ]; then
-        PLUGIN_PATH="$overlay_path"
-        export PLUGIN_PATH
-        HOMEBOY_BENCH_RIG_OVERLAY_SCENARIOS=$(IFS=','; printf '%s' "${overlaid_ids[*]}")
-        export HOMEBOY_BENCH_RIG_OVERLAY_SCENARIOS
-
-        local remaining_value=""
-        if [ ${#remaining_paths[@]} -gt 0 ]; then
-            remaining_value=$(IFS=':'; printf '%s' "${remaining_paths[*]}")
-        fi
-        export HOMEBOY_BENCH_EXTRA_WORKLOADS="$remaining_value"
-    fi
 }
 
 homeboy_wp_codebox_extra_workload_scenarios_json() {
@@ -755,8 +722,6 @@ if [ -z "$ARTIFACTS_DIR" ]; then
 fi
 mkdir -p "$ARTIFACTS_DIR"
 
-homeboy_wp_codebox_apply_selected_rig_workload_overlays
-
 homeboy_wp_codebox_run_prepare_steps
 
 if type homeboy_preflight_declared_validation_dependency_paths &>/dev/null; then
@@ -800,6 +765,7 @@ if [ "$settings_json" != "{}" ]; then
     WP_CODEBOX_WORKLOADS_JSON=$(printf '%s' "$settings_json" | jq -c '.wp_codebox_workloads // .playground_workloads // []' 2>/dev/null || echo "[]")
 fi
 WP_CODEBOX_WORKLOADS_JSON=$(jq -nc --argjson declared "$WP_CODEBOX_WORKLOADS_JSON" --argjson scenarios "$SCENARIO_MANIFEST_WORKLOADS_JSON" '$declared + $scenarios')
+homeboy_wp_codebox_append_extra_bench_workloads_configured_json
 
 MOUNTS_JSON="[]"
 COMPONENT_PLUGIN_FILE="$(homeboy_wp_codebox_find_plugin_file "$PLUGIN_PATH" || true)"
@@ -1107,26 +1073,6 @@ fi
 
 mkdir -p "$(dirname "$RESULTS_FILE")"
 jq '.benchResults | del(.warmup_iterations)' "$WP_CODEBOX_TMPFILE" > "$RESULTS_FILE"
-
-if [ -n "${HOMEBOY_BENCH_RIG_OVERLAY_SCENARIOS:-}" ]; then
-    OVERLAY_RESULTS_FILE=$(mktemp "${TMPDIR:-/tmp}/homeboy-wp-codebox-rig-overlay-results.XXXXXX")
-    if jq --arg scenarios "$HOMEBOY_BENCH_RIG_OVERLAY_SCENARIOS" '
-        ($scenarios | split(",") | map(select(. != ""))) as $rigIds
-        | .scenarios = ((.scenarios // []) | map(
-            if (.id as $id | $rigIds | index($id)) then
-                .source = "rig"
-                | .provenance = ((.provenance // {}) + {source: "rig-overlay"})
-            else
-                .
-            end
-        ))
-    ' "$RESULTS_FILE" > "$OVERLAY_RESULTS_FILE"; then
-        mv "$OVERLAY_RESULTS_FILE" "$RESULTS_FILE"
-    else
-        rm -f "$OVERLAY_RESULTS_FILE"
-        echo "Warning: failed to mark selected rig overlay scenarios in bench results." >&2
-    fi
-fi
 
 PREPARED_DEPENDENCIES_METADATA_FILE="${ARTIFACTS_DIR%/}/prepared-bench-dependencies.json"
 if [ -f "$PREPARED_DEPENDENCIES_METADATA_FILE" ]; then

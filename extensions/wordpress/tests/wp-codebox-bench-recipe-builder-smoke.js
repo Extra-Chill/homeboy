@@ -66,6 +66,7 @@ const filteredResult = spawnSync(process.execPath, [script], {
 assert.equal(filteredResult.status, 0, filteredResult.stderr);
 const filteredRecipe = JSON.parse(filteredResult.stdout);
 assert.deepEqual(filteredRecipe.inputs.workloads.map((workload) => workload.id), ['fixture-workload']);
+assert.deepEqual(filteredRecipe.inputs.scenarioIds, ['fixture-workload']);
 
 const diagnosticResult = spawnSync(process.execPath, [script], {
 	cwd: path.join(__dirname, '..'),
