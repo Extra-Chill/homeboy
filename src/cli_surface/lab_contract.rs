@@ -1,3 +1,5 @@
+use crate::core::agent_task_provider::provider_requires_cwd_git_checkout;
+
 use super::{CommandDescriptor, Commands};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,6 +29,7 @@ pub enum LabSourcePathMode {
 pub enum LabWorkspaceModePolicy {
     ChangedSinceGitElseSnapshot,
     Git,
+    GitCheckoutRequired,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,12 +57,16 @@ impl Commands {
                         | super::agent_task::AgentTaskCommand::RunPlan(_)
                 ) =>
             {
-                lab_portable_contract(
+                let mut contract = lab_portable_contract(
                     "agent-task dispatch/cook/loop/run-plan",
                     None,
                     true,
                     LAB_NO_EXTRA_TOOLS,
-                )
+                );
+                if agent_task_provider_requires_cwd_git_checkout(&args.command) {
+                    contract.workspace_mode_policy = LabWorkspaceModePolicy::GitCheckoutRequired;
+                }
+                contract
             }
             Commands::AgentTask(args)
                 if matches!(
@@ -144,6 +151,19 @@ impl Commands {
         };
 
         Some(contract)
+    }
+}
+
+fn agent_task_provider_requires_cwd_git_checkout(
+    command: &super::agent_task::AgentTaskCommand,
+) -> bool {
+    match command {
+        super::agent_task::AgentTaskCommand::Cook(args)
+        | super::agent_task::AgentTaskCommand::Dispatch(args) => {
+            args.cwd.as_ref().is_some_and(|cwd| !cwd.trim().is_empty())
+                && provider_requires_cwd_git_checkout(&args.backend, args.selector.as_deref())
+        }
+        _ => false,
     }
 }
 

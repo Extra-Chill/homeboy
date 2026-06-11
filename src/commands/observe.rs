@@ -172,6 +172,7 @@ pub fn run(args: ObserveArgs, _global: &GlobalArgs) -> CmdResult<ObserveOutput> 
         toolchain: None,
         components: None,
         dependencies: Vec::new(),
+        metrics: Default::default(),
         preview: None,
     };
 

@@ -102,6 +102,7 @@ pub(crate) fn refused_trace_result(
         toolchain: None,
         components: None,
         dependencies: Vec::new(),
+        metrics: Default::default(),
         preview: None,
     };
 

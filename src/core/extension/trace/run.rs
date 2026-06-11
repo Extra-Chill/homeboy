@@ -1313,6 +1313,7 @@ mod tests {
             temporal_assertions: Vec::new(),
             artifacts: Vec::new(),
             dependencies: Vec::new(),
+            metrics: Default::default(),
             toolchain: None,
             components: None,
         };
@@ -1436,6 +1437,7 @@ mod tests {
             toolchain: None,
             components: None,
             dependencies: Vec::new(),
+            metrics: Default::default(),
             preview: None,
         };
 
