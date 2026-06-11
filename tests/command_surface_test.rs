@@ -1,4 +1,5 @@
-use homeboy::cli_surface::current_command_surface;
+use clap::{CommandFactory, Parser};
+use homeboy::cli_surface::{current_command_surface, Cli};
 use std::collections::BTreeSet;
 
 #[test]
@@ -90,6 +91,28 @@ fn command_index_matches_top_level_command_surface() {
         stale.is_empty(),
         "docs/commands/commands-index.md lists stale top-level commands: {stale:?}"
     );
+}
+
+#[test]
+fn upgrade_runner_selector_does_not_collide_with_global_lab_runner_flag() {
+    let root = Cli::command();
+    let root_flags: BTreeSet<String> = root
+        .get_arguments()
+        .filter_map(|arg| arg.get_long().map(|long| format!("--{long}")))
+        .collect();
+    let upgrade = root
+        .find_subcommand("upgrade")
+        .expect("upgrade command")
+        .clone();
+    let upgrade_flags: BTreeSet<String> = upgrade
+        .get_arguments()
+        .filter_map(|arg| arg.get_long().map(|long| format!("--{long}")))
+        .collect();
+
+    assert!(root_flags.contains("--runner"));
+    assert!(upgrade_flags.contains("--upgrade-runner"));
+    Cli::try_parse_from(["homeboy", "upgrade", "--upgrade-runner", "homeboy-lab"])
+        .expect("upgrade runner selector should parse without colliding with global --runner");
 }
 
 fn documented_command_index_entries() -> BTreeSet<String> {
