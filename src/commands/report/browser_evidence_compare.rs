@@ -41,6 +41,7 @@ pub struct BrowserEvidenceCompareReport {
     pub baseline_label: String,
     pub candidate_label: String,
     pub totals: BrowserEvidenceCompareTotals,
+    pub artifacts: ArtifactComparison,
     pub variants: Vec<BrowserEvidenceVariantComparison>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
@@ -172,6 +173,10 @@ pub fn browser_evidence_compare_from_dirs(
             .map(|note| format!("{}: {}", candidate_label, note)),
     );
 
+    let artifacts = ArtifactComparison {
+        baseline: baseline.artifacts.iter().cloned().collect(),
+        candidate: candidate.artifacts.iter().cloned().collect(),
+    };
     let variants = implementation::compare_variants(&baseline.samples, &candidate.samples);
     let totals = BrowserEvidenceCompareTotals {
         baseline_samples: baseline.samples.len(),
@@ -190,6 +195,7 @@ pub fn browser_evidence_compare_from_dirs(
         baseline_label,
         candidate_label,
         &totals,
+        &artifacts,
         &variants,
         &notes,
     );
@@ -200,6 +206,7 @@ pub fn browser_evidence_compare_from_dirs(
         baseline_label: baseline_label.to_string(),
         candidate_label: candidate_label.to_string(),
         totals,
+        artifacts,
         variants,
         notes,
     })
@@ -211,6 +218,7 @@ mod implementation {
     #[derive(Debug, Clone)]
     pub(super) struct EvidenceSet {
         pub(super) samples: Vec<BrowserEvidenceSample>,
+        pub(super) artifacts: BTreeSet<ArtifactRef>,
         pub(super) notes: Vec<String>,
     }
 
@@ -255,6 +263,7 @@ mod implementation {
         files.sort();
 
         let mut samples = Vec::new();
+        let mut artifacts = BTreeSet::new();
         for file in files {
             let raw = match std::fs::read_to_string(&file) {
                 Ok(raw) => raw,
@@ -279,14 +288,32 @@ mod implementation {
                 }
             };
             let source = artifact_ref(root, &file, include_local_paths, None);
-            collect_samples(&value, &SampleContext::default(), &source, &mut samples);
+            let before = samples.len();
+            collect_samples(
+                &value,
+                &SampleContext::default(),
+                &source,
+                &mut samples,
+                &mut artifacts,
+            );
+            if samples.len() == before {
+                collect_provenance_artifacts(&value, &source, &mut artifacts);
+            }
         }
 
         if samples.is_empty() {
             notes.push("no browser evidence samples found".to_string());
         }
 
-        Ok(EvidenceSet { samples, notes })
+        for sample in &samples {
+            artifacts.extend(sample.artifacts.iter().cloned());
+        }
+
+        Ok(EvidenceSet {
+            samples,
+            artifacts,
+            notes,
+        })
     }
 
     pub(super) fn read_evidence_dirs(
@@ -295,12 +322,14 @@ mod implementation {
     ) -> homeboy::core::Result<EvidenceSet> {
         let mut merged = EvidenceSet {
             samples: Vec::new(),
+            artifacts: BTreeSet::new(),
             notes: Vec::new(),
         };
         for root in roots {
             match read_evidence_set(root, include_local_paths) {
                 Ok(mut set) => {
                     merged.samples.append(&mut set.samples);
+                    merged.artifacts.append(&mut set.artifacts);
                     merged.notes.append(&mut set.notes);
                 }
                 Err(err) => merged.notes.push(format!(
@@ -336,12 +365,15 @@ mod implementation {
         inherited: &SampleContext,
         source: &ArtifactRef,
         samples: &mut Vec<BrowserEvidenceSample>,
+        artifacts: &mut BTreeSet<ArtifactRef>,
     ) {
         match value {
-            Value::Object(object) => collect_object_samples(object, inherited, source, samples),
+            Value::Object(object) => {
+                collect_object_samples(object, inherited, source, samples, artifacts)
+            }
             Value::Array(array) => {
                 for item in array {
-                    collect_samples(item, inherited, source, samples);
+                    collect_samples(item, inherited, source, samples, artifacts);
                 }
             }
             _ => {}
@@ -353,20 +385,24 @@ mod implementation {
         inherited: &SampleContext,
         source: &ArtifactRef,
         samples: &mut Vec<BrowserEvidenceSample>,
+        artifacts: &mut BTreeSet<ArtifactRef>,
     ) {
         let context = context_for_object(object, inherited);
         let runs = object.get("runs").and_then(Value::as_array);
 
         if has_browser_signal(object) && runs.is_none() {
             samples.push(sample_from_object(object, &context, source));
+        } else if has_provenance_signal(object) {
+            collect_object_artifacts(object, artifacts);
+            artifacts.insert(source.clone());
         }
 
         if let Some(data) = object.get("data") {
-            collect_samples(data, &context, source, samples);
+            collect_samples(data, &context, source, samples, artifacts);
         }
         for key in ["scenarios", "profiles", "variants", "matrix", "results"] {
             if let Some(value) = object.get(key) {
-                collect_samples(value, &context, source, samples);
+                collect_samples(value, &context, source, samples, artifacts);
             }
         }
         if let Some(runs) = runs {
@@ -375,7 +411,7 @@ mod implementation {
                 if run_context.profile.is_none() {
                     run_context.profile = Some(format!("repeat-{}", index + 1));
                 }
-                collect_samples(run, &run_context, source, samples);
+                collect_samples(run, &run_context, source, samples, artifacts);
             }
         }
     }
@@ -407,8 +443,6 @@ mod implementation {
             "browser_metrics",
             "lifecycle_metrics",
             "dom_lifecycle",
-            "summary",
-            "files",
             "console_errors",
             "page_errors",
             "errors",
@@ -426,6 +460,75 @@ mod implementation {
                 ],
             )
             .is_some()
+            || object
+                .get("summary")
+                .and_then(Value::as_object)
+                .is_some_and(summary_has_browser_signal)
+    }
+
+    fn summary_has_browser_signal(summary: &Map<String, Value>) -> bool {
+        summary.contains_key("assertions")
+            || first_number(summary, &["networkEvents", "consoleMessages", "errors"]).is_some()
+            || summary
+                .get("metrics")
+                .and_then(Value::as_object)
+                .is_some_and(|metrics| {
+                    has_metric_object_signal(metrics, &browser_metric_names())
+                        || has_metric_object_signal(metrics, &lifecycle_metric_names())
+                })
+    }
+
+    fn has_metric_object_signal(object: &Map<String, Value>, names: &[&str]) -> bool {
+        object
+            .iter()
+            .any(|(key, value)| names.contains(&key.as_str()) && value.as_f64().is_some())
+    }
+
+    fn has_provenance_signal(object: &Map<String, Value>) -> bool {
+        object.contains_key("artifacts")
+            || object.contains_key("files")
+            || first_string(
+                object,
+                &["artifact", "artifact_id", "manifest", "manifest_id"],
+            )
+            .is_some()
+            || first_string(object, &["id", "name"]).is_some_and(|value| {
+                value.contains("artifact")
+                    || value.contains("manifest")
+                    || value.contains("provenance")
+            })
+    }
+
+    fn collect_provenance_artifacts(
+        value: &Value,
+        source: &ArtifactRef,
+        artifacts: &mut BTreeSet<ArtifactRef>,
+    ) {
+        match value {
+            Value::Object(object) => {
+                if has_provenance_signal(object) {
+                    collect_object_artifacts(object, artifacts);
+                    artifacts.insert(source.clone());
+                }
+                for value in object.values() {
+                    collect_provenance_artifacts(value, source, artifacts);
+                }
+            }
+            Value::Array(values) => {
+                for value in values {
+                    collect_provenance_artifacts(value, source, artifacts);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn collect_object_artifacts(
+        object: &Map<String, Value>,
+        artifacts: &mut BTreeSet<ArtifactRef>,
+    ) {
+        collect_artifacts(object, artifacts);
+        collect_wp_codebox_files(object.get("files"), artifacts);
     }
 
     fn sample_from_object(
@@ -603,6 +706,7 @@ mod implementation {
         baseline_label: &str,
         candidate_label: &str,
         totals: &BrowserEvidenceCompareTotals,
+        artifacts: &ArtifactComparison,
         variants: &[BrowserEvidenceVariantComparison],
         notes: &[String],
     ) -> String {
@@ -677,6 +781,8 @@ mod implementation {
             }
         }
 
+        render_provenance_artifacts(&mut out, artifacts);
+
         if !notes.is_empty() {
             out.push_str("### Report Notes\n");
             for note in notes {
@@ -686,6 +792,30 @@ mod implementation {
         }
 
         out
+    }
+
+    fn render_provenance_artifacts(out: &mut String, artifacts: &ArtifactComparison) {
+        if artifacts.baseline.is_empty() && artifacts.candidate.is_empty() {
+            return;
+        }
+        out.push_str("### Provenance / Artifact Records\n");
+        for (label, refs) in [
+            ("Baseline", &artifacts.baseline),
+            ("Candidate", &artifacts.candidate),
+        ] {
+            if refs.is_empty() {
+                let _ = writeln!(out, "- {}: none recorded", label);
+                continue;
+            }
+            let rendered = refs
+                .iter()
+                .take(12)
+                .map(|artifact| format!("{}: {}", artifact.label, artifact.target))
+                .collect::<Vec<_>>()
+                .join("; ");
+            let _ = writeln!(out, "- {}: {}", label, rendered);
+        }
+        out.push('\n');
     }
 
     fn render_assertions(out: &mut String, variant: &BrowserEvidenceVariantComparison) {
