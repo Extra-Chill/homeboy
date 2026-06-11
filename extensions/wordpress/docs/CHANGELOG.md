@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.119.10] - 2026-06-11
+
+### Fixed
+- run selected WP bench rig overlays
+
 ## [2.119.9] - 2026-06-11
 
 ### Fixed
