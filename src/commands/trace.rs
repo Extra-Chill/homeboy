@@ -374,6 +374,8 @@ fn run_outputs(mut args: TraceArgs) -> CmdResult<(TraceCommandOutput, Option<Tra
         return Ok(((output, None), exit_code));
     }
 
+    reject_target_compare_flags_without_compare(&args)?;
+
     if args.comp.component.as_deref() == Some("matrix") {
         apply_matrix_target_args(&mut args);
         let (output, exit_code) = matrix::run_scenario_matrix(args)?;
@@ -435,6 +437,19 @@ fn run_outputs(mut args: TraceArgs) -> CmdResult<(TraceCommandOutput, Option<Tra
         attach_profile_output(output, profile);
     }
     Ok(((stdout_output, artifact_output), exit_code))
+}
+
+fn reject_target_compare_flags_without_compare(args: &TraceArgs) -> homeboy::core::Result<()> {
+    if args.baseline_target.is_none() && args.candidate.is_none() {
+        return Ok(());
+    }
+
+    Err(homeboy::core::Error::validation_invalid_argument(
+        "--baseline-target/--candidate",
+        "target compare flags are only supported by `homeboy trace compare`; use `homeboy trace compare <component> <scenario> --baseline-target <target> --candidate <target>`",
+        None,
+        None,
+    ))
 }
 
 pub(super) fn apply_command_target_component(args: &mut TraceArgs) {
