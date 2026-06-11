@@ -80,7 +80,8 @@ pub use offload_metadata::{
 pub use resource_metrics::RunnerResourceMetrics;
 pub use session::{
     ReverseRunnerConnectOptions, RunnerConnectReport, RunnerDisconnectReport, RunnerFailureKind,
-    RunnerSession, RunnerSessionRole, RunnerSessionState, RunnerStatusReport, RunnerTunnelMode,
+    RunnerSession, RunnerSessionRole, RunnerSessionState, RunnerStaleDaemonWarning,
+    RunnerStatusReport, RunnerTunnelMode,
 };
 pub use worker::{run_reverse_worker, ReverseRunnerWorkerOptions, ReverseRunnerWorkerOutput};
 pub use workspace::{

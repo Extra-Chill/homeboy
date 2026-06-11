@@ -12,6 +12,14 @@ Upgrades Homeboy to the latest version. The command auto-detects the installatio
 
 By default, after a successful local upgrade, Homeboy also checks configured SSH runners and runs their configured Homeboy binary through the same upgrade path. This keeps lab runners from drifting behind the local CLI.
 
+Runner sync uses this contract:
+
+- Run each configured SSH runner through its configured `homeboy_path`, falling back to bare `homeboy` only when no path is configured.
+- Sync every parent extension that has portable source metadata (`source_url` plus `source_revision`) to the runner.
+- Isolate extension sync failures per extension so one failed extension does not prevent later extensions from being attempted.
+- Report configured `homeboy_path` versus bare `homeboy` version drift when both can be observed.
+- Report a stale connected runner daemon when the daemon session version no longer matches the configured runner executable version.
+
 ## Options
 
 - `--check`: Check for updates without installing. Returns version information without making changes.
@@ -19,7 +27,7 @@ By default, after a successful local upgrade, Homeboy also checks configured SSH
 - `--no-restart`: Skip automatic restart after upgrade. Useful for scripted environments.
 - `--skip-extensions`: Skip automatic extension updates.
 - `--skip-runners`: Skip automatic configured runner upgrades.
-- `--runner`: Upgrade only the named configured runner. Repeat to target multiple runners.
+- `--upgrade-runner`: Upgrade only the named configured runner. Repeat to target multiple runners.
 - `--method`: Override install method detection (`homebrew|cargo|source|binary`).
 
 ## Installation Method Detection
@@ -68,7 +76,7 @@ homeboy upgrade --force
 Upgrade only a specific runner after the local upgrade:
 
 ```sh
-homeboy upgrade --runner lab
+homeboy upgrade --upgrade-runner lab
 ```
 
 Upgrade locally without touching configured runners:
@@ -103,6 +111,8 @@ homeboy upgrade --skip-runners
 - `projects_migrated`: Project config migration entries
 - `runners_updated`: Runner upgrade entries for configured runners that completed successfully
 - `runners_skipped`: Runner upgrade entries for configured runners that failed or could not verify a version
+
+Runner upgrade entries include the configured `homeboy_path`, observed configured executable version, optional bare `homeboy` version, optional path drift detail, per-extension sync successes/failures, and optional stale-daemon remediation commands.
 
 ## Exit code
 

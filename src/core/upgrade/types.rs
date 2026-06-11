@@ -71,8 +71,34 @@ pub struct RunnerUpgradeEntry {
     pub previous_version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub new_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bare_homeboy_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path_drift: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub extensions_synced: Vec<RunnerExtensionSyncEntry>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub extensions_failed: Vec<RunnerExtensionSyncEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stale_daemon: Option<RunnerDaemonDriftEntry>,
     pub exit_code: i32,
     pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunnerExtensionSyncEntry {
+    pub extension_id: String,
+    pub source_revision: String,
+    pub synced: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunnerDaemonDriftEntry {
+    pub session_homeboy_version: String,
+    pub current_homeboy_version: String,
+    pub recovery_commands: Vec<String>,
 }
 
 #[derive(Deserialize)]
