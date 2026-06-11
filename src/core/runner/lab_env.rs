@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use super::execution::RUNNER_EXEC_WAIT_TIMEOUT_ENV;
 use crate::core::observation::LAB_OFFLOAD_METADATA_ENV;
 
 const SETTINGS_DIAGNOSTICS_SCHEMA: &str = "homeboy/lab-offload-settings-env/v1";
@@ -66,6 +67,23 @@ pub(super) fn settings_env_diagnostics(
         "settings": settings,
         "forwarded_environment": forwarded_environment,
     })
+}
+
+pub(super) fn misplaced_runner_exec_wait_timeout_warning(
+    normalized_args: &[String],
+) -> Option<String> {
+    if std::env::var_os(RUNNER_EXEC_WAIT_TIMEOUT_ENV).is_some() {
+        return None;
+    }
+
+    parsed_setting_args(normalized_args)
+        .into_iter()
+        .any(|setting| setting.key == RUNNER_EXEC_WAIT_TIMEOUT_ENV)
+        .then(|| {
+            format!(
+                "Lab offload: `{RUNNER_EXEC_WAIT_TIMEOUT_ENV}` was supplied as a workload setting, but runner wait timeout is controlled by the controller process. Set it before invoking homeboy instead, e.g. `{RUNNER_EXEC_WAIT_TIMEOUT_ENV}=2400 homeboy ...`."
+            )
+        })
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -283,5 +301,35 @@ mod tests {
             env.get("RELEASE_BLOCKING_COMMANDS").map(String::as_str),
             Some("lint,test")
         );
+    }
+
+    #[test]
+    fn warns_when_runner_exec_wait_timeout_is_only_a_workload_setting() {
+        std::env::remove_var(RUNNER_EXEC_WAIT_TIMEOUT_ENV);
+        let args = vec![
+            "homeboy".to_string(),
+            "bench".to_string(),
+            "--setting".to_string(),
+            format!("{RUNNER_EXEC_WAIT_TIMEOUT_ENV}=2400"),
+        ];
+
+        let warning = misplaced_runner_exec_wait_timeout_warning(&args).expect("warning");
+
+        assert!(warning.contains(RUNNER_EXEC_WAIT_TIMEOUT_ENV));
+        assert!(warning.contains("controller process"));
+        assert!(warning.contains("workload setting"));
+    }
+
+    #[test]
+    fn skips_runner_exec_wait_timeout_setting_warning_when_controller_env_is_set() {
+        let _guard = EnvVarGuard::set(RUNNER_EXEC_WAIT_TIMEOUT_ENV, "2400");
+        let args = vec![
+            "homeboy".to_string(),
+            "bench".to_string(),
+            "--setting".to_string(),
+            format!("{RUNNER_EXEC_WAIT_TIMEOUT_ENV}=2400"),
+        ];
+
+        assert_eq!(misplaced_runner_exec_wait_timeout_warning(&args), None);
     }
 }
