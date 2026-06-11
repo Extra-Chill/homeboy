@@ -54,6 +54,10 @@ const CODEX_SECRET_ENV = [
   'AI_PROVIDER_OPENAI_CODEX_FEDRAMP',
 ];
 
+const CLAUDE_CODE_SECRET_ENV = [
+  'AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN',
+];
+
 const DEFAULT_CODEX_MODEL = 'gpt-5.5';
 
 const AGENT_BUNDLE_CONFIG_FIELDS = [
@@ -401,6 +405,9 @@ function defaultSecretEnv(provider, settings) {
   }
   if (provider === 'codex') {
     return CODEX_SECRET_ENV;
+  }
+  if (provider === 'claude-code') {
+    return CLAUDE_CODE_SECRET_ENV;
   }
   return provider === 'openai' ? ['OPENAI_API_KEY'] : [];
 }

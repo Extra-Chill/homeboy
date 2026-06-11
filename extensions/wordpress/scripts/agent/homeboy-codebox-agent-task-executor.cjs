@@ -316,7 +316,7 @@ function redactDiagnosticText(text) {
 }
 
 function missingSecretEnvNames(stderr) {
-  const match = String(stderr || '').match(/Required WP Codebox secret environment variable missing:\s*([^\n\r]+)/i);
+  const match = String(stderr || '').match(/(?:Required WP Codebox secret environment variable missing|Claude Code provider auth preflight failed: missing required secret environment (?:mapping|value)):\s*([^\n\r]+)/i);
   if (!match) {
     return [];
   }
@@ -326,14 +326,23 @@ function missingSecretEnvNames(stderr) {
     .filter((name) => /^[A-Z0-9_]+$/.test(name));
 }
 
+function preflightFailureClass(stderr, missingSecretEnv) {
+  if (/Claude Code provider auth preflight failed:/i.test(stderr)) {
+    return missingSecretEnv.length > 0
+      ? 'codebox.preflight.claude_code_auth'
+      : 'codebox.preflight.stderr';
+  }
+  return missingSecretEnv.length > 0
+    ? 'codebox.preflight.missing_secret_env'
+    : 'codebox.preflight.stderr';
+}
+
 function stderrFailurePayload(result) {
   const stderr = redactDiagnosticText(result.stderr || '');
   const missingSecretEnv = missingSecretEnvNames(stderr);
-  const diagnosticClass = missingSecretEnv.length > 0
-    ? 'codebox.preflight.missing_secret_env'
-    : 'codebox.preflight.stderr';
+  const diagnosticClass = preflightFailureClass(stderr, missingSecretEnv);
   const message = missingSecretEnv.length > 0
-    ? `WP Codebox task runner preflight is missing required secret environment variables: ${missingSecretEnv.join(', ')}.`
+    ? `WP Codebox task runner preflight is missing required secret environment variables for ${diagnosticClass === 'codebox.preflight.claude_code_auth' ? 'Claude Code provider auth' : 'the runtime'}: ${missingSecretEnv.join(', ')}.`
     : 'WP Codebox task runner failed before returning a JSON outcome.';
 
   return {
