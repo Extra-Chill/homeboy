@@ -369,6 +369,66 @@ function stderrFailurePayload(result) {
   };
 }
 
+function isRepoCookingRequest(request, taskInput) {
+  const config = request.executor?.config || {};
+  const parentConfig = taskInput.parent_request?.executor?.config || {};
+  return config.task_kind === 'repo-cooking' || config.taskKind === 'repo-cooking' || parentConfig.task_kind === 'repo-cooking' || parentConfig.taskKind === 'repo-cooking';
+}
+
+function workspaceMounts(taskInput) {
+  return Array.isArray(taskInput.mounts) ? taskInput.mounts : [];
+}
+
+function hasWorkspaceMount(taskInput) {
+  return workspaceMounts(taskInput).some((mount) => {
+    if (!mount || typeof mount !== 'object') {
+      return false;
+    }
+    if (mount.metadata?.kind === 'homeboy-dmc-workspace') {
+      return Boolean(mount.source);
+    }
+    return Boolean(mount.source) && /^\/workspace(?:\/|$)/.test(String(mount.target || ''));
+  });
+}
+
+function missingWorkspacePayload(request, taskInput) {
+  if (!isRepoCookingRequest(request, taskInput) || hasWorkspaceMount(taskInput)) {
+    return null;
+  }
+
+  const config = request.executor?.config || {};
+  const message = 'WP Codebox repo-cooking task has no mounted checkout/workspace.';
+  return {
+    success: false,
+    status: 'failed',
+    failure_classification: 'execution_failed',
+    summary: message,
+    diagnostics: [{
+      class: 'codebox.preflight.missing_workspace',
+      message,
+      data: {
+        phase: 'codebox.preflight',
+        repo: config.repo || request.group_key || request.workspace?.slug || '',
+        task_kind: config.task_kind || config.taskKind || '',
+        workspace_root: config.workspace_root || config.workspaceRoot || request.workspace?.root || '',
+        mounts_count: workspaceMounts(taskInput).length,
+        workspaces_count: Array.isArray(taskInput.workspaces) ? taskInput.workspaces.length : 0,
+        workspace_materialization: request.workspace?.materialization || {},
+      },
+    }],
+    metadata: {
+      phase: 'codebox.preflight',
+      missing_workspace: true,
+      repo: config.repo || request.group_key || request.workspace?.slug || '',
+      task_kind: config.task_kind || config.taskKind || '',
+      workspace_root: config.workspace_root || config.workspaceRoot || request.workspace?.root || '',
+      mounts_count: workspaceMounts(taskInput).length,
+      workspaces_count: Array.isArray(taskInput.workspaces) ? taskInput.workspaces.length : 0,
+      workspace_materialization: request.workspace?.materialization || {},
+    },
+  };
+}
+
 function missingModelPreflightPayload(taskInput) {
   if (!taskInput?.provider || taskInput?.model) {
     return null;
@@ -433,6 +493,10 @@ async function runTaskRunner(request) {
   const missingModelPayload = missingModelPreflightPayload(taskInput);
   if (missingModelPayload) {
     return agentTaskOutcomeFromCodeboxResult(request, missingModelPayload, { exitStatus: 1, ...coreNormalizers });
+  }
+  const preflightPayload = missingWorkspacePayload(request, taskInput);
+  if (preflightPayload) {
+    return agentTaskOutcomeFromCodeboxResult(request, preflightPayload, { exitStatus: 1, ...coreNormalizers });
   }
   const configArgs = [
     ['--agents-api', config.agents_api_path || config.agentsApiPath],
