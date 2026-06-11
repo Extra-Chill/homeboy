@@ -260,6 +260,48 @@ state, serialized byte size, value type, array entry count when applicable, and
 sample context such as `sample_index`, `label`, and `sampled_at_unix_ms`. Pass
 `network => true` in the transient context to sample a site transient.
 
+### WordPress benchmark WooCommerce fixture profiles
+
+WooCommerce bench workloads can seed reusable store shapes by requiring the
+WooCommerce fixture helper mounted with the WordPress extension:
+
+```php
+<?php
+require_once '/homeboy-extension/scripts/bench/lib/woocommerce-fixtures.php';
+
+return homeboy_wordpress_bench_wc_apply_fixture_profile(
+    'small-shortcode-checkout',
+    [
+        'run_id' => getenv('HOMEBOY_RUN_ID') ?: 'local-checkout-run',
+        'product_count' => 150,
+    ]
+);
+```
+
+The helper returns the normal workload payload shape with numeric `metrics` and
+structured `metadata.woocommerce_fixture`. Fixture objects are scoped by a
+normalized run id and deterministic prefix so repeated workloads can explain the
+generated store shape in Homeboy artifacts.
+
+Built-in profiles:
+
+- `small-shortcode-checkout`: shortcode checkout, HPOS off, COD enabled, about
+  150 products and 125 variations by default.
+- `large-admin-catalog`: larger mixed virtual/physical catalog, categories,
+  Woo admin/onboarding options, coupons, customers, and historical orders.
+- `account-heavy-store`: many customers with repeat historical orders for account
+  and login workloads.
+- `shipping-package-matrix`: physical catalog with configurable shipping zones,
+  methods, package count, and items per package metadata.
+
+Common overrides include `run_id`, `product_count`, `variable_product_count`,
+`variations_per_product`, `category_count`, `customer_count`,
+`orders_per_customer`, `guest_order_count`, `coupon_count`,
+`shipping_zone_count`, `shipping_methods_per_zone`, `hpos`, and `checkout`.
+Profiles use WooCommerce APIs when WooCommerce is loaded; outside a WooCommerce
+runtime the helper returns a structured `woocommerce_unavailable` failure instead
+of fatalling, which keeps smoke tests and matrix diagnostics readable.
+
 Playground grader workloads may also return a normalized reward payload:
 
 ```json
