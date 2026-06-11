@@ -168,7 +168,8 @@ fn sync_runner_extensions(
             continue;
         };
 
-        let command = vec![
+        let exists = runner_extension_exists(runner, homeboy_path, &extension.extension_id, exec)?;
+        let mut command = vec![
             homeboy_path.to_string(),
             "extension".to_string(),
             "install".to_string(),
@@ -177,8 +178,10 @@ fn sync_runner_extensions(
             extension.extension_id.clone(),
             "--ref".to_string(),
             source_revision.to_string(),
-            "--replace".to_string(),
         ];
+        if exists {
+            command.push("--replace".to_string());
+        }
 
         let result = exec(&runner.id, runner_exec_options(runner, command.clone()));
         match result {
@@ -210,6 +213,41 @@ fn sync_runner_extensions(
     }
 
     Ok(())
+}
+
+fn runner_extension_exists(
+    runner: &Runner,
+    homeboy_path: &str,
+    extension_id: &str,
+    exec: &mut impl FnMut(&str, RunnerExecOptions) -> Result<(runner::RunnerExecOutput, i32)>,
+) -> std::result::Result<bool, String> {
+    let result = exec(
+        &runner.id,
+        runner_exec_options(
+            runner,
+            vec![
+                homeboy_path.to_string(),
+                "extension".to_string(),
+                "show".to_string(),
+                extension_id.to_string(),
+            ],
+        ),
+    );
+
+    match result {
+        Ok((_output, 0)) => Ok(true),
+        Ok((_output, 4)) => Ok(false),
+        Ok((output, exit_code)) => Err(format!(
+            "extension {} lookup failed with exit code {}: {}",
+            extension_id,
+            exit_code,
+            runner_upgrade_detail(&output)
+        )),
+        Err(err) => Err(format!(
+            "extension {} lookup failed: {}",
+            extension_id, err.message
+        )),
+    }
 }
 
 fn runner_homeboy_version(
@@ -406,6 +444,7 @@ mod tests {
                     2 => "{\"success\":true}\n",
                     3 => "homeboy 0.228.5\n",
                     4 => "{\"success\":true}\n",
+                    5 => "{\"success\":true}\n",
                     _ => "",
                 };
                 Ok((exec_output(runner_id, options.command, stdout, "", 0), 0))
@@ -414,7 +453,7 @@ mod tests {
         assert!(skipped.is_empty());
         assert_eq!(updated.len(), 1);
         assert_eq!(
-            commands[3],
+            commands[4],
             vec![
                 "/home/chubes/.cargo/bin/homeboy",
                 "extension",
@@ -425,6 +464,59 @@ mod tests {
                 "--ref",
                 "48517ac3",
                 "--replace",
+            ]
+        );
+    }
+
+    #[test]
+    fn installs_missing_runner_extension_without_replace_flag() {
+        let runner = ssh_runner("lab", Some("/home/chubes/.cargo/bin/homeboy"));
+        let extension_updates = vec![ExtensionUpgradeEntry {
+            extension_id: "swift".to_string(),
+            old_version: "2.6.1".to_string(),
+            new_version: "2.6.1".to_string(),
+            linked: true,
+            source_path: Some("/Users/chubes/Developer/homeboy-extensions/swift".to_string()),
+            git_root: Some("/Users/chubes/Developer/homeboy-extensions".to_string()),
+            source_url: Some("https://github.com/Extra-Chill/homeboy-extensions.git".to_string()),
+            source_revision: Some("98a61eda".to_string()),
+            source_update: Default::default(),
+        }];
+        let mut commands = Vec::new();
+
+        let (updated, skipped) =
+            upgrade_runners_with_executor(&[runner], &extension_updates, |runner_id, options| {
+                commands.push(options.command.clone());
+                let (stdout, exit_code) = match commands.len() {
+                    1 => ("homeboy 0.228.4\n", 0),
+                    2 => ("{\"success\":true}\n", 0),
+                    3 => ("homeboy 0.228.5\n", 0),
+                    4 => (
+                        "{\"success\":false,\"error\":{\"code\":\"extension.not_found\"}}\n",
+                        4,
+                    ),
+                    5 => ("{\"success\":true}\n", 0),
+                    _ => ("", 0),
+                };
+                Ok((
+                    exec_output(runner_id, options.command, stdout, "", exit_code),
+                    exit_code,
+                ))
+            });
+
+        assert!(skipped.is_empty());
+        assert_eq!(updated.len(), 1);
+        assert_eq!(
+            commands[4],
+            vec![
+                "/home/chubes/.cargo/bin/homeboy",
+                "extension",
+                "install",
+                "https://github.com/Extra-Chill/homeboy-extensions.git",
+                "--id",
+                "swift",
+                "--ref",
+                "98a61eda",
             ]
         );
     }
