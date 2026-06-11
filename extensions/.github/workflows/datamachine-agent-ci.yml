@@ -1139,11 +1139,11 @@ jobs:
             exit 1
           fi
 
-          if [ "$job_status" = "completed" ] || [ "$success_status" = "pr_opened" ] || [ "$completion_outcome_satisfied" = "true" ] || { [ "$success_status" = "no_changes" ] && [ "$no_changes_allowed" = "true" ]; }; then
+          if [ "$success_status" = "pr_opened" ] || [ "$completion_outcome_satisfied" = "true" ] || { [ "$success_status" = "no_changes" ] && [ "$no_changes_allowed" = "true" ]; }; then
             exit 0
           fi
 
-          printf 'ERROR: scenario %s expected completed job, opened PR, satisfied completion outcome, or allowed no-changes result, got job_status=%s success_status=%s completion_outcome_satisfied=%s no_changes_allowed=%s\n' \
+          printf 'ERROR: scenario %s expected opened PR, satisfied completion outcome, or allowed no-changes result, got job_status=%s success_status=%s completion_outcome_satisfied=%s no_changes_allowed=%s\n' \
             "${{ inputs.flow_slug }}" \
             "$job_status" \
             "$success_status" \

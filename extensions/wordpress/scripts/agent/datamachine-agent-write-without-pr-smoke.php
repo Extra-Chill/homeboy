@@ -154,6 +154,16 @@ namespace {
         exit( 1 );
     }
 
+    if ( 'write_without_pr' !== homeboy_datamachine_agent_success_status( false, false, true ) ) {
+        fwrite( STDERR, "Expected file writes without PR publication to be classified as write_without_pr.\n" );
+        exit( 1 );
+    }
+
+    if ( 'no_changes' !== homeboy_datamachine_agent_success_status( false, false, false ) ) {
+        fwrite( STDERR, "Expected no writes and no PR publication to be classified as no_changes.\n" );
+        exit( 1 );
+    }
+
     $pr_opened = array(
         'github_tool_results' => array(
             array(
