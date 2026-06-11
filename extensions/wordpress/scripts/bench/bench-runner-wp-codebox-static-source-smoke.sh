@@ -196,6 +196,37 @@ jq -e '
     and ([.recipe.workflow.steps[0].args[] | select(startswith("workloads-json=") and contains("ssi-import"))] | length) == 0
 ' "$SELECTED_CAPTURE_FILE" >/dev/null
 
+printf '<?php return function (): array { return array("metrics" => array("shadow" => 1)); };\n' > "${SOURCE_ROOT}/tests/bench/rig-workload.php"
+set +e
+DUPLICATE_OUTPUT=$(HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$RESOLVE_HELPER" \
+HOMEBOY_RUNTIME_BENCH_HELPER_SH="$BENCH_HELPER" \
+HOMEBOY_WORDPRESS_DEPENDENCY_HELPER="$DEPENDENCY_HELPER" \
+HOMEBOY_SMOKE_SOURCE_ROOT="$SOURCE_ROOT" \
+HOMEBOY_SMOKE_CAPTURE_FILE="${TMP_ROOT}/duplicate-capture.json" \
+HOMEBOY_SETTINGS_JSON="$SETTINGS_JSON" \
+HOMEBOY_BENCH_EXTRA_WORKLOADS="$EXTRA_WORKLOAD" \
+HOMEBOY_BENCH_SCENARIOS="rig-workload" \
+HOMEBOY_WP_CODEBOX_BIN="$WP_CODEBOX_BIN" \
+HOMEBOY_WP_CODEBOX_CORE_MODULE="$WP_CODEBOX_CORE_MODULE" \
+HOMEBOY_BENCH_RESULTS_FILE="${TMP_ROOT}/duplicate-results.json" \
+HOMEBOY_WP_CODEBOX_ARTIFACTS_DIR="${TMP_ROOT}/duplicate-artifacts" \
+HOMEBOY_RUNTIME_FAILURE_TRAP="" \
+HOMEBOY_BENCH_ITERATIONS=1 \
+HOMEBOY_BENCH_WARMUP_ITERATIONS=0 \
+bash "$SCRIPT_DIR/bench-runner-wp-codebox.sh" 2>&1 >/dev/null)
+DUPLICATE_STATUS=$?
+set -e
+rm -f "${SOURCE_ROOT}/tests/bench/rig-workload.php"
+if [ "$DUPLICATE_STATUS" -eq 0 ]; then
+    echo "Expected duplicate selected rig/in-tree workload ids to fail." >&2
+    exit 1
+fi
+if [[ "$DUPLICATE_OUTPUT" != *"duplicate WordPress bench scenario id 'rig-workload'"* ]]; then
+    echo "Expected duplicate selected rig/in-tree workload failure to name the scenario id." >&2
+    printf '%s\n' "$DUPLICATE_OUTPUT" >&2
+    exit 1
+fi
+
 LIST_RESULTS_FILE="${TMP_ROOT}/bench-list-results.json"
 HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$RESOLVE_HELPER" \
 HOMEBOY_RUNTIME_BENCH_HELPER_SH="$BENCH_HELPER" \

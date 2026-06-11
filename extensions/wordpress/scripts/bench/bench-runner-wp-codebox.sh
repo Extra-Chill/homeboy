@@ -419,6 +419,33 @@ homeboy_wp_codebox_filter_extra_bench_workloads() {
     export HOMEBOY_BENCH_EXTRA_WORKLOADS="$filtered_value"
 }
 
+homeboy_wp_codebox_fail_on_duplicate_selected_rig_workloads() {
+    local workloads_value="${HOMEBOY_BENCH_EXTRA_WORKLOADS:-}"
+    local selected_value="${HOMEBOY_BENCH_SCENARIOS:-}"
+    [ -n "$workloads_value" ] || return 0
+    [ -n "$selected_value" ] || return 0
+
+    local bench_dir="${PLUGIN_PATH}/tests/bench"
+    [ -d "$bench_dir" ] || return 0
+
+    local workload_path workload_name scenario_id component_workload
+    IFS=':' read -r -a workload_paths <<< "$workloads_value"
+    for workload_path in "${workload_paths[@]}"; do
+        [ -n "$workload_path" ] || continue
+        workload_name="$(basename "$workload_path")"
+        scenario_id="$(homeboy_wp_codebox_workload_scenario_id "$workload_name")"
+        component_workload="${bench_dir}/${scenario_id}.php"
+        if [ -f "$component_workload" ]; then
+            echo "Error: duplicate WordPress bench scenario id '${scenario_id}' is selected from both a rig workload and an in-tree workload." >&2
+            echo "  Rig workload: ${workload_path}" >&2
+            echo "  In-tree workload: ${component_workload}" >&2
+            echo "Rename one workload or select a unique scenario id so the rig workload cannot be shadowed." >&2
+            FAILED_STEP="WP Codebox bench workload setup"
+            exit 1
+        fi
+    done
+}
+
 homeboy_wp_codebox_extra_workload_scenarios_json() {
     local workloads_value="${HOMEBOY_BENCH_EXTRA_WORKLOADS:-}"
     local scenarios="[]"
@@ -667,6 +694,7 @@ homeboy_wp_codebox_compile_bootstrap_files
 homeboy_wp_codebox_compile_bootstrap_steps
 homeboy_wp_codebox_compile_prepare_steps
 homeboy_wp_codebox_filter_extra_bench_workloads
+homeboy_wp_codebox_fail_on_duplicate_selected_rig_workloads
 
 WP_CODEBOX_WORDPRESS_VERSION=""
 if [ "$settings_json" != "{}" ]; then
