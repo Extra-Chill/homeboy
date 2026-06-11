@@ -154,6 +154,8 @@ pub struct TraceAggregateOutput {
     pub runs: Vec<TraceAggregateRunOutput>,
     pub spans: Vec<TraceAggregateSpanOutput>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub metrics: Vec<TraceAggregateMetricOutput>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub guardrails: Vec<TraceGuardrailOutput>,
     #[serde(default, skip_serializing_if = "is_default_usize")]
     pub guardrail_failure_count: usize,
@@ -220,6 +222,27 @@ pub struct TraceAggregateSpanOutput {
     pub samples: Vec<TraceAggregateSpanSampleOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<TraceSpanMetadata>,
+}
+
+#[derive(Serialize, Clone)]
+pub struct TraceAggregateMetricOutput {
+    pub id: String,
+    pub n: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub median: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max: Option<f64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub samples: Vec<TraceAggregateMetricSampleOutput>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct TraceAggregateMetricSampleOutput {
+    pub run_index: usize,
+    pub value: f64,
+    pub artifact_path: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Default)]
@@ -296,6 +319,14 @@ pub struct TraceCompareOutput {
     pub span_count: usize,
     pub spans: Vec<TraceCompareSpanOutput>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub metrics: Vec<TraceCompareMetricOutput>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub metric_guardrails: Vec<TraceMetricGuardrailOutput>,
+    #[serde(default, skip_serializing_if = "is_default_usize")]
+    pub metric_guardrail_failure_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metric_guardrail_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub focus_span_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub focus_spans: Vec<TraceCompareSpanOutput>,
@@ -354,6 +385,56 @@ pub struct TraceCompareClassificationSummaryOutput {
     pub after_total_median_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub median_delta_ms: Option<i64>,
+}
+
+#[derive(Serialize, Clone)]
+pub struct TraceCompareMetricOutput {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub before_n: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub after_n: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub before_min: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub after_min: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub before_median: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub after_median: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub median_delta: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub median_delta_percent: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub before_max: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub after_max: Option<f64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub before_samples: Vec<TraceAggregateMetricSampleOutput>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub after_samples: Vec<TraceAggregateMetricSampleOutput>,
+}
+
+#[derive(Serialize, Clone)]
+pub struct TraceMetricGuardrailOutput {
+    pub metric: String,
+    pub policy: String,
+    pub statistic: String,
+    pub passed: bool,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub threshold: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub before_value: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub after_value: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delta: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delta_percent: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure: Option<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -832,6 +913,7 @@ mod tests {
                 timeline: Vec::new(),
                 span_definitions: Vec::new(),
                 span_results: Vec::new(),
+                metrics: Default::default(),
                 assertions: Vec::new(),
                 temporal_assertions: Vec::new(),
                 artifacts: vec![TraceArtifact {
@@ -911,6 +993,7 @@ mod tests {
                     message: None,
                 }],
                 assertions: Vec::new(),
+                metrics: Default::default(),
                 temporal_assertions: Vec::new(),
                 artifacts: Vec::new(),
                 toolchain: None,
@@ -1000,6 +1083,7 @@ mod tests {
                 message: None,
             }],
             assertions: Vec::new(),
+            metrics: Default::default(),
             temporal_assertions: Vec::new(),
             artifacts: Vec::new(),
             toolchain: Some(TraceToolchainProvenance {
@@ -1069,6 +1153,7 @@ mod tests {
             timeline: Vec::new(),
             span_definitions: Vec::new(),
             span_results: Vec::new(),
+            metrics: Default::default(),
             assertions: Vec::new(),
             temporal_assertions: Vec::new(),
             artifacts: vec![

@@ -7,10 +7,12 @@ use homeboy::core::extension::trace as extension_trace;
 use homeboy::core::extension::trace::TraceCommandOutput;
 use homeboy::core::rig;
 
-use super::aggregate::{aggregate_span, TraceAggregateSpanSample};
+use super::aggregate::{
+    aggregate_metric, aggregate_span, TraceAggregateMetricSample, TraceAggregateSpanSample,
+};
 use super::output::{
     classification_summaries, compare_trace_aggregates_with_focus, TraceAggregateInput,
-    TraceAggregateRunInput, TraceAggregateSpanInput, TraceOverlayInput,
+    TraceAggregateMetricInput, TraceAggregateRunInput, TraceAggregateSpanInput, TraceOverlayInput,
 };
 use super::repeat::{focus_aggregate_spans, run_repeat};
 use super::{
@@ -63,6 +65,7 @@ pub(super) fn run_compare_variant(mut args: TraceArgs) -> CmdResult<TraceCommand
     let focus_spans = args.focus_spans.clone();
     let regression_threshold = args.regression_threshold;
     let regression_min_delta_ms = args.regression_min_delta_ms;
+    let metric_guardrails = args.metric_guardrails.clone();
 
     let (baseline, variant, run_order) = run_compare_variant_pair(args)?;
 
@@ -85,6 +88,7 @@ pub(super) fn run_compare_variant(mut args: TraceArgs) -> CmdResult<TraceCommand
         &focus_spans,
         regression_threshold,
         regression_min_delta_ms,
+        &metric_guardrails,
     );
     write_trace_compare_variant_json(&compare_path, &compare)?;
     write_trace_compare_variant_summary(
@@ -100,6 +104,7 @@ pub(super) fn run_compare_variant(mut args: TraceArgs) -> CmdResult<TraceCommand
         && variant.exit_code == 0
         && compare.focus_status.as_deref() != Some("fail")
         && compare.guardrail_status.as_deref() != Some("fail")
+        && compare.metric_guardrail_status.as_deref() != Some("fail")
     {
         0
     } else {
@@ -178,6 +183,7 @@ struct TraceCompareVariantAggregateBuilder {
     runs: Vec<extension_trace::TraceAggregateRunOutput>,
     run_order: Vec<extension_trace::TraceRunOrderEntryOutput>,
     span_samples: BTreeMap<String, Vec<TraceAggregateSpanSample>>,
+    metric_samples: BTreeMap<String, Vec<TraceAggregateMetricSample>>,
     span_failures: BTreeMap<String, usize>,
     all_span_ids: BTreeSet<String>,
     overlays: Vec<extension_trace::run::TraceOverlay>,
@@ -195,6 +201,7 @@ impl TraceCompareVariantAggregateBuilder {
             runs: Vec::new(),
             run_order: Vec::new(),
             span_samples: BTreeMap::new(),
+            metric_samples: BTreeMap::new(),
             span_failures: BTreeMap::new(),
             all_span_ids: BTreeSet::new(),
             overlays: Vec::new(),
@@ -241,6 +248,18 @@ impl TraceCompareVariantAggregateBuilder {
                 *self.span_failures.entry(span.id).or_default() += span.failures;
             }
         }
+        for metric in aggregate.metrics {
+            for sample in metric.samples {
+                self.metric_samples
+                    .entry(metric.id.clone())
+                    .or_default()
+                    .push(TraceAggregateMetricSample {
+                        value: sample.value,
+                        run_index: plan.index(),
+                        artifact_path: sample.artifact_path,
+                    });
+            }
+        }
     }
 
     fn finish(mut self) -> extension_trace::TraceAggregateOutput {
@@ -255,6 +274,11 @@ impl TraceCompareVariantAggregateBuilder {
             })
             .collect::<Vec<_>>();
         let focus_spans = focus_aggregate_spans(&spans, &self.args.focus_spans);
+        let metrics = self
+            .metric_samples
+            .into_iter()
+            .map(|(id, samples)| aggregate_metric(id, samples))
+            .collect::<Vec<_>>();
         let classification_summaries = classification_summaries(&spans);
         let exit_code = if self.failure_count == 0 && self.guardrail_failure_count == 0 {
             0
@@ -290,6 +314,7 @@ impl TraceCompareVariantAggregateBuilder {
             overlays: self.overlays,
             runs: self.runs,
             spans,
+            metrics,
             guardrails: self.guardrails,
             guardrail_failure_count: self.guardrail_failure_count,
             focus_span_ids: self.args.focus_spans.clone(),
@@ -390,6 +415,18 @@ fn aggregate_to_compare_input(
                 max_artifact_path: span.max_artifact_path.clone(),
                 failures: span.failures,
                 metadata: span.metadata.clone(),
+            })
+            .collect(),
+        metrics: aggregate
+            .metrics
+            .iter()
+            .map(|metric| TraceAggregateMetricInput {
+                id: metric.id.clone(),
+                n: metric.n,
+                min: metric.min,
+                median: metric.median,
+                max: metric.max,
+                samples: metric.samples.clone(),
             })
             .collect(),
         guardrails: aggregate.guardrails.clone(),

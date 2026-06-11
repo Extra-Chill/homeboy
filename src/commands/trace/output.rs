@@ -29,6 +29,8 @@ pub(super) struct TraceAggregateInput {
     pub(super) runs: Vec<TraceAggregateRunInput>,
     pub(super) spans: Vec<TraceAggregateSpanInput>,
     #[serde(default)]
+    pub(super) metrics: Vec<TraceAggregateMetricInput>,
+    #[serde(default)]
     pub(super) guardrails: Vec<extension_trace::TraceGuardrailOutput>,
     #[serde(default)]
     pub(super) guardrail_failure_count: usize,
@@ -54,6 +56,43 @@ pub(super) struct TraceAggregateSpanInput {
     pub(super) failures: usize,
     #[serde(default)]
     pub(super) metadata: Option<extension_trace::TraceSpanMetadata>,
+}
+
+#[derive(Deserialize, Clone)]
+pub(super) struct TraceAggregateMetricInput {
+    pub(super) id: String,
+    pub(super) n: usize,
+    #[serde(default)]
+    pub(super) min: Option<f64>,
+    #[serde(default)]
+    pub(super) median: Option<f64>,
+    #[serde(default)]
+    pub(super) max: Option<f64>,
+    #[serde(default)]
+    pub(super) samples: Vec<extension_trace::TraceAggregateMetricSampleOutput>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TraceMetricGuardrailSpec {
+    pub metric: String,
+    pub statistic: TraceMetricStatistic,
+    pub policy: TraceMetricGuardrailPolicy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraceMetricStatistic {
+    Min,
+    Median,
+    Max,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum TraceMetricGuardrailPolicy {
+    Required,
+    Equal,
+    CandidateLteBaseline,
+    AbsoluteDelta { max: f64 },
+    PercentDelta { max_percent: f64 },
 }
 
 #[derive(Deserialize)]
@@ -92,9 +131,11 @@ pub(super) fn run_compare(args: TraceArgs) -> CmdResult<TraceCommandOutput> {
         &args.focus_spans,
         args.regression_threshold,
         args.regression_min_delta_ms,
+        &args.metric_guardrails,
     );
     let exit_code = if output.focus_status.as_deref() == Some("fail")
         || output.guardrail_status.as_deref() == Some("fail")
+        || output.metric_guardrail_status.as_deref() == Some("fail")
     {
         1
     } else {
@@ -177,6 +218,7 @@ pub(super) fn compare_trace_aggregates(
         &[],
         extension_trace::baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT,
         extension_trace::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
+        &[],
     )
 }
 
@@ -188,6 +230,7 @@ pub(super) fn compare_trace_aggregates_with_focus(
     focus_span_ids: &[String],
     regression_threshold_percent: f64,
     regression_min_delta_ms: u64,
+    metric_guardrail_specs: &[TraceMetricGuardrailSpec],
 ) -> extension_trace::TraceCompareOutput {
     let before_spans = before
         .spans
@@ -237,6 +280,32 @@ pub(super) fn compare_trace_aggregates_with_focus(
         .collect::<Vec<_>>();
     spans.sort_by(compare_trace_span_impact);
     let classification_summaries = compare_classification_summaries(&before_spans, &after_spans);
+    let before_metrics = before
+        .metrics
+        .into_iter()
+        .map(|metric| (metric.id.clone(), metric))
+        .collect::<BTreeMap<_, _>>();
+    let after_metrics = after
+        .metrics
+        .into_iter()
+        .map(|metric| (metric.id.clone(), metric))
+        .collect::<BTreeMap<_, _>>();
+    let metrics = compare_metrics(&before_metrics, &after_metrics);
+    let metric_guardrails = metric_guardrail_specs
+        .iter()
+        .map(|spec| evaluate_metric_guardrail(spec, &before_metrics, &after_metrics))
+        .collect::<Vec<_>>();
+    let metric_guardrail_failure_count = metric_guardrails
+        .iter()
+        .filter(|guardrail| !guardrail.passed)
+        .count();
+    let metric_guardrail_status = if metric_guardrail_specs.is_empty() {
+        None
+    } else if metric_guardrail_failure_count > 0 {
+        Some("fail".to_string())
+    } else {
+        Some("pass".to_string())
+    };
 
     let focus_spans = focus_compare_spans(&spans, focus_span_ids);
     let focus_regression_count = focus_spans
@@ -287,6 +356,10 @@ pub(super) fn compare_trace_aggregates_with_focus(
         after_scenario_id: after.scenario_id,
         span_count: spans.len(),
         spans,
+        metrics,
+        metric_guardrails,
+        metric_guardrail_failure_count,
+        metric_guardrail_status,
         focus_span_ids: focus_span_ids.to_vec(),
         focus_spans,
         focus_regression_count,
@@ -300,6 +373,211 @@ pub(super) fn compare_trace_aggregates_with_focus(
         proof_run_order: Vec::new(),
         caveats: Vec::new(),
         browser_proof: None,
+    }
+}
+
+pub(super) fn parse_metric_guardrail(value: &str) -> Result<TraceMetricGuardrailSpec, String> {
+    let parts = value.split(':').collect::<Vec<_>>();
+    if !(2..=3).contains(&parts.len()) {
+        return Err(
+            "metric guardrail must use METRIC[.min|.median|.max]:POLICY[:VALUE]".to_string(),
+        );
+    }
+    let (metric, statistic) = parse_metric_and_statistic(parts[0])?;
+    let policy = match parts[1] {
+        "required" | "present" => TraceMetricGuardrailPolicy::Required,
+        "equal" | "eq" => TraceMetricGuardrailPolicy::Equal,
+        "lte" | "candidate_lte_baseline" | "candidate<=baseline" => {
+            TraceMetricGuardrailPolicy::CandidateLteBaseline
+        }
+        "delta" | "absolute_delta" | "max_delta" => TraceMetricGuardrailPolicy::AbsoluteDelta {
+            max: parse_required_threshold(parts.get(2), parts[1])?,
+        },
+        "percent" | "percent_delta" | "max_percent" => TraceMetricGuardrailPolicy::PercentDelta {
+            max_percent: parse_required_threshold(parts.get(2), parts[1])?,
+        },
+        other => {
+            return Err(format!(
+                "unsupported metric guardrail policy '{}'; use required, equal, lte, delta, or percent",
+                other
+            ));
+        }
+    };
+    if matches!(
+        policy,
+        TraceMetricGuardrailPolicy::Required
+            | TraceMetricGuardrailPolicy::Equal
+            | TraceMetricGuardrailPolicy::CandidateLteBaseline
+    ) && parts.len() == 3
+    {
+        return Err(format!("policy '{}' does not take a threshold", parts[1]));
+    }
+    Ok(TraceMetricGuardrailSpec {
+        metric,
+        statistic,
+        policy,
+    })
+}
+
+fn parse_metric_and_statistic(value: &str) -> Result<(String, TraceMetricStatistic), String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err("metric name must not be empty".to_string());
+    }
+    for (suffix, statistic) in [
+        (".min", TraceMetricStatistic::Min),
+        (".median", TraceMetricStatistic::Median),
+        (".max", TraceMetricStatistic::Max),
+    ] {
+        if let Some(metric) = value.strip_suffix(suffix) {
+            if metric.is_empty() {
+                return Err("metric name must not be empty".to_string());
+            }
+            return Ok((metric.to_string(), statistic));
+        }
+    }
+    Ok((value.to_string(), TraceMetricStatistic::Median))
+}
+
+fn parse_required_threshold(value: Option<&&str>, policy: &str) -> Result<f64, String> {
+    let value = value.ok_or_else(|| format!("policy '{}' requires a numeric threshold", policy))?;
+    value
+        .parse::<f64>()
+        .map_err(|_| format!("policy '{}' threshold must be numeric", policy))
+}
+
+fn compare_metrics(
+    before_metrics: &BTreeMap<String, TraceAggregateMetricInput>,
+    after_metrics: &BTreeMap<String, TraceAggregateMetricInput>,
+) -> Vec<extension_trace::TraceCompareMetricOutput> {
+    let metric_ids = before_metrics
+        .keys()
+        .chain(after_metrics.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    metric_ids
+        .into_iter()
+        .map(|id| {
+            let before = before_metrics.get(&id);
+            let after = after_metrics.get(&id);
+            let before_median = before.and_then(|metric| metric.median);
+            let after_median = after.and_then(|metric| metric.median);
+            extension_trace::TraceCompareMetricOutput {
+                id,
+                before_n: before.map(|metric| metric.n),
+                after_n: after.map(|metric| metric.n),
+                before_min: before.and_then(|metric| metric.min),
+                after_min: after.and_then(|metric| metric.min),
+                before_median,
+                after_median,
+                median_delta: option_delta_f64(before_median, after_median),
+                median_delta_percent: option_percent_delta(before_median, after_median),
+                before_max: before.and_then(|metric| metric.max),
+                after_max: after.and_then(|metric| metric.max),
+                before_samples: before
+                    .map(|metric| metric.samples.clone())
+                    .unwrap_or_default(),
+                after_samples: after
+                    .map(|metric| metric.samples.clone())
+                    .unwrap_or_default(),
+            }
+        })
+        .collect()
+}
+
+fn evaluate_metric_guardrail(
+    spec: &TraceMetricGuardrailSpec,
+    before_metrics: &BTreeMap<String, TraceAggregateMetricInput>,
+    after_metrics: &BTreeMap<String, TraceAggregateMetricInput>,
+) -> extension_trace::TraceMetricGuardrailOutput {
+    let before_value = before_metrics
+        .get(&spec.metric)
+        .and_then(|metric| metric_value(metric, spec.statistic));
+    let after_value = after_metrics
+        .get(&spec.metric)
+        .and_then(|metric| metric_value(metric, spec.statistic));
+    let delta = option_delta_f64(before_value, after_value);
+    let delta_percent = option_percent_delta(before_value, after_value);
+    let failure = match spec.policy {
+        TraceMetricGuardrailPolicy::Required => {
+            if before_value.is_some() && after_value.is_some() {
+                None
+            } else {
+                Some("metric is required in both baseline and candidate aggregates".to_string())
+            }
+        }
+        TraceMetricGuardrailPolicy::Equal => match (before_value, after_value) {
+            (Some(before), Some(after)) if (after - before).abs() < f64::EPSILON => None,
+            (Some(_), Some(_)) => Some("candidate value differs from baseline".to_string()),
+            _ => Some("metric is missing from baseline or candidate aggregate".to_string()),
+        },
+        TraceMetricGuardrailPolicy::CandidateLteBaseline => match (before_value, after_value) {
+            (Some(before), Some(after)) if after <= before => None,
+            (Some(_), Some(_)) => Some("candidate value exceeds baseline".to_string()),
+            _ => Some("metric is missing from baseline or candidate aggregate".to_string()),
+        },
+        TraceMetricGuardrailPolicy::AbsoluteDelta { max } => match delta {
+            Some(delta) if delta.abs() <= max => None,
+            Some(_) => Some(format!("absolute delta exceeds {}", max)),
+            None => Some("metric is missing from baseline or candidate aggregate".to_string()),
+        },
+        TraceMetricGuardrailPolicy::PercentDelta { max_percent } => match delta_percent {
+            Some(delta_percent) if delta_percent.abs() <= max_percent => None,
+            Some(_) => Some(format!("percent delta exceeds {}%", max_percent)),
+            None => {
+                Some("percent delta unavailable for missing or zero baseline metric".to_string())
+            }
+        },
+    };
+    extension_trace::TraceMetricGuardrailOutput {
+        metric: spec.metric.clone(),
+        policy: metric_policy_label(&spec.policy).to_string(),
+        statistic: metric_statistic_label(spec.statistic).to_string(),
+        passed: failure.is_none(),
+        status: if failure.is_none() { "pass" } else { "fail" }.to_string(),
+        threshold: metric_policy_threshold(&spec.policy),
+        before_value,
+        after_value,
+        delta,
+        delta_percent,
+        failure,
+    }
+}
+
+fn metric_value(
+    metric: &TraceAggregateMetricInput,
+    statistic: TraceMetricStatistic,
+) -> Option<f64> {
+    match statistic {
+        TraceMetricStatistic::Min => metric.min,
+        TraceMetricStatistic::Median => metric.median,
+        TraceMetricStatistic::Max => metric.max,
+    }
+}
+
+fn metric_statistic_label(statistic: TraceMetricStatistic) -> &'static str {
+    match statistic {
+        TraceMetricStatistic::Min => "min",
+        TraceMetricStatistic::Median => "median",
+        TraceMetricStatistic::Max => "max",
+    }
+}
+
+fn metric_policy_label(policy: &TraceMetricGuardrailPolicy) -> &'static str {
+    match policy {
+        TraceMetricGuardrailPolicy::Required => "required",
+        TraceMetricGuardrailPolicy::Equal => "equal",
+        TraceMetricGuardrailPolicy::CandidateLteBaseline => "candidate_lte_baseline",
+        TraceMetricGuardrailPolicy::AbsoluteDelta { .. } => "absolute_delta",
+        TraceMetricGuardrailPolicy::PercentDelta { .. } => "percent_delta",
+    }
+}
+
+fn metric_policy_threshold(policy: &TraceMetricGuardrailPolicy) -> Option<f64> {
+    match policy {
+        TraceMetricGuardrailPolicy::AbsoluteDelta { max } => Some(*max),
+        TraceMetricGuardrailPolicy::PercentDelta { max_percent } => Some(*max_percent),
+        _ => None,
     }
 }
 
@@ -630,6 +908,8 @@ pub(super) fn render_aggregate_markdown(
         }
     }
 
+    push_aggregate_metric_markdown(&mut out, &aggregate.metrics);
+
     push_guardrail_markdown(&mut out, "Guardrails", &aggregate.guardrails);
 
     out.push_str("\n## Run Artifacts\n\n");
@@ -733,6 +1013,8 @@ pub(super) fn render_trace_aggregate_evidence_markdown(
         }
     }
 
+    push_aggregate_metric_markdown(&mut out, &aggregate.metrics);
+
     push_guardrail_markdown(&mut out, "Assertion Status", &aggregate.guardrails);
     push_aggregate_artifact_completeness_markdown(&mut out, &aggregate.runs, &aggregate.spans);
     out
@@ -767,6 +1049,9 @@ pub(super) fn render_trace_compare_evidence_markdown(
     if let Some(status) = compare.guardrail_status.as_deref() {
         let _ = writeln!(out, "- **Guardrail assertion status:** `{}`", status);
     }
+    if let Some(status) = compare.metric_guardrail_status.as_deref() {
+        let _ = writeln!(out, "- **Metric guardrail status:** `{}`", status);
+    }
 
     push_compare_proof_markdown(&mut out, compare);
 
@@ -790,6 +1075,9 @@ pub(super) fn render_trace_compare_evidence_markdown(
             );
         }
     }
+
+    push_metric_compare_markdown(&mut out, compare);
+    push_metric_guardrail_markdown(&mut out, compare);
 
     if !compare.focus_span_ids.is_empty() {
         out.push_str("\n## Assertion Status\n\n");
@@ -1087,6 +1375,30 @@ fn push_aggregate_span_row(out: &mut String, span: &extension_trace::TraceAggreg
     ));
 }
 
+fn push_aggregate_metric_markdown(
+    out: &mut String,
+    metrics: &[extension_trace::TraceAggregateMetricOutput],
+) {
+    if metrics.is_empty() {
+        return;
+    }
+    out.push_str("\n## Scalar Metrics\n\n");
+    out.push_str("| Metric | n | min | median | max | samples |\n");
+    out.push_str("|---|---:|---:|---:|---:|---:|\n");
+    for metric in metrics {
+        let _ = writeln!(
+            out,
+            "| `{}` | {} | {} | {} | {} | {} |",
+            metric.id,
+            metric.n,
+            fmt_number(metric.min),
+            fmt_number(metric.median),
+            fmt_number(metric.max),
+            metric.samples.len(),
+        );
+    }
+}
+
 pub(super) fn render_compare_markdown(compare: &extension_trace::TraceCompareOutput) -> String {
     let mut out = String::new();
     out.push_str("# Trace Compare\n\n");
@@ -1130,6 +1442,8 @@ pub(super) fn render_compare_markdown(compare: &extension_trace::TraceCompareOut
             ));
         }
     }
+
+    push_metric_compare_markdown(&mut out, compare);
 
     push_compare_proof_markdown(&mut out, compare);
 
@@ -1189,10 +1503,66 @@ pub(super) fn render_compare_markdown(compare: &extension_trace::TraceCompareOut
         }
     }
 
+    push_metric_guardrail_markdown(&mut out, compare);
+
     push_guardrail_markdown(&mut out, "Before Guardrails", &compare.before_guardrails);
     push_guardrail_markdown(&mut out, "After Guardrails", &compare.after_guardrails);
 
     out
+}
+
+fn push_metric_compare_markdown(out: &mut String, compare: &extension_trace::TraceCompareOutput) {
+    if compare.metrics.is_empty() {
+        return;
+    }
+    out.push_str("\n## Metric Delta Summary\n\n");
+    out.push_str("| Metric | before n | after n | before median | after median | delta | delta % | before min | after min | before max | after max |\n");
+    out.push_str("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n");
+    for metric in &compare.metrics {
+        let _ = writeln!(
+            out,
+            "| `{}` | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
+            metric.id,
+            fmt_count(metric.before_n),
+            fmt_count(metric.after_n),
+            fmt_number(metric.before_median),
+            fmt_number(metric.after_median),
+            fmt_signal_delta_number(metric.median_delta),
+            fmt_percent(metric.median_delta_percent),
+            fmt_number(metric.before_min),
+            fmt_number(metric.after_min),
+            fmt_number(metric.before_max),
+            fmt_number(metric.after_max),
+        );
+    }
+}
+
+fn push_metric_guardrail_markdown(out: &mut String, compare: &extension_trace::TraceCompareOutput) {
+    if compare.metric_guardrails.is_empty() {
+        return;
+    }
+    out.push_str("\n## Metric Guardrails\n\n");
+    out.push_str("| Metric | Statistic | Policy | Status | Baseline | Candidate | Delta | Delta % | Failure |\n");
+    out.push_str("|---|---|---|---|---:|---:|---:|---:|---|\n");
+    for guardrail in &compare.metric_guardrails {
+        let _ = writeln!(
+            out,
+            "| `{}` | `{}` | `{}` | `{}` | {} | {} | {} | {} | {} |",
+            guardrail.metric,
+            guardrail.statistic,
+            guardrail.policy,
+            guardrail.status,
+            fmt_number(guardrail.before_value),
+            fmt_number(guardrail.after_value),
+            fmt_signal_delta_number(guardrail.delta),
+            fmt_percent(guardrail.delta_percent),
+            guardrail
+                .failure
+                .as_deref()
+                .map(|failure| format!("`{}`", failure.replace('`', "'")))
+                .unwrap_or_else(|| "-".to_string())
+        );
+    }
 }
 
 fn push_guardrail_markdown(
@@ -1350,6 +1720,23 @@ pub(super) fn fmt_delta_avg_ms(value: Option<f64>) -> String {
 
 fn fmt_signal_delta_avg_ms(value: Option<f64>) -> String {
     let formatted = fmt_delta_avg_ms(value);
+    if value.is_some_and(|value| value.abs() >= f64::EPSILON) {
+        format!("**{}**", formatted)
+    } else {
+        formatted
+    }
+}
+
+fn fmt_number(value: Option<f64>) -> String {
+    value
+        .map(|value| format!("{:.3}", value))
+        .unwrap_or_else(|| "-".to_string())
+}
+
+fn fmt_signal_delta_number(value: Option<f64>) -> String {
+    let formatted = value
+        .map(|value| format!("{:+.3}", value))
+        .unwrap_or_else(|| "-".to_string());
     if value.is_some_and(|value| value.abs() >= f64::EPSILON) {
         format!("**{}**", formatted)
     } else {

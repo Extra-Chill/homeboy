@@ -87,6 +87,7 @@ pub(crate) fn refused_trace_result(
         timeline: Vec::new(),
         span_definitions: args.span_definitions,
         span_results: Vec::new(),
+        metrics: Default::default(),
         assertions: evidence
             .reasons
             .iter()

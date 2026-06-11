@@ -68,7 +68,7 @@ use preview_args::trace_public_preview_for_args;
 #[cfg(test)]
 use output::render_aggregate_markdown;
 use output::{
-    attach_span_metadata, classification_summaries, render_matrix_markdown,
+    attach_span_metadata, classification_summaries, parse_metric_guardrail, render_matrix_markdown,
     render_scenario_matrix_markdown, render_trace_aggregate_evidence_markdown,
     render_trace_compare_evidence_markdown, render_trace_run_evidence_markdown, run_compare,
 };
@@ -140,6 +140,10 @@ pub struct TraceArgs {
     /// Highlight a span in aggregate and compare reports. Repeatable.
     #[arg(long = "focus-span", value_name = "SPAN_ID")]
     pub focus_spans: Vec<String>,
+
+    /// Compare scalar metrics with `METRIC[.min|.median|.max]:POLICY[:VALUE]`. Repeatable.
+    #[arg(long = "metric-guardrail", value_name = "SPEC", value_parser = parse_metric_guardrail)]
+    pub metric_guardrails: Vec<output::TraceMetricGuardrailSpec>,
 
     /// Add a span definition as `id:source.event:source.event`.
     #[arg(long = "span", value_name = "ID:FROM:TO", value_parser = extension_trace::spans::parse_span_definition)]

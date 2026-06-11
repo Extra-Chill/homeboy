@@ -76,6 +76,8 @@ pub struct TraceResults {
     pub span_results: Vec<TraceSpanResult>,
     #[serde(default)]
     pub assertions: Vec<TraceAssertion>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metrics: BTreeMap<String, f64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub temporal_assertions: Vec<TraceTemporalAssertionDefinition>,
     #[serde(default)]

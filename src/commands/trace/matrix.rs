@@ -6,7 +6,7 @@ use homeboy::core::extension::trace::TraceCommandOutput;
 
 use super::output::{
     compare_trace_aggregates_with_focus, render_matrix_markdown, TraceAggregateInput,
-    TraceAggregateSpanInput,
+    TraceAggregateMetricInput, TraceAggregateSpanInput,
 };
 use super::{
     apply_command_target_component, execute_trace_run, required_trace_scenario, run_repeat,
@@ -393,11 +393,13 @@ pub(super) fn run_variant_matrix(args: TraceArgs) -> CmdResult<TraceCommandOutpu
             &args.focus_spans,
             args.regression_threshold,
             args.regression_min_delta_ms,
+            &args.metric_guardrails,
         );
         write_json_artifact(&compare_path, &compare)?;
         if !aggregate.passed
             || compare.focus_status.as_deref() == Some("fail")
             || compare.guardrail_status.as_deref() == Some("fail")
+            || compare.metric_guardrail_status.as_deref() == Some("fail")
         {
             failure_count += 1;
         }
@@ -584,6 +586,18 @@ pub(super) fn aggregate_to_compare_input(
                 max_artifact_path: span.max_artifact_path.clone(),
                 failures: span.failures,
                 metadata: span.metadata.clone(),
+            })
+            .collect(),
+        metrics: aggregate
+            .metrics
+            .iter()
+            .map(|metric| TraceAggregateMetricInput {
+                id: metric.id.clone(),
+                n: metric.n,
+                min: metric.min,
+                median: metric.median,
+                max: metric.max,
+                samples: metric.samples.clone(),
             })
             .collect(),
         guardrails: aggregate.guardrails.clone(),

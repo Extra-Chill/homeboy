@@ -7,6 +7,13 @@ pub(super) struct TraceAggregateSpanSample {
     pub(super) artifact_path: String,
 }
 
+#[derive(Clone)]
+pub(super) struct TraceAggregateMetricSample {
+    pub(super) value: f64,
+    pub(super) run_index: usize,
+    pub(super) artifact_path: String,
+}
+
 pub(super) fn aggregate_span(
     id: String,
     samples: Vec<TraceAggregateSpanSample>,
@@ -55,6 +62,33 @@ pub(super) fn aggregate_span(
     }
 }
 
+pub(super) fn aggregate_metric(
+    id: String,
+    samples: Vec<TraceAggregateMetricSample>,
+) -> extension_trace::TraceAggregateMetricOutput {
+    let sample_outputs = samples
+        .iter()
+        .map(|sample| extension_trace::TraceAggregateMetricSampleOutput {
+            run_index: sample.run_index,
+            value: sample.value,
+            artifact_path: sample.artifact_path.clone(),
+        })
+        .collect::<Vec<_>>();
+    let mut values = samples
+        .iter()
+        .map(|sample| sample.value)
+        .collect::<Vec<_>>();
+    values.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+    extension_trace::TraceAggregateMetricOutput {
+        id,
+        n: values.len(),
+        min: values.first().copied(),
+        median: median_f64(&values),
+        max: values.last().copied(),
+        samples: sample_outputs,
+    }
+}
+
 fn median(values: &[u64]) -> Option<u64> {
     if values.is_empty() {
         return None;
@@ -64,6 +98,18 @@ fn median(values: &[u64]) -> Option<u64> {
         Some(values[midpoint])
     } else {
         Some((values[midpoint - 1] + values[midpoint]) / 2)
+    }
+}
+
+fn median_f64(values: &[f64]) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    let midpoint = values.len() / 2;
+    if values.len() % 2 == 1 {
+        Some(values[midpoint])
+    } else {
+        Some((values[midpoint - 1] + values[midpoint]) / 2.0)
     }
 }
 

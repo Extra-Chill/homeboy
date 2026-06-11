@@ -451,6 +451,19 @@ homeboy trace compare before.json after.json --focus-span phase.wp_boot_start_to
 
 Focused compare spans are evaluated independently from the full span table. When a focused span's median slowdown exceeds both `--regression-threshold` and `--regression-min-delta-ms`, or its failure count increases, `trace compare` returns a failing exit code and records `focus_status`, `focus_regression_count`, and `focus_failure_count` in JSON output. All compared spans remain present in `spans`.
 
+Trace runners can also emit scalar metrics in the top-level `metrics` object. Repeated trace aggregates summarize each numeric metric with `min`, `median`, `max`, and raw `samples`; compare output includes metric deltas and preserves baseline/candidate sample lists.
+
+Use repeatable `--metric-guardrail` flags to fail compare output when generic scalar policies are violated:
+
+```sh
+homeboy trace compare before.json after.json \
+  --metric-guardrail request_count:equal \
+  --metric-guardrail page_errors.max:lte \
+  --metric-guardrail ready_ms:percent:10
+```
+
+The syntax is `METRIC[.min|.median|.max]:POLICY[:VALUE]`. The default statistic is `median`. Supported policies are `required`, `equal`, `lte`/`candidate_lte_baseline`, `delta`/`absolute_delta`, and `percent`/`percent_delta`. Threshold policies use absolute deltas so improvements and regressions are both bounded unless the caller chooses `lte` for lower-is-better metrics.
+
 ## Scenario Matrices
 
 Use `trace matrix` to run the same trace scenario across a Cartesian product of axis values. Each `--axis` is declared as `name=value1,value2`; repeat the flag for dimensions such as viewport, ECE location, payment method, selected variation state, or feature switches.
