@@ -53,6 +53,10 @@ pub struct ExtensionUpgradeEntry {
     pub source_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub git_root: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_revision: Option<String>,
     #[serde(flatten)]
     pub source_update: ExtensionSourceUpdate,
 }

@@ -137,6 +137,17 @@ pub fn current_branch(git_root: &Path) -> Option<String> {
     .filter(|value| !value.is_empty())
 }
 
+pub fn remote_origin_url(git_root: &Path) -> Option<String> {
+    run_git(
+        git_root,
+        &["remote", "get-url", "origin"],
+        "git remote get-url origin",
+    )
+    .ok()
+    .map(|value| value.trim().to_string())
+    .filter(|value| !value.is_empty())
+}
+
 fn default_remote_branch(git_root: &Path) -> Option<String> {
     run_git(
         git_root,

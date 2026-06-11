@@ -1,5 +1,6 @@
 use crate::core::defaults;
 use crate::core::error::{Error, Result};
+use crate::core::{extension, git};
 use std::path::Path;
 use std::process::Command;
 
@@ -185,7 +186,7 @@ pub fn run_upgrade_with_method(
             let (runners_updated, runners_skipped) = if skip_runners {
                 (vec![], vec![])
             } else {
-                runners::upgrade_configured_runners(runner_targets)?
+                runners::upgrade_configured_runners(runner_targets, &extensions_updated)?
             };
             return Ok(UpgradeResult {
                 command: "upgrade".to_string(),
@@ -216,7 +217,7 @@ pub fn run_upgrade_with_method(
     };
 
     let (runners_updated, runners_skipped) = if success && !skip_runners {
-        runners::upgrade_configured_runners(runner_targets)?
+        runners::upgrade_configured_runners(runner_targets, &extensions_updated)?
     } else {
         (vec![], vec![])
     };
@@ -248,8 +249,6 @@ pub fn run_upgrade_with_method(
 /// Update all installed extensions. Best-effort — failures are logged and
 /// the extension is added to the skipped list.
 fn update_all_extensions() -> (Vec<ExtensionUpgradeEntry>, Vec<String>) {
-    use crate::core::extension;
-
     let extension_ids = extension::available_extension_ids();
     if extension_ids.is_empty() {
         return (vec![], vec![]);
@@ -276,6 +275,12 @@ fn update_all_extensions() -> (Vec<ExtensionUpgradeEntry>, Vec<String>) {
                     .ok()
                     .map(|m| m.version.clone())
                     .unwrap_or_default();
+                let source_url = portable_extension_source_url(&result);
+                let source_revision = result
+                    .source_update
+                    .new_source_revision
+                    .clone()
+                    .or_else(|| extension::read_source_revision(id));
 
                 if result.linked {
                     let branch_detail = match (
@@ -311,6 +316,8 @@ fn update_all_extensions() -> (Vec<ExtensionUpgradeEntry>, Vec<String>) {
                     git_root: result
                         .git_root
                         .map(|path| path.to_string_lossy().to_string()),
+                    source_url,
+                    source_revision,
                     source_update: result.source_update,
                 });
             }
@@ -322,6 +329,18 @@ fn update_all_extensions() -> (Vec<ExtensionUpgradeEntry>, Vec<String>) {
     }
 
     (updated, skipped)
+}
+
+fn portable_extension_source_url(result: &crate::core::extension::UpdateResult) -> Option<String> {
+    if let Some(git_root) = result.git_root.as_ref() {
+        return git::remote_origin_url(git_root);
+    }
+
+    if extension::is_git_url(&result.url) {
+        Some(result.url.clone())
+    } else {
+        None
+    }
 }
 
 #[cfg(not(unix))]

@@ -56,7 +56,7 @@ pub use pr_policy::{
 };
 pub use primitives::{
     clone_repo, clone_repo_at_ref, current_branch, get_component_path_prefix, get_git_root,
-    is_workdir_clean_or_not_git, pull_repo, run_git, short_head_revision,
+    is_workdir_clean_or_not_git, pull_repo, remote_origin_url, run_git, short_head_revision,
     update_to_remote_default_branch,
 };
 pub(crate) use primitives::{is_git_repo, list_tracked_markdown_files};
