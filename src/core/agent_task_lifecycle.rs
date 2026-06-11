@@ -6,6 +6,7 @@ use uuid::Uuid;
 
 use crate::core::agent_task::{
     AgentTaskArtifact, AgentTaskEvidenceRef, AgentTaskExecutionHandle, AgentTaskOutcome,
+    AgentTaskWorkflowEvidence,
 };
 use crate::core::agent_task_scheduler::{
     AgentTaskAggregate, AgentTaskPlan, AgentTaskProgressEvent, AgentTaskState,
@@ -551,10 +552,30 @@ fn aggregate_evidence_refs(aggregate: Option<&AgentTaskAggregate>) -> Vec<AgentT
             aggregate
                 .outcomes
                 .iter()
-                .flat_map(|outcome| outcome.evidence_refs.clone())
+                .flat_map(evidence_refs_for_outcome)
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn evidence_refs_for_outcome(outcome: &AgentTaskOutcome) -> Vec<AgentTaskEvidenceRef> {
+    outcome
+        .evidence_refs
+        .iter()
+        .cloned()
+        .chain(workflow_evidence_refs(outcome.workflow.as_ref()))
+        .collect()
+}
+
+fn workflow_evidence_refs(
+    workflow: Option<&AgentTaskWorkflowEvidence>,
+) -> impl Iterator<Item = AgentTaskEvidenceRef> + '_ {
+    workflow.into_iter().flat_map(|workflow| {
+        workflow
+            .steps
+            .iter()
+            .flat_map(|step| step.artifact_refs.iter().cloned())
+    })
 }
 
 fn queued_task(request: &crate::core::agent_task::AgentTaskRequest) -> AgentTaskRunTask {
@@ -624,6 +645,8 @@ fn artifact_refs_for_outcomes(outcomes: &[AgentTaskOutcome]) -> Vec<AgentTaskArt
             let evidence_refs = outcome
                 .evidence_refs
                 .iter()
+                .cloned()
+                .chain(workflow_evidence_refs(outcome.workflow.as_ref()))
                 .map(|evidence| AgentTaskArtifactRef {
                     task_id: outcome.task_id.clone(),
                     kind: evidence.kind.clone(),
@@ -729,7 +752,9 @@ mod tests {
     use super::*;
     use crate::core::agent_task::{
         AgentTaskExecutionHandle, AgentTaskExecutor, AgentTaskLimits, AgentTaskPolicy,
-        AgentTaskRequest, AgentTaskWorkspace, AGENT_TASK_REQUEST_SCHEMA,
+        AgentTaskRequest, AgentTaskWorkflowEvidence, AgentTaskWorkflowStepEvidence,
+        AgentTaskWorkflowStepStatus, AgentTaskWorkspace, AGENT_TASK_REQUEST_SCHEMA,
+        AGENT_TASK_WORKFLOW_SCHEMA,
     };
     use crate::core::agent_task_scheduler::{
         AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
@@ -886,6 +911,84 @@ mod tests {
             assert_eq!(
                 record.metadata["provider_run_ids"],
                 json!(["provider-run-123"])
+            );
+        });
+    }
+
+    #[test]
+    fn failed_provider_run_exposes_workflow_evidence_refs() {
+        with_isolated_home(|_| {
+            let plan = test_plan();
+            let aggregate = AgentTaskAggregate {
+                schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
+                plan_id: plan.plan_id.clone(),
+                status: AgentTaskAggregateStatus::Failed,
+                totals: AgentTaskAggregateTotals {
+                    queued: 1,
+                    failed: 1,
+                    ..AgentTaskAggregateTotals::default()
+                },
+                outcomes: vec![AgentTaskOutcome {
+                    schema: crate::core::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+                    task_id: "task-a".to_string(),
+                    status: crate::core::agent_task::AgentTaskOutcomeStatus::Failed,
+                    summary: Some("provider task failed".to_string()),
+                    failure_classification: Some(
+                        crate::core::agent_task::AgentTaskFailureClassification::ExecutionFailed,
+                    ),
+                    artifacts: Vec::new(),
+                    evidence_refs: Vec::new(),
+                    diagnostics: Vec::new(),
+                    outputs: Value::Null,
+                    workflow: Some(AgentTaskWorkflowEvidence {
+                        schema: AGENT_TASK_WORKFLOW_SCHEMA.to_string(),
+                        id: "provider-run-123".to_string(),
+                        label: Some("provider workflow".to_string()),
+                        steps: vec![AgentTaskWorkflowStepEvidence {
+                            id: "runtime".to_string(),
+                            label: Some("runtime evidence".to_string()),
+                            status: AgentTaskWorkflowStepStatus::Failed,
+                            depends_on: Vec::new(),
+                            started_at: None,
+                            finished_at: None,
+                            duration_ms: None,
+                            metrics: Value::Null,
+                            artifact_refs: vec![AgentTaskEvidenceRef {
+                                kind: "provider-transcript".to_string(),
+                                uri: "provider://runs/provider-run-123/transcript".to_string(),
+                                label: Some("Provider transcript".to_string()),
+                            }],
+                            diagnostics: Vec::new(),
+                            suggestions: Vec::new(),
+                            metadata: Value::Null,
+                        }],
+                        metadata: Value::Null,
+                    }),
+                    follow_up: None,
+                    metadata: Value::Null,
+                }],
+                events: vec![AgentTaskProgressEvent {
+                    task_id: "task-a".to_string(),
+                    state: AgentTaskState::Failed,
+                    attempt: 1,
+                    message: Some("provider task failed".to_string()),
+                }],
+                artifact_lineage: Vec::new(),
+                queue: Default::default(),
+            };
+
+            let record = record_completed_run(&plan, &aggregate, Some("run-provider-failed"))
+                .expect("recorded");
+            let durable_status = status(&record.run_id).expect("status");
+            let durable_artifacts = artifacts(&record.run_id).expect("artifacts");
+
+            assert_eq!(durable_status.state, AgentTaskRunState::Failed);
+            assert_eq!(durable_status.artifact_refs.len(), 1);
+            assert_eq!(durable_status.artifact_refs[0].kind, "provider-transcript");
+            assert_eq!(durable_artifacts.evidence_refs.len(), 1);
+            assert_eq!(
+                durable_artifacts.evidence_refs[0].uri,
+                "provider://runs/provider-run-123/transcript"
             );
         });
     }
