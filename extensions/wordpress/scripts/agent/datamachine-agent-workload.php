@@ -646,11 +646,14 @@ if ( ! function_exists( 'homeboy_datamachine_agent_run_command_checks' ) ) {
 		$started = hrtime( true );
 		$result  = $ability->execute(
 			array(
-				'workspace'   => $handle,
-				'handle'      => $handle,
-				'command'     => $command_config['command'],
-				'description' => $command_config['description'],
-				'kind'        => $key,
+				'workspace'        => $handle,
+				'handle'           => $handle,
+				'workspace_path'   => isset( $runner_workspace['path'] ) && is_scalar( $runner_workspace['path'] ) ? (string) $runner_workspace['path'] : '',
+				'workspace_backend' => isset( $runner_workspace['backend'] ) && is_scalar( $runner_workspace['backend'] ) ? (string) $runner_workspace['backend'] : '',
+				'runner_workspace' => $runner_workspace,
+				'command'          => $command_config['command'],
+				'description'      => $command_config['description'],
+				'kind'             => $key,
 			)
 		);
 		if ( function_exists( 'is_wp_error' ) && is_wp_error( $result ) ) {
@@ -678,7 +681,7 @@ if ( ! function_exists( 'homeboy_datamachine_agent_run_command_checks' ) ) {
 			'elapsed_ms'     => isset( $response['elapsed_ms'] ) ? (float) $response['elapsed_ms'] : ( hrtime( true ) - $started ) / 1000000,
 			'workspace'      => $handle,
 			'ability'        => $ability_name,
-			'error'          => is_scalar( $response['error'] ?? null ) ? (string) $response['error'] : '',
+			'error'          => is_scalar( $response['error'] ?? null ) ? (string) $response['error'] : ( is_array( $response['error'] ?? null ) ? wp_json_encode( $response['error'] ) : '' ),
 			'upstream_issue' => is_scalar( $response['upstream_issue'] ?? null ) ? (string) $response['upstream_issue'] : '',
 		);
 	}
@@ -2586,18 +2589,37 @@ if ( ! function_exists( 'homeboy_datamachine_agent_provision_workspace' ) ) {
             return array( 'enabled' => true, 'success' => false, 'error' => 'runner_workspace.repo is required' );
         }
 
-        $required = array(
-            'datamachine-code/workspace-show',
-            'datamachine-code/workspace-clone',
-            'datamachine-code/workspace-worktree-add',
-        );
-        foreach ( $required as $ability_name ) {
-            if ( ! wp_get_ability( $ability_name ) ) {
-                return array( 'enabled' => true, 'success' => false, 'error' => $ability_name . ' is not registered' );
-            }
-        }
+		$required = array(
+			'datamachine-code/workspace-show',
+			'datamachine-code/workspace-clone',
+			'datamachine-code/workspace-worktree-add',
+		);
+		$local_seed_path = isset( $workspace['local_seed_path'] ) && is_scalar( $workspace['local_seed_path'] ) ? trim( (string) $workspace['local_seed_path'] ) : '';
+		if ( '' !== $local_seed_path ) {
+			$required[] = 'datamachine-code/workspace-adopt';
+		}
+		foreach ( $required as $ability_name ) {
+			if ( ! wp_get_ability( $ability_name ) ) {
+				return array( 'enabled' => true, 'success' => false, 'error' => $ability_name . ' is not registered' );
+			}
+		}
 
-        $show = wp_get_ability( 'datamachine-code/workspace-show' )->execute( array( 'name' => $repo ) );
+		if ( '' !== $local_seed_path ) {
+			$adopt = wp_get_ability( 'datamachine-code/workspace-adopt' )->execute(
+				array(
+					'path' => $local_seed_path,
+					'name' => $repo,
+				)
+			);
+			if ( function_exists( 'is_wp_error' ) && is_wp_error( $adopt ) ) {
+				return array( 'enabled' => true, 'success' => false, 'error' => $adopt->get_error_message(), 'local_seed_path' => $local_seed_path );
+			}
+			if ( ! is_array( $adopt ) || empty( $adopt['success'] ) ) {
+				return array( 'enabled' => true, 'success' => false, 'error' => 'workspace-adopt did not succeed', 'local_seed_path' => $local_seed_path, 'result' => $adopt );
+			}
+		}
+
+		$show = wp_get_ability( 'datamachine-code/workspace-show' )->execute( array( 'name' => $repo ) );
         if ( function_exists( 'is_wp_error' ) && is_wp_error( $show ) ) {
             $clone_url = isset( $workspace['clone_url'] ) && is_scalar( $workspace['clone_url'] ) ? trim( (string) $workspace['clone_url'] ) : '';
             if ( '' === $clone_url ) {

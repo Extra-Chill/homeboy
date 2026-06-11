@@ -601,6 +601,9 @@ namespace {
                 if ( 'repo@branch' !== ( $input['workspace'] ?? '' ) ) {
                     return array( 'success' => false, 'error' => 'Unexpected workspace handle.' );
                 }
+				if ( '/workspace/repo@branch' !== ( $input['workspace_path'] ?? '' ) ) {
+					return array( 'success' => false, 'error' => 'Unexpected workspace path.' );
+				}
 				if ( 'printf ok > verification.txt' === ( $input['command'] ?? '' ) ) {
 					$workspace_files['verification.txt'] = 'ok';
 					return array( 'status' => 'completed', 'exit_code' => 0, 'stdout' => '', 'stderr' => '' );
@@ -614,7 +617,7 @@ namespace {
     );
     $verification_result = homeboy_datamachine_agent_run_command_checks(
         array( 'verification_commands' => array( array( 'command' => 'printf ok > verification.txt', 'description' => 'Write verification marker' ) ) ),
-        array( 'handle' => 'repo@branch' ),
+        array( 'handle' => 'repo@branch', 'path' => '/workspace/repo@branch', 'backend' => 'local_git' ),
         'verification_commands'
     );
     if ( empty( $verification_result['success'] ) || empty( $workspace_files['verification.txt'] ) || 'wp-codebox/run-runner-workspace-command' !== ( $verification_result['ability'] ?? '' ) ) {
@@ -623,7 +626,7 @@ namespace {
     }
     $drift_result = homeboy_datamachine_agent_run_command_checks(
         array( 'drift_checks' => array( array( 'command' => 'test -f verification.txt', 'description' => 'Generated outputs are present' ) ) ),
-        array( 'handle' => 'repo@branch' ),
+        array( 'handle' => 'repo@branch', 'path' => '/workspace/repo@branch', 'backend' => 'local_git' ),
         'drift_checks'
     );
     if ( empty( $drift_result['success'] ) || 2 !== count( $workspace_command_calls ) ) {
@@ -641,6 +644,30 @@ namespace {
         fwrite( STDERR, "Expected missing WP Codebox verification API to fail loudly with the WP Codebox integration point.\n" );
         exit( 1 );
     }
+
+	$GLOBALS['homeboy_datamachine_agent_fake_abilities'] = array(
+		'wp-codebox/run-runner-workspace-command' => new Homeboy_Datamachine_Agent_Fake_Ability(
+			function (): array {
+				return array(
+					'success'   => false,
+					'exit_code' => 1,
+					'error'     => array(
+						'code'    => 'wp_codebox_runner_workspace_backend_unavailable',
+						'message' => 'Runner workspace backend ability is not available for this operation.',
+					),
+				);
+			}
+		),
+	);
+	$structured_error_result = homeboy_datamachine_agent_run_command_checks(
+		array( 'verification_commands' => array( array( 'command' => 'pnpm verify', 'description' => 'Verify generated docs' ) ) ),
+		array( 'handle' => 'repo@branch', 'path' => 'github://owner/repo#branch' ),
+		'verification_commands'
+	);
+	if ( ! str_contains( (string) ( $structured_error_result['error'] ?? '' ), 'wp_codebox_runner_workspace_backend_unavailable' ) ) {
+		fwrite( STDERR, "Expected structured WP Codebox command errors to be preserved.\n" );
+		exit( 1 );
+	}
 
     fwrite( STDOUT, "Data Machine agent write-without-PR smoke passed.\n" );
 }

@@ -835,6 +835,16 @@ jobs:
           pipeline_step_patches_json="$(validate_json_input pipeline_step_patches array "$PIPELINE_STEP_PATCHES")"
           flow_step_patches_json="$(validate_json_input flow_step_patches array "$FLOW_STEP_PATCHES")"
           runner_workspace_json="$(validate_json_input runner_workspace object "$RUNNER_WORKSPACE_CONFIG")"
+          runner_workspace_repo="${TARGET_REPO#*/}"
+          runner_workspace_repo="${runner_workspace_repo%.git}"
+          datamachine_workspace_guest_root="/homeboy-datamachine-workspace"
+          datamachine_workspace_guest_primary="${datamachine_workspace_guest_root}/${runner_workspace_repo}"
+          runner_workspace_mounts_json="[]"
+          if jq -e '.enabled == true' <<< "$runner_workspace_json" >/dev/null; then
+            runner_workspace_mounts_json="$(jq -nc --arg source "$GITHUB_WORKSPACE" --arg target "$datamachine_workspace_guest_primary" '[{type: "directory", source: $source, target: $target, mode: "readwrite"}]')"
+            runner_workspace_json="$(jq -c --arg seed "$datamachine_workspace_guest_primary" '. + {local_seed_path: $seed}' <<< "$runner_workspace_json")"
+            extra_wp_config_defines_json="$(jq -c --arg root "$datamachine_workspace_guest_root" '. + {DATAMACHINE_WORKSPACE_PATH: $root}' <<< "$extra_wp_config_defines_json")"
+          fi
           rules_json="$(validate_json_input rules object "$RULES")"
           general_rules_json="$(validate_json_input general_rules array "$GENERAL_RULES")"
           task_rules_json="$(validate_json_input task_rules array "$TASK_RULES")"
@@ -898,6 +908,7 @@ jobs:
             --argjson extraWpConfigDefines "$extra_wp_config_defines_json" \
             --argjson extraWpCodeboxMounts "$extra_wp_codebox_mounts_json" \
             --argjson executeWorkflowMounts "$execute_workflow_mounts_json" \
+            --argjson runnerWorkspaceMounts "$runner_workspace_mounts_json" \
             --argjson workloadRunBefore "$workload_run_before_json" \
             --argjson workloadRunAfter "$workload_run_after_json" \
             --argjson dailyMemoryEnabled "$DAILY_MEMORY_ENABLED" \
@@ -929,7 +940,7 @@ jobs:
                   target: "/wordpress/wp-content/plugins/datamachine-agent-ci-driver/datamachine-agent-ci-driver.php",
                   mode: "readonly"
                 }
-              ] + $extraWpCodeboxMounts + $executeWorkflowMounts),
+              ] + $extraWpCodeboxMounts + $executeWorkflowMounts + $runnerWorkspaceMounts),
               wp_config_defines: $extraWpConfigDefines,
               workload_run_before: $workloadRunBefore,
               workload_run_after: $workloadRunAfter,
