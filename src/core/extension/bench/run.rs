@@ -384,17 +384,19 @@ fn workload_status_failures(results: &BenchResults) -> Vec<String> {
                 ));
             }
 
-            let failed = scenario.metrics.get("failed_count").unwrap_or(0.0);
-            let unsupported = scenario.metrics.get("unsupported_count").unwrap_or(0.0);
-            let passed = scenario.metrics.get("passed_count");
+            let failed = child_status_count(scenario, "failed").unwrap_or(0.0);
+            let unsupported = child_status_count(scenario, "unsupported").unwrap_or(0.0);
+            let warning = child_status_count(scenario, "warning").unwrap_or(0.0);
+            let passed = child_status_count(scenario, "passed");
             let total = scenario.metrics.get("adapter_count");
 
-            if failed > 0.0 || unsupported > 0.0 {
+            if failed > 0.0 || unsupported > 0.0 || warning > 0.0 {
                 return Some(format!(
-                    "bench scenario `{}` reported failed_count={} unsupported_count={} passed_count={}",
+                    "bench scenario `{}` reported failed_count={} unsupported_count={} warning_count={} passed_count={}",
                     scenario.id,
                     format_count(failed),
                     format_count(unsupported),
+                    format_count(warning),
                     passed
                         .map(format_count)
                         .unwrap_or_else(|| "<unknown>".to_string())
@@ -403,15 +405,34 @@ fn workload_status_failures(results: &BenchResults) -> Vec<String> {
 
             if passed == Some(0.0) && total.is_some_and(|count| count > 0.0) {
                 return Some(format!(
-                    "bench scenario `{}` reported no passing children out of adapter_count={}",
+                    "bench scenario `{}` reported no passing children out of adapter_count={} (failed_count={} unsupported_count={} warning_count={})",
                     scenario.id,
-                    format_count(total.unwrap_or(0.0))
+                    format_count(total.unwrap_or(0.0)),
+                    format_count(failed),
+                    format_count(unsupported),
+                    format_count(warning)
                 ));
             }
 
             None
         })
         .collect()
+}
+
+fn child_status_count(scenario: &BenchScenario, status: &str) -> Option<f64> {
+    scenario
+        .metrics
+        .get(&format!("{status}_count"))
+        .or_else(|| metadata_result_count(scenario, status))
+}
+
+fn metadata_result_count(scenario: &BenchScenario, status: &str) -> Option<f64> {
+    scenario
+        .metadata
+        .get("result_counts")?
+        .as_object()?
+        .get(status)?
+        .as_f64()
 }
 
 fn format_count(value: f64) -> String {
@@ -1875,6 +1896,68 @@ mod tests {
         assert!(failures[0].contains("workflow-bench"));
         assert!(failures[0].contains("failed_count=1"));
         assert!(failures[0].contains("unsupported_count=1"));
+    }
+
+    #[test]
+    fn workload_status_failures_catches_warning_children() {
+        let results = parsing::parse_bench_results_str(
+            r#"{
+                "component_id": "studio-web",
+                "iterations": 1,
+                "scenarios": [{
+                    "id": "workflow-bench",
+                    "iterations": 1,
+                    "metrics": {
+                        "adapter_count": 1,
+                        "passed_count": 0,
+                        "failed_count": 0,
+                        "unsupported_count": 0,
+                        "warning_count": 1
+                    }
+                }]
+            }"#,
+        )
+        .expect("parse bench results");
+
+        let failures = workload_status_failures(&results);
+
+        assert_eq!(failures.len(), 1);
+        assert!(failures[0].contains("workflow-bench"));
+        assert!(failures[0].contains("warning_count=1"));
+        assert!(failures[0].contains("passed_count=0"));
+    }
+
+    #[test]
+    fn workload_status_failures_catches_metadata_warning_result_counts() {
+        let results = parsing::parse_bench_results_str(
+            r#"{
+                "component_id": "studio-web",
+                "iterations": 1,
+                "scenarios": [{
+                    "id": "workflow-bench",
+                    "iterations": 1,
+                    "metrics": {
+                        "adapter_count": 1,
+                        "passed_count": 0,
+                        "failed_count": 0,
+                        "unsupported_count": 0
+                    },
+                    "metadata": {
+                        "result_counts": {
+                            "warning": 1
+                        }
+                    }
+                }]
+            }"#,
+        )
+        .expect("parse bench results");
+
+        let failures = workload_status_failures(&results);
+
+        assert_eq!(failures.len(), 1);
+        assert!(failures[0].contains("workflow-bench"));
+        assert!(failures[0].contains("warning_count=1"));
+        assert!(failures[0].contains("passed_count=0"));
     }
 
     #[test]
