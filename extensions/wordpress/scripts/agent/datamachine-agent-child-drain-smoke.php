@@ -138,6 +138,10 @@ namespace {
 		fwrite( STDERR, "Expected reusable workflow success assertion to accept opened PRs and satisfied completion outcomes.\n" );
 		exit( 1 );
 	}
+	if ( str_contains( $workflow_source, '[ "$job_status" = "completed" ] || [ "$success_status" = "pr_opened" ]' ) ) {
+		fwrite( STDERR, "Did not expect reusable workflow success assertion to treat any completed job as success.\n" );
+		exit( 1 );
+	}
 	if ( ! str_contains( $workflow_source, 'error_message="$(jq -r' ) || ! str_contains( $workflow_source, 'if [ -n "$error_message" ]; then' ) ) {
 		fwrite( STDERR, "Expected reusable workflow success assertion to fail when the agent reports an error message.\n" );
 		exit( 1 );

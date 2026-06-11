@@ -1090,6 +1090,24 @@ if ( ! function_exists( 'homeboy_datamachine_agent_completion_outcome_satisfied'
     }
 }
 
+if ( ! function_exists( 'homeboy_datamachine_agent_success_status' ) ) {
+    function homeboy_datamachine_agent_success_status( bool $pr_opened, bool $completion_outcome_satisfied, bool $file_written ): string {
+        if ( $pr_opened ) {
+            return 'pr_opened';
+        }
+
+        if ( $completion_outcome_satisfied ) {
+            return 'completion_outcome_satisfied';
+        }
+
+        if ( $file_written ) {
+            return 'write_without_pr';
+        }
+
+        return 'no_changes';
+    }
+}
+
 if ( ! function_exists( 'homeboy_datamachine_agent_bundle_path_in_repo' ) ) {
     function homeboy_datamachine_agent_bundle_path_in_repo( array $config ): string {
         $configured = trim( (string) ( $config['bundle_path_in_repo'] ?? '' ), '/' );
@@ -3407,7 +3425,7 @@ if ( $file_written && ! $pr_opened && empty( $runner_workspace_capture['changed'
     }
 }
 $completion_outcome_satisfied = homeboy_datamachine_agent_completion_outcome_satisfied( $engine_data, $config );
-$success_status = $pr_opened ? 'pr_opened' : ( $completion_outcome_satisfied ? 'completion_outcome_satisfied' : 'no_changes' );
+$success_status = homeboy_datamachine_agent_success_status( $pr_opened, $completion_outcome_satisfied, $file_written );
 $artifact_pr_context = array(
     'success_status'           => $success_status,
     'success_requires_pr'      => $success_requires_pr,
@@ -3440,6 +3458,7 @@ if ( is_array( $job_artifact_exports['engine_data'] ?? null ) ) {
     $engine_data = $job_artifact_exports['engine_data'];
     $pr_opened   = true;
 }
+$success_status = homeboy_datamachine_agent_success_status( $pr_opened, $completion_outcome_satisfied, $file_written );
 
 $metadata += array(
     'agent_id'             => $agent_id,
