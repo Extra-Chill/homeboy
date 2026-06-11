@@ -243,6 +243,57 @@ pub(super) fn agent_task_plan_extra_workspaces(
     Ok(workspaces)
 }
 
+pub(super) fn rig_component_path_env_extra_workspaces(
+    source_path: &Path,
+) -> Result<Vec<ExtraLabWorkspace>> {
+    rig_component_path_env_extra_workspaces_from_entries(source_path, std::env::vars())
+}
+
+fn rig_component_path_env_extra_workspaces_from_entries(
+    source_path: &Path,
+    entries: impl IntoIterator<Item = (String, String)>,
+) -> Result<Vec<ExtraLabWorkspace>> {
+    let source_canon = source_path
+        .canonicalize()
+        .unwrap_or_else(|_| source_path.to_path_buf());
+    let mut seen = BTreeSet::new();
+    let mut workspaces = Vec::new();
+
+    for (name, value) in entries
+        .into_iter()
+        .filter(|(name, value)| is_rig_component_path_env_name(name) && !value.trim().is_empty())
+    {
+        let expanded = shellexpand::tilde(&value).to_string();
+        let path = Path::new(&expanded);
+        if !path.exists() {
+            return Err(Error::validation_invalid_argument(
+                name.clone(),
+                format!(
+                    "Lab offload cannot forward `{name}` because its controller-side path does not exist"
+                ),
+                Some(value.clone()),
+                Some(vec![
+                    format!("Controller-side value: {value}"),
+                    "Set the variable to an existing checkout/component path before offload, unset it to use the rig default, or run with --force-hot to keep the check local.".to_string(),
+                ]),
+            ));
+        }
+        add_candidate_extra_workspace(
+            &value,
+            "rig_component_path_env",
+            &source_canon,
+            &mut seen,
+            &mut workspaces,
+        )?;
+    }
+
+    Ok(workspaces)
+}
+
+pub(super) fn is_rig_component_path_env_name(name: &str) -> bool {
+    name.starts_with("HOMEBOY_") && name.ends_with("_COMPONENT_PATH")
+}
+
 pub(super) fn preflight_provider_config_source_cli_dependencies(
     args: &[String],
     snapshot_excludes: &[String],
@@ -691,6 +742,7 @@ mod provider_config_candidate_paths_tests {
     use super::{
         agent_task_plan_extra_workspaces, preflight_provider_config_source_cli_dependencies,
         provider_config_candidate_paths, provider_config_extra_workspaces,
+        rig_component_path_env_extra_workspaces_from_entries,
         workspace_mapping_entry_for_git_dependency,
     };
     use crate::core::runner::{RunnerGitDependencyMaterializationOutput, RunnerWorkspaceSyncMode};
@@ -913,6 +965,48 @@ mod provider_config_candidate_paths_tests {
         let workspaces = agent_task_plan_extra_workspaces(&args, &source).expect("workspaces");
 
         assert!(workspaces.is_empty());
+    }
+
+    #[test]
+    fn rig_component_path_env_extra_workspaces_syncs_existing_component_path() {
+        crate::test_support::with_isolated_home(|home| {
+            let source = home.path().join("primary");
+            std::fs::create_dir_all(&source).expect("source path");
+            let component_path = home.path().join("Developer/plugin/includes");
+            std::fs::create_dir_all(&component_path).expect("component path");
+
+            let workspaces = rig_component_path_env_extra_workspaces_from_entries(
+                &source,
+                [(
+                    "HOMEBOY_TEST_COMPONENT_PATH".to_string(),
+                    component_path.display().to_string(),
+                )],
+            )
+            .expect("workspaces");
+
+            assert_eq!(workspaces.len(), 1);
+            assert_eq!(workspaces[0].role, "rig_component_path_env");
+            assert_eq!(workspaces[0].path, component_path.canonicalize().unwrap());
+        });
+    }
+
+    #[test]
+    fn rig_component_path_env_extra_workspaces_rejects_missing_component_path() {
+        crate::test_support::with_isolated_home(|home| {
+            let missing = home.path().join("missing-plugin");
+
+            let err = rig_component_path_env_extra_workspaces_from_entries(
+                home.path(),
+                [(
+                    "HOMEBOY_MISSING_COMPONENT_PATH".to_string(),
+                    missing.display().to_string(),
+                )],
+            )
+            .expect_err("missing path");
+
+            assert_eq!(err.details["field"], "HOMEBOY_MISSING_COMPONENT_PATH");
+            assert!(err.message.contains("controller-side path does not exist"));
+        });
     }
 
     #[test]
