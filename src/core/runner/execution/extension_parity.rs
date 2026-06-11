@@ -109,7 +109,20 @@ fn validate_runner_extension_revision(
     };
     let Some(remote_revision) = remote_revision.filter(|revision| !revision.trim().is_empty())
     else {
-        return Ok(());
+        return Err(Error::validation_invalid_argument(
+            "runner_extension",
+            format!(
+                "Runner '{runner_id}' has stale extension parity for '{extension_id}' before command execution"
+            ),
+            Some(extension_id.to_string()),
+            Some(vec![
+                format!("Local extension source_revision: {local_revision}"),
+                "Runner extension source_revision: <missing>".to_string(),
+                format!(
+                    "Relink or update the extension on the runner before dispatch: {homeboy_path} extension relink {extension_id} <source>"
+                ),
+            ]),
+        ));
     };
 
     if local_revision == remote_revision {
@@ -178,6 +191,28 @@ mod tests {
             assert!(err.to_string().contains("stale extension parity"));
             assert!(err.details["tried"].to_string().contains("local123"));
             assert!(err.details["tried"].to_string().contains("remote456"));
+        });
+    }
+
+    #[test]
+    fn revision_parity_rejects_runner_extension_without_source_revision() {
+        with_isolated_home(|home| {
+            let extension_dir = home.path().join(".config/homeboy/extensions/wordpress");
+            fs::create_dir_all(&extension_dir).expect("extension dir");
+            fs::write(extension_dir.join(".source-revision"), "local123\n").expect("revision");
+            let remote_stdout = r#"{"success":true,"data":{"extension":{"id":"wordpress"}}}"#;
+
+            let err = validate_runner_extension_revision(
+                "homeboy-lab",
+                "homeboy",
+                "wordpress",
+                remote_stdout,
+            )
+            .expect_err("runner extension without revision should fail parity");
+
+            assert!(err.to_string().contains("stale extension parity"));
+            assert!(err.details["tried"].to_string().contains("local123"));
+            assert!(err.details["tried"].to_string().contains("<missing>"));
         });
     }
 }
