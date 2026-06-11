@@ -40,7 +40,12 @@ pub(super) fn remap_provider_config_in_args(
     // Longest local prefix first so nested paths remap against the most specific
     // workspace (e.g. a dependency under the primary checkout).
     let mut ordered: Vec<&LabPathRemap> = mappings.iter().collect();
-    ordered.sort_by_key(|mapping| std::cmp::Reverse(mapping.local.len()));
+    ordered.sort_by_key(|mapping| {
+        (
+            std::cmp::Reverse(mapping.local.len()),
+            std::cmp::Reverse(mapping.remote.len()),
+        )
+    });
 
     let mut out = Vec::with_capacity(args.len());
     let mut iter = args.iter().peekable();
@@ -83,7 +88,12 @@ pub(super) fn remap_agent_task_plan_in_args(
     }
 
     let mut ordered: Vec<&LabPathRemap> = mappings.iter().collect();
-    ordered.sort_by_key(|mapping| std::cmp::Reverse(mapping.local.len()));
+    ordered.sort_by_key(|mapping| {
+        (
+            std::cmp::Reverse(mapping.local.len()),
+            std::cmp::Reverse(mapping.remote.len()),
+        )
+    });
 
     let mut out = Vec::with_capacity(args.len());
     let mut iter = args.iter().peekable();
@@ -268,7 +278,18 @@ pub(super) fn lab_offload_source_path(args: &[String]) -> Result<PathBuf> {
         .map_err(|err| Error::internal_io(err.to_string(), Some("read cwd".to_string())))
 }
 
-pub(super) fn rewrite_lab_offload_args(args: &[String], remote_path: &str) -> Vec<String> {
+pub(super) fn rewrite_lab_offload_args(
+    args: &[String],
+    remote_path: &str,
+    mappings: &[LabPathRemap],
+) -> Vec<String> {
+    let mut ordered: Vec<&LabPathRemap> = mappings.iter().collect();
+    ordered.sort_by_key(|mapping| {
+        (
+            std::cmp::Reverse(mapping.local.len()),
+            std::cmp::Reverse(mapping.remote.len()),
+        )
+    });
     let mut stripped = Vec::with_capacity(args.len());
     let mut iter = args.iter().peekable();
     let mut passthrough = false;
@@ -288,16 +309,24 @@ pub(super) fn rewrite_lab_offload_args(args: &[String], remote_path: &str) -> Ve
         }
         if arg == "--path" || arg == "--cwd" {
             stripped.push(arg.clone());
-            let _ = iter.next();
-            stripped.push(remote_path.to_string());
+            let value = iter.next();
+            stripped.push(
+                value
+                    .and_then(|value| remap_local_path(value, &ordered))
+                    .unwrap_or_else(|| remote_path.to_string()),
+            );
             continue;
         }
-        if arg.starts_with("--path=") {
-            stripped.push(format!("--path={remote_path}"));
+        if let Some(value) = arg.strip_prefix("--path=") {
+            let rewritten =
+                remap_local_path(value, &ordered).unwrap_or_else(|| remote_path.to_string());
+            stripped.push(format!("--path={rewritten}"));
             continue;
         }
-        if arg.starts_with("--cwd=") {
-            stripped.push(format!("--cwd={remote_path}"));
+        if let Some(value) = arg.strip_prefix("--cwd=") {
+            let rewritten =
+                remap_local_path(value, &ordered).unwrap_or_else(|| remote_path.to_string());
+            stripped.push(format!("--cwd={rewritten}"));
             continue;
         }
         if arg == "--runner" {
@@ -637,7 +666,7 @@ mod tests {
         ];
 
         assert_eq!(
-            rewrite_lab_offload_args(&args, "/home/chubes/Developer/wp-site-generator"),
+            rewrite_lab_offload_args(&args, "/home/chubes/Developer/wp-site-generator", &[]),
             vec![
                 "homeboy".to_string(),
                 "--force-hot".to_string(),
@@ -646,6 +675,60 @@ mod tests {
                 "--cwd=/home/chubes/Developer/wp-site-generator".to_string(),
                 "--prompt".to_string(),
                 "cook".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn lab_args_rewrite_path_with_dependency_mapping() {
+        let args = vec![
+            "homeboy".to_string(),
+            "bench".to_string(),
+            "--path".to_string(),
+            "/controller/repo/packages/component".to_string(),
+        ];
+        let mappings = vec![LabPathRemap {
+            local: "/controller/repo".to_string(),
+            remote: "/runner/repo".to_string(),
+        }];
+
+        assert_eq!(
+            rewrite_lab_offload_args(&args, "/runner/primary", &mappings),
+            vec![
+                "homeboy".to_string(),
+                "--force-hot".to_string(),
+                "bench".to_string(),
+                "--path".to_string(),
+                "/runner/repo/packages/component".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn lab_args_rewrite_path_prefers_more_specific_duplicate_local_mapping() {
+        let args = vec![
+            "homeboy".to_string(),
+            "bench".to_string(),
+            "--path=/controller/repo/packages/component".to_string(),
+        ];
+        let mappings = vec![
+            LabPathRemap {
+                local: "/controller/repo/packages/component".to_string(),
+                remote: "/runner/primary".to_string(),
+            },
+            LabPathRemap {
+                local: "/controller/repo/packages/component".to_string(),
+                remote: "/runner/repo/packages/component".to_string(),
+            },
+        ];
+
+        assert_eq!(
+            rewrite_lab_offload_args(&args, "/runner/primary", &mappings),
+            vec![
+                "homeboy".to_string(),
+                "--force-hot".to_string(),
+                "bench".to_string(),
+                "--path=/runner/repo/packages/component".to_string(),
             ]
         );
     }
