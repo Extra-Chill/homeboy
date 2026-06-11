@@ -586,6 +586,7 @@ fn execute_trace_run(args: TraceArgs) -> homeboy::core::Result<TraceRunExecution
     });
     let (extra_workloads, trace_dependencies, runner_capabilities, invocation_requirements) =
         trace_workload_inputs(rig_context.as_ref(), ctx.extension_id.as_deref());
+    warn_rig_owned_trace_workload_expansion(rig_context.as_ref(), ctx.extension_id.as_deref());
     let experiment_settings = trace_experiment_settings(experiment_plan.as_ref())?;
     let mut experiment_env = trace_experiment_env(experiment_plan.as_ref())?;
     experiment_env.extend(args.matrix_env.clone());
@@ -718,6 +719,7 @@ fn run_list(args: TraceArgs) -> CmdResult<TraceCommandOutput> {
     let run_dir = RunDir::create()?;
     let (extra_workloads, trace_dependencies, runner_capabilities, invocation_requirements) =
         trace_workload_inputs(rig_context.as_ref(), ctx.extension_id.as_deref());
+    warn_rig_owned_trace_workload_expansion(rig_context.as_ref(), ctx.extension_id.as_deref());
     let list = extension_trace::run_trace_list_workflow(
         &ctx.component,
         TraceListWorkflowArgs {
@@ -787,6 +789,67 @@ fn trace_workload_inputs(
             id,
         ),
     )
+}
+
+fn warn_rig_owned_trace_workload_expansion(
+    rig_context: Option<&TraceRigContext>,
+    extension_id: Option<&str>,
+) {
+    for warning in rig_owned_trace_workload_expansion_warnings(rig_context, extension_id) {
+        eprintln!("{warning}");
+    }
+}
+
+fn rig_owned_trace_workload_expansion_warnings(
+    rig_context: Option<&TraceRigContext>,
+    extension_id: Option<&str>,
+) -> Vec<String> {
+    let Some((context, id)) = rig_context.zip(extension_id) else {
+        return Vec::new();
+    };
+    let Some((root_label, root)) = context
+        .rig_package_root
+        .as_ref()
+        .map(|root| ("rig package root", root))
+        .or_else(|| {
+            context
+                .rig_config_root
+                .as_ref()
+                .map(|root| ("rig config root", root))
+        })
+    else {
+        return Vec::new();
+    };
+
+    rig::workload_path_expansions_for_extension(
+        &context.rig_spec,
+        rig::RigWorkloadKind::Trace,
+        context.rig_package_root.as_deref(),
+        id,
+    )
+    .into_iter()
+    .filter(|expansion| !path_is_under(&expansion.expanded_path, root))
+    .map(|expansion| {
+        let freshness = if expansion.expanded_path.is_file() {
+            " If this is stale, refresh/reinstall the rig package or sync edits to the executed path before rerunning."
+        } else {
+            " Refresh/reinstall the rig package or check the expanded path before rerunning."
+        };
+        format!(
+            "Warning: rig `{}` owns trace workload `{}`, but it expands outside the {root_label}. Rig source root: `{}`. Executed extra workload path: `{}`.{freshness}",
+            context.rig_spec.id,
+            expansion.declared_path,
+            root.display(),
+            expansion.expanded_path.display(),
+        )
+    })
+    .collect()
+}
+
+fn path_is_under(path: &Path, root: &Path) -> bool {
+    let normalized_path = path.components().collect::<PathBuf>();
+    let normalized_root = root.components().collect::<PathBuf>();
+    normalized_path == normalized_root || normalized_path.starts_with(normalized_root)
 }
 
 #[derive(Clone)]

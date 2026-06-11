@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use crate::core::rig::spec::RigSpec;
 use crate::core::rig::{
     check_groups_for_extension_workloads, extension_ids_for_workloads,
-    runner_capabilities_for_extension, trace_dependencies_for_extension, workloads_for_extension,
-    RigWorkloadKind,
+    runner_capabilities_for_extension, trace_dependencies_for_extension,
+    workload_path_expansions_for_extension, workloads_for_extension, RigWorkloadKind,
 };
 
 #[test]
@@ -167,6 +167,42 @@ fn test_extension_workloads_expand_package_root_when_available() {
         vec![PathBuf::from(
             "/tmp/homeboy-rigs/Automattic/studio/bench/studio-app-create-site.trace.mjs"
         )]
+    );
+}
+
+#[test]
+fn test_workload_path_expansions_preserve_declared_and_expanded_paths() {
+    let rig_spec: RigSpec = serde_json::from_str(
+        r#"{
+            "id": "wc-stripe-trace",
+            "components": {
+                "stripe": { "path": "/tmp/woocommerce-gateway-stripe" }
+            },
+            "trace_workloads": {
+                "extension-a": [
+                    { "path": "${components.stripe.path}/bench/ece-product-page-waterfall.trace.mjs" }
+                ]
+            }
+        }"#,
+    )
+    .expect("parse rig spec");
+    let package = PathBuf::from("/tmp/homeboy-rigs/wc-stripe-trace");
+
+    let expansions = workload_path_expansions_for_extension(
+        &rig_spec,
+        RigWorkloadKind::Trace,
+        Some(&package),
+        "extension-a",
+    );
+
+    assert_eq!(expansions.len(), 1);
+    assert_eq!(
+        expansions[0].declared_path,
+        "${components.stripe.path}/bench/ece-product-page-waterfall.trace.mjs"
+    );
+    assert_eq!(
+        expansions[0].expanded_path,
+        PathBuf::from("/tmp/woocommerce-gateway-stripe/bench/ece-product-page-waterfall.trace.mjs")
     );
 }
 
