@@ -217,6 +217,10 @@ fn requested_lab_workspace_sync_mode(
     policy: LabOffloadWorkspaceModePolicy,
     args: &[String],
 ) -> RunnerWorkspaceSyncMode {
+    if agent_task_codebox_cwd_requires_git_checkout(args) {
+        return RunnerWorkspaceSyncMode::Git;
+    }
+
     match policy {
         LabOffloadWorkspaceModePolicy::Git => RunnerWorkspaceSyncMode::Git,
         LabOffloadWorkspaceModePolicy::ChangedSinceGitElseSnapshot => {
@@ -239,6 +243,10 @@ fn lab_workspace_sync_mode(
         return Ok(requested);
     }
 
+    if agent_task_codebox_cwd_requires_git_checkout(args) {
+        return Ok(RunnerWorkspaceSyncMode::Git);
+    }
+
     let remote_url =
         super::workspace::git_output(source_path, &["config", "--get", "remote.origin.url"])?;
     if super::source_materialization::requires_controller_routed_workspace_sync(&remote_url) {
@@ -246,6 +254,41 @@ fn lab_workspace_sync_mode(
     }
 
     Ok(requested)
+}
+
+fn agent_task_codebox_cwd_requires_git_checkout(args: &[String]) -> bool {
+    if args.get(1).map(String::as_str) != Some("agent-task") {
+        return false;
+    }
+    if !matches!(args.get(2).map(String::as_str), Some("dispatch" | "cook")) {
+        return false;
+    }
+
+    let mut has_cwd = false;
+    let mut backend: Option<&str> = None;
+    let mut iter = args.iter().skip(3).peekable();
+    while let Some(arg) = iter.next() {
+        if arg == "--" {
+            break;
+        }
+        if arg == "--cwd" {
+            has_cwd = iter.next().is_some();
+            continue;
+        }
+        if let Some(value) = arg.strip_prefix("--cwd=") {
+            has_cwd = !value.is_empty();
+            continue;
+        }
+        if arg == "--backend" {
+            backend = iter.next().map(String::as_str);
+            continue;
+        }
+        if let Some(value) = arg.strip_prefix("--backend=") {
+            backend = Some(value);
+        }
+    }
+
+    has_cwd && backend.unwrap_or("codebox") == "codebox"
 }
 
 pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadOutcome> {
@@ -1497,6 +1540,46 @@ mod tests {
             .expect("sync mode");
 
         assert_eq!(mode, RunnerWorkspaceSyncMode::Snapshot);
+    }
+
+    #[test]
+    fn agent_task_cook_codebox_cwd_uses_git_sync_for_private_sources() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .status()
+            .expect("init git repo");
+        std::process::Command::new("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "git@github.a8c.com:chubes4/conductor.git",
+            ])
+            .current_dir(dir.path())
+            .status()
+            .expect("add origin");
+
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--cwd".to_string(),
+            dir.path().display().to_string(),
+            "--backend".to_string(),
+            "codebox".to_string(),
+            "--prompt".to_string(),
+            "prove it".to_string(),
+        ];
+        let mode = lab_workspace_sync_mode(
+            LabOffloadWorkspaceModePolicy::ChangedSinceGitElseSnapshot,
+            &args,
+            dir.path(),
+        )
+        .expect("sync mode");
+
+        assert_eq!(mode, RunnerWorkspaceSyncMode::Git);
     }
 
     #[test]

@@ -152,21 +152,34 @@ pub fn sync_workspace(
                 options.changed_since_base.as_deref(),
                 options.git_fetch_refs,
             )?;
-            if runner.kind != RunnerKind::Local {
-                super::source_materialization::validate_runner_git_materialization(
+            let remote_path = deterministic_remote_path(workspace_root, &local_path, &git.head);
+            if super::source_materialization::requires_controller_routed_workspace_sync(
+                &git.remote_url,
+            ) {
+                materialize_git_from_controller_bundle(
+                    &runner,
+                    &local_path,
+                    &remote_path,
+                    &git.head,
+                    git.changed_since_base.as_deref(),
+                    &git.git_fetch_refs,
+                )?;
+            } else {
+                if runner.kind != RunnerKind::Local {
+                    super::source_materialization::validate_runner_git_materialization(
+                        &git.remote_url,
+                        &runner.id,
+                    )?;
+                }
+                materialize_git(
+                    &runner,
+                    &remote_path,
                     &git.remote_url,
-                    &runner.id,
+                    &git.head,
+                    git.changed_since_base.as_deref(),
+                    &git.git_fetch_refs,
                 )?;
             }
-            let remote_path = deterministic_remote_path(workspace_root, &local_path, &git.head);
-            materialize_git(
-                &runner,
-                &remote_path,
-                &git.remote_url,
-                &git.head,
-                git.changed_since_base.as_deref(),
-                &git.git_fetch_refs,
-            )?;
             super::validation_dependencies::sync_validation_dependency_workspaces(
                 &runner,
                 &local_path,
@@ -602,6 +615,106 @@ fn materialize_git(
     }
 }
 
+fn materialize_git_from_controller_bundle(
+    runner: &Runner,
+    local_path: &Path,
+    remote_path: &str,
+    head: &str,
+    changed_since_base: Option<&str>,
+    git_fetch_refs: &[String],
+) -> Result<()> {
+    let bundle_dir = tempfile::tempdir().map_err(|err| {
+        Error::internal_io(
+            err.to_string(),
+            Some("create controller git bundle directory".to_string()),
+        )
+    })?;
+    let bundle_path = bundle_dir.path().join("workspace.bundle");
+
+    let mut refs = vec![
+        head.to_string(),
+        "--branches".to_string(),
+        "--tags".to_string(),
+    ];
+    if let Some(base) = changed_since_base {
+        refs.push(base.to_string());
+    }
+    refs.extend(git_fetch_refs.iter().cloned());
+
+    let output = Command::new("git")
+        .arg("bundle")
+        .arg("create")
+        .arg(&bundle_path)
+        .args(&refs)
+        .current_dir(local_path)
+        .output()
+        .map_err(|err| {
+            Error::internal_io(err.to_string(), Some("create git bundle".to_string()))
+        })?;
+    if !output.status.success() {
+        return Err(Error::internal_unexpected(format!(
+            "create git bundle failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+
+    let install_command = git_bundle_install_command(remote_path, head);
+    let result = match runner.kind {
+        RunnerKind::Local => materialize_git_bundle_piped(
+            &bundle_path,
+            &format!("sh -c {}", shell::quote_arg(&install_command)),
+            "materialize local git bundle workspace",
+        ),
+        RunnerKind::Ssh => {
+            let (_server, client) = ssh_client_for_runner(runner)?;
+            if client.is_local {
+                materialize_git_bundle_piped(
+                    &bundle_path,
+                    &format!("sh -c {}", shell::quote_arg(&install_command)),
+                    "materialize local git bundle workspace",
+                )
+            } else {
+                let remote = format!("{}@{}", client.user, client.host);
+                let target = format!(
+                    "ssh {ssh_args} {remote} {remote_command}",
+                    ssh_args = ssh_args(&client),
+                    remote = shell::quote_arg(&remote),
+                    remote_command = shell::quote_arg(&install_command),
+                );
+                materialize_git_bundle_piped(
+                    &bundle_path,
+                    &target,
+                    "materialize SSH git bundle workspace",
+                )
+            }
+        }
+    };
+
+    result
+}
+
+fn materialize_git_bundle_piped(
+    bundle_path: &Path,
+    target_command: &str,
+    action: &str,
+) -> Result<()> {
+    let command = format!(
+        "cat {bundle} | {target_command}",
+        bundle = shell::quote_arg(&bundle_path.display().to_string()),
+        target_command = target_command,
+    );
+    run_shell_command(&command, action)
+}
+
+fn git_bundle_install_command(remote_path: &str, head: &str) -> String {
+    format!(
+        "parent={parent}; dest={dest}; tmp=\"${{dest}}.tmp.$$\"; bundle=\"${{dest}}.bundle.$$\"; mkdir -p \"$parent\" && trap 'rm -rf \"$tmp\" \"$bundle\"' EXIT; rm -rf \"$tmp\" \"$bundle\" && cat > \"$bundle\" && git clone \"$bundle\" \"$tmp\" && git -C \"$tmp\" checkout --detach {head} && git -C \"$tmp\" reset --hard {head} && git -C \"$tmp\" clean -ffdqx && rm -rf \"$dest\" && mv \"$tmp\" \"$dest\"",
+        parent = shell::quote_arg(parent_remote_path(remote_path).as_str()),
+        dest = shell::quote_arg(remote_path),
+        head = shell::quote_arg(head),
+    )
+}
+
 fn materialize_git_command(
     remote_path: &str,
     remote_url: &str,
@@ -959,6 +1072,62 @@ mod tests {
             assert!(!Path::new(&output.remote_path)
                 .join("target/debug/homeboy")
                 .exists());
+        });
+    }
+
+    #[test]
+    fn git_sync_for_private_remote_materializes_controller_bundle_checkout() {
+        crate::test_support::with_isolated_home(|_| {
+            let source = tempfile::tempdir().expect("source tempdir");
+            let runner_root = tempfile::tempdir().expect("runner root tempdir");
+            git(source.path(), &["init"]);
+            git(source.path(), &["config", "user.email", "test@example.com"]);
+            git(source.path(), &["config", "user.name", "Test User"]);
+            fs::write(source.path().join("file.txt"), "base\n").expect("write file");
+            git(source.path(), &["add", "."]);
+            git(source.path(), &["commit", "-m", "base"]);
+            git(
+                source.path(),
+                &[
+                    "remote",
+                    "add",
+                    "origin",
+                    "git@github.a8c.com:chubes4/conductor.git",
+                ],
+            );
+
+            super::super::create(
+                &format!(
+                    r#"{{"id":"lab-local-git-bundle","kind":"local","workspace_root":"{}"}}"#,
+                    runner_root.path().display()
+                ),
+                false,
+            )
+            .expect("create runner");
+
+            let (output, exit_code) = sync_workspace(
+                "lab-local-git-bundle",
+                RunnerWorkspaceSyncOptions {
+                    path: source.path().display().to_string(),
+                    mode: RunnerWorkspaceSyncMode::Git,
+                    changed_since_base: None,
+                    git_fetch_refs: Vec::new(),
+                    snapshot_includes: Vec::new(),
+                },
+            )
+            .expect("sync workspace");
+
+            assert_eq!(exit_code, 0);
+            assert_eq!(output.sync_mode, RunnerWorkspaceSyncMode::Git);
+            let remote = Path::new(&output.remote_path);
+            assert_eq!(
+                git_output(remote, &["rev-parse", "--is-inside-work-tree"]).unwrap(),
+                "true"
+            );
+            assert_eq!(
+                fs::read_to_string(remote.join("file.txt")).expect("read synced file"),
+                "base\n"
+            );
         });
     }
 
