@@ -343,6 +343,7 @@ PHP
     fi
 
     jq -n \
+        --arg transcriptPath "$wp_codebox_transcript_path" \
         --slurpfile run "$wp_codebox_output" \
         --slurpfile review "$wp_codebox_review_input" \
         --slurpfile changedFiles "$wp_codebox_changed_files_input" \
@@ -380,6 +381,7 @@ PHP
                 diffs: ($artifacts.diffsPath // ""),
                 changed_files: ($artifacts.changedFilesPath // ""),
                 patch: ($artifacts.patchPath // ""),
+                transcript: $transcriptPath,
                 review: ($artifacts.reviewPath // ""),
                 runtime_reference_manifest: ($artifacts.runtimeReferenceManifestPath // $artifacts.runtimeReferencesManifestPath // $artifacts.runtime_reference_manifest_path // $artifacts.referenceManifestPath // $artifacts.runtimeReferencePath // $artifacts.runtimeReferencesPath // $artifacts.runtime.referenceManifestPath // "")
             } | with_entries(select(.value != "")),
@@ -774,7 +776,7 @@ homeboy_datamachine_agent_attach_evidence_references() {
             | (first_field($metadata; "workspace_policy_result") // $metadata.datamachine_code_policy_attestation // null) as $policyResult
             | ($artifacts.episode_jsonl.path // $metadata.runtime_episode_trace.path // $metadata.runtime_episode_trace // "") as $episodeTrace
             | ($artifacts.replay_bundle.path // $metadata.replay_bundle_path // "") as $replayBundle
-            | (first_field($metadata.transcript_artifacts; "json") // "") as $transcriptJson
+            | ($wpPaths.transcript // "") as $transcriptJson
             | {
                 schema: "homeboy/datamachine-agent-evidence-references/v1",
                 scope: "generic-runner-evidence",
