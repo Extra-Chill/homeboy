@@ -280,13 +280,14 @@ fn connected_runner_not_ready_reason(
     status: &RunnerStatusReport,
 ) -> Option<String> {
     if let Some(warning) = status.stale_daemon.as_ref() {
-        let reconnect = warning
-            .recovery_commands
-            .first()
-            .cloned()
-            .unwrap_or_else(|| format!("homeboy runner connect {runner_id}"));
+        let restart = warning.recovery_commands.join(" && ");
+        let restart = if restart.is_empty() {
+            format!("homeboy runner disconnect {runner_id} && homeboy runner connect {runner_id}")
+        } else {
+            restart
+        };
         return Some(format!(
-            "connected runner `{runner_id}` daemon is stale: connected daemon reports {}, but the configured runner executable reports {}; refresh the session with `{reconnect}`",
+            "connected runner `{runner_id}` daemon is stale: connected daemon reports {}, but the configured runner executable reports {}; restart the active daemon with `{restart}`",
             warning.session_homeboy_version, warning.current_homeboy_version
         ));
     }

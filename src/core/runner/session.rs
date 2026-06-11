@@ -141,9 +141,8 @@ impl RunnerStaleDaemonWarning {
         Self {
             session_homeboy_version,
             current_homeboy_version,
-            message: "connected runner daemon was started by a different Homeboy version than the configured runner executable".to_string(),
+            message: "connected runner daemon was started by a different Homeboy version than the configured runner executable; run recovery_commands in order to restart the active daemon".to_string(),
             recovery_commands: vec![
-                format!("homeboy runner connect {}", runner_id),
                 format!("homeboy runner disconnect {}", runner_id),
                 format!("homeboy runner connect {}", runner_id),
             ],
