@@ -100,6 +100,19 @@ pub struct AssertionStats {
     pub passed: u64,
     pub failed: u64,
     pub skipped: u64,
+    #[serde(default, skip_serializing_if = "is_default_u64")]
+    pub advisory_failed: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failed_advisory_assertions: Vec<AssertionFailure>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+pub struct AssertionFailure {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selector: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -128,6 +141,10 @@ pub struct ArtifactComparison {
 pub struct ArtifactRef {
     pub label: String,
     pub target: String,
+}
+
+fn is_default_u64(value: &u64) -> bool {
+    value.eq(&u64::default())
 }
 
 pub fn render_browser_evidence_compare_from_args(
@@ -820,24 +837,57 @@ mod implementation {
 
     fn render_assertions(out: &mut String, variant: &BrowserEvidenceVariantComparison) {
         out.push_str("**Pass/fail assertion deltas**\n");
-        out.push_str("| Set | Total | Passed | Failed | Skipped |\n");
-        out.push_str("| --- | ---: | ---: | ---: | ---: |\n");
+        out.push_str("| Set | Total | Passed | Failed | Advisory failed | Skipped |\n");
+        out.push_str("| --- | ---: | ---: | ---: | ---: | ---: |\n");
         for (label, stats) in [
             ("Baseline", &variant.assertions.baseline),
             ("Candidate", &variant.assertions.candidate),
         ] {
             let _ = writeln!(
                 out,
-                "| {} | {} | {} | {} | {} |",
-                label, stats.total, stats.passed, stats.failed, stats.skipped
+                "| {} | {} | {} | {} | {} | {} |",
+                label,
+                stats.total,
+                stats.passed,
+                stats.failed,
+                stats.advisory_failed,
+                stats.skipped
             );
         }
         let _ = writeln!(
             out,
-            "| Delta | - | {} | {} | - |\n",
+            "| Delta | - | {} | {} | {} | - |\n",
             signed(variant.assertions.pass_delta as f64),
-            signed(variant.assertions.fail_delta as f64)
+            signed(variant.assertions.fail_delta as f64),
+            signed(
+                variant.assertions.candidate.advisory_failed as f64
+                    - variant.assertions.baseline.advisory_failed as f64
+            )
         );
+
+        render_advisory_failures(out, "Baseline", &variant.assertions.baseline);
+        render_advisory_failures(out, "Candidate", &variant.assertions.candidate);
+    }
+
+    fn render_advisory_failures(out: &mut String, label: &str, stats: &AssertionStats) {
+        if stats.failed_advisory_assertions.is_empty() {
+            return;
+        }
+        let _ = writeln!(out, "**{} failed advisory assertions**", label);
+        for failure in &stats.failed_advisory_assertions {
+            let selector = failure
+                .selector
+                .as_deref()
+                .map(|selector| format!(" selector `{}`", selector))
+                .unwrap_or_default();
+            let message = failure
+                .message
+                .as_deref()
+                .map(|message| format!(" - {}", message))
+                .unwrap_or_default();
+            let _ = writeln!(out, "- `{}`{}{}", failure.id, selector, message);
+        }
+        out.push('\n');
     }
 
     fn render_metric_section(
@@ -914,6 +964,7 @@ mod implementation {
                 passed: u64_value(object, "passed").unwrap_or_default(),
                 failed: u64_value(object, "failed").unwrap_or_default(),
                 skipped: u64_value(object, "skipped").unwrap_or_default(),
+                ..AssertionStats::default()
             };
         }
         let mut stats = AssertionStats::default();
@@ -925,12 +976,48 @@ mod implementation {
             stats.total += 1;
             match status {
                 "pass" | "passed" | "ok" | "success" => stats.passed += 1,
-                "fail" | "failed" | "error" => stats.failed += 1,
+                "fail" | "failed" | "error" => {
+                    stats.failed += 1;
+                    if is_advisory_assertion(assertion) {
+                        stats.advisory_failed += 1;
+                        stats
+                            .failed_advisory_assertions
+                            .push(assertion_failure(assertion));
+                    }
+                }
                 "skip" | "skipped" => stats.skipped += 1,
                 _ => {}
             }
         }
         stats
+    }
+
+    fn is_advisory_assertion(assertion: &Value) -> bool {
+        ["severity", "level", "kind", "type"]
+            .iter()
+            .filter_map(|key| assertion.get(*key).and_then(Value::as_str))
+            .any(|value| value.eq_ignore_ascii_case("advisory"))
+            || first_value_string(assertion, &["id"])
+                .is_some_and(|id| id.to_ascii_lowercase().starts_with("advisory:"))
+            || assertion
+                .get("details")
+                .and_then(Value::as_object)
+                .and_then(|details| first_string(details, &["severity", "level", "kind", "type"]))
+                .is_some_and(|value| value.eq_ignore_ascii_case("advisory"))
+    }
+
+    fn assertion_failure(assertion: &Value) -> AssertionFailure {
+        let id = first_value_string(assertion, &["id", "name"])
+            .unwrap_or_else(|| "advisory assertion".to_string());
+        let details = assertion.get("details").and_then(Value::as_object);
+        AssertionFailure {
+            id,
+            selector: first_value_string(assertion, &["selector"])
+                .or_else(|| details.and_then(|details| first_string(details, &["selector"]))),
+            message: first_value_string(assertion, &["message", "failure"]).or_else(|| {
+                details.and_then(|details| first_string(details, &["message", "failure"]))
+            }),
+        }
     }
 
     fn collect_requests(object: &Map<String, Value>, sample: &mut BrowserEvidenceSample) {
@@ -1049,6 +1136,9 @@ mod implementation {
                 acc.passed += sample.assertions.passed;
                 acc.failed += sample.assertions.failed;
                 acc.skipped += sample.assertions.skipped;
+                acc.advisory_failed += sample.assertions.advisory_failed;
+                acc.failed_advisory_assertions
+                    .extend(sample.assertions.failed_advisory_assertions.clone());
                 acc
             })
     }

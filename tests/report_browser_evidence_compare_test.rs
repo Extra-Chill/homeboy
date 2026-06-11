@@ -242,6 +242,69 @@ fn compares_browser_evidence_across_multiple_run_dirs() {
 }
 
 #[test]
+fn surfaces_failed_advisory_assertions_in_json_and_markdown() {
+    let root = tmp_dir("advisory-assertions");
+    write_fixture_file(
+        &root.join("baseline"),
+        "browser-evidence.json",
+        r##"{
+            "scenario_id":"checkout",
+            "profile":"desktop",
+            "assertions":[
+                {"id":"advisory:exists:#wc-stripe-express-checkout-element","status":"pass","selector":"#wc-stripe-express-checkout-element"}
+            ],
+            "browser_metrics":{"ready_ms":900}
+        }"##,
+    );
+    write_fixture_file(
+        &root.join("candidate"),
+        "browser-evidence.json",
+        r##"{
+            "scenario_id":"checkout",
+            "profile":"desktop",
+            "assertions":[
+                {
+                    "id":"advisory:exists:#wc-stripe-express-checkout-element",
+                    "status":"fail",
+                    "selector":"#wc-stripe-express-checkout-element",
+                    "message":"expected ECE mount to exist"
+                }
+            ],
+            "browser_metrics":{"ready_ms":900}
+        }"##,
+    );
+
+    let report = browser_evidence_compare_from_args(&args(&root, false)).expect("report renders");
+    let variant = report.variants.first().expect("variant should exist");
+
+    assert_eq!(variant.assertions.baseline.advisory_failed, 0);
+    assert_eq!(variant.assertions.candidate.advisory_failed, 1);
+    assert_eq!(
+        variant.assertions.candidate.failed_advisory_assertions[0]
+            .selector
+            .as_deref(),
+        Some("#wc-stripe-express-checkout-element")
+    );
+    assert!(report
+        .markdown
+        .contains("Candidate failed advisory assertions"));
+    assert!(report
+        .markdown
+        .contains("`advisory:exists:#wc-stripe-express-checkout-element`"));
+    assert!(report
+        .markdown
+        .contains("selector `#wc-stripe-express-checkout-element`"));
+
+    let report_json = serde_json::to_value(&report).expect("report should serialize");
+    assert_eq!(
+        report_json["variants"][0]["assertions"]["candidate"]["advisory_failed"],
+        serde_json::json!(1)
+    );
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
 fn promotes_wp_codebox_browser_summary_metrics() {
     let root = tmp_dir("wp-codebox-summary");
     write_fixture_file(
