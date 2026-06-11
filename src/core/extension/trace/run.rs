@@ -390,9 +390,6 @@ fn run_trace_workflow_with_context(
     } else {
         None
     };
-    let parsed_status = results.as_ref().map(|r| r.status.as_str().to_string());
-    let failure = (!runner_output.success && parsed_status.as_deref() != Some("pass"))
-        .then(|| failure_from_output(&args, &runner_output, Some(&artifact_dir), results.as_ref()));
     if let Some(parsed) = results.as_mut() {
         parsed.toolchain = Some(toolchain.clone());
         parsed.components = Some(components.clone());
@@ -407,14 +404,19 @@ fn run_trace_workflow_with_context(
         persist_trace_results(&results_path, parsed)?;
     }
 
-    let status = parsed_status.unwrap_or_else(|| {
-        if runner_output.success {
-            "pass"
-        } else {
-            "error"
-        }
-        .to_string()
-    });
+    let status = results
+        .as_ref()
+        .map(|r| r.status.as_str().to_string())
+        .unwrap_or_else(|| {
+            if runner_output.success {
+                "pass"
+            } else {
+                "error"
+            }
+            .to_string()
+        });
+    let failure = (!runner_output.success && status != "pass")
+        .then(|| failure_from_output(&args, &runner_output, Some(&artifact_dir), results.as_ref()));
     let exit_code = if status == "pass" {
         0
     } else if runner_output.success {
