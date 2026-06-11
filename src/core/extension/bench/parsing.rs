@@ -1170,12 +1170,9 @@ mod tests {
         }"#;
 
         let selected = vec!["target".to_string()];
-        let parsed = parse_bench_results_str_with_artifact_context_and_scenarios(
-            raw,
-            None,
-            &selected,
-        )
-        .unwrap();
+        let parsed =
+            parse_bench_results_str_with_artifact_context_and_scenarios(raw, None, &selected)
+                .unwrap();
 
         assert_eq!(parsed.scenarios.len(), 1);
         assert_eq!(parsed.scenarios[0].id, "target");
@@ -1203,12 +1200,8 @@ mod tests {
         }"#;
 
         let selected = vec!["target".to_string()];
-        let err = parse_bench_results_str_with_artifact_context_and_scenarios(
-            raw,
-            None,
-            &selected,
-        )
-        .unwrap_err();
+        let err = parse_bench_results_str_with_artifact_context_and_scenarios(raw, None, &selected)
+            .unwrap_err();
         let problem = err
             .details
             .get("problem")
