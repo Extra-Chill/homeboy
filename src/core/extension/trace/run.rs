@@ -1314,7 +1314,6 @@ mod tests {
             artifacts: Vec::new(),
             metrics: Default::default(),
             dependencies: Vec::new(),
-            metrics: Default::default(),
             toolchain: None,
             components: None,
         };
@@ -1439,7 +1438,6 @@ mod tests {
             toolchain: None,
             components: None,
             dependencies: Vec::new(),
-            metrics: Default::default(),
             preview: None,
         };
 

@@ -150,6 +150,13 @@ where
 }
 
 fn build_dispatch_plan(args: &DispatchArgs) -> homeboy::core::Result<AgentTaskPlan> {
+    build_dispatch_plan_with_provider_requirements(args, provider_requires_cwd_git_checkout)
+}
+
+fn build_dispatch_plan_with_provider_requirements(
+    args: &DispatchArgs,
+    provider_requires_cwd_git_checkout: impl Fn(&str, Option<&str>) -> bool,
+) -> homeboy::core::Result<AgentTaskPlan> {
     if args.prompt.is_none() && args.tasks.is_empty() && args.tasks_json.is_none() {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "prompt",
@@ -163,7 +170,11 @@ fn build_dispatch_plan(args: &DispatchArgs) -> homeboy::core::Result<AgentTaskPl
     }
 
     let workspace_target = resolve_dispatch_workspace(args)?;
-    validate_dispatch_workspace_target(args, workspace_target.as_ref())?;
+    validate_dispatch_workspace_target(
+        args,
+        workspace_target.as_ref(),
+        &provider_requires_cwd_git_checkout,
+    )?;
     let workspace_root = workspace_target.as_ref().map(|target| target.root.clone());
     let repo = args
         .repo
@@ -300,6 +311,7 @@ fn build_dispatch_plan(args: &DispatchArgs) -> homeboy::core::Result<AgentTaskPl
 fn validate_dispatch_workspace_target(
     args: &DispatchArgs,
     workspace: Option<&DispatchWorkspaceTarget>,
+    provider_requires_cwd_git_checkout: &impl Fn(&str, Option<&str>) -> bool,
 ) -> homeboy::core::Result<()> {
     let Some(workspace) = workspace else {
         return Ok(());
@@ -854,12 +866,15 @@ mod tests {
     fn codebox_dispatch_rejects_non_git_cwd() {
         let workspace = tempfile::tempdir().expect("workspace");
 
-        let error = build_dispatch_plan(&dispatch_args(DispatchArgOverrides {
-            prompt: Some("Generate files here.".to_string()),
-            cwd: Some(workspace.path().display().to_string()),
-            backend: Some("codebox".to_string()),
-            ..DispatchArgOverrides::default()
-        }))
+        let error = build_dispatch_plan_with_provider_requirements(
+            &dispatch_args(DispatchArgOverrides {
+                prompt: Some("Generate files here.".to_string()),
+                cwd: Some(workspace.path().display().to_string()),
+                backend: Some("codebox".to_string()),
+                ..DispatchArgOverrides::default()
+            }),
+            |backend, _selector| backend == "codebox",
+        )
         .expect_err("non-git Codebox cwd should be rejected");
 
         assert!(error.to_string().contains("git checkout"));
@@ -871,12 +886,15 @@ mod tests {
         let workspace = tempfile::tempdir().expect("workspace");
         git(workspace.path(), &["init"]);
 
-        let plan = build_dispatch_plan(&dispatch_args(DispatchArgOverrides {
-            prompt: Some("Generate files here.".to_string()),
-            cwd: Some(workspace.path().display().to_string()),
-            backend: Some("codebox".to_string()),
-            ..DispatchArgOverrides::default()
-        }))
+        let plan = build_dispatch_plan_with_provider_requirements(
+            &dispatch_args(DispatchArgOverrides {
+                prompt: Some("Generate files here.".to_string()),
+                cwd: Some(workspace.path().display().to_string()),
+                backend: Some("codebox".to_string()),
+                ..DispatchArgOverrides::default()
+            }),
+            |backend, _selector| backend == "codebox",
+        )
         .expect("git Codebox cwd should be accepted");
 
         assert_eq!(
