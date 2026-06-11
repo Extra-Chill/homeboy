@@ -93,6 +93,18 @@ const inputArg = process.argv.find((arg) => arg.startsWith('--input-file='));
 const inputPath = inputArg ? inputArg.slice('--input-file='.length) : process.argv[process.argv.indexOf('--input-file') + 1];
 const input = JSON.parse(fs.readFileSync(inputPath, 'utf8'));
 fs.writeFileSync(${JSON.stringify(capture)}, JSON.stringify({ argv: process.argv.slice(2), input }, null, 2));
+if (process.env.FIXTURE_WP_CODEBOX_AGENT_TASK_FAILURE) {
+  process.stdout.write(JSON.stringify({
+    success: false,
+    schema: 'wp-codebox/agent-task-run/v1',
+    status: 'failed',
+    summary: 'WP Codebox agent task failed.',
+    session: { id: input.sandbox_session_id, status: 'failed' },
+    artifacts: input.artifacts_path,
+    metadata: {}
+  }));
+  process.exit(0);
+}
 process.stdout.write(JSON.stringify({
   success: true,
   schema: 'wp-codebox/agent-task-run/v1',
@@ -1384,6 +1396,33 @@ try {
   assert.equal(capturedRecipeWpCodeboxRun.input.recipe.pack, 'example-codebox-recipes');
   assert.equal(capturedRecipeWpCodeboxRun.input.recipe.name, 'minimal-runtime');
   assert.equal(capturedRecipeWpCodeboxRun.input.recipe.target_ref, 'Extra-Chill/example#42');
+
+  const failedWpCodeboxRoot = fs.mkdtempSync(path.join(root, 'failed-wp-codebox-'));
+  const { fixture: failedFakeWpCodebox } = writeFakeWpCodebox(failedWpCodeboxRoot);
+  const failedWpCodeboxResult = spawnSync(process.execPath, [
+    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs'),
+  ], {
+    encoding: 'utf8',
+    env: { ...process.env, FIXTURE_WP_CODEBOX_AGENT_TASK_FAILURE: '1' },
+    input: JSON.stringify({
+      ...request,
+      task_id: 'failed-wp-codebox-task-123',
+      executor: {
+        backend: 'codebox',
+        config: {
+          wp_codebox_bin: failedFakeWpCodebox,
+          homeboy_extensions: path.join(__dirname, '..'),
+        },
+      },
+    }),
+  });
+  assert.equal(failedWpCodeboxResult.status, 1, failedWpCodeboxResult.stderr || failedWpCodeboxResult.stdout);
+  const failedWpCodeboxOutcome = JSON.parse(failedWpCodeboxResult.stdout);
+  assert.equal(failedWpCodeboxOutcome.status, 'failed');
+  assert.equal(failedWpCodeboxOutcome.artifacts.some((artifact) => artifact.kind === 'codebox-command-evidence'), true);
+  assert.equal(failedWpCodeboxOutcome.artifacts.some((artifact) => artifact.kind === 'codebox-agent-task-input'), true);
+  assert.equal(failedWpCodeboxOutcome.evidence_refs.some((ref) => ref.kind === 'codebox-command-evidence'), true);
+  assert.equal(failedWpCodeboxOutcome.diagnostics.some((diagnostic) => diagnostic.class === 'wp-codebox.command.evidence_preserved'), true);
 
   const contractResult = spawnSync(process.execPath, [
     path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs'),
