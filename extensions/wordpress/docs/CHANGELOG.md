@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.119.2] - 2026-06-11
+
+### Fixed
+- remove datamachine agent fallback PR path
+
 ## [2.119.1] - 2026-06-11
 
 ### Fixed
