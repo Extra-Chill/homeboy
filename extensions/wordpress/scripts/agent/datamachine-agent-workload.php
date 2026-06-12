@@ -3277,10 +3277,14 @@ $metadata['child_drain_results'] = $child_drain_summary['drain_results'];
 
 $job = $jobs->get_job( $job_id );
 $job_status = is_array( $job ) ? (string) ( $job['status'] ?? '' ) : '';
+$terminal_engine_data = function_exists( 'datamachine_get_engine_data' ) ? datamachine_get_engine_data( $job_id ) : array();
+$terminal_engine_data = homeboy_datamachine_agent_merge_recorded_tool_results( $terminal_engine_data, $config );
+$terminal_engine_data = homeboy_datamachine_agent_merge_child_engine_data( $terminal_engine_data, $child_drain_summary['children'], $config );
 $terminal_error = homeboy_datamachine_agent_job_terminal_error( $job_id, $job_status );
 if ( '' !== $terminal_error ) {
     $metadata['job_id'] = $job_id;
     $metadata['job_status'] = $job_status;
+    $metadata['engine_data'] = $terminal_engine_data;
     return homeboy_datamachine_agent_result(
         array(
             'job_completed' => 0,
@@ -3301,6 +3305,7 @@ foreach ( $child_drain_summary['children'] as $child_job ) {
     if ( '' !== $child_error ) {
         $metadata['job_id'] = $job_id;
         $metadata['job_status'] = $job_status;
+        $metadata['engine_data'] = $terminal_engine_data;
         return homeboy_datamachine_agent_result(
             array(
                 'job_completed' => 1,

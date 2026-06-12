@@ -143,5 +143,11 @@ namespace {
         exit( 1 );
     }
 
+    $workload_source = file_get_contents( __DIR__ . '/datamachine-agent-workload.php' ) ?: '';
+    if ( ! str_contains( $workload_source, "\$metadata['engine_data'] = \$terminal_engine_data" ) ) {
+        fwrite( STDERR, "Expected terminal failure results to expose final engine_data.\n" );
+        exit( 1 );
+    }
+
     fwrite( STDOUT, "Data Machine agent terminal state smoke passed.\n" );
 }
