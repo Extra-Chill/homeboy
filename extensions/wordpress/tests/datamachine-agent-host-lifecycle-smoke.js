@@ -96,6 +96,12 @@ function makeRunFiles(tmp, config) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-host-lifecycle-success.'));
   const repo = makeRepo(tmp);
   const gh = makeGhFixture(tmp);
+  checked('git', ['checkout', '-B', 'agent-artifacts/docs-agent-host-lifecycle'], { cwd: repo });
+  fs.writeFileSync(path.join(repo, 'stale.txt'), 'old branch content\n');
+  checked('git', ['add', 'stale.txt'], { cwd: repo });
+  checked('git', ['commit', '-m', 'Stale generated docs'], { cwd: repo });
+  checked('git', ['push', '-u', 'origin', 'agent-artifacts/docs-agent-host-lifecycle'], { cwd: repo });
+  checked('git', ['checkout', 'main'], { cwd: repo });
   fs.writeFileSync(path.join(repo, 'generated.txt'), 'hello from agent\n');
   const { configPath, resultsPath } = makeRunFiles(tmp, {
     verification_commands: [{ command: 'test -f generated.txt', description: 'Generated file exists' }],
