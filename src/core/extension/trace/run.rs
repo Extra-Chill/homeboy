@@ -208,7 +208,7 @@ fn run_trace_workflow_with_component_script(
         Some(acquire_trace_overlay_locks(&args.overlays, run_dir)?)
     };
     let applied_overlays = apply_trace_overlays(&args.overlays, args.keep_overlay)?;
-    let preview_session = start_trace_public_preview(&mut args)?;
+    let preview_session = start_trace_public_preview(&mut args, run_dir)?;
     let mut script_env = vec![
         (
             "HOMEBOY_TRACE_SCENARIO".to_string(),
@@ -350,7 +350,7 @@ fn run_trace_workflow_with_context(
         Some(acquire_trace_overlay_locks(&args.overlays, run_dir)?)
     };
     let applied_overlays = apply_trace_overlays(&args.overlays, args.keep_overlay)?;
-    let preview_session = start_trace_public_preview(&mut args)?;
+    let preview_session = start_trace_public_preview(&mut args, run_dir)?;
     let artifact_dir = run_dir.path().join("artifacts");
     std::fs::create_dir_all(&artifact_dir).map_err(|e| {
         Error::internal_io(
@@ -1102,11 +1102,13 @@ fn last_observed_homeboy_event(results: &TraceResults) -> Option<String> {
 
 fn start_trace_public_preview(
     args: &mut TraceRunWorkflowArgs,
+    run_dir: &RunDir,
 ) -> Result<Option<TracePublicPreviewSession>> {
     let Some(spec) = args.runner_inputs.public_preview.clone() else {
         return Ok(None);
     };
-    let session = TracePublicPreviewSession::start(&spec)?;
+    let artifact_dir = run_dir.path().join("artifacts");
+    let session = TracePublicPreviewSession::start_with_artifact_dir(&spec, Some(&artifact_dir))?;
     args.runner_inputs.env.extend(session.env_vars()?);
     Ok(Some(session))
 }
