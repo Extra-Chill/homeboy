@@ -78,6 +78,10 @@ name: Data Machine Agent CI (reusable)
         description: JSON array of generated-output drift checks to run in the target workspace after verification. Entries may be strings or {command, description} objects.
         type: string
         default: "[]"
+      writable_paths:
+        description: Comma-separated or JSON array of target workspace paths the agent may change. Empty disables host-side path enforcement.
+        type: string
+        default: ""
       include_agent_runtime_dependencies:
         description: "Include the standard WordPress agent runtime stack: Agents API, Data Machine, and Data Machine Code."
         type: boolean
@@ -667,6 +671,7 @@ jobs:
           CONTEXT_REPOSITORIES: ${{ inputs.context_repositories }}
           VERIFICATION_COMMANDS: ${{ inputs.verification_commands }}
           DRIFT_CHECKS: ${{ inputs.drift_checks }}
+          WRITABLE_PATHS: ${{ inputs.writable_paths }}
           PROMPT: ${{ inputs.prompt }}
           PROVIDER: ${{ inputs.provider }}
           MODEL: ${{ inputs.model }}
@@ -813,6 +818,14 @@ jobs:
           }
           verification_commands_json="$(normalize_command_list verification_commands "$VERIFICATION_COMMANDS")"
           drift_checks_json="$(normalize_command_list drift_checks "$DRIFT_CHECKS")"
+          writable_paths_json="$(printf '%s' "$WRITABLE_PATHS" | jq -Rse '
+            gsub("^\\s+|\\s+$"; "") as $value
+            | if $value == "" then []
+              elif ($value | startswith("[")) then ($value | fromjson | if type == "array" then . else error("writable_paths JSON must be an array") end)
+              else ($value | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(. != "")))
+              end
+            | map(if type == "string" and length > 0 then . else error("writable_paths entries must be non-empty strings") end)
+          ')"
           extra_wp_config_defines_json="$(validate_json_input extra_wp_config_defines object "$EXTRA_WP_CONFIG_DEFINES")"
           extra_wp_codebox_mounts_json="$(validate_json_input extra_wp_codebox_mounts array "$EXTRA_WP_CODEBOX_MOUNTS" | jq -c --arg workspace "$GITHUB_WORKSPACE" '
             map(
@@ -876,6 +889,7 @@ jobs:
             --argjson contextRepositories "$context_repositories_json" \
             --argjson verificationCommands "$verification_commands_json" \
             --argjson driftChecks "$drift_checks_json" \
+            --argjson writablePaths "$writable_paths_json" \
             --arg prompt "$PROMPT" \
             --arg provider "$PROVIDER" \
             --arg model "$MODEL" \
@@ -970,6 +984,7 @@ jobs:
               context_repositories: $contextRepositories,
               verification_commands: $verificationCommands,
               drift_checks: $driftChecks,
+              writable_paths: $writablePaths,
               host_runner_lifecycle: true,
               datamachine_code_policy_attestation: {
                 schema: "homeboy/datamachine-agent-ci-dmc-policy/v1",

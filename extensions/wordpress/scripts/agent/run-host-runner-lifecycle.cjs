@@ -131,6 +131,56 @@ function changedFiles(workspace) {
     .filter((file) => file && !file.startsWith('.ci/'));
 }
 
+function normalizePathPattern(value) {
+  return String(value || '').trim().replace(/^\.\//, '').replace(/^\/+/, '').replace(/\\/g, '/');
+}
+
+function writablePathPatterns(config) {
+  const paths = Array.isArray(config.writable_paths) ? config.writable_paths : [];
+  return paths.map(normalizePathPattern).filter(Boolean);
+}
+
+function globPatternToRegExp(pattern) {
+  let source = '^';
+  const normalized = normalizePathPattern(pattern);
+  for (let index = 0; index < normalized.length; index += 1) {
+    const char = normalized[index];
+    const next = normalized[index + 1];
+    if (char === '*' && next === '*') {
+      source += '.*';
+      index += 1;
+    } else if (char === '*') {
+      source += '[^/]*';
+    } else if (char === '?') {
+      source += '[^/]';
+    } else {
+      source += char.replace(/[|\\{}()[\]^$+?.]/g, '\\$&');
+    }
+  }
+  source += '$';
+  return new RegExp(source);
+}
+
+function validateWritablePaths(config, files) {
+  const patterns = writablePathPatterns(config);
+  if (patterns.length === 0) {
+    return { enabled: false, patterns: [], rejected_files: [] };
+  }
+
+  const matchers = patterns.map(globPatternToRegExp);
+  const rejected = files
+    .map((file) => normalizePathPattern(file))
+    .filter((file) => file && !matchers.some((matcher) => matcher.test(file)));
+  const success = rejected.length === 0;
+  return {
+    enabled: true,
+    success,
+    patterns,
+    rejected_files: rejected,
+    error: success ? '' : `Changed files outside writable_paths: ${rejected.join(', ')}`,
+  };
+}
+
 function renderTemplate(template, values) {
   return String(template || '').replace(/\{([^}]+)\}/g, (_, key) => {
     const value = values[key.trim()];
@@ -410,12 +460,15 @@ function recordLifecycle(results, scenario, lifecycle) {
   metadata.engine_data.runner_drift_check_results = lifecycle.drift;
   metadata.engine_data.runner_workspace_capture = lifecycle.capture;
   metadata.engine_data.runner_workspace_publication = lifecycle.publication;
+  metadata.engine_data.runner_writable_path_policy = lifecycle.writablePaths;
   metadata.runner_workspace_capture = lifecycle.capture;
   metadata.runner_workspace_publication = lifecycle.publication;
+  metadata.runner_writable_path_policy = lifecycle.writablePaths;
   metadata.verification_results = lifecycle.verification;
   metadata.drift_check_results = lifecycle.drift;
   scenario.metrics.verification_commands_succeeded = !lifecycle.verification.enabled || lifecycle.verification.success ? 1 : 0;
   scenario.metrics.drift_checks_succeeded = !lifecycle.drift.enabled || lifecycle.drift.success ? 1 : 0;
+  scenario.metrics.writable_paths_satisfied = !lifecycle.writablePaths.enabled || lifecycle.writablePaths.success ? 1 : 0;
   scenario.metrics.pr_opened = lifecycle.publication.opened ? 1 : 0;
   scenario.metrics.file_written = lifecycle.capture.changed ? 1 : 0;
   if (lifecycle.success && lifecycle.publication.opened) {
@@ -454,15 +507,22 @@ function main() {
     ? { enabled: false, checks: [], skipped_reason: 'verification_commands_failed' }
     : runCommandChecks(config, workspace, 'drift_checks');
   const files = changedFiles(workspace);
+  const writablePaths = validateWritablePaths(config, files);
   const capture = { enabled: true, changed: files.length > 0, files, workspace };
   let publication = { opened: false };
-  let success = (!verification.enabled || verification.success) && (!drift.enabled || drift.success);
+  let success = (!verification.enabled || verification.success)
+    && (!drift.enabled || drift.success)
+    && (!writablePaths.enabled || writablePaths.success);
   let error = '';
 
   if (!success) {
-    error = verification.enabled && !verification.success
-      ? (verification.error || 'verification_commands failed')
-      : (drift.error || 'drift_checks failed');
+    if (verification.enabled && !verification.success) {
+      error = verification.error || 'verification_commands failed';
+    } else if (drift.enabled && !drift.success) {
+      error = drift.error || 'drift_checks failed';
+    } else {
+      error = writablePaths.error || 'writable_paths policy failed';
+    }
   } else {
     try {
       publication = publishWorkspace(config, results, scenario, workspace, files);
@@ -480,7 +540,7 @@ function main() {
     }
   }
 
-  recordLifecycle(results, scenario, { verification, drift, capture, publication, success, error });
+  recordLifecycle(results, scenario, { verification, drift, writablePaths, capture, publication, success, error });
   writeJson(resultsPath, results);
   if (!success) {
     throw new Error(error);

@@ -117,6 +117,7 @@ function makeRunFiles(tmp, config) {
   checked('git', ['checkout', 'trunk'], { cwd: repo });
   fs.writeFileSync(path.join(repo, 'generated.txt'), 'hello from agent\n');
   const { configPath, resultsPath } = makeRunFiles(tmp, {
+    writable_paths: ['generated.txt'],
     verification_commands: [{ command: 'test -f generated.txt', description: 'Generated file exists' }],
     drift_checks: [{ command: 'git diff --exit-code', description: 'Verification did not create unstaged drift' }],
   });
@@ -129,6 +130,7 @@ function makeRunFiles(tmp, config) {
   const scenario = output.scenarios[0];
   assert.equal(scenario.metrics.verification_commands_succeeded, 1);
   assert.equal(scenario.metrics.drift_checks_succeeded, 1);
+  assert.equal(scenario.metrics.writable_paths_satisfied, 1);
   assert.equal(scenario.metrics.pr_opened, 1);
   assert.equal(scenario.metadata.success_status, 'pr_opened');
   assert.equal(scenario.metadata.runner_workspace_publication.url, 'https://github.com/owner/repo/pull/1291');
@@ -141,6 +143,31 @@ function makeRunFiles(tmp, config) {
   ).stdout;
   assert.match(publishedFiles, /generated\.txt/);
   assert.doesNotMatch(publishedFiles, /stale\.txt/);
+}
+
+{
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-host-lifecycle-writable-paths.'));
+  const repo = makeRepo(tmp);
+  const gh = makeGhFixture(tmp);
+  fs.mkdirSync(path.join(repo, 'plugins', 'amp'), { recursive: true });
+  fs.writeFileSync(path.join(repo, 'plugins', 'amp', 'AGENTS.md'), 'invalid docs lane output\n');
+  const { configPath, resultsPath } = makeRunFiles(tmp, {
+    writable_paths: ['README.md', 'docs/**', 'plugins/**/README.md'],
+    verification_commands: [{ command: 'test -f plugins/amp/AGENTS.md', description: 'Out-of-policy file exists' }],
+  });
+
+  const result = run('node', [script, '--results', resultsPath, '--config', configPath, '--scenario', 'developer-docs', '--workspace', repo], {
+    env: { PATH: `${gh.bin}${path.delimiter}${process.env.PATH}`, GITHUB_RUN_ID: '12345', GH_TOKEN: 'fixture' },
+  });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /Changed files outside writable_paths: plugins\/amp\/AGENTS\.md/);
+  const output = readJson(resultsPath);
+  const scenario = output.scenarios[0];
+  assert.equal(output.status, 'failed');
+  assert.equal(scenario.metrics.writable_paths_satisfied, 0);
+  assert.equal(scenario.metrics.pr_opened, 0);
+  assert.deepEqual(scenario.metadata.runner_writable_path_policy.rejected_files, ['plugins/amp/AGENTS.md']);
+  assert.equal(fs.existsSync(gh.log), false);
 }
 
 {
