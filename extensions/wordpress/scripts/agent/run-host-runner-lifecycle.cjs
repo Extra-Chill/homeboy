@@ -190,6 +190,15 @@ function publicationTemplates(config, values) {
   };
 }
 
+function pushWorkspaceBranch(workspace, branch) {
+  const fetch = git(workspace, ['fetch', 'origin', `+refs/heads/${branch}:refs/remotes/origin/${branch}`], { check: false });
+  const args = ['push', '-u', 'origin', `HEAD:${branch}`];
+  if (fetch.status === 0) {
+    args.splice(1, 0, `--force-with-lease=refs/heads/${branch}`);
+  }
+  git(workspace, args);
+}
+
 function publishWorkspace(config, results, scenario, workspace, files) {
   if (files.length === 0) {
     return { opened: false, changed: false };
@@ -230,7 +239,7 @@ function publishWorkspace(config, results, scenario, workspace, files) {
   git(workspace, ['config', 'user.name', 'homeboy-agent-ci']);
   git(workspace, ['config', 'user.email', '41898282+github-actions[bot]@users.noreply.github.com']);
   git(workspace, ['commit', '-m', templates.commitMessage]);
-  git(workspace, ['push', '-u', 'origin', `HEAD:${branch}`]);
+  pushWorkspaceBranch(workspace, branch);
 
   const existing = gh(workspace, ['pr', 'view', branch, '--json', 'url', '--jq', '.url'], { check: false });
   const existingUrl = existing.status === 0 ? existing.stdout.trim() : '';
