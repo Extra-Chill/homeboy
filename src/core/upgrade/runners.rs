@@ -6,10 +6,16 @@ use crate::core::runner::{
 };
 use crate::core::upgrade::ExtensionUpgradeEntry;
 use crate::core::Result;
+use std::path::Path;
 
-use super::types::{RunnerDaemonDriftEntry, RunnerExtensionSyncEntry, RunnerUpgradeEntry};
+use super::types::{
+    InstallMethod, RunnerDaemonDriftEntry, RunnerExtensionSyncEntry, RunnerUpgradeEntry,
+};
 
 pub(super) fn upgrade_configured_runners(
+    force: bool,
+    method_override: Option<InstallMethod>,
+    source_path: Option<&Path>,
     runner_targets: &[String],
     extension_updates: &[ExtensionUpgradeEntry],
 ) -> Result<(Vec<RunnerUpgradeEntry>, Vec<RunnerUpgradeEntry>)> {
@@ -25,6 +31,9 @@ pub(super) fn upgrade_configured_runners(
     );
     Ok(upgrade_runners_with_executor(
         &runners,
+        force,
+        method_override,
+        source_path,
         extension_updates,
         runner::exec,
         runner::status,
@@ -47,6 +56,9 @@ fn runner_upgrade_targets(runner_targets: &[String]) -> Result<Vec<Runner>> {
 
 fn upgrade_runners_with_executor(
     runners: &[Runner],
+    force: bool,
+    method_override: Option<InstallMethod>,
+    source_path: Option<&Path>,
     extension_updates: &[ExtensionUpgradeEntry],
     mut exec: impl FnMut(&str, RunnerExecOptions) -> Result<(runner::RunnerExecOutput, i32)>,
     status: impl Fn(&str) -> Result<RunnerStatusReport>,
@@ -55,7 +67,15 @@ fn upgrade_runners_with_executor(
     let mut skipped = Vec::new();
 
     for runner in runners {
-        let entry = upgrade_runner_with_executor(runner, extension_updates, &mut exec, &status);
+        let entry = upgrade_runner_with_executor(
+            runner,
+            force,
+            method_override,
+            source_path,
+            extension_updates,
+            &mut exec,
+            &status,
+        );
         if entry.success {
             crate::log_status!(
                 "upgrade",
@@ -75,6 +95,9 @@ fn upgrade_runners_with_executor(
 
 fn upgrade_runner_with_executor(
     runner: &Runner,
+    force: bool,
+    method_override: Option<InstallMethod>,
+    source_path: Option<&Path>,
     extension_updates: &[ExtensionUpgradeEntry],
     exec: &mut impl FnMut(&str, RunnerExecOptions) -> Result<(runner::RunnerExecOutput, i32)>,
     status: &impl Fn(&str) -> Result<RunnerStatusReport>,
@@ -91,12 +114,7 @@ fn upgrade_runner_with_executor(
         &runner.id,
         runner_exec_options(
             runner,
-            vec![
-                homeboy_path.clone(),
-                "upgrade".to_string(),
-                "--no-restart".to_string(),
-                "--skip-runners".to_string(),
-            ],
+            runner_upgrade_command(&homeboy_path, force, method_override, source_path),
         ),
     );
 
@@ -274,6 +292,36 @@ fn sync_runner_extensions(
     }
 
     (synced, failed)
+}
+
+fn runner_upgrade_command(
+    homeboy_path: &str,
+    force: bool,
+    method_override: Option<InstallMethod>,
+    source_path: Option<&Path>,
+) -> Vec<String> {
+    let mut command = vec![
+        homeboy_path.to_string(),
+        "upgrade".to_string(),
+        "--no-restart".to_string(),
+        "--skip-runners".to_string(),
+    ];
+
+    if force {
+        command.push("--force".to_string());
+    }
+
+    if let Some(method) = method_override {
+        command.push("--method".to_string());
+        command.push(method.as_str().to_string());
+    }
+
+    if let Some(path) = source_path {
+        command.push("--source-path".to_string());
+        command.push(path.display().to_string());
+    }
+
+    command
 }
 
 fn runner_extension_exists(
@@ -563,6 +611,9 @@ mod tests {
         let mut commands = Vec::new();
         let (updated, skipped) = upgrade_runners_with_executor(
             &[runner],
+            false,
+            None,
+            None,
             &[],
             |runner_id, options| {
                 commands.push((
@@ -609,11 +660,62 @@ mod tests {
     }
 
     #[test]
+    fn forwards_forced_source_upgrade_options_to_runner() {
+        let runner = ssh_runner("lab", Some("/home/chubes/.cargo/bin/homeboy"));
+        let source_path = Path::new(
+            "/Users/chubes/Developer/homeboy@fix-bench-selected-duplicate-validation-1266",
+        );
+        let mut commands = Vec::new();
+
+        let (updated, skipped) = upgrade_runners_with_executor(
+            &[runner],
+            true,
+            Some(InstallMethod::Source),
+            Some(source_path),
+            &[],
+            |runner_id, options| {
+                commands.push(options.command.clone());
+                let stdout = match commands.len() {
+                    1 => "homeboy 0.228.13\n",
+                    2 => "{\"install_method\":\"source\",\"message\":\"Upgrade command completed but active binary is still 0.228.13\",\"upgraded\":false}\n",
+                    3 => "homeboy 0.228.13\n",
+                    4 => "homeboy 0.228.13\n",
+                    _ => "",
+                };
+                Ok((exec_output(runner_id, options.command, stdout, "", 0), 0))
+            },
+            runner_status,
+        );
+
+        assert!(skipped.is_empty());
+        assert_eq!(updated.len(), 1);
+        assert!(updated[0].success);
+        assert!(!updated[0].upgraded);
+        assert_eq!(
+            commands[1],
+            vec![
+                "/home/chubes/.cargo/bin/homeboy",
+                "upgrade",
+                "--no-restart",
+                "--skip-runners",
+                "--force",
+                "--method",
+                "source",
+                "--source-path",
+                "/Users/chubes/Developer/homeboy@fix-bench-selected-duplicate-validation-1266",
+            ]
+        );
+    }
+
+    #[test]
     fn reports_runner_upgrade_failure_without_stopping_other_runners() {
         let runners = vec![ssh_runner("lab", None), ssh_runner("bench", None)];
         let mut calls = HashMap::<String, usize>::new();
         let (updated, skipped) = upgrade_runners_with_executor(
             &runners,
+            false,
+            None,
+            None,
             &[],
             |runner_id, options| {
                 let count = calls.entry(runner_id.to_string()).or_default();
@@ -673,6 +775,9 @@ mod tests {
 
         let (updated, skipped) = upgrade_runners_with_executor(
             &[runner],
+            false,
+            None,
+            None,
             &extension_updates,
             |runner_id, options| {
                 commands.push(options.command.clone());
@@ -726,6 +831,9 @@ mod tests {
 
         let (updated, skipped) = upgrade_runners_with_executor(
             &[runner],
+            false,
+            None,
+            None,
             &extension_updates,
             |runner_id, options| {
                 commands.push(options.command.clone());
@@ -777,6 +885,9 @@ mod tests {
 
         let (updated, skipped) = upgrade_runners_with_executor(
             &[runner],
+            false,
+            None,
+            None,
             &extension_updates,
             |runner_id, options| {
                 commands.push(options.command.clone());
@@ -825,6 +936,9 @@ mod tests {
 
         let (updated, skipped) = upgrade_runners_with_executor(
             &[runner],
+            false,
+            None,
+            None,
             &[],
             |runner_id, options| {
                 commands.push(options.command.clone());
@@ -864,6 +978,9 @@ mod tests {
 
         let (updated, skipped) = upgrade_runners_with_executor(
             &[runner],
+            false,
+            None,
+            None,
             &[],
             |runner_id, options| {
                 let stdout = match options.command.as_slice() {
