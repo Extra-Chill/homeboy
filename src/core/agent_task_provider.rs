@@ -18,9 +18,6 @@ use crate::core::agent_task_secrets::{resolve_secret_env, AgentTaskSecretResolut
 use crate::core::agent_task_timeout::timeout_with_grace;
 use crate::core::extension::load_all_extensions;
 
-const CODEBOX_AGENT_TASK_PROVIDER_ID: &str = "wordpress.codebox-agent-task-executor";
-const CODEBOX_AGENT_TASK_RESULT_SCHEMA: &str = "wp-codebox/agent-task-run-result/v1";
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskExecutorProvider {
     pub schema: String,
@@ -505,7 +502,6 @@ fn run_provider_command(
             if outcome.schema != AGENT_TASK_OUTCOME_SCHEMA {
                 outcome.schema = AGENT_TASK_OUTCOME_SCHEMA.to_string();
             }
-            normalize_codebox_failed_outcome(&mut outcome, provider, output.status.code(), &stderr);
             outcome
         }
         Err(error) => failure_outcome(
@@ -520,198 +516,6 @@ fn run_provider_command(
             json!({ "provider": provider.id, "command": command, "exit_code": output.status.code(), "stderr": stderr, "stdout": stdout }),
         ),
     }
-}
-
-fn normalize_codebox_failed_outcome(
-    outcome: &mut AgentTaskOutcome,
-    provider: &AgentTaskExecutorProvider,
-    exit_code: Option<i32>,
-    stderr: &str,
-) {
-    if !is_failed_status(outcome.status) || !is_codebox_outcome(outcome, provider) {
-        return;
-    }
-
-    ensure_codebox_run_result(outcome);
-    let Some(result) = codebox_run_result_mut(outcome) else {
-        return;
-    };
-
-    ensure_codebox_result_shape(result);
-    if codebox_result_has_actionable_evidence(result) {
-        return;
-    }
-
-    let diagnostic = AgentTaskDiagnostic {
-        class: "agent_task.codebox_no_runtime_refs".to_string(),
-        message: "WP Codebox provider reported failure without a runtime id, run id, logs, transcripts, or artifact refs.".to_string(),
-        data: json!({
-            "provider": provider.id,
-            "exit_code": exit_code,
-            "stderr": stderr,
-        }),
-    };
-
-    {
-        let Some(result_object) = result.as_object_mut() else {
-            return;
-        };
-        result_object.insert(
-            "diagnostics".to_string(),
-            json!([{
-                "class": diagnostic.class.clone(),
-                "message": diagnostic.message.clone(),
-                "data": diagnostic.data.clone(),
-            }]),
-        );
-
-        let metadata = result_object.entry("metadata").or_insert_with(|| json!({}));
-        if let Some(metadata_object) = metadata.as_object_mut() {
-            let provider_error = metadata_object
-                .entry("provider_error")
-                .or_insert_with(|| json!({}));
-            if provider_error
-                .as_object()
-                .is_none_or(|object| object.is_empty())
-            {
-                *provider_error = json!({
-                    "code": "codebox_no_runtime_refs",
-                    "message": "WP Codebox provider failed before reporting a runtime/session or evidence refs.",
-                    "exit_code": exit_code,
-                });
-            }
-        }
-    }
-
-    if outcome.diagnostics.is_empty() {
-        outcome.diagnostics.push(diagnostic);
-    }
-}
-
-fn is_failed_status(status: AgentTaskOutcomeStatus) -> bool {
-    !matches!(
-        status,
-        AgentTaskOutcomeStatus::Succeeded | AgentTaskOutcomeStatus::NoOp
-    )
-}
-
-fn is_codebox_outcome(outcome: &AgentTaskOutcome, provider: &AgentTaskExecutorProvider) -> bool {
-    provider.id == CODEBOX_AGENT_TASK_PROVIDER_ID
-        || codebox_run_result(outcome)
-            .and_then(|result| result.get("schema"))
-            .and_then(Value::as_str)
-            == Some(CODEBOX_AGENT_TASK_RESULT_SCHEMA)
-}
-
-fn ensure_codebox_run_result(outcome: &mut AgentTaskOutcome) {
-    if codebox_run_result(outcome).is_some() {
-        return;
-    }
-    let metadata = ensure_object(&mut outcome.metadata);
-    metadata.insert(
-        "codebox_run_result".to_string(),
-        json!({
-            "schema": CODEBOX_AGENT_TASK_RESULT_SCHEMA,
-            "status": "failed",
-            "failure_classification": "provider",
-        }),
-    );
-}
-
-fn ensure_codebox_result_shape(result: &mut Value) {
-    let object = ensure_object(result);
-    object
-        .entry("schema".to_string())
-        .or_insert_with(|| json!(CODEBOX_AGENT_TASK_RESULT_SCHEMA));
-    object
-        .entry("status".to_string())
-        .or_insert_with(|| json!("failed"));
-    object
-        .entry("failure_classification".to_string())
-        .or_insert_with(|| json!("provider"));
-    object
-        .entry("artifacts".to_string())
-        .or_insert_with(|| json!([]));
-    object
-        .entry("diagnostics".to_string())
-        .or_insert_with(|| json!([]));
-    object.entry("metadata".to_string()).or_insert_with(|| {
-        json!({
-            "provider_error": {},
-            "run_id": "",
-            "run_status": "",
-            "runtime_id": "",
-            "runtime_status": "",
-        })
-    });
-    object.entry("refs".to_string()).or_insert_with(|| {
-        json!({
-            "artifact_bundles": [],
-            "changed_files": [],
-            "logs": [],
-            "patches": [],
-            "runtimes": [],
-            "transcripts": [],
-        })
-    });
-}
-
-fn codebox_result_has_actionable_evidence(result: &Value) -> bool {
-    string_field(result, "run_id").is_some_and(|value| !value.is_empty())
-        || string_field(result, "runtime_id").is_some_and(|value| !value.is_empty())
-        || string_field_path(result, &["metadata", "run_id"]).is_some_and(|value| !value.is_empty())
-        || string_field_path(result, &["metadata", "runtime_id"])
-            .is_some_and(|value| !value.is_empty())
-        || non_empty_array_path(result, &["refs", "logs"])
-        || non_empty_array_path(result, &["refs", "transcripts"])
-        || non_empty_array_path(result, &["refs", "artifact_bundles"])
-        || non_empty_array_path(result, &["artifacts"])
-        || non_empty_array_path(result, &["diagnostics"])
-}
-
-fn codebox_run_result(outcome: &AgentTaskOutcome) -> Option<&Value> {
-    outcome
-        .outputs
-        .get("codebox_run_result")
-        .or_else(|| outcome.metadata.get("codebox_run_result"))
-}
-
-fn codebox_run_result_mut(outcome: &mut AgentTaskOutcome) -> Option<&mut Value> {
-    if outcome.outputs.get("codebox_run_result").is_some() {
-        outcome.outputs.get_mut("codebox_run_result")
-    } else {
-        outcome.metadata.get_mut("codebox_run_result")
-    }
-}
-
-fn ensure_object(value: &mut Value) -> &mut serde_json::Map<String, Value> {
-    if !value.is_object() {
-        *value = json!({});
-    }
-    value.as_object_mut().expect("value normalized to object")
-}
-
-fn string_field<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
-    value.get(key).and_then(Value::as_str)
-}
-
-fn string_field_path<'a>(value: &'a Value, path: &[&str]) -> Option<&'a str> {
-    let mut current = value;
-    for segment in path {
-        current = current.get(segment)?;
-    }
-    current.as_str()
-}
-
-fn non_empty_array_path(value: &Value, path: &[&str]) -> bool {
-    let mut current = value;
-    for segment in path {
-        let Some(next) = current.get(segment) else {
-            return false;
-        };
-        current = next;
-    }
-    current.as_array().is_some_and(|array| !array.is_empty())
 }
 
 fn render_provider_command(provider: &AgentTaskExecutorProvider) -> String {
@@ -1021,56 +825,6 @@ mod tests {
         );
         assert_eq!(outcome.artifacts.len(), 1);
         assert_eq!(outcome.artifacts[0].id, "timeout-evidence");
-    }
-
-    #[test]
-    fn codebox_failed_provider_payload_gets_no_runtime_diagnostic() {
-        let command = format!(
-            "node {}",
-            script("let fs=require('fs'); let req=JSON.parse(fs.readFileSync(0,'utf8')); process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'failed',summary:'WP Codebox agent task failed.',failure_classification:'provider',metadata:{provider:'wordpress.codebox-agent-task-executor',codebox_run_result:{schema:'wp-codebox/agent-task-run-result/v1',status:'failed',failure_classification:'runtime',artifacts:[],diagnostics:[],metadata:{provider_error:{},run_id:'',run_status:'',runtime_id:'',runtime_status:''},refs:{artifact_bundles:[],changed_files:[],logs:[],patches:[],runtimes:[],transcripts:[]}}}}));")
-        );
-        let (request, mut provider) = request("task-codebox-empty-failure", command);
-        provider.id = CODEBOX_AGENT_TASK_PROVIDER_ID.to_string();
-
-        let outcome = run_provider_command(&request, &provider);
-
-        assert_eq!(outcome.status, AgentTaskOutcomeStatus::Failed);
-        assert_eq!(
-            outcome.diagnostics[0].class,
-            "agent_task.codebox_no_runtime_refs"
-        );
-        let result = &outcome.metadata["codebox_run_result"];
-        assert_eq!(
-            result["diagnostics"][0]["class"],
-            "agent_task.codebox_no_runtime_refs"
-        );
-        assert_eq!(
-            result["metadata"]["provider_error"]["code"],
-            "codebox_no_runtime_refs"
-        );
-    }
-
-    #[test]
-    fn codebox_failed_provider_payload_keeps_runtime_refs_without_synthetic_diagnostic() {
-        let command = format!(
-            "node {}",
-            script("let fs=require('fs'); let req=JSON.parse(fs.readFileSync(0,'utf8')); process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'failed',summary:'WP Codebox agent task failed.',failure_classification:'execution_failed',outputs:{codebox_run_result:{schema:'wp-codebox/agent-task-run-result/v1',status:'failed',failure_classification:'runtime',metadata:{run_id:'codebox-run-1',runtime_id:'runtime-1'},refs:{logs:['homeboy://codebox/runs/codebox-run-1/logs'],transcripts:[],artifact_bundles:[]}}}}));")
-        );
-        let (request, mut provider) = request("task-codebox-runtime-failure", command);
-        provider.id = CODEBOX_AGENT_TASK_PROVIDER_ID.to_string();
-
-        let outcome = run_provider_command(&request, &provider);
-
-        assert_eq!(outcome.status, AgentTaskOutcomeStatus::Failed);
-        assert!(outcome.diagnostics.is_empty());
-        assert_eq!(
-            outcome.outputs["codebox_run_result"]["metadata"]["runtime_id"],
-            "runtime-1"
-        );
-        assert_eq!(
-            outcome.outputs["codebox_run_result"]["refs"]["logs"][0],
-            "homeboy://codebox/runs/codebox-run-1/logs"
-        );
     }
 
     #[test]
