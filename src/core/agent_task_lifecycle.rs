@@ -523,6 +523,7 @@ pub fn record_remote_dispatch_failure(
                 Some("parse offloaded agent-task dispatch aggregate".to_string()),
             )
         })?;
+    enrich_remote_dispatch_aggregate(envelope, &mut aggregate);
     if aggregate.events.is_empty() {
         aggregate.events = events_for_outcomes(&aggregate.outcomes);
     }
@@ -619,6 +620,41 @@ pub fn record_remote_dispatch_failure(
 
     store::write_record(&record)?;
     Ok(Some(record))
+}
+
+fn enrich_remote_dispatch_aggregate(envelope: &Value, aggregate: &mut AgentTaskAggregate) {
+    let remote_run_id = envelope.get("run_id").and_then(Value::as_str);
+    for outcome in &mut aggregate.outcomes {
+        if outcome.outputs.get("codebox_run_result").is_none() {
+            if let Some(result) = outcome.metadata.get("codebox_run_result") {
+                let mut outputs = outcome.outputs.as_object().cloned().unwrap_or_default();
+                outputs.insert("codebox_run_result".to_string(), result.clone());
+                outcome.outputs = Value::Object(outputs);
+            }
+        }
+
+        if outcome.evidence_refs.is_empty() {
+            if let Some(remote_run_id) = remote_run_id {
+                outcome.evidence_refs.extend([
+                    AgentTaskEvidenceRef {
+                        kind: "remote-agent-task-logs".to_string(),
+                        uri: format!("homeboy://agent-task/run/{remote_run_id}/logs"),
+                        label: Some("Remote agent-task logs".to_string()),
+                    },
+                    AgentTaskEvidenceRef {
+                        kind: "remote-agent-task-review".to_string(),
+                        uri: format!("homeboy://agent-task/run/{remote_run_id}/review"),
+                        label: Some("Remote agent-task review".to_string()),
+                    },
+                    AgentTaskEvidenceRef {
+                        kind: "remote-agent-task-artifacts".to_string(),
+                        uri: format!("homeboy://agent-task/run/{remote_run_id}/artifacts"),
+                        label: Some("Remote agent-task artifacts".to_string()),
+                    },
+                ]);
+            }
+        }
+    }
 }
 
 fn synthetic_remote_dispatch_plan(
@@ -1483,6 +1519,102 @@ mod tests {
             assert!(raw_aggregate.contains("wp-codebox/agent-task-run-result/v1"));
             assert!(raw_aggregate.contains("failure_classification"));
             assert!(raw_aggregate.contains("remote_plan_ref"));
+        });
+    }
+
+    #[test]
+    fn sparse_aggregate_only_remote_dispatch_failure_adds_remote_evidence_refs() {
+        with_isolated_home(|_| {
+            let aggregate = AgentTaskAggregate {
+                schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
+                plan_id: "remote-plan".to_string(),
+                status: AgentTaskAggregateStatus::Failed,
+                totals: AgentTaskAggregateTotals {
+                    failed: 1,
+                    ..AgentTaskAggregateTotals::default()
+                },
+                outcomes: vec![AgentTaskOutcome {
+                    schema: crate::core::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+                    task_id: "cook-conductor".to_string(),
+                    status: crate::core::agent_task::AgentTaskOutcomeStatus::Failed,
+                    summary: Some("WP Codebox agent task failed.".to_string()),
+                    failure_classification: Some(AgentTaskFailureClassification::Provider),
+                    artifacts: Vec::new(),
+                    evidence_refs: Vec::new(),
+                    diagnostics: Vec::new(),
+                    outputs: serde_json::json!({}),
+                    workflow: None,
+                    follow_up: None,
+                    metadata: serde_json::json!({
+                        "provider": "wordpress.codebox-agent-task-executor",
+                        "codebox_run_result": {
+                            "schema": "wp-codebox/agent-task-run-result/v1",
+                            "status": "failed",
+                            "failure_classification": "runtime"
+                        }
+                    }),
+                }],
+                events: Vec::new(),
+                artifact_lineage: Vec::new(),
+                queue: AgentTaskQueueStatus {
+                    max_concurrency: 1,
+                    completed: 1,
+                    ..AgentTaskQueueStatus::default()
+                },
+            };
+            let envelope = serde_json::json!({
+                "schema": "homeboy/agent-task-dispatch/v1",
+                "run_id": "remote-run",
+                "plan_id": "remote-plan",
+                "state": "failed",
+                "aggregate": aggregate,
+            });
+
+            record_remote_dispatch_failure(
+                AgentTaskRemoteDispatchFailure {
+                    run_id: "local-sparse-run",
+                    local_command: vec![
+                        "homeboy".to_string(),
+                        "agent-task".to_string(),
+                        "cook".to_string(),
+                    ],
+                    remote_command: vec![
+                        "homeboy".to_string(),
+                        "agent-task".to_string(),
+                        "cook".to_string(),
+                    ],
+                    runner_id: "lab-a",
+                    remote_workspace: "/runner/workspace/conductor",
+                    stdout: "",
+                    stderr: &envelope.to_string(),
+                    exit_code: 1,
+                },
+                &envelope,
+            )
+            .expect("sparse dispatch failure recorded")
+            .expect("dispatch envelope recognized");
+
+            let loaded = status("local-sparse-run").expect("status loaded");
+            let artifacts = artifacts("local-sparse-run").expect("artifacts loaded");
+            let (raw_aggregate, _) =
+                aggregate_source("local-sparse-run").expect("aggregate source");
+
+            assert_eq!(loaded.tasks[0].task_id, "cook-conductor");
+            assert_eq!(
+                loaded.tasks[0].backend,
+                "wordpress.codebox-agent-task-executor"
+            );
+            assert_eq!(loaded.metadata["remote_run_id"], "remote-run");
+            assert!(artifacts
+                .evidence_refs
+                .iter()
+                .any(|evidence| evidence.kind == "remote-agent-task-logs"));
+            assert!(artifacts
+                .evidence_refs
+                .iter()
+                .any(|evidence| evidence.kind == "remote-agent-task-review"));
+            assert!(raw_aggregate.contains("wp-codebox/agent-task-run-result/v1"));
+            assert!(raw_aggregate.contains("failure_classification"));
         });
     }
 
