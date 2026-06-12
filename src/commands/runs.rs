@@ -342,6 +342,28 @@ pub fn global_runner_error(args: &RunsArgs, runner_id: &str) -> Error {
 }
 
 impl RunsArgs {
+    pub fn absorb_global_runner_for_list(&mut self, runner: Option<String>) -> Option<String> {
+        match (&mut self.command, runner) {
+            (RunsCommand::List(args), Some(runner_id)) if args.runner.is_none() => {
+                args.runner = Some(runner_id);
+                None
+            }
+            (RunsCommand::List(args), Some(runner_id))
+                if args.runner.as_deref() == Some(runner_id.as_str()) =>
+            {
+                None
+            }
+            (_, runner) => runner,
+        }
+    }
+
+    pub fn list_runner(&self) -> Option<&str> {
+        match &self.command {
+            RunsCommand::List(args) => args.runner.as_deref(),
+            _ => None,
+        }
+    }
+
     pub fn is_markdown_mode(&self) -> bool {
         matches!(self.command, RunsCommand::Compare(ref compare) if compare::is_table_mode(compare))
     }
