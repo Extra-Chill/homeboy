@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.119.16] - 2026-06-12
+
+### Fixed
+- filter wp-codebox selected bench discovery
+
 ## [2.119.15] - 2026-06-12
 
 ### Fixed
