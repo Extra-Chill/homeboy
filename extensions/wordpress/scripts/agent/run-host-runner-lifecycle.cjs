@@ -244,6 +244,10 @@ function pushWorkspaceBranch(workspace, branch) {
   git(workspace, args);
 }
 
+function pushNewWorkspaceBranch(workspace, branch) {
+  git(workspace, ['push', '-u', 'origin', `HEAD:${branch}`]);
+}
+
 function pullRequestForBranch(workspace, branch) {
   const result = gh(workspace, ['pr', 'view', branch, '--json', 'number,state,url', '--jq', '.'], { check: false });
   if (result.status !== 0) {
@@ -254,6 +258,21 @@ function pullRequestForBranch(workspace, branch) {
   } catch {
     return null;
   }
+}
+
+function createPullRequest(workspace, branch, templates) {
+  return gh(workspace, [
+    'pr', 'create',
+    '--head', branch,
+    '--base', templates.base,
+    '--title', templates.title,
+    '--body', templates.body,
+  ]).stdout.trim();
+}
+
+function replacementBranchName(branch) {
+  const suffix = process.env.GITHUB_RUN_ID || Date.now();
+  return `${branch}-run-${suffix}`.replace(/[^A-Za-z0-9._/-]+/g, '-').replace(/^-+|-+$/g, '');
 }
 
 function ensurePullRequest(workspace, branch, templates) {
@@ -268,23 +287,33 @@ function ensurePullRequest(workspace, branch, templates) {
   }
 
   if (existing?.state === 'CLOSED' && existing.number) {
-    gh(workspace, ['pr', 'reopen', String(existing.number)]);
-    gh(
-      workspace,
-      ['pr', 'edit', String(existing.number), '--title', templates.title, '--body', templates.body],
-      { check: false },
-    );
-    return { url: existing.url || '', action: 'reopened', number: existing.number, state: 'OPEN' };
+    const reopened = gh(workspace, ['pr', 'reopen', String(existing.number)], { check: false });
+    if (reopened.status === 0) {
+      gh(
+        workspace,
+        ['pr', 'edit', String(existing.number), '--title', templates.title, '--body', templates.body],
+        { check: false },
+      );
+      return { url: existing.url || '', action: 'reopened', head: branch, number: existing.number, state: 'OPEN' };
+    }
+
+    const replacementBranch = replacementBranchName(branch);
+    pushNewWorkspaceBranch(workspace, replacementBranch);
+    const url = createPullRequest(workspace, replacementBranch, templates);
+    return {
+      url,
+      action: 'created_after_closed_pr',
+      head: replacementBranch,
+      number: null,
+      state: 'OPEN',
+      closed_pr_number: existing.number,
+      closed_pr_url: existing.url || '',
+      reopen_error: (reopened.stderr || reopened.stdout || '').trim(),
+    };
   }
 
-  const url = gh(workspace, [
-    'pr', 'create',
-    '--head', branch,
-    '--base', templates.base,
-    '--title', templates.title,
-    '--body', templates.body,
-  ]).stdout.trim();
-  return { url, action: 'created', number: null, state: 'OPEN' };
+  const url = createPullRequest(workspace, branch, templates);
+  return { url, action: 'created', head: branch, number: null, state: 'OPEN' };
 }
 
 function publishWorkspace(config, results, scenario, workspace, files) {
@@ -338,12 +367,15 @@ function publishWorkspace(config, results, scenario, workspace, files) {
     source: 'host_runner_lifecycle',
     success: Boolean(url),
     repo: config.target_repo || process.env.GITHUB_REPOSITORY || '',
-    head: branch,
+    head: pullRequest.head || branch,
     base: templates.base,
     url,
     action: pullRequest.action,
     pr_number: pullRequest.number,
     pr_state: pullRequest.state,
+    closed_pr_number: pullRequest.closed_pr_number,
+    closed_pr_url: pullRequest.closed_pr_url,
+    reopen_error: pullRequest.reopen_error,
     files: staged,
   };
 }

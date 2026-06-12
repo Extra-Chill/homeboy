@@ -66,7 +66,13 @@ if (process.argv[2] === 'pr' && process.argv[3] === 'create') {
   process.stdout.write('https://github.com/owner/repo/pull/1291\\n');
   process.exit(0);
 }
-if (process.argv[2] === 'pr' && process.argv[3] === 'reopen') process.exit(0);
+if (process.argv[2] === 'pr' && process.argv[3] === 'reopen') {
+  if (${JSON.stringify(Boolean(options.failReopen))}) {
+    process.stderr.write('API call failed: GraphQL: Could not open the pull request. (reopenPullRequest)');
+    process.exit(1);
+  }
+  process.exit(0);
+}
 if (process.argv[2] === 'pr' && process.argv[3] === 'edit') process.exit(0);
 process.stderr.write('unexpected gh call: ' + process.argv.slice(2).join(' '));
 process.exit(1);
@@ -168,6 +174,47 @@ function makeRunFiles(tmp, config) {
   const publishedFiles = checked(
     'git',
     ['ls-tree', '-r', '--name-only', 'origin/agent-artifacts/docs-agent-host-lifecycle'],
+    { cwd: repo },
+  ).stdout;
+  assert.match(publishedFiles, /generated\.txt/);
+  assert.doesNotMatch(publishedFiles, /stale\.txt/);
+}
+
+{
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-host-lifecycle-closed-pr-replacement.'));
+  const repo = makeRepo(tmp);
+  const gh = makeGhFixture(tmp, {
+    existingPullRequest: { number: 47, state: 'CLOSED', url: 'https://github.com/owner/repo/pull/47' },
+    failReopen: true,
+  });
+  checked('git', ['checkout', '-B', 'agent-artifacts/docs-agent-host-lifecycle'], { cwd: repo });
+  fs.writeFileSync(path.join(repo, 'stale.txt'), 'old branch content\n');
+  checked('git', ['add', 'stale.txt'], { cwd: repo });
+  checked('git', ['commit', '-m', 'Stale generated docs'], { cwd: repo });
+  checked('git', ['push', '-u', 'origin', 'agent-artifacts/docs-agent-host-lifecycle'], { cwd: repo });
+  fs.writeFileSync(path.join(repo, 'generated.txt'), 'hello from replacement branch\n');
+  const { configPath, resultsPath } = makeRunFiles(tmp, {
+    verification_commands: [{ command: 'test -f generated.txt', description: 'Generated file exists' }],
+  });
+
+  const result = run('node', [script, '--results', resultsPath, '--config', configPath, '--scenario', 'developer-docs', '--workspace', repo], {
+    env: { PATH: `${gh.bin}${path.delimiter}${process.env.PATH}`, GITHUB_RUN_ID: '12345', GH_TOKEN: 'fixture' },
+  });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const output = readJson(resultsPath);
+  const publication = output.scenarios[0].metadata.runner_workspace_publication;
+  assert.equal(publication.url, 'https://github.com/owner/repo/pull/1291');
+  assert.equal(publication.action, 'created_after_closed_pr');
+  assert.equal(publication.head, 'agent-artifacts/docs-agent-host-lifecycle-run-12345');
+  assert.equal(publication.closed_pr_number, 47);
+  assert.match(publication.reopen_error, /Could not open the pull request/);
+  const ghLog = fs.readFileSync(gh.log, 'utf8');
+  assert.match(ghLog, /pr reopen 47/);
+  assert.match(ghLog, /pr create --head agent-artifacts\/docs-agent-host-lifecycle-run-12345 --base trunk/);
+  checked('git', ['fetch', 'origin', 'agent-artifacts/docs-agent-host-lifecycle-run-12345'], { cwd: repo });
+  const publishedFiles = checked(
+    'git',
+    ['ls-tree', '-r', '--name-only', 'origin/agent-artifacts/docs-agent-host-lifecycle-run-12345'],
     { cwd: repo },
   ).stdout;
   assert.match(publishedFiles, /generated\.txt/);
