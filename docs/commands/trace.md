@@ -76,8 +76,8 @@ the public origin with bounded concurrency. Any aborted request, timeout,
 non-2xx response, or optional body-content mismatch fails the trace before it can
 produce misleading browser evidence.
 
-Use this gate before Woo Stripe real-wallet reruns that depend on WP Codebox
-static plugin assets:
+Use this gate when a trace depends on a public preview serving a burst of static
+assets reliably:
 
 ```jsonc
 {
@@ -87,9 +87,9 @@ static plugin assets:
     "require_https": true,
     "asset_fanout": {
       "asset_paths": [
-        "/wp-content/plugins/woocommerce-gateway-stripe/build/express-checkout.js?ver=10.8.0",
-        "/wp-content/plugins/woocommerce-gateway-stripe/build/express-checkout.css?ver=10.8.0",
-        "/wp-content/plugins/woocommerce/assets/js/frontend/add-to-cart.min.js"
+        "/assets/app.js?ver=1",
+        "/assets/app.css?ver=1",
+        "/assets/vendor.js?ver=1"
       ],
       "concurrency": 16,
       "repeat_count": 3
@@ -102,6 +102,10 @@ The emitted preview metadata includes `asset_fanout.schema =
 homeboy/preview-asset-fanout/v1`, expected/client request totals, status counts,
 failure buckets, and request rows. Native tunnel integrations may also fill
 ingress and local-origin request counts when those counters are available.
+
+Keep core fanout proof generic. WP Codebox, WooCommerce, or other product-specific
+asset lists should live in their owning rig or extension and consume this
+contract.
 
 ## Baseline/Candidate Compare
 

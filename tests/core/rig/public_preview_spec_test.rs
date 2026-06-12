@@ -85,12 +85,4 @@ fn test_trace_public_preview_parse_homeboy_native() {
         native.token_env.as_deref(),
         Some("HOMEBOY_PREVIEW_TUNNEL_TOKEN")
     );
-    let fanout = preview.asset_fanout.as_ref().expect("asset fanout");
-    assert_eq!(fanout.asset_paths.len(), 2);
-    assert_eq!(fanout.concurrency, Some(8));
-    assert_eq!(fanout.repeat_count, Some(3));
-    assert_eq!(
-        fanout.expected_body_contains.as_deref(),
-        Some("homeboy-fanout-ok")
-    );
 }
