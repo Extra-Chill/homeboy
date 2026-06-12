@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.121.0] - 2026-06-12
+
+### Added
+- add benchmark slow-path matrix reports
+
 ## [2.120.7] - 2026-06-12
 
 ### Changed
