@@ -473,6 +473,7 @@ mod tests {
                 RunnerWorkspaceSyncOptions {
                     path: source.display().to_string(),
                     mode: RunnerWorkspaceSyncMode::Snapshot,
+                    controller_routed_git: false,
                     changed_since_base: None,
                     git_fetch_refs: Vec::new(),
                     snapshot_includes: Vec::new(),
@@ -546,6 +547,7 @@ mod tests {
                 RunnerWorkspaceSyncOptions {
                     path: source.display().to_string(),
                     mode: RunnerWorkspaceSyncMode::Snapshot,
+                    controller_routed_git: false,
                     changed_since_base: None,
                     git_fetch_refs: Vec::new(),
                     snapshot_includes: Vec::new(),
@@ -619,6 +621,7 @@ mod tests {
                 RunnerWorkspaceSyncOptions {
                     path: source.display().to_string(),
                     mode: RunnerWorkspaceSyncMode::Snapshot,
+                    controller_routed_git: false,
                     changed_since_base: None,
                     git_fetch_refs: Vec::new(),
                     snapshot_includes: Vec::new(),
@@ -689,6 +692,7 @@ mod tests {
                 RunnerWorkspaceSyncOptions {
                     path: source.display().to_string(),
                     mode: RunnerWorkspaceSyncMode::Snapshot,
+                    controller_routed_git: false,
                     changed_since_base: None,
                     git_fetch_refs: Vec::new(),
                     snapshot_includes: Vec::new(),
@@ -767,6 +771,7 @@ mod tests {
                 RunnerWorkspaceSyncOptions {
                     path: source.display().to_string(),
                     mode: RunnerWorkspaceSyncMode::Snapshot,
+                    controller_routed_git: false,
                     changed_since_base: None,
                     git_fetch_refs: Vec::new(),
                     snapshot_includes: Vec::new(),

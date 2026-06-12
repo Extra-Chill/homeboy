@@ -402,6 +402,7 @@ fn materialize_runner_source_path(runner: &Runner, source_path: &Path) -> Result
         RunnerWorkspaceSyncOptions {
             path: source_path.display().to_string(),
             mode: RunnerWorkspaceSyncMode::Git,
+            controller_routed_git: true,
             changed_since_base: None,
             git_fetch_refs: Vec::new(),
             snapshot_includes: Vec::new(),

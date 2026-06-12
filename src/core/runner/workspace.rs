@@ -61,6 +61,7 @@ impl RunnerWorkspaceSyncMode {
 pub struct RunnerWorkspaceSyncOptions {
     pub path: String,
     pub mode: RunnerWorkspaceSyncMode,
+    pub controller_routed_git: bool,
     pub changed_since_base: Option<String>,
     pub git_fetch_refs: Vec<String>,
     pub snapshot_includes: Vec<String>,
@@ -153,9 +154,11 @@ pub fn sync_workspace(
                 options.git_fetch_refs,
             )?;
             let remote_path = deterministic_remote_path(workspace_root, &local_path, &git.head);
-            if super::source_materialization::requires_controller_routed_workspace_sync(
-                &git.remote_url,
-            ) {
+            if options.controller_routed_git
+                || super::source_materialization::requires_controller_routed_workspace_sync(
+                    &git.remote_url,
+                )
+            {
                 materialize_git_from_controller_bundle(
                     &runner,
                     &local_path,
@@ -940,6 +943,7 @@ mod tests {
                 RunnerWorkspaceSyncOptions {
                     path: source.path().display().to_string(),
                     mode: RunnerWorkspaceSyncMode::Snapshot,
+                    controller_routed_git: false,
                     changed_since_base: None,
                     git_fetch_refs: Vec::new(),
                     snapshot_includes: Vec::new(),
@@ -984,6 +988,7 @@ mod tests {
                 RunnerWorkspaceSyncOptions {
                     path: source.path().display().to_string(),
                     mode: RunnerWorkspaceSyncMode::Snapshot,
+                    controller_routed_git: false,
                     changed_since_base: None,
                     git_fetch_refs: Vec::new(),
                     snapshot_includes: Vec::new(),
@@ -1044,6 +1049,7 @@ mod tests {
                 RunnerWorkspaceSyncOptions {
                     path: source.path().display().to_string(),
                     mode: RunnerWorkspaceSyncMode::Snapshot,
+                    controller_routed_git: false,
                     changed_since_base: None,
                     git_fetch_refs: Vec::new(),
                     snapshot_includes: Vec::new(),
@@ -1110,6 +1116,7 @@ mod tests {
                 RunnerWorkspaceSyncOptions {
                     path: source.path().display().to_string(),
                     mode: RunnerWorkspaceSyncMode::Git,
+                    controller_routed_git: false,
                     changed_since_base: None,
                     git_fetch_refs: Vec::new(),
                     snapshot_includes: Vec::new(),
@@ -1127,6 +1134,63 @@ mod tests {
             assert_eq!(
                 fs::read_to_string(remote.join("file.txt")).expect("read synced file"),
                 "base\n"
+            );
+        });
+    }
+
+    #[test]
+    fn controller_routed_git_sync_materializes_bundle_for_public_remote() {
+        crate::test_support::with_isolated_home(|_| {
+            let source = tempfile::tempdir().expect("source tempdir");
+            let runner_root = tempfile::tempdir().expect("runner root tempdir");
+            git(source.path(), &["init"]);
+            git(source.path(), &["config", "user.email", "test@example.com"]);
+            git(source.path(), &["config", "user.name", "Test User"]);
+            fs::write(source.path().join("file.txt"), "source-upgrade\n").expect("write file");
+            git(source.path(), &["add", "."]);
+            git(source.path(), &["commit", "-m", "source upgrade"]);
+            git(
+                source.path(),
+                &[
+                    "remote",
+                    "add",
+                    "origin",
+                    "https://github.com/Extra-Chill/homeboy.git",
+                ],
+            );
+
+            super::super::create(
+                &format!(
+                    r#"{{"id":"lab-local-controller-git","kind":"local","workspace_root":"{}"}}"#,
+                    runner_root.path().display()
+                ),
+                false,
+            )
+            .expect("create runner");
+
+            let (output, exit_code) = sync_workspace(
+                "lab-local-controller-git",
+                RunnerWorkspaceSyncOptions {
+                    path: source.path().display().to_string(),
+                    mode: RunnerWorkspaceSyncMode::Git,
+                    controller_routed_git: true,
+                    changed_since_base: None,
+                    git_fetch_refs: Vec::new(),
+                    snapshot_includes: Vec::new(),
+                },
+            )
+            .expect("sync workspace");
+
+            assert_eq!(exit_code, 0);
+            assert_eq!(output.sync_mode, RunnerWorkspaceSyncMode::Git);
+            let remote = Path::new(&output.remote_path);
+            assert_eq!(
+                git_output(remote, &["rev-parse", "--is-inside-work-tree"]).unwrap(),
+                "true"
+            );
+            assert_eq!(
+                fs::read_to_string(remote.join("file.txt")).expect("read synced file"),
+                "source-upgrade\n"
             );
         });
     }
@@ -1151,6 +1215,7 @@ mod tests {
             let options = RunnerWorkspaceSyncOptions {
                 path: source.path().display().to_string(),
                 mode: RunnerWorkspaceSyncMode::Snapshot,
+                controller_routed_git: false,
                 changed_since_base: None,
                 git_fetch_refs: Vec::new(),
                 snapshot_includes: Vec::new(),
