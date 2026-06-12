@@ -23,8 +23,8 @@ use super::lab_apply::apply_lab_offload_patch;
 #[cfg(test)]
 use super::lab_args::EXPLICIT_PASSTHROUGH_SENTINEL;
 use super::lab_args::{
-    lab_offload_source_path, remap_agent_task_plan_in_args, remap_provider_config_in_args,
-    rewrite_lab_offload_args, LabPathRemap,
+    lab_offload_source_path, remap_agent_task_plan_in_args, remap_path_settings_in_args,
+    remap_provider_config_in_args, rewrite_lab_offload_args, LabPathRemap,
 };
 use super::lab_capabilities::lab_runner_capability_contract;
 use super::lab_command::lab_offload_command_prefix;
@@ -41,9 +41,10 @@ use super::lab_selection::{
 };
 use super::lab_workspaces::{
     agent_task_plan_extra_workspaces, lab_extra_workspaces, lab_workspace_mapping_metadata,
-    preflight_provider_config_source_cli_dependencies, provider_config_extra_workspaces,
-    rig_component_path_env_extra_workspaces, sync_extra_lab_workspaces,
-    workspace_mapping_entries_for_git_dependency, workspace_mapping_entry,
+    path_setting_extra_workspaces, preflight_provider_config_source_cli_dependencies,
+    provider_config_extra_workspaces, rig_component_path_env_extra_workspaces,
+    sync_extra_lab_workspaces, workspace_mapping_entries_for_git_dependency,
+    workspace_mapping_entry,
 };
 
 pub struct LabOffloadRequest<'a> {
@@ -591,6 +592,10 @@ fn run_lab_offload_inner(
         &changed_since_preflight.args,
         &source_path,
     )?);
+    extra_workspaces.extend(path_setting_extra_workspaces(
+        &changed_since_preflight.args,
+        &source_path,
+    )?);
     extra_workspaces.extend(rig_component_path_env_extra_workspaces(&source_path)?);
     let synced = sync_workspace(
         runner_id,
@@ -726,6 +731,7 @@ fn run_lab_offload_inner(
     );
     let remapped_args = remap_provider_config_in_args(&remapped_args, &path_remaps);
     let remapped_args = remap_agent_task_plan_in_args(&remapped_args, &path_remaps);
+    let remapped_args = remap_path_settings_in_args(&remapped_args, &path_remaps);
     let (remapped_args, synced_remapped_plan) =
         materialize_inline_agent_task_plan_arg(runner_id, &remapped_args)?;
     if let Some(entry) = synced_remapped_plan {
@@ -783,7 +789,7 @@ fn run_lab_offload_inner(
     lab_metadata["agent_task_secret_env"] = agent_task_secret_env;
     lab_metadata["trace_secret_env"] = trace_secret_env;
     lab_metadata["rig_component_path_env"] = rig_component_path_env;
-    lab_metadata["settings_env"] = settings_env_diagnostics(&changed_since_preflight.args, &env);
+    lab_metadata["settings_env"] = settings_env_diagnostics(&remapped_args, &env);
     lab_metadata["rig_sync"] = serde_json::json!({
         "step": "lab.sync_rigs",
         "synced_count": synced_rigs.len(),

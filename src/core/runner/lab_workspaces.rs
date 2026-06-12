@@ -276,6 +276,29 @@ pub(super) fn agent_task_plan_extra_workspaces(
     Ok(workspaces)
 }
 
+pub(super) fn path_setting_extra_workspaces(
+    args: &[String],
+    source_path: &Path,
+) -> Result<Vec<ExtraLabWorkspace>> {
+    let source_canon = source_path
+        .canonicalize()
+        .unwrap_or_else(|_| source_path.to_path_buf());
+    let mut seen = BTreeSet::new();
+    let mut workspaces = Vec::new();
+
+    for value in path_setting_values(args) {
+        add_candidate_extra_workspace(
+            &value,
+            "path_setting",
+            &source_canon,
+            &mut seen,
+            &mut workspaces,
+        )?;
+    }
+
+    Ok(workspaces)
+}
+
 pub(super) fn rig_component_path_env_extra_workspaces(
     source_path: &Path,
 ) -> Result<Vec<ExtraLabWorkspace>> {
@@ -415,6 +438,43 @@ fn agent_task_plan_spec(args: &[String]) -> Option<String> {
         }
     }
     None
+}
+
+fn path_setting_values(args: &[String]) -> Vec<String> {
+    let mut values = Vec::new();
+    let mut iter = args.iter().peekable();
+    let mut passthrough = false;
+    while let Some(arg) = iter.next() {
+        if passthrough {
+            continue;
+        }
+        if arg == "--" {
+            passthrough = true;
+            continue;
+        }
+        if arg == "--setting" || arg == "--setting-json" {
+            if let Some(raw) = iter.next() {
+                push_path_setting_value(raw, &mut values);
+            }
+            continue;
+        }
+        if let Some(raw) = arg
+            .strip_prefix("--setting=")
+            .or_else(|| arg.strip_prefix("--setting-json="))
+        {
+            push_path_setting_value(raw, &mut values);
+        }
+    }
+    values
+}
+
+fn push_path_setting_value(raw: &str, values: &mut Vec<String>) {
+    let Some((key, value)) = raw.split_once('=') else {
+        return;
+    };
+    if matches!(key, "wp_codebox_bin") && !value.trim().is_empty() {
+        values.push(value.to_string());
+    }
 }
 
 fn subcommand_index(args: &[String], subcommand: &str) -> Option<usize> {
@@ -777,7 +837,7 @@ mod provider_config_candidate_paths_tests {
     use std::process::Command;
 
     use super::{
-        agent_task_plan_extra_workspaces, agent_task_plan_spec,
+        agent_task_plan_extra_workspaces, agent_task_plan_spec, path_setting_extra_workspaces,
         preflight_provider_config_source_cli_dependencies, provider_config_candidate_paths,
         provider_config_extra_workspaces, rig_component_path_env_extra_workspaces_from_entries,
         workspace_mapping_entries_for_git_dependency,
@@ -1018,6 +1078,40 @@ mod provider_config_candidate_paths_tests {
         let workspaces = agent_task_plan_extra_workspaces(&args, &source).expect("workspaces");
 
         assert!(workspaces.is_empty());
+    }
+
+    #[test]
+    fn path_setting_wp_codebox_bin_syncs_containing_checkout() {
+        let controller = tempfile::tempdir().expect("controller");
+        let source = controller.path().join("primary");
+        let codebox = controller.path().join("wp-codebox");
+        let codebox_bin = codebox.join("packages/cli/dist/index.js");
+        std::fs::create_dir_all(&source).expect("source dir");
+        std::fs::create_dir_all(codebox_bin.parent().unwrap()).expect("codebox cli dir");
+        std::fs::write(&codebox_bin, "#!/usr/bin/env node\n").expect("codebox bin");
+        std::fs::write(codebox.join("package-lock.json"), "{}\n").expect("package lock");
+        git(&codebox, &["init", "-b", "main"]);
+        git(&codebox, &["config", "user.email", "test@example.com"]);
+        git(&codebox, &["config", "user.name", "Homeboy Test"]);
+        git(&codebox, &["add", "."]);
+        git(&codebox, &["commit", "-m", "initial"]);
+
+        let args = vec![
+            "homeboy".to_string(),
+            "trace".to_string(),
+            "--setting".to_string(),
+            format!("wp_codebox_bin={}", codebox_bin.display()),
+        ];
+
+        let workspaces = path_setting_extra_workspaces(&args, &source).expect("workspaces");
+
+        assert_eq!(workspaces.len(), 1);
+        assert_eq!(workspaces[0].role, "path_setting");
+        assert_eq!(workspaces[0].path, codebox.canonicalize().unwrap());
+        assert!(workspaces[0]
+            .snapshot_includes
+            .contains(&"packages/cli/dist/**".to_string()));
+        assert!(workspaces[0].bootstrap_node_dependencies);
     }
 
     #[test]
