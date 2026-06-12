@@ -77,7 +77,7 @@ function makeRunFiles(tmp, config) {
     provider: 'openai',
     model: 'gpt-5.5',
     workload_id: 'developer-docs',
-    runner_workspace: { branch: 'agent-artifacts/docs-agent-host-lifecycle', base: 'main' },
+    runner_workspace: { branch: 'agent-artifacts/docs-agent-host-lifecycle', from: 'origin/trunk' },
     artifact_export: {
       commit_message_template: 'chore: persist generated docs',
       pr_title_template: 'Persist generated docs',
@@ -112,7 +112,7 @@ function makeRunFiles(tmp, config) {
   assert.equal(scenario.metrics.drift_checks_succeeded, 1);
   assert.equal(scenario.metrics.pr_opened, 1);
   assert.equal(scenario.metadata.runner_workspace_publication.url, 'https://github.com/owner/repo/pull/1291');
-  assert.match(fs.readFileSync(gh.log, 'utf8'), /pr create/);
+  assert.match(fs.readFileSync(gh.log, 'utf8'), /pr create .*--base trunk/);
 }
 
 {
