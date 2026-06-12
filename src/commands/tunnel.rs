@@ -98,6 +98,10 @@ enum TunnelPreviewClientCommand {
         #[arg(long)]
         local_origin: String,
 
+        /// Preview session ID claimed by this client
+        #[arg(long)]
+        session_id: Option<String>,
+
         /// Environment variable that contains the preview tunnel bearer token
         #[arg(long, default_value = "HOMEBOY_PREVIEW_TUNNEL_TOKEN")]
         token_env: String,
@@ -105,6 +109,10 @@ enum TunnelPreviewClientCommand {
         /// Long-poll timeout in seconds for ingress request claims
         #[arg(long, default_value_t = 30)]
         poll_timeout: u64,
+
+        /// Print the public preview origin to stdout after successful registration
+        #[arg(long)]
+        ready_stdout: bool,
     },
 }
 
@@ -169,6 +177,10 @@ enum TunnelPreviewIngressCommand {
         /// Public host pattern routed to this ingress
         #[arg(long, default_value = "*-tunnel.{domain}")]
         public_host_pattern: String,
+
+        /// Environment variable containing the allowed client token SHA-256 digest
+        #[arg(long, default_value = "HOMEBOY_PREVIEW_TUNNEL_TOKEN_SHA256")]
+        token_sha256_env: String,
     },
 }
 
@@ -456,15 +468,19 @@ fn run_preview_client(command: TunnelPreviewClientCommand) -> CmdResult<TunnelOu
             ingress,
             public_host,
             local_origin,
+            session_id,
             token_env,
             poll_timeout,
+            ready_stdout,
         } => {
             let report = preview_client::start(PreviewClientStartSpec {
                 ingress,
                 public_host,
                 local_origin,
+                session_id,
                 token_env,
                 poll_timeout_secs: poll_timeout,
+                ready_stdout,
             })?;
             Ok((
                 TunnelOutput {
@@ -592,12 +608,14 @@ fn run_preview_ingress(command: TunnelPreviewIngressCommand) -> CmdResult<Tunnel
             bind,
             domain,
             public_host_pattern,
+            token_sha256_env,
         } => {
             let pattern = public_host_pattern.replace("{domain}", &domain);
             let status = preview_ingress::serve(PreviewIngressServeSpec {
                 bind,
                 domain,
                 public_host_pattern: pattern,
+                token_sha256_env,
             })?;
             Ok((
                 TunnelOutput {

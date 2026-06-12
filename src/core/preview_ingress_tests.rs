@@ -1,5 +1,12 @@
 use super::preview_ingress::*;
+use super::tunnel::native_preview_token_sha256;
 use crate::test_support;
+use base64::Engine;
+use serde_json::json;
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::thread;
+use std::time::Duration;
 
 #[test]
 fn route_registers_host_to_upstream_origin() {
@@ -76,6 +83,126 @@ fn route_validation_rejects_non_http_upstream_origin() {
 
         assert!(err.message.contains("upstream origin"));
     });
+}
+
+#[test]
+fn reverse_channel_client_serves_public_request() {
+    test_support::with_isolated_home(|_| {
+        let token = "test-preview-token";
+        std::env::set_var(
+            "HOMEBOY_TEST_PREVIEW_TOKEN_SHA256",
+            native_preview_token_sha256(token),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").expect("reserve port");
+        let port = listener.local_addr().expect("local addr").port();
+        drop(listener);
+        thread::spawn(move || {
+            serve(PreviewIngressServeSpec {
+                bind: format!("127.0.0.1:{port}"),
+                domain: "example.com".to_string(),
+                public_host_pattern: "*-tunnel.example.com".to_string(),
+                token_sha256_env: "HOMEBOY_TEST_PREVIEW_TOKEN_SHA256".to_string(),
+            })
+            .expect("serve ingress");
+        });
+        thread::sleep(Duration::from_millis(100));
+
+        let register = http_request(
+            port,
+            "POST",
+            "/preview/client/register",
+            "homeboy-health-tunnel.example.com",
+            Some(token),
+            json!({
+                "public_host": "run-1-tunnel.example.com",
+                "local_origin": "http://127.0.0.1:49999",
+                "session_id": "run-1"
+            })
+            .to_string(),
+        );
+        assert!(register.contains("200 OK"), "{register}");
+
+        let browser = thread::spawn(move || {
+            raw_http_request(
+                port,
+                "GET /assets/app.js?ver=1 HTTP/1.1\r\nHost: run-1-tunnel.example.com\r\n\r\n",
+            )
+        });
+        thread::sleep(Duration::from_millis(100));
+
+        let next = http_request(
+            port,
+            "POST",
+            "/preview/client/next",
+            "homeboy-health-tunnel.example.com",
+            Some(token),
+            json!({ "public_host": "run-1-tunnel.example.com", "timeout_secs": 2 }).to_string(),
+        );
+        assert!(next.contains("/assets/app.js?ver=1"), "{next}");
+        let request_id = response_json(&next)["request"]["request_id"]
+            .as_str()
+            .expect("request id")
+            .to_string();
+
+        let respond = http_request(
+            port,
+            "POST",
+            "/preview/client/respond",
+            "homeboy-health-tunnel.example.com",
+            Some(token),
+            json!({
+                "public_host": "run-1-tunnel.example.com",
+                "response": {
+                    "request_id": request_id,
+                    "status": 200,
+                    "headers": { "content-type": "application/javascript" },
+                    "body_base64": base64::engine::general_purpose::STANDARD.encode("console.log('ok');")
+                }
+            })
+            .to_string(),
+        );
+        assert!(respond.contains("200 OK"), "{respond}");
+
+        let browser_response = browser.join().expect("browser response");
+        assert!(browser_response.contains("200 OK"), "{browser_response}");
+        assert!(
+            browser_response.contains("console.log('ok');"),
+            "{browser_response}"
+        );
+    });
+}
+
+fn http_request(
+    port: u16,
+    method: &str,
+    path: &str,
+    host: &str,
+    bearer: Option<&str>,
+    body: String,
+) -> String {
+    let auth = bearer
+        .map(|token| format!("Authorization: Bearer {token}\r\n"))
+        .unwrap_or_default();
+    raw_http_request(
+        port,
+        &format!(
+            "{method} {path} HTTP/1.1\r\nHost: {host}\r\n{auth}Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        ),
+    )
+}
+
+fn raw_http_request(port: u16, request: &str) -> String {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+    stream.write_all(request.as_bytes()).expect("write request");
+    let mut response = String::new();
+    stream.read_to_string(&mut response).expect("read response");
+    response
+}
+
+fn response_json(response: &str) -> serde_json::Value {
+    let body = response.split("\r\n\r\n").nth(1).expect("response body");
+    serde_json::from_str(body).expect("json body")
 }
 
 fn install_options() -> PreviewIngressInstallOptions {

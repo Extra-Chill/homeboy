@@ -16,8 +16,10 @@ pub struct PreviewClientStartSpec {
     pub ingress: String,
     pub public_host: String,
     pub local_origin: String,
+    pub session_id: Option<String>,
     pub token_env: String,
     pub poll_timeout_secs: u64,
+    pub ready_stdout: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -99,6 +101,9 @@ pub fn start(spec: PreviewClientStartSpec) -> Result<PreviewClientReport> {
         })?;
 
     register_session(&client, &spec, &token)?;
+    if spec.ready_stdout {
+        println!("ready https://{}", spec.public_host);
+    }
     while !stop.load(Ordering::SeqCst) {
         match poll_next_request(&client, &spec, &token) {
             Ok(Some(request)) => {
@@ -225,6 +230,7 @@ fn register_session(client: &Client, spec: &PreviewClientStartSpec, token: &str)
         json!({
             "public_host": spec.public_host,
             "local_origin": spec.local_origin,
+            "session_id": spec.session_id,
         }),
         "register preview client session",
     )
@@ -457,8 +463,10 @@ mod tests {
             ingress: "https://preview.example.test".to_string(),
             public_host: "*-tunnel.example.test".to_string(),
             local_origin: "http://127.0.0.1:49822".to_string(),
+            session_id: Some("run-1".to_string()),
             token_env: "HOMEBOY_PREVIEW_TUNNEL_TOKEN".to_string(),
             poll_timeout_secs: 30,
+            ready_stdout: false,
         })
         .expect_err("wildcard host should fail");
 
