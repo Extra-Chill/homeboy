@@ -1,6 +1,7 @@
 use clap::{Args, Subcommand, ValueEnum};
 use serde::Serialize;
 
+use homeboy::core::preview_client::{self, PreviewClientReport, PreviewClientStartSpec};
 use homeboy::core::tunnel::{
     self, ExposeServiceTunnelSpec, ServiceTunnel, ServiceTunnelAuth, ServiceTunnelAuthMode,
     ServiceTunnelExposure, ServiceTunnelPolicy, ServiceTunnelPreviewPolicy,
@@ -17,6 +18,8 @@ use super::{CmdResult, DynamicSetArgs};
 pub struct TunnelExtra {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub service: Option<ServiceTunnelActionOutput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview_client: Option<PreviewClientActionOutput>,
 }
 
 #[derive(Debug, Serialize)]
@@ -27,6 +30,11 @@ pub enum ServiceTunnelActionOutput {
         local_url: String,
     },
     Status(ServiceTunnelStatus),
+}
+
+#[derive(Debug, Serialize)]
+pub struct PreviewClientActionOutput {
+    pub report: PreviewClientReport,
 }
 
 pub type TunnelOutput = EntityCrudOutput<ServiceTunnel, TunnelExtra>;
@@ -43,6 +51,38 @@ enum TunnelCommand {
     Service {
         #[command(subcommand)]
         command: TunnelServiceCommand,
+    },
+    /// Connect a local preview origin to a Homeboy preview ingress
+    #[command(name = "preview-client")]
+    PreviewClient {
+        #[command(subcommand)]
+        command: TunnelPreviewClientCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum TunnelPreviewClientCommand {
+    /// Start an outbound authenticated reverse channel for one public host
+    Start {
+        /// Preview ingress/broker base URL
+        #[arg(long)]
+        ingress: String,
+
+        /// Exact public host to register. Wildcards are rejected.
+        #[arg(long)]
+        public_host: String,
+
+        /// Local loopback HTTP(S) origin to forward requests to
+        #[arg(long)]
+        local_origin: String,
+
+        /// Environment variable that contains the preview tunnel bearer token
+        #[arg(long, default_value = "HOMEBOY_PREVIEW_TUNNEL_TOKEN")]
+        token_env: String,
+
+        /// Long-poll timeout in seconds for ingress request claims
+        #[arg(long, default_value_t = 30)]
+        poll_timeout: u64,
     },
 }
 
@@ -269,6 +309,39 @@ impl From<ServiceTunnelAuthModeArg> for ServiceTunnelAuthMode {
 pub fn run(args: TunnelArgs, _global: &super::GlobalArgs) -> CmdResult<TunnelOutput> {
     match args.command {
         TunnelCommand::Service { command } => run_service(command),
+        TunnelCommand::PreviewClient { command } => run_preview_client(command),
+    }
+}
+
+fn run_preview_client(command: TunnelPreviewClientCommand) -> CmdResult<TunnelOutput> {
+    match command {
+        TunnelPreviewClientCommand::Start {
+            ingress,
+            public_host,
+            local_origin,
+            token_env,
+            poll_timeout,
+        } => {
+            let report = preview_client::start(PreviewClientStartSpec {
+                ingress,
+                public_host,
+                local_origin,
+                token_env,
+                poll_timeout_secs: poll_timeout,
+            })?;
+            Ok((
+                TunnelOutput {
+                    command: "tunnel.preview_client.start".to_string(),
+                    id: Some(report.public_host.clone()),
+                    extra: TunnelExtra {
+                        preview_client: Some(PreviewClientActionOutput { report }),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                0,
+            ))
+        }
     }
 }
 
@@ -456,6 +529,7 @@ fn url_service(id: &str) -> CmdResult<TunnelOutput> {
                     service_id: id.to_string(),
                     local_url,
                 }),
+                ..Default::default()
             },
             ..Default::default()
         },
@@ -471,6 +545,7 @@ fn status_service(id: &str) -> CmdResult<TunnelOutput> {
             id: Some(id.to_string()),
             extra: TunnelExtra {
                 service: Some(ServiceTunnelActionOutput::Status(report)),
+                ..Default::default()
             },
             ..Default::default()
         },
@@ -487,6 +562,7 @@ fn start_service(spec: StartServiceTunnelSpec) -> CmdResult<TunnelOutput> {
             id: Some(id),
             extra: TunnelExtra {
                 service: Some(ServiceTunnelActionOutput::Status(report)),
+                ..Default::default()
             },
             ..Default::default()
         },
@@ -502,6 +578,7 @@ fn stop_service(id: &str) -> CmdResult<TunnelOutput> {
             id: Some(id.to_string()),
             extra: TunnelExtra {
                 service: Some(ServiceTunnelActionOutput::Status(report)),
+                ..Default::default()
             },
             ..Default::default()
         },

@@ -54,6 +54,7 @@ pub mod observation;
 pub mod output;
 pub(crate) mod ownership;
 pub mod plan;
+pub mod preview_client;
 pub mod process;
 pub mod product_identity;
 pub mod project;
