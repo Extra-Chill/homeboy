@@ -186,7 +186,13 @@ pub fn run_upgrade_with_method(
             let (runners_updated, runners_skipped) = if skip_runners {
                 (vec![], vec![])
             } else {
-                runners::upgrade_configured_runners(runner_targets, &extensions_updated)?
+                runners::upgrade_configured_runners(
+                    force,
+                    method_override,
+                    source_path,
+                    runner_targets,
+                    &extensions_updated,
+                )?
             };
             return Ok(UpgradeResult {
                 command: "upgrade".to_string(),
@@ -218,7 +224,13 @@ pub fn run_upgrade_with_method(
     };
 
     let (runners_updated, runners_skipped) = if upgrade_completed && !skip_runners {
-        runners::upgrade_configured_runners(runner_targets, &extensions_updated)?
+        runners::upgrade_configured_runners(
+            force,
+            method_override,
+            source_path,
+            runner_targets,
+            &extensions_updated,
+        )?
     } else {
         (vec![], vec![])
     };
