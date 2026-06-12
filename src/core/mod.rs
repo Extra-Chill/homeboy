@@ -55,6 +55,9 @@ pub mod observation;
 pub mod output;
 pub(crate) mod ownership;
 pub mod plan;
+pub mod preview_ingress;
+#[cfg(test)]
+mod preview_ingress_tests;
 pub mod process;
 pub mod product_identity;
 pub mod project;
