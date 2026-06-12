@@ -441,9 +441,99 @@ fn ensure_remote_daemon(
     homeboy: &str,
 ) -> std::result::Result<RemoteDaemon, String> {
     if let Some(daemon) = remote_daemon_status(client, homeboy)? {
+        if let Some(stale_reason) = remote_daemon_binary_stale(client, homeboy, &daemon)? {
+            log_status!(
+                "runner",
+                "Remote managed daemon is stale ({stale_reason}); restarting it"
+            );
+            remote_daemon_stop(client, homeboy)?;
+            return remote_daemon_start(client, homeboy);
+        }
         return Ok(daemon);
     }
     remote_daemon_start(client, homeboy)
+}
+
+fn remote_daemon_binary_stale(
+    client: &SshClient,
+    homeboy: &str,
+    daemon: &RemoteDaemon,
+) -> std::result::Result<Option<String>, String> {
+    let Some(pid) = daemon.pid else {
+        return Ok(None);
+    };
+    let command = remote_daemon_binary_probe_command(homeboy, pid);
+    let output = client.execute(&command);
+    match classify_remote_daemon_binary_probe(output.exit_code, &output.stdout) {
+        RemoteDaemonBinaryProbe::Fresh | RemoteDaemonBinaryProbe::Unknown => Ok(None),
+        RemoteDaemonBinaryProbe::Stale(reason) => Ok(Some(reason)),
+        RemoteDaemonBinaryProbe::Failed => Err(command_failure_message(
+            "remote daemon binary freshness probe failed",
+            &output,
+        )),
+    }
+}
+
+fn remote_daemon_stop(client: &SshClient, homeboy: &str) -> std::result::Result<(), String> {
+    let command = format!("{} daemon stop", shell::quote_arg(homeboy));
+    let output = client.execute(&command);
+    if !output.success {
+        return Err(command_failure_message(
+            "remote daemon stop failed while refreshing stale managed daemon",
+            &output,
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RemoteDaemonBinaryProbe {
+    Fresh,
+    Stale(String),
+    Unknown,
+    Failed,
+}
+
+fn classify_remote_daemon_binary_probe(exit_code: i32, stdout: &str) -> RemoteDaemonBinaryProbe {
+    match exit_code {
+        0 => RemoteDaemonBinaryProbe::Fresh,
+        10 => RemoteDaemonBinaryProbe::Stale(stdout.trim().to_string()),
+        2 => RemoteDaemonBinaryProbe::Unknown,
+        _ => RemoteDaemonBinaryProbe::Failed,
+    }
+}
+
+fn remote_daemon_binary_probe_command(homeboy: &str, pid: u32) -> String {
+    let quoted_homeboy = shell::quote_arg(homeboy);
+    format!(
+        r#"set -eu
+pid={pid}
+current=$(command -v {quoted_homeboy} 2>/dev/null || printf '%s\n' {quoted_homeboy})
+current=$(readlink -f "$current" 2>/dev/null || printf '%s\n' "$current")
+if [ ! -e "/proc/$pid/exe" ]; then
+  exit 2
+fi
+exe=$(readlink "/proc/$pid/exe" 2>/dev/null || true)
+if [ -z "$exe" ]; then
+  exit 2
+fi
+case "$exe" in
+  *" (deleted)")
+    printf 'daemon pid %s executable has been replaced: %s\n' "$pid" "$exe"
+    exit 10
+    ;;
+esac
+current_id=$(stat -Lc '%d:%i' "$current" 2>/dev/null || true)
+daemon_id=$(stat -Lc '%d:%i' "/proc/$pid/exe" 2>/dev/null || true)
+if [ -z "$current_id" ] || [ -z "$daemon_id" ]; then
+  exit 2
+fi
+if [ "$current_id" != "$daemon_id" ]; then
+  printf 'daemon pid %s executable inode differs from current Homeboy binary %s\n' "$pid" "$current"
+  exit 10
+fi
+exit 0"#
+    )
 }
 
 fn remote_daemon_status(
@@ -762,6 +852,42 @@ mod tests {
                 "homeboy runner connect homeboy-lab".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn classifies_remote_daemon_binary_probe_results() {
+        assert_eq!(
+            classify_remote_daemon_binary_probe(0, ""),
+            RemoteDaemonBinaryProbe::Fresh
+        );
+        assert_eq!(
+            classify_remote_daemon_binary_probe(2, ""),
+            RemoteDaemonBinaryProbe::Unknown
+        );
+        assert_eq!(
+            classify_remote_daemon_binary_probe(
+                10,
+                "daemon pid 123 executable has been replaced\n"
+            ),
+            RemoteDaemonBinaryProbe::Stale(
+                "daemon pid 123 executable has been replaced".to_string()
+            )
+        );
+        assert_eq!(
+            classify_remote_daemon_binary_probe(1, "boom"),
+            RemoteDaemonBinaryProbe::Failed
+        );
+    }
+
+    #[test]
+    fn remote_daemon_binary_probe_detects_deleted_or_replaced_executables() {
+        let command =
+            remote_daemon_binary_probe_command("/home/chubes/.cargo/bin/homeboy", 3790534);
+
+        assert!(command.contains("/proc/$pid/exe"));
+        assert!(command.contains("*\" (deleted)\")"));
+        assert!(command.contains("stat -Lc '%d:%i'"));
+        assert!(command.contains("executable inode differs from current Homeboy binary"));
     }
 
     #[test]
