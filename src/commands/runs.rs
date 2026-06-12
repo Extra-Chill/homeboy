@@ -29,7 +29,7 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 use serde_json::Value;
 
-use homeboy::core::artifact_links::{public_artifact_url, viewer_links};
+use homeboy::core::artifact_links::{cached_validated_viewer_links, public_artifact_url};
 use homeboy::core::observation::{ArtifactRecord, ObservationStore, RunListFilter, RunRecord};
 use homeboy::core::Error;
 
@@ -667,7 +667,7 @@ fn enrich_artifact_link(mut artifact: ArtifactRecord) -> ArtifactRecord {
         public_artifact_url(&artifact).or_else(|| public_url_for_url_artifact(&artifact));
     if let Some(url) = public_url.clone() {
         artifact.public_url = Some(url.clone());
-        artifact.viewer_links = viewer_links(&artifact, Some(&url));
+        artifact.viewer_links = cached_validated_viewer_links(&artifact, &url);
         artifact.viewer_url = artifact.viewer_links.first().map(|link| link.url.clone());
     }
     artifact
@@ -757,6 +757,28 @@ mod tests {
                 None => std::env::remove_var(self.key),
             }
         }
+    }
+
+    fn serve_public_artifact_base_once(status: u16) -> String {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind public artifact server");
+        let addr = listener.local_addr().expect("server address");
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept public artifact probe");
+            let mut buffer = [0; 1024];
+            let _ = stream.read(&mut buffer);
+            let status_text = if status == 200 { "OK" } else { "Not Found" };
+            let body = if status == 200 { "{}" } else { "missing" };
+            write!(
+                stream,
+                "HTTP/1.1 {status} {status_text}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .expect("write public artifact response");
+        });
+        format!("http://{addr}/homeboy")
     }
 
     fn sample_run(kind: &str, component_id: &str, rig_id: &str, metadata: Value) -> NewRunRecord {
@@ -1230,9 +1252,10 @@ mod tests {
     fn artifacts_command_derives_viewer_links_from_public_artifact_url_metadata() {
         with_isolated_home(|home| {
             let _xdg = XdgGuard::unset();
+            let public_artifact_base = serve_public_artifact_base_once(200);
             let _artifact_url = EnvGuard::set(
                 homeboy::core::artifact_links::PUBLIC_ARTIFACT_BASE_URL_ENV,
-                "https://artifacts.example.test/homeboy",
+                &public_artifact_base,
             );
             let store = ObservationStore::open_initialized().expect("store");
             let run = store
@@ -1295,7 +1318,7 @@ mod tests {
                 .find(|artifact| artifact.kind == "replay-artifact")
                 .expect("replay artifact");
             let artifact_url = replay.public_url.as_deref().expect("public url");
-            assert!(artifact_url.starts_with("https://artifacts.example.test/homeboy/runs/"));
+            assert!(artifact_url.starts_with(&format!("{public_artifact_base}/runs/")));
             assert!(!artifact_url.ends_with("/content"));
             assert_eq!(replay.mime.as_deref(), Some("application/json"));
             assert_eq!(replay.sha256.as_deref(), Some("abc123"));
@@ -1312,7 +1335,11 @@ mod tests {
                 .starts_with("https://playground.wordpress.net/?blueprint-url="));
             assert!(replay.viewer_links[0]
                 .url
-                .contains("https%3A%2F%2Fartifacts.example.test%2Fhomeboy%2Fruns%2F"));
+                .contains("http%3A%2F%2F127.0.0.1%3A"));
+            assert_eq!(
+                replay.metadata_json["public_url_validation"]["reachable"],
+                true
+            );
             assert_eq!(
                 replay.viewer_links[0]
                     .replay
@@ -1324,6 +1351,64 @@ mod tests {
             assert_eq!(
                 replay.metadata_json["viewer"]["query"]["value"]["source"],
                 "public-artifact-url"
+            );
+        });
+    }
+
+    #[test]
+    fn artifacts_command_suppresses_viewer_links_when_public_url_is_unreachable() {
+        with_isolated_home(|home| {
+            let _xdg = XdgGuard::unset();
+            let public_artifact_base = serve_public_artifact_base_once(404);
+            let _artifact_url = EnvGuard::set(
+                homeboy::core::artifact_links::PUBLIC_ARTIFACT_BASE_URL_ENV,
+                &public_artifact_base,
+            );
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(sample_run("bench", "homeboy", "studio", Value::Null))
+                .expect("run");
+            let artifact_path = home.path().join("blueprint.after.json");
+            std::fs::write(&artifact_path, br#"{"steps":[]}"#).expect("artifact bytes");
+            store
+                .record_artifact_with_metadata(
+                    &run.id,
+                    "bench_artifact",
+                    &artifact_path,
+                    serde_json::json!({
+                        "viewer": {
+                            "kind": "wordpress-playground-blueprint",
+                            "base": "https://playground.wordpress.net/",
+                            "query": {
+                                "parameter": "blueprint-url",
+                                "value": { "source": "public-artifact-url" },
+                                "encoding": "url"
+                            }
+                        }
+                    }),
+                )
+                .expect("record artifact");
+
+            let (output, _) = artifacts(&run.id).expect("artifacts");
+            let RunsOutput::Artifacts(output) = output else {
+                panic!("expected artifacts output");
+            };
+            let artifact = output
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.kind == "bench_artifact")
+                .expect("bench artifact");
+
+            assert!(artifact.public_url.is_some());
+            assert!(artifact.viewer_links.is_empty());
+            assert_eq!(artifact.viewer_url, None);
+            assert_eq!(
+                artifact.metadata_json["public_url_validation"]["reachable"],
+                false
+            );
+            assert_eq!(
+                artifact.metadata_json["public_url_validation"]["status_code"],
+                404
             );
         });
     }
