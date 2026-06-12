@@ -1150,8 +1150,7 @@ function emptyJsonPayload(payload) {
     && (!Array.isArray(payload.evidence_refs) || payload.evidence_refs.length === 0);
 }
 
-function emptyJsonPayloadFailure(payload, result, artifacts) {
-  const message = 'WP Codebox agent-task-run returned an empty JSON payload.';
+function emptyOutputFailurePayload(payload, result, artifacts, message, diagnosticClass) {
   return {
     ...payload,
     success: false,
@@ -1160,7 +1159,7 @@ function emptyJsonPayloadFailure(payload, result, artifacts) {
     diagnostics: [
       ...(Array.isArray(payload.diagnostics) ? payload.diagnostics : []),
       {
-        class: 'wp-codebox.agent_task_run_empty_json',
+        class: diagnosticClass,
         message,
         data: {
           status: result.status,
@@ -1171,11 +1170,31 @@ function emptyJsonPayloadFailure(payload, result, artifacts) {
     ],
     metadata: {
       ...(plainObject(payload.metadata) ? payload.metadata : {}),
-      empty_json_payload: true,
+      empty_output: true,
       status: result.status,
       signal: result.signal,
     },
   };
+}
+
+function emptyJsonPayloadFailure(payload, result, artifacts) {
+  return emptyOutputFailurePayload(
+    payload,
+    result,
+    artifacts,
+    'WP Codebox agent-task-run returned an empty JSON payload.',
+    'wp-codebox.agent_task_run_empty_json',
+  );
+}
+
+function emptyStdoutPayloadFailure(result, artifacts) {
+  return emptyOutputFailurePayload(
+    {},
+    result,
+    artifacts,
+    'WP Codebox agent-task-run exited successfully without stdout.',
+    'wp-codebox.agent_task_run_empty_stdout',
+  );
 }
 
 function runWpCodeboxParentTask(request) {
@@ -1275,6 +1294,18 @@ function runWpCodeboxParentTask(request) {
   }
   if (result.error) {
     process.stderr.write(`${result.error.message}\n`);
+  }
+  if ((result.status ?? 0) === 0) {
+    const evidence = preserveWpCodeboxFailureEvidence({
+      artifacts,
+      inputPath,
+      result,
+      command: resolved.command,
+      args: resolved.args,
+      secretNames: input.secret_env || [],
+    });
+    process.stdout.write(`${JSON.stringify(attachFailureEvidence(emptyStdoutPayloadFailure(result, artifacts), evidence), null, 2)}\n`);
+    return 1;
   }
   return result.status ?? 1;
 }

@@ -102,6 +102,16 @@ process.exit(0);
   return fixture;
 }
 
+function writeEmptyStdoutTaskRunner(root) {
+  const fixture = path.join(root, 'empty-stdout-task-runner.cjs');
+  fs.writeFileSync(fixture, `#!/usr/bin/env node
+'use strict';
+process.exit(0);
+`);
+  fs.chmodSync(fixture, 0o755);
+  return fixture;
+}
+
 function writeFakeWpCodebox(root) {
   const fixture = path.join(root, 'fake-wp-cli.cjs');
   const capture = path.join(root, 'fake-wp-cli-capture.json');
@@ -1533,6 +1543,30 @@ try {
   assert.equal(emptyJsonWpCodeboxOutcome.diagnostics.some((diagnostic) => diagnostic.class === 'wp-codebox.agent_task_run_empty_json'), true);
   assert.equal(emptyJsonWpCodeboxOutcome.artifacts.some((artifact) => artifact.kind === 'codebox-command-evidence'), true);
   assert.equal(emptyJsonWpCodeboxOutcome.evidence_refs.some((ref) => ref.kind === 'codebox-command-evidence'), true);
+
+  const emptyStdoutWpCodeboxResult = spawnSync(process.execPath, [
+    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs'),
+  ], {
+    encoding: 'utf8',
+    env: fixtureEnv(),
+    input: JSON.stringify({
+      ...request,
+      task_id: 'empty-stdout-wp-codebox-task-123',
+      executor: {
+        backend: 'codebox',
+        config: {
+          wp_codebox_bin: writeEmptyStdoutTaskRunner(root),
+          homeboy_extensions: path.join(__dirname, '..'),
+        },
+      },
+    }),
+  });
+  assert.equal(emptyStdoutWpCodeboxResult.status, 1, emptyStdoutWpCodeboxResult.stderr || emptyStdoutWpCodeboxResult.stdout);
+  const emptyStdoutWpCodeboxOutcome = JSON.parse(emptyStdoutWpCodeboxResult.stdout);
+  assert.equal(emptyStdoutWpCodeboxOutcome.status, 'failed');
+  assert.equal(emptyStdoutWpCodeboxOutcome.diagnostics.some((diagnostic) => diagnostic.class === 'wp-codebox.agent_task_run_empty_stdout'), true);
+  assert.equal(emptyStdoutWpCodeboxOutcome.artifacts.some((artifact) => artifact.kind === 'codebox-command-evidence'), true);
+  assert.equal(emptyStdoutWpCodeboxOutcome.evidence_refs.some((ref) => ref.kind === 'codebox-command-evidence'), true);
 
   const contractResult = spawnSync(process.execPath, [
     path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs'),
