@@ -414,6 +414,9 @@ function recordLifecycle(results, scenario, lifecycle) {
   scenario.metrics.drift_checks_succeeded = !lifecycle.drift.enabled || lifecycle.drift.success ? 1 : 0;
   scenario.metrics.pr_opened = lifecycle.publication.opened ? 1 : 0;
   scenario.metrics.file_written = lifecycle.capture.changed ? 1 : 0;
+  if (lifecycle.success && lifecycle.publication.opened) {
+    metadata.success_status = 'pr_opened';
+  }
   if (!lifecycle.success) {
     scenario.status = 'failed';
     scenario.summary = lifecycle.error;
