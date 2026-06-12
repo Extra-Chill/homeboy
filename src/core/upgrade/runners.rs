@@ -153,6 +153,7 @@ fn upgrade_runner_with_executor(
                 path_drift: None,
                 recovery_commands: runner_upgrade_recovery_commands(&runner.id),
                 extensions_synced: Vec::new(),
+                extensions_skipped: Vec::new(),
                 extensions_failed: Vec::new(),
                 stale_daemon: None,
                 exit_code: 1,
@@ -187,6 +188,7 @@ fn upgrade_runner_with_executor(
                 path_drift: None,
                 recovery_commands: runner_upgrade_recovery_commands(&runner.id),
                 extensions_synced: Vec::new(),
+                extensions_skipped: Vec::new(),
                 extensions_failed: Vec::new(),
                 stale_daemon: None,
                 exit_code,
@@ -205,6 +207,7 @@ fn upgrade_runner_with_executor(
                 path_drift: None,
                 recovery_commands: runner_upgrade_recovery_commands(&runner.id),
                 extensions_synced: Vec::new(),
+                extensions_skipped: Vec::new(),
                 extensions_failed: Vec::new(),
                 stale_daemon: None,
                 exit_code: 1,
@@ -216,7 +219,7 @@ fn upgrade_runner_with_executor(
     let new_version = runner_homeboy_version(runner, &homeboy_path, exec)
         .ok()
         .flatten();
-    let (extensions_synced, extensions_failed) =
+    let (extensions_synced, extensions_skipped, extensions_failed) =
         sync_runner_extensions(runner, &homeboy_path, extension_updates, exec);
     let bare_homeboy_version = runner_bare_homeboy_version(runner, &homeboy_path, exec);
     let path_drift = runner_path_drift(
@@ -237,6 +240,7 @@ fn upgrade_runner_with_executor(
         detail,
         path_drift.as_deref(),
         stale_daemon.as_ref(),
+        &extensions_skipped,
         &extensions_failed,
     );
 
@@ -251,6 +255,7 @@ fn upgrade_runner_with_executor(
         path_drift,
         recovery_commands,
         extensions_synced,
+        extensions_skipped,
         extensions_failed,
         stale_daemon,
         exit_code,
@@ -263,8 +268,13 @@ fn sync_runner_extensions(
     homeboy_path: &str,
     extension_updates: &[ExtensionUpgradeEntry],
     exec: &mut impl FnMut(&str, RunnerExecOptions) -> Result<(runner::RunnerExecOutput, i32)>,
-) -> (Vec<RunnerExtensionSyncEntry>, Vec<RunnerExtensionSyncEntry>) {
+) -> (
+    Vec<RunnerExtensionSyncEntry>,
+    Vec<RunnerExtensionSyncEntry>,
+    Vec<RunnerExtensionSyncEntry>,
+) {
     let mut synced = Vec::new();
+    let mut skipped = Vec::new();
     let mut failed = Vec::new();
     for extension in extension_updates {
         let Some(source_url) = extension.source_url.as_deref() else {
@@ -273,6 +283,16 @@ fn sync_runner_extensions(
         let Some(source_revision) = extension.source_revision.as_deref() else {
             continue;
         };
+        if !runner_supports_extension_sync(runner, &extension.extension_id) {
+            skipped.push(RunnerExtensionSyncEntry {
+                extension_id: extension.extension_id.clone(),
+                source_revision: source_revision.to_string(),
+                synced: false,
+                detail: Some("skipped by runner supported_extensions policy".to_string()),
+                recovery_commands: Vec::new(),
+            });
+            continue;
+        }
 
         let exists =
             match runner_extension_exists(runner, homeboy_path, &extension.extension_id, exec) {
@@ -346,7 +366,16 @@ fn sync_runner_extensions(
         }
     }
 
-    (synced, failed)
+    (synced, skipped, failed)
+}
+
+fn runner_supports_extension_sync(runner: &Runner, extension_id: &str) -> bool {
+    runner.policy.supported_extensions.is_empty()
+        || runner
+            .policy
+            .supported_extensions
+            .iter()
+            .any(|supported| supported == extension_id)
 }
 
 fn runner_upgrade_command(
@@ -583,9 +612,27 @@ fn runner_upgrade_final_detail(
     detail: String,
     path_drift: Option<&str>,
     stale_daemon: Option<&RunnerDaemonDriftEntry>,
+    extensions_skipped: &[RunnerExtensionSyncEntry],
     extensions_failed: &[RunnerExtensionSyncEntry],
 ) -> String {
     let mut parts = vec![detail];
+
+    if !extensions_skipped.is_empty() {
+        parts.push(format!(
+            "{} runner extension sync(s) skipped: {}",
+            extensions_skipped.len(),
+            extensions_skipped
+                .iter()
+                .map(|entry| format!(
+                    "{}@{} ({})",
+                    entry.extension_id,
+                    entry.source_revision,
+                    entry.detail.as_deref().unwrap_or("no detail")
+                ))
+                .collect::<Vec<_>>()
+                .join("; ")
+        ));
+    }
 
     if !extensions_failed.is_empty() {
         parts.push(format!(
@@ -1025,6 +1072,63 @@ mod tests {
         assert!(skipped[0]
             .detail
             .contains("homeboy upgrade --force --upgrade-runner lab"));
+        assert!(commands
+            .iter()
+            .any(|command| command.contains(&"wordpress".to_string())));
+    }
+
+    #[test]
+    fn skips_runner_extensions_outside_supported_extension_policy() {
+        let mut runner = ssh_runner("lab", Some("/home/chubes/.cargo/bin/homeboy"));
+        runner.policy.supported_extensions = vec!["wordpress".to_string()];
+        let extension_updates = vec![
+            extension_update("swift", "98a61eda"),
+            extension_update("wordpress", "48517ac3"),
+        ];
+        let mut commands = Vec::new();
+
+        let (updated, skipped) = upgrade_runners_with_executor(
+            &[runner],
+            false,
+            None,
+            None,
+            &extension_updates,
+            |runner_id, options| {
+                assert!(
+                    !options.command.contains(&"swift".to_string()),
+                    "unsupported Swift extension should not be synced"
+                );
+                commands.push(options.command.clone());
+                let stdout = match commands.len() {
+                    1 => "homeboy 0.228.4\n",
+                    2 => "{\"success\":true}\n",
+                    3 => "homeboy 0.228.5\n",
+                    4 => "{\"success\":true}\n",
+                    5 => "{\"success\":true}\n",
+                    6 => "homeboy 0.228.5\n",
+                    _ => "",
+                };
+                Ok((exec_output(runner_id, options.command, stdout, "", 0), 0))
+            },
+            runner_status,
+        );
+
+        assert!(skipped.is_empty());
+        assert_eq!(updated.len(), 1);
+        assert!(updated[0].success);
+        assert_eq!(updated[0].extensions_synced.len(), 1);
+        assert_eq!(updated[0].extensions_synced[0].extension_id, "wordpress");
+        assert_eq!(updated[0].extensions_skipped.len(), 1);
+        assert_eq!(updated[0].extensions_skipped[0].extension_id, "swift");
+        assert_eq!(updated[0].extensions_failed.len(), 0);
+        assert!(updated[0].extensions_skipped[0]
+            .detail
+            .as_deref()
+            .unwrap()
+            .contains("supported_extensions"));
+        assert!(updated[0]
+            .detail
+            .contains("runner extension sync(s) skipped"));
         assert!(commands
             .iter()
             .any(|command| command.contains(&"wordpress".to_string())));

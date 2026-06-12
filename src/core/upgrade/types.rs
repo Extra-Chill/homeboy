@@ -80,6 +80,8 @@ pub struct RunnerUpgradeEntry {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub extensions_synced: Vec<RunnerExtensionSyncEntry>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub extensions_skipped: Vec<RunnerExtensionSyncEntry>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub extensions_failed: Vec<RunnerExtensionSyncEntry>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stale_daemon: Option<RunnerDaemonDriftEntry>,

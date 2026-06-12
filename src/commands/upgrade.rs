@@ -127,6 +127,7 @@ mod tests {
                 "homeboy upgrade --force --upgrade-runner homeboy-lab".to_string()
             ],
             extensions_synced: Vec::new(),
+            extensions_skipped: Vec::new(),
             extensions_failed: Vec::new(),
             stale_daemon: None,
             exit_code: 0,
@@ -152,6 +153,7 @@ mod tests {
                 "homeboy upgrade --force --upgrade-runner homeboy-lab".to_string()
             ],
             extensions_synced: Vec::new(),
+            extensions_skipped: Vec::new(),
             extensions_failed: Vec::new(),
             stale_daemon: None,
             exit_code: 1,
