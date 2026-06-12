@@ -4,10 +4,13 @@
 
 ```sh
 homeboy tunnel service <COMMAND>
+homeboy tunnel preview-client <COMMAND>
 homeboy tunnel preview-ingress <COMMAND>
 ```
 
 `tunnel` manages Homeboy-native private service tunnel declarations, local managed service lifecycle, and the VPS-side public preview ingress used by generic browser/reviewer URLs. Homeboy can start a long-running local command, record safe command/process/log evidence, report readiness, and stop the process group without relying on an external chat or tunnel wrapper.
+
+`preview-client` connects a local/lab preview origin to a Homeboy-owned preview ingress over an outbound authenticated reverse channel. It is the local side of native public browser preview tunnels and does not use external tunnel providers.
 
 ## Service Tunnels
 
@@ -61,6 +64,31 @@ The `command` backend is a generic adapter seam. Homeboy starts and supervises t
 
 When a service's preview policy is relevant, `service status` and `service start` include a structured `preview` artifact with schema `homeboy/preview-url/v1`. The artifact records the service ID, local URL, optional public URL, backend, policy, cleanup/expiry metadata, and owning run/workflow IDs when the start command supplied them.
 
+## Preview Client
+
+Start a native outbound reverse preview client for one exact public host:
+
+```sh
+homeboy tunnel preview-client start \
+  --ingress https://preview-broker.example \
+  --public-host run42-tunnel.example.test \
+  --local-origin http://127.0.0.1:49822 \
+  --token-env HOMEBOY_PREVIEW_TUNNEL_TOKEN
+```
+
+The client registers exactly one public host; wildcard public hosts are rejected so a lab runtime cannot implicitly claim a whole domain. `--local-origin` must be an HTTP(S) origin supplied by the caller, commonly a local development server or lab-managed preview service.
+
+The preview ingress contract is JSON-over-HTTP with bearer auth from `--token-env`:
+
+- `POST /preview/client/register`: register `{ public_host, local_origin }`.
+- `POST /preview/client/next`: long-poll for one request with `{ public_host, timeout_secs }`.
+- `POST /preview/client/respond`: return `{ public_host, response }` for a request.
+- `POST /preview/client/close`: mark the public host session closed on shutdown.
+
+Ingress requests carry `request_id`, `method`, `path`, selected `headers`, and optional `body_base64`. Client responses carry `request_id`, `status`, response `headers`, `body_base64`, and optional structured `error`. Local-origin failures are returned as `502` responses with `error.kind` such as `local_origin_request_failed`, distinct from ingress/channel failures logged by the client process.
+
+Each claimed ingress request is forwarded on a worker thread so browser static asset fanout can be served concurrently. Hop-by-hop headers are filtered before forwarding to the local origin and before returning the local response to ingress.
+
 ## Preview Ingress
 
 `preview-ingress` is the VPS-side HTTP daemon surface for Homeboy-native browser preview tunnels. It is designed to run behind an operator-managed TLS/proxy layer such as Nginx, Caddy, or Cloudflare:
@@ -108,7 +136,7 @@ Diagnostics are structured so generic preview workloads can distinguish ingress 
 
 Each request writes a JSON line to stderr with request ID, host, path, status, bytes, duration, and classification. `/_homeboy/preview-ingress/status` returns the current route status as JSON from the running daemon.
 
-This is the ingress side of #4089 and the first Homeboy-owned replacement path for #4062's current tunnel-provider blocker. Auth/pairing/token lifecycle and the authenticated reverse preview client are separate follow-up surfaces; the ingress route's `upstream_origin` is the generic HTTP seam those clients attach to.
+This is the ingress side of #4089 and the first Homeboy-owned replacement path for #4062's current tunnel-provider blocker. Auth/pairing/token lifecycle and the authenticated reverse preview client remain generic surfaces; the ingress route's `upstream_origin` is the HTTP seam those clients attach to.
 
 ## Subcommands
 
@@ -121,6 +149,7 @@ This is the ingress side of #4089 and the first Homeboy-owned replacement path f
 - `service start <id>`: start and supervise a declared local service command and optional provider-neutral public tunnel backend.
 - `service status <id>`: report declaration, process, local URL, public URL when present, health, backend, and log evidence state.
 - `service stop <id>`: terminate the managed process group and remove runtime state while leaving log evidence files in place.
+- `preview-client start`: connect a local HTTP(S) preview origin to a Homeboy preview ingress for one public host.
 - `preview-ingress route <session-id>`: register or replace a host-routed preview session.
 - `preview-ingress unroute <session-id>`: remove a preview route.
 - `preview-ingress list`: list route records.
