@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.120.7] - 2026-06-12
+
+### Changed
+- add bench artifact viewer contract helper
+
 ## [2.120.6] - 2026-06-12
 
 ### Changed
