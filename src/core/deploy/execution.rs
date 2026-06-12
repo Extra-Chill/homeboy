@@ -1,3 +1,4 @@
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use crate::core::artifact_inputs;
@@ -9,6 +10,7 @@ use crate::core::error::Result;
 use crate::core::extension::build::resolve_artifact_path_from_root;
 use crate::core::git;
 use crate::core::project::Project;
+use crate::core::release::version;
 
 use super::effect::remote_version_after_deploy_effect;
 use super::generated_artifacts::GeneratedBuildArtifactCleanupGuard;
@@ -596,6 +598,21 @@ fn resolve_preflight_artifact_path(
         artifact_path
     };
 
+    if let Some(expected_version) = local_version.as_deref() {
+        if let Err(error) =
+            validate_predeploy_artifact_version(component, &artifact_path, expected_version)
+        {
+            return Err(failed_preflight_artifact_result(
+                component,
+                base_path,
+                local_version,
+                remote_version,
+                build_exit_code,
+                error,
+            ));
+        }
+    }
+
     let has_deploy_override = find_deploy_override(install_dir).is_some();
     if artifact_requires_component_extract_command(
         &artifact_path,
@@ -712,6 +729,130 @@ fn create_archive_artifact_from_head(
             error
         )
     })
+}
+
+fn validate_predeploy_artifact_version(
+    component: &Component,
+    artifact_path: &Path,
+    expected_version: &str,
+) -> std::result::Result<(), String> {
+    if artifact_path.extension().and_then(|ext| ext.to_str()) != Some("zip") {
+        return Ok(());
+    }
+
+    let Some(targets) = component.version_targets.as_ref() else {
+        return Ok(());
+    };
+    if targets.is_empty() {
+        return Ok(());
+    }
+
+    let file = std::fs::File::open(artifact_path).map_err(|error| {
+        format!(
+            "Failed to inspect artifact '{}' before deploy: {}",
+            artifact_path.display(),
+            error
+        )
+    })?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|error| {
+        format!(
+            "Failed to inspect artifact '{}' before deploy: {}",
+            artifact_path.display(),
+            error
+        )
+    })?;
+    let entry_names: Vec<String> = (0..archive.len())
+        .filter_map(|index| {
+            archive
+                .by_index(index)
+                .ok()
+                .map(|file| file.name().to_string())
+        })
+        .filter(|name| !name.ends_with('/'))
+        .collect();
+
+    for target in targets {
+        let pattern = target
+            .pattern
+            .clone()
+            .or_else(|| version::default_pattern_for_file(&target.file))
+            .ok_or_else(|| {
+                format!(
+                    "Cannot inspect artifact '{}' before deploy: version target '{}' has no pattern",
+                    artifact_path.display(),
+                    target.file
+                )
+            })?
+            .replace("\\\\", "\\");
+        let Some(entry_name) = entry_names
+            .iter()
+            .find(|name| zip_entry_matches_version_target(name, &target.file))
+        else {
+            return Err(format!(
+                "Artifact '{}' does not contain version target '{}' for component '{}'. Refusing to deploy unverified content.",
+                artifact_path.display(),
+                target.file,
+                component.id
+            ));
+        };
+
+        let mut entry = archive.by_name(entry_name).map_err(|error| {
+            format!(
+                "Failed to read version target '{}' from artifact '{}': {}",
+                entry_name,
+                artifact_path.display(),
+                error
+            )
+        })?;
+        let mut content = String::new();
+        entry.read_to_string(&mut content).map_err(|error| {
+            format!(
+                "Failed to read version target '{}' from artifact '{}': {}",
+                entry_name,
+                artifact_path.display(),
+                error
+            )
+        })?;
+
+        let observed = version::parse_version(&content, &pattern).ok_or_else(|| {
+            format!(
+                "Artifact '{}' contains version target '{}' but Homeboy could not parse a version with the configured pattern. Refusing to deploy unverified content.",
+                artifact_path.display(),
+                entry_name
+            )
+        })?;
+
+        if observed != expected_version {
+            return Err(format!(
+                "Artifact '{}' contains version '{}' in '{}' but expected '{}'. Refusing to deploy mismatched release content.",
+                artifact_path.display(),
+                observed,
+                entry_name,
+                expected_version
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn zip_entry_matches_version_target(entry_name: &str, target_file: &str) -> bool {
+    if entry_name == target_file {
+        return true;
+    }
+
+    let relative = entry_name
+        .split_once('/')
+        .map(|(_, rest)| rest)
+        .unwrap_or(entry_name);
+    if relative == target_file {
+        return true;
+    }
+
+    Path::new(target_file)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|basename| relative == basename)
 }
 
 fn artifact_requires_extract_command(path: &Path) -> bool {
@@ -1079,10 +1220,11 @@ mod tests {
     use super::{
         artifact_requires_component_extract_command, cleanup_deploy_build_artifact,
         failed_component_deploy_result, resolve_preflight_artifact_path,
-        should_try_download_release_artifact,
+        should_try_download_release_artifact, validate_predeploy_artifact_version,
     };
-    use crate::core::component::{ArtifactInput, Component};
+    use crate::core::component::{ArtifactInput, Component, VersionTarget};
     use crate::core::deploy::types::DeployConfig;
+    use std::io::Write;
     use std::process::Command;
 
     #[test]
@@ -1496,5 +1638,63 @@ mod tests {
         cleanup_deploy_build_artifact(&component, &artifact);
 
         assert!(artifact.exists());
+    }
+
+    #[test]
+    fn predeploy_artifact_version_inspection_rejects_mismatched_zip() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let artifact = temp.path().join("fixture.zip");
+        write_zip(
+            &artifact,
+            &[("fixture/fixture.php", "<?php\nVersion: 0.8.1\n")],
+        );
+        let component = versioned_zip_component(temp.path());
+
+        let error = validate_predeploy_artifact_version(&component, &artifact, "0.14.0")
+            .expect_err("stale artifact version should fail preflight");
+
+        assert!(
+            error.contains("contains version '0.8.1'") && error.contains("expected '0.14.0'"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn predeploy_artifact_version_inspection_accepts_matching_zip() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let artifact = temp.path().join("fixture.zip");
+        write_zip(
+            &artifact,
+            &[("fixture/fixture.php", "<?php\nVersion: 0.14.0\n")],
+        );
+        let component = versioned_zip_component(temp.path());
+
+        validate_predeploy_artifact_version(&component, &artifact, "0.14.0")
+            .expect("matching artifact version should pass");
+    }
+
+    fn versioned_zip_component(local_path: &std::path::Path) -> Component {
+        Component {
+            id: "fixture".to_string(),
+            local_path: local_path.to_string_lossy().to_string(),
+            version_targets: Some(vec![VersionTarget {
+                file: "fixture.php".to_string(),
+                pattern: Some(r"Version:\s*([0-9.]+)".to_string()),
+            }]),
+            ..Component::default()
+        }
+    }
+
+    fn write_zip(path: &std::path::Path, files: &[(&str, &str)]) {
+        let file = std::fs::File::create(path).expect("zip file");
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::FileOptions::default();
+
+        for (name, contents) in files {
+            zip.start_file(*name, options).expect("zip entry");
+            zip.write_all(contents.as_bytes()).expect("zip contents");
+        }
+
+        zip.finish().expect("finish zip");
     }
 }
