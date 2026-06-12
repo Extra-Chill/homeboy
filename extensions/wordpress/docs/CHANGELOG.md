@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.120.3] - 2026-06-12
+
+### Fixed
+- fix host runner drift checks
+
 ## [2.120.2] - 2026-06-12
 
 ### Fixed
