@@ -16,7 +16,11 @@ pub fn route_after_parse(
     }
 
     if let (Some(runner_id), Commands::Runs(args)) = (cli.runner.as_deref(), &cli.command) {
-        return Err(crate::commands::runs::global_runner_error(args, runner_id));
+        if !is_runs_list_runner_option(normalized_args) {
+            return Err(crate::commands::runs::global_runner_error(args, runner_id));
+        }
+
+        return Ok(None);
     }
 
     let lab_command = lab_offload_command(&cli.command)?;
@@ -142,6 +146,20 @@ pub fn route_after_parse(
             }
         },
     }
+}
+
+fn is_runs_list_runner_option(args: &[String]) -> bool {
+    let Some(runs_index) = args.iter().position(|arg| arg == "runs") else {
+        return false;
+    };
+    let Some(list_index) = args.iter().position(|arg| arg == "list") else {
+        return false;
+    };
+
+    list_index > runs_index
+        && args.iter().enumerate().any(|(index, arg)| {
+            index > list_index && (arg == "--runner" || arg.starts_with("--runner="))
+        })
 }
 
 fn execute_trace_lab_offload_with_timeout(
@@ -575,6 +593,63 @@ mod tests {
         assert_eq!(err.code.as_str(), "validation.invalid_argument");
         assert!(err.message.contains("homeboy runs show run-123"));
         assert!(err.message.contains("without --runner"));
+    }
+
+    #[test]
+    fn runs_list_runner_option_after_subcommand_routes_locally() {
+        let _env = EnvGuard::remove(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV);
+
+        for normalized in [
+            vec![
+                "homeboy".to_string(),
+                "runs".to_string(),
+                "list".to_string(),
+                "--runner".to_string(),
+                "homeboy-lab".to_string(),
+                "--status".to_string(),
+                "running".to_string(),
+                "--limit".to_string(),
+                "20".to_string(),
+            ],
+            vec![
+                "homeboy".to_string(),
+                "runs".to_string(),
+                "list".to_string(),
+                "--runner=homeboy-lab".to_string(),
+                "--status".to_string(),
+                "running".to_string(),
+                "--limit".to_string(),
+                "20".to_string(),
+            ],
+        ] {
+            let cli = Cli::parse_from(&normalized);
+
+            let outcome = route_after_parse(&cli, &normalized, None)
+                .expect("runs list subcommand runner option should not be rejected");
+
+            assert_eq!(outcome, None);
+        }
+    }
+
+    #[test]
+    fn global_runner_for_runs_list_keeps_placement_guidance() {
+        let _env = EnvGuard::remove(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV);
+        let normalized = vec![
+            "homeboy".to_string(),
+            "--runner".to_string(),
+            "homeboy-lab".to_string(),
+            "runs".to_string(),
+            "list".to_string(),
+        ];
+        let cli = Cli::parse_from(&normalized);
+
+        let err = route_after_parse(&cli, &normalized, None)
+            .expect_err("top-level runner on runs list should keep placement guidance");
+
+        assert_eq!(err.code.as_str(), "validation.invalid_argument");
+        assert!(err
+            .message
+            .contains("homeboy runs list --runner homeboy-lab"));
     }
 
     #[test]
