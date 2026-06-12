@@ -387,6 +387,22 @@ homeboy_wp_codebox_workload_scenario_id() {
     printf '%s\n' "$scenario_id"
 }
 
+homeboy_wp_codebox_selected_scenarios_json() {
+    local selected_value="${HOMEBOY_BENCH_SCENARIOS:-}"
+    if [ -z "$selected_value" ]; then
+        printf '{}\n'
+        return 0
+    fi
+
+    jq -Rnc '
+        input
+        | split(",")
+        | map(gsub("^\\s+|\\s+$"; ""))
+        | map(select(. != ""))
+        | reduce .[] as $id ({}; .[$id] = true)
+    ' <<< "$selected_value"
+}
+
 homeboy_wp_codebox_filter_extra_bench_workloads() {
     local workloads_value="${HOMEBOY_BENCH_EXTRA_WORKLOADS:-}"
     local selected_value="${HOMEBOY_BENCH_SCENARIOS:-}"
@@ -893,11 +909,14 @@ if [ "${HOMEBOY_BENCH_LIST_ONLY:-}" = "1" ]; then
     mkdir -p "$(dirname "$RESULTS_FILE")"
     jq -n \
         --arg component "$COMPONENT_ID" \
+        --argjson selectedScenarios "$(homeboy_wp_codebox_selected_scenarios_json)" \
         --argjson componentScenarios "$(homeboy_wp_codebox_component_workload_scenarios_json)" \
         --argjson extraScenarios "$(homeboy_wp_codebox_extra_workload_scenarios_json)" \
         --argjson configuredScenarios "$(homeboy_wp_codebox_configured_workload_scenarios_json "$WP_CODEBOX_WORKLOADS_JSON")" \
         '$componentScenarios + $extraScenarios + $configuredScenarios as $scenarios |
-        {component_id: $component, iterations: 0, scenarios: $scenarios}' > "$RESULTS_FILE"
+        $scenarios
+        | map(select(($selectedScenarios | length) == 0 or ($selectedScenarios[.id] == true)))
+        | {component_id: $component, iterations: 0, scenarios: .}' > "$RESULTS_FILE"
     exit 0
 fi
 
