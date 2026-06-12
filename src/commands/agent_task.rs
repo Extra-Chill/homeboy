@@ -172,6 +172,8 @@ pub enum AgentTaskAuthCommand {
     Status(AgentTaskAuthStatusArgs),
     /// Store a provider secret in the OS keychain and map it to a required env name.
     SetKeychain(AgentTaskAuthSetKeychainArgs),
+    /// Store a provider secret in Homeboy global config and map it to a required env name.
+    SetConfig(AgentTaskAuthSetConfigArgs),
     /// Store a JSON secret bundle in one OS keychain item.
     SetKeychainBundle(AgentTaskAuthSetKeychainBundleArgs),
     /// Map a required provider env name to another process env var.
@@ -210,6 +212,21 @@ pub struct AgentTaskAuthSetKeychainArgs {
     /// Keychain entry name. Defaults to ENV.
     #[arg(long = "name", value_name = "NAME")]
     pub keychain_name: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct AgentTaskAuthSetConfigArgs {
+    /// Required provider environment variable name to satisfy.
+    #[arg(value_name = "ENV")]
+    pub secret_env: String,
+
+    /// Secret value. Omit to prompt securely.
+    #[arg(value_name = "VALUE")]
+    pub value: Option<String>,
+
+    /// Read the secret value from stdin.
+    #[arg(long)]
+    pub value_stdin: bool,
 }
 
 #[derive(Args, Debug)]
@@ -661,6 +678,17 @@ fn auth(args: AgentTaskAuthArgs) -> CmdResult<Value> {
                 set_args.scope.as_deref(),
                 set_args.keychain_name.as_deref(),
             )?;
+            Ok((
+                serde_json::json!({
+                    "schema": "homeboy/agent-task-auth-configured/v1",
+                    "secret_env": status,
+                }),
+                0,
+            ))
+        }
+        AgentTaskAuthCommand::SetConfig(set_args) => {
+            let value = read_agent_task_secret_value(set_args.value, set_args.value_stdin)?;
+            let status = agent_task_secrets::set_config_secret(&set_args.secret_env, &value)?;
             Ok((
                 serde_json::json!({
                     "schema": "homeboy/agent-task-auth-configured/v1",

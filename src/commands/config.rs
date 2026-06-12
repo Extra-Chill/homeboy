@@ -2,7 +2,7 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 use serde_json::Value;
 
-use homeboy::core::defaults::{self, Defaults, HomeboyConfig};
+use homeboy::core::defaults::{self, Defaults};
 
 use super::CmdResult;
 
@@ -42,7 +42,7 @@ enum ConfigCommand {
 pub struct ConfigOutput {
     command: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    config: Option<HomeboyConfig>,
+    config: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     defaults: Option<Defaults>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -84,6 +84,7 @@ fn show(builtin: bool) -> CmdResult<ConfigOutput> {
         ))
     } else {
         let config = defaults::load_config();
+        let config = redacted_config_value(&config)?;
         Ok((
             ConfigOutput {
                 command: "config.show".to_string(),
@@ -142,11 +143,12 @@ fn set(pointer: &str, value_str: &str) -> CmdResult<ConfigOutput> {
 
     // Save the config
     defaults::save_config(&config)?;
+    let redacted_config = redacted_config_value(&config)?;
 
     Ok((
         ConfigOutput {
             command: "config.set".to_string(),
-            config: Some(config),
+            config: Some(redacted_config),
             defaults: None,
             path: None,
             exists: None,
@@ -191,11 +193,12 @@ fn remove(pointer: &str) -> CmdResult<ConfigOutput> {
 
     // Save the config
     defaults::save_config(&config)?;
+    let redacted_config = redacted_config_value(&config)?;
 
     Ok((
         ConfigOutput {
             command: "config.remove".to_string(),
-            config: Some(config),
+            config: Some(redacted_config),
             defaults: None,
             path: None,
             exists: None,
@@ -205,6 +208,27 @@ fn remove(pointer: &str) -> CmdResult<ConfigOutput> {
         },
         0,
     ))
+}
+
+fn redacted_config_value(config: &defaults::HomeboyConfig) -> homeboy::core::Result<Value> {
+    let mut value = serde_json::to_value(config).map_err(|e| {
+        homeboy::core::Error::internal_unexpected(format!("Failed to serialize config: {}", e))
+    })?;
+
+    if let Some(secrets) = value
+        .pointer_mut("/agent_task/secrets")
+        .and_then(Value::as_object_mut)
+    {
+        for source in secrets.values_mut() {
+            if let Some(source) = source.as_object_mut() {
+                if source.contains_key("value") {
+                    source.insert("value".to_string(), Value::String("[redacted]".to_string()));
+                }
+            }
+        }
+    }
+
+    Ok(value)
 }
 
 fn reset() -> CmdResult<ConfigOutput> {
