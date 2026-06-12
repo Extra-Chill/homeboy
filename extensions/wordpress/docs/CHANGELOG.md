@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.119.21] - 2026-06-12
+
+### Changed
+- Run pnpm verification through corepack
+
 ## [2.119.20] - 2026-06-12
 
 ### Changed
