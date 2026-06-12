@@ -369,7 +369,14 @@ fn parse_execution_results_file(
         )?));
     }
 
-    Ok(parsing::parse_bench_results_file_with_artifact_context(results_file, rig_id).ok())
+    Ok(
+        parsing::parse_bench_results_file_with_artifact_context_and_scenarios(
+            results_file,
+            rig_id,
+            scenario_ids,
+        )
+        .ok(),
+    )
 }
 
 fn failure_scenario_id(scenario_ids: &[String]) -> Option<String> {
@@ -1883,6 +1890,51 @@ mod tests {
                 PathBuf::from("/tmp/bench/WpAdminLoad.php"),
             ]
         );
+    }
+
+    #[test]
+    fn failed_execution_parse_ignores_unselected_duplicate_scenario_ids() {
+        let run_dir = RunDir::create().expect("run dir");
+        let results_file = run_dir.step_file(run_dir::files::BENCH_RESULTS);
+        fs::write(
+            &results_file,
+            r#"{
+                "component_id": "woocommerce",
+                "iterations": 1,
+                "scenarios": [
+                    {
+                        "id": "rest-product-batch-import",
+                        "file": "tests/bench/rest-product-batch-import.php",
+                        "iterations": 1,
+                        "metrics": { "p95_ms": 5.0 }
+                    },
+                    {
+                        "id": "checkout-concurrent-create-order",
+                        "file": "tests/bench/checkout-concurrent-create-order.php",
+                        "iterations": 1,
+                        "metrics": { "p95_ms": 10.0 }
+                    },
+                    {
+                        "id": "checkout-concurrent-create-order",
+                        "iterations": 1,
+                        "metrics": { "p95_ms": 20.0 }
+                    }
+                ]
+            }"#,
+        )
+        .expect("write results file");
+
+        let parsed = parse_execution_results_file(
+            &results_file,
+            &["rest-product-batch-import".to_string()],
+            false,
+            None,
+        )
+        .expect("failed runner parse should not validate unselected duplicates")
+        .expect("parsed results");
+
+        assert_eq!(parsed.scenarios.len(), 1);
+        assert_eq!(parsed.scenarios[0].id, "rest-product-batch-import");
     }
 
     #[test]
