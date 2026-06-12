@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.119.26] - 2026-06-12
+
+### Fixed
+- fix datamachine agent host lifecycle
+
 ## [2.119.25] - 2026-06-12
 
 ### Fixed
