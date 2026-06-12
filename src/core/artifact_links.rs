@@ -94,6 +94,51 @@ pub fn validated_viewer_links(
     }
 }
 
+pub fn cached_validated_viewer_links(
+    artifact: &ArtifactRecord,
+    public_url: &str,
+) -> Vec<ArtifactViewerLink> {
+    let links = viewer_links(artifact, Some(public_url));
+    if links.is_empty() {
+        return links;
+    }
+    if artifact
+        .metadata_json
+        .get("public_url_validation")
+        .and_then(|validation| validation.get("reachable"))
+        .and_then(Value::as_bool)
+        == Some(true)
+    {
+        links
+    } else {
+        Vec::new()
+    }
+}
+
+pub fn annotate_public_artifact_url_validation(
+    artifact: &mut ArtifactRecord,
+) -> Option<PublicArtifactUrlValidation> {
+    let public_url = public_artifact_url(artifact)?;
+    if viewer_links(artifact, Some(&public_url)).is_empty() {
+        return None;
+    }
+    let validation = validate_public_artifact_url(&public_url);
+    artifact.metadata_json["public_url_validation"] =
+        public_artifact_url_validation_json(&validation);
+    Some(validation)
+}
+
+pub fn public_artifact_url_validation_json(
+    validation: &PublicArtifactUrlValidation,
+) -> serde_json::Value {
+    serde_json::json!({
+        "url": validation.url,
+        "reachable": validation.reachable,
+        "status_code": validation.status_code,
+        "error": validation.error,
+    })
+}
+
 pub fn validate_public_artifact_url(public_url: &str) -> PublicArtifactUrlValidation {
     match probe_public_artifact_url(public_url) {
         Ok(status) if status.is_success() => PublicArtifactUrlValidation {

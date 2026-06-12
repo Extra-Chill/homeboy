@@ -166,7 +166,7 @@ fn index_manifest_refs(
             "viewer": reference.get("viewer").cloned().unwrap_or(Value::Null),
         });
 
-        store.import_artifact(&ArtifactRecord {
+        let mut artifact = ArtifactRecord {
             id,
             run_id: source.run_id.clone(),
             kind,
@@ -181,7 +181,9 @@ fn index_manifest_refs(
             mime: media_type,
             metadata_json,
             created_at,
-        })?;
+        };
+        crate::core::artifact_links::annotate_public_artifact_url_validation(&mut artifact);
+        store.import_artifact(&artifact)?;
     }
 
     Ok(())

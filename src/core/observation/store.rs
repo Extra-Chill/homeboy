@@ -392,6 +392,23 @@ impl ObservationStore {
         let stored_path = persisted_artifact_path(run_id, &id, path)?;
         copy_artifact_file(path, &stored_path)?;
         let path_string = stored_path.to_string_lossy().to_string();
+        let mut artifact = ArtifactRecord {
+            id: id.clone(),
+            run_id: run_id.to_string(),
+            kind: kind.to_string(),
+            artifact_type: "file".to_string(),
+            path: path_string.clone(),
+            url: None,
+            public_url: None,
+            viewer_url: None,
+            viewer_links: Vec::new(),
+            sha256: sha256.clone(),
+            size_bytes,
+            mime: mime.clone(),
+            metadata_json,
+            created_at: created_at.clone(),
+        };
+        crate::core::artifact_links::annotate_public_artifact_url_validation(&mut artifact);
 
         self.connection
             .execute(
@@ -408,7 +425,7 @@ impl ObservationStore {
                     sha256,
                     size_bytes,
                     mime,
-                    serialize_metadata(&metadata_json)?,
+                    serialize_metadata(&artifact.metadata_json)?,
                     created_at,
                 ],
             )

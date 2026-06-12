@@ -579,15 +579,20 @@ fn apply_recorded_bench_artifact_links(
         return None;
     };
     artifact.public_url = Some(public_url.clone());
-    let (viewer_links, validation) = artifact_links::validated_viewer_links(record, &public_url);
-    artifact.viewer_links = viewer_links;
+    artifact.viewer_links = artifact_links::cached_validated_viewer_links(record, &public_url);
     artifact.viewer_url = artifact.viewer_links.first().map(|link| link.url.clone());
-    validation.and_then(|validation| {
-        (!validation.reachable).then(|| {
-            let error = validation
-                .error
-                .clone()
-                .unwrap_or_else(|| "public artifact URL was not reachable".to_string());
+    let Some(validation) = record.metadata_json.get("public_url_validation") else {
+        return None;
+    };
+    let reachable = validation
+        .get("reachable")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    (!reachable).then(|| {
+        let error = validation
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("public artifact URL was not reachable");
             bench_artifact_diagnostic(
                 scenario_id,
                 run_index,
@@ -597,12 +602,11 @@ fn apply_recorded_bench_artifact_links(
                     "public artifact URL for bench artifact `{name}` is not reachable; viewer links were not published: {error}"
                 ),
                 serde_json::json!({
-                    "url": validation.url,
-                    "status_code": validation.status_code,
-                    "error": validation.error,
+                    "url": validation.get("url").cloned().unwrap_or(serde_json::Value::Null),
+                    "status_code": validation.get("status_code").cloned().unwrap_or(serde_json::Value::Null),
+                    "error": validation.get("error").cloned().unwrap_or(serde_json::Value::Null),
                 }),
             )
-        })
     })
 }
 
@@ -821,10 +825,10 @@ mod tests {
 
     #[test]
     fn recorded_bench_artifact_reports_unreachable_public_viewer_url() {
-        let public_artifact_base = serve_public_artifact_base_once(404);
+        let public_artifact_base = "https://artifacts.example.test/homeboy";
         let _public_artifact_base = EnvGuard::set(
             homeboy::core::artifact_links::PUBLIC_ARTIFACT_BASE_URL_ENV,
-            &public_artifact_base,
+            public_artifact_base,
         );
         let mut artifact = BenchArtifact::default();
         let record = ArtifactRecord {
@@ -849,6 +853,12 @@ mod tests {
                         "value": { "source": "public-artifact-url" },
                         "encoding": "url"
                     }
+                },
+                "public_url_validation": {
+                    "url": "https://artifacts.example.test/homeboy/runs/run-1/artifacts/artifact-1",
+                    "reachable": false,
+                    "status_code": 404,
+                    "error": "public artifact URL returned HTTP 404"
                 }
             }),
             created_at: "2026-06-12T00:00:00Z".to_string(),

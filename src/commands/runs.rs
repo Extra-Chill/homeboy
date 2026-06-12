@@ -29,7 +29,7 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 use serde_json::Value;
 
-use homeboy::core::artifact_links::{public_artifact_url, validated_viewer_links};
+use homeboy::core::artifact_links::{cached_validated_viewer_links, public_artifact_url};
 use homeboy::core::observation::{ArtifactRecord, ObservationStore, RunListFilter, RunRecord};
 use homeboy::core::Error;
 
@@ -621,16 +621,7 @@ fn enrich_artifact_link(mut artifact: ArtifactRecord) -> ArtifactRecord {
         public_artifact_url(&artifact).or_else(|| public_url_for_url_artifact(&artifact));
     if let Some(url) = public_url.clone() {
         artifact.public_url = Some(url.clone());
-        let (viewer_links, validation) = validated_viewer_links(&artifact, &url);
-        if let Some(validation) = validation {
-            artifact.metadata_json["public_url_validation"] = serde_json::json!({
-                "url": validation.url,
-                "reachable": validation.reachable,
-                "status_code": validation.status_code,
-                "error": validation.error,
-            });
-        }
-        artifact.viewer_links = viewer_links;
+        artifact.viewer_links = cached_validated_viewer_links(&artifact, &url);
         artifact.viewer_url = artifact.viewer_links.first().map(|link| link.url.clone());
     }
     artifact
