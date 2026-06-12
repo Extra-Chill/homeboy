@@ -1026,6 +1026,9 @@ fn row_to_artifact_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<ArtifactR
         } else {
             None
         },
+        public_url: None,
+        viewer_url: None,
+        viewer_links: Vec::new(),
         sha256: row.get(5)?,
         size_bytes: row.get(6)?,
         mime: row.get(7)?,

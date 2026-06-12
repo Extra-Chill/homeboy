@@ -351,6 +351,9 @@ fn artifact_record() -> ArtifactRecord {
         artifact_type: "file".to_string(),
         path: "artifacts/summary.json".to_string(),
         url: Some("https://example.test/artifacts/summary.json".to_string()),
+        public_url: None,
+        viewer_url: None,
+        viewer_links: Vec::new(),
         sha256: Some(
             "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
         ),
