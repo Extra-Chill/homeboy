@@ -844,6 +844,12 @@ jobs:
             runner_workspace_mounts_json="$(jq -nc --arg source "$GITHUB_WORKSPACE" --arg target "$runner_workspace_guest_checkout" '[{type: "directory", source: $source, target: $target, mode: "readwrite", metadata: {kind: "runner-workspace", artifactExcludePaths: [".ci/**"]}}]')"
             runner_workspace_json="$(jq -c --arg checkout "$runner_workspace_guest_checkout" '. + {checkout_path: $checkout}' <<< "$runner_workspace_json")"
           fi
+          runner_command_mounts_json="[]"
+          node_bin="$(command -v node || true)"
+          if [ -n "$node_bin" ]; then
+            node_tool_root="$(cd "$(dirname "$node_bin")/.." && pwd -P)"
+            runner_command_mounts_json="$(jq -nc --arg source "$node_tool_root" '[{type: "directory", source: $source, target: $source, mode: "readonly", metadata: {kind: "runner-command-toolchain"}}]')"
+          fi
           rules_json="$(validate_json_input rules object "$RULES")"
           general_rules_json="$(validate_json_input general_rules array "$GENERAL_RULES")"
           task_rules_json="$(validate_json_input task_rules array "$TASK_RULES")"
@@ -909,6 +915,7 @@ jobs:
             --argjson extraWpCodeboxMounts "$extra_wp_codebox_mounts_json" \
             --argjson executeWorkflowMounts "$execute_workflow_mounts_json" \
             --argjson runnerWorkspaceMounts "$runner_workspace_mounts_json" \
+            --argjson runnerCommandMounts "$runner_command_mounts_json" \
             --argjson workloadRunBefore "$workload_run_before_json" \
             --argjson workloadRunAfter "$workload_run_after_json" \
             --argjson dailyMemoryEnabled "$DAILY_MEMORY_ENABLED" \
@@ -940,7 +947,7 @@ jobs:
                   target: "/wordpress/wp-content/plugins/datamachine-agent-ci-driver/datamachine-agent-ci-driver.php",
                   mode: "readonly"
                 }
-              ] + $extraWpCodeboxMounts + $executeWorkflowMounts + $runnerWorkspaceMounts),
+              ] + $extraWpCodeboxMounts + $executeWorkflowMounts + $runnerWorkspaceMounts + $runnerCommandMounts),
               wp_config_defines: $extraWpConfigDefines,
               workload_run_before: $workloadRunBefore,
               workload_run_after: $workloadRunAfter,
