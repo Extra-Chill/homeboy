@@ -150,7 +150,9 @@ function makeRunFiles(tmp, config) {
   const repo = makeRepo(tmp);
   const gh = makeGhFixture(tmp);
   fs.mkdirSync(path.join(repo, 'plugins', 'amp'), { recursive: true });
+  fs.mkdirSync(path.join(repo, 'datamachine-agent-artifacts', 'technical-docs-agent'), { recursive: true });
   fs.writeFileSync(path.join(repo, 'plugins', 'amp', 'AGENTS.md'), 'invalid docs lane output\n');
+  fs.writeFileSync(path.join(repo, 'datamachine-agent-artifacts', 'technical-docs-agent', 'transcript.json'), '{}\n');
   const { configPath, resultsPath } = makeRunFiles(tmp, {
     writable_paths: ['README.md', 'docs/**', 'plugins/**/README.md'],
     verification_commands: [{ command: 'test -f plugins/amp/AGENTS.md', description: 'Out-of-policy file exists' }],
