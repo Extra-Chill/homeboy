@@ -4,6 +4,46 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.228.14] - 2026-06-12
+
+### Changed
+- Keep doctor resources core agnostic
+- Add preview asset fanout gate
+- Add native preview tunnel client
+- Add trace secret env hydration
+- Keep trace preview lifecycle generic
+- Stabilize native preview lifecycle test
+- Add native trace preview lifecycle mode
+- format selected bench parser tests
+- warn on rig workload path expansion
+
+### Fixed
+- fix bench scenario discovery diagnostics
+- add preview ingress operator plan
+- add native preview tunnel auth claims
+- add preview ingress tunnel server
+- expose Homeboy build identity
+- restart stale managed runner daemons
+- project bench artifact viewer links
+- preserve workspace ownership for root materialization
+- surface artifact viewer links
+- parse lab dispatch failures from stderr
+- preserve branch for controller git sync
+- route runner source git syncs through controller
+- materialize runner source upgrades
+- forward source upgrade options to runners
+- scope bench discovery to selected scenarios
+- preserve aggregate-only lab dispatch failures
+- preflight trace public preview assets
+- filter failed bench results before validation
+- preserve lab agent-task dispatch failures
+- allow lab extension updates
+- filter selected bench scenarios before validation
+- persist nested publication artifact refs
+- fix trace preview port diagnostics
+- surface advisory assertion failures
+- fix trace target compare flag misuse
+
 ## [0.228.13] - 2026-06-11
 
 ### Changed
