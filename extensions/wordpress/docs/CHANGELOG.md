@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.119.17] - 2026-06-12
+
+### Fixed
+- honor bench overrides in list discovery
+
 ## [2.119.16] - 2026-06-12
 
 ### Fixed
