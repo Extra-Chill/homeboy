@@ -396,13 +396,13 @@ fn provider_config_spec(args: &[String]) -> Option<String> {
 }
 
 fn agent_task_plan_spec(args: &[String]) -> Option<String> {
-    if args.get(1).map(String::as_str) != Some("agent-task")
-        || args.get(2).map(String::as_str) != Some("run-plan")
-    {
-        return None;
-    }
+    let run_plan_index = subcommand_index(args, "agent-task").and_then(|index| {
+        args.get(index + 1)
+            .filter(|arg| arg.as_str() == "run-plan")
+            .map(|_| index + 1)
+    })?;
 
-    let mut iter = args.iter().skip(3).peekable();
+    let mut iter = args.iter().skip(run_plan_index + 1).peekable();
     while let Some(arg) = iter.next() {
         if arg == "--" {
             break;
@@ -415,6 +415,10 @@ fn agent_task_plan_spec(args: &[String]) -> Option<String> {
         }
     }
     None
+}
+
+fn subcommand_index(args: &[String], subcommand: &str) -> Option<usize> {
+    args.iter().position(|arg| arg == subcommand)
 }
 
 fn provider_config_candidate_paths(value: &serde_json::Value) -> Vec<String> {
@@ -773,9 +777,9 @@ mod provider_config_candidate_paths_tests {
     use std::process::Command;
 
     use super::{
-        agent_task_plan_extra_workspaces, preflight_provider_config_source_cli_dependencies,
-        provider_config_candidate_paths, provider_config_extra_workspaces,
-        rig_component_path_env_extra_workspaces_from_entries,
+        agent_task_plan_extra_workspaces, agent_task_plan_spec,
+        preflight_provider_config_source_cli_dependencies, provider_config_candidate_paths,
+        provider_config_extra_workspaces, rig_component_path_env_extra_workspaces_from_entries,
         workspace_mapping_entries_for_git_dependency,
     };
     use crate::core::runner::{RunnerGitDependencyMaterializationOutput, RunnerWorkspaceSyncMode};
@@ -836,6 +840,22 @@ mod provider_config_candidate_paths_tests {
     fn empty_config_yields_no_candidates() {
         let value = serde_json::json!({ "model": "x" });
         assert!(provider_config_candidate_paths(&value).is_empty());
+    }
+
+    #[test]
+    fn agent_task_plan_spec_allows_global_flags_before_agent_task() {
+        let args = vec![
+            "homeboy".to_string(),
+            "--force-hot".to_string(),
+            "agent-task".to_string(),
+            "run-plan".to_string(),
+            "--plan=@/tmp/plan.json".to_string(),
+        ];
+
+        assert_eq!(
+            agent_task_plan_spec(&args),
+            Some("@/tmp/plan.json".to_string())
+        );
     }
 
     #[test]
