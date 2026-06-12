@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.119.19] - 2026-06-12
+
+### Changed
+- Expose terminal engine data in agent results
+
 ## [2.119.18] - 2026-06-12
 
 ### Changed
