@@ -631,7 +631,6 @@ fn wp_codebox_bin_env() -> Option<(String, String)> {
         .find_map(|key| {
             std::env::var(key)
                 .ok()
-                .filter(|value| !value.trim().is_empty())
                 .map(|value| (key.to_string(), value))
         })
 }
@@ -1546,34 +1545,6 @@ mod tests {
         );
         assert!(provenance.sha.is_some());
         assert_eq!(provenance.dirty, Some(false));
-    }
-
-    #[test]
-    fn wp_codebox_bin_env_ignores_empty_scrub_values() {
-        struct EnvGuard {
-            key: &'static str,
-            prior: Option<String>,
-        }
-        impl EnvGuard {
-            fn set(key: &'static str, value: &str) -> Self {
-                let prior = std::env::var(key).ok();
-                std::env::set_var(key, value);
-                Self { key, prior }
-            }
-        }
-        impl Drop for EnvGuard {
-            fn drop(&mut self) {
-                match &self.prior {
-                    Some(value) => std::env::set_var(self.key, value),
-                    None => std::env::remove_var(self.key),
-                }
-            }
-        }
-
-        let _homeboy_bin = EnvGuard::set("HOMEBOY_WP_CODEBOX_BIN", "");
-        let _settings_bin = EnvGuard::set("HOMEBOY_SETTINGS_WP_CODEBOX_BIN", "   ");
-
-        assert_eq!(wp_codebox_bin_env(), None);
     }
 
     #[test]

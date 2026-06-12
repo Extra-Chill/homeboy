@@ -7,8 +7,6 @@ use super::lab_workspaces::{is_rig_component_path_env_name, LabWorkspaceMappingE
 use crate::core::observation::LAB_OFFLOAD_METADATA_ENV;
 
 const SETTINGS_DIAGNOSTICS_SCHEMA: &str = "homeboy/lab-offload-settings-env/v1";
-const WP_CODEBOX_BIN_ENV_KEYS: &[&str] =
-    &["HOMEBOY_WP_CODEBOX_BIN", "HOMEBOY_SETTINGS_WP_CODEBOX_BIN"];
 
 pub(super) fn forward_env_if_present(env: &mut HashMap<String, String>, name: &str) {
     if let Ok(value) = std::env::var(name) {
@@ -29,40 +27,6 @@ pub(super) fn build_lab_offload_env(lab_metadata: &serde_json::Value) -> HashMap
         LAB_OFFLOAD_METADATA_ENV.to_string(),
         serde_json::to_string(lab_metadata).unwrap_or_default(),
     )])
-}
-
-pub(super) fn scrub_ambient_wp_codebox_env(env: &mut HashMap<String, String>) {
-    for key in WP_CODEBOX_BIN_ENV_KEYS {
-        env.entry((*key).to_string()).or_default();
-    }
-}
-
-pub(super) fn wp_codebox_env_diagnostics(
-    forwarded_env: &HashMap<String, String>,
-) -> serde_json::Value {
-    let keys = WP_CODEBOX_BIN_ENV_KEYS
-        .iter()
-        .filter_map(|key| {
-            forwarded_env.get(*key).map(|value| {
-                serde_json::json!({
-                    "name": key,
-                    "forwarded_to_runner": true,
-                    "action": if value.trim().is_empty() {
-                        "scrub_ambient_runner_env"
-                    } else {
-                        "forward_explicit_value"
-                    },
-                    "value_preview": if value.trim().is_empty() { "" } else { "<redacted>" },
-                    "redacted": !value.trim().is_empty(),
-                })
-            })
-        })
-        .collect::<Vec<_>>();
-
-    serde_json::json!({
-        "schema": "homeboy/lab-offload-wp-codebox-env/v1",
-        "keys": keys,
-    })
 }
 
 pub(super) fn forward_rig_component_path_env(
@@ -347,7 +311,7 @@ mod tests {
             "homeboy".to_string(),
             "trace".to_string(),
             "--setting".to_string(),
-            "wp_codebox_bin=/tmp/codebox.js".to_string(),
+            "tool_bin=/tmp/tool.js".to_string(),
             "--setting-json={\"ignored\":true}".to_string(),
             "--setting-json".to_string(),
             "retries=3".to_string(),
@@ -359,8 +323,8 @@ mod tests {
             vec![
                 ParsedSettingArg {
                     source: "setting",
-                    key: "wp_codebox_bin".to_string(),
-                    value: "/tmp/codebox.js".to_string(),
+                    key: "tool_bin".to_string(),
+                    value: "/tmp/tool.js".to_string(),
                 },
                 ParsedSettingArg {
                     source: "setting_json",
@@ -382,7 +346,7 @@ mod tests {
             "homeboy".to_string(),
             "trace".to_string(),
             "--setting".to_string(),
-            "wp_codebox_bin=/tmp/codebox.js".to_string(),
+            "tool_bin=/tmp/tool.js".to_string(),
             "--setting".to_string(),
             "api_token=secret-value".to_string(),
         ];
@@ -395,15 +359,12 @@ mod tests {
         let diagnostics = settings_env_diagnostics(&args, &env);
 
         assert_eq!(diagnostics["schema"], SETTINGS_DIAGNOSTICS_SCHEMA);
-        assert_eq!(diagnostics["settings"][0]["key"], "wp_codebox_bin");
+        assert_eq!(diagnostics["settings"][0]["key"], "tool_bin");
         assert_eq!(
             diagnostics["settings"][0]["env_name"],
-            "HOMEBOY_SETTINGS_WP_CODEBOX_BIN"
+            "HOMEBOY_SETTINGS_TOOL_BIN"
         );
-        assert_eq!(
-            diagnostics["settings"][0]["value_preview"],
-            "/tmp/codebox.js"
-        );
+        assert_eq!(diagnostics["settings"][0]["value_preview"], "/tmp/tool.js");
         assert_eq!(diagnostics["settings"][0]["forwarded_as"], "argv");
         assert_eq!(diagnostics["settings"][0]["remote_export_expected"], true);
         assert_eq!(
@@ -423,78 +384,14 @@ mod tests {
     }
 
     #[test]
-    fn scrub_ambient_wp_codebox_env_overrides_daemon_inheritance() {
-        let mut env = HashMap::new();
-
-        scrub_ambient_wp_codebox_env(&mut env);
-
-        assert_eq!(
-            env.get("HOMEBOY_WP_CODEBOX_BIN").map(String::as_str),
-            Some("")
-        );
-        assert_eq!(
-            env.get("HOMEBOY_SETTINGS_WP_CODEBOX_BIN")
-                .map(String::as_str),
-            Some("")
-        );
-    }
-
-    #[test]
-    fn scrub_ambient_wp_codebox_env_preserves_explicit_request_values() {
-        let mut env = HashMap::from([(
-            "HOMEBOY_WP_CODEBOX_BIN".to_string(),
-            "/runner/wp-codebox/packages/cli/dist/index.js".to_string(),
-        )]);
-
-        scrub_ambient_wp_codebox_env(&mut env);
-
-        assert_eq!(
-            env.get("HOMEBOY_WP_CODEBOX_BIN").map(String::as_str),
-            Some("/runner/wp-codebox/packages/cli/dist/index.js")
-        );
-        assert_eq!(
-            env.get("HOMEBOY_SETTINGS_WP_CODEBOX_BIN")
-                .map(String::as_str),
-            Some("")
-        );
-    }
-
-    #[test]
-    fn wp_codebox_env_diagnostics_reports_scrubbed_and_explicit_values() {
-        let env = HashMap::from([
-            ("HOMEBOY_WP_CODEBOX_BIN".to_string(), "".to_string()),
-            (
-                "HOMEBOY_SETTINGS_WP_CODEBOX_BIN".to_string(),
-                "/runner/wp-codebox/packages/cli/dist/index.js".to_string(),
-            ),
-        ]);
-
-        let diagnostics = wp_codebox_env_diagnostics(&env);
-
-        assert_eq!(
-            diagnostics["schema"],
-            "homeboy/lab-offload-wp-codebox-env/v1"
-        );
-        assert_eq!(diagnostics["keys"][0]["name"], "HOMEBOY_WP_CODEBOX_BIN");
-        assert_eq!(diagnostics["keys"][0]["action"], "scrub_ambient_runner_env");
-        assert_eq!(diagnostics["keys"][0]["value_preview"], "");
-        assert_eq!(
-            diagnostics["keys"][1]["name"],
-            "HOMEBOY_SETTINGS_WP_CODEBOX_BIN"
-        );
-        assert_eq!(diagnostics["keys"][1]["action"], "forward_explicit_value");
-        assert_eq!(diagnostics["keys"][1]["value_preview"], "<redacted>");
-    }
-
-    #[test]
     fn rig_component_path_env_is_forwarded_with_runner_path() {
         let mapping = vec![workspace_mapping_entry(
             "rig_component_path_env",
             &RunnerWorkspaceSyncOutput {
                 command: "runner.workspace.sync",
                 runner_id: "homeboy-lab".to_string(),
-                local_path: "/Users/chubes/Developer/woocommerce-gateway-stripe".to_string(),
-                remote_path: "/home/chubes/Developer/woocommerce-gateway-stripe".to_string(),
+                local_path: "/Users/chubes/Developer/example-component".to_string(),
+                remote_path: "/home/chubes/Developer/example-component".to_string(),
                 sync_mode: RunnerWorkspaceSyncMode::Snapshot,
                 snapshot_identity: "snapshot".to_string(),
                 files: 1,
@@ -510,18 +407,18 @@ mod tests {
             &mapping,
             [(
                 "HOMEBOY_TEST_COMPONENT_PATH".to_string(),
-                "/Users/chubes/Developer/woocommerce-gateway-stripe/includes".to_string(),
+                "/Users/chubes/Developer/example-component/includes".to_string(),
             )],
         )
         .expect("forward env");
 
         assert_eq!(
             env.get("HOMEBOY_TEST_COMPONENT_PATH").map(String::as_str),
-            Some("/home/chubes/Developer/woocommerce-gateway-stripe/includes")
+            Some("/home/chubes/Developer/example-component/includes")
         );
         assert_eq!(
             metadata["forwarded"][0]["runner_value"],
-            "/home/chubes/Developer/woocommerce-gateway-stripe/includes"
+            "/home/chubes/Developer/example-component/includes"
         );
     }
 
