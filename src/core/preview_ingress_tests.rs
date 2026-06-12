@@ -77,3 +77,66 @@ fn route_validation_rejects_non_http_upstream_origin() {
         assert!(err.message.contains("upstream origin"));
     });
 }
+
+fn install_options() -> PreviewIngressInstallOptions {
+    PreviewIngressInstallOptions {
+        server_id: "preview-vps".to_string(),
+        domain: "example.com".to_string(),
+        public_host_pattern: "*-tunnel.example.com".to_string(),
+        ..PreviewIngressInstallOptions::default()
+    }
+}
+
+#[test]
+fn install_plan_renders_generic_non_secret_operator_config() {
+    let plan = render_install_plan(install_options()).expect("plan");
+
+    assert_eq!(plan.server_id, "preview-vps");
+    assert_eq!(plan.dns_probe_host, "homeboy-health-tunnel.example.com");
+    assert!(plan.systemd_unit.contains("Homeboy preview ingress"));
+    assert!(plan.systemd_unit.contains("tunnel preview-ingress serve"));
+    assert!(plan.systemd_unit.contains("--public-host-pattern"));
+    assert!(plan.nginx_site.contains("server_name *-tunnel.example.com"));
+    assert!(plan
+        .caddy_site
+        .contains("reverse_proxy http://127.0.0.1:7350"));
+    assert!(plan
+        .secrets_policy
+        .iter()
+        .any(|item| item.contains("non-secret")));
+    assert!(plan
+        .required_operator_config
+        .iter()
+        .any(|item| item.contains("Wildcard DNS")));
+    assert!(plan.dry_run);
+    assert!(!plan.applied);
+}
+
+#[test]
+fn install_status_plan_is_machine_readable_without_live_probe() {
+    let status = render_install_status_plan(install_options()).expect("status");
+
+    assert!(!status.probed);
+    assert_eq!(status.checks.len(), 5);
+    assert!(status
+        .checks
+        .iter()
+        .all(|check| check.status == PreviewIngressInstallCheckStatus::Planned));
+}
+
+#[test]
+fn install_validation_rejects_public_bind_and_non_wildcard_pattern() {
+    let public_bind = render_install_plan(PreviewIngressInstallOptions {
+        bind: "0.0.0.0:7350".to_string(),
+        ..install_options()
+    })
+    .expect_err("public bind rejected");
+    assert!(public_bind.message.contains("loopback"));
+
+    let fixed_host = render_install_plan(PreviewIngressInstallOptions {
+        public_host_pattern: "preview.example.com".to_string(),
+        ..install_options()
+    })
+    .expect_err("non-wildcard rejected");
+    assert!(fixed_host.message.contains("wildcard"));
+}

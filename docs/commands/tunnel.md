@@ -104,6 +104,47 @@ Client
 
 The core contract is generic HTTP ingress: public host/session routing, reverse-channel-compatible HTTP origins, request/response streaming, status, logs, and cleanup. Workload-specific behavior, asset health policy, and preview interpretation belongs in Homeboy Extensions or `homeboy-rigs`, not in Homeboy core.
 
+Render a non-destructive operator install plan for a wildcard preview ingress domain:
+
+```sh
+homeboy tunnel preview-ingress install \
+  --server chubes-net \
+  --domain chubes.net \
+  --public-host-pattern '*-tunnel.chubes.net' \
+  --service-name homeboy-preview-ingress
+```
+
+The install command is plan-first. It does not SSH to the server, write files, reload proxies, or deploy anything. It emits machine-readable JSON containing:
+
+- a systemd unit for the preview ingress service
+- Nginx and Caddy reverse proxy snippets for the supplied wildcard host pattern
+- DNS, loopback status, and public status smoke-check commands
+- systemd status, restart, and rollback commands
+- the exact operator configuration still required before the plan can be applied
+- a non-secret policy note for token/pairing material
+
+Render the install status contract without probing the live VPS:
+
+```sh
+homeboy tunnel preview-ingress install-status \
+  --server chubes-net \
+  --domain chubes.net \
+  --public-host-pattern '*-tunnel.chubes.net'
+```
+
+Install status output records planned checks so operators and future apply/probe flows can share one output shape. It includes `systemctl is-active`, `systemctl status`, loopback ingress status, wildcard DNS, and public ingress status commands.
+
+The required VPS/operator inputs are intentionally explicit and non-secret:
+
+- a configured Homeboy server ID with SSH access to the VPS
+- wildcard DNS for the host pattern pointing at the VPS public address
+- TLS certificate coverage for the wildcard preview host pattern
+- a Homeboy binary path on the VPS
+- a system user/group for the service
+- one reverse proxy choice, Nginx or Caddy
+
+Secrets are not rendered into the generated unit or proxy snippets. Pairing tokens/client credentials belong in Homeboy secret/config surfaces before enabling live routes.
+
 Register one active preview route:
 
 ```sh
@@ -202,6 +243,8 @@ The current layer validates config, token, host, session, origin, and lease sema
 - `service status <id>`: report declaration, process, local URL, public URL when present, health, backend, and log evidence state.
 - `service stop <id>`: terminate the managed process group and remove runtime state while leaving log evidence files in place.
 - `preview-client start`: connect a local HTTP(S) preview origin to a Homeboy preview ingress for one public host.
+- `preview-ingress install`: render a non-destructive VPS preview ingress install plan.
+- `preview-ingress install-status`: render machine-readable VPS preview ingress install status checks.
 - `preview-ingress route <session-id>`: register or replace a host-routed preview session.
 - `preview-ingress unroute <session-id>`: remove a preview route.
 - `preview-ingress list`: list route records.
