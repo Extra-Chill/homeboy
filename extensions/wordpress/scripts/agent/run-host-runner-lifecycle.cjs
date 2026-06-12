@@ -125,7 +125,6 @@ function gh(workspace, args, options = {}) {
 function changedFiles(workspace) {
   const status = git(workspace, ['status', '--porcelain', '--untracked-files=all']).stdout || '';
   return status.split('\n')
-    .map((line) => line.trim())
     .filter(Boolean)
     .map((line) => line.slice(3).trim())
     .filter((file) => file && !file.startsWith('.ci/') && !file.startsWith('datamachine-agent-artifacts/'));

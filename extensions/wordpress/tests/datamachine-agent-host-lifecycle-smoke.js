@@ -173,6 +173,36 @@ function makeRunFiles(tmp, config) {
 }
 
 {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-host-lifecycle-tracked-file.'));
+  const repo = makeRepo(tmp);
+  const gh = makeGhFixture(tmp);
+  fs.appendFileSync(path.join(repo, 'README.md'), '\nTracked docs update\n');
+  const { configPath, resultsPath } = makeRunFiles(tmp, {
+    writable_paths: ['README.md'],
+    verification_commands: [{ command: 'test -f README.md', description: 'Tracked file exists' }],
+    drift_checks: [{ command: 'git diff --exit-code', description: 'Tracked docs update is staged for drift check' }],
+  });
+
+  const result = run('node', [script, '--results', resultsPath, '--config', configPath, '--scenario', 'developer-docs', '--workspace', repo], {
+    env: { PATH: `${gh.bin}${path.delimiter}${process.env.PATH}`, GITHUB_RUN_ID: '12345', GH_TOKEN: 'fixture' },
+  });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const output = readJson(resultsPath);
+  const scenario = output.scenarios[0];
+  assert.equal(scenario.metrics.writable_paths_satisfied, 1);
+  assert.equal(scenario.metrics.pr_opened, 1);
+  assert.deepEqual(scenario.metadata.runner_workspace_capture.files, ['README.md']);
+  assert.deepEqual(scenario.metadata.runner_writable_path_policy.rejected_files, []);
+  checked('git', ['fetch', 'origin', 'agent-artifacts/docs-agent-host-lifecycle'], { cwd: repo });
+  const publishedReadme = checked(
+    'git',
+    ['show', 'origin/agent-artifacts/docs-agent-host-lifecycle:README.md'],
+    { cwd: repo },
+  ).stdout;
+  assert.match(publishedReadme, /Tracked docs update/);
+}
+
+{
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-host-lifecycle-verification-side-effect.'));
   const repo = makeRepo(tmp);
   const gh = makeGhFixture(tmp);
