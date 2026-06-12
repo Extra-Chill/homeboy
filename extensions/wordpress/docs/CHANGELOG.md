@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.120.0] - 2026-06-12
+
+### Added
+- assert release ZIP internal version matches the release before upload
+
 ## [2.119.29] - 2026-06-12
 
 ### Fixed
