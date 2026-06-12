@@ -79,6 +79,11 @@ pub(super) use schedule::{
 };
 use workload::trace_workload_scenario_id;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ResolvedTraceSecretEnv {
+    env: Vec<(String, String)>,
+}
+
 #[cfg(test)]
 use matrix::{expand_variant_matrix, TraceVariantStackItem};
 #[derive(Args, Clone)]
@@ -710,6 +715,44 @@ fn hydrate_trace_secret_env(
     let (resolved, statuses) = homeboy::core::trace_secrets::resolve_secret_env(names, project_id)?;
     env.extend(resolved);
     Ok(homeboy::core::trace_secrets::status_metadata(statuses))
+}
+
+fn resolve_trace_secret_env_once(
+    names: &[String],
+    project_id: Option<&str>,
+) -> homeboy::core::Result<Option<ResolvedTraceSecretEnv>> {
+    if names.iter().all(|name| name.trim().is_empty()) {
+        return Ok(None);
+    }
+
+    let (env, _statuses) = homeboy::core::trace_secrets::resolve_secret_env(names, project_id)?;
+    Ok(Some(ResolvedTraceSecretEnv { env }))
+}
+
+fn apply_resolved_trace_secret_env(
+    args: &mut TraceArgs,
+    resolved: Option<&ResolvedTraceSecretEnv>,
+) {
+    apply_resolved_trace_secret_env_to_fields(&mut args.secret_env, &mut args.matrix_env, resolved);
+}
+
+fn apply_resolved_trace_secret_env_to_fields(
+    secret_env: &mut Vec<String>,
+    matrix_env: &mut Vec<(String, String)>,
+    resolved: Option<&ResolvedTraceSecretEnv>,
+) {
+    if let Some(resolved) = resolved {
+        matrix_env.extend(resolved.env.clone());
+        secret_env.clear();
+    }
+}
+
+fn trace_secret_env_project_id_for_args(args: &TraceArgs) -> homeboy::core::Result<String> {
+    let rig_context = load_rig_context(args.rig.as_deref())?;
+    resolve_component_id(
+        &args.comp,
+        rig_context.as_ref().map(|context| &context.rig_spec),
+    )
 }
 
 fn run_list(args: TraceArgs) -> CmdResult<TraceCommandOutput> {
@@ -1658,6 +1701,52 @@ fn merge_trace_artifact_metadata(
         );
     }
     metadata
+}
+
+#[cfg(test)]
+mod secret_env_tests {
+    use super::*;
+
+    #[test]
+    fn resolved_trace_secret_env_moves_values_to_child_matrix_env() {
+        let mut secret_env = vec!["STRIPE_SECRET_KEY".to_string()];
+        let mut matrix_env = vec![("EXISTING".to_string(), "1".to_string())];
+        let resolved = ResolvedTraceSecretEnv {
+            env: vec![(
+                "STRIPE_SECRET_KEY".to_string(),
+                "redacted-test-value".to_string(),
+            )],
+        };
+
+        apply_resolved_trace_secret_env_to_fields(
+            &mut secret_env,
+            &mut matrix_env,
+            Some(&resolved),
+        );
+
+        assert!(secret_env.is_empty());
+        assert_eq!(
+            matrix_env,
+            vec![
+                ("EXISTING".to_string(), "1".to_string()),
+                (
+                    "STRIPE_SECRET_KEY".to_string(),
+                    "redacted-test-value".to_string()
+                )
+            ]
+        );
+    }
+
+    #[test]
+    fn unresolved_trace_secret_env_leaves_child_args_unchanged() {
+        let mut secret_env = vec!["STRIPE_SECRET_KEY".to_string()];
+        let mut matrix_env = Vec::new();
+
+        apply_resolved_trace_secret_env_to_fields(&mut secret_env, &mut matrix_env, None);
+
+        assert_eq!(secret_env, vec!["STRIPE_SECRET_KEY".to_string()]);
+        assert!(matrix_env.is_empty());
+    }
 }
 
 #[cfg(test)]

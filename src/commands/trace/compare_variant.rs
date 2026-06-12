@@ -16,8 +16,9 @@ use super::output::{
 };
 use super::repeat::{focus_aggregate_spans, run_repeat};
 use super::{
-    apply_command_target_component, plan_trace_run_order, validate_trace_variants_for_args,
-    TraceArgs, TraceRunPlanEntry, TraceSchedule,
+    apply_command_target_component, apply_resolved_trace_secret_env, plan_trace_run_order,
+    resolve_trace_secret_env_once, trace_secret_env_project_id_for_args,
+    validate_trace_variants_for_args, TraceArgs, TraceRunPlanEntry, TraceSchedule,
 };
 use crate::commands::CmdResult;
 
@@ -62,6 +63,10 @@ pub(super) fn run_compare_variant(mut args: TraceArgs) -> CmdResult<TraceCommand
     args.report = None;
     args.compare_after = None;
     validate_trace_variants_for_args(&args)?;
+    let project_id = trace_secret_env_project_id_for_args(&args)?;
+    let resolved_trace_secret_env =
+        resolve_trace_secret_env_once(&args.secret_env, Some(&project_id))?;
+    apply_resolved_trace_secret_env(&mut args, resolved_trace_secret_env.as_ref());
     let focus_spans = args.focus_spans.clone();
     let regression_threshold = args.regression_threshold;
     let regression_min_delta_ms = args.regression_min_delta_ms;
