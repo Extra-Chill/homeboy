@@ -986,8 +986,13 @@ fn materialize_inline_agent_task_plan_arg(
     Vec<String>,
     Option<super::lab_workspaces::LabWorkspaceMappingEntry>,
 )> {
-    if args.get(1).map(String::as_str) != Some("agent-task")
-        || args.get(2).map(String::as_str) != Some("run-plan")
+    if subcommand_index(args, "agent-task")
+        .and_then(|index| {
+            args.get(index + 1)
+                .filter(|arg| arg.as_str() == "run-plan")
+                .map(|_| index + 1)
+        })
+        .is_none()
     {
         return Ok((args.to_vec(), None));
     }
@@ -1231,15 +1236,15 @@ fn agent_task_dispatch_envelope_value(value: &serde_json::Value) -> Option<&serd
 }
 
 fn agent_task_run_plan_recording_args(args: &[String]) -> Option<(String, String)> {
-    if args.get(1).map(String::as_str) != Some("agent-task")
-        || args.get(2).map(String::as_str) != Some("run-plan")
-    {
-        return None;
-    }
+    let run_plan_index = subcommand_index(args, "agent-task").and_then(|index| {
+        args.get(index + 1)
+            .filter(|arg| arg.as_str() == "run-plan")
+            .map(|_| index + 1)
+    })?;
 
     let mut plan = None;
     let mut record_run_id = None;
-    let mut iter = args.iter().skip(3);
+    let mut iter = args.iter().skip(run_plan_index + 1);
     while let Some(arg) = iter.next() {
         if arg == "--" {
             break;
@@ -1261,13 +1266,13 @@ fn agent_task_run_plan_recording_args(args: &[String]) -> Option<(String, String
 }
 
 fn agent_task_dispatch_requested_run_id(args: &[String]) -> Option<String> {
-    if args.get(1).map(String::as_str) != Some("agent-task")
-        || !matches!(args.get(2).map(String::as_str), Some("dispatch" | "cook"))
-    {
-        return None;
-    }
+    let action_index = subcommand_index(args, "agent-task").and_then(|index| {
+        args.get(index + 1)
+            .filter(|arg| matches!(arg.as_str(), "dispatch" | "cook"))
+            .map(|_| index + 1)
+    })?;
 
-    let mut iter = args.iter().skip(3);
+    let mut iter = args.iter().skip(action_index + 1);
     while let Some(arg) = iter.next() {
         if arg == "--" {
             break;
@@ -1343,7 +1348,7 @@ fn hydrate_trace_secret_env(
 }
 
 fn declared_agent_task_secret_env(args: &[String]) -> Vec<String> {
-    if args.get(1).map(String::as_str) != Some("agent-task") {
+    if subcommand_index(args, "agent-task").is_none() {
         return Vec::new();
     }
 
@@ -1380,7 +1385,7 @@ fn declared_agent_task_secret_env(args: &[String]) -> Vec<String> {
 }
 
 fn declared_trace_secret_env(args: &[String]) -> Vec<String> {
-    if args.get(1).map(String::as_str) != Some("trace") {
+    if subcommand_index(args, "trace").is_none() {
         return Vec::new();
     }
 
@@ -1388,11 +1393,9 @@ fn declared_trace_secret_env(args: &[String]) -> Vec<String> {
 }
 
 fn trace_project_id_from_args(args: &[String]) -> Option<String> {
-    if args.get(1).map(String::as_str) != Some("trace") {
-        return None;
-    }
+    let trace_index = subcommand_index(args, "trace")?;
 
-    for index in 2..args.len() {
+    for index in (trace_index + 1)..args.len() {
         let arg = &args[index];
         if let Some(component) = arg.strip_prefix("--component=") {
             return non_empty_arg(component);
@@ -1402,11 +1405,17 @@ fn trace_project_id_from_args(args: &[String]) -> Option<String> {
         }
     }
 
-    match args.get(2).map(String::as_str) {
-        Some("compare") => args.get(3).and_then(|value| non_empty_arg(value)),
+    match args.get(trace_index + 1).map(String::as_str) {
+        Some("compare") => args
+            .get(trace_index + 2)
+            .and_then(|value| non_empty_arg(value)),
         Some(command) if !command.starts_with('-') => Some(command.to_string()),
         _ => None,
     }
+}
+
+fn subcommand_index(args: &[String], subcommand: &str) -> Option<usize> {
+    args.iter().position(|arg| arg == subcommand)
 }
 
 fn non_empty_arg(value: &str) -> Option<String> {
@@ -1501,13 +1510,13 @@ fn declared_agent_task_run_plan_secret_env(args: &[String]) -> Vec<String> {
 }
 
 fn agent_task_run_plan_plan_spec(args: &[String]) -> Option<String> {
-    if args.get(1).map(String::as_str) != Some("agent-task")
-        || args.get(2).map(String::as_str) != Some("run-plan")
-    {
-        return None;
-    }
+    let run_plan_index = subcommand_index(args, "agent-task").and_then(|index| {
+        args.get(index + 1)
+            .filter(|arg| arg.as_str() == "run-plan")
+            .map(|_| index + 1)
+    })?;
 
-    let mut iter = args.iter().skip(3);
+    let mut iter = args.iter().skip(run_plan_index + 1);
     while let Some(arg) = iter.next() {
         if arg == "--" {
             break;
@@ -2121,6 +2130,20 @@ mod tests {
     }
 
     #[test]
+    fn agent_task_dispatch_requested_run_id_allows_global_flags_before_agent_task() {
+        assert_eq!(
+            agent_task_dispatch_requested_run_id(&[
+                "homeboy".to_string(),
+                "--force-hot".to_string(),
+                "agent-task".to_string(),
+                "dispatch".to_string(),
+                "--run-id=dispatch-run".to_string(),
+            ]),
+            Some("dispatch-run".to_string())
+        );
+    }
+
+    #[test]
     fn declared_agent_task_secret_env_parses_repeated_and_equals_args() {
         let names = declared_agent_task_secret_env(&[
             "homeboy".to_string(),
@@ -2140,6 +2163,19 @@ mod tests {
                 "HOMEBOY_TEST_REFRESH_TOKEN".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn declared_agent_task_secret_env_allows_global_flags_before_agent_task() {
+        let names = declared_agent_task_secret_env(&[
+            "homeboy".to_string(),
+            "--force-hot".to_string(),
+            "agent-task".to_string(),
+            "dispatch".to_string(),
+            "--secret-env=HOMEBOY_TEST_ACCESS_TOKEN".to_string(),
+        ]);
+
+        assert_eq!(names, vec!["HOMEBOY_TEST_ACCESS_TOKEN".to_string()]);
     }
 
     #[test]
@@ -2181,10 +2217,40 @@ mod tests {
     }
 
     #[test]
+    fn declared_trace_secret_env_allows_global_flags_before_trace() {
+        let names = declared_trace_secret_env(&[
+            "homeboy".to_string(),
+            "--runner".to_string(),
+            "homeboy-lab".to_string(),
+            "--force-hot".to_string(),
+            "trace".to_string(),
+            "compare".to_string(),
+            "woocommerce-gateway-stripe".to_string(),
+            "real-wallet".to_string(),
+            "--secret-env=STRIPE_SECRET_KEY".to_string(),
+        ]);
+
+        assert_eq!(names, vec!["STRIPE_SECRET_KEY".to_string()]);
+    }
+
+    #[test]
     fn trace_project_id_from_args_reads_compare_and_component_forms() {
         assert_eq!(
             trace_project_id_from_args(&[
                 "homeboy".to_string(),
+                "trace".to_string(),
+                "compare".to_string(),
+                "woocommerce-gateway-stripe".to_string(),
+                "real-wallet".to_string(),
+            ]),
+            Some("woocommerce-gateway-stripe".to_string())
+        );
+        assert_eq!(
+            trace_project_id_from_args(&[
+                "homeboy".to_string(),
+                "--runner".to_string(),
+                "homeboy-lab".to_string(),
+                "--force-hot".to_string(),
                 "trace".to_string(),
                 "compare".to_string(),
                 "woocommerce-gateway-stripe".to_string(),
