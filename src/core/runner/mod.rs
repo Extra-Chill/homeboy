@@ -172,6 +172,13 @@ pub fn load(id: &str) -> Result<Runner> {
     load_server_runner(id)
 }
 
+pub fn effective_env(id: &str) -> Result<HashMap<String, String>> {
+    let runner = load(id)?;
+    let mut env = runner.env.clone();
+    normalize_runner_command_env(&mut env);
+    Ok(env)
+}
+
 pub fn list() -> Result<Vec<Runner>> {
     let mut runners: Vec<Runner> = config::list::<Runner>()?
         .into_iter()

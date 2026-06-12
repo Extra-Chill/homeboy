@@ -58,6 +58,10 @@ pub struct SshConnectOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stderr: Option<String>,
     pub success: bool,
+    pub exit_code: i32,
+    pub result_classification: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_reason: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -137,6 +141,12 @@ pub fn run(args: SshArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<Ss
                         stdout: Some(output.stdout),
                         stderr: Some(output.stderr),
                         success: output.success,
+                        exit_code: output.exit_code,
+                        result_classification: ssh_result_classification(
+                            output.success,
+                            output.exit_code,
+                        ),
+                        failure_reason: ssh_failure_reason(output.success, output.exit_code),
                     }),
                     output.exit_code,
                 ))
@@ -153,10 +163,78 @@ pub fn run(args: SshArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<Ss
                         stdout: None,
                         stderr: None,
                         success: exit_code == 0,
+                        exit_code,
+                        result_classification: ssh_result_classification(exit_code == 0, exit_code),
+                        failure_reason: ssh_failure_reason(exit_code == 0, exit_code),
                     }),
                     exit_code,
                 ))
             }
         }
+    }
+}
+
+fn ssh_result_classification(success: bool, exit_code: i32) -> String {
+    if success {
+        return "remote_command_success".to_string();
+    }
+
+    if exit_code == 255 || exit_code < 0 {
+        return "ssh_transport_failed".to_string();
+    }
+
+    "remote_command_failed".to_string()
+}
+
+fn ssh_failure_reason(success: bool, exit_code: i32) -> Option<String> {
+    if success {
+        return None;
+    }
+
+    if exit_code == 255 {
+        return Some("SSH transport failed with exit code 255".to_string());
+    }
+
+    if exit_code < 0 {
+        return Some("SSH process terminated without a remote exit code".to_string());
+    }
+
+    Some(format!(
+        "Remote command exited with status {exit_code}; stdout/stderr may be empty for no-output commands"
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ssh_success_classification_does_not_depend_on_output() {
+        assert_eq!(ssh_result_classification(true, 0), "remote_command_success");
+        assert_eq!(ssh_failure_reason(true, 0), None);
+    }
+
+    #[test]
+    fn ssh_failure_reason_handles_empty_output_failures() {
+        assert_eq!(
+            ssh_result_classification(false, 42),
+            "remote_command_failed"
+        );
+        assert_eq!(
+            ssh_failure_reason(false, 42).as_deref(),
+            Some("Remote command exited with status 42; stdout/stderr may be empty for no-output commands")
+        );
+    }
+
+    #[test]
+    fn ssh_transport_failure_is_distinct_from_remote_command_failure() {
+        assert_eq!(
+            ssh_result_classification(false, 255),
+            "ssh_transport_failed"
+        );
+        assert_eq!(
+            ssh_failure_reason(false, 255).as_deref(),
+            Some("SSH transport failed with exit code 255")
+        );
     }
 }
