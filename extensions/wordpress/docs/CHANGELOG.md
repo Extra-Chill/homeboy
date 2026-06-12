@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.121.1] - 2026-06-12
+
+### Fixed
+- publish only agent-authored runner files
+
 ## [2.121.0] - 2026-06-12
 
 ### Added
