@@ -61,6 +61,20 @@ cat > "$RESULTS_FILE" <<'JSON'
       },
       "artifacts": {
         "transcript": { "path": "artifacts/transcript.json", "kind": "json" },
+        "blueprint.after": {
+          "path": "artifacts/blueprint.after.json",
+          "kind": "json",
+          "label": "Generated site replay",
+          "viewer": {
+            "kind": "wordpress-playground-blueprint",
+            "base": "https://playground.wordpress.net/",
+            "query": {
+              "parameter": "blueprint-url",
+              "value": { "source": "public-artifact-url" },
+              "encoding": "url"
+            }
+          }
+        },
         "runtime_url": { "path": "https://example.test", "kind": "url" }
       }
     },
@@ -142,9 +156,15 @@ success=$(jq -r "$scenario | .success" "$JSONL_FILE")
 reward=$(jq -r "$scenario | .reward" "$JSONL_FILE")
 duration=$(jq -r "$scenario | .duration_ms" "$JSONL_FILE")
 artifact=$(jq -r "$scenario | .artifacts.transcript.path" "$JSONL_FILE")
+viewer_source=$(jq -r "$scenario | .artifacts[\"blueprint.after\"].viewer.query.value.source" "$JSONL_FILE")
 
 if [ "$provider" != "openai" ] || [ "$model" != "gpt-5.5" ] || [ "$success" != "true" ] || [ "$reward" != "1" ] || [ "$duration" != "1234" ] || [ "$artifact" != "artifacts/transcript.json" ]; then
     echo "ERROR: JSONL row missing expected scenario fields" >&2
+    cat "$JSONL_FILE" >&2
+    exit 1
+fi
+if [ "$viewer_source" != "public-artifact-url" ]; then
+    echo "ERROR: JSONL row did not preserve generated-site viewer metadata" >&2
     cat "$JSONL_FILE" >&2
     exit 1
 fi
