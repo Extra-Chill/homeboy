@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.119.23] - 2026-06-12
+
+### Changed
+- Expose runner command failure details
+
 ## [2.119.22] - 2026-06-12
 
 ### Changed
