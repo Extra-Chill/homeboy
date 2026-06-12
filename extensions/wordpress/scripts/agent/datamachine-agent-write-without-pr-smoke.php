@@ -642,12 +642,15 @@ namespace {
     }
 
 	$pnpm_result = homeboy_datamachine_agent_run_command_checks(
-		array( 'verification_commands' => array( array( 'command' => 'pnpm verify', 'description' => 'Verify generated docs' ) ) ),
+		array(
+			'runner_command_env'   => array( 'PATH' => '/opt/hostedtoolcache/node/bin:/usr/bin' ),
+			'verification_commands' => array( array( 'command' => 'pnpm verify', 'description' => 'Verify generated docs' ) ),
+		),
 		array( 'handle' => 'repo@branch', 'path' => '/workspace/repo@branch', 'backend' => 'local_git' ),
 		'verification_commands'
 	);
 	$last_command_call = end( $workspace_command_calls );
-	if ( empty( $pnpm_result['success'] ) || 'corepack pnpm verify' !== ( $last_command_call['command'] ?? '' ) || 'pnpm verify' !== ( $pnpm_result['checks'][0]['command'] ?? '' ) || 'corepack pnpm verify' !== ( $pnpm_result['checks'][0]['executed_command'] ?? '' ) ) {
+	if ( empty( $pnpm_result['success'] ) || 'corepack pnpm verify' !== ( $last_command_call['command'] ?? '' ) || '/opt/hostedtoolcache/node/bin:/usr/bin' !== ( $last_command_call['env']['PATH'] ?? '' ) || 'pnpm verify' !== ( $pnpm_result['checks'][0]['command'] ?? '' ) || 'corepack pnpm verify' !== ( $pnpm_result['checks'][0]['executed_command'] ?? '' ) ) {
 		fwrite( STDERR, "Expected pnpm verification commands to run through corepack while preserving the reported command.\n" );
 		exit( 1 );
 	}

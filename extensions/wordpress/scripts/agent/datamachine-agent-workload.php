@@ -625,10 +625,25 @@ if ( ! function_exists( 'homeboy_datamachine_agent_run_command_checks' ) ) {
 		return $command;
 	}
 
-	function homeboy_datamachine_agent_run_workspace_command( array $runner_workspace, array $command_config, string $key ): array {
+	function homeboy_datamachine_agent_runner_command_env( array $config ): array {
+		$env = is_array( $config['runner_command_env'] ?? null ) ? $config['runner_command_env'] : array();
+		$clean_env = array();
+		foreach ( $env as $name => $value ) {
+			$name = trim( (string) $name );
+			if ( '' === $name || ! preg_match( '/^[A-Za-z_][A-Za-z0-9_]*$/', $name ) || ! is_scalar( $value ) ) {
+				continue;
+			}
+			$clean_env[ $name ] = (string) $value;
+		}
+
+		return $clean_env;
+	}
+
+	function homeboy_datamachine_agent_run_workspace_command( array $config, array $runner_workspace, array $command_config, string $key ): array {
 		$ability_name = 'wp-codebox/run-runner-workspace-command';
 		$handle       = isset( $runner_workspace['handle'] ) && is_scalar( $runner_workspace['handle'] ) ? trim( (string) $runner_workspace['handle'] ) : '';
 		$command      = homeboy_datamachine_agent_prepare_runner_command( (string) ( $command_config['command'] ?? '' ) );
+		$env          = homeboy_datamachine_agent_runner_command_env( $config );
 		if ( '' === $handle ) {
 			return array(
 				'success'        => false,
@@ -666,6 +681,7 @@ if ( ! function_exists( 'homeboy_datamachine_agent_run_command_checks' ) ) {
 				'command'          => $command,
 				'description'      => $command_config['description'],
 				'kind'             => $key,
+				'env'              => $env,
 			)
 		);
 		if ( function_exists( 'is_wp_error' ) && is_wp_error( $result ) ) {
@@ -713,7 +729,7 @@ if ( ! function_exists( 'homeboy_datamachine_agent_run_command_checks' ) ) {
 
 		$results = array();
 		foreach ( $commands as $command_config ) {
-			$result    = homeboy_datamachine_agent_run_workspace_command( $runner_workspace, $command_config, $key );
+			$result    = homeboy_datamachine_agent_run_workspace_command( $config, $runner_workspace, $command_config, $key );
 			$results[] = $result;
 			if ( empty( $result['success'] ) ) {
 				return array(

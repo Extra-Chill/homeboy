@@ -894,6 +894,7 @@ jobs:
             --arg executeWorkflowPath "$execute_workflow_guest_path" \
             --arg providerRegisterFunction "$provider_register_function" \
             --arg wpCliToolName "$WP_CLI_TOOL_NAME" \
+            --arg runnerCommandPath "${PATH:-}" \
             --argjson validationDependencies "$validation_json" \
             --argjson providerCredentials "$provider_credentials_json" \
             --argjson providerBenchEnv "$provider_bench_env_json" \
@@ -970,6 +971,7 @@ jobs:
               context_repositories: $contextRepositories,
               verification_commands: $verificationCommands,
               drift_checks: $driftChecks,
+              runner_command_env: (if $runnerCommandPath != "" then {PATH: $runnerCommandPath} else {} end),
               datamachine_code_policy_attestation: {
                 schema: "homeboy/datamachine-agent-ci-dmc-policy/v1",
                 target_repo: $targetRepo,
