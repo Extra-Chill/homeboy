@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.119.28] - 2026-06-12
+
+### Fixed
+- fix datamachine agent host publication base
+
 ## [2.119.27] - 2026-06-12
 
 ### Changed
