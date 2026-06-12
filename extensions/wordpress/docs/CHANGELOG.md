@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.120.6] - 2026-06-12
+
+### Changed
+- ignore runner artifacts in writable path checks
+
 ## [2.120.5] - 2026-06-12
 
 ### Changed
