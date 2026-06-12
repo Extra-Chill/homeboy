@@ -194,7 +194,7 @@ pub fn run_bench_list_workflow(
             json_summary: false,
             ci_env: Vec::new(),
             passthrough_args: args.passthrough_args,
-            scenario_ids: Vec::new(),
+            scenario_ids: args.scenario_ids.clone(),
             rig_id: None,
             shared_state: None,
             extra_workloads: args.extra_workloads,
@@ -478,10 +478,7 @@ fn discover_bench_scenarios(
         })?;
     }
 
-    let mut discovery_args = args.clone();
-    discovery_args.scenario_ids.clear();
-
-    let runner_output = build_runner(execution_context, component, &discovery_args, run_dir, None)?
+    let runner_output = build_runner(execution_context, component, args, run_dir, None)?
         .env("HOMEBOY_BENCH_LIST_ONLY", "1")
         .run()?;
 
