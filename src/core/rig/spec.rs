@@ -526,6 +526,10 @@ pub struct TracePublicPreviewSpec {
     /// Seconds to wait for the provider command to print a public HTTPS URL.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub startup_timeout_seconds: Option<u64>,
+
+    /// Public-origin-relative asset URLs that must load before trace collection starts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_asset_paths: Vec<String>,
 }
 
 impl TraceProfileSpec {

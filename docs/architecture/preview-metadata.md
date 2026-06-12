@@ -49,6 +49,32 @@ object does not already contain that field.
 Homeboy does not create tunnels, publish previews, or know about product-specific
 runtimes. Public access is supplied by the caller/integration.
 
+## Trace Public Preview Assets
+
+Trace workloads can declare public-preview assets that must be fetchable before
+trace collection starts:
+
+```json
+{
+  "public_preview": {
+    "local_origin": "http://127.0.0.1:49823",
+    "public_origin": "https://preview.example.test",
+    "require_https": true,
+    "required_asset_paths": [
+      "/wp-content/plugins/woocommerce-gateway-stripe/build/express-checkout.js?ver=10.8.0",
+      "/wp-content/plugins/woocommerce/assets/js/frontend/add-to-cart.min.js"
+    ]
+  }
+}
+```
+
+Each entry can be a public-origin-relative path or an absolute `http`/`https`
+URL. Homeboy fetches the required assets through the public preview origin before
+starting the trace runner. Non-2xx responses, aborted requests, and connection
+errors fail fast with `public_preview.required_asset_paths` diagnostics so a run
+does not collect baseline/candidate traces from a page whose static assets cannot
+load.
+
 ## Persistence
 
 When a command records an observation run, Homeboy stores the object at
