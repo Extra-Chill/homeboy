@@ -1,4 +1,5 @@
 use clap::{Args, Subcommand};
+use homeboy::core::build_identity;
 use homeboy::core::engine;
 use homeboy::core::self_status;
 use serde_json::Value;
@@ -15,12 +16,17 @@ pub struct SelfArgs {
 pub enum SelfCommand {
     /// Report active binary, version, and nearby install/update signals
     Status(SelfStatusArgs),
+    /// Report the active binary build identity without external probes
+    Identity(SelfIdentityArgs),
     /// Plan or delete orphaned Homeboy runtime temp entries
     CleanupRuntimeTmp(SelfCleanupRuntimeTmpArgs),
 }
 
 #[derive(Args)]
 pub struct SelfStatusArgs {}
+
+#[derive(Args)]
+pub struct SelfIdentityArgs {}
 
 #[derive(Args)]
 pub struct SelfCleanupRuntimeTmpArgs {
@@ -43,6 +49,11 @@ pub fn run(args: SelfArgs, _global: &GlobalArgs) -> CmdResult<Value> {
         SelfCommand::Status(_) => {
             let status = self_status::collect_status();
             let json = serde_json::to_value(status)
+                .map_err(|e| homeboy::core::Error::internal_json(e.to_string(), None))?;
+            Ok((json, 0))
+        }
+        SelfCommand::Identity(_) => {
+            let json = serde_json::to_value(build_identity::current())
                 .map_err(|e| homeboy::core::Error::internal_json(e.to_string(), None))?;
             Ok((json, 0))
         }

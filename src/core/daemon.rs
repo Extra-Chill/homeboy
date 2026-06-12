@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use crate::core::api_jobs::{JobStatus, JobStore};
+use crate::core::build_identity;
 use crate::core::error::{Error, RemoteCommandFailedDetails, Result, TargetDetails};
 use crate::core::http_api::{self, AnalysisJobRunner, HttpMethod, UnsupportedAnalysisJobRunner};
 use crate::core::paths;
@@ -258,6 +259,7 @@ where
             body: json!({
                 "status": "ok",
                 "version": VERSION,
+                "build_identity": build_identity::current(),
             }),
             artifact: None,
         },
@@ -265,6 +267,7 @@ where
             status_code: 200,
             body: json!({
                 "version": VERSION,
+                "build_identity": build_identity::current(),
             }),
             artifact: None,
         },

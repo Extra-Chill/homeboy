@@ -155,7 +155,29 @@ fn normalize_homeboy_version(version: &str) -> &str {
         .unwrap_or(version.trim())
 }
 
+pub(super) fn normalize_homeboy_version_owned(version: &str) -> String {
+    normalize_homeboy_version(version).to_string()
+}
+
+pub(super) fn daemon_http_identity(local_url: &str) -> std::result::Result<String, String> {
+    let body = daemon_http_body(local_url)?;
+    daemon_identity_from_body(&body)
+        .filter(|identity| !identity.trim().is_empty())
+        .map(|identity| identity.trim().to_string())
+        .ok_or_else(|| {
+            "remote daemon version response did not include a build identity".to_string()
+        })
+}
+
 pub(super) fn daemon_http_version(local_url: &str) -> std::result::Result<String, String> {
+    let body = daemon_http_body(local_url)?;
+    daemon_version_from_body(&body)
+        .filter(|version| !version.trim().is_empty())
+        .map(|version| version.trim().to_string())
+        .ok_or_else(|| "remote daemon version response did not include a version".to_string())
+}
+
+fn daemon_http_body(local_url: &str) -> std::result::Result<Value, String> {
     let client = Client::builder()
         .timeout(Duration::from_secs(2))
         .build()
@@ -174,10 +196,7 @@ pub(super) fn daemon_http_version(local_url: &str) -> std::result::Result<String
             status_code, body
         ));
     }
-    daemon_version_from_body(&body)
-        .filter(|version| !version.trim().is_empty())
-        .map(|version| version.trim().to_string())
-        .ok_or_else(|| "remote daemon version response did not include a version".to_string())
+    Ok(body)
 }
 
 pub(super) fn daemon_version_from_body(body: &Value) -> Option<&str> {
@@ -186,6 +205,16 @@ pub(super) fn daemon_version_from_body(body: &Value) -> Option<&str> {
             .and_then(|data| data.get("version"))
             .and_then(Value::as_str)
     })
+}
+
+pub(super) fn daemon_identity_from_body(body: &Value) -> Option<&str> {
+    body.pointer("/build_identity/display")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            body.pointer("/data/build_identity/display")
+                .and_then(Value::as_str)
+        })
+        .or_else(|| daemon_version_from_body(body))
 }
 
 fn remote_daemon_stop(client: &SshClient, homeboy: &str) -> std::result::Result<(), String> {
