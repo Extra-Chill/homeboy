@@ -1,6 +1,7 @@
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 fn main() {
     let manifest_dir =
@@ -24,6 +25,69 @@ fn main() {
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR missing"));
     fs::write(out_dir.join("generated_docs.rs"), generated)
         .expect("Failed to write generated_docs.rs");
+
+    emit_git_build_identity(&manifest_dir);
+}
+
+fn emit_git_build_identity(manifest_dir: &Path) {
+    let git_dir = resolve_git_dir(manifest_dir).unwrap_or_else(|| manifest_dir.join(".git"));
+    println!("cargo:rerun-if-changed={}", git_dir.join("HEAD").display());
+    if let Ok(head) = fs::read_to_string(git_dir.join("HEAD")) {
+        if let Some(reference) = head.trim().strip_prefix("ref: ") {
+            println!(
+                "cargo:rerun-if-changed={}",
+                git_dir.join(reference).display()
+            );
+        }
+    }
+
+    if let Some(commit) = git_output(manifest_dir, &["rev-parse", "--short=12", "HEAD"]) {
+        println!("cargo:rustc-env=HOMEBOY_BUILD_GIT_COMMIT={commit}");
+    }
+    if let Some(status) = git_output(manifest_dir, &["status", "--porcelain"]) {
+        println!(
+            "cargo:rustc-env=HOMEBOY_BUILD_GIT_DIRTY={}",
+            if status.trim().is_empty() {
+                "false"
+            } else {
+                "true"
+            }
+        );
+    }
+}
+
+fn resolve_git_dir(manifest_dir: &Path) -> Option<PathBuf> {
+    let git_path = manifest_dir.join(".git");
+    if git_path.is_dir() {
+        return Some(git_path);
+    }
+
+    let git_file = fs::read_to_string(&git_path).ok()?;
+    let raw_path = git_file.trim().strip_prefix("gitdir: ")?.trim();
+    let path = PathBuf::from(raw_path);
+    Some(if path.is_absolute() {
+        path
+    } else {
+        manifest_dir.join(path)
+    })
+}
+
+fn git_output(manifest_dir: &Path, args: &[&str]) -> Option<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(manifest_dir)
+        .args(args)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
 }
 
 fn collect_md_files(docs_root: &Path, dir: &Path, out: &mut Vec<PathBuf>) {

@@ -1756,6 +1756,7 @@ mod tests {
                 tunnel_pid: None,
                 remote_daemon_pid: None,
                 homeboy_version: "homeboy 0.0.0".to_string(),
+                homeboy_build_identity: Some("homeboy 0.0.0+test".to_string()),
                 connected_at: "2026-06-03T00:00:00Z".to_string(),
             }),
             stale_daemon: None,

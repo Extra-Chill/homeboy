@@ -1,3 +1,4 @@
+use crate::core::build_identity::{self, BuildIdentity};
 use crate::core::upgrade::{self, InstallMethod};
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -55,6 +56,7 @@ pub struct SelfStatus {
     pub command: String,
     pub active_binary: String,
     pub active_version: String,
+    pub active_build_identity: BuildIdentity,
     pub install_method: InstallMethod,
     pub latest_github_release: ProbeValue,
     pub homebrew: HomebrewStatus,
@@ -92,6 +94,7 @@ where
         .map(|path| path.to_string_lossy().to_string())
         .unwrap_or_else(|| "unknown".to_string());
     let active_version = upgrade::current_version().to_string();
+    let active_build_identity = build_identity::current();
     let install_method = detect_install_method_from_path(active_binary.as_deref());
     let latest_github_release = probe_latest_github(fetch_latest_github);
     let homebrew = probe_homebrew(&run);
@@ -110,6 +113,7 @@ where
         command: "self status".to_string(),
         active_binary: active_binary_string,
         active_version,
+        active_build_identity,
         install_method,
         latest_github_release,
         homebrew,
@@ -356,6 +360,11 @@ mod tests {
         assert_eq!(status.command, "self status");
         assert_eq!(status.active_binary, "/opt/homebrew/bin/homeboy");
         assert_eq!(status.active_version, upgrade::current_version());
+        assert_eq!(
+            status.active_build_identity.version,
+            upgrade::current_version()
+        );
+        assert!(status.active_build_identity.display.starts_with("homeboy "));
         assert_eq!(status.install_method, InstallMethod::Homebrew);
         assert_eq!(
             status.latest_github_release.version.as_deref(),
@@ -429,6 +438,10 @@ mod tests {
 
         assert_eq!(json["command"], "self status");
         assert_eq!(json["active_binary"], "/tmp/homeboy");
+        assert_eq!(
+            json["active_build_identity"]["version"],
+            upgrade::current_version()
+        );
         assert_eq!(json["latest_github_release"]["available"], false);
         assert_eq!(json["latest_github_release"]["error"], "github unavailable");
         assert_eq!(json["homebrew"]["available"], false);

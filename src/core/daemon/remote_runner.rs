@@ -43,6 +43,8 @@ struct SessionRequest {
     broker_url: Option<String>,
     #[serde(default)]
     homeboy_version: Option<String>,
+    #[serde(default)]
+    homeboy_build_identity: Option<String>,
 }
 
 pub(super) fn route(
@@ -116,6 +118,7 @@ fn register_session(body: Option<Value>) -> Result<Value> {
             .homeboy_version
             .clone()
             .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string()),
+        homeboy_build_identity: request.homeboy_build_identity.clone(),
         connected_at: chrono::Utc::now().to_rfc3339(),
     };
     let path = paths::runner_session_file(&session.runner_id)?;

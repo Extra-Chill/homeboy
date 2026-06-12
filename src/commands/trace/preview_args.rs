@@ -53,6 +53,7 @@ fn expand_trace_public_preview(
         }
     };
     rig::TracePublicPreviewSpec {
+        mode: spec.mode.clone(),
         local_origin: expand(&spec.local_origin),
         public_origin: spec.public_origin.as_deref().map(&expand),
         command: spec.command.as_deref().map(expand),
@@ -64,5 +65,16 @@ fn expand_trace_public_preview(
             .iter()
             .map(|path| expand(path))
             .collect(),
+        native: spec
+            .native
+            .as_ref()
+            .map(|native| rig::TraceNativePublicPreviewSpec {
+                public_host: native.public_host.as_deref().map(&expand),
+                operator_domain: native.operator_domain.as_deref().map(&expand),
+                session_id: native.session_id.as_deref().map(&expand),
+                ingress_url: native.ingress_url.as_deref().map(&expand),
+                token_env: native.token_env.clone(),
+                client_binary: native.client_binary.as_deref().map(&expand),
+            }),
     }
 }

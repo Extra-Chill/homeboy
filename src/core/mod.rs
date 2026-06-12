@@ -23,6 +23,7 @@ pub mod artifact_links;
 pub mod artifact_manifest;
 pub(crate) mod artifact_metadata;
 pub mod browser_evidence;
+pub mod build_identity;
 pub mod change_artifact;
 pub mod ci_profile;
 pub mod cleanup;
@@ -55,6 +56,9 @@ pub mod output;
 pub(crate) mod ownership;
 pub mod plan;
 pub mod preview_client;
+pub mod preview_ingress;
+#[cfg(test)]
+mod preview_ingress_tests;
 pub mod process;
 pub mod product_identity;
 pub mod project;

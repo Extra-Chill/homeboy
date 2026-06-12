@@ -6,13 +6,14 @@ fn test_trace_public_preview_parse() {
         r#"{
             "path": "/tmp/wallet.trace.mjs",
             "public_preview": {
+                "mode": "external",
                 "local_origin": "http://127.0.0.1:8080",
                 "command": "cloudflared tunnel --url http://127.0.0.1:8080",
                 "require_https": true,
                 "provider": "cloudflared",
                 "startup_timeout_seconds": 5,
                 "required_asset_paths": [
-                    "/wp-content/plugins/woocommerce-gateway-stripe/build/express-checkout.js?ver=10.8.0"
+                    "/assets/app.js"
                 ]
             }
         }"#,
@@ -26,9 +27,45 @@ fn test_trace_public_preview_parse() {
     assert_eq!(preview.startup_timeout_seconds, Some(5));
     assert_eq!(
         preview.required_asset_paths,
-        vec![
-            "/wp-content/plugins/woocommerce-gateway-stripe/build/express-checkout.js?ver=10.8.0"
-                .to_string()
-        ]
+        vec!["/assets/app.js".to_string()]
+    );
+}
+
+#[test]
+fn test_trace_public_preview_parse_homeboy_native() {
+    let workload: WorkloadSpec = serde_json::from_str(
+        r#"{
+            "path": "/tmp/wallet.trace.mjs",
+            "public_preview": {
+                "mode": "homeboy_native",
+                "local_origin": "http://127.0.0.1:49823",
+                "require_https": true,
+                "native": {
+                    "operator_domain": "chubes.net",
+                    "session_id": "wc-stripe-real-wallet",
+                    "ingress_url": "https://preview-broker.chubes.net",
+                    "token_env": "HOMEBOY_PREVIEW_TUNNEL_TOKEN"
+                }
+            }
+        }"#,
+    )
+    .expect("parse native public preview workload");
+
+    let preview = workload.public_preview().expect("public preview");
+    assert_eq!(preview.local_origin, "http://127.0.0.1:49823");
+    assert_eq!(
+        preview.mode,
+        crate::core::rig::TracePublicPreviewMode::HomeboyNative
+    );
+    let native = preview.native.as_ref().expect("native settings");
+    assert_eq!(native.operator_domain.as_deref(), Some("chubes.net"));
+    assert_eq!(native.session_id.as_deref(), Some("wc-stripe-real-wallet"));
+    assert_eq!(
+        native.ingress_url.as_deref(),
+        Some("https://preview-broker.chubes.net")
+    );
+    assert_eq!(
+        native.token_env.as_deref(),
+        Some("HOMEBOY_PREVIEW_TUNNEL_TOKEN")
     );
 }
