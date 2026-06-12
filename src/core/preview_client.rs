@@ -402,16 +402,23 @@ fn validate_start_spec(spec: &PreviewClientStartSpec) -> Result<()> {
             None,
         ));
     }
-    if !(spec.local_origin.starts_with("http://127.0.0.1:")
-        || spec.local_origin.starts_with("http://localhost:")
-        || spec.local_origin.starts_with("https://127.0.0.1:")
-        || spec.local_origin.starts_with("https://localhost:"))
-    {
+    let parsed_origin = reqwest::Url::parse(&spec.local_origin).map_err(|err| {
+        Error::validation_invalid_argument(
+            "local_origin",
+            &format!("preview client local origin must be a valid HTTP(S) URL: {err}"),
+            Some(spec.local_origin.clone()),
+            None,
+        )
+    })?;
+    if !matches!(parsed_origin.scheme(), "http" | "https") {
         return Err(Error::validation_invalid_argument(
             "local_origin",
-            "preview client local origin must be an explicit loopback HTTP(S) origin",
+            "preview client local origin must use http or https",
             Some(spec.local_origin.clone()),
-            Some(vec!["http://127.0.0.1:<port>".to_string()]),
+            Some(vec![
+                "http://127.0.0.1:<port>".to_string(),
+                "http://localhost:<port>".to_string(),
+            ]),
         ));
     }
     Ok(())
@@ -468,7 +475,7 @@ mod tests {
             let mut buffer = [0_u8; 4096];
             let read = stream.read(&mut buffer).expect("read request");
             let request = String::from_utf8_lossy(&buffer[..read]);
-            assert!(request.starts_with("POST /wp-content/plugin.js?ver=1 HTTP/1.1"));
+            assert!(request.starts_with("POST /assets/app.js?ver=1 HTTP/1.1"));
             assert!(request.contains("x-preview-test: yes"));
             assert!(request.ends_with("asset-body"));
             stream
@@ -488,7 +495,7 @@ mod tests {
             PreviewIngressRequest {
                 request_id: "req-1".to_string(),
                 method: "POST".to_string(),
-                path: "/wp-content/plugin.js?ver=1".to_string(),
+                path: "/assets/app.js?ver=1".to_string(),
                 headers: BTreeMap::from([
                     ("Host".to_string(), "public.example.test".to_string()),
                     ("X-Preview-Test".to_string(), "yes".to_string()),

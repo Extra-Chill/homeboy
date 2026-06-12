@@ -70,12 +70,12 @@ Start a native outbound reverse preview client for one exact public host:
 ```sh
 homeboy tunnel preview-client start \
   --ingress https://preview-broker.example \
-  --public-host wc-stripe-ece-run42-tunnel.chubes.net \
+  --public-host run42-tunnel.example.test \
   --local-origin http://127.0.0.1:49822 \
   --token-env HOMEBOY_PREVIEW_TUNNEL_TOKEN
 ```
 
-The client registers exactly one public host; wildcard public hosts are rejected so a lab runtime cannot implicitly claim a whole domain. `--local-origin` must be an explicit loopback HTTP(S) origin such as a WP Codebox preview port.
+The client registers exactly one public host; wildcard public hosts are rejected so a lab runtime cannot implicitly claim a whole domain. `--local-origin` must be an HTTP(S) origin supplied by the caller, commonly a local development server or lab-managed preview service.
 
 The preview ingress contract is JSON-over-HTTP with bearer auth from `--token-env`:
 
