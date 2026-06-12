@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.119.25] - 2026-06-12
+
+### Fixed
+- fix codebox empty stdout failure evidence
+
 ## [2.119.24] - 2026-06-12
 
 ### Changed
