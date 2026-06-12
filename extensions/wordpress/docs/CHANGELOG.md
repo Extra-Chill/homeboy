@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.119.22] - 2026-06-12
+
+### Changed
+- Isolate Codebox agent smoke environment
+
 ## [2.119.21] - 2026-06-12
 
 ### Changed
