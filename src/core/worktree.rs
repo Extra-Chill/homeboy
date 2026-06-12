@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use crate::core::component::{self, TargetSpec};
 use crate::core::error::{Error, Result};
+use crate::core::ownership;
 use crate::core::{git, paths};
 
 mod types {
@@ -201,6 +202,7 @@ fn create_with_store(
         ));
     }
 
+    let worktree_owner = ownership::owner_for_path_or_ancestor(parent)?;
     let base_ref = options.from.unwrap_or_else(|| "HEAD".to_string());
     git::run_git(
         &source_checkout,
@@ -214,6 +216,7 @@ fn create_with_store(
         ],
         "git worktree add",
     )?;
+    ownership::normalize_created_path(&worktree_path, worktree_owner, true, "git worktree add")?;
 
     let record = TaskWorktreeRecord {
         id,
@@ -379,13 +382,18 @@ fn record_path(store_dir: &Path, id: &str) -> PathBuf {
 }
 
 fn write_record(store_dir: &Path, record: &TaskWorktreeRecord) -> Result<()> {
+    let store_owner = ownership::owner_for_path_or_ancestor(store_dir)?;
     fs::create_dir_all(store_dir).map_err(|err| {
         Error::internal_io(err.to_string(), Some(store_dir.display().to_string()))
     })?;
     let json = serde_json::to_string_pretty(record)
         .map_err(|err| Error::internal_json(err.to_string(), Some(record.id.clone())))?;
-    fs::write(record_path(store_dir, &record.id), format!("{json}\n"))
-        .map_err(|err| Error::internal_io(err.to_string(), Some(record.id.clone())))
+    let path = record_path(store_dir, &record.id);
+    fs::write(&path, format!("{json}\n"))
+        .map_err(|err| Error::internal_io(err.to_string(), Some(record.id.clone())))?;
+    ownership::normalize_created_path(store_dir, store_owner, false, "write worktree metadata")?;
+    ownership::normalize_created_path(&path, store_owner, false, "write worktree metadata")?;
+    Ok(())
 }
 
 fn read_record(store_dir: &Path, id: &str) -> Result<TaskWorktreeRecord> {

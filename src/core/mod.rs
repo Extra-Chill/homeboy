@@ -52,6 +52,7 @@ pub mod issues;
 pub mod keychain;
 pub mod observation;
 pub mod output;
+pub(crate) mod ownership;
 pub mod plan;
 pub mod process;
 pub mod product_identity;
