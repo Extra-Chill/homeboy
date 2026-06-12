@@ -388,6 +388,7 @@ fn runner_upgrade_command(
         homeboy_path.to_string(),
         "upgrade".to_string(),
         "--no-restart".to_string(),
+        "--skip-extensions".to_string(),
         "--skip-runners".to_string(),
     ];
 
@@ -781,6 +782,7 @@ mod tests {
                 "/home/chubes/.local/bin/homeboy",
                 "upgrade",
                 "--no-restart",
+                "--skip-extensions",
                 "--skip-runners"
             ]
         );
@@ -845,6 +847,7 @@ mod tests {
                 "/home/chubes/.cargo/bin/homeboy",
                 "upgrade",
                 "--no-restart",
+                "--skip-extensions",
                 "--skip-runners",
                 "--force",
                 "--method",
@@ -1132,6 +1135,70 @@ mod tests {
         assert!(commands
             .iter()
             .any(|command| command.contains(&"wordpress".to_string())));
+    }
+
+    #[test]
+    fn upgrades_runner_binary_before_controller_scoped_extension_sync() {
+        let mut runner = ssh_runner("lab", Some("/home/chubes/.cargo/bin/homeboy"));
+        runner.policy.supported_extensions = vec!["required-extension".to_string()];
+        let extension_updates = vec![
+            extension_update("irrelevant-extension", "98a61eda"),
+            extension_update("required-extension", "48517ac3"),
+        ];
+        let mut commands = Vec::new();
+
+        let (updated, skipped) = upgrade_runners_with_executor(
+            &[runner],
+            false,
+            None,
+            None,
+            &extension_updates,
+            |runner_id, options| {
+                commands.push(options.command.clone());
+                let (stdout, stderr, exit_code) = match commands.len() {
+                    1 => ("homeboy 0.228.18\n", "", 0),
+                    2 => {
+                        assert!(
+                            options.command.contains(&"--skip-extensions".to_string()),
+                            "runner binary upgrade must not run stale runner-side extension sync"
+                        );
+                        ("{\"success\":true}\n", "", 0)
+                    }
+                    3 => ("homeboy 0.228.21\n", "", 0),
+                    4 => ("{\"success\":true}\n", "", 0),
+                    5 => ("{\"success\":true}\n", "", 0),
+                    6 => ("homeboy 0.228.21\n", "", 0),
+                    _ => ("", "unexpected runner command", 1),
+                };
+                Ok((
+                    exec_output(runner_id, options.command, stdout, stderr, exit_code),
+                    exit_code,
+                ))
+            },
+            runner_status,
+        );
+
+        assert!(skipped.is_empty());
+        assert_eq!(updated.len(), 1);
+        assert!(updated[0].success);
+        assert_eq!(updated[0].previous_version.as_deref(), Some("0.228.18"));
+        assert_eq!(updated[0].new_version.as_deref(), Some("0.228.21"));
+        assert_eq!(updated[0].extensions_synced.len(), 1);
+        assert_eq!(
+            updated[0].extensions_synced[0].extension_id,
+            "required-extension"
+        );
+        assert_eq!(updated[0].extensions_skipped.len(), 1);
+        assert_eq!(
+            updated[0].extensions_skipped[0].extension_id,
+            "irrelevant-extension"
+        );
+        assert!(commands
+            .iter()
+            .all(|command| !command.contains(&"irrelevant-extension".to_string())));
+        assert!(commands
+            .iter()
+            .any(|command| command.contains(&"required-extension".to_string())));
     }
 
     #[test]
