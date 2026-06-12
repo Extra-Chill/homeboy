@@ -615,7 +615,7 @@ namespace {
                 if ( 'test -f verification.txt' === ( $input['command'] ?? '' ) ) {
                     return array( 'success' => isset( $workspace_files['verification.txt'] ), 'exit_code' => isset( $workspace_files['verification.txt'] ) ? 0 : 1 );
                 }
-				if ( 'corepack pnpm verify' === ( $input['command'] ?? '' ) ) {
+				if ( 'pnpm verify' === ( $input['command'] ?? '' ) ) {
 					return array( 'status' => 'completed', 'exit_code' => 0, 'stdout' => 'verified', 'stderr' => '' );
 				}
                 return array( 'success' => false, 'error' => 'Unexpected command.' );
@@ -650,8 +650,8 @@ namespace {
 		'verification_commands'
 	);
 	$last_command_call = end( $workspace_command_calls );
-	if ( empty( $pnpm_result['success'] ) || 'corepack pnpm verify' !== ( $last_command_call['command'] ?? '' ) || '/opt/hostedtoolcache/node/bin:/usr/bin' !== ( $last_command_call['env']['PATH'] ?? '' ) || 'pnpm verify' !== ( $pnpm_result['checks'][0]['command'] ?? '' ) || 'corepack pnpm verify' !== ( $pnpm_result['checks'][0]['executed_command'] ?? '' ) ) {
-		fwrite( STDERR, "Expected pnpm verification commands to run through corepack while preserving the reported command.\n" );
+	if ( empty( $pnpm_result['success'] ) || 'pnpm verify' !== ( $last_command_call['command'] ?? '' ) || '/opt/hostedtoolcache/node/bin:/usr/bin' !== ( $last_command_call['env']['PATH'] ?? '' ) || 'pnpm verify' !== ( $pnpm_result['checks'][0]['command'] ?? '' ) || 'pnpm verify' !== ( $pnpm_result['checks'][0]['executed_command'] ?? '' ) ) {
+		fwrite( STDERR, "Expected pnpm verification commands to preserve the configured command without sandbox-side corepack wrapping.\n" );
 		exit( 1 );
 	}
 
@@ -662,7 +662,7 @@ namespace {
 					'success'   => false,
 					'command'   => (string) ( $input['command'] ?? '' ),
 					'exit_code' => 127,
-					'stderr'    => 'corepack: not found',
+					'stderr'    => 'pnpm: not found',
 				);
 			}
 		),
@@ -672,7 +672,7 @@ namespace {
 		array( 'handle' => 'repo@branch', 'path' => '/workspace/repo@branch', 'backend' => 'local_git' ),
 		'verification_commands'
 	);
-	if ( ! empty( $failed_pnpm_result['success'] ) || 'corepack pnpm verify' !== ( $failed_pnpm_result['checks'][0]['executed_command'] ?? '' ) || 'corepack: not found' !== ( $failed_pnpm_result['error'] ?? '' ) ) {
+	if ( ! empty( $failed_pnpm_result['success'] ) || 'pnpm verify' !== ( $failed_pnpm_result['checks'][0]['executed_command'] ?? '' ) || 'pnpm: not found' !== ( $failed_pnpm_result['error'] ?? '' ) ) {
 		fwrite( STDERR, "Expected failed pnpm verification commands to expose executed command and stderr.\n" );
 		exit( 1 );
 	}

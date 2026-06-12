@@ -124,11 +124,12 @@ The runner converts the agent config into a single WP Codebox sandbox run:
   can explicitly ask the agent to work in that checkout.
 - `runner_workspace.expose_to_agent: false` enables runner-owned capture
   mode. It preserves the natural task prompt, keeps workspace tool calls scoped
-  to the provisioned handle when those tools are used, then asks WP Codebox to
-  capture and publish the final runner workspace after the run.
-- `verification_commands` and `drift_checks` execute through the WP Codebox
-  runner workspace command API, preserving verification metadata without
-  requiring Homeboy to resolve backend-local workspace paths.
+  to the provisioned handle when those tools are used, then lets the host
+  lifecycle capture and publish the final runner workspace after the run.
+- `verification_commands` and `drift_checks` execute on the GitHub Actions /
+  Homeboy host after WP Codebox returns from the WordPress/Data Machine agent
+  run. This keeps project CI commands in the checked-out target repository where
+  Node, pnpm, git auth, and workflow checkout state naturally live.
 - `ability_tools` can expose additional WordPress abilities as tools during the
   agent run.
 - `enable_terminal_actions` exposes terminal actions through the WordPress
@@ -141,9 +142,11 @@ The runner converts the agent config into a single WP Codebox sandbox run:
   consumer needs a different agent-facing tool name.
 - `pipeline_step_patches` and `flow_step_patches` can adjust imported bundle
   step configuration before execution.
-- Runner-owned workspace publication is handled by the canonical Data Machine
-  Code runner publication API. If that API is unavailable or publication fails,
-  the run fails as `write_without_pr` instead of composing fallback PR calls.
+- Runner-owned workspace publication is handled by the host lifecycle after
+  successful verification and drift checks. If publication fails after files are
+  written, the run fails as `write_without_pr`. The WP Codebox sandbox remains
+  responsible for WordPress runtime primitives, transcript/review artifacts, and
+  Data Machine API access.
 
 The reusable workflow reports the selected GitHub token path as `auth_mode` and
 in the run summary. Same-repo consumers can use the repository-scoped

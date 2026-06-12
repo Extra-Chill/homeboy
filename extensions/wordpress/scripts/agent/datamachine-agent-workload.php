@@ -617,11 +617,6 @@ if ( ! function_exists( 'homeboy_datamachine_agent_command_list' ) ) {
 
 if ( ! function_exists( 'homeboy_datamachine_agent_run_command_checks' ) ) {
 	function homeboy_datamachine_agent_prepare_runner_command( string $command ): string {
-		$trimmed = trim( $command );
-		if ( preg_match( '/^pnpm(\s|$)/', $trimmed ) ) {
-			return 'corepack ' . $trimmed;
-		}
-
 		return $command;
 	}
 
@@ -2602,6 +2597,12 @@ if ( ! function_exists( 'homeboy_datamachine_agent_bool_config' ) ) {
     }
 }
 
+if ( ! function_exists( 'homeboy_datamachine_agent_host_runner_lifecycle_enabled' ) ) {
+    function homeboy_datamachine_agent_host_runner_lifecycle_enabled( array $config ): bool {
+        return homeboy_datamachine_agent_bool_config( $config, 'host_runner_lifecycle', false );
+    }
+}
+
 if ( ! function_exists( 'homeboy_datamachine_agent_slug' ) ) {
     function homeboy_datamachine_agent_slug( string $value ): string {
         $slug = strtolower( preg_replace( '/[^a-zA-Z0-9]+/', '-', $value ) ?? '' );
@@ -3361,10 +3362,15 @@ $runner_workspace_capture = homeboy_datamachine_agent_capture_runner_workspace( 
 if ( is_array( $runner_workspace_capture['engine_data'] ?? null ) ) {
 	$engine_data = $runner_workspace_capture['engine_data'];
 }
-$verification_results = homeboy_datamachine_agent_run_command_checks( $config, is_array( $config['runner_workspace_result'] ?? null ) ? $config['runner_workspace_result'] : array(), 'verification_commands' );
-$drift_check_results  = empty( $verification_results['enabled'] ) || ! empty( $verification_results['success'] )
-	? homeboy_datamachine_agent_run_command_checks( $config, is_array( $config['runner_workspace_result'] ?? null ) ? $config['runner_workspace_result'] : array(), 'drift_checks' )
-	: array( 'enabled' => false, 'checks' => array(), 'skipped_reason' => 'verification_commands_failed' );
+$host_runner_lifecycle = homeboy_datamachine_agent_host_runner_lifecycle_enabled( $config );
+$verification_results = $host_runner_lifecycle
+	? array( 'enabled' => false, 'checks' => array(), 'skipped_reason' => 'host_runner_lifecycle' )
+	: homeboy_datamachine_agent_run_command_checks( $config, is_array( $config['runner_workspace_result'] ?? null ) ? $config['runner_workspace_result'] : array(), 'verification_commands' );
+$drift_check_results  = $host_runner_lifecycle
+	? array( 'enabled' => false, 'checks' => array(), 'skipped_reason' => 'host_runner_lifecycle' )
+	: ( empty( $verification_results['enabled'] ) || ! empty( $verification_results['success'] )
+		? homeboy_datamachine_agent_run_command_checks( $config, is_array( $config['runner_workspace_result'] ?? null ) ? $config['runner_workspace_result'] : array(), 'drift_checks' )
+		: array( 'enabled' => false, 'checks' => array(), 'skipped_reason' => 'verification_commands_failed' ) );
 $engine_data['runner_verification_results'] = $verification_results;
 $engine_data['runner_drift_check_results']  = $drift_check_results;
 if ( isset( $context_repositories ) ) {
@@ -3386,7 +3392,7 @@ $artifact_pr_context = array(
     'runner_workspace_publication' => $runner_workspace_publication,
     'error_message'            => (string) ( $engine_data['error_message'] ?? '' ),
 );
-if ( ! empty( $runner_workspace_capture['changed'] ) && ! $pr_opened ) {
+if ( ! $host_runner_lifecycle && ! empty( $runner_workspace_capture['changed'] ) && ! $pr_opened ) {
     $runner_workspace = is_array( $config['runner_workspace_result'] ?? null ) ? $config['runner_workspace_result'] : array();
     $template_values  = homeboy_datamachine_agent_artifact_pr_context(
         $job_id,
@@ -3409,7 +3415,9 @@ if ( ! empty( $runner_workspace_capture['changed'] ) && ! $pr_opened ) {
     }
     $artifact_pr_context['runner_workspace_publication'] = $runner_workspace_publication;
 }
-$job_artifact_exports = homeboy_datamachine_agent_export_job_artifacts( $job_id, $config, $pr_opened, $engine_data, $artifact_pr_context );
+$job_artifact_exports = $host_runner_lifecycle
+	? array( 'skipped_reason' => 'host_runner_lifecycle' )
+	: homeboy_datamachine_agent_export_job_artifacts( $job_id, $config, $pr_opened, $engine_data, $artifact_pr_context );
 if ( is_array( $job_artifact_exports['engine_data'] ?? null ) ) {
     $engine_data = $job_artifact_exports['engine_data'];
     $pr_opened   = true;
@@ -3463,7 +3471,7 @@ if ( ! empty( $drift_check_results['enabled'] ) && empty( $drift_check_results['
 	return homeboy_datamachine_agent_result( array( 'drift_checks_succeeded' => 0 ), $metadata, (string) ( $drift_check_results['error'] ?? 'drift_checks failed' ) );
 }
 
-if ( $file_written && ! $pr_opened ) {
+if ( ! $host_runner_lifecycle && $file_written && ! $pr_opened ) {
     $metadata['success_status'] = 'write_without_pr';
     $publication_error = is_array( $runner_workspace_publication ) ? (string) ( $runner_workspace_publication['error'] ?? '' ) : '';
     $capture_error  = is_array( $runner_workspace_capture ) ? (string) ( $runner_workspace_capture['error'] ?? '' ) : '';
@@ -3480,7 +3488,7 @@ if ( ! empty( $job_artifact_exports['error'] ) ) {
     return homeboy_datamachine_agent_result( array( 'job_artifact_exported' => 0 ), $metadata, (string) $job_artifact_exports['error'] );
 }
 
-if ( $success_requires_pr && ! $pr_opened && ! $completion_outcome_satisfied ) {
+if ( ! $host_runner_lifecycle && $success_requires_pr && ! $pr_opened && ! $completion_outcome_satisfied ) {
     return homeboy_datamachine_agent_result( array( 'pr_opened' => 0 ), $metadata, 'Agent completed without opening a pull request' );
 }
 
