@@ -127,6 +127,61 @@ pub(super) fn remap_agent_task_plan_in_args(
     out
 }
 
+pub(super) fn remap_path_settings_in_args(
+    args: &[String],
+    mappings: &[LabPathRemap],
+) -> Vec<String> {
+    if mappings.is_empty() {
+        return args.to_vec();
+    }
+
+    let mut ordered: Vec<&LabPathRemap> = mappings.iter().collect();
+    ordered.sort_by_key(|mapping| {
+        (
+            std::cmp::Reverse(mapping.local.len()),
+            std::cmp::Reverse(mapping.remote.len()),
+        )
+    });
+
+    let mut out = Vec::with_capacity(args.len());
+    let mut iter = args.iter().peekable();
+    let mut passthrough = false;
+    while let Some(arg) = iter.next() {
+        if passthrough {
+            out.push(arg.clone());
+            continue;
+        }
+        if arg == "--" {
+            passthrough = true;
+            out.push(arg.clone());
+            continue;
+        }
+        if arg == "--setting" || arg == "--setting-json" {
+            out.push(arg.clone());
+            if let Some(raw) = iter.next() {
+                out.push(remap_path_setting_pair(raw, &ordered));
+            }
+            continue;
+        }
+        if let Some(raw) = arg.strip_prefix("--setting=") {
+            out.push(format!(
+                "--setting={}",
+                remap_path_setting_pair(raw, &ordered)
+            ));
+            continue;
+        }
+        if let Some(raw) = arg.strip_prefix("--setting-json=") {
+            out.push(format!(
+                "--setting-json={}",
+                remap_path_setting_pair(raw, &ordered)
+            ));
+            continue;
+        }
+        out.push(arg.clone());
+    }
+    out
+}
+
 /// Resolve an agent-task plan spec, remap every controller-local path embedded
 /// in the JSON, and inline the result so the runner never reads stale local
 /// paths from a synced-but-unmodified plan file.
@@ -141,6 +196,22 @@ fn remap_agent_task_plan_spec(spec: &str, mappings: &[&LabPathRemap]) -> String 
     };
     remap_paths_in_value(&mut value, mappings);
     serde_json::to_string(&value).unwrap_or_else(|_| remap_at_file_spec(spec, mappings))
+}
+
+fn remap_path_setting_pair(raw: &str, mappings: &[&LabPathRemap]) -> String {
+    let Some((key, value)) = raw.split_once('=') else {
+        return raw.to_string();
+    };
+    if !is_lab_path_setting_key(key) {
+        return raw.to_string();
+    }
+    remap_local_path(value, mappings)
+        .map(|remapped| format!("{key}={remapped}"))
+        .unwrap_or_else(|| raw.to_string())
+}
+
+fn is_lab_path_setting_key(key: &str) -> bool {
+    matches!(key, "wp_codebox_bin")
 }
 
 fn remap_at_file_spec(spec: &str, mappings: &[&LabPathRemap]) -> String {
@@ -631,6 +702,30 @@ mod tests {
             remap_agent_task_plan_in_args(&args, &mappings)[4],
             "@/home/chubes/Developer/wp-site-generator/.ci/missing.json"
         );
+    }
+
+    #[test]
+    fn remap_path_settings_rewrites_wp_codebox_bin() {
+        let mappings = vec![LabPathRemap {
+            local: "/Users/chubes/Developer/wp-codebox".to_string(),
+            remote: "/home/chubes/_lab_workspaces/wp-codebox".to_string(),
+        }];
+        let args = vec![
+            "homeboy".to_string(),
+            "trace".to_string(),
+            "--setting".to_string(),
+            "wp_codebox_bin=/Users/chubes/Developer/wp-codebox/packages/cli/dist/index.js"
+                .to_string(),
+            "--setting=mode=fast".to_string(),
+        ];
+
+        let out = remap_path_settings_in_args(&args, &mappings);
+
+        assert_eq!(
+            out[3],
+            "wp_codebox_bin=/home/chubes/_lab_workspaces/wp-codebox/packages/cli/dist/index.js"
+        );
+        assert_eq!(out[4], "--setting=mode=fast");
     }
 
     #[test]
