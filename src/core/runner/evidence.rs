@@ -13,7 +13,7 @@ use crate::core::observation::{ArtifactRecord, ObservationStore, RunRecord};
 use crate::core::paths;
 
 use super::execution::{canonical_daemon_body, daemon_api_get};
-use super::Runner;
+use super::{load, Runner};
 
 pub fn is_remote_runner_artifact_path(path: &str) -> bool {
     EXECUTION_CONTRACT.artifacts.is_runner_artifact_ref(path)
@@ -200,6 +200,75 @@ pub fn mirror_daemon_evidence(
     }))
 }
 
+pub fn mirror_daemon_job_progress(
+    runner: &Runner,
+    cwd: &str,
+    command: &[String],
+    job: &Job,
+    events: &[JobEvent],
+) -> Result<RunRecord> {
+    let store = ObservationStore::open_initialized()?;
+    mirror_job_run(&store, runner, cwd, command, job, events, &json!({}))
+}
+
+pub fn refresh_mirrored_daemon_evidence(run_id: &str) -> Result<Option<Vec<RunRecord>>> {
+    let store = ObservationStore::open_initialized()?;
+    let Some(run) = store.get_run(run_id)? else {
+        return Ok(None);
+    };
+    let Some((runner_id, job_id)) = mirrored_runner_job_identity(&run) else {
+        return Ok(None);
+    };
+    let runner = load(&runner_id)?;
+    let job = fetch_daemon_job(&runner_id, &job_id)?;
+    let events = fetch_daemon_events(&runner_id, &job_id)?;
+    let result = result_event_data(&events).unwrap_or_else(|| json!({}));
+    let cwd = run.cwd.as_deref().unwrap_or("");
+    let command = run
+        .command
+        .as_ref()
+        .map(|command| vec![command.clone()])
+        .unwrap_or_default();
+    mirror_job_run(&store, &runner, cwd, &command, &job, &events, &result)?;
+    Ok(Some(mirror_remote_observation_runs(&store, &runner, &job)?))
+}
+
+pub fn mirrored_runner_job_identity(run: &RunRecord) -> Option<(String, String)> {
+    let lab = run.metadata_json.get("lab")?;
+    let runner_id = lab
+        .pointer("/runner/id")
+        .or_else(|| lab.get("runner_id"))
+        .and_then(Value::as_str)?;
+    let job_id = lab
+        .pointer("/remote_job/id")
+        .or_else(|| lab.get("remote_job_id"))
+        .and_then(Value::as_str)?;
+    Some((runner_id.to_string(), job_id.to_string()))
+}
+
+fn fetch_daemon_job(runner_id: &str, job_id: &str) -> Result<Job> {
+    let data = daemon_api_get(runner_id, &format!("/jobs/{job_id}"))?;
+    let body = canonical_daemon_body(&data, "daemon job response")?;
+    serde_json::from_value(body["job"].clone())
+        .map_err(|err| Error::internal_json(err.to_string(), Some("parse daemon job".to_string())))
+}
+
+fn fetch_daemon_events(runner_id: &str, job_id: &str) -> Result<Vec<JobEvent>> {
+    let data = daemon_api_get(runner_id, &format!("/jobs/{job_id}/events"))?;
+    let body = canonical_daemon_body(&data, "daemon job events response")?;
+    serde_json::from_value(body["events"].clone()).map_err(|err| {
+        Error::internal_json(err.to_string(), Some("parse daemon job events".to_string()))
+    })
+}
+
+fn result_event_data(events: &[JobEvent]) -> Option<Value> {
+    events
+        .iter()
+        .rev()
+        .find(|event| matches!(event.kind, crate::core::api_jobs::JobEventKind::Result))
+        .and_then(|event| event.data.clone())
+}
+
 fn mirrored_patch_result(
     store: &ObservationStore,
     runner: &Runner,
@@ -291,12 +360,13 @@ fn mirror_remote_observation_runs(
     store: &ObservationStore,
     runner: &Runner,
     job: &Job,
-) -> Result<()> {
+) -> Result<Vec<RunRecord>> {
     let data = daemon_api_get(&runner.id, "/runs?limit=100")?;
     let body = canonical_daemon_body(&data, "runner runs response")?;
     let Some(remote_runs) = body.get("runs").and_then(Value::as_array) else {
-        return Ok(());
+        return Ok(Vec::new());
     };
+    let mut mirrored = Vec::new();
     for summary in remote_runs {
         let Some(run_id) = summary.get("id").and_then(Value::as_str) else {
             continue;
@@ -317,15 +387,13 @@ fn mirror_remote_observation_runs(
         for artifact in remote_detail_artifacts(detail, runner, &run.id)? {
             import_artifact_if_absent(store, &artifact)?;
         }
+        mirrored.push(run);
     }
-    Ok(())
+    Ok(mirrored)
 }
 
 fn import_run_if_absent(store: &ObservationStore, run: &RunRecord) -> Result<()> {
-    if store.get_run(&run.id)?.is_some() {
-        return Ok(());
-    }
-    store.import_run(run)
+    store.upsert_imported_run(run)
 }
 
 fn import_artifact_if_absent(store: &ObservationStore, artifact: &ArtifactRecord) -> Result<()> {

@@ -17,7 +17,7 @@ use super::broker_http;
 use super::capabilities::{
     runner_capability_snapshot_for_preflight, validate_runner_capability_preflight,
 };
-use super::evidence::mirror_daemon_evidence;
+use super::evidence::{mirror_daemon_evidence, mirror_daemon_job_progress};
 use super::normalize_runner_command_env;
 use super::resource_metrics::{
     measured_command_output, measured_command_output_until_cancelled, RunnerResourceMetrics,
@@ -282,11 +282,14 @@ fn exec_via_reverse_broker(
         JobStatus::Succeeded | JobStatus::Failed | JobStatus::Cancelled
     ) {
         if Instant::now() >= deadline {
-            return Err(cancel_daemon_job_after_timeout(
-                &client,
-                broker_url,
-                &runner.id,
-                &job.id.to_string(),
+            let events =
+                fetch_daemon_events(&client, broker_url, &job.id.to_string()).unwrap_or_default();
+            return Err(daemon_job_wait_timeout(
+                runner,
+                &cwd,
+                &command,
+                &job,
+                &events,
                 "reverse runner job",
             ));
         }
@@ -403,11 +406,14 @@ fn exec_via_daemon(
         JobStatus::Succeeded | JobStatus::Failed | JobStatus::Cancelled
     ) {
         if Instant::now() >= deadline {
-            return Err(cancel_daemon_job_after_timeout(
-                &client,
-                local_url,
-                &runner.id,
-                &job.id.to_string(),
+            let events =
+                fetch_daemon_events(&client, local_url, &job.id.to_string()).unwrap_or_default();
+            return Err(daemon_job_wait_timeout(
+                runner,
+                &cwd,
+                &command,
+                &job,
+                &events,
                 "runner daemon job",
             ));
         }
@@ -511,58 +517,51 @@ fn daemon_job_context_error(runner_id: &str, job_id: &str, err: Error) -> Error 
     with_context
 }
 
-fn cancel_daemon_job_after_timeout(
-    client: &Client,
-    local_url: &str,
-    runner_id: &str,
-    job_id: &str,
+fn daemon_job_wait_timeout(
+    runner: &Runner,
+    cwd: &str,
+    command: &[String],
+    job: &Job,
+    events: &[JobEvent],
     label: &str,
 ) -> Error {
+    let job_id = job.id.to_string();
+    let mirrored = mirror_daemon_job_progress(runner, cwd, command, job, events);
     let timeout_hint = format!(
         "Set controller-side `{RUNNER_EXEC_WAIT_TIMEOUT_ENV}` before invoking homeboy to change this wait budget, e.g. `{RUNNER_EXEC_WAIT_TIMEOUT_ENV}=2400 homeboy ...`; workload settings are applied inside the remote job and cannot extend the controller wait."
     );
-    match cancel_daemon_job(client, local_url, job_id) {
-        Ok(()) => Error::internal_unexpected(format!(
-            "{label} {job_id} on runner {runner_id} did not finish before timeout; cancellation was requested"
+    let mut error = Error::internal_unexpected(format!(
+        "{label} {job_id} on runner {} did not finish before timeout; the remote job is still in flight and was not cancelled",
+        runner.id
+    ));
+    match mirrored {
+        Ok(run) => {
+            error = error
+                .with_hint(format!(
+                    "Mirrored controller timeout state as run `{}`; inspect it with `homeboy runs show {}`.",
+                    run.id, run.id
+                ))
+                .with_hint(format!(
+                    "After the remote job finishes, run `homeboy runs artifacts {}` to refresh and list mirrored Lab artifacts without SSH temp-directory spelunking.",
+                    run.id
+                ));
+        }
+        Err(err) => {
+            error = error.with_hint(format!(
+                "Could not persist a local timeout mirror for remote job `{job_id}`: {}",
+                err.message
+            ));
+        }
+    }
+    error
+        .with_hint(format!(
+            "Check remote progress with `homeboy runs list --runner {} --status running --limit 20`.",
+            runner.id
         ))
         .with_hint(format!(
-            "Confirm cleanup with `homeboy http get {}/jobs/{job_id}`.",
-            local_url.trim_end_matches('/')
+            "Runner daemon job id `{job_id}` was already dispatched; wait for it to finish or cancel it explicitly through the runner daemon if needed."
         ))
-        .with_hint(timeout_hint),
-        Err(err) => Error::internal_unexpected(format!(
-            "{label} {job_id} on runner {runner_id} did not finish before timeout; automatic cancellation failed: {}",
-            err.message
-        ))
-        .with_hint(format!(
-            "Run `homeboy http request POST {}/jobs/{job_id}/cancel` to cancel the remote job.",
-            local_url.trim_end_matches('/')
-        ))
-        .with_hint(timeout_hint),
-    }
-}
-
-fn cancel_daemon_job(client: &Client, local_url: &str, job_id: &str) -> Result<()> {
-    let response = client
-        .post(format!(
-            "{}/jobs/{job_id}/cancel",
-            local_url.trim_end_matches('/')
-        ))
-        .send()
-        .map_err(|err| Error::internal_unexpected(format!("cancel runner daemon job: {err}")))?;
-    let envelope: DaemonEnvelope = response.json().map_err(|err| {
-        Error::internal_json(
-            err.to_string(),
-            Some("parse daemon job cancellation response".to_string()),
-        )
-    })?;
-    if !envelope.success {
-        return Err(Error::internal_unexpected(format!(
-            "daemon job cancellation failed: {}",
-            envelope.error.unwrap_or(Value::Null)
-        )));
-    }
-    Ok(())
+        .with_hint(timeout_hint)
 }
 
 fn runner_exec_wait_timeout() -> Duration {
@@ -1648,59 +1647,67 @@ mod tests {
     }
 
     #[test]
-    fn timeout_cleanup_requests_remote_job_cancellation() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
-        let addr = listener.local_addr().expect("addr");
-        let seen_path = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
-        let server_seen_path = seen_path.clone();
-        std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept");
-            let mut buffer = [0; 4096];
-            let bytes = std::io::Read::read(&mut stream, &mut buffer).expect("read request");
-            let request = String::from_utf8_lossy(&buffer[..bytes]);
-            let request_line = request.lines().next().expect("request line");
-            *server_seen_path.lock().expect("seen path") = request_line.to_string();
-            let body = serde_json::json!({
-                "success": true,
-                "data": { "body": { "job": { "status": "cancelled" } } }
-            })
-            .to_string();
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(),
-                body
+    fn timeout_mirrors_remote_job_without_cancelling() {
+        crate::test_support::with_isolated_home(|_| {
+            let runner = ssh_runner();
+            let job_id = uuid::Uuid::new_v4();
+            let job = Job {
+                id: job_id,
+                operation: "runner.exec".to_string(),
+                status: JobStatus::Running,
+                created_at_ms: 1_700_000_000_000,
+                updated_at_ms: 1_700_000_001_000,
+                started_at_ms: Some(1_700_000_000_000),
+                finished_at_ms: None,
+                event_count: 0,
+                source_snapshot: None,
+                stale_reason: None,
+                target_runner_id: None,
+                target_project_id: None,
+                claim_id: None,
+                claimed_by_runner_id: None,
+                claimed_at_ms: None,
+                claim_expires_at_ms: None,
+                artifacts: Vec::new(),
+            };
+            let err = daemon_job_wait_timeout(
+                &runner,
+                "/srv/homeboy/project",
+                &["homeboy".to_string(), "bench".to_string()],
+                &job,
+                &[],
+                "runner daemon job",
             );
-            std::io::Write::write_all(&mut stream, response.as_bytes()).expect("write response");
+            let run_id = format!("runner-exec-lab-{job_id}");
+
+            assert!(err.message.contains("runner daemon job"));
+            assert!(err.message.contains(job_id.to_string().as_str()));
+            assert!(err.message.contains("lab"));
+            assert!(err.message.contains("was not cancelled"));
+            assert!(err.hints.iter().any(|hint| hint
+                .message
+                .contains(&format!("homeboy runs show {run_id}"))));
+            assert!(err.hints.iter().any(|hint| hint
+                .message
+                .contains(&format!("homeboy runs artifacts {run_id}"))));
+            assert!(err.hints.iter().any(|hint| {
+                hint.message.contains(RUNNER_EXEC_WAIT_TIMEOUT_ENV)
+                    && hint.message.contains("controller-side")
+                    && hint.message.contains("workload settings")
+            }));
+
+            let store =
+                crate::core::observation::ObservationStore::open_initialized().expect("store");
+            let mirrored = store
+                .get_run(&run_id)
+                .expect("get mirrored run")
+                .expect("mirrored run");
+            assert_eq!(mirrored.status, "running");
+            assert_eq!(
+                mirrored.metadata_json["lab"]["remote_job"]["id"].as_str(),
+                Some(job_id.to_string().as_str())
+            );
         });
-
-        let client = Client::builder()
-            .timeout(Duration::from_secs(10))
-            .build()
-            .expect("client");
-        let err = cancel_daemon_job_after_timeout(
-            &client,
-            &format!("http://{addr}"),
-            "homeboy-lab",
-            "job-123",
-            "runner daemon job",
-        );
-
-        assert!(err.message.contains("runner daemon job job-123"));
-        assert!(err.message.contains("homeboy-lab"));
-        assert!(err.message.contains("cancellation was requested"));
-        assert!(err
-            .hints
-            .iter()
-            .any(|hint| hint.message.contains("homeboy http get http://")));
-        assert!(err.hints.iter().any(|hint| {
-            hint.message.contains(RUNNER_EXEC_WAIT_TIMEOUT_ENV)
-                && hint.message.contains("controller-side")
-                && hint.message.contains("workload settings")
-        }));
-        assert_eq!(
-            seen_path.lock().expect("seen path").as_str(),
-            "POST /jobs/job-123/cancel HTTP/1.1"
-        );
     }
 
     #[test]
