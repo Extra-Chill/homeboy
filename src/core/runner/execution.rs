@@ -745,7 +745,9 @@ pub(crate) fn prepare_runner_process(request: RunnerProcessRequest) -> Result<Ru
 
     let mut env = runner.env.clone();
     env.extend(request.env);
-    env.extend(resolve_runner_secret_env(&runner.secret_env)?);
+    if runner.kind == RunnerKind::Local {
+        env.extend(resolve_runner_secret_env(&runner.secret_env)?);
+    }
     normalize_runner_command_env(&mut env);
 
     let source_snapshot = request
@@ -1142,7 +1144,7 @@ fn daemon_failure_message(status_code: u16, envelope: &DaemonEnvelope) -> String
 mod tests {
     use super::*;
     use crate::core::error::ErrorCode;
-    use crate::core::server::{self, RunnerPolicy, RunnerSettings};
+    use crate::core::server::{self, RunnerPolicy, RunnerSecretEnvRef, RunnerSettings};
 
     fn ssh_runner() -> Runner {
         Runner {
@@ -1242,6 +1244,83 @@ mod tests {
 
             assert_eq!(plan.runner.id, "lab");
             assert_eq!(plan.cwd, "/srv/homeboy/project");
+        });
+    }
+
+    #[test]
+    fn remote_daemon_secret_env_refs_resolve_only_on_runner_side() {
+        crate::test_support::with_isolated_home(|_| {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let workspace = temp.path().join("workspace");
+            std::fs::create_dir_all(&workspace).expect("workspace");
+            let secret_file = temp.path().join("runner-secret");
+            std::fs::write(&secret_file, "dummy-runner-secret\n").expect("secret file");
+            let missing_controller_file = temp.path().join("missing-controller-secret");
+
+            let mut controller_runner = ssh_runner();
+            controller_runner.workspace_root = Some(workspace.display().to_string());
+            controller_runner.secret_env.insert(
+                "OPENAI_API_KEY".to_string(),
+                RunnerSecretEnvRef {
+                    env: None,
+                    file: Some(missing_controller_file.display().to_string()),
+                },
+            );
+
+            let controller_plan = prepare_runner_process(RunnerProcessRequest {
+                runner_id: "lab".to_string(),
+                runner: Some(controller_runner),
+                cwd: Some(workspace.display().to_string()),
+                project_id: None,
+                command: vec!["true".to_string()],
+                env: Default::default(),
+                capture_patch: false,
+                raw_exec: false,
+                source_snapshot: Some(SourceSnapshot::existing_remote(
+                    "lab",
+                    &workspace.display().to_string(),
+                    Some(&workspace.display().to_string()),
+                )),
+                require_paths: Vec::new(),
+                validate_require_paths_on_host: false,
+            })
+            .expect("controller prep keeps secret refs unresolved for SSH runner");
+
+            assert!(!controller_plan.env.contains_key("OPENAI_API_KEY"));
+
+            let mut daemon_runner = ssh_runner();
+            daemon_runner.workspace_root = Some(workspace.display().to_string());
+            daemon_runner.secret_env.insert(
+                "OPENAI_API_KEY".to_string(),
+                RunnerSecretEnvRef {
+                    env: None,
+                    file: Some(secret_file.display().to_string()),
+                },
+            );
+
+            let daemon_plan = prepare_daemon_local_process(RunnerProcessRequest {
+                runner_id: "lab".to_string(),
+                runner: Some(daemon_runner),
+                cwd: Some(workspace.display().to_string()),
+                project_id: None,
+                command: vec!["true".to_string()],
+                env: Default::default(),
+                capture_patch: false,
+                raw_exec: false,
+                source_snapshot: Some(SourceSnapshot::existing_remote(
+                    "lab",
+                    &workspace.display().to_string(),
+                    Some(&workspace.display().to_string()),
+                )),
+                require_paths: Vec::new(),
+                validate_require_paths_on_host: true,
+            })
+            .expect("daemon prep resolves secret refs on runner side");
+
+            assert_eq!(
+                daemon_plan.env.get("OPENAI_API_KEY").map(String::as_str),
+                Some("dummy-runner-secret")
+            );
         });
     }
 
