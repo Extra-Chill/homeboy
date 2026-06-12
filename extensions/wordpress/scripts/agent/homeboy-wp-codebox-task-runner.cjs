@@ -1135,6 +1135,49 @@ function commandFailurePayload(result, artifacts, evidence) {
   }, evidence);
 }
 
+function emptyJsonPayload(payload) {
+  if (!plainObject(payload)) {
+    return false;
+  }
+  return !payload.schema
+    && payload.success !== false
+    && !payload.status
+    && !payload.run
+    && !payload.session
+    && !payload.summary
+    && (!Array.isArray(payload.diagnostics) || payload.diagnostics.length === 0)
+    && (!Array.isArray(payload.artifacts) || payload.artifacts.length === 0)
+    && (!Array.isArray(payload.evidence_refs) || payload.evidence_refs.length === 0);
+}
+
+function emptyJsonPayloadFailure(payload, result, artifacts) {
+  const message = 'WP Codebox agent-task-run returned an empty JSON payload.';
+  return {
+    ...payload,
+    success: false,
+    status: 'failed',
+    summary: message,
+    diagnostics: [
+      ...(Array.isArray(payload.diagnostics) ? payload.diagnostics : []),
+      {
+        class: 'wp-codebox.agent_task_run_empty_json',
+        message,
+        data: {
+          status: result.status,
+          signal: result.signal,
+          artifacts,
+        },
+      },
+    ],
+    metadata: {
+      ...(plainObject(payload.metadata) ? payload.metadata : {}),
+      empty_json_payload: true,
+      status: result.status,
+      signal: result.signal,
+    },
+  };
+}
+
 function runWpCodeboxParentTask(request) {
   const explicitArtifacts = argValue('--artifacts') || request.artifacts_path || '';
   const artifacts = explicitArtifacts || fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-wp-codebox-artifacts-'));
@@ -1201,8 +1244,10 @@ function runWpCodeboxParentTask(request) {
   if (result.stdout) {
     try {
       const payload = normalizeAgentTaskRun(input, JSON.parse(result.stdout));
+      const emptyPayload = emptyJsonPayload(payload);
+      const normalizedPayload = emptyPayload ? emptyJsonPayloadFailure(payload, result, artifacts) : payload;
       const payloadFailed = payload.success === false || payload.status === 'failed' || payload.session?.status === 'failed';
-      const payloadEvidence = failureEvidence || (payloadFailed ? preserveWpCodeboxFailureEvidence({
+      const payloadEvidence = failureEvidence || (emptyPayload || payloadFailed ? preserveWpCodeboxFailureEvidence({
         artifacts,
         inputPath,
         result,
@@ -1210,9 +1255,9 @@ function runWpCodeboxParentTask(request) {
         args: resolved.args,
         secretNames: input.secret_env || [],
       }) : null);
-      const enrichedPayload = payloadEvidence ? attachFailureEvidence(payload, payloadEvidence) : payload;
+      const enrichedPayload = payloadEvidence ? attachFailureEvidence(normalizedPayload, payloadEvidence) : normalizedPayload;
       process.stdout.write(`${JSON.stringify(enrichedPayload, null, 2)}\n`);
-      return payload.success === false ? 1 : 0;
+      return normalizedPayload.success === false ? 1 : 0;
     } catch {
       if (failureEvidence) {
         process.stdout.write(`${JSON.stringify(commandFailurePayload(result, artifacts, failureEvidence), null, 2)}\n`);
