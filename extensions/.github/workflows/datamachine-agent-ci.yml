@@ -841,7 +841,7 @@ jobs:
           runner_workspace_guest_checkout="${runner_workspace_guest_root}/${runner_workspace_repo}"
           runner_workspace_mounts_json="[]"
           if jq -e '.enabled == true' <<< "$runner_workspace_json" >/dev/null; then
-            runner_workspace_mounts_json="$(jq -nc --arg source "$GITHUB_WORKSPACE" --arg target "$runner_workspace_guest_checkout" '[{type: "directory", source: $source, target: $target, mode: "readwrite"}]')"
+            runner_workspace_mounts_json="$(jq -nc --arg source "$GITHUB_WORKSPACE" --arg target "$runner_workspace_guest_checkout" '[{type: "directory", source: $source, target: $target, mode: "readwrite", metadata: {kind: "runner-workspace", artifactExcludePaths: [".ci/**"]}}]')"
             runner_workspace_json="$(jq -c --arg checkout "$runner_workspace_guest_checkout" '. + {checkout_path: $checkout}' <<< "$runner_workspace_json")"
           fi
           rules_json="$(validate_json_input rules object "$RULES")"
