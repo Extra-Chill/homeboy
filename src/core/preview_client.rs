@@ -480,7 +480,7 @@ mod tests {
             assert!(request.ends_with("asset-body"));
             stream
                 .write_all(
-                    b"HTTP/1.1 201 Created\r\nContent-Type: text/plain\r\nX-Origin: codebox\r\nContent-Length: 2\r\n\r\nok",
+                    b"HTTP/1.1 201 Created\r\nContent-Type: text/plain\r\nX-Origin: local-service\r\nContent-Length: 2\r\n\r\nok",
                 )
                 .expect("write response");
         });
@@ -508,7 +508,7 @@ mod tests {
         assert_eq!(response.request_id, "req-1");
         assert_eq!(response.status, 201);
         assert_eq!(response.headers["content-type"], "text/plain");
-        assert_eq!(response.headers["x-origin"], "codebox");
+        assert_eq!(response.headers["x-origin"], "local-service");
         assert_eq!(
             base64::engine::general_purpose::STANDARD
                 .decode(response.body_base64)

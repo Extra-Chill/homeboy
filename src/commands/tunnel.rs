@@ -72,7 +72,7 @@ enum TunnelPreviewClientCommand {
         #[arg(long)]
         public_host: String,
 
-        /// Local loopback HTTP(S) origin to forward requests to
+        /// Local HTTP(S) origin to forward requests to
         #[arg(long)]
         local_origin: String,
 

@@ -99,4 +99,4 @@ Each claimed ingress request is forwarded on a worker thread so browser static a
 - `service start <id>`: start and supervise a declared local service command and optional provider-neutral public tunnel backend.
 - `service status <id>`: report declaration, process, local URL, public URL when present, health, backend, and log evidence state.
 - `service stop <id>`: terminate the managed process group and remove runtime state while leaving log evidence files in place.
-- `preview-client start`: connect a local loopback preview origin to a Homeboy preview ingress for one public host.
+- `preview-client start`: connect a local HTTP(S) preview origin to a Homeboy preview ingress for one public host.
