@@ -503,6 +503,7 @@ homeboy_wp_codebox_configured_workload_scenarios_json() {
     printf '%s' "$workloads_json" | jq -c '
         if type == "array" then . else [] end
         | map(select((.id? | type) == "string" and .id != ""))
+        | map(select((.metadata? // {}).homeboy_bench_workload_source != "rig"))
         | map(
             {
                 id: .id,
@@ -512,6 +513,15 @@ homeboy_wp_codebox_configured_workload_scenarios_json() {
             }
             + (if (.label? | type) == "string" and .label != "" then {label: .label} else {} end)
         )
+    '
+}
+
+homeboy_wp_codebox_configured_override_scenario_ids_json() {
+    local workloads_json="$1"
+    printf '%s' "$workloads_json" | jq -c '
+        if type == "array" then . else [] end
+        | map(select((.id? | type) == "string" and .id != "" and .overridesDiscovered == true))
+        | reduce .[] as $workload ({}; .[$workload.id] = true)
     '
 }
 
@@ -910,10 +920,12 @@ if [ "${HOMEBOY_BENCH_LIST_ONLY:-}" = "1" ]; then
     jq -n \
         --arg component "$COMPONENT_ID" \
         --argjson selectedScenarios "$(homeboy_wp_codebox_selected_scenarios_json)" \
+        --argjson overrideScenarios "$(homeboy_wp_codebox_configured_override_scenario_ids_json "$WP_CODEBOX_WORKLOADS_JSON")" \
         --argjson componentScenarios "$(homeboy_wp_codebox_component_workload_scenarios_json)" \
         --argjson extraScenarios "$(homeboy_wp_codebox_extra_workload_scenarios_json)" \
         --argjson configuredScenarios "$(homeboy_wp_codebox_configured_workload_scenarios_json "$WP_CODEBOX_WORKLOADS_JSON")" \
-        '$componentScenarios + $extraScenarios + $configuredScenarios as $scenarios |
+        '($componentScenarios | map(select($overrideScenarios[.id] != true)))
+        + $extraScenarios + $configuredScenarios as $scenarios |
         $scenarios
         | map(select(($selectedScenarios | length) == 0 or ($selectedScenarios[.id] == true)))
         | {component_id: $component, iterations: 0, scenarios: .}' > "$RESULTS_FILE"
