@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.228.16] - 2026-06-12
+
+### Fixed
+- verify deploy artifact versions before upload
+- resolve trace secrets once for child runs
+
 ## [0.228.15] - 2026-06-12
 
 ### Fixed
