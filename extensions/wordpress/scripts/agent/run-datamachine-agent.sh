@@ -81,6 +81,11 @@ homeboy_datamachine_agent_add_wp_codebox_mount() {
     local target="${2:-}"
     local mode="${3:-readwrite}"
     local type="${4:-}"
+    local metadata="{}"
+
+    if [ "$#" -ge 5 ]; then
+        metadata="$5"
+    fi
 
     if [ -z "$source" ] || [ -z "$target" ]; then
         return 0
@@ -102,7 +107,8 @@ homeboy_datamachine_agent_add_wp_codebox_mount() {
         --arg source "$source" \
         --arg target "$target" \
         --arg mode "$mode" \
-        '$mounts + [{type: $type, source: $source, target: $target, mode: $mode}]')
+        --arg metadata "$metadata" \
+        '($metadata | fromjson? | select(type == "object") // {}) as $mountMetadata | $mounts + [({type: $type, source: $source, target: $target, mode: $mode} + (if $mountMetadata == {} then {} else {metadata: $mountMetadata} end))]')
 }
 
 homeboy_datamachine_agent_wp_codebox_run() {
@@ -196,7 +202,8 @@ PHP
         mount_target=$(jq -r '.target // .to // empty' <<<"$extra_mount")
         mount_mode=$(jq -r '.mode // "readwrite"' <<<"$extra_mount")
         mount_type=$(jq -r '.type // empty' <<<"$extra_mount")
-        homeboy_datamachine_agent_add_wp_codebox_mount "$mount_source" "$mount_target" "$mount_mode" "$mount_type"
+        mount_metadata=$(jq -c '.metadata // {}' <<<"$extra_mount")
+        homeboy_datamachine_agent_add_wp_codebox_mount "$mount_source" "$mount_target" "$mount_mode" "$mount_type" "$mount_metadata"
     done < <(jq -c '.wp_codebox_mounts? // [] | .[]?' <<<"$CONFIG_JSON")
 
     local provider_plugin_path provider_slug

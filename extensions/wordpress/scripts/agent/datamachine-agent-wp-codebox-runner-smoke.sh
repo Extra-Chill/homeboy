@@ -115,6 +115,9 @@ if (!recipe.inputs?.mounts?.some((mount) => mount.type === 'file' && mount.sourc
 if (!recipe.inputs?.mounts?.some((mount) => mount.type === 'directory' && mount.source.endsWith('/fixture-directory-mount') && mount.target === '/wordpress/wp-content/plugins/example/fixtures' && mount.mode === 'readwrite')) {
   throw new Error('missing typed directory mount in recipe')
 }
+if (!recipe.inputs?.mounts?.some((mount) => mount.source.endsWith('/fixture-directory-mount') && JSON.stringify(mount.metadata?.artifactExcludePaths ?? []) === JSON.stringify(['.ci/**']))) {
+  throw new Error('missing typed directory mount artifact exclusion metadata in recipe')
+}
 
 const artifactRoot = path.join(valueAfter('--artifacts'), 'runtime-smoke')
 const filesRoot = path.join(artifactRoot, 'files')
@@ -279,7 +282,7 @@ jq -n \
         },
         wp_codebox_mounts: [
             {type: "file", source: $fileMount, target: "/wordpress/wp-content/plugins/example/fixture-config.json", mode: "readonly"},
-            ($dirMount + ":/wordpress/wp-content/plugins/example/fixtures:readwrite")
+            {type: "directory", source: $dirMount, target: "/wordpress/wp-content/plugins/example/fixtures", mode: "readwrite", metadata: {artifactExcludePaths: [".ci/**"]}}
         ]
     }' > "$CONFIG_TMPFILE"
 
