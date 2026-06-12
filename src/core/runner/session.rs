@@ -68,6 +68,8 @@ pub struct RunnerSession {
     pub tunnel_pid: Option<u32>,
     pub remote_daemon_pid: Option<u32>,
     pub homeboy_version: String,
+    #[serde(default)]
+    pub homeboy_build_identity: Option<String>,
     pub connected_at: String,
 }
 
@@ -105,6 +107,8 @@ pub struct RunnerConnectReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub homeboy_version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub homeboy_build_identity: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub session_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure_kind: Option<RunnerFailureKind>,
@@ -128,6 +132,10 @@ pub struct RunnerStatusReport {
 pub struct RunnerStaleDaemonWarning {
     pub session_homeboy_version: String,
     pub current_homeboy_version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_homeboy_build_identity: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_homeboy_build_identity: Option<String>,
     pub message: String,
     pub recovery_commands: Vec<String>,
 }
@@ -137,10 +145,14 @@ impl RunnerStaleDaemonWarning {
         runner_id: &str,
         session_homeboy_version: String,
         current_homeboy_version: String,
+        session_homeboy_build_identity: Option<String>,
+        current_homeboy_build_identity: Option<String>,
     ) -> Self {
         Self {
             session_homeboy_version,
             current_homeboy_version,
+            session_homeboy_build_identity,
+            current_homeboy_build_identity,
             message: "connected runner daemon was started by a different Homeboy version than the configured runner executable; run recovery_commands in order to restart the active daemon".to_string(),
             recovery_commands: vec![
                 format!("homeboy runner disconnect {}", runner_id),

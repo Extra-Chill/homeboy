@@ -1138,6 +1138,8 @@ mod tests {
                 runner_id,
                 "0.228.4".to_string(),
                 "0.228.5".to_string(),
+                None,
+                None,
             )),
             session_path: "/tmp/homeboy-runner-session.json".to_string(),
         })

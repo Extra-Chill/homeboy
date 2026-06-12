@@ -41,6 +41,7 @@ fn lab_runner_preparation_falls_back_for_unreachable_default_runner() {
                     tunnel_pid: None,
                     remote_daemon_pid: None,
                     homeboy_version: None,
+                    homeboy_build_identity: None,
                     session_path: Some("/tmp/lab.json".to_string()),
                     failure_kind: Some(super::super::RunnerFailureKind::SshFailure),
                     failure_message: Some("SSH connectivity check failed".to_string()),
@@ -273,6 +274,7 @@ fn lab_runner_preparation_connects_disconnected_runner() {
                     tunnel_pid: None,
                     remote_daemon_pid: Some(42),
                     homeboy_version: Some("homeboy 0.0.0".to_string()),
+                    homeboy_build_identity: Some("homeboy 0.0.0+test".to_string()),
                     session_path: Some("/tmp/lab.json".to_string()),
                     failure_kind: None,
                     failure_message: None,
@@ -321,6 +323,7 @@ fn lab_runner_preparation_errors_for_unreachable_explicit_runner() {
                     tunnel_pid: None,
                     remote_daemon_pid: None,
                     homeboy_version: None,
+                    homeboy_build_identity: None,
                     session_path: Some("/tmp/lab.json".to_string()),
                     failure_kind: Some(super::super::RunnerFailureKind::SshFailure),
                     failure_message: Some("SSH connectivity check failed".to_string()),
@@ -351,6 +354,7 @@ fn connected_direct_session(
         tunnel_pid: None,
         remote_daemon_pid: Some(42),
         homeboy_version: "homeboy 0.0.0".to_string(),
+        homeboy_build_identity: Some("homeboy 0.0.0+test".to_string()),
         connected_at: "2026-06-03T00:00:00Z".to_string(),
     }
 }
@@ -360,5 +364,7 @@ fn stale_daemon_warning(runner_id: &str) -> RunnerStaleDaemonWarning {
         runner_id,
         "homeboy 0.218.0".to_string(),
         "homeboy 0.219.0".to_string(),
+        Some("homeboy 0.218.0+old".to_string()),
+        Some("homeboy 0.219.0+new".to_string()),
     )
 }

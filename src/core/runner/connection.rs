@@ -23,6 +23,7 @@ use super::{load, Runner, RunnerKind};
 #[path = "connection_daemon.rs"]
 mod connection_daemon;
 use connection_daemon::{connect_remote_daemon, daemon_http_version, versions_match};
+use connection_daemon::{daemon_http_identity, normalize_homeboy_version_owned};
 
 #[derive(Debug, Clone, Deserialize)]
 struct CliEnvelope {
@@ -55,15 +56,16 @@ pub fn connect(runner_id: &str) -> Result<(RunnerConnectReport, i32)> {
         ));
     }
 
-    let version = remote_homeboy_version(&client, homeboy);
-    let Ok(version) = version else {
+    let identity = remote_homeboy_identity(&client, homeboy);
+    let Ok(identity) = identity else {
         return Ok(failed_connect(
             runner_id,
             session_path,
             RunnerFailureKind::MissingRemoteHomeboy,
-            version.err().unwrap(),
+            identity.err().unwrap(),
         ));
     };
+    let version = identity.version.clone();
 
     let daemon = ensure_remote_daemon(&client, homeboy);
     let Ok(daemon) = daemon else {
@@ -101,6 +103,7 @@ pub fn connect(runner_id: &str) -> Result<(RunnerConnectReport, i32)> {
         tunnel_pid,
         remote_daemon_pid: daemon.pid,
         homeboy_version: version,
+        homeboy_build_identity: Some(identity.display),
         connected_at: Utc::now().to_rfc3339(),
     };
     write_session(&session)?;
@@ -119,6 +122,7 @@ pub fn connect(runner_id: &str) -> Result<(RunnerConnectReport, i32)> {
             tunnel_pid: session.tunnel_pid,
             remote_daemon_pid: session.remote_daemon_pid,
             homeboy_version: Some(session.homeboy_version.clone()),
+            homeboy_build_identity: session.homeboy_build_identity.clone(),
             session_path: Some(session_path.display().to_string()),
             failure_kind: None,
             failure_message: None,
@@ -147,7 +151,8 @@ pub fn connect_reverse(options: ReverseRunnerConnectOptions) -> Result<(RunnerCo
 
     let runner = load(&options.runner_id)?;
     let session_path = session_path(&runner.id)?;
-    let homeboy_version = env!("CARGO_PKG_VERSION").to_string();
+    let homeboy_identity = crate::core::build_identity::current();
+    let homeboy_version = homeboy_identity.version.clone();
     let session = RunnerSession {
         runner_id: runner.id.clone(),
         mode: RunnerTunnelMode::Reverse,
@@ -161,6 +166,7 @@ pub fn connect_reverse(options: ReverseRunnerConnectOptions) -> Result<(RunnerCo
         tunnel_pid: None,
         remote_daemon_pid: None,
         homeboy_version,
+        homeboy_build_identity: Some(homeboy_identity.display),
         connected_at: Utc::now().to_rfc3339(),
     };
     write_session(&session)?;
@@ -183,6 +189,7 @@ pub fn connect_reverse(options: ReverseRunnerConnectOptions) -> Result<(RunnerCo
             tunnel_pid: None,
             remote_daemon_pid: None,
             homeboy_version: Some(session.homeboy_version),
+            homeboy_build_identity: session.homeboy_build_identity,
             session_path: Some(session_path.display().to_string()),
             failure_kind: None,
             failure_message: None,
@@ -206,6 +213,7 @@ fn register_reverse_session_with_broker(broker_url: &str, session: &RunnerSessio
             "controller_id": session.controller_id,
             "broker_url": session.broker_url,
             "homeboy_version": session.homeboy_version,
+            "homeboy_build_identity": session.homeboy_build_identity,
         }))
         .send()
         .map_err(|err| {
@@ -258,14 +266,21 @@ fn stale_daemon_warning(
     }
     let homeboy = runner.settings.homeboy_path.as_deref().unwrap_or("homeboy");
     let (_server_id, _server, client) = resolve_ssh_runner(runner).ok()??;
-    let current_version = remote_homeboy_version(&client, homeboy).ok()?;
+    let current_identity = remote_homeboy_identity(&client, homeboy).ok()?;
+    let current_version = current_identity.version.clone();
     let observed_session_version = session
         .local_url
         .as_deref()
         .and_then(|local_url| daemon_http_version(local_url).ok())
         .unwrap_or_else(|| session.homeboy_version.clone());
+    let session_identity = session
+        .local_url
+        .as_deref()
+        .and_then(|local_url| daemon_http_identity(local_url).ok())
+        .or_else(|| session.homeboy_build_identity.clone());
     if versions_match(&observed_session_version, &current_version)
         && versions_match(&session.homeboy_version, &current_version)
+        && identities_match(session_identity.as_deref(), Some(&current_identity.display))
     {
         return None;
     }
@@ -273,6 +288,8 @@ fn stale_daemon_warning(
         &runner.id,
         observed_session_version,
         current_version,
+        session_identity,
+        Some(current_identity.display),
     ))
 }
 
@@ -344,6 +361,57 @@ fn remote_homeboy_version(
         return Err("remote Homeboy version check returned empty output".to_string());
     }
     Ok(version)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RemoteHomeboyIdentity {
+    version: String,
+    display: String,
+}
+
+fn remote_homeboy_identity(
+    client: &SshClient,
+    homeboy: &str,
+) -> std::result::Result<RemoteHomeboyIdentity, String> {
+    let command = format!("{} self identity", shell::quote_arg(homeboy));
+    let output = client.execute(&command);
+    if output.success {
+        if let Some(identity) = parse_self_identity_output(&output.stdout) {
+            return Ok(identity);
+        }
+    }
+
+    let version = remote_homeboy_version(client, homeboy)?;
+    Ok(RemoteHomeboyIdentity {
+        version: normalize_homeboy_version_owned(&version),
+        display: version,
+    })
+}
+
+fn parse_self_identity_output(output: &str) -> Option<RemoteHomeboyIdentity> {
+    let body: Value = serde_json::from_str(output.trim()).ok()?;
+    let data = body.get("data").unwrap_or(&body);
+    let version = data.get("version")?.as_str()?.trim();
+    let display = data
+        .get("display")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(version);
+    if version.is_empty() {
+        return None;
+    }
+    Some(RemoteHomeboyIdentity {
+        version: version.to_string(),
+        display: display.to_string(),
+    })
+}
+
+fn identities_match(left: Option<&str>, right: Option<&str>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => versions_match(left, right),
+        _ => true,
+    }
 }
 
 pub(super) struct SshTunnelOutput {
@@ -743,6 +811,7 @@ pub(super) fn failed_connect(
             tunnel_pid: None,
             remote_daemon_pid: None,
             homeboy_version: None,
+            homeboy_build_identity: None,
             session_path: Some(session_path.display().to_string()),
             failure_kind: Some(failure_kind),
             failure_message: Some(failure_message),
@@ -816,6 +885,10 @@ mod tests {
     fn compares_cli_and_daemon_version_shapes() {
         assert!(versions_match("homeboy 0.204.0", "0.204.0"));
         assert!(versions_match("0.204.0", "homeboy 0.204.0"));
+        assert!(versions_match(
+            "homeboy 0.204.0+19a41cd5102d",
+            "0.204.0+19a41cd5102d"
+        ));
         assert!(!versions_match("homeboy 0.201.3", "homeboy 0.204.0"));
     }
 
@@ -831,6 +904,23 @@ mod tests {
             ),
             Some("0.199.4")
         );
+        assert_eq!(
+            super::connection_daemon::daemon_identity_from_body(
+                &serde_json::json!({"version":"0.228.13","build_identity":{"display":"homeboy 0.228.13+f7569a5e"}})
+            ),
+            Some("homeboy 0.228.13+f7569a5e")
+        );
+    }
+
+    #[test]
+    fn parses_self_identity_json_envelope() {
+        let identity = parse_self_identity_output(
+            r#"{"success":true,"data":{"version":"0.228.13","display":"homeboy 0.228.13+19a41cd5102d"}}"#,
+        )
+        .expect("identity");
+
+        assert_eq!(identity.version, "0.228.13");
+        assert_eq!(identity.display, "homeboy 0.228.13+19a41cd5102d");
     }
 
     #[test]
@@ -839,10 +929,16 @@ mod tests {
             "homeboy-lab",
             "homeboy 0.201.3".to_string(),
             "homeboy 0.204.0".to_string(),
+            Some("homeboy 0.201.3+old".to_string()),
+            Some("homeboy 0.204.0+new".to_string()),
         );
 
         assert_eq!(warning.session_homeboy_version, "homeboy 0.201.3");
         assert_eq!(warning.current_homeboy_version, "homeboy 0.204.0");
+        assert_eq!(
+            warning.session_homeboy_build_identity.as_deref(),
+            Some("homeboy 0.201.3+old")
+        );
         assert!(warning.message.contains("different Homeboy version"));
         assert!(warning.message.contains("run recovery_commands in order"));
         assert_eq!(
@@ -949,6 +1045,7 @@ mod tests {
                 tunnel_pid: None,
                 remote_daemon_pid: None,
                 homeboy_version: "test".to_string(),
+                homeboy_build_identity: Some("homeboy test+abc123".to_string()),
                 connected_at: Utc::now().to_rfc3339(),
             };
             write_session(&session).expect("write session");

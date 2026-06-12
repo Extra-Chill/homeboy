@@ -23,6 +23,7 @@ pub mod artifact_links;
 pub mod artifact_manifest;
 pub(crate) mod artifact_metadata;
 pub mod browser_evidence;
+pub mod build_identity;
 pub mod change_artifact;
 pub mod ci_profile;
 pub mod cleanup;
