@@ -231,53 +231,11 @@ fn expand_setting_matrix_cells(
 }
 
 fn apply_matrix_settings(child_args: &mut BenchRunArgs, settings: &BTreeMap<String, String>) {
-    let mut json_roots = BTreeMap::<String, serde_json::Value>::new();
-
     for (name, value) in settings {
-        if let Some((root, path)) = name.split_once('.') {
-            if root.is_empty() || path.is_empty() {
-                child_args
-                    .setting_args
-                    .setting
-                    .push((name.clone(), value.clone()));
-                continue;
-            }
-            let root_value = json_roots
-                .entry(root.to_string())
-                .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
-            insert_json_path(root_value, path.split('.'), value.clone());
-        } else {
-            child_args
-                .setting_args
-                .setting
-                .push((name.clone(), value.clone()));
-        }
-    }
-
-    child_args.setting_args.setting_json.extend(json_roots);
-}
-
-fn insert_json_path<'a, I>(target: &mut serde_json::Value, mut path: I, value: String)
-where
-    I: Iterator<Item = &'a str>,
-{
-    let Some(segment) = path.next() else {
-        *target = serde_json::Value::String(value);
-        return;
-    };
-
-    if path.size_hint().0 == 0 {
-        if let serde_json::Value::Object(map) = target {
-            map.insert(segment.to_string(), serde_json::Value::String(value));
-        }
-        return;
-    }
-
-    if let serde_json::Value::Object(map) = target {
-        let child = map
-            .entry(segment.to_string())
-            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
-        insert_json_path(child, path, value);
+        child_args
+            .setting_args
+            .setting
+            .push((name.clone(), value.clone()));
     }
 }
 
@@ -395,7 +353,7 @@ mod tests {
     }
 
     #[test]
-    fn applies_dotted_setting_axes_as_typed_json_settings() {
+    fn applies_dotted_setting_axes_as_string_settings() {
         #[derive(Parser)]
         struct MatrixCli {
             #[command(flatten)]
@@ -427,17 +385,19 @@ mod tests {
 
         assert_eq!(
             args.setting_args.setting,
-            vec![("wp_codebox_bin".to_string(), "/tmp/wp-codebox".to_string())]
+            vec![
+                (
+                    "bench_env.GUTENBERG_RTC_BATCH_SIZE".to_string(),
+                    "25".to_string()
+                ),
+                (
+                    "bench_env.GUTENBERG_RTC_CLIENTS".to_string(),
+                    "100".to_string()
+                ),
+                ("wp_codebox_bin".to_string(), "/tmp/wp-codebox".to_string())
+            ]
         );
-        assert_eq!(args.setting_args.setting_json.len(), 1);
-        assert_eq!(args.setting_args.setting_json[0].0, "bench_env");
-        assert_eq!(
-            args.setting_args.setting_json[0].1,
-            serde_json::json!({
-                "GUTENBERG_RTC_BATCH_SIZE": "25",
-                "GUTENBERG_RTC_CLIENTS": "100"
-            })
-        );
+        assert!(args.setting_args.setting_json.is_empty());
     }
 
     #[test]
