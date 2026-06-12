@@ -16,6 +16,7 @@ module.exports = {
 	...require('./lib/fixture-setup'),
 	...require('./lib/codebox-memory-report'),
 	...require('./lib/webperf-evidence-summary'),
+	...require('./lib/benchmark-matrix-report'),
 	...require('./lib/agent-terminal-actions'),
 	...require('./lib/wp-codebox-apply-adapter'),
 };
