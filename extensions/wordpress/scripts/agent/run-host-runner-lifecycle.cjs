@@ -128,7 +128,7 @@ function changedFiles(workspace) {
     .map((line) => line.trim())
     .filter(Boolean)
     .map((line) => line.slice(3).trim())
-    .filter((file) => file && !file.startsWith('.ci/'));
+    .filter((file) => file && !file.startsWith('.ci/') && !file.startsWith('datamachine-agent-artifacts/'));
 }
 
 function normalizePathPattern(value) {
