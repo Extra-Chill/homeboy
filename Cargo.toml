@@ -1,6 +1,6 @@
 [package]
 name = "homeboy"
-version = "0.228.19"
+version = "0.228.20"
 edition = "2021"
 license = "MIT"
 authors = ["Chris Huber <chubes@extrachill.com>"]

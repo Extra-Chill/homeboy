@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.228.20] - 2026-06-12
+
+### Fixed
+- store agent task secrets in global config
+
 ## [0.228.19] - 2026-06-12
 
 ### Fixed
