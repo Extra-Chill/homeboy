@@ -239,11 +239,7 @@ fn bench_list_result(
     scenario_ids: &[String],
 ) -> Result<BenchListWorkflowResult> {
     let parsed = apply_scenario_filter(
-        parsing::parse_bench_results_file_with_artifact_context_and_scenarios(
-            &results_file,
-            None,
-            scenario_ids,
-        )?,
+        parsing::parse_bench_results_file_with_artifact_context(&results_file, None)?,
         scenario_ids,
     )?;
     let count = parsed.scenarios.len();
@@ -497,11 +493,7 @@ fn discover_bench_scenarios(
         ));
     }
 
-    parsing::parse_bench_results_file_with_artifact_context_and_scenarios(
-        &results_file,
-        None,
-        &args.scenario_ids,
-    )
+    parsing::parse_bench_results_file_with_artifact_context(&results_file, None)
 }
 
 fn validate_bench_run_args(args: &BenchRunWorkflowArgs) -> Result<()> {
