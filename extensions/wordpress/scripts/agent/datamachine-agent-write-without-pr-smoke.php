@@ -381,6 +381,10 @@ namespace {
         fwrite( STDERR, "Expected runner workspace capture to use the WP Codebox capture API once.\n" );
         exit( 1 );
     }
+    if ( array( '.ci/**' ) !== ( $runner_capture_calls[0]['input']['exclude_paths'] ?? array() ) ) {
+        fwrite( STDERR, "Expected runner workspace capture to exclude runner dependency checkouts.\n" );
+        exit( 1 );
+    }
 
     $GLOBALS['homeboy_datamachine_agent_fake_abilities'] = array();
     $unavailable_publication = homeboy_datamachine_agent_publish_runner_workspace(

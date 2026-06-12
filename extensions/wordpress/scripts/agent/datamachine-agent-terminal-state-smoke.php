@@ -138,5 +138,10 @@ namespace {
         exit( 1 );
     }
 
+    if ( ! homeboy_datamachine_agent_job_status_terminal( 'failed - tool_result_failed' ) ) {
+        fwrite( STDERR, "Expected Data Machine failed sub-statuses to be treated as terminal.\n" );
+        exit( 1 );
+    }
+
     fwrite( STDOUT, "Data Machine agent terminal state smoke passed.\n" );
 }

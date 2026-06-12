@@ -2023,6 +2023,7 @@ if ( ! function_exists( 'homeboy_datamachine_agent_capture_runner_workspace' ) )
                 'handle'           => $handle,
                 'repo'             => homeboy_datamachine_agent_scalar( $config, 'target_repo' ),
                 'runner_workspace' => $runner_workspace,
+                'exclude_paths'    => array( '.ci/**' ),
             )
         );
         if ( empty( $capture['success'] ) ) {
@@ -2856,7 +2857,8 @@ if ( ! function_exists( 'homeboy_datamachine_agent_export_transcript' ) ) {
 
 if ( ! function_exists( 'homeboy_datamachine_agent_job_status_terminal' ) ) {
     function homeboy_datamachine_agent_job_status_terminal( string $job_status ): bool {
-        return in_array( $job_status, array( 'completed', 'failed', 'cancelled' ), true );
+        $status = trim( $job_status );
+        return in_array( $status, array( 'completed', 'failed', 'cancelled' ), true ) || str_starts_with( $status, 'failed ' ) || str_starts_with( $status, 'cancelled ' );
     }
 
     function homeboy_datamachine_agent_job_terminal_error( int $job_id, string $job_status, string $label = 'Data Machine job' ): string {
