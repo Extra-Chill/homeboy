@@ -139,6 +139,33 @@ function renderTemplate(template, values) {
   });
 }
 
+function normalizeBaseRef(value) {
+  const ref = String(value || '').trim();
+  if (!ref) {
+    return '';
+  }
+  return ref
+    .replace(/^refs\/heads\//, '')
+    .replace(/^remotes\/origin\//, '')
+    .replace(/^origin\//, '');
+}
+
+function publicationBase(config) {
+  const artifactExport = plainObject(config.artifact_export) ? config.artifact_export : {};
+  const workspaceConfig = plainObject(config.runner_workspace) ? config.runner_workspace : {};
+  return normalizeBaseRef(
+    workspaceConfig.base
+      || workspaceConfig.base_branch
+      || workspaceConfig.base_ref
+      || workspaceConfig.from
+      || artifactExport.base
+      || artifactExport.base_branch
+      || artifactExport.base_ref
+      || process.env.GITHUB_BASE_REF
+      || 'main',
+  ) || 'main';
+}
+
 function publicationTemplates(config, values) {
   const artifactExport = plainObject(config.artifact_export) ? config.artifact_export : {};
   const workspaceConfig = plainObject(config.runner_workspace) ? config.runner_workspace : {};
@@ -159,7 +186,7 @@ function publicationTemplates(config, values) {
       artifactExport.pr_body_template || '## Result\n\nData Machine agent workspace changes are ready for review.\n',
       values,
     ),
-    base: workspaceConfig.base || workspaceConfig.base_branch || process.env.GITHUB_BASE_REF || 'main',
+    base: publicationBase(config),
   };
 }
 
