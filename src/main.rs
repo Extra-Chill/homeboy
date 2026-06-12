@@ -167,10 +167,11 @@ fn main() -> std::process::ExitCode {
         return std::process::ExitCode::from(exit_code_to_u8(exit_code));
     }
 
-    let cli = match Cli::from_arg_matches(&matches) {
+    let mut cli = match Cli::from_arg_matches(&matches) {
         Ok(cli) => cli,
         Err(e) => e.exit(),
     };
+    normalize_runs_list_runner(&mut cli);
 
     match homeboy::commands::route::route_after_parse(&cli, &normalized, output_file.as_deref()) {
         Ok(None) => {}
@@ -311,6 +312,12 @@ fn validate_output_file_path(path: &str) -> Option<homeboy::core::Error> {
     ))
 }
 
+fn normalize_runs_list_runner(cli: &mut Cli) {
+    if let Commands::Runs(args) = &mut cli.command {
+        cli.runner = args.absorb_global_runner_for_list(cli.runner.take());
+    }
+}
+
 /// Attempt to augment a clap error with entity suggestions.
 /// Returns Some(augmented_message) if the unrecognized string matches a known entity.
 fn try_augment_clap_error(e: &clap::Error) -> Option<String> {
@@ -402,4 +409,65 @@ fn extract_parent_command_from_error(e: &clap::Error) -> Option<String> {
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn runs_list_runner_after_subcommand_is_not_treated_as_global_runner() {
+        let mut cli = Cli::parse_from([
+            "homeboy",
+            "runs",
+            "list",
+            "--runner",
+            "homeboy-lab",
+            "--status",
+            "running",
+        ]);
+
+        assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
+
+        normalize_runs_list_runner(&mut cli);
+
+        assert_eq!(cli.runner, None);
+        let Commands::Runs(args) = &cli.command else {
+            panic!("expected runs command");
+        };
+        assert_eq!(args.list_runner(), Some("homeboy-lab"));
+    }
+
+    #[test]
+    fn global_runner_for_runs_show_is_preserved_for_guidance_error() {
+        let mut cli = Cli::parse_from([
+            "homeboy",
+            "--runner",
+            "homeboy-lab",
+            "runs",
+            "show",
+            "run-123",
+        ]);
+
+        normalize_runs_list_runner(&mut cli);
+
+        assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
+        let err = homeboy::commands::route::route_after_parse(
+            &cli,
+            &[
+                "homeboy".into(),
+                "--runner".into(),
+                "homeboy-lab".into(),
+                "runs".into(),
+                "show".into(),
+                "run-123".into(),
+            ],
+            None,
+        )
+        .expect_err("runs show still rejects global runner");
+
+        assert_eq!(err.code.as_str(), "validation.invalid_argument");
+        assert!(err.message.contains("without --runner"));
+    }
 }
