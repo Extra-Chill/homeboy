@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.121.3] - 2026-06-12
+
+### Fixed
+- honor configured Codebox binary
+
 ## [2.121.2] - 2026-06-12
 
 ### Fixed
