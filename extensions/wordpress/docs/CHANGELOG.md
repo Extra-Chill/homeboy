@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.119.18] - 2026-06-12
+
+### Changed
+- Preserve WP Codebox mount metadata
+
 ## [2.119.17] - 2026-06-12
 
 ### Fixed
