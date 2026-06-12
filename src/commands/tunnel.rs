@@ -3,7 +3,8 @@ use serde::Serialize;
 
 use homeboy::core::preview_client::{self, PreviewClientReport, PreviewClientStartSpec};
 use homeboy::core::preview_ingress::{
-    self, PreviewIngressRoute, PreviewIngressServeSpec, PreviewIngressStatus,
+    self, PreviewIngressInstallOptions, PreviewIngressInstallPlan, PreviewIngressInstallStatusPlan,
+    PreviewIngressRoute, PreviewIngressServeSpec, PreviewIngressStatus,
 };
 use homeboy::core::tunnel::{
     self, ExposeServiceTunnelSpec, ServiceTunnel, ServiceTunnelAuth, ServiceTunnelAuthMode,
@@ -45,6 +46,8 @@ pub struct PreviewClientActionOutput {
 #[derive(Debug, Serialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum PreviewIngressActionOutput {
+    Install(PreviewIngressInstallPlan),
+    InstallStatus(PreviewIngressInstallStatusPlan),
     Route(PreviewIngressRoute),
     Routes { routes: Vec<PreviewIngressRoute> },
     Status(PreviewIngressStatus),
@@ -107,6 +110,10 @@ enum TunnelPreviewClientCommand {
 
 #[derive(Subcommand)]
 enum TunnelPreviewIngressCommand {
+    /// Render a non-destructive operator install plan for a VPS preview ingress domain
+    Install(PreviewIngressInstallArgs),
+    /// Render machine-readable operator install status checks without probing a live VPS
+    InstallStatus(PreviewIngressInstallArgs),
     /// Register or replace one active public-host route
     Route {
         /// Preview session ID
@@ -163,6 +170,56 @@ enum TunnelPreviewIngressCommand {
         #[arg(long, default_value = "*-tunnel.{domain}")]
         public_host_pattern: String,
     },
+}
+
+#[derive(Args)]
+struct PreviewIngressInstallArgs {
+    /// Configured Homeboy server ID for the VPS
+    #[arg(long)]
+    server: String,
+
+    /// Operator-owned domain, e.g. chubes.net
+    #[arg(long)]
+    domain: String,
+
+    /// Wildcard host pattern routed to the ingress, e.g. *-tunnel.chubes.net
+    #[arg(long)]
+    public_host_pattern: String,
+
+    /// Stable loopback bind address for the ingress daemon
+    #[arg(long, default_value = "127.0.0.1:7350")]
+    bind: String,
+
+    /// Homeboy binary path used by the service unit
+    #[arg(long, default_value = "/usr/local/bin/homeboy")]
+    binary_path: String,
+
+    /// systemd service name
+    #[arg(long, default_value = "homeboy-preview-ingress")]
+    service_name: String,
+
+    /// System user that runs the ingress service
+    #[arg(long, default_value = "homeboy")]
+    user: String,
+
+    /// System group that runs the ingress service
+    #[arg(long, default_value = "homeboy")]
+    group: String,
+}
+
+impl PreviewIngressInstallArgs {
+    fn into_options(self) -> PreviewIngressInstallOptions {
+        PreviewIngressInstallOptions {
+            server_id: self.server,
+            domain: self.domain,
+            public_host_pattern: self.public_host_pattern,
+            bind: self.bind,
+            binary_path: self.binary_path,
+            service_name: self.service_name,
+            service_user: self.user,
+            service_group: self.group,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -427,6 +484,38 @@ fn run_preview_client(command: TunnelPreviewClientCommand) -> CmdResult<TunnelOu
 
 fn run_preview_ingress(command: TunnelPreviewIngressCommand) -> CmdResult<TunnelOutput> {
     match command {
+        TunnelPreviewIngressCommand::Install(args) => {
+            let server_id = args.server.clone();
+            let plan = preview_ingress::render_install_plan(args.into_options())?;
+            Ok((
+                TunnelOutput {
+                    command: "tunnel.preview_ingress.install".to_string(),
+                    id: Some(server_id),
+                    extra: TunnelExtra {
+                        preview_ingress: Some(PreviewIngressActionOutput::Install(plan)),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                0,
+            ))
+        }
+        TunnelPreviewIngressCommand::InstallStatus(args) => {
+            let server_id = args.server.clone();
+            let status = preview_ingress::render_install_status_plan(args.into_options())?;
+            Ok((
+                TunnelOutput {
+                    command: "tunnel.preview_ingress.install_status".to_string(),
+                    id: Some(server_id),
+                    extra: TunnelExtra {
+                        preview_ingress: Some(PreviewIngressActionOutput::InstallStatus(status)),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                0,
+            ))
+        }
         TunnelPreviewIngressCommand::Route {
             session_id,
             public_host,

@@ -61,6 +61,104 @@ pub struct PreviewIngressServeSpec {
     pub public_host_pattern: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreviewIngressInstallOptions {
+    pub server_id: String,
+    pub domain: String,
+    pub public_host_pattern: String,
+    pub bind: String,
+    pub binary_path: String,
+    pub service_name: String,
+    pub service_user: String,
+    pub service_group: String,
+}
+
+impl Default for PreviewIngressInstallOptions {
+    fn default() -> Self {
+        Self {
+            server_id: String::new(),
+            domain: String::new(),
+            public_host_pattern: String::new(),
+            bind: "127.0.0.1:7350".to_string(),
+            binary_path: "/usr/local/bin/homeboy".to_string(),
+            service_name: "homeboy-preview-ingress".to_string(),
+            service_user: "homeboy".to_string(),
+            service_group: "homeboy".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PreviewIngressInstallPlan {
+    pub command: String,
+    pub server_id: String,
+    pub domain: String,
+    pub public_host_pattern: String,
+    pub dns_probe_host: String,
+    pub bind: String,
+    pub service_name: String,
+    pub service_user: String,
+    pub service_group: String,
+    pub binary_path: String,
+    pub local_status_url: String,
+    pub public_status_url: String,
+    pub dry_run: bool,
+    pub applied: bool,
+    pub writes: Vec<PreviewIngressWrite>,
+    pub systemd_unit: String,
+    pub nginx_site: String,
+    pub caddy_site: String,
+    pub install_commands: Vec<String>,
+    pub status_commands: Vec<String>,
+    pub rollback_commands: Vec<String>,
+    pub smoke_checks: Vec<String>,
+    pub required_operator_config: Vec<String>,
+    pub secrets_policy: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PreviewIngressWrite {
+    pub path: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PreviewIngressInstallStatusPlan {
+    pub command: String,
+    pub server_id: String,
+    pub domain: String,
+    pub public_host_pattern: String,
+    pub dns_probe_host: String,
+    pub bind: String,
+    pub service_name: String,
+    pub local_status_url: String,
+    pub public_status_url: String,
+    pub probed: bool,
+    pub checks: Vec<PreviewIngressInstallCheck>,
+    pub status_commands: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PreviewIngressInstallCheck {
+    pub name: String,
+    pub command: String,
+    pub status: PreviewIngressInstallCheckStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stdout: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stderr: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PreviewIngressInstallCheckStatus {
+    Planned,
+    Passed,
+    Failed,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 struct PreviewIngressLogLine {
     request_id: String,
@@ -137,6 +235,100 @@ pub fn status(
     public_host_pattern: Option<String>,
 ) -> Result<PreviewIngressStatus> {
     status_with_failures(bind, domain, public_host_pattern, Vec::new())
+}
+
+pub fn render_install_plan(
+    options: PreviewIngressInstallOptions,
+) -> Result<PreviewIngressInstallPlan> {
+    let normalized = normalize_install_options(options)?;
+    let dns_probe_host = dns_probe_host(&normalized.public_host_pattern, &normalized.domain);
+    let local_status_url = format!("http://{}/_homeboy/preview-ingress/status", normalized.bind);
+    let public_status_url = format!("https://{}/_homeboy/preview-ingress/status", dns_probe_host);
+
+    Ok(PreviewIngressInstallPlan {
+        command: "tunnel.preview_ingress.install".to_string(),
+        server_id: normalized.server_id.clone(),
+        domain: normalized.domain.clone(),
+        public_host_pattern: normalized.public_host_pattern.clone(),
+        dns_probe_host: dns_probe_host.clone(),
+        bind: normalized.bind.clone(),
+        service_name: normalized.service_name.clone(),
+        service_user: normalized.service_user.clone(),
+        service_group: normalized.service_group.clone(),
+        binary_path: normalized.binary_path.clone(),
+        local_status_url: local_status_url.clone(),
+        public_status_url: public_status_url.clone(),
+        dry_run: true,
+        applied: false,
+        writes: vec![
+            PreviewIngressWrite {
+                path: format!("/etc/systemd/system/{}.service", normalized.service_name),
+                description: "systemd unit for the Homeboy preview ingress daemon".to_string(),
+            },
+            PreviewIngressWrite {
+                path: format!("/etc/nginx/sites-available/{}", normalized.service_name),
+                description: "optional Nginx reverse proxy snippet for the wildcard preview host"
+                    .to_string(),
+            },
+            PreviewIngressWrite {
+                path: format!("/etc/caddy/sites/{}.caddy", normalized.service_name),
+                description: "optional Caddy reverse proxy snippet for the wildcard preview host"
+                    .to_string(),
+            },
+        ],
+        systemd_unit: render_systemd_unit(&normalized),
+        nginx_site: render_nginx_site(&normalized),
+        caddy_site: render_caddy_site(&normalized),
+        install_commands: install_commands(&normalized),
+        status_commands: install_status_commands(&normalized, &dns_probe_host),
+        rollback_commands: rollback_commands(&normalized),
+        smoke_checks: vec![
+            format!("getent hosts {dns_probe_host}"),
+            format!("curl -fsS {local_status_url}"),
+            format!("curl -fsS {public_status_url}"),
+        ],
+        required_operator_config: required_operator_config(&normalized),
+        secrets_policy: vec![
+            "Do not put token material in the systemd unit or proxy snippets.".to_string(),
+            "Store ingress pairing/client secrets through Homeboy secret/config surfaces before enabling live routes.".to_string(),
+            "This generated plan contains only non-secret operator configuration.".to_string(),
+        ],
+    })
+}
+
+pub fn render_install_status_plan(
+    options: PreviewIngressInstallOptions,
+) -> Result<PreviewIngressInstallStatusPlan> {
+    let normalized = normalize_install_options(options)?;
+    let dns_probe_host = dns_probe_host(&normalized.public_host_pattern, &normalized.domain);
+    let local_status_url = format!("http://{}/_homeboy/preview-ingress/status", normalized.bind);
+    let public_status_url = format!("https://{}/_homeboy/preview-ingress/status", dns_probe_host);
+    let commands = install_status_commands(&normalized, &dns_probe_host);
+
+    Ok(PreviewIngressInstallStatusPlan {
+        command: "tunnel.preview_ingress.install_status".to_string(),
+        server_id: normalized.server_id,
+        domain: normalized.domain,
+        public_host_pattern: normalized.public_host_pattern,
+        dns_probe_host,
+        bind: normalized.bind,
+        service_name: normalized.service_name,
+        local_status_url,
+        public_status_url,
+        probed: false,
+        checks: commands
+            .iter()
+            .map(|command| PreviewIngressInstallCheck {
+                name: install_check_name(command),
+                command: command.clone(),
+                status: PreviewIngressInstallCheckStatus::Planned,
+                exit_code: None,
+                stdout: None,
+                stderr: None,
+            })
+            .collect(),
+        status_commands: commands,
+    })
 }
 
 fn status_with_failures(
@@ -546,6 +738,235 @@ fn validate_serve_spec(spec: &PreviewIngressServeSpec) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+fn normalize_install_options(
+    mut options: PreviewIngressInstallOptions,
+) -> Result<PreviewIngressInstallOptions> {
+    options.domain = trim_scheme(&options.domain)
+        .trim_end_matches('/')
+        .to_string();
+    options.public_host_pattern = options.public_host_pattern.trim().to_string();
+
+    if options.server_id.trim().is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "server",
+            "preview ingress install requires a configured Homeboy server id",
+            None,
+            Some(vec![
+                "Create one with: homeboy server create <id> --host <host> --user <user>"
+                    .to_string(),
+            ]),
+        ));
+    }
+    if options.domain.is_empty() || options.domain.contains('/') {
+        return Err(Error::validation_invalid_argument(
+            "domain",
+            "domain must be a bare operator domain such as example.com",
+            Some(options.domain),
+            None,
+        ));
+    }
+    if !options.public_host_pattern.contains(&options.domain) {
+        return Err(Error::validation_invalid_argument(
+            "public_host_pattern",
+            "public host pattern must include the operator domain",
+            Some(options.public_host_pattern),
+            None,
+        ));
+    }
+    if !options.public_host_pattern.contains('*') {
+        return Err(Error::validation_invalid_argument(
+            "public_host_pattern",
+            "public host pattern must include a wildcard label for preview routes",
+            Some(options.public_host_pattern),
+            Some(vec![format!(
+                "Use a value like '*-tunnel.{}'",
+                options.domain
+            )]),
+        ));
+    }
+    if !options.bind.starts_with("127.") && !options.bind.starts_with("[::1]") {
+        return Err(Error::validation_invalid_argument(
+            "bind",
+            "preview ingress should bind to loopback and be exposed by the reverse proxy",
+            Some(options.bind),
+            Some(vec!["Use a value like 127.0.0.1:7350".to_string()]),
+        ));
+    }
+    Ok(options)
+}
+
+fn trim_scheme(value: &str) -> &str {
+    value
+        .strip_prefix("https://")
+        .or_else(|| value.strip_prefix("http://"))
+        .unwrap_or(value)
+}
+
+fn dns_probe_host(public_host_pattern: &str, domain: &str) -> String {
+    let host = public_host_pattern
+        .replace('*', "homeboy-health")
+        .replace("..", ".")
+        .trim_end_matches('.')
+        .trim_start_matches('.')
+        .to_string();
+    if host.is_empty() {
+        format!("homeboy-health.{domain}")
+    } else {
+        host
+    }
+}
+
+fn render_systemd_unit(options: &PreviewIngressInstallOptions) -> String {
+    format!(
+        r#"[Unit]
+Description=Homeboy preview ingress
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={user}
+Group={group}
+Environment=HOME=/var/lib/homeboy
+Environment=XDG_DATA_HOME=/var/lib/homeboy/.local/share
+ExecStart={binary} tunnel preview-ingress serve --bind {bind} --domain {domain} --public-host-pattern '{public_host_pattern}'
+Restart=on-failure
+RestartSec=5s
+StateDirectory=homeboy
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+
+[Install]
+WantedBy=multi-user.target
+"#,
+        user = options.service_user,
+        group = options.service_group,
+        binary = options.binary_path,
+        bind = options.bind,
+        domain = options.domain,
+        public_host_pattern = options.public_host_pattern,
+    )
+}
+
+fn render_nginx_site(options: &PreviewIngressInstallOptions) -> String {
+    format!(
+        r#"server {{
+    listen 443 ssl http2;
+    server_name {public_host_pattern};
+
+    location / {{
+        proxy_pass http://{bind};
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }}
+}}
+"#,
+        public_host_pattern = options.public_host_pattern,
+        bind = options.bind,
+    )
+}
+
+fn render_caddy_site(options: &PreviewIngressInstallOptions) -> String {
+    format!(
+        r#"{public_host_pattern} {{
+    reverse_proxy http://{bind}
+}}
+"#,
+        public_host_pattern = options.public_host_pattern,
+        bind = options.bind,
+    )
+}
+
+fn install_commands(options: &PreviewIngressInstallOptions) -> Vec<String> {
+    vec![
+        "sudo install -d -m 0755 /etc/systemd/system".to_string(),
+        format!(
+            "sudo install -m 0644 <rendered-unit> /etc/systemd/system/{}.service",
+            options.service_name
+        ),
+        "sudo systemctl daemon-reload".to_string(),
+        format!("sudo systemctl enable --now {}", options.service_name),
+        "install either the rendered Nginx or Caddy reverse proxy snippet, then reload that proxy"
+            .to_string(),
+    ]
+}
+
+fn install_status_commands(
+    options: &PreviewIngressInstallOptions,
+    dns_probe_host: &str,
+) -> Vec<String> {
+    vec![
+        format!("systemctl is-active {}", options.service_name),
+        format!("systemctl status {} --no-pager", options.service_name),
+        format!(
+            "curl -fsS http://{}/_homeboy/preview-ingress/status",
+            options.bind
+        ),
+        format!("getent hosts {dns_probe_host}"),
+        format!(
+            "curl -fsS https://{}/_homeboy/preview-ingress/status",
+            dns_probe_host
+        ),
+    ]
+}
+
+fn rollback_commands(options: &PreviewIngressInstallOptions) -> Vec<String> {
+    vec![
+        format!("sudo systemctl disable --now {}", options.service_name),
+        format!(
+            "sudo rm -f /etc/systemd/system/{}.service",
+            options.service_name
+        ),
+        "sudo systemctl daemon-reload".to_string(),
+        "remove the installed Nginx/Caddy site snippet and reload the proxy".to_string(),
+    ]
+}
+
+fn required_operator_config(options: &PreviewIngressInstallOptions) -> Vec<String> {
+    vec![
+        format!(
+            "Homeboy server `{}` with SSH access to the target VPS",
+            options.server_id
+        ),
+        format!(
+            "Wildcard DNS for `{}` pointing at the VPS public address",
+            options.public_host_pattern
+        ),
+        "TLS certificate coverage for the wildcard preview host pattern".to_string(),
+        format!(
+            "A Homeboy binary installed at `{}` on the VPS",
+            options.binary_path
+        ),
+        format!(
+            "System user/group `{}`/`{}` available on the VPS",
+            options.service_user, options.service_group
+        ),
+        "A proxy choice: install the rendered Nginx or Caddy snippet, not both".to_string(),
+    ]
+}
+
+fn install_check_name(command: &str) -> String {
+    if command.starts_with("systemctl is-active") {
+        "systemd_active".to_string()
+    } else if command.starts_with("systemctl status") {
+        "systemd_status".to_string()
+    } else if command.starts_with("curl -fsS http://") {
+        "local_status".to_string()
+    } else if command.starts_with("getent hosts") {
+        "dns".to_string()
+    } else if command.starts_with("curl -fsS https://") {
+        "public_status".to_string()
+    } else {
+        "command".to_string()
+    }
 }
 
 fn upstream_url(route: &PreviewIngressRoute, target: &str) -> Result<String> {
