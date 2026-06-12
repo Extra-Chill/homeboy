@@ -181,6 +181,13 @@ function validateWritablePaths(config, files) {
   };
 }
 
+function differenceFiles(files, baseline) {
+  const baselineSet = new Set(baseline.map(normalizePathPattern));
+  return files
+    .map((file) => normalizePathPattern(file))
+    .filter((file) => file && !baselineSet.has(file));
+}
+
 function renderTemplate(template, values) {
   return String(template || '').replace(/\{([^}]+)\}/g, (_, key) => {
     const value = values[key.trim()];
@@ -506,9 +513,18 @@ function main() {
   const drift = verification.enabled && !verification.success
     ? { enabled: false, checks: [], skipped_reason: 'verification_commands_failed' }
     : runCommandChecks(config, workspace, 'drift_checks');
-  const files = changedFiles(workspace);
+  const workspaceFiles = changedFiles(workspace);
+  const files = agentFiles;
   const writablePaths = validateWritablePaths(config, files);
-  const capture = { enabled: true, changed: files.length > 0, files, workspace };
+  const verificationSideEffectFiles = differenceFiles(workspaceFiles, agentFiles);
+  const capture = {
+    enabled: true,
+    changed: files.length > 0,
+    files,
+    workspace,
+    workspace_files: workspaceFiles,
+    verification_side_effect_files: verificationSideEffectFiles,
+  };
   let publication = { opened: false };
   let success = (!verification.enabled || verification.success)
     && (!drift.enabled || drift.success)
