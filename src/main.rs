@@ -171,7 +171,7 @@ fn main() -> std::process::ExitCode {
         Ok(cli) => cli,
         Err(e) => e.exit(),
     };
-    normalize_runs_list_runner(&mut cli);
+    normalize_runs_list_runner(&mut cli, &normalized);
 
     match homeboy::commands::route::route_after_parse(&cli, &normalized, output_file.as_deref()) {
         Ok(None) => {}
@@ -312,10 +312,26 @@ fn validate_output_file_path(path: &str) -> Option<homeboy::core::Error> {
     ))
 }
 
-fn normalize_runs_list_runner(cli: &mut Cli) {
-    if let Commands::Runs(args) = &mut cli.command {
-        cli.runner = args.absorb_global_runner_for_list(cli.runner.take());
+fn normalize_runs_list_runner(cli: &mut Cli, normalized_args: &[String]) {
+    if is_runs_list_runner_option(normalized_args) {
+        if let Commands::Runs(args) = &mut cli.command {
+            cli.runner = args.absorb_global_runner_for_list(cli.runner.take());
+        }
     }
+}
+
+fn is_runs_list_runner_option(args: &[String]) -> bool {
+    let Some(runs_index) = args.iter().position(|arg| arg == "runs") else {
+        return false;
+    };
+    let Some(list_index) = args.iter().position(|arg| arg == "list") else {
+        return false;
+    };
+
+    list_index > runs_index
+        && args.iter().enumerate().any(|(index, arg)| {
+            index > list_index && (arg == "--runner" || arg.starts_with("--runner="))
+        })
 }
 
 /// Attempt to augment a clap error with entity suggestions.
@@ -430,7 +446,18 @@ mod tests {
 
         assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
 
-        normalize_runs_list_runner(&mut cli);
+        normalize_runs_list_runner(
+            &mut cli,
+            &[
+                "homeboy".into(),
+                "runs".into(),
+                "list".into(),
+                "--runner".into(),
+                "homeboy-lab".into(),
+                "--status".into(),
+                "running".into(),
+            ],
+        );
 
         assert_eq!(cli.runner, None);
         let Commands::Runs(args) = &cli.command else {
@@ -450,7 +477,17 @@ mod tests {
             "run-123",
         ]);
 
-        normalize_runs_list_runner(&mut cli);
+        normalize_runs_list_runner(
+            &mut cli,
+            &[
+                "homeboy".into(),
+                "--runner".into(),
+                "homeboy-lab".into(),
+                "runs".into(),
+                "show".into(),
+                "run-123".into(),
+            ],
+        );
 
         assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
         let err = homeboy::commands::route::route_after_parse(
