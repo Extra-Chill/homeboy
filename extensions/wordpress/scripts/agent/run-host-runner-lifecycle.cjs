@@ -102,6 +102,10 @@ function runCommandChecks(config, workspace, key) {
   return { enabled: true, success: true, workspace, checks };
 }
 
+function hasCommandChecks(config, key) {
+  return commandList(config, key).length > 0;
+}
+
 function git(workspace, args, options = {}) {
   const result = run('git', args, { cwd: workspace, env: options.env });
   if (options.check !== false && result.status !== 0) {
@@ -438,7 +442,11 @@ function main() {
     throw new Error(`Scenario not found in results: ${scenarioId || '(first scenario)'}`);
   }
 
+  const agentFiles = changedFiles(workspace);
   const verification = runCommandChecks(config, workspace, 'verification_commands');
+  if ((!verification.enabled || verification.success) && agentFiles.length > 0 && hasCommandChecks(config, 'drift_checks')) {
+    git(workspace, ['add', '--', ...agentFiles]);
+  }
   const drift = verification.enabled && !verification.success
     ? { enabled: false, checks: [], skipped_reason: 'verification_commands_failed' }
     : runCommandChecks(config, workspace, 'drift_checks');

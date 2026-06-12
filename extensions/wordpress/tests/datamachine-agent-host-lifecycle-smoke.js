@@ -118,7 +118,7 @@ function makeRunFiles(tmp, config) {
   fs.writeFileSync(path.join(repo, 'generated.txt'), 'hello from agent\n');
   const { configPath, resultsPath } = makeRunFiles(tmp, {
     verification_commands: [{ command: 'test -f generated.txt', description: 'Generated file exists' }],
-    drift_checks: [{ command: 'grep -q hello generated.txt', description: 'Generated file contains expected content' }],
+    drift_checks: [{ command: 'git diff --exit-code', description: 'Verification did not create unstaged drift' }],
   });
 
   const result = run('node', [script, '--results', resultsPath, '--config', configPath, '--scenario', 'developer-docs', '--workspace', repo], {
@@ -219,6 +219,33 @@ function makeRunFiles(tmp, config) {
   ).stdout;
   assert.match(publishedFiles, /generated\.txt/);
   assert.doesNotMatch(publishedFiles, /stale\.txt/);
+}
+
+{
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-host-lifecycle-drift-fail.'));
+  const repo = makeRepo(tmp);
+  const gh = makeGhFixture(tmp);
+  fs.writeFileSync(path.join(repo, 'generated.txt'), 'hello from agent\n');
+  const { configPath, resultsPath } = makeRunFiles(tmp, {
+    verification_commands: [{
+      command: 'printf "\\nverifier drift\\n" >> README.md',
+      description: 'Verifier mutates tracked output',
+    }],
+    drift_checks: [{ command: 'git diff --exit-code', description: 'Verifier output must be committed' }],
+  });
+
+  const result = run('node', [script, '--results', resultsPath, '--config', configPath, '--scenario', 'developer-docs', '--workspace', repo], {
+    env: { PATH: `${gh.bin}${path.delimiter}${process.env.PATH}`, GITHUB_RUN_ID: '12345', GH_TOKEN: 'fixture' },
+  });
+  assert.notEqual(result.status, 0);
+  const output = readJson(resultsPath);
+  const drift = output.scenarios[0].metadata.drift_check_results.checks[0];
+  assert.equal(output.status, 'failed');
+  assert.equal(output.scenarios[0].metrics.verification_commands_succeeded, 1);
+  assert.equal(output.scenarios[0].metrics.drift_checks_succeeded, 0);
+  assert.equal(drift.command, 'git diff --exit-code');
+  assert.match(drift.stdout, /README\.md/);
+  assert.equal(fs.existsSync(gh.log), false);
 }
 
 {
