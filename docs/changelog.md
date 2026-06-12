@@ -4,6 +4,20 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.228.19] - 2026-06-12
+
+### Fixed
+- clarify runner secret env diagnostics
+- support secret-safe runner env
+- isolate runner process env
+- scrub Lab WP Codebox env overrides
+- cache public artifact URL validation
+- generalize lab run idempotency guard
+- keep mirrored Lab runs readable offline
+- validate public artifact viewer URLs
+- mirror timed-out Lab runner evidence
+- stop duplicate Workflow Bench lab attempts
+
 ## [0.228.18] - 2026-06-12
 
 ### Fixed
