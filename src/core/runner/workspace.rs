@@ -315,9 +315,15 @@ fn git_snapshot(
 
         return Err(Error::validation_invalid_argument(
             "mode",
-            "git workspace sync requires a clean working tree; use --mode snapshot to include dirty local changes",
+            "git workspace sync requires a clean working tree before remote execution",
             Some("git".to_string()),
-            None,
+            Some(vec![
+                "Commit or stash local changes before git-backed Lab execution.".to_string(),
+                "Run with --force-hot to execute the command locally while the worktree is dirty."
+                    .to_string(),
+                "Use `homeboy runner workspace sync <runner-id> --path <local-worktree> --mode snapshot` when materializing a standalone snapshot workspace."
+                    .to_string(),
+            ]),
         ));
     }
     let head = git_output(local_path, &["rev-parse", "HEAD"])?;
@@ -1358,7 +1364,7 @@ mod tests {
     }
 
     #[test]
-    fn dirty_git_sync_without_changed_since_suggests_snapshot_mode() {
+    fn dirty_git_sync_without_changed_since_reports_supported_remediation() {
         let source = dirty_git_repo();
 
         let err = match git_snapshot(source.path(), None, Vec::new()) {
@@ -1366,7 +1372,18 @@ mod tests {
             Err(err) => err,
         };
 
-        assert!(err.message.contains("use --mode snapshot"));
+        assert!(err.message.contains("requires a clean working tree"));
+        assert!(!err.message.contains("use --mode snapshot"));
+        let hint_text = err.details["tried"]
+            .as_array()
+            .expect("dirty git sync error includes recovery options")
+            .iter()
+            .filter_map(|value| value.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(hint_text.contains("Commit or stash"));
+        assert!(hint_text.contains("--force-hot"));
+        assert!(hint_text.contains("homeboy runner workspace sync <runner-id>"));
     }
 
     #[test]
