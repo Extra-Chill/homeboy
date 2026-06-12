@@ -579,10 +579,13 @@ fn includes_override_exclude(includes: &[String], exclude: &str) -> bool {
 }
 
 fn snapshot_install_command(remote_path: &str) -> String {
+    let parent = parent_remote_path(remote_path);
     format!(
-        "parent={parent}; dest={dest}; tmp=\"${{dest}}.tmp.$$\"; mkdir -p \"$parent\" && trap 'rm -rf \"$tmp\"' EXIT; rm -rf \"$tmp\" && mkdir -p \"$tmp\" && tar -C \"$tmp\" -xf - && rm -rf \"$dest\" && mv \"$tmp\" \"$dest\"",
-        parent = shell::quote_arg(parent_remote_path(remote_path).as_str()),
+        "parent={parent}; dest={dest}; tmp=\"${{dest}}.tmp.$$\"; {owner_capture}; mkdir -p \"$parent\" && trap 'rm -rf \"$tmp\"' EXIT; rm -rf \"$tmp\" && mkdir -p \"$tmp\" && tar -C \"$tmp\" -xf - && rm -rf \"$dest\" && mv \"$tmp\" \"$dest\" && {owner_restore}",
+        parent = shell::quote_arg(parent.as_str()),
         dest = shell::quote_arg(remote_path),
+        owner_capture = owner_capture_shell("$parent"),
+        owner_restore = owner_restore_shell("$parent", "$dest"),
     )
 }
 
@@ -724,6 +727,7 @@ fn git_bundle_install_command(
     branch: Option<&str>,
     remote_url: &str,
 ) -> String {
+    let parent = parent_remote_path(remote_path);
     let checkout = if let Some(branch) = branch {
         format!(
             "git -C \"$tmp\" checkout -B {branch} {head} && git -C \"$tmp\" config branch.{branch}.remote origin && git -C \"$tmp\" config branch.{branch}.merge refs/heads/{branch}",
@@ -738,12 +742,14 @@ fn git_bundle_install_command(
     };
 
     format!(
-        "parent={parent}; dest={dest}; tmp=\"${{dest}}.tmp.$$\"; bundle=\"${{dest}}.bundle.$$\"; mkdir -p \"$parent\" && trap 'rm -rf \"$tmp\" \"$bundle\"' EXIT; rm -rf \"$tmp\" \"$bundle\" && cat > \"$bundle\" && git clone \"$bundle\" \"$tmp\" && git -C \"$tmp\" remote set-url origin {remote_url} && {checkout} && git -C \"$tmp\" reset --hard {head} && git -C \"$tmp\" clean -ffdqx && rm -rf \"$dest\" && mv \"$tmp\" \"$dest\"",
-        parent = shell::quote_arg(parent_remote_path(remote_path).as_str()),
+        "parent={parent}; dest={dest}; tmp=\"${{dest}}.tmp.$$\"; bundle=\"${{dest}}.bundle.$$\"; {owner_capture}; mkdir -p \"$parent\" && trap 'rm -rf \"$tmp\" \"$bundle\"' EXIT; rm -rf \"$tmp\" \"$bundle\" && cat > \"$bundle\" && git clone \"$bundle\" \"$tmp\" && git -C \"$tmp\" remote set-url origin {remote_url} && {checkout} && git -C \"$tmp\" reset --hard {head} && git -C \"$tmp\" clean -ffdqx && rm -rf \"$dest\" && mv \"$tmp\" \"$dest\" && {owner_restore}",
+        parent = shell::quote_arg(parent.as_str()),
         dest = shell::quote_arg(remote_path),
         remote_url = shell::quote_arg(remote_url),
         checkout = checkout,
         head = shell::quote_arg(head),
+        owner_capture = owner_capture_shell("$parent"),
+        owner_restore = owner_restore_shell("$parent", "$dest"),
     )
 }
 
@@ -754,6 +760,7 @@ fn materialize_git_command(
     changed_since_base: Option<&str>,
     git_fetch_refs: &[String],
 ) -> String {
+    let parent = parent_remote_path(remote_path);
     let dest = shell::quote_arg(remote_path);
     let fetch_changed_since = changed_since_base
         .map(|base| {
@@ -775,13 +782,27 @@ fn materialize_git_command(
         .collect::<String>();
 
     format!(
-        "mkdir -p {parent} && if [ -d {dest}/.git ]; then git -C {dest} reset --hard && git -C {dest} clean -ffdqx && git -C {dest} fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'; else rm -rf {dest} && git clone {url} {dest} && git -C {dest} fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'; fi{fetch_changed_since}{fetch_extra_refs} && git -C {dest} checkout --detach {head} && git -C {dest} reset --hard {head} && git -C {dest} clean -ffdqx",
-        parent = shell::quote_arg(parent_remote_path(remote_path).as_str()),
+        "parent={parent}; dest={dest}; {owner_capture}; mkdir -p \"$parent\" && if [ -d \"$dest\"/.git ]; then git -C \"$dest\" reset --hard && git -C \"$dest\" clean -ffdqx && git -C \"$dest\" fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'; else rm -rf \"$dest\" && git clone {url} \"$dest\" && git -C \"$dest\" fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'; fi{fetch_changed_since}{fetch_extra_refs} && git -C \"$dest\" checkout --detach {head} && git -C \"$dest\" reset --hard {head} && git -C \"$dest\" clean -ffdqx && {owner_restore}",
+        parent = shell::quote_arg(parent.as_str()),
         dest = dest,
         url = shell::quote_arg(remote_url),
         head = shell::quote_arg(head),
         fetch_changed_since = fetch_changed_since,
         fetch_extra_refs = fetch_extra_refs,
+        owner_capture = owner_capture_shell("$parent"),
+        owner_restore = owner_restore_shell("$parent", "$dest"),
+    )
+}
+
+fn owner_capture_shell(reference: &str) -> String {
+    format!(
+        "owner_path={reference}; while [ ! -e \"$owner_path\" ] && [ \"$owner_path\" != \"/\" ]; do owner_path=$(dirname \"$owner_path\"); done; owner=\"\"; if [ -e \"$owner_path\" ]; then owner=$(stat -c '%u:%g' \"$owner_path\" 2>/dev/null || stat -f '%u:%g' \"$owner_path\" 2>/dev/null || true); fi",
+    )
+}
+
+fn owner_restore_shell(parent: &str, dest: &str) -> String {
+    format!(
+        "if [ \"$(id -u)\" = \"0\" ] && [ -n \"$owner\" ] && [ \"$owner\" != \"0:0\" ]; then chown \"$owner\" {parent} && chown -R \"$owner\" {dest}; fi",
     )
 }
 
@@ -1290,6 +1311,36 @@ mod tests {
         assert!(command.contains("checkout --detach abc123"));
         assert!(command.contains("reset --hard"));
         assert!(command.contains("reset --hard abc123"));
+    }
+
+    #[test]
+    fn git_materialization_restores_workspace_owner_after_root_run() {
+        let command = materialize_git_command(
+            "/var/lib/datamachine/workspace/_lab_workspaces/homeboy-abc",
+            "https://github.com/Extra-Chill/homeboy.git",
+            "abc123",
+            None,
+            &[],
+        );
+
+        assert!(command.contains("owner_path=$parent"));
+        assert!(command.contains("stat -c '%u:%g'"));
+        assert!(command.contains("stat -f '%u:%g'"));
+        assert!(command.contains("[ \"$(id -u)\" = \"0\" ]"));
+        assert!(command.contains("[ \"$owner\" != \"0:0\" ]"));
+        assert!(command.contains("chown \"$owner\" $parent"));
+        assert!(command.contains("chown -R \"$owner\" $dest"));
+    }
+
+    #[test]
+    fn snapshot_install_restores_workspace_owner_after_root_run() {
+        let command =
+            snapshot_install_command("/var/lib/datamachine/workspace/_lab_workspaces/homeboy-abc");
+
+        assert!(command.contains("owner_path=$parent"));
+        assert!(command.contains("mkdir -p \"$parent\""));
+        assert!(command.contains("mv \"$tmp\" \"$dest\" && if"));
+        assert!(command.contains("chown -R \"$owner\" $dest"));
     }
 
     #[test]
