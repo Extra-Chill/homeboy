@@ -8,6 +8,12 @@ homeboy runner <COMMAND>
 
 `runner` manages durable execution backends. SSH runners are a capability on a `homeboy server` record, so the common Lab flow uses one ID for the machine and its runner. Local runners remain standalone because they describe this machine rather than an SSH server.
 
+Runner configuration separates printable environment from secrets:
+
+- `env` is for non-secret values that are useful in diagnostics, such as `HOMEBOY_PUBLIC_ARTIFACT_BASE_URL`.
+- `secret_env` is for execution-time secret references like `{ "env": "NAME" }` or `{ "file": "~/.config/homeboy/secrets/name" }`.
+- Command output redacts sensitive names in `env` and prints only `secret_env` references, never resolved secret values.
+
 ## Subcommands
 
 ### `add`
@@ -340,10 +346,10 @@ Path rules:
 
 Runner job environment:
 
-- `homeboy runner env <runner-id>` shows the effective environment Homeboy injects into runner jobs before command execution.
-- Values are redacted by default because runner env commonly contains tokens. Use `--show-values` only in trusted local/operator contexts.
+- `homeboy runner env <runner-id>` shows configured public runner env plus `secret_env` keys/references for runner jobs. It does not resolve or print secret values.
+- Public `env` values are redacted by default because legacy configs may still contain tokens. Use `--show-values` only in trusted local/operator contexts; `secret_env` remains references-only even with `--show-values`.
 - `homeboy ssh <server> -- printenv NAME` inspects the server login shell environment. It does not include runner job env unless the variable is also configured on the server shell.
-- Use `homeboy runner exec <runner-id> -- printenv NAME` or `homeboy runner env <runner-id> --show-values` when debugging Lab job environment.
+- Use `homeboy runner exec <runner-id> -- printenv NAME` for final execution-time proof when debugging resolved runner job environment.
 
 Runner metrics:
 

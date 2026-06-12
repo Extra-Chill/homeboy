@@ -4,12 +4,13 @@ use clap::{Args, Subcommand, ValueEnum};
 use serde::Serialize;
 use serde_json::Value;
 
+use homeboy::core::redaction::RedactionPolicy;
 use homeboy::core::runner::{
     self, ReverseRunnerConnectOptions, ReverseRunnerWorkerOptions, ReverseRunnerWorkerOutput,
     Runner, RunnerConnectReport, RunnerDisconnectReport, RunnerExecOutput, RunnerKind,
     RunnerStatusReport,
 };
-use homeboy::core::server::{RunnerPolicy, RunnerSettings};
+use homeboy::core::server::{RunnerPolicy, RunnerSecretEnvRef, RunnerSettings};
 use homeboy::core::{EntityCrudOutput, MergeOutput};
 
 use super::{CmdResult, DynamicSetArgs};
@@ -56,7 +57,18 @@ pub struct RunnerEnvOutput {
     pub source: String,
     pub values_redacted: bool,
     pub env: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub secret_env: BTreeMap<String, RunnerSecretEnvReferenceOutput>,
     pub diagnostics: RunnerEnvDiagnostics,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RunnerSecretEnvReferenceOutput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub env: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    pub values_redacted: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -532,8 +544,13 @@ fn redact_runner_output_env(output: &mut RunnerOutput) {
 }
 
 fn redact_runner_env(runner: &mut Runner) {
-    for value in runner.env.values_mut() {
-        *value = REDACTED_ENV_VALUE.to_string();
+    let policy = RedactionPolicy::default();
+    for (key, value) in runner.env.iter_mut() {
+        if policy.is_sensitive_key(key) {
+            *value = REDACTED_ENV_VALUE.to_string();
+        } else {
+            *value = policy.redact_string(value);
+        }
     }
 }
 
@@ -589,6 +606,7 @@ fn add(input: RunnerAddInput) -> CmdResult<RunnerOutput> {
             workspace_root: input.workspace_root,
             settings: input.settings,
             env: HashMap::new(),
+            secret_env: HashMap::new(),
             resources: HashMap::<String, Value>::new(),
             policy: RunnerPolicy::default(),
         };
@@ -853,6 +871,7 @@ fn exec(
 }
 
 fn env(runner_id: &str, show_values: bool) -> CmdResult<RunnerEnvOutput> {
+    let runner = runner::load(runner_id)?;
     let effective_env = runner::effective_env(runner_id)?;
     let env = effective_env
         .into_iter()
@@ -867,6 +886,11 @@ fn env(runner_id: &str, show_values: bool) -> CmdResult<RunnerEnvOutput> {
             )
         })
         .collect();
+    let secret_env = runner
+        .secret_env
+        .into_iter()
+        .map(|(key, reference)| (key, secret_env_reference_output(reference)))
+        .collect();
 
     Ok((
         RunnerEnvOutput {
@@ -875,13 +899,22 @@ fn env(runner_id: &str, show_values: bool) -> CmdResult<RunnerEnvOutput> {
             source: "runner_job_env".to_string(),
             values_redacted: !show_values,
             env,
+            secret_env,
             diagnostics: RunnerEnvDiagnostics {
                 server_shell_env: "Use `homeboy ssh <server> -- printenv NAME` to inspect the server login shell environment; it does not include runner job env by default.".to_string(),
-                runner_job_env: "This output is the configured env Homeboy injects into `homeboy runner exec` jobs before command execution.".to_string(),
+                runner_job_env: "This output shows configured public env Homeboy injects into runner jobs. secret_env entries are shown as refs only; their values resolve on the runner at execution time and are never printed here.".to_string(),
             },
         },
         0,
     ))
+}
+
+fn secret_env_reference_output(reference: RunnerSecretEnvRef) -> RunnerSecretEnvReferenceOutput {
+    RunnerSecretEnvReferenceOutput {
+        env: reference.env,
+        file: reference.file,
+        values_redacted: true,
+    }
 }
 
 #[cfg(test)]
@@ -897,8 +930,12 @@ mod tests {
             settings: RunnerSettings::default(),
             env: HashMap::from([
                 ("OPENCODE_API_KEY".to_string(), "secret-token".to_string()),
-                ("PATH".to_string(), "/secret/bin".to_string()),
+                (
+                    "HOMEBOY_PUBLIC_ARTIFACT_BASE_URL".to_string(),
+                    "https://artifacts.example.test".to_string(),
+                ),
             ]),
+            secret_env: HashMap::new(),
             resources: HashMap::new(),
             policy: RunnerPolicy::default(),
         }
@@ -922,9 +959,11 @@ mod tests {
             value["entity"]["env"]["OPENCODE_API_KEY"],
             REDACTED_ENV_VALUE
         );
-        assert_eq!(value["entity"]["env"]["PATH"], REDACTED_ENV_VALUE);
+        assert_eq!(
+            value["entity"]["env"]["HOMEBOY_PUBLIC_ARTIFACT_BASE_URL"],
+            "https://artifacts.example.test"
+        );
         assert!(!value.to_string().contains("secret-token"));
-        assert!(!value.to_string().contains("/secret/bin"));
     }
 
     #[test]
@@ -944,9 +983,11 @@ mod tests {
             value["entities"][0]["env"]["OPENCODE_API_KEY"],
             REDACTED_ENV_VALUE
         );
-        assert_eq!(value["entities"][0]["env"]["PATH"], REDACTED_ENV_VALUE);
+        assert_eq!(
+            value["entities"][0]["env"]["HOMEBOY_PUBLIC_ARTIFACT_BASE_URL"],
+            "https://artifacts.example.test"
+        );
         assert!(!value.to_string().contains("secret-token"));
-        assert!(!value.to_string().contains("/secret/bin"));
     }
 
     #[test]
@@ -957,6 +998,7 @@ mod tests {
             source: "runner_job_env".to_string(),
             values_redacted: true,
             env: BTreeMap::from([("TOKEN".to_string(), REDACTED_ENV_VALUE.to_string())]),
+            secret_env: BTreeMap::new(),
             diagnostics: RunnerEnvDiagnostics {
                 server_shell_env: "shell".to_string(),
                 runner_job_env: "runner".to_string(),
@@ -969,5 +1011,47 @@ mod tests {
         assert_eq!(value["source"], "runner_job_env");
         assert_eq!(value["values_redacted"], true);
         assert_eq!(value["env"]["TOKEN"], REDACTED_ENV_VALUE);
+    }
+
+    #[test]
+    fn runner_env_output_reports_secret_env_refs_without_values() {
+        let output = RunnerEnvOutput {
+            command: "runner.env".to_string(),
+            runner_id: "lab".to_string(),
+            source: "runner_job_env".to_string(),
+            values_redacted: false,
+            env: BTreeMap::from([(
+                "HOMEBOY_PUBLIC_ARTIFACT_BASE_URL".to_string(),
+                "https://artifacts.example.test".to_string(),
+            )]),
+            secret_env: BTreeMap::from([(
+                "OPENAI_API_KEY".to_string(),
+                RunnerSecretEnvReferenceOutput {
+                    env: Some("OPENAI_API_KEY".to_string()),
+                    file: None,
+                    values_redacted: true,
+                },
+            )]),
+            diagnostics: RunnerEnvDiagnostics {
+                server_shell_env: "shell".to_string(),
+                runner_job_env: "runner".to_string(),
+            },
+        };
+
+        let value = serde_json::to_value(output).expect("serialize output");
+
+        assert_eq!(
+            value["env"]["HOMEBOY_PUBLIC_ARTIFACT_BASE_URL"],
+            "https://artifacts.example.test"
+        );
+        assert_eq!(
+            value["secret_env"]["OPENAI_API_KEY"]["env"],
+            "OPENAI_API_KEY"
+        );
+        assert_eq!(
+            value["secret_env"]["OPENAI_API_KEY"]["values_redacted"],
+            true
+        );
+        assert!(!value.to_string().contains("dummy-secret"));
     }
 }

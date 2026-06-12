@@ -18,11 +18,11 @@ use super::capabilities::{
     runner_capability_snapshot_for_preflight, validate_runner_capability_preflight,
 };
 use super::evidence::{mirror_daemon_evidence, mirror_daemon_job_progress};
-use super::normalize_runner_command_env;
 use super::resource_metrics::{
     measured_command_output, measured_command_output_until_cancelled, RunnerResourceMetrics,
 };
 use super::{load, status, Runner, RunnerCapabilityPreflight, RunnerKind, RunnerTunnelMode};
+use super::{normalize_runner_command_env, resolve_runner_secret_env};
 
 const DEFAULT_RUNNER_EXEC_WAIT_TIMEOUT_SECS: u64 = 20 * 60;
 pub(crate) const RUNNER_EXEC_WAIT_TIMEOUT_ENV: &str = "HOMEBOY_RUNNER_EXEC_WAIT_TIMEOUT_SECS";
@@ -745,6 +745,9 @@ pub(crate) fn prepare_runner_process(request: RunnerProcessRequest) -> Result<Ru
 
     let mut env = runner.env.clone();
     env.extend(request.env);
+    if runner.kind == RunnerKind::Local {
+        env.extend(resolve_runner_secret_env(&runner.secret_env)?);
+    }
     normalize_runner_command_env(&mut env);
 
     let source_snapshot = request
@@ -799,16 +802,28 @@ pub(crate) fn prepare_daemon_local_process(
             ]),
         )
     })?;
-    let runner = Runner {
-        id: request.runner_id,
-        kind: RunnerKind::Local,
-        server_id: None,
-        workspace_root: Some(cwd.clone()),
-        settings: server::RunnerSettings::default(),
-        env: HashMap::new(),
-        resources: HashMap::new(),
-        policy: server::RunnerPolicy::default(),
-    };
+    let runner = request
+        .runner
+        .map(|mut runner| {
+            if runner.id.is_empty() {
+                runner.id = request.runner_id.clone();
+            }
+            runner.kind = RunnerKind::Local;
+            runner.server_id = None;
+            runner.workspace_root = runner.workspace_root.or_else(|| Some(cwd.clone()));
+            runner
+        })
+        .unwrap_or_else(|| Runner {
+            id: request.runner_id,
+            kind: RunnerKind::Local,
+            server_id: None,
+            workspace_root: Some(cwd.clone()),
+            settings: server::RunnerSettings::default(),
+            env: HashMap::new(),
+            secret_env: HashMap::new(),
+            resources: HashMap::new(),
+            policy: server::RunnerPolicy::default(),
+        });
     validate_runner_process_cwd(&runner, &cwd)?;
     validate_required_paths(
         &runner,
@@ -816,7 +831,9 @@ pub(crate) fn prepare_daemon_local_process(
         request.validate_require_paths_on_host,
     )?;
 
-    let mut env = request.env;
+    let mut env = runner.env.clone();
+    env.extend(request.env);
+    env.extend(resolve_runner_secret_env(&runner.secret_env)?);
     normalize_runner_command_env(&mut env);
     let source_snapshot = request.source_snapshot.unwrap_or_else(|| {
         SourceSnapshot::collect_local(&runner.id, Path::new(&cwd), Some(&cwd), "existing_remote")
@@ -1127,7 +1144,7 @@ fn daemon_failure_message(status_code: u16, envelope: &DaemonEnvelope) -> String
 mod tests {
     use super::*;
     use crate::core::error::ErrorCode;
-    use crate::core::server::{self, RunnerPolicy, RunnerSettings};
+    use crate::core::server::{self, RunnerPolicy, RunnerSecretEnvRef, RunnerSettings};
 
     fn ssh_runner() -> Runner {
         Runner {
@@ -1140,6 +1157,7 @@ mod tests {
                 ..Default::default()
             },
             env: Default::default(),
+            secret_env: Default::default(),
             resources: Default::default(),
             policy: RunnerPolicy::default(),
         }
@@ -1226,6 +1244,83 @@ mod tests {
 
             assert_eq!(plan.runner.id, "lab");
             assert_eq!(plan.cwd, "/srv/homeboy/project");
+        });
+    }
+
+    #[test]
+    fn remote_daemon_secret_env_refs_resolve_only_on_runner_side() {
+        crate::test_support::with_isolated_home(|_| {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let workspace = temp.path().join("workspace");
+            std::fs::create_dir_all(&workspace).expect("workspace");
+            let secret_file = temp.path().join("runner-secret");
+            std::fs::write(&secret_file, "dummy-runner-secret\n").expect("secret file");
+            let missing_controller_file = temp.path().join("missing-controller-secret");
+
+            let mut controller_runner = ssh_runner();
+            controller_runner.workspace_root = Some(workspace.display().to_string());
+            controller_runner.secret_env.insert(
+                "OPENAI_API_KEY".to_string(),
+                RunnerSecretEnvRef {
+                    env: None,
+                    file: Some(missing_controller_file.display().to_string()),
+                },
+            );
+
+            let controller_plan = prepare_runner_process(RunnerProcessRequest {
+                runner_id: "lab".to_string(),
+                runner: Some(controller_runner),
+                cwd: Some(workspace.display().to_string()),
+                project_id: None,
+                command: vec!["true".to_string()],
+                env: Default::default(),
+                capture_patch: false,
+                raw_exec: false,
+                source_snapshot: Some(SourceSnapshot::existing_remote(
+                    "lab",
+                    &workspace.display().to_string(),
+                    Some(&workspace.display().to_string()),
+                )),
+                require_paths: Vec::new(),
+                validate_require_paths_on_host: false,
+            })
+            .expect("controller prep keeps secret refs unresolved for SSH runner");
+
+            assert!(!controller_plan.env.contains_key("OPENAI_API_KEY"));
+
+            let mut daemon_runner = ssh_runner();
+            daemon_runner.workspace_root = Some(workspace.display().to_string());
+            daemon_runner.secret_env.insert(
+                "OPENAI_API_KEY".to_string(),
+                RunnerSecretEnvRef {
+                    env: None,
+                    file: Some(secret_file.display().to_string()),
+                },
+            );
+
+            let daemon_plan = prepare_daemon_local_process(RunnerProcessRequest {
+                runner_id: "lab".to_string(),
+                runner: Some(daemon_runner),
+                cwd: Some(workspace.display().to_string()),
+                project_id: None,
+                command: vec!["true".to_string()],
+                env: Default::default(),
+                capture_patch: false,
+                raw_exec: false,
+                source_snapshot: Some(SourceSnapshot::existing_remote(
+                    "lab",
+                    &workspace.display().to_string(),
+                    Some(&workspace.display().to_string()),
+                )),
+                require_paths: Vec::new(),
+                validate_require_paths_on_host: true,
+            })
+            .expect("daemon prep resolves secret refs on runner side");
+
+            assert_eq!(
+                daemon_plan.env.get("OPENAI_API_KEY").map(String::as_str),
+                Some("dummy-runner-secret")
+            );
         });
     }
 

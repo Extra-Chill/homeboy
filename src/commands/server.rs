@@ -1,6 +1,7 @@
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
+use homeboy::core::redaction::RedactionPolicy;
 use homeboy::core::server::{self, Server, ServerSessionConfig, SshClient};
 use homeboy::core::{EntityCrudOutput, MergeOutput};
 
@@ -16,6 +17,8 @@ pub struct ServerExtra {
 }
 
 pub type ServerOutput = EntityCrudOutput<Server, ServerExtra>;
+
+const REDACTED_ENV_VALUE: &str = "[redacted]";
 
 #[derive(Debug, Serialize)]
 
@@ -144,7 +147,7 @@ enum KeyCommand {
 }
 
 pub fn run(args: ServerArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<ServerOutput> {
-    match args.command {
+    map_server_output(match args.command {
         ServerCommand::Create {
             json,
             skip_existing,
@@ -231,6 +234,42 @@ pub fn run(args: ServerArgs, _global: &crate::commands::GlobalArgs) -> CmdResult
         ServerCommand::Status { server_id } => session_status(&server_id),
         ServerCommand::Disconnect { server_id } => session_disconnect(&server_id),
         ServerCommand::Key(key_args) => run_key(key_args),
+    })
+}
+
+fn map_server_output(result: CmdResult<ServerOutput>) -> CmdResult<ServerOutput> {
+    result.map(|(mut output, exit_code)| {
+        redact_server_output_env(&mut output);
+        (output, exit_code)
+    })
+}
+
+fn redact_server_output_env(output: &mut ServerOutput) {
+    if let Some(server) = output.entity.as_mut() {
+        redact_server_env(server);
+    }
+    for server in &mut output.entities {
+        redact_server_env(server);
+    }
+}
+
+fn redact_server_env(server: &mut Server) {
+    let policy = RedactionPolicy::default();
+    for (key, value) in server.env.iter_mut() {
+        if policy.is_sensitive_key(key) {
+            *value = REDACTED_ENV_VALUE.to_string();
+        } else {
+            *value = policy.redact_string(value);
+        }
+    }
+    if let Some(runner) = server.runner.as_mut() {
+        for (key, value) in runner.env.iter_mut() {
+            if policy.is_sensitive_key(key) {
+                *value = REDACTED_ENV_VALUE.to_string();
+            } else {
+                *value = policy.redact_string(value);
+            }
+        }
     }
 }
 
@@ -502,4 +541,58 @@ fn key_import(server_id: &str, private_key_path: &str) -> CmdResult<ServerOutput
         },
         0,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use homeboy::core::server::{RunnerSecretEnvRef, ServerRunner};
+    use std::collections::HashMap;
+
+    #[test]
+    fn server_output_redacts_sensitive_env_but_keeps_public_runner_env_visible() {
+        let mut output = ServerOutput {
+            command: "server.show".to_string(),
+            entity: Some(Server {
+                id: "lab".to_string(),
+                aliases: Vec::new(),
+                host: "example.test".to_string(),
+                user: "runner".to_string(),
+                port: 22,
+                identity_file: None,
+                kind: None,
+                auth: None,
+                env: HashMap::from([("OPENAI_API_KEY".to_string(), "dummy-secret".to_string())]),
+                runner: Some(ServerRunner {
+                    env: HashMap::from([(
+                        "HOMEBOY_PUBLIC_ARTIFACT_BASE_URL".to_string(),
+                        "https://artifacts.example.test".to_string(),
+                    )]),
+                    secret_env: HashMap::from([(
+                        "OPENAI_API_KEY".to_string(),
+                        RunnerSecretEnvRef {
+                            env: Some("OPENAI_API_KEY".to_string()),
+                            file: None,
+                        },
+                    )]),
+                    ..Default::default()
+                }),
+            }),
+            ..Default::default()
+        };
+
+        redact_server_output_env(&mut output);
+        let value = serde_json::to_value(output).expect("serialize output");
+
+        assert_eq!(value["entity"]["env"]["OPENAI_API_KEY"], REDACTED_ENV_VALUE);
+        assert_eq!(
+            value["entity"]["runner"]["env"]["HOMEBOY_PUBLIC_ARTIFACT_BASE_URL"],
+            "https://artifacts.example.test"
+        );
+        assert_eq!(
+            value["entity"]["runner"]["secret_env"]["OPENAI_API_KEY"]["env"],
+            "OPENAI_API_KEY"
+        );
+        assert!(!value.to_string().contains("dummy-secret"));
+    }
 }

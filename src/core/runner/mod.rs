@@ -7,7 +7,7 @@ use crate::core::config::{self, ConfigEntity};
 use crate::core::defaults;
 use crate::core::error::{Error, Result};
 use crate::core::output::{BatchResult, CreateOutput, CreateResult, MergeOutput, MergeResult};
-use crate::core::server::{self, RunnerPolicy, RunnerSettings, ServerRunner};
+use crate::core::server::{self, RunnerPolicy, RunnerSecretEnvRef, RunnerSettings, ServerRunner};
 
 mod apply;
 mod broker_http;
@@ -111,6 +111,8 @@ pub struct Runner {
     pub settings: RunnerSettings,
     #[serde(default)]
     pub env: HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub secret_env: HashMap<String, RunnerSecretEnvRef>,
     #[serde(default)]
     pub resources: HashMap<String, Value>,
     #[serde(default, skip_serializing_if = "RunnerPolicy::is_empty")]
@@ -419,9 +421,74 @@ fn runner_from_server(server_id: &str, runner: ServerRunner) -> Runner {
         workspace_root: runner.workspace_root,
         settings: runner.settings,
         env: runner.env,
+        secret_env: runner.secret_env,
         resources: runner.resources,
         policy: runner.policy,
     }
+}
+
+pub(crate) fn resolve_runner_secret_env(
+    secret_env: &HashMap<String, RunnerSecretEnvRef>,
+) -> Result<HashMap<String, String>> {
+    let mut resolved = HashMap::new();
+    for (name, source) in secret_env {
+        let has_env = source
+            .env
+            .as_ref()
+            .is_some_and(|value| !value.trim().is_empty());
+        let has_file = source
+            .file
+            .as_ref()
+            .is_some_and(|value| !value.trim().is_empty());
+        match (has_env, has_file) {
+            (true, false) => {
+                let env_name = source.env.as_deref().unwrap_or_default();
+                let value = std::env::var(env_name).map_err(|err| {
+                    Error::validation_invalid_argument(
+                        "secret_env",
+                        format!("failed to read secret env ref for {name}: {err}"),
+                        Some(env_name.to_string()),
+                        Some(vec![
+                            "Set the referenced environment variable on the runner process."
+                                .to_string(),
+                        ]),
+                    )
+                })?;
+                resolved.insert(name.clone(), value);
+            }
+            (false, true) => {
+                let raw_path = source.file.as_deref().unwrap_or_default();
+                let path = shellexpand::tilde(raw_path).to_string();
+                let value = std::fs::read_to_string(&path).map_err(|err| {
+                    Error::internal_io(
+                        err.to_string(),
+                        Some(format!("read secret env file {path}")),
+                    )
+                })?;
+                resolved.insert(
+                    name.clone(),
+                    value.trim_end_matches(['\r', '\n']).to_string(),
+                );
+            }
+            (false, false) => {
+                return Err(Error::validation_invalid_argument(
+                    "secret_env",
+                    format!("secret env ref for {name} requires env or file"),
+                    Some(name.clone()),
+                    None,
+                ));
+            }
+            (true, true) => {
+                return Err(Error::validation_invalid_argument(
+                    "secret_env",
+                    format!("secret env ref for {name} must use env or file, not both"),
+                    Some(name.clone()),
+                    None,
+                ));
+            }
+        }
+    }
+    Ok(resolved)
 }
 
 fn merge_server_runner(
@@ -667,6 +734,7 @@ mod tests {
                 workspace_root: Some("/home/chubes/Developer".to_string()),
                 settings: RunnerSettings::default(),
                 env: HashMap::new(),
+                secret_env: HashMap::new(),
                 resources: HashMap::new(),
                 policy: RunnerPolicy::default(),
             };
@@ -682,6 +750,42 @@ mod tests {
             assert!(!exists("lab"));
             assert!(list().expect("list runners").is_empty());
         });
+    }
+
+    #[test]
+    fn runner_secret_env_refs_resolve_from_env_and_files() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let secret_file = temp.path().join("runner-token");
+        std::fs::write(&secret_file, "dummy-file-secret\n").expect("write dummy secret");
+        std::env::set_var("HOMEBOY_DUMMY_SECRET_REF", "dummy-env-secret");
+
+        let resolved = resolve_runner_secret_env(&HashMap::from([
+            (
+                "FROM_ENV".to_string(),
+                server::RunnerSecretEnvRef {
+                    env: Some("HOMEBOY_DUMMY_SECRET_REF".to_string()),
+                    file: None,
+                },
+            ),
+            (
+                "FROM_FILE".to_string(),
+                server::RunnerSecretEnvRef {
+                    env: None,
+                    file: Some(secret_file.display().to_string()),
+                },
+            ),
+        ]))
+        .expect("resolve secret refs");
+
+        assert_eq!(
+            resolved.get("FROM_ENV").map(String::as_str),
+            Some("dummy-env-secret")
+        );
+        assert_eq!(
+            resolved.get("FROM_FILE").map(String::as_str),
+            Some("dummy-file-secret")
+        );
+        std::env::remove_var("HOMEBOY_DUMMY_SECRET_REF");
     }
 
     #[test]

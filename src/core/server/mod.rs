@@ -69,6 +69,14 @@ pub struct RunnerSettings {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunnerSecretEnvRef {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RunnerPolicy {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub accepted_peer_ids: Vec<String>,
@@ -98,6 +106,8 @@ pub struct ServerRunner {
     pub settings: RunnerSettings,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub env: HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub secret_env: HashMap<String, RunnerSecretEnvRef>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub resources: HashMap<String, serde_json::Value>,
     #[serde(default, skip_serializing_if = "RunnerPolicy::is_empty")]
