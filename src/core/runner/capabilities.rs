@@ -550,6 +550,7 @@ mod tests {
                 ..Default::default()
             },
             env: Default::default(),
+            secret_env: Default::default(),
             resources: Default::default(),
             policy: RunnerPolicy::default(),
         }

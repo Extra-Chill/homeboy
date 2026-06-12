@@ -18,11 +18,11 @@ use super::capabilities::{
     runner_capability_snapshot_for_preflight, validate_runner_capability_preflight,
 };
 use super::evidence::{mirror_daemon_evidence, mirror_daemon_job_progress};
-use super::normalize_runner_command_env;
 use super::resource_metrics::{
     measured_command_output, measured_command_output_until_cancelled, RunnerResourceMetrics,
 };
 use super::{load, status, Runner, RunnerCapabilityPreflight, RunnerKind, RunnerTunnelMode};
+use super::{normalize_runner_command_env, resolve_runner_secret_env};
 
 const DEFAULT_RUNNER_EXEC_WAIT_TIMEOUT_SECS: u64 = 20 * 60;
 pub(crate) const RUNNER_EXEC_WAIT_TIMEOUT_ENV: &str = "HOMEBOY_RUNNER_EXEC_WAIT_TIMEOUT_SECS";
@@ -745,6 +745,7 @@ pub(crate) fn prepare_runner_process(request: RunnerProcessRequest) -> Result<Ru
 
     let mut env = runner.env.clone();
     env.extend(request.env);
+    env.extend(resolve_runner_secret_env(&runner.secret_env)?);
     normalize_runner_command_env(&mut env);
 
     let source_snapshot = request
@@ -799,16 +800,28 @@ pub(crate) fn prepare_daemon_local_process(
             ]),
         )
     })?;
-    let runner = Runner {
-        id: request.runner_id,
-        kind: RunnerKind::Local,
-        server_id: None,
-        workspace_root: Some(cwd.clone()),
-        settings: server::RunnerSettings::default(),
-        env: HashMap::new(),
-        resources: HashMap::new(),
-        policy: server::RunnerPolicy::default(),
-    };
+    let runner = request
+        .runner
+        .map(|mut runner| {
+            if runner.id.is_empty() {
+                runner.id = request.runner_id.clone();
+            }
+            runner.kind = RunnerKind::Local;
+            runner.server_id = None;
+            runner.workspace_root = runner.workspace_root.or_else(|| Some(cwd.clone()));
+            runner
+        })
+        .unwrap_or_else(|| Runner {
+            id: request.runner_id,
+            kind: RunnerKind::Local,
+            server_id: None,
+            workspace_root: Some(cwd.clone()),
+            settings: server::RunnerSettings::default(),
+            env: HashMap::new(),
+            secret_env: HashMap::new(),
+            resources: HashMap::new(),
+            policy: server::RunnerPolicy::default(),
+        });
     validate_runner_process_cwd(&runner, &cwd)?;
     validate_required_paths(
         &runner,
@@ -816,7 +829,9 @@ pub(crate) fn prepare_daemon_local_process(
         request.validate_require_paths_on_host,
     )?;
 
-    let mut env = request.env;
+    let mut env = runner.env.clone();
+    env.extend(request.env);
+    env.extend(resolve_runner_secret_env(&runner.secret_env)?);
     normalize_runner_command_env(&mut env);
     let source_snapshot = request.source_snapshot.unwrap_or_else(|| {
         SourceSnapshot::collect_local(&runner.id, Path::new(&cwd), Some(&cwd), "existing_remote")
@@ -1140,6 +1155,7 @@ mod tests {
                 ..Default::default()
             },
             env: Default::default(),
+            secret_env: Default::default(),
             resources: Default::default(),
             policy: RunnerPolicy::default(),
         }

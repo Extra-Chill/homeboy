@@ -8,6 +8,12 @@ homeboy runner <COMMAND>
 
 `runner` manages durable execution backends. SSH runners are a capability on a `homeboy server` record, so the common Lab flow uses one ID for the machine and its runner. Local runners remain standalone because they describe this machine rather than an SSH server.
 
+Runner configuration separates printable environment from secrets:
+
+- `env` is for non-secret values that are useful in diagnostics, such as `HOMEBOY_PUBLIC_ARTIFACT_BASE_URL`.
+- `secret_env` is for execution-time secret references like `{ "env": "NAME" }` or `{ "file": "~/.config/homeboy/secrets/name" }`.
+- Command output redacts sensitive names in `env` and prints only `secret_env` references, never resolved secret values.
+
 ## Subcommands
 
 ### `add`

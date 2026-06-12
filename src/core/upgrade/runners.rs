@@ -1156,6 +1156,7 @@ mod tests {
                 ..Default::default()
             },
             env: HashMap::new(),
+            secret_env: HashMap::new(),
             resources: HashMap::new(),
             policy: Default::default(),
         }

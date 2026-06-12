@@ -28,6 +28,7 @@ Server configuration defines SSH server connections stored in `servers/<id>.json
       "snapshot_excludes": ["string"]
     },
     "env": {},
+    "secret_env": {},
     "resources": {}
   },
   "forward_agent": boolean
@@ -78,6 +79,7 @@ Server configuration defines SSH server connections stored in `servers/<id>.json
       "snapshot_excludes": ["generated-state", "generated-state/**"]
     },
     "env": {},
+    "secret_env": {},
     "resources": {}
   },
   "forward_agent": true
@@ -87,6 +89,35 @@ Server configuration defines SSH server connections stored in `servers/<id>.json
 ## Runner Capability
 
 Use `homeboy runner enable <server_id>` to make an SSH server runner-capable. The server ID is also the runner ID, matching the common runner-machine model: one machine, one server, one runner-capable server.
+
+### Runner Environment
+
+Use `runner.env` for non-secret values that are safe to show in diagnostics, such as public artifact URLs:
+
+```json
+{
+  "runner": {
+    "env": {
+      "HOMEBOY_PUBLIC_ARTIFACT_BASE_URL": "https://artifacts.example.test"
+    }
+  }
+}
+```
+
+Use `runner.secret_env` for values that must be read at execution time instead of stored in plaintext config. Each key is the environment variable exposed to the runner process. The value references either an environment variable visible to the Homeboy process on the runner or a file on the runner machine:
+
+```json
+{
+  "runner": {
+    "secret_env": {
+      "OPENAI_API_KEY": { "env": "OPENAI_API_KEY" },
+      "SERVICE_TOKEN": { "file": "~/.config/homeboy/secrets/service-token" }
+    }
+  }
+}
+```
+
+Homeboy command output redacts sensitive names in `env` and keeps `secret_env` as references only. Secret file contents and referenced environment variable values are not printed by runner config/status diagnostics.
 
 ## Managed SSH Sessions
 

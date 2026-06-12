@@ -4,6 +4,7 @@ use clap::{Args, Subcommand, ValueEnum};
 use serde::Serialize;
 use serde_json::Value;
 
+use homeboy::core::redaction::RedactionPolicy;
 use homeboy::core::runner::{
     self, ReverseRunnerConnectOptions, ReverseRunnerWorkerOptions, ReverseRunnerWorkerOutput,
     Runner, RunnerConnectReport, RunnerDisconnectReport, RunnerExecOutput, RunnerKind,
@@ -532,8 +533,13 @@ fn redact_runner_output_env(output: &mut RunnerOutput) {
 }
 
 fn redact_runner_env(runner: &mut Runner) {
-    for value in runner.env.values_mut() {
-        *value = REDACTED_ENV_VALUE.to_string();
+    let policy = RedactionPolicy::default();
+    for (key, value) in runner.env.iter_mut() {
+        if policy.is_sensitive_key(key) {
+            *value = REDACTED_ENV_VALUE.to_string();
+        } else {
+            *value = policy.redact_string(value);
+        }
     }
 }
 
@@ -589,6 +595,7 @@ fn add(input: RunnerAddInput) -> CmdResult<RunnerOutput> {
             workspace_root: input.workspace_root,
             settings: input.settings,
             env: HashMap::new(),
+            secret_env: HashMap::new(),
             resources: HashMap::<String, Value>::new(),
             policy: RunnerPolicy::default(),
         };
@@ -897,8 +904,12 @@ mod tests {
             settings: RunnerSettings::default(),
             env: HashMap::from([
                 ("OPENCODE_API_KEY".to_string(), "secret-token".to_string()),
-                ("PATH".to_string(), "/secret/bin".to_string()),
+                (
+                    "HOMEBOY_PUBLIC_ARTIFACT_BASE_URL".to_string(),
+                    "https://artifacts.example.test".to_string(),
+                ),
             ]),
+            secret_env: HashMap::new(),
             resources: HashMap::new(),
             policy: RunnerPolicy::default(),
         }
@@ -922,9 +933,11 @@ mod tests {
             value["entity"]["env"]["OPENCODE_API_KEY"],
             REDACTED_ENV_VALUE
         );
-        assert_eq!(value["entity"]["env"]["PATH"], REDACTED_ENV_VALUE);
+        assert_eq!(
+            value["entity"]["env"]["HOMEBOY_PUBLIC_ARTIFACT_BASE_URL"],
+            "https://artifacts.example.test"
+        );
         assert!(!value.to_string().contains("secret-token"));
-        assert!(!value.to_string().contains("/secret/bin"));
     }
 
     #[test]
@@ -944,9 +957,11 @@ mod tests {
             value["entities"][0]["env"]["OPENCODE_API_KEY"],
             REDACTED_ENV_VALUE
         );
-        assert_eq!(value["entities"][0]["env"]["PATH"], REDACTED_ENV_VALUE);
+        assert_eq!(
+            value["entities"][0]["env"]["HOMEBOY_PUBLIC_ARTIFACT_BASE_URL"],
+            "https://artifacts.example.test"
+        );
         assert!(!value.to_string().contains("secret-token"));
-        assert!(!value.to_string().contains("/secret/bin"));
     }
 
     #[test]
