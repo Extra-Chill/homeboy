@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 
 use crate::core::engine::local_files;
@@ -24,6 +25,9 @@ pub struct HomeboyConfig {
     #[serde(default)]
     pub triage: TriageConfig,
 
+    #[serde(default)]
+    pub agent_task: AgentTaskConfig,
+
     /// Directory where persisted run artifacts are copied.
     ///
     /// Defaults to the machine-local product data directory under
@@ -45,6 +49,7 @@ impl Default for HomeboyConfig {
             bench: BenchConfig::default(),
             lab: LabConfig::default(),
             triage: TriageConfig::default(),
+            agent_task: AgentTaskConfig::default(),
             artifact_root: None,
             update_check: true,
         }
@@ -98,6 +103,32 @@ pub struct LabConfig {
 pub struct TriageConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority_labels: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskConfig {
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub secrets: HashMap<String, AgentTaskSecretSource>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskSecretSource {
+    #[serde(default = "default_agent_task_secret_source")]
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_var: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+}
+
+fn default_agent_task_secret_source() -> String {
+    "env".to_string()
 }
 
 /// All configurable defaults that can be overridden via the product config file.
@@ -334,6 +365,27 @@ mod tests {
         .unwrap();
 
         assert_eq!(config.lab.preferred_runner.as_deref(), Some("homeboy-lab"));
+    }
+
+    #[test]
+    fn homeboy_config_parses_agent_task_config_secret() {
+        let config: HomeboyConfig = serde_json::from_str(
+            r#"{
+                "agent_task": {
+                    "secrets": {
+                        "TOKEN": {
+                            "source": "config",
+                            "value": "redacted-test-token"
+                        }
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let secret = config.agent_task.secrets.get("TOKEN").unwrap();
+        assert_eq!(secret.source, "config");
+        assert_eq!(secret.value.as_deref(), Some("redacted-test-token"));
     }
 
     #[test]

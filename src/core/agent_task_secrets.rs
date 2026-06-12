@@ -3,6 +3,7 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 
+use crate::core::defaults::{self, AgentTaskSecretSource};
 use crate::core::keychain;
 use crate::core::paths;
 use crate::core::Error;
@@ -45,6 +46,27 @@ pub fn map_secret_to_env(
             scope: None,
             name: None,
             field: None,
+            value: None,
+        },
+    );
+    config.save()?;
+    Ok(secret_env_status_with_config(&[name.to_string()], &config)
+        .into_iter()
+        .next()
+        .expect("single status"))
+}
+
+pub fn set_config_secret(name: &str, value: &str) -> crate::core::Result<AgentTaskSecretEnvStatus> {
+    let mut config = AgentTaskSecretConfig::load();
+    config.secrets.insert(
+        name.to_string(),
+        AgentTaskSecretSource {
+            source: "config".to_string(),
+            env_var: None,
+            scope: None,
+            name: None,
+            field: None,
+            value: Some(value.to_string()),
         },
     );
     config.save()?;
@@ -73,6 +95,7 @@ pub fn set_keychain_secret(
             scope: Some(scope.to_string()),
             name: Some(keychain_name.to_string()),
             field: None,
+            value: None,
         },
     );
     config.save()?;
@@ -118,6 +141,7 @@ pub fn map_secret_to_keychain_bundle(
             scope: Some(scope.unwrap_or("agent-task").to_string()),
             name: Some(keychain_name.unwrap_or(bundle).to_string()),
             field: Some(field.to_string()),
+            value: None,
         },
     );
     config.save()?;
@@ -234,6 +258,13 @@ struct AgentTaskSecretConfig {
 
 impl AgentTaskSecretConfig {
     fn load() -> Self {
+        let config = defaults::load_config();
+        if !config.agent_task.secrets.is_empty() {
+            return Self {
+                secrets: config.agent_task.secrets,
+            };
+        }
+
         let Ok(path) = Self::path() else {
             return Self::default();
         };
@@ -248,46 +279,11 @@ impl AgentTaskSecretConfig {
     }
 
     fn save(&self) -> crate::core::Result<()> {
-        let path = Self::path()?;
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|error| {
-                Error::internal_io(
-                    error.to_string(),
-                    Some(format!(
-                        "create agent-task secret config dir {}",
-                        parent.display()
-                    )),
-                )
-            })?;
-        }
-        let raw = serde_json::to_string_pretty(self).map_err(|error| {
-            Error::internal_json(
-                error.to_string(),
-                Some("serialize agent-task secret config".to_string()),
-            )
-        })?;
-        fs::write(&path, format!("{raw}\n")).map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some(format!("write agent-task secret config {}", path.display())),
-            )
-        })?;
+        let mut config = defaults::load_config();
+        config.agent_task.secrets = self.secrets.clone();
+        defaults::save_config(&config)?;
         Ok(())
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-struct AgentTaskSecretSource {
-    #[serde(default = "default_source")]
-    source: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    env_var: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    scope: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    field: Option<String>,
 }
 
 impl AgentTaskSecretSource {
@@ -297,6 +293,7 @@ impl AgentTaskSecretSource {
         bundle_cache: &mut HashMap<String, Option<Value>>,
     ) -> Option<String> {
         match self.source.as_str() {
+            "config" => self.value.clone(),
             "env" => env::var(self.env_var.as_deref().unwrap_or(requested_name)).ok(),
             "keychain" => keychain::get(
                 self.scope.as_deref().unwrap_or("agent-task"),
@@ -342,10 +339,6 @@ fn bundle_field_value(bundle: &Value, field: &str) -> Option<String> {
         Value::Number(number) => Some(number.to_string()),
         _ => None,
     }
-}
-
-fn default_source() -> String {
-    "env".to_string()
 }
 
 #[cfg(test)]
@@ -415,6 +408,7 @@ mod tests {
                 scope: None,
                 name: None,
                 field: None,
+                value: None,
             },
         );
         let config = AgentTaskSecretConfig { secrets };
@@ -428,6 +422,28 @@ mod tests {
             vec![(configured_name, "configured-secret-value".to_string())]
         );
         std::env::remove_var(source_name);
+    }
+
+    #[test]
+    fn stores_and_resolves_declared_secret_from_global_config() {
+        crate::test_support::with_isolated_home(|_| {
+            let configured_name = unique_env("CONFIG_SECRET");
+            std::env::remove_var(&configured_name);
+
+            let status = set_config_secret(&configured_name, "stored-secret-value")
+                .expect("secret config saved");
+
+            assert_eq!(status.name, configured_name);
+            assert!(status.configured);
+            assert_eq!(status.source, "config");
+
+            let resolved = resolve_secret_env(std::slice::from_ref(&status.name))
+                .expect("config secret resolves");
+            assert_eq!(
+                resolved,
+                vec![(status.name, "stored-secret-value".to_string())]
+            );
+        });
     }
 
     #[test]
@@ -480,6 +496,7 @@ mod tests {
             scope: Some("agent-task".to_string()),
             name: Some("provider-oauth".to_string()),
             field: Some("tokens.access".to_string()),
+            value: None,
         };
         let mut cache = HashMap::new();
         cache.insert(
