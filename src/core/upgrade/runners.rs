@@ -219,13 +219,18 @@ fn upgrade_runner_with_executor(
     let new_version = runner_homeboy_version(runner, &homeboy_path, exec)
         .ok()
         .flatten();
-    let (extensions_synced, extensions_skipped, extensions_failed) =
+    let (extensions_synced, mut extensions_skipped, mut extensions_failed) =
         sync_runner_extensions(runner, &homeboy_path, extension_updates, exec);
     let bare_homeboy_version = runner_bare_homeboy_version(runner, &homeboy_path, exec);
     let path_drift = runner_path_drift(
         &homeboy_path,
         new_version.as_deref(),
         bare_homeboy_version.as_deref(),
+    );
+    defer_extension_failures_for_path_drift(
+        path_drift.as_deref(),
+        &mut extensions_skipped,
+        &mut extensions_failed,
     );
     let recovery_commands =
         runner_recovery_commands(&runner.id, &homeboy_path, path_drift.as_ref());
@@ -376,6 +381,30 @@ fn runner_supports_extension_sync(runner: &Runner, extension_id: &str) -> bool {
             .supported_extensions
             .iter()
             .any(|supported| supported == extension_id)
+}
+
+fn defer_extension_failures_for_path_drift(
+    path_drift: Option<&str>,
+    skipped: &mut Vec<RunnerExtensionSyncEntry>,
+    failed: &mut Vec<RunnerExtensionSyncEntry>,
+) {
+    let Some(path_drift) = path_drift else {
+        return;
+    };
+    if failed.is_empty() {
+        return;
+    }
+
+    skipped.extend(failed.drain(..).map(|mut entry| {
+        let original_detail = entry
+            .detail
+            .take()
+            .unwrap_or_else(|| "no failure detail".to_string());
+        entry.detail = Some(format!(
+            "deferred because runner executable drift was detected after binary refresh: {path_drift}; original failure: {original_detail}"
+        ));
+        entry
+    }));
 }
 
 fn runner_upgrade_command(
@@ -1135,6 +1164,78 @@ mod tests {
         assert!(commands
             .iter()
             .any(|command| command.contains(&"wordpress".to_string())));
+    }
+
+    #[test]
+    fn defers_extension_failures_when_runner_refresh_leaves_path_drift() {
+        let runner = ssh_runner("lab", Some("/home/chubes/.cargo/bin/homeboy"));
+        let extension_updates = vec![
+            extension_update("auxiliary-extension", "98a61eda"),
+            extension_update("required-extension", "48517ac3"),
+        ];
+        let mut commands = Vec::new();
+
+        let (updated, skipped) = upgrade_runners_with_executor(
+            &[runner],
+            true,
+            None,
+            None,
+            &extension_updates,
+            |runner_id, options| {
+                commands.push(options.command.clone());
+                let (stdout, stderr, exit_code) = match commands.len() {
+                    1 => ("homeboy 0.228.18\n", "", 0),
+                    2 => (
+                        "{\"success\":true,\"message\":\"Upgrade command completed but active binary is still 0.228.18\"}\n",
+                        "",
+                        0,
+                    ),
+                    3 => ("homeboy 0.228.18\n", "", 0),
+                    4 => ("{\"success\":true}\n", "", 0),
+                    5 => ("", "extension setup failed", 1),
+                    6 => ("{\"success\":true}\n", "", 0),
+                    7 => ("{\"success\":true}\n", "", 0),
+                    8 => ("homeboy 0.228.13\n", "", 0),
+                    _ => ("", "unexpected runner command", 1),
+                };
+                Ok((
+                    exec_output(runner_id, options.command, stdout, stderr, exit_code),
+                    exit_code,
+                ))
+            },
+            runner_status,
+        );
+
+        assert!(skipped.is_empty());
+        assert_eq!(updated.len(), 1);
+        assert!(updated[0].success);
+        assert!(!updated[0].upgraded);
+        assert_eq!(updated[0].previous_version.as_deref(), Some("0.228.18"));
+        assert_eq!(updated[0].new_version.as_deref(), Some("0.228.18"));
+        assert!(updated[0].path_drift.is_some());
+        assert!(updated[0].extensions_failed.is_empty());
+        assert_eq!(updated[0].extensions_synced.len(), 1);
+        assert_eq!(
+            updated[0].extensions_synced[0].extension_id,
+            "required-extension"
+        );
+        assert_eq!(updated[0].extensions_skipped.len(), 1);
+        assert_eq!(
+            updated[0].extensions_skipped[0].extension_id,
+            "auxiliary-extension"
+        );
+        let skipped_detail = updated[0].extensions_skipped[0].detail.as_deref().unwrap();
+        assert!(skipped_detail.contains("deferred because runner executable drift"));
+        assert!(skipped_detail.contains("extension setup failed"));
+        assert!(updated[0]
+            .detail
+            .contains("runner extension sync(s) skipped"));
+        assert!(!updated[0]
+            .detail
+            .contains("runner extension sync(s) failed"));
+        assert!(commands
+            .iter()
+            .any(|command| command.contains(&"required-extension".to_string())));
     }
 
     #[test]
