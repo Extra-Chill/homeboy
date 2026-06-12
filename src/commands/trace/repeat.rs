@@ -7,15 +7,19 @@ use super::aggregate::{
     aggregate_metric, aggregate_span, TraceAggregateMetricSample, TraceAggregateSpanSample,
 };
 use super::{
-    attach_span_metadata, classification_summaries, cli_span_definitions_for_args,
-    execute_trace_run, plan_trace_run_order, resolved_profile_output_for_args,
-    run_trace_guardrails_for_args, trace_scenario, TraceArgs,
+    apply_resolved_trace_secret_env, attach_span_metadata, classification_summaries,
+    cli_span_definitions_for_args, execute_trace_run, plan_trace_run_order,
+    resolve_trace_secret_env_once, resolved_profile_output_for_args, run_trace_guardrails_for_args,
+    trace_scenario, trace_secret_env_project_id_for_args, TraceArgs,
 };
 use crate::commands::CmdResult;
 
 pub(super) fn run_repeat(args: TraceArgs) -> CmdResult<TraceCommandOutput> {
     let repeat = args.repeat;
     let scenario_id = trace_scenario(&args)?.to_string();
+    let project_id = trace_secret_env_project_id_for_args(&args)?;
+    let resolved_trace_secret_env =
+        resolve_trace_secret_env_once(&args.secret_env, Some(&project_id))?;
     let mut runs = Vec::new();
     let mut overlays = Vec::new();
     let mut span_samples: BTreeMap<String, Vec<TraceAggregateSpanSample>> = BTreeMap::new();
@@ -36,6 +40,7 @@ pub(super) fn run_repeat(args: TraceArgs) -> CmdResult<TraceCommandOutput> {
         let index = plan_entry.index();
         let mut run_args = args.clone();
         run_args.repeat = 1;
+        apply_resolved_trace_secret_env(&mut run_args, resolved_trace_secret_env.as_ref());
         match execute_trace_run(run_args) {
             Ok(execution) => {
                 if rig_state.is_none() {

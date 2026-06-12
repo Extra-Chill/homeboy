@@ -12,9 +12,10 @@ use super::aggregate::{
 use super::matrix::{aggregate_to_compare_input, write_json_artifact};
 use super::output::compare_trace_aggregates_with_focus;
 use super::{
-    attach_span_metadata, classification_summaries, cli_span_definitions_for_args,
-    load_rig_context, plan_trace_run_order, resolve_component_id, rig_component_for_trace,
-    run_trace_guardrails_for_args, trace_span_metadata_for_args, TraceArgs,
+    apply_resolved_trace_secret_env, attach_span_metadata, classification_summaries,
+    cli_span_definitions_for_args, load_rig_context, plan_trace_run_order, resolve_component_id,
+    resolve_trace_secret_env_once, rig_component_for_trace, run_trace_guardrails_for_args,
+    trace_span_metadata_for_args, ResolvedTraceSecretEnv, TraceArgs,
 };
 use crate::commands::utils::args::PositionalComponentArgs;
 use crate::commands::CmdResult;
@@ -186,6 +187,8 @@ fn run_target_proof_matrix(
 ) -> homeboy::core::Result<TargetProofMatrix> {
     let repeat = args.repeat.max(1);
     let plan = plan_trace_run_order(repeat, args.schedule, &["baseline", "candidate"]);
+    let resolved_trace_secret_env =
+        resolve_trace_secret_env_once(&args.secret_env, Some(component_id))?;
     let span_metadata = trace_span_metadata_for_args(args)?;
     let declared_spans = cli_span_definitions_for_args(args)?;
     let mut baseline = TargetAggregateBuilder::new(
@@ -210,7 +213,13 @@ fn run_target_proof_matrix(
         } else {
             (candidate_target, &mut candidate)
         };
-        let run = execute_target_once(args, component_id, scenario_id, target);
+        let run = execute_target_once(
+            args,
+            component_id,
+            scenario_id,
+            target,
+            resolved_trace_secret_env.as_ref(),
+        );
         let proof_entry = builder.record(entry.index(), run);
         proof_run_order.push(extension_trace::TraceCompareRunOrderOutput {
             index: proof_entry.index,
@@ -235,6 +244,7 @@ fn execute_target_once(
     component_id: &str,
     scenario_id: &str,
     target: &ResolvedCompareTarget,
+    resolved_trace_secret_env: Option<&ResolvedTraceSecretEnv>,
 ) -> Result<super::TraceRunExecution, homeboy::core::Error> {
     let mut run_args = args.clone();
     run_args.comp.component = Some(component_id.to_string());
@@ -247,6 +257,7 @@ fn execute_target_once(
     run_args.aggregate = None;
     run_args.output_dir = None;
     run_args.checkout_provenance = target.checkout_provenance.clone();
+    apply_resolved_trace_secret_env(&mut run_args, resolved_trace_secret_env);
     super::execute_trace_run(run_args)
 }
 
