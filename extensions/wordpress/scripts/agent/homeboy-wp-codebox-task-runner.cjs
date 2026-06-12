@@ -173,6 +173,46 @@ function executable(filePath) {
   }
 }
 
+function configuredBinaryDiagnostic(filePath) {
+  if (!filePath || !path.isAbsolute(filePath)) {
+    return null;
+  }
+  if (!fs.existsSync(filePath)) {
+    return {
+      class: 'wp-codebox.config.invalid_binary',
+      message: `Configured WP Codebox binary does not exist: ${filePath}`,
+      data: { phase: 'codebox.config', wp_codebox_bin: filePath, reason: 'missing' },
+    };
+  }
+  const extension = path.extname(filePath);
+  if (['.js', '.cjs', '.mjs'].includes(extension) || executable(filePath)) {
+    return null;
+  }
+  return {
+    class: 'wp-codebox.config.invalid_binary',
+    message: `Configured WP Codebox binary is not executable: ${filePath}`,
+    data: { phase: 'codebox.config', wp_codebox_bin: filePath, reason: 'not_executable' },
+  };
+}
+
+function configuredBinaryFailurePayload(input, artifacts, diagnostic) {
+  return {
+    success: false,
+    schema: 'wp-codebox/agent-task-run/v1',
+    status: 'failed',
+    failure_classification: 'execution_failed',
+    summary: diagnostic.message,
+    artifacts,
+    task_input: input,
+    diagnostics: [diagnostic],
+    metadata: {
+      phase: 'codebox.config',
+      wp_codebox_bin: diagnostic.data.wp_codebox_bin,
+      reason: diagnostic.data.reason,
+    },
+  };
+}
+
 function resolveCommand(command, args) {
   if ((path.extname(command) === '.js' || path.extname(command) === '.cjs' || path.extname(command) === '.mjs') && !executable(command)) {
     return { command: process.execPath, args: [command, ...args] };
@@ -1208,8 +1248,14 @@ function runWpCodeboxParentTask(request) {
   }
 
   const input = runnerInput(request, artifacts);
-  const inputPath = writeJsonFile('homeboy-wp-codebox-agent-task-input-', stableTaskInput(input));
   const wpCodeboxBin = input.wp_codebox_bin || process.env.HOMEBOY_WP_CODEBOX_BIN || 'wp-codebox';
+  const binaryDiagnostic = configuredBinaryDiagnostic(wpCodeboxBin);
+  if (binaryDiagnostic) {
+    process.stdout.write(`${JSON.stringify(configuredBinaryFailurePayload(input, artifacts, binaryDiagnostic), null, 2)}\n`);
+    return 1;
+  }
+
+  const inputPath = writeJsonFile('homeboy-wp-codebox-agent-task-input-', stableTaskInput(input));
   const args = ['agent-task-run', `--input-file=${inputPath}`, '--json'];
   const previewHold = argValue('--preview-hold');
   if (previewHold) {

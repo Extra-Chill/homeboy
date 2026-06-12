@@ -1519,6 +1519,57 @@ try {
   assert.equal(failedWpCodeboxOutcome.artifacts.some((artifact) => artifact.kind === 'codebox-agent-task-input'), true);
   assert.equal(failedWpCodeboxOutcome.evidence_refs.some((ref) => ref.kind === 'codebox-command-evidence'), true);
   assert.equal(failedWpCodeboxOutcome.diagnostics.some((diagnostic) => diagnostic.class === 'wp-codebox.command.evidence_preserved'), true);
+  const failedCommandEvidence = JSON.parse(fs.readFileSync(failedWpCodeboxOutcome.artifacts.find((artifact) => artifact.kind === 'codebox-command-evidence').path, 'utf8'));
+  assert.equal(failedCommandEvidence.command, failedFakeWpCodebox);
+
+  const settingsWpCodeboxRoot = fs.mkdtempSync(path.join(root, 'settings-wp-codebox-'));
+  const { fixture: settingsFakeWpCodebox } = writeFakeWpCodebox(settingsWpCodeboxRoot);
+  const settingsWpCodeboxResult = spawnSync(process.execPath, [
+    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs'),
+  ], {
+    encoding: 'utf8',
+    env: fixtureEnv({
+      FIXTURE_WP_CODEBOX_AGENT_TASK_FAILURE: '1',
+      HOMEBOY_SETTINGS_JSON: JSON.stringify({ wp_codebox_bin: settingsFakeWpCodebox }),
+    }),
+    input: JSON.stringify({
+      ...request,
+      task_id: 'settings-wp-codebox-task-123',
+      executor: {
+        backend: 'codebox',
+        config: {
+          homeboy_extensions: path.join(__dirname, '..'),
+        },
+      },
+    }),
+  });
+  assert.equal(settingsWpCodeboxResult.status, 1, settingsWpCodeboxResult.stderr || settingsWpCodeboxResult.stdout);
+  const settingsWpCodeboxOutcome = JSON.parse(settingsWpCodeboxResult.stdout);
+  const settingsCommandEvidence = JSON.parse(fs.readFileSync(settingsWpCodeboxOutcome.artifacts.find((artifact) => artifact.kind === 'codebox-command-evidence').path, 'utf8'));
+  assert.equal(settingsCommandEvidence.command, settingsFakeWpCodebox);
+
+  const missingConfiguredBinary = path.join(root, 'missing-wp-codebox.cjs');
+  const missingConfiguredBinaryResult = spawnSync(process.execPath, [
+    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs'),
+  ], {
+    encoding: 'utf8',
+    env: fixtureEnv({ HOMEBOY_SETTINGS_JSON: JSON.stringify({ wp_codebox_bin: missingConfiguredBinary }) }),
+    input: JSON.stringify({
+      ...request,
+      task_id: 'missing-configured-wp-codebox-task-123',
+      executor: {
+        backend: 'codebox',
+        config: {
+          homeboy_extensions: path.join(__dirname, '..'),
+        },
+      },
+    }),
+  });
+  assert.equal(missingConfiguredBinaryResult.status, 1, missingConfiguredBinaryResult.stderr || missingConfiguredBinaryResult.stdout);
+  const missingConfiguredBinaryOutcome = JSON.parse(missingConfiguredBinaryResult.stdout);
+  assert.equal(missingConfiguredBinaryOutcome.status, 'failed');
+  assert.equal(missingConfiguredBinaryOutcome.diagnostics[0].class, 'wp-codebox.config.invalid_binary');
+  assert.equal(missingConfiguredBinaryOutcome.diagnostics[0].data.wp_codebox_bin, missingConfiguredBinary);
 
   const emptyJsonWpCodeboxResult = spawnSync(process.execPath, [
     path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs'),
