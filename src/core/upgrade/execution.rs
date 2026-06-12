@@ -127,11 +127,11 @@ pub(crate) fn resolve_source_workspace(source_path: Option<&Path>) -> Result<Pat
 
     Err(Error::validation_invalid_argument(
         "source_path",
-        "Could not find a Homeboy git checkout for source build",
+        "Could not find a Homeboy source workspace for source build",
         id,
         None,
     )
-    .with_hint("Run from the Homeboy source checkout, or pass: homeboy upgrade --method source --source-path <PATH>"))
+    .with_hint("Run from the Homeboy source workspace, or pass: homeboy upgrade --method source --source-path <PATH>"))
 }
 
 fn workspace_from_exe_path(exe_path: &Path) -> Option<PathBuf> {
@@ -150,22 +150,37 @@ fn workspace_from_exe_path(exe_path: &Path) -> Option<PathBuf> {
 }
 
 fn is_homeboy_source_checkout(path: &Path) -> bool {
-    let git_dir = path.join(".git");
-    if !git_dir.exists() {
-        return false;
-    }
-
     let manifest = path.join("homeboy.json");
     let Ok(contents) = std::fs::read_to_string(manifest) else {
         return false;
     };
 
-    serde_json::from_str::<serde_json::Value>(&contents)
+    let is_homeboy_manifest = serde_json::from_str::<serde_json::Value>(&contents)
         .ok()
         .and_then(|value| {
             value
                 .get("id")
                 .and_then(|id| id.as_str())
+                .map(str::to_string)
+        })
+        .as_deref()
+        == Some("homeboy");
+
+    is_homeboy_manifest && is_homeboy_cargo_package(path)
+}
+
+fn is_homeboy_cargo_package(path: &Path) -> bool {
+    let Ok(contents) = std::fs::read_to_string(path.join("Cargo.toml")) else {
+        return false;
+    };
+
+    toml::from_str::<toml::Value>(&contents)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("package")
+                .and_then(|package| package.get("name"))
+                .and_then(|name| name.as_str())
                 .map(str::to_string)
         })
         .as_deref()
@@ -277,11 +292,20 @@ mod tests {
 
         let err = resolve_source_workspace(Some(dir.path())).expect_err("invalid checkout");
 
-        assert!(err.message.contains("Homeboy git checkout"));
+        assert!(err.message.contains("Homeboy source workspace"));
         assert!(err
             .hints
             .iter()
             .any(|hint| hint.message.contains("--source-path")));
+    }
+
+    #[test]
+    fn source_workspace_accepts_snapshot_without_git_metadata() {
+        let dir = source_workspace_with_package_name("homeboy");
+
+        let resolved = resolve_source_workspace(Some(dir.path())).expect("source snapshot");
+
+        assert_eq!(resolved, dir.path());
     }
 
     #[test]
@@ -341,8 +365,23 @@ mod tests {
     fn checkout_with_package_name(package_name: &str) -> tempfile::TempDir {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::create_dir(dir.path().join(".git")).expect("git dir");
-        let manifest = serde_json::json!({ "id": package_name });
-        std::fs::write(dir.path().join("homeboy.json"), manifest.to_string()).expect("manifest");
+        write_source_workspace_files(dir.path(), package_name);
         dir
+    }
+
+    fn source_workspace_with_package_name(package_name: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_source_workspace_files(dir.path(), package_name);
+        dir
+    }
+
+    fn write_source_workspace_files(path: &Path, package_name: &str) {
+        let manifest = serde_json::json!({ "id": package_name });
+        std::fs::write(path.join("homeboy.json"), manifest.to_string()).expect("manifest");
+        std::fs::write(
+            path.join("Cargo.toml"),
+            format!("[package]\nname = \"{package_name}\"\nversion = \"0.0.0\"\n"),
+        )
+        .expect("cargo manifest");
     }
 }

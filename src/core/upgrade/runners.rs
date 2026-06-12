@@ -2,7 +2,7 @@ use regex::Regex;
 
 use crate::core::runner::{
     self, Runner, RunnerCapabilityPreflight, RunnerExecOptions, RunnerKind, RunnerRequiredTool,
-    RunnerStatusReport,
+    RunnerStatusReport, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
 };
 use crate::core::upgrade::ExtensionUpgradeEntry;
 use crate::core::Result;
@@ -63,6 +63,28 @@ fn upgrade_runners_with_executor(
     mut exec: impl FnMut(&str, RunnerExecOptions) -> Result<(runner::RunnerExecOutput, i32)>,
     status: impl Fn(&str) -> Result<RunnerStatusReport>,
 ) -> (Vec<RunnerUpgradeEntry>, Vec<RunnerUpgradeEntry>) {
+    upgrade_runners_with_executor_and_source_materializer(
+        runners,
+        force,
+        method_override,
+        source_path,
+        extension_updates,
+        &mut exec,
+        status,
+        materialize_runner_source_path,
+    )
+}
+
+fn upgrade_runners_with_executor_and_source_materializer(
+    runners: &[Runner],
+    force: bool,
+    method_override: Option<InstallMethod>,
+    source_path: Option<&Path>,
+    extension_updates: &[ExtensionUpgradeEntry],
+    mut exec: impl FnMut(&str, RunnerExecOptions) -> Result<(runner::RunnerExecOutput, i32)>,
+    status: impl Fn(&str) -> Result<RunnerStatusReport>,
+    mut materialize_source_path: impl FnMut(&Runner, &Path) -> Result<String>,
+) -> (Vec<RunnerUpgradeEntry>, Vec<RunnerUpgradeEntry>) {
     let mut updated = Vec::new();
     let mut skipped = Vec::new();
 
@@ -75,6 +97,7 @@ fn upgrade_runners_with_executor(
             extension_updates,
             &mut exec,
             &status,
+            &mut materialize_source_path,
         );
         if entry.success {
             crate::log_status!(
@@ -101,6 +124,7 @@ fn upgrade_runner_with_executor(
     extension_updates: &[ExtensionUpgradeEntry],
     exec: &mut impl FnMut(&str, RunnerExecOptions) -> Result<(runner::RunnerExecOutput, i32)>,
     status: &impl Fn(&str) -> Result<RunnerStatusReport>,
+    materialize_source_path: &mut impl FnMut(&Runner, &Path) -> Result<String>,
 ) -> RunnerUpgradeEntry {
     let homeboy_path = runner
         .settings
@@ -110,11 +134,42 @@ fn upgrade_runner_with_executor(
     let previous_version = runner_homeboy_version(runner, &homeboy_path, exec)
         .ok()
         .flatten();
+    let command_source_path = match runner_upgrade_source_path(
+        runner,
+        method_override,
+        source_path,
+        materialize_source_path,
+    ) {
+        Ok(path) => path,
+        Err(err) => {
+            return RunnerUpgradeEntry {
+                runner_id: runner.id.clone(),
+                homeboy_path,
+                success: false,
+                upgraded: false,
+                previous_version,
+                new_version: None,
+                bare_homeboy_version: None,
+                path_drift: None,
+                recovery_commands: runner_upgrade_recovery_commands(&runner.id),
+                extensions_synced: Vec::new(),
+                extensions_failed: Vec::new(),
+                stale_daemon: None,
+                exit_code: 1,
+                detail: err.message,
+            };
+        }
+    };
     let upgrade = exec(
         &runner.id,
         runner_exec_options(
             runner,
-            runner_upgrade_command(&homeboy_path, force, method_override, source_path),
+            runner_upgrade_command(
+                &homeboy_path,
+                force,
+                method_override,
+                command_source_path.as_deref(),
+            ),
         ),
     );
 
@@ -298,7 +353,7 @@ fn runner_upgrade_command(
     homeboy_path: &str,
     force: bool,
     method_override: Option<InstallMethod>,
-    source_path: Option<&Path>,
+    source_path: Option<&str>,
 ) -> Vec<String> {
     let mut command = vec![
         homeboy_path.to_string(),
@@ -318,10 +373,43 @@ fn runner_upgrade_command(
 
     if let Some(path) = source_path {
         command.push("--source-path".to_string());
-        command.push(path.display().to_string());
+        command.push(path.to_string());
     }
 
     command
+}
+
+fn runner_upgrade_source_path(
+    runner: &Runner,
+    method_override: Option<InstallMethod>,
+    source_path: Option<&Path>,
+    materialize_source_path: &mut impl FnMut(&Runner, &Path) -> Result<String>,
+) -> Result<Option<String>> {
+    let Some(source_path) = source_path else {
+        return Ok(None);
+    };
+
+    if method_override == Some(InstallMethod::Source) && runner.kind == RunnerKind::Ssh {
+        return materialize_source_path(runner, source_path).map(Some);
+    }
+
+    Ok(Some(source_path.display().to_string()))
+}
+
+fn materialize_runner_source_path(runner: &Runner, source_path: &Path) -> Result<String> {
+    let (output, _) = runner::sync_workspace(
+        &runner.id,
+        RunnerWorkspaceSyncOptions {
+            path: source_path.display().to_string(),
+            mode: RunnerWorkspaceSyncMode::Git,
+            controller_routed_git: true,
+            changed_since_base: None,
+            git_fetch_refs: Vec::new(),
+            snapshot_includes: Vec::new(),
+        },
+    )?;
+
+    Ok(output.remote_path)
 }
 
 fn runner_extension_exists(
@@ -660,14 +748,15 @@ mod tests {
     }
 
     #[test]
-    fn forwards_forced_source_upgrade_options_to_runner() {
+    fn materializes_forced_source_upgrade_path_before_forwarding_to_runner() {
         let runner = ssh_runner("lab", Some("/home/chubes/.cargo/bin/homeboy"));
         let source_path = Path::new(
             "/Users/chubes/Developer/homeboy@fix-bench-selected-duplicate-validation-1266",
         );
         let mut commands = Vec::new();
+        let mut materialized = Vec::new();
 
-        let (updated, skipped) = upgrade_runners_with_executor(
+        let (updated, skipped) = upgrade_runners_with_executor_and_source_materializer(
             &[runner],
             true,
             Some(InstallMethod::Source),
@@ -685,12 +774,24 @@ mod tests {
                 Ok((exec_output(runner_id, options.command, stdout, "", 0), 0))
             },
             runner_status,
+            |runner, path| {
+                materialized.push((runner.id.clone(), path.display().to_string()));
+                Ok("/home/chubes/Developer/_lab_workspaces/homeboy-source".to_string())
+            },
         );
 
         assert!(skipped.is_empty());
         assert_eq!(updated.len(), 1);
         assert!(updated[0].success);
         assert!(!updated[0].upgraded);
+        assert_eq!(
+            materialized,
+            vec![(
+                "lab".to_string(),
+                "/Users/chubes/Developer/homeboy@fix-bench-selected-duplicate-validation-1266"
+                    .to_string()
+            )]
+        );
         assert_eq!(
             commands[1],
             vec![
@@ -702,7 +803,7 @@ mod tests {
                 "--method",
                 "source",
                 "--source-path",
-                "/Users/chubes/Developer/homeboy@fix-bench-selected-duplicate-validation-1266",
+                "/home/chubes/Developer/_lab_workspaces/homeboy-source",
             ]
         );
     }

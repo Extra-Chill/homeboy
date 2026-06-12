@@ -597,6 +597,7 @@ fn run_lab_offload_inner(
         RunnerWorkspaceSyncOptions {
             path: source_path.display().to_string(),
             mode: sync_mode,
+            controller_routed_git: false,
             changed_since_base: changed_since_preflight.resolved_base.clone(),
             git_fetch_refs: lab_offload_git_fetch_refs(
                 &changed_since_preflight.args,
@@ -1056,6 +1057,7 @@ fn sync_inline_agent_task_plan(
         RunnerWorkspaceSyncOptions {
             path: temp.path().display().to_string(),
             mode: RunnerWorkspaceSyncMode::Snapshot,
+            controller_routed_git: false,
             changed_since_base: None,
             git_fetch_refs: Vec::new(),
             snapshot_includes: Vec::new(),

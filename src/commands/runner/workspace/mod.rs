@@ -81,6 +81,7 @@ fn sync(
         runner::RunnerWorkspaceSyncOptions {
             path,
             mode: RunnerWorkspaceSyncMode::from(mode),
+            controller_routed_git: false,
             changed_since_base: None,
             git_fetch_refs: Vec::new(),
             snapshot_includes: Vec::new(),
