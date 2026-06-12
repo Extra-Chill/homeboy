@@ -779,7 +779,9 @@ fn run_lab_offload_inner(
     let rig_component_path_env = forward_rig_component_path_env(&mut env, &workspace_mapping)?;
     let agent_task_secret_env =
         hydrate_agent_task_secret_env(&changed_since_preflight.args, &mut env)?;
+    let trace_secret_env = hydrate_trace_secret_env(&changed_since_preflight.args, &mut env)?;
     lab_metadata["agent_task_secret_env"] = agent_task_secret_env;
+    lab_metadata["trace_secret_env"] = trace_secret_env;
     lab_metadata["rig_component_path_env"] = rig_component_path_env;
     lab_metadata["settings_env"] = settings_env_diagnostics(&changed_since_preflight.args, &env);
     lab_metadata["rig_sync"] = serde_json::json!({
@@ -795,6 +797,7 @@ fn run_lab_offload_inner(
     forward_release_ci_env(&mut env);
     forward_rig_component_path_env(&mut env, &workspace_mapping)?;
     hydrate_agent_task_secret_env(&changed_since_preflight.args, &mut env)?;
+    hydrate_trace_secret_env(&changed_since_preflight.args, &mut env)?;
     let exec_result = exec(
         runner_id,
         RunnerExecOptions {
@@ -1320,7 +1323,30 @@ fn hydrate_agent_task_secret_env(
     }))
 }
 
+fn hydrate_trace_secret_env(
+    args: &[String],
+    env: &mut std::collections::HashMap<String, String>,
+) -> Result<serde_json::Value> {
+    let names = declared_trace_secret_env(args);
+    if names.is_empty() {
+        return Ok(crate::core::trace_secrets::empty_status());
+    }
+
+    let project_id = trace_project_id_from_args(args);
+    let (resolved, statuses) =
+        crate::core::trace_secrets::resolve_secret_env(&names, project_id.as_deref())?;
+    for (name, value) in resolved {
+        env.insert(name, value);
+    }
+
+    Ok(crate::core::trace_secrets::status_metadata(statuses))
+}
+
 fn declared_agent_task_secret_env(args: &[String]) -> Vec<String> {
+    if args.get(1).map(String::as_str) != Some("agent-task") {
+        return Vec::new();
+    }
+
     let mut names = Vec::new();
     let mut index = 0;
     while index < args.len() {
@@ -1348,6 +1374,62 @@ fn declared_agent_task_secret_env(args: &[String]) -> Vec<String> {
         index += 1;
     }
     names.extend(declared_agent_task_run_plan_secret_env(args));
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn declared_trace_secret_env(args: &[String]) -> Vec<String> {
+    if args.get(1).map(String::as_str) != Some("trace") {
+        return Vec::new();
+    }
+
+    declared_secret_env_args(args)
+}
+
+fn trace_project_id_from_args(args: &[String]) -> Option<String> {
+    if args.get(1).map(String::as_str) != Some("trace") {
+        return None;
+    }
+
+    for index in 2..args.len() {
+        let arg = &args[index];
+        if let Some(component) = arg.strip_prefix("--component=") {
+            return non_empty_arg(component);
+        }
+        if arg == "--component" {
+            return args.get(index + 1).and_then(|value| non_empty_arg(value));
+        }
+    }
+
+    match args.get(2).map(String::as_str) {
+        Some("compare") => args.get(3).and_then(|value| non_empty_arg(value)),
+        Some(command) if !command.starts_with('-') => Some(command.to_string()),
+        _ => None,
+    }
+}
+
+fn non_empty_arg(value: &str) -> Option<String> {
+    (!value.trim().is_empty() && !value.starts_with('-')).then(|| value.to_string())
+}
+
+fn declared_secret_env_args(args: &[String]) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--secret-env" {
+            if let Some(name) = args.get(index + 1) {
+                names.push(name.clone());
+            }
+            index += 2;
+            continue;
+        }
+        if let Some(name) = arg.strip_prefix("--secret-env=") {
+            names.push(name.to_string());
+        }
+        index += 1;
+    }
     names.sort();
     names.dedup();
     names
@@ -2058,6 +2140,97 @@ mod tests {
                 "HOMEBOY_TEST_REFRESH_TOKEN".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn declared_agent_task_secret_env_ignores_trace_secret_env() {
+        let names = declared_agent_task_secret_env(&[
+            "homeboy".to_string(),
+            "trace".to_string(),
+            "compare".to_string(),
+            "woocommerce-gateway-stripe".to_string(),
+            "real-wallet".to_string(),
+            "--secret-env=STRIPE_SECRET_KEY".to_string(),
+        ]);
+
+        assert!(names.is_empty());
+    }
+
+    #[test]
+    fn declared_trace_secret_env_parses_repeated_and_equals_args() {
+        let names = declared_trace_secret_env(&[
+            "homeboy".to_string(),
+            "trace".to_string(),
+            "compare".to_string(),
+            "woocommerce-gateway-stripe".to_string(),
+            "real-wallet".to_string(),
+            "--secret-env".to_string(),
+            "STRIPE_PUBLISHABLE_KEY".to_string(),
+            "--secret-env=STRIPE_SECRET_KEY".to_string(),
+            "--secret-env".to_string(),
+            "STRIPE_SECRET_KEY".to_string(),
+        ]);
+
+        assert_eq!(
+            names,
+            vec![
+                "STRIPE_PUBLISHABLE_KEY".to_string(),
+                "STRIPE_SECRET_KEY".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn trace_project_id_from_args_reads_compare_and_component_forms() {
+        assert_eq!(
+            trace_project_id_from_args(&[
+                "homeboy".to_string(),
+                "trace".to_string(),
+                "compare".to_string(),
+                "woocommerce-gateway-stripe".to_string(),
+                "real-wallet".to_string(),
+            ]),
+            Some("woocommerce-gateway-stripe".to_string())
+        );
+        assert_eq!(
+            trace_project_id_from_args(&[
+                "homeboy".to_string(),
+                "trace".to_string(),
+                "compare-variant".to_string(),
+                "--component".to_string(),
+                "woocommerce-gateway-stripe".to_string(),
+                "--scenario".to_string(),
+                "real-wallet".to_string(),
+            ]),
+            Some("woocommerce-gateway-stripe".to_string())
+        );
+    }
+
+    #[test]
+    fn hydrate_trace_secret_env_reports_redacted_status_without_values() {
+        let args = vec![
+            "homeboy".to_string(),
+            "trace".to_string(),
+            "compare".to_string(),
+            "woocommerce-gateway-stripe".to_string(),
+            "real-wallet".to_string(),
+            "--secret-env=HOMEBOY_TRACE_SECRET_TEST_KEY".to_string(),
+        ];
+        let mut env = std::collections::HashMap::new();
+        std::env::set_var("HOMEBOY_TRACE_SECRET_TEST_KEY", "sk_test_fake_not_real");
+
+        let diagnostics = hydrate_trace_secret_env(&args, &mut env).expect("hydrate trace secret");
+
+        assert_eq!(
+            env.get("HOMEBOY_TRACE_SECRET_TEST_KEY").map(String::as_str),
+            Some("sk_test_fake_not_real")
+        );
+        let rendered = diagnostics.to_string();
+        assert!(rendered.contains("HOMEBOY_TRACE_SECRET_TEST_KEY"));
+        assert!(rendered.contains("env"));
+        assert!(!rendered.contains("sk_test_fake_not_real"));
+
+        std::env::remove_var("HOMEBOY_TRACE_SECRET_TEST_KEY");
     }
 
     #[test]

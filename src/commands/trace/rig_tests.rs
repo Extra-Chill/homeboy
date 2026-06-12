@@ -41,6 +41,7 @@ fn trace_args_for_rig(rig_id: &str, component_id: &str, scenario_id: &str) -> Tr
         profile: None,
         profiles: false,
         setting_args: SettingArgs::default(),
+        secret_env: Vec::new(),
         json_summary: false,
         report: None,
         experiment: None,
