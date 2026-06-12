@@ -297,6 +297,58 @@ impl ObservationStore {
         Ok(())
     }
 
+    pub fn upsert_imported_run(&self, run: &RunRecord) -> Result<()> {
+        validate_required("run.id", &run.id)?;
+        let metadata_json = serialize_metadata(&run.metadata_json)?;
+        self.connection
+            .execute(
+                r#"
+                INSERT INTO runs(
+                    id,
+                    kind,
+                    component_id,
+                    started_at,
+                    finished_at,
+                    status,
+                    command,
+                    cwd,
+                    homeboy_version,
+                    git_sha,
+                    rig_id,
+                    metadata_json
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                ON CONFLICT(id) DO UPDATE SET
+                    kind = excluded.kind,
+                    component_id = excluded.component_id,
+                    started_at = excluded.started_at,
+                    finished_at = excluded.finished_at,
+                    status = excluded.status,
+                    command = excluded.command,
+                    cwd = excluded.cwd,
+                    homeboy_version = excluded.homeboy_version,
+                    git_sha = excluded.git_sha,
+                    rig_id = excluded.rig_id,
+                    metadata_json = excluded.metadata_json
+                "#,
+                params![
+                    run.id,
+                    run.kind,
+                    run.component_id,
+                    run.started_at,
+                    run.finished_at,
+                    run.status,
+                    run.command,
+                    run.cwd,
+                    run.homeboy_version,
+                    run.git_sha,
+                    run.rig_id,
+                    metadata_json,
+                ],
+            )
+            .map_err(sqlite_error("upsert imported run record"))?;
+        Ok(())
+    }
+
     pub fn import_artifact(&self, artifact: &ArtifactRecord) -> Result<()> {
         validate_required("artifact.id", &artifact.id)?;
         if self.get_run(&artifact.run_id)?.is_none() {

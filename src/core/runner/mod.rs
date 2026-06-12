@@ -56,7 +56,8 @@ pub(crate) use evidence::artifact_store_locator_from_runner_artifact_id;
 pub use evidence::runner_artifact_store_token;
 pub use evidence::{
     download_remote_artifact, is_remote_runner_artifact_path, is_reportable_artifact_evidence_path,
-    is_retrievable_runner_artifact, reportable_artifact_evidence_path, RemoteArtifactDownload,
+    is_retrievable_runner_artifact, mirrored_runner_job_identity, refresh_mirrored_daemon_evidence,
+    reportable_artifact_evidence_path, RemoteArtifactDownload,
 };
 pub(crate) use execution::{
     daemon_api_get, execute_runner_process_until_cancelled, prepare_daemon_local_process,

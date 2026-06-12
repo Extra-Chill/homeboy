@@ -437,6 +437,8 @@ pub fn list_runs(args: RunsListArgs, command: &'static str) -> CmdResult<RunsOut
 fn show_run(run_id: &str) -> CmdResult<RunsOutput> {
     let store = ObservationStore::open_initialized()?;
     reconcile::reconcile_owned_stale_running_runs(&store, 1000)?;
+    require_run(&store, run_id)?;
+    homeboy::core::runner::refresh_mirrored_daemon_evidence(run_id)?;
     let run = require_run(&store, run_id)?;
     Ok((
         RunsOutput::Show(RunsShowOutput {
@@ -449,18 +451,53 @@ fn show_run(run_id: &str) -> CmdResult<RunsOutput> {
 
 pub fn artifacts(run_id: &str) -> CmdResult<RunsOutput> {
     let store = ObservationStore::open_initialized()?;
-    require_run(&store, run_id)?;
+    let run = require_run(&store, run_id)?;
+    homeboy::core::runner::refresh_mirrored_daemon_evidence(run_id)?;
     homeboy::core::publication_artifacts::index_remote_published_artifact_refs_for_run(
         &store, run_id,
     )?;
+    let mut artifacts = store.list_artifacts(run_id)?;
+    artifacts.extend(related_lab_artifacts_for_runner_job(&store, &run)?);
     Ok((
         RunsOutput::Artifacts(RunsArtifactsOutput {
             command: "runs.artifacts",
             run_id: run_id.to_string(),
-            artifacts: enrich_artifact_links(store.list_artifacts(run_id)?),
+            artifacts: enrich_artifact_links(artifacts),
         }),
         0,
     ))
+}
+
+fn related_lab_artifacts_for_runner_job(
+    store: &ObservationStore,
+    run: &RunRecord,
+) -> homeboy::core::Result<Vec<ArtifactRecord>> {
+    let Some((_runner_id, job_id)) = homeboy::core::runner::mirrored_runner_job_identity(run)
+    else {
+        return Ok(Vec::new());
+    };
+    let mut artifacts = Vec::new();
+    for candidate in store.list_runs(RunListFilter {
+        kind: None,
+        component_id: None,
+        status: None,
+        rig_id: None,
+        limit: Some(1000),
+    })? {
+        if candidate.id == run.id {
+            continue;
+        }
+        if candidate
+            .metadata_json
+            .pointer("/lab/remote_job_id")
+            .and_then(Value::as_str)
+            != Some(job_id.as_str())
+        {
+            continue;
+        }
+        artifacts.extend(store.list_artifacts(&candidate.id)?);
+    }
+    Ok(artifacts)
 }
 
 fn artifact_command(args: RunsArtifactArgs) -> CmdResult<RunsOutput> {
@@ -930,6 +967,64 @@ mod tests {
                 output.artifacts[0].url.as_deref(),
                 Some("https://example.test/")
             );
+        });
+    }
+
+    #[test]
+    fn runner_job_artifact_listing_includes_related_lab_run_artifacts() {
+        with_isolated_home(|home| {
+            let _xdg = XdgGuard::unset();
+            let store = ObservationStore::open_initialized().expect("store");
+            let job_id = "job-123";
+            let runner_run = RunRecord {
+                id: "runner-exec-lab-job-123".to_string(),
+                kind: "runner-exec".to_string(),
+                component_id: None,
+                started_at: "2026-06-12T00:00:00Z".to_string(),
+                finished_at: None,
+                status: "running".to_string(),
+                command: Some("homeboy bench".to_string()),
+                cwd: Some("/srv/homeboy/project".to_string()),
+                homeboy_version: None,
+                git_sha: None,
+                rig_id: None,
+                metadata_json: serde_json::json!({
+                    "lab": {
+                        "runner": { "id": "lab" },
+                        "remote_job": { "id": job_id }
+                    }
+                }),
+            };
+            store.upsert_imported_run(&runner_run).expect("runner run");
+            let remote_run = RunRecord {
+                id: "bench-run-1".to_string(),
+                kind: "bench".to_string(),
+                component_id: Some("homeboy".to_string()),
+                started_at: "2026-06-12T00:00:01Z".to_string(),
+                finished_at: Some("2026-06-12T00:10:00Z".to_string()),
+                status: "pass".to_string(),
+                command: Some("homeboy bench".to_string()),
+                cwd: Some("/srv/homeboy/project".to_string()),
+                homeboy_version: None,
+                git_sha: None,
+                rig_id: None,
+                metadata_json: serde_json::json!({
+                    "lab": { "remote_job_id": job_id }
+                }),
+            };
+            store.upsert_imported_run(&remote_run).expect("remote run");
+            let summary = home.path().join("homeboy-summary.json");
+            std::fs::write(&summary, br#"{"passed":true}"#).expect("summary");
+            let artifact = store
+                .record_artifact(&remote_run.id, "homeboy_summary", &summary)
+                .expect("artifact");
+
+            let artifacts = related_lab_artifacts_for_runner_job(&store, &runner_run)
+                .expect("related artifacts");
+
+            assert_eq!(artifacts.len(), 1);
+            assert_eq!(artifacts[0].id, artifact.id);
+            assert_eq!(artifacts[0].run_id, remote_run.id);
         });
     }
 
