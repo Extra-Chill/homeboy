@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::path::PathBuf;
@@ -81,6 +82,65 @@ pub struct ServiceTunnelPolicy {
     pub allowed_clients: Vec<String>,
     #[serde(default)]
     pub preview: ServiceTunnelPreviewPolicy,
+    #[serde(
+        default,
+        skip_serializing_if = "ServiceTunnelNativePreviewAuthPolicy::is_default"
+    )]
+    pub native_preview_auth: ServiceTunnelNativePreviewAuthPolicy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ServiceTunnelNativePreviewAuthPolicy {
+    #[serde(default = "default_true")]
+    pub require_client_token: bool,
+    #[serde(default = "default_preview_session_ttl_secs")]
+    pub default_session_ttl_secs: u64,
+    #[serde(default = "default_preview_session_max_ttl_secs")]
+    pub max_session_ttl_secs: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_public_hosts: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_session_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tokens: Vec<ServiceTunnelNativePreviewToken>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ServiceTunnelNativePreviewToken {
+    pub id: String,
+    pub token_sha256: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_clients: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_public_hosts: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_session_ids: Vec<String>,
+    #[serde(default)]
+    pub revoked: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceTunnelNativePreviewClaimRequest {
+    pub client_id: String,
+    pub token: String,
+    pub public_host: String,
+    pub session_id: String,
+    pub local_origin: String,
+    pub requested_ttl_secs: Option<u64>,
+    pub now: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ServiceTunnelNativePreviewClaim {
+    pub service_id: String,
+    pub client_id: String,
+    pub token_id: String,
+    pub public_host: String,
+    pub session_id: String,
+    pub local_origin: String,
+    pub expires_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -325,6 +385,53 @@ fn default_true() -> bool {
 
 fn default_exposure() -> ServiceTunnelExposure {
     ServiceTunnelExposure::PrivateLoopback
+}
+
+fn default_preview_session_ttl_secs() -> u64 {
+    15 * 60
+}
+
+fn default_preview_session_max_ttl_secs() -> u64 {
+    60 * 60
+}
+
+impl Default for ServiceTunnelNativePreviewAuthPolicy {
+    fn default() -> Self {
+        Self {
+            require_client_token: true,
+            default_session_ttl_secs: default_preview_session_ttl_secs(),
+            max_session_ttl_secs: default_preview_session_max_ttl_secs(),
+            allowed_public_hosts: Vec::new(),
+            allowed_session_ids: Vec::new(),
+            tokens: Vec::new(),
+        }
+    }
+}
+
+impl ServiceTunnelNativePreviewAuthPolicy {
+    fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
+pub fn native_preview_token_sha256(token: &str) -> String {
+    let digest = Sha256::digest(token.as_bytes());
+    format!("{digest:x}")
+}
+
+pub fn native_preview_token_record(
+    id: impl Into<String>,
+    token: &str,
+) -> ServiceTunnelNativePreviewToken {
+    ServiceTunnelNativePreviewToken {
+        id: id.into(),
+        token_sha256: native_preview_token_sha256(token),
+        allowed_clients: Vec::new(),
+        allowed_public_hosts: Vec::new(),
+        allowed_session_ids: Vec::new(),
+        revoked: false,
+        expires_at: None,
+    }
 }
 
 impl ConfigEntity for ServiceTunnel {
@@ -616,6 +723,194 @@ pub(super) fn preview_artifact_for(
     })
 }
 
+pub fn validate_native_preview_claim(
+    tunnel: &ServiceTunnel,
+    request: ServiceTunnelNativePreviewClaimRequest,
+) -> Result<ServiceTunnelNativePreviewClaim> {
+    let policy = &tunnel.policy.native_preview_auth;
+    if !policy.require_client_token {
+        return Err(preview_auth_error(
+            "auth",
+            "native preview ingress requires client token authentication",
+            Some(tunnel.id.clone()),
+            Some(vec!["set require_client_token=true".to_string()]),
+        ));
+    }
+    if request.client_id.trim().is_empty() {
+        return Err(preview_auth_error(
+            "client_id",
+            "preview client id is required",
+            Some(tunnel.id.clone()),
+            None,
+        ));
+    }
+    if request.token.trim().is_empty() {
+        return Err(preview_auth_error(
+            "token",
+            "preview client token is required",
+            Some(tunnel.id.clone()),
+            None,
+        ));
+    }
+    if request.public_host.trim().is_empty() {
+        return Err(preview_auth_error(
+            "public_host",
+            "preview public host claim is required",
+            Some(tunnel.id.clone()),
+            None,
+        ));
+    }
+    if request.session_id.trim().is_empty() {
+        return Err(preview_auth_error(
+            "session_id",
+            "preview session id claim is required",
+            Some(tunnel.id.clone()),
+            None,
+        ));
+    }
+    validate_native_preview_local_origin(&request.local_origin, &tunnel.id)?;
+
+    let token_hash = native_preview_token_sha256(&request.token);
+    let Some(token) = policy
+        .tokens
+        .iter()
+        .find(|candidate| candidate.token_sha256 == token_hash)
+    else {
+        return Err(preview_auth_error(
+            "token",
+            "preview client token is not recognized",
+            Some(tunnel.id.clone()),
+            None,
+        ));
+    };
+
+    if token.revoked {
+        return Err(preview_auth_error(
+            "token",
+            "preview client token is revoked",
+            Some(token.id.clone()),
+            None,
+        ));
+    }
+    if let Some(expires_at) = token.expires_at.as_deref().and_then(parse_rfc3339_utc) {
+        if request.now > expires_at {
+            return Err(preview_auth_error(
+                "token",
+                "preview client token is expired",
+                Some(token.id.clone()),
+                None,
+            ));
+        }
+    }
+    if !string_claim_allowed(&request.client_id, &token.allowed_clients) {
+        return Err(preview_auth_error(
+            "client_id",
+            "preview client is not authorized for this token",
+            Some(request.client_id),
+            Some(token.allowed_clients.clone()),
+        ));
+    }
+    if !host_claim_allowed(&request.public_host, &policy.allowed_public_hosts)
+        || !host_claim_allowed(&request.public_host, &token.allowed_public_hosts)
+    {
+        return Err(preview_auth_error(
+            "public_host",
+            "preview token is not authorized to claim this public host",
+            Some(request.public_host),
+            policy_host_suggestions(policy, token),
+        ));
+    }
+    if !string_claim_allowed(&request.session_id, &policy.allowed_session_ids)
+        || !string_claim_allowed(&request.session_id, &token.allowed_session_ids)
+    {
+        return Err(preview_auth_error(
+            "session_id",
+            "preview token is not authorized to claim this session id",
+            Some(request.session_id),
+            policy_session_suggestions(policy, token),
+        ));
+    }
+
+    let ttl_secs = request
+        .requested_ttl_secs
+        .unwrap_or(policy.default_session_ttl_secs)
+        .min(policy.max_session_ttl_secs);
+    let expires_at = request.now + chrono::Duration::seconds(ttl_secs as i64);
+
+    Ok(ServiceTunnelNativePreviewClaim {
+        service_id: tunnel.id.clone(),
+        client_id: request.client_id,
+        token_id: token.id.clone(),
+        public_host: request.public_host,
+        session_id: request.session_id,
+        local_origin: request.local_origin,
+        expires_at: expires_at.to_rfc3339(),
+    })
+}
+
+fn preview_auth_error(
+    field: &str,
+    message: impl Into<String>,
+    value: Option<String>,
+    suggestions: Option<Vec<String>>,
+) -> Error {
+    Error::validation_invalid_argument(field, message, value, suggestions)
+}
+
+fn validate_native_preview_local_origin(local_origin: &str, id: &str) -> Result<()> {
+    let Some(rest) = local_origin.strip_prefix("http://") else {
+        return Err(preview_auth_error(
+            "local_origin",
+            "preview local origin must use http:// loopback",
+            Some(id.to_string()),
+            Some(vec!["http://127.0.0.1:<port>".to_string()]),
+        ));
+    };
+    let host = rest.split(['/', ':']).next().unwrap_or_default();
+    validate_loopback_host(host, id)
+}
+
+fn string_claim_allowed(value: &str, allowed: &[String]) -> bool {
+    allowed.is_empty() || allowed.iter().any(|candidate| candidate == value)
+}
+
+fn host_claim_allowed(value: &str, allowed: &[String]) -> bool {
+    allowed.is_empty()
+        || allowed
+            .iter()
+            .any(|candidate| candidate == value || glob_match::glob_match(candidate, value))
+}
+
+fn policy_host_suggestions(
+    policy: &ServiceTunnelNativePreviewAuthPolicy,
+    token: &ServiceTunnelNativePreviewToken,
+) -> Option<Vec<String>> {
+    suggestions_from_scopes(&policy.allowed_public_hosts, &token.allowed_public_hosts)
+}
+
+fn policy_session_suggestions(
+    policy: &ServiceTunnelNativePreviewAuthPolicy,
+    token: &ServiceTunnelNativePreviewToken,
+) -> Option<Vec<String>> {
+    suggestions_from_scopes(&policy.allowed_session_ids, &token.allowed_session_ids)
+}
+
+fn suggestions_from_scopes(
+    policy_values: &[String],
+    token_values: &[String],
+) -> Option<Vec<String>> {
+    let mut suggestions = Vec::new();
+    suggestions.extend(policy_values.iter().cloned());
+    suggestions.extend(token_values.iter().cloned());
+    if suggestions.is_empty() {
+        None
+    } else {
+        suggestions.sort();
+        suggestions.dedup();
+        Some(suggestions)
+    }
+}
+
 fn preview_artifact_for_status(
     tunnel: &ServiceTunnel,
     state: &ServiceTunnelRuntimeState,
@@ -743,6 +1038,65 @@ fn validate_service_tunnel(tunnel: &ServiceTunnel) -> Result<()> {
                 "policy.preview.keep_alive_until",
                 "preview expiry must be a valid RFC3339 timestamp",
                 Some(tunnel.id.clone()),
+                None,
+            ));
+        }
+    }
+    validate_native_preview_auth_policy(&tunnel.policy.native_preview_auth, &tunnel.id)?;
+    Ok(())
+}
+
+fn validate_native_preview_auth_policy(
+    policy: &ServiceTunnelNativePreviewAuthPolicy,
+    id: &str,
+) -> Result<()> {
+    if policy.default_session_ttl_secs == 0 || policy.max_session_ttl_secs == 0 {
+        return Err(Error::validation_invalid_argument(
+            "policy.native_preview_auth.ttl",
+            "native preview session TTLs must be greater than zero",
+            Some(id.to_string()),
+            None,
+        ));
+    }
+    if policy.default_session_ttl_secs > policy.max_session_ttl_secs {
+        return Err(Error::validation_invalid_argument(
+            "policy.native_preview_auth.default_session_ttl_secs",
+            "default native preview session TTL cannot exceed max_session_ttl_secs",
+            Some(id.to_string()),
+            None,
+        ));
+    }
+    for token in &policy.tokens {
+        if token.id.trim().is_empty() {
+            return Err(Error::validation_invalid_argument(
+                "policy.native_preview_auth.tokens.id",
+                "native preview token id is required",
+                Some(id.to_string()),
+                None,
+            ));
+        }
+        if token.token_sha256.len() != 64
+            || !token
+                .token_sha256
+                .chars()
+                .all(|character| character.is_ascii_hexdigit())
+        {
+            return Err(Error::validation_invalid_argument(
+                "policy.native_preview_auth.tokens.token_sha256",
+                "native preview tokens store a SHA-256 digest, not plaintext token material",
+                Some(token.id.clone()),
+                None,
+            ));
+        }
+        if token
+            .expires_at
+            .as_deref()
+            .is_some_and(|expires_at| parse_rfc3339_utc(expires_at).is_none())
+        {
+            return Err(Error::validation_invalid_argument(
+                "policy.native_preview_auth.tokens.expires_at",
+                "native preview token expiry must be a valid RFC3339 timestamp",
+                Some(token.id.clone()),
                 None,
             ));
         }

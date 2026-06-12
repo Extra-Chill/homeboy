@@ -44,6 +44,7 @@ fn expose_records_private_loopback_declaration_without_running_tunnel() {
                 require_auth: true,
                 allowed_clients: vec!["app-runtime".to_string()],
                 preview: ServiceTunnelPreviewPolicy::default(),
+                native_preview_auth: ServiceTunnelNativePreviewAuthPolicy::default(),
             },
             description: Some("Private preview service".to_string()),
         })
@@ -80,6 +81,7 @@ fn validation_rejects_auth_mode_without_env_var() {
                 require_auth: true,
                 allowed_clients: Vec::new(),
                 preview: ServiceTunnelPreviewPolicy::default(),
+                native_preview_auth: ServiceTunnelNativePreviewAuthPolicy::default(),
             },
             description: None,
         })
@@ -116,6 +118,7 @@ fn start_status_and_stop_manage_local_service_runtime_state() {
                     mode: ServiceTunnelPreviewPolicyMode::Always,
                     keep_alive_until: None,
                 },
+                native_preview_auth: ServiceTunnelNativePreviewAuthPolicy::default(),
             },
             description: None,
         })
@@ -190,6 +193,7 @@ fn start_cleans_runtime_state_when_readiness_fails() {
                 require_auth: true,
                 allowed_clients: Vec::new(),
                 preview: ServiceTunnelPreviewPolicy::default(),
+                native_preview_auth: ServiceTunnelNativePreviewAuthPolicy::default(),
             },
             description: None,
         })
@@ -246,6 +250,7 @@ fn command_backend_records_public_url_and_cleans_up_backend_process() {
                 require_auth: true,
                 allowed_clients: Vec::new(),
                 preview: ServiceTunnelPreviewPolicy::default(),
+                native_preview_auth: ServiceTunnelNativePreviewAuthPolicy::default(),
             },
             description: None,
         })
@@ -367,6 +372,133 @@ fn preview_policy_decisions_match_workflow_outcomes() {
     ));
 }
 
+fn native_preview_tunnel() -> ServiceTunnel {
+    let mut token = native_preview_token_record("lab-token", "secret-token");
+    token.allowed_clients = vec!["lab-client".to_string()];
+    token.allowed_public_hosts = vec!["*.preview.example.test".to_string()];
+    token.allowed_session_ids = vec!["run-123".to_string()];
+
+    ServiceTunnel {
+        id: "site-preview".to_string(),
+        aliases: Vec::new(),
+        description: None,
+        server_id: "private-host".to_string(),
+        target: ServiceTunnelTarget {
+            host: "127.0.0.1".to_string(),
+            port: 7331,
+        },
+        scheme: "http".to_string(),
+        local_host: "127.0.0.1".to_string(),
+        local_port: Some(7331),
+        auth: ServiceTunnelAuth {
+            mode: ServiceTunnelAuthMode::BearerEnv,
+            env_var: Some("TOKEN".to_string()),
+            header: Some("Authorization".to_string()),
+        },
+        policy: ServiceTunnelPolicy {
+            exposure: ServiceTunnelExposure::PrivateLoopback,
+            require_auth: true,
+            allowed_clients: Vec::new(),
+            preview: ServiceTunnelPreviewPolicy::default(),
+            native_preview_auth: ServiceTunnelNativePreviewAuthPolicy {
+                require_client_token: true,
+                default_session_ttl_secs: 60,
+                max_session_ttl_secs: 300,
+                allowed_public_hosts: vec!["*.preview.example.test".to_string()],
+                allowed_session_ids: vec!["run-123".to_string()],
+                tokens: vec![token],
+            },
+        },
+    }
+}
+
+fn native_preview_request() -> ServiceTunnelNativePreviewClaimRequest {
+    ServiceTunnelNativePreviewClaimRequest {
+        client_id: "lab-client".to_string(),
+        token: "secret-token".to_string(),
+        public_host: "run-123.preview.example.test".to_string(),
+        session_id: "run-123".to_string(),
+        local_origin: "http://127.0.0.1:7331".to_string(),
+        requested_ttl_secs: Some(120),
+        now: chrono::DateTime::parse_from_rfc3339("2026-06-07T12:00:00Z")
+            .expect("timestamp")
+            .with_timezone(&chrono::Utc),
+    }
+}
+
+#[test]
+fn native_preview_claim_accepts_scoped_client_host_session_and_caps_lease() {
+    let tunnel = native_preview_tunnel();
+    let mut request = native_preview_request();
+    request.requested_ttl_secs = Some(600);
+
+    let claim = validate_native_preview_claim(&tunnel, request).expect("valid claim");
+
+    assert_eq!(claim.service_id, "site-preview");
+    assert_eq!(claim.client_id, "lab-client");
+    assert_eq!(claim.token_id, "lab-token");
+    assert_eq!(claim.public_host, "run-123.preview.example.test");
+    assert_eq!(claim.session_id, "run-123");
+    assert_eq!(claim.local_origin, "http://127.0.0.1:7331");
+    assert_eq!(claim.expires_at, "2026-06-07T12:05:00+00:00");
+}
+
+#[test]
+fn native_preview_claim_rejects_wrong_token_without_leaking_expected_token() {
+    let tunnel = native_preview_tunnel();
+    let mut request = native_preview_request();
+    request.token = "wrong-token".to_string();
+
+    let err = validate_native_preview_claim(&tunnel, request).expect_err("wrong token fails");
+
+    assert_eq!(err.code, crate::core::ErrorCode::ValidationInvalidArgument);
+    assert!(err.message.contains("not recognized"));
+    assert!(!err.message.contains("secret-token"));
+    assert!(!err.details.to_string().contains("secret-token"));
+}
+
+#[test]
+fn native_preview_claim_rejects_wrong_client_host_session_and_origin() {
+    let tunnel = native_preview_tunnel();
+
+    let mut request = native_preview_request();
+    request.client_id = "other-client".to_string();
+    let err = validate_native_preview_claim(&tunnel, request).expect_err("wrong client fails");
+    assert!(err.message.contains("client is not authorized"));
+
+    let mut request = native_preview_request();
+    request.public_host = "run-123.other.example.test".to_string();
+    let err = validate_native_preview_claim(&tunnel, request).expect_err("wrong host fails");
+    assert!(err.message.contains("public host"));
+
+    let mut request = native_preview_request();
+    request.session_id = "run-456".to_string();
+    let err = validate_native_preview_claim(&tunnel, request).expect_err("wrong session fails");
+    assert!(err.message.contains("session id"));
+
+    let mut request = native_preview_request();
+    request.local_origin = "http://192.168.1.5:7331".to_string();
+    let err =
+        validate_native_preview_claim(&tunnel, request).expect_err("non-loopback origin fails");
+    assert!(err.message.contains("loopback"));
+}
+
+#[test]
+fn native_preview_claim_rejects_revoked_and_expired_tokens() {
+    let mut tunnel = native_preview_tunnel();
+    tunnel.policy.native_preview_auth.tokens[0].revoked = true;
+    let err = validate_native_preview_claim(&tunnel, native_preview_request())
+        .expect_err("revoked token fails");
+    assert!(err.message.contains("revoked"));
+
+    let mut tunnel = native_preview_tunnel();
+    tunnel.policy.native_preview_auth.tokens[0].expires_at =
+        Some("2026-06-07T11:59:59Z".to_string());
+    let err = validate_native_preview_claim(&tunnel, native_preview_request())
+        .expect_err("expired token fails");
+    assert!(err.message.contains("expired"));
+}
+
 #[test]
 fn preview_artifact_serializes_structured_reviewer_contract() {
     let tunnel = ServiceTunnel {
@@ -394,6 +526,7 @@ fn preview_artifact_serializes_structured_reviewer_contract() {
                 mode: ServiceTunnelPreviewPolicyMode::KeepAliveUntil,
                 keep_alive_until: Some("2026-06-07T13:00:00Z".to_string()),
             },
+            native_preview_auth: ServiceTunnelNativePreviewAuthPolicy::default(),
         },
     };
     let state = ServiceTunnelRuntimeState {

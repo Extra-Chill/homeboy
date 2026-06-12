@@ -8,7 +8,7 @@ homeboy tunnel preview-client <COMMAND>
 homeboy tunnel preview-ingress <COMMAND>
 ```
 
-`tunnel` manages Homeboy-native private service tunnel declarations, local managed service lifecycle, and the VPS-side public preview ingress used by generic browser/reviewer URLs. Homeboy can start a long-running local command, record safe command/process/log evidence, report readiness, and stop the process group without relying on an external chat or tunnel wrapper.
+`tunnel` manages Homeboy-native private service tunnel declarations, local managed service lifecycle, and the VPS-side public preview ingress used by generic preview URLs. Homeboy can start a long-running local command, record safe command/process/log evidence, report readiness, and stop the process group without relying on an external chat or tunnel wrapper.
 
 `preview-client` connects a local/lab preview origin to a Homeboy-owned preview ingress over an outbound authenticated reverse channel. It is the local side of native public browser preview tunnels and does not use external tunnel providers.
 
@@ -28,7 +28,7 @@ homeboy tunnel service expose site-preview \
   --preview-policy always
 ```
 
-The declaration requires an explicit auth mode and stores a private-loopback policy. It does not expose a public unauthenticated URL. `--preview-policy` defaults to `none`; workloads can opt into `always`, `on-failure`, `manual-approval`, or `keep-alive-until` when reviewer-facing preview artifacts are useful.
+The declaration requires an explicit auth mode and stores a private-loopback policy. It does not expose a public unauthenticated URL. `--preview-policy` defaults to `none`; workloads can opt into `always`, `on-failure`, `manual-approval`, or `keep-alive-until` when public preview artifacts are useful.
 
 Start a declared local service command and record lifecycle evidence:
 
@@ -91,10 +91,10 @@ Each claimed ingress request is forwarded on a worker thread so browser static a
 
 ## Preview Ingress
 
-`preview-ingress` is the VPS-side HTTP daemon surface for Homeboy-native browser preview tunnels. It is designed to run behind an operator-managed TLS/proxy layer such as Nginx, Caddy, or Cloudflare:
+`preview-ingress` is the VPS-side HTTP daemon surface for Homeboy-native public preview tunnels. It is designed to run behind an operator-managed TLS/proxy layer such as Nginx, Caddy, or Cloudflare:
 
 ```text
-Browser
+Client
   -> https://{id}-tunnel.<operator-domain>
   -> TLS/proxy layer
   -> homeboy tunnel preview-ingress serve --bind 127.0.0.1:7350
@@ -102,13 +102,13 @@ Browser
   -> local/reverse-channel HTTP origin
 ```
 
-The core contract is generic HTTP ingress: public host/session routing, reverse-channel-compatible HTTP origins, request/response streaming, status, logs, and cleanup. Workload-specific behavior such as WordPress, WP Codebox, WooCommerce, static asset health, or browser probe interpretation belongs in Homeboy Extensions or `homeboy-rigs`, not in Homeboy core.
+The core contract is generic HTTP ingress: public host/session routing, reverse-channel-compatible HTTP origins, request/response streaming, status, logs, and cleanup. Workload-specific behavior, asset health policy, and preview interpretation belongs in Homeboy Extensions or `homeboy-rigs`, not in Homeboy core.
 
 Register one active preview route:
 
 ```sh
 homeboy tunnel preview-ingress route run-123 \
-  --public-host run-123-tunnel.chubes.net \
+  --public-host run-123.preview.example.net \
   --upstream-origin http://127.0.0.1:7331 \
   --expires-at 2026-06-12T03:30:00Z
 ```
@@ -119,12 +119,12 @@ Run the ingress daemon:
 
 ```sh
 homeboy tunnel preview-ingress serve \
-  --domain chubes.net \
+  --domain preview.example.net \
   --bind 127.0.0.1:7350 \
-  --public-host-pattern '*-tunnel.chubes.net'
+  --public-host-pattern '*.preview.example.net'
 ```
 
-The daemon routes by `Host`, handles concurrent browser asset requests in separate worker threads, proxies request bodies to the configured upstream origin, streams upstream response bodies back to the browser, and preserves response status plus non-hop-by-hop headers such as `content-type` and cache headers.
+The daemon routes by `Host`, handles concurrent preview requests in separate worker threads, proxies request bodies to the configured upstream origin, streams upstream response bodies back to the client, and preserves response status plus non-hop-by-hop headers such as `content-type` and cache headers.
 
 Diagnostics are structured so generic preview workloads can distinguish ingress and upstream problems:
 
@@ -137,6 +137,58 @@ Diagnostics are structured so generic preview workloads can distinguish ingress 
 Each request writes a JSON line to stderr with request ID, host, path, status, bytes, duration, and classification. `/_homeboy/preview-ingress/status` returns the current route status as JSON from the running daemon.
 
 This is the ingress side of #4089 and the first Homeboy-owned replacement path for #4062's current tunnel-provider blocker. Auth/pairing/token lifecycle and the authenticated reverse preview client remain generic surfaces; the ingress route's `upstream_origin` is the HTTP seam those clients attach to.
+
+## Native Preview Tunnel Auth Model
+
+Homeboy-native preview ingress uses a separate auth contract from reverse runner jobs. Runner broker auth proves which lab can claim and finish runner work; preview tunnel auth proves which client may claim a public preview host/session and forward requests over a reverse channel to a loopback origin.
+
+The native preview auth policy lives under `policy.native_preview_auth` on a service tunnel declaration. It stores only token metadata and SHA-256 token digests, never plaintext token material:
+
+```json
+{
+  "policy": {
+    "native_preview_auth": {
+      "require_client_token": true,
+      "default_session_ttl_secs": 900,
+      "max_session_ttl_secs": 3600,
+      "allowed_public_hosts": [ "*.preview.example.net" ],
+      "allowed_session_ids": [ "run-123" ],
+      "tokens": [
+        {
+          "id": "lab-client-1",
+          "token_sha256": "<sha256 digest>",
+          "allowed_clients": [ "local-lab" ],
+          "allowed_public_hosts": [ "run-123.preview.example.net" ],
+          "allowed_session_ids": [ "run-123" ],
+          "revoked": false,
+          "expires_at": "2026-06-07T13:00:00Z"
+        }
+      ]
+    }
+  }
+}
+```
+
+An ingress/client pairing request is valid only when all of these claims match:
+
+- `client_id` is allowed by the matched token.
+- `token` hashes to a configured, unrevoked, unexpired token digest.
+- `public_host` matches both the service policy and token host scopes. Exact hostnames and glob patterns are supported.
+- `session_id` matches both the service policy and token session scopes when scopes are configured.
+- `local_origin` is an `http://` loopback origin such as `http://127.0.0.1:7331`.
+- The granted lease expires at the requested TTL capped by `max_session_ttl_secs`.
+
+Auth failures return structured validation errors for the failing claim (`token`, `client_id`, `public_host`, `session_id`, or `local_origin`). Token values are request inputs only and are not serialized in declarations, status, preview artifacts, logs, or diagnostics.
+
+Safe operator setup for a VPS wildcard domain:
+
+1. Configure wildcard DNS and TLS for the preview ingress host, for example `*.preview.example.net`.
+2. Declare the preview service with `homeboy tunnel service expose` and keep `policy.require_auth=true`.
+3. Generate high-entropy client token material outside normal logs, store the token itself in Homeboy's keychain/secret/env surface for the preview client, and store only the SHA-256 digest in `policy.native_preview_auth.tokens`.
+4. Scope each token to the smallest useful client, host pattern, and session ID.
+5. Use short `expires_at` and session TTLs for short-lived preview sessions; revoke by removing the token entry or setting `revoked=true`.
+
+The current layer validates config, token, host, session, origin, and lease semantics. The actual VPS ingress route table and reverse-channel forwarding endpoints are the integration points for the native ingress/client work tracked separately from this command contract.
 
 ## Subcommands
 
