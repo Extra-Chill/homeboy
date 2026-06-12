@@ -65,8 +65,8 @@ pub use spec::{
     ServiceKind, ServiceSpec, SharedPathOp, SharedPathSpec, StackOp, SymlinkSpec, TimeSource,
     TraceDependencySpec, TraceExperimentArtifactSpec, TraceExperimentCommandSpec,
     TraceExperimentSpec, TraceGuardrailSpec, TraceNativePublicPreviewSpec,
-    TracePreviewAssetFanoutSpec, TraceProfileSpec, TracePublicPreviewMode,
-    TracePublicPreviewSpec, TraceVariantSpec, WorkloadSpec,
+    TracePreviewAssetFanoutSpec, TraceProfileSpec, TracePublicPreviewMode, TracePublicPreviewSpec,
+    TraceVariantSpec, WorkloadSpec,
 };
 pub use stack::{
     plan_stack_sync, run_component_sync, run_sync, RigStackPlanEntry, RigStackSyncEntry,
