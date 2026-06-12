@@ -7,6 +7,8 @@ use super::lab_workspaces::{is_rig_component_path_env_name, LabWorkspaceMappingE
 use crate::core::observation::LAB_OFFLOAD_METADATA_ENV;
 
 const SETTINGS_DIAGNOSTICS_SCHEMA: &str = "homeboy/lab-offload-settings-env/v1";
+const WP_CODEBOX_BIN_ENV_KEYS: &[&str] =
+    &["HOMEBOY_WP_CODEBOX_BIN", "HOMEBOY_SETTINGS_WP_CODEBOX_BIN"];
 
 pub(super) fn forward_env_if_present(env: &mut HashMap<String, String>, name: &str) {
     if let Ok(value) = std::env::var(name) {
@@ -27,6 +29,40 @@ pub(super) fn build_lab_offload_env(lab_metadata: &serde_json::Value) -> HashMap
         LAB_OFFLOAD_METADATA_ENV.to_string(),
         serde_json::to_string(lab_metadata).unwrap_or_default(),
     )])
+}
+
+pub(super) fn scrub_ambient_wp_codebox_env(env: &mut HashMap<String, String>) {
+    for key in WP_CODEBOX_BIN_ENV_KEYS {
+        env.entry((*key).to_string()).or_default();
+    }
+}
+
+pub(super) fn wp_codebox_env_diagnostics(
+    forwarded_env: &HashMap<String, String>,
+) -> serde_json::Value {
+    let keys = WP_CODEBOX_BIN_ENV_KEYS
+        .iter()
+        .filter_map(|key| {
+            forwarded_env.get(*key).map(|value| {
+                serde_json::json!({
+                    "name": key,
+                    "forwarded_to_runner": true,
+                    "action": if value.trim().is_empty() {
+                        "scrub_ambient_runner_env"
+                    } else {
+                        "forward_explicit_value"
+                    },
+                    "value_preview": if value.trim().is_empty() { "" } else { "<redacted>" },
+                    "redacted": !value.trim().is_empty(),
+                })
+            })
+        })
+        .collect::<Vec<_>>();
+
+    serde_json::json!({
+        "schema": "homeboy/lab-offload-wp-codebox-env/v1",
+        "keys": keys,
+    })
 }
 
 pub(super) fn forward_rig_component_path_env(
@@ -273,6 +309,9 @@ mod tests {
     use super::*;
     use crate::core::runner::lab_workspaces::workspace_mapping_entry;
     use crate::core::runner::{RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOutput};
+    use std::sync::Mutex;
+
+    static ENV_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     struct EnvVarGuard {
         name: &'static str,
@@ -283,6 +322,12 @@ mod tests {
         fn set(name: &'static str, value: &str) -> Self {
             let prior = std::env::var(name).ok();
             std::env::set_var(name, value);
+            Self { name, prior }
+        }
+
+        fn unset(name: &'static str) -> Self {
+            let prior = std::env::var(name).ok();
+            std::env::remove_var(name);
             Self { name, prior }
         }
     }
@@ -378,6 +423,70 @@ mod tests {
     }
 
     #[test]
+    fn scrub_ambient_wp_codebox_env_overrides_daemon_inheritance() {
+        let mut env = HashMap::new();
+
+        scrub_ambient_wp_codebox_env(&mut env);
+
+        assert_eq!(
+            env.get("HOMEBOY_WP_CODEBOX_BIN").map(String::as_str),
+            Some("")
+        );
+        assert_eq!(
+            env.get("HOMEBOY_SETTINGS_WP_CODEBOX_BIN")
+                .map(String::as_str),
+            Some("")
+        );
+    }
+
+    #[test]
+    fn scrub_ambient_wp_codebox_env_preserves_explicit_request_values() {
+        let mut env = HashMap::from([(
+            "HOMEBOY_WP_CODEBOX_BIN".to_string(),
+            "/runner/wp-codebox/packages/cli/dist/index.js".to_string(),
+        )]);
+
+        scrub_ambient_wp_codebox_env(&mut env);
+
+        assert_eq!(
+            env.get("HOMEBOY_WP_CODEBOX_BIN").map(String::as_str),
+            Some("/runner/wp-codebox/packages/cli/dist/index.js")
+        );
+        assert_eq!(
+            env.get("HOMEBOY_SETTINGS_WP_CODEBOX_BIN")
+                .map(String::as_str),
+            Some("")
+        );
+    }
+
+    #[test]
+    fn wp_codebox_env_diagnostics_reports_scrubbed_and_explicit_values() {
+        let env = HashMap::from([
+            ("HOMEBOY_WP_CODEBOX_BIN".to_string(), "".to_string()),
+            (
+                "HOMEBOY_SETTINGS_WP_CODEBOX_BIN".to_string(),
+                "/runner/wp-codebox/packages/cli/dist/index.js".to_string(),
+            ),
+        ]);
+
+        let diagnostics = wp_codebox_env_diagnostics(&env);
+
+        assert_eq!(
+            diagnostics["schema"],
+            "homeboy/lab-offload-wp-codebox-env/v1"
+        );
+        assert_eq!(diagnostics["keys"][0]["name"], "HOMEBOY_WP_CODEBOX_BIN");
+        assert_eq!(diagnostics["keys"][0]["action"], "scrub_ambient_runner_env");
+        assert_eq!(diagnostics["keys"][0]["value_preview"], "");
+        assert_eq!(
+            diagnostics["keys"][1]["name"],
+            "HOMEBOY_SETTINGS_WP_CODEBOX_BIN"
+        );
+        assert_eq!(diagnostics["keys"][1]["action"], "forward_explicit_value");
+        assert_eq!(diagnostics["keys"][1]["value_preview"], "<redacted>");
+    }
+
+    #[test]
     fn rig_component_path_env_is_forwarded_with_runner_path() {
         let mapping = vec![workspace_mapping_entry(
             "rig_component_path_env",
@@ -452,7 +561,8 @@ mod tests {
 
     #[test]
     fn warns_when_runner_exec_wait_timeout_is_only_a_workload_setting() {
-        std::env::remove_var(RUNNER_EXEC_WAIT_TIMEOUT_ENV);
+        let _lock = ENV_TEST_LOCK.lock().expect("env test lock");
+        let _guard = EnvVarGuard::unset(RUNNER_EXEC_WAIT_TIMEOUT_ENV);
         let args = vec![
             "homeboy".to_string(),
             "bench".to_string(),
@@ -469,6 +579,7 @@ mod tests {
 
     #[test]
     fn skips_runner_exec_wait_timeout_setting_warning_when_controller_env_is_set() {
+        let _lock = ENV_TEST_LOCK.lock().expect("env test lock");
         let _guard = EnvVarGuard::set(RUNNER_EXEC_WAIT_TIMEOUT_ENV, "2400");
         let args = vec![
             "homeboy".to_string(),

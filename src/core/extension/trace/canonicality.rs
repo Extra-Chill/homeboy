@@ -214,10 +214,7 @@ pub(crate) fn evaluate_trace_canonicality(
                     None,
                     &mut reasons,
                 )),
-                _ => reasons.push(format!(
-                    "WP Codebox toolchain path `{}` is empty via {}",
-                    key, source
-                )),
+                _ => {}
             }
         }
     }

@@ -31,7 +31,7 @@ use super::lab_command::lab_offload_command_prefix;
 use super::lab_env::{
     build_lab_offload_env, forward_env_if_present, forward_release_ci_env,
     forward_rig_component_path_env, misplaced_runner_exec_wait_timeout_warning,
-    settings_env_diagnostics,
+    scrub_ambient_wp_codebox_env, settings_env_diagnostics, wp_codebox_env_diagnostics,
 };
 use super::lab_plan::{base_lab_plan, disabled_select_runner_plan, with_step};
 pub use super::lab_selection::LabRunnerSelectionSource;
@@ -786,10 +786,12 @@ fn run_lab_offload_inner(
     let agent_task_secret_env =
         hydrate_agent_task_secret_env(&changed_since_preflight.args, &mut env)?;
     let trace_secret_env = hydrate_trace_secret_env(&changed_since_preflight.args, &mut env)?;
+    scrub_ambient_wp_codebox_env(&mut env);
     lab_metadata["agent_task_secret_env"] = agent_task_secret_env;
     lab_metadata["trace_secret_env"] = trace_secret_env;
     lab_metadata["rig_component_path_env"] = rig_component_path_env;
     lab_metadata["settings_env"] = settings_env_diagnostics(&remapped_args, &env);
+    lab_metadata["wp_codebox_env"] = wp_codebox_env_diagnostics(&env);
     lab_metadata["rig_sync"] = serde_json::json!({
         "step": "lab.sync_rigs",
         "synced_count": synced_rigs.len(),
@@ -804,6 +806,7 @@ fn run_lab_offload_inner(
     forward_rig_component_path_env(&mut env, &workspace_mapping)?;
     hydrate_agent_task_secret_env(&changed_since_preflight.args, &mut env)?;
     hydrate_trace_secret_env(&changed_since_preflight.args, &mut env)?;
+    scrub_ambient_wp_codebox_env(&mut env);
     let exec_result = exec(
         runner_id,
         RunnerExecOptions {
