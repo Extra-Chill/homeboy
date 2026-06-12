@@ -76,6 +76,7 @@ fn validate_runner_extension(
     };
 
     if output.success {
+        validate_runner_extension_ready(runner_id, homeboy_path, extension_id, &output.stdout)?;
         validate_runner_extension_revision(runner_id, homeboy_path, extension_id, &output.stdout)?;
         return Ok(());
     }
@@ -94,6 +95,63 @@ fn validate_runner_extension(
             extension_parity_diagnostic_tail(&output.stderr, &output.stdout),
         ]),
     ))
+}
+
+fn validate_runner_extension_ready(
+    runner_id: &str,
+    homeboy_path: &str,
+    extension_id: &str,
+    remote_stdout: &str,
+) -> Result<()> {
+    let Some(status) = remote_extension_ready_status(remote_stdout) else {
+        return Ok(());
+    };
+    if status.ready {
+        return Ok(());
+    }
+
+    let mut tried = vec![format!("Runner extension ready: false")];
+    if let Some(reason) = status.reason.filter(|value| !value.trim().is_empty()) {
+        tried.push(format!("Ready reason: {reason}"));
+    }
+    if let Some(detail) = status.detail.filter(|value| !value.trim().is_empty()) {
+        tried.push(format!("Ready detail: {detail}"));
+    }
+
+    Err(Error::validation_invalid_argument(
+        "runner_extension",
+        format!(
+            "Runner '{runner_id}' has unready extension parity for '{extension_id}' before command execution"
+        ),
+        Some(extension_id.to_string()),
+        Some(vec![
+            format!("Run extension setup on the runner before dispatch: {homeboy_path} extension setup {extension_id}"),
+            format!("If setup remains stale, update or relink the extension on the runner: {homeboy_path} extension update {extension_id} or {homeboy_path} extension relink {extension_id} <source>"),
+            tried.join("\n"),
+        ]),
+    ))
+}
+
+struct RemoteExtensionReadyStatus {
+    ready: bool,
+    reason: Option<String>,
+    detail: Option<String>,
+}
+
+fn remote_extension_ready_status(stdout: &str) -> Option<RemoteExtensionReadyStatus> {
+    let value: Value = serde_json::from_str(stdout.trim()).ok()?;
+    let extension = value.get("data").and_then(|data| data.get("extension"))?;
+    Some(RemoteExtensionReadyStatus {
+        ready: extension.get("ready").and_then(Value::as_bool)?,
+        reason: extension
+            .get("ready_reason")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        detail: extension
+            .get("ready_detail")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    })
 }
 
 fn validate_runner_extension_revision(
@@ -157,7 +215,10 @@ fn remote_extension_source_revision(stdout: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{remote_extension_source_revision, validate_runner_extension_revision};
+    use super::{
+        remote_extension_ready_status, remote_extension_source_revision,
+        validate_runner_extension_ready, validate_runner_extension_revision,
+    };
     use crate::test_support::with_isolated_home;
 
     use std::fs;
@@ -170,6 +231,42 @@ mod tests {
             remote_extension_source_revision(stdout).as_deref(),
             Some("abc1234")
         );
+    }
+
+    #[test]
+    fn remote_extension_ready_status_reads_extension_show_output() {
+        let stdout = r#"{"success":true,"data":{"extension":{"id":"wordpress","ready":false,"ready_reason":"ready_check_failed","ready_detail":"missing generated asset"}}}"#;
+        let status = remote_extension_ready_status(stdout).expect("ready status");
+
+        assert!(!status.ready);
+        assert_eq!(status.reason.as_deref(), Some("ready_check_failed"));
+        assert_eq!(status.detail.as_deref(), Some("missing generated asset"));
+    }
+
+    #[test]
+    fn readiness_parity_rejects_unready_runner_extension() {
+        let remote_stdout = r#"{"success":true,"data":{"extension":{"id":"wordpress","ready":false,"ready_reason":"ready_check_failed","ready_detail":"missing generated asset"}}}"#;
+
+        let err =
+            validate_runner_extension_ready("homeboy-lab", "homeboy", "wordpress", remote_stdout)
+                .expect_err("unready runner extension should fail parity");
+
+        assert!(err.to_string().contains("unready extension parity"));
+        assert!(err.details["tried"]
+            .to_string()
+            .contains("extension setup wordpress"));
+        assert!(err.details["tried"]
+            .to_string()
+            .contains("missing generated asset"));
+    }
+
+    #[test]
+    fn readiness_parity_accepts_ready_runner_extension() {
+        let remote_stdout =
+            r#"{"success":true,"data":{"extension":{"id":"wordpress","ready":true}}}"#;
+
+        validate_runner_extension_ready("homeboy-lab", "homeboy", "wordpress", remote_stdout)
+            .expect("ready runner extension should pass parity");
     }
 
     #[test]
