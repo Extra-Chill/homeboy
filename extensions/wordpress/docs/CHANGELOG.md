@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.119.15] - 2026-06-12
+
+### Fixed
+- Fix runner workspace capture boundaries
+
 ## [2.119.14] - 2026-06-11
 
 ### Fixed
