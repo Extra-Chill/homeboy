@@ -91,7 +91,7 @@ pub enum LabOffloadOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct PublishedWorkflowBenchRun {
+struct TerminalLabRunEvidence {
     run_id: String,
     run_dir: PathBuf,
     summary_path: PathBuf,
@@ -493,40 +493,40 @@ fn run_lab_offload_inner(
     let source_path =
         rig_materialization::lab_offload_rig_component_checkout_root(request.normalized_args)?
             .unwrap_or(lab_offload_source_path(request.normalized_args)?);
-    if let Some(published) = published_workflow_bench_run(request.normalized_args, &source_path) {
+    if let Some(terminal) = terminal_lab_run_evidence(request.normalized_args, &source_path) {
         plan = with_step(
             plan,
             PlanStep::builder(
-                "lab.workflow_bench_published_guard",
-                "lab.workflow_bench_published_guard",
+                "lab.run_idempotency_guard",
+                "lab.run_idempotency_guard",
                 PlanStepStatus::Success,
             )
             .inputs(
                 PlanValues::new()
-                    .string("run_id", &published.run_id)
-                    .string("run_dir", published.run_dir.to_string_lossy().to_string())
+                    .string("run_id", &terminal.run_id)
+                    .string("run_dir", terminal.run_dir.to_string_lossy().to_string())
                     .string(
                         "summary_path",
-                        published.summary_path.to_string_lossy().to_string(),
+                        terminal.summary_path.to_string_lossy().to_string(),
                     )
                     .string(
                         "manifest_path",
-                        published.manifest_path.to_string_lossy().to_string(),
+                        terminal.manifest_path.to_string_lossy().to_string(),
                     )
-                    .json("passed_count", published.passed_count),
+                    .json("passed_count", terminal.passed_count),
             )
             .build(),
         );
         let stdout = serde_json::json!({
-            "schema": "homeboy/lab-workflow-bench-published-guard/v1",
-            "command": "lab.workflow_bench_published_guard",
-            "run_id": published.run_id,
-            "status": published.status,
+            "schema": "homeboy/lab-run-idempotency-guard/v1",
+            "command": "lab.run_idempotency_guard",
+            "run_id": terminal.run_id,
+            "status": terminal.status,
             "result_counts": {
-                "passed": published.passed_count,
+                "passed": terminal.passed_count,
             },
             "published": {
-                "manifest_path": published.manifest_path.to_string_lossy().to_string(),
+                "manifest_path": terminal.manifest_path.to_string_lossy().to_string(),
             },
             "retry_policy": {
                 "after_published_pass": "stop",
@@ -537,9 +537,9 @@ fn run_lab_offload_inner(
         });
         let stdout = serde_json::to_string_pretty(&stdout).unwrap_or_else(|_| "{}".to_string());
         let stderr = format!(
-            "Lab offload: Workflow Bench run `{}` already published a passing result at {}; skipping duplicate remote attempt.\n",
-            published.run_id,
-            published.manifest_path.display()
+            "Lab offload: run `{}` already published a passing result at {}; skipping duplicate remote attempt.\n",
+            terminal.run_id,
+            terminal.manifest_path.display()
         );
         return Ok(LabOffloadOutcome::Offloaded {
             plan,
@@ -1159,27 +1159,23 @@ fn looks_like_inline_json(spec: &str) -> bool {
     trimmed.starts_with('{') || trimmed.starts_with('[')
 }
 
-fn published_workflow_bench_run(
+fn terminal_lab_run_evidence(
     args: &[String],
     source_path: &Path,
-) -> Option<PublishedWorkflowBenchRun> {
-    let run_id = workflow_bench_run_id(args)?;
-    let mut candidates = workflow_bench_output_candidates(args, source_path, &run_id);
+) -> Option<TerminalLabRunEvidence> {
+    let run_id = lab_command_run_id(args)?;
+    let mut candidates = lab_run_output_candidates(args, source_path, &run_id);
     candidates.sort();
     candidates.dedup();
     candidates
         .into_iter()
-        .find_map(|candidate| published_workflow_bench_run_at(&run_id, candidate))
+        .find_map(|candidate| terminal_lab_run_evidence_at(&run_id, candidate))
 }
 
-fn workflow_bench_run_id(args: &[String]) -> Option<String> {
-    let mut saw_workflow_bench = false;
+fn lab_command_run_id(args: &[String]) -> Option<String> {
     let mut run_id = None;
     let mut iter = args.iter().peekable();
     while let Some(arg) = iter.next() {
-        if arg.contains("workflow-bench") {
-            saw_workflow_bench = true;
-        }
         if arg == "--run-id" {
             run_id = iter.next().cloned();
             continue;
@@ -1190,43 +1186,45 @@ fn workflow_bench_run_id(args: &[String]) -> Option<String> {
             }
         }
     }
-    saw_workflow_bench.then_some(run_id).flatten()
+    run_id
 }
 
-fn workflow_bench_output_candidates(
-    args: &[String],
-    source_path: &Path,
-    run_id: &str,
-) -> Vec<PathBuf> {
+fn lab_run_output_candidates(args: &[String], source_path: &Path, run_id: &str) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
-    for explicit in workflow_bench_explicit_output_paths(args) {
-        candidates.push(explicit.clone());
-        candidates.push(explicit.join(run_id));
-        candidates.push(explicit.join("runs").join(run_id));
+    for explicit in lab_explicit_output_paths(args, source_path) {
+        candidates.extend(run_dir_candidates(explicit, run_id));
+    }
+    for status_parent in lab_status_file_parent_paths(args, source_path) {
+        candidates.extend(run_dir_candidates(status_parent, run_id));
     }
     candidates.extend([
-        source_path.to_path_buf(),
         source_path.join(run_id),
         source_path.join("runs").join(run_id),
         source_path.join("artifacts").join(run_id),
-        source_path.join("workflow-bench").join("runs").join(run_id),
-        source_path
-            .join(".workflow-bench")
-            .join("runs")
-            .join(run_id),
+        source_path.join(".homeboy").join("runs").join(run_id),
+        source_path.join(".homeboy").join("artifacts").join(run_id),
         source_path.join("bench-runs").join(run_id),
     ]);
+    candidates.extend(lab_run_summary_dirs_from_tree(source_path, run_id));
     candidates
 }
 
-fn workflow_bench_explicit_output_paths(args: &[String]) -> Vec<PathBuf> {
+fn run_dir_candidates(path: PathBuf, run_id: &str) -> Vec<PathBuf> {
+    vec![
+        path.clone(),
+        path.join(run_id),
+        path.join("runs").join(run_id),
+    ]
+}
+
+fn lab_explicit_output_paths(args: &[String], source_path: &Path) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--output-dir" | "--output-root" | "--artifact-dir" | "--artifacts-dir" => {
                 if let Some(path) = iter.next() {
-                    paths.push(PathBuf::from(path));
+                    paths.push(resolve_lab_arg_path(path, source_path));
                 }
             }
             _ => {
@@ -1238,7 +1236,7 @@ fn workflow_bench_explicit_output_paths(args: &[String]) -> Vec<PathBuf> {
                 ] {
                     if let Some(path) = arg.strip_prefix(prefix) {
                         if !path.is_empty() {
-                            paths.push(PathBuf::from(path));
+                            paths.push(resolve_lab_arg_path(path, source_path));
                         }
                     }
                 }
@@ -1248,10 +1246,82 @@ fn workflow_bench_explicit_output_paths(args: &[String]) -> Vec<PathBuf> {
     paths
 }
 
-fn published_workflow_bench_run_at(
-    run_id: &str,
-    run_dir: PathBuf,
-) -> Option<PublishedWorkflowBenchRun> {
+fn lab_status_file_parent_paths(args: &[String], source_path: &Path) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        let path = if arg == "--status-file" {
+            iter.next()
+                .map(|value| resolve_lab_arg_path(value, source_path))
+        } else {
+            arg.strip_prefix("--status-file=")
+                .filter(|value| !value.is_empty())
+                .map(|value| resolve_lab_arg_path(value, source_path))
+        };
+        if let Some(path) = path.and_then(|path| path.parent().map(Path::to_path_buf)) {
+            paths.push(path);
+        }
+    }
+    paths
+}
+
+fn resolve_lab_arg_path(path: &str, source_path: &Path) -> PathBuf {
+    let path = PathBuf::from(path);
+    if path.is_absolute() {
+        path
+    } else {
+        source_path.join(path)
+    }
+}
+
+fn lab_run_summary_dirs_from_tree(source_path: &Path, run_id: &str) -> Vec<PathBuf> {
+    const MAX_DEPTH: usize = 6;
+    const MAX_DIRS: usize = 2048;
+
+    let mut dirs = Vec::new();
+    let mut stack = vec![(source_path.to_path_buf(), 0usize)];
+    let mut visited = 0usize;
+    while let Some((dir, depth)) = stack.pop() {
+        visited += 1;
+        if visited > MAX_DIRS {
+            break;
+        }
+        let summary = dir.join("homeboy-summary.json");
+        if summary.is_file() && path_contains_component(&dir, run_id) {
+            dirs.push(dir.clone());
+        }
+        if depth >= MAX_DEPTH {
+            continue;
+        }
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() && !is_hidden_or_heavy_lab_scan_dir(&path) {
+                stack.push((path, depth + 1));
+            }
+        }
+    }
+    dirs
+}
+
+fn path_contains_component(path: &Path, expected: &str) -> bool {
+    path.components()
+        .any(|component| component.as_os_str().to_string_lossy() == expected)
+}
+
+fn is_hidden_or_heavy_lab_scan_dir(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    matches!(
+        name,
+        ".git" | "node_modules" | "vendor" | "target" | ".next" | "dist" | "build"
+    )
+}
+
+fn terminal_lab_run_evidence_at(run_id: &str, run_dir: PathBuf) -> Option<TerminalLabRunEvidence> {
     let summary_path = run_dir.join("homeboy-summary.json");
     let manifest_path = run_dir.join("published").join("manifest.json");
     if !summary_path.is_file() || !manifest_path.is_file() {
@@ -1259,7 +1329,7 @@ fn published_workflow_bench_run_at(
     }
     let summary: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&summary_path).ok()?).ok()?;
-    if !summary_matches_workflow_bench_run(&summary, run_id) {
+    if !summary_matches_lab_run(&summary, run_id) && !path_contains_component(&run_dir, run_id) {
         return None;
     }
     let passed_count = summary
@@ -1279,7 +1349,7 @@ fn published_workflow_bench_run_at(
     {
         return None;
     }
-    Some(PublishedWorkflowBenchRun {
+    Some(TerminalLabRunEvidence {
         run_id: run_id.to_string(),
         run_dir,
         summary_path,
@@ -1289,13 +1359,13 @@ fn published_workflow_bench_run_at(
     })
 }
 
-fn summary_matches_workflow_bench_run(summary: &serde_json::Value, run_id: &str) -> bool {
+fn summary_matches_lab_run(summary: &serde_json::Value, run_id: &str) -> bool {
     for key in ["run_id", "id"] {
         if let Some(value) = summary.get(key).and_then(serde_json::Value::as_str) {
             return value == run_id;
         }
     }
-    true
+    false
 }
 
 fn in_flight_daemon_disconnect_error(
@@ -2040,9 +2110,9 @@ mod tests {
     }
 
     #[test]
-    fn workflow_bench_published_guard_detects_passed_published_run() {
+    fn lab_run_idempotency_guard_detects_passed_published_run() {
         let source = tempfile::tempdir().expect("source tempdir");
-        let run_dir = source.path().join("workflow-bench/runs/studio-web-r10");
+        let run_dir = source.path().join("runs/studio-web-r10");
         std::fs::create_dir_all(run_dir.join("published")).expect("mkdir published");
         std::fs::write(
             run_dir.join("homeboy-summary.json"),
@@ -2060,14 +2130,11 @@ mod tests {
             "homeboy".to_string(),
             "bench".to_string(),
             "studio-web".to_string(),
-            "--".to_string(),
-            "scripts/workflow-bench.mjs".to_string(),
-            "run".to_string(),
             "--run-id".to_string(),
             "studio-web-r10".to_string(),
         ];
 
-        let published = published_workflow_bench_run(&args, source.path())
+        let published = terminal_lab_run_evidence(&args, source.path())
             .expect("published passing run should be terminal");
 
         assert_eq!(published.run_id, "studio-web-r10");
@@ -2079,9 +2146,9 @@ mod tests {
     }
 
     #[test]
-    fn workflow_bench_published_guard_ignores_unpublished_or_failed_runs() {
+    fn lab_run_idempotency_guard_ignores_unpublished_or_failed_runs() {
         let source = tempfile::tempdir().expect("source tempdir");
-        let run_dir = source.path().join("workflow-bench/runs/studio-web-r11");
+        let run_dir = source.path().join("runs/studio-web-r11");
         std::fs::create_dir_all(&run_dir).expect("mkdir run");
         std::fs::write(
             run_dir.join("homeboy-summary.json"),
@@ -2097,17 +2164,71 @@ mod tests {
             "homeboy".to_string(),
             "bench".to_string(),
             "studio-web".to_string(),
-            "--".to_string(),
-            "scripts/workflow-bench.mjs".to_string(),
-            "run".to_string(),
             "--run-id=studio-web-r11".to_string(),
         ];
 
-        assert!(published_workflow_bench_run(&args, source.path()).is_none());
+        assert!(terminal_lab_run_evidence(&args, source.path()).is_none());
 
         std::fs::create_dir_all(run_dir.join("published")).expect("mkdir published");
         std::fs::write(run_dir.join("published/manifest.json"), "{}").expect("write manifest");
-        assert!(published_workflow_bench_run(&args, source.path()).is_none());
+        assert!(terminal_lab_run_evidence(&args, source.path()).is_none());
+    }
+
+    #[test]
+    fn lab_run_idempotency_guard_resolves_relative_explicit_output_dir() {
+        let source = tempfile::tempdir().expect("source tempdir");
+        let run_dir = source.path().join("relative-output/runs/site-run-1");
+        std::fs::create_dir_all(run_dir.join("published")).expect("mkdir published");
+        std::fs::write(
+            run_dir.join("homeboy-summary.json"),
+            serde_json::json!({
+                "status": "completed",
+                "result_counts": { "passed": 1 }
+            })
+            .to_string(),
+        )
+        .expect("write summary");
+        std::fs::write(run_dir.join("published/manifest.json"), "{}").expect("write manifest");
+        let args = vec![
+            "homeboy".to_string(),
+            "bench".to_string(),
+            "site".to_string(),
+            "--run-id=site-run-1".to_string(),
+            "--output-dir".to_string(),
+            "relative-output".to_string(),
+        ];
+
+        let terminal = terminal_lab_run_evidence(&args, source.path())
+            .expect("relative output dir should resolve against source path");
+
+        assert_eq!(terminal.run_dir, run_dir);
+        assert_eq!(terminal.passed_count, 1);
+    }
+
+    #[test]
+    fn lab_run_idempotency_guard_rejects_summary_without_matching_run_scope() {
+        let source = tempfile::tempdir().expect("source tempdir");
+        let run_dir = source.path().join("relative-output/current");
+        std::fs::create_dir_all(run_dir.join("published")).expect("mkdir published");
+        std::fs::write(
+            run_dir.join("homeboy-summary.json"),
+            serde_json::json!({
+                "status": "completed",
+                "result_counts": { "passed": 1 }
+            })
+            .to_string(),
+        )
+        .expect("write summary");
+        std::fs::write(run_dir.join("published/manifest.json"), "{}").expect("write manifest");
+        let args = vec![
+            "homeboy".to_string(),
+            "bench".to_string(),
+            "site".to_string(),
+            "--run-id=site-run-2".to_string(),
+            "--output-dir=relative-output/current".to_string(),
+        ];
+
+        assert!(terminal_lab_run_evidence(&args, source.path()).is_none());
     }
 
     fn reverse_status(runner_id: &str) -> RunnerStatusReport {
