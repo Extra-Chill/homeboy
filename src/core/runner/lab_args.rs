@@ -202,16 +202,9 @@ fn remap_path_setting_pair(raw: &str, mappings: &[&LabPathRemap]) -> String {
     let Some((key, value)) = raw.split_once('=') else {
         return raw.to_string();
     };
-    if !is_lab_path_setting_key(key) {
-        return raw.to_string();
-    }
     remap_local_path(value, mappings)
         .map(|remapped| format!("{key}={remapped}"))
         .unwrap_or_else(|| raw.to_string())
-}
-
-fn is_lab_path_setting_key(key: &str) -> bool {
-    matches!(key, "wp_codebox_bin")
 }
 
 fn remap_at_file_spec(spec: &str, mappings: &[&LabPathRemap]) -> String {
@@ -582,10 +575,10 @@ mod tests {
                 "tasks": [{
                     "task_id": "task-1",
                     "executor": {
-                        "backend": "wp-codebox",
+                        "backend": "tool-runner",
                         "config": {
-                            "wp_codebox_bin": "/Users/chubes/Developer/wp-site-generator/.ci/wp-codebox/packages/cli/dist/index.js",
-                            "artifact_root": "/Users/chubes/Developer/wp-site-generator/artifacts"
+                            "tool_bin": "/Users/chubes/Developer/example-project/.ci/tool-runner/packages/cli/dist/index.js",
+                            "artifact_root": "/Users/chubes/Developer/example-project/artifacts"
                         }
                     },
                     "instructions": "test"
@@ -595,8 +588,8 @@ mod tests {
         )
         .expect("write plan");
         let mappings = vec![LabPathRemap {
-            local: "/Users/chubes/Developer/wp-site-generator".to_string(),
-            remote: "/home/chubes/Developer/wp-site-generator".to_string(),
+            local: "/Users/chubes/Developer/example-project".to_string(),
+            remote: "/home/chubes/Developer/example-project".to_string(),
         }];
         let args = vec![
             "homeboy".to_string(),
@@ -613,12 +606,12 @@ mod tests {
             serde_json::from_str(&out[plan_idx]).expect("inline plan");
 
         assert_eq!(
-            remapped["tasks"][0]["executor"]["config"]["wp_codebox_bin"],
-            "/home/chubes/Developer/wp-site-generator/.ci/wp-codebox/packages/cli/dist/index.js"
+            remapped["tasks"][0]["executor"]["config"]["tool_bin"],
+            "/home/chubes/Developer/example-project/.ci/tool-runner/packages/cli/dist/index.js"
         );
         assert_eq!(
             remapped["tasks"][0]["executor"]["config"]["artifact_root"],
-            "/home/chubes/Developer/wp-site-generator/artifacts"
+            "/home/chubes/Developer/example-project/artifacts"
         );
         assert!(out.iter().any(|a| a == "--record-run-id=loop-1"));
     }
@@ -627,15 +620,15 @@ mod tests {
     #[cfg(unix)]
     fn remap_agent_task_run_plan_prefers_canonical_symlink_target() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let primary = temp.path().join("wp-site-generator");
-        let codebox = temp.path().join("wp-codebox");
-        let codebox_bin = codebox.join("packages/cli/dist/index.js");
-        let symlink = primary.join(".ci/wp-codebox");
+        let primary = temp.path().join("example-project");
+        let tool = temp.path().join("tool-runner");
+        let tool_bin = tool.join("packages/cli/dist/index.js");
+        let symlink = primary.join(".ci/tool-runner");
         let plan = primary.join(".ci/site-generation-loop.agent-task-plan.json");
         std::fs::create_dir_all(symlink.parent().unwrap()).expect("ci dir");
-        std::fs::create_dir_all(codebox_bin.parent().unwrap()).expect("codebox bin dir");
-        std::fs::write(&codebox_bin, "#!/usr/bin/env node\n").expect("codebox bin");
-        std::os::unix::fs::symlink(&codebox, &symlink).expect("codebox symlink");
+        std::fs::create_dir_all(tool_bin.parent().unwrap()).expect("tool bin dir");
+        std::fs::write(&tool_bin, "#!/usr/bin/env node\n").expect("tool bin");
+        std::os::unix::fs::symlink(&tool, &symlink).expect("tool symlink");
         let symlinked_bin = symlink.join("packages/cli/dist/index.js");
         std::fs::write(
             &plan,
@@ -645,8 +638,8 @@ mod tests {
                 "tasks": [{
                     "task_id": "task-1",
                     "executor": {
-                        "backend": "wp-codebox",
-                        "config": { "wp_codebox_bin": symlinked_bin }
+                        "backend": "tool-runner",
+                        "config": { "tool_bin": symlinked_bin }
                     },
                     "instructions": "test"
                 }]
@@ -661,8 +654,8 @@ mod tests {
                 remote: "/home/chubes/_lab_workspaces/wp-site-generator".to_string(),
             },
             LabPathRemap {
-                local: codebox.canonicalize().unwrap().display().to_string(),
-                remote: "/home/chubes/_lab_workspaces/wp-codebox".to_string(),
+                local: tool.canonicalize().unwrap().display().to_string(),
+                remote: "/home/chubes/_lab_workspaces/tool-runner".to_string(),
             },
         ];
         let args = vec![
@@ -679,43 +672,42 @@ mod tests {
             serde_json::from_str(&out[plan_idx]).expect("inline plan");
 
         assert_eq!(
-            remapped["tasks"][0]["executor"]["config"]["wp_codebox_bin"],
-            "/home/chubes/_lab_workspaces/wp-codebox/packages/cli/dist/index.js"
+            remapped["tasks"][0]["executor"]["config"]["tool_bin"],
+            "/home/chubes/_lab_workspaces/tool-runner/packages/cli/dist/index.js"
         );
     }
 
     #[test]
     fn remap_agent_task_run_plan_absolute_file_spec_when_plan_unreadable() {
         let mappings = vec![LabPathRemap {
-            local: "/Users/chubes/Developer/wp-site-generator".to_string(),
-            remote: "/home/chubes/Developer/wp-site-generator".to_string(),
+            local: "/Users/chubes/Developer/example-project".to_string(),
+            remote: "/home/chubes/Developer/example-project".to_string(),
         }];
         let args = vec![
             "homeboy".to_string(),
             "agent-task".to_string(),
             "run-plan".to_string(),
             "--plan".to_string(),
-            "@/Users/chubes/Developer/wp-site-generator/.ci/missing.json".to_string(),
+            "@/Users/chubes/Developer/example-project/.ci/missing.json".to_string(),
         ];
 
         assert_eq!(
             remap_agent_task_plan_in_args(&args, &mappings)[4],
-            "@/home/chubes/Developer/wp-site-generator/.ci/missing.json"
+            "@/home/chubes/Developer/example-project/.ci/missing.json"
         );
     }
 
     #[test]
-    fn remap_path_settings_rewrites_wp_codebox_bin() {
+    fn remap_path_settings_rewrites_local_path_values() {
         let mappings = vec![LabPathRemap {
-            local: "/Users/chubes/Developer/wp-codebox".to_string(),
-            remote: "/home/chubes/_lab_workspaces/wp-codebox".to_string(),
+            local: "/Users/chubes/Developer/tool-runner".to_string(),
+            remote: "/home/chubes/_lab_workspaces/tool-runner".to_string(),
         }];
         let args = vec![
             "homeboy".to_string(),
             "trace".to_string(),
             "--setting".to_string(),
-            "wp_codebox_bin=/Users/chubes/Developer/wp-codebox/packages/cli/dist/index.js"
-                .to_string(),
+            "tool_bin=/Users/chubes/Developer/tool-runner/packages/cli/dist/index.js".to_string(),
             "--setting=mode=fast".to_string(),
         ];
 
@@ -723,7 +715,7 @@ mod tests {
 
         assert_eq!(
             out[3],
-            "wp_codebox_bin=/home/chubes/_lab_workspaces/wp-codebox/packages/cli/dist/index.js"
+            "tool_bin=/home/chubes/_lab_workspaces/tool-runner/packages/cli/dist/index.js"
         );
         assert_eq!(out[4], "--setting=mode=fast");
     }

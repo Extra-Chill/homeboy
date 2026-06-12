@@ -273,6 +273,9 @@ mod tests {
     use super::*;
     use crate::core::runner::lab_workspaces::workspace_mapping_entry;
     use crate::core::runner::{RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOutput};
+    use std::sync::Mutex;
+
+    static ENV_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     struct EnvVarGuard {
         name: &'static str,
@@ -283,6 +286,12 @@ mod tests {
         fn set(name: &'static str, value: &str) -> Self {
             let prior = std::env::var(name).ok();
             std::env::set_var(name, value);
+            Self { name, prior }
+        }
+
+        fn unset(name: &'static str) -> Self {
+            let prior = std::env::var(name).ok();
+            std::env::remove_var(name);
             Self { name, prior }
         }
     }
@@ -302,7 +311,7 @@ mod tests {
             "homeboy".to_string(),
             "trace".to_string(),
             "--setting".to_string(),
-            "wp_codebox_bin=/tmp/codebox.js".to_string(),
+            "tool_bin=/tmp/tool.js".to_string(),
             "--setting-json={\"ignored\":true}".to_string(),
             "--setting-json".to_string(),
             "retries=3".to_string(),
@@ -314,8 +323,8 @@ mod tests {
             vec![
                 ParsedSettingArg {
                     source: "setting",
-                    key: "wp_codebox_bin".to_string(),
-                    value: "/tmp/codebox.js".to_string(),
+                    key: "tool_bin".to_string(),
+                    value: "/tmp/tool.js".to_string(),
                 },
                 ParsedSettingArg {
                     source: "setting_json",
@@ -337,7 +346,7 @@ mod tests {
             "homeboy".to_string(),
             "trace".to_string(),
             "--setting".to_string(),
-            "wp_codebox_bin=/tmp/codebox.js".to_string(),
+            "tool_bin=/tmp/tool.js".to_string(),
             "--setting".to_string(),
             "api_token=secret-value".to_string(),
         ];
@@ -350,15 +359,12 @@ mod tests {
         let diagnostics = settings_env_diagnostics(&args, &env);
 
         assert_eq!(diagnostics["schema"], SETTINGS_DIAGNOSTICS_SCHEMA);
-        assert_eq!(diagnostics["settings"][0]["key"], "wp_codebox_bin");
+        assert_eq!(diagnostics["settings"][0]["key"], "tool_bin");
         assert_eq!(
             diagnostics["settings"][0]["env_name"],
-            "HOMEBOY_SETTINGS_WP_CODEBOX_BIN"
+            "HOMEBOY_SETTINGS_TOOL_BIN"
         );
-        assert_eq!(
-            diagnostics["settings"][0]["value_preview"],
-            "/tmp/codebox.js"
-        );
+        assert_eq!(diagnostics["settings"][0]["value_preview"], "/tmp/tool.js");
         assert_eq!(diagnostics["settings"][0]["forwarded_as"], "argv");
         assert_eq!(diagnostics["settings"][0]["remote_export_expected"], true);
         assert_eq!(
@@ -384,8 +390,8 @@ mod tests {
             &RunnerWorkspaceSyncOutput {
                 command: "runner.workspace.sync",
                 runner_id: "homeboy-lab".to_string(),
-                local_path: "/Users/chubes/Developer/woocommerce-gateway-stripe".to_string(),
-                remote_path: "/home/chubes/Developer/woocommerce-gateway-stripe".to_string(),
+                local_path: "/Users/chubes/Developer/example-component".to_string(),
+                remote_path: "/home/chubes/Developer/example-component".to_string(),
                 sync_mode: RunnerWorkspaceSyncMode::Snapshot,
                 snapshot_identity: "snapshot".to_string(),
                 files: 1,
@@ -401,18 +407,18 @@ mod tests {
             &mapping,
             [(
                 "HOMEBOY_TEST_COMPONENT_PATH".to_string(),
-                "/Users/chubes/Developer/woocommerce-gateway-stripe/includes".to_string(),
+                "/Users/chubes/Developer/example-component/includes".to_string(),
             )],
         )
         .expect("forward env");
 
         assert_eq!(
             env.get("HOMEBOY_TEST_COMPONENT_PATH").map(String::as_str),
-            Some("/home/chubes/Developer/woocommerce-gateway-stripe/includes")
+            Some("/home/chubes/Developer/example-component/includes")
         );
         assert_eq!(
             metadata["forwarded"][0]["runner_value"],
-            "/home/chubes/Developer/woocommerce-gateway-stripe/includes"
+            "/home/chubes/Developer/example-component/includes"
         );
     }
 
@@ -452,7 +458,8 @@ mod tests {
 
     #[test]
     fn warns_when_runner_exec_wait_timeout_is_only_a_workload_setting() {
-        std::env::remove_var(RUNNER_EXEC_WAIT_TIMEOUT_ENV);
+        let _lock = ENV_TEST_LOCK.lock().expect("env test lock");
+        let _guard = EnvVarGuard::unset(RUNNER_EXEC_WAIT_TIMEOUT_ENV);
         let args = vec![
             "homeboy".to_string(),
             "bench".to_string(),
@@ -469,6 +476,7 @@ mod tests {
 
     #[test]
     fn skips_runner_exec_wait_timeout_setting_warning_when_controller_env_is_set() {
+        let _lock = ENV_TEST_LOCK.lock().expect("env test lock");
         let _guard = EnvVarGuard::set(RUNNER_EXEC_WAIT_TIMEOUT_ENV, "2400");
         let args = vec![
             "homeboy".to_string(),

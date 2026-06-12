@@ -472,7 +472,7 @@ fn push_path_setting_value(raw: &str, values: &mut Vec<String>) {
     let Some((key, value)) = raw.split_once('=') else {
         return;
     };
-    if matches!(key, "wp_codebox_bin") && !value.trim().is_empty() {
+    if !key.trim().is_empty() && !value.trim().is_empty() {
         values.push(value.to_string());
     }
 }
@@ -994,14 +994,14 @@ mod provider_config_candidate_paths_tests {
         let controller = tempfile::tempdir().expect("controller");
         let source = controller.path().join("primary");
         let planner = controller.path().join("plan-owner");
-        let codebox = controller.path().join("wp-codebox");
-        let codebox_bin = codebox.join("packages/cli/dist/index.js");
+        let tool = controller.path().join("tool-runner");
+        let tool_bin = tool.join("packages/cli/dist/index.js");
         let plan = planner.join(".ci/site-generation-loop.agent-task-plan.json");
         std::fs::create_dir_all(&source).expect("source dir");
         std::fs::create_dir_all(plan.parent().unwrap()).expect("plan dir");
-        std::fs::create_dir_all(codebox_bin.parent().unwrap()).expect("codebox cli dir");
-        std::fs::write(&codebox_bin, "#!/usr/bin/env node\n").expect("codebox bin");
-        std::fs::write(codebox.join("package-lock.json"), "{}\n").expect("package lock");
+        std::fs::create_dir_all(tool_bin.parent().unwrap()).expect("tool cli dir");
+        std::fs::write(&tool_bin, "#!/usr/bin/env node\n").expect("tool bin");
+        std::fs::write(tool.join("package-lock.json"), "{}\n").expect("package lock");
         std::fs::write(
             &plan,
             serde_json::json!({
@@ -1010,9 +1010,9 @@ mod provider_config_candidate_paths_tests {
                 "tasks": [{
                     "task_id": "task-1",
                     "executor": {
-                        "backend": "wp-codebox",
+                        "backend": "tool-runner",
                         "config": {
-                            "wp_codebox_bin": codebox_bin,
+                            "tool_bin": tool_bin,
                             "artifact_root": planner.join("artifacts")
                         }
                     },
@@ -1027,11 +1027,11 @@ mod provider_config_candidate_paths_tests {
         git(&planner, &["config", "user.name", "Homeboy Test"]);
         git(&planner, &["add", "."]);
         git(&planner, &["commit", "-m", "initial"]);
-        git(&codebox, &["init", "-b", "main"]);
-        git(&codebox, &["config", "user.email", "test@example.com"]);
-        git(&codebox, &["config", "user.name", "Homeboy Test"]);
-        git(&codebox, &["add", "."]);
-        git(&codebox, &["commit", "-m", "initial"]);
+        git(&tool, &["init", "-b", "main"]);
+        git(&tool, &["config", "user.email", "test@example.com"]);
+        git(&tool, &["config", "user.name", "Homeboy Test"]);
+        git(&tool, &["add", "."]);
+        git(&tool, &["commit", "-m", "initial"]);
 
         let args = vec![
             "homeboy".to_string(),
@@ -1049,7 +1049,7 @@ mod provider_config_candidate_paths_tests {
         assert!(workspaces[0].snapshot_includes.is_empty());
         assert!(!workspaces[0].bootstrap_node_dependencies);
         assert_eq!(workspaces[1].role, "agent_task_plan_config");
-        assert_eq!(workspaces[1].path, codebox.canonicalize().unwrap());
+        assert_eq!(workspaces[1].path, tool.canonicalize().unwrap());
         assert!(workspaces[1]
             .snapshot_includes
             .contains(&"packages/cli/dist/**".to_string()));
@@ -1081,33 +1081,33 @@ mod provider_config_candidate_paths_tests {
     }
 
     #[test]
-    fn path_setting_wp_codebox_bin_syncs_containing_checkout() {
+    fn path_setting_local_file_syncs_containing_checkout() {
         let controller = tempfile::tempdir().expect("controller");
         let source = controller.path().join("primary");
-        let codebox = controller.path().join("wp-codebox");
-        let codebox_bin = codebox.join("packages/cli/dist/index.js");
+        let tool = controller.path().join("tool-runner");
+        let tool_bin = tool.join("packages/cli/dist/index.js");
         std::fs::create_dir_all(&source).expect("source dir");
-        std::fs::create_dir_all(codebox_bin.parent().unwrap()).expect("codebox cli dir");
-        std::fs::write(&codebox_bin, "#!/usr/bin/env node\n").expect("codebox bin");
-        std::fs::write(codebox.join("package-lock.json"), "{}\n").expect("package lock");
-        git(&codebox, &["init", "-b", "main"]);
-        git(&codebox, &["config", "user.email", "test@example.com"]);
-        git(&codebox, &["config", "user.name", "Homeboy Test"]);
-        git(&codebox, &["add", "."]);
-        git(&codebox, &["commit", "-m", "initial"]);
+        std::fs::create_dir_all(tool_bin.parent().unwrap()).expect("tool cli dir");
+        std::fs::write(&tool_bin, "#!/usr/bin/env node\n").expect("tool bin");
+        std::fs::write(tool.join("package-lock.json"), "{}\n").expect("package lock");
+        git(&tool, &["init", "-b", "main"]);
+        git(&tool, &["config", "user.email", "test@example.com"]);
+        git(&tool, &["config", "user.name", "Homeboy Test"]);
+        git(&tool, &["add", "."]);
+        git(&tool, &["commit", "-m", "initial"]);
 
         let args = vec![
             "homeboy".to_string(),
             "trace".to_string(),
             "--setting".to_string(),
-            format!("wp_codebox_bin={}", codebox_bin.display()),
+            format!("tool_bin={}", tool_bin.display()),
         ];
 
         let workspaces = path_setting_extra_workspaces(&args, &source).expect("workspaces");
 
         assert_eq!(workspaces.len(), 1);
         assert_eq!(workspaces[0].role, "path_setting");
-        assert_eq!(workspaces[0].path, codebox.canonicalize().unwrap());
+        assert_eq!(workspaces[0].path, tool.canonicalize().unwrap());
         assert!(workspaces[0]
             .snapshot_includes
             .contains(&"packages/cli/dist/**".to_string()));
@@ -1161,15 +1161,15 @@ mod provider_config_candidate_paths_tests {
     fn agent_task_run_plan_syncs_symlinked_dependency_target_inside_primary_workspace() {
         let controller = tempfile::tempdir().expect("controller");
         let source = controller.path().join("primary");
-        let codebox = controller.path().join("wp-codebox");
-        let codebox_bin = codebox.join("packages/cli/dist/index.js");
-        let symlink = source.join(".ci/wp-codebox");
+        let tool = controller.path().join("tool-runner");
+        let tool_bin = tool.join("packages/cli/dist/index.js");
+        let symlink = source.join(".ci/tool-runner");
         let plan = source.join(".ci/site-generation-loop.agent-task-plan.json");
         std::fs::create_dir_all(symlink.parent().unwrap()).expect("ci dir");
-        std::fs::create_dir_all(codebox_bin.parent().unwrap()).expect("codebox cli dir");
-        std::fs::write(&codebox_bin, "#!/usr/bin/env node\n").expect("codebox bin");
-        std::fs::write(codebox.join("package-lock.json"), "{}\n").expect("package lock");
-        std::os::unix::fs::symlink(&codebox, &symlink).expect("codebox symlink");
+        std::fs::create_dir_all(tool_bin.parent().unwrap()).expect("tool cli dir");
+        std::fs::write(&tool_bin, "#!/usr/bin/env node\n").expect("tool bin");
+        std::fs::write(tool.join("package-lock.json"), "{}\n").expect("package lock");
+        std::os::unix::fs::symlink(&tool, &symlink).expect("tool symlink");
         std::fs::write(
             &plan,
             serde_json::json!({
@@ -1178,9 +1178,9 @@ mod provider_config_candidate_paths_tests {
                 "tasks": [{
                     "task_id": "task-1",
                     "executor": {
-                        "backend": "wp-codebox",
+                        "backend": "tool-runner",
                         "config": {
-                            "wp_codebox_bin": symlink.join("packages/cli/dist/index.js")
+                            "tool_bin": symlink.join("packages/cli/dist/index.js")
                         }
                     },
                     "instructions": "test"
@@ -1189,11 +1189,11 @@ mod provider_config_candidate_paths_tests {
             .to_string(),
         )
         .expect("plan file");
-        git(&codebox, &["init", "-b", "main"]);
-        git(&codebox, &["config", "user.email", "test@example.com"]);
-        git(&codebox, &["config", "user.name", "Homeboy Test"]);
-        git(&codebox, &["add", "."]);
-        git(&codebox, &["commit", "-m", "initial"]);
+        git(&tool, &["init", "-b", "main"]);
+        git(&tool, &["config", "user.email", "test@example.com"]);
+        git(&tool, &["config", "user.name", "Homeboy Test"]);
+        git(&tool, &["add", "."]);
+        git(&tool, &["commit", "-m", "initial"]);
 
         let args = vec![
             "homeboy".to_string(),
@@ -1207,7 +1207,7 @@ mod provider_config_candidate_paths_tests {
 
         assert_eq!(workspaces.len(), 1);
         assert_eq!(workspaces[0].role, "agent_task_plan_config");
-        assert_eq!(workspaces[0].path, codebox.canonicalize().unwrap());
+        assert_eq!(workspaces[0].path, tool.canonicalize().unwrap());
         assert!(workspaces[0]
             .snapshot_includes
             .contains(&"packages/cli/dist/**".to_string()));

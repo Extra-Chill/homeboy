@@ -917,14 +917,8 @@ fn validate_runner_process_cwd(runner: &Runner, cwd: &str) -> Result<()> {
 
 pub(crate) fn execute_runner_process(plan: &RunnerProcessPlan) -> Result<ProcessOutput> {
     let mut command = std::process::Command::new(&plan.command[0]);
-    command
-        .args(&plan.command[1..])
-        .current_dir(&plan.cwd)
-        .envs(plan.env.iter())
-        .env(
-            crate::core::observation::SOURCE_SNAPSHOT_METADATA_ENV,
-            serde_json::to_string(&plan.source_snapshot).unwrap_or_default(),
-        );
+    command.args(&plan.command[1..]).current_dir(&plan.cwd);
+    apply_runner_process_env(&mut command, plan);
 
     command_output(&mut command)
 }
@@ -934,16 +928,29 @@ pub(crate) fn execute_runner_process_until_cancelled(
     is_cancelled: impl FnMut() -> bool,
 ) -> Result<ProcessOutput> {
     let mut command = std::process::Command::new(&plan.command[0]);
-    command
-        .args(&plan.command[1..])
-        .current_dir(&plan.cwd)
-        .envs(plan.env.iter())
-        .env(
-            crate::core::observation::SOURCE_SNAPSHOT_METADATA_ENV,
-            serde_json::to_string(&plan.source_snapshot).unwrap_or_default(),
-        );
+    command.args(&plan.command[1..]).current_dir(&plan.cwd);
+    apply_runner_process_env(&mut command, plan);
 
     command_output_until_cancelled(&mut command, is_cancelled)
+}
+
+fn apply_runner_process_env(command: &mut std::process::Command, plan: &RunnerProcessPlan) {
+    command.env_clear();
+    for key in inherited_runner_process_env_keys() {
+        if !plan.env.contains_key(*key) {
+            if let Some(value) = std::env::var_os(key) {
+                command.env(key, value);
+            }
+        }
+    }
+    command.envs(plan.env.iter()).env(
+        crate::core::observation::SOURCE_SNAPSHOT_METADATA_ENV,
+        serde_json::to_string(&plan.source_snapshot).unwrap_or_default(),
+    );
+}
+
+fn inherited_runner_process_env_keys() -> &'static [&'static str] {
+    &["HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "TEMP", "TMP"]
 }
 
 fn command_output(command: &mut std::process::Command) -> Result<ProcessOutput> {
@@ -1148,6 +1155,28 @@ mod tests {
         }
     }
 
+    struct EnvVarGuard {
+        name: &'static str,
+        prior: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(name: &'static str, value: &str) -> Self {
+            let prior = std::env::var(name).ok();
+            std::env::set_var(name, value);
+            Self { name, prior }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.prior {
+                Some(value) => std::env::set_var(self.name, value),
+                None => std::env::remove_var(self.name),
+            }
+        }
+    }
+
     #[test]
     fn daemon_job_context_error_preserves_in_flight_job_details() {
         let source = Error::internal_unexpected(
@@ -1246,6 +1275,76 @@ mod tests {
             assert_eq!(source_snapshot.sync_mode, "existing_remote");
             assert!(source_snapshot.snapshot_hash.starts_with("sha256:"));
             assert!(output.job_id.is_none());
+        });
+    }
+
+    #[test]
+    fn test_exec_does_not_leak_ambient_process_env() {
+        crate::test_support::with_isolated_home(|_| {
+            let _guard = EnvVarGuard::set("HOMEBOY_TEST_AMBIENT_ONLY", "leaked");
+            super::super::create(r#"{"id":"lab-local","kind":"local"}"#, false)
+                .expect("create local runner");
+
+            let (output, exit_code) = exec(
+                "lab-local",
+                RunnerExecOptions {
+                    cwd: None,
+                    project_id: None,
+                    allow_diagnostic_ssh: false,
+                    command: vec![
+                        "sh".to_string(),
+                        "-c".to_string(),
+                        "test -z \"${HOMEBOY_TEST_AMBIENT_ONLY+x}\" && printf isolated".to_string(),
+                    ],
+                    env: Default::default(),
+                    capture_patch: false,
+                    raw_exec: false,
+                    source_snapshot: None,
+                    capability_preflight: None,
+                    required_extensions: Vec::new(),
+                    require_paths: Vec::new(),
+                },
+            )
+            .expect("exec local runner");
+
+            assert_eq!(exit_code, 0);
+            assert_eq!(output.stdout, "isolated");
+        });
+    }
+
+    #[test]
+    fn test_exec_preserves_explicit_request_env() {
+        crate::test_support::with_isolated_home(|_| {
+            super::super::create(r#"{"id":"lab-local","kind":"local"}"#, false)
+                .expect("create local runner");
+
+            let (output, exit_code) = exec(
+                "lab-local",
+                RunnerExecOptions {
+                    cwd: None,
+                    project_id: None,
+                    allow_diagnostic_ssh: false,
+                    command: vec![
+                        "sh".to_string(),
+                        "-c".to_string(),
+                        "printf %s \"$HOMEBOY_TEST_EXPLICIT\"".to_string(),
+                    ],
+                    env: HashMap::from([(
+                        "HOMEBOY_TEST_EXPLICIT".to_string(),
+                        "planned".to_string(),
+                    )]),
+                    capture_patch: false,
+                    raw_exec: false,
+                    source_snapshot: None,
+                    capability_preflight: None,
+                    required_extensions: Vec::new(),
+                    require_paths: Vec::new(),
+                },
+            )
+            .expect("exec local runner");
+
+            assert_eq!(exit_code, 0);
+            assert_eq!(output.stdout, "planned");
         });
     }
 
