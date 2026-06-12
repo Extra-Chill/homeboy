@@ -295,7 +295,7 @@ mod positional_tests {
 #[cfg(test)]
 mod normalize_tests {
     use super::{normalize, EXPLICIT_PASSTHROUGH_SENTINEL};
-    use crate::cli_surface::Cli;
+    use crate::cli_surface::{Cli, Commands};
     use clap::Parser;
 
     fn argv(parts: &[&str]) -> Vec<String> {
@@ -354,6 +354,32 @@ mod normalize_tests {
         ]));
 
         assert!(Cli::try_parse_from(args).is_ok());
+    }
+
+    #[test]
+    fn trace_secret_env_parses_repeated_split_and_equals_args() {
+        let parsed = Cli::try_parse_from(normalize(argv(&[
+            "homeboy",
+            "trace",
+            "compare",
+            "woocommerce-gateway-stripe",
+            "real-wallet",
+            "--secret-env",
+            "STRIPE_PUBLISHABLE_KEY",
+            "--secret-env=STRIPE_SECRET_KEY",
+        ])))
+        .expect("trace secret-env args parse");
+
+        let Commands::Trace(args) = parsed.command else {
+            panic!("expected trace command");
+        };
+        assert_eq!(
+            args.secret_env,
+            vec![
+                "STRIPE_PUBLISHABLE_KEY".to_string(),
+                "STRIPE_SECRET_KEY".to_string(),
+            ]
+        );
     }
 
     #[test]

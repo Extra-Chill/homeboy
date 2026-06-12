@@ -113,6 +113,9 @@ pub struct TraceArgs {
     pub profiles: bool,
     #[command(flatten)]
     pub setting_args: SettingArgs,
+    /// Secret environment variable name to hydrate for the trace runner. Repeatable.
+    #[arg(long = "secret-env", value_name = "NAME")]
+    pub secret_env: Vec<String>,
     /// Print compact machine-readable summary.
     #[arg(long)]
     pub json_summary: bool,
@@ -535,6 +538,14 @@ fn execute_trace_run(args: TraceArgs) -> homeboy::core::Result<TraceRunExecution
         .map(|context| rig::snapshot_state(&context.rig_spec));
     let run_dir = RunDir::create()?;
     run_trace_experiment_setup_for_plan(experiment_plan.as_ref(), &run_dir)?;
+    let experiment_settings = trace_experiment_settings(experiment_plan.as_ref())?;
+    let mut experiment_env = trace_experiment_env(experiment_plan.as_ref())?;
+    experiment_env.extend(args.matrix_env.clone());
+    let trace_secret_env_status = hydrate_trace_secret_env(
+        &args.secret_env,
+        Some(&ctx.component_id),
+        &mut experiment_env,
+    )?;
     let scenario_id = scenario.clone();
     let rig_id = args.rig.clone();
     let requested_overlays = args.overlays.clone();
@@ -562,6 +573,7 @@ fn execute_trace_run(args: TraceArgs) -> homeboy::core::Result<TraceRunExecution
                         "requested_variants": requested_variants,
                         "span_definitions": span_definitions.clone(),
                         "phase_preset": args.phase_preset.clone(),
+                        "secret_env": trace_secret_env_status.clone(),
                         "phase_milestones": args.phases.clone().into_iter().map(|phase| {
                             serde_json::json!({ "label": phase.label, "key": phase.key })
                         }).collect::<Vec<_>>(),
@@ -587,9 +599,6 @@ fn execute_trace_run(args: TraceArgs) -> homeboy::core::Result<TraceRunExecution
     let (extra_workloads, trace_dependencies, runner_capabilities, invocation_requirements) =
         trace_workload_inputs(rig_context.as_ref(), ctx.extension_id.as_deref());
     warn_rig_owned_trace_workload_expansion(rig_context.as_ref(), ctx.extension_id.as_deref());
-    let experiment_settings = trace_experiment_settings(experiment_plan.as_ref())?;
-    let mut experiment_env = trace_experiment_env(experiment_plan.as_ref())?;
-    experiment_env.extend(args.matrix_env.clone());
     let trace_probes =
         trace_probes_for_args(&args, rig_context.as_ref(), ctx.extension_id.as_deref())?;
     let public_preview =
@@ -687,6 +696,20 @@ fn trace_scenario(args: &TraceArgs) -> homeboy::core::Result<&str> {
                 None,
             )
         })
+}
+
+fn hydrate_trace_secret_env(
+    names: &[String],
+    project_id: Option<&str>,
+    env: &mut Vec<(String, String)>,
+) -> homeboy::core::Result<serde_json::Value> {
+    if names.iter().all(|name| name.trim().is_empty()) {
+        return Ok(homeboy::core::trace_secrets::empty_status());
+    }
+
+    let (resolved, statuses) = homeboy::core::trace_secrets::resolve_secret_env(names, project_id)?;
+    env.extend(resolved);
+    Ok(homeboy::core::trace_secrets::status_metadata(statuses))
 }
 
 fn run_list(args: TraceArgs) -> CmdResult<TraceCommandOutput> {

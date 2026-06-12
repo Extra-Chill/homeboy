@@ -423,6 +423,7 @@ fn trace_compare_exits_nonzero_for_guardrail_failures() {
         profile: None,
         profiles: false,
         setting_args: SettingArgs::default(),
+        secret_env: Vec::new(),
         json_summary: false,
         report: None,
         experiment: None,
