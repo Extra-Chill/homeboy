@@ -10,6 +10,7 @@ use super::run::{BenchRunFailure, BenchRunWorkflowResult};
 use crate::core::ci_profile::CiContext;
 use crate::core::finding::HomeboyFinding;
 use crate::core::gate::HomeboyGateResult;
+use crate::core::observation::ArtifactViewerLink;
 use crate::core::rig::RigStateSnapshot;
 use crate::core::runner::reportable_artifact_evidence_path;
 
@@ -145,6 +146,10 @@ pub struct BenchArtifactRef {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub public_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub viewer_url: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub viewer_links: Vec<ArtifactViewerLink>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub local_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
@@ -191,6 +196,8 @@ fn artifact_ref(
         role: artifact.role.clone(),
         preview_url: artifact.preview_url.clone(),
         public_url: artifact.public_url.clone(),
+        viewer_url: artifact.viewer_url.clone(),
+        viewer_links: artifact.viewer_links.clone(),
         local_url: artifact.local_url.clone(),
         status: artifact.status.clone(),
         preview_lifecycle: artifact.preview_lifecycle.clone(),

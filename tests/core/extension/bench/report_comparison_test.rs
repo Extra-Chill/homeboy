@@ -171,6 +171,9 @@ mod fixtures {
             role: role.map(str::to_string),
             preview_url: Some(preview_url.to_string()),
             public_url: Some(preview_url.to_string()),
+            viewer: None,
+            viewer_url: None,
+            viewer_links: Vec::new(),
             local_url: Some("http://127.0.0.1:8080".to_string()),
             status: Some(status.to_string()),
             preview_lifecycle: BenchPreviewLifecycleMetadata {
@@ -322,6 +325,42 @@ fn comparison_side_by_side_renders_baseline_and_candidate_preview_links() {
     assert_eq!(
         value["reports"]["side_by_side"]["rigs"][1]["preview_links"][0]["url"],
         "https://candidate-preview.example.test/"
+    );
+}
+
+#[test]
+fn comparison_side_by_side_uses_viewer_url_as_preview_link() {
+    let mut candidate_scenario = scenario("site-build", &[("elapsed_ms", 8_000.0)]);
+    candidate_scenario.artifacts.insert(
+        "blueprint.after".to_string(),
+        BenchArtifact {
+            path: Some("artifacts/blueprint.after.json".to_string()),
+            kind: Some("json".to_string()),
+            label: Some("Generated site replay".to_string()),
+            public_url: Some("https://artifacts.example.test/runs/1/blueprint.after".to_string()),
+            viewer_url: Some(
+                "https://playground.wordpress.net/?blueprint-url=https%3A%2F%2Fartifacts.example.test%2Fruns%2F1%2Fblueprint.after"
+                    .to_string(),
+            ),
+            ..BenchArtifact::default()
+        },
+    );
+
+    let entries = vec![entry(
+        "candidate-rig",
+        true,
+        Some(results(vec![candidate_scenario])),
+    )];
+
+    let (out, exit) = aggregate_comparison("studio".into(), 10, entries);
+    let preview_link = &out.reports.side_by_side.rigs[0].preview_links[0];
+
+    assert_eq!(exit, 0);
+    assert_eq!(preview_link.name, "blueprint.after");
+    assert_eq!(preview_link.role, "baseline");
+    assert_eq!(
+        preview_link.url,
+        "https://playground.wordpress.net/?blueprint-url=https%3A%2F%2Fartifacts.example.test%2Fruns%2F1%2Fblueprint.after"
     );
 }
 

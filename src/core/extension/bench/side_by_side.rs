@@ -162,6 +162,7 @@ fn side_by_side_preview_link(
     let url = artifact
         .preview_url
         .clone()
+        .or_else(|| artifact.viewer_url.clone())
         .or_else(|| artifact.public_url.clone())
         .or_else(|| artifact.url.clone())
         .or_else(|| artifact.path.as_deref().and_then(url_from_artifact_path))?;
@@ -187,6 +188,8 @@ fn side_by_side_preview_link(
 
 fn is_preview_artifact(artifact: &BenchArtifactRef) -> bool {
     artifact.preview_url.is_some()
+        || artifact.viewer_url.is_some()
+        || !artifact.viewer_links.is_empty()
         || artifact.public_url.is_some()
         || artifact.local_url.is_some()
         || artifact.status.is_some()

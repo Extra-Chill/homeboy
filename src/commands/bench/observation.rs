@@ -2,13 +2,15 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
+use homeboy::core::artifact_links;
 use homeboy::core::engine::run_dir::{self, RunDir};
 use homeboy::core::extension::bench::{
     BenchDiagnostic, BenchDiagnosticSource, BenchResults, BenchRunWorkflowResult,
 };
 use homeboy::core::git::short_head_revision_at;
 use homeboy::core::observation::{
-    finding_records_from_budget, merge_metadata, ActiveObservation, NewRunRecord, RunStatus,
+    finding_records_from_budget, merge_metadata, ActiveObservation, ArtifactRecord, NewRunRecord,
+    RunStatus,
 };
 use homeboy::core::rig::RigStateSnapshot;
 
@@ -487,7 +489,7 @@ fn persist_bench_artifact(
             metadata,
         ) {
             Ok(record) => {
-                artifact.observation_artifact_id = Some(record.id);
+                apply_recorded_bench_artifact_links(artifact, &record);
                 None
             }
             Err(error) => Some(bench_artifact_diagnostic(
@@ -549,8 +551,8 @@ fn persist_bench_artifact(
 
     match record {
         Ok(record) => {
-            artifact.path = Some(record.path);
-            artifact.observation_artifact_id = Some(record.id);
+            artifact.path = Some(record.path.clone());
+            apply_recorded_bench_artifact_links(artifact, &record);
             None
         }
         Err(error) => Some(bench_artifact_diagnostic(
@@ -565,6 +567,19 @@ fn persist_bench_artifact(
             }),
         )),
     }
+}
+
+fn apply_recorded_bench_artifact_links(
+    artifact: &mut homeboy::core::extension::bench::BenchArtifact,
+    record: &ArtifactRecord,
+) {
+    artifact.observation_artifact_id = Some(record.id.clone());
+    let Some(public_url) = artifact_links::public_artifact_url(record) else {
+        return;
+    };
+    artifact.public_url = Some(public_url.clone());
+    artifact.viewer_links = artifact_links::viewer_links(record, Some(&public_url));
+    artifact.viewer_url = artifact.viewer_links.first().map(|link| link.url.clone());
 }
 
 fn bench_artifact_metadata(
@@ -582,6 +597,7 @@ fn bench_artifact_metadata(
         "label": artifact.label,
         "original_path": artifact.path,
         "url": artifact.url,
+        "viewer": artifact.viewer,
     })
 }
 
@@ -718,6 +734,11 @@ mod tests {
 
     pub(super) struct XdgGuard(Option<String>);
 
+    struct EnvGuard {
+        key: &'static str,
+        prior: Option<String>,
+    }
+
     impl XdgGuard {
         pub(super) fn unset() -> Self {
             let prior = std::env::var("XDG_DATA_HOME").ok();
@@ -731,6 +752,23 @@ mod tests {
             match &self.0 {
                 Some(value) => std::env::set_var("XDG_DATA_HOME", value),
                 None => std::env::remove_var("XDG_DATA_HOME"),
+            }
+        }
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let prior = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, prior }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.prior {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
             }
         }
     }
@@ -791,6 +829,10 @@ mod tests {
     fn bench_observation_persists_success_with_metrics_and_artifacts() {
         with_isolated_home(|home| {
             let _xdg = XdgGuard::unset();
+            let _public_artifact_base = EnvGuard::set(
+                homeboy::core::artifact_links::PUBLIC_ARTIFACT_BASE_URL_ENV,
+                "https://artifacts.example.test/homeboy",
+            );
             let run_dir = RunDir::create().expect("run dir");
             fs::write(run_dir.step_file(run_dir::files::BENCH_RESULTS), b"{}").expect("results");
             fs::write(run_dir.step_file(run_dir::files::RESOURCE_SUMMARY), b"{}")
@@ -809,6 +851,15 @@ mod tests {
                     kind: Some("json".to_string()),
                     label: Some("Transcript".to_string()),
                     observation_artifact_id: None,
+                    viewer: Some(serde_json::json!({
+                        "kind": "wordpress-playground-blueprint",
+                        "base": "https://playground.wordpress.net/",
+                        "query": {
+                            "parameter": "blueprint-url",
+                            "value": { "source": "public-artifact-url" },
+                            "encoding": "url"
+                        }
+                    })),
                     ..BenchArtifact::default()
                 },
             );
@@ -916,6 +967,26 @@ mod tests {
             assert_eq!(transcript_record.metadata_json["scenario_id"], "cold");
             assert_eq!(transcript_record.metadata_json["name"], "transcript");
             assert_eq!(transcript_record.metadata_json["kind"], "json");
+            assert_eq!(
+                transcript_record.metadata_json["viewer"]["query"]["value"]["source"],
+                "public-artifact-url"
+            );
+            let transcript_artifact =
+                &workflow.results.as_ref().unwrap().scenarios[0].artifacts["transcript"];
+            assert!(transcript_artifact
+                .public_url
+                .as_deref()
+                .expect("public url")
+                .starts_with("https://artifacts.example.test/homeboy/runs/"));
+            assert!(transcript_artifact
+                .viewer_url
+                .as_deref()
+                .expect("viewer url")
+                .starts_with("https://playground.wordpress.net/?blueprint-url="));
+            assert_eq!(
+                transcript_artifact.viewer_links[0].kind,
+                "wordpress-playground-blueprint"
+            );
             assert!(
                 workflow.results.as_ref().unwrap().scenarios[0].artifacts["admin"]
                     .observation_artifact_id
