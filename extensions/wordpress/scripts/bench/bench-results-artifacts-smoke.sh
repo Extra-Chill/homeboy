@@ -4,6 +4,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bench-results-artifacts.sh
 source "${SCRIPT_DIR}/bench-results-artifacts.sh"
+# shellcheck source=bench-artifact-viewer-contract.sh
+source "${SCRIPT_DIR}/bench-artifact-viewer-contract.sh"
 
 if ! command -v jq >/dev/null 2>&1; then
     echo "ERROR: jq required for JSON assertions in this smoke." >&2
@@ -11,7 +13,11 @@ if ! command -v jq >/dev/null 2>&1; then
 fi
 
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/bench-results-artifacts.XXXXXX")
+PUBLIC_SERVER_PID=""
 cleanup() {
+    if [ -n "$PUBLIC_SERVER_PID" ]; then
+        kill "$PUBLIC_SERVER_PID" >/dev/null 2>&1 || true
+    fi
     rm -rf "$TMP_ROOT"
 }
 trap cleanup EXIT
@@ -124,6 +130,8 @@ LEADERBOARD_FILE="${TMP_ROOT}/leaderboard.md"
 SERIES_FILE="${TMP_ROOT}/series.json"
 WEBPERF_SUMMARY_JSON_FILE="${TMP_ROOT}/webperf-evidence-summary.json"
 WEBPERF_SUMMARY_MARKDOWN_FILE="${TMP_ROOT}/webperf-evidence-summary.md"
+PUBLIC_ROOT="${TMP_ROOT}/public"
+PUBLIC_PORT_FILE="${TMP_ROOT}/public-port"
 
 if [ ! -s "$JSONL_FILE" ]; then
     echo "ERROR: missing results.jsonl artifact" >&2
@@ -207,6 +215,87 @@ fi
 if ! grep -q 'Web Performance Evidence Summary' "$WEBPERF_SUMMARY_MARKDOWN_FILE"; then
     echo "ERROR: webperf markdown summary missing title" >&2
     cat "$WEBPERF_SUMMARY_MARKDOWN_FILE" >&2
+    exit 1
+fi
+
+mkdir -p "${PUBLIC_ROOT}/published/artifacts"
+printf '{"landingPage":"/"}\n' > "${PUBLIC_ROOT}/published/artifacts/blueprint.after.json"
+
+PUBLIC_ROOT="$PUBLIC_ROOT" PUBLIC_PORT_FILE="$PUBLIC_PORT_FILE" node -e '
+const fs = require("fs");
+const http = require("http");
+const path = require("path");
+
+const root = path.resolve(process.env.PUBLIC_ROOT);
+const portFile = process.env.PUBLIC_PORT_FILE;
+const server = http.createServer((request, response) => {
+  const requestUrl = new URL(request.url, "http://127.0.0.1");
+  const requestedPath = path.resolve(root, `.${decodeURIComponent(requestUrl.pathname)}`);
+  if (requestedPath !== root && !requestedPath.startsWith(`${root}${path.sep}`)) {
+    response.writeHead(403);
+    response.end("forbidden");
+    return;
+  }
+
+  fs.readFile(requestedPath, (error, data) => {
+    if (error) {
+      response.writeHead(404);
+      response.end("not found");
+      return;
+    }
+
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(request.method === "HEAD" ? undefined : data);
+  });
+});
+
+server.listen(0, "127.0.0.1", () => {
+  fs.writeFileSync(portFile, String(server.address().port));
+});
+' &
+PUBLIC_SERVER_PID="$!"
+
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+    if [ -s "$PUBLIC_PORT_FILE" ]; then
+        break
+    fi
+    sleep 0.1
+done
+
+if [ ! -s "$PUBLIC_PORT_FILE" ]; then
+    echo "ERROR: public artifact fixture server did not start" >&2
+    exit 1
+fi
+
+PUBLIC_BASE_URL="http://127.0.0.1:$(cat "$PUBLIC_PORT_FILE")/published/"
+PUBLIC_ARTIFACT_URL="$(homeboy_bench_artifact_public_url "artifacts/blueprint.after.json" "$PUBLIC_BASE_URL")"
+EXPECTED_PUBLIC_ARTIFACT_URL="${PUBLIC_BASE_URL}artifacts/blueprint.after.json"
+
+if [ "$PUBLIC_ARTIFACT_URL" != "$EXPECTED_PUBLIC_ARTIFACT_URL" ]; then
+    echo "ERROR: public artifact URL helper resolved unexpected URL" >&2
+    echo "expected: $EXPECTED_PUBLIC_ARTIFACT_URL" >&2
+    echo "actual:   $PUBLIC_ARTIFACT_URL" >&2
+    exit 1
+fi
+
+if ! homeboy_bench_require_public_artifact_reachable "$PUBLIC_ARTIFACT_URL"; then
+    echo "ERROR: public artifact URL was not reachable: $PUBLIC_ARTIFACT_URL" >&2
+    exit 1
+fi
+
+VIEWER_JSON="$(homeboy_bench_playground_blueprint_viewer_json "artifacts/blueprint.after.json" "$PUBLIC_BASE_URL")"
+VIEWER_URL="$(printf '%s\n' "$VIEWER_JSON" | jq -r '.url')"
+VIEWER_KIND="$(printf '%s\n' "$VIEWER_JSON" | jq -r '.kind')"
+VIEWER_SOURCE="$(printf '%s\n' "$VIEWER_JSON" | jq -r '.query.value.source')"
+VIEWER_PUBLIC_ARTIFACT_URL="$(printf '%s\n' "$VIEWER_JSON" | jq -r '.query.value.url')"
+VIEWER_BLUEPRINT_URL="$(node -e '
+const viewerUrl = new URL(process.argv[1]);
+console.log(viewerUrl.searchParams.get("blueprint-url"));
+' "$VIEWER_URL")"
+
+if [ "$VIEWER_KIND" != "wordpress-playground-blueprint" ] || [ "$VIEWER_SOURCE" != "public-artifact-url" ] || [ "$VIEWER_PUBLIC_ARTIFACT_URL" != "$PUBLIC_ARTIFACT_URL" ] || [ "$VIEWER_BLUEPRINT_URL" != "$PUBLIC_ARTIFACT_URL" ]; then
+    echo "ERROR: resolved viewer metadata did not point at the reachable public artifact" >&2
+    printf '%s\n' "$VIEWER_JSON" >&2
     exit 1
 fi
 
