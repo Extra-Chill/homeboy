@@ -47,9 +47,15 @@ function run(command, args, options = {}) {
   });
 }
 
+function prepareRunnerCommand(command) {
+  const trimmed = String(command || '').trim();
+  return /^pnpm(\s|$)/.test(trimmed) ? `corepack ${trimmed}` : trimmed;
+}
+
 function runShellCommand(commandConfig, workspace, key) {
   const started = process.hrtime.bigint();
-  const result = run('bash', ['-lc', commandConfig.command], { cwd: workspace });
+  const preparedCommand = prepareRunnerCommand(commandConfig.command);
+  const result = run('bash', ['-lc', preparedCommand], { cwd: workspace });
   const elapsedMs = Number(process.hrtime.bigint() - started) / 1000000;
   const exitCode = typeof result.status === 'number' ? result.status : 1;
   const stdout = (result.stdout || '').trim();
@@ -59,8 +65,8 @@ function runShellCommand(commandConfig, workspace, key) {
 
   return {
     command: commandConfig.command,
-    prepared_command: commandConfig.command,
-    executed_command: `bash -lc ${JSON.stringify(commandConfig.command)}`,
+    prepared_command: preparedCommand,
+    executed_command: `bash -lc ${JSON.stringify(preparedCommand)}`,
     description: commandConfig.description,
     exit_code: exitCode,
     success: exitCode === 0,
@@ -319,9 +325,16 @@ function main() {
   }
 }
 
-try {
-  main();
-} catch (error) {
-  console.error(error.message);
-  process.exit(1);
+if (require.main === module) {
+  try {
+    main();
+  } catch (error) {
+    console.error(error.message);
+    process.exit(1);
+  }
 }
+
+module.exports = {
+  prepareRunnerCommand,
+  runShellCommand,
+};
