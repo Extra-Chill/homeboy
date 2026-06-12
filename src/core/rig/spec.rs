@@ -536,9 +536,33 @@ pub struct TracePublicPreviewSpec {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub required_asset_paths: Vec<String>,
 
+    /// Optional concurrent static-asset fanout check for public preview tunnels.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asset_fanout: Option<TracePreviewAssetFanoutSpec>,
+
     /// Homeboy-native preview tunnel settings used when `mode` is `homeboy_native`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native: Option<TraceNativePublicPreviewSpec>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TracePreviewAssetFanoutSpec {
+    /// Public-origin-relative asset URLs to fetch concurrently through the preview origin.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub asset_paths: Vec<String>,
+
+    /// Maximum number of concurrent fetch workers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub concurrency: Option<usize>,
+
+    /// Number of times to request each asset path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repeat_count: Option<usize>,
+
+    /// Optional body substring that every successful response must contain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_body_contains: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

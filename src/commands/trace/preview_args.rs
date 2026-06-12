@@ -65,6 +65,15 @@ fn expand_trace_public_preview(
             .iter()
             .map(|path| expand(path))
             .collect(),
+        asset_fanout: spec
+            .asset_fanout
+            .as_ref()
+            .map(|fanout| rig::TracePreviewAssetFanoutSpec {
+                asset_paths: fanout.asset_paths.iter().map(|path| expand(path)).collect(),
+                concurrency: fanout.concurrency,
+                repeat_count: fanout.repeat_count,
+                expected_body_contains: fanout.expected_body_contains.as_deref().map(expand),
+            }),
         native: spec
             .native
             .as_ref()

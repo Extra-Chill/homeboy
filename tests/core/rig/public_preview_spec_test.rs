@@ -14,7 +14,16 @@ fn test_trace_public_preview_parse() {
                 "startup_timeout_seconds": 5,
                 "required_asset_paths": [
                     "/assets/app.js"
-                ]
+                ],
+                "asset_fanout": {
+                    "asset_paths": [
+                        "/assets/app.js?ver=1",
+                        "/assets/app.css?ver=1"
+                    ],
+                    "concurrency": 8,
+                    "repeat_count": 3,
+                    "expected_body_contains": "homeboy-fanout-ok"
+                }
             }
         }"#,
     )
@@ -28,6 +37,14 @@ fn test_trace_public_preview_parse() {
     assert_eq!(
         preview.required_asset_paths,
         vec!["/assets/app.js".to_string()]
+    );
+    let fanout = preview.asset_fanout.as_ref().expect("asset fanout");
+    assert_eq!(fanout.asset_paths.len(), 2);
+    assert_eq!(fanout.concurrency, Some(8));
+    assert_eq!(fanout.repeat_count, Some(3));
+    assert_eq!(
+        fanout.expected_body_contains.as_deref(),
+        Some("homeboy-fanout-ok")
     );
 }
 
