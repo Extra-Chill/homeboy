@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.121.2] - 2026-06-12
+
+### Fixed
+- preserve tracked file paths in host lifecycle
+
 ## [2.121.1] - 2026-06-12
 
 ### Fixed
