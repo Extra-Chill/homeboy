@@ -2,6 +2,14 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.119.20] - 2026-06-12
+
+### Changed
+- preserve bench artifact viewer metadata
+
+### Fixed
+- fix codebox agent-task failure diagnostics
+
 ## [2.119.19] - 2026-06-12
 
 ### Changed
