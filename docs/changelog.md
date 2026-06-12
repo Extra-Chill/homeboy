@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.228.15] - 2026-06-12
+
+### Fixed
+- clarify dirty Lab git sync remediation
+- parse lab subcommands after global flags
+- add keychain read diagnostics
+
 ## [0.228.14] - 2026-06-12
 
 ### Changed
