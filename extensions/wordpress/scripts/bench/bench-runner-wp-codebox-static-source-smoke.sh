@@ -261,8 +261,10 @@ bash "$SCRIPT_DIR/bench-runner-wp-codebox.sh" >/dev/null
 jq -e '
     .component_id == "wp-site-generator"
     and .iterations == 0
+    and (.scenarios | length == 4)
     and (.scenarios[] | select(.id == "website-generation" and .file == "tests/bench/website-generation.php" and .source == "component"))
     and (.scenarios[] | select(.id == "rig-workload" and .file == "tests/bench/rig-workload.php" and .source == "rig"))
+    and ([.scenarios[] | select(.id == "rig-workload")] | length == 1)
     and (.scenarios[] | select(.id == "ssi-import" and .source == "configured"))
     and (.scenarios[] | select(.id == "manifest-navigation" and .source == "scenario-manifest"))
 ' "$LIST_RESULTS_FILE" >/dev/null
