@@ -616,9 +616,19 @@ if ( ! function_exists( 'homeboy_datamachine_agent_command_list' ) ) {
 }
 
 if ( ! function_exists( 'homeboy_datamachine_agent_run_command_checks' ) ) {
+	function homeboy_datamachine_agent_prepare_runner_command( string $command ): string {
+		$trimmed = trim( $command );
+		if ( preg_match( '/^pnpm(\s|$)/', $trimmed ) ) {
+			return 'corepack ' . $trimmed;
+		}
+
+		return $command;
+	}
+
 	function homeboy_datamachine_agent_run_workspace_command( array $runner_workspace, array $command_config, string $key ): array {
 		$ability_name = 'wp-codebox/run-runner-workspace-command';
 		$handle       = isset( $runner_workspace['handle'] ) && is_scalar( $runner_workspace['handle'] ) ? trim( (string) $runner_workspace['handle'] ) : '';
+		$command      = homeboy_datamachine_agent_prepare_runner_command( (string) ( $command_config['command'] ?? '' ) );
 		if ( '' === $handle ) {
 			return array(
 				'success'        => false,
@@ -651,7 +661,7 @@ if ( ! function_exists( 'homeboy_datamachine_agent_run_command_checks' ) ) {
 				'workspace_path'   => isset( $runner_workspace['path'] ) && is_scalar( $runner_workspace['path'] ) ? (string) $runner_workspace['path'] : '',
 				'workspace_backend' => isset( $runner_workspace['backend'] ) && is_scalar( $runner_workspace['backend'] ) ? (string) $runner_workspace['backend'] : '',
 				'runner_workspace' => $runner_workspace,
-				'command'          => $command_config['command'],
+				'command'          => $command,
 				'description'      => $command_config['description'],
 				'kind'             => $key,
 			)

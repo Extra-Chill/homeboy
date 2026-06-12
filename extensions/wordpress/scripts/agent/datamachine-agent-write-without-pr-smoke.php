@@ -615,6 +615,9 @@ namespace {
                 if ( 'test -f verification.txt' === ( $input['command'] ?? '' ) ) {
                     return array( 'success' => isset( $workspace_files['verification.txt'] ), 'exit_code' => isset( $workspace_files['verification.txt'] ) ? 0 : 1 );
                 }
+				if ( 'corepack pnpm verify' === ( $input['command'] ?? '' ) ) {
+					return array( 'status' => 'completed', 'exit_code' => 0, 'stdout' => 'verified', 'stderr' => '' );
+				}
                 return array( 'success' => false, 'error' => 'Unexpected command.' );
             }
         ),
@@ -637,6 +640,17 @@ namespace {
         fwrite( STDERR, "Expected drift_checks to run after verification through WP Codebox.\n" );
         exit( 1 );
     }
+
+	$pnpm_result = homeboy_datamachine_agent_run_command_checks(
+		array( 'verification_commands' => array( array( 'command' => 'pnpm verify', 'description' => 'Verify generated docs' ) ) ),
+		array( 'handle' => 'repo@branch', 'path' => '/workspace/repo@branch', 'backend' => 'local_git' ),
+		'verification_commands'
+	);
+	$last_command_call = end( $workspace_command_calls );
+	if ( empty( $pnpm_result['success'] ) || 'corepack pnpm verify' !== ( $last_command_call['command'] ?? '' ) || 'pnpm verify' !== ( $pnpm_result['checks'][0]['command'] ?? '' ) ) {
+		fwrite( STDERR, "Expected pnpm verification commands to run through corepack while preserving the reported command.\n" );
+		exit( 1 );
+	}
 
     $GLOBALS['homeboy_datamachine_agent_fake_abilities'] = array();
     $missing_verification_api = homeboy_datamachine_agent_run_command_checks(
