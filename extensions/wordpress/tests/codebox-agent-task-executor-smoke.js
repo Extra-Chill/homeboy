@@ -810,6 +810,67 @@ assert.equal(
   true
 );
 
+const emptyRunSummaryOutcome = agentTaskOutcomeFromCodeboxResult(request, {
+  success: false,
+  schema: 'wp-codebox/agent-task-run/v1',
+  status: 'failed',
+}, {
+  normalizeAgentTaskRunResult: () => ({
+    schema: 'wp-codebox/agent-task-run-result/v1',
+    status: 'failed',
+    failure_classification: 'runtime',
+    artifacts: [],
+    diagnostics: [],
+    metadata: {
+      provider_error: {},
+      run_id: '',
+      run_status: '',
+      runtime_id: '',
+      runtime_status: '',
+    },
+    refs: {
+      artifact_bundles: [],
+      changed_files: [],
+      logs: [],
+      patches: [],
+      runtimes: [],
+      transcripts: [],
+    },
+  }),
+  exitStatus: 1,
+});
+assert.equal(emptyRunSummaryOutcome.status, 'failed');
+assert.equal(emptyRunSummaryOutcome.metadata.codebox_run_result.diagnostics[0].class, 'codebox.no_runtime_session');
+assert.equal(emptyRunSummaryOutcome.metadata.codebox_run_result.metadata.provider_error.code, 'codebox_no_runtime_session');
+assert.equal(emptyRunSummaryOutcome.diagnostics[0].class, 'codebox.no_runtime_session');
+
+const runtimeRefRunSummaryOutcome = agentTaskOutcomeFromCodeboxResult(request, {
+  success: false,
+  schema: 'wp-codebox/agent-task-run/v1',
+  status: 'failed',
+}, {
+  normalizeAgentTaskRunResult: () => ({
+    schema: 'wp-codebox/agent-task-run-result/v1',
+    status: 'failed',
+    failure_classification: 'runtime',
+    artifacts: [],
+    diagnostics: [],
+    metadata: {
+      run_id: 'codebox-run-1',
+      runtime_id: 'runtime-1',
+    },
+    refs: {
+      logs: ['homeboy://codebox/runs/codebox-run-1/logs'],
+      transcripts: [],
+      artifact_bundles: [],
+    },
+  }),
+  exitStatus: 1,
+});
+assert.equal(runtimeRefRunSummaryOutcome.metadata.codebox_run_result.metadata.runtime_id, 'runtime-1');
+assert.equal(runtimeRefRunSummaryOutcome.metadata.codebox_run_result.refs.logs[0], 'homeboy://codebox/runs/codebox-run-1/logs');
+assert.equal(runtimeRefRunSummaryOutcome.diagnostics.some((diagnostic) => diagnostic.class === 'codebox.no_runtime_session'), false);
+
 const recipeProbeFailureOutcome = agentTaskOutcomeFromCodeboxResult(request, {
   success: true,
   schema: 'wp-codebox/agent-task-run/v1',

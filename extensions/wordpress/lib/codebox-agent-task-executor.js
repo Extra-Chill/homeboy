@@ -1172,10 +1172,63 @@ function codeboxRunSummary(result, options = {}) {
     return null;
   }
   try {
-    return options.normalizeAgentTaskRunResult(result, { exitStatus: options.exitStatus ?? 0 });
+    return enrichFailedCodeboxRunSummary(
+      options.normalizeAgentTaskRunResult(result, { exitStatus: options.exitStatus ?? 0 }),
+      result,
+      options,
+    );
   } catch {
     return null;
   }
+}
+
+function enrichFailedCodeboxRunSummary(runSummary, result = {}, options = {}) {
+  if (!runSummary || typeof runSummary !== 'object' || Array.isArray(runSummary)) {
+    return runSummary;
+  }
+  if (runSummary.status !== 'failed' || codeboxRunSummaryHasActionableRefs(runSummary, result)) {
+    return runSummary;
+  }
+
+  const diagnostic = {
+    class: 'codebox.no_runtime_session',
+    message: 'WP Codebox reported a failed agent task without a run id, runtime id, session id, logs, transcripts, or artifact refs.',
+    data: sanitizePublicMetadata({
+      exit_status: options.exitStatus ?? 0,
+      result_status: result.status,
+      result_schema: result.schema,
+      has_run: !!result.run,
+      has_session: !!result.session,
+    }),
+  };
+
+  return {
+    ...runSummary,
+    diagnostics: [diagnostic, ...(Array.isArray(runSummary.diagnostics) ? runSummary.diagnostics : [])],
+    metadata: {
+      ...(runSummary.metadata && typeof runSummary.metadata === 'object' && !Array.isArray(runSummary.metadata) ? runSummary.metadata : {}),
+      provider_error: {
+        code: 'codebox_no_runtime_session',
+        message: 'WP Codebox failed before reporting a runtime/session or evidence refs.',
+        exit_status: options.exitStatus ?? 0,
+      },
+    },
+  };
+}
+
+function codeboxRunSummaryHasActionableRefs(runSummary, result = {}) {
+  const metadata = runSummary.metadata && typeof runSummary.metadata === 'object' && !Array.isArray(runSummary.metadata) ? runSummary.metadata : {};
+  if ([runSummary.run_id, runSummary.runtime_id, metadata.run_id, metadata.runtime_id, result.run?.runId, result.run?.runtime?.id, result.session?.id].some(Boolean)) {
+    return true;
+  }
+  if (Array.isArray(runSummary.artifacts) && runSummary.artifacts.length > 0) {
+    return true;
+  }
+  if (Array.isArray(runSummary.diagnostics) && runSummary.diagnostics.length > 0) {
+    return true;
+  }
+  const refs = runSummary.refs && typeof runSummary.refs === 'object' && !Array.isArray(runSummary.refs) ? runSummary.refs : {};
+  return Object.values(refs).some((value) => Array.isArray(value) && value.length > 0);
 }
 
 function codeboxRecipeRunSummary(result, options = {}) {
