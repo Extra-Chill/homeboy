@@ -936,7 +936,7 @@ mod tests {
                 command: None,
                 require_https: true,
                 provider: None,
-                startup_timeout_seconds: Some(2),
+                startup_timeout_seconds: Some(5),
                 required_asset_paths: Vec::new(),
                 native: Some(TraceNativePublicPreviewSpec {
                     public_host: None,
