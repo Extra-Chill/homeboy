@@ -168,6 +168,16 @@ fi
 
 apply_github_host_env "${GITHUB_HOST}"
 
+# Assert the artifact's internal version matches the release tag before
+# uploading. This is the last chokepoint before a ZIP becomes the GitHub
+# Release asset that deploys consume — a stale artifact here means silent
+# production rollback (data-machine-socials v0.14.0 shipped a v0.8.1 zip
+# for 6 days). Strip the leading "v" and any monorepo "<component>-v"
+# prefix from the tag to get the bare semver.
+EXPECTED_VERSION="${TAG##*v}"
+bash "${SCRIPT_DIR}/verify-artifact-version.sh" "${ARTIFACT_PATH}" "${EXPECTED_VERSION}" >/dev/null
+echo "Verified ${ARTIFACT_PATH} contains version ${EXPECTED_VERSION} (tag ${TAG})" >&2
+
 echo "Uploading ${ARTIFACT_PATH} to ${REPO_SLUG} release ${TAG}..." >&2
 
 gh release upload "${TAG}" "${ARTIFACT_PATH}" \
