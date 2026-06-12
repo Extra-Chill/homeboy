@@ -127,11 +127,6 @@ function changedFiles(workspace) {
     .filter((file) => file && !file.startsWith('.ci/'));
 }
 
-function currentBranch(workspace) {
-  const branch = (git(workspace, ['rev-parse', '--abbrev-ref', 'HEAD'], { check: false }).stdout || '').trim();
-  return branch && branch !== 'HEAD' ? branch : '';
-}
-
 function renderTemplate(template, values) {
   return String(template || '').replace(/\{([^}]+)\}/g, (_, key) => {
     const value = values[key.trim()];
@@ -190,6 +185,56 @@ function publicationTemplates(config, values) {
   };
 }
 
+function copyFile(source, destination) {
+  fs.mkdirSync(path.dirname(destination), { recursive: true });
+  fs.copyFileSync(source, destination);
+}
+
+function preserveWorkspaceFiles(workspace, files) {
+  const temp = fs.mkdtempSync(path.join(
+    process.env.RUNNER_TEMP || process.env.TMPDIR || '/tmp',
+    'homeboy-runner-workspace.',
+  ));
+  const entries = [];
+  for (const file of files) {
+    const source = path.join(workspace, file);
+    const backup = path.join(temp, file);
+    if (fs.existsSync(source) && fs.statSync(source).isFile()) {
+      copyFile(source, backup);
+      entries.push({ file, backup, deleted: false });
+    } else {
+      entries.push({ file, deleted: true });
+    }
+  }
+  return { temp, entries };
+}
+
+function restoreWorkspaceFiles(workspace, preserved) {
+  for (const entry of preserved.entries) {
+    const target = path.join(workspace, entry.file);
+    if (entry.deleted) {
+      fs.rmSync(target, { force: true });
+      continue;
+    }
+    copyFile(entry.backup, target);
+  }
+  fs.rmSync(preserved.temp, { recursive: true, force: true });
+}
+
+function resetPublicationBranch(workspace, branch, base, files) {
+  const preserved = preserveWorkspaceFiles(workspace, files);
+  const fetch = git(
+    workspace,
+    ['fetch', 'origin', `+refs/heads/${base}:refs/remotes/origin/${base}`],
+    { check: false },
+  );
+  const baseRef = fetch.status === 0 ? `origin/${base}` : base;
+  git(workspace, ['reset', '--hard', 'HEAD']);
+  git(workspace, ['clean', '-fd']);
+  git(workspace, ['checkout', '-B', branch, baseRef]);
+  restoreWorkspaceFiles(workspace, preserved);
+}
+
 function pushWorkspaceBranch(workspace, branch) {
   const fetch = git(workspace, ['fetch', 'origin', `+refs/heads/${branch}:refs/remotes/origin/${branch}`], { check: false });
   const args = ['push', '-u', 'origin', `HEAD:${branch}`];
@@ -197,6 +242,49 @@ function pushWorkspaceBranch(workspace, branch) {
     args.splice(1, 0, `--force-with-lease=refs/heads/${branch}`);
   }
   git(workspace, args);
+}
+
+function pullRequestForBranch(workspace, branch) {
+  const result = gh(workspace, ['pr', 'view', branch, '--json', 'number,state,url', '--jq', '.'], { check: false });
+  if (result.status !== 0) {
+    return null;
+  }
+  try {
+    return JSON.parse(result.stdout || '{}');
+  } catch {
+    return null;
+  }
+}
+
+function ensurePullRequest(workspace, branch, templates) {
+  const existing = pullRequestForBranch(workspace, branch);
+  if (existing?.state === 'OPEN' && existing.url) {
+    gh(
+      workspace,
+      ['pr', 'edit', String(existing.number || branch), '--title', templates.title, '--body', templates.body],
+      { check: false },
+    );
+    return { url: existing.url, action: 'updated', number: existing.number || null, state: 'OPEN' };
+  }
+
+  if (existing?.state === 'CLOSED' && existing.number) {
+    gh(workspace, ['pr', 'reopen', String(existing.number)]);
+    gh(
+      workspace,
+      ['pr', 'edit', String(existing.number), '--title', templates.title, '--body', templates.body],
+      { check: false },
+    );
+    return { url: existing.url || '', action: 'reopened', number: existing.number, state: 'OPEN' };
+  }
+
+  const url = gh(workspace, [
+    'pr', 'create',
+    '--head', branch,
+    '--base', templates.base,
+    '--title', templates.title,
+    '--body', templates.body,
+  ]).stdout.trim();
+  return { url, action: 'created', number: null, state: 'OPEN' };
 }
 
 function publishWorkspace(config, results, scenario, workspace, files) {
@@ -226,9 +314,8 @@ function publishWorkspace(config, results, scenario, workspace, files) {
     return { opened: false, changed: true, dry_run: true, head: branch, files };
   }
 
-  if (currentBranch(workspace) !== branch) {
-    git(workspace, ['checkout', '-B', branch]);
-  }
+  resetPublicationBranch(workspace, branch, templates.base, files);
+  files = changedFiles(workspace);
 
   git(workspace, ['add', '--', ...files]);
   const staged = git(workspace, ['diff', '--cached', '--name-only'], { check: false }).stdout.trim().split('\n').filter(Boolean);
@@ -241,15 +328,8 @@ function publishWorkspace(config, results, scenario, workspace, files) {
   git(workspace, ['commit', '-m', templates.commitMessage]);
   pushWorkspaceBranch(workspace, branch);
 
-  const existing = gh(workspace, ['pr', 'view', branch, '--json', 'url', '--jq', '.url'], { check: false });
-  const existingUrl = existing.status === 0 ? existing.stdout.trim() : '';
-  const url = existingUrl || gh(workspace, [
-    'pr', 'create',
-    '--head', branch,
-    '--base', templates.base,
-    '--title', templates.title,
-    '--body', templates.body,
-  ]).stdout.trim();
+  const pullRequest = ensurePullRequest(workspace, branch, templates);
+  const url = pullRequest.url;
 
   return {
     opened: Boolean(url),
@@ -261,6 +341,9 @@ function publishWorkspace(config, results, scenario, workspace, files) {
     head: branch,
     base: templates.base,
     url,
+    action: pullRequest.action,
+    pr_number: pullRequest.number,
+    pr_state: pullRequest.state,
     files: staged,
   };
 }

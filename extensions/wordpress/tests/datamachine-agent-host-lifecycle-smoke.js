@@ -35,7 +35,7 @@ function makeRepo(tmp) {
   const repo = path.join(tmp, 'repo');
   const origin = path.join(tmp, 'origin.git');
   fs.mkdirSync(repo, { recursive: true });
-  checked('git', ['init', '-b', 'main'], { cwd: repo });
+  checked('git', ['init', '-b', 'trunk'], { cwd: repo });
   checked('git', ['config', 'user.name', 'Fixture User'], { cwd: repo });
   checked('git', ['config', 'user.email', 'fixture@example.test'], { cwd: repo });
   fs.writeFileSync(path.join(repo, 'README.md'), '# Fixture\n');
@@ -43,11 +43,11 @@ function makeRepo(tmp) {
   checked('git', ['commit', '-m', 'Initial commit'], { cwd: repo });
   checked('git', ['init', '--bare', origin]);
   checked('git', ['remote', 'add', 'origin', origin], { cwd: repo });
-  checked('git', ['push', '-u', 'origin', 'main'], { cwd: repo });
+  checked('git', ['push', '-u', 'origin', 'trunk'], { cwd: repo });
   return repo;
 }
 
-function makeGhFixture(tmp) {
+function makeGhFixture(tmp, options = {}) {
   const bin = path.join(tmp, 'bin');
   const log = path.join(tmp, 'gh.log');
   fs.mkdirSync(bin, { recursive: true });
@@ -56,11 +56,18 @@ function makeGhFixture(tmp) {
 'use strict';
 const fs = require('node:fs');
 fs.appendFileSync(${JSON.stringify(log)}, process.argv.slice(2).join(' ') + '\\n');
-if (process.argv[2] === 'pr' && process.argv[3] === 'view') process.exit(1);
+const existing = ${JSON.stringify(options.existingPullRequest || null)};
+if (process.argv[2] === 'pr' && process.argv[3] === 'view') {
+  if (!existing) process.exit(1);
+  process.stdout.write(JSON.stringify(existing) + '\\n');
+  process.exit(0);
+}
 if (process.argv[2] === 'pr' && process.argv[3] === 'create') {
   process.stdout.write('https://github.com/owner/repo/pull/1291\\n');
   process.exit(0);
 }
+if (process.argv[2] === 'pr' && process.argv[3] === 'reopen') process.exit(0);
+if (process.argv[2] === 'pr' && process.argv[3] === 'edit') process.exit(0);
 process.stderr.write('unexpected gh call: ' + process.argv.slice(2).join(' '));
 process.exit(1);
 `);
@@ -101,7 +108,7 @@ function makeRunFiles(tmp, config) {
   checked('git', ['add', 'stale.txt'], { cwd: repo });
   checked('git', ['commit', '-m', 'Stale generated docs'], { cwd: repo });
   checked('git', ['push', '-u', 'origin', 'agent-artifacts/docs-agent-host-lifecycle'], { cwd: repo });
-  checked('git', ['checkout', 'main'], { cwd: repo });
+  checked('git', ['checkout', 'trunk'], { cwd: repo });
   fs.writeFileSync(path.join(repo, 'generated.txt'), 'hello from agent\n');
   const { configPath, resultsPath } = makeRunFiles(tmp, {
     verification_commands: [{ command: 'test -f generated.txt', description: 'Generated file exists' }],
@@ -119,6 +126,52 @@ function makeRunFiles(tmp, config) {
   assert.equal(scenario.metrics.pr_opened, 1);
   assert.equal(scenario.metadata.runner_workspace_publication.url, 'https://github.com/owner/repo/pull/1291');
   assert.match(fs.readFileSync(gh.log, 'utf8'), /pr create .*--base trunk/);
+  checked('git', ['fetch', 'origin', 'agent-artifacts/docs-agent-host-lifecycle'], { cwd: repo });
+  const publishedFiles = checked(
+    'git',
+    ['ls-tree', '-r', '--name-only', 'origin/agent-artifacts/docs-agent-host-lifecycle'],
+    { cwd: repo },
+  ).stdout;
+  assert.match(publishedFiles, /generated\.txt/);
+  assert.doesNotMatch(publishedFiles, /stale\.txt/);
+}
+
+{
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-host-lifecycle-closed-pr.'));
+  const repo = makeRepo(tmp);
+  const gh = makeGhFixture(tmp, {
+    existingPullRequest: { number: 47, state: 'CLOSED', url: 'https://github.com/owner/repo/pull/47' },
+  });
+  checked('git', ['checkout', '-B', 'agent-artifacts/docs-agent-host-lifecycle'], { cwd: repo });
+  fs.writeFileSync(path.join(repo, 'stale.txt'), 'old branch content\n');
+  checked('git', ['add', 'stale.txt'], { cwd: repo });
+  checked('git', ['commit', '-m', 'Stale generated docs'], { cwd: repo });
+  checked('git', ['push', '-u', 'origin', 'agent-artifacts/docs-agent-host-lifecycle'], { cwd: repo });
+  fs.writeFileSync(path.join(repo, 'generated.txt'), 'hello from agent on stale branch\n');
+  const { configPath, resultsPath } = makeRunFiles(tmp, {
+    verification_commands: [{ command: 'test -f generated.txt', description: 'Generated file exists' }],
+  });
+
+  const result = run('node', [script, '--results', resultsPath, '--config', configPath, '--scenario', 'developer-docs', '--workspace', repo], {
+    env: { PATH: `${gh.bin}${path.delimiter}${process.env.PATH}`, GITHUB_RUN_ID: '12345', GH_TOKEN: 'fixture' },
+  });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const output = readJson(resultsPath);
+  const publication = output.scenarios[0].metadata.runner_workspace_publication;
+  assert.equal(publication.url, 'https://github.com/owner/repo/pull/47');
+  assert.equal(publication.action, 'reopened');
+  assert.equal(publication.pr_state, 'OPEN');
+  const ghLog = fs.readFileSync(gh.log, 'utf8');
+  assert.match(ghLog, /pr reopen 47/);
+  assert.doesNotMatch(ghLog, /pr create/);
+  checked('git', ['fetch', 'origin', 'agent-artifacts/docs-agent-host-lifecycle'], { cwd: repo });
+  const publishedFiles = checked(
+    'git',
+    ['ls-tree', '-r', '--name-only', 'origin/agent-artifacts/docs-agent-host-lifecycle'],
+    { cwd: repo },
+  ).stdout;
+  assert.match(publishedFiles, /generated\.txt/);
+  assert.doesNotMatch(publishedFiles, /stale\.txt/);
 }
 
 {
