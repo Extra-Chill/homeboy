@@ -12,22 +12,8 @@ use classification::{
     classify_load, classify_memory, classify_processes, classify_rig_leases, overall_recommendation,
 };
 
-const RELEVANT_PROCESS_EXECUTABLES: &[&str] = &[
-    "homeboy",
-    "eslint",
-    "phpstan",
-    "phpcs",
-    "cargo",
-    "rustc",
-    "node",
-    "npm",
-    "pnpm",
-    "bun",
-    "vitest",
-    "playwright",
-];
-
-const RELEVANT_PROCESS_KEYWORDS: &[&str] = &["wordpress-server-child", "playground", "studio"];
+const RELEVANT_PROCESS_EXECUTABLES: &[&str] = &["homeboy"];
+const RESOURCE_PROCESS_MATCHES_ENV: &str = "HOMEBOY_DOCTOR_RESOURCE_PROCESS_MATCHES";
 
 #[derive(Args)]
 pub struct ResourcesArgs {}
@@ -341,6 +327,10 @@ fn parse_process_row(line: &str) -> Option<ProcessRow> {
 }
 
 fn is_relevant_process(row: &ProcessRow) -> bool {
+    is_relevant_process_with_matches(row, &configured_process_matches())
+}
+
+fn is_relevant_process_with_matches(row: &ProcessRow, configured_matches: &[String]) -> bool {
     let command_name = executable_name(&row.command);
     let arg0_name = row
         .args
@@ -356,9 +346,25 @@ fn is_relevant_process(row: &ProcessRow) -> bool {
     }
 
     let haystack = format!("{} {}", row.command, row.args).to_lowercase();
-    RELEVANT_PROCESS_KEYWORDS
-        .iter()
-        .any(|needle| haystack.contains(needle))
+    configured_matches.iter().any(|needle| {
+        let needle = needle.to_lowercase();
+        command_name == needle || arg0_name == needle || haystack.contains(&needle)
+    })
+}
+
+fn configured_process_matches() -> Vec<String> {
+    std::env::var(RESOURCE_PROCESS_MATCHES_ENV)
+        .ok()
+        .into_iter()
+        .flat_map(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|entry| !entry.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .collect()
 }
 
 fn executable_name(path: &str) -> String {
@@ -410,7 +416,8 @@ mod tests {
 
     #[test]
     fn parses_relevant_process_rows_without_using_host_processes() {
-        let row = parse_process_row("123 88.5 1048576 /usr/bin/node node vite --host").unwrap();
+        let row =
+            parse_process_row("123 88.5 1048576 /usr/bin/homeboy homeboy worker run").unwrap();
         assert_eq!(row.pid, 123);
         assert_eq!(row.cpu_percent, 88.5);
         assert_eq!(row.rss_mb, 1024);
@@ -418,13 +425,29 @@ mod tests {
     }
 
     #[test]
-    fn ignores_unrelated_processes_that_only_mention_node_in_flags() {
+    fn configured_matches_select_additional_processes() {
         let row = ProcessRow {
             pid: 2,
             cpu_percent: 1.0,
             rss_mb: 100,
-            command: "/Applications/Discord.app/Discord Helper".to_string(),
-            args: "--enable-node-leakage-in-renderers".to_string(),
+            command: "/usr/local/bin/preview-worker".to_string(),
+            args: "serve --public".to_string(),
+        };
+
+        assert!(is_relevant_process_with_matches(
+            &row,
+            &["preview-worker".to_string()]
+        ));
+    }
+
+    #[test]
+    fn ignores_unrelated_processes_without_configured_match() {
+        let row = ProcessRow {
+            pid: 2,
+            cpu_percent: 1.0,
+            rss_mb: 100,
+            command: "/Applications/Chat.app/Chat Helper".to_string(),
+            args: "--enable-worker-mode".to_string(),
         };
 
         assert!(!is_relevant_process(&row));

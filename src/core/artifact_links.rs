@@ -81,9 +81,9 @@ mod tests {
         let artifact = ArtifactRecord {
             id: "artifact-1".to_string(),
             run_id: "run-1".to_string(),
-            kind: "blueprint-after".to_string(),
+            kind: "preview-after".to_string(),
             artifact_type: "file".to_string(),
-            path: "/tmp/blueprint.after.json".to_string(),
+            path: "/tmp/preview.after.json".to_string(),
             url: None,
             public_url: None,
             viewer_url: None,
@@ -93,11 +93,11 @@ mod tests {
             mime: Some("application/json".to_string()),
             metadata_json: serde_json::json!({
                 "viewer": {
-                    "kind": "wordpress-playground-blueprint",
-                    "base": "https://playground.wordpress.net/",
+                    "kind": "artifact-preview",
+                    "base": "https://viewer.example.test/",
                     "query": {
-                        "parameter": "blueprint-url",
-                        "value": { "source": "public-artifact-url", "path": "blueprint.after.json" },
+                        "parameter": "artifact-url",
+                        "value": { "source": "public-artifact-url", "path": "preview.after.json" },
                         "encoding": "url"
                     },
                     "replay": { "status": "partial", "limitations": [] }
@@ -109,10 +109,10 @@ mod tests {
         let links = viewer_links(&artifact, Some("https://artifacts.example.test/a b.json"));
 
         assert_eq!(links.len(), 1);
-        assert_eq!(links[0].kind, "wordpress-playground-blueprint");
+        assert_eq!(links[0].kind, "artifact-preview");
         assert_eq!(
             links[0].url,
-            "https://playground.wordpress.net/?blueprint-url=https%3A%2F%2Fartifacts.example.test%2Fa%20b.json"
+            "https://viewer.example.test/?artifact-url=https%3A%2F%2Fartifacts.example.test%2Fa%20b.json"
         );
     }
 }
