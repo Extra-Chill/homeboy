@@ -490,6 +490,7 @@ fn run_service(command: TunnelServiceCommand) -> CmdResult<TunnelOutput> {
                     mode: preview_policy.into(),
                     keep_alive_until: preview_keep_alive_until,
                 },
+                native_preview_auth: Default::default(),
             },
             description,
         }),
