@@ -1,6 +1,9 @@
 use clap::{Args, Subcommand, ValueEnum};
 use serde::Serialize;
 
+use homeboy::core::preview_ingress::{
+    self, PreviewIngressRoute, PreviewIngressServeSpec, PreviewIngressStatus,
+};
 use homeboy::core::tunnel::{
     self, ExposeServiceTunnelSpec, ServiceTunnel, ServiceTunnelAuth, ServiceTunnelAuthMode,
     ServiceTunnelExposure, ServiceTunnelPolicy, ServiceTunnelPreviewPolicy,
@@ -17,6 +20,8 @@ use super::{CmdResult, DynamicSetArgs};
 pub struct TunnelExtra {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub service: Option<ServiceTunnelActionOutput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview_ingress: Option<PreviewIngressActionOutput>,
 }
 
 #[derive(Debug, Serialize)]
@@ -27,6 +32,14 @@ pub enum ServiceTunnelActionOutput {
         local_url: String,
     },
     Status(ServiceTunnelStatus),
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum PreviewIngressActionOutput {
+    Route(PreviewIngressRoute),
+    Routes { routes: Vec<PreviewIngressRoute> },
+    Status(PreviewIngressStatus),
 }
 
 pub type TunnelOutput = EntityCrudOutput<ServiceTunnel, TunnelExtra>;
@@ -43,6 +56,72 @@ enum TunnelCommand {
     Service {
         #[command(subcommand)]
         command: TunnelServiceCommand,
+    },
+    /// Run and inspect the VPS-side public preview ingress
+    #[command(name = "preview-ingress")]
+    PreviewIngress {
+        #[command(subcommand)]
+        command: TunnelPreviewIngressCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum TunnelPreviewIngressCommand {
+    /// Register or replace one active public-host route
+    Route {
+        /// Preview session ID
+        session_id: String,
+
+        /// Public host routed by the TLS/proxy layer, e.g. run-123-tunnel.chubes.net
+        #[arg(long)]
+        public_host: String,
+
+        /// Local/reverse-channel HTTP origin for this session
+        #[arg(long)]
+        upstream_origin: String,
+
+        /// RFC3339 expiry after which ingress returns 410
+        #[arg(long)]
+        expires_at: Option<String>,
+
+        /// Mark the route disconnected while preserving diagnostics
+        #[arg(long)]
+        inactive: bool,
+    },
+    /// Remove one preview ingress route
+    Unroute {
+        /// Preview session ID
+        session_id: String,
+    },
+    /// List registered preview ingress routes
+    List,
+    /// Report route lifecycle and recent server failure metadata
+    Status {
+        /// Bind address to include in the status output
+        #[arg(long)]
+        bind: Option<String>,
+
+        /// Operator-owned preview domain
+        #[arg(long)]
+        domain: Option<String>,
+
+        /// Public host pattern routed to this ingress
+        #[arg(long)]
+        public_host_pattern: Option<String>,
+    },
+    /// Run the blocking HTTP ingress server behind a TLS terminator
+    Serve {
+        /// Loopback bind address for Nginx/Caddy/Cloudflare to proxy to
+        #[arg(long, default_value = "127.0.0.1:7350")]
+        bind: String,
+
+        /// Operator-owned preview domain
+        #[arg(long)]
+        domain: String,
+
+        /// Public host pattern routed to this ingress
+        #[arg(long, default_value = "*-tunnel.{domain}")]
+        public_host_pattern: String,
     },
 }
 
@@ -269,6 +348,107 @@ impl From<ServiceTunnelAuthModeArg> for ServiceTunnelAuthMode {
 pub fn run(args: TunnelArgs, _global: &super::GlobalArgs) -> CmdResult<TunnelOutput> {
     match args.command {
         TunnelCommand::Service { command } => run_service(command),
+        TunnelCommand::PreviewIngress { command } => run_preview_ingress(command),
+    }
+}
+
+fn run_preview_ingress(command: TunnelPreviewIngressCommand) -> CmdResult<TunnelOutput> {
+    match command {
+        TunnelPreviewIngressCommand::Route {
+            session_id,
+            public_host,
+            upstream_origin,
+            expires_at,
+            inactive,
+        } => {
+            let route = preview_ingress::register_route(PreviewIngressRoute {
+                session_id: session_id.clone(),
+                public_host,
+                upstream_origin,
+                expires_at,
+                active: !inactive,
+            })?;
+            Ok((
+                TunnelOutput {
+                    command: "tunnel.preview_ingress.route".to_string(),
+                    id: Some(session_id),
+                    extra: TunnelExtra {
+                        preview_ingress: Some(PreviewIngressActionOutput::Route(route)),
+                        ..Default::default()
+                    },
+                    updated_fields: vec!["route".to_string()],
+                    ..Default::default()
+                },
+                0,
+            ))
+        }
+        TunnelPreviewIngressCommand::Unroute { session_id } => {
+            preview_ingress::remove_route(&session_id)?;
+            Ok((
+                TunnelOutput {
+                    command: "tunnel.preview_ingress.unroute".to_string(),
+                    id: Some(session_id.clone()),
+                    deleted: vec![session_id],
+                    ..Default::default()
+                },
+                0,
+            ))
+        }
+        TunnelPreviewIngressCommand::List => {
+            let routes = preview_ingress::list_routes()?;
+            Ok((
+                TunnelOutput {
+                    command: "tunnel.preview_ingress.list".to_string(),
+                    extra: TunnelExtra {
+                        preview_ingress: Some(PreviewIngressActionOutput::Routes { routes }),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                0,
+            ))
+        }
+        TunnelPreviewIngressCommand::Status {
+            bind,
+            domain,
+            public_host_pattern,
+        } => {
+            let status = preview_ingress::status(bind, domain, public_host_pattern)?;
+            Ok((
+                TunnelOutput {
+                    command: "tunnel.preview_ingress.status".to_string(),
+                    extra: TunnelExtra {
+                        preview_ingress: Some(PreviewIngressActionOutput::Status(status)),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                0,
+            ))
+        }
+        TunnelPreviewIngressCommand::Serve {
+            bind,
+            domain,
+            public_host_pattern,
+        } => {
+            let pattern = public_host_pattern.replace("{domain}", &domain);
+            let status = preview_ingress::serve(PreviewIngressServeSpec {
+                bind,
+                domain,
+                public_host_pattern: pattern,
+            })?;
+            Ok((
+                TunnelOutput {
+                    command: "tunnel.preview_ingress.serve".to_string(),
+                    extra: TunnelExtra {
+                        preview_ingress: Some(PreviewIngressActionOutput::Status(status)),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                0,
+            ))
+        }
     }
 }
 
@@ -456,6 +636,7 @@ fn url_service(id: &str) -> CmdResult<TunnelOutput> {
                     service_id: id.to_string(),
                     local_url,
                 }),
+                ..Default::default()
             },
             ..Default::default()
         },
@@ -471,6 +652,7 @@ fn status_service(id: &str) -> CmdResult<TunnelOutput> {
             id: Some(id.to_string()),
             extra: TunnelExtra {
                 service: Some(ServiceTunnelActionOutput::Status(report)),
+                ..Default::default()
             },
             ..Default::default()
         },
@@ -487,6 +669,7 @@ fn start_service(spec: StartServiceTunnelSpec) -> CmdResult<TunnelOutput> {
             id: Some(id),
             extra: TunnelExtra {
                 service: Some(ServiceTunnelActionOutput::Status(report)),
+                ..Default::default()
             },
             ..Default::default()
         },
@@ -502,6 +685,7 @@ fn stop_service(id: &str) -> CmdResult<TunnelOutput> {
             id: Some(id.to_string()),
             extra: TunnelExtra {
                 service: Some(ServiceTunnelActionOutput::Status(report)),
+                ..Default::default()
             },
             ..Default::default()
         },

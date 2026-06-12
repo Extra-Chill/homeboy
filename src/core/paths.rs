@@ -223,6 +223,16 @@ pub fn service_tunnel_runtime_state_file(id: &str) -> Result<PathBuf> {
     Ok(service_tunnel_runtime_dir(id)?.join("state.json"))
 }
 
+/// Preview ingress route declarations (~/.config/homeboy/preview-ingress/routes/).
+pub fn preview_ingress_routes_dir() -> Result<PathBuf> {
+    Ok(homeboy()?.join("preview-ingress").join("routes"))
+}
+
+/// Preview ingress route declaration file.
+pub fn preview_ingress_route_file(id: &str) -> Result<PathBuf> {
+    Ok(preview_ingress_routes_dir()?.join(format!("{}.json", sanitize_path_segment(id))))
+}
+
 /// Extension directory path
 pub fn extension(id: &str) -> Result<PathBuf> {
     Ok(extensions()?.join(id))

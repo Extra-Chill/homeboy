@@ -4,9 +4,10 @@
 
 ```sh
 homeboy tunnel service <COMMAND>
+homeboy tunnel preview-ingress <COMMAND>
 ```
 
-`tunnel` manages Homeboy-native private service tunnel declarations and local managed service lifecycle. Homeboy can start a long-running local command, record safe command/process/log evidence, report readiness, and stop the process group without relying on an external chat or tunnel wrapper.
+`tunnel` manages Homeboy-native private service tunnel declarations, local managed service lifecycle, and the VPS-side public preview ingress used by generic browser/reviewer URLs. Homeboy can start a long-running local command, record safe command/process/log evidence, report readiness, and stop the process group without relying on an external chat or tunnel wrapper.
 
 ## Service Tunnels
 
@@ -60,6 +61,55 @@ The `command` backend is a generic adapter seam. Homeboy starts and supervises t
 
 When a service's preview policy is relevant, `service status` and `service start` include a structured `preview` artifact with schema `homeboy/preview-url/v1`. The artifact records the service ID, local URL, optional public URL, backend, policy, cleanup/expiry metadata, and owning run/workflow IDs when the start command supplied them.
 
+## Preview Ingress
+
+`preview-ingress` is the VPS-side HTTP daemon surface for Homeboy-native browser preview tunnels. It is designed to run behind an operator-managed TLS/proxy layer such as Nginx, Caddy, or Cloudflare:
+
+```text
+Browser
+  -> https://{id}-tunnel.<operator-domain>
+  -> TLS/proxy layer
+  -> homeboy tunnel preview-ingress serve --bind 127.0.0.1:7350
+  -> active Homeboy preview route
+  -> local/reverse-channel HTTP origin
+```
+
+The core contract is generic HTTP ingress: public host/session routing, reverse-channel-compatible HTTP origins, request/response streaming, status, logs, and cleanup. Workload-specific behavior such as WordPress, WP Codebox, WooCommerce, static asset health, or browser probe interpretation belongs in Homeboy Extensions or `homeboy-rigs`, not in Homeboy core.
+
+Register one active preview route:
+
+```sh
+homeboy tunnel preview-ingress route run-123 \
+  --public-host run-123-tunnel.chubes.net \
+  --upstream-origin http://127.0.0.1:7331 \
+  --expires-at 2026-06-12T03:30:00Z
+```
+
+Use `--inactive` to retain a route record for diagnostics while making the ingress return `410 disconnected_session`.
+
+Run the ingress daemon:
+
+```sh
+homeboy tunnel preview-ingress serve \
+  --domain chubes.net \
+  --bind 127.0.0.1:7350 \
+  --public-host-pattern '*-tunnel.chubes.net'
+```
+
+The daemon routes by `Host`, handles concurrent browser asset requests in separate worker threads, proxies request bodies to the configured upstream origin, streams upstream response bodies back to the browser, and preserves response status plus non-hop-by-hop headers such as `content-type` and cache headers.
+
+Diagnostics are structured so generic preview workloads can distinguish ingress and upstream problems:
+
+- `404 missing_session`: no active route matched the requested host.
+- `410 expired_session`: the route's RFC3339 expiry has passed.
+- `410 disconnected_session`: the route is retained but marked inactive.
+- `502 upstream_error`: the upstream origin failed before response streaming.
+- `504 upstream_timeout`: the upstream origin timed out.
+
+Each request writes a JSON line to stderr with request ID, host, path, status, bytes, duration, and classification. `/_homeboy/preview-ingress/status` returns the current route status as JSON from the running daemon.
+
+This is the ingress side of #4089 and the first Homeboy-owned replacement path for #4062's current tunnel-provider blocker. Auth/pairing/token lifecycle and the authenticated reverse preview client are separate follow-up surfaces; the ingress route's `upstream_origin` is the generic HTTP seam those clients attach to.
+
 ## Subcommands
 
 - `service expose`: create or replace a private service tunnel declaration.
@@ -71,3 +121,8 @@ When a service's preview policy is relevant, `service status` and `service start
 - `service start <id>`: start and supervise a declared local service command and optional provider-neutral public tunnel backend.
 - `service status <id>`: report declaration, process, local URL, public URL when present, health, backend, and log evidence state.
 - `service stop <id>`: terminate the managed process group and remove runtime state while leaving log evidence files in place.
+- `preview-ingress route <session-id>`: register or replace a host-routed preview session.
+- `preview-ingress unroute <session-id>`: remove a preview route.
+- `preview-ingress list`: list route records.
+- `preview-ingress status`: report route lifecycle metadata.
+- `preview-ingress serve`: run the blocking VPS-side HTTP ingress daemon.
