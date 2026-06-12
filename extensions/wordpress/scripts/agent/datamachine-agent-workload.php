@@ -633,6 +633,7 @@ if ( ! function_exists( 'homeboy_datamachine_agent_run_command_checks' ) ) {
 			return array(
 				'success'        => false,
 				'command'        => $command_config['command'],
+				'executed_command' => $command,
 				'description'    => $command_config['description'],
 				'error'          => $key . ' requires a WP Codebox runner workspace handle.',
 				'ability'        => $ability_name,
@@ -645,6 +646,7 @@ if ( ! function_exists( 'homeboy_datamachine_agent_run_command_checks' ) ) {
 			return array(
 				'success'        => false,
 				'command'        => $command_config['command'],
+				'executed_command' => $command,
 				'description'    => $command_config['description'],
 				'workspace'      => $handle,
 				'error'          => $ability_name . ' is not available; runner workspace command execution is blocked on WP Codebox runner verification support.',
@@ -670,6 +672,7 @@ if ( ! function_exists( 'homeboy_datamachine_agent_run_command_checks' ) ) {
 			return array(
 				'success'        => false,
 				'command'        => $command_config['command'],
+				'executed_command' => $command,
 				'description'    => $command_config['description'],
 				'workspace'      => $handle,
 				'error'          => $result->get_error_message(),
@@ -678,20 +681,26 @@ if ( ! function_exists( 'homeboy_datamachine_agent_run_command_checks' ) ) {
 			);
 		}
 
-		$response = is_array( $result ) ? $result : array();
-		$exit_code = (int) ( $response['exit_code'] ?? $response['code'] ?? ( empty( $response['success'] ) ? 1 : 0 ) );
-		$completed = ! empty( $response['success'] ) || 0 === $exit_code || 'completed' === (string) ( $response['status'] ?? '' );
+		$response         = is_array( $result ) ? $result : array();
+		$exit_code        = (int) ( $response['exit_code'] ?? $response['code'] ?? ( empty( $response['success'] ) ? 1 : 0 ) );
+		$completed        = ! empty( $response['success'] ) || 0 === $exit_code || 'completed' === (string) ( $response['status'] ?? '' );
+		$stdout           = is_scalar( $response['stdout'] ?? null ) ? trim( (string) $response['stdout'] ) : '';
+		$stderr           = is_scalar( $response['stderr'] ?? null ) ? trim( (string) $response['stderr'] ) : '';
+		$response_error   = is_scalar( $response['error'] ?? null ) ? trim( (string) $response['error'] ) : ( is_array( $response['error'] ?? null ) ? wp_json_encode( $response['error'] ) : '' );
+		$failure_details  = '' !== $response_error ? $response_error : ( '' !== $stderr ? $stderr : $stdout );
+		$executed_command = is_scalar( $response['command'] ?? null ) && '' !== trim( (string) $response['command'] ) ? trim( (string) $response['command'] ) : $command;
 		return array(
 			'command'        => $command_config['command'],
+			'executed_command' => $executed_command,
 			'description'    => $command_config['description'],
 			'exit_code'      => $exit_code,
 			'success'        => $completed,
-			'stdout'         => is_scalar( $response['stdout'] ?? null ) ? trim( (string) $response['stdout'] ) : '',
-			'stderr'         => is_scalar( $response['stderr'] ?? null ) ? trim( (string) $response['stderr'] ) : '',
+			'stdout'         => $stdout,
+			'stderr'         => $stderr,
 			'elapsed_ms'     => isset( $response['elapsed_ms'] ) ? (float) $response['elapsed_ms'] : ( hrtime( true ) - $started ) / 1000000,
 			'workspace'      => $handle,
 			'ability'        => $ability_name,
-			'error'          => is_scalar( $response['error'] ?? null ) ? (string) $response['error'] : ( is_array( $response['error'] ?? null ) ? wp_json_encode( $response['error'] ) : '' ),
+			'error'          => $completed ? $response_error : $failure_details,
 			'upstream_issue' => is_scalar( $response['upstream_issue'] ?? null ) ? (string) $response['upstream_issue'] : '',
 		);
 	}

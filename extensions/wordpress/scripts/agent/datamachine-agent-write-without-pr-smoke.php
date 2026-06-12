@@ -647,8 +647,30 @@ namespace {
 		'verification_commands'
 	);
 	$last_command_call = end( $workspace_command_calls );
-	if ( empty( $pnpm_result['success'] ) || 'corepack pnpm verify' !== ( $last_command_call['command'] ?? '' ) || 'pnpm verify' !== ( $pnpm_result['checks'][0]['command'] ?? '' ) ) {
+	if ( empty( $pnpm_result['success'] ) || 'corepack pnpm verify' !== ( $last_command_call['command'] ?? '' ) || 'pnpm verify' !== ( $pnpm_result['checks'][0]['command'] ?? '' ) || 'corepack pnpm verify' !== ( $pnpm_result['checks'][0]['executed_command'] ?? '' ) ) {
 		fwrite( STDERR, "Expected pnpm verification commands to run through corepack while preserving the reported command.\n" );
+		exit( 1 );
+	}
+
+	$GLOBALS['homeboy_datamachine_agent_fake_abilities'] = array(
+		'wp-codebox/run-runner-workspace-command' => new Homeboy_Datamachine_Agent_Fake_Ability(
+			function ( array $input ): array {
+				return array(
+					'success'   => false,
+					'command'   => (string) ( $input['command'] ?? '' ),
+					'exit_code' => 127,
+					'stderr'    => 'corepack: not found',
+				);
+			}
+		),
+	);
+	$failed_pnpm_result = homeboy_datamachine_agent_run_command_checks(
+		array( 'verification_commands' => array( array( 'command' => 'pnpm verify', 'description' => 'Verify generated docs' ) ) ),
+		array( 'handle' => 'repo@branch', 'path' => '/workspace/repo@branch', 'backend' => 'local_git' ),
+		'verification_commands'
+	);
+	if ( ! empty( $failed_pnpm_result['success'] ) || 'corepack pnpm verify' !== ( $failed_pnpm_result['checks'][0]['executed_command'] ?? '' ) || 'corepack: not found' !== ( $failed_pnpm_result['error'] ?? '' ) ) {
+		fwrite( STDERR, "Expected failed pnpm verification commands to expose executed command and stderr.\n" );
 		exit( 1 );
 	}
 
