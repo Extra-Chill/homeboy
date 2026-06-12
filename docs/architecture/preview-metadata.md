@@ -116,7 +116,18 @@ trace collection starts:
     "required_asset_paths": [
       "/assets/app.js",
       "/assets/app.css"
-    ]
+    ],
+    "asset_fanout": {
+      "asset_paths": [
+        "/assets/app.js?ver=1",
+        "/assets/app.css?ver=1",
+        "/assets/vendor.js?ver=1",
+        "/assets/runtime.css?ver=1"
+      ],
+      "concurrency": 16,
+      "repeat_count": 3,
+      "expected_body_contains": "fixture-asset-ok"
+    }
   }
 }
 ```
@@ -127,6 +138,23 @@ starting the trace runner. Non-2xx responses, aborted requests, and connection
 errors fail fast with `public_preview.required_asset_paths` diagnostics so a run
 does not collect baseline/candidate traces from a page whose static assets cannot
 load.
+
+`asset_fanout` is the native preview tunnel stress gate for browser/static asset
+bursts. Homeboy expands each listed path against the public preview origin,
+requests every path `repeat_count` times with up to `concurrency` concurrent
+workers, and fails before trace collection when any request aborts, times out,
+returns a non-2xx status such as `502`/`504`, or misses the optional
+`expected_body_contains` text. The preview metadata records a
+`homeboy/preview-asset-fanout/v1` report with client request totals, status
+counts, failure buckets, and per-request rows. Native ingress/client/local-origin
+implementations can populate the optional ingress and local-origin request count
+fields in the same report so reviewer artifacts can distinguish browser/client
+errors from tunnel ingress or origin delivery gaps.
+
+Use this core gate for generic HTTP asset fanout proof. Product-specific proofs,
+such as WP Codebox or WooCommerce asset lists for Extra-Chill/homeboy#4062,
+should live in the owning rig or extension and consume this generic
+`asset_fanout` contract.
 
 ## Persistence
 

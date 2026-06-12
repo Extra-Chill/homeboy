@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, VecDeque};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
 use crate::core::error::{Error, Result};
@@ -12,6 +13,8 @@ use crate::core::rig::{
 
 const DEFAULT_STARTUP_TIMEOUT_SECONDS: u64 = 20;
 const DEFAULT_ASSET_CHECK_TIMEOUT_SECONDS: u64 = 10;
+const DEFAULT_ASSET_FANOUT_CONCURRENCY: usize = 16;
+const DEFAULT_ASSET_FANOUT_REPEAT_COUNT: usize = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TracePreviewAssetCheck {
@@ -21,6 +24,40 @@ pub struct TracePreviewAssetCheck {
     pub ok: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TracePreviewAssetFanoutRequest {
+    pub path: String,
+    pub url: String,
+    pub status: Option<u16>,
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_bucket: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TracePreviewAssetFanoutReport {
+    pub schema: String,
+    pub concurrency: usize,
+    pub repeat_count: usize,
+    pub asset_path_count: usize,
+    pub expected_request_count: usize,
+    pub client_request_count: usize,
+    pub success_count: usize,
+    pub failure_count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ingress_request_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_origin_request_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub status_counts: BTreeMap<String, usize>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub failure_buckets: BTreeMap<String, usize>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requests: Vec<TracePreviewAssetFanoutRequest>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -39,6 +76,8 @@ pub struct TracePreviewMetadata {
     pub require_https: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub required_assets: Vec<TracePreviewAssetCheck>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asset_fanout: Option<TracePreviewAssetFanoutReport>,
     pub status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub process_id: Option<String>,
@@ -137,6 +176,14 @@ impl TracePublicPreviewSession {
             }
         };
 
+        let asset_fanout = match validate_asset_fanout(spec, &public_origin) {
+            Ok(report) => report,
+            Err(error) => {
+                stop_child(&mut child);
+                return Err(error);
+            }
+        };
+
         let process_id = child.as_ref().map(|child| child.id().to_string());
         Ok(Self {
             child,
@@ -156,6 +203,7 @@ impl TracePublicPreviewSession {
                 window_is_secure_context: is_https,
                 require_https: spec.require_https,
                 required_assets,
+                asset_fanout,
                 status: "running".to_string(),
                 process_id,
                 cleanup_status: "pending".to_string(),
@@ -223,6 +271,14 @@ impl TracePublicPreviewSession {
             }
         };
 
+        let asset_fanout = match validate_asset_fanout(spec, &public_origin) {
+            Ok(report) => report,
+            Err(error) => {
+                stop_child(&mut child);
+                return Err(error);
+            }
+        };
+
         let process_id = child.as_ref().map(|child| child.id().to_string());
         Ok(Self {
             child,
@@ -242,6 +298,7 @@ impl TracePublicPreviewSession {
                 window_is_secure_context: is_https,
                 require_https: spec.require_https,
                 required_assets,
+                asset_fanout,
                 status: "running".to_string(),
                 process_id,
                 cleanup_status: "pending".to_string(),
@@ -672,6 +729,259 @@ fn preflight_required_assets(
     ))
 }
 
+fn validate_asset_fanout(
+    spec: &TracePublicPreviewSpec,
+    public_origin: &str,
+) -> Result<Option<TracePreviewAssetFanoutReport>> {
+    let Some(fanout) = spec.asset_fanout.as_ref() else {
+        return Ok(None);
+    };
+    if fanout.asset_paths.is_empty() {
+        return Ok(Some(empty_asset_fanout_report(fanout)));
+    }
+
+    let concurrency = fanout
+        .concurrency
+        .unwrap_or(DEFAULT_ASSET_FANOUT_CONCURRENCY)
+        .max(1);
+    let repeat_count = fanout
+        .repeat_count
+        .unwrap_or(DEFAULT_ASSET_FANOUT_REPEAT_COUNT)
+        .max(1);
+    let expected_request_count = fanout.asset_paths.len() * repeat_count;
+    let mut jobs = VecDeque::with_capacity(expected_request_count);
+    for _ in 0..repeat_count {
+        for path in &fanout.asset_paths {
+            jobs.push_back((path.clone(), preview_asset_url(public_origin, path)));
+        }
+    }
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(DEFAULT_ASSET_CHECK_TIMEOUT_SECONDS))
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .build()
+        .map_err(|e| {
+            Error::internal_io(
+                format!("Failed to create trace public_preview asset fanout client: {e}"),
+                Some("trace.preview.asset_fanout_client".to_string()),
+            )
+        })?;
+    let jobs = Arc::new(Mutex::new(jobs));
+    let requests = Arc::new(Mutex::new(Vec::with_capacity(expected_request_count)));
+    let expected_body_contains = fanout.expected_body_contains.clone();
+
+    let worker_count = concurrency.min(expected_request_count);
+    let mut workers = Vec::with_capacity(worker_count);
+    for _ in 0..worker_count {
+        let client = client.clone();
+        let jobs = Arc::clone(&jobs);
+        let requests = Arc::clone(&requests);
+        let expected_body_contains = expected_body_contains.clone();
+        workers.push(std::thread::spawn(move || loop {
+            let Some((path, url)) = jobs.lock().expect("asset fanout jobs lock").pop_front() else {
+                break;
+            };
+            let request = fetch_fanout_asset(&client, path, url, expected_body_contains.as_deref());
+            requests
+                .lock()
+                .expect("asset fanout requests lock")
+                .push(request);
+        }));
+    }
+    for worker in workers {
+        worker.join().map_err(|_| {
+            Error::internal_io(
+                "trace public_preview asset fanout worker panicked".to_string(),
+                Some("trace.preview.asset_fanout".to_string()),
+            )
+        })?;
+    }
+
+    let requests = Arc::try_unwrap(requests)
+        .expect("asset fanout request handles released")
+        .into_inner()
+        .expect("asset fanout requests lock");
+    let report = asset_fanout_report(
+        concurrency,
+        repeat_count,
+        fanout.asset_paths.len(),
+        requests,
+    );
+    if report.failure_count == 0 && report.client_request_count == expected_request_count {
+        return Ok(Some(report));
+    }
+
+    let details = report
+        .failure_buckets
+        .iter()
+        .map(|(bucket, count)| format!("{bucket}={count}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(Error::validation_invalid_argument(
+        "public_preview.asset_fanout",
+        format!(
+            "trace public_preview asset fanout failed before trace collection: expected_request_count={} client_request_count={} failure_count={} failure_buckets=[{}]",
+            report.expected_request_count,
+            report.client_request_count,
+            report.failure_count,
+            details
+        ),
+        Some(public_origin.to_string()),
+        Some(report.failure_buckets.keys().cloned().collect()),
+    ))
+}
+
+fn fetch_fanout_asset(
+    client: &reqwest::blocking::Client,
+    path: String,
+    url: String,
+    expected_body_contains: Option<&str>,
+) -> TracePreviewAssetFanoutRequest {
+    match client.get(&url).send() {
+        Ok(response) => {
+            let status = response.status();
+            if !status.is_success() {
+                let failure_bucket = format!("http_{}", status.as_u16());
+                return TracePreviewAssetFanoutRequest {
+                    path,
+                    url,
+                    status: Some(status.as_u16()),
+                    ok: false,
+                    failure_bucket: Some(failure_bucket),
+                    error: None,
+                };
+            }
+            if let Some(expected) = expected_body_contains {
+                match response.text() {
+                    Ok(body) if body.contains(expected) => TracePreviewAssetFanoutRequest {
+                        path,
+                        url,
+                        status: Some(status.as_u16()),
+                        ok: true,
+                        failure_bucket: None,
+                        error: None,
+                    },
+                    Ok(_) => TracePreviewAssetFanoutRequest {
+                        path,
+                        url,
+                        status: Some(status.as_u16()),
+                        ok: false,
+                        failure_bucket: Some("body_mismatch".to_string()),
+                        error: Some("response body did not contain expected text".to_string()),
+                    },
+                    Err(error) => TracePreviewAssetFanoutRequest {
+                        path,
+                        url,
+                        status: Some(status.as_u16()),
+                        ok: false,
+                        failure_bucket: Some("body_read_error".to_string()),
+                        error: Some(error.to_string()),
+                    },
+                }
+            } else {
+                TracePreviewAssetFanoutRequest {
+                    path,
+                    url,
+                    status: Some(status.as_u16()),
+                    ok: true,
+                    failure_bucket: None,
+                    error: None,
+                }
+            }
+        }
+        Err(error) => TracePreviewAssetFanoutRequest {
+            path,
+            url,
+            status: None,
+            ok: false,
+            failure_bucket: Some(request_error_bucket(&error)),
+            error: Some(error.to_string()),
+        },
+    }
+}
+
+fn request_error_bucket(error: &reqwest::Error) -> String {
+    if error.is_timeout() {
+        return "timeout".to_string();
+    }
+    if error.is_connect() {
+        return "connect_error".to_string();
+    }
+    if error.is_body() {
+        return "body_error".to_string();
+    }
+    if error.is_decode() {
+        return "decode_error".to_string();
+    }
+    "request_error".to_string()
+}
+
+fn asset_fanout_report(
+    concurrency: usize,
+    repeat_count: usize,
+    asset_path_count: usize,
+    requests: Vec<TracePreviewAssetFanoutRequest>,
+) -> TracePreviewAssetFanoutReport {
+    let expected_request_count = asset_path_count * repeat_count;
+    let client_request_count = requests.len();
+    let success_count = requests.iter().filter(|request| request.ok).count();
+    let failure_count = client_request_count.saturating_sub(success_count);
+    let mut status_counts = BTreeMap::new();
+    let mut failure_buckets = BTreeMap::new();
+    for request in &requests {
+        let status = request
+            .status
+            .map(|status| status.to_string())
+            .unwrap_or_else(|| "none".to_string());
+        *status_counts.entry(status).or_insert(0) += 1;
+        if let Some(bucket) = request.failure_bucket.as_ref() {
+            *failure_buckets.entry(bucket.clone()).or_insert(0) += 1;
+        }
+    }
+
+    TracePreviewAssetFanoutReport {
+        schema: "homeboy/preview-asset-fanout/v1".to_string(),
+        concurrency,
+        repeat_count,
+        asset_path_count,
+        expected_request_count,
+        client_request_count,
+        success_count,
+        failure_count,
+        ingress_request_count: None,
+        local_origin_request_count: None,
+        status_counts,
+        failure_buckets,
+        requests,
+    }
+}
+
+fn empty_asset_fanout_report(
+    fanout: &crate::core::rig::TracePreviewAssetFanoutSpec,
+) -> TracePreviewAssetFanoutReport {
+    TracePreviewAssetFanoutReport {
+        schema: "homeboy/preview-asset-fanout/v1".to_string(),
+        concurrency: fanout
+            .concurrency
+            .unwrap_or(DEFAULT_ASSET_FANOUT_CONCURRENCY)
+            .max(1),
+        repeat_count: fanout
+            .repeat_count
+            .unwrap_or(DEFAULT_ASSET_FANOUT_REPEAT_COUNT)
+            .max(1),
+        asset_path_count: 0,
+        expected_request_count: 0,
+        client_request_count: 0,
+        success_count: 0,
+        failure_count: 0,
+        ingress_request_count: None,
+        local_origin_request_count: None,
+        status_counts: BTreeMap::new(),
+        failure_buckets: BTreeMap::new(),
+        requests: Vec::new(),
+    }
+}
+
 fn preview_asset_url(public_origin: &str, path: &str) -> String {
     if path.starts_with("http://") || path.starts_with("https://") {
         return path.to_string();
@@ -707,10 +1017,13 @@ fn stop_child(child: &mut Option<Child>) -> bool {
 mod tests {
     use super::{first_https_origin, TracePublicPreviewSession};
     use crate::core::rig::{
-        TraceNativePublicPreviewSpec, TracePublicPreviewMode, TracePublicPreviewSpec,
+        TraceNativePublicPreviewSpec, TracePreviewAssetFanoutSpec, TracePublicPreviewMode,
+        TracePublicPreviewSpec,
     };
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
     use std::thread;
 
     #[test]
@@ -734,6 +1047,7 @@ mod tests {
             provider: Some("fixture".to_string()),
             startup_timeout_seconds: Some(2),
             required_asset_paths: Vec::new(),
+            asset_fanout: None,
             native: None,
         })
         .expect("preview starts");
@@ -763,6 +1077,7 @@ mod tests {
             provider: Some("fixture".to_string()),
             startup_timeout_seconds: None,
             required_asset_paths: vec!["/assets/frontend.js?ver=1".to_string()],
+            asset_fanout: None,
             native: None,
         })
         .expect("preview starts after asset preflight");
@@ -786,6 +1101,7 @@ mod tests {
             provider: Some("fixture".to_string()),
             startup_timeout_seconds: None,
             required_asset_paths: vec!["/assets/frontend.js?ver=1".to_string()],
+            asset_fanout: None,
             native: None,
         });
 
@@ -826,6 +1142,7 @@ mod tests {
                 provider: None,
                 startup_timeout_seconds: Some(5),
                 required_asset_paths: Vec::new(),
+                asset_fanout: None,
                 native: Some(TraceNativePublicPreviewSpec {
                     public_host: None,
                     operator_domain: Some("chubes.net".to_string()),
@@ -870,6 +1187,91 @@ mod tests {
         assert_eq!(metadata.cleanup_status, "terminated");
     }
 
+    #[test]
+    fn records_successful_concurrent_asset_fanout() {
+        let paths = vec![
+            "/assets/app.js?ver=1".to_string(),
+            "/assets/app.css?ver=1".to_string(),
+            "/assets/vendor.js?ver=1".to_string(),
+            "/assets/runtime.css?ver=1".to_string(),
+        ];
+        let expected_requests = paths.len() * 3;
+        let (origin, local_origin_count) =
+            start_fanout_fixture_server(paths.clone(), expected_requests, 200);
+
+        let session = TracePublicPreviewSession::start(&TracePublicPreviewSpec {
+            mode: TracePublicPreviewMode::External,
+            local_origin: origin.clone(),
+            public_origin: Some(origin),
+            command: None,
+            require_https: false,
+            provider: Some("homeboy-native-fixture".to_string()),
+            startup_timeout_seconds: None,
+            required_asset_paths: Vec::new(),
+            asset_fanout: Some(TracePreviewAssetFanoutSpec {
+                asset_paths: paths,
+                concurrency: Some(4),
+                repeat_count: Some(3),
+                expected_body_contains: Some("homeboy-fanout-ok".to_string()),
+            }),
+            native: None,
+        })
+        .expect("preview starts after asset fanout");
+
+        let report = session
+            .metadata()
+            .asset_fanout
+            .as_ref()
+            .expect("fanout report");
+        assert_eq!(report.schema, "homeboy/preview-asset-fanout/v1");
+        assert_eq!(report.concurrency, 4);
+        assert_eq!(report.repeat_count, 3);
+        assert_eq!(report.expected_request_count, expected_requests);
+        assert_eq!(report.client_request_count, expected_requests);
+        assert_eq!(report.success_count, expected_requests);
+        assert_eq!(report.failure_count, 0);
+        assert_eq!(report.status_counts.get("200"), Some(&expected_requests));
+        assert!(report.failure_buckets.is_empty());
+        assert_eq!(local_origin_count.load(Ordering::SeqCst), expected_requests);
+    }
+
+    #[test]
+    fn fails_fast_when_concurrent_asset_fanout_sees_bad_gateway() {
+        let paths = vec![
+            "/assets/app.js?ver=1".to_string(),
+            "/assets/app.css?ver=1".to_string(),
+        ];
+        let (origin, local_origin_count) =
+            start_fanout_fixture_server(paths.clone(), paths.len(), 502);
+
+        let result = TracePublicPreviewSession::start(&TracePublicPreviewSpec {
+            mode: TracePublicPreviewMode::External,
+            local_origin: origin.clone(),
+            public_origin: Some(origin),
+            command: None,
+            require_https: false,
+            provider: Some("homeboy-native-fixture".to_string()),
+            startup_timeout_seconds: None,
+            required_asset_paths: Vec::new(),
+            asset_fanout: Some(TracePreviewAssetFanoutSpec {
+                asset_paths: paths,
+                concurrency: Some(2),
+                repeat_count: Some(1),
+                expected_body_contains: None,
+            }),
+            native: None,
+        });
+
+        let error = match result {
+            Ok(_) => panic!("asset fanout should fail before trace starts"),
+            Err(error) => error,
+        };
+        let message = error.to_string();
+        assert!(message.contains("asset fanout failed before trace collection"));
+        assert!(message.contains("failure_buckets=[http_502=2]"));
+        assert_eq!(local_origin_count.load(Ordering::SeqCst), 2);
+    }
+
     fn start_asset_fixture_server(routes: Vec<(String, u16)>) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind fixture server");
         let addr = listener.local_addr().expect("fixture server addr");
@@ -899,5 +1301,49 @@ mod tests {
             }
         });
         format!("http://{addr}")
+    }
+
+    fn start_fanout_fixture_server(
+        paths: Vec<String>,
+        expected_requests: usize,
+        status: u16,
+    ) -> (String, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind fanout fixture server");
+        let addr = listener.local_addr().expect("fanout fixture server addr");
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let server_request_count = Arc::clone(&request_count);
+        thread::spawn(move || {
+            for stream in listener.incoming().take(expected_requests) {
+                let mut stream = stream.expect("fixture connection");
+                server_request_count.fetch_add(1, Ordering::SeqCst);
+                let mut buffer = [0; 2048];
+                let len = stream.read(&mut buffer).expect("read request");
+                let request = String::from_utf8_lossy(&buffer[..len]);
+                let target = request
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .unwrap_or("/");
+                let route_status = if paths.iter().any(|path| path == target) {
+                    status
+                } else {
+                    404
+                };
+                let reason = if route_status == 200 {
+                    "OK"
+                } else {
+                    "Bad Gateway"
+                };
+                let body = "homeboy-fanout-ok";
+                let response = format!(
+                    "HTTP/1.1 {route_status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .expect("write response");
+            }
+        });
+        (format!("http://{addr}"), request_count)
     }
 }

@@ -66,6 +66,43 @@ JSON run, summary, and aggregate outputs include a `profile` object with the res
 
 Trace dependency preflight rejects stale or dirty dependency checkouts before running the expensive workflow so stale local dependencies cannot produce misleading evidence.
 
+## Public Preview Asset Gates
+
+Trace workloads can declare `public_preview.required_asset_paths` for serial asset
+preflight and `public_preview.asset_fanout` for concurrent browser/static asset
+stress proof. `asset_fanout` starts after the public preview URL is available and
+before the trace runner begins, then fetches every configured asset path through
+the public origin with bounded concurrency. Any aborted request, timeout,
+non-2xx response, or optional body-content mismatch fails the trace before it can
+produce misleading browser evidence.
+
+Use this gate before Woo Stripe real-wallet reruns that depend on WP Codebox
+static plugin assets:
+
+```jsonc
+{
+  "public_preview": {
+    "local_origin": "http://127.0.0.1:49823",
+    "public_origin": "https://preview.example.test",
+    "require_https": true,
+    "asset_fanout": {
+      "asset_paths": [
+        "/wp-content/plugins/woocommerce-gateway-stripe/build/express-checkout.js?ver=10.8.0",
+        "/wp-content/plugins/woocommerce-gateway-stripe/build/express-checkout.css?ver=10.8.0",
+        "/wp-content/plugins/woocommerce/assets/js/frontend/add-to-cart.min.js"
+      ],
+      "concurrency": 16,
+      "repeat_count": 3
+    }
+  }
+}
+```
+
+The emitted preview metadata includes `asset_fanout.schema =
+homeboy/preview-asset-fanout/v1`, expected/client request totals, status counts,
+failure buckets, and request rows. Native tunnel integrations may also fill
+ingress and local-origin request counts when those counters are available.
+
 ## Baseline/Candidate Compare
 
 `homeboy trace compare <component> <scenario>` can run the same trace scenario against two local paths or git refs, aggregate the span timings, write JSON artifacts, and render a Markdown summary. This is the first-class A/B browser proof workflow for trace rigs: pass baseline and candidate targets, choose `--runs`, and Homeboy preserves per-run artifacts while producing reviewer-ready span and browser evidence tables.
