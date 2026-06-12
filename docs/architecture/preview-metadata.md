@@ -69,7 +69,7 @@ external provider command:
       "token_env": "HOMEBOY_PREVIEW_TUNNEL_TOKEN"
     },
     "required_asset_paths": [
-      "/wp-content/plugins/woocommerce-gateway-stripe/build/express-checkout.js?ver=10.8.0"
+      "/assets/app.js"
     ]
   }
 }
@@ -114,8 +114,8 @@ trace collection starts:
     "public_origin": "https://preview.example.test",
     "require_https": true,
     "required_asset_paths": [
-      "/wp-content/plugins/woocommerce-gateway-stripe/build/express-checkout.js?ver=10.8.0",
-      "/wp-content/plugins/woocommerce/assets/js/frontend/add-to-cart.min.js"
+      "/assets/app.js",
+      "/assets/app.css"
     ]
   }
 }

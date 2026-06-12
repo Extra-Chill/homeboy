@@ -13,7 +13,7 @@ fn test_trace_public_preview_parse() {
                 "provider": "cloudflared",
                 "startup_timeout_seconds": 5,
                 "required_asset_paths": [
-                    "/wp-content/plugins/woocommerce-gateway-stripe/build/express-checkout.js?ver=10.8.0"
+                    "/assets/app.js"
                 ]
             }
         }"#,
@@ -27,10 +27,7 @@ fn test_trace_public_preview_parse() {
     assert_eq!(preview.startup_timeout_seconds, Some(5));
     assert_eq!(
         preview.required_asset_paths,
-        vec![
-            "/wp-content/plugins/woocommerce-gateway-stripe/build/express-checkout.js?ver=10.8.0"
-                .to_string()
-        ]
+        vec!["/assets/app.js".to_string()]
     );
 }
 

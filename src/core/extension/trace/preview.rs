@@ -12,8 +12,6 @@ use crate::core::rig::{
 
 const DEFAULT_STARTUP_TIMEOUT_SECONDS: u64 = 20;
 const DEFAULT_ASSET_CHECK_TIMEOUT_SECONDS: u64 = 10;
-const WC_STRIPE_ECE_PREVIEW_PORT_SETTING: &str = "woocommerce_stripe_ece_preview_port";
-const WC_STRIPE_ECE_PREVIEW_PORT_ENV: &str = "HOMEBOY_WC_STRIPE_ECE_PREVIEW_PORT";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TracePreviewAssetCheck {
@@ -129,11 +127,6 @@ impl TracePublicPreviewSession {
                 Some(public_origin),
                 None,
             ));
-        }
-
-        if let Err(error) = validate_preview_port_alignment(spec, &public_origin) {
-            stop_child(&mut child);
-            return Err(error);
         }
 
         let required_assets = match preflight_required_assets(spec, &public_origin) {
@@ -699,61 +692,6 @@ fn first_https_origin(line: &str) -> Option<String> {
     Some(rest[..end].trim_end_matches('/').to_string())
 }
 
-fn validate_preview_port_alignment(
-    spec: &TracePublicPreviewSpec,
-    public_origin: &str,
-) -> Result<()> {
-    let Some(expected_port) = expected_local_tunnel_port(public_origin) else {
-        return Ok(());
-    };
-    let local_port = local_origin_port(&spec.local_origin);
-    if local_port == Some(expected_port) {
-        return Ok(());
-    }
-
-    let suggested_setting =
-        format!("--setting {WC_STRIPE_ECE_PREVIEW_PORT_SETTING}={expected_port}");
-    let suggested_env = format!("{WC_STRIPE_ECE_PREVIEW_PORT_ENV}={expected_port}");
-    Err(Error::validation_invalid_argument(
-        "public_preview.local_origin",
-        format!(
-            "public preview URL routes to local port {expected_port}, but runtime local preview origin is `{}`. requested_public_url=`{public_origin}` runtime_local_preview_origin=`{}` expected_local_tunnel_port={expected_port} suggested_setting=`{suggested_setting}` suggested_env=`{suggested_env}`",
-            spec.local_origin, spec.local_origin
-        ),
-        Some(public_origin.to_string()),
-        Some(vec![suggested_setting, suggested_env]),
-    ))
-}
-
-fn expected_local_tunnel_port(public_origin: &str) -> Option<u16> {
-    let after_scheme = public_origin.split_once("://")?.1;
-    let authority = after_scheme
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or(after_scheme)
-        .split('@')
-        .next_back()
-        .unwrap_or(after_scheme);
-    let host = authority
-        .rsplit_once(':')
-        .map_or(authority, |(host, _)| host);
-    let prefix = host.split_once("-tunnel.")?.0;
-    let digits = prefix.rsplit('-').next().unwrap_or(prefix);
-    digits.parse::<u16>().ok().filter(|port| *port > 0)
-}
-
-fn local_origin_port(local_origin: &str) -> Option<u16> {
-    let after_scheme = local_origin.split_once("://")?.1;
-    let authority = after_scheme
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or(after_scheme)
-        .split('@')
-        .next_back()
-        .unwrap_or(after_scheme);
-    authority.rsplit_once(':')?.1.parse::<u16>().ok()
-}
-
 fn stop_child(child: &mut Option<Child>) -> bool {
     let Some(mut child) = child.take() else {
         return false;
@@ -767,7 +705,7 @@ fn stop_child(child: &mut Option<Child>) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{expected_local_tunnel_port, first_https_origin, TracePublicPreviewSession};
+    use super::{first_https_origin, TracePublicPreviewSession};
     use crate::core::rig::{
         TraceNativePublicPreviewSpec, TracePublicPreviewMode, TracePublicPreviewSpec,
     };
@@ -812,53 +750,9 @@ mod tests {
     }
 
     #[test]
-    fn extracts_expected_port_from_kimaki_tunnel_origin() {
-        assert_eq!(
-            expected_local_tunnel_port("https://site-49822-tunnel.kimaki.dev/"),
-            Some(49822)
-        );
-        assert_eq!(
-            expected_local_tunnel_port("https://49822-tunnel.kimaki.dev"),
-            Some(49822)
-        );
-        assert_eq!(
-            expected_local_tunnel_port("https://preview.example.test/"),
-            None
-        );
-    }
-
-    #[test]
-    fn fails_fast_when_public_tunnel_port_does_not_match_local_origin() {
-        let result = TracePublicPreviewSession::start(&TracePublicPreviewSpec {
-            mode: TracePublicPreviewMode::External,
-            local_origin: "http://127.0.0.1:20000".to_string(),
-            public_origin: Some("https://site-49822-tunnel.kimaki.dev/".to_string()),
-            command: None,
-            require_https: true,
-            provider: Some("fixture".to_string()),
-            startup_timeout_seconds: None,
-            required_asset_paths: Vec::new(),
-            native: None,
-        });
-        let error = match result {
-            Ok(_) => panic!("mismatched preview port should fail before trace starts"),
-            Err(error) => error,
-        };
-
-        let message = error.to_string();
-        assert!(message.contains("requested_public_url=`https://site-49822-tunnel.kimaki.dev/`"));
-        assert!(message.contains("runtime_local_preview_origin=`http://127.0.0.1:20000`"));
-        assert!(message.contains("expected_local_tunnel_port=49822"));
-        assert!(message.contains("--setting woocommerce_stripe_ece_preview_port=49822"));
-        assert!(message.contains("HOMEBOY_WC_STRIPE_ECE_PREVIEW_PORT=49822"));
-    }
-
-    #[test]
     fn records_successful_required_asset_preflight() {
-        let origin = start_asset_fixture_server(vec![(
-            "/wp-content/plugins/example/build/frontend.js?ver=1".to_string(),
-            200,
-        )]);
+        let origin =
+            start_asset_fixture_server(vec![("/assets/frontend.js?ver=1".to_string(), 200)]);
 
         let session = TracePublicPreviewSession::start(&TracePublicPreviewSpec {
             mode: TracePublicPreviewMode::External,
@@ -868,9 +762,7 @@ mod tests {
             require_https: false,
             provider: Some("fixture".to_string()),
             startup_timeout_seconds: None,
-            required_asset_paths: vec![
-                "/wp-content/plugins/example/build/frontend.js?ver=1".to_string()
-            ],
+            required_asset_paths: vec!["/assets/frontend.js?ver=1".to_string()],
             native: None,
         })
         .expect("preview starts after asset preflight");
@@ -882,10 +774,8 @@ mod tests {
 
     #[test]
     fn fails_fast_when_required_asset_cannot_be_fetched() {
-        let origin = start_asset_fixture_server(vec![(
-            "/wp-content/plugins/example/build/frontend.js?ver=1".to_string(),
-            502,
-        )]);
+        let origin =
+            start_asset_fixture_server(vec![("/assets/frontend.js?ver=1".to_string(), 502)]);
 
         let result = TracePublicPreviewSession::start(&TracePublicPreviewSpec {
             mode: TracePublicPreviewMode::External,
@@ -895,9 +785,7 @@ mod tests {
             require_https: false,
             provider: Some("fixture".to_string()),
             startup_timeout_seconds: None,
-            required_asset_paths: vec![
-                "/wp-content/plugins/example/build/frontend.js?ver=1".to_string()
-            ],
+            required_asset_paths: vec!["/assets/frontend.js?ver=1".to_string()],
             native: None,
         });
 
@@ -907,7 +795,7 @@ mod tests {
         };
         let message = error.to_string();
         assert!(message.contains("required asset preflight failed before trace collection"));
-        assert!(message.contains("/wp-content/plugins/example/build/frontend.js?ver=1 -> HTTP 502"));
+        assert!(message.contains("/assets/frontend.js?ver=1 -> HTTP 502"));
     }
 
     #[test]
