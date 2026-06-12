@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.119.24] - 2026-06-12
+
+### Changed
+- Pass runner command PATH env
+
 ## [2.119.23] - 2026-06-12
 
 ### Changed
