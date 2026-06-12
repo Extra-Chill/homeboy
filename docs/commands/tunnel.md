@@ -7,7 +7,7 @@ homeboy tunnel service <COMMAND>
 homeboy tunnel preview-ingress <COMMAND>
 ```
 
-`tunnel` manages Homeboy-native private service tunnel declarations, local managed service lifecycle, and the VPS-side public preview ingress used by browser trace/reviewer URLs. Homeboy can start a long-running local command, record safe command/process/log evidence, report readiness, and stop the process group without relying on an external chat or tunnel wrapper.
+`tunnel` manages Homeboy-native private service tunnel declarations, local managed service lifecycle, and the VPS-side public preview ingress used by generic browser/reviewer URLs. Homeboy can start a long-running local command, record safe command/process/log evidence, report readiness, and stop the process group without relying on an external chat or tunnel wrapper.
 
 ## Service Tunnels
 
@@ -74,6 +74,8 @@ Browser
   -> local/reverse-channel HTTP origin
 ```
 
+The core contract is generic HTTP ingress: public host/session routing, reverse-channel-compatible HTTP origins, request/response streaming, status, logs, and cleanup. Workload-specific behavior such as WordPress, WP Codebox, WooCommerce, static asset health, or browser probe interpretation belongs in Homeboy Extensions or `homeboy-rigs`, not in Homeboy core.
+
 Register one active preview route:
 
 ```sh
@@ -96,7 +98,7 @@ homeboy tunnel preview-ingress serve \
 
 The daemon routes by `Host`, handles concurrent browser asset requests in separate worker threads, proxies request bodies to the configured upstream origin, streams upstream response bodies back to the browser, and preserves response status plus non-hop-by-hop headers such as `content-type` and cache headers.
 
-Diagnostics are structured so browser-trace failures can distinguish ingress and upstream problems:
+Diagnostics are structured so generic preview workloads can distinguish ingress and upstream problems:
 
 - `404 missing_session`: no active route matched the requested host.
 - `410 expired_session`: the route's RFC3339 expiry has passed.
@@ -106,7 +108,7 @@ Diagnostics are structured so browser-trace failures can distinguish ingress and
 
 Each request writes a JSON line to stderr with request ID, host, path, status, bytes, duration, and classification. `/_homeboy/preview-ingress/status` returns the current route status as JSON from the running daemon.
 
-This is the ingress side of #4089 and the first Homeboy-owned replacement path for #4062. Auth/pairing/token lifecycle and the authenticated reverse preview client are separate follow-up surfaces; the ingress route's `upstream_origin` is the seam those clients will attach to.
+This is the ingress side of #4089 and the first Homeboy-owned replacement path for #4062's current tunnel-provider blocker. Auth/pairing/token lifecycle and the authenticated reverse preview client are separate follow-up surfaces; the ingress route's `upstream_origin` is the generic HTTP seam those clients attach to.
 
 ## Subcommands
 
