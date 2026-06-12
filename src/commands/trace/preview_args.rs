@@ -59,5 +59,10 @@ fn expand_trace_public_preview(
         require_https: spec.require_https,
         provider: spec.provider.clone(),
         startup_timeout_seconds: spec.startup_timeout_seconds,
+        required_asset_paths: spec
+            .required_asset_paths
+            .iter()
+            .map(|path| expand(path))
+            .collect(),
     }
 }
