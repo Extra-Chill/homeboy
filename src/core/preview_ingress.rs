@@ -1,10 +1,16 @@
+use base64::Engine;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
+
+use crate::core::preview_client::{PreviewIngressRequest, PreviewIngressResponse};
 
 use crate::core::error::{Error, Result};
 use crate::core::paths;
@@ -59,6 +65,7 @@ pub struct PreviewIngressServeSpec {
     pub bind: String,
     pub domain: String,
     pub public_host_pattern: String,
+    pub token_sha256_env: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -168,6 +175,52 @@ struct PreviewIngressLogLine {
     bytes: usize,
     duration_ms: u128,
     classification: String,
+}
+
+#[derive(Debug, Clone)]
+struct PreviewClientSession {
+    local_origin: String,
+    pending: VecDeque<PreviewIngressRequest>,
+    responses: HashMap<String, PreviewIngressResponse>,
+    active: bool,
+}
+
+#[derive(Debug, Default)]
+struct PreviewClientSessions {
+    sessions: Mutex<HashMap<String, PreviewClientSession>>,
+    changed: Condvar,
+}
+
+#[derive(Debug, Clone)]
+struct PreviewIngressAuth {
+    token_sha256_env: String,
+    token_sha256: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PreviewRegisterRequest {
+    public_host: String,
+    local_origin: String,
+    #[serde(default)]
+    session_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PreviewNextRequest {
+    public_host: String,
+    #[serde(default)]
+    timeout_secs: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct PreviewRespondRequest {
+    public_host: String,
+    response: PreviewIngressResponse,
+}
+
+#[derive(Debug, Deserialize)]
+struct PreviewCloseRequest {
+    public_host: String,
 }
 
 fn default_true() -> bool {
@@ -356,6 +409,11 @@ pub fn serve(spec: PreviewIngressServeSpec) -> Result<PreviewIngressStatus> {
     validate_serve_spec(&spec)?;
     let listener = TcpListener::bind(&spec.bind)
         .map_err(|e| Error::internal_io(e.to_string(), Some(spec.bind.clone())))?;
+    let sessions = Arc::new(PreviewClientSessions::default());
+    let auth = Arc::new(PreviewIngressAuth {
+        token_sha256_env: spec.token_sha256_env.clone(),
+        token_sha256: preview_token_sha256(&spec.token_sha256_env),
+    });
     eprintln!(
         "homeboy preview ingress listening on {} for {} ({})",
         spec.bind, spec.domain, spec.public_host_pattern
@@ -373,8 +431,12 @@ pub fn serve(spec: PreviewIngressServeSpec) -> Result<PreviewIngressStatus> {
             Ok(stream) => {
                 let client = client.clone();
                 let recent_failures = Arc::clone(&recent_failures);
+                let sessions = Arc::clone(&sessions);
+                let auth = Arc::clone(&auth);
                 thread::spawn(move || {
-                    if let Err(error) = handle_connection(stream, client, recent_failures) {
+                    if let Err(error) =
+                        handle_connection(stream, client, sessions, auth, recent_failures)
+                    {
                         eprintln!(
                             "homeboy preview ingress connection error: {}",
                             error.message
@@ -398,6 +460,8 @@ pub fn serve(spec: PreviewIngressServeSpec) -> Result<PreviewIngressStatus> {
 fn handle_connection(
     mut stream: TcpStream,
     client: reqwest::blocking::Client,
+    sessions: Arc<PreviewClientSessions>,
+    auth: Arc<PreviewIngressAuth>,
     recent_failures: Arc<Mutex<Vec<PreviewIngressFailure>>>,
 ) -> Result<()> {
     let started = Instant::now();
@@ -440,17 +504,21 @@ fn handle_connection(
         return Ok(());
     }
 
+    if request.target.starts_with("/preview/client/") {
+        return handle_client_api(&mut stream, request, &sessions, &auth);
+    }
+
     let Some(route) = route_for_host(&host)? else {
-        let failure = PreviewIngressFailure {
-            request_id: request_id.clone(),
-            host: host.clone(),
-            path: path.clone(),
-            status: 404,
-            classification: "missing_session".to_string(),
-            message: "No active Homeboy preview ingress route matches this host".to_string(),
-        };
-        record_failure(&recent_failures, failure.clone());
-        return write_diagnostic(&mut stream, &failure, started);
+        return proxy_reverse_channel_request(
+            &mut stream,
+            request,
+            request_id,
+            host,
+            path,
+            started,
+            sessions,
+            recent_failures,
+        );
     };
 
     match classify_route(&route) {
@@ -563,6 +631,220 @@ fn read_http_request(reader: &mut BufReader<TcpStream>) -> Result<IngressHttpReq
     })
 }
 
+fn handle_client_api(
+    stream: &mut TcpStream,
+    request: IngressHttpRequest,
+    sessions: &Arc<PreviewClientSessions>,
+    auth: &PreviewIngressAuth,
+) -> Result<()> {
+    if request.method != "POST" {
+        return write_json_response(
+            stream,
+            405,
+            json!({ "error": "method_not_allowed", "message": "preview client endpoints require POST" }),
+        );
+    }
+    if !authorized_preview_client(&request, auth) {
+        return write_json_response(
+            stream,
+            401,
+            json!({ "error": "unauthorized", "message": "preview client bearer token is missing or invalid" }),
+        );
+    }
+
+    match request.target.as_str() {
+        "/preview/client/register" => {
+            let body: PreviewRegisterRequest = parse_json_body(&request.body, "register")?;
+            let public_host = normalize_public_host(&body.public_host);
+            validate_client_public_host(&public_host)?;
+            validate_client_local_origin(&body.local_origin)?;
+            let _session_id = body.session_id.unwrap_or_else(|| public_host.clone());
+            let mut sessions_guard = sessions
+                .sessions
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            sessions_guard.insert(
+                public_host,
+                PreviewClientSession {
+                    local_origin: body.local_origin,
+                    pending: VecDeque::new(),
+                    responses: HashMap::new(),
+                    active: true,
+                },
+            );
+            sessions.changed.notify_all();
+            write_json_response(stream, 200, json!({ "registered": true }))
+        }
+        "/preview/client/next" => {
+            let body: PreviewNextRequest = parse_json_body(&request.body, "next")?;
+            let public_host = normalize_public_host(&body.public_host);
+            let timeout = Duration::from_secs(body.timeout_secs.clamp(1, 60));
+            let started = Instant::now();
+            let mut sessions_guard = sessions
+                .sessions
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            loop {
+                if let Some(session) = sessions_guard.get_mut(&public_host) {
+                    if !session.active {
+                        return write_json_response(
+                            stream,
+                            410,
+                            json!({ "error": "session_closed" }),
+                        );
+                    }
+                    if let Some(request) = session.pending.pop_front() {
+                        return write_json_response(stream, 200, json!({ "request": request }));
+                    }
+                } else {
+                    return write_json_response(stream, 404, json!({ "error": "missing_session" }));
+                }
+
+                let elapsed = started.elapsed();
+                if elapsed >= timeout {
+                    return write_json_response(stream, 200, json!({ "request": null }));
+                }
+                let wait_for = timeout - elapsed;
+                let (guard, wait) = sessions
+                    .changed
+                    .wait_timeout(sessions_guard, wait_for)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                sessions_guard = guard;
+                if wait.timed_out() {
+                    return write_json_response(stream, 200, json!({ "request": null }));
+                }
+            }
+        }
+        "/preview/client/respond" => {
+            let body: PreviewRespondRequest = parse_json_body(&request.body, "respond")?;
+            let public_host = normalize_public_host(&body.public_host);
+            let mut sessions_guard = sessions
+                .sessions
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let Some(session) = sessions_guard.get_mut(&public_host) else {
+                return write_json_response(stream, 404, json!({ "error": "missing_session" }));
+            };
+            session
+                .responses
+                .insert(body.response.request_id.clone(), body.response);
+            sessions.changed.notify_all();
+            write_json_response(stream, 200, json!({ "accepted": true }))
+        }
+        "/preview/client/close" => {
+            let body: PreviewCloseRequest = parse_json_body(&request.body, "close")?;
+            let public_host = normalize_public_host(&body.public_host);
+            let mut sessions_guard = sessions
+                .sessions
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(session) = sessions_guard.get_mut(&public_host) {
+                session.active = false;
+            }
+            sessions_guard.remove(&public_host);
+            sessions.changed.notify_all();
+            write_json_response(stream, 200, json!({ "closed": true }))
+        }
+        _ => write_json_response(stream, 404, json!({ "error": "not_found" })),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn proxy_reverse_channel_request(
+    stream: &mut TcpStream,
+    request: IngressHttpRequest,
+    request_id: String,
+    host: String,
+    path: String,
+    started: Instant,
+    sessions: Arc<PreviewClientSessions>,
+    recent_failures: Arc<Mutex<Vec<PreviewIngressFailure>>>,
+) -> Result<()> {
+    let public_host = normalize_public_host(&host);
+    let preview_request = PreviewIngressRequest {
+        request_id: request_id.clone(),
+        method: request.method,
+        path: request.target,
+        headers: request.headers.into_iter().collect::<BTreeMap<_, _>>(),
+        body_base64: if request.body.is_empty() {
+            None
+        } else {
+            Some(base64::engine::general_purpose::STANDARD.encode(request.body))
+        },
+    };
+    let mut sessions_guard = sessions
+        .sessions
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Some(session) = sessions_guard.get_mut(&public_host) else {
+        let failure = PreviewIngressFailure {
+            request_id,
+            host,
+            path,
+            status: 404,
+            classification: "missing_session".to_string(),
+            message: "No active Homeboy preview ingress route matches this host".to_string(),
+        };
+        record_failure(&recent_failures, failure.clone());
+        return write_diagnostic(stream, &failure, started);
+    };
+    if !session.active {
+        let failure = PreviewIngressFailure {
+            request_id,
+            host,
+            path,
+            status: 410,
+            classification: "disconnected_session".to_string(),
+            message: "Homeboy preview client session is disconnected".to_string(),
+        };
+        record_failure(&recent_failures, failure.clone());
+        return write_diagnostic(stream, &failure, started);
+    }
+    let _local_origin = session.local_origin.clone();
+    session.pending.push_back(preview_request);
+    sessions.changed.notify_all();
+
+    let timeout = Duration::from_secs(60);
+    loop {
+        if let Some(session) = sessions_guard.get_mut(&public_host) {
+            if let Some(response) = session.responses.remove(&request_id) {
+                drop(sessions_guard);
+                return write_preview_response(stream, response, &host, &path, started);
+            }
+        }
+        let elapsed = started.elapsed();
+        if elapsed >= timeout {
+            let failure = PreviewIngressFailure {
+                request_id,
+                host,
+                path,
+                status: 504,
+                classification: "client_timeout".to_string(),
+                message: "Homeboy preview client did not respond before timeout".to_string(),
+            };
+            record_failure(&recent_failures, failure.clone());
+            return write_diagnostic(stream, &failure, started);
+        }
+        let (guard, wait) = sessions
+            .changed
+            .wait_timeout(sessions_guard, timeout - elapsed)
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        sessions_guard = guard;
+        if wait.timed_out() {
+            let failure = PreviewIngressFailure {
+                request_id,
+                host,
+                path,
+                status: 504,
+                classification: "client_timeout".to_string(),
+                message: "Homeboy preview client did not respond before timeout".to_string(),
+            };
+            record_failure(&recent_failures, failure.clone());
+            return write_diagnostic(stream, &failure, started);
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn proxy_request(
     stream: &mut TcpStream,
@@ -668,6 +950,132 @@ fn classify_route(route: &PreviewIngressRoute) -> PreviewIngressRouteLifecycle {
         return PreviewIngressRouteLifecycle::Expired;
     }
     PreviewIngressRouteLifecycle::Active
+}
+
+fn preview_token_sha256(env_name: &str) -> Option<String> {
+    std::env::var(env_name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn authorized_preview_client(request: &IngressHttpRequest, auth: &PreviewIngressAuth) -> bool {
+    let Some(expected) = auth.token_sha256.as_deref() else {
+        eprintln!(
+            "homeboy preview ingress client auth disabled: {} is not set",
+            auth.token_sha256_env
+        );
+        return false;
+    };
+    let Some(token) = request.headers.iter().find_map(|(name, value)| {
+        if name.eq_ignore_ascii_case("authorization") {
+            value
+                .strip_prefix("Bearer ")
+                .or_else(|| value.strip_prefix("bearer "))
+                .map(str::trim)
+                .map(str::to_string)
+        } else {
+            None
+        }
+    }) else {
+        return false;
+    };
+    let digest = Sha256::digest(token.as_bytes());
+    format!("{digest:x}").eq_ignore_ascii_case(expected)
+}
+
+fn parse_json_body<T: for<'de> Deserialize<'de>>(body: &[u8], context: &str) -> Result<T> {
+    serde_json::from_slice(body)
+        .map_err(|e| Error::internal_json(e.to_string(), Some(context.to_string())))
+}
+
+fn normalize_public_host(host: &str) -> String {
+    host.trim()
+        .trim_end_matches('.')
+        .split(':')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+}
+
+fn validate_client_public_host(public_host: &str) -> Result<()> {
+    if public_host.is_empty() || public_host.contains('*') || public_host.contains('/') {
+        return Err(Error::validation_invalid_argument(
+            "public_host",
+            "preview client must register exactly one public host",
+            Some(public_host.to_string()),
+            None,
+        ));
+    }
+    Ok(())
+}
+
+fn validate_client_local_origin(local_origin: &str) -> Result<()> {
+    let parsed = reqwest::Url::parse(local_origin).map_err(|err| {
+        Error::validation_invalid_argument(
+            "local_origin",
+            format!("preview client local origin must be a valid HTTP(S) URL: {err}"),
+            Some(local_origin.to_string()),
+            None,
+        )
+    })?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(Error::validation_invalid_argument(
+            "local_origin",
+            "preview client local origin must use http or https",
+            Some(local_origin.to_string()),
+            None,
+        ));
+    }
+    Ok(())
+}
+
+fn write_json_response(stream: &mut TcpStream, status: u16, body: serde_json::Value) -> Result<()> {
+    let body = serde_json::to_vec(&body).map_err(|e| {
+        Error::internal_json(e.to_string(), Some("preview ingress json".to_string()))
+    })?;
+    write_response(
+        stream,
+        status,
+        reason_for_status(status),
+        &[(&"content-type".to_string(), "application/json".to_string())],
+        &body,
+    )
+}
+
+fn write_preview_response(
+    stream: &mut TcpStream,
+    response: PreviewIngressResponse,
+    host: &str,
+    path: &str,
+    started: Instant,
+) -> Result<()> {
+    let body = base64::engine::general_purpose::STANDARD
+        .decode(response.body_base64.as_bytes())
+        .map_err(|e| Error::internal_json(e.to_string(), Some(response.request_id.clone())))?;
+    let headers = response.headers.into_iter().collect::<Vec<_>>();
+    write_status_and_headers(
+        stream,
+        response.status,
+        reason_for_status(response.status),
+        &headers,
+    )?;
+    stream.write_all(&body).map_err(|e| {
+        Error::internal_io(
+            e.to_string(),
+            Some("write preview client response body".to_string()),
+        )
+    })?;
+    log_request(&PreviewIngressLogLine {
+        request_id: response.request_id,
+        host: host.to_string(),
+        path: path.to_string(),
+        status: response.status,
+        bytes: body.len(),
+        duration_ms: started.elapsed().as_millis(),
+        classification: "reverse_channel".to_string(),
+    });
+    Ok(())
 }
 
 fn validate_route(route: &PreviewIngressRoute) -> Result<()> {
@@ -831,7 +1239,7 @@ User={user}
 Group={group}
 Environment=HOME=/var/lib/homeboy
 Environment=XDG_DATA_HOME=/var/lib/homeboy/.local/share
-ExecStart={binary} tunnel preview-ingress serve --bind {bind} --domain {domain} --public-host-pattern '{public_host_pattern}'
+ExecStart={binary} tunnel preview-ingress serve --bind {bind} --domain {domain} --public-host-pattern '{public_host_pattern}' --token-sha256-env HOMEBOY_PREVIEW_TUNNEL_TOKEN_SHA256
 Restart=on-failure
 RestartSec=5s
 StateDirectory=homeboy
