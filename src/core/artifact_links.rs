@@ -1,9 +1,19 @@
 use serde_json::Value;
+use std::time::Duration;
 
 use crate::core::execution_contract::encode_uri_component;
 use crate::core::observation::{ArtifactRecord, ArtifactViewerLink};
 
 pub const PUBLIC_ARTIFACT_BASE_URL_ENV: &str = "HOMEBOY_PUBLIC_ARTIFACT_BASE_URL";
+const PUBLIC_ARTIFACT_URL_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublicArtifactUrlValidation {
+    pub url: String,
+    pub reachable: bool,
+    pub status_code: Option<u16>,
+    pub error: Option<String>,
+}
 
 pub fn public_artifact_url(artifact: &ArtifactRecord) -> Option<String> {
     if !artifact_is_fetchable(artifact) {
@@ -67,8 +77,61 @@ pub fn viewer_links(
     }]
 }
 
+pub fn validated_viewer_links(
+    artifact: &ArtifactRecord,
+    public_url: &str,
+) -> (Vec<ArtifactViewerLink>, Option<PublicArtifactUrlValidation>) {
+    let links = viewer_links(artifact, Some(public_url));
+    if links.is_empty() {
+        return (links, None);
+    }
+
+    let validation = validate_public_artifact_url(public_url);
+    if validation.reachable {
+        (links, Some(validation))
+    } else {
+        (Vec::new(), Some(validation))
+    }
+}
+
+pub fn validate_public_artifact_url(public_url: &str) -> PublicArtifactUrlValidation {
+    match probe_public_artifact_url(public_url) {
+        Ok(status) if status.is_success() => PublicArtifactUrlValidation {
+            url: public_url.to_string(),
+            reachable: true,
+            status_code: Some(status.as_u16()),
+            error: None,
+        },
+        Ok(status) => PublicArtifactUrlValidation {
+            url: public_url.to_string(),
+            reachable: false,
+            status_code: Some(status.as_u16()),
+            error: Some(format!(
+                "public artifact URL returned HTTP {}",
+                status.as_u16()
+            )),
+        },
+        Err(error) => PublicArtifactUrlValidation {
+            url: public_url.to_string(),
+            reachable: false,
+            status_code: None,
+            error: Some(error.to_string()),
+        },
+    }
+}
+
 fn artifact_is_fetchable(artifact: &ArtifactRecord) -> bool {
     artifact.artifact_type == "file" || artifact.artifact_type == "remote_file"
+}
+
+fn probe_public_artifact_url(public_url: &str) -> Result<reqwest::StatusCode, reqwest::Error> {
+    reqwest::blocking::Client::builder()
+        .timeout(PUBLIC_ARTIFACT_URL_PROBE_TIMEOUT)
+        .build()?
+        .get(public_url)
+        .header(reqwest::header::RANGE, "bytes=0-0")
+        .send()
+        .map(|response| response.status())
 }
 
 #[cfg(test)]
@@ -114,5 +177,85 @@ mod tests {
             links[0].url,
             "https://viewer.example.test/?artifact-url=https%3A%2F%2Fartifacts.example.test%2Fa%20b.json"
         );
+    }
+
+    #[test]
+    fn validated_viewer_links_requires_reachable_public_url() {
+        let public_url = serve_once(404);
+        let artifact = viewer_artifact();
+
+        let (links, validation) = validated_viewer_links(&artifact, &public_url);
+
+        assert!(links.is_empty());
+        let validation = validation.expect("validation result");
+        assert!(!validation.reachable);
+        assert_eq!(validation.status_code, Some(404));
+        assert_eq!(
+            validation.error.as_deref(),
+            Some("public artifact URL returned HTTP 404")
+        );
+    }
+
+    #[test]
+    fn validated_viewer_links_emits_links_for_reachable_public_url() {
+        let public_url = serve_once(200);
+        let artifact = viewer_artifact();
+
+        let (links, validation) = validated_viewer_links(&artifact, &public_url);
+
+        assert_eq!(links.len(), 1);
+        assert!(links[0].url.contains("artifact-url="));
+        assert!(validation.expect("validation result").reachable);
+    }
+
+    fn viewer_artifact() -> ArtifactRecord {
+        ArtifactRecord {
+            id: "artifact-1".to_string(),
+            run_id: "run-1".to_string(),
+            kind: "preview-after".to_string(),
+            artifact_type: "file".to_string(),
+            path: "/tmp/preview.after.json".to_string(),
+            url: None,
+            public_url: None,
+            viewer_url: None,
+            viewer_links: Vec::new(),
+            sha256: None,
+            size_bytes: None,
+            mime: Some("application/json".to_string()),
+            metadata_json: serde_json::json!({
+                "viewer": {
+                    "kind": "artifact-preview",
+                    "base": "https://viewer.example.test/",
+                    "query": {
+                        "parameter": "artifact-url",
+                        "value": { "source": "public-artifact-url" },
+                        "encoding": "url"
+                    }
+                }
+            }),
+            created_at: "2026-06-12T00:00:00Z".to_string(),
+        }
+    }
+
+    fn serve_once(status: u16) -> String {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let addr = listener.local_addr().expect("server address");
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept request");
+            let mut buffer = [0; 1024];
+            let _ = stream.read(&mut buffer);
+            let status_text = if status == 200 { "OK" } else { "Not Found" };
+            let body = if status == 200 { "ok" } else { "missing" };
+            write!(
+                stream,
+                "HTTP/1.1 {status} {status_text}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .expect("write response");
+        });
+        format!("http://{addr}/artifact.json")
     }
 }

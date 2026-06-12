@@ -489,8 +489,7 @@ fn persist_bench_artifact(
             metadata,
         ) {
             Ok(record) => {
-                apply_recorded_bench_artifact_links(artifact, &record);
-                None
+                apply_recorded_bench_artifact_links(scenario_id, run_index, name, artifact, &record)
             }
             Err(error) => Some(bench_artifact_diagnostic(
                 scenario_id,
@@ -552,8 +551,7 @@ fn persist_bench_artifact(
     match record {
         Ok(record) => {
             artifact.path = Some(record.path.clone());
-            apply_recorded_bench_artifact_links(artifact, &record);
-            None
+            apply_recorded_bench_artifact_links(scenario_id, run_index, name, artifact, &record)
         }
         Err(error) => Some(bench_artifact_diagnostic(
             scenario_id,
@@ -570,16 +568,42 @@ fn persist_bench_artifact(
 }
 
 fn apply_recorded_bench_artifact_links(
+    scenario_id: &str,
+    run_index: Option<usize>,
+    name: &str,
     artifact: &mut homeboy::core::extension::bench::BenchArtifact,
     record: &ArtifactRecord,
-) {
+) -> Option<BenchDiagnostic> {
     artifact.observation_artifact_id = Some(record.id.clone());
     let Some(public_url) = artifact_links::public_artifact_url(record) else {
-        return;
+        return None;
     };
     artifact.public_url = Some(public_url.clone());
-    artifact.viewer_links = artifact_links::viewer_links(record, Some(&public_url));
+    let (viewer_links, validation) = artifact_links::validated_viewer_links(record, &public_url);
+    artifact.viewer_links = viewer_links;
     artifact.viewer_url = artifact.viewer_links.first().map(|link| link.url.clone());
+    validation.and_then(|validation| {
+        (!validation.reachable).then(|| {
+            let error = validation
+                .error
+                .clone()
+                .unwrap_or_else(|| "public artifact URL was not reachable".to_string());
+            bench_artifact_diagnostic(
+                scenario_id,
+                run_index,
+                name,
+                "bench_public_artifact_url_unreachable",
+                format!(
+                    "public artifact URL for bench artifact `{name}` is not reachable; viewer links were not published: {error}"
+                ),
+                serde_json::json!({
+                    "url": validation.url,
+                    "status_code": validation.status_code,
+                    "error": validation.error,
+                }),
+            )
+        })
+    })
 }
 
 fn bench_artifact_metadata(
@@ -773,6 +797,83 @@ mod tests {
         }
     }
 
+    fn serve_public_artifact_base_once(status: u16) -> String {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind public artifact server");
+        let addr = listener.local_addr().expect("server address");
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept public artifact probe");
+            let mut buffer = [0; 1024];
+            let _ = stream.read(&mut buffer);
+            let status_text = if status == 200 { "OK" } else { "Not Found" };
+            let body = if status == 200 { "{}" } else { "missing" };
+            write!(
+                stream,
+                "HTTP/1.1 {status} {status_text}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .expect("write public artifact response");
+        });
+        format!("http://{addr}/homeboy")
+    }
+
+    #[test]
+    fn recorded_bench_artifact_reports_unreachable_public_viewer_url() {
+        let public_artifact_base = serve_public_artifact_base_once(404);
+        let _public_artifact_base = EnvGuard::set(
+            homeboy::core::artifact_links::PUBLIC_ARTIFACT_BASE_URL_ENV,
+            &public_artifact_base,
+        );
+        let mut artifact = BenchArtifact::default();
+        let record = ArtifactRecord {
+            id: "artifact-1".to_string(),
+            run_id: "run-1".to_string(),
+            kind: "bench_artifact".to_string(),
+            artifact_type: "file".to_string(),
+            path: "/tmp/blueprint.after.json".to_string(),
+            url: None,
+            public_url: None,
+            viewer_url: None,
+            viewer_links: Vec::new(),
+            sha256: None,
+            size_bytes: None,
+            mime: Some("application/json".to_string()),
+            metadata_json: serde_json::json!({
+                "viewer": {
+                    "kind": "wordpress-playground-blueprint",
+                    "base": "https://playground.wordpress.net/",
+                    "query": {
+                        "parameter": "blueprint-url",
+                        "value": { "source": "public-artifact-url" },
+                        "encoding": "url"
+                    }
+                }
+            }),
+            created_at: "2026-06-12T00:00:00Z".to_string(),
+        };
+
+        let diagnostic = apply_recorded_bench_artifact_links(
+            "cold",
+            Some(0),
+            "blueprint.after",
+            &mut artifact,
+            &record,
+        )
+        .expect("unreachable diagnostic");
+
+        assert_eq!(
+            artifact.observation_artifact_id.as_deref(),
+            Some("artifact-1")
+        );
+        assert!(artifact.public_url.is_some());
+        assert!(artifact.viewer_links.is_empty());
+        assert_eq!(artifact.viewer_url, None);
+        assert_eq!(diagnostic.class, "bench_public_artifact_url_unreachable");
+        assert_eq!(diagnostic.metadata["status_code"], 404);
+    }
+
     pub(super) fn bench_results(component_id: &str, scenario_id: &str, p95: f64) -> BenchResults {
         serde_json::from_value(serde_json::json!({
             "component_id": component_id,
@@ -829,9 +930,10 @@ mod tests {
     fn bench_observation_persists_success_with_metrics_and_artifacts() {
         with_isolated_home(|home| {
             let _xdg = XdgGuard::unset();
+            let public_artifact_base = serve_public_artifact_base_once(200);
             let _public_artifact_base = EnvGuard::set(
                 homeboy::core::artifact_links::PUBLIC_ARTIFACT_BASE_URL_ENV,
-                "https://artifacts.example.test/homeboy",
+                &public_artifact_base,
             );
             let run_dir = RunDir::create().expect("run dir");
             fs::write(run_dir.step_file(run_dir::files::BENCH_RESULTS), b"{}").expect("results");
@@ -977,7 +1079,7 @@ mod tests {
                 .public_url
                 .as_deref()
                 .expect("public url")
-                .starts_with("https://artifacts.example.test/homeboy/runs/"));
+                .starts_with(&format!("{public_artifact_base}/runs/")));
             assert!(transcript_artifact
                 .viewer_url
                 .as_deref()
