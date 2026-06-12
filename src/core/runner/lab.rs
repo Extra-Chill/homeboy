@@ -916,7 +916,10 @@ fn run_lab_offload_inner(
     stderr.push_str(&exec_output.stderr);
     if exit_code != 0 {
         if let Some(run_id) = agent_task_dispatch_requested_run_id(request.normalized_args) {
-            if let Some(envelope) = parse_offloaded_dispatch_envelope(&exec_output.stdout)? {
+            if let Some(envelope) = parse_offloaded_dispatch_envelope_from_outputs(
+                &exec_output.stdout,
+                &exec_output.stderr,
+            )? {
                 if let Some(record) = agent_task_lifecycle::record_remote_dispatch_failure(
                     agent_task_lifecycle::AgentTaskRemoteDispatchFailure {
                         run_id: &run_id,
@@ -1200,6 +1203,16 @@ fn parse_offloaded_dispatch_envelope(stdout: &str) -> Result<Option<serde_json::
     }
 
     Ok(None)
+}
+
+fn parse_offloaded_dispatch_envelope_from_outputs(
+    stdout: &str,
+    stderr: &str,
+) -> Result<Option<serde_json::Value>> {
+    parse_offloaded_dispatch_envelope(stdout).and_then(|parsed| match parsed {
+        Some(envelope) => Ok(Some(envelope)),
+        None => parse_offloaded_dispatch_envelope(stderr),
+    })
 }
 
 fn agent_task_dispatch_envelope_value(value: &serde_json::Value) -> Option<&serde_json::Value> {
@@ -1921,6 +1934,59 @@ mod tests {
 
         assert_eq!(parsed["run_id"], "run-1");
         assert_eq!(parsed["aggregate"]["status"], "failed");
+    }
+
+    #[test]
+    fn offloaded_dispatch_envelope_parser_selects_structured_failure_from_stderr() {
+        let stdout = "remote setup complete\n";
+        let stderr = concat!(
+            "{\n",
+            "  \"success\": false,\n",
+            "  \"data\": {\n",
+            "    \"schema\": \"homeboy/agent-task-dispatch/v1\",\n",
+            "    \"run_id\": \"conductor-full-loop-proof-retry3-20260612\",\n",
+            "    \"state\": \"failed\",\n",
+            "    \"aggregate\": {\n",
+            "      \"status\": \"failed\",\n",
+            "      \"outcomes\": [{\n",
+            "        \"task_id\": \"cook-conductor\",\n",
+            "        \"status\": \"failed\",\n",
+            "        \"summary\": \"WP Codebox agent task failed.\",\n",
+            "        \"metadata\": {\n",
+            "          \"provider\": \"wordpress.codebox-agent-task-executor\",\n",
+            "          \"codebox_run_result\": {\n",
+            "            \"schema\": \"wp-codebox/agent-task-run-result/v1\",\n",
+            "            \"status\": \"failed\",\n",
+            "            \"failure_classification\": \"runtime\"\n",
+            "          }\n",
+            "        }\n",
+            "      }]\n",
+            "    }\n",
+            "  }\n",
+            "}\n"
+        );
+
+        let parsed = parse_offloaded_dispatch_envelope_from_outputs(stdout, stderr)
+            .expect("parse dispatch outputs")
+            .expect("dispatch envelope found");
+
+        assert_eq!(
+            parsed["run_id"],
+            "conductor-full-loop-proof-retry3-20260612"
+        );
+        assert_eq!(
+            parsed["aggregate"]["outcomes"][0]["task_id"],
+            "cook-conductor"
+        );
+        assert_eq!(
+            parsed["aggregate"]["outcomes"][0]["metadata"]["provider"],
+            "wordpress.codebox-agent-task-executor"
+        );
+        assert_eq!(
+            parsed["aggregate"]["outcomes"][0]["metadata"]["codebox_run_result"]
+                ["failure_classification"],
+            "runtime"
+        );
     }
 
     #[test]
