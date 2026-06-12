@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.120.2] - 2026-06-12
+
+### Fixed
+- fix closed runner pr replacement
+
 ## [2.120.1] - 2026-06-12
 
 ### Fixed
