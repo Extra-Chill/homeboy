@@ -124,6 +124,7 @@ fn index_manifest_refs(
         let media_type = reference
             .get("media_type")
             .or_else(|| reference.get("mime"))
+            .or_else(|| reference.get("contentType"))
             .and_then(Value::as_str)
             .map(str::to_string)
             .or_else(|| crate::core::artifact_metadata::content_type_from_path(Path::new(&path)));
@@ -133,7 +134,11 @@ fn index_manifest_refs(
             .and_then(Value::as_i64);
         let sha256 = reference
             .get("sha256")
-            .and_then(Value::as_str)
+            .and_then(|sha256| {
+                sha256
+                    .as_str()
+                    .or_else(|| sha256.get("value").and_then(Value::as_str))
+            })
             .map(str::to_string);
         let created_at = reference
             .get("created_at")
@@ -158,6 +163,7 @@ fn index_manifest_refs(
             "sha256": sha256,
             "description": reference.get("description").cloned().unwrap_or(Value::Null),
             "metadata": reference.get("metadata").cloned().unwrap_or(Value::Null),
+            "viewer": reference.get("viewer").cloned().unwrap_or(Value::Null),
         });
 
         store.import_artifact(&ArtifactRecord {
@@ -167,6 +173,9 @@ fn index_manifest_refs(
             artifact_type,
             path,
             url: None,
+            public_url: None,
+            viewer_url: None,
+            viewer_links: Vec::new(),
             sha256,
             size_bytes,
             mime: media_type,

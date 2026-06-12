@@ -29,6 +29,7 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 use serde_json::Value;
 
+use homeboy::core::artifact_links::{public_artifact_url, viewer_links};
 use homeboy::core::observation::{ArtifactRecord, ObservationStore, RunListFilter, RunRecord};
 use homeboy::core::Error;
 
@@ -456,7 +457,7 @@ pub fn artifacts(run_id: &str) -> CmdResult<RunsOutput> {
         RunsOutput::Artifacts(RunsArtifactsOutput {
             command: "runs.artifacts",
             run_id: run_id.to_string(),
-            artifacts: store.list_artifacts(run_id)?,
+            artifacts: enrich_artifact_links(store.list_artifacts(run_id)?),
         }),
         0,
     ))
@@ -602,13 +603,34 @@ pub(super) fn run_detail(
     store: &ObservationStore,
     run: RunRecord,
 ) -> homeboy::core::Result<RunDetail> {
-    let artifacts = store.list_artifacts(&run.id)?;
+    let artifacts = enrich_artifact_links(store.list_artifacts(&run.id)?);
     Ok(RunDetail {
         summary: run_summary(run.clone()),
         homeboy_version: run.homeboy_version,
         metadata: run.metadata_json,
         artifacts,
     })
+}
+
+fn enrich_artifact_links(artifacts: Vec<ArtifactRecord>) -> Vec<ArtifactRecord> {
+    artifacts.into_iter().map(enrich_artifact_link).collect()
+}
+
+fn enrich_artifact_link(mut artifact: ArtifactRecord) -> ArtifactRecord {
+    let public_url =
+        public_artifact_url(&artifact).or_else(|| public_url_for_url_artifact(&artifact));
+    if let Some(url) = public_url.clone() {
+        artifact.public_url = Some(url.clone());
+        artifact.viewer_links = viewer_links(&artifact, Some(&url));
+        artifact.viewer_url = artifact.viewer_links.first().map(|link| link.url.clone());
+    }
+    artifact
+}
+
+fn public_url_for_url_artifact(artifact: &ArtifactRecord) -> Option<String> {
+    (artifact.artifact_type == "url")
+        .then(|| artifact.url.clone().or_else(|| Some(artifact.path.clone())))
+        .flatten()
 }
 
 pub(crate) fn run_summary(run: RunRecord) -> RunSummary {
@@ -652,6 +674,11 @@ mod tests {
 
     struct XdgGuard(Option<String>);
 
+    struct EnvGuard {
+        key: &'static str,
+        prior: Option<String>,
+    }
+
     impl XdgGuard {
         fn unset() -> Self {
             let prior = std::env::var("XDG_DATA_HOME").ok();
@@ -665,6 +692,23 @@ mod tests {
             match &self.0 {
                 Some(value) => std::env::set_var("XDG_DATA_HOME", value),
                 None => std::env::remove_var("XDG_DATA_HOME"),
+            }
+        }
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let prior = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, prior }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.prior {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
             }
         }
     }
@@ -995,6 +1039,108 @@ mod tests {
             assert_eq!(
                 std::fs::read(&output_path).expect("downloaded nested"),
                 br#"{"nested":true}"#
+            );
+        });
+    }
+
+    #[test]
+    fn artifacts_command_derives_viewer_links_from_public_artifact_url_metadata() {
+        with_isolated_home(|home| {
+            let _xdg = XdgGuard::unset();
+            let _artifact_url = EnvGuard::set(
+                homeboy::core::artifact_links::PUBLIC_ARTIFACT_BASE_URL_ENV,
+                "https://artifacts.example.test/homeboy",
+            );
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(sample_run("bench", "homeboy", "studio", Value::Null))
+                .expect("run");
+            let locator = "homeboy/workflow-bench/runs/run-1/artifacts/scenario/adapter/attempt-1/replay.json";
+            let package_root = home.path().join("publication-package");
+            let nested_source = package_root.join("scenario/adapter/attempt-1/replay.json");
+            std::fs::create_dir_all(nested_source.parent().expect("nested parent"))
+                .expect("create nested parent");
+            std::fs::write(&nested_source, br#"{"steps":[]}"#).expect("nested bytes");
+            let manifest_path = package_root.join("manifest.json");
+            std::fs::write(
+                &manifest_path,
+                serde_json::json!({
+                    "id": "publication-run-1",
+                    "artifacts": [{
+                        "id": "scenario/adapter/attempt-1/replay",
+                        "kind": "replay-artifact",
+                        "locator": {
+                            "type": "artifact-store",
+                            "value": locator,
+                        },
+                        "contentType": "application/json",
+                        "sha256": {
+                            "algorithm": "sha256",
+                            "value": "abc123"
+                        },
+                        "viewer": {
+                            "kind": "wordpress-playground-blueprint",
+                            "base": "https://playground.wordpress.net/",
+                            "query": {
+                                "parameter": "blueprint-url",
+                                "value": {
+                                    "source": "public-artifact-url"
+                                },
+                                "encoding": "url"
+                            },
+                            "replay": {
+                                "status": "partial",
+                                "limitations": ["fixture limitation"]
+                            }
+                        }
+                    }]
+                })
+                .to_string(),
+            )
+            .expect("manifest bytes");
+            store
+                .record_artifact(&run.id, "publication_manifest", &manifest_path)
+                .expect("record manifest");
+
+            let (output, _) = artifacts(&run.id).expect("artifacts");
+            let RunsOutput::Artifacts(output) = output else {
+                panic!("expected artifacts output");
+            };
+            let replay = output
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.kind == "replay-artifact")
+                .expect("replay artifact");
+            let artifact_url = replay.public_url.as_deref().expect("public url");
+            assert!(artifact_url.starts_with("https://artifacts.example.test/homeboy/runs/"));
+            assert!(!artifact_url.ends_with("/content"));
+            assert_eq!(replay.mime.as_deref(), Some("application/json"));
+            assert_eq!(replay.sha256.as_deref(), Some("abc123"));
+            assert_eq!(
+                replay.viewer_links[0].kind,
+                "wordpress-playground-blueprint"
+            );
+            assert_eq!(
+                replay.viewer_url.as_deref(),
+                Some(replay.viewer_links[0].url.as_str())
+            );
+            assert!(replay.viewer_links[0]
+                .url
+                .starts_with("https://playground.wordpress.net/?blueprint-url="));
+            assert!(replay.viewer_links[0]
+                .url
+                .contains("https%3A%2F%2Fartifacts.example.test%2Fhomeboy%2Fruns%2F"));
+            assert_eq!(
+                replay.viewer_links[0]
+                    .replay
+                    .as_ref()
+                    .and_then(|replay| replay.get("status"))
+                    .and_then(Value::as_str),
+                Some("partial")
+            );
+            assert_eq!(
+                replay.metadata_json["viewer"]["query"]["value"]["source"],
+                "public-artifact-url"
             );
         });
     }
@@ -1382,6 +1528,9 @@ mod tests {
                     artifact_type: "file".to_string(),
                     path: "/srv/remote-only/trace.zip".to_string(),
                     url: None,
+                    public_url: None,
+                    viewer_url: None,
+                    viewer_links: Vec::new(),
                     sha256: None,
                     size_bytes: None,
                     mime: None,

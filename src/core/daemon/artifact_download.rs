@@ -4,8 +4,10 @@ use std::io::Write;
 use std::net::TcpStream;
 use std::path::PathBuf;
 
+use crate::core::artifact_links::{public_artifact_url, viewer_links};
 use crate::core::error::{Error, Result};
 use crate::core::observation::{ArtifactRecord, ObservationStore};
+use crate::core::runner;
 
 use super::{error_response, HttpResponse};
 
@@ -112,6 +114,40 @@ fn resolve_artifact_download(
     }
 
     if artifact.artifact_type != "file" {
+        if artifact.artifact_type == "remote_file"
+            || runner::is_remote_runner_artifact_path(&artifact.path)
+        {
+            let download = runner::download_remote_artifact(&artifact.path, None)?;
+            let filename = download
+                .output_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(&artifact.id)
+                .to_string();
+            let size_bytes = download
+                .size_bytes
+                .and_then(|size| u64::try_from(size).ok())
+                .or_else(|| {
+                    fs::metadata(&download.output_path)
+                        .ok()
+                        .map(|metadata| metadata.len())
+                })
+                .unwrap_or(0);
+            let content_type = download
+                .content_type
+                .clone()
+                .or_else(|| artifact.mime.clone())
+                .unwrap_or_else(|| "application/octet-stream".to_string());
+            return Ok(ResolvedArtifactResponse::Download(Box::new(
+                ArtifactDownload {
+                    record: artifact,
+                    path: download.output_path,
+                    content_type,
+                    size_bytes,
+                    filename,
+                },
+            )));
+        }
         return Err(Error::validation_invalid_argument(
             "artifact_id",
             format!(
@@ -175,6 +211,8 @@ fn artifact_sync_manifest(run_id: &str) -> Result<ResolvedArtifactResponse> {
         .list_artifacts(run_id)?
         .into_iter()
         .map(|artifact| {
+            let public_url = public_artifact_url(&artifact);
+            let viewer_links = viewer_links(&artifact, public_url.as_deref());
             json!({
                 "id": artifact.id,
                 "path_token": artifact.id,
@@ -182,6 +220,8 @@ fn artifact_sync_manifest(run_id: &str) -> Result<ResolvedArtifactResponse> {
                 "kind": artifact.kind,
                 "type": artifact.artifact_type,
                 "download_path": format!("/runs/{}/artifacts/{}", run_id, artifact.id),
+                "public_url": public_url,
+                "viewer_links": viewer_links,
                 "sha256": artifact.sha256,
                 "size_bytes": artifact.size_bytes,
                 "mime": artifact.mime,
@@ -271,6 +311,9 @@ mod tests {
                 artifact_type: "file".to_string(),
                 path: artifact_path.path().display().to_string(),
                 url: None,
+                public_url: None,
+                viewer_url: None,
+                viewer_links: Vec::new(),
                 sha256: Some("abc123".to_string()),
                 size_bytes: Some(13),
                 mime: Some("text/plain".to_string()),

@@ -20,11 +20,11 @@ pub use records::{
     finding_record_from_audit, finding_record_from_lint, finding_records_from_annotation_file,
     finding_records_from_annotations_dir, finding_records_from_audit,
     finding_records_from_homeboy_findings, finding_records_from_lint, homeboy_finding_from_audit,
-    ArtifactCleanupCandidateRecord, ArtifactCleanupFilter, ArtifactRecord, FindingListFilter,
-    FindingRecord, NewFindingRecord, NewRunRecord, NewRunRecordBuilder, NewTraceRunRecord,
-    NewTraceRunRecordBuilder, NewTraceSpanRecord, NewTraceSpanRecordBuilder, NewTriageItemRecord,
-    RecordedHomeboyFinding, RunListFilter, RunRecord, RunStatus, TraceRunRecord, TraceSpanRecord,
-    TriageItemRecord, TriagePullRequestSignals,
+    ArtifactCleanupCandidateRecord, ArtifactCleanupFilter, ArtifactRecord, ArtifactViewerLink,
+    FindingListFilter, FindingRecord, NewFindingRecord, NewRunRecord, NewRunRecordBuilder,
+    NewTraceRunRecord, NewTraceRunRecordBuilder, NewTraceSpanRecord, NewTraceSpanRecordBuilder,
+    NewTriageItemRecord, RecordedHomeboyFinding, RunListFilter, RunRecord, RunStatus,
+    TraceRunRecord, TraceSpanRecord, TriageItemRecord, TriagePullRequestSignals,
 };
 pub use store::{
     ObservationDbStatus, ObservationStore, CURRENT_SCHEMA_VERSION, LAB_OFFLOAD_METADATA_ENV,

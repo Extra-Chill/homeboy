@@ -77,12 +77,26 @@ pub struct ArtifactRecord {
     pub path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub viewer_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub viewer_links: Vec<ArtifactViewerLink>,
     pub sha256: Option<String>,
     pub size_bytes: Option<i64>,
     pub mime: Option<String>,
     #[serde(default)]
     pub metadata_json: serde_json::Value,
     pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArtifactViewerLink {
+    pub kind: String,
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

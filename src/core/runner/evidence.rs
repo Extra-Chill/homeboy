@@ -417,6 +417,9 @@ fn remote_detail_artifacts(
                 .get("url")
                 .and_then(Value::as_str)
                 .map(str::to_string),
+            public_url: None,
+            viewer_url: None,
+            viewer_links: Vec::new(),
             sha256: artifact
                 .get("sha256")
                 .and_then(Value::as_str)
@@ -723,6 +726,9 @@ mod tests {
                     artifact_type: "remote_file".to_string(),
                     path: token.clone(),
                     url: None,
+                    public_url: None,
+                    viewer_url: None,
+                    viewer_links: Vec::new(),
                     sha256: Some("abc".to_string()),
                     size_bytes: Some(12),
                     mime: Some("text/x-diff".to_string()),
