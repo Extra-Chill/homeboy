@@ -78,5 +78,35 @@ fi
 
 echo "Built ${ARTIFACT_PATH}" >&2
 
+# Assert the ZIP we just built actually contains the version this release
+# is shipping. Catches stale artifacts (e.g. a pre-existing build/*.zip that
+# was restored instead of rebuilt) before they can reach the publish step.
+# The expected version comes from the release payload when homeboy invokes
+# this action; standalone dry-runs fall back to the on-disk header so the
+# check still validates build output against source.
+EXPECTED_VERSION=""
+if [[ -n "${HOMEBOY_SETTINGS_JSON:-}" ]]; then
+  EXPECTED_VERSION="$(echo "${HOMEBOY_SETTINGS_JSON}" | jq -r '.release.version // empty')"
+fi
+if [[ -z "${EXPECTED_VERSION}" ]]; then
+  for candidate in *.php; do
+    [[ -f "${candidate}" ]] || continue
+    if grep -qi 'Plugin Name:' "${candidate}"; then
+      EXPECTED_VERSION="$(grep -i -m1 'Version:' "${candidate}" | sed 's/.*[Vv]ersion:[[:space:]]*//' | tr -d '[:space:]')"
+      break
+    fi
+  done
+  if [[ -z "${EXPECTED_VERSION}" ]] && [[ -f "style.css" ]]; then
+    EXPECTED_VERSION="$(grep -i -m1 'Version:' "style.css" | sed 's/.*[Vv]ersion:[[:space:]]*//' | tr -d '[:space:]')"
+  fi
+fi
+
+if [[ -n "${EXPECTED_VERSION}" ]]; then
+  bash "${SCRIPT_DIR}/verify-artifact-version.sh" "${ARTIFACT_PATH}" "${EXPECTED_VERSION}" >/dev/null
+  echo "Verified ${ARTIFACT_PATH} contains version ${EXPECTED_VERSION}" >&2
+else
+  echo "Warning: could not determine expected version; skipping artifact version verification" >&2
+fi
+
 jq -cn --arg path "${ARTIFACT_PATH}" \
   '[{path: $path, type: "wordpress-zip", platform: null}]'
