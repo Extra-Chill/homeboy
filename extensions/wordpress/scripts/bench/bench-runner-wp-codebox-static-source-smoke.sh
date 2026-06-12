@@ -267,6 +267,27 @@ jq -e '
     and (.scenarios[] | select(.id == "manifest-navigation" and .source == "scenario-manifest"))
 ' "$LIST_RESULTS_FILE" >/dev/null
 
+SELECTED_LIST_RESULTS_FILE="${TMP_ROOT}/bench-list-selected-results.json"
+HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$RESOLVE_HELPER" \
+HOMEBOY_RUNTIME_BENCH_HELPER_SH="$BENCH_HELPER" \
+HOMEBOY_WORDPRESS_DEPENDENCY_HELPER="$DEPENDENCY_HELPER" \
+HOMEBOY_SMOKE_SOURCE_ROOT="$SOURCE_ROOT" \
+HOMEBOY_SETTINGS_JSON="$SETTINGS_JSON" \
+HOMEBOY_BENCH_EXTRA_WORKLOADS="$EXTRA_WORKLOAD" \
+HOMEBOY_BENCH_SCENARIOS="rig-workload" \
+HOMEBOY_BENCH_RESULTS_FILE="$SELECTED_LIST_RESULTS_FILE" \
+HOMEBOY_RUNTIME_FAILURE_TRAP="" \
+HOMEBOY_BENCH_LIST_ONLY=1 \
+bash "$SCRIPT_DIR/bench-runner-wp-codebox.sh" >/dev/null
+
+jq -e '
+    .component_id == "wp-site-generator"
+    and .iterations == 0
+    and (.scenarios | length == 1)
+    and (.scenarios[0].id == "rig-workload")
+    and (.scenarios[0].source == "rig")
+' "$SELECTED_LIST_RESULTS_FILE" >/dev/null
+
 PLUGIN_ROOT="${TMP_ROOT}/plugin-component"
 mkdir -p "$PLUGIN_ROOT/scenarios"
 printf '<?php\n/**\n * Plugin Name: Fixture Component\n */\n' > "${PLUGIN_ROOT}/plugin-main.php"
