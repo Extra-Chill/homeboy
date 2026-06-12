@@ -511,43 +511,83 @@ pub fn record_remote_dispatch_failure(
         return Ok(None);
     }
 
-    let Some(record_value) = envelope.get("record") else {
-        return Ok(None);
-    };
     let Some(aggregate_value) = envelope.get("aggregate") else {
         return Ok(None);
     };
 
     let run_id = sanitize_run_id(failure.run_id);
-    let mut record: AgentTaskRunRecord =
-        serde_json::from_value(record_value.clone()).map_err(|error| {
-            Error::internal_json(
-                error.to_string(),
-                Some("parse offloaded agent-task dispatch record".to_string()),
-            )
-        })?;
-    let aggregate: AgentTaskAggregate =
-        serde_json::from_value(aggregate_value.clone()).map_err(|error| {
+    let mut aggregate: AgentTaskAggregate = serde_json::from_value(aggregate_value.clone())
+        .map_err(|error| {
             Error::internal_json(
                 error.to_string(),
                 Some("parse offloaded agent-task dispatch aggregate".to_string()),
             )
         })?;
+    if aggregate.events.is_empty() {
+        aggregate.events = events_for_outcomes(&aggregate.outcomes);
+    }
 
-    let remote_run_id = record.run_id.clone();
-    let remote_plan_path = record.plan_path.clone();
-    let remote_aggregate_path = record.aggregate_path.clone();
-    record.run_id = run_id.clone();
-    record.state = run_state_for_aggregate(&aggregate);
-    record.updated_at = Some(now_timestamp());
-    record.aggregate_path = Some(
-        store::write_aggregate(&run_id, &aggregate)?
-            .display()
-            .to_string(),
-    );
-    record.totals = Some(aggregate.totals.clone());
-    record.artifact_refs = artifact_refs_for_outcomes(&aggregate.outcomes);
-    record.provider_handles = provider_handles_for_outcomes(&aggregate.outcomes);
+    let (mut record, remote_run_id, remote_plan_path, remote_aggregate_path) =
+        if let Some(record_value) = envelope.get("record") {
+            let mut record: AgentTaskRunRecord = serde_json::from_value(record_value.clone())
+                .map_err(|error| {
+                    Error::internal_json(
+                        error.to_string(),
+                        Some("parse offloaded agent-task dispatch record".to_string()),
+                    )
+                })?;
+            let remote_run_id = record.run_id.clone();
+            let remote_plan_path = record.plan_path.clone();
+            let remote_aggregate_path = record.aggregate_path.clone();
+            let plan = store::read_plan_path(&record.plan_path).unwrap_or_else(|_| {
+                synthetic_remote_dispatch_plan(&run_id, &failure, envelope, &aggregate)
+            });
+            record.run_id = run_id.clone();
+            apply_aggregate_to_record(
+                &mut record,
+                &plan,
+                &aggregate,
+                store::write_aggregate(&run_id, &aggregate)?
+                    .display()
+                    .to_string(),
+            );
+            (
+                record,
+                remote_run_id,
+                remote_plan_path,
+                remote_aggregate_path,
+            )
+        } else {
+            let remote_run_id = envelope
+                .get("run_id")
+                .and_then(Value::as_str)
+                .unwrap_or(failure.run_id)
+                .to_string();
+            let remote_plan_path = envelope
+                .get("plan_path")
+                .and_then(Value::as_str)
+                .map(ToString::to_string)
+                .unwrap_or_else(|| {
+                    envelope
+                        .get("plan_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or(&aggregate.plan_id)
+                        .to_string()
+                });
+            let remote_aggregate_path = envelope
+                .get("aggregate_path")
+                .and_then(Value::as_str)
+                .map(ToString::to_string);
+            let plan = synthetic_remote_dispatch_plan(&run_id, &failure, envelope, &aggregate);
+            let mut record = submit_plan(&plan, Some(&run_id))?;
+            record_aggregate(&mut record, &plan, &aggregate)?;
+            (
+                record,
+                remote_run_id,
+                remote_plan_path,
+                remote_aggregate_path,
+            )
+        };
 
     let provider_run_ids: Vec<String> = record
         .provider_handles
@@ -579,6 +619,95 @@ pub fn record_remote_dispatch_failure(
 
     store::write_record(&record)?;
     Ok(Some(record))
+}
+
+fn synthetic_remote_dispatch_plan(
+    run_id: &str,
+    failure: &AgentTaskRemoteDispatchFailure<'_>,
+    envelope: &Value,
+    aggregate: &AgentTaskAggregate,
+) -> AgentTaskPlan {
+    let tasks = aggregate
+        .outcomes
+        .iter()
+        .map(|outcome| {
+            let provider = outcome
+                .metadata
+                .get("provider")
+                .and_then(Value::as_str)
+                .unwrap_or("homeboy-lab");
+            AgentTaskRequest {
+                schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
+                task_id: outcome.task_id.clone(),
+                group_key: Some("lab-offload".to_string()),
+                parent_plan_id: None,
+                executor: AgentTaskExecutor {
+                    backend: provider.to_string(),
+                    selector: None,
+                    required_capabilities: Vec::new(),
+                    secret_env: Vec::new(),
+                    model: None,
+                    config: Value::Null,
+                },
+                instructions: outcome.summary.clone().unwrap_or_else(|| {
+                    "Persist remote Lab agent-task dispatch outcome.".to_string()
+                }),
+                inputs: json!({
+                    "remote_dispatch_envelope": envelope,
+                    "remote_command": failure.remote_command,
+                }),
+                source_refs: vec![AgentTaskSourceRef {
+                    kind: "lab-offload-remote-dispatch".to_string(),
+                    uri: envelope
+                        .get("run_id")
+                        .and_then(Value::as_str)
+                        .map(|remote_run_id| format!("homeboy://agent-task/run/{remote_run_id}"))
+                        .unwrap_or_else(|| {
+                            format!("homeboy://agent-task/run/{run_id}/lab-offload")
+                        }),
+                    revision: envelope
+                        .get("plan_id")
+                        .and_then(Value::as_str)
+                        .map(ToString::to_string),
+                }],
+                workspace: AgentTaskWorkspace {
+                    mode: AgentTaskWorkspaceMode::Existing,
+                    root: Some(failure.remote_workspace.to_string()),
+                    slug: None,
+                    kind: Some("lab-offload".to_string()),
+                    component_id: None,
+                    branch: None,
+                    base_ref: None,
+                    task_url: None,
+                    cleanup: Some("preserve".to_string()),
+                    materialization: json!({
+                        "runner_id": failure.runner_id,
+                        "remote_workspace": failure.remote_workspace,
+                    }),
+                },
+                policy: AgentTaskPolicy::default(),
+                limits: AgentTaskLimits::default(),
+                expected_artifacts: Vec::new(),
+                metadata: outcome.metadata.clone(),
+            }
+        })
+        .collect();
+
+    let mut plan = AgentTaskPlan::new(
+        envelope
+            .get("plan_id")
+            .and_then(Value::as_str)
+            .unwrap_or(&aggregate.plan_id),
+        tasks,
+    );
+    plan.group_key = Some("lab-offload".to_string());
+    plan.metadata = json!({
+        "kind": "lab_offload_remote_dispatch_failure",
+        "runner_id": failure.runner_id,
+        "remote_workspace": failure.remote_workspace,
+        "remote_run_id": envelope.get("run_id").and_then(Value::as_str),
+    });
+    plan
 }
 
 fn record_aggregate(
@@ -845,8 +974,37 @@ fn tasks_for_aggregate(
                 .find(|event| event.task_id == request.task_id)
             {
                 task.state = event.state;
+            } else if let Some(outcome) = aggregate
+                .outcomes
+                .iter()
+                .find(|outcome| outcome.task_id == request.task_id)
+            {
+                task.state = task_state_for_outcome_status(outcome.status);
             }
             task
+        })
+        .collect()
+}
+
+fn task_state_for_outcome_status(status: AgentTaskOutcomeStatus) -> AgentTaskState {
+    match status {
+        AgentTaskOutcomeStatus::Succeeded | AgentTaskOutcomeStatus::NoOp => {
+            AgentTaskState::Succeeded
+        }
+        AgentTaskOutcomeStatus::Timeout => AgentTaskState::TimedOut,
+        AgentTaskOutcomeStatus::Cancelled => AgentTaskState::Cancelled,
+        _ => AgentTaskState::Failed,
+    }
+}
+
+fn events_for_outcomes(outcomes: &[AgentTaskOutcome]) -> Vec<AgentTaskProgressEvent> {
+    outcomes
+        .iter()
+        .map(|outcome| AgentTaskProgressEvent {
+            task_id: outcome.task_id.clone(),
+            state: task_state_for_outcome_status(outcome.status),
+            attempt: 1,
+            message: outcome.summary.clone(),
         })
         .collect()
 }
@@ -923,7 +1081,43 @@ fn provider_handles_for_outcome(outcome: &AgentTaskOutcome) -> Vec<AgentTaskRunP
                 .map(|handle| run_provider_handle(outcome, handle)),
         );
     }
+    if handles.is_empty() {
+        if let Some(handle) = provider_handle_from_outcome_metadata(outcome) {
+            handles.push(handle);
+        }
+    }
     handles
+}
+
+fn provider_handle_from_outcome_metadata(
+    outcome: &AgentTaskOutcome,
+) -> Option<AgentTaskRunProviderHandle> {
+    let provider = outcome.metadata.get("provider").and_then(Value::as_str)?;
+    let provider_run_id = outcome
+        .metadata
+        .get("remote_run_id")
+        .or_else(|| outcome.metadata.get("provider_run_id"))
+        .and_then(Value::as_str)
+        .or_else(|| {
+            outcome
+                .outputs
+                .get("codebox_run_result")
+                .and_then(|result| result.get("run_id").or_else(|| result.get("id")))
+                .and_then(Value::as_str)
+        })?;
+
+    Some(AgentTaskRunProviderHandle {
+        task_id: outcome.task_id.clone(),
+        backend: provider.to_string(),
+        provider_run_id: provider_run_id.to_string(),
+        stream_uri: outcome
+            .metadata
+            .get("stream_uri")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        state: Some(task_state_for_outcome_status(outcome.status)),
+        metadata: outcome.metadata.clone(),
+    })
 }
 
 fn provider_handle_from_value(value: &Value) -> Option<AgentTaskExecutionHandle> {
@@ -1175,6 +1369,120 @@ mod tests {
             assert_eq!(artifacts.evidence_refs[0].kind, "logs");
             assert!(raw_aggregate.contains("wordpress.codebox-agent-task-executor"));
             assert!(raw_aggregate.contains("failure_classification"));
+        });
+    }
+
+    #[test]
+    fn aggregate_only_remote_dispatch_failure_preserves_lab_outcome_details() {
+        with_isolated_home(|_| {
+            let aggregate = AgentTaskAggregate {
+                schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
+                plan_id: "remote-plan".to_string(),
+                status: AgentTaskAggregateStatus::Failed,
+                totals: AgentTaskAggregateTotals {
+                    failed: 1,
+                    ..AgentTaskAggregateTotals::default()
+                },
+                outcomes: vec![AgentTaskOutcome {
+                    schema: crate::core::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+                    task_id: "cook-conductor".to_string(),
+                    status: crate::core::agent_task::AgentTaskOutcomeStatus::Failed,
+                    summary: Some("WP Codebox agent task failed.".to_string()),
+                    failure_classification: Some(AgentTaskFailureClassification::Provider),
+                    artifacts: Vec::new(),
+                    evidence_refs: vec![AgentTaskEvidenceRef {
+                        kind: "codebox-run".to_string(),
+                        uri: "homeboy://codebox/runs/codebox-run-1".to_string(),
+                        label: Some("Codebox run".to_string()),
+                    }],
+                    diagnostics: Vec::new(),
+                    outputs: serde_json::json!({
+                        "codebox_run_result": {
+                            "schema": "wp-codebox/agent-task-run-result/v1",
+                            "run_id": "codebox-run-1",
+                            "status": "failed",
+                            "failure_classification": "runtime",
+                            "metadata": {
+                                "remote_plan_ref": "remote-plan",
+                                "remote_run_ref": "remote-run"
+                            }
+                        }
+                    }),
+                    workflow: None,
+                    follow_up: None,
+                    metadata: serde_json::json!({
+                        "provider": "wordpress.codebox-agent-task-executor",
+                        "remote_run_id": "codebox-run-1",
+                    }),
+                }],
+                events: Vec::new(),
+                artifact_lineage: Vec::new(),
+                queue: AgentTaskQueueStatus {
+                    max_concurrency: 1,
+                    completed: 1,
+                    ..AgentTaskQueueStatus::default()
+                },
+            };
+            let envelope = serde_json::json!({
+                "schema": "homeboy/agent-task-dispatch/v1",
+                "run_id": "remote-run",
+                "plan_id": "remote-plan",
+                "state": "failed",
+                "aggregate": aggregate,
+            });
+
+            let record = record_remote_dispatch_failure(
+                AgentTaskRemoteDispatchFailure {
+                    run_id: "conductor-full-loop-proof-retry2-20260611",
+                    local_command: vec![
+                        "homeboy".to_string(),
+                        "agent-task".to_string(),
+                        "cook".to_string(),
+                    ],
+                    remote_command: vec![
+                        "homeboy".to_string(),
+                        "agent-task".to_string(),
+                        "cook".to_string(),
+                    ],
+                    runner_id: "lab-a",
+                    remote_workspace: "/runner/workspace/conductor",
+                    stdout: &envelope.to_string(),
+                    stderr: "",
+                    exit_code: 1,
+                },
+                &envelope,
+            )
+            .expect("aggregate-only dispatch failure recorded")
+            .expect("dispatch envelope recognized");
+
+            let loaded =
+                status("conductor-full-loop-proof-retry2-20260611").expect("status loaded");
+            let log = logs("conductor-full-loop-proof-retry2-20260611").expect("logs loaded");
+            let artifacts =
+                artifacts("conductor-full-loop-proof-retry2-20260611").expect("artifacts loaded");
+            let (raw_aggregate, _) = aggregate_source("conductor-full-loop-proof-retry2-20260611")
+                .expect("aggregate source");
+
+            assert_eq!(record.run_id, "conductor-full-loop-proof-retry2-20260611");
+            assert_eq!(loaded.state, AgentTaskRunState::Failed);
+            assert_eq!(loaded.tasks[0].task_id, "cook-conductor");
+            assert_eq!(loaded.tasks[0].state, AgentTaskState::Failed);
+            assert_eq!(
+                loaded.tasks[0].backend,
+                "wordpress.codebox-agent-task-executor"
+            );
+            assert_eq!(loaded.provider_handles.len(), 1);
+            assert_eq!(loaded.provider_handles[0].provider_run_id, "codebox-run-1");
+            assert_eq!(loaded.metadata["remote_run_id"], "remote-run");
+            assert_eq!(loaded.metadata["remote_plan_path"], "remote-plan");
+            assert_eq!(
+                log.events[0].message.as_deref(),
+                Some("WP Codebox agent task failed.")
+            );
+            assert_eq!(artifacts.evidence_refs[0].kind, "codebox-run");
+            assert!(raw_aggregate.contains("wp-codebox/agent-task-run-result/v1"));
+            assert!(raw_aggregate.contains("failure_classification"));
+            assert!(raw_aggregate.contains("remote_plan_ref"));
         });
     }
 
