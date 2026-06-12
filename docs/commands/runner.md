@@ -321,6 +321,8 @@ homeboy runner exec <runner-id> -- <command...>
 homeboy runner exec <runner-id> --project <project-id> --cwd /runner/workspace/project -- <command...>
 homeboy runner exec <runner-id> --ssh --cwd /runner/workspace/project -- <command...>
 homeboy runner exec <runner-id> --cwd /runner/workspace/project --require-path /runner/workspace/project -- <command...>
+homeboy runner env <runner-id>
+homeboy runner env <runner-id> --show-values
 ```
 
 `exec` submits the command to the connected runner daemon when `homeboy runner connect <runner-id>` has established a live loopback tunnel. If no daemon session is connected, local runners execute directly and SSH runners require explicit diagnostic `--ssh`. SSH runner raw exec is policy-denied by default until `policy.allow_raw_exec` is explicitly true.
@@ -335,6 +337,13 @@ Path rules:
 - `--ssh` is the explicit diagnostic fallback when `connect` is unavailable; daemon execution is preferred because it records job metadata and supports artifact-oriented workflows.
 - Diagnostic SSH output serializes as `mode: "diagnostic_ssh"` and does not include job/event evidence.
 - Raw SSH execution remains intentionally explicit and should not be used as production Lab/offload evidence; use connected daemon or reverse broker execution for job/event/artifact-compatible output.
+
+Runner job environment:
+
+- `homeboy runner env <runner-id>` shows the effective environment Homeboy injects into runner jobs before command execution.
+- Values are redacted by default because runner env commonly contains tokens. Use `--show-values` only in trusted local/operator contexts.
+- `homeboy ssh <server> -- printenv NAME` inspects the server login shell environment. It does not include runner job env unless the variable is also configured on the server shell.
+- Use `homeboy runner exec <runner-id> -- printenv NAME` or `homeboy runner env <runner-id> --show-values` when debugging Lab job environment.
 
 Runner metrics:
 

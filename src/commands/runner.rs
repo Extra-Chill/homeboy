@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use clap::{Args, Subcommand, ValueEnum};
 use serde::Serialize;
@@ -44,8 +44,25 @@ pub enum RunnerCommandOutput {
     Registry(RunnerOutput),
     Doctor(doctor::RunnerDoctorOutput),
     Execution(RunnerExecOutput),
+    Env(RunnerEnvOutput),
     Worker(ReverseRunnerWorkerOutput),
     Workspace(workspace::RunnerWorkspaceOutput),
+}
+
+#[derive(Debug, Serialize)]
+pub struct RunnerEnvOutput {
+    pub command: String,
+    pub runner_id: String,
+    pub source: String,
+    pub values_redacted: bool,
+    pub env: BTreeMap<String, String>,
+    pub diagnostics: RunnerEnvDiagnostics,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RunnerEnvDiagnostics {
+    pub server_shell_env: String,
+    pub runner_job_env: String,
 }
 
 #[derive(Args)]
@@ -273,6 +290,15 @@ enum RunnerCommand {
         #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<String>,
     },
+    /// Show the effective environment injected into runner jobs
+    Env {
+        /// Runner ID
+        id: String,
+
+        /// Print actual values instead of redacting them
+        #[arg(long)]
+        show_values: bool,
+    },
     /// Claim and execute one brokered reverse-runner job from this machine
     Work {
         /// Runner ID on this machine
@@ -461,6 +487,7 @@ pub fn run(
             require_paths,
             command,
         )),
+        RunnerCommand::Env { id, show_values } => map_env(env(&id, show_values)),
         RunnerCommand::Work {
             runner_id,
             broker_url,
@@ -516,6 +543,10 @@ fn map_doctor(result: CmdResult<doctor::RunnerDoctorOutput>) -> CmdResult<Runner
 
 fn map_execution(result: CmdResult<RunnerExecOutput>) -> CmdResult<RunnerCommandOutput> {
     result.map(|(output, exit_code)| (RunnerCommandOutput::Execution(output), exit_code))
+}
+
+fn map_env(result: CmdResult<RunnerEnvOutput>) -> CmdResult<RunnerCommandOutput> {
+    result.map(|(output, exit_code)| (RunnerCommandOutput::Env(output), exit_code))
 }
 
 fn map_worker(result: CmdResult<ReverseRunnerWorkerOutput>) -> CmdResult<RunnerCommandOutput> {
@@ -821,6 +852,38 @@ fn exec(
     )
 }
 
+fn env(runner_id: &str, show_values: bool) -> CmdResult<RunnerEnvOutput> {
+    let effective_env = runner::effective_env(runner_id)?;
+    let env = effective_env
+        .into_iter()
+        .map(|(key, value)| {
+            (
+                key,
+                if show_values {
+                    value
+                } else {
+                    REDACTED_ENV_VALUE.to_string()
+                },
+            )
+        })
+        .collect();
+
+    Ok((
+        RunnerEnvOutput {
+            command: "runner.env".to_string(),
+            runner_id: runner_id.to_string(),
+            source: "runner_job_env".to_string(),
+            values_redacted: !show_values,
+            env,
+            diagnostics: RunnerEnvDiagnostics {
+                server_shell_env: "Use `homeboy ssh <server> -- printenv NAME` to inspect the server login shell environment; it does not include runner job env by default.".to_string(),
+                runner_job_env: "This output is the configured env Homeboy injects into `homeboy runner exec` jobs before command execution.".to_string(),
+            },
+        },
+        0,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -884,5 +947,27 @@ mod tests {
         assert_eq!(value["entities"][0]["env"]["PATH"], REDACTED_ENV_VALUE);
         assert!(!value.to_string().contains("secret-token"));
         assert!(!value.to_string().contains("/secret/bin"));
+    }
+
+    #[test]
+    fn runner_env_output_redacts_values_by_default() {
+        let output = RunnerEnvOutput {
+            command: "runner.env".to_string(),
+            runner_id: "lab".to_string(),
+            source: "runner_job_env".to_string(),
+            values_redacted: true,
+            env: BTreeMap::from([("TOKEN".to_string(), REDACTED_ENV_VALUE.to_string())]),
+            diagnostics: RunnerEnvDiagnostics {
+                server_shell_env: "shell".to_string(),
+                runner_job_env: "runner".to_string(),
+            },
+        };
+
+        let value = serde_json::to_value(output).expect("serialize output");
+
+        assert_eq!(value["command"], "runner.env");
+        assert_eq!(value["source"], "runner_job_env");
+        assert_eq!(value["values_redacted"], true);
+        assert_eq!(value["env"]["TOKEN"], REDACTED_ENV_VALUE);
     }
 }

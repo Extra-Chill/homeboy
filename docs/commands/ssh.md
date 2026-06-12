@@ -61,6 +61,10 @@ The connect action uses an interactive SSH session and does not print the JSON e
 
 When a command is provided, it is executed non-interactively and Homeboy captures stdout/stderr into the JSON response.
 
+Non-interactive command responses include `exit_code`, `success`, `result_classification`, and `failure_reason` when the command fails. This makes empty-output commands unambiguous: a command that exits `0` reports `success: true`, while a no-output failure reports the actual exit code and whether Homeboy classified it as a remote command failure or SSH transport failure.
+
+`homeboy ssh` shows the server shell environment. Runner-specific job environment is injected by `homeboy runner exec`; inspect it with `homeboy runner env <runner-id>` or `homeboy runner exec <runner-id> -- printenv NAME`.
+
 Note: the CLI still computes a JSON `data` object internally for this action, but it is not printed in interactive passthrough mode.
 
 ## Exit code
