@@ -29,6 +29,7 @@ try {
   fs.writeFileSync(path.join(dependencyPath, 'generic-dependency.php'), "<?php\n/* Plugin Name: Generic Dependency */\n");
   fs.writeFileSync(path.join(monorepoPluginPath, 'woocommerce.php'), "<?php\n/* Plugin Name: WooCommerce */\n");
   fs.writeFileSync(path.join(stripeDependencyPath, 'woocommerce-gateway-stripe.php'), "<?php\n/* Plugin Name: WooCommerce Stripe Gateway */\nhomeboy_missing_wordpress_runtime_function();\n");
+  fs.writeFileSync(path.join(stripeDependencyPath, 'package.json'), JSON.stringify({ engines: { node: '>=20', npm: '>=10' } }, null, 2));
   fs.writeFileSync(path.join(failingDependencyPath, 'gateway-build-fails.php'), "<?php\n/* Plugin Name: Gateway Build Fails */\n");
   fs.writeFileSync(path.join(failingDependencyPath, 'composer.json'), JSON.stringify({ scripts: { postInstall: 'npm install' } }, null, 2));
   fs.writeFileSync(path.join(failingDependencyPath, 'package.json'), JSON.stringify({ engines: { node: '>=99', npm: '>=99' } }, null, 2));
@@ -86,7 +87,20 @@ homeboy_require_bash_version() { :; }
 `);
 
   const settings = {
-    validation_dependencies: [dependencyPath, monorepoDependencyPath, stripeDependencyPath],
+    validation_dependencies: [
+      dependencyPath,
+      monorepoDependencyPath,
+      {
+        source_type: 'local',
+        source: stripeDependencyPath,
+        slug: 'woocommerce-gateway-stripe',
+        plugin_file: 'woocommerce-gateway-stripe/woocommerce-gateway-stripe.php',
+        version: '9.9.0-test',
+        revision: 'fixture-revision',
+        build_commands: ['npm run build'],
+        activate: true,
+      },
+    ],
     wp_codebox_core_module: fixtureCoreModule,
     wp_codebox_extra_plugins: [
       { source: '/tmp/runtime-prerequisite', slug: 'runtime-prerequisite', activate: true },
@@ -132,6 +146,15 @@ homeboy_require_bash_version() { :; }
   const successResults = JSON.parse(fs.readFileSync(path.join(root, 'success-results.json'), 'utf8'));
   assert.ok(successResults.prepared_dependencies.some((dependency) => dependency.slug === 'woocommerce' && dependency.source_path === fs.realpathSync(monorepoDependencyPath) && dependency.package_root === fs.realpathSync(monorepoPluginPath) && dependency.mounted_plugin_dir === '/wordpress/wp-content/plugins/woocommerce'), JSON.stringify(successResults.prepared_dependencies, null, 2));
   assert.ok(successResults.prepared_dependencies.some((dependency) => dependency.slug === 'woocommerce-gateway-stripe' && dependency.source_path === fs.realpathSync(stripeDependencyPath) && dependency.package_root === fs.realpathSync(stripeDependencyPath)), JSON.stringify(successResults.prepared_dependencies, null, 2));
+  const stripePrepared = successResults.prepared_dependencies.find((dependency) => dependency.slug === 'woocommerce-gateway-stripe');
+  assert.equal(stripePrepared.source_type, 'local');
+  assert.equal(stripePrepared.requested_version, '9.9.0-test');
+  assert.equal(stripePrepared.requested_revision, 'fixture-revision');
+  assert.equal(stripePrepared.plugin_file, 'woocommerce-gateway-stripe/woocommerce-gateway-stripe.php');
+  assert.equal(stripePrepared.activation_status, 'active');
+  assert.deepEqual(stripePrepared.build_commands, ['npm run build']);
+  assert.equal(stripePrepared.runtime_requirements.node.node, '>=20');
+  assert.equal(stripePrepared.runtime_requirements.node.npm, '>=10');
 
   const scopedCoreResult = spawnSync('bash', [path.join(extensionPath, 'scripts', 'bench', 'bench-runner.sh')], {
     cwd: componentPath,
