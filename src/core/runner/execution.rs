@@ -114,7 +114,7 @@ pub(crate) struct RunnerProcessRequest {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct RunnerProcessPlan {
+pub(crate) struct PreparedRunnerProcess {
     pub runner: Runner,
     pub cwd: String,
     pub command: Vec<String>,
@@ -634,7 +634,7 @@ fn result_event_data(events: &[JobEvent]) -> Option<Value> {
         .and_then(|event| event.data.clone())
 }
 
-fn exec_local(plan: RunnerProcessPlan) -> Result<(RunnerExecOutput, i32)> {
+fn exec_local(plan: PreparedRunnerProcess) -> Result<(RunnerExecOutput, i32)> {
     let output = execute_runner_process(&plan)?;
     Ok(exec_output(
         &plan.runner,
@@ -704,7 +704,9 @@ pub(crate) struct ProcessOutput {
     pub capture: Option<CommandCaptureMetadata>,
 }
 
-pub(crate) fn prepare_runner_process(request: RunnerProcessRequest) -> Result<RunnerProcessPlan> {
+pub(crate) fn prepare_runner_process(
+    request: RunnerProcessRequest,
+) -> Result<PreparedRunnerProcess> {
     if request.command.is_empty() {
         return Err(Error::validation_invalid_argument(
             "command",
@@ -769,7 +771,7 @@ pub(crate) fn prepare_runner_process(request: RunnerProcessRequest) -> Result<Ru
         request.validate_require_paths_on_host,
     )?;
 
-    Ok(RunnerProcessPlan {
+    Ok(PreparedRunnerProcess {
         runner,
         cwd,
         command: request.command,
@@ -781,7 +783,7 @@ pub(crate) fn prepare_runner_process(request: RunnerProcessRequest) -> Result<Ru
 
 pub(crate) fn prepare_daemon_local_process(
     request: RunnerProcessRequest,
-) -> Result<RunnerProcessPlan> {
+) -> Result<PreparedRunnerProcess> {
     if request.command.is_empty() {
         return Err(Error::validation_invalid_argument(
             "command",
@@ -839,7 +841,7 @@ pub(crate) fn prepare_daemon_local_process(
         SourceSnapshot::collect_local(&runner.id, Path::new(&cwd), Some(&cwd), "existing_remote")
     });
 
-    Ok(RunnerProcessPlan {
+    Ok(PreparedRunnerProcess {
         runner,
         cwd,
         command: request.command,
@@ -931,7 +933,7 @@ fn validate_runner_process_cwd(runner: &Runner, cwd: &str) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn execute_runner_process(plan: &RunnerProcessPlan) -> Result<ProcessOutput> {
+pub(crate) fn execute_runner_process(plan: &PreparedRunnerProcess) -> Result<ProcessOutput> {
     let mut command = std::process::Command::new(&plan.command[0]);
     command.args(&plan.command[1..]).current_dir(&plan.cwd);
     apply_runner_process_env(&mut command, plan);
@@ -940,7 +942,7 @@ pub(crate) fn execute_runner_process(plan: &RunnerProcessPlan) -> Result<Process
 }
 
 pub(crate) fn execute_runner_process_until_cancelled(
-    plan: &RunnerProcessPlan,
+    plan: &PreparedRunnerProcess,
     is_cancelled: impl FnMut() -> bool,
 ) -> Result<ProcessOutput> {
     let mut command = std::process::Command::new(&plan.command[0]);
@@ -950,7 +952,7 @@ pub(crate) fn execute_runner_process_until_cancelled(
     command_output_until_cancelled(&mut command, is_cancelled)
 }
 
-fn apply_runner_process_env(command: &mut std::process::Command, plan: &RunnerProcessPlan) {
+fn apply_runner_process_env(command: &mut std::process::Command, plan: &PreparedRunnerProcess) {
     command.env_clear();
     for key in inherited_runner_process_env_keys() {
         if !plan.env.contains_key(*key) {

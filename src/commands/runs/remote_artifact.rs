@@ -291,7 +291,7 @@ fn persisted_artifact_remove_error(path: &Path, err: io::Error) -> crate::core::
 }
 
 #[derive(Debug, Default)]
-struct RunnerDownloadCleanupPlan {
+struct RunnerDownloadCleanupPreview {
     file_count: usize,
     directory_count: usize,
     size_bytes: u64,
@@ -332,8 +332,8 @@ fn cleanup_path_component(name: &str, value: Option<&str>) -> crate::core::Resul
     Ok(Some(value.to_string()))
 }
 
-fn plan_runner_download_cleanup(root: &Path) -> crate::core::Result<RunnerDownloadCleanupPlan> {
-    let mut plan = RunnerDownloadCleanupPlan::default();
+fn plan_runner_download_cleanup(root: &Path) -> crate::core::Result<RunnerDownloadCleanupPreview> {
+    let mut plan = RunnerDownloadCleanupPreview::default();
     if !root.exists() {
         return Ok(plan);
     }
@@ -364,7 +364,7 @@ fn plan_runner_download_cleanup(root: &Path) -> crate::core::Result<RunnerDownlo
 fn collect_runner_download_cleanup(
     root: &Path,
     path: &Path,
-    plan: &mut RunnerDownloadCleanupPlan,
+    plan: &mut RunnerDownloadCleanupPreview,
 ) -> crate::core::Result<()> {
     let metadata = fs::symlink_metadata(path).map_err(|err| {
         crate::core::Error::internal_io(
