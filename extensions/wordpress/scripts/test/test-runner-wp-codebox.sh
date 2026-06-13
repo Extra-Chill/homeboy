@@ -170,16 +170,10 @@ while [ "$#" -gt 0 ]; do
     shift
 done
 
-WP_CODEBOX_BIN="${HOMEBOY_WP_CODEBOX_BIN:-}"
-if [ -z "$WP_CODEBOX_BIN" ] && [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]; then
-    WP_CODEBOX_BIN=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -r '.wp_codebox_bin // empty' 2>/dev/null || true)
-fi
-WP_CODEBOX_BIN="${WP_CODEBOX_BIN:-wp-codebox}"
-if [ "$WP_CODEBOX_BIN" = "wp-codebox" ] && ! command -v wp-codebox >/dev/null 2>&1; then
-    echo "Error: wp-codebox not found; set HOMEBOY_WP_CODEBOX_BIN, settings wp_codebox_bin, or install wp-codebox." >&2
+WP_CODEBOX_BIN="$(homeboy_wp_codebox_resolve_bin "${HOMEBOY_SETTINGS_JSON:-}")" || {
     FAILED_STEP="WP Codebox CLI setup"
     exit 1
-fi
+}
 
 settings_json="${HOMEBOY_SETTINGS_JSON:-}"
 [ -n "$settings_json" ] || settings_json="{}"
@@ -773,12 +767,8 @@ WP_CODEBOX_TMPFILE=$(mktemp)
 PHPUNIT_STDOUT_TMPFILE=$(mktemp)
 RECIPE_FILE=$(mktemp "${TMPDIR:-/tmp}/homeboy-wp-codebox-test-recipe.XXXXXX")
 RECIPE_OPTIONS_FILE=$(mktemp "${TMPDIR:-/tmp}/homeboy-wp-codebox-test-recipe-options.XXXXXX")
-wp_codebox_command=("$WP_CODEBOX_BIN")
-case "$WP_CODEBOX_BIN" in
-    *.js)
-        wp_codebox_command=(node "$WP_CODEBOX_BIN")
-        ;;
-esac
+homeboy_wp_codebox_set_command "$WP_CODEBOX_BIN"
+wp_codebox_command=("${HOMEBOY_WP_CODEBOX_COMMAND[@]}")
 
 jq -n \
     --arg wp "$WP_CODEBOX_WORDPRESS_VERSION" \
