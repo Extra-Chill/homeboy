@@ -225,7 +225,7 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     agent_bundles: config.agent_bundles || config.agentBundles || options.agentBundles || [],
     runtime_stack_mounts: config.runtime_stack_mounts || options.runtimeStackMounts || [],
     runtime_overlay_profiles: config.runtime_overlay_profiles || config.runtimeOverlayProfiles || options.runtimeOverlayProfiles || defaults.runtimeOverlayProfiles || [],
-    runtime_overlays: config.runtime_overlays || options.runtimeOverlays || [],
+    runtime_overlays: config.runtime_overlays || options.runtimeOverlays || defaults.runtimeOverlays || [],
     secret_env: explicitSecretEnv.length > 0 ? Array.from(new Set(explicitSecretEnv)) : defaults.secretEnv || [],
     // Post-agent verification gate (recipe workflow.after). Supplied as WP
     // Codebox recipe steps; a non-zero exit fails the run so the orchestrator
@@ -343,7 +343,8 @@ function defaultCodeboxRuntimeConfig(request, config, inputs, options = {}) {
     model,
     secretEnv: defaultSecretEnv(provider, settings),
     wpCodeboxBin: firstValue(settings.wp_codebox_bin, settings.wpCodeboxBin, process.env.HOMEBOY_WP_CODEBOX_BIN, ''),
-    runtimeOverlayProfiles: [],
+    runtimeOverlayProfiles: defaultRuntimeOverlayProfiles(settings),
+    runtimeOverlays: defaultRuntimeOverlays(settings),
     mounts: defaultWorkspaceMounts(workspaceRoot, request, config, inputs, options),
     workspaces: defaultWorkspaces(config, inputs, options),
     allowedTools: defaultWorkspaceAllowedTools(workspaceRoot, workspaceMode(request, config, inputs)),
@@ -360,6 +361,14 @@ function defaultProviderPluginPaths(provider, settings, fallbackProviderPluginPa
     return [];
   }
   return fallbackProviderPluginPath ? [fallbackProviderPluginPath] : [];
+}
+
+function defaultRuntimeOverlayProfiles(settings) {
+  return normalizeArray(settings.wp_codebox_runtime_overlay_profiles || settings.runtime_overlay_profiles);
+}
+
+function defaultRuntimeOverlays(settings) {
+  return normalizeArray(settings.wp_codebox_runtime_overlays || settings.runtime_overlays);
 }
 
 function firstDefined(...values) {

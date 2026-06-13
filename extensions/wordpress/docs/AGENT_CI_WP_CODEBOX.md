@@ -303,6 +303,9 @@ Callers that need a provider stack supply WP Codebox's generic fields directly:
 `provider_plugin_paths`, `runtime_overlays`, `runtime_overlay_profiles`, and
 `secret_env`. HBEX forwards those fields without expanding provider-specific
 runtime stacks; WP Codebox owns sandbox recipe expansion and artifact capture.
+The same generic fields can live in Homeboy/global settings as
+`wp_codebox_provider_plugin_paths`, `wp_codebox_runtime_overlays`,
+`wp_codebox_runtime_overlay_profiles`, and `wp_codebox_secret_env`.
 
 ## Runner config surface
 
