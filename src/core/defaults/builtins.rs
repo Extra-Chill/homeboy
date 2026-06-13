@@ -33,7 +33,7 @@ pub(super) fn default_cargo_config() -> InstallMethodConfig {
 pub(super) fn default_source_config() -> InstallMethodConfig {
     InstallMethodConfig {
         path_patterns: vec!["/target/release/".to_string(), "/target/debug/".to_string()],
-        upgrade_command: "git pull && . \"$HOME/.cargo/env\" && cargo build --release".to_string(),
+        upgrade_command: "if git symbolic-ref --quiet HEAD >/dev/null; then git pull; fi && . \"$HOME/.cargo/env\" && cargo build --release".to_string(),
         list_command: None,
     }
 }
@@ -123,6 +123,20 @@ fi
 "#
         .to_string(),
         list_command: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_upgrade_command_allows_detached_checkouts() {
+        let command = default_source_config().upgrade_command;
+
+        assert!(command.contains("git symbolic-ref --quiet HEAD"));
+        assert!(command.contains("then git pull; fi"));
+        assert!(command.contains("cargo build --release"));
     }
 }
 
