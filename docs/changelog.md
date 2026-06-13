@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.229.1] - 2026-06-13
+
+### Fixed
+- add adaptive agent task concurrency
+- drop stale controller action fallbacks
+- serve workflow bench artifacts through public origins
+
 ## [0.229.0] - 2026-06-13
 
 ### Added
