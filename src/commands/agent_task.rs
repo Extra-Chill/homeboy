@@ -19,7 +19,7 @@ use homeboy::core::agent_task_lifecycle;
 use homeboy::core::agent_task_loop_controller::{
     self, AgentTaskLoopActionStatus, AgentTaskLoopControllerRecord, AgentTaskLoopExternalEvent,
     AgentTaskLoopHistoryEvent, AgentTaskLoopPolicyAction, AgentTaskLoopPolicyActionRecord,
-    AgentTaskLoopRunRef, AgentTaskLoopWait, AgentTaskLoopWaitStatus,
+    AgentTaskLoopRunRef,
 };
 use homeboy::core::agent_task_provider::ExtensionProviderAgentTaskExecutor;
 use homeboy::core::agent_task_scheduler::{
@@ -887,7 +887,10 @@ where
         AgentTaskLoopPolicyAction::RouteFinding { .. }
         | AgentTaskLoopPolicyAction::ValidateCandidatePatch { .. }
         | AgentTaskLoopPolicyAction::Retry { .. }
-        | AgentTaskLoopPolicyAction::RequestChanges { .. } => {
+        | AgentTaskLoopPolicyAction::RequestChanges { .. }
+        | AgentTaskLoopPolicyAction::SpawnController { .. }
+        | AgentTaskLoopPolicyAction::SpawnSubloop { .. }
+        | AgentTaskLoopPolicyAction::WaitForController { .. } => {
             Err(homeboy::core::Error::validation_invalid_argument(
                 "action_id",
                 format!(
@@ -2118,6 +2121,7 @@ mod tests {
     use homeboy::core::agent_task_lifecycle::{
         status as lifecycle_status, AgentTaskRunRecord, AgentTaskRunState,
     };
+    use homeboy::core::agent_task_loop_controller::{AgentTaskLoopWait, AgentTaskLoopWaitStatus};
     use homeboy::core::agent_task_scheduler::{AgentTaskExecutionContext, AgentTaskState};
     use serde_json::{json, Value};
     use std::sync::{Arc, Mutex};

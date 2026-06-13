@@ -6,6 +6,7 @@
 homeboy tunnel service <COMMAND>
 homeboy tunnel preview-client <COMMAND>
 homeboy tunnel preview-ingress <COMMAND>
+homeboy tunnel wpcom-edit-page <PAGE_URL>
 ```
 
 `tunnel` manages Homeboy-native private service tunnel declarations, local managed service lifecycle, and the VPS-side public preview ingress used by generic preview URLs. Homeboy can start a long-running local command, record safe command/process/log evidence, report readiness, and stop the process group without relying on an external chat or tunnel wrapper.
@@ -63,6 +64,36 @@ homeboy tunnel service start context-a8c \
 The `command` backend is a generic adapter seam. Homeboy starts and supervises the backend command, injects `HOMEBOY_SERVICE_ID`, `HOMEBOY_SERVICE_LOCAL_URL`, and `HOMEBOY_TUNNEL_PUBLIC_URL`, records backend PID/process/log evidence, and stops it with the managed service. Provider-specific behavior such as Traforo, Cloudflare, ngrok, or a Homeboy VPS broker belongs in the backend command or a future extension, not in Homeboy core semantics.
 
 When a service's preview policy is relevant, `service status` and `service start` include a structured `preview` artifact with schema `homeboy/preview-url/v1`. The artifact records the service ID, local URL, optional public URL, backend, policy, cleanup/expiry metadata, and owning run/workflow IDs when the start command supplied them.
+
+## WordPress.com Page Editor Orchestration
+
+`wpcom-edit-page` opens a named WordPress.com page through a Homeboy-owned public preview URL and delegates page classification, fixture setup, Codebox runtime startup, and editor URL construction to `wpcom-codebox`:
+
+```sh
+homeboy tunnel wpcom-edit-page https://wordpress.com/ai \
+  --wpcom-codebox-dir /Users/chubes/Developer/wpcom-codebox@fix-edit-page-held-editor-url \
+  --service-id site-preview \
+  --preview-hold 30m
+```
+
+Use `--service-id` when `homeboy tunnel service start` has already recorded a `public_url` for the held preview service. Use `--preview-public-url` when another Homeboy workload already has the public origin in hand:
+
+```sh
+homeboy tunnel wpcom-edit-page https://wordpress.com/ai \
+  --wpcom-codebox-dir /Users/chubes/Developer/wpcom-codebox@fix-edit-page-held-editor-url \
+  --preview-public-url https://run-123-tunnel.example.net \
+  --preview-hold 30m
+```
+
+Homeboy owns the public URL lifecycle. The command passes that URL to `node scripts/edit-page.mjs <PAGE_URL> --preview-public-url <URL> --preview-hold <DURATION>` and treats `wpcom-codebox` as the preview consumer. It writes a Homeboy artifact named `homeboy-wpcom-edit-page.json` beside the `wpcom-codebox` `summary.json` and returns:
+
+- `selected_url`: the named page URL.
+- `preview_public_url`: the Homeboy public origin passed to `wpcom-codebox`.
+- `public_preview_editor_url`: the clickable public editor URL when the Codebox run reports one.
+- `local_preview_editor_url` and `logical_routed_editor_url` for diagnostics.
+- `artifacts_dir`, `artifact_path`, stdout, stderr, and `edit_page_exit_code` for durable handoff.
+
+Optional flags forward existing `wpcom-codebox edit-page` contract inputs: `--cli`, `--wpcom`, `--source-dir`, `--preview-port`, `--preview-bind`, and `--preview-hold-blocking`.
 
 ## Preview Client
 
@@ -250,3 +281,4 @@ The current layer validates config, token, host, session, origin, and lease sema
 - `preview-ingress list`: list route records.
 - `preview-ingress status`: report route lifecycle metadata.
 - `preview-ingress serve`: run the blocking VPS-side HTTP ingress daemon.
+- `wpcom-edit-page <PAGE_URL>`: delegate to `wpcom-codebox edit-page` with a Homeboy-owned public preview URL and return the public editor URL plus artifacts.
