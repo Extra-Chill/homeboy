@@ -10,13 +10,15 @@ use crate::core::agent_task::{
     AgentTaskOutcome, AgentTaskOutcomeStatus, AgentTaskRequest, AGENT_TASK_OUTCOME_SCHEMA,
 };
 pub use crate::core::agent_task_schedule::{
-    AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
-    AgentTaskArtifactBinding, AgentTaskArtifactLineage, AgentTaskArtifactOutputDeclaration,
-    AgentTaskBackpressureStatus, AgentTaskCancellationToken, AgentTaskExecutionContext,
-    AgentTaskOutputBinding, AgentTaskOutputDependencies, AgentTaskPlan, AgentTaskProgressEvent,
-    AgentTaskQueueStatus, AgentTaskResourceBudget, AgentTaskResourceBudgetStatus,
-    AgentTaskRetryPolicy, AgentTaskScheduleOptions, AgentTaskState, AGENT_TASK_AGGREGATE_SCHEMA,
-    AGENT_TASK_PLAN_SCHEMA,
+    AgentTaskAdaptiveConcurrencyAction, AgentTaskAdaptiveConcurrencyDecision,
+    AgentTaskAdaptiveConcurrencyInputs, AgentTaskAdaptiveConcurrencyPolicy,
+    AgentTaskAdaptiveConcurrencyStatus, AgentTaskAggregate, AgentTaskAggregateStatus,
+    AgentTaskAggregateTotals, AgentTaskArtifactBinding, AgentTaskArtifactLineage,
+    AgentTaskArtifactOutputDeclaration, AgentTaskBackpressureStatus, AgentTaskCancellationToken,
+    AgentTaskExecutionContext, AgentTaskOutputBinding, AgentTaskOutputDependencies, AgentTaskPlan,
+    AgentTaskProgressEvent, AgentTaskQueueStatus, AgentTaskResourceBudget,
+    AgentTaskResourceBudgetStatus, AgentTaskRetryPolicy, AgentTaskScheduleOptions, AgentTaskState,
+    AGENT_TASK_AGGREGATE_SCHEMA, AGENT_TASK_PLAN_SCHEMA,
 };
 use crate::core::agent_task_timeout::timeout_with_grace;
 use crate::core::agent_task_timeout_artifacts::{
@@ -94,6 +96,8 @@ where
         let mut cancellation_notified = false;
         let max_attempts = plan.options.retry.max_attempts.max(1);
         let (tx, rx) = mpsc::channel();
+        let mut adaptive_decisions = Vec::new();
+        let mut last_effective_concurrency = None;
 
         for task in &queued {
             events.push(event(
@@ -138,7 +142,50 @@ where
                 }
             }
 
-            while running.len() < max_concurrency
+            let adaptive_decision = adaptive_concurrency_decision(
+                plan.options.adaptive_concurrency.as_ref(),
+                max_concurrency,
+                queued.len(),
+                running.len(),
+                &plan.options.resource_budget,
+                active_resource_units(&running),
+                last_effective_concurrency,
+            );
+            let effective_concurrency = adaptive_decision
+                .as_ref()
+                .map(|decision| decision.effective_concurrency)
+                .unwrap_or(max_concurrency);
+            if let Some(decision) = adaptive_decision {
+                last_effective_concurrency = Some(decision.effective_concurrency);
+                if adaptive_decisions
+                    .last()
+                    .map(|previous: &AgentTaskAdaptiveConcurrencyDecision| {
+                        previous.action != decision.action
+                            || previous.effective_concurrency != decision.effective_concurrency
+                            || previous.reason != decision.reason
+                    })
+                    .unwrap_or(true)
+                {
+                    adaptive_decisions.push(decision);
+                }
+            }
+
+            if effective_concurrency == 0 && running.is_empty() && !queued.is_empty() {
+                while let Some(task) = queued.pop_front() {
+                    let message = "adaptive concurrency paused dispatch".to_string();
+                    outcomes.push(AgentTaskScheduleSupport::block_scheduled_task(
+                        &task,
+                        "adaptive_concurrency",
+                        message,
+                        &mut backpressure,
+                        &mut events,
+                    ));
+                    blocked_count += 1;
+                }
+                break;
+            }
+
+            while running.len() < effective_concurrency
                 && !queued.is_empty()
                 && !cancellation.is_cancelled()
             {
@@ -359,6 +406,8 @@ where
                 &plan.options.per_executor_concurrency,
                 &plan.options.per_model_concurrency,
                 &plan.options.resource_budget,
+                plan.options.adaptive_concurrency.as_ref(),
+                &adaptive_decisions,
                 &backpressure,
                 retry_budget_total.map(|budget| budget.saturating_sub(retry_budget_used)),
             ),
@@ -1055,6 +1104,8 @@ impl AgentTaskScheduleSupport {
         per_executor_concurrency: &HashMap<String, usize>,
         per_model_concurrency: &HashMap<String, usize>,
         resource_budget: &AgentTaskResourceBudget,
+        adaptive_policy: Option<&AgentTaskAdaptiveConcurrencyPolicy>,
+        adaptive_decisions: &[AgentTaskAdaptiveConcurrencyDecision],
         backpressure: &[AgentTaskBackpressureStatus],
         retry_budget_remaining: Option<u32>,
     ) -> AgentTaskQueueStatus {
@@ -1069,6 +1120,22 @@ impl AgentTaskScheduleSupport {
 
         AgentTaskQueueStatus {
             max_concurrency,
+            adaptive_concurrency: adaptive_policy.map(|policy| {
+                let max_adaptive_concurrency = policy
+                    .max_concurrency
+                    .unwrap_or(max_concurrency)
+                    .max(policy.min_concurrency.max(1));
+                AgentTaskAdaptiveConcurrencyStatus {
+                    configured_max_concurrency: max_concurrency,
+                    effective_concurrency: adaptive_decisions
+                        .last()
+                        .map(|decision| decision.effective_concurrency)
+                        .unwrap_or(max_concurrency.min(max_adaptive_concurrency)),
+                    min_concurrency: policy.min_concurrency.max(1),
+                    max_concurrency: max_adaptive_concurrency,
+                    decisions: adaptive_decisions.to_vec(),
+                }
+            }),
             max_tasks,
             max_queue_depth,
             queued: 0,
@@ -1218,6 +1285,158 @@ fn resource_capacity_available(
     };
     active_resource_units(running).saturating_add(task_resource_units(request, budget))
         <= max_active_units
+}
+
+fn adaptive_concurrency_decision(
+    policy: Option<&AgentTaskAdaptiveConcurrencyPolicy>,
+    configured_max_concurrency: usize,
+    queued: usize,
+    running: usize,
+    resource_budget: &AgentTaskResourceBudget,
+    active_units: u32,
+    previous_effective_concurrency: Option<usize>,
+) -> Option<AgentTaskAdaptiveConcurrencyDecision> {
+    let policy = policy?;
+    let configured_max_concurrency = configured_max_concurrency.max(1);
+    let min_concurrency = policy.min_concurrency.max(1);
+    let policy_max_concurrency = policy
+        .max_concurrency
+        .unwrap_or(configured_max_concurrency)
+        .max(min_concurrency);
+    let mut effective_concurrency = policy_max_concurrency;
+    let mut reason =
+        format!("adaptive concurrency held at configured ceiling {policy_max_concurrency}");
+
+    if let Some(runner_capacity) = policy.runner_capacity {
+        let available_runner_slots = runner_capacity.saturating_sub(policy.active_leases);
+        if available_runner_slots == 0 {
+            effective_concurrency = 0;
+            reason = format!(
+                "paused because active_leases={} consume runner_capacity={runner_capacity}",
+                policy.active_leases
+            );
+        } else if available_runner_slots < effective_concurrency {
+            effective_concurrency = available_runner_slots;
+            reason = format!(
+                "scaled down to available runner slots {available_runner_slots} from runner_capacity={runner_capacity} active_leases={}",
+                policy.active_leases
+            );
+        } else if available_runner_slots > configured_max_concurrency
+            && policy_max_concurrency > configured_max_concurrency
+        {
+            reason = format!(
+                "scaled up because runner slots are available: runner_capacity={runner_capacity} active_leases={}",
+                policy.active_leases
+            );
+        }
+    }
+
+    if let Some(max_active_units) = resource_budget.max_active_units {
+        let default_task_units = resource_budget.default_task_units.max(1);
+        let available_units = max_active_units.saturating_sub(active_units);
+        let resource_slots = (available_units / default_task_units) as usize;
+        if resource_slots == 0 {
+            effective_concurrency = 0;
+            reason = format!(
+                "paused because active_units={active_units} consume max_active_units={max_active_units}"
+            );
+        } else if resource_slots < effective_concurrency {
+            effective_concurrency = resource_slots;
+            reason = format!(
+                "scaled down to resource slots {resource_slots} from max_active_units={max_active_units} active_units={active_units} default_task_units={default_task_units}"
+            );
+        }
+    }
+
+    if policy
+        .pause_on_pressure
+        .zip(policy.resource_pressure)
+        .map(|(pause_on, pressure)| pressure >= pause_on)
+        .unwrap_or(false)
+    {
+        effective_concurrency = 0;
+        reason = format!(
+            "paused because resource_pressure={:?} reached pause_on_pressure={:?}",
+            policy.resource_pressure.expect("pressure checked"),
+            policy.pause_on_pressure.expect("pause threshold checked")
+        );
+    }
+
+    if policy
+        .pause_after_recent_failures
+        .map(|threshold| threshold > 0 && policy.recent_failures >= threshold)
+        .unwrap_or(false)
+    {
+        effective_concurrency = 0;
+        reason = format!(
+            "paused because recent_failures={} reached pause_after_recent_failures={}",
+            policy.recent_failures,
+            policy.pause_after_recent_failures.unwrap_or_default()
+        );
+    }
+
+    if policy
+        .pause_after_recent_timeouts
+        .map(|threshold| threshold > 0 && policy.recent_timeouts >= threshold)
+        .unwrap_or(false)
+    {
+        effective_concurrency = 0;
+        reason = format!(
+            "paused because recent_timeouts={} reached pause_after_recent_timeouts={}",
+            policy.recent_timeouts,
+            policy.pause_after_recent_timeouts.unwrap_or_default()
+        );
+    }
+
+    if effective_concurrency > 0 {
+        effective_concurrency = effective_concurrency
+            .max(min_concurrency)
+            .min(policy_max_concurrency);
+    }
+    if queued == 0 && running == 0 && effective_concurrency > configured_max_concurrency {
+        reason = format!(
+            "held because no queued or running tasks need fan-out above configured max {configured_max_concurrency}"
+        );
+        effective_concurrency = configured_max_concurrency;
+    }
+
+    let action = match (previous_effective_concurrency, effective_concurrency) {
+        (_, 0) => AgentTaskAdaptiveConcurrencyAction::Paused,
+        (Some(previous), current) if current > previous => {
+            AgentTaskAdaptiveConcurrencyAction::Increased
+        }
+        (Some(previous), current) if current < previous => {
+            AgentTaskAdaptiveConcurrencyAction::Decreased
+        }
+        (None, current) if current > configured_max_concurrency => {
+            AgentTaskAdaptiveConcurrencyAction::Increased
+        }
+        (None, current) if current < configured_max_concurrency => {
+            AgentTaskAdaptiveConcurrencyAction::Decreased
+        }
+        _ => AgentTaskAdaptiveConcurrencyAction::Held,
+    };
+
+    Some(AgentTaskAdaptiveConcurrencyDecision {
+        action,
+        effective_concurrency,
+        previous_effective_concurrency,
+        reason,
+        inputs: AgentTaskAdaptiveConcurrencyInputs {
+            queued,
+            running,
+            configured_max_concurrency,
+            runner_capacity: policy.runner_capacity,
+            active_leases: policy.active_leases,
+            queue_depth: policy.queue_depth,
+            resource_pressure: policy.resource_pressure,
+            max_active_units: resource_budget.max_active_units,
+            active_units,
+            default_task_units: resource_budget.default_task_units.max(1),
+            recent_failures: policy.recent_failures,
+            recent_timeouts: policy.recent_timeouts,
+        },
+    })
 }
 
 fn render_value_templates(value: &mut Value, bindings: &HashMap<String, Value>) {
@@ -1698,6 +1917,130 @@ mod tests {
     }
 
     #[test]
+    fn adaptive_concurrency_scales_up_when_runner_slots_are_available() {
+        let executor = RecordingExecutor::new(HashMap::new(), Duration::from_millis(25));
+        let max_seen = Arc::clone(&executor.max_seen);
+        let scheduler = AgentTaskScheduler::new(executor);
+        let mut plan = plan_with_tasks(4);
+        plan.options.max_concurrency = 1;
+        plan.options.adaptive_concurrency = Some(AgentTaskAdaptiveConcurrencyPolicy {
+            max_concurrency: Some(3),
+            runner_capacity: Some(3),
+            ..AgentTaskAdaptiveConcurrencyPolicy::default()
+        });
+
+        let aggregate = scheduler.run(plan);
+        let adaptive = aggregate
+            .queue
+            .adaptive_concurrency
+            .expect("adaptive status");
+
+        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+        assert!(max_seen.load(Ordering::SeqCst) > 1);
+        assert!(max_seen.load(Ordering::SeqCst) <= 3);
+        assert_eq!(adaptive.configured_max_concurrency, 1);
+        assert_eq!(adaptive.max_concurrency, 3);
+        assert!(adaptive.decisions.iter().any(|decision| {
+            decision.action == AgentTaskAdaptiveConcurrencyAction::Increased
+                && decision.effective_concurrency == 3
+                && decision.reason.contains("runner slots are available")
+        }));
+    }
+
+    #[test]
+    fn adaptive_concurrency_scales_down_under_runner_pressure() {
+        let executor = RecordingExecutor::new(HashMap::new(), Duration::from_millis(25));
+        let max_seen = Arc::clone(&executor.max_seen);
+        let scheduler = AgentTaskScheduler::new(executor);
+        let mut plan = plan_with_tasks(3);
+        plan.options.max_concurrency = 4;
+        plan.options.adaptive_concurrency = Some(AgentTaskAdaptiveConcurrencyPolicy {
+            max_concurrency: Some(4),
+            runner_capacity: Some(3),
+            active_leases: 2,
+            ..AgentTaskAdaptiveConcurrencyPolicy::default()
+        });
+
+        let aggregate = scheduler.run(plan);
+        let adaptive = aggregate
+            .queue
+            .adaptive_concurrency
+            .expect("adaptive status");
+
+        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+        assert!(max_seen.load(Ordering::SeqCst) <= 1);
+        assert_eq!(adaptive.effective_concurrency, 1);
+        assert!(adaptive.decisions.iter().any(|decision| {
+            decision.action == AgentTaskAdaptiveConcurrencyAction::Decreased
+                && decision.reason.contains("available runner slots 1")
+        }));
+    }
+
+    #[test]
+    fn adaptive_concurrency_pauses_and_blocks_when_runner_capacity_is_unavailable() {
+        let executor = RecordingExecutor {
+            statuses: HashMap::new(),
+            delay: Duration::from_millis(0),
+            running: Arc::new(AtomicUsize::new(0)),
+            max_seen: Arc::new(AtomicUsize::new(0)),
+            cancel_calls: Arc::new(Mutex::new(Vec::new())),
+        };
+        let max_seen = Arc::clone(&executor.max_seen);
+        let scheduler = AgentTaskScheduler::new(executor);
+        let mut plan = plan_with_tasks(2);
+        plan.options.max_concurrency = 2;
+        plan.options.adaptive_concurrency = Some(AgentTaskAdaptiveConcurrencyPolicy {
+            runner_capacity: Some(1),
+            active_leases: 1,
+            ..AgentTaskAdaptiveConcurrencyPolicy::default()
+        });
+
+        let aggregate = scheduler.run(plan);
+        let adaptive = aggregate
+            .queue
+            .adaptive_concurrency
+            .expect("adaptive status");
+
+        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Failed);
+        assert_eq!(aggregate.totals.blocked, 2);
+        assert_eq!(max_seen.load(Ordering::SeqCst), 0);
+        assert_eq!(adaptive.effective_concurrency, 0);
+        assert!(adaptive.decisions.iter().any(|decision| {
+            decision.action == AgentTaskAdaptiveConcurrencyAction::Paused
+                && decision.reason.contains("consume runner_capacity=1")
+        }));
+        assert!(aggregate
+            .queue
+            .backpressure
+            .iter()
+            .any(|status| status.kind == "adaptive_concurrency"));
+    }
+
+    #[test]
+    fn adaptive_concurrency_status_records_held_decision() {
+        let scheduler = AgentTaskScheduler::new(RecordingExecutor::new(
+            HashMap::new(),
+            Duration::from_millis(0),
+        ));
+        let mut plan = plan_with_tasks(1);
+        plan.options.max_concurrency = 2;
+        plan.options.adaptive_concurrency = Some(AgentTaskAdaptiveConcurrencyPolicy::default());
+
+        let aggregate = scheduler.run(plan);
+        let adaptive = aggregate
+            .queue
+            .adaptive_concurrency
+            .expect("adaptive status");
+
+        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+        assert_eq!(adaptive.effective_concurrency, 2);
+        assert!(adaptive.decisions.iter().any(|decision| {
+            decision.action == AgentTaskAdaptiveConcurrencyAction::Held
+                && decision.reason.contains("configured ceiling")
+        }));
+    }
+
+    #[test]
     fn applies_per_model_concurrency_below_global_limit() {
         let executor = RecordingExecutor::new(HashMap::new(), Duration::from_millis(25));
         let max_seen = Arc::clone(&executor.max_seen);
@@ -2077,6 +2420,8 @@ mod tests {
         assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
         assert_eq!(aggregate.totals.succeeded, 2);
         assert_eq!(aggregate.totals.skipped, 0);
+        assert_eq!(aggregate.queue.max_concurrency, 1);
+        assert!(aggregate.queue.adaptive_concurrency.is_none());
     }
 
     #[test]
