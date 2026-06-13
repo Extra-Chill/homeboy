@@ -1370,7 +1370,7 @@ homeboy_prepare_validation_dependency_for_wp_codebox_bench() {
     fi
 
     if ! command -v composer >/dev/null 2>&1; then
-        _homeboy_record_bench_dependency_build_failure "$artifacts_dir" "$dependency_slug" "$dependency_path" "$package_root" "$package_root" "$package_root" 'composer install --no-dev --no-interaction --no-progress --prefer-dist' 127 ''
+        _homeboy_record_bench_dependency_build_failure "$artifacts_dir" "$dependency_slug" "$dependency_path" "$package_root" "$package_root" "$package_root" 'composer install --no-dev --no-interaction --no-progress --prefer-dist --classmap-authoritative' 127 ''
         echo "Error: WordPress bench dependency '${dependency_path}' has composer.json but no vendor autoload files, and composer is not available." >&2
         return 1
     fi
@@ -1438,12 +1438,12 @@ homeboy_prepare_validation_dependency_for_wp_codebox_bench() {
     local composer_output composer_exit
     composer_output=$(mktemp "${TMPDIR:-/tmp}/homeboy-wp-bench-dependency-composer-${dependency_slug}.XXXXXX")
     set +e
-    composer install --working-dir="$tmp_prepared_plugin_path" --no-dev --no-interaction --no-progress --prefer-dist >"$composer_output" 2>&1
+    composer install --working-dir="$tmp_prepared_plugin_path" --no-dev --no-interaction --no-progress --prefer-dist --classmap-authoritative >"$composer_output" 2>&1
     composer_exit=$?
     set -e
     if [ "$composer_exit" -ne 0 ]; then
         cat "$composer_output" >&2
-        _homeboy_record_bench_dependency_build_failure "$artifacts_dir" "$dependency_slug" "$dependency_path" "$package_root" "$prepare_root" "$tmp_prepared_plugin_path" "composer install --working-dir=${tmp_prepared_plugin_path} --no-dev --no-interaction --no-progress --prefer-dist" "$composer_exit" "$composer_output"
+        _homeboy_record_bench_dependency_build_failure "$artifacts_dir" "$dependency_slug" "$dependency_path" "$package_root" "$prepare_root" "$tmp_prepared_plugin_path" "composer install --working-dir=${tmp_prepared_plugin_path} --no-dev --no-interaction --no-progress --prefer-dist --classmap-authoritative" "$composer_exit" "$composer_output"
         rm -rf "$tmp_entry"
         rm -f "$composer_output"
         echo "Error: Could not prepare WordPress bench dependency '${dependency_slug}' with Composer at ${tmp_prepared_plugin_path}." >&2
