@@ -21,8 +21,6 @@ use homeboy::core::agent_task_loop_controller::{
     AgentTaskLoopHistoryEvent, AgentTaskLoopPolicyAction, AgentTaskLoopPolicyActionRecord,
     AgentTaskLoopRunRef,
 };
-#[cfg(test)]
-use homeboy::core::agent_task_loop_controller::{AgentTaskLoopWait, AgentTaskLoopWaitStatus};
 use homeboy::core::agent_task_provider::ExtensionProviderAgentTaskExecutor;
 use homeboy::core::agent_task_scheduler::{
     AgentTaskExecutorAdapter, AgentTaskPlan, AgentTaskScheduler,
@@ -626,7 +624,7 @@ fn controller(args: AgentTaskControllerArgs) -> CmdResult<Value> {
             0,
         )),
         AgentTaskControllerCommand::Status(status_args) => Ok((
-            command_json_value(agent_task_loop_controller::controller_status(
+            command_json_value(agent_task_loop_controller::controller_status_report(
                 &status_args.loop_id,
             )?)?,
             0,
@@ -892,10 +890,7 @@ where
         | AgentTaskLoopPolicyAction::WaitForController { .. }
         | AgentTaskLoopPolicyAction::ValidateCandidatePatch { .. }
         | AgentTaskLoopPolicyAction::Retry { .. }
-        | AgentTaskLoopPolicyAction::RequestChanges { .. }
-        | AgentTaskLoopPolicyAction::SpawnController { .. }
-        | AgentTaskLoopPolicyAction::SpawnSubloop { .. }
-        | AgentTaskLoopPolicyAction::WaitForController { .. } => {
+        | AgentTaskLoopPolicyAction::RequestChanges { .. } => {
             Err(homeboy::core::Error::validation_invalid_argument(
                 "action_id",
                 format!(

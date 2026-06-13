@@ -40,6 +40,17 @@ pub(super) fn read_record(run_id: &str) -> Result<AgentTaskRunRecord> {
     read_json(&record_path(run_id)?)
 }
 
+pub(super) fn record_exists(run_id: &str) -> Result<bool> {
+    match fs::metadata(record_path(run_id)?) {
+        Ok(metadata) => Ok(metadata.is_file()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(Error::internal_io(
+            error.to_string(),
+            Some(run_id.to_string()),
+        )),
+    }
+}
+
 pub(super) fn read_records() -> Result<Vec<AgentTaskRunRecord>> {
     let root = paths::homeboy_data()?.join("agent-task-runs");
     let entries = match fs::read_dir(&root) {
