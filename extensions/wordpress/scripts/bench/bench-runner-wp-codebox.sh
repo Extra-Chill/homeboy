@@ -12,6 +12,7 @@ BENCH_RESULTS_ARTIFACTS_HELPER="${SCRIPT_DIR}/bench-results-artifacts.sh"
 BENCH_BROWSER_METRICS_HELPER="${EXTENSION_DIR}/lib/wp-codebox-browser-metrics.js"
 DEPENDENCY_HELPER="${HOMEBOY_WORDPRESS_DEPENDENCY_HELPER:-${SCRIPT_DIR}/../lib/validation-dependencies.sh}"
 BENCH_BROWSER_TARGET_HELPER="${SCRIPT_DIR}/browser-target.sh"
+WP_CODEBOX_PATHS_HELPER="${SCRIPT_DIR}/../lib/wp-codebox-paths.sh"
 BENCH_RECIPE_BUILDER="${SCRIPT_DIR}/build-wp-codebox-bench-recipe.mjs"
 
 # shellcheck source=/dev/null
@@ -42,6 +43,8 @@ if [ -f "$DEPENDENCY_HELPER" ]; then
 fi
 # shellcheck source=browser-target.sh
 source "$BENCH_BROWSER_TARGET_HELPER"
+# shellcheck source=../lib/wp-codebox-paths.sh
+source "$WP_CODEBOX_PATHS_HELPER"
 
 if [ -n "${COMPONENT_ID:-}" ]; then
     PLUGIN_SLUG="$COMPONENT_ID"
@@ -50,16 +53,10 @@ else
     COMPONENT_ID="$PLUGIN_SLUG"
 fi
 
-WP_CODEBOX_BIN="${HOMEBOY_WP_CODEBOX_BIN:-}"
-if [ -z "$WP_CODEBOX_BIN" ] && [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]; then
-    WP_CODEBOX_BIN=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -r '.wp_codebox_bin // empty' 2>/dev/null || true)
-fi
-WP_CODEBOX_BIN="${WP_CODEBOX_BIN:-wp-codebox}"
-if [ "$WP_CODEBOX_BIN" = "wp-codebox" ] && ! command -v wp-codebox >/dev/null 2>&1; then
-    echo "Error: wp-codebox not found; set HOMEBOY_WP_CODEBOX_BIN, settings wp_codebox_bin, or install wp-codebox." >&2
+WP_CODEBOX_BIN="$(homeboy_wp_codebox_resolve_bin "${HOMEBOY_SETTINGS_JSON:-}")" || {
     FAILED_STEP="WP Codebox CLI setup"
     exit 1
-fi
+}
 
 settings_json="${HOMEBOY_SETTINGS_JSON:-}"
 [ -n "$settings_json" ] || settings_json="{}"
@@ -757,16 +754,9 @@ if type homeboy_preflight_declared_validation_dependency_paths &>/dev/null; then
     fi
 fi
 
-wp_codebox_command=("$WP_CODEBOX_BIN")
-case "$WP_CODEBOX_BIN" in
-    *.js)
-        wp_codebox_command=(node "$WP_CODEBOX_BIN")
-        ;;
-esac
-WP_CODEBOX_RESOLVED_BIN="$WP_CODEBOX_BIN"
-if resolved_wp_codebox_bin=$(command -v "$WP_CODEBOX_BIN" 2>/dev/null); then
-    WP_CODEBOX_RESOLVED_BIN="$resolved_wp_codebox_bin"
-fi
+homeboy_wp_codebox_set_command "$WP_CODEBOX_BIN"
+wp_codebox_command=("${HOMEBOY_WP_CODEBOX_COMMAND[@]}")
+WP_CODEBOX_RESOLVED_BIN="$(homeboy_wp_codebox_resolved_bin_path "$WP_CODEBOX_BIN")"
 
 if type homeboy_export_validation_dependency_paths &>/dev/null; then
     homeboy_export_validation_dependency_paths "$PLUGIN_PATH"

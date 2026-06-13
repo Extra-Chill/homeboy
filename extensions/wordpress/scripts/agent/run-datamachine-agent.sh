@@ -7,6 +7,10 @@ WORKLOAD_PATH="$SCRIPT_DIR/datamachine-agent-workload.php"
 REPLAY_BUNDLE_BUILDER="$SCRIPT_DIR/build-replay-bundle.js"
 WPGYM_EVAL_ROW_PROJECTOR="$SCRIPT_DIR/project-wpgym-eval-row.js"
 WPGYM_EVAL_ROW_VALIDATOR="$SCRIPT_DIR/validate-wpgym-eval-row.js"
+WP_CODEBOX_PATHS_HELPER="$SCRIPT_DIR/../lib/wp-codebox-paths.sh"
+
+# shellcheck source=../lib/wp-codebox-paths.sh
+source "$WP_CODEBOX_PATHS_HELPER"
 
 homeboy_datamachine_agent_bundle_clone_url() {
     local repo_url="${1:-}"
@@ -112,14 +116,8 @@ homeboy_datamachine_agent_add_wp_codebox_mount() {
 }
 
 homeboy_datamachine_agent_wp_codebox_run() {
-    local wp_codebox_bin="${HOMEBOY_WP_CODEBOX_BIN:-}"
-    if [ -z "$wp_codebox_bin" ]; then
-        wp_codebox_bin=$(jq -r '.wp_codebox_bin // "wp-codebox"' "$CONFIG_PATH")
-    fi
-    if [ "$wp_codebox_bin" = "wp-codebox" ] && ! command -v wp-codebox >/dev/null 2>&1; then
-        echo "ERROR: wp-codebox not found; set HOMEBOY_WP_CODEBOX_BIN or config wp_codebox_bin" >&2
-        exit 1
-    fi
+    local wp_codebox_bin
+    wp_codebox_bin="$(homeboy_wp_codebox_resolve_bin "$CONFIG_JSON" "config")" || exit 1
 
     local artifacts_dir="${HOMEBOY_WP_CODEBOX_ARTIFACTS_DIR:-}"
     if [ -z "$artifacts_dir" ]; then
@@ -247,12 +245,8 @@ PHP
 
     local wp_codebox_output
     wp_codebox_output=$(mktemp "${TMPDIR:-/tmp}/homeboy-wp-codebox-output.XXXXXX")
-    local wp_codebox_command=("$wp_codebox_bin")
-    case "$wp_codebox_bin" in
-        *.js)
-            wp_codebox_command=(node "$wp_codebox_bin")
-            ;;
-    esac
+    homeboy_wp_codebox_set_command "$wp_codebox_bin"
+    local wp_codebox_command=("${HOMEBOY_WP_CODEBOX_COMMAND[@]}")
 
     set +e
     HOMEBOY_DATAMACHINE_AGENT_CONFIG="$CONFIG_JSON" \
@@ -511,12 +505,8 @@ homeboy_datamachine_agent_wp_codebox_command() {
     local wp_codebox_bin="$1"
     shift
 
-    local wp_codebox_command=("$wp_codebox_bin")
-    case "$wp_codebox_bin" in
-        *.js)
-            wp_codebox_command=(node "$wp_codebox_bin")
-            ;;
-    esac
+    homeboy_wp_codebox_set_command "$wp_codebox_bin"
+    local wp_codebox_command=("${HOMEBOY_WP_CODEBOX_COMMAND[@]}")
 
     "${wp_codebox_command[@]}" "$@"
 }
