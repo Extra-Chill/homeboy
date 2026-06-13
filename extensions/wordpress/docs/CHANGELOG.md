@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.121.15] - 2026-06-13
+
+### Fixed
+- scope WordPress bench dependencies by profile
+
 ## [2.121.14] - 2026-06-13
 
 ### Fixed
