@@ -810,6 +810,10 @@ pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
     Ok(record)
 }
 
+pub fn run_record_exists(run_id: &str) -> Result<bool> {
+    store::record_exists(run_id)
+}
+
 pub fn cancel(run_id: &str) -> Result<AgentTaskRunRecord> {
     let mut record = store::read_record(&sanitize_run_id(run_id))?;
     if matches!(

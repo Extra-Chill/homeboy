@@ -1,4 +1,4 @@
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -6,9 +6,12 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::PathBuf;
 
-use crate::core::{paths, Error, Result};
+use crate::core::{agent_task_lifecycle, paths, Error, Result};
 
 pub const AGENT_TASK_LOOP_CONTROLLER_SCHEMA: &str = "homeboy/agent-task-loop-controller/v1";
+pub const AGENT_TASK_LOOP_CONTROLLER_STATUS_SCHEMA: &str =
+    "homeboy/agent-task-loop-controller-status/v1";
+const STALE_PENDING_ACTION_SECONDS: i64 = 24 * 60 * 60;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgentTaskLoopControllerRecord {
@@ -472,6 +475,50 @@ pub struct AgentTaskLoopHistoryEvent {
     pub payload: Value,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentTaskLoopControllerStatusReport {
+    pub schema: String,
+    pub controller: AgentTaskLoopControllerRecord,
+    pub diagnostics: AgentTaskLoopControllerDiagnostics,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentTaskLoopControllerDiagnostics {
+    pub schema: String,
+    pub stale_pending_threshold_seconds: i64,
+    pub summary: AgentTaskLoopControllerDiagnosticSummary,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_actions: Vec<AgentTaskLoopPendingActionDiagnostic>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskLoopControllerDiagnosticSummary {
+    pub pending_action_count: usize,
+    pub stale_pending_action_count: usize,
+    pub orphaned_pending_action_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskLoopPendingActionDiagnostic {
+    pub action_id: String,
+    pub action: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dedupe_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub referenced_run_id: Option<String>,
+    pub created_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub age_seconds: Option<i64>,
+    pub stale: bool,
+    pub orphaned: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub problems: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recovery_commands: Vec<String>,
+}
+
 impl AgentTaskLoopControllerRecord {
     pub fn new(
         loop_id: impl Into<String>,
@@ -890,6 +937,101 @@ impl AgentTaskLoopControllerRecord {
     }
 }
 
+pub fn controller_status_report(loop_id: &str) -> Result<AgentTaskLoopControllerStatusReport> {
+    let controller = load_controller(loop_id)?;
+    let diagnostics = controller_status_diagnostics(&controller)?;
+    Ok(AgentTaskLoopControllerStatusReport {
+        schema: AGENT_TASK_LOOP_CONTROLLER_STATUS_SCHEMA.to_string(),
+        controller,
+        diagnostics,
+    })
+}
+
+pub fn controller_status_diagnostics(
+    record: &AgentTaskLoopControllerRecord,
+) -> Result<AgentTaskLoopControllerDiagnostics> {
+    controller_status_diagnostics_with(record, Utc::now(), |run_id| {
+        agent_task_lifecycle::run_record_exists(run_id)
+    })
+}
+
+fn controller_status_diagnostics_with<F>(
+    record: &AgentTaskLoopControllerRecord,
+    now: DateTime<Utc>,
+    mut run_exists: F,
+) -> Result<AgentTaskLoopControllerDiagnostics>
+where
+    F: FnMut(&str) -> Result<bool>,
+{
+    let mut pending_actions = Vec::new();
+    let mut stale_pending_action_count = 0;
+    let mut orphaned_pending_action_count = 0;
+
+    for action in record
+        .next_actions
+        .iter()
+        .filter(|action| action.status == AgentTaskLoopActionStatus::Pending)
+    {
+        let age_seconds = parse_timestamp(&action.created_at).map(|created_at| {
+            now.signed_duration_since(created_at.with_timezone(&Utc))
+                .num_seconds()
+                .max(0)
+        });
+        let stale = age_seconds.is_some_and(|age| age >= STALE_PENDING_ACTION_SECONDS);
+        let runner_id = action_runner_id(action, record);
+        let referenced_run_id = action_referenced_run_id(action, record);
+        let missing_referenced_run = if let Some(run_id) = referenced_run_id.as_deref() {
+            !run_exists(run_id)?
+        } else {
+            false
+        };
+        let orphaned = missing_referenced_run;
+        let mut problems = Vec::new();
+        if stale {
+            problems.push("pending action is older than stale threshold".to_string());
+        }
+        if missing_referenced_run {
+            problems.push("referenced run record is missing".to_string());
+        }
+        let recovery_commands = if stale || orphaned {
+            recovery_commands_for(record, runner_id.as_deref())
+        } else {
+            Vec::new()
+        };
+
+        if stale {
+            stale_pending_action_count += 1;
+        }
+        if orphaned {
+            orphaned_pending_action_count += 1;
+        }
+        pending_actions.push(AgentTaskLoopPendingActionDiagnostic {
+            action_id: action.action_id.clone(),
+            action: action_name(&action.action).to_string(),
+            dedupe_key: action.dedupe_key.clone(),
+            runner_id,
+            referenced_run_id,
+            created_at: action.created_at.clone(),
+            age_seconds,
+            stale,
+            orphaned,
+            problems,
+            recovery_commands,
+        });
+    }
+
+    Ok(AgentTaskLoopControllerDiagnostics {
+        schema: "homeboy/agent-task-loop-controller-diagnostics/v1".to_string(),
+        stale_pending_threshold_seconds: STALE_PENDING_ACTION_SECONDS,
+        summary: AgentTaskLoopControllerDiagnosticSummary {
+            pending_action_count: pending_actions.len(),
+            stale_pending_action_count,
+            orphaned_pending_action_count,
+        },
+        pending_actions,
+    })
+}
+
 pub fn create_controller(
     loop_id: &str,
     phase: &str,
@@ -1046,6 +1188,119 @@ fn action_name(action: &AgentTaskLoopPolicyAction) -> &'static str {
     }
 }
 
+fn action_runner_id(
+    action: &AgentTaskLoopPolicyActionRecord,
+    record: &AgentTaskLoopControllerRecord,
+) -> Option<String> {
+    action_value(action)
+        .as_ref()
+        .and_then(|value| first_string_at_keys(value, &["runner_id", "runner", "lab_runner_id"]))
+        .or_else(|| {
+            first_string_at_keys(
+                &record.metadata,
+                &["runner_id", "runner", "lab_runner_id", "configured_runner"],
+            )
+        })
+}
+
+fn action_referenced_run_id(
+    action: &AgentTaskLoopPolicyActionRecord,
+    record: &AgentTaskLoopControllerRecord,
+) -> Option<String> {
+    match &action.action {
+        AgentTaskLoopPolicyAction::Retry { target_run_id }
+        | AgentTaskLoopPolicyAction::RequestChanges { target_run_id, .. } => {
+            Some(target_run_id.clone())
+        }
+        _ => action_value(action)
+            .as_ref()
+            .and_then(|value| {
+                first_string_at_keys(
+                    value,
+                    &[
+                        "referenced_run_id",
+                        "target_run_id",
+                        "remote_run_id",
+                        "run_id",
+                    ],
+                )
+            })
+            .or_else(|| referenced_run_id_from_dedupe(action, record)),
+    }
+}
+
+fn referenced_run_id_from_dedupe(
+    action: &AgentTaskLoopPolicyActionRecord,
+    record: &AgentTaskLoopControllerRecord,
+) -> Option<String> {
+    let dedupe_key = action.dedupe_key.as_ref()?;
+    record
+        .dedupe_keys
+        .get(dedupe_key)
+        .and_then(|dedupe| dedupe.run_id.clone())
+}
+
+fn action_value(action: &AgentTaskLoopPolicyActionRecord) -> Option<Value> {
+    serde_json::to_value(&action.action).ok()
+}
+
+fn first_string_at_keys(value: &Value, keys: &[&str]) -> Option<String> {
+    match value {
+        Value::Object(map) => {
+            for key in keys {
+                if let Some(value) = map.get(*key).and_then(Value::as_str) {
+                    if !value.trim().is_empty() {
+                        return Some(value.to_string());
+                    }
+                }
+            }
+            map.values()
+                .find_map(|value| first_string_at_keys(value, keys))
+        }
+        Value::Array(values) => values
+            .iter()
+            .find_map(|value| first_string_at_keys(value, keys)),
+        _ => None,
+    }
+}
+
+fn parse_timestamp(value: &str) -> Option<DateTime<chrono::FixedOffset>> {
+    DateTime::parse_from_rfc3339(value).ok()
+}
+
+fn recovery_commands_for(
+    record: &AgentTaskLoopControllerRecord,
+    runner_id: Option<&str>,
+) -> Vec<String> {
+    let loop_id = shell_arg(&record.loop_id);
+    let mut commands = Vec::new();
+    if let Some(runner_id) = runner_id {
+        commands.push(format!(
+            "homeboy agent-task controller run {loop_id} --runner {}",
+            shell_arg(runner_id)
+        ));
+        commands.push(format!(
+            "homeboy agent-task controller resume {loop_id} --runner {}",
+            shell_arg(runner_id)
+        ));
+    } else {
+        commands.push(format!("homeboy agent-task controller run {loop_id}"));
+        commands.push(format!("homeboy agent-task controller resume {loop_id}"));
+    }
+    commands
+}
+
+fn shell_arg(value: &str) -> String {
+    if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | ':'))
+    {
+        value.to_string()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
+}
+
 fn entity_dedupe_key(entity_type: &str, key: &str) -> String {
     format!("entity:{entity_type}:{key}")
 }
@@ -1113,6 +1368,86 @@ mod tests {
         assert_eq!(first.status, AgentTaskLoopActionStatus::Pending);
         assert_eq!(second.status, AgentTaskLoopActionStatus::AlreadySatisfied);
         assert_eq!(record.dedupe_keys.len(), 1);
+    }
+
+    #[test]
+    fn status_diagnostics_flag_old_pending_actions() {
+        let mut record = AgentTaskLoopControllerRecord::new("loop", "repair", "v1");
+        record.metadata = json!({ "runner_id": "lab-runner" });
+        record.record_action(
+            AgentTaskLoopPolicyAction::SpawnTask {
+                dedupe_key: "finding:abc:repair".to_string(),
+                entity_id: Some("finding:abc".to_string()),
+                request: json!({ "task": "repair" }),
+            },
+            "finding emitted",
+        );
+        record.next_actions[0].created_at = "2026-06-09T00:00:00Z".to_string();
+
+        let diagnostics = controller_status_diagnostics_with(
+            &record,
+            DateTime::parse_from_rfc3339("2026-06-11T00:00:01Z")
+                .expect("now")
+                .with_timezone(&Utc),
+            |_| Ok(true),
+        )
+        .expect("diagnostics");
+
+        assert_eq!(diagnostics.summary.pending_action_count, 1);
+        assert_eq!(diagnostics.summary.stale_pending_action_count, 1);
+        assert_eq!(diagnostics.summary.orphaned_pending_action_count, 0);
+        let action = &diagnostics.pending_actions[0];
+        assert_eq!(action.action_id, "action-1");
+        assert_eq!(action.dedupe_key.as_deref(), Some("finding:abc:repair"));
+        assert_eq!(action.runner_id.as_deref(), Some("lab-runner"));
+        assert_eq!(action.age_seconds, Some(172801));
+        assert!(action.stale);
+        assert!(!action.orphaned);
+        assert!(action
+            .problems
+            .contains(&"pending action is older than stale threshold".to_string()));
+        assert!(action.recovery_commands.iter().any(|command| command
+            .contains("homeboy agent-task controller run loop --runner lab-runner")));
+    }
+
+    #[test]
+    fn status_diagnostics_flag_missing_referenced_run_records() {
+        let mut record = AgentTaskLoopControllerRecord::new("loop", "repair", "v1");
+        record.record_action(
+            AgentTaskLoopPolicyAction::SpawnTask {
+                dedupe_key: "finding:abc:repair".to_string(),
+                entity_id: Some("finding:abc".to_string()),
+                request: json!({
+                    "task": "repair",
+                    "lab": { "runner_id": "configured-lab" },
+                    "metadata": { "remote_run_id": "missing-run-123" }
+                }),
+            },
+            "finding emitted",
+        );
+        record.next_actions[0].created_at = "2026-06-11T00:00:00Z".to_string();
+
+        let diagnostics = controller_status_diagnostics_with(
+            &record,
+            DateTime::parse_from_rfc3339("2026-06-11T00:05:00Z")
+                .expect("now")
+                .with_timezone(&Utc),
+            |run_id| Ok(run_id != "missing-run-123"),
+        )
+        .expect("diagnostics");
+
+        assert_eq!(diagnostics.summary.pending_action_count, 1);
+        assert_eq!(diagnostics.summary.stale_pending_action_count, 0);
+        assert_eq!(diagnostics.summary.orphaned_pending_action_count, 1);
+        let action = &diagnostics.pending_actions[0];
+        assert_eq!(action.runner_id.as_deref(), Some("configured-lab"));
+        assert_eq!(action.referenced_run_id.as_deref(), Some("missing-run-123"));
+        assert_eq!(action.age_seconds, Some(300));
+        assert!(!action.stale);
+        assert!(action.orphaned);
+        assert!(action
+            .problems
+            .contains(&"referenced run record is missing".to_string()));
     }
 
     #[test]
