@@ -295,6 +295,18 @@ pub struct AgentTaskLoopPolicyActionRecord {
     pub created_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dedupe_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<AgentTaskLoopActionDiagnostic>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskLoopActionDiagnostic {
+    pub code: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner: Option<String>,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub details: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -367,6 +379,44 @@ pub enum AgentTaskLoopActionStatus {
     AlreadySatisfied,
     Completed,
     Failed,
+    BlockedRunnerUnavailable,
+    BlockedRemoteMaterialization,
+    BlockedLocalFallbackDenied,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskLoopRunnerPolicy {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_fallback: Option<AgentTaskLoopLocalFallbackPolicy>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentTaskLoopLocalFallbackPolicy {
+    Allowed,
+    Denied,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentTaskLoopRunnerAvailability {
+    Available,
+    Unavailable { reason: String },
+    MaterializationBlocked { reason: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentTaskLoopRunnerExecutionTarget {
+    Local,
+    Runner(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentTaskLoopRunnerPolicyDecision {
+    pub target: Option<AgentTaskLoopRunnerExecutionTarget>,
+    pub blocked_status: Option<AgentTaskLoopActionStatus>,
+    pub diagnostic: Option<AgentTaskLoopActionDiagnostic>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -753,10 +803,160 @@ impl AgentTaskLoopControllerRecord {
             reason,
             created_at: now_timestamp(),
             dedupe_key,
+            diagnostics: Vec::new(),
         };
         self.next_actions.push(record.clone());
         self.touch();
         record
+    }
+
+    pub fn block_action_for_runner_policy(
+        &mut self,
+        action_id: &str,
+        status: AgentTaskLoopActionStatus,
+        diagnostic: AgentTaskLoopActionDiagnostic,
+    ) -> Result<()> {
+        if !matches!(
+            status,
+            AgentTaskLoopActionStatus::BlockedRunnerUnavailable
+                | AgentTaskLoopActionStatus::BlockedRemoteMaterialization
+                | AgentTaskLoopActionStatus::BlockedLocalFallbackDenied
+        ) {
+            return Err(Error::validation_invalid_argument(
+                "status",
+                "runner policy blocks must use a blocked action status",
+                Some(format!("{status:?}")),
+                None,
+            ));
+        }
+
+        let action = self
+            .next_actions
+            .iter_mut()
+            .find(|action| action.action_id == action_id)
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "action_id",
+                    format!("loop action '{action_id}' does not exist"),
+                    Some(action_id.to_string()),
+                    None,
+                )
+            })?;
+        action.status = status;
+        action.reason = diagnostic.message.clone();
+        action.diagnostics.push(diagnostic.clone());
+        self.history.push(AgentTaskLoopHistoryEvent {
+            event_id: format!("runner-policy-block-{}", self.history.len() + 1),
+            event_type: "runner_policy.blocked".to_string(),
+            recorded_at: now_timestamp(),
+            entity_id: action_entity_id(&action.action),
+            payload: json!({
+                "action_id": action_id,
+                "status": status,
+                "diagnostic": diagnostic,
+            }),
+        });
+        self.touch();
+        Ok(())
+    }
+
+    pub fn runner_policy_for_action(
+        &self,
+        action: &AgentTaskLoopPolicyAction,
+    ) -> AgentTaskLoopRunnerPolicy {
+        let request = action_runner_request(action);
+        let runner = request
+            .and_then(|value| value.get("runner"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|runner| !runner.is_empty())
+            .map(ToString::to_string);
+        let local_fallback = request
+            .and_then(|value| value.get("local_fallback"))
+            .and_then(parse_local_fallback_policy);
+
+        AgentTaskLoopRunnerPolicy {
+            runner,
+            local_fallback,
+        }
+    }
+
+    pub fn resolve_action_runner_policy<F>(
+        &self,
+        action: &AgentTaskLoopPolicyAction,
+        mut runner_availability: F,
+    ) -> AgentTaskLoopRunnerPolicyDecision
+    where
+        F: FnMut(&str) -> AgentTaskLoopRunnerAvailability,
+    {
+        let policy = self.runner_policy_for_action(action);
+        let fallback = policy.local_fallback.unwrap_or_else(|| {
+            if policy.runner.is_some() {
+                AgentTaskLoopLocalFallbackPolicy::Denied
+            } else {
+                AgentTaskLoopLocalFallbackPolicy::Allowed
+            }
+        });
+
+        let Some(runner) = policy.runner else {
+            return match fallback {
+                AgentTaskLoopLocalFallbackPolicy::Allowed => AgentTaskLoopRunnerPolicyDecision {
+                    target: Some(AgentTaskLoopRunnerExecutionTarget::Local),
+                    blocked_status: None,
+                    diagnostic: None,
+                },
+                AgentTaskLoopLocalFallbackPolicy::Denied => blocked_runner_decision(
+                    AgentTaskLoopActionStatus::BlockedLocalFallbackDenied,
+                    None,
+                    "controller action denies local fallback but did not declare a runner",
+                    Value::Null,
+                ),
+            };
+        };
+
+        match runner_availability(&runner) {
+            AgentTaskLoopRunnerAvailability::Available => AgentTaskLoopRunnerPolicyDecision {
+                target: Some(AgentTaskLoopRunnerExecutionTarget::Runner(runner)),
+                blocked_status: None,
+                diagnostic: None,
+            },
+            AgentTaskLoopRunnerAvailability::Unavailable { reason } => match fallback {
+                AgentTaskLoopLocalFallbackPolicy::Allowed => AgentTaskLoopRunnerPolicyDecision {
+                    target: Some(AgentTaskLoopRunnerExecutionTarget::Local),
+                    blocked_status: None,
+                    diagnostic: Some(AgentTaskLoopActionDiagnostic {
+                        code: "runner_unavailable_local_fallback_allowed".to_string(),
+                        message: reason,
+                        runner: Some(runner),
+                        details: Value::Null,
+                    }),
+                },
+                AgentTaskLoopLocalFallbackPolicy::Denied => blocked_runner_decision(
+                    AgentTaskLoopActionStatus::BlockedRunnerUnavailable,
+                    Some(runner),
+                    reason,
+                    Value::Null,
+                ),
+            },
+            AgentTaskLoopRunnerAvailability::MaterializationBlocked { reason } => match fallback {
+                AgentTaskLoopLocalFallbackPolicy::Allowed => AgentTaskLoopRunnerPolicyDecision {
+                    target: Some(AgentTaskLoopRunnerExecutionTarget::Local),
+                    blocked_status: None,
+                    diagnostic: Some(AgentTaskLoopActionDiagnostic {
+                        code: "remote_materialization_blocked_local_fallback_allowed".to_string(),
+                        message: reason,
+                        runner: Some(runner),
+                        details: Value::Null,
+                    }),
+                },
+                AgentTaskLoopLocalFallbackPolicy::Denied => blocked_runner_decision(
+                    AgentTaskLoopActionStatus::BlockedRemoteMaterialization,
+                    Some(runner),
+                    reason,
+                    Value::Null,
+                ),
+            },
+        }
     }
 
     pub fn mark_human_ready(&mut self, entity_id: &str, reason: Option<String>) -> Result<()> {
@@ -1201,6 +1401,60 @@ fn action_dedupe_key(action: &AgentTaskLoopPolicyAction) -> Option<String> {
     }
 }
 
+fn action_runner_request(action: &AgentTaskLoopPolicyAction) -> Option<&Value> {
+    match action {
+        AgentTaskLoopPolicyAction::SpawnTask { request, .. } => Some(request),
+        AgentTaskLoopPolicyAction::FanOut {
+            request_template, ..
+        }
+        | AgentTaskLoopPolicyAction::RouteFinding {
+            request_template, ..
+        } => Some(request_template),
+        _ => None,
+    }
+}
+
+fn parse_local_fallback_policy(value: &Value) -> Option<AgentTaskLoopLocalFallbackPolicy> {
+    match value {
+        Value::Bool(true) => Some(AgentTaskLoopLocalFallbackPolicy::Allowed),
+        Value::Bool(false) => Some(AgentTaskLoopLocalFallbackPolicy::Denied),
+        Value::String(value) if value == "allowed" || value == "allow" || value == "true" => {
+            Some(AgentTaskLoopLocalFallbackPolicy::Allowed)
+        }
+        Value::String(value) if value == "denied" || value == "deny" || value == "false" => {
+            Some(AgentTaskLoopLocalFallbackPolicy::Denied)
+        }
+        _ => None,
+    }
+}
+
+fn blocked_runner_decision(
+    status: AgentTaskLoopActionStatus,
+    runner: Option<String>,
+    message: impl Into<String>,
+    details: Value,
+) -> AgentTaskLoopRunnerPolicyDecision {
+    AgentTaskLoopRunnerPolicyDecision {
+        target: None,
+        blocked_status: Some(status),
+        diagnostic: Some(AgentTaskLoopActionDiagnostic {
+            code: blocked_runner_status_code(status).to_string(),
+            message: message.into(),
+            runner,
+            details,
+        }),
+    }
+}
+
+fn blocked_runner_status_code(status: AgentTaskLoopActionStatus) -> &'static str {
+    match status {
+        AgentTaskLoopActionStatus::BlockedRunnerUnavailable => "blocked_runner_unavailable",
+        AgentTaskLoopActionStatus::BlockedRemoteMaterialization => "blocked_remote_materialization",
+        AgentTaskLoopActionStatus::BlockedLocalFallbackDenied => "blocked_local_fallback_denied",
+        _ => "runner_policy_not_blocked",
+    }
+}
+
 fn jsonpath_match_is_truthy(value: &Value) -> bool {
     match value {
         Value::Null => false,
@@ -1565,6 +1819,207 @@ mod tests {
 
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0].status, AgentTaskLoopActionStatus::Pending);
+    }
+
+    #[test]
+    fn runner_policy_prefers_declared_runner_when_available() {
+        let record = AgentTaskLoopControllerRecord::new("loop", "dispatch", "v1");
+        let action = AgentTaskLoopPolicyAction::SpawnTask {
+            dedupe_key: "task:lab".to_string(),
+            entity_id: None,
+            request: json!({ "task": "repair", "runner": "homeboy-lab" }),
+        };
+
+        let decision = record.resolve_action_runner_policy(&action, |runner| {
+            assert_eq!(runner, "homeboy-lab");
+            AgentTaskLoopRunnerAvailability::Available
+        });
+
+        assert_eq!(
+            decision.target,
+            Some(AgentTaskLoopRunnerExecutionTarget::Runner(
+                "homeboy-lab".to_string()
+            ))
+        );
+        assert_eq!(decision.blocked_status, None);
+        assert_eq!(decision.diagnostic, None);
+    }
+
+    #[test]
+    fn runner_policy_allows_explicit_local_fallback_when_runner_is_unavailable() {
+        let record = AgentTaskLoopControllerRecord::new("loop", "dispatch", "v1");
+        let action = AgentTaskLoopPolicyAction::SpawnTask {
+            dedupe_key: "task:lab".to_string(),
+            entity_id: None,
+            request: json!({
+                "task": "repair",
+                "runner": "homeboy-lab",
+                "local_fallback": "allowed"
+            }),
+        };
+
+        let decision = record.resolve_action_runner_policy(&action, |_| {
+            AgentTaskLoopRunnerAvailability::Unavailable {
+                reason: "runner heartbeat is stale".to_string(),
+            }
+        });
+
+        assert_eq!(
+            decision.target,
+            Some(AgentTaskLoopRunnerExecutionTarget::Local)
+        );
+        assert_eq!(decision.blocked_status, None);
+        assert_eq!(
+            decision
+                .diagnostic
+                .as_ref()
+                .map(|diagnostic| diagnostic.code.as_str()),
+            Some("runner_unavailable_local_fallback_allowed")
+        );
+    }
+
+    #[test]
+    fn runner_policy_denies_local_fallback_for_unavailable_required_runner() {
+        let record = AgentTaskLoopControllerRecord::new("loop", "dispatch", "v1");
+        let action = AgentTaskLoopPolicyAction::SpawnTask {
+            dedupe_key: "task:lab".to_string(),
+            entity_id: None,
+            request: json!({
+                "task": "repair",
+                "runner": "homeboy-lab",
+                "local_fallback": "denied"
+            }),
+        };
+
+        let decision = record.resolve_action_runner_policy(&action, |_| {
+            AgentTaskLoopRunnerAvailability::Unavailable {
+                reason: "runner is not registered".to_string(),
+            }
+        });
+
+        assert_eq!(decision.target, None);
+        assert_eq!(
+            decision.blocked_status,
+            Some(AgentTaskLoopActionStatus::BlockedRunnerUnavailable)
+        );
+        let diagnostic = decision.diagnostic.expect("blocked diagnostic");
+        assert_eq!(diagnostic.code, "blocked_runner_unavailable");
+        assert_eq!(diagnostic.runner.as_deref(), Some("homeboy-lab"));
+    }
+
+    #[test]
+    fn runner_policy_blocks_remote_materialization_failures() {
+        let record = AgentTaskLoopControllerRecord::new("loop", "dispatch", "v1");
+        let action = AgentTaskLoopPolicyAction::FanOut {
+            dedupe_key: "fanout:lab".to_string(),
+            entity_ids: vec!["finding:1".to_string()],
+            request_template: json!({
+                "task": "repair",
+                "runner": "homeboy-lab",
+                "local_fallback": false
+            }),
+        };
+
+        let decision = record.resolve_action_runner_policy(&action, |_| {
+            AgentTaskLoopRunnerAvailability::MaterializationBlocked {
+                reason: "workspace snapshot could not be materialized remotely".to_string(),
+            }
+        });
+
+        assert_eq!(decision.target, None);
+        assert_eq!(
+            decision.blocked_status,
+            Some(AgentTaskLoopActionStatus::BlockedRemoteMaterialization)
+        );
+        assert_eq!(
+            decision
+                .diagnostic
+                .as_ref()
+                .map(|diagnostic| diagnostic.code.as_str()),
+            Some("blocked_remote_materialization")
+        );
+    }
+
+    #[test]
+    fn runner_policy_blocks_local_execution_when_fallback_is_denied_without_runner() {
+        let record = AgentTaskLoopControllerRecord::new("loop", "dispatch", "v1");
+        let action = AgentTaskLoopPolicyAction::RouteFinding {
+            finding: AgentTaskLoopFindingPacket {
+                finding_id: "finding-1".to_string(),
+                severity: "high".to_string(),
+                summary: "drift".to_string(),
+                owner: None,
+                source_transformer: None,
+                reproduction_key: None,
+                lineage: Vec::new(),
+                payload: Value::Null,
+            },
+            dedupe_key: "finding:1".to_string(),
+            entity_id: Some("finding:1".to_string()),
+            request_template: json!({
+                "task": "repair",
+                "local_fallback": "denied"
+            }),
+        };
+
+        let decision = record.resolve_action_runner_policy(&action, |_| {
+            unreachable!("no runner should not probe runner availability")
+        });
+
+        assert_eq!(decision.target, None);
+        assert_eq!(
+            decision.blocked_status,
+            Some(AgentTaskLoopActionStatus::BlockedLocalFallbackDenied)
+        );
+        assert_eq!(
+            decision
+                .diagnostic
+                .as_ref()
+                .map(|diagnostic| diagnostic.code.as_str()),
+            Some("blocked_local_fallback_denied")
+        );
+    }
+
+    #[test]
+    fn runner_policy_block_persists_status_and_diagnostic() {
+        let mut record = AgentTaskLoopControllerRecord::new("loop", "dispatch", "v1");
+        let action = record.record_action(
+            AgentTaskLoopPolicyAction::SpawnTask {
+                dedupe_key: "task:lab".to_string(),
+                entity_id: Some("finding:1".to_string()),
+                request: json!({ "task": "repair", "runner": "homeboy-lab" }),
+            },
+            "policy matched",
+        );
+
+        let decision = record.resolve_action_runner_policy(&action.action, |_| {
+            AgentTaskLoopRunnerAvailability::Unavailable {
+                reason: "runner heartbeat is stale".to_string(),
+            }
+        });
+        record
+            .block_action_for_runner_policy(
+                &action.action_id,
+                decision.blocked_status.expect("blocked status"),
+                decision.diagnostic.expect("blocked diagnostic"),
+            )
+            .expect("blocked action recorded");
+
+        let persisted_action = record
+            .next_actions
+            .iter()
+            .find(|candidate| candidate.action_id == action.action_id)
+            .expect("action present");
+        assert_eq!(
+            persisted_action.status,
+            AgentTaskLoopActionStatus::BlockedRunnerUnavailable
+        );
+        assert_eq!(persisted_action.diagnostics.len(), 1);
+        assert_eq!(
+            persisted_action.diagnostics[0].code,
+            "blocked_runner_unavailable"
+        );
+        assert_eq!(record.history[0].event_type, "runner_policy.blocked");
     }
 
     #[test]

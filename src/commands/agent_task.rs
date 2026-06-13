@@ -887,6 +887,9 @@ where
             0,
         )),
         AgentTaskLoopPolicyAction::RouteFinding { .. }
+        | AgentTaskLoopPolicyAction::SpawnController { .. }
+        | AgentTaskLoopPolicyAction::SpawnSubloop { .. }
+        | AgentTaskLoopPolicyAction::WaitForController { .. }
         | AgentTaskLoopPolicyAction::ValidateCandidatePatch { .. }
         | AgentTaskLoopPolicyAction::Retry { .. }
         | AgentTaskLoopPolicyAction::RequestChanges { .. }
@@ -1044,6 +1047,7 @@ where
             reason: action.reason.clone(),
             created_at: action.created_at.clone(),
             dedupe_key: Some(child_dedupe_key.clone()),
+            diagnostics: Vec::new(),
         };
         let (result, child_exit_code) = execute_spawn_task_action(
             record,
@@ -2123,6 +2127,7 @@ mod tests {
     use homeboy::core::agent_task_lifecycle::{
         status as lifecycle_status, AgentTaskRunRecord, AgentTaskRunState,
     };
+    use homeboy::core::agent_task_loop_controller::{AgentTaskLoopWait, AgentTaskLoopWaitStatus};
     use homeboy::core::agent_task_scheduler::{AgentTaskExecutionContext, AgentTaskState};
     use serde_json::{json, Value};
     use std::sync::{Arc, Mutex};
