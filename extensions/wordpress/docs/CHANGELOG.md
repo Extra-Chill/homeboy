@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.121.7] - 2026-06-13
+
+### Fixed
+- use npm install for gitignored lockfiles instead of npm ci
+- report WordPress bench dependency build failures
+
 ## [2.121.6] - 2026-06-13
 
 ### Fixed
