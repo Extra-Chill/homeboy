@@ -58,6 +58,7 @@ pub use fingerprint::{
     run_fingerprint_script, AggregateConstructionSeam, AggregateLiteral, CallSite, DeadCodeMarker,
     FingerprintOutput, HookRef, UnusedParam,
 };
+pub(crate) use lifecycle::source_metadata::resolve_source_url;
 pub use lifecycle::source_metadata::SourceMetadataRepair;
 pub use lifecycle::{
     check_update_available, derive_id_from_url, install, install_for_component,
