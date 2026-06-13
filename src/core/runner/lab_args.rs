@@ -1,3 +1,4 @@
+use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -82,11 +83,8 @@ pub(super) fn remap_provider_config_in_args(
 pub(super) fn remap_agent_task_plan_in_args(
     args: &[String],
     mappings: &[LabPathRemap],
-) -> Vec<String> {
-    if mappings.is_empty() {
-        return args.to_vec();
-    }
-
+    source_path: &Path,
+) -> Result<Vec<String>> {
     let mut ordered: Vec<&LabPathRemap> = mappings.iter().collect();
     ordered.sort_by_key(|mapping| {
         (
@@ -111,20 +109,20 @@ pub(super) fn remap_agent_task_plan_in_args(
         if arg == "--plan" {
             out.push(arg.clone());
             if let Some(spec) = iter.next() {
-                out.push(remap_agent_task_plan_spec(spec, &ordered));
+                out.push(remap_agent_task_plan_spec(spec, &ordered, source_path)?);
             }
             continue;
         }
         if let Some(spec) = arg.strip_prefix("--plan=") {
             out.push(format!(
                 "--plan={}",
-                remap_agent_task_plan_spec(spec, &ordered)
+                remap_agent_task_plan_spec(spec, &ordered, source_path)?
             ));
             continue;
         }
         out.push(arg.clone());
     }
-    out
+    Ok(out)
 }
 
 pub(super) fn remap_path_settings_in_args(
@@ -192,17 +190,83 @@ pub(super) fn remap_path_settings_in_args(
 /// Resolve an agent-task plan spec, remap every controller-local path embedded
 /// in the JSON, and inline the result so the runner never reads stale local
 /// paths from a synced-but-unmodified plan file.
-fn remap_agent_task_plan_spec(spec: &str, mappings: &[&LabPathRemap]) -> String {
-    let raw = match read_json_spec_to_string(spec) {
-        Ok(raw) => raw,
-        Err(_) => return remap_at_file_spec(spec, mappings),
-    };
-    let mut value: Value = match serde_json::from_str(&raw) {
-        Ok(value) => value,
-        Err(_) => return remap_at_file_spec(spec, mappings),
-    };
+fn remap_agent_task_plan_spec(
+    spec: &str,
+    mappings: &[&LabPathRemap],
+    source_path: &Path,
+) -> Result<String> {
+    if spec == "-" {
+        return Ok(spec.to_string());
+    }
+
+    let raw = read_agent_task_plan_spec_to_string(spec, source_path)?;
+    let mut value: Value = serde_json::from_str(&raw).map_err(|err| {
+        Error::validation_invalid_json(
+            err,
+            Some(format!("parse agent-task run-plan --plan {spec}")),
+            None,
+        )
+    })?;
     remap_paths_in_value(&mut value, mappings);
-    serde_json::to_string(&value).unwrap_or_else(|_| remap_at_file_spec(spec, mappings))
+    serde_json::to_string(&value).map_err(|err| {
+        Error::internal_json(
+            err.to_string(),
+            Some("serialize remapped agent-task plan".to_string()),
+        )
+    })
+}
+
+fn read_agent_task_plan_spec_to_string(spec: &str, source_path: &Path) -> Result<String> {
+    let Some(raw_path) = spec.strip_prefix('@') else {
+        return read_json_spec_to_string(spec);
+    };
+    if raw_path.trim().is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "plan",
+            "Lab offload cannot materialize empty agent-task plan file spec '@'",
+            Some(spec.to_string()),
+            Some(vec![
+                "Pass inline JSON, '-', or @path/to/plan.json.".to_string()
+            ]),
+        ));
+    }
+    if raw_path.contains("://") {
+        return Err(Error::validation_invalid_argument(
+            "plan",
+            "Lab offload only supports local filesystem @file plan specs",
+            Some(spec.to_string()),
+            Some(vec![
+                "Use an absolute path, a path relative to the current directory, or a path relative to --cwd/--path.".to_string(),
+                "Remote URLs must be downloaded or generated locally before Lab offload.".to_string(),
+            ]),
+        ));
+    }
+
+    let expanded = PathBuf::from(shellexpand::tilde(raw_path).to_string());
+    let mut candidates = vec![expanded.clone()];
+    if expanded.is_relative() {
+        candidates.push(source_path.join(&expanded));
+    }
+
+    let mut tried = Vec::new();
+    for candidate in candidates {
+        tried.push(candidate.display().to_string());
+        if candidate.is_file() {
+            return fs::read_to_string(&candidate).map_err(|err| {
+                Error::internal_io(
+                    err.to_string(),
+                    Some(format!("read agent-task plan {}", candidate.display())),
+                )
+            });
+        }
+    }
+
+    Err(Error::validation_invalid_argument(
+        "plan",
+        "Lab offload cannot materialize agent-task run-plan @file because the controller-side file does not exist",
+        Some(spec.to_string()),
+        Some(tried),
+    ))
 }
 
 fn remap_path_setting_pair(raw: &str, mappings: &[&LabPathRemap]) -> String {
@@ -226,15 +290,6 @@ fn remap_path_json_setting_pair(raw: &str, mappings: &[&LabPathRemap]) -> String
     serde_json::to_string(&value)
         .map(|value| format!("{key}={value}"))
         .unwrap_or_else(|_| raw.to_string())
-}
-
-fn remap_at_file_spec(spec: &str, mappings: &[&LabPathRemap]) -> String {
-    let Some(path) = spec.strip_prefix('@') else {
-        return spec.to_string();
-    };
-    remap_local_path(path, mappings)
-        .map(|remapped| format!("@{remapped}"))
-        .unwrap_or_else(|| spec.to_string())
 }
 
 /// Resolve a provider-config spec (inline JSON / `@file` / `-`), remap its
@@ -621,7 +676,7 @@ mod tests {
             "--record-run-id=loop-1".to_string(),
         ];
 
-        let out = remap_agent_task_plan_in_args(&args, &mappings);
+        let out = remap_agent_task_plan_in_args(&args, &mappings, temp.path()).expect("remap plan");
         let plan_idx = out.iter().position(|a| a == "--plan").unwrap() + 1;
         let remapped: serde_json::Value =
             serde_json::from_str(&out[plan_idx]).expect("inline plan");
@@ -687,7 +742,7 @@ mod tests {
             format!("@{}", plan.display()),
         ];
 
-        let out = remap_agent_task_plan_in_args(&args, &mappings);
+        let out = remap_agent_task_plan_in_args(&args, &mappings, &primary).expect("remap plan");
         let plan_idx = out.iter().position(|a| a == "--plan").unwrap() + 1;
         let remapped: serde_json::Value =
             serde_json::from_str(&out[plan_idx]).expect("inline plan");
@@ -699,9 +754,28 @@ mod tests {
     }
 
     #[test]
-    fn remap_agent_task_run_plan_absolute_file_spec_when_plan_unreadable() {
+    fn remap_agent_task_run_plan_relative_file_spec_uses_source_path() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = temp.path().join("example-project");
+        let plan = source.join(".ci/plan.json");
+        std::fs::create_dir_all(plan.parent().unwrap()).expect("plan dir");
+        std::fs::write(
+            &plan,
+            serde_json::json!({
+                "schema": "homeboy/agent-task-plan/v1",
+                "tasks": [{
+                    "task_id": "task-1",
+                    "executor": {
+                        "backend": "tool-runner",
+                        "config": { "artifact_root": source.join("artifacts") }
+                    }
+                }]
+            })
+            .to_string(),
+        )
+        .expect("write plan");
         let mappings = vec![LabPathRemap {
-            local: "/Users/chubes/Developer/example-project".to_string(),
+            local: source.display().to_string(),
             remote: "/home/chubes/Developer/example-project".to_string(),
         }];
         let args = vec![
@@ -709,13 +783,54 @@ mod tests {
             "agent-task".to_string(),
             "run-plan".to_string(),
             "--plan".to_string(),
-            "@/Users/chubes/Developer/example-project/.ci/missing.json".to_string(),
+            "@.ci/plan.json".to_string(),
         ];
 
+        let out = remap_agent_task_plan_in_args(&args, &mappings, &source).expect("remap plan");
+        let remapped: serde_json::Value = serde_json::from_str(&out[4]).expect("inline plan");
+
         assert_eq!(
-            remap_agent_task_plan_in_args(&args, &mappings)[4],
-            "@/home/chubes/Developer/example-project/.ci/missing.json"
+            remapped["tasks"][0]["executor"]["config"]["artifact_root"],
+            "/home/chubes/Developer/example-project/artifacts"
         );
+    }
+
+    #[test]
+    fn remap_agent_task_run_plan_rejects_missing_file_spec() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mappings = vec![LabPathRemap {
+            local: temp.path().display().to_string(),
+            remote: "/home/chubes/Developer/example-project".to_string(),
+        }];
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "run-plan".to_string(),
+            "--plan".to_string(),
+            "@.ci/missing.json".to_string(),
+        ];
+
+        let err = remap_agent_task_plan_in_args(&args, &mappings, temp.path())
+            .expect_err("missing plan must fail locally");
+
+        assert_eq!(err.details["field"], "plan");
+        assert!(err.message.contains("controller-side file does not exist"));
+    }
+
+    #[test]
+    fn remap_agent_task_run_plan_rejects_remote_url_file_spec() {
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "run-plan".to_string(),
+            "--plan=@https://example.test/plan.json".to_string(),
+        ];
+
+        let err = remap_agent_task_plan_in_args(&args, &[], Path::new("/tmp"))
+            .expect_err("remote plan spec must fail locally");
+
+        assert_eq!(err.details["field"], "plan");
+        assert!(err.message.contains("local filesystem @file"));
     }
 
     #[test]

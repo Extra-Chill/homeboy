@@ -804,7 +804,8 @@ fn run_lab_offload_inner(
         &remote_cwd,
     );
     let remapped_args = remap_provider_config_in_args(&remapped_args, &path_remaps);
-    let remapped_args = remap_agent_task_plan_in_args(&remapped_args, &path_remaps);
+    let remapped_args =
+        remap_agent_task_plan_in_args(&remapped_args, &path_remaps, Path::new(&synced.local_path))?;
     let remapped_args = remap_path_settings_in_args(&remapped_args, &path_remaps);
     let (remapped_args, synced_remapped_plan) =
         materialize_inline_agent_task_plan_arg(runner_id, &remapped_args)?;
