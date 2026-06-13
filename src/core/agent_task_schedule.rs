@@ -1,35 +1,31 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
 use crate::core::agent_task::{AgentTaskFailureClassification, AgentTaskOutcome, AgentTaskRequest};
+use crate::core::plan::{HomeboyPlan, PlanArtifact, PlanKind, PlanStep, PlanStepStatus};
 
 pub const AGENT_TASK_PLAN_SCHEMA: &str = "homeboy/agent-task-plan/v1";
 pub const AGENT_TASK_AGGREGATE_SCHEMA: &str = "homeboy/agent-task-aggregate/v1";
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AgentTaskPlan {
-    #[serde(default = "plan_schema")]
     pub schema: String,
     pub plan_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_key: Option<String>,
     pub tasks: Vec<AgentTaskRequest>,
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub output_dependencies: HashMap<String, AgentTaskOutputDependencies>,
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub artifact_outputs: HashMap<String, Vec<AgentTaskArtifactOutputDeclaration>>,
-    #[serde(default)]
     pub options: AgentTaskScheduleOptions,
-    #[serde(default, skip_serializing_if = "Value::is_null")]
     pub metadata: Value,
+    pub homeboy_plan: HomeboyPlan,
 }
 
 impl AgentTaskPlan {
     pub fn new(plan_id: impl Into<String>, tasks: Vec<AgentTaskRequest>) -> Self {
-        Self {
+        let mut plan = Self {
             schema: AGENT_TASK_PLAN_SCHEMA.to_string(),
             plan_id: plan_id.into(),
             group_key: None,
@@ -38,8 +34,256 @@ impl AgentTaskPlan {
             artifact_outputs: HashMap::new(),
             options: AgentTaskScheduleOptions::default(),
             metadata: Value::Null,
+            homeboy_plan: HomeboyPlan::default(),
+        };
+        plan.rebuild_homeboy_plan();
+        plan
+    }
+
+    pub fn from_homeboy_plan(homeboy_plan: HomeboyPlan) -> Self {
+        let schema = string_input(&homeboy_plan, "schema")
+            .unwrap_or_else(|| AGENT_TASK_PLAN_SCHEMA.to_string());
+        let plan_id =
+            string_input(&homeboy_plan, "plan_id").unwrap_or_else(|| homeboy_plan.id.clone());
+        let group_key = string_input(&homeboy_plan, "group_key");
+        let tasks = homeboy_plan
+            .steps
+            .iter()
+            .filter_map(|step| value_as(&step.inputs, "agent_task_request"))
+            .collect();
+        let output_dependencies = homeboy_plan
+            .steps
+            .iter()
+            .filter_map(|step| {
+                let dependencies = value_as::<AgentTaskOutputDependencies>(
+                    &step.inputs,
+                    "agent_task_output_dependencies",
+                )
+                .unwrap_or_else(|| AgentTaskOutputDependencies {
+                    depends_on: step.needs.clone(),
+                    bindings: HashMap::new(),
+                });
+                (!dependencies.depends_on.is_empty() || !dependencies.bindings.is_empty())
+                    .then(|| (step.id.clone(), dependencies))
+            })
+            .collect();
+        let mut artifact_outputs: HashMap<String, Vec<AgentTaskArtifactOutputDeclaration>> =
+            HashMap::new();
+        for artifact in &homeboy_plan.artifacts {
+            let Some(task_id) = string_data(artifact, "task_id") else {
+                continue;
+            };
+            let Some(declaration) = artifact
+                .data
+                .get("agent_task_artifact_output")
+                .and_then(|value| serde_json::from_value(value.clone()).ok())
+            else {
+                continue;
+            };
+            artifact_outputs
+                .entry(task_id)
+                .or_default()
+                .push(declaration);
+        }
+        let options = homeboy_plan
+            .policy
+            .get("agent_task_schedule_options")
+            .and_then(|value| serde_json::from_value(value.clone()).ok())
+            .unwrap_or_default();
+        let metadata = homeboy_plan
+            .inputs
+            .get("metadata")
+            .cloned()
+            .unwrap_or(Value::Null);
+
+        Self {
+            schema,
+            plan_id,
+            group_key,
+            tasks,
+            output_dependencies,
+            artifact_outputs,
+            options,
+            metadata,
+            homeboy_plan,
         }
     }
+
+    pub fn rebuild_homeboy_plan(&mut self) {
+        self.homeboy_plan = self.to_homeboy_plan();
+    }
+
+    pub fn canonicalize(mut self) -> Self {
+        self.rebuild_homeboy_plan();
+        Self::from_homeboy_plan(self.homeboy_plan)
+    }
+
+    fn to_homeboy_plan(&self) -> HomeboyPlan {
+        let mut plan = HomeboyPlan::for_description(PlanKind::AgentTask, self.plan_id.clone());
+        plan.id = self.plan_id.clone();
+        plan.inputs
+            .insert("schema".to_string(), Value::String(self.schema.clone()));
+        plan.inputs
+            .insert("plan_id".to_string(), Value::String(self.plan_id.clone()));
+        if let Some(group_key) = &self.group_key {
+            plan.inputs
+                .insert("group_key".to_string(), Value::String(group_key.clone()));
+        }
+        if !self.metadata.is_null() {
+            plan.inputs
+                .insert("metadata".to_string(), self.metadata.clone());
+        }
+        plan.policy.insert(
+            "agent_task_schedule_options".to_string(),
+            serde_json::to_value(&self.options).unwrap_or(Value::Null),
+        );
+        plan.steps = self
+            .tasks
+            .iter()
+            .map(|request| {
+                let dependencies = self.output_dependencies.get(&request.task_id).cloned();
+                let mut inputs = HashMap::from([(
+                    "agent_task_request".to_string(),
+                    serde_json::to_value(request).unwrap_or(Value::Null),
+                )]);
+                if let Some(dependencies) = &dependencies {
+                    inputs.insert(
+                        "agent_task_output_dependencies".to_string(),
+                        serde_json::to_value(dependencies).unwrap_or(Value::Null),
+                    );
+                }
+                PlanStep {
+                    id: request.task_id.clone(),
+                    kind: "agent_task".to_string(),
+                    label: Some(request.task_id.clone()),
+                    blocking: true,
+                    scope: Vec::new(),
+                    needs: dependencies
+                        .as_ref()
+                        .map(|dependencies| dependencies.depends_on.clone())
+                        .unwrap_or_default(),
+                    status: PlanStepStatus::Ready,
+                    inputs,
+                    outputs: HashMap::new(),
+                    skip_reason: None,
+                    policy: HashMap::new(),
+                    missing: Vec::new(),
+                }
+            })
+            .collect();
+        for (task_id, declarations) in &self.artifact_outputs {
+            for declaration in declarations {
+                let mut data = HashMap::new();
+                data.insert("task_id".to_string(), Value::String(task_id.clone()));
+                data.insert("name".to_string(), Value::String(declaration.name.clone()));
+                data.insert(
+                    "agent_task_artifact_output".to_string(),
+                    serde_json::to_value(declaration).unwrap_or(Value::Null),
+                );
+                plan.artifacts.push(PlanArtifact {
+                    id: format!("{task_id}:{}", declaration.name),
+                    path: declaration.payload_path.clone(),
+                    artifact_type: Some(declaration.kind.clone()),
+                    data,
+                });
+            }
+        }
+        plan
+    }
+}
+
+impl Serialize for AgentTaskPlan {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        AgentTaskPlanJson::from(self).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for AgentTaskPlan {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let json = AgentTaskPlanJson::deserialize(deserializer)?;
+        Ok(json.into_plan())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AgentTaskPlanJson {
+    #[serde(default = "plan_schema")]
+    schema: String,
+    plan_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    group_key: Option<String>,
+    tasks: Vec<AgentTaskRequest>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    output_dependencies: HashMap<String, AgentTaskOutputDependencies>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    artifact_outputs: HashMap<String, Vec<AgentTaskArtifactOutputDeclaration>>,
+    #[serde(default)]
+    options: AgentTaskScheduleOptions,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    metadata: Value,
+}
+
+impl AgentTaskPlanJson {
+    fn into_plan(self) -> AgentTaskPlan {
+        let mut plan = AgentTaskPlan {
+            schema: self.schema,
+            plan_id: self.plan_id,
+            group_key: self.group_key,
+            tasks: self.tasks,
+            output_dependencies: self.output_dependencies,
+            artifact_outputs: self.artifact_outputs,
+            options: self.options,
+            metadata: self.metadata,
+            homeboy_plan: HomeboyPlan::default(),
+        };
+        plan.rebuild_homeboy_plan();
+        plan
+    }
+}
+
+impl From<&AgentTaskPlan> for AgentTaskPlanJson {
+    fn from(plan: &AgentTaskPlan) -> Self {
+        Self {
+            schema: plan.schema.clone(),
+            plan_id: plan.plan_id.clone(),
+            group_key: plan.group_key.clone(),
+            tasks: plan.tasks.clone(),
+            output_dependencies: plan.output_dependencies.clone(),
+            artifact_outputs: plan.artifact_outputs.clone(),
+            options: plan.options.clone(),
+            metadata: plan.metadata.clone(),
+        }
+    }
+}
+
+fn string_input(plan: &HomeboyPlan, key: &str) -> Option<String> {
+    plan.inputs
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+fn string_data(artifact: &PlanArtifact, key: &str) -> Option<String> {
+    artifact
+        .data
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+fn value_as<T: serde::de::DeserializeOwned>(
+    values: &HashMap<String, Value>,
+    key: &str,
+) -> Option<T> {
+    values
+        .get(key)
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
