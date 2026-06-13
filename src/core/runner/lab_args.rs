@@ -156,10 +156,17 @@ pub(super) fn remap_path_settings_in_args(
             out.push(arg.clone());
             continue;
         }
-        if arg == "--setting" || arg == "--setting-json" {
+        if arg == "--setting" {
             out.push(arg.clone());
             if let Some(raw) = iter.next() {
                 out.push(remap_path_setting_pair(raw, &ordered));
+            }
+            continue;
+        }
+        if arg == "--setting-json" {
+            out.push(arg.clone());
+            if let Some(raw) = iter.next() {
+                out.push(remap_path_json_setting_pair(raw, &ordered));
             }
             continue;
         }
@@ -173,7 +180,7 @@ pub(super) fn remap_path_settings_in_args(
         if let Some(raw) = arg.strip_prefix("--setting-json=") {
             out.push(format!(
                 "--setting-json={}",
-                remap_path_setting_pair(raw, &ordered)
+                remap_path_json_setting_pair(raw, &ordered)
             ));
             continue;
         }
@@ -205,6 +212,20 @@ fn remap_path_setting_pair(raw: &str, mappings: &[&LabPathRemap]) -> String {
     remap_local_path(value, mappings)
         .map(|remapped| format!("{key}={remapped}"))
         .unwrap_or_else(|| raw.to_string())
+}
+
+fn remap_path_json_setting_pair(raw: &str, mappings: &[&LabPathRemap]) -> String {
+    let Some((key, value)) = raw.split_once('=') else {
+        return raw.to_string();
+    };
+    let mut value: Value = match serde_json::from_str(value) {
+        Ok(value) => value,
+        Err(_) => return remap_path_setting_pair(raw, mappings),
+    };
+    remap_paths_in_value(&mut value, mappings);
+    serde_json::to_string(&value)
+        .map(|value| format!("{key}={value}"))
+        .unwrap_or_else(|_| raw.to_string())
 }
 
 fn remap_at_file_spec(spec: &str, mappings: &[&LabPathRemap]) -> String {
@@ -718,6 +739,33 @@ mod tests {
             "tool_bin=/home/chubes/_lab_workspaces/tool-runner/packages/cli/dist/index.js"
         );
         assert_eq!(out[4], "--setting=mode=fast");
+    }
+
+    #[test]
+    fn remap_path_settings_rewrites_json_array_path_values() {
+        let mappings = vec![LabPathRemap {
+            local: "/Users/chubes/Developer/woocommerce-gateway-stripe".to_string(),
+            remote: "/home/chubes/_lab_workspaces/woocommerce-gateway-stripe".to_string(),
+        }];
+        let args = vec![
+            "homeboy".to_string(),
+            "bench".to_string(),
+            "--setting-json".to_string(),
+            "validation_dependencies=[\"/Users/chubes/Developer/woocommerce-gateway-stripe\"]"
+                .to_string(),
+            "--setting-json=depends_on={\"plugins\":[\"/Users/chubes/Developer/woocommerce-gateway-stripe/includes\"],\"token\":\"keep-secret-like-string\"}".to_string(),
+        ];
+
+        let out = remap_path_settings_in_args(&args, &mappings);
+
+        assert_eq!(
+            out[3],
+            "validation_dependencies=[\"/home/chubes/_lab_workspaces/woocommerce-gateway-stripe\"]"
+        );
+        assert_eq!(
+            out[4],
+            "--setting-json=depends_on={\"plugins\":[\"/home/chubes/_lab_workspaces/woocommerce-gateway-stripe/includes\"],\"token\":\"keep-secret-like-string\"}"
+        );
     }
 
     #[test]
