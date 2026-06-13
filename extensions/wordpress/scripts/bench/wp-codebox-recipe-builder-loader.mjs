@@ -2,6 +2,7 @@
  * External dependencies
  */
 import { existsSync, readdirSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -41,6 +42,11 @@ export async function loadCodeboxRecipeBuilder(requiredExport) {
 
 function discoverCodeboxCoreModuleCandidates() {
 	const candidates = [DEFAULT_CODEBOX_CORE_MODULE];
+	for (const candidate of setupCacheCoreModuleCandidates()) {
+		if (existsSync(candidate) && !candidates.includes(candidate)) {
+			candidates.push(candidate);
+		}
+	}
 	const roots = workspaceRoots();
 
 	for (const root of roots) {
@@ -53,6 +59,16 @@ function discoverCodeboxCoreModuleCandidates() {
 	}
 
 	return candidates;
+}
+
+function setupCacheCoreModuleCandidates() {
+	const installRoot = process.env.HOMEBOY_WP_CODEBOX_INSTALL_DIR || resolve(homedir(), '.cache/homeboy/wp-codebox');
+	return [
+		resolve(installRoot, 'source', RUNTIME_CORE_ENTRY),
+		resolve(installRoot, 'source/node_modules/@automattic/wp-codebox-core/dist/index.js'),
+		resolve(installRoot, 'release/wp-codebox-cli', RUNTIME_CORE_ENTRY),
+		resolve(installRoot, 'release/wp-codebox-cli/node_modules/@automattic/wp-codebox-core/dist/index.js'),
+	];
 }
 
 function workspaceRoots() {

@@ -1,10 +1,17 @@
 const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
+const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 
 const script = path.join(__dirname, '..', 'scripts', 'bench', 'build-wp-codebox-bench-recipe.mjs');
+const readyScript = path.join(__dirname, '..', 'scripts', 'build', 'check-wp-codebox-runtime-core.mjs');
 const fixtureCoreModule = path.join(__dirname, 'fixtures', 'wp-codebox-core-recipe-builder.mjs');
 const missingBenchBuilderModule = path.join(__dirname, 'fixtures', 'wp-codebox-core-missing-bench-builder.mjs');
+const installRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-wp-codebox-install-'));
+const cachedCoreModule = path.join(installRoot, 'source', 'packages', 'runtime-core', 'dist', 'index.js');
+fs.mkdirSync(path.dirname(cachedCoreModule), { recursive: true });
+fs.copyFileSync(fixtureCoreModule, cachedCoreModule);
 
 const input = {
 	options: {
@@ -67,6 +74,26 @@ assert.equal(filteredResult.status, 0, filteredResult.stderr);
 const filteredRecipe = JSON.parse(filteredResult.stdout);
 assert.deepEqual(filteredRecipe.inputs.workloads.map((workload) => workload.id), ['fixture-workload']);
 assert.deepEqual(filteredRecipe.inputs.scenarioIds, ['fixture-workload']);
+
+const cacheDiscoveryResult = spawnSync(process.execPath, [script], {
+	cwd: path.join(__dirname, '..'),
+	input: JSON.stringify(input),
+	encoding: 'utf8',
+	env: { ...process.env, HOMEBOY_WP_CODEBOX_CORE_MODULE: '', HOMEBOY_WP_CODEBOX_INSTALL_DIR: installRoot },
+});
+
+assert.equal(cacheDiscoveryResult.status, 0, cacheDiscoveryResult.stderr);
+const cacheDiscoveredRecipe = JSON.parse(cacheDiscoveryResult.stdout);
+assert.equal(cacheDiscoveredRecipe.schema, 'wp-codebox/workspace-recipe/v1');
+
+const readyResult = spawnSync(process.execPath, [readyScript], {
+	cwd: path.join(__dirname, '..'),
+	encoding: 'utf8',
+	env: { ...process.env, HOMEBOY_WP_CODEBOX_CORE_MODULE: '', HOMEBOY_WP_CODEBOX_INSTALL_DIR: installRoot },
+});
+
+assert.equal(readyResult.status, 0, readyResult.stderr);
+assert.match(readyResult.stdout, /WP Codebox runtime core ready:/);
 
 const diagnosticResult = spawnSync(process.execPath, [script], {
 	cwd: path.join(__dirname, '..'),

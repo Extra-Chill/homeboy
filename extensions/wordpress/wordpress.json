@@ -832,7 +832,7 @@
   "executable": {
     "runtime": {
       "setup_command": "bash {{extension_path}}/scripts/build/setup.sh",
-      "ready_check": "command -v wp-codebox >/dev/null 2>&1 || test -n \"${HOMEBOY_WP_CODEBOX_BIN:-}\"",
+      "ready_check": "node {{extension_path}}/scripts/build/check-wp-codebox-runtime-core.mjs",
       "run_command": "bash {{extension_path}}/scripts/test/test-runner.sh"
     }
   },
