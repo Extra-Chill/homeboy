@@ -636,10 +636,13 @@ pub fn run_main_bench_workflow(
         if let Some(results) = parsed.as_mut() {
             results.responsiveness = responsiveness.clone();
         }
-        let gate_failures = parsed
+        let mut gate_failures = parsed
             .as_mut()
             .map(super::gate::evaluate_gates)
             .unwrap_or_default();
+        if let Some(results) = parsed.as_ref() {
+            gate_failures.extend(workload_status_failures(results));
+        }
         let gate_results = parsed
             .as_ref()
             .map(super::gate::normalized_gate_results)
@@ -2139,6 +2142,101 @@ mod tests {
         .expect("parse bench results");
 
         assert!(workload_status_failures(&results).is_empty());
+    }
+
+    #[test]
+    fn component_script_bench_failed_metrics_mark_workflow_failed() {
+        let component_dir = tempfile::tempdir().expect("component dir");
+        let script_dir = component_dir.path().join("scripts");
+        fs::create_dir_all(&script_dir).expect("script dir");
+        fs::write(
+            script_dir.join("bench.sh"),
+            r#"#!/bin/sh
+cat > "$HOMEBOY_BENCH_RESULTS_FILE" <<'JSON'
+{
+  "component_id": "workflow-bench-fixture",
+  "iterations": 1,
+  "scenarios": [
+    {
+      "id": "workflow-bench",
+      "iterations": 1,
+      "metrics": {
+        "adapter_count": 1,
+        "passed_count": 0,
+        "failed_count": 1
+      },
+      "artifacts": {
+        "report": {
+          "path": "bench-report.json",
+          "kind": "json",
+          "label": "Bench report"
+        }
+      }
+    }
+  ]
+}
+JSON
+printf '{}' > "$HOMEBOY_RUN_DIR/bench-report.json"
+"#,
+        )
+        .expect("bench script");
+        let mut component = Component::new(
+            "workflow-bench-fixture".to_string(),
+            component_dir.path().to_string_lossy().to_string(),
+            String::new(),
+            None,
+        );
+        component.scripts = Some(crate::core::component::ComponentScriptsConfig {
+            bench: vec!["sh scripts/bench.sh".to_string()],
+            ..Default::default()
+        });
+        let run_dir = RunDir::create().expect("run dir");
+
+        let result = run_main_bench_workflow(
+            &component,
+            &component_dir.path().to_path_buf(),
+            BenchRunWorkflowArgs {
+                component_label: "Workflow Bench Fixture".to_string(),
+                component_id: "workflow-bench-fixture".to_string(),
+                path_override: None,
+                settings: Vec::new(),
+                settings_json: Vec::new(),
+                iterations: 1,
+                warmup_iterations: None,
+                execution: BenchRunExecution {
+                    runs: 1,
+                    concurrency: 1,
+                },
+                baseline_flags: BaselineFlags {
+                    baseline: false,
+                    ignore_baseline: true,
+                    ratchet: false,
+                },
+                regression_threshold_percent: 5.0,
+                json_summary: false,
+                ci_env: Vec::new(),
+                passthrough_args: Vec::new(),
+                scenario_ids: Vec::new(),
+                rig_id: None,
+                shared_state: None,
+                extra_workloads: Vec::new(),
+                invocation_requirements: InvocationRequirements::default(),
+            },
+            &run_dir,
+        )
+        .expect("bench workflow");
+
+        assert_eq!(result.status, "failed");
+        assert_eq!(result.exit_code, 1);
+        assert!(result.results.is_some());
+        assert!(result
+            .gate_failures
+            .iter()
+            .any(|failure| failure.contains("failed_count=1")));
+        assert!(result.results.as_ref().unwrap().scenarios[0]
+            .artifacts
+            .contains_key("report"));
+        run_dir.cleanup();
     }
 
     #[test]

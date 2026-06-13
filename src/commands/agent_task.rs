@@ -844,6 +844,42 @@ where
             request_template,
             executor,
         ),
+        AgentTaskLoopPolicyAction::SpawnController {
+            dedupe_key,
+            loop_id,
+            entity_id,
+            phase,
+            config_version,
+            request,
+        } => execute_spawn_controller_action(
+            record,
+            action,
+            "spawn_controller",
+            dedupe_key,
+            loop_id,
+            entity_id.as_deref(),
+            phase,
+            config_version,
+            request,
+        ),
+        AgentTaskLoopPolicyAction::SpawnSubloop {
+            dedupe_key,
+            loop_id,
+            entity_id,
+            phase,
+            config_version,
+            request,
+        } => execute_spawn_controller_action(
+            record,
+            action,
+            "spawn_subloop",
+            dedupe_key,
+            loop_id,
+            entity_id.as_deref(),
+            phase,
+            config_version,
+            request,
+        ),
         AgentTaskLoopPolicyAction::Join { wait_key } => Ok((
             serde_json::json!({ "mode": "join", "wait_key": wait_key }),
             0,
@@ -852,6 +888,17 @@ where
             serde_json::json!({ "mode": "wait_for_event", "wait_key": wait.wait_key }),
             0,
         )),
+        AgentTaskLoopPolicyAction::WaitForController {
+            loop_id,
+            entity_id,
+            wait_key,
+            terminal_states,
+        } => execute_wait_for_controller_action(
+            loop_id,
+            entity_id.as_deref(),
+            wait_key.as_deref(),
+            terminal_states,
+        ),
         AgentTaskLoopPolicyAction::RunGates {
             bundle_id,
             entity_id,
@@ -902,6 +949,93 @@ where
             ))
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_spawn_controller_action(
+    record: &mut AgentTaskLoopControllerRecord,
+    action: &AgentTaskLoopPolicyActionRecord,
+    mode: &str,
+    dedupe_key: &str,
+    loop_id: &str,
+    entity_id: Option<&str>,
+    phase: &str,
+    config_version: &str,
+    request: &Value,
+) -> CmdResult<Value> {
+    let mut created = false;
+    let mut child = match agent_task_loop_controller::load_controller(loop_id) {
+        Ok(child) => child,
+        Err(_) => {
+            created = true;
+            let mut child = AgentTaskLoopControllerRecord::new(loop_id, phase, config_version);
+            child.parent_loop_id = Some(record.loop_id.clone());
+            child.parent_action_id = Some(action.action_id.clone());
+            child.parent_entity_id = entity_id.map(str::to_string);
+            child.metadata = request.clone();
+            child
+        }
+    };
+    let mut child_changed = false;
+    if child.parent_loop_id.is_none() {
+        child.parent_loop_id = Some(record.loop_id.clone());
+        child_changed = true;
+    }
+    if child.parent_action_id.is_none() {
+        child.parent_action_id = Some(action.action_id.clone());
+        child_changed = true;
+    }
+    if child.parent_entity_id.is_none() {
+        child.parent_entity_id = entity_id.map(str::to_string);
+        child_changed = child.parent_entity_id.is_some();
+    }
+    if created || child_changed {
+        agent_task_loop_controller::write_controller(&child)?;
+    }
+    push_controller_history(
+        record,
+        "controller.action.spawned_controller",
+        entity_id.map(str::to_string),
+        serde_json::json!({
+            "action_id": action.action_id,
+            "dedupe_key": dedupe_key,
+            "loop_id": child.loop_id,
+            "mode": mode,
+            "created": created,
+        }),
+    );
+    Ok((
+        serde_json::json!({
+            "mode": mode,
+            "loop_id": child.loop_id,
+            "phase": child.phase,
+            "config_version": child.config_version,
+            "created": created,
+        }),
+        0,
+    ))
+}
+
+fn execute_wait_for_controller_action(
+    loop_id: &str,
+    entity_id: Option<&str>,
+    wait_key: Option<&str>,
+    terminal_states: &[homeboy::core::agent_task_loop_controller::AgentTaskLoopControllerState],
+) -> CmdResult<Value> {
+    let child_state = agent_task_loop_controller::load_controller(loop_id)
+        .ok()
+        .map(|child| format!("{:?}", child.state));
+    Ok((
+        serde_json::json!({
+            "mode": "wait_for_controller",
+            "loop_id": loop_id,
+            "entity_id": entity_id,
+            "wait_key": wait_key,
+            "terminal_states": terminal_states,
+            "child_state": child_state,
+        }),
+        0,
+    ))
 }
 
 fn execute_spawn_task_action<E>(
@@ -2474,16 +2608,18 @@ mod tests {
             )
             .expect("controller created");
             controller.record_action(
-                AgentTaskLoopPolicyAction::WaitForEvent(AgentTaskLoopWait {
-                    wait_key: "wait-a".to_string(),
-                    event_type: "task.completed".to_string(),
-                    entity_id: None,
-                    external_ref: None,
-                    timeout_at: None,
-                    escalation_policy: None,
-                    status: AgentTaskLoopWaitStatus::Open,
-                    satisfied_by_event_id: None,
-                }),
+                AgentTaskLoopPolicyAction::WaitForEvent(
+                    agent_task_loop_controller::AgentTaskLoopWait {
+                        wait_key: "wait-a".to_string(),
+                        event_type: "task.completed".to_string(),
+                        entity_id: None,
+                        external_ref: None,
+                        timeout_at: None,
+                        escalation_policy: None,
+                        status: agent_task_loop_controller::AgentTaskLoopWaitStatus::Open,
+                        satisfied_by_event_id: None,
+                    },
+                ),
                 "wait first",
             );
             controller.record_action(
