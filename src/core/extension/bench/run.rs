@@ -1913,15 +1913,16 @@ mod tests {
             component_id: "studio-web".to_string(),
             path_override: None,
             settings: vec![("workflow_bench_env.FOO".to_string(), "bar".to_string())],
-            settings_json: vec![
-                (
-                    "workflow_bench_env".to_string(),
-                    serde_json::json!({ "WORKFLOW_BENCH_RUN_ID": "component-script-run" }),
-                ),
-            ],
+            settings_json: vec![(
+                "workflow_bench_env".to_string(),
+                serde_json::json!({ "WORKFLOW_BENCH_RUN_ID": "component-script-run" }),
+            )],
             iterations: 10,
             warmup_iterations: None,
-            execution: BenchRunExecution { runs: 1, concurrency: 1 },
+            execution: BenchRunExecution {
+                runs: 1,
+                concurrency: 1,
+            },
             baseline_flags: BaselineFlags {
                 baseline: false,
                 ignore_baseline: true,
@@ -1958,12 +1959,10 @@ mod tests {
             component_id: "studio-web".to_string(),
             path_override: None,
             settings: Vec::new(),
-            settings_json: vec![
-                (
-                    "workflow_bench_env".to_string(),
-                    serde_json::json!({ "WORKFLOW_BENCH_SCENARIO": "plain-site-data-machine" }),
-                ),
-            ],
+            settings_json: vec![(
+                "workflow_bench_env".to_string(),
+                serde_json::json!({ "WORKFLOW_BENCH_SCENARIO": "plain-site-data-machine" }),
+            )],
             passthrough_args: Vec::new(),
             scenario_ids: Vec::new(),
             extra_workloads: Vec::new(),
