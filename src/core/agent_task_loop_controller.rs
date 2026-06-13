@@ -300,8 +300,10 @@ impl Default for AgentTaskLoopCandidateLoopLimits {
 #[serde(rename_all = "snake_case")]
 pub enum AgentTaskLoopActionStatus {
     Pending,
+    Running,
     AlreadySatisfied,
     Completed,
+    Failed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
