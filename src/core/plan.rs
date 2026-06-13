@@ -172,6 +172,8 @@ pub enum PlanKind {
     Fleet,
     Trace,
     Review,
+    AgentTaskFanout,
+    AgentTaskMatrix,
     Custom,
 }
 
@@ -193,6 +195,8 @@ impl PlanKind {
             Self::Fleet => "fleet",
             Self::Trace => "trace",
             Self::Review => "review",
+            Self::AgentTaskFanout => "agent_task_fanout",
+            Self::AgentTaskMatrix => "agent_task_matrix",
             Self::Custom => "custom",
         }
     }
