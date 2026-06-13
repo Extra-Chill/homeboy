@@ -61,6 +61,7 @@ pub struct LabOffloadRequest<'a> {
 pub struct LabOffloadCommand {
     pub hot_label: &'static str,
     pub portable: bool,
+    pub default_lab_offload: bool,
     pub unsupported_reason: Option<&'static str>,
     pub workspace_mode_policy: LabOffloadWorkspaceModePolicy,
     pub requires_extension_parity: bool,
@@ -315,6 +316,14 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
                 Some(reason),
             )),
             plan,
+            messages: Vec::new(),
+        });
+    }
+
+    if request.explicit_runner.is_none() && !contract.default_lab_offload {
+        return Ok(LabOffloadOutcome::RunLocal {
+            plan: disabled_select_runner_plan(plan, "automatic Lab offload disabled"),
+            metadata: None,
             messages: Vec::new(),
         });
     }
@@ -1925,6 +1934,7 @@ mod tests {
         LabOffloadCommand {
             hot_label: label,
             portable: true,
+            default_lab_offload: true,
             unsupported_reason: None,
             workspace_mode_policy: LabOffloadWorkspaceModePolicy::ChangedSinceGitElseSnapshot,
             requires_extension_parity: true,
@@ -1938,6 +1948,7 @@ mod tests {
         LabOffloadCommand {
             hot_label: "rig up",
             portable: false,
+            default_lab_offload: false,
             unsupported_reason: Some(reason),
             workspace_mode_policy: LabOffloadWorkspaceModePolicy::ChangedSinceGitElseSnapshot,
             requires_extension_parity: false,
@@ -2876,6 +2887,44 @@ mod tests {
 
         assert_eq!(selection.runner_id, "lab-default");
         assert_eq!(selection.source, LabRunnerSelectionSource::Default);
+    }
+
+    #[test]
+    fn lab_runner_selection_ignores_default_when_auto_offload_is_disabled() {
+        let mut command = portable_lab_command("extension update");
+        command.default_lab_offload = false;
+
+        let selection = resolve_lab_runner_selection_from_default(
+            &command,
+            None,
+            false,
+            false,
+            false,
+            Some("lab-default".to_string()),
+        )
+        .expect("selection");
+
+        assert!(selection.is_none());
+    }
+
+    #[test]
+    fn lab_runner_selection_honors_explicit_runner_when_auto_offload_is_disabled() {
+        let mut command = portable_lab_command("extension update");
+        command.default_lab_offload = false;
+
+        let selection = resolve_lab_runner_selection_from_default(
+            &command,
+            Some("lab-explicit"),
+            false,
+            false,
+            false,
+            Some("lab-default".to_string()),
+        )
+        .expect("selection")
+        .expect("explicit runner selected");
+
+        assert_eq!(selection.runner_id, "lab-explicit");
+        assert_eq!(selection.source, LabRunnerSelectionSource::Explicit);
     }
 
     #[test]

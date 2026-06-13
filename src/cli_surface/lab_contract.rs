@@ -6,6 +6,7 @@ use super::{CommandDescriptor, Commands};
 pub struct LabCommandContract {
     pub hot_label: &'static str,
     pub portability: LabCommandPortability,
+    pub default_lab_offload: bool,
     pub source_path_mode: LabSourcePathMode,
     pub workspace_mode_policy: LabWorkspaceModePolicy,
     pub mutation_flag: Option<&'static str>,
@@ -102,7 +103,7 @@ impl Commands {
                 LAB_NO_EXTRA_TOOLS,
             ),
             Commands::Extension(args) if args.is_update_command() => {
-                lab_portable_workload_contract("extension update", None, false, LAB_NO_EXTRA_TOOLS)
+                lab_explicit_runner_contract("extension update", None, false, LAB_NO_EXTRA_TOOLS)
             }
             Commands::Fleet(args) if args.is_hot_resource_command() => {
                 lab_local_only_contract("fleet exec", FLEET_EXEC_LAB_UNSUPPORTED_REASON)
@@ -193,6 +194,7 @@ fn lab_portable_contract(
     LabCommandContract {
         hot_label,
         portability: LabCommandPortability::Portable,
+        default_lab_offload: true,
         source_path_mode: LabSourcePathMode::CwdOrPathFlag,
         workspace_mode_policy: LabWorkspaceModePolicy::ChangedSinceGitElseSnapshot,
         mutation_flag,
@@ -219,10 +221,28 @@ fn lab_portable_workload_contract(
     }
 }
 
+fn lab_explicit_runner_contract(
+    hot_label: &'static str,
+    mutation_flag: Option<&'static str>,
+    requires_extension_parity: bool,
+    extra_required_tools: &'static [LabCommandRequiredTool],
+) -> LabCommandContract {
+    LabCommandContract {
+        default_lab_offload: false,
+        ..lab_portable_workload_contract(
+            hot_label,
+            mutation_flag,
+            requires_extension_parity,
+            extra_required_tools,
+        )
+    }
+}
+
 fn lab_local_only_contract(hot_label: &'static str, reason: &'static str) -> LabCommandContract {
     LabCommandContract {
         hot_label,
         portability: LabCommandPortability::LocalOnly(reason),
+        default_lab_offload: false,
         source_path_mode: LabSourcePathMode::CwdOrPathFlag,
         workspace_mode_policy: LabWorkspaceModePolicy::ChangedSinceGitElseSnapshot,
         mutation_flag: None,
