@@ -16,7 +16,11 @@ use std::io::Read;
 
 use homeboy::core::agent_task::AgentTaskRequest;
 use homeboy::core::agent_task_lifecycle;
-use homeboy::core::agent_task_loop_controller::{self, AgentTaskLoopExternalEvent};
+use homeboy::core::agent_task_loop_controller::{
+    self, AgentTaskLoopActionStatus, AgentTaskLoopControllerRecord, AgentTaskLoopExternalEvent,
+    AgentTaskLoopHistoryEvent, AgentTaskLoopPolicyAction, AgentTaskLoopPolicyActionRecord,
+    AgentTaskLoopRunRef,
+};
 use homeboy::core::agent_task_provider::ExtensionProviderAgentTaskExecutor;
 use homeboy::core::agent_task_scheduler::{
     AgentTaskExecutorAdapter, AgentTaskPlan, AgentTaskScheduler,
@@ -102,6 +106,12 @@ pub enum AgentTaskControllerCommand {
     List,
     /// Apply an external event and resume matching waits.
     ApplyEvent(AgentTaskControllerApplyEventArgs),
+    /// Claim and execute the next pending controller action.
+    RunNext(AgentTaskControllerRunNextArgs),
+    /// Claim and execute one pending controller action.
+    Run(AgentTaskControllerRunArgs),
+    /// Execute pending controller actions until no executable action remains.
+    Resume(AgentTaskControllerRunNextArgs),
     /// Mark a tracked entity as human-ready work.
     MarkHumanReady(AgentTaskControllerMarkHumanReadyArgs),
 }
@@ -150,6 +160,22 @@ pub struct AgentTaskControllerApplyEventArgs {
     /// Event payload JSON, @file, or - for stdin. May contain a `policy` object to evaluate.
     #[arg(long, value_name = "JSON")]
     pub payload: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct AgentTaskControllerRunNextArgs {
+    /// Durable loop id returned by `agent-task controller init`.
+    pub loop_id: String,
+}
+
+#[derive(Args, Debug)]
+pub struct AgentTaskControllerRunArgs {
+    /// Durable loop id returned by `agent-task controller init`.
+    pub loop_id: String,
+
+    /// Pending controller action id to execute.
+    #[arg(long = "action-id", value_name = "ID")]
+    pub action_id: String,
 }
 
 #[derive(Args, Debug)]
@@ -611,6 +637,9 @@ fn controller(args: AgentTaskControllerArgs) -> CmdResult<Value> {
             0,
         )),
         AgentTaskControllerCommand::ApplyEvent(event_args) => apply_controller_event(event_args),
+        AgentTaskControllerCommand::RunNext(run_args) => controller_run_next(run_args),
+        AgentTaskControllerCommand::Run(run_args) => controller_run_action(run_args),
+        AgentTaskControllerCommand::Resume(run_args) => controller_resume(run_args),
         AgentTaskControllerCommand::MarkHumanReady(ready_args) => {
             let mut record = agent_task_loop_controller::load_controller(&ready_args.loop_id)?;
             record.mark_human_ready(&ready_args.entity_id, ready_args.reason)?;
@@ -659,6 +688,701 @@ fn apply_controller_event(args: AgentTaskControllerApplyEventArgs) -> CmdResult<
         }),
         0,
     ))
+}
+
+fn controller_run_next(args: AgentTaskControllerRunNextArgs) -> CmdResult<Value> {
+    controller_run_next_with_executor(args.loop_id, ExtensionProviderAgentTaskExecutor::discover())
+}
+
+fn controller_run_action(args: AgentTaskControllerRunArgs) -> CmdResult<Value> {
+    controller_run_action_with_executor(
+        args.loop_id,
+        args.action_id,
+        ExtensionProviderAgentTaskExecutor::discover(),
+    )
+}
+
+fn controller_resume(args: AgentTaskControllerRunNextArgs) -> CmdResult<Value> {
+    controller_resume_with_executor(args.loop_id, ExtensionProviderAgentTaskExecutor::discover())
+}
+
+fn controller_run_next_with_executor<E>(loop_id: String, executor: E) -> CmdResult<Value>
+where
+    E: AgentTaskExecutorAdapter + Clone,
+{
+    let mut record = agent_task_loop_controller::load_controller(&loop_id)?;
+    let Some(action_id) = first_pending_action_id(&record) else {
+        return Ok((
+            serde_json::json!({
+                "schema": "homeboy/agent-task-loop-controller-action-result/v1",
+                "loop_id": record.loop_id,
+                "claimed": false,
+                "controller": record,
+            }),
+            0,
+        ));
+    };
+    execute_controller_action(&mut record, &action_id, executor)
+}
+
+fn controller_run_action_with_executor<E>(
+    loop_id: String,
+    action_id: String,
+    executor: E,
+) -> CmdResult<Value>
+where
+    E: AgentTaskExecutorAdapter + Clone,
+{
+    let mut record = agent_task_loop_controller::load_controller(&loop_id)?;
+    execute_controller_action(&mut record, &action_id, executor)
+}
+
+fn controller_resume_with_executor<E>(loop_id: String, executor: E) -> CmdResult<Value>
+where
+    E: AgentTaskExecutorAdapter + Clone,
+{
+    let mut results = Vec::new();
+    loop {
+        let record = agent_task_loop_controller::load_controller(&loop_id)?;
+        let Some(action_id) = first_pending_action_id(&record) else {
+            return Ok((
+                serde_json::json!({
+                    "schema": "homeboy/agent-task-loop-controller-resume-result/v1",
+                    "loop_id": record.loop_id,
+                    "claimed": false,
+                    "results": results,
+                    "controller": record,
+                }),
+                0,
+            ));
+        };
+        let (value, exit_code) =
+            controller_run_action_with_executor(loop_id.clone(), action_id, executor.clone())?;
+        results.push(value);
+        if exit_code != 0 {
+            let record = agent_task_loop_controller::load_controller(&loop_id)?;
+            return Ok((
+                serde_json::json!({
+                    "schema": "homeboy/agent-task-loop-controller-resume-result/v1",
+                    "loop_id": record.loop_id,
+                    "claimed": true,
+                    "results": results,
+                    "controller": record,
+                }),
+                exit_code,
+            ));
+        }
+    }
+}
+
+fn execute_controller_action<E>(
+    record: &mut AgentTaskLoopControllerRecord,
+    action_id: &str,
+    executor: E,
+) -> CmdResult<Value>
+where
+    E: AgentTaskExecutorAdapter + Clone,
+{
+    let action = claim_controller_action(record, action_id)?;
+    agent_task_loop_controller::write_controller(record)?;
+
+    match execute_claimed_controller_action(record, &action, executor) {
+        Ok((execution, exit_code)) => {
+            complete_controller_action(record, action_id, &execution, exit_code)?;
+            agent_task_loop_controller::write_controller(record)?;
+            Ok((
+                serde_json::json!({
+                    "schema": "homeboy/agent-task-loop-controller-action-result/v1",
+                    "loop_id": record.loop_id,
+                    "claimed": true,
+                    "action_id": action_id,
+                    "status": if exit_code == 0 { "completed" } else { "failed" },
+                    "execution": execution,
+                    "controller": record,
+                }),
+                exit_code,
+            ))
+        }
+        Err(error) => {
+            fail_controller_action(record, action_id, &error.to_string())?;
+            agent_task_loop_controller::write_controller(record)?;
+            Err(error)
+        }
+    }
+}
+
+fn execute_claimed_controller_action<E>(
+    record: &mut AgentTaskLoopControllerRecord,
+    action: &AgentTaskLoopPolicyActionRecord,
+    executor: E,
+) -> CmdResult<Value>
+where
+    E: AgentTaskExecutorAdapter + Clone,
+{
+    match &action.action {
+        AgentTaskLoopPolicyAction::SpawnTask {
+            dedupe_key,
+            entity_id,
+            request,
+        } => execute_spawn_task_action(
+            record,
+            action,
+            dedupe_key,
+            entity_id.as_deref(),
+            request,
+            executor,
+        ),
+        AgentTaskLoopPolicyAction::FanOut {
+            dedupe_key,
+            entity_ids,
+            request_template,
+        } => execute_fan_out_action(
+            record,
+            action,
+            dedupe_key,
+            entity_ids,
+            request_template,
+            executor,
+        ),
+        AgentTaskLoopPolicyAction::Join { wait_key } => Ok((
+            serde_json::json!({ "mode": "join", "wait_key": wait_key }),
+            0,
+        )),
+        AgentTaskLoopPolicyAction::WaitForEvent(wait) => Ok((
+            serde_json::json!({ "mode": "wait_for_event", "wait_key": wait.wait_key }),
+            0,
+        )),
+        AgentTaskLoopPolicyAction::RunGates {
+            bundle_id,
+            entity_id,
+        } => Ok((
+            serde_json::json!({
+                "mode": "run_gates",
+                "bundle_id": bundle_id,
+                "entity_id": entity_id,
+                "queued": true,
+                "note": "gate bundle execution is represented in controller state; concrete gate runners consume gate_bundles"
+            }),
+            0,
+        )),
+        AgentTaskLoopPolicyAction::MarkHumanReady { entity_id, reason } => {
+            record.mark_human_ready(entity_id, reason.clone())?;
+            Ok((
+                serde_json::json!({ "mode": "mark_human_ready", "entity_id": entity_id }),
+                0,
+            ))
+        }
+        AgentTaskLoopPolicyAction::Complete { reason } => Ok((
+            serde_json::json!({ "mode": "complete", "reason": reason }),
+            0,
+        )),
+        AgentTaskLoopPolicyAction::Abandon { reason } => Ok((
+            serde_json::json!({ "mode": "abandon", "reason": reason }),
+            0,
+        )),
+        AgentTaskLoopPolicyAction::Escalate { reason } => Ok((
+            serde_json::json!({ "mode": "escalate", "reason": reason }),
+            0,
+        )),
+        AgentTaskLoopPolicyAction::RouteFinding { .. }
+        | AgentTaskLoopPolicyAction::SpawnController { .. }
+        | AgentTaskLoopPolicyAction::SpawnSubloop { .. }
+        | AgentTaskLoopPolicyAction::WaitForController { .. }
+        | AgentTaskLoopPolicyAction::ValidateCandidatePatch { .. }
+        | AgentTaskLoopPolicyAction::Retry { .. }
+        | AgentTaskLoopPolicyAction::RequestChanges { .. } => {
+            Err(homeboy::core::Error::validation_invalid_argument(
+                "action_id",
+                format!(
+                    "controller action '{}' is not executable by the generic controller runner yet",
+                    action.action_id
+                ),
+                Some(action.action_id.clone()),
+                None,
+            ))
+        }
+    }
+}
+
+fn execute_spawn_task_action<E>(
+    record: &mut AgentTaskLoopControllerRecord,
+    action: &AgentTaskLoopPolicyActionRecord,
+    dedupe_key: &str,
+    entity_id: Option<&str>,
+    request: &Value,
+    executor: E,
+) -> CmdResult<Value>
+where
+    E: AgentTaskExecutorAdapter,
+{
+    let mode = request
+        .get("mode")
+        .and_then(Value::as_str)
+        .unwrap_or("run_plan");
+    match mode {
+        "run_plan" => {
+            let plan = plan_from_controller_request(request)?;
+            let run_id = controller_request_run_id(request, dedupe_key, &action.action_id);
+            let submitted = agent_task_lifecycle::submit_plan(&plan, Some(&run_id))?;
+            record_controller_spawn(
+                record,
+                action,
+                dedupe_key,
+                entity_id,
+                &submitted.run_id,
+                request,
+            )?;
+            let (aggregate, exit_code) =
+                run_submitted_with_executor(submitted.run_id.clone(), executor)?;
+            Ok((
+                serde_json::json!({
+                    "mode": mode,
+                    "run_id": submitted.run_id,
+                    "submitted": submitted,
+                    "aggregate": aggregate,
+                }),
+                exit_code,
+            ))
+        }
+        "submit" => {
+            let plan = plan_from_controller_request(request)?;
+            let run_id = controller_request_run_id(request, dedupe_key, &action.action_id);
+            let submitted = agent_task_lifecycle::submit_plan(&plan, Some(&run_id))?;
+            record_controller_spawn(
+                record,
+                action,
+                dedupe_key,
+                entity_id,
+                &submitted.run_id,
+                request,
+            )?;
+            Ok((
+                serde_json::json!({
+                    "mode": mode,
+                    "run_id": submitted.run_id,
+                    "submitted": submitted,
+                }),
+                0,
+            ))
+        }
+        "run" => {
+            let run_id = required_string(request, "run_id")?;
+            record_controller_spawn(record, action, dedupe_key, entity_id, &run_id, request)?;
+            let (aggregate, exit_code) = run_submitted_with_executor(run_id.clone(), executor)?;
+            Ok((
+                serde_json::json!({ "mode": mode, "run_id": run_id, "aggregate": aggregate }),
+                exit_code,
+            ))
+        }
+        "resume" => {
+            let run_id = required_string(request, "run_id")?;
+            record_controller_spawn(record, action, dedupe_key, entity_id, &run_id, request)?;
+            let (aggregate, exit_code) = run_resume_with_executor(run_id.clone(), executor)?;
+            Ok((
+                serde_json::json!({ "mode": mode, "run_id": run_id, "aggregate": aggregate }),
+                exit_code,
+            ))
+        }
+        "run_next" => {
+            let (value, exit_code) = run_next_with_executor(executor)?;
+            if let Some(run_id) = value.get("run_id").and_then(Value::as_str) {
+                record_controller_spawn(record, action, dedupe_key, entity_id, run_id, request)?;
+            }
+            Ok((
+                serde_json::json!({ "mode": mode, "result": value }),
+                exit_code,
+            ))
+        }
+        "dispatch" => {
+            let dispatch_args = dispatch_args_from_controller_request(request)?;
+            let (value, exit_code) = dispatch_with_executor(dispatch_args, executor)?;
+            if let Some(run_id) = value.get("run_id").and_then(Value::as_str) {
+                record_controller_spawn(record, action, dedupe_key, entity_id, run_id, request)?;
+            }
+            Ok((
+                serde_json::json!({ "mode": mode, "result": value }),
+                exit_code,
+            ))
+        }
+        other => Err(homeboy::core::Error::validation_invalid_argument(
+            "request.mode",
+            format!("unsupported spawn_task request mode '{other}'"),
+            Some(other.to_string()),
+            Some(vec![
+                "Supported modes: run_plan, submit, run, resume, run_next, dispatch".to_string(),
+            ]),
+        )),
+    }
+}
+
+fn execute_fan_out_action<E>(
+    record: &mut AgentTaskLoopControllerRecord,
+    action: &AgentTaskLoopPolicyActionRecord,
+    dedupe_key: &str,
+    entity_ids: &[String],
+    request_template: &Value,
+    executor: E,
+) -> CmdResult<Value>
+where
+    E: AgentTaskExecutorAdapter + Clone,
+{
+    let mut results = Vec::new();
+    let mut exit_code = 0;
+    for entity_id in entity_ids {
+        let request = materialize_fan_out_request(request_template, entity_id);
+        let child_dedupe_key = format!("{dedupe_key}:{entity_id}");
+        let child_action = AgentTaskLoopPolicyActionRecord {
+            action_id: format!("{}:{entity_id}", action.action_id),
+            action: AgentTaskLoopPolicyAction::SpawnTask {
+                dedupe_key: child_dedupe_key.clone(),
+                entity_id: Some(entity_id.clone()),
+                request: request.clone(),
+            },
+            status: AgentTaskLoopActionStatus::Running,
+            reason: action.reason.clone(),
+            created_at: action.created_at.clone(),
+            dedupe_key: Some(child_dedupe_key.clone()),
+            diagnostics: Vec::new(),
+        };
+        let (result, child_exit_code) = execute_spawn_task_action(
+            record,
+            &child_action,
+            &child_dedupe_key,
+            Some(entity_id),
+            &request,
+            executor.clone(),
+        )?;
+        if child_exit_code != 0 {
+            exit_code = child_exit_code;
+        }
+        results.push(result);
+    }
+    Ok((
+        serde_json::json!({ "mode": "fan_out", "results": results }),
+        exit_code,
+    ))
+}
+
+fn claim_controller_action(
+    record: &mut AgentTaskLoopControllerRecord,
+    action_id: &str,
+) -> homeboy::core::Result<AgentTaskLoopPolicyActionRecord> {
+    let action = record
+        .next_actions
+        .iter_mut()
+        .find(|action| action.action_id == action_id)
+        .ok_or_else(|| {
+            homeboy::core::Error::validation_invalid_argument(
+                "action_id",
+                format!("controller action '{action_id}' does not exist"),
+                Some(action_id.to_string()),
+                None,
+            )
+        })?;
+    if action.status != AgentTaskLoopActionStatus::Pending {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "action_id",
+            format!(
+                "controller action '{}' is {:?}, not pending",
+                action.action_id, action.status
+            ),
+            Some(action.action_id.clone()),
+            None,
+        ));
+    }
+    action.status = AgentTaskLoopActionStatus::Running;
+    let action = action.clone();
+    push_controller_history(
+        record,
+        "controller.action.claimed",
+        None,
+        serde_json::json!({ "action_id": action.action_id, "dedupe_key": action.dedupe_key }),
+    );
+    Ok(action)
+}
+
+fn complete_controller_action(
+    record: &mut AgentTaskLoopControllerRecord,
+    action_id: &str,
+    execution: &Value,
+    exit_code: i32,
+) -> homeboy::core::Result<()> {
+    let status = if exit_code == 0 {
+        AgentTaskLoopActionStatus::Completed
+    } else {
+        AgentTaskLoopActionStatus::Failed
+    };
+    set_controller_action_status(record, action_id, status)?;
+    push_controller_history(
+        record,
+        if exit_code == 0 {
+            "controller.action.completed"
+        } else {
+            "controller.action.failed"
+        },
+        None,
+        serde_json::json!({ "action_id": action_id, "exit_code": exit_code, "execution": execution }),
+    );
+    Ok(())
+}
+
+fn fail_controller_action(
+    record: &mut AgentTaskLoopControllerRecord,
+    action_id: &str,
+    message: &str,
+) -> homeboy::core::Result<()> {
+    set_controller_action_status(record, action_id, AgentTaskLoopActionStatus::Failed)?;
+    push_controller_history(
+        record,
+        "controller.action.failed",
+        None,
+        serde_json::json!({ "action_id": action_id, "error": message }),
+    );
+    Ok(())
+}
+
+fn set_controller_action_status(
+    record: &mut AgentTaskLoopControllerRecord,
+    action_id: &str,
+    status: AgentTaskLoopActionStatus,
+) -> homeboy::core::Result<()> {
+    let action = record
+        .next_actions
+        .iter_mut()
+        .find(|action| action.action_id == action_id)
+        .ok_or_else(|| {
+            homeboy::core::Error::validation_invalid_argument(
+                "action_id",
+                format!("controller action '{action_id}' does not exist"),
+                Some(action_id.to_string()),
+                None,
+            )
+        })?;
+    action.status = status;
+    Ok(())
+}
+
+fn record_controller_spawn(
+    record: &mut AgentTaskLoopControllerRecord,
+    action: &AgentTaskLoopPolicyActionRecord,
+    dedupe_key: &str,
+    entity_id: Option<&str>,
+    run_id: &str,
+    request: &Value,
+) -> homeboy::core::Result<()> {
+    if let Some(dedupe) = record.dedupe_keys.get_mut(dedupe_key) {
+        dedupe.run_id = Some(run_id.to_string());
+    }
+    if let Some(entity_id) = entity_id {
+        if let Some(entity) = record.entities.get_mut(entity_id) {
+            if !entity.run_refs.iter().any(|run| run.run_id == run_id) {
+                entity.run_refs.push(AgentTaskLoopRunRef {
+                    run_id: run_id.to_string(),
+                    task_id: None,
+                    role: Some("spawn_task".to_string()),
+                });
+            }
+        }
+    }
+    if !record
+        .task_lineage
+        .iter()
+        .any(|lineage| lineage.run_id == run_id)
+    {
+        record.task_lineage.push(
+            homeboy::core::agent_task_loop_controller::AgentTaskLoopTaskLineage {
+                run_id: run_id.to_string(),
+                task_id: None,
+                parent_run_id: None,
+                parent_task_id: None,
+                entity_id: entity_id.map(str::to_string),
+                dedupe_key: Some(dedupe_key.to_string()),
+                artifact_refs: Vec::new(),
+                inputs: request.clone(),
+                outputs: Value::Null,
+            },
+        );
+    }
+    push_controller_history(
+        record,
+        "controller.action.spawned_run",
+        entity_id.map(str::to_string),
+        serde_json::json!({
+            "action_id": action.action_id,
+            "dedupe_key": dedupe_key,
+            "run_id": run_id,
+        }),
+    );
+    agent_task_loop_controller::write_controller(record)?;
+    Ok(())
+}
+
+fn first_pending_action_id(record: &AgentTaskLoopControllerRecord) -> Option<String> {
+    record
+        .next_actions
+        .iter()
+        .find(|action| action.status == AgentTaskLoopActionStatus::Pending)
+        .map(|action| action.action_id.clone())
+}
+
+fn plan_from_controller_request(request: &Value) -> homeboy::core::Result<AgentTaskPlan> {
+    let plan_value = request.get("plan").unwrap_or(request);
+    serde_json::from_value(plan_value.clone()).map_err(|error| {
+        homeboy::core::Error::validation_invalid_json(
+            error,
+            Some("controller spawn_task plan".to_string()),
+            Some(plan_value.to_string()),
+        )
+    })
+}
+
+fn dispatch_args_from_controller_request(request: &Value) -> homeboy::core::Result<DispatchArgs> {
+    let dispatch = request.get("dispatch").unwrap_or(request);
+    Ok(DispatchArgs {
+        prompt: optional_string(dispatch, "prompt"),
+        tasks: optional_string_array(dispatch, "tasks")?,
+        tasks_json: optional_string(dispatch, "tasks_json"),
+        cwd: optional_string(dispatch, "cwd"),
+        workspace: optional_string(dispatch, "workspace"),
+        repo: optional_string(dispatch, "repo"),
+        task_url: optional_string(dispatch, "task_url"),
+        backend: optional_string(dispatch, "backend").unwrap_or_else(|| "codebox".to_string()),
+        selector: optional_string(dispatch, "selector"),
+        model: optional_string(dispatch, "model"),
+        secret_env: optional_string_array(dispatch, "secret_env")?,
+        provider_config: optional_string(dispatch, "provider_config"),
+        client_context: optional_string(dispatch, "client_context"),
+        concurrency: optional_usize(dispatch, "concurrency")?.unwrap_or(1),
+        attempts: optional_u32(dispatch, "attempts")?.unwrap_or(1),
+        run_id: optional_string(dispatch, "run_id"),
+        queue_only: optional_bool(dispatch, "queue_only").unwrap_or(false),
+    })
+}
+
+fn materialize_fan_out_request(template: &Value, entity_id: &str) -> Value {
+    let mut request = template.clone();
+    if let Some(object) = request.as_object_mut() {
+        object.insert(
+            "entity_id".to_string(),
+            Value::String(entity_id.to_string()),
+        );
+        object.entry("run_id".to_string()).or_insert_with(|| {
+            Value::String(format!(
+                "controller-{}",
+                entity_id.replace([':', '/', '#'], "_")
+            ))
+        });
+    }
+    request
+}
+
+fn controller_request_run_id(request: &Value, dedupe_key: &str, action_id: &str) -> String {
+    optional_string(request, "run_id").unwrap_or_else(|| {
+        format!(
+            "controller-{}-{}",
+            action_id,
+            dedupe_key.replace([':', '/', '#', ' '], "_")
+        )
+    })
+}
+
+fn required_string(value: &Value, key: &str) -> homeboy::core::Result<String> {
+    optional_string(value, key).ok_or_else(|| {
+        homeboy::core::Error::validation_invalid_argument(
+            key,
+            format!("controller action request requires string field '{key}'"),
+            None,
+            None,
+        )
+    })
+}
+
+fn optional_string(value: &Value, key: &str) -> Option<String> {
+    value.get(key).and_then(Value::as_str).map(str::to_string)
+}
+
+fn optional_bool(value: &Value, key: &str) -> Option<bool> {
+    value.get(key).and_then(Value::as_bool)
+}
+
+fn optional_u32(value: &Value, key: &str) -> homeboy::core::Result<Option<u32>> {
+    value
+        .get(key)
+        .map(|value| {
+            value
+                .as_u64()
+                .and_then(|value| u32::try_from(value).ok())
+                .ok_or_else(|| {
+                    homeboy::core::Error::validation_invalid_argument(
+                        key,
+                        format!("controller action request field '{key}' must be a u32"),
+                        Some(value.to_string()),
+                        None,
+                    )
+                })
+        })
+        .transpose()
+}
+
+fn optional_usize(value: &Value, key: &str) -> homeboy::core::Result<Option<usize>> {
+    value
+        .get(key)
+        .map(|value| {
+            value
+                .as_u64()
+                .and_then(|value| usize::try_from(value).ok())
+                .ok_or_else(|| {
+                    homeboy::core::Error::validation_invalid_argument(
+                        key,
+                        format!("controller action request field '{key}' must be a usize"),
+                        Some(value.to_string()),
+                        None,
+                    )
+                })
+        })
+        .transpose()
+}
+
+fn optional_string_array(value: &Value, key: &str) -> homeboy::core::Result<Vec<String>> {
+    let Some(value) = value.get(key) else {
+        return Ok(Vec::new());
+    };
+    let Some(values) = value.as_array() else {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            key,
+            format!("controller action request field '{key}' must be an array of strings"),
+            Some(value.to_string()),
+            None,
+        ));
+    };
+    values
+        .iter()
+        .map(|value| {
+            value.as_str().map(str::to_string).ok_or_else(|| {
+                homeboy::core::Error::validation_invalid_argument(
+                    key,
+                    format!("controller action request field '{key}' must contain only strings"),
+                    Some(value.to_string()),
+                    None,
+                )
+            })
+        })
+        .collect()
+}
+
+fn push_controller_history(
+    record: &mut AgentTaskLoopControllerRecord,
+    event_type: &str,
+    entity_id: Option<String>,
+    payload: Value,
+) {
+    record.history.push(AgentTaskLoopHistoryEvent {
+        event_id: format!("event-{}", record.history.len() + 1),
+        event_type: event_type.to_string(),
+        recorded_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        entity_id,
+        payload,
+    });
 }
 
 fn auth(args: AgentTaskAuthArgs) -> CmdResult<Value> {
@@ -1398,6 +2122,7 @@ mod tests {
     use homeboy::core::agent_task_lifecycle::{
         status as lifecycle_status, AgentTaskRunRecord, AgentTaskRunState,
     };
+    use homeboy::core::agent_task_loop_controller::{AgentTaskLoopWait, AgentTaskLoopWaitStatus};
     use homeboy::core::agent_task_scheduler::{AgentTaskExecutionContext, AgentTaskState};
     use serde_json::{json, Value};
     use std::sync::{Arc, Mutex};
@@ -1667,6 +2392,130 @@ mod tests {
     }
 
     #[test]
+    fn controller_run_next_executes_spawn_task_plan_and_records_dedupe_lineage() {
+        with_temp_home(|| {
+            let observed_request = Arc::new(Mutex::new(None));
+            let mut controller = agent_task_loop_controller::create_controller(
+                "loop-controller-run-next",
+                "repair",
+                "v1",
+            )
+            .expect("controller created");
+            let mut plan = test_plan();
+            plan.tasks[0].executor.selector = Some("homeboy-lab".to_string());
+            plan.tasks[0].executor.config = json!({
+                "artifact_root": "/tmp/homeboy-lab-artifacts/controller-run-next"
+            });
+
+            controller.record_action(
+                AgentTaskLoopPolicyAction::SpawnTask {
+                    dedupe_key: "finding:abc:repair".to_string(),
+                    entity_id: None,
+                    request: json!({
+                        "mode": "run_plan",
+                        "run_id": "controller-run-next-a",
+                        "plan": plan,
+                    }),
+                },
+                "finding emitted",
+            );
+            agent_task_loop_controller::write_controller(&controller).expect("controller written");
+
+            let (value, exit_code) = controller_run_next_with_executor(
+                "loop-controller-run-next".to_string(),
+                CapturingExecutor {
+                    observed_request: Arc::clone(&observed_request),
+                },
+            )
+            .expect("controller action executed");
+
+            let observed = observed_request
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+                .expect("provider saw request");
+            let loaded = agent_task_loop_controller::load_controller("loop-controller-run-next")
+                .expect("controller loaded");
+
+            assert_eq!(exit_code, 0);
+            assert_eq!(value["claimed"], true);
+            assert_eq!(
+                loaded.next_actions[0].status,
+                AgentTaskLoopActionStatus::Completed
+            );
+            assert_eq!(
+                loaded.dedupe_keys["finding:abc:repair"].run_id.as_deref(),
+                Some("controller-run-next-a")
+            );
+            assert_eq!(loaded.task_lineage[0].run_id, "controller-run-next-a");
+            assert!(loaded
+                .history
+                .iter()
+                .any(|event| event.event_type == "controller.action.claimed"));
+            assert!(loaded
+                .history
+                .iter()
+                .any(|event| event.event_type == "controller.action.completed"));
+            assert_eq!(observed.executor.selector.as_deref(), Some("homeboy-lab"));
+            assert_eq!(
+                observed.executor.config["artifact_root"],
+                json!("/tmp/homeboy-lab-artifacts/controller-run-next")
+            );
+        });
+    }
+
+    #[test]
+    fn controller_run_executes_requested_action_id_only() {
+        with_temp_home(|| {
+            let mut controller = agent_task_loop_controller::create_controller(
+                "loop-controller-run-action",
+                "repair",
+                "v1",
+            )
+            .expect("controller created");
+            controller.record_action(
+                AgentTaskLoopPolicyAction::WaitForEvent(AgentTaskLoopWait {
+                    wait_key: "wait-a".to_string(),
+                    event_type: "task.completed".to_string(),
+                    entity_id: None,
+                    external_ref: None,
+                    timeout_at: None,
+                    escalation_policy: None,
+                    status: AgentTaskLoopWaitStatus::Open,
+                    satisfied_by_event_id: None,
+                }),
+                "wait first",
+            );
+            controller.record_action(
+                AgentTaskLoopPolicyAction::Complete {
+                    reason: Some("done".to_string()),
+                },
+                "complete second",
+            );
+            agent_task_loop_controller::write_controller(&controller).expect("controller written");
+
+            let (_value, exit_code) = controller_run_action_with_executor(
+                "loop-controller-run-action".to_string(),
+                "action-2".to_string(),
+                CapturingExecutor::default(),
+            )
+            .expect("specific action executed");
+            let loaded = agent_task_loop_controller::load_controller("loop-controller-run-action")
+                .expect("controller loaded");
+
+            assert_eq!(exit_code, 0);
+            assert_eq!(
+                loaded.next_actions[0].status,
+                AgentTaskLoopActionStatus::Pending
+            );
+            assert_eq!(
+                loaded.next_actions[1].status,
+                AgentTaskLoopActionStatus::Completed
+            );
+        });
+    }
+
+    #[test]
     fn promotion_source_resolves_completed_run_id() {
         with_temp_home(|| {
             let run_id = "run-promotion-source";
@@ -1878,7 +2727,7 @@ mod tests {
         }
     }
 
-    #[derive(Default)]
+    #[derive(Clone, Default)]
     struct CapturingExecutor {
         observed_request: Arc<Mutex<Option<AgentTaskRequest>>>,
     }

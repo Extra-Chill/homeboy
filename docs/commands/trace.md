@@ -116,6 +116,8 @@ homeboy trace compare woocommerce-gateway-stripe ece-product-page-waterfall \
   --baseline-target develop \
   --candidate HEAD \
   --runs 5 \
+  --visual-compare \
+  --visual-compare-provider <COMMAND> \
   --report markdown
 ```
 
@@ -126,6 +128,15 @@ The compare command writes `baseline.aggregate.json`, `candidate.aggregate.json`
 Target compares run baseline and candidate through the same scheduler. Use `--schedule interleaved` to alternate `baseline, candidate, baseline, candidate` for the configured repetition count, or `--schedule grouped` to run one side then the other. `compare.json` and `summary.md` include a `proof_run_order` / `A/B Run Matrix` section with each run's group, iteration, status, exit code, raw trace artifact path, and failure message when a run fails. Failed runs are retained in the aggregate and comparison instead of being silently dropped.
 
 When run artifacts contain browser evidence JSON, target compare also attaches `browser_proof` to `compare.json` and appends a `Browser Evidence Comparison` section to `summary.md`. The browser proof aggregates promoted browser metrics such as LCP, ready time, DOM lifecycle timings, request counts, console errors, page errors, assertion deltas, and artifact references across baseline/candidate samples. Profile and matrix labels emitted by the evidence are preserved so throttled, synthetic, viewport, or scenario-profiled runs remain distinguishable in review. Treat throttled or synthetic timing labels as relative proof data unless the underlying profile says otherwise.
+
+Pass `--visual-compare` when the browser evidence includes screenshot artifacts
+and a visual compare provider is available. Homeboy delegates visual diff work to
+the executable named by `--visual-compare-provider`, writes visual artifacts under
+`--visual-artifacts-dir` or the trace compare output directory, and records
+normalized mismatch metrics plus source/candidate/diff artifact refs in
+`browser_proof.report`. The same proof block includes `baseline_runs` and
+`candidate_runs` child artifact addresses so follow-up reports can consume the
+persisted compare record instead of rediscovering temp paths.
 
 Known trace lab plumbing issues are tracked separately and are not papered over by this report path: [#3621](https://github.com/Extra-Chill/homeboy/issues/3621) for Docker preflight detection and [#3631](https://github.com/Extra-Chill/homeboy/issues/3631) for runner daemon restart exec diagnostics.
 

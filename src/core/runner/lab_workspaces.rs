@@ -236,11 +236,9 @@ pub(super) fn agent_task_plan_extra_workspaces(
     let mut seen = BTreeSet::new();
     let mut workspaces = Vec::new();
 
-    if let Some(path) = spec.strip_prefix('@') {
-        let expanded = shellexpand::tilde(path).to_string();
-        let path = Path::new(&expanded);
+    if let Some(path) = agent_task_plan_file_path(&spec, source_path) {
         if path.is_file() {
-            let workspace_path = containing_checkout_or_parent(path)?;
+            let workspace_path = containing_checkout_or_parent(&path)?;
             if let Ok(canon) = workspace_path.canonicalize() {
                 if canon != source_canon && !canon.starts_with(&source_canon) {
                     seen.insert(canon.clone());
@@ -255,7 +253,7 @@ pub(super) fn agent_task_plan_extra_workspaces(
         }
     }
 
-    let raw = match crate::core::config::read_json_spec_to_string(&spec) {
+    let raw = match read_agent_task_plan_spec_to_string(&spec, source_path) {
         Ok(raw) => raw,
         Err(_) => return Ok(workspaces),
     };
@@ -438,6 +436,40 @@ fn agent_task_plan_spec(args: &[String]) -> Option<String> {
         }
     }
     None
+}
+
+fn agent_task_plan_file_path(spec: &str, source_path: &Path) -> Option<PathBuf> {
+    let path = spec.strip_prefix('@')?;
+    if path.trim().is_empty() || path.contains("://") {
+        return None;
+    }
+
+    let expanded = PathBuf::from(shellexpand::tilde(path).to_string());
+    if expanded.is_file() || expanded.is_absolute() {
+        return Some(expanded);
+    }
+
+    let source_relative = source_path.join(&expanded);
+    if source_relative.is_file() {
+        return Some(source_relative);
+    }
+
+    Some(expanded)
+}
+
+fn read_agent_task_plan_spec_to_string(spec: &str, source_path: &Path) -> Result<String> {
+    let Some(_) = spec.strip_prefix('@') else {
+        return crate::core::config::read_json_spec_to_string(spec);
+    };
+    let Some(path) = agent_task_plan_file_path(spec, source_path) else {
+        return crate::core::config::read_json_spec_to_string(spec);
+    };
+    std::fs::read_to_string(&path).map_err(|err| {
+        Error::internal_io(
+            err.to_string(),
+            Some(format!("read agent-task plan {}", path.display())),
+        )
+    })
 }
 
 fn path_setting_values(args: &[String]) -> Vec<String> {
@@ -1078,6 +1110,54 @@ mod provider_config_candidate_paths_tests {
         let workspaces = agent_task_plan_extra_workspaces(&args, &source).expect("workspaces");
 
         assert!(workspaces.is_empty());
+    }
+
+    #[test]
+    fn agent_task_run_plan_relative_file_reads_from_primary_workspace() {
+        let controller = tempfile::tempdir().expect("controller");
+        let source = controller.path().join("primary");
+        let tool = controller.path().join("tool-runner");
+        let tool_bin = tool.join("packages/cli/dist/index.js");
+        let plan = source.join(".ci/site-generation-loop.agent-task-plan.json");
+        std::fs::create_dir_all(plan.parent().unwrap()).expect("plan dir");
+        std::fs::create_dir_all(tool_bin.parent().unwrap()).expect("tool cli dir");
+        std::fs::write(&tool_bin, "#!/usr/bin/env node\n").expect("tool bin");
+        std::fs::write(tool.join("package-lock.json"), "{}\n").expect("package lock");
+        std::fs::write(
+            &plan,
+            serde_json::json!({
+                "schema": "homeboy/agent-task-plan/v1",
+                "plan_id": "site-generation-loop",
+                "tasks": [{
+                    "task_id": "task-1",
+                    "executor": {
+                        "backend": "tool-runner",
+                        "config": { "tool_bin": tool_bin }
+                    }
+                }]
+            })
+            .to_string(),
+        )
+        .expect("plan file");
+        git(&tool, &["init", "-b", "main"]);
+        git(&tool, &["config", "user.email", "test@example.com"]);
+        git(&tool, &["config", "user.name", "Homeboy Test"]);
+        git(&tool, &["add", "."]);
+        git(&tool, &["commit", "-m", "initial"]);
+
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "run-plan".to_string(),
+            "--plan".to_string(),
+            "@.ci/site-generation-loop.agent-task-plan.json".to_string(),
+        ];
+
+        let workspaces = agent_task_plan_extra_workspaces(&args, &source).expect("workspaces");
+
+        assert_eq!(workspaces.len(), 1);
+        assert_eq!(workspaces[0].role, "agent_task_plan_config");
+        assert_eq!(workspaces[0].path, tool.canonicalize().unwrap());
     }
 
     #[test]

@@ -431,9 +431,45 @@ fn extract_parent_command_from_error(e: &clap::Error) -> Option<String> {
 mod tests {
     use super::*;
     use clap::Parser;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    struct EnvGuard {
+        name: &'static str,
+        previous: Option<String>,
+        _guard: MutexGuard<'static, ()>,
+    }
+
+    impl EnvGuard {
+        fn remove(name: &'static str) -> Self {
+            let guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+            let previous = std::env::var(name).ok();
+            std::env::remove_var(name);
+            Self {
+                name,
+                previous,
+                _guard: guard,
+            }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            if let Some(value) = &self.previous {
+                std::env::set_var(self.name, value);
+            } else {
+                std::env::remove_var(self.name);
+            }
+        }
+    }
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn runs_list_runner_after_subcommand_is_not_treated_as_global_runner() {
+        let _env = EnvGuard::remove(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV);
         let mut cli = Cli::parse_from([
             "homeboy",
             "runs",
@@ -468,6 +504,7 @@ mod tests {
 
     #[test]
     fn global_runner_for_runs_show_is_preserved_for_guidance_error() {
+        let _env = EnvGuard::remove(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV);
         let mut cli = Cli::parse_from([
             "homeboy",
             "--runner",

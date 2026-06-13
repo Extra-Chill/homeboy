@@ -21,6 +21,12 @@ pub struct AgentTaskLoopControllerRecord {
     pub phase: String,
     pub state: AgentTaskLoopControllerState,
     pub config_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_loop_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_action_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_entity_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -35,6 +41,8 @@ pub struct AgentTaskLoopControllerRecord {
     pub gate_results: Vec<AgentTaskGateBundleResult>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub waits: Vec<AgentTaskLoopWait>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub subcontrollers: Vec<AgentTaskLoopSubcontrollerRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub feedback: Vec<AgentTaskLoopFeedbackArtifact>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -121,6 +129,28 @@ pub struct AgentTaskLoopDedupeRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentTaskLoopSubcontrollerRef {
+    pub loop_id: String,
+    pub dedupe_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entity_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_loop_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_action_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub terminal_states: Vec<AgentTaskLoopControllerState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<AgentTaskLoopControllerState>,
+    pub created_at: String,
+    pub updated_at: String,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub request: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgentTaskLoopTaskLineage {
     pub run_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -178,6 +208,30 @@ pub enum AgentTaskLoopPolicyAction {
         #[serde(default, skip_serializing_if = "Value::is_null")]
         request_template: Value,
     },
+    SpawnController {
+        dedupe_key: String,
+        loop_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        entity_id: Option<String>,
+        #[serde(default = "default_controller_phase")]
+        phase: String,
+        #[serde(default = "default_config_version")]
+        config_version: String,
+        #[serde(default, skip_serializing_if = "Value::is_null")]
+        request: Value,
+    },
+    SpawnSubloop {
+        dedupe_key: String,
+        loop_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        entity_id: Option<String>,
+        #[serde(default = "default_controller_phase")]
+        phase: String,
+        #[serde(default = "default_config_version")]
+        config_version: String,
+        #[serde(default, skip_serializing_if = "Value::is_null")]
+        request: Value,
+    },
     RouteFinding {
         finding: AgentTaskLoopFindingPacket,
         dedupe_key: String,
@@ -209,6 +263,15 @@ pub enum AgentTaskLoopPolicyAction {
         entity_id: Option<String>,
     },
     WaitForEvent(AgentTaskLoopWait),
+    WaitForController {
+        loop_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        entity_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        wait_key: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        terminal_states: Vec<AgentTaskLoopControllerState>,
+    },
     MarkHumanReady {
         entity_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -235,6 +298,18 @@ pub struct AgentTaskLoopPolicyActionRecord {
     pub created_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dedupe_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<AgentTaskLoopActionDiagnostic>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskLoopActionDiagnostic {
+    pub code: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner: Option<String>,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub details: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -303,8 +378,48 @@ impl Default for AgentTaskLoopCandidateLoopLimits {
 #[serde(rename_all = "snake_case")]
 pub enum AgentTaskLoopActionStatus {
     Pending,
+    Running,
     AlreadySatisfied,
     Completed,
+    Failed,
+    BlockedRunnerUnavailable,
+    BlockedRemoteMaterialization,
+    BlockedLocalFallbackDenied,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskLoopRunnerPolicy {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_fallback: Option<AgentTaskLoopLocalFallbackPolicy>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentTaskLoopLocalFallbackPolicy {
+    Allowed,
+    Denied,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentTaskLoopRunnerAvailability {
+    Available,
+    Unavailable { reason: String },
+    MaterializationBlocked { reason: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentTaskLoopRunnerExecutionTarget {
+    Local,
+    Runner(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentTaskLoopRunnerPolicyDecision {
+    pub target: Option<AgentTaskLoopRunnerExecutionTarget>,
+    pub blocked_status: Option<AgentTaskLoopActionStatus>,
+    pub diagnostic: Option<AgentTaskLoopActionDiagnostic>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -532,6 +647,9 @@ impl AgentTaskLoopControllerRecord {
             phase: phase.into(),
             state: AgentTaskLoopControllerState::Running,
             config_version: config_version.into(),
+            parent_loop_id: None,
+            parent_action_id: None,
+            parent_entity_id: None,
             created_at: now.clone(),
             updated_at: now,
             entities: BTreeMap::new(),
@@ -540,6 +658,7 @@ impl AgentTaskLoopControllerRecord {
             gate_bundles: Vec::new(),
             gate_results: Vec::new(),
             waits: Vec::new(),
+            subcontrollers: Vec::new(),
             feedback: Vec::new(),
             next_actions: Vec::new(),
             history: Vec::new(),
@@ -722,18 +841,169 @@ impl AgentTaskLoopControllerRecord {
             AgentTaskLoopActionStatus::Pending
         };
 
-        self.apply_action_side_effects(&action, status);
+        let action_id = format!("action-{}", self.next_actions.len() + 1);
+        self.apply_action_side_effects(&action, status, &action_id);
         let record = AgentTaskLoopPolicyActionRecord {
-            action_id: format!("action-{}", self.next_actions.len() + 1),
+            action_id,
             action,
             status,
             reason,
             created_at: now_timestamp(),
             dedupe_key,
+            diagnostics: Vec::new(),
         };
         self.next_actions.push(record.clone());
         self.touch();
         record
+    }
+
+    pub fn block_action_for_runner_policy(
+        &mut self,
+        action_id: &str,
+        status: AgentTaskLoopActionStatus,
+        diagnostic: AgentTaskLoopActionDiagnostic,
+    ) -> Result<()> {
+        if !matches!(
+            status,
+            AgentTaskLoopActionStatus::BlockedRunnerUnavailable
+                | AgentTaskLoopActionStatus::BlockedRemoteMaterialization
+                | AgentTaskLoopActionStatus::BlockedLocalFallbackDenied
+        ) {
+            return Err(Error::validation_invalid_argument(
+                "status",
+                "runner policy blocks must use a blocked action status",
+                Some(format!("{status:?}")),
+                None,
+            ));
+        }
+
+        let action = self
+            .next_actions
+            .iter_mut()
+            .find(|action| action.action_id == action_id)
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "action_id",
+                    format!("loop action '{action_id}' does not exist"),
+                    Some(action_id.to_string()),
+                    None,
+                )
+            })?;
+        action.status = status;
+        action.reason = diagnostic.message.clone();
+        action.diagnostics.push(diagnostic.clone());
+        self.history.push(AgentTaskLoopHistoryEvent {
+            event_id: format!("runner-policy-block-{}", self.history.len() + 1),
+            event_type: "runner_policy.blocked".to_string(),
+            recorded_at: now_timestamp(),
+            entity_id: action_entity_id(&action.action),
+            payload: json!({
+                "action_id": action_id,
+                "status": status,
+                "diagnostic": diagnostic,
+            }),
+        });
+        self.touch();
+        Ok(())
+    }
+
+    pub fn runner_policy_for_action(
+        &self,
+        action: &AgentTaskLoopPolicyAction,
+    ) -> AgentTaskLoopRunnerPolicy {
+        let request = action_runner_request(action);
+        let runner = request
+            .and_then(|value| value.get("runner"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|runner| !runner.is_empty())
+            .map(ToString::to_string);
+        let local_fallback = request
+            .and_then(|value| value.get("local_fallback"))
+            .and_then(parse_local_fallback_policy);
+
+        AgentTaskLoopRunnerPolicy {
+            runner,
+            local_fallback,
+        }
+    }
+
+    pub fn resolve_action_runner_policy<F>(
+        &self,
+        action: &AgentTaskLoopPolicyAction,
+        mut runner_availability: F,
+    ) -> AgentTaskLoopRunnerPolicyDecision
+    where
+        F: FnMut(&str) -> AgentTaskLoopRunnerAvailability,
+    {
+        let policy = self.runner_policy_for_action(action);
+        let fallback = policy.local_fallback.unwrap_or_else(|| {
+            if policy.runner.is_some() {
+                AgentTaskLoopLocalFallbackPolicy::Denied
+            } else {
+                AgentTaskLoopLocalFallbackPolicy::Allowed
+            }
+        });
+
+        let Some(runner) = policy.runner else {
+            return match fallback {
+                AgentTaskLoopLocalFallbackPolicy::Allowed => AgentTaskLoopRunnerPolicyDecision {
+                    target: Some(AgentTaskLoopRunnerExecutionTarget::Local),
+                    blocked_status: None,
+                    diagnostic: None,
+                },
+                AgentTaskLoopLocalFallbackPolicy::Denied => blocked_runner_decision(
+                    AgentTaskLoopActionStatus::BlockedLocalFallbackDenied,
+                    None,
+                    "controller action denies local fallback but did not declare a runner",
+                    Value::Null,
+                ),
+            };
+        };
+
+        match runner_availability(&runner) {
+            AgentTaskLoopRunnerAvailability::Available => AgentTaskLoopRunnerPolicyDecision {
+                target: Some(AgentTaskLoopRunnerExecutionTarget::Runner(runner)),
+                blocked_status: None,
+                diagnostic: None,
+            },
+            AgentTaskLoopRunnerAvailability::Unavailable { reason } => match fallback {
+                AgentTaskLoopLocalFallbackPolicy::Allowed => AgentTaskLoopRunnerPolicyDecision {
+                    target: Some(AgentTaskLoopRunnerExecutionTarget::Local),
+                    blocked_status: None,
+                    diagnostic: Some(AgentTaskLoopActionDiagnostic {
+                        code: "runner_unavailable_local_fallback_allowed".to_string(),
+                        message: reason,
+                        runner: Some(runner),
+                        details: Value::Null,
+                    }),
+                },
+                AgentTaskLoopLocalFallbackPolicy::Denied => blocked_runner_decision(
+                    AgentTaskLoopActionStatus::BlockedRunnerUnavailable,
+                    Some(runner),
+                    reason,
+                    Value::Null,
+                ),
+            },
+            AgentTaskLoopRunnerAvailability::MaterializationBlocked { reason } => match fallback {
+                AgentTaskLoopLocalFallbackPolicy::Allowed => AgentTaskLoopRunnerPolicyDecision {
+                    target: Some(AgentTaskLoopRunnerExecutionTarget::Local),
+                    blocked_status: None,
+                    diagnostic: Some(AgentTaskLoopActionDiagnostic {
+                        code: "remote_materialization_blocked_local_fallback_allowed".to_string(),
+                        message: reason,
+                        runner: Some(runner),
+                        details: Value::Null,
+                    }),
+                },
+                AgentTaskLoopLocalFallbackPolicy::Denied => blocked_runner_decision(
+                    AgentTaskLoopActionStatus::BlockedRemoteMaterialization,
+                    Some(runner),
+                    reason,
+                    Value::Null,
+                ),
+            },
+        }
     }
 
     pub fn mark_human_ready(&mut self, entity_id: &str, reason: Option<String>) -> Result<()> {
@@ -858,6 +1128,7 @@ impl AgentTaskLoopControllerRecord {
         &mut self,
         action: &AgentTaskLoopPolicyAction,
         status: AgentTaskLoopActionStatus,
+        action_id: &str,
     ) {
         if status == AgentTaskLoopActionStatus::AlreadySatisfied {
             return;
@@ -909,6 +1180,67 @@ impl AgentTaskLoopControllerRecord {
                     self.waits.push(wait.clone());
                 }
             }
+            AgentTaskLoopPolicyAction::SpawnController {
+                dedupe_key,
+                loop_id,
+                entity_id,
+                request,
+                ..
+            }
+            | AgentTaskLoopPolicyAction::SpawnSubloop {
+                dedupe_key,
+                loop_id,
+                entity_id,
+                request,
+                ..
+            } => {
+                self.record_subcontroller_ref(
+                    loop_id,
+                    dedupe_key,
+                    entity_id.clone(),
+                    Some(action_id.to_string()),
+                    None,
+                    Vec::new(),
+                    request.clone(),
+                );
+            }
+            AgentTaskLoopPolicyAction::WaitForController {
+                loop_id,
+                entity_id,
+                wait_key,
+                terminal_states,
+            } => {
+                self.state = AgentTaskLoopControllerState::Waiting;
+                let wait_key = wait_key
+                    .clone()
+                    .unwrap_or_else(|| controller_wait_key(loop_id));
+                let terminal_states = controller_terminal_states(terminal_states);
+                self.record_subcontroller_ref(
+                    loop_id,
+                    &format!("controller:{loop_id}"),
+                    entity_id.clone(),
+                    None,
+                    Some(wait_key.clone()),
+                    terminal_states.clone(),
+                    Value::Null,
+                );
+                if !self
+                    .waits
+                    .iter()
+                    .any(|existing| existing.wait_key == wait_key)
+                {
+                    self.waits.push(AgentTaskLoopWait {
+                        wait_key,
+                        event_type: "controller.terminal".to_string(),
+                        entity_id: entity_id.clone(),
+                        external_ref: Some(loop_id.clone()),
+                        timeout_at: None,
+                        escalation_policy: None,
+                        status: AgentTaskLoopWaitStatus::Open,
+                        satisfied_by_event_id: None,
+                    });
+                }
+            }
             AgentTaskLoopPolicyAction::MarkHumanReady { entity_id, reason } => {
                 let _ = self.mark_human_ready(entity_id, reason.clone());
             }
@@ -935,10 +1267,54 @@ impl AgentTaskLoopControllerRecord {
     fn touch(&mut self) {
         self.updated_at = now_timestamp();
     }
+
+    fn record_subcontroller_ref(
+        &mut self,
+        loop_id: &str,
+        dedupe_key: &str,
+        entity_id: Option<String>,
+        parent_action_id: Option<String>,
+        wait_key: Option<String>,
+        terminal_states: Vec<AgentTaskLoopControllerState>,
+        request: Value,
+    ) {
+        if let Some(existing) = self
+            .subcontrollers
+            .iter_mut()
+            .find(|existing| existing.dedupe_key == dedupe_key || existing.loop_id == loop_id)
+        {
+            existing.entity_id = existing.entity_id.clone().or(entity_id);
+            existing.parent_action_id = existing.parent_action_id.clone().or(parent_action_id);
+            existing.wait_key = existing.wait_key.clone().or(wait_key);
+            if existing.terminal_states.is_empty() {
+                existing.terminal_states = terminal_states;
+            }
+            if existing.request.is_null() {
+                existing.request = request;
+            }
+            existing.updated_at = now_timestamp();
+            return;
+        }
+
+        let now = now_timestamp();
+        self.subcontrollers.push(AgentTaskLoopSubcontrollerRef {
+            loop_id: sanitize_loop_id(loop_id),
+            dedupe_key: dedupe_key.to_string(),
+            entity_id,
+            parent_loop_id: Some(self.loop_id.clone()),
+            parent_action_id,
+            wait_key,
+            terminal_states,
+            state: None,
+            created_at: now.clone(),
+            updated_at: now,
+            request,
+        });
+    }
 }
 
 pub fn controller_status_report(loop_id: &str) -> Result<AgentTaskLoopControllerStatusReport> {
-    let controller = load_controller(loop_id)?;
+    let controller = controller_status(loop_id)?;
     let diagnostics = controller_status_diagnostics(&controller)?;
     Ok(AgentTaskLoopControllerStatusReport {
         schema: AGENT_TASK_LOOP_CONTROLLER_STATUS_SCHEMA.to_string(),
@@ -1046,6 +1422,14 @@ pub fn load_controller(loop_id: &str) -> Result<AgentTaskLoopControllerRecord> {
     read_json(&controller_path(&sanitize_loop_id(loop_id))?)
 }
 
+pub fn controller_status(loop_id: &str) -> Result<AgentTaskLoopControllerRecord> {
+    let mut record = load_controller(loop_id)?;
+    if refresh_subcontroller_statuses(&mut record)? {
+        write_controller(&record)?;
+    }
+    Ok(record)
+}
+
 pub fn list_controllers() -> Result<Vec<AgentTaskLoopControllerRecord>> {
     let root = controllers_root()?;
     let entries = match fs::read_dir(&root) {
@@ -1121,6 +1505,8 @@ fn action_dedupe_key(action: &AgentTaskLoopPolicyAction) -> Option<String> {
     match action {
         AgentTaskLoopPolicyAction::SpawnTask { dedupe_key, .. }
         | AgentTaskLoopPolicyAction::FanOut { dedupe_key, .. }
+        | AgentTaskLoopPolicyAction::SpawnController { dedupe_key, .. }
+        | AgentTaskLoopPolicyAction::SpawnSubloop { dedupe_key, .. }
         | AgentTaskLoopPolicyAction::RouteFinding { dedupe_key, .. } => Some(dedupe_key.clone()),
         AgentTaskLoopPolicyAction::ValidateCandidatePatch {
             candidate,
@@ -1131,6 +1517,14 @@ fn action_dedupe_key(action: &AgentTaskLoopPolicyAction) -> Option<String> {
             candidate.candidate_id, validation.validation_id
         )),
         AgentTaskLoopPolicyAction::WaitForEvent(wait) => Some(format!("wait:{}", wait.wait_key)),
+        AgentTaskLoopPolicyAction::WaitForController {
+            loop_id, wait_key, ..
+        } => Some(format!(
+            "wait:{}",
+            wait_key
+                .clone()
+                .unwrap_or_else(|| controller_wait_key(loop_id))
+        )),
         AgentTaskLoopPolicyAction::RunGates {
             bundle_id,
             entity_id,
@@ -1149,6 +1543,60 @@ fn action_dedupe_key(action: &AgentTaskLoopPolicyAction) -> Option<String> {
     }
 }
 
+fn action_runner_request(action: &AgentTaskLoopPolicyAction) -> Option<&Value> {
+    match action {
+        AgentTaskLoopPolicyAction::SpawnTask { request, .. } => Some(request),
+        AgentTaskLoopPolicyAction::FanOut {
+            request_template, ..
+        }
+        | AgentTaskLoopPolicyAction::RouteFinding {
+            request_template, ..
+        } => Some(request_template),
+        _ => None,
+    }
+}
+
+fn parse_local_fallback_policy(value: &Value) -> Option<AgentTaskLoopLocalFallbackPolicy> {
+    match value {
+        Value::Bool(true) => Some(AgentTaskLoopLocalFallbackPolicy::Allowed),
+        Value::Bool(false) => Some(AgentTaskLoopLocalFallbackPolicy::Denied),
+        Value::String(value) if value == "allowed" || value == "allow" || value == "true" => {
+            Some(AgentTaskLoopLocalFallbackPolicy::Allowed)
+        }
+        Value::String(value) if value == "denied" || value == "deny" || value == "false" => {
+            Some(AgentTaskLoopLocalFallbackPolicy::Denied)
+        }
+        _ => None,
+    }
+}
+
+fn blocked_runner_decision(
+    status: AgentTaskLoopActionStatus,
+    runner: Option<String>,
+    message: impl Into<String>,
+    details: Value,
+) -> AgentTaskLoopRunnerPolicyDecision {
+    AgentTaskLoopRunnerPolicyDecision {
+        target: None,
+        blocked_status: Some(status),
+        diagnostic: Some(AgentTaskLoopActionDiagnostic {
+            code: blocked_runner_status_code(status).to_string(),
+            message: message.into(),
+            runner,
+            details,
+        }),
+    }
+}
+
+fn blocked_runner_status_code(status: AgentTaskLoopActionStatus) -> &'static str {
+    match status {
+        AgentTaskLoopActionStatus::BlockedRunnerUnavailable => "blocked_runner_unavailable",
+        AgentTaskLoopActionStatus::BlockedRemoteMaterialization => "blocked_remote_materialization",
+        AgentTaskLoopActionStatus::BlockedLocalFallbackDenied => "blocked_local_fallback_denied",
+        _ => "runner_policy_not_blocked",
+    }
+}
+
 fn jsonpath_match_is_truthy(value: &Value) -> bool {
     match value {
         Value::Null => false,
@@ -1163,6 +1611,9 @@ fn jsonpath_match_is_truthy(value: &Value) -> bool {
 fn action_entity_id(action: &AgentTaskLoopPolicyAction) -> Option<String> {
     match action {
         AgentTaskLoopPolicyAction::SpawnTask { entity_id, .. }
+        | AgentTaskLoopPolicyAction::SpawnController { entity_id, .. }
+        | AgentTaskLoopPolicyAction::SpawnSubloop { entity_id, .. }
+        | AgentTaskLoopPolicyAction::WaitForController { entity_id, .. }
         | AgentTaskLoopPolicyAction::RouteFinding { entity_id, .. }
         | AgentTaskLoopPolicyAction::RunGates { entity_id, .. } => entity_id.clone(),
         AgentTaskLoopPolicyAction::MarkHumanReady { entity_id, .. } => Some(entity_id.clone()),
@@ -1174,6 +1625,8 @@ fn action_name(action: &AgentTaskLoopPolicyAction) -> &'static str {
     match action {
         AgentTaskLoopPolicyAction::SpawnTask { .. } => "spawn_task",
         AgentTaskLoopPolicyAction::FanOut { .. } => "fan_out",
+        AgentTaskLoopPolicyAction::SpawnController { .. } => "spawn_controller",
+        AgentTaskLoopPolicyAction::SpawnSubloop { .. } => "spawn_subloop",
         AgentTaskLoopPolicyAction::RouteFinding { .. } => "route_finding",
         AgentTaskLoopPolicyAction::ValidateCandidatePatch { .. } => "validate_candidate_patch",
         AgentTaskLoopPolicyAction::Join { .. } => "join",
@@ -1181,6 +1634,7 @@ fn action_name(action: &AgentTaskLoopPolicyAction) -> &'static str {
         AgentTaskLoopPolicyAction::RequestChanges { .. } => "request_changes",
         AgentTaskLoopPolicyAction::RunGates { .. } => "run_gates",
         AgentTaskLoopPolicyAction::WaitForEvent(_) => "wait_for_event",
+        AgentTaskLoopPolicyAction::WaitForController { .. } => "wait_for_controller",
         AgentTaskLoopPolicyAction::MarkHumanReady { .. } => "mark_human_ready",
         AgentTaskLoopPolicyAction::Complete { .. } => "complete",
         AgentTaskLoopPolicyAction::Abandon { .. } => "abandon",
@@ -1299,6 +1753,79 @@ fn shell_arg(value: &str) -> String {
     } else {
         format!("'{}'", value.replace('\'', "'\\''"))
     }
+}
+
+fn refresh_subcontroller_statuses(record: &mut AgentTaskLoopControllerRecord) -> Result<bool> {
+    let mut changed = false;
+    let mut satisfied_waits = Vec::new();
+    for subcontroller in &mut record.subcontrollers {
+        let Ok(child) = load_controller(&subcontroller.loop_id) else {
+            continue;
+        };
+        if subcontroller.state != Some(child.state) {
+            subcontroller.state = Some(child.state);
+            subcontroller.updated_at = now_timestamp();
+            changed = true;
+        }
+        let terminal_states = controller_terminal_states(&subcontroller.terminal_states);
+        if terminal_states.contains(&child.state) {
+            if let Some(wait_key) = &subcontroller.wait_key {
+                satisfied_waits.push((wait_key.clone(), child.loop_id.clone(), child.state));
+            }
+        }
+    }
+
+    for (wait_key, child_loop_id, child_state) in satisfied_waits {
+        if let Some(wait) = record
+            .waits
+            .iter_mut()
+            .find(|wait| wait.wait_key == wait_key && wait.status == AgentTaskLoopWaitStatus::Open)
+        {
+            wait.status = AgentTaskLoopWaitStatus::Satisfied;
+            wait.satisfied_by_event_id = Some(format!(
+                "controller-terminal:{child_loop_id}:{child_state:?}"
+            ));
+            changed = true;
+        }
+    }
+
+    if record.open_wait_count() == 0 && record.state == AgentTaskLoopControllerState::Waiting {
+        record.state = AgentTaskLoopControllerState::Running;
+        changed = true;
+    }
+
+    if changed {
+        record.touch();
+    }
+    Ok(changed)
+}
+
+fn controller_wait_key(loop_id: &str) -> String {
+    format!("controller:{}:terminal", sanitize_loop_id(loop_id))
+}
+
+fn controller_terminal_states(
+    states: &[AgentTaskLoopControllerState],
+) -> Vec<AgentTaskLoopControllerState> {
+    if states.is_empty() {
+        vec![
+            AgentTaskLoopControllerState::Completed,
+            AgentTaskLoopControllerState::Failed,
+            AgentTaskLoopControllerState::HumanReady,
+            AgentTaskLoopControllerState::Abandoned,
+            AgentTaskLoopControllerState::Escalated,
+        ]
+    } else {
+        states.to_vec()
+    }
+}
+
+fn default_controller_phase() -> String {
+    "init".to_string()
+}
+
+fn default_config_version() -> String {
+    "v1".to_string()
 }
 
 fn entity_dedupe_key(entity_type: &str, key: &str) -> String {
@@ -1451,6 +1978,95 @@ mod tests {
     }
 
     #[test]
+    fn subcontroller_spawn_records_parent_visible_child_once() {
+        let mut record = AgentTaskLoopControllerRecord::new("parent", "plan", "v1");
+        let first = record.record_action(
+            AgentTaskLoopPolicyAction::SpawnController {
+                dedupe_key: "controller:child:plan".to_string(),
+                loop_id: "child/controller".to_string(),
+                entity_id: Some("goal:4216".to_string()),
+                phase: "implement".to_string(),
+                config_version: "nested-v1".to_string(),
+                request: json!({ "issue": 4216 }),
+            },
+            "spawn child controller",
+        );
+        let second = record.record_action(
+            AgentTaskLoopPolicyAction::SpawnSubloop {
+                dedupe_key: "controller:child:plan".to_string(),
+                loop_id: "child/controller".to_string(),
+                entity_id: Some("goal:4216".to_string()),
+                phase: "implement".to_string(),
+                config_version: "nested-v1".to_string(),
+                request: json!({ "issue": 4216 }),
+            },
+            "replayed child controller spawn",
+        );
+
+        assert_eq!(first.status, AgentTaskLoopActionStatus::Pending);
+        assert_eq!(second.status, AgentTaskLoopActionStatus::AlreadySatisfied);
+        assert_eq!(record.subcontrollers.len(), 1);
+        let child = &record.subcontrollers[0];
+        assert_eq!(child.loop_id, "child_controller");
+        assert_eq!(child.parent_loop_id.as_deref(), Some("parent"));
+        assert_eq!(child.parent_action_id.as_deref(), Some("action-1"));
+        assert_eq!(child.entity_id.as_deref(), Some("goal:4216"));
+    }
+
+    #[test]
+    fn controller_status_satisfies_wait_when_child_reaches_terminal_state() {
+        with_isolated_home(|_| {
+            let mut parent = create_controller("parent-loop", "delegate", "v1").expect("parent");
+            parent.record_action(
+                AgentTaskLoopPolicyAction::SpawnController {
+                    dedupe_key: "controller:child-loop".to_string(),
+                    loop_id: "child-loop".to_string(),
+                    entity_id: Some("goal:4216".to_string()),
+                    phase: "implement".to_string(),
+                    config_version: "v1".to_string(),
+                    request: Value::Null,
+                },
+                "spawn child",
+            );
+            parent.record_action(
+                AgentTaskLoopPolicyAction::WaitForController {
+                    loop_id: "child-loop".to_string(),
+                    entity_id: Some("goal:4216".to_string()),
+                    wait_key: None,
+                    terminal_states: Vec::new(),
+                },
+                "wait for child terminal state",
+            );
+            write_controller(&parent).expect("parent written");
+
+            let mut child = create_controller("child-loop", "implement", "v1").expect("child");
+            child.record_action(
+                AgentTaskLoopPolicyAction::Complete {
+                    reason: Some("child finished".to_string()),
+                },
+                "child finished",
+            );
+            write_controller(&child).expect("child written");
+
+            let refreshed = controller_status("parent-loop").expect("refreshed");
+
+            assert_eq!(refreshed.state, AgentTaskLoopControllerState::Running);
+            assert_eq!(
+                refreshed.subcontrollers[0].state,
+                Some(AgentTaskLoopControllerState::Completed)
+            );
+            assert_eq!(
+                refreshed.waits[0].status,
+                AgentTaskLoopWaitStatus::Satisfied
+            );
+            assert_eq!(
+                refreshed.waits[0].satisfied_by_event_id.as_deref(),
+                Some("controller-terminal:child-loop:Completed")
+            );
+        });
+    }
+
+    #[test]
     fn external_events_satisfy_matching_waits_and_resume_controller() {
         let mut record = AgentTaskLoopControllerRecord::new("loop", "review", "v1");
         record.record_action(
@@ -1538,6 +2154,207 @@ mod tests {
 
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0].status, AgentTaskLoopActionStatus::Pending);
+    }
+
+    #[test]
+    fn runner_policy_prefers_declared_runner_when_available() {
+        let record = AgentTaskLoopControllerRecord::new("loop", "dispatch", "v1");
+        let action = AgentTaskLoopPolicyAction::SpawnTask {
+            dedupe_key: "task:lab".to_string(),
+            entity_id: None,
+            request: json!({ "task": "repair", "runner": "homeboy-lab" }),
+        };
+
+        let decision = record.resolve_action_runner_policy(&action, |runner| {
+            assert_eq!(runner, "homeboy-lab");
+            AgentTaskLoopRunnerAvailability::Available
+        });
+
+        assert_eq!(
+            decision.target,
+            Some(AgentTaskLoopRunnerExecutionTarget::Runner(
+                "homeboy-lab".to_string()
+            ))
+        );
+        assert_eq!(decision.blocked_status, None);
+        assert_eq!(decision.diagnostic, None);
+    }
+
+    #[test]
+    fn runner_policy_allows_explicit_local_fallback_when_runner_is_unavailable() {
+        let record = AgentTaskLoopControllerRecord::new("loop", "dispatch", "v1");
+        let action = AgentTaskLoopPolicyAction::SpawnTask {
+            dedupe_key: "task:lab".to_string(),
+            entity_id: None,
+            request: json!({
+                "task": "repair",
+                "runner": "homeboy-lab",
+                "local_fallback": "allowed"
+            }),
+        };
+
+        let decision = record.resolve_action_runner_policy(&action, |_| {
+            AgentTaskLoopRunnerAvailability::Unavailable {
+                reason: "runner heartbeat is stale".to_string(),
+            }
+        });
+
+        assert_eq!(
+            decision.target,
+            Some(AgentTaskLoopRunnerExecutionTarget::Local)
+        );
+        assert_eq!(decision.blocked_status, None);
+        assert_eq!(
+            decision
+                .diagnostic
+                .as_ref()
+                .map(|diagnostic| diagnostic.code.as_str()),
+            Some("runner_unavailable_local_fallback_allowed")
+        );
+    }
+
+    #[test]
+    fn runner_policy_denies_local_fallback_for_unavailable_required_runner() {
+        let record = AgentTaskLoopControllerRecord::new("loop", "dispatch", "v1");
+        let action = AgentTaskLoopPolicyAction::SpawnTask {
+            dedupe_key: "task:lab".to_string(),
+            entity_id: None,
+            request: json!({
+                "task": "repair",
+                "runner": "homeboy-lab",
+                "local_fallback": "denied"
+            }),
+        };
+
+        let decision = record.resolve_action_runner_policy(&action, |_| {
+            AgentTaskLoopRunnerAvailability::Unavailable {
+                reason: "runner is not registered".to_string(),
+            }
+        });
+
+        assert_eq!(decision.target, None);
+        assert_eq!(
+            decision.blocked_status,
+            Some(AgentTaskLoopActionStatus::BlockedRunnerUnavailable)
+        );
+        let diagnostic = decision.diagnostic.expect("blocked diagnostic");
+        assert_eq!(diagnostic.code, "blocked_runner_unavailable");
+        assert_eq!(diagnostic.runner.as_deref(), Some("homeboy-lab"));
+    }
+
+    #[test]
+    fn runner_policy_blocks_remote_materialization_failures() {
+        let record = AgentTaskLoopControllerRecord::new("loop", "dispatch", "v1");
+        let action = AgentTaskLoopPolicyAction::FanOut {
+            dedupe_key: "fanout:lab".to_string(),
+            entity_ids: vec!["finding:1".to_string()],
+            request_template: json!({
+                "task": "repair",
+                "runner": "homeboy-lab",
+                "local_fallback": false
+            }),
+        };
+
+        let decision = record.resolve_action_runner_policy(&action, |_| {
+            AgentTaskLoopRunnerAvailability::MaterializationBlocked {
+                reason: "workspace snapshot could not be materialized remotely".to_string(),
+            }
+        });
+
+        assert_eq!(decision.target, None);
+        assert_eq!(
+            decision.blocked_status,
+            Some(AgentTaskLoopActionStatus::BlockedRemoteMaterialization)
+        );
+        assert_eq!(
+            decision
+                .diagnostic
+                .as_ref()
+                .map(|diagnostic| diagnostic.code.as_str()),
+            Some("blocked_remote_materialization")
+        );
+    }
+
+    #[test]
+    fn runner_policy_blocks_local_execution_when_fallback_is_denied_without_runner() {
+        let record = AgentTaskLoopControllerRecord::new("loop", "dispatch", "v1");
+        let action = AgentTaskLoopPolicyAction::RouteFinding {
+            finding: AgentTaskLoopFindingPacket {
+                finding_id: "finding-1".to_string(),
+                severity: "high".to_string(),
+                summary: "drift".to_string(),
+                owner: None,
+                source_transformer: None,
+                reproduction_key: None,
+                lineage: Vec::new(),
+                payload: Value::Null,
+            },
+            dedupe_key: "finding:1".to_string(),
+            entity_id: Some("finding:1".to_string()),
+            request_template: json!({
+                "task": "repair",
+                "local_fallback": "denied"
+            }),
+        };
+
+        let decision = record.resolve_action_runner_policy(&action, |_| {
+            unreachable!("no runner should not probe runner availability")
+        });
+
+        assert_eq!(decision.target, None);
+        assert_eq!(
+            decision.blocked_status,
+            Some(AgentTaskLoopActionStatus::BlockedLocalFallbackDenied)
+        );
+        assert_eq!(
+            decision
+                .diagnostic
+                .as_ref()
+                .map(|diagnostic| diagnostic.code.as_str()),
+            Some("blocked_local_fallback_denied")
+        );
+    }
+
+    #[test]
+    fn runner_policy_block_persists_status_and_diagnostic() {
+        let mut record = AgentTaskLoopControllerRecord::new("loop", "dispatch", "v1");
+        let action = record.record_action(
+            AgentTaskLoopPolicyAction::SpawnTask {
+                dedupe_key: "task:lab".to_string(),
+                entity_id: Some("finding:1".to_string()),
+                request: json!({ "task": "repair", "runner": "homeboy-lab" }),
+            },
+            "policy matched",
+        );
+
+        let decision = record.resolve_action_runner_policy(&action.action, |_| {
+            AgentTaskLoopRunnerAvailability::Unavailable {
+                reason: "runner heartbeat is stale".to_string(),
+            }
+        });
+        record
+            .block_action_for_runner_policy(
+                &action.action_id,
+                decision.blocked_status.expect("blocked status"),
+                decision.diagnostic.expect("blocked diagnostic"),
+            )
+            .expect("blocked action recorded");
+
+        let persisted_action = record
+            .next_actions
+            .iter()
+            .find(|candidate| candidate.action_id == action.action_id)
+            .expect("action present");
+        assert_eq!(
+            persisted_action.status,
+            AgentTaskLoopActionStatus::BlockedRunnerUnavailable
+        );
+        assert_eq!(persisted_action.diagnostics.len(), 1);
+        assert_eq!(
+            persisted_action.diagnostics[0].code,
+            "blocked_runner_unavailable"
+        );
+        assert_eq!(record.history[0].event_type, "runner_policy.blocked");
     }
 
     #[test]
