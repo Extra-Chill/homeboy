@@ -46,7 +46,9 @@ pub(crate) use compiler_warning_contract::{
     extensions_for_compiler_warning_contract, run_compiler_warning_contract_script,
     CompilerWarningContract,
 };
-pub(crate) use execution::{execute_action, wordpress_release_publish_token_remediation};
+pub(crate) use execution::{
+    build_settings_json_from_manifest, execute_action, wordpress_release_publish_token_remediation,
+};
 pub use execution::{
     extension_ready_status, is_extension_compatible, run_action, run_extension, run_setup,
     ExtensionExecutionMode, ExtensionReadyStatus, ExtensionRunResult, ExtensionSetupResult,
