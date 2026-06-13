@@ -10,19 +10,30 @@ const {
 	RUNTIME_CORE_ENTRY,
 } = require('../../lib/wp-codebox-core-loader.js');
 
+const RECIPE_BUILDER_MODULE_OPTIONS = {
+	packageCandidates: [
+		'@automattic/wp-codebox-core/recipe-builders',
+		'wp-codebox-workspace/recipe-builders',
+		'@automattic/wp-codebox-core',
+	],
+	packageDistEntries: ['recipe-builders.js', 'index.js'],
+	runtimeCoreEntries: ['packages/runtime-core/dist/recipe-builders.js', RUNTIME_CORE_ENTRY],
+};
+
 export async function loadCodeboxRecipeBuilder(requiredExport) {
 	try {
-		const result = await loadWpCodeboxCoreExport(requiredExport, { required: true });
+		const result = await loadWpCodeboxCoreExport(requiredExport, { ...RECIPE_BUILDER_MODULE_OPTIONS, required: true });
 		return { builder: result.value, source: result.source };
 	} catch (error) {
-		const candidates = coreModuleCandidates();
+		const candidates = coreModuleCandidates(RECIPE_BUILDER_MODULE_OPTIONS);
 		const errors = (error.wpCodeboxCoreErrors || []).map(formatCoreLoaderError);
 
 		throw new Error([
 			`WP Codebox recipe builder export ${requiredExport} is unavailable.`,
-			`Install/build a WP Codebox runtime-core module that exports ${requiredExport}.`,
-			`Pass --setting wp_codebox_core_module=/path/to/wp-codebox/${RUNTIME_CORE_ENTRY}, or set HOMEBOY_WP_CODEBOX_CORE_MODULE to that built ESM entrypoint.`,
-			`Fallback discovery also checks sibling wp-codebox checkouts for ${RUNTIME_CORE_ENTRY}.`,
+			`Install/build a WP Codebox recipe-builder module that exports ${requiredExport}.`,
+			'Use @automattic/wp-codebox-core/recipe-builders or wp-codebox-workspace/recipe-builders when the stable WP Codebox API is available.',
+			`Pass --setting wp_codebox_core_module=/path/to/wp-codebox/packages/runtime-core/dist/recipe-builders.js, or set HOMEBOY_WP_CODEBOX_CORE_MODULE to that built ESM entrypoint.`,
+			`Fallback discovery also checks sibling wp-codebox checkouts for packages/runtime-core/dist/recipe-builders.js and ${RUNTIME_CORE_ENTRY}.`,
 			'This is separate from HOMEBOY_WP_CODEBOX_BIN / wp_codebox_bin, which only selects the wp-codebox CLI.',
 			'Homeboy Extensions no longer falls back to bundled WP Codebox recipe builders because that stale local copy can drift from the Codebox recipe contract.',
 			`Tried ${candidates.length} candidate(s):`,

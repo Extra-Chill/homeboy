@@ -10,6 +10,8 @@ const { pathToFileURL } = require('node:url');
 
 const DEFAULT_CODEBOX_CORE_MODULE = '@automattic/wp-codebox-core';
 const RUNTIME_CORE_ENTRY = 'packages/runtime-core/dist/index.js';
+const DEFAULT_CORE_PACKAGE_CANDIDATES = [DEFAULT_CODEBOX_CORE_MODULE];
+const DEFAULT_RUNTIME_CORE_ENTRIES = [RUNTIME_CORE_ENTRY];
 
 function coreModuleSpecifier(options = {}) {
 	const explicit = options.wpCodeboxCoreModule || options.coreModule || process.env.HOMEBOY_WP_CODEBOX_CORE_MODULE || process.env.WP_CODEBOX_CORE_MODULE;
@@ -38,7 +40,9 @@ function coreModuleCandidates(options = {}) {
 		return [normalizeCoreModuleSpecifier(explicit)];
 	}
 
-	const candidates = [DEFAULT_CODEBOX_CORE_MODULE];
+	const packageCandidates = options.packageCandidates || DEFAULT_CORE_PACKAGE_CANDIDATES;
+	const runtimeCoreEntries = options.runtimeCoreEntries || DEFAULT_RUNTIME_CORE_ENTRIES;
+	const candidates = [...packageCandidates];
 	for (const candidate of setupCacheCoreModuleCandidates(options)) {
 		if (existsSync(candidate) && !candidates.includes(candidate)) {
 			candidates.push(candidate);
@@ -47,9 +51,11 @@ function coreModuleCandidates(options = {}) {
 
 	for (const root of workspaceRoots(options)) {
 		for (const repoPath of codeboxRepoCandidates(root)) {
-			const runtimeCore = path.resolve(repoPath, RUNTIME_CORE_ENTRY);
-			if (existsSync(runtimeCore) && !candidates.includes(runtimeCore)) {
-				candidates.push(runtimeCore);
+			for (const entry of runtimeCoreEntries) {
+				const runtimeCore = path.resolve(repoPath, entry);
+				if (existsSync(runtimeCore) && !candidates.includes(runtimeCore)) {
+					candidates.push(runtimeCore);
+				}
 			}
 		}
 	}
@@ -59,12 +65,18 @@ function coreModuleCandidates(options = {}) {
 
 function setupCacheCoreModuleCandidates(options = {}) {
 	const installRoot = options.wpCodeboxInstallDir || process.env.HOMEBOY_WP_CODEBOX_INSTALL_DIR || path.resolve(homedir(), '.cache/homeboy/wp-codebox');
-	return [
-		path.resolve(installRoot, 'source', RUNTIME_CORE_ENTRY),
-		path.resolve(installRoot, 'source/node_modules/@automattic/wp-codebox-core/dist/index.js'),
-		path.resolve(installRoot, 'release/wp-codebox-cli', RUNTIME_CORE_ENTRY),
-		path.resolve(installRoot, 'release/wp-codebox-cli/node_modules/@automattic/wp-codebox-core/dist/index.js'),
-	];
+	const runtimeCoreEntries = options.runtimeCoreEntries || DEFAULT_RUNTIME_CORE_ENTRIES;
+	const packageDistEntries = options.packageDistEntries || ['index.js'];
+	const candidates = [];
+	for (const entry of runtimeCoreEntries) {
+		candidates.push(path.resolve(installRoot, 'source', entry));
+		candidates.push(path.resolve(installRoot, 'release/wp-codebox-cli', entry));
+	}
+	for (const entry of packageDistEntries) {
+		candidates.push(path.resolve(installRoot, 'source/node_modules/@automattic/wp-codebox-core/dist', entry));
+		candidates.push(path.resolve(installRoot, 'release/wp-codebox-cli/node_modules/@automattic/wp-codebox-core/dist', entry));
+	}
+	return candidates;
 }
 
 function workspaceRoots(options = {}) {
