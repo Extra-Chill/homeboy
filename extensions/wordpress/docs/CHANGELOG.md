@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.121.4] - 2026-06-13
+
+### Fixed
+- discover WP Codebox runtime core setup
+
 ## [2.121.3] - 2026-06-12
 
 ### Fixed
