@@ -39,6 +39,7 @@ pub(super) const DEFAULT_EXCLUDES: &[&str] = &[
     ".turbo/**",
     ".cache",
     ".cache/**",
+    "*.tsbuildinfo",
 ];
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -1077,6 +1078,7 @@ mod tests {
                 .expect("extension scripts build dir");
             fs::create_dir_all(source.path().join(".git")).expect("git dir");
             fs::create_dir_all(source.path().join("target/debug")).expect("target dir");
+            fs::create_dir_all(source.path().join("packages/cli")).expect("package dir");
             fs::write(source.path().join("src/main.rs"), "fn main() {}\n").expect("source file");
             fs::write(source.path().join("build/bundle.js"), "artifact").expect("build file");
             fs::write(source.path().join("vendor/autoload.php"), "<?php\n").expect("vendor file");
@@ -1090,6 +1092,11 @@ mod tests {
             fs::write(source.path().join("src/._main.rs"), "appledouble").expect("sidecar file");
             fs::write(source.path().join(".env.local"), "SECRET=1\n").expect("secret file");
             fs::write(source.path().join("target/debug/homeboy"), "binary").expect("build file");
+            fs::write(
+                source.path().join("packages/cli/tsconfig.tsbuildinfo"),
+                "stale incremental state",
+            )
+            .expect("tsbuildinfo file");
 
             super::super::create(
                 &format!(
@@ -1133,6 +1140,9 @@ mod tests {
             assert!(!Path::new(&output.remote_path).join(".env.local").exists());
             assert!(!Path::new(&output.remote_path)
                 .join("target/debug/homeboy")
+                .exists());
+            assert!(!Path::new(&output.remote_path)
+                .join("packages/cli/tsconfig.tsbuildinfo")
                 .exists());
         });
     }
