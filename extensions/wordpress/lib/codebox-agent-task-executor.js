@@ -111,8 +111,6 @@ const AGENT_BUNDLE_TRIGGER_FIELDS = AGENT_BUNDLE_CONFIG_FIELDS.filter((field) =>
 ].includes(field));
 
 const LEGACY_RUNTIME_PREFIX = ['data', 'machine'].join('_');
-const WP_CODEBOX_RUNTIME_PATH_KEY = `${LEGACY_RUNTIME_PREFIX}_path`;
-const WP_CODEBOX_RUNTIME_TOOLS_PATH_KEY = `${LEGACY_RUNTIME_PREFIX}_code_path`;
 const LEGACY_BUNDLE_KEYS = [
   `${LEGACY_RUNTIME_PREFIX}_bundle`,
   `${LEGACY_RUNTIME_PREFIX}Bundle`,
@@ -235,9 +233,6 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     verify_steps: inputs.verify_steps || config.verify_steps || options.verifySteps || [],
     mounts,
     workspaces: inputs.workspaces || config.workspaces || options.workspaces || defaults.workspaces || [],
-    agents_api_path: components.agents_api || config.agents_api || config.agents_api_path || options.agentsApi || '',
-    [WP_CODEBOX_RUNTIME_PATH_KEY]: components.agent_runtime || '',
-    [WP_CODEBOX_RUNTIME_TOOLS_PATH_KEY]: components.agent_runtime_tools || '',
     runtime_component_paths: components,
     homeboy_path: config.homeboy || config.homeboy_path || options.homeboy || '',
     homeboy_extensions_path: config.homeboy_extensions || config.homeboy_extensions_path || options.homeboyExtensions || '',
@@ -274,15 +269,31 @@ function runtimeComponentPaths(config, options = {}) {
   const explicit = config.runtime_component_paths && typeof config.runtime_component_paths === 'object'
     ? config.runtime_component_paths
     : {};
+  const contractPaths = runtimeComponentPathsFromContracts(config.component_contracts || options.componentContracts || []);
   const legacyRuntimePath = config[LEGACY_RUNTIME_PREFIX] || config[`${LEGACY_RUNTIME_PREFIX}_path`] || options.legacyRuntime;
   const legacyToolsKey = `${LEGACY_RUNTIME_PREFIX}_code`;
   const legacyRuntimeToolsPath = config[legacyToolsKey] || config[`${legacyToolsKey}_path`] || options.legacyRuntimeTools;
   return Object.fromEntries(Object.entries({
+    ...contractPaths,
     ...explicit,
-    agents_api: explicit.agents_api || config.agents_api || config.agents_api_path || options.agentsApi,
-    agent_runtime: explicit.agent_runtime || config.agent_runtime || config.agent_runtime_path || legacyRuntimePath,
-    agent_runtime_tools: explicit.agent_runtime_tools || config.agent_runtime_tools || config.agent_runtime_tools_path || legacyRuntimeToolsPath,
+    agents_api: explicit.agents_api || contractPaths.agents_api || config.agents_api || config.agents_api_path || options.agentsApi,
+    agent_runtime: explicit.agent_runtime || contractPaths.agent_runtime || config.agent_runtime || config.agent_runtime_path || legacyRuntimePath,
+    agent_runtime_tools: explicit.agent_runtime_tools || contractPaths.agent_runtime_tools || config.agent_runtime_tools_path || config.agent_runtime_tools || legacyRuntimeToolsPath,
   }).filter(([, value]) => value !== undefined && value !== ''));
+}
+
+function runtimeComponentPathsFromContracts(contracts) {
+  if (!Array.isArray(contracts)) {
+    return {};
+  }
+  const slugToKey = new Map([
+    ['agents-api', 'agents_api'],
+    ['data-machine', 'agent_runtime'],
+    ['data-machine-code', 'agent_runtime_tools'],
+  ]);
+  return Object.fromEntries(contracts
+    .map((contract) => [slugToKey.get(contract?.slug), contract?.path || contract?.source])
+    .filter(([key, value]) => key && value));
 }
 
 function defaultCodeboxRuntimeConfig(request, config, inputs, options = {}) {
@@ -313,12 +324,6 @@ function defaultCodeboxRuntimeConfig(request, config, inputs, options = {}) {
     siblingPath(workspaceBase, 'ai-provider-for-openai'),
     siblingPath(workspaceBase, 'ai-provider-for-openai-main'),
   );
-  const phpAiClientPath = firstExistingPath(
-    settings.wp_codebox_php_ai_client_path,
-    settings.php_ai_client_path,
-    process.env.HOMEBOY_WP_CODEBOX_PHP_AI_CLIENT_PATH,
-    siblingPath(workspaceBase, 'php-ai-client'),
-  );
   const provider = config.provider || options.provider || defaultProvider(settings, providerPluginPath);
   const model = config.model || options.model || defaultModelForProvider(provider, settings);
   const agentsApiPath = firstExistingPath(
@@ -338,8 +343,8 @@ function defaultCodeboxRuntimeConfig(request, config, inputs, options = {}) {
     model,
     secretEnv: defaultSecretEnv(provider, settings),
     wpCodeboxBin: firstValue(settings.wp_codebox_bin, settings.wpCodeboxBin, process.env.HOMEBOY_WP_CODEBOX_BIN, ''),
-    runtimeOverlayProfiles: [],
-    runtimeOverlays: defaultRuntimeOverlays(provider, settings, phpAiClientPath),
+    runtimeOverlayProfiles: defaultRuntimeOverlayProfiles(settings),
+    runtimeOverlays: defaultRuntimeOverlays(settings),
     mounts: defaultWorkspaceMounts(workspaceRoot, request, config, inputs, options),
     workspaces: defaultWorkspaces(config, inputs, options),
     allowedTools: defaultWorkspaceAllowedTools(workspaceRoot, workspaceMode(request, config, inputs)),
@@ -353,26 +358,17 @@ function defaultProviderPluginPaths(provider, settings, fallbackProviderPluginPa
     return explicit;
   }
   if (provider === 'codex') {
-    return fallbackProviderPluginPath ? [fallbackProviderPluginPath] : [];
+    return [];
   }
   return fallbackProviderPluginPath ? [fallbackProviderPluginPath] : [];
 }
 
-function defaultRuntimeOverlays(provider, settings, phpAiClientPath) {
-  const explicit = normalizeArray(settings.wp_codebox_runtime_overlays || settings.runtime_overlays);
-  if (explicit.length > 0) {
-    return explicit;
-  }
-  if (provider !== 'codex' || !phpAiClientPath) {
-    return [];
-  }
-  return [{
-    type: 'bundled-library',
-    library: 'php-ai-client',
-    source: phpAiClientPath,
-    target: '/wordpress/wp-includes/php-ai-client',
-    metadata: { component: 'php-ai-client', ref: 'codex-provider-stack' },
-  }];
+function defaultRuntimeOverlayProfiles(settings) {
+  return normalizeArray(settings.wp_codebox_runtime_overlay_profiles || settings.runtime_overlay_profiles);
+}
+
+function defaultRuntimeOverlays(settings) {
+  return normalizeArray(settings.wp_codebox_runtime_overlays || settings.runtime_overlays);
 }
 
 function firstDefined(...values) {

@@ -2,6 +2,29 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.121.12] - 2026-06-13
+
+### Fixed
+- keep codebox runtime stack generic
+- expand codex codebox defaults
+
+## [2.121.11] - 2026-06-13
+
+### Fixed
+- prefer stable WP Codebox recipe builder imports
+- unify WP Codebox recipe builder loading
+
+## [2.121.10] - 2026-06-13
+
+### Fixed
+- centralize WP Codebox command resolution
+- normalize WP Codebox runtime component vocabulary
+
+## [2.121.9] - 2026-06-13
+
+### Fixed
+- route Data Machine agent CI through Codebox tasks
+
 ## [2.121.8] - 2026-06-13
 
 ### Fixed

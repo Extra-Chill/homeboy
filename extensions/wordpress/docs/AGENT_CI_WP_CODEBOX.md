@@ -68,8 +68,8 @@ jobs:
 
 The workflow checks out `homeboy-extensions`, installs the WordPress extension
 toolchain, mounts the standard agent runtime and any additional validation
-dependencies under `.ci/<repo>`, builds a runner config, and calls
-`wordpress/scripts/agent/run-datamachine-agent.sh`.
+dependencies under `.ci/<repo>`, builds a runner config, and dispatches it
+through the WP Codebox agent-task executor.
 
 The reusable workflow always uses WP Codebox for agent CI. Callers cannot select
 the legacy direct runner path.
@@ -301,18 +301,18 @@ adaptation and redaction logic in this extension.
 
 Callers that need a provider stack supply WP Codebox's generic fields directly:
 `provider_plugin_paths`, `runtime_overlays`, `runtime_overlay_profiles`, and
-`secret_env`. HBEX forwards explicit values without expanding named profiles;
-for default Codex subscription runs, HBEX expands the generic provider stack
-primitives itself: an OpenAI provider plugin path, a `php-ai-client` bundled
-library overlay when available, and the Codex credential env names. WP Codebox
-owns sandbox recipe expansion and artifact capture, not provider-specific named
-profiles.
+`secret_env`. HBEX forwards those fields without expanding provider-specific
+runtime stacks; WP Codebox owns sandbox recipe expansion and artifact capture.
+The same generic fields can live in Homeboy/global settings as
+`wp_codebox_provider_plugin_paths`, `wp_codebox_runtime_overlays`,
+`wp_codebox_runtime_overlay_profiles`, and `wp_codebox_secret_env`.
 
 ## Runner config surface
 
 Most consumers should use `.github/workflows/datamachine-agent-ci.yml` rather than
 building runner config directly. The reusable workflow forwards these generic
-knobs to `run-datamachine-agent.sh`:
+knobs to `homeboy-codebox-agent-task-executor.cjs` through the quarantined
+`run-datamachine-agent-task.cjs` config adapter:
 
 - Bundle location: `bundle_path`, `bundle_repo`, `bundle_ref`, `bundle_path_in_repo`.
 - Agent selection: `agent_slug`, `pipeline_slug`, `flow_slug`, `prompt`, `provider`, `model`.
@@ -324,7 +324,7 @@ knobs to `run-datamachine-agent.sh`:
 - Eval projection: `wp_gym_benchmark_mode` turns missing wp-gym replay/evidence references into errors.
 - Extension points: `extra_required_abilities`, `ability_tools`, `tool_recorders`, `enable_terminal_actions`, `wp_cli_tool_name`, `pipeline_step_patches`, `flow_step_patches`, `runner_workspace`.
 
-`bundle_repo` is for cross-repo consumers. The shell runner clones the bundle
+`bundle_repo` is for cross-repo consumers. The workflow clones the bundle
 repository, points `bundle_path` at the cloned bundle inside WP Codebox, and adds
 that checkout to the mounted validation dependencies. This lets a repository such
 as `agents-api` run a bundle owned by `docs-agent` without copying the bundle or
@@ -580,10 +580,15 @@ and environment policy checks, and the `forbidden_mutations` /
 
 - `.github/workflows/datamachine-agent-ci.yml` is the reusable workflow.
 - `.github/workflows/README.md` documents workflow inputs and examples.
-- `wordpress/scripts/agent/run-datamachine-agent.sh` builds the WordPress
-  workload config and dispatches the selected runtime.
-- `wordpress/scripts/agent/datamachine-agent-workload.php` is the transitional
-  Data Machine Agent CI workload used by the reusable workflow, not the generic
-  agent-task provider path.
+- `wordpress/scripts/agent/homeboy-codebox-agent-task-executor.cjs` is the
+  generic Homeboy agent-task provider entry point.
+- `wordpress/scripts/agent/homeboy-wp-codebox-task-runner.cjs` dispatches the
+  stable `wp-codebox agent-task-run` command.
+- `wordpress/scripts/agent/run-datamachine-agent-task.cjs` is a quarantined
+  compatibility adapter that converts the reusable workflow's existing config
+  JSON into `homeboy/agent-task-request/v1` and writes legacy scenario results
+  for downstream workflow steps.
+- `wordpress/scripts/agent/run-datamachine-agent.sh` is the retired legacy shell
+  recipe runner retained only for compatibility with older pinned workflows.
 - `wordpress/tests/fixtures/datamachine-agent-ci-driver/` provides the stable
   plugin path used for workloads and transcript artifacts.

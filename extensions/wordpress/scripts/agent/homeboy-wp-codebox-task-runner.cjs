@@ -419,8 +419,6 @@ function attachFailureEvidence(payload, evidence) {
 }
 
 const LEGACY_RUNTIME_PREFIX = ['data', 'machine'].join('_');
-const WP_CODEBOX_RUNTIME_PATH_KEY = `${LEGACY_RUNTIME_PREFIX}_path`;
-const WP_CODEBOX_RUNTIME_TOOLS_PATH_KEY = `${LEGACY_RUNTIME_PREFIX}_code_path`;
 const LEGACY_BUNDLE_KEYS = [
   `${LEGACY_RUNTIME_PREFIX}_bundle`,
   `${LEGACY_RUNTIME_PREFIX}Bundle`,
@@ -450,19 +448,38 @@ function requestRuntimeComponents(request, mounts = []) {
   const explicit = request.runtime_component_paths && typeof request.runtime_component_paths === 'object'
     ? request.runtime_component_paths
     : {};
+  const contractPaths = runtimeComponentPathsFromContracts(request.component_contracts || []);
   const workspaceRoot = workspaceRootFromMounts(mounts);
-  const dataMachinePath = explicit.agent_runtime || legacyValue(request) || firstExistingPath(siblingPath(workspaceRoot, 'data-machine'));
+  const agentRuntimePath = explicit.agent_runtime || contractPaths.agent_runtime || legacyValue(request) || firstExistingPath(siblingPath(workspaceRoot, 'data-machine'));
   return Object.fromEntries(Object.entries({
+    ...contractPaths,
     ...explicit,
-    agents_api: explicit.agents_api || request.agents_api_path || request.agents_api || bundledAgentsApiPath(dataMachinePath),
-    agent_runtime: dataMachinePath,
-    agent_runtime_tools: explicit.agent_runtime_tools || legacyValue(request, 'code') || firstExistingPath(siblingPath(workspaceRoot, 'data-machine-code')),
+    agents_api: explicit.agents_api || contractPaths.agents_api || request.agents_api_path || request.agents_api || bundledAgentsApiPath(agentRuntimePath),
+    agent_runtime: agentRuntimePath,
+    agent_runtime_tools: explicit.agent_runtime_tools || contractPaths.agent_runtime_tools || legacyValue(request, 'code') || firstExistingPath(siblingPath(workspaceRoot, 'data-machine-code')),
   }).filter(([, value]) => value !== '' && value !== undefined));
+}
+
+function runtimeComponentPathsFromContracts(contracts) {
+  if (!Array.isArray(contracts)) {
+    return {};
+  }
+  const slugToKey = new Map([
+    ['agents-api', 'agents_api'],
+    ['data-machine', 'agent_runtime'],
+    ['data-machine-code', 'agent_runtime_tools'],
+  ]);
+  return Object.fromEntries(contracts
+    .map((contract) => [slugToKey.get(contract?.slug), contract?.path || contract?.source])
+    .filter(([key, value]) => key && value));
 }
 
 function runnerInput(request, artifacts) {
   const mounts = mountEntries(request);
-  const runtimeComponentPaths = requestRuntimeComponents(request, mounts);
+  const runtimeComponentPaths = {
+    ...requestRuntimeComponents(request, mounts),
+    ...(argValue('--agents-api') ? { agents_api: argValue('--agents-api') } : {}),
+  };
   return Object.fromEntries(Object.entries({
     parent_request: request,
     agent: argValue('--agent') || request.agent || 'wp-codebox-sandbox',
@@ -483,7 +500,6 @@ function runnerInput(request, artifacts) {
     runtime_task: request.runtime_task || request.runtimeTask,
     artifacts_path: artifacts,
     wp_codebox_bin: argValue('--wp-codebox-bin') || request.wp_codebox_bin || '',
-    agents_api_path: argValue('--agents-api') || request.agents_api_path || request.agents_api || '',
     runtime_component_paths: runtimeComponentPaths,
     homeboy_path: argValue('--homeboy') || request.homeboy_path || request.homeboy || '',
     homeboy_extensions_path: argValue('--homeboy-extensions') || request.homeboy_extensions_path || request.homeboy_extensions || path.resolve(__dirname, '..', '..'),
@@ -493,10 +509,7 @@ function runnerInput(request, artifacts) {
 }
 
 function runtimeComponentExtraPlugins(input) {
-  const components = {
-    agents_api: input.agents_api_path,
-    ...(input.runtime_component_paths || {}),
-  };
+  const components = input.runtime_component_paths || {};
   return [
     { key: 'agents_api', slug: 'agents-api' },
     { key: 'agent_runtime', slug: 'data-machine' },
@@ -508,10 +521,10 @@ function runtimeComponentExtraPlugins(input) {
 }
 
 function componentContracts(input) {
-  // Translate the runtime component paths (agents-api, data-machine,
-  // data-machine-code) into the WP Codebox 0.8.0 `component_contracts` shape:
+  // Translate normalized runtime component paths into the WP Codebox 0.8.0
+  // `component_contracts` shape:
   // `{ slug, path, loadAs, activate }`. WP Codebox mounts these as mu-plugins so
-  // Data Machine loads its own vendored Agents API and registers agents/chat.
+  // the runtime stack can register its tools and agent/chat surfaces.
   return runtimeComponentExtraPlugins(input).map((plugin) => ({
     slug: plugin.slug,
     path: plugin.source,
@@ -570,10 +583,9 @@ function stableTaskInput(input) {
     model: input.model,
     provider_plugin_paths: input.provider_plugin_paths || [],
     extra_plugins: extraPlugins(input),
-    // WP Codebox 0.8.0 reads runtime component plugins (agents-api, data-machine,
-    // data-machine-code) from `component_contracts`, not the legacy
-    // `runtime_component_paths` / legacy runtime path fields. Without this the
-    // components never mount and agents/chat is unavailable in the sandbox.
+    // WP Codebox 0.8.0 reads runtime component plugins from
+    // `component_contracts`; keep `runtime_component_paths` as neutral
+    // orchestration metadata and avoid emitting legacy runtime path aliases.
     component_contracts: componentContracts(input),
     // Post-agent verification gate. WP Codebox emits these as recipe
     // `workflow.after` steps that run once the agent finishes editing; any
@@ -595,9 +607,6 @@ function stableTaskInput(input) {
     orchestrator: input.orchestrator || {},
     artifacts_path: input.artifacts_path,
     wp_codebox_bin: input.wp_codebox_bin,
-    agents_api_path: input.agents_api_path,
-    [WP_CODEBOX_RUNTIME_PATH_KEY]: input.runtime_component_paths?.agent_runtime,
-    [WP_CODEBOX_RUNTIME_TOOLS_PATH_KEY]: input.runtime_component_paths?.agent_runtime_tools,
     runtime_component_paths: input.runtime_component_paths || {},
     wp: input.wp_version,
     agent_bundle: isAgentBundle(input) ? agentBundleConfig(input, input.agent_bundle || {}) : {},

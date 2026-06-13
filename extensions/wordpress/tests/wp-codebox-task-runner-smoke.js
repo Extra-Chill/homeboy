@@ -263,18 +263,18 @@ try {
   assert.equal(captured.input.runtime_stack_mounts[0].source, '/components/php-ai-client');
   assert.equal(captured.input.runtime_stack_mounts[1].source, '/components/wordpress-develop');
   assert.equal(captured.input.mounts[0].source, '/repo/plugin');
-  assert.equal(captured.input.agents_api_path, '/components/agents-api');
-  assert.equal(captured.input.data_machine_path, '/components/data-machine');
-  assert.equal(captured.input.data_machine_code_path, '/components/data-machine-code');
+  assert.equal(captured.input.runtime_component_paths.agents_api, '/components/agents-api');
   assert.equal(captured.input.runtime_component_paths.agent_runtime, '/components/data-machine');
   assert.equal(captured.input.runtime_component_paths.agent_runtime_tools, '/components/data-machine-code');
+  assert.equal(Object.hasOwn(captured.input, 'agents_api_path'), false);
+  assert.equal(Object.hasOwn(captured.input, 'data_machine_path'), false);
+  assert.equal(Object.hasOwn(captured.input, 'data_machine_code_path'), false);
   assert.equal(captured.input.extra_plugins.find((plugin) => plugin.slug === 'agents-api').source, '/components/agents-api');
   assert.equal(captured.input.extra_plugins.find((plugin) => plugin.slug === 'data-machine').source, '/components/data-machine');
   assert.equal(captured.input.extra_plugins.find((plugin) => plugin.slug === 'data-machine-code').source, '/components/data-machine-code');
   assert.equal(captured.input.extra_plugins.find((plugin) => plugin.slug === 'data-machine').loadAs, 'mu-plugin');
   assert.equal(captured.input.extra_plugins.find((plugin) => plugin.slug === 'data-machine-code').activate, false);
-  // WP Codebox 0.8.0 mounts runtime components from `component_contracts`
-  // ({ slug, path }), not the legacy `runtime_component_paths` fields.
+  // WP Codebox 0.8.0 mounts runtime components from `component_contracts`.
   assert.equal(captured.input.component_contracts.find((contract) => contract.slug === 'agents-api').path, '/components/agents-api');
   assert.equal(captured.input.component_contracts.find((contract) => contract.slug === 'data-machine').path, '/components/data-machine');
   assert.equal(captured.input.component_contracts.find((contract) => contract.slug === 'data-machine-code').path, '/components/data-machine-code');
@@ -440,6 +440,30 @@ try {
   assert.equal(implicitRuntimeInput.extra_plugins.find((plugin) => plugin.slug === 'agents-api').source, defaultAgentsApiPath);
   assert.equal(implicitRuntimeInput.extra_plugins.find((plugin) => plugin.slug === 'data-machine').source, defaultDataMachinePath);
   assert.equal(implicitRuntimeInput.extra_plugins.find((plugin) => plugin.slug === 'data-machine-code').source, defaultDataMachineCodePath);
+
+  const legacyRuntimeCapturePath = path.join(root, 'capture-legacy-runtime-stack.json');
+  const legacyRuntimeResult = spawnSync(process.execPath, [
+    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-wp-codebox-task-runner.cjs'),
+    '--wp-codebox-bin', fixtureWpCodebox,
+  ], {
+    encoding: 'utf8',
+    input: JSON.stringify({
+      ...request,
+      runtime_component_paths: undefined,
+      agents_api_path: '/legacy/agents-api',
+      data_machine_path: '/legacy/data-machine',
+      data_machine_code_path: '/legacy/data-machine-code',
+    }),
+    env: { ...process.env, FIXTURE_WP_CODEBOX_CAPTURE: legacyRuntimeCapturePath, OPENCODE_API_KEY: 'redacted-test-key' },
+  });
+  assert.equal(legacyRuntimeResult.status, 0, legacyRuntimeResult.stderr || legacyRuntimeResult.stdout);
+  const legacyRuntimeInput = readJson(legacyRuntimeCapturePath).input;
+  assert.equal(legacyRuntimeInput.runtime_component_paths.agents_api, '/legacy/agents-api');
+  assert.equal(legacyRuntimeInput.runtime_component_paths.agent_runtime, '/legacy/data-machine');
+  assert.equal(legacyRuntimeInput.runtime_component_paths.agent_runtime_tools, '/legacy/data-machine-code');
+  assert.equal(legacyRuntimeInput.component_contracts.find((contract) => contract.slug === 'agents-api').path, '/legacy/agents-api');
+  assert.equal(Object.hasOwn(legacyRuntimeInput, 'data_machine_path'), false);
+  assert.equal(Object.hasOwn(legacyRuntimeInput, 'data_machine_code_path'), false);
 
   const sourceRoot = path.join(root, 'source-plugin');
   fs.mkdirSync(sourceRoot, { recursive: true });

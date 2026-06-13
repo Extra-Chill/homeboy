@@ -443,9 +443,12 @@ assert.equal(codexRequest.mode, 'sandbox');
 assert.equal(codexRequest.provider, 'codex');
 assert.equal(codexRequest.model, 'gpt-5.5');
 assert.deepEqual(codexRequest.provider_plugin_paths, ['/components/ai-provider-for-openai']);
-assert.equal(codexRequest.agents_api_path, '/components/agents-api');
+assert.equal(codexRequest.runtime_component_paths.agents_api, '/components/agents-api');
 assert.equal(codexRequest.runtime_component_paths.agent_runtime, '/components/data-machine');
 assert.equal(codexRequest.runtime_component_paths.agent_runtime_tools, '/components/data-machine-code');
+assert.equal(Object.hasOwn(codexRequest, 'agents_api_path'), false);
+assert.equal(Object.hasOwn(codexRequest, 'data_machine_path'), false);
+assert.equal(Object.hasOwn(codexRequest, 'data_machine_code_path'), false);
 assert.equal(codexRequest.homeboy_path, '/components/homeboy');
 assert.equal(codexRequest.homeboy_extensions_path, '/components/homeboy-extensions');
 assert.equal(codexRequest.wp_codebox_bin, '/bin/wp-codebox');
@@ -468,8 +471,7 @@ try {
   const dataMachineCodePath = path.join(defaultsRoot, 'data-machine-code');
   const staleStandaloneAgentsApiPath = path.join(defaultsRoot, 'agents-api');
   const providerPath = path.join(defaultsRoot, 'ai-provider-for-openai');
-  const phpAiClientPath = path.join(defaultsRoot, 'php-ai-client');
-  for (const directory of [workspaceRoot, bundledAgentsApiPath, dataMachineCodePath, staleStandaloneAgentsApiPath, providerPath, phpAiClientPath]) {
+  for (const directory of [workspaceRoot, bundledAgentsApiPath, dataMachineCodePath, staleStandaloneAgentsApiPath, providerPath]) {
     fs.mkdirSync(directory, { recursive: true });
   }
 
@@ -486,19 +488,12 @@ try {
   }, {
     settings: {},
   });
-  assert.equal(defaultedRequest.agents_api_path, bundledAgentsApiPath);
   assert.equal(defaultedRequest.runtime_component_paths.agents_api, bundledAgentsApiPath);
   assert.equal(defaultedRequest.runtime_component_paths.agent_runtime, dataMachinePath);
   assert.equal(defaultedRequest.runtime_component_paths.agent_runtime_tools, dataMachineCodePath);
-  assert.deepEqual(defaultedRequest.provider_plugin_paths, [providerPath]);
+  assert.deepEqual(defaultedRequest.provider_plugin_paths, []);
   assert.deepEqual(defaultedRequest.runtime_overlay_profiles, []);
-  assert.deepEqual(defaultedRequest.runtime_overlays, [{
-    type: 'bundled-library',
-    library: 'php-ai-client',
-    source: phpAiClientPath,
-    target: '/wordpress/wp-includes/php-ai-client',
-    metadata: { component: 'php-ai-client', ref: 'codex-provider-stack' },
-  }]);
+  assert.deepEqual(defaultedRequest.runtime_overlays, []);
   assert.deepEqual(defaultedRequest.secret_env, [
     'AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN',
     'AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN',
@@ -539,15 +534,9 @@ try {
   });
   assert.equal(codexSubscriptionDefaultedRequest.provider, 'codex');
   assert.equal(codexSubscriptionDefaultedRequest.model, 'gpt-5.5');
-  assert.deepEqual(codexSubscriptionDefaultedRequest.provider_plugin_paths, [providerPath]);
+  assert.deepEqual(codexSubscriptionDefaultedRequest.provider_plugin_paths, []);
   assert.deepEqual(codexSubscriptionDefaultedRequest.runtime_overlay_profiles, []);
-  assert.deepEqual(codexSubscriptionDefaultedRequest.runtime_overlays, [{
-    type: 'bundled-library',
-    library: 'php-ai-client',
-    source: phpAiClientPath,
-    target: '/wordpress/wp-includes/php-ai-client',
-    metadata: { component: 'php-ai-client', ref: 'codex-provider-stack' },
-  }]);
+  assert.deepEqual(codexSubscriptionDefaultedRequest.runtime_overlays, []);
   assert.deepEqual(codexSubscriptionDefaultedRequest.secret_env, codexSecretEnv);
 
   const openAiDefaultedRequest = codeboxTaskRequestFromAgentTaskRequest({
@@ -684,15 +673,19 @@ try {
   }, {
     settings: {},
   });
-  assert.equal(alternateDefaultedRequest.agents_api_path, alternateBundledAgentsApiPath);
+  assert.equal(alternateDefaultedRequest.runtime_component_paths.agents_api, alternateBundledAgentsApiPath);
 
-  const configuredProviderPath = path.join(defaultsRoot, 'configured-ai-provider-for-openai');
-  const configuredPhpAiClientPath = path.join(defaultsRoot, 'configured-php-ai-client');
-  fs.mkdirSync(configuredProviderPath, { recursive: true });
-  fs.mkdirSync(configuredPhpAiClientPath, { recursive: true });
-  const configuredCodexStackRequest = codeboxTaskRequestFromAgentTaskRequest({
+  const configuredProviderPath = path.join(defaultsRoot, 'configured-provider');
+  const configuredLibraryPath = path.join(defaultsRoot, 'configured-library');
+  const configuredRuntimeOverlays = [{
+    type: 'bundled-library',
+    library: 'php-ai-client',
+    source: configuredLibraryPath,
+    target: '/wordpress/wp-includes/php-ai-client',
+  }];
+  const configuredGenericStackRequest = codeboxTaskRequestFromAgentTaskRequest({
     ...request,
-    task_id: 'configured-codex-runtime-stack-task-123',
+    task_id: 'configured-generic-stack-task-123',
     executor: {
       backend: 'codebox',
       config: { provider: 'codex' },
@@ -702,19 +695,16 @@ try {
     },
   }, {
     settings: {
-      wp_codebox_provider_plugin_path: configuredProviderPath,
-      wp_codebox_php_ai_client_path: configuredPhpAiClientPath,
+      wp_codebox_provider_plugin_paths: [configuredProviderPath],
+      wp_codebox_runtime_overlay_profiles: ['configured-profile'],
+      wp_codebox_runtime_overlays: configuredRuntimeOverlays,
+      wp_codebox_secret_env: ['CONFIGURED_SECRET'],
     },
   });
-  assert.deepEqual(configuredCodexStackRequest.provider_plugin_paths, [configuredProviderPath]);
-  assert.deepEqual(configuredCodexStackRequest.runtime_overlay_profiles, []);
-  assert.deepEqual(configuredCodexStackRequest.runtime_overlays, [{
-    type: 'bundled-library',
-    library: 'php-ai-client',
-    source: configuredPhpAiClientPath,
-    target: '/wordpress/wp-includes/php-ai-client',
-    metadata: { component: 'php-ai-client', ref: 'codex-provider-stack' },
-  }]);
+  assert.deepEqual(configuredGenericStackRequest.provider_plugin_paths, [configuredProviderPath]);
+  assert.deepEqual(configuredGenericStackRequest.runtime_overlay_profiles, ['configured-profile']);
+  assert.deepEqual(configuredGenericStackRequest.runtime_overlays, configuredRuntimeOverlays);
+  assert.deepEqual(configuredGenericStackRequest.secret_env, ['CONFIGURED_SECRET']);
 
   const explicitOverrideRequest = codeboxTaskRequestFromAgentTaskRequest({
     ...request,
@@ -740,7 +730,7 @@ try {
       target: { root: workspaceRoot },
     },
   });
-  assert.equal(explicitOverrideRequest.agents_api_path, staleStandaloneAgentsApiPath);
+  assert.equal(explicitOverrideRequest.runtime_component_paths.agents_api, staleStandaloneAgentsApiPath);
   assert.equal(explicitOverrideRequest.runtime_component_paths.agent_runtime, '/explicit/data-machine');
   assert.equal(explicitOverrideRequest.runtime_component_paths.agent_runtime_tools, '/explicit/data-machine-code');
   assert.deepEqual(explicitOverrideRequest.provider_plugin_paths, ['/explicit/provider']);
@@ -749,6 +739,28 @@ try {
   assert.deepEqual(explicitOverrideRequest.secret_env, ['EXPLICIT_SECRET']);
   assert.deepEqual(explicitOverrideRequest.mounts, [{ source: '/explicit/worktree', target: '/workspace', mode: 'readonly' }]);
   assert.deepEqual(explicitOverrideRequest.workspaces, [{ target: '/explicit-workspace', mode: 'readonly' }]);
+
+  const legacyAliasRequest = codeboxTaskRequestFromAgentTaskRequest({
+    ...request,
+    task_id: 'legacy-runtime-alias-task-123',
+    executor: {
+      backend: 'codebox',
+      config: {
+        provider: 'codex',
+        agents_api_path: staleStandaloneAgentsApiPath,
+        data_machine_path: '/legacy/data-machine',
+        data_machine_code_path: '/legacy/data-machine-code',
+      },
+    },
+    inputs: {
+      target: { root: workspaceRoot },
+    },
+  });
+  assert.equal(legacyAliasRequest.runtime_component_paths.agents_api, staleStandaloneAgentsApiPath);
+  assert.equal(legacyAliasRequest.runtime_component_paths.agent_runtime, '/legacy/data-machine');
+  assert.equal(legacyAliasRequest.runtime_component_paths.agent_runtime_tools, '/legacy/data-machine-code');
+  assert.equal(Object.hasOwn(legacyAliasRequest, 'data_machine_path'), false);
+  assert.equal(Object.hasOwn(legacyAliasRequest, 'data_machine_code_path'), false);
 } finally {
   fs.rmSync(defaultsRoot, { recursive: true, force: true });
 }
@@ -1446,11 +1458,12 @@ try {
   assert.equal(capturedCodex.request.provider, 'codex');
   assert.equal(capturedCodex.request.model, 'gpt-5.5');
   assert.deepEqual(capturedCodex.request.provider_plugin_paths, ['/components/ai-provider-for-openai']);
-  assert.equal(capturedCodex.request.agents_api_path, '/components/agents-api');
-  assert.equal(capturedCodex.request.data_machine_path, '/components/data-machine');
-  assert.equal(capturedCodex.request.data_machine_code_path, '/components/data-machine-code');
+  assert.equal(capturedCodex.request.runtime_component_paths.agents_api, '/components/agents-api');
   assert.equal(capturedCodex.request.runtime_component_paths.agent_runtime, '/components/data-machine');
   assert.equal(capturedCodex.request.runtime_component_paths.agent_runtime_tools, '/components/data-machine-code');
+  assert.equal(Object.hasOwn(capturedCodex.request, 'agents_api_path'), false);
+  assert.equal(Object.hasOwn(capturedCodex.request, 'data_machine_path'), false);
+  assert.equal(Object.hasOwn(capturedCodex.request, 'data_machine_code_path'), false);
   assert.equal(capturedCodex.request.homeboy_path, '/components/homeboy');
   assert.equal(capturedCodex.request.homeboy_extensions_path, '/components/homeboy-extensions');
   assert.deepEqual(capturedCodex.request.secret_env, [
