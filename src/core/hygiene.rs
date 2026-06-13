@@ -1,3 +1,4 @@
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -7,6 +8,22 @@ use crate::core::component::{self, Component};
 use crate::core::error::{Error, ErrorCode, Result, ValidationErrorItem};
 use crate::core::extension::{build, ExtensionCapability};
 use crate::extensions::deps_provider;
+
+const LAB_SOURCE_EVIDENCE_FILE: &str = ".homeboy/lab-source-evidence.json";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct LabSourceEvidence {
+    schema: String,
+    id: String,
+    role: String,
+    source_path: String,
+    head: String,
+    branch: Option<String>,
+    upstream: String,
+    ahead: Option<u32>,
+    behind: Option<u32>,
+    dirty: bool,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CheckoutHygieneSnapshot {
@@ -33,6 +50,57 @@ impl CheckoutHygieneSnapshot {
             || self.dirty == Some(true)
             || self.behind.unwrap_or(0) > 0
     }
+}
+
+pub(crate) fn write_validation_dependency_source_evidence(
+    id: &str,
+    source_path: &Path,
+    destination_path: &Path,
+) -> Result<()> {
+    let snapshot = checkout_hygiene_snapshot(
+        DependencyCheckout {
+            id: id.to_string(),
+            role: "validation_dependency".to_string(),
+            path: source_path.to_path_buf(),
+        },
+        false,
+    )?;
+    let evidence = lab_source_evidence_from_snapshot(&snapshot).ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "validation_dependencies",
+            format!(
+                "Validation dependency `{id}` cannot be materialized for Lab without clean git source evidence"
+            ),
+            Some(source_path.display().to_string()),
+            Some(vec![
+                "Ensure the dependency checkout has git metadata, an upstream, and a clean working tree before Lab dispatch.".to_string(),
+            ]),
+        )
+    })?;
+    let evidence_path = destination_path.join(LAB_SOURCE_EVIDENCE_FILE);
+    if let Some(parent) = evidence_path.parent() {
+        fs::create_dir_all(parent).map_err(|err| {
+            Error::internal_io(
+                err.to_string(),
+                Some(format!(
+                    "create Lab source evidence directory {}",
+                    parent.display()
+                )),
+            )
+        })?;
+    }
+    let content = serde_json::to_string_pretty(&evidence).map_err(|err| {
+        Error::internal_unexpected(format!("serialize Lab source evidence: {err}"))
+    })?;
+    fs::write(&evidence_path, format!("{content}\n")).map_err(|err| {
+        Error::internal_io(
+            err.to_string(),
+            Some(format!(
+                "write Lab source evidence {}",
+                evidence_path.display()
+            )),
+        )
+    })
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -299,7 +367,7 @@ fn checkout_hygiene_snapshot(
     }
     let dirty = git_output(&path, &["status", "--porcelain=v1"]).map(|value| !value.is_empty());
 
-    Ok(CheckoutHygieneSnapshot {
+    let mut snapshot = CheckoutHygieneSnapshot {
         id: checkout.id,
         role: checkout.role,
         path: path.to_string_lossy().to_string(),
@@ -310,12 +378,61 @@ fn checkout_hygiene_snapshot(
         behind,
         dirty,
         allowed,
+    };
+    apply_lab_source_evidence(&mut snapshot);
+    Ok(snapshot)
+}
+
+fn lab_source_evidence_from_snapshot(
+    snapshot: &CheckoutHygieneSnapshot,
+) -> Option<LabSourceEvidence> {
+    Some(LabSourceEvidence {
+        schema: "homeboy.lab_source_evidence.v1".to_string(),
+        id: snapshot.id.clone(),
+        role: snapshot.role.clone(),
+        source_path: snapshot.path.clone(),
+        head: snapshot.head.clone()?,
+        branch: snapshot.branch.clone(),
+        upstream: snapshot.upstream.clone()?,
+        ahead: snapshot.ahead,
+        behind: snapshot.behind,
+        dirty: snapshot.dirty?,
     })
+    .filter(|evidence| evidence.role == "validation_dependency" && !evidence.dirty)
+}
+
+fn apply_lab_source_evidence(snapshot: &mut CheckoutHygieneSnapshot) {
+    if snapshot.role != "validation_dependency" || !snapshot.missing_required_git_metadata() {
+        return;
+    }
+    let Ok(content) = fs::read_to_string(Path::new(&snapshot.path).join(LAB_SOURCE_EVIDENCE_FILE))
+    else {
+        return;
+    };
+    let Ok(evidence) = serde_json::from_str::<LabSourceEvidence>(&content) else {
+        return;
+    };
+    if evidence.schema != "homeboy.lab_source_evidence.v1"
+        || evidence.id != snapshot.id
+        || evidence.role != snapshot.role
+        || evidence.dirty
+        || evidence.head.trim().is_empty()
+        || evidence.upstream.trim().is_empty()
+    {
+        return;
+    }
+
+    snapshot.head = Some(evidence.head);
+    snapshot.branch = evidence.branch;
+    snapshot.upstream = Some(evidence.upstream);
+    snapshot.ahead = evidence.ahead;
+    snapshot.behind = evidence.behind;
+    snapshot.dirty = Some(false);
 }
 
 fn git_ahead_behind(path: &Path) -> (Option<u32>, Option<u32>) {
     git_output(
-        &path,
+        path,
         &["rev-list", "--left-right", "--count", "@{upstream}...HEAD"],
     )
     .and_then(|value| {
@@ -630,6 +747,39 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("missing git metadata"));
+    }
+
+    #[test]
+    fn dependency_hygiene_accepts_lab_snapshot_with_source_evidence() {
+        let source = tempfile::tempdir().unwrap();
+        let dependency = tempfile::tempdir().unwrap();
+        fs::write(source.path().join("README.md"), "source\n").unwrap();
+        let _remote = init_repo_with_upstream(source.path());
+        fs::write(dependency.path().join("README.md"), "snapshot\n").unwrap();
+
+        write_validation_dependency_source_evidence(
+            "snapshot-dep",
+            source.path(),
+            dependency.path(),
+        )
+        .expect("write Lab source evidence");
+
+        let snapshots = require_checkout_hygiene_without_lifecycle(
+            vec![DependencyCheckout {
+                id: "snapshot-dep".to_string(),
+                role: "validation_dependency".to_string(),
+                path: dependency.path().to_path_buf(),
+            }],
+            DependencyHygieneOptions { allow_stale: false },
+        )
+        .expect("Lab snapshot with clean source evidence should pass hygiene");
+
+        assert_eq!(
+            snapshots[0].head,
+            git_output(source.path(), &["rev-parse", "HEAD"])
+        );
+        assert_eq!(snapshots[0].upstream.as_deref(), Some("origin/main"));
+        assert_eq!(snapshots[0].dirty, Some(false));
     }
 
     #[test]

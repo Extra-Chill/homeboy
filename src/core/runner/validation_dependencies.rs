@@ -180,6 +180,11 @@ fn prepare_validation_dependency_workspace(
 
     component.local_path = prepared_path.display().to_string();
     run_dependency_lifecycle(&component, &prepared_path)?;
+    crate::core::hygiene::write_validation_dependency_source_evidence(
+        &component.id,
+        &path,
+        &prepared_path,
+    )?;
 
     let prepared_path = prepared_path.canonicalize().map_err(|err| {
         Error::internal_io(
@@ -484,9 +489,22 @@ mod tests {
             assert_eq!(exit_code, 0);
             let remote_parent = parent_remote_path(&output.remote_path);
             assert!(Path::new(&output.remote_path).join("src/main.php").exists());
-            assert!(Path::new(&remote_parent)
-                .join("agents-api/lib/agents.php")
+            let remote_dependency = Path::new(&remote_parent).join("agents-api");
+            assert!(remote_dependency.join("lib/agents.php").exists());
+            assert!(!remote_dependency.join(".git").exists());
+            assert!(remote_dependency
+                .join(".homeboy/lab-source-evidence.json")
                 .exists());
+
+            crate::core::hygiene::require_checkout_hygiene_without_lifecycle(
+                vec![crate::core::hygiene::DependencyCheckout {
+                    id: "agents-api".to_string(),
+                    role: "validation_dependency".to_string(),
+                    path: remote_dependency,
+                }],
+                crate::core::hygiene::DependencyHygieneOptions { allow_stale: false },
+            )
+            .expect("Lab-materialized validation dependency should retain source evidence");
         });
     }
 
