@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.121.20] - 2026-06-13
+
+### Fixed
+- Fix WP Codebox cache updater npm path
+
 ## [2.121.19] - 2026-06-13
 
 ### Fixed
