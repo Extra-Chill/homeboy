@@ -213,6 +213,22 @@ try {
       agent_runtime: '/components/data-machine',
       agent_runtime_tools: '/components/data-machine-code',
     },
+    runtime_env: {
+      GENERIC_PROVIDER_CONFIG: '/runtime/provider/config.json',
+      XDG_DATA_HOME: '/runtime/provider/data',
+    },
+    runtime_state_mounts: [{
+      source: '/host/provider/state.json',
+      target: '/runtime/provider/state.json',
+      mode: 'readonly',
+      metadata: { purpose: 'provider-state' },
+    }],
+    runtime_config_mounts: [{
+      source: '/host/provider/config.json',
+      target: '/runtime/provider/config.json',
+      mode: 'readonly',
+      metadata: { purpose: 'provider-config' },
+    }],
     runtime_stack_mounts: [{ source: '/components/php-ai-client', target: '/wordpress/wp-includes/php-ai-client', mode: 'readonly' }],
     runtime_overlays: [{ kind: 'bundled-library', library: 'php-ai-client' }],
     secret_env: ['OPENCODE_API_KEY'],
@@ -260,6 +276,9 @@ try {
   assert.equal(captured.input.model, 'opencode-go/kimi-k2.6');
   assert.deepEqual(captured.input.secret_env, ['OPENCODE_API_KEY']);
   assert.equal(captured.input.provider_plugin_paths[0], providerPluginPath);
+  assert.deepEqual(captured.input.runtime_env, request.runtime_env);
+  assert.deepEqual(captured.input.runtime_state_mounts, request.runtime_state_mounts);
+  assert.deepEqual(captured.input.runtime_config_mounts, request.runtime_config_mounts);
   assert.equal(captured.input.runtime_stack_mounts[0].source, '/components/php-ai-client');
   assert.equal(captured.input.runtime_stack_mounts[1].source, '/components/wordpress-develop');
   assert.equal(captured.input.mounts[0].source, '/repo/plugin');

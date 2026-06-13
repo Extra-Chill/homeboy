@@ -1572,6 +1572,22 @@ try {
   const agentBundleRoot = fs.mkdtempSync(path.join(root, 'agent-bundle-'));
   const bundle = writeBundleFixture(agentBundleRoot);
   const { fixture: fakeWpCodebox, capture: fakeWpCodeboxCapture } = writeFakeWpCodebox(agentBundleRoot);
+  const fullRunnerRuntimeEnv = {
+    GENERIC_PROVIDER_CONFIG: '/runtime/provider/config.json',
+    XDG_DATA_HOME: '/runtime/provider/data',
+  };
+  const fullRunnerRuntimeStateMounts = [{
+    source: '/host/provider/state.json',
+    target: '/runtime/provider/state.json',
+    mode: 'readonly',
+    metadata: { purpose: 'provider-state' },
+  }];
+  const fullRunnerRuntimeConfigMounts = [{
+    source: '/host/provider/config.json',
+    target: '/runtime/provider/config.json',
+    mode: 'readonly',
+    metadata: { purpose: 'provider-config' },
+  }];
   const agentBundleCliRequest = {
     ...request,
     task_id: 'agent-bundle-cli-task-123',
@@ -1586,6 +1602,9 @@ try {
           agent_runtime: '/components/data-machine',
           agent_runtime_tools: '/components/data-machine-code',
         },
+        runtime_env: fullRunnerRuntimeEnv,
+        runtime_state_mounts: fullRunnerRuntimeStateMounts,
+        runtime_config_mounts: fullRunnerRuntimeConfigMounts,
         homeboy_extensions: path.join(__dirname, '..'),
         wp_codebox_bin: fakeWpCodebox,
         bundle_path: bundle,
@@ -1612,6 +1631,9 @@ try {
   const capturedAgentBundleRun = JSON.parse(fs.readFileSync(fakeWpCodeboxCapture, 'utf8'));
   assert.equal(capturedAgentBundleRun.argv[0], 'agent-task-run');
   assert.equal(capturedAgentBundleRun.input.schema, 'wp-codebox/task-input/v1');
+  assert.deepEqual(capturedAgentBundleRun.input.runtime_env, fullRunnerRuntimeEnv);
+  assert.deepEqual(capturedAgentBundleRun.input.runtime_state_mounts, fullRunnerRuntimeStateMounts);
+  assert.deepEqual(capturedAgentBundleRun.input.runtime_config_mounts, fullRunnerRuntimeConfigMounts);
   assert.equal(capturedAgentBundleRun.input.agent_bundle.bundle_path, bundle);
   assert.equal(capturedAgentBundleRun.input.agent_bundle.agent_slug, 'static-site-agent');
   assert.equal(capturedAgentBundleRun.input.agent_bundle.pipeline_slug, 'static-site-pipeline');
