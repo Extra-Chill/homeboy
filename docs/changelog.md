@@ -4,6 +4,17 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.229.3] - 2026-06-13
+
+### Changed
+- Derive plan wrapper fields from HomeboyPlan
+- Rename internal non-workflow plan structs
+- Project agent task plans through HomeboyPlan
+- Represent preview ingress plans with HomeboyPlan
+
+### Fixed
+- use vendor-neutral API examples
+
 ## [0.229.2] - 2026-06-13
 
 ### Changed
