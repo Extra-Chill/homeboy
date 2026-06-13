@@ -62,9 +62,10 @@ where
 
     pub(crate) fn run_with_cancellation(
         &self,
-        mut plan: AgentTaskPlan,
+        plan: AgentTaskPlan,
         cancellation: AgentTaskCancellationToken,
     ) -> AgentTaskAggregate {
+        let mut plan = plan.canonicalize();
         let max_concurrency = plan.options.max_concurrency.max(1);
         let total_tasks = plan.tasks.len();
         let max_queue_depth = plan.options.max_queue_depth.or(plan.options.max_tasks);
@@ -2422,6 +2423,106 @@ mod tests {
         assert_eq!(aggregate.totals.skipped, 0);
         assert_eq!(aggregate.queue.max_concurrency, 1);
         assert!(aggregate.queue.adaptive_concurrency.is_none());
+    }
+
+    #[test]
+    fn legacy_agent_task_plan_json_round_trips_through_homeboy_plan_projection() {
+        let mut plan =
+            AgentTaskPlan::new("plan-projection", vec![request("idea"), request("design")]);
+        plan.group_key = Some("group-a".to_string());
+        plan.options.max_concurrency = 2;
+        plan.metadata = json!({ "source": "compat" });
+        plan.output_dependencies.insert(
+            "design".to_string(),
+            AgentTaskOutputDependencies {
+                depends_on: vec!["idea".to_string()],
+                bindings: HashMap::from([(
+                    "issue_number".to_string(),
+                    AgentTaskOutputBinding {
+                        task_id: "idea".to_string(),
+                        path: "/outputs/issue_number".to_string(),
+                        artifact: None,
+                        required: true,
+                        default: Value::Null,
+                    },
+                )]),
+            },
+        );
+        plan.artifact_outputs.insert(
+            "idea".to_string(),
+            vec![AgentTaskArtifactOutputDeclaration {
+                name: "concept_packet".to_string(),
+                kind: "concept_packet".to_string(),
+                schema: Some("example/concept-packet/v1".to_string()),
+                artifact_id: Some("concept".to_string()),
+                payload_path: Some("/title".to_string()),
+            }],
+        );
+
+        let raw = serde_json::to_string(&plan).expect("serialize legacy contract");
+        let value: Value = serde_json::from_str(&raw).expect("serialized json");
+        assert_eq!(value["schema"], AGENT_TASK_PLAN_SCHEMA);
+        assert!(value.get("homeboy_plan").is_none());
+
+        let decoded: AgentTaskPlan = serde_json::from_str(&raw).expect("legacy plan decodes");
+        let projected = AgentTaskPlan::from_homeboy_plan(decoded.homeboy_plan.clone());
+
+        assert_eq!(
+            decoded.homeboy_plan.kind,
+            crate::core::plan::PlanKind::AgentTask
+        );
+        assert_eq!(projected.schema, AGENT_TASK_PLAN_SCHEMA);
+        assert_eq!(projected.plan_id, plan.plan_id);
+        assert_eq!(projected.group_key, plan.group_key);
+        assert_eq!(projected.tasks, plan.tasks);
+        assert_eq!(projected.output_dependencies, plan.output_dependencies);
+        assert_eq!(projected.artifact_outputs, plan.artifact_outputs);
+        assert_eq!(projected.options, plan.options);
+        assert_eq!(projected.metadata, plan.metadata);
+    }
+
+    #[test]
+    fn scheduler_executes_from_projected_homeboy_plan() {
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let scheduler = AgentTaskScheduler::new(OutputTemplateExecutor {
+            observed: Arc::clone(&observed),
+            include_issue_number: true,
+        });
+        let mut plan = AgentTaskPlan::new(
+            "plan-homeboy-projection",
+            vec![request("idea"), request("design")],
+        );
+        plan.options.max_concurrency = 2;
+        plan.tasks[1].instructions = "Build design for issue #{{outputs.issue_number}}".to_string();
+        plan.output_dependencies.insert(
+            "design".to_string(),
+            AgentTaskOutputDependencies {
+                depends_on: vec!["idea".to_string()],
+                bindings: HashMap::from([(
+                    "issue_number".to_string(),
+                    AgentTaskOutputBinding {
+                        task_id: "idea".to_string(),
+                        path: "/outputs/issue_number".to_string(),
+                        artifact: None,
+                        required: true,
+                        default: Value::Null,
+                    },
+                )]),
+            },
+        );
+        plan.rebuild_homeboy_plan();
+        let projected = AgentTaskPlan::from_homeboy_plan(plan.homeboy_plan.clone());
+
+        let aggregate = scheduler.run(projected);
+        let observed = observed.lock().expect("observed requests");
+        let design = observed
+            .iter()
+            .find(|request| request.task_id == "design")
+            .expect("design request dispatched");
+
+        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+        assert_eq!(aggregate.totals.succeeded, 2);
+        assert_eq!(design.instructions, "Build design for issue #3447");
     }
 
     #[test]
