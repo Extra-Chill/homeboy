@@ -3,8 +3,9 @@ use crate::core::engine::local_files::FileSystem;
 use crate::core::error::{Error, Result};
 use crate::core::extension;
 use crate::core::project;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 #[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
 pub struct ComponentReconcileReport {
@@ -17,6 +18,32 @@ pub struct ComponentReconcileReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repair: Option<String>,
     pub applied: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+pub struct ComponentLocalPathDiagnostic {
+    pub component_id: String,
+    pub local_path: String,
+    pub exists: bool,
+    pub is_git_checkout: bool,
+    pub is_temp_checkout: bool,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub git_root: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub head: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upstream: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub discovered_candidates: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repair_command: Option<String>,
 }
 
 /// Derive a runtime component inventory from project attachments, standalone
@@ -338,12 +365,12 @@ pub fn reconcile_standalone_registration(
         .and_then(|value| value.as_str())
         .unwrap_or_default()
         .to_string();
-    let registered_path = Path::new(&registered_local_path);
-    let status = reconcile_status(registered_path);
+    let diagnostic = local_path_diagnostic_for(id, &registered_local_path);
+    let status = diagnostic.status.clone();
     let discovered_local_path = if status == "ok" {
         None
     } else {
-        discover_reconcile_candidate(id, registered_path)
+        unique_candidate(diagnostic.discovered_candidates.clone())
     };
     let repair = discovered_local_path
         .as_ref()
@@ -391,44 +418,229 @@ pub fn reconcile_standalone_registration(
     })
 }
 
-fn reconcile_status(path: &Path) -> String {
+pub fn local_path_diagnostic(component: &Component) -> ComponentLocalPathDiagnostic {
+    local_path_diagnostic_for(&component.id, &component.local_path)
+}
+
+fn local_path_diagnostic_for(id: &str, local_path: &str) -> ComponentLocalPathDiagnostic {
+    let path = Path::new(local_path);
+    let exists = path.exists();
+    let git_root_path = detect_git_root(path);
+    let is_git_checkout = git_root_path.is_some();
+    let is_temp_checkout = is_temp_checkout_path(path);
+    let status = reconcile_status(path, is_git_checkout, is_temp_checkout);
+    let discovered_candidates = if status == "ok" {
+        Vec::new()
+    } else {
+        discover_reconcile_candidates(id, path)
+    };
+    let unique_candidate = unique_candidate(discovered_candidates.clone());
+    let warning = if status == "ok" {
+        None
+    } else {
+        Some(match status.as_str() {
+            "temp_checkout" => format!(
+                "Component '{id}' local_path points at a temporary/opencode checkout: {local_path}"
+            ),
+            "missing" => format!("Component '{id}' local_path does not exist: {local_path}"),
+            "non_git" => format!("Component '{id}' local_path is not a git checkout: {local_path}"),
+            "missing_local_path" => format!("Component '{id}' has no local_path"),
+            _ => format!("Component '{id}' local_path needs attention: {local_path}"),
+        })
+    };
+    let repair_command = if let Some(candidate) = unique_candidate {
+        if standalone_registration_exists(id) {
+            Some(format!(
+                "homeboy component reconcile {id} --apply # updates local_path to {}",
+                shell_quote_for_hint(&candidate)
+            ))
+        } else {
+            Some(format!(
+                "homeboy component set {id} --local-path {}",
+                shell_quote_for_hint(&candidate)
+            ))
+        }
+    } else if status != "ok" {
+        Some(format!(
+            "homeboy component set {id} --local-path <stable-checkout-path>"
+        ))
+    } else {
+        None
+    };
+
+    ComponentLocalPathDiagnostic {
+        component_id: id.to_string(),
+        local_path: local_path.to_string(),
+        exists,
+        is_git_checkout,
+        is_temp_checkout,
+        status,
+        git_root: git_root_path
+            .as_ref()
+            .map(|path| path.to_string_lossy().to_string()),
+        branch: git_root_path
+            .as_ref()
+            .and_then(|path| git_output(path, &["rev-parse", "--abbrev-ref", "HEAD"])),
+        head: git_root_path
+            .as_ref()
+            .and_then(|path| git_output(path, &["rev-parse", "--short", "HEAD"])),
+        remote_url: git_root_path
+            .as_ref()
+            .and_then(|path| git_output(path, &["config", "--get", "remote.origin.url"])),
+        upstream: git_root_path.as_ref().and_then(|path| {
+            git_output(
+                path,
+                &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+            )
+        }),
+        discovered_candidates,
+        warning,
+        repair_command,
+    }
+}
+
+fn reconcile_status(path: &Path, is_git_checkout: bool, is_temp_checkout: bool) -> String {
     if path.as_os_str().is_empty() {
         return "missing_local_path".to_string();
     }
     if !path.exists() {
         return "missing".to_string();
     }
-    if !path.join(".git").exists() {
+    if !is_git_checkout {
         return "non_git".to_string();
+    }
+    if is_temp_checkout {
+        return "temp_checkout".to_string();
     }
     "ok".to_string()
 }
 
-fn discover_reconcile_candidate(id: &str, registered_path: &Path) -> Option<String> {
-    let parent = registered_path.parent()?;
-    let entries = std::fs::read_dir(parent).ok()?;
-    let mut candidates = Vec::new();
+fn discover_reconcile_candidates(id: &str, registered_path: &Path) -> Vec<String> {
+    let mut roots = BTreeSet::new();
+    if let Some(parent) = registered_path.parent() {
+        roots.insert(parent.to_path_buf());
+    }
+    for root in stable_workspace_roots(registered_path) {
+        roots.insert(root);
+    }
+
+    let mut candidates = BTreeSet::new();
+    for root in roots {
+        discover_candidate_children(id, &root, &mut candidates);
+    }
+
+    candidates.into_iter().collect()
+}
+
+fn discover_candidate_children(id: &str, root: &Path, candidates: &mut BTreeSet<String>) {
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
 
     for entry in entries.flatten() {
         let path = entry.path();
-        if !path.is_dir() || !path.join(".git").exists() {
+        if !path.is_dir() || detect_git_root(&path).is_none() || is_temp_checkout_path(&path) {
             continue;
         }
         let Some(component) = discover_from_portable(&path) else {
             continue;
         };
         if component.id == id {
-            candidates.push(path);
+            candidates.insert(path.to_string_lossy().to_string());
         }
     }
+}
 
+fn unique_candidate(candidates: Vec<String>) -> Option<String> {
     if candidates.len() == 1 {
-        candidates
-            .pop()
-            .map(|path| path.to_string_lossy().to_string())
+        candidates.into_iter().next()
     } else {
         None
     }
+}
+
+fn stable_workspace_roots(path: &Path) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Ok(home) = std::env::var("HOME") {
+        roots.push(PathBuf::from(home).join("Developer"));
+    }
+    if let Some(root) = stable_root_before_temp_marker(path) {
+        roots.push(root);
+    }
+    roots.into_iter().filter(|root| root.is_dir()).collect()
+}
+
+fn stable_root_before_temp_marker(path: &Path) -> Option<PathBuf> {
+    let mut root = PathBuf::new();
+    for component in path.components() {
+        let segment = component.as_os_str().to_string_lossy();
+        if segment == "opencode" || segment == "tmp" || segment == "Temp" || segment == "T" {
+            return if root.as_os_str().is_empty() {
+                None
+            } else {
+                Some(root)
+            };
+        }
+        root.push(component.as_os_str());
+    }
+    None
+}
+
+fn is_temp_checkout_path(path: &Path) -> bool {
+    let rendered = path.to_string_lossy();
+    rendered.contains("/opencode/")
+        || rendered.contains("/tmp/opencode/")
+        || rendered.contains("/Temp/")
+        || rendered.contains("/T/opencode/")
+}
+
+fn detect_git_root(path: &Path) -> Option<PathBuf> {
+    if path.join(".git").exists() {
+        return Some(path.to_path_buf());
+    }
+
+    let output = Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if raw.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(raw))
+    }
+}
+
+fn git_output(path: &Path, args: &[&str]) -> Option<String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+fn shell_quote_for_hint(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn standalone_registration_exists(id: &str) -> bool {
+    crate::core::paths::components()
+        .map(|dir| dir.join(format!("{id}.json")).exists())
+        .unwrap_or(false)
 }
 
 /// Read a standalone registration file for a component ID without loading
@@ -613,6 +825,7 @@ pub fn rename_standalone_registration(old_id: &str, component: &Component) -> Re
 mod tests {
     use super::*;
     use std::fs;
+    use std::process::Command;
     use std::sync::MutexGuard;
     use tempfile::TempDir;
 
@@ -669,6 +882,29 @@ mod tests {
             "auto_cleanup": false
         });
         fs::write(path, serde_json::to_string_pretty(&json).unwrap()).unwrap();
+    }
+
+    fn init_git_repo(path: &std::path::Path) {
+        fs::create_dir_all(path).expect("repo dir");
+        let output = Command::new("git")
+            .arg("init")
+            .arg("--quiet")
+            .current_dir(path)
+            .output()
+            .expect("git init should run");
+        assert!(
+            output.status.success(),
+            "git init failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn write_portable_id(path: &std::path::Path, id: &str) {
+        fs::write(
+            path.join("homeboy.json"),
+            serde_json::to_string_pretty(&serde_json::json!({ "id": id })).unwrap(),
+        )
+        .expect("homeboy.json");
     }
 
     #[test]
@@ -963,6 +1199,88 @@ mod tests {
         assert_eq!(
             json.get("local_path").and_then(|value| value.as_str()),
             Some(checkout.to_string_lossy().as_ref())
+        );
+    }
+
+    #[test]
+    fn local_path_diagnostic_flags_temp_checkout_and_reports_stable_candidate() {
+        let dir = TempDir::new().unwrap();
+        let stable_checkout = dir.path().join("Developer").join("homeboy");
+        let temp_checkout = dir.path().join("opencode").join("homeboy-issue-4202-temp");
+        init_git_repo(&stable_checkout);
+        init_git_repo(&temp_checkout);
+        write_portable_id(&stable_checkout, "homeboy");
+        write_portable_id(&temp_checkout, "homeboy");
+
+        let _home = with_home_override(dir.path());
+        let component = Component::new(
+            "homeboy".to_string(),
+            temp_checkout.to_string_lossy().to_string(),
+            String::new(),
+            None,
+        );
+
+        let diagnostic = local_path_diagnostic(&component);
+
+        assert_eq!(diagnostic.status, "temp_checkout");
+        assert!(diagnostic.exists);
+        assert!(diagnostic.is_git_checkout);
+        assert!(diagnostic.is_temp_checkout);
+        assert_eq!(
+            diagnostic.git_root.as_deref(),
+            Some(temp_checkout.to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            diagnostic.discovered_candidates,
+            vec![stable_checkout.to_string_lossy().to_string()]
+        );
+        assert!(diagnostic
+            .warning
+            .as_deref()
+            .unwrap_or_default()
+            .contains("temporary/opencode checkout"));
+        assert!(diagnostic
+            .repair_command
+            .as_deref()
+            .unwrap_or_default()
+            .contains("homeboy component set homeboy --local-path"));
+    }
+
+    #[test]
+    fn reconcile_repairs_temp_checkout_to_unique_stable_candidate() {
+        let dir = TempDir::new().unwrap();
+        let config_components = dir
+            .path()
+            .join(".config")
+            .join("homeboy")
+            .join("components");
+        fs::create_dir_all(&config_components).unwrap();
+        let stable_checkout = dir.path().join("Developer").join("homeboy");
+        let temp_checkout = dir.path().join("opencode").join("homeboy-temp");
+        init_git_repo(&stable_checkout);
+        init_git_repo(&temp_checkout);
+        write_portable_id(&stable_checkout, "homeboy");
+        write_portable_id(&temp_checkout, "homeboy");
+        write_standalone_json(
+            &config_components,
+            "homeboy",
+            &temp_checkout.to_string_lossy(),
+        );
+
+        let _home = with_home_override(dir.path());
+        let report = reconcile_standalone_registration("homeboy", true).unwrap();
+
+        assert_eq!(report.status, "temp_checkout");
+        assert_eq!(
+            report.discovered_local_path.as_deref(),
+            Some(stable_checkout.to_string_lossy().as_ref())
+        );
+        assert!(report.applied);
+        let raw = fs::read_to_string(config_components.join("homeboy.json")).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(
+            json.get("local_path").and_then(|value| value.as_str()),
+            Some(stable_checkout.to_string_lossy().as_ref())
         );
     }
 
