@@ -299,12 +299,10 @@ The provider shells through `wp-codebox agent-task-run --input-file=<json>
 artifact capture behind that stable command; Homeboy keeps only request/outcome
 adaptation and redaction logic in this extension.
 
-When Codex subscription credentials are available, the provider expands the
-Codex defaults into WP Codebox's generic provider stack primitives: explicit
-`provider_plugin_paths`, a `php-ai-client` bundled-library `runtime_overlays`
-entry when configured, and the Codex credential `secret_env` keys. WP Codebox
-owns sandbox recipe expansion and artifact capture; Homeboy owns these
-caller-specific defaults.
+Callers that need a provider stack supply WP Codebox's generic fields directly:
+`provider_plugin_paths`, `runtime_overlays`, `runtime_overlay_profiles`, and
+`secret_env`. HBEX forwards those fields without expanding provider-specific
+runtime stacks; WP Codebox owns sandbox recipe expansion and artifact capture.
 
 ## Runner config surface
 
