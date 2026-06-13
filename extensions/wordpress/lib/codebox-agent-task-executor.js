@@ -111,8 +111,6 @@ const AGENT_BUNDLE_TRIGGER_FIELDS = AGENT_BUNDLE_CONFIG_FIELDS.filter((field) =>
 ].includes(field));
 
 const LEGACY_RUNTIME_PREFIX = ['data', 'machine'].join('_');
-const WP_CODEBOX_RUNTIME_PATH_KEY = `${LEGACY_RUNTIME_PREFIX}_path`;
-const WP_CODEBOX_RUNTIME_TOOLS_PATH_KEY = `${LEGACY_RUNTIME_PREFIX}_code_path`;
 const LEGACY_BUNDLE_KEYS = [
   `${LEGACY_RUNTIME_PREFIX}_bundle`,
   `${LEGACY_RUNTIME_PREFIX}Bundle`,
@@ -235,9 +233,6 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     verify_steps: inputs.verify_steps || config.verify_steps || options.verifySteps || [],
     mounts,
     workspaces: inputs.workspaces || config.workspaces || options.workspaces || defaults.workspaces || [],
-    agents_api_path: components.agents_api || config.agents_api || config.agents_api_path || options.agentsApi || '',
-    [WP_CODEBOX_RUNTIME_PATH_KEY]: components.agent_runtime || '',
-    [WP_CODEBOX_RUNTIME_TOOLS_PATH_KEY]: components.agent_runtime_tools || '',
     runtime_component_paths: components,
     homeboy_path: config.homeboy || config.homeboy_path || options.homeboy || '',
     homeboy_extensions_path: config.homeboy_extensions || config.homeboy_extensions_path || options.homeboyExtensions || '',
@@ -274,15 +269,31 @@ function runtimeComponentPaths(config, options = {}) {
   const explicit = config.runtime_component_paths && typeof config.runtime_component_paths === 'object'
     ? config.runtime_component_paths
     : {};
+  const contractPaths = runtimeComponentPathsFromContracts(config.component_contracts || options.componentContracts || []);
   const legacyRuntimePath = config[LEGACY_RUNTIME_PREFIX] || config[`${LEGACY_RUNTIME_PREFIX}_path`] || options.legacyRuntime;
   const legacyToolsKey = `${LEGACY_RUNTIME_PREFIX}_code`;
   const legacyRuntimeToolsPath = config[legacyToolsKey] || config[`${legacyToolsKey}_path`] || options.legacyRuntimeTools;
   return Object.fromEntries(Object.entries({
+    ...contractPaths,
     ...explicit,
-    agents_api: explicit.agents_api || config.agents_api || config.agents_api_path || options.agentsApi,
-    agent_runtime: explicit.agent_runtime || config.agent_runtime || config.agent_runtime_path || legacyRuntimePath,
-    agent_runtime_tools: explicit.agent_runtime_tools || config.agent_runtime_tools || config.agent_runtime_tools_path || legacyRuntimeToolsPath,
+    agents_api: explicit.agents_api || contractPaths.agents_api || config.agents_api || config.agents_api_path || options.agentsApi,
+    agent_runtime: explicit.agent_runtime || contractPaths.agent_runtime || config.agent_runtime || config.agent_runtime_path || legacyRuntimePath,
+    agent_runtime_tools: explicit.agent_runtime_tools || contractPaths.agent_runtime_tools || config.agent_runtime_tools_path || config.agent_runtime_tools || legacyRuntimeToolsPath,
   }).filter(([, value]) => value !== undefined && value !== ''));
+}
+
+function runtimeComponentPathsFromContracts(contracts) {
+  if (!Array.isArray(contracts)) {
+    return {};
+  }
+  const slugToKey = new Map([
+    ['agents-api', 'agents_api'],
+    ['data-machine', 'agent_runtime'],
+    ['data-machine-code', 'agent_runtime_tools'],
+  ]);
+  return Object.fromEntries(contracts
+    .map((contract) => [slugToKey.get(contract?.slug), contract?.path || contract?.source])
+    .filter(([key, value]) => key && value));
 }
 
 function defaultCodeboxRuntimeConfig(request, config, inputs, options = {}) {
