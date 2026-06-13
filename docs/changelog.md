@@ -4,6 +4,36 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.229.0] - 2026-06-13
+
+### Added
+- orchestrate wpcom edit-page previews
+
+### Fixed
+- make preview consumer orchestration generic
+- execute nested controller actions
+- index workflow bench publication artifacts
+- orchestrate generic visual compare evidence
+- isolate runner parser tests from lab metadata
+- add nested controller primitives
+- execute controller pending actions
+- materialize run-plan file specs for lab
+- flag stale agent task controller actions
+- fail closed controller runner policy
+- allow trace compare to share rig lease
+- pass settings to component bench scripts
+- flag stale component checkout paths
+- preserve Lab dependency source evidence
+- keep extension updates local by default
+- skip rig preflight during bench list discovery
+- remap Lab JSON path settings
+- enforce runner extension readiness parity
+- preserve global runner for runs show
+- defer drifted runner extension failures
+- route runs list runner option
+- accept runs list runner option
+- complete native preview reverse channel
+
 ## [0.228.22] - 2026-06-12
 
 ### Fixed
