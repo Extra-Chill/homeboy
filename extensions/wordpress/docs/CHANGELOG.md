@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.121.18] - 2026-06-13
+
+### Fixed
+- catalog WordPress bench gateway dependencies
+
 ## [2.121.17] - 2026-06-13
 
 ### Fixed
