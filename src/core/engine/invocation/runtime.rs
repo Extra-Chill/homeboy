@@ -11,8 +11,8 @@
 //!
 //! In priority order:
 //! 1. `HOMEBOY_INVOCATION_RUNTIME_DIR` env override (tests, advanced users).
-//! 2. `/tmp/hb` on macOS / Linux when `/tmp` is a writable directory. macOS
-//!    apps that respect `$TMPDIR` get per-user isolation under
+//! 2. `/tmp/hb-<uid>` on macOS / Linux when `/tmp` is a writable directory.
+//!    macOS apps that respect `$TMPDIR` get per-user isolation under
 //!    `/var/folders/<14>/T/...` which is already ~50 bytes — anchoring the
 //!    runtime root to `/tmp` saves ~35 bytes of `sockaddr_un` budget per
 //!    invocation, the difference between "fits" and "EINVAL on bind".
@@ -92,14 +92,14 @@ pub fn invocation_runtime_root() -> Result<PathBuf> {
 
     #[cfg(unix)]
     {
-        // Prefer `/tmp/hb` on every Unix host. On macOS the per-user
+        // Prefer a per-user `/tmp/hb-<uid>` root on every Unix host. On macOS the per-user
         // `$TMPDIR` (`/var/folders/<14>/T/...`) is already ~50 bytes long,
         // which leaves no realistic `sockaddr_un` budget after appending a
         // short id and a typical workload-relative socket name. `/tmp` is
         // ~5 bytes, gives us ~35 extra bytes of headroom, and is writable
         // on every standard macOS / Linux configuration.
         if Path::new("/tmp").is_dir() {
-            return Ok(PathBuf::from("/tmp/hb"));
+            return Ok(PathBuf::from(format!("/tmp/hb-{}", current_uid())));
         }
 
         // Fallbacks for unusual hosts where `/tmp` is missing or not a
@@ -159,6 +159,11 @@ fn cache_fallback_root() -> Result<PathBuf> {
             .join("homeboy")
             .join("inv"))
     }
+}
+
+#[cfg(unix)]
+fn current_uid() -> libc::uid_t {
+    unsafe { libc::getuid() }
 }
 
 /// Verify that handing out `path` leaves room for a realistic
@@ -226,7 +231,10 @@ mod tests {
         env::set_var(HOMEBOY_INVOCATION_RUNTIME_DIR_ENV, "   ");
 
         let root = invocation_runtime_root().expect("root resolves");
-        assert!(root.ends_with("hb") || root.ends_with("inv"));
+        assert!(root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("hb-") || name == "inv"));
 
         match prior {
             Some(value) => env::set_var(HOMEBOY_INVOCATION_RUNTIME_DIR_ENV, value),
@@ -256,8 +264,26 @@ mod tests {
 
     #[test]
     fn budget_accepts_short_path() {
-        let path = PathBuf::from("/tmp/hb/abc1234567/state");
+        let path = PathBuf::from("/tmp/hb-501/abc1234567/state");
         enforce_path_budget(&path).expect("short path fits");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_tmp_root_is_scoped_by_uid() {
+        let _guard = home_env_guard();
+        let prior = env::var(HOMEBOY_INVOCATION_RUNTIME_DIR_ENV).ok();
+        env::remove_var(HOMEBOY_INVOCATION_RUNTIME_DIR_ENV);
+
+        let root = invocation_runtime_root().expect("root resolves");
+        if Path::new("/tmp").is_dir() {
+            assert_eq!(root, PathBuf::from(format!("/tmp/hb-{}", current_uid())));
+        }
+
+        match prior {
+            Some(value) => env::set_var(HOMEBOY_INVOCATION_RUNTIME_DIR_ENV, value),
+            None => env::remove_var(HOMEBOY_INVOCATION_RUNTIME_DIR_ENV),
+        }
     }
 
     #[test]
