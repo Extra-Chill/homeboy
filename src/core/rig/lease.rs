@@ -66,7 +66,10 @@ pub fn acquire_active_run_lease(rig: &RigSpec, command: &str) -> Result<Option<A
     })?;
 
     prune_stale_leases()?;
-    if let Some(conflict) = find_conflict(rig, &resources)? {
+    if has_covering_parent_lease(rig, command)? {
+        return Ok(None);
+    }
+    if let Some(conflict) = find_conflict(rig, command, &resources)? {
         return Err(Error::rig_resource_conflict(RigResourceConflictInfo {
             rig_id: rig.id.clone(),
             command: command.to_string(),
@@ -105,9 +108,16 @@ struct ResourceConflict {
     resource_value: String,
 }
 
-fn find_conflict(rig: &RigSpec, resources: &RigResourcesSpec) -> Result<Option<ResourceConflict>> {
+fn find_conflict(
+    rig: &RigSpec,
+    command: &str,
+    resources: &RigResourcesSpec,
+) -> Result<Option<ResourceConflict>> {
     for lease in live_leases()? {
         if lease.rig_id == rig.id {
+            if lease_allows_child_command(&lease, command) {
+                continue;
+            }
             return Ok(Some(ResourceConflict {
                 resource_kind: "rig".to_string(),
                 resource_value: rig.id.clone(),
@@ -123,6 +133,16 @@ fn find_conflict(rig: &RigSpec, resources: &RigResourcesSpec) -> Result<Option<R
         }
     }
     Ok(None)
+}
+
+fn has_covering_parent_lease(rig: &RigSpec, command: &str) -> Result<bool> {
+    Ok(live_leases()?
+        .iter()
+        .any(|lease| lease.rig_id == rig.id && lease_allows_child_command(lease, command)))
+}
+
+fn lease_allows_child_command(lease: &RigRunLease, command: &str) -> bool {
+    lease.pid == std::process::id() && lease.command == "trace compare" && command == "trace"
 }
 
 fn overlapping_resource(

@@ -146,6 +146,26 @@ fn test_active_run_leases_lists_live_leases_without_mutating_them() {
 }
 
 #[test]
+fn test_trace_compare_lease_allows_same_process_child_trace() {
+    with_isolated_home(|_| {
+        let studio = rig("studio", resources());
+
+        let compare_lease = acquire_active_run_lease(&studio, "trace compare")
+            .expect("compare lease")
+            .expect("resourceful rig leases");
+        let child_lease = acquire_active_run_lease(&studio, "trace")
+            .expect("child trace lease should be allowed under compare");
+
+        assert!(child_lease.is_none());
+        assert_eq!(active_run_leases().expect("list active leases").len(), 1);
+        drop(compare_lease);
+        assert!(active_run_leases()
+            .expect("list active leases after drop")
+            .is_empty());
+    });
+}
+
+#[test]
 fn test_acquire_active_run_lease_prunes_stale_pid() {
     with_isolated_home(|_| {
         let stale = RigRunLease {

@@ -33,6 +33,19 @@ pub(super) fn run_compare_targets(args: TraceArgs) -> CmdResult<TraceCommandOutp
     let baseline = required_target(args.baseline_target.as_deref(), "--baseline-target")?;
     let candidate = required_target(args.candidate.as_deref(), "--candidate")?;
     let (component_id, base_component) = compare_target_component(&args)?;
+    let _compare_lease = if let Some(rig_id) = args.rig.as_deref() {
+        load_rig_context(Some(rig_id))?
+            .map(|context| {
+                homeboy::core::rig::lease::acquire_active_run_lease(
+                    &context.rig_spec,
+                    "trace compare",
+                )
+            })
+            .transpose()?
+            .flatten()
+    } else {
+        None
+    };
     let scenario_id = args
         .scenario_arg
         .clone()
@@ -713,9 +726,25 @@ impl Drop for TemporaryGitWorktree {
 
 #[cfg(test)]
 mod tests {
+    use super::super::test_fixture::{write_trace_extension, write_trace_rig};
     use super::*;
     use crate::commands::utils::args::{BaselineArgs, SettingArgs};
     use homeboy::core::component::ScopedExtensionConfig;
+
+    fn set_trace_rig_resources(rig_id: &str, resources: serde_json::Value) {
+        let rig_path = homeboy::core::paths::rigs()
+            .expect("rig dir")
+            .join(format!("{rig_id}.json"));
+        let mut rig_json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&rig_path).expect("read rig"))
+                .expect("parse rig");
+        rig_json["resources"] = resources;
+        std::fs::write(
+            rig_path,
+            serde_json::to_string(&rig_json).expect("serialize rig"),
+        )
+        .expect("write rig");
+    }
 
     fn compare_args_for_rig(rig_id: &str, component_id: Option<&str>) -> TraceArgs {
         TraceArgs {
@@ -835,6 +864,45 @@ mod tests {
 
             assert_eq!(component_id, "only-component");
             assert_eq!(component.local_path, component_dir.path().to_string_lossy());
+        });
+    }
+
+    #[test]
+    fn compare_targets_with_same_resourceful_rig_runs_interleaved_children() {
+        crate::test_support::with_isolated_home(|home| {
+            write_trace_extension(home);
+            let component_dir = tempfile::TempDir::new().expect("component dir");
+            let baseline_dir = tempfile::TempDir::new().expect("baseline dir");
+            let candidate_dir = tempfile::TempDir::new().expect("candidate dir");
+            let output_dir = tempfile::TempDir::new().expect("output dir");
+            write_trace_rig(home, "studio-rig", "studio", component_dir.path());
+            set_trace_rig_resources(
+                "studio-rig",
+                serde_json::json!({ "exclusive": ["studio-runtime"] }),
+            );
+
+            let mut args = compare_args_for_rig("studio-rig", Some("studio"));
+            args.scenario_arg = Some("studio-app-create-site".to_string());
+            args.baseline_target = Some(baseline_dir.path().to_string_lossy().to_string());
+            args.candidate = Some(candidate_dir.path().to_string_lossy().to_string());
+            args.repeat = 2;
+            args.schedule = super::super::TraceSchedule::Interleaved;
+            args.output_dir = Some(output_dir.path().to_path_buf());
+
+            let (output, exit_code) = run_compare_targets(args).expect("compare target run");
+
+            assert_eq!(exit_code, 0);
+            let TraceCommandOutput::Compare(compare) = output else {
+                panic!("expected compare output");
+            };
+            assert_eq!(compare.proof_run_order.len(), 4);
+            assert_eq!(compare.proof_run_order[0].group, "baseline");
+            assert_eq!(compare.proof_run_order[1].group, "candidate");
+            assert_eq!(compare.proof_run_order[2].group, "baseline");
+            assert_eq!(compare.proof_run_order[3].group, "candidate");
+            assert!(homeboy::core::rig::lease::active_run_leases()
+                .expect("active leases")
+                .is_empty());
         });
     }
 }
