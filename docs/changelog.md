@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.229.2] - 2026-06-13
+
+### Changed
+- project fanout and matrix through HomeboyPlan
+
 ## [0.229.1] - 2026-06-13
 
 ### Fixed
