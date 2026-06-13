@@ -91,6 +91,8 @@ Updates a git-cloned extension.
 
 - If the extension is symlinked, Homeboy returns an error (linked extensions are updated at the source directory).
 - Update runs without an extra confirmation flag.
+- By default, update runs against the local installed extension even when a preferred Lab runner is configured.
+- To update the extension installed on a runner, pass explicit Lab intent with the global runner flag, for example `homeboy --runner <runner-id> extension update <extension_id>`.
 - Homeboy reads `sourceUrl` from the extension's manifest to report the extension URL in JSON output.
 
 ### `uninstall`

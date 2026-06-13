@@ -234,6 +234,7 @@ fn lab_offload_command(
             contract.portability,
             homeboy::cli_surface::LabCommandPortability::Portable
         ),
+        default_lab_offload: contract.default_lab_offload,
         unsupported_reason: match contract.portability {
             homeboy::cli_surface::LabCommandPortability::Portable => None,
             homeboy::cli_surface::LabCommandPortability::LocalOnly(reason) => Some(reason),
@@ -529,7 +530,7 @@ mod tests {
     }
 
     #[test]
-    fn extension_update_is_lab_portable_without_extension_parity() {
+    fn extension_update_requires_explicit_lab_runner_without_extension_parity() {
         let cli = Cli::parse_from([
             "homeboy",
             "--runner",
@@ -543,10 +544,30 @@ mod tests {
 
         assert_eq!(command.hot_label, "extension update");
         assert!(command.portable);
+        assert!(!command.default_lab_offload);
         assert!(command.unsupported_reason.is_none());
         assert!(!command.requires_extension_parity);
         assert!(command.required_extensions.is_empty());
         assert!(!command.infer_source_path_tools);
+        assert!(cli.command.supports_lab_runner());
+    }
+
+    #[test]
+    fn extension_update_routes_locally_without_explicit_lab_runner() {
+        let _env = EnvGuard::remove(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV);
+        let normalized = vec![
+            "homeboy".to_string(),
+            "extension".to_string(),
+            "update".to_string(),
+            "wordpress".to_string(),
+        ];
+        let cli = Cli::parse_from(&normalized);
+
+        let outcome = route_after_parse(&cli, &normalized, None)
+            .expect("extension update without --runner should not offload");
+
+        assert_eq!(outcome, None);
+        assert!(std::env::var(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV).is_err());
     }
 
     #[test]

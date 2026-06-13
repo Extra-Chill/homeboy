@@ -320,11 +320,12 @@ pub(super) fn resolve_lab_runner_selection(
         .bench
         .local_execution
         .is_denied();
-    let default_runner = if explicit_runner.is_none() && command.portable {
-        super::resolve_default_lab_runner()?
-    } else {
-        None
-    };
+    let default_runner =
+        if explicit_runner.is_none() && command.portable && command.default_lab_offload {
+            super::resolve_default_lab_runner()?
+        } else {
+            None
+        };
 
     resolve_lab_runner_selection_from_default(
         command,
@@ -365,15 +366,23 @@ pub(super) fn resolve_lab_runner_selection_from_default(
         }));
     }
 
-    if force_hot && command.portable && default_runner.is_some() && !allow_local_hot {
-        let runner_id = default_runner.expect("checked above");
+    if !command.default_lab_offload {
+        fail_if_local_bench_denied(command, deny_local_bench)?;
+        return Ok(None);
+    }
+
+    if force_hot && command.portable && !allow_local_hot {
+        let Some(runner_id) = default_runner.as_ref() else {
+            fail_if_local_bench_denied(command, deny_local_bench)?;
+            return Ok(None);
+        };
         return Err(Error::validation_invalid_argument(
             "force_hot",
             format!(
                 "--force-hot would run portable hot command `{}` locally, but default Lab runner `{runner_id}` is available",
                 command.hot_label
             ),
-            Some(runner_id),
+            Some(runner_id.clone()),
             Some(vec![
                 "Omit --force-hot or pass --runner to offload the command to Lab.".to_string(),
                 "Pass --force-hot --allow-local-hot only when you intentionally want this portable hot command to run on the controller machine.".to_string(),
