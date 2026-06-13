@@ -215,10 +215,24 @@ homeboy agent-task controller apply-event transformer-loop \
 
 The payload may include a `policy` object using
 `homeboy/agent-task-loop-controller/v1` action names such as `spawn_task`,
-`fan_out`, `join`, `retry`, `request_changes`, `run_gates`, `wait_for_event`,
-`mark_human_ready`, `complete`, `abandon`, and `escalate`. Actions with
-deterministic `dedupe_key` values are recorded once, so replaying a resumed
-controller does not duplicate already-open tasks or PR work.
+`fan_out`, `spawn_controller`, `spawn_subloop`, `wait_for_controller`, `join`,
+`retry`, `request_changes`, `run_gates`, `wait_for_event`, `mark_human_ready`,
+`complete`, `abandon`, and `escalate`. Actions with deterministic `dedupe_key`
+values are recorded once, so replaying a resumed controller does not duplicate
+already-open tasks, child controllers, or PR work.
+
+Nested controller actions are first-class state primitives. `spawn_controller`
+and its `spawn_subloop` alias record a parent-visible child controller ref with
+the parent loop id, spawning action id, optional entity id, request payload, and
+dedupe key. Controller records also include optional `parent_loop_id`,
+`parent_action_id`, and `parent_entity_id` fields so spawned child records can
+carry their parent provenance directly. `wait_for_controller` puts the parent in
+`waiting` state and records a wait that is satisfied when `controller status`
+observes the child controller in a terminal state (`completed`, `failed`,
+`human_ready`, `abandoned`, or `escalated` by default). Autonomous execution of
+pending spawn/wait actions is still owned by #3905; until that lands, these
+primitives define the durable schema, idempotency, and status visibility that
+the runner will execute.
 
 Mark work as explicitly ready for a human handoff:
 
