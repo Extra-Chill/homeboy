@@ -222,6 +222,44 @@ function contractGlobEntries(config) {
   });
 }
 
+function contractEntryPointEntries(config) {
+  const checks = Array.isArray(config.entry_points) ? config.entry_points : [];
+  return checks.flatMap((entry) => {
+    if (!plainObject(entry)) {
+      return [];
+    }
+    const entryPath = typeof entry.path === 'string'
+      ? entry.path
+      : (typeof entry.entry_path === 'string' ? entry.entry_path : entry.entry);
+    const mustLinkTo = Array.isArray(entry.must_link_to) ? entry.must_link_to : [entry.must_link_to];
+    const targets = mustLinkTo
+      .map((target) => normalizePathPattern(target))
+      .filter(Boolean);
+    if (typeof entryPath !== 'string' || entryPath.trim() === '' || targets.length === 0) {
+      return [];
+    }
+    return [{
+      path: normalizePathPattern(entryPath),
+      must_link_to: targets,
+      description: typeof entry.description === 'string' ? entry.description.trim() : '',
+    }];
+  }).filter((entry) => entry.path);
+}
+
+function contractForbiddenPhraseEntries(config) {
+  const checks = Array.isArray(config.forbidden_phrases) ? config.forbidden_phrases : [];
+  return checks.flatMap((entry) => {
+    const phrase = typeof entry === 'string' ? entry : entry?.phrase;
+    if (typeof phrase !== 'string' || phrase.trim() === '') {
+      return [];
+    }
+    return [{
+      phrase: phrase.trim(),
+      description: typeof entry?.description === 'string' ? entry.description.trim() : '',
+    }];
+  });
+}
+
 function safeWorkspacePath(workspace, relativePath) {
   const normalized = normalizePathPattern(relativePath);
   if (!normalized || normalized.split('/').includes('..')) {
@@ -256,12 +294,105 @@ function workspaceFileList(workspace) {
   return files;
 }
 
+function isWorkspaceTextFile(file) {
+  return /\.(md|markdown|mdx|txt|text)$/i.test(file);
+}
+
+function scopedContractFiles(config, contract, workspace, workspaceFiles, pathChecks, globChecks, entryChecks) {
+  const explicitScope = Array.isArray(contract.scope) ? contract.scope : [];
+  const scopePatterns = [
+    ...explicitScope.map(normalizePathPattern),
+    ...writablePathPatterns(config),
+    ...globChecks.map((entry) => entry.glob),
+  ].filter(Boolean);
+  const scopeMatchers = scopePatterns.map(globPatternToRegExp);
+  const explicitFiles = new Set([
+    ...pathChecks.map((entry) => entry.path),
+    ...entryChecks.map((entry) => entry.path),
+  ].filter(Boolean));
+
+  return workspaceFiles.filter((file) => {
+    if (!isWorkspaceTextFile(file)) {
+      return false;
+    }
+    if (scopeMatchers.length === 0 && explicitFiles.size === 0) {
+      return true;
+    }
+    if (explicitFiles.has(file)) {
+      return true;
+    }
+    return scopeMatchers.some((matcher) => matcher.test(file));
+  }).filter((file) => Boolean(safeWorkspacePath(workspace, file)));
+}
+
+function entryPointLinksTo(content, target, entryPath) {
+  const normalized = normalizePathPattern(target);
+  const relativeFromEntry = normalizePathPattern(path.posix.relative(path.posix.dirname(entryPath), normalized));
+  const candidates = new Set([
+    target,
+    normalized,
+    `./${normalized}`,
+    relativeFromEntry,
+    `./${relativeFromEntry}`,
+    encodeURI(normalized),
+    `./${encodeURI(normalized)}`,
+    encodeURI(relativeFromEntry),
+    `./${encodeURI(relativeFromEntry)}`,
+  ].filter(Boolean));
+  for (const candidate of candidates) {
+    if (content.includes(candidate)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function evaluateEntryPoints(entries, workspace) {
+  return entries.map((entry) => {
+    const resolved = safeWorkspacePath(workspace, entry.path);
+    const exists = Boolean(resolved && fs.existsSync(resolved) && fs.statSync(resolved).isFile());
+    const content = exists ? fs.readFileSync(resolved, 'utf8') : '';
+    const missing_targets = exists
+      ? entry.must_link_to.filter((target) => !entryPointLinksTo(content, target, entry.path))
+      : [...entry.must_link_to];
+    return {
+      ...entry,
+      exists,
+      missing_targets,
+      success: exists && missing_targets.length === 0,
+    };
+  });
+}
+
+function evaluateForbiddenPhrases(entries, workspace, scopedFiles) {
+  return entries.map((entry) => {
+    const matching_files = [];
+    for (const file of scopedFiles) {
+      const resolved = safeWorkspacePath(workspace, file);
+      if (!resolved || !fs.existsSync(resolved) || !fs.statSync(resolved).isFile()) {
+        continue;
+      }
+      const content = fs.readFileSync(resolved, 'utf8');
+      if (content.includes(entry.phrase)) {
+        matching_files.push(file);
+      }
+    }
+    return {
+      ...entry,
+      matching_files,
+      success: matching_files.length === 0,
+    };
+  });
+}
+
 function evaluateWorkspaceContract(config, workspace) {
   const contract = workspaceContractConfig(config);
   const pathChecks = contractPathEntries(contract, 'paths_exist');
   const globChecks = contractGlobEntries(contract);
-  if (pathChecks.length === 0 && globChecks.length === 0) {
-    return { enabled: false, success: true, paths_exist: [], glob_min_count: [] };
+  const entryChecks = contractEntryPointEntries(contract);
+  const forbiddenPhraseChecks = contractForbiddenPhraseEntries(contract);
+  if (pathChecks.length === 0 && globChecks.length === 0 && entryChecks.length === 0 && forbiddenPhraseChecks.length === 0) {
+    return { enabled: false, success: true, paths_exist: [], glob_min_count: [], entry_points: [], forbidden_phrases: [] };
   }
 
   const pathsExist = pathChecks.map((entry) => {
@@ -269,7 +400,8 @@ function evaluateWorkspaceContract(config, workspace) {
     const exists = Boolean(resolved && fs.existsSync(resolved));
     return { ...entry, exists, success: exists };
   });
-  const workspaceFiles = globChecks.length > 0 ? workspaceFileList(workspace) : [];
+  const needsWorkspaceFiles = globChecks.length > 0 || forbiddenPhraseChecks.length > 0;
+  const workspaceFiles = needsWorkspaceFiles ? workspaceFileList(workspace) : [];
   const globMinCount = globChecks.map((entry) => {
     const matcher = globPatternToRegExp(entry.glob);
     const matches = workspaceFiles.filter((file) => matcher.test(file));
@@ -280,9 +412,16 @@ function evaluateWorkspaceContract(config, workspace) {
       success: matches.length >= entry.min,
     };
   });
+  const entryPoints = evaluateEntryPoints(entryChecks, workspace);
+  const forbiddenPhraseFiles = forbiddenPhraseChecks.length > 0
+    ? scopedContractFiles(config, contract, workspace, workspaceFiles, pathChecks, globChecks, entryChecks)
+    : [];
+  const forbiddenPhrases = evaluateForbiddenPhrases(forbiddenPhraseChecks, workspace, forbiddenPhraseFiles);
   const failures = [
     ...pathsExist.filter((entry) => !entry.success).map((entry) => `missing path ${entry.path}`),
     ...globMinCount.filter((entry) => !entry.success).map((entry) => `glob ${entry.glob} matched ${entry.count}, expected at least ${entry.min}`),
+    ...entryPoints.filter((entry) => !entry.success).map((entry) => `entry_points ${entry.path} missing links: ${entry.missing_targets.join(', ')}`),
+    ...forbiddenPhrases.filter((entry) => !entry.success).map((entry) => `forbidden phrase ${JSON.stringify(entry.phrase)} found in ${entry.matching_files.join(', ')}`),
   ];
   const success = failures.length === 0;
   return {
@@ -290,6 +429,9 @@ function evaluateWorkspaceContract(config, workspace) {
     success,
     paths_exist: pathsExist,
     glob_min_count: globMinCount,
+    entry_points: entryPoints,
+    forbidden_phrases: forbiddenPhrases,
+    forbidden_phrase_files: forbiddenPhraseFiles,
     error: success ? '' : `workspace_contract_checks failed: ${failures.join('; ')}`,
   };
 }

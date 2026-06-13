@@ -150,6 +150,7 @@ function makeRunFiles(tmp, config) {
   const repo = makeRepo(tmp);
   const gh = makeGhFixture(tmp);
   fs.mkdirSync(path.join(repo, 'docs', 'reference'), { recursive: true });
+  fs.writeFileSync(path.join(repo, 'docs', 'index.md'), '# Docs\n\n- [Architecture](architecture.md)\n- [API](reference/api.md)\n');
   fs.writeFileSync(path.join(repo, 'docs', 'architecture.md'), '# Architecture\n');
   fs.writeFileSync(path.join(repo, 'docs', 'reference', 'api.md'), '# API\n');
   const { configPath, resultsPath } = makeRunFiles(tmp, {
@@ -157,6 +158,8 @@ function makeRunFiles(tmp, config) {
     workspace_contract_checks: {
       paths_exist: ['docs/architecture.md'],
       glob_min_count: [{ glob: 'docs/**/*.md', min: 2 }],
+      entry_points: [{ path: 'docs/index.md', must_link_to: ['docs/architecture.md', 'docs/reference/api.md'] }],
+      forbidden_phrases: ['TODO_GENERATED_DOCS'],
     },
   });
 
@@ -169,7 +172,11 @@ function makeRunFiles(tmp, config) {
   assert.equal(scenario.metrics.workspace_contract_satisfied, 1);
   assert.equal(scenario.metrics.pr_opened, 1);
   assert.equal(scenario.metadata.runner_workspace_contract.paths_exist[0].success, true);
-  assert.equal(scenario.metadata.runner_workspace_contract.glob_min_count[0].count, 2);
+  assert.equal(scenario.metadata.runner_workspace_contract.glob_min_count[0].count, 3);
+  assert.equal(scenario.metadata.runner_workspace_contract.entry_points[0].success, true);
+  assert.deepEqual(scenario.metadata.runner_workspace_contract.entry_points[0].missing_targets, []);
+  assert.equal(scenario.metadata.runner_workspace_contract.forbidden_phrases[0].success, true);
+  assert.deepEqual(scenario.metadata.runner_workspace_contract.forbidden_phrases[0].matching_files, []);
 }
 
 {
@@ -177,12 +184,15 @@ function makeRunFiles(tmp, config) {
   const repo = makeRepo(tmp);
   const gh = makeGhFixture(tmp);
   fs.mkdirSync(path.join(repo, 'docs'), { recursive: true });
-  fs.writeFileSync(path.join(repo, 'docs', 'architecture.md'), '# Architecture\n');
+  fs.writeFileSync(path.join(repo, 'docs', 'index.md'), '# Docs\n\n- [Architecture](architecture.md)\n');
+  fs.writeFileSync(path.join(repo, 'docs', 'architecture.md'), '# Architecture\n\nTODO_GENERATED_DOCS\n');
   const { configPath, resultsPath } = makeRunFiles(tmp, {
     writable_paths: ['docs/**'],
     workspace_contract_checks: {
       paths_exist: ['docs/index.md'],
-      glob_min_count: [{ glob: 'docs/**/*.md', min: 2 }],
+      glob_min_count: [{ glob: 'docs/**/*.md', min: 3 }],
+      entry_points: [{ path: 'docs/index.md', must_link_to: ['docs/architecture.md', 'docs/reference/api.md'] }],
+      forbidden_phrases: ['TODO_GENERATED_DOCS'],
     },
   });
 
@@ -191,14 +201,20 @@ function makeRunFiles(tmp, config) {
   });
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /workspace_contract_checks failed/);
-  assert.match(result.stderr, /missing path docs\/index\.md/);
+  assert.match(result.stderr, /glob docs\/\*\*\/\*\.md matched 2, expected at least 3/);
+  assert.match(result.stderr, /entry_points docs\/index\.md missing links: docs\/reference\/api\.md/);
+  assert.match(result.stderr, /forbidden phrase "TODO_GENERATED_DOCS" found in docs\/architecture\.md/);
   const output = readJson(resultsPath);
   const scenario = output.scenarios[0];
   assert.equal(output.status, 'failed');
   assert.equal(scenario.metrics.workspace_contract_satisfied, 0);
   assert.equal(scenario.metrics.pr_opened, 0);
-  assert.equal(scenario.metadata.runner_workspace_contract.paths_exist[0].success, false);
+  assert.equal(scenario.metadata.runner_workspace_contract.paths_exist[0].success, true);
   assert.equal(scenario.metadata.runner_workspace_contract.glob_min_count[0].success, false);
+  assert.equal(scenario.metadata.runner_workspace_contract.entry_points[0].success, false);
+  assert.deepEqual(scenario.metadata.runner_workspace_contract.entry_points[0].missing_targets, ['docs/reference/api.md']);
+  assert.equal(scenario.metadata.runner_workspace_contract.forbidden_phrases[0].success, false);
+  assert.deepEqual(scenario.metadata.runner_workspace_contract.forbidden_phrases[0].matching_files, ['docs/architecture.md']);
   assert.equal(fs.existsSync(gh.log), false);
 }
 
