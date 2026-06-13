@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.121.9] - 2026-06-13
+
+### Fixed
+- route Data Machine agent CI through Codebox tasks
+
 ## [2.121.8] - 2026-06-13
 
 ### Fixed
