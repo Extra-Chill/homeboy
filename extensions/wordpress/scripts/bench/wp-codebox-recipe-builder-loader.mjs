@@ -1,108 +1,47 @@
 /**
  * External dependencies
  */
-import { existsSync, readdirSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { dirname, resolve } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { createRequire } from 'node:module';
 
-const DEFAULT_CODEBOX_CORE_MODULE = '@automattic/wp-codebox-core';
-const RUNTIME_CORE_ENTRY = 'packages/runtime-core/dist/index.js';
+const require = createRequire(import.meta.url);
+const {
+	coreModuleCandidates,
+	loadWpCodeboxCoreExport,
+	RUNTIME_CORE_ENTRY,
+} = require('../../lib/wp-codebox-core-loader.js');
+
+const RECIPE_BUILDER_MODULE_OPTIONS = {
+	packageCandidates: [
+		'@automattic/wp-codebox-core/recipe-builders',
+		'wp-codebox-workspace/recipe-builders',
+		'@automattic/wp-codebox-core',
+	],
+	packageDistEntries: ['recipe-builders.js', 'index.js'],
+	runtimeCoreEntries: ['packages/runtime-core/dist/recipe-builders.js', RUNTIME_CORE_ENTRY],
+};
 
 export async function loadCodeboxRecipeBuilder(requiredExport) {
-	const configuredModule = process.env.HOMEBOY_WP_CODEBOX_CORE_MODULE;
-	const candidates = configuredModule ? [configuredModule] : discoverCodeboxCoreModuleCandidates();
-	const errors = [];
-
-	for (const candidate of candidates) {
-		try {
-			const module = await importModule(candidate);
-			if (typeof module[requiredExport] !== 'function') {
-				errors.push(`${candidate}: missing ${requiredExport} export`);
-				continue;
-			}
-
-			return { builder: module[requiredExport], source: candidate };
-		} catch (error) {
-			errors.push(`${candidate}: ${error.message}`);
-		}
-	}
-
-	throw new Error([
-		`WP Codebox recipe builder export ${requiredExport} is unavailable.`,
-		`Install/build a WP Codebox runtime-core module that exports ${requiredExport}.`,
-		`Pass --setting wp_codebox_core_module=/path/to/wp-codebox/${RUNTIME_CORE_ENTRY}, or set HOMEBOY_WP_CODEBOX_CORE_MODULE to that built ESM entrypoint.`,
-		`Fallback discovery also checks sibling wp-codebox checkouts for ${RUNTIME_CORE_ENTRY}.`,
-		'This is separate from HOMEBOY_WP_CODEBOX_BIN / wp_codebox_bin, which only selects the wp-codebox CLI.',
-		'Homeboy Extensions no longer falls back to bundled WP Codebox recipe builders because that stale local copy can drift from the Codebox recipe contract.',
-		`Tried ${candidates.length} candidate(s):`,
-		...errors.map((error) => `- ${error}`),
-	].join('\n'));
-}
-
-function discoverCodeboxCoreModuleCandidates() {
-	const candidates = [DEFAULT_CODEBOX_CORE_MODULE];
-	for (const candidate of setupCacheCoreModuleCandidates()) {
-		if (existsSync(candidate) && !candidates.includes(candidate)) {
-			candidates.push(candidate);
-		}
-	}
-	const roots = workspaceRoots();
-
-	for (const root of roots) {
-		for (const repoPath of codeboxRepoCandidates(root)) {
-			const runtimeCore = resolve(repoPath, RUNTIME_CORE_ENTRY);
-			if (existsSync(runtimeCore) && !candidates.includes(runtimeCore)) {
-				candidates.push(runtimeCore);
-			}
-		}
-	}
-
-	return candidates;
-}
-
-function setupCacheCoreModuleCandidates() {
-	const installRoot = process.env.HOMEBOY_WP_CODEBOX_INSTALL_DIR || resolve(homedir(), '.cache/homeboy/wp-codebox');
-	return [
-		resolve(installRoot, 'source', RUNTIME_CORE_ENTRY),
-		resolve(installRoot, 'source/node_modules/@automattic/wp-codebox-core/dist/index.js'),
-		resolve(installRoot, 'release/wp-codebox-cli', RUNTIME_CORE_ENTRY),
-		resolve(installRoot, 'release/wp-codebox-cli/node_modules/@automattic/wp-codebox-core/dist/index.js'),
-	];
-}
-
-function workspaceRoots() {
-	const scriptDir = dirname(fileURLToPath(import.meta.url));
-	const repoRoot = resolve(scriptDir, '../../..');
-	const roots = [
-		process.env.HOMEBOY_WORKSPACE_ROOT,
-		process.env.HOMEBOY_DEVELOPER_WORKSPACE,
-		dirname(repoRoot),
-	];
-
-	return [...new Set(roots.filter(Boolean))];
-}
-
-function codeboxRepoCandidates(root) {
-	const exact = resolve(root, 'wp-codebox');
-	const candidates = existsSync(exact) ? [exact] : [];
-
 	try {
-		const siblingWorktrees = readdirSync(root, { withFileTypes: true })
-			.filter((entry) => entry.isDirectory() && entry.name.startsWith('wp-codebox@'))
-			.map((entry) => resolve(root, entry.name))
-			.sort();
-		candidates.push(...siblingWorktrees);
-	} catch {
-		// A missing or unreadable workspace root simply contributes no candidates.
-	}
+		const result = await loadWpCodeboxCoreExport(requiredExport, { ...RECIPE_BUILDER_MODULE_OPTIONS, required: true });
+		return { builder: result.value, source: result.source };
+	} catch (error) {
+		const candidates = coreModuleCandidates(RECIPE_BUILDER_MODULE_OPTIONS);
+		const errors = (error.wpCodeboxCoreErrors || []).map(formatCoreLoaderError);
 
-	return candidates;
+		throw new Error([
+			`WP Codebox recipe builder export ${requiredExport} is unavailable.`,
+			`Install/build a WP Codebox recipe-builder module that exports ${requiredExport}.`,
+			'Use @automattic/wp-codebox-core/recipe-builders or wp-codebox-workspace/recipe-builders when the stable WP Codebox API is available.',
+			`Pass --setting wp_codebox_core_module=/path/to/wp-codebox/packages/runtime-core/dist/recipe-builders.js, or set HOMEBOY_WP_CODEBOX_CORE_MODULE to that built ESM entrypoint.`,
+			`Fallback discovery also checks sibling wp-codebox checkouts for packages/runtime-core/dist/recipe-builders.js and ${RUNTIME_CORE_ENTRY}.`,
+			'This is separate from HOMEBOY_WP_CODEBOX_BIN / wp_codebox_bin, which only selects the wp-codebox CLI.',
+			'Homeboy Extensions no longer falls back to bundled WP Codebox recipe builders because that stale local copy can drift from the Codebox recipe contract.',
+			`Tried ${candidates.length} candidate(s):`,
+			...errors.map((error) => `- ${error}`),
+		].join('\n'));
+	}
 }
 
-async function importModule(specifier) {
-	if (specifier.startsWith('.') || specifier.startsWith('/') || specifier.startsWith('file:')) {
-		return import(specifier.startsWith('file:') ? specifier : pathToFileURL(resolve(specifier)).href);
-	}
-	return import(specifier);
+function formatCoreLoaderError(error) {
+	return `${error.specifier}: ${error.message}`;
 }
