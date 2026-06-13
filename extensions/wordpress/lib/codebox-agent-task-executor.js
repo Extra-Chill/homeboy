@@ -227,7 +227,7 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     agent_bundles: config.agent_bundles || config.agentBundles || options.agentBundles || [],
     runtime_stack_mounts: config.runtime_stack_mounts || options.runtimeStackMounts || [],
     runtime_overlay_profiles: config.runtime_overlay_profiles || config.runtimeOverlayProfiles || options.runtimeOverlayProfiles || defaults.runtimeOverlayProfiles || [],
-    runtime_overlays: config.runtime_overlays || options.runtimeOverlays || [],
+    runtime_overlays: config.runtime_overlays || options.runtimeOverlays || defaults.runtimeOverlays || [],
     secret_env: explicitSecretEnv.length > 0 ? Array.from(new Set(explicitSecretEnv)) : defaults.secretEnv || [],
     // Post-agent verification gate (recipe workflow.after). Supplied as WP
     // Codebox recipe steps; a non-zero exit fails the run so the orchestrator
@@ -313,6 +313,20 @@ function defaultCodeboxRuntimeConfig(request, config, inputs, options = {}) {
     siblingPath(workspaceBase, 'ai-provider-for-openai'),
     siblingPath(workspaceBase, 'ai-provider-for-openai-main'),
   );
+  const codexProviderPluginPath = firstExistingPath(
+    settings.wp_codebox_codex_provider_plugin_path,
+    settings.wp_codebox_codex_provider_plugin,
+    process.env.WP_CODEBOX_CODEX_PROVIDER_PLUGIN_PATH,
+    process.env.HOMEBOY_WP_CODEBOX_CODEX_PROVIDER_PLUGIN_PATH,
+    providerPluginPath,
+  );
+  const phpAiClientPath = firstExistingPath(
+    settings.wp_codebox_php_ai_client_path,
+    settings.php_ai_client_path,
+    process.env.WP_CODEBOX_PHP_AI_CLIENT_PATH,
+    process.env.HOMEBOY_WP_CODEBOX_PHP_AI_CLIENT_PATH,
+    siblingPath(workspaceBase, 'php-ai-client'),
+  );
   const provider = config.provider || options.provider || defaultProvider(settings, providerPluginPath);
   const model = config.model || options.model || defaultModelForProvider(provider, settings);
   const agentsApiPath = firstExistingPath(
@@ -327,12 +341,13 @@ function defaultCodeboxRuntimeConfig(request, config, inputs, options = {}) {
     agentsApi: agentsApiPath,
     legacyRuntime: dataMachinePath,
     legacyRuntimeTools: dataMachineCodePath,
-    providerPluginPaths: defaultProviderPluginPaths(provider, settings, providerPluginPath),
+    providerPluginPaths: defaultProviderPluginPaths(provider, settings, providerPluginPath, codexProviderPluginPath),
     provider,
     model,
     secretEnv: defaultSecretEnv(provider, settings),
     wpCodeboxBin: firstValue(settings.wp_codebox_bin, settings.wpCodeboxBin, process.env.HOMEBOY_WP_CODEBOX_BIN, ''),
-    runtimeOverlayProfiles: defaultRuntimeOverlayProfiles(provider),
+    runtimeOverlayProfiles: [],
+    runtimeOverlays: defaultRuntimeOverlays(provider, phpAiClientPath),
     mounts: defaultWorkspaceMounts(workspaceRoot, request, config, inputs, options),
     workspaces: defaultWorkspaces(config, inputs, options),
     allowedTools: defaultWorkspaceAllowedTools(workspaceRoot, workspaceMode(request, config, inputs)),
@@ -340,19 +355,27 @@ function defaultCodeboxRuntimeConfig(request, config, inputs, options = {}) {
   };
 }
 
-function defaultProviderPluginPaths(provider, settings, fallbackProviderPluginPath) {
+function defaultProviderPluginPaths(provider, settings, fallbackProviderPluginPath, codexProviderPluginPath = '') {
   const explicit = normalizeArray(settings.wp_codebox_provider_plugin_paths || settings.provider_plugin_paths);
   if (explicit.length > 0) {
     return explicit;
   }
   if (provider === 'codex') {
-    return [];
+    return codexProviderPluginPath ? [codexProviderPluginPath] : [];
   }
   return fallbackProviderPluginPath ? [fallbackProviderPluginPath] : [];
 }
 
-function defaultRuntimeOverlayProfiles(provider) {
-  return provider === 'codex' ? ['codex-subscription'] : [];
+function defaultRuntimeOverlays(provider, phpAiClientPath) {
+  if (provider !== 'codex' || !phpAiClientPath) {
+    return [];
+  }
+  return [{
+    type: 'bundled-library',
+    library: 'php-ai-client',
+    source: phpAiClientPath,
+    target: '/wordpress/wp-includes/php-ai-client',
+  }];
 }
 
 function firstDefined(...values) {
