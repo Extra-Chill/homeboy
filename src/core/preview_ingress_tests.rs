@@ -3,7 +3,7 @@ use super::tunnel::native_preview_token_sha256;
 use crate::test_support;
 use base64::Engine;
 use serde_json::json;
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::thread;
 use std::time::Duration;
@@ -66,6 +66,34 @@ fn route_status_reports_expired_and_disconnected_sessions() {
             PreviewIngressRouteLifecycle::Disconnected
         );
         assert_eq!(routes[1].lifecycle, PreviewIngressRouteLifecycle::Expired);
+    });
+}
+
+#[test]
+fn status_for_host_reports_route_registration_state() {
+    test_support::with_isolated_home(|_| {
+        register_route(PreviewIngressRoute {
+            session_id: "run-123".to_string(),
+            public_host: "run-123-tunnel.chubes.net".to_string(),
+            upstream_origin: "http://127.0.0.1:7331".to_string(),
+            expires_at: None,
+            active: true,
+        })
+        .expect("register route");
+
+        let status = status_for_host(
+            None,
+            None,
+            None,
+            Some("RUN-123-TUNNEL.CHUBES.NET:443".to_string()),
+        )
+        .expect("status");
+
+        assert_eq!(
+            status.inspected_host.as_deref(),
+            Some("run-123-tunnel.chubes.net")
+        );
+        assert_eq!(status.inspected_state.as_deref(), Some("registered"));
     });
 }
 
@@ -168,6 +196,115 @@ fn reverse_channel_client_serves_public_request() {
         assert!(
             browser_response.contains("console.log('ok');"),
             "{browser_response}"
+        );
+    });
+}
+
+#[test]
+fn route_proxy_serves_artifact_json_with_cors_headers() {
+    test_support::with_isolated_home(|_| {
+        let upstream = TcpListener::bind("127.0.0.1:0").expect("upstream bind");
+        let upstream_port = upstream.local_addr().expect("upstream addr").port();
+        thread::spawn(move || {
+            let (mut stream, _) = upstream.accept().expect("accept upstream");
+            let mut request = String::new();
+            BufReader::new(stream.try_clone().expect("clone upstream"))
+                .read_line(&mut request)
+                .expect("read upstream request");
+            assert!(
+                request
+                    .contains("/homeboy/workflow-bench/runs/run-1/artifacts/blueprint.after.json"),
+                "{request}"
+            );
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 12\r\n\r\n{\"steps\":[]}")
+                .expect("write upstream response");
+        });
+
+        let ingress = TcpListener::bind("127.0.0.1:0").expect("reserve port");
+        let ingress_port = ingress.local_addr().expect("ingress addr").port();
+        drop(ingress);
+        thread::spawn(move || {
+            serve(PreviewIngressServeSpec {
+                bind: format!("127.0.0.1:{ingress_port}"),
+                domain: "example.com".to_string(),
+                public_host_pattern: "*-tunnel.example.com".to_string(),
+                token_sha256_env: "HOMEBOY_TEST_UNUSED_TOKEN_SHA256".to_string(),
+            })
+            .expect("serve ingress");
+        });
+        thread::sleep(Duration::from_millis(100));
+
+        register_route(PreviewIngressRoute {
+            session_id: "run-1".to_string(),
+            public_host: "run-1-tunnel.example.com".to_string(),
+            upstream_origin: format!("http://127.0.0.1:{upstream_port}"),
+            expires_at: None,
+            active: true,
+        })
+        .expect("register route");
+
+        let response = raw_http_request(
+            ingress_port,
+            "GET /homeboy/workflow-bench/runs/run-1/artifacts/blueprint.after.json HTTP/1.1\r\nHost: run-1-tunnel.example.com\r\n\r\n",
+        );
+
+        assert!(response.contains("200 OK"), "{response}");
+        assert!(
+            response.contains("access-control-allow-origin: *"),
+            "{response}"
+        );
+        assert!(
+            response.contains("content-type: application/json"),
+            "{response}"
+        );
+        assert!(response.contains("{\"steps\":[]}"), "{response}");
+    });
+}
+
+#[test]
+fn route_proxy_answers_artifact_preflight_without_upstream() {
+    test_support::with_isolated_home(|_| {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("reserve port");
+        let port = listener.local_addr().expect("local addr").port();
+        drop(listener);
+        thread::spawn(move || {
+            serve(PreviewIngressServeSpec {
+                bind: format!("127.0.0.1:{port}"),
+                domain: "example.com".to_string(),
+                public_host_pattern: "*-tunnel.example.com".to_string(),
+                token_sha256_env: "HOMEBOY_TEST_UNUSED_TOKEN_SHA256".to_string(),
+            })
+            .expect("serve ingress");
+        });
+        thread::sleep(Duration::from_millis(100));
+
+        register_route(PreviewIngressRoute {
+            session_id: "run-1".to_string(),
+            public_host: "run-1-tunnel.example.com".to_string(),
+            upstream_origin: "http://127.0.0.1:9".to_string(),
+            expires_at: None,
+            active: true,
+        })
+        .expect("register route");
+
+        let response = raw_http_request(
+            port,
+            "OPTIONS /homeboy/workflow-bench/runs/run-1/artifacts/blueprint.after.json HTTP/1.1\r\nHost: run-1-tunnel.example.com\r\n\r\n",
+        );
+
+        assert!(response.contains("204 No Content"), "{response}");
+        assert!(
+            response.contains("access-control-allow-origin: *"),
+            "{response}"
+        );
+        assert!(
+            response.contains("access-control-allow-methods: GET, HEAD, OPTIONS"),
+            "{response}"
+        );
+        assert!(
+            response.contains("content-type: application/json"),
+            "{response}"
         );
     });
 }

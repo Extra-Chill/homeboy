@@ -33,6 +33,10 @@ pub struct PreviewIngressStatus {
     pub public_host_pattern: Option<String>,
     pub routes: Vec<PreviewIngressRouteStatus>,
     pub recent_failures: Vec<PreviewIngressFailure>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inspected_host: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inspected_state: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -287,7 +291,27 @@ pub fn status(
     domain: Option<String>,
     public_host_pattern: Option<String>,
 ) -> Result<PreviewIngressStatus> {
-    status_with_failures(bind, domain, public_host_pattern, Vec::new())
+    status_for_host(bind, domain, public_host_pattern, None)
+}
+
+pub fn status_for_host(
+    bind: Option<String>,
+    domain: Option<String>,
+    public_host_pattern: Option<String>,
+    host: Option<String>,
+) -> Result<PreviewIngressStatus> {
+    let inspected_host = host.map(|host| normalize_public_host(&host));
+    let inspected_state = inspected_host.as_ref().map(|host| {
+        classify_route_host_state(host).unwrap_or_else(|| "missing_session".to_string())
+    });
+    status_with_failures(
+        bind,
+        domain,
+        public_host_pattern,
+        Vec::new(),
+        inspected_host,
+        inspected_state,
+    )
 }
 
 pub fn render_install_plan(
@@ -389,6 +413,8 @@ fn status_with_failures(
     domain: Option<String>,
     public_host_pattern: Option<String>,
     recent_failures: Vec<PreviewIngressFailure>,
+    inspected_host: Option<String>,
+    inspected_state: Option<String>,
 ) -> Result<PreviewIngressStatus> {
     Ok(PreviewIngressStatus {
         bind,
@@ -402,6 +428,8 @@ fn status_with_failures(
             })
             .collect(),
         recent_failures,
+        inspected_host,
+        inspected_state,
     })
 }
 
@@ -476,15 +504,28 @@ fn handle_connection(
     let host = request.host.clone().unwrap_or_default();
     let path = request.target.clone();
 
-    if request.target == "/_homeboy/preview-ingress/status" {
+    if request.target.split('?').next() == Some("/_homeboy/preview-ingress/status") {
         let failures = recent_failures
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
-        let body = serde_json::to_vec_pretty(&status_with_failures(None, None, None, failures)?)
-            .map_err(|e| {
-                Error::internal_json(e.to_string(), Some("preview ingress status".to_string()))
-            })?;
+        let inspected_host =
+            query_value(&request.target, "host").map(|host| normalize_public_host(&host));
+        let inspected_state = inspected_host.as_ref().map(|host| {
+            classify_runtime_host_state(host, &sessions, &failures)
+                .unwrap_or_else(|| "missing_session".to_string())
+        });
+        let body = serde_json::to_vec_pretty(&status_with_failures(
+            None,
+            None,
+            None,
+            failures,
+            inspected_host,
+            inspected_state,
+        )?)
+        .map_err(|e| {
+            Error::internal_json(e.to_string(), Some("preview ingress status".to_string()))
+        })?;
         write_response(
             &mut stream,
             200,
@@ -505,7 +546,7 @@ fn handle_connection(
     }
 
     if request.target.starts_with("/preview/client/") {
-        return handle_client_api(&mut stream, request, &sessions, &auth);
+        return handle_client_api(&mut stream, request, &sessions, &auth, &recent_failures);
     }
 
     let Some(route) = route_for_host(&host)? else {
@@ -636,6 +677,7 @@ fn handle_client_api(
     request: IngressHttpRequest,
     sessions: &Arc<PreviewClientSessions>,
     auth: &PreviewIngressAuth,
+    recent_failures: &Arc<Mutex<Vec<PreviewIngressFailure>>>,
 ) -> Result<()> {
     if request.method != "POST" {
         return write_json_response(
@@ -645,10 +687,24 @@ fn handle_client_api(
         );
     }
     if !authorized_preview_client(&request, auth) {
+        let failure = PreviewIngressFailure {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            host: request.host.clone().unwrap_or_default(),
+            path: request.target.clone(),
+            status: 401,
+            classification: "auth_failed_recently".to_string(),
+            message: "preview client bearer token is missing or invalid; compare no-newline SHA-256 digests with `homeboy tunnel preview-client diagnose-auth`".to_string(),
+        };
+        record_failure(recent_failures, failure);
         return write_json_response(
             stream,
             401,
-            json!({ "error": "unauthorized", "message": "preview client bearer token is missing or invalid" }),
+            json!({
+                "error": "unauthorized",
+                "classification": "auth_failed_recently",
+                "message": "preview client bearer token is missing or invalid",
+                "hint": "Run `homeboy tunnel preview-client diagnose-auth`; Homeboy hashes exact token bytes (printf %s), never newline-terminated input."
+            }),
         );
     }
 
@@ -857,6 +913,24 @@ fn proxy_request(
     started: Instant,
     recent_failures: Arc<Mutex<Vec<PreviewIngressFailure>>>,
 ) -> Result<()> {
+    if request.method.eq_ignore_ascii_case("OPTIONS") {
+        write_status_and_headers(
+            stream,
+            204,
+            "No Content",
+            &artifact_cors_headers(Vec::new(), &path),
+        )?;
+        log_request(&PreviewIngressLogLine {
+            request_id,
+            host,
+            path,
+            status: 204,
+            bytes: 0,
+            duration_ms: started.elapsed().as_millis(),
+            classification: "cors_preflight".to_string(),
+        });
+        return Ok(());
+    }
     let upstream_url = upstream_url(route, &request.target)?;
     let method = reqwest::Method::from_bytes(request.method.as_bytes())
         .map_err(|e| Error::validation_invalid_argument("method", e.to_string(), None, None))?;
@@ -885,6 +959,7 @@ fn proxy_request(
                     value.to_str().ok().map(|value| (name, value.to_string()))
                 })
                 .collect::<Vec<_>>();
+            let headers = artifact_cors_headers(headers, &path);
             write_status_and_headers(
                 stream,
                 status.as_u16(),
@@ -1008,6 +1083,64 @@ fn validate_client_public_host(public_host: &str) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+fn classify_runtime_host_state(
+    public_host: &str,
+    sessions: &Arc<PreviewClientSessions>,
+    recent_failures: &[PreviewIngressFailure],
+) -> Option<String> {
+    let sessions_guard = sessions
+        .sessions
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(session) = sessions_guard.get(public_host) {
+        return Some(
+            if session.active {
+                "registered"
+            } else {
+                "disconnected"
+            }
+            .to_string(),
+        );
+    }
+    drop(sessions_guard);
+    if recent_failures.iter().rev().any(|failure| {
+        normalize_public_host(&failure.host) == public_host
+            && failure.classification == "auth_failed_recently"
+    }) {
+        return Some("auth_failed_recently".to_string());
+    }
+    route_for_host(public_host)
+        .ok()
+        .flatten()
+        .map(|route| route_state_label(&route))
+}
+
+fn classify_route_host_state(public_host: &str) -> Option<String> {
+    route_for_host(public_host)
+        .ok()
+        .flatten()
+        .map(|route| route_state_label(&route))
+}
+
+fn route_state_label(route: &PreviewIngressRoute) -> String {
+    match classify_route(route) {
+        PreviewIngressRouteLifecycle::Active => "registered".to_string(),
+        PreviewIngressRouteLifecycle::Expired => "missing_session".to_string(),
+        PreviewIngressRouteLifecycle::Disconnected => "disconnected".to_string(),
+    }
+}
+
+fn query_value(target: &str, key: &str) -> Option<String> {
+    let query = target.split_once('?')?.1;
+    for pair in query.split('&') {
+        let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
+        if name == key {
+            return Some(value.replace('+', " "));
+        }
+    }
+    None
 }
 
 fn validate_client_local_origin(local_origin: &str) -> Result<()> {
@@ -1460,6 +1593,29 @@ fn write_status_and_headers(
     }
     write!(stream, "\r\n")
         .map_err(|e| Error::internal_io(e.to_string(), Some("write header terminator".to_string())))
+}
+
+fn artifact_cors_headers(mut headers: Vec<(String, String)>, path: &str) -> Vec<(String, String)> {
+    push_header_if_missing(&mut headers, "access-control-allow-origin", "*");
+    push_header_if_missing(
+        &mut headers,
+        "access-control-allow-methods",
+        "GET, HEAD, OPTIONS",
+    );
+    push_header_if_missing(&mut headers, "access-control-allow-headers", "*");
+    if path.split('?').next().unwrap_or(path).ends_with(".json") {
+        push_header_if_missing(&mut headers, "content-type", "application/json");
+    }
+    headers
+}
+
+fn push_header_if_missing(headers: &mut Vec<(String, String)>, name: &str, value: &str) {
+    if !headers
+        .iter()
+        .any(|(header_name, _)| header_name.eq_ignore_ascii_case(name))
+    {
+        headers.push((name.to_string(), value.to_string()));
+    }
 }
 
 fn reason_for_status(status: u16) -> &'static str {
