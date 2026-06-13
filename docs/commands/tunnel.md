@@ -6,6 +6,7 @@
 homeboy tunnel service <COMMAND>
 homeboy tunnel preview-client <COMMAND>
 homeboy tunnel preview-ingress <COMMAND>
+homeboy tunnel preview-consumer <COMMAND>
 ```
 
 `tunnel` manages Homeboy-native private service tunnel declarations, local managed service lifecycle, and the VPS-side public preview ingress used by generic preview URLs. Homeboy can start a long-running local command, record safe command/process/log evidence, report readiness, and stop the process group without relying on an external chat or tunnel wrapper.
@@ -63,6 +64,53 @@ homeboy tunnel service start context-a8c \
 The `command` backend is a generic adapter seam. Homeboy starts and supervises the backend command, injects `HOMEBOY_SERVICE_ID`, `HOMEBOY_SERVICE_LOCAL_URL`, and `HOMEBOY_TUNNEL_PUBLIC_URL`, records backend PID/process/log evidence, and stops it with the managed service. Provider-specific behavior such as Traforo, Cloudflare, ngrok, or a Homeboy VPS broker belongs in the backend command or a future extension, not in Homeboy core semantics.
 
 When a service's preview policy is relevant, `service status` and `service start` include a structured `preview` artifact with schema `homeboy/preview-url/v1`. The artifact records the service ID, local URL, optional public URL, backend, policy, cleanup/expiry metadata, and owning run/workflow IDs when the start command supplied them.
+
+## Preview Consumer Orchestration
+
+`preview-consumer run` executes a configured command that needs a Homeboy-owned public preview URL. The consumer contract is configuration-based: Homeboy supplies `${preview_public_url}` and `${artifacts_dir}` template values, runs the configured command, and extracts a reviewer-clickable result URL using the configured stdout prefix or JSON pointer.
+
+Example `preview-consumer.json`:
+
+```json
+{
+  "id": "sample-preview-consumer",
+  "command": {
+    "program": "node",
+    "args": [
+      "tools/open-consumer.mjs",
+      "--public-url",
+      "${preview_public_url}",
+      "--artifacts",
+      "${artifacts_dir}"
+    ],
+    "cwd": "/workspace/project",
+    "artifacts_dir": "artifacts/sample-preview-consumer"
+  },
+  "output": {
+    "public_result_json_file": "summary.json",
+    "public_result_json_pointer": "/public_result_url",
+    "public_result_stdout_prefix": "Public result URL:"
+  }
+}
+```
+
+Use `--service-id` when `homeboy tunnel service start` has already recorded a `public_url` for the held preview service:
+
+```sh
+homeboy tunnel preview-consumer run \
+  --config ./preview-consumer.json \
+  --service-id site-preview
+```
+
+Use `--preview-public-url` when the orchestrating workload already has the public origin in hand:
+
+```sh
+homeboy tunnel preview-consumer run \
+  --config ./preview-consumer.json \
+  --preview-public-url https://run-123-tunnel.example.net
+```
+
+The output artifact uses schema `homeboy/preview-consumer-run/v1` and records the consumer ID, public preview URL, optional service ID, artifact directory, optional `public_result_url`, stdout, stderr, exit code, and artifact path. Preview interpretation stays in the configured consumer; Homeboy only owns public URL lifecycle, command execution, and durable evidence capture.
 
 ## Preview Client
 
@@ -250,3 +298,4 @@ The current layer validates config, token, host, session, origin, and lease sema
 - `preview-ingress list`: list route records.
 - `preview-ingress status`: report route lifecycle metadata.
 - `preview-ingress serve`: run the blocking VPS-side HTTP ingress daemon.
+- `preview-consumer run`: execute a configured consumer command with a Homeboy-owned public preview URL and record durable evidence.

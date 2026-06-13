@@ -1,5 +1,6 @@
 use clap::{Args, Subcommand, ValueEnum};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use homeboy::core::preview_client::{self, PreviewClientReport, PreviewClientStartSpec};
 use homeboy::core::preview_ingress::{
@@ -14,7 +15,9 @@ use homeboy::core::tunnel::{
 };
 use homeboy::core::{EntityCrudOutput, MergeOutput};
 use std::collections::BTreeMap;
+use std::fs;
 use std::path::PathBuf;
+use std::process::Command;
 
 use super::{CmdResult, DynamicSetArgs};
 
@@ -26,6 +29,8 @@ pub struct TunnelExtra {
     pub preview_client: Option<PreviewClientActionOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub preview_ingress: Option<PreviewIngressActionOutput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview_consumer: Option<PreviewConsumerOutput>,
 }
 
 #[derive(Debug, Serialize)]
@@ -51,6 +56,55 @@ pub enum PreviewIngressActionOutput {
     Route(PreviewIngressRoute),
     Routes { routes: Vec<PreviewIngressRoute> },
     Status(PreviewIngressStatus),
+}
+
+#[derive(Debug, Serialize)]
+pub struct PreviewConsumerOutput {
+    pub schema: String,
+    pub consumer_id: String,
+    pub preview_public_url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service_id: Option<String>,
+    pub artifacts_dir: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub public_result_url: Option<String>,
+    pub exit_code: i32,
+    pub stdout: String,
+    pub stderr: String,
+    pub artifact_path: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct PreviewConsumerConfig {
+    pub id: String,
+    pub command: PreviewConsumerCommandConfig,
+    #[serde(default)]
+    pub output: PreviewConsumerOutputConfig,
+    #[serde(default)]
+    pub artifact_file: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PreviewConsumerCommandConfig {
+    pub program: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub cwd: Option<PathBuf>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    #[serde(default)]
+    pub artifacts_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct PreviewConsumerOutputConfig {
+    #[serde(default)]
+    pub public_result_json_file: Option<PathBuf>,
+    #[serde(default)]
+    pub public_result_json_pointer: Option<String>,
+    #[serde(default)]
+    pub public_result_stdout_prefix: Option<String>,
 }
 
 pub type TunnelOutput = EntityCrudOutput<ServiceTunnel, TunnelExtra>;
@@ -79,6 +133,34 @@ enum TunnelCommand {
     PreviewIngress {
         #[command(subcommand)]
         command: TunnelPreviewIngressCommand,
+    },
+    /// Run a configured preview consumer with a Homeboy-owned public URL
+    #[command(name = "preview-consumer")]
+    PreviewConsumer {
+        #[command(subcommand)]
+        command: TunnelPreviewConsumerCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum TunnelPreviewConsumerCommand {
+    /// Run a command described by a preview-consumer JSON config
+    Run {
+        /// JSON config containing command, args, env, artifact, and extraction rules
+        #[arg(long)]
+        config: PathBuf,
+
+        /// Service ID whose started tunnel status contains the public preview URL
+        #[arg(long, conflicts_with = "preview_public_url")]
+        service_id: Option<String>,
+
+        /// Public/tunnel preview origin owned by Homeboy
+        #[arg(long, conflicts_with = "service_id")]
+        preview_public_url: Option<String>,
+
+        /// Override the config artifact directory
+        #[arg(long)]
+        artifacts_dir: Option<PathBuf>,
     },
 }
 
@@ -459,7 +541,228 @@ pub fn run(args: TunnelArgs, _global: &super::GlobalArgs) -> CmdResult<TunnelOut
         TunnelCommand::Service { command } => run_service(command),
         TunnelCommand::PreviewClient { command } => run_preview_client(command),
         TunnelCommand::PreviewIngress { command } => run_preview_ingress(command),
+        TunnelCommand::PreviewConsumer { command } => run_preview_consumer(command),
     }
+}
+
+fn run_preview_consumer(command: TunnelPreviewConsumerCommand) -> CmdResult<TunnelOutput> {
+    match command {
+        TunnelPreviewConsumerCommand::Run {
+            config,
+            service_id,
+            preview_public_url,
+            artifacts_dir,
+        } => run_preview_consumer_config(config, service_id, preview_public_url, artifacts_dir),
+    }
+}
+
+fn run_preview_consumer_config(
+    config_path: PathBuf,
+    service_id: Option<String>,
+    preview_public_url: Option<String>,
+    artifacts_dir_override: Option<PathBuf>,
+) -> CmdResult<TunnelOutput> {
+    let config = read_preview_consumer_config(&config_path)?;
+    let public_url =
+        resolve_preview_consumer_public_url(service_id.as_deref(), preview_public_url.as_deref())?;
+    let artifacts_dir = artifacts_dir_override
+        .or_else(|| config.command.artifacts_dir.clone())
+        .unwrap_or_else(|| {
+            homeboy::core::artifact_root()
+                .unwrap_or_else(|_| std::env::temp_dir().join("homeboy-artifacts"))
+                .join("preview-consumer")
+                .join(safe_artifact_slug(&config.id))
+        });
+    fs::create_dir_all(&artifacts_dir).map_err(|err| {
+        homeboy::core::Error::internal_io(
+            err.to_string(),
+            Some(format!("create artifacts dir {}", artifacts_dir.display())),
+        )
+    })?;
+
+    let mut command = Command::new(render_preview_consumer_template(
+        &config.command.program,
+        &public_url,
+        &artifacts_dir,
+    ));
+    for arg in &config.command.args {
+        command.arg(render_preview_consumer_template(
+            arg,
+            &public_url,
+            &artifacts_dir,
+        ));
+    }
+    for (key, value) in &config.command.env {
+        command.env(
+            key,
+            render_preview_consumer_template(value, &public_url, &artifacts_dir),
+        );
+    }
+    if let Some(cwd) = &config.command.cwd {
+        command.current_dir(cwd);
+    }
+
+    let output = command.output().map_err(|err| {
+        homeboy::core::Error::internal_io(
+            err.to_string(),
+            Some(format!("run preview consumer {}", config.id)),
+        )
+    })?;
+    let exit_code = output.status.code().unwrap_or(1);
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    let public_result_url =
+        extract_preview_consumer_public_result_url(&config.output, &artifacts_dir, &stdout);
+    let artifact_file = config
+        .artifact_file
+        .as_deref()
+        .unwrap_or("homeboy-preview-consumer.json");
+    let result = PreviewConsumerOutput {
+        schema: "homeboy/preview-consumer-run/v1".to_string(),
+        consumer_id: config.id.clone(),
+        preview_public_url: public_url,
+        service_id,
+        artifacts_dir: artifacts_dir.display().to_string(),
+        public_result_url,
+        exit_code,
+        stdout,
+        stderr,
+        artifact_path: artifacts_dir.join(artifact_file).display().to_string(),
+    };
+
+    let artifact_json = serde_json::to_string_pretty(&result).map_err(|err| {
+        homeboy::core::Error::internal_json(
+            err.to_string(),
+            Some("serialize preview consumer run artifact".to_string()),
+        )
+    })?;
+    fs::write(&result.artifact_path, format!("{artifact_json}\n")).map_err(|err| {
+        homeboy::core::Error::internal_io(
+            err.to_string(),
+            Some(format!("write {}", result.artifact_path)),
+        )
+    })?;
+
+    Ok((
+        TunnelOutput {
+            command: "tunnel.preview_consumer.run".to_string(),
+            id: Some(config.id),
+            extra: TunnelExtra {
+                preview_consumer: Some(result),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        exit_code,
+    ))
+}
+
+fn read_preview_consumer_config(
+    path: &std::path::Path,
+) -> homeboy::core::Result<PreviewConsumerConfig> {
+    let raw = fs::read_to_string(path).map_err(|err| {
+        homeboy::core::Error::internal_io(
+            err.to_string(),
+            Some(format!("read preview consumer config {}", path.display())),
+        )
+    })?;
+    serde_json::from_str(&raw).map_err(|err| {
+        homeboy::core::Error::validation_invalid_json(
+            err,
+            Some(format!("parse preview consumer config {}", path.display())),
+            Some(raw),
+        )
+    })
+}
+
+fn resolve_preview_consumer_public_url(
+    service_id: Option<&str>,
+    preview_public_url: Option<&str>,
+) -> homeboy::core::Result<String> {
+    if let Some(public_url) = preview_public_url {
+        return Ok(public_url.to_string());
+    }
+    let Some(service_id) = service_id else {
+        return Err(homeboy::core::Error::validation_missing_argument(vec![
+            "--service-id or --preview-public-url".to_string(),
+        ]));
+    };
+    let status = tunnel::status(service_id)?;
+    status
+        .preview_identity
+        .public_url
+        .or_else(|| status.preview.and_then(|preview| preview.preview_identity.public_url))
+        .ok_or_else(|| {
+            homeboy::core::Error::validation_invalid_argument(
+                "service-id",
+                "service status does not contain a public preview URL; start the service with a public tunnel backend first",
+                Some(service_id.to_string()),
+                None,
+            )
+        })
+}
+
+fn render_preview_consumer_template(
+    value: &str,
+    public_url: &str,
+    artifacts_dir: &std::path::Path,
+) -> String {
+    value
+        .replace("${preview_public_url}", public_url)
+        .replace("${artifacts_dir}", &artifacts_dir.to_string_lossy())
+}
+
+fn extract_preview_consumer_public_result_url(
+    config: &PreviewConsumerOutputConfig,
+    artifacts_dir: &std::path::Path,
+    stdout: &str,
+) -> Option<String> {
+    config
+        .public_result_json_file
+        .as_ref()
+        .and_then(|path| {
+            let path = if path.is_absolute() {
+                path.clone()
+            } else {
+                artifacts_dir.join(path)
+            };
+            let raw = fs::read_to_string(path).ok()?;
+            serde_json::from_str::<Value>(&raw).ok()
+        })
+        .and_then(|value| {
+            config
+                .public_result_json_pointer
+                .as_deref()
+                .and_then(|pointer| json_pointer_string(&value, pointer))
+        })
+        .or_else(|| {
+            config
+                .public_result_stdout_prefix
+                .as_deref()
+                .and_then(|prefix| parse_prefixed_line(stdout, prefix))
+        })
+}
+
+fn json_pointer_string(value: &Value, pointer: &str) -> Option<String> {
+    value.pointer(pointer)?.as_str().map(str::to_string)
+}
+
+fn parse_prefixed_line(output: &str, prefix: &str) -> Option<String> {
+    output.lines().find_map(|line| {
+        line.strip_prefix(prefix)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    })
+}
+
+fn safe_artifact_slug(value: &str) -> String {
+    let slug: String = value
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+        .collect();
+    slug.trim_matches('-').chars().take(96).collect()
 }
 
 fn run_preview_client(command: TunnelPreviewClientCommand) -> CmdResult<TunnelOutput> {
@@ -906,6 +1209,7 @@ mod tests {
     use crate::test_support;
     use homeboy::core::server::Server;
     use std::collections::HashMap;
+    use std::fs;
 
     fn create_server() {
         homeboy::core::server::save(&Server {
@@ -947,6 +1251,93 @@ mod tests {
             assert_eq!(exit_code, 0);
             assert_eq!(output.command, "tunnel.service.expose");
             assert_eq!(output.entity.expect("entity").id, "site-preview");
+        });
+    }
+
+    #[test]
+    fn parses_public_result_url_from_configured_stdout_prefix() {
+        let stdout = "Consumer ready\nPublic result URL: https://run.example.test/result\n";
+
+        assert_eq!(
+            parse_prefixed_line(stdout, "Public result URL:").as_deref(),
+            Some("https://run.example.test/result")
+        );
+    }
+
+    #[test]
+    fn safe_artifact_slug_keeps_consumer_id_human_readable() {
+        assert_eq!(
+            safe_artifact_slug("preview consumer: sample"),
+            "preview-consumer--sample"
+        );
+    }
+
+    #[test]
+    fn preview_consumer_run_uses_configured_public_url_and_artifacts() {
+        test_support::with_isolated_home(|_| {
+            let checkout = tempfile::tempdir().expect("checkout");
+            let script = checkout.path().join("consumer.mjs");
+            fs::write(
+                &script,
+                r#"
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+const artifacts = process.argv[process.argv.indexOf('--artifacts') + 1];
+const publicUrl = process.argv[process.argv.indexOf('--public-url') + 1];
+mkdirSync(artifacts, { recursive: true });
+writeFileSync(join(artifacts, 'result.json'), JSON.stringify({ public_result_url: `${publicUrl}/result` }));
+console.log(`Public result URL: ${publicUrl}/result`);
+"#,
+            )
+            .expect("script");
+            let artifacts = tempfile::tempdir().expect("artifacts");
+            let config = tempfile::NamedTempFile::new().expect("config");
+            fs::write(
+                config.path(),
+                serde_json::json!({
+                    "id": "sample-consumer",
+                    "command": {
+                        "program": "node",
+                        "args": [
+                            script.display().to_string(),
+                            "--public-url",
+                            "${preview_public_url}",
+                            "--artifacts",
+                            "${artifacts_dir}"
+                        ],
+                        "artifacts_dir": artifacts.path()
+                    },
+                    "output": {
+                        "public_result_json_file": "result.json",
+                        "public_result_json_pointer": "/public_result_url",
+                        "public_result_stdout_prefix": "Public result URL:"
+                    }
+                })
+                .to_string(),
+            )
+            .expect("config json");
+
+            let (output, exit_code) = run_preview_consumer_config(
+                config.path().to_path_buf(),
+                None,
+                Some("https://run.example.test".to_string()),
+                None,
+            )
+            .expect("preview consumer command succeeds");
+
+            assert_eq!(exit_code, 0);
+            let result = output
+                .extra
+                .preview_consumer
+                .expect("preview consumer output");
+            assert_eq!(
+                result.public_result_url.as_deref(),
+                Some("https://run.example.test/result")
+            );
+            assert!(artifacts
+                .path()
+                .join("homeboy-preview-consumer.json")
+                .exists());
         });
     }
 }
