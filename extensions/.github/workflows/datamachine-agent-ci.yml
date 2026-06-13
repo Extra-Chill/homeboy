@@ -82,6 +82,10 @@ name: Data Machine Agent CI (reusable)
         description: Comma-separated or JSON array of target workspace paths the agent may change. Empty disables host-side path enforcement.
         type: string
         default: ""
+      workspace_contract_checks:
+        description: JSON object of generic host-side post-run workspace checks. Supports paths_exist and glob_min_count.
+        type: string
+        default: "{}"
       include_agent_runtime_dependencies:
         description: "Include the standard WordPress agent runtime stack: Agents API, Data Machine, and Data Machine Code."
         type: boolean
@@ -672,6 +676,7 @@ jobs:
           VERIFICATION_COMMANDS: ${{ inputs.verification_commands }}
           DRIFT_CHECKS: ${{ inputs.drift_checks }}
           WRITABLE_PATHS: ${{ inputs.writable_paths }}
+          WORKSPACE_CONTRACT_CHECKS: ${{ inputs.workspace_contract_checks }}
           PROMPT: ${{ inputs.prompt }}
           PROVIDER: ${{ inputs.provider }}
           MODEL: ${{ inputs.model }}
@@ -826,6 +831,7 @@ jobs:
               end
             | map(if type == "string" and length > 0 then . else error("writable_paths entries must be non-empty strings") end)
           ')"
+          workspace_contract_checks_json="$(validate_json_input workspace_contract_checks object "$WORKSPACE_CONTRACT_CHECKS")"
           extra_wp_config_defines_json="$(validate_json_input extra_wp_config_defines object "$EXTRA_WP_CONFIG_DEFINES")"
           extra_wp_codebox_mounts_json="$(validate_json_input extra_wp_codebox_mounts array "$EXTRA_WP_CODEBOX_MOUNTS" | jq -c --arg workspace "$GITHUB_WORKSPACE" '
             map(
@@ -890,6 +896,7 @@ jobs:
             --argjson verificationCommands "$verification_commands_json" \
             --argjson driftChecks "$drift_checks_json" \
             --argjson writablePaths "$writable_paths_json" \
+            --argjson workspaceContractChecks "$workspace_contract_checks_json" \
             --arg prompt "$PROMPT" \
             --arg provider "$PROVIDER" \
             --arg model "$MODEL" \
@@ -985,6 +992,7 @@ jobs:
               verification_commands: $verificationCommands,
               drift_checks: $driftChecks,
               writable_paths: $writablePaths,
+              workspace_contract_checks: $workspaceContractChecks,
               host_runner_lifecycle: true,
               datamachine_code_policy_attestation: {
                 schema: "homeboy/datamachine-agent-ci-dmc-policy/v1",

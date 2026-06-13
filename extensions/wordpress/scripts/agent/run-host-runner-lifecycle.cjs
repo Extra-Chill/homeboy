@@ -146,8 +146,13 @@ function globPatternToRegExp(pattern) {
     const char = normalized[index];
     const next = normalized[index + 1];
     if (char === '*' && next === '*') {
-      source += '.*';
-      index += 1;
+      if (normalized[index + 2] === '/') {
+        source += '(?:.*/)?';
+        index += 2;
+      } else {
+        source += '.*';
+        index += 1;
+      }
     } else if (char === '*') {
       source += '[^/]*';
     } else if (char === '?') {
@@ -177,6 +182,115 @@ function validateWritablePaths(config, files) {
     patterns,
     rejected_files: rejected,
     error: success ? '' : `Changed files outside writable_paths: ${rejected.join(', ')}`,
+  };
+}
+
+function workspaceContractConfig(config) {
+  return plainObject(config.workspace_contract_checks) ? config.workspace_contract_checks : {};
+}
+
+function contractPathEntries(config, key) {
+  const checks = Array.isArray(config[key]) ? config[key] : [];
+  return checks.flatMap((entry) => {
+    const checkPath = typeof entry === 'string' ? entry : entry?.path;
+    if (typeof checkPath !== 'string' || checkPath.trim() === '') {
+      return [];
+    }
+    return [{
+      path: normalizePathPattern(checkPath),
+      description: typeof entry?.description === 'string' ? entry.description.trim() : '',
+    }];
+  }).filter((entry) => entry.path);
+}
+
+function contractGlobEntries(config) {
+  const checks = Array.isArray(config.glob_min_count) ? config.glob_min_count : [];
+  return checks.flatMap((entry) => {
+    if (!plainObject(entry)) {
+      return [];
+    }
+    const glob = typeof entry.glob === 'string' ? normalizePathPattern(entry.glob) : '';
+    const min = Number(entry.min);
+    if (!glob || !Number.isInteger(min) || min < 0) {
+      return [];
+    }
+    return [{
+      glob,
+      min,
+      description: typeof entry.description === 'string' ? entry.description.trim() : '',
+    }];
+  });
+}
+
+function safeWorkspacePath(workspace, relativePath) {
+  const normalized = normalizePathPattern(relativePath);
+  if (!normalized || normalized.split('/').includes('..')) {
+    return null;
+  }
+  const resolved = path.resolve(workspace, normalized);
+  const workspaceRoot = path.resolve(workspace);
+  if (resolved !== workspaceRoot && !resolved.startsWith(`${workspaceRoot}${path.sep}`)) {
+    return null;
+  }
+  return resolved;
+}
+
+function workspaceFileList(workspace) {
+  const files = [];
+  const excludedDirectories = new Set(['.git', '.ci', 'datamachine-agent-artifacts']);
+  function visit(directory, prefix = '') {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      if (entry.isDirectory() && excludedDirectories.has(entry.name)) {
+        continue;
+      }
+      const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
+      const fullPath = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        visit(fullPath, relative);
+      } else if (entry.isFile()) {
+        files.push(normalizePathPattern(relative));
+      }
+    }
+  }
+  visit(workspace);
+  return files;
+}
+
+function evaluateWorkspaceContract(config, workspace) {
+  const contract = workspaceContractConfig(config);
+  const pathChecks = contractPathEntries(contract, 'paths_exist');
+  const globChecks = contractGlobEntries(contract);
+  if (pathChecks.length === 0 && globChecks.length === 0) {
+    return { enabled: false, success: true, paths_exist: [], glob_min_count: [] };
+  }
+
+  const pathsExist = pathChecks.map((entry) => {
+    const resolved = safeWorkspacePath(workspace, entry.path);
+    const exists = Boolean(resolved && fs.existsSync(resolved));
+    return { ...entry, exists, success: exists };
+  });
+  const workspaceFiles = globChecks.length > 0 ? workspaceFileList(workspace) : [];
+  const globMinCount = globChecks.map((entry) => {
+    const matcher = globPatternToRegExp(entry.glob);
+    const matches = workspaceFiles.filter((file) => matcher.test(file));
+    return {
+      ...entry,
+      count: matches.length,
+      matches,
+      success: matches.length >= entry.min,
+    };
+  });
+  const failures = [
+    ...pathsExist.filter((entry) => !entry.success).map((entry) => `missing path ${entry.path}`),
+    ...globMinCount.filter((entry) => !entry.success).map((entry) => `glob ${entry.glob} matched ${entry.count}, expected at least ${entry.min}`),
+  ];
+  const success = failures.length === 0;
+  return {
+    enabled: true,
+    success,
+    paths_exist: pathsExist,
+    glob_min_count: globMinCount,
+    error: success ? '' : `workspace_contract_checks failed: ${failures.join('; ')}`,
   };
 }
 
@@ -467,14 +581,17 @@ function recordLifecycle(results, scenario, lifecycle) {
   metadata.engine_data.runner_workspace_capture = lifecycle.capture;
   metadata.engine_data.runner_workspace_publication = lifecycle.publication;
   metadata.engine_data.runner_writable_path_policy = lifecycle.writablePaths;
+  metadata.engine_data.runner_workspace_contract = lifecycle.workspaceContract;
   metadata.runner_workspace_capture = lifecycle.capture;
   metadata.runner_workspace_publication = lifecycle.publication;
   metadata.runner_writable_path_policy = lifecycle.writablePaths;
+  metadata.runner_workspace_contract = lifecycle.workspaceContract;
   metadata.verification_results = lifecycle.verification;
   metadata.drift_check_results = lifecycle.drift;
   scenario.metrics.verification_commands_succeeded = !lifecycle.verification.enabled || lifecycle.verification.success ? 1 : 0;
   scenario.metrics.drift_checks_succeeded = !lifecycle.drift.enabled || lifecycle.drift.success ? 1 : 0;
   scenario.metrics.writable_paths_satisfied = !lifecycle.writablePaths.enabled || lifecycle.writablePaths.success ? 1 : 0;
+  scenario.metrics.workspace_contract_satisfied = !lifecycle.workspaceContract.enabled || lifecycle.workspaceContract.success ? 1 : 0;
   scenario.metrics.pr_opened = lifecycle.publication.opened ? 1 : 0;
   scenario.metrics.file_written = lifecycle.capture.changed ? 1 : 0;
   if (lifecycle.success && lifecycle.publication.opened) {
@@ -515,6 +632,7 @@ function main() {
   const workspaceFiles = changedFiles(workspace);
   const files = agentFiles;
   const writablePaths = validateWritablePaths(config, files);
+  const workspaceContract = evaluateWorkspaceContract(config, workspace);
   const verificationSideEffectFiles = differenceFiles(workspaceFiles, agentFiles);
   const capture = {
     enabled: true,
@@ -527,7 +645,8 @@ function main() {
   let publication = { opened: false };
   let success = (!verification.enabled || verification.success)
     && (!drift.enabled || drift.success)
-    && (!writablePaths.enabled || writablePaths.success);
+    && (!writablePaths.enabled || writablePaths.success)
+    && (!workspaceContract.enabled || workspaceContract.success);
   let error = '';
 
   if (!success) {
@@ -535,6 +654,8 @@ function main() {
       error = verification.error || 'verification_commands failed';
     } else if (drift.enabled && !drift.success) {
       error = drift.error || 'drift_checks failed';
+    } else if (workspaceContract.enabled && !workspaceContract.success) {
+      error = workspaceContract.error || 'workspace_contract_checks failed';
     } else {
       error = writablePaths.error || 'writable_paths policy failed';
     }
@@ -555,7 +676,7 @@ function main() {
     }
   }
 
-  recordLifecycle(results, scenario, { verification, drift, writablePaths, capture, publication, success, error });
+  recordLifecycle(results, scenario, { verification, drift, writablePaths, workspaceContract, capture, publication, success, error });
   writeJson(resultsPath, results);
   if (!success) {
     throw new Error(error);
@@ -572,6 +693,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  evaluateWorkspaceContract,
   prepareRunnerCommand,
   runShellCommand,
 };
