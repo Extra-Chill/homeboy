@@ -146,6 +146,63 @@ function makeRunFiles(tmp, config) {
 }
 
 {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-host-lifecycle-workspace-contract-success.'));
+  const repo = makeRepo(tmp);
+  const gh = makeGhFixture(tmp);
+  fs.mkdirSync(path.join(repo, 'docs', 'reference'), { recursive: true });
+  fs.writeFileSync(path.join(repo, 'docs', 'architecture.md'), '# Architecture\n');
+  fs.writeFileSync(path.join(repo, 'docs', 'reference', 'api.md'), '# API\n');
+  const { configPath, resultsPath } = makeRunFiles(tmp, {
+    writable_paths: ['docs/**'],
+    workspace_contract_checks: {
+      paths_exist: ['docs/architecture.md'],
+      glob_min_count: [{ glob: 'docs/**/*.md', min: 2 }],
+    },
+  });
+
+  const result = run('node', [script, '--results', resultsPath, '--config', configPath, '--scenario', 'developer-docs', '--workspace', repo], {
+    env: { PATH: `${gh.bin}${path.delimiter}${process.env.PATH}`, GITHUB_RUN_ID: '12345', GH_TOKEN: 'fixture' },
+  });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const output = readJson(resultsPath);
+  const scenario = output.scenarios[0];
+  assert.equal(scenario.metrics.workspace_contract_satisfied, 1);
+  assert.equal(scenario.metrics.pr_opened, 1);
+  assert.equal(scenario.metadata.runner_workspace_contract.paths_exist[0].success, true);
+  assert.equal(scenario.metadata.runner_workspace_contract.glob_min_count[0].count, 2);
+}
+
+{
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-host-lifecycle-workspace-contract-failure.'));
+  const repo = makeRepo(tmp);
+  const gh = makeGhFixture(tmp);
+  fs.mkdirSync(path.join(repo, 'docs'), { recursive: true });
+  fs.writeFileSync(path.join(repo, 'docs', 'architecture.md'), '# Architecture\n');
+  const { configPath, resultsPath } = makeRunFiles(tmp, {
+    writable_paths: ['docs/**'],
+    workspace_contract_checks: {
+      paths_exist: ['docs/index.md'],
+      glob_min_count: [{ glob: 'docs/**/*.md', min: 2 }],
+    },
+  });
+
+  const result = run('node', [script, '--results', resultsPath, '--config', configPath, '--scenario', 'developer-docs', '--workspace', repo], {
+    env: { PATH: `${gh.bin}${path.delimiter}${process.env.PATH}`, GITHUB_RUN_ID: '12345', GH_TOKEN: 'fixture' },
+  });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /workspace_contract_checks failed/);
+  assert.match(result.stderr, /missing path docs\/index\.md/);
+  const output = readJson(resultsPath);
+  const scenario = output.scenarios[0];
+  assert.equal(output.status, 'failed');
+  assert.equal(scenario.metrics.workspace_contract_satisfied, 0);
+  assert.equal(scenario.metrics.pr_opened, 0);
+  assert.equal(scenario.metadata.runner_workspace_contract.paths_exist[0].success, false);
+  assert.equal(scenario.metadata.runner_workspace_contract.glob_min_count[0].success, false);
+  assert.equal(fs.existsSync(gh.log), false);
+}
+
+{
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-host-lifecycle-writable-paths.'));
   const repo = makeRepo(tmp);
   const gh = makeGhFixture(tmp);
