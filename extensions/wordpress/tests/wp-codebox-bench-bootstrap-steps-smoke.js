@@ -12,12 +12,19 @@ try {
   const extensionPath = path.join(__dirname, '..');
   const componentPath = path.join(root, 'bootstrap-steps-fixture');
   const dependencyPath = path.join(root, 'generic-dependency');
+  const monorepoDependencyPath = path.join(root, 'woocommerce@fix-test-branch');
+  const monorepoPluginPath = path.join(monorepoDependencyPath, 'plugins', 'woocommerce');
+  const stripeDependencyPath = path.join(root, 'woocommerce-gateway-stripe');
   const fixtureCoreModule = path.join(__dirname, 'fixtures', 'wp-codebox-core-bench-runner.mjs');
   const benchDir = path.join(componentPath, 'tests', 'bench');
   fs.mkdirSync(benchDir, { recursive: true });
   fs.mkdirSync(dependencyPath, { recursive: true });
+  fs.mkdirSync(monorepoPluginPath, { recursive: true });
+  fs.mkdirSync(stripeDependencyPath, { recursive: true });
   fs.writeFileSync(path.join(componentPath, 'bootstrap-steps-fixture.php'), "<?php\n/* Plugin Name: Bootstrap Steps Fixture */\n");
   fs.writeFileSync(path.join(dependencyPath, 'generic-dependency.php'), "<?php\n/* Plugin Name: Generic Dependency */\n");
+  fs.writeFileSync(path.join(monorepoPluginPath, 'woocommerce.php'), "<?php\n/* Plugin Name: WooCommerce */\n");
+  fs.writeFileSync(path.join(stripeDependencyPath, 'woocommerce-gateway-stripe.php'), "<?php\n/* Plugin Name: WooCommerce Stripe Gateway */\nhomeboy_missing_wordpress_runtime_function();\n");
   fs.writeFileSync(path.join(benchDir, 'assert-bootstrap.php'), "<?php\nreturn static fn() => ['metrics' => ['bootstrap_seen' => 1]];\n");
 
   const successCaptureFile = path.join(root, 'captured-success-recipe.json');
@@ -65,7 +72,7 @@ homeboy_require_bash_version() { :; }
 `);
 
   const settings = {
-    validation_dependencies: [dependencyPath],
+    validation_dependencies: [dependencyPath, monorepoDependencyPath, stripeDependencyPath],
     wp_codebox_core_module: fixtureCoreModule,
     wp_codebox_extra_plugins: [
       { source: '/tmp/runtime-prerequisite', slug: 'runtime-prerequisite', activate: true },
@@ -100,9 +107,17 @@ homeboy_require_bash_version() { :; }
   assert.equal(successResult.status, 0, successResult.stderr || successResult.stdout);
   const recipe = JSON.parse(fs.readFileSync(successCaptureFile, 'utf8'));
   assert.equal(recipe.inputs.extra_plugins.some((plugin) => plugin.slug === 'generic-dependency'), true);
+  const woocommercePlugin = recipe.inputs.extra_plugins.find((plugin) => plugin.slug === 'woocommerce');
+  assert.equal(woocommercePlugin.source, monorepoPluginPath);
+  assert.equal(woocommercePlugin.pluginFile, 'woocommerce/woocommerce.php');
+  assert.equal(recipe.inputs.extra_plugins.some((plugin) => plugin.slug === 'woocommerce-gateway-stripe'), true);
   assert.deepEqual(recipe.inputs.extra_plugins.find((plugin) => plugin.slug === 'runtime-prerequisite'), settings.wp_codebox_extra_plugins[0]);
   assert.deepEqual(recipe.inputs.pluginRuntime.setup, settings.wp_codebox_bootstrap_steps);
   assert.equal(recipe.workflow.steps[0].command, 'wordpress.bench');
+
+  const successResults = JSON.parse(fs.readFileSync(path.join(root, 'success-results.json'), 'utf8'));
+  assert.ok(successResults.prepared_dependencies.some((dependency) => dependency.slug === 'woocommerce' && dependency.source_path === fs.realpathSync(monorepoDependencyPath) && dependency.package_root === fs.realpathSync(monorepoPluginPath) && dependency.mounted_plugin_dir === '/wordpress/wp-content/plugins/woocommerce'), JSON.stringify(successResults.prepared_dependencies, null, 2));
+  assert.ok(successResults.prepared_dependencies.some((dependency) => dependency.slug === 'woocommerce-gateway-stripe' && dependency.source_path === fs.realpathSync(stripeDependencyPath) && dependency.package_root === fs.realpathSync(stripeDependencyPath)), JSON.stringify(successResults.prepared_dependencies, null, 2));
 
   const failureResult = spawnSync('bash', [path.join(extensionPath, 'scripts', 'bench', 'bench-runner.sh')], {
     cwd: componentPath,

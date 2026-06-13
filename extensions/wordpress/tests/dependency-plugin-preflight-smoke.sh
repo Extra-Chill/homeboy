@@ -44,12 +44,20 @@ cat > "${WOOCOMMERCE_SOURCE}/plugins/woocommerce/woocommerce.php" <<'PHP'
 PHP
 
 MISSING_MAIN_ARTIFACTS="${TMP_ROOT}/missing-main-artifacts"
-if homeboy_preflight_wordpress_dependency_plugins "$WOOCOMMERCE_SOURCE" "$MISSING_MAIN_ARTIFACTS" "bench"; then
-    echo "ERROR: expected source checkout without root plugin main file to fail." >&2
+homeboy_preflight_wordpress_dependency_plugins "$WOOCOMMERCE_SOURCE" "$MISSING_MAIN_ARTIFACTS" "bench"
+if [ -f "${MISSING_MAIN_ARTIFACTS}/wordpress-dependency-plugin-preflight-diagnostics.json" ]; then
+    echo "ERROR: materializable source checkout dependency should not emit bench preflight diagnostics." >&2
+    jq '.' "${MISSING_MAIN_ARTIFACTS}/wordpress-dependency-plugin-preflight-diagnostics.json" >&2 || true
+    exit 1
+fi
+
+MISSING_MAIN_VALIDATION_ARTIFACTS="${TMP_ROOT}/missing-main-validation-artifacts"
+if homeboy_preflight_wordpress_dependency_plugins "$WOOCOMMERCE_SOURCE" "$MISSING_MAIN_VALIDATION_ARTIFACTS" "wordpress"; then
+    echo "ERROR: expected source checkout without root plugin main file to fail outside bench materialization." >&2
     exit 1
 fi
 assert_diagnostic \
-    "${MISSING_MAIN_ARTIFACTS}/wordpress-dependency-plugin-preflight-diagnostics.json" \
+    "${MISSING_MAIN_VALIDATION_ARTIFACTS}/wordpress-dependency-plugin-preflight-diagnostics.json" \
     '(.diagnostics | length) == 1 and .diagnostics[0].code == "wordpress-dependency-plugin-main-file-missing" and .diagnostics[0].package_required == true and (.diagnostics[0].source_checkout_plugin_file | endswith("/plugins/woocommerce/woocommerce.php"))' \
     'missing main file diagnostic did not identify source-checkout package requirement.'
 
@@ -64,12 +72,20 @@ require_once __DIR__ . '/includes/react-admin/feature-config.php';
 PHP
 
 LOAD_FATAL_ARTIFACTS="${TMP_ROOT}/load-fatal-artifacts"
-if homeboy_preflight_wordpress_dependency_plugins "$FATAL_DEP" "$LOAD_FATAL_ARTIFACTS" "bench"; then
-    echo "ERROR: expected plugin load fatal preflight to fail." >&2
+homeboy_preflight_wordpress_dependency_plugins "$FATAL_DEP" "$LOAD_FATAL_ARTIFACTS" "bench"
+if [ -f "${LOAD_FATAL_ARTIFACTS}/wordpress-dependency-plugin-preflight-diagnostics.json" ]; then
+    echo "ERROR: bench dependency load preflight should defer plugin activation to WP Codebox." >&2
+    jq '.' "${LOAD_FATAL_ARTIFACTS}/wordpress-dependency-plugin-preflight-diagnostics.json" >&2 || true
+    exit 1
+fi
+
+LOAD_FATAL_VALIDATION_ARTIFACTS="${TMP_ROOT}/load-fatal-validation-artifacts"
+if homeboy_preflight_wordpress_dependency_plugins "$FATAL_DEP" "$LOAD_FATAL_VALIDATION_ARTIFACTS" "wordpress"; then
+    echo "ERROR: expected plugin load fatal preflight to fail outside bench materialization." >&2
     exit 1
 fi
 assert_diagnostic \
-    "${LOAD_FATAL_ARTIFACTS}/wordpress-dependency-plugin-preflight-diagnostics.json" \
+    "${LOAD_FATAL_VALIDATION_ARTIFACTS}/wordpress-dependency-plugin-preflight-diagnostics.json" \
     '(.diagnostics | length) == 1 and .diagnostics[0].code == "wordpress-dependency-plugin-load-fatal" and .diagnostics[0].package_required == true and (.diagnostics[0].missing_include | endswith("/includes/react-admin/feature-config.php"))' \
     'load fatal diagnostic did not identify the missing build artifact.'
 

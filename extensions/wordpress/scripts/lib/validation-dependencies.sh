@@ -100,6 +100,11 @@ homeboy_get_validation_dependency_slug() {
         return 0
     fi
 
+    if [ -f "${plugin_path}/plugins/${canonical_dir_slug}/${canonical_dir_slug}.php" ] || [ -f "${plugin_path}/plugins/${canonical_dir_slug}/plugin.php" ]; then
+        printf '%s\n' "$canonical_dir_slug"
+        return 0
+    fi
+
     local main_file
     main_file=$(find "$plugin_path" -maxdepth 1 -name "*.php" -exec grep -l "Plugin Name:" {} \; 2>/dev/null | head -1)
     if [ -n "$main_file" ]; then
@@ -155,6 +160,29 @@ homeboy_find_validation_dependency_plugin_main_file() {
             return 0
         fi
     done
+
+    return 1
+}
+
+homeboy_find_validation_dependency_plugin_package_root() {
+    local plugin_path="${1:-}"
+    local dependency_slug="${2:-}"
+    local plugin_file
+
+    [ -n "$plugin_path" ] && [ -d "$plugin_path" ] || return 1
+
+    plugin_file=$(homeboy_find_validation_dependency_plugin_main_file "$plugin_path" || true)
+    if [ -n "$plugin_file" ]; then
+        printf '%s\n' "$plugin_path"
+        return 0
+    fi
+
+    [ -n "$dependency_slug" ] || dependency_slug=$(homeboy_get_validation_dependency_slug "$plugin_path" || basename "$plugin_path")
+    plugin_file=$(_homeboy_wordpress_dependency_preflight_source_checkout_plugin_file "$plugin_path" "$dependency_slug" || true)
+    if [ -n "$plugin_file" ]; then
+        dirname "$plugin_file"
+        return 0
+    fi
 
     return 1
 }
@@ -388,6 +416,16 @@ homeboy_preflight_wordpress_dependency_plugins() {
             continue
         fi
 
+        if [ "$context" = "bench" ]; then
+            local package_root
+            package_root=$(homeboy_find_validation_dependency_plugin_package_root "$dependency_path" "$dependency_slug" || true)
+            if [ -n "$package_root" ] && [ "$package_root" != "$dependency_path" ]; then
+                dependency_path="$package_root"
+                dependency_slug=$(homeboy_get_validation_dependency_slug "$dependency_path" || basename "$dependency_path")
+                expected_plugin_file="${dependency_path%/}/${dependency_slug}.php"
+            fi
+        fi
+
         plugin_file=$(homeboy_find_validation_dependency_plugin_main_file "$dependency_path" || true)
         if [ -z "$plugin_file" ]; then
             nested_plugin_file=$(_homeboy_wordpress_dependency_preflight_source_checkout_plugin_file "$dependency_path" "$dependency_slug" || true)
@@ -403,6 +441,10 @@ homeboy_preflight_wordpress_dependency_plugins() {
             fi
             echo "  Use a packaged plugin build for WordPress runtime bench/trace evidence." >&2
             failed=1
+            continue
+        fi
+
+        if [ "$context" = "bench" ]; then
             continue
         fi
 
@@ -1130,21 +1172,30 @@ _homeboy_prepared_dependency_cache_metadata() {
     local prepare_root="${2:-}"
     local relative_plugin_path="${3:-}"
     local dependency_slug="${4:-}"
-    local php_version source_realpath prepare_realpath git_state composer_json_hash composer_lock_hash
+    local package_root="${5:-}"
+    local mounted_plugin_dir="${6:-}"
+    local php_version source_realpath prepare_realpath package_realpath git_state composer_json_hash composer_lock_hash
 
     source_realpath=$(cd "$dependency_path" && pwd -P)
     prepare_realpath=$(cd "$prepare_root" && pwd -P)
+    if [ -n "$package_root" ] && [ -d "$package_root" ]; then
+        package_realpath=$(cd "$package_root" && pwd -P)
+    else
+        package_realpath="$source_realpath"
+    fi
     php_version=$(_homeboy_prepared_dependency_php_version)
     git_state=$(_homeboy_prepared_dependency_git_state "$prepare_root")
-    composer_json_hash=$(_homeboy_sha256_file "${dependency_path}/composer.json")
-    composer_lock_hash=$(_homeboy_sha256_file "${dependency_path}/composer.lock")
+    composer_json_hash=$(_homeboy_sha256_file "${package_realpath}/composer.json")
+    composer_lock_hash=$(_homeboy_sha256_file "${package_realpath}/composer.lock")
 
     jq -n \
         --arg schema 'homeboy/prepared-wordpress-bench-dependency/v1' \
         --arg slug "$dependency_slug" \
         --arg source_path "$source_realpath" \
         --arg prepare_root "$prepare_realpath" \
+        --arg package_root "$package_realpath" \
         --arg relative_plugin_path "$relative_plugin_path" \
+        --arg mounted_plugin_dir "$mounted_plugin_dir" \
         --arg git_state "$git_state" \
         --arg composer_json_hash "$composer_json_hash" \
         --arg composer_lock_hash "$composer_lock_hash" \
@@ -1154,7 +1205,9 @@ _homeboy_prepared_dependency_cache_metadata() {
             slug: $slug,
             source_path: $source_path,
             prepare_root: $prepare_root,
+            package_root: $package_root,
             relative_plugin_path: $relative_plugin_path,
+            mounted_plugin_dir: $mounted_plugin_dir,
             git_state: $git_state,
             composer_json_hash: $composer_json_hash,
             composer_lock_hash: $composer_lock_hash,
@@ -1165,7 +1218,7 @@ _homeboy_prepared_dependency_cache_metadata() {
 _homeboy_prepared_dependency_cache_key() {
     local metadata_json="${1:-}"
 
-    printf '%s' "$metadata_json" | jq -c '{source_path, prepare_root, relative_plugin_path, git_state, composer_json_hash, composer_lock_hash, php_version}' | _homeboy_sha256_string
+    printf '%s' "$metadata_json" | jq -c '{source_path, prepare_root, package_root, relative_plugin_path, mounted_plugin_dir, git_state, composer_json_hash, composer_lock_hash, php_version}' | _homeboy_sha256_string
 }
 
 _homeboy_record_prepared_dependency_metadata() {
@@ -1202,8 +1255,22 @@ homeboy_prepare_validation_dependency_for_wp_codebox_bench() {
 
     [ -n "$dependency_path" ] && [ -d "$dependency_path" ] || return 1
 
-    if ! homeboy_dependency_needs_composer_prepare "$dependency_path"; then
-        printf '%s\n' "$dependency_path"
+    local dependency_slug package_root
+    dependency_slug=$(homeboy_get_validation_dependency_slug "$dependency_path" || basename "$dependency_path")
+    package_root=$(homeboy_find_validation_dependency_plugin_package_root "$dependency_path" "$dependency_slug" || true)
+    [ -n "$package_root" ] && [ -d "$package_root" ] || package_root="$dependency_path"
+
+    if ! homeboy_dependency_needs_composer_prepare "$package_root"; then
+        local source_realpath package_realpath relative_source_plugin_path metadata_json
+        source_realpath=$(cd "$dependency_path" && pwd -P)
+        package_realpath=$(cd "$package_root" && pwd -P)
+        relative_source_plugin_path=""
+        if [ "$package_realpath" != "$source_realpath" ]; then
+            relative_source_plugin_path="${package_realpath#"$source_realpath"/}"
+        fi
+        metadata_json=$(_homeboy_prepared_dependency_cache_metadata "$dependency_path" "$dependency_path" "$relative_source_plugin_path" "$dependency_slug" "$package_root" "/wordpress/wp-content/plugins/${dependency_slug}")
+        _homeboy_record_prepared_dependency_metadata "$artifacts_dir" "$metadata_json" "source-package-root" "$package_root" "source"
+        printf '%s\n' "$package_root"
         return 0
     fi
 
@@ -1212,11 +1279,8 @@ homeboy_prepare_validation_dependency_for_wp_codebox_bench() {
         return 1
     fi
 
-    local dependency_slug
-    dependency_slug=$(homeboy_get_validation_dependency_slug "$dependency_path" || basename "$dependency_path")
-
     local prepare_root
-    prepare_root="$(_homeboy_dependency_repo_root "$dependency_path")"
+    prepare_root="$(_homeboy_dependency_repo_root "$package_root")"
     [ -n "$prepare_root" ] && [ -d "$prepare_root" ] || prepare_root="$dependency_path"
 
     local dependency_realpath prepare_realpath relative_plugin_path
@@ -1237,7 +1301,7 @@ homeboy_prepare_validation_dependency_for_wp_codebox_bench() {
     esac
 
     local cache_metadata cache_key cache_dir cache_entry prepared_root prepared_plugin_path metadata_file
-    cache_metadata=$(_homeboy_prepared_dependency_cache_metadata "$dependency_path" "$prepare_root" "$relative_plugin_path" "$dependency_slug")
+    cache_metadata=$(_homeboy_prepared_dependency_cache_metadata "$dependency_path" "$prepare_root" "$relative_plugin_path" "$dependency_slug" "$package_root" "/wordpress/wp-content/plugins/${dependency_slug}")
     cache_key=$(_homeboy_prepared_dependency_cache_key "$cache_metadata")
     cache_dir=$(_homeboy_prepared_dependency_cache_dir "$artifacts_dir")
     cache_entry="${cache_dir%/}/${dependency_slug}-${cache_key}"
