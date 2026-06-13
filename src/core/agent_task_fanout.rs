@@ -7,6 +7,7 @@ use crate::core::agent_task_scheduler::{
     AgentTaskAggregate, AgentTaskExecutorAdapter, AgentTaskOutputDependencies, AgentTaskPlan,
     AgentTaskScheduleOptions, AgentTaskScheduler,
 };
+use crate::core::plan::{HomeboyPlan, PlanKind, PlanStep};
 
 pub const AGENT_TASK_FANOUT_PLAN_SCHEMA: &str = "homeboy/agent-task-fanout-plan/v1";
 pub const AGENT_TASK_FANOUT_AGGREGATE_SCHEMA: &str = "homeboy/agent-task-fanout-aggregate/v1";
@@ -98,6 +99,139 @@ impl AgentTaskFanoutPlan {
         plan.metadata = metadata_with_fanout(self.metadata.clone(), &self.fanout_id, self.plane);
         plan
     }
+
+    pub fn to_homeboy_plan(&self) -> HomeboyPlan {
+        let mut plan =
+            HomeboyPlan::for_description(PlanKind::AgentTaskFanout, self.fanout_id.clone());
+        plan.id = self.fanout_id.clone();
+        plan.mode = Some("agent_task_fanout".to_string());
+        plan.inputs
+            .insert("schema".to_string(), Value::String(self.schema.clone()));
+        plan.inputs.insert(
+            "fanout_id".to_string(),
+            Value::String(self.fanout_id.clone()),
+        );
+        plan.inputs.insert(
+            "plane".to_string(),
+            serde_json::to_value(self.plane).expect("fanout plane serializes"),
+        );
+        if let Some(group_key) = &self.group_key {
+            plan.inputs
+                .insert("group_key".to_string(), Value::String(group_key.clone()));
+        }
+        if !self.metadata.is_null() {
+            plan.inputs
+                .insert("metadata".to_string(), self.metadata.clone());
+        }
+        plan.policy.insert(
+            "options".to_string(),
+            serde_json::to_value(&self.options).expect("fanout options serialize"),
+        );
+        plan.steps = self
+            .tasks
+            .iter()
+            .map(|request| {
+                let mut builder =
+                    PlanStep::ready(request.task_id.clone(), "agent_task.fanout.task")
+                        .label(request.task_id.clone())
+                        .input_value(
+                            "request",
+                            serde_json::to_value(request).expect("agent task request serializes"),
+                        );
+                if let Some(dependencies) = self.output_dependencies.get(&request.task_id) {
+                    builder = builder
+                        .needs(fanout_dependency_step_ids(dependencies))
+                        .input_value(
+                            "output_dependencies",
+                            serde_json::to_value(dependencies)
+                                .expect("agent task output dependencies serialize"),
+                        );
+                }
+                builder.build()
+            })
+            .collect();
+        plan
+    }
+
+    pub fn from_homeboy_plan(plan: &HomeboyPlan) -> Result<Self, String> {
+        let fanout_id = plan
+            .inputs
+            .get("fanout_id")
+            .and_then(Value::as_str)
+            .unwrap_or(plan.id.as_str())
+            .to_string();
+        let plane = plan
+            .inputs
+            .get("plane")
+            .cloned()
+            .ok_or_else(|| "HomeboyPlan fanout projection is missing plane".to_string())
+            .and_then(|value| serde_json::from_value(value).map_err(|error| error.to_string()))?;
+        let tasks = plan
+            .steps
+            .iter()
+            .map(|step| {
+                step.inputs
+                    .get("request")
+                    .cloned()
+                    .ok_or_else(|| format!("fanout step '{}' is missing request", step.id))
+                    .and_then(|value| {
+                        serde_json::from_value(value).map_err(|error| error.to_string())
+                    })
+            })
+            .collect::<Result<Vec<AgentTaskRequest>, String>>()?;
+        let output_dependencies = plan
+            .steps
+            .iter()
+            .filter_map(|step| {
+                step.inputs
+                    .get("output_dependencies")
+                    .cloned()
+                    .map(|value| {
+                        serde_json::from_value(value)
+                            .map(|dependencies| (step.id.clone(), dependencies))
+                            .map_err(|error| error.to_string())
+                    })
+            })
+            .collect::<Result<HashMap<String, AgentTaskOutputDependencies>, String>>()?;
+        let options = plan
+            .policy
+            .get("options")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|error| error.to_string())?
+            .unwrap_or_default();
+
+        Ok(Self {
+            schema: plan
+                .inputs
+                .get("schema")
+                .and_then(Value::as_str)
+                .unwrap_or(AGENT_TASK_FANOUT_PLAN_SCHEMA)
+                .to_string(),
+            fanout_id,
+            plane,
+            group_key: plan
+                .inputs
+                .get("group_key")
+                .and_then(Value::as_str)
+                .map(ToString::to_string),
+            tasks,
+            output_dependencies,
+            options,
+            metadata: plan.inputs.get("metadata").cloned().unwrap_or(Value::Null),
+        })
+    }
+}
+
+fn fanout_dependency_step_ids(dependencies: &AgentTaskOutputDependencies) -> Vec<String> {
+    let mut needs = dependencies.depends_on.clone();
+    for binding in dependencies.bindings.values() {
+        if !needs.contains(&binding.task_id) {
+            needs.push(binding.task_id.clone());
+        }
+    }
+    needs
 }
 
 impl AgentTaskFanoutAggregate {
@@ -240,6 +374,58 @@ mod tests {
         );
         assert_eq!(diagnose.metadata["fanout"]["plane"], json!("workflow"));
         assert_eq!(diagnose.metadata["generated_from_outputs"], json!(true));
+    }
+
+    #[test]
+    fn fanout_homeboy_plan_projection_preserves_schedule_compatibility() {
+        let mut plan = AgentTaskFanoutPlan::new(
+            "fanout/site-workflow",
+            AgentTaskFanoutPlane::Workflow,
+            vec![request("generate"), request("diagnose")],
+        );
+        plan.group_key = Some("site-workflow".to_string());
+        plan.options.max_concurrency = 3;
+        plan.metadata = json!({ "source": "compat-test" });
+        plan.output_dependencies.insert(
+            "diagnose".to_string(),
+            AgentTaskOutputDependencies {
+                depends_on: Vec::new(),
+                bindings: HashMap::from([(
+                    "artifact_id".to_string(),
+                    AgentTaskOutputBinding {
+                        task_id: "generate".to_string(),
+                        path: "/outputs/artifact_id".to_string(),
+                        artifact: None,
+                        required: true,
+                        default: Value::Null,
+                    },
+                )]),
+            },
+        );
+
+        let homeboy_plan = plan.to_homeboy_plan();
+        let projected =
+            AgentTaskFanoutPlan::from_homeboy_plan(&homeboy_plan).expect("project fanout plan");
+
+        assert_eq!(projected, plan);
+        assert_eq!(homeboy_plan.id, "fanout/site-workflow");
+        assert_eq!(homeboy_plan.kind, PlanKind::AgentTaskFanout);
+        assert_eq!(homeboy_plan.steps.len(), 2);
+        assert_eq!(homeboy_plan.steps[1].needs, vec!["generate".to_string()]);
+
+        let schedule = projected.to_schedule_plan();
+        assert_eq!(schedule.plan_id, "fanout/site-workflow");
+        assert_eq!(schedule.group_key.as_deref(), Some("site-workflow"));
+        assert_eq!(schedule.options.max_concurrency, 3);
+        assert_eq!(schedule.output_dependencies, plan.output_dependencies);
+        assert_eq!(
+            schedule.tasks[0].parent_plan_id.as_deref(),
+            Some("fanout/site-workflow")
+        );
+        assert_eq!(
+            schedule.tasks[0].metadata["fanout"]["plane"],
+            json!("workflow")
+        );
     }
 
     #[derive(Default)]

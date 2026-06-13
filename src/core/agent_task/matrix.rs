@@ -7,6 +7,7 @@ use super::{
     AgentTaskOutcomeStatus, AgentTaskRequest, AGENT_TASK_MATRIX_AGGREGATE_SCHEMA,
     AGENT_TASK_MATRIX_PLAN_SCHEMA,
 };
+use crate::core::plan::{HomeboyPlan, PlanKind, PlanStep};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskMatrixAxis {
@@ -59,6 +60,119 @@ pub struct AgentTaskMatrixAggregateCell {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentTaskMatrixError {
     pub message: String,
+}
+
+impl AgentTaskMatrixPlan {
+    pub fn to_homeboy_plan(&self) -> HomeboyPlan {
+        let mut plan =
+            HomeboyPlan::for_description(PlanKind::AgentTaskMatrix, self.plan_id.clone());
+        plan.id = self.plan_id.clone();
+        plan.mode = Some("agent_task_matrix".to_string());
+        plan.inputs
+            .insert("schema".to_string(), Value::String(self.schema.clone()));
+        plan.inputs
+            .insert("plan_id".to_string(), Value::String(self.plan_id.clone()));
+        plan.inputs.insert(
+            "axes".to_string(),
+            serde_json::to_value(&self.axes).expect("matrix axes serialize"),
+        );
+        plan.steps = self
+            .cells
+            .iter()
+            .map(|cell| {
+                PlanStep::ready(cell.cell_id.clone(), "agent_task.matrix.cell")
+                    .label(cell.cell_id.clone())
+                    .input_value("cell_id", Value::String(cell.cell_id.clone()))
+                    .input_value(
+                        "axes",
+                        serde_json::to_value(&cell.axes).expect("matrix cell axes serialize"),
+                    )
+                    .input_value(
+                        "request",
+                        serde_json::to_value(&cell.task).expect("agent task request serializes"),
+                    )
+                    .build()
+            })
+            .collect();
+        plan
+    }
+
+    pub fn from_homeboy_plan(plan: &HomeboyPlan) -> Result<Self, AgentTaskMatrixError> {
+        let plan_id = plan
+            .inputs
+            .get("plan_id")
+            .and_then(Value::as_str)
+            .unwrap_or(plan.id.as_str())
+            .to_string();
+        let axes = plan
+            .inputs
+            .get("axes")
+            .cloned()
+            .ok_or_else(|| {
+                AgentTaskMatrixError::new("HomeboyPlan matrix projection is missing axes")
+            })
+            .and_then(|value| {
+                serde_json::from_value(value)
+                    .map_err(|error| AgentTaskMatrixError::new(error.to_string()))
+            })?;
+        let cells = plan
+            .steps
+            .iter()
+            .map(|step| {
+                let cell_id = step
+                    .inputs
+                    .get("cell_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or(step.id.as_str())
+                    .to_string();
+                let axes = step
+                    .inputs
+                    .get("axes")
+                    .cloned()
+                    .ok_or_else(|| {
+                        AgentTaskMatrixError::new(format!(
+                            "matrix step '{}' is missing axes",
+                            step.id
+                        ))
+                    })
+                    .and_then(|value| {
+                        serde_json::from_value(value)
+                            .map_err(|error| AgentTaskMatrixError::new(error.to_string()))
+                    })?;
+                let task = step
+                    .inputs
+                    .get("request")
+                    .cloned()
+                    .ok_or_else(|| {
+                        AgentTaskMatrixError::new(format!(
+                            "matrix step '{}' is missing request",
+                            step.id
+                        ))
+                    })
+                    .and_then(|value| {
+                        serde_json::from_value(value)
+                            .map_err(|error| AgentTaskMatrixError::new(error.to_string()))
+                    })?;
+                Ok(AgentTaskMatrixCell {
+                    cell_id,
+                    axes,
+                    task,
+                })
+            })
+            .collect::<Result<Vec<AgentTaskMatrixCell>, AgentTaskMatrixError>>()?;
+
+        Ok(Self {
+            schema: plan
+                .inputs
+                .get("schema")
+                .and_then(Value::as_str)
+                .unwrap_or(AGENT_TASK_MATRIX_PLAN_SCHEMA)
+                .to_string(),
+            plan_id,
+            axes,
+            cells,
+        })
+    }
 }
 
 impl AgentTaskMatrixError {
@@ -335,6 +449,44 @@ mod tests {
             .all(|cell| cell.task.parent_plan_id.as_deref() == Some("bench/studio-web")));
         assert_eq!(plan.cells[2].task.metadata["matrix"]["model"], "claude");
         assert_eq!(plan.cells[2].task.metadata["matrix"]["prompt"], "site-a");
+    }
+
+    #[test]
+    fn matrix_homeboy_plan_projection_preserves_expansion_compatibility() {
+        let plan = expand_agent_task_matrix(
+            "bench/studio-web",
+            vec![
+                AgentTaskMatrixAxis {
+                    name: "model".to_string(),
+                    values: vec!["gpt".to_string(), "claude".to_string()],
+                },
+                AgentTaskMatrixAxis {
+                    name: "prompt".to_string(),
+                    values: vec!["site".to_string()],
+                },
+            ],
+            template_request(),
+        )
+        .expect("expand matrix");
+
+        let homeboy_plan = plan.to_homeboy_plan();
+        let projected =
+            AgentTaskMatrixPlan::from_homeboy_plan(&homeboy_plan).expect("project matrix plan");
+
+        assert_eq!(projected, plan);
+        assert_eq!(homeboy_plan.id, "bench/studio-web");
+        assert_eq!(homeboy_plan.kind, PlanKind::AgentTaskMatrix);
+        assert_eq!(homeboy_plan.steps.len(), 2);
+        assert_eq!(homeboy_plan.steps[0].kind, "agent_task.matrix.cell");
+        assert_eq!(homeboy_plan.steps[0].inputs["axes"]["model"], json!("gpt"));
+        assert_eq!(
+            projected.cells[1].task.parent_plan_id.as_deref(),
+            Some("bench/studio-web")
+        );
+        assert_eq!(
+            projected.cells[1].task.metadata["matrix"]["model"],
+            json!("claude")
+        );
     }
 
     #[test]
