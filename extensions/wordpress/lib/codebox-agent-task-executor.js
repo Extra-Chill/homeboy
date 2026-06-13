@@ -226,6 +226,9 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     runtime_stack_mounts: config.runtime_stack_mounts || options.runtimeStackMounts || [],
     runtime_overlay_profiles: config.runtime_overlay_profiles || config.runtimeOverlayProfiles || options.runtimeOverlayProfiles || defaults.runtimeOverlayProfiles || [],
     runtime_overlays: config.runtime_overlays || options.runtimeOverlays || defaults.runtimeOverlays || [],
+    runtime_env: firstDefined(config.runtime_env, config.runtimeEnv, config.wp_codebox_runtime_env, options.runtimeEnv, defaults.runtimeEnv, {}),
+    runtime_state_mounts: firstDefined(config.runtime_state_mounts, config.runtimeStateMounts, config.wp_codebox_runtime_state_mounts, options.runtimeStateMounts, defaults.runtimeStateMounts, []),
+    runtime_config_mounts: firstDefined(config.runtime_config_mounts, config.runtimeConfigMounts, config.wp_codebox_runtime_config_mounts, options.runtimeConfigMounts, defaults.runtimeConfigMounts, []),
     secret_env: explicitSecretEnv.length > 0 ? Array.from(new Set(explicitSecretEnv)) : defaults.secretEnv || [],
     // Post-agent verification gate (recipe workflow.after). Supplied as WP
     // Codebox recipe steps; a non-zero exit fails the run so the orchestrator
@@ -345,6 +348,9 @@ function defaultCodeboxRuntimeConfig(request, config, inputs, options = {}) {
     wpCodeboxBin: firstValue(settings.wp_codebox_bin, settings.wpCodeboxBin, process.env.HOMEBOY_WP_CODEBOX_BIN, ''),
     runtimeOverlayProfiles: defaultRuntimeOverlayProfiles(settings),
     runtimeOverlays: defaultRuntimeOverlays(settings),
+    runtimeEnv: defaultRuntimeEnv(settings),
+    runtimeStateMounts: defaultRuntimeStateMounts(settings),
+    runtimeConfigMounts: defaultRuntimeConfigMounts(settings),
     mounts: defaultWorkspaceMounts(workspaceRoot, request, config, inputs, options),
     workspaces: defaultWorkspaces(config, inputs, options),
     allowedTools: defaultWorkspaceAllowedTools(workspaceRoot, workspaceMode(request, config, inputs)),
@@ -369,6 +375,18 @@ function defaultRuntimeOverlayProfiles(settings) {
 
 function defaultRuntimeOverlays(settings) {
   return normalizeArray(settings.wp_codebox_runtime_overlays || settings.runtime_overlays);
+}
+
+function defaultRuntimeEnv(settings) {
+  return firstObject(settings.wp_codebox_runtime_env, settings.runtime_env) || {};
+}
+
+function defaultRuntimeStateMounts(settings) {
+  return normalizeArray(settings.wp_codebox_runtime_state_mounts || settings.runtime_state_mounts);
+}
+
+function defaultRuntimeConfigMounts(settings) {
+  return normalizeArray(settings.wp_codebox_runtime_config_mounts || settings.runtime_config_mounts);
 }
 
 function firstDefined(...values) {
