@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.121.10] - 2026-06-13
+
+### Fixed
+- centralize WP Codebox command resolution
+- normalize WP Codebox runtime component vocabulary
+
 ## [2.121.9] - 2026-06-13
 
 ### Fixed
