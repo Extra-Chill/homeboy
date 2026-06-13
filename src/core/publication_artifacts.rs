@@ -80,6 +80,12 @@ enum IndexedArtifactPath {
     Missing,
 }
 
+struct ManifestArtifactRef<'a> {
+    reference: &'a Value,
+    locator: String,
+    locator_type: &'static str,
+}
+
 fn index_manifest_refs(
     store: &ObservationStore,
     source: &ArtifactRecord,
@@ -91,12 +97,11 @@ fn index_manifest_refs(
         .and_then(Value::as_str)
         .map(str::to_string);
     let mut refs = Vec::new();
-    collect_artifact_store_refs(manifest, &mut refs);
+    let url_bases = publication_url_bases(manifest);
+    collect_publication_artifact_refs(manifest, &url_bases, &mut refs);
 
     for reference in refs {
-        let Some(locator) = artifact_store_locator(reference) else {
-            continue;
-        };
+        let locator = reference.locator.as_str();
         let Some(indexed_path) = resolve_path(locator)? else {
             continue;
         };
@@ -108,6 +113,7 @@ fn index_manifest_refs(
             IndexedArtifactPath::Missing => continue,
         };
         let original_manifest_id = reference
+            .reference
             .get("id")
             .and_then(Value::as_str)
             .unwrap_or(locator);
@@ -116,23 +122,27 @@ fn index_manifest_refs(
             continue;
         }
         let kind = reference
+            .reference
             .get("kind")
             .and_then(Value::as_str)
-            .or_else(|| reference.get("role").and_then(Value::as_str))
+            .or_else(|| reference.reference.get("role").and_then(Value::as_str))
             .unwrap_or("published_artifact")
             .to_string();
         let media_type = reference
+            .reference
             .get("media_type")
-            .or_else(|| reference.get("mime"))
-            .or_else(|| reference.get("contentType"))
+            .or_else(|| reference.reference.get("mime"))
+            .or_else(|| reference.reference.get("contentType"))
             .and_then(Value::as_str)
             .map(str::to_string)
             .or_else(|| crate::core::artifact_metadata::content_type_from_path(Path::new(&path)));
         let size_bytes = reference
+            .reference
             .get("bytes")
-            .or_else(|| reference.get("size_bytes"))
+            .or_else(|| reference.reference.get("size_bytes"))
             .and_then(Value::as_i64);
         let sha256 = reference
+            .reference
             .get("sha256")
             .and_then(|sha256| {
                 sha256
@@ -141,6 +151,7 @@ fn index_manifest_refs(
             })
             .map(str::to_string);
         let created_at = reference
+            .reference
             .get("created_at")
             .and_then(Value::as_str)
             .unwrap_or(&source.created_at)
@@ -153,17 +164,17 @@ fn index_manifest_refs(
             "manifest_id": manifest_id,
             "original_manifest_id": original_manifest_id,
             "name": name,
-            "role": reference.get("role").cloned().unwrap_or(Value::Null),
+            "role": reference.reference.get("role").cloned().unwrap_or(Value::Null),
             "locator": {
-                "type": "artifact-store",
+                "type": reference.locator_type,
                 "value": locator,
             },
             "media_type": media_type,
             "bytes": size_bytes,
             "sha256": sha256,
-            "description": reference.get("description").cloned().unwrap_or(Value::Null),
-            "metadata": reference.get("metadata").cloned().unwrap_or(Value::Null),
-            "viewer": reference.get("viewer").cloned().unwrap_or(Value::Null),
+            "description": reference.reference.get("description").cloned().unwrap_or(Value::Null),
+            "metadata": reference.reference.get("metadata").cloned().unwrap_or(Value::Null),
+            "viewer": reference.reference.get("viewer").cloned().unwrap_or(Value::Null),
         });
 
         let mut artifact = ArtifactRecord {
@@ -189,19 +200,33 @@ fn index_manifest_refs(
     Ok(())
 }
 
-fn collect_artifact_store_refs<'a>(value: &'a Value, refs: &mut Vec<&'a Value>) {
+fn collect_publication_artifact_refs<'a>(
+    value: &'a Value,
+    url_bases: &[String],
+    refs: &mut Vec<ManifestArtifactRef<'a>>,
+) {
     match value {
         Value::Object(object) => {
-            if artifact_store_locator(value).is_some() {
-                refs.push(value);
+            if let Some(locator) = artifact_store_locator(value) {
+                refs.push(ManifestArtifactRef {
+                    reference: value,
+                    locator: locator.to_string(),
+                    locator_type: "artifact-store",
+                });
+            } else if let Some(locator) = url_locator_artifact_store_locator(value, url_bases) {
+                refs.push(ManifestArtifactRef {
+                    reference: value,
+                    locator,
+                    locator_type: "url",
+                });
             }
             for child in object.values() {
-                collect_artifact_store_refs(child, refs);
+                collect_publication_artifact_refs(child, url_bases, refs);
             }
         }
         Value::Array(array) => {
             for child in array {
-                collect_artifact_store_refs(child, refs);
+                collect_publication_artifact_refs(child, url_bases, refs);
             }
         }
         _ => {}
@@ -214,6 +239,67 @@ fn artifact_store_locator(reference: &Value) -> Option<&str> {
         return None;
     }
     locator.get("value").and_then(Value::as_str)
+}
+
+fn url_locator_artifact_store_locator(reference: &Value, url_bases: &[String]) -> Option<String> {
+    let locator = reference.get("locator")?;
+    if locator.get("type").and_then(Value::as_str)? != "url" {
+        return None;
+    }
+    let value = locator.get("value").and_then(Value::as_str)?;
+    url_locator_relative_path(value, url_bases)
+}
+
+fn publication_url_bases(manifest: &Value) -> Vec<String> {
+    let mut bases = Vec::new();
+    for object in [manifest.get("publication"), Some(manifest)]
+        .into_iter()
+        .flatten()
+    {
+        for key in [
+            "public_base_url",
+            "publicBaseUrl",
+            "artifact_base",
+            "artifactBase",
+        ] {
+            if let Some(base) = object.get(key).and_then(Value::as_str) {
+                bases.push(base.to_string());
+            }
+        }
+    }
+    bases.sort();
+    bases.dedup();
+    bases
+}
+
+fn url_locator_relative_path(value: &str, bases: &[String]) -> Option<String> {
+    let url = reqwest::Url::parse(value).ok()?;
+    if url.query().is_some() || url.fragment().is_some() {
+        return None;
+    }
+    for base in bases {
+        let Ok(base) = reqwest::Url::parse(base) else {
+            continue;
+        };
+        if url.scheme() != base.scheme()
+            || url.host_str() != base.host_str()
+            || url.port_or_known_default() != base.port_or_known_default()
+        {
+            continue;
+        }
+        let mut base_path = base.path().to_string();
+        if !base_path.ends_with('/') {
+            base_path.push('/');
+        }
+        let Some(relative) = url.path().strip_prefix(&base_path) else {
+            continue;
+        };
+        if relative.is_empty() || artifact_store_path(Path::new(""), relative).is_none() {
+            continue;
+        }
+        return Some(relative.to_string());
+    }
+    None
 }
 
 fn artifact_store_path(root: &Path, locator: &str) -> Option<PathBuf> {
@@ -335,4 +421,109 @@ fn artifact_name(manifest_id: &str) -> String {
         .filter(|name| !name.is_empty())
         .unwrap_or(manifest_id)
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::observation::{NewRunRecord, ObservationStore};
+
+    #[test]
+    fn indexes_url_locators_under_publication_base_and_preserves_viewer() {
+        crate::test_support::with_isolated_home(|_| {
+            let publication_dir = tempfile::tempdir().expect("publication dir");
+            std::fs::write(publication_dir.path().join("blueprint.after.json"), "{}").unwrap();
+            let manifest_path = publication_dir.path().join("publication-manifest.json");
+            std::fs::write(
+                &manifest_path,
+                serde_json::json!({
+                    "id": "workflow-bench-publication",
+                    "publication": {
+                        "public_base_url": "https://artifacts.example.test/runs/e62c34cf/"
+                    },
+                    "blueprint": {
+                        "after": {
+                            "id": "blueprint.after",
+                            "kind": "blueprint",
+                            "media_type": "application/json",
+                            "locator": {
+                                "type": "url",
+                                "value": "https://artifacts.example.test/runs/e62c34cf/blueprint.after.json"
+                            },
+                            "viewer": {
+                                "url": "https://viewer.example.test/?artifact=blueprint.after"
+                            }
+                        }
+                    }
+                })
+                .to_string(),
+            )
+            .unwrap();
+
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(NewRunRecord::builder("bench").build())
+                .expect("run");
+            let manifest = store
+                .record_artifact(&run.id, "publication_manifest", &manifest_path)
+                .expect("manifest artifact");
+            let artifacts = store.list_artifacts(&run.id).expect("artifacts");
+            let indexed = artifacts
+                .iter()
+                .find(|artifact| artifact.id != manifest.id && artifact.kind == "blueprint")
+                .expect("indexed blueprint artifact");
+
+            assert_eq!(indexed.artifact_type, "file");
+            assert!(Path::new(&indexed.path).is_file());
+            assert_eq!(indexed.metadata_json["locator"]["type"], "url");
+            assert_eq!(
+                indexed.metadata_json["locator"]["value"],
+                "blueprint.after.json"
+            );
+            assert_eq!(
+                indexed.metadata_json["viewer"]["url"],
+                "https://viewer.example.test/?artifact=blueprint.after"
+            );
+        });
+    }
+
+    #[test]
+    fn rejects_url_locators_outside_publication_base() {
+        crate::test_support::with_isolated_home(|_| {
+            let publication_dir = tempfile::tempdir().expect("publication dir");
+            std::fs::write(publication_dir.path().join("leak.json"), "{}").unwrap();
+            let manifest_path = publication_dir.path().join("publication-manifest.json");
+            std::fs::write(
+                &manifest_path,
+                serde_json::json!({
+                    "publication": {
+                        "public_base_url": "https://artifacts.example.test/runs/e62c34cf/"
+                    },
+                    "blueprint": {
+                        "after": {
+                            "id": "blueprint.after",
+                            "kind": "blueprint",
+                            "locator": {
+                                "type": "url",
+                                "value": "https://evil.example.test/runs/e62c34cf/leak.json"
+                            }
+                        }
+                    }
+                })
+                .to_string(),
+            )
+            .unwrap();
+
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(NewRunRecord::builder("bench").build())
+                .expect("run");
+            store
+                .record_artifact(&run.id, "publication_manifest", &manifest_path)
+                .expect("manifest artifact");
+            let artifacts = store.list_artifacts(&run.id).expect("artifacts");
+
+            assert_eq!(artifacts.len(), 1);
+        });
+    }
 }
