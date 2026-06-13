@@ -289,6 +289,9 @@ assert.deepEqual(codeboxRequest.runtime_overlays, [{
   target: '/wordpress/wp-includes/php-ai-client',
   metadata: { component: 'php-ai-client', ref: 'custom-provider-auth' },
 }]);
+assert.deepEqual(codeboxRequest.runtime_env, {});
+assert.deepEqual(codeboxRequest.runtime_state_mounts, []);
+assert.deepEqual(codeboxRequest.runtime_config_mounts, []);
 assert.deepEqual(codeboxRequest.secret_env, ['OPENAI_API_KEY']);
 assert.equal(codeboxRequest.max_turns, 8);
 assert.equal(codeboxRequest.task_timeout_seconds, 120);
@@ -382,6 +385,95 @@ const abilityBridgeRequest = codeboxTaskRequestFromAgentTaskRequest({
 assert.equal(abilityBridgeRequest.runtime_task.ability, 'example/validate-artifact');
 assert.deepEqual(abilityBridgeRequest.runtime_task.input, { artifact: { slug: 'example-site' }, report: '/artifacts/import-report.json' });
 assert.equal(abilityBridgeRequest.parent_request.executor.config.output_mappings.validation_result, 'result.import_validation_result');
+
+const genericRuntimeEnv = {
+  GENERIC_PROVIDER_CONFIG: '/runtime/provider/config.json',
+  XDG_DATA_HOME: '/runtime/provider/data',
+};
+const genericRuntimeStateMounts = [{
+  source: '/host/provider/state.json',
+  target: '/runtime/provider/state.json',
+  mode: 'readonly',
+  metadata: { purpose: 'provider-state' },
+}];
+const genericRuntimeConfigMounts = [{
+  source: '/host/provider/config.json',
+  target: '/runtime/provider/config.json',
+  mode: 'readonly',
+  metadata: { purpose: 'provider-config' },
+}];
+const genericProviderRuntimeRequest = codeboxTaskRequestFromAgentTaskRequest({
+  ...request,
+  task_id: 'generic-runtime-env-task-123',
+  executor: {
+    backend: 'codebox',
+    config: {
+      provider: 'fixture-provider',
+      runtime_env: genericRuntimeEnv,
+      runtime_state_mounts: genericRuntimeStateMounts,
+      runtime_config_mounts: genericRuntimeConfigMounts,
+      provider_plugin_paths: ['/providers/fixture-provider'],
+      runtime_overlays: [{ type: 'fixture-overlay', source: '/overlays/fixture' }],
+      runtime_overlay_profiles: ['fixture-profile'],
+      secret_env: ['FIXTURE_PROVIDER_SECRET'],
+    },
+  },
+});
+assert.equal(genericProviderRuntimeRequest.provider, 'fixture-provider');
+assert.deepEqual(genericProviderRuntimeRequest.runtime_env, genericRuntimeEnv);
+assert.deepEqual(genericProviderRuntimeRequest.runtime_state_mounts, genericRuntimeStateMounts);
+assert.deepEqual(genericProviderRuntimeRequest.runtime_config_mounts, genericRuntimeConfigMounts);
+assert.deepEqual(genericProviderRuntimeRequest.provider_plugin_paths, ['/providers/fixture-provider']);
+assert.deepEqual(genericProviderRuntimeRequest.runtime_overlays, [{ type: 'fixture-overlay', source: '/overlays/fixture' }]);
+assert.deepEqual(genericProviderRuntimeRequest.runtime_overlay_profiles, ['fixture-profile']);
+assert.deepEqual(genericProviderRuntimeRequest.secret_env, ['FIXTURE_PROVIDER_SECRET']);
+
+const optionsRuntimeRequest = codeboxTaskRequestFromAgentTaskRequest({
+  ...request,
+  task_id: 'options-runtime-env-task-123',
+  executor: {
+    backend: 'codebox',
+    config: { provider: 'another-fixture-provider' },
+  },
+}, {
+  runtimeEnv: { OPTIONS_PROVIDER_HOME: '/runtime/options-provider' },
+  runtimeStateMounts: [{ source: '/host/options-state', target: '/runtime/options-state', mode: 'readonly' }],
+  runtimeConfigMounts: [{ source: '/host/options-config', target: '/runtime/options-config', mode: 'readonly' }],
+});
+assert.equal(optionsRuntimeRequest.provider, 'another-fixture-provider');
+assert.deepEqual(optionsRuntimeRequest.runtime_env, { OPTIONS_PROVIDER_HOME: '/runtime/options-provider' });
+assert.deepEqual(optionsRuntimeRequest.runtime_state_mounts, [{ source: '/host/options-state', target: '/runtime/options-state', mode: 'readonly' }]);
+assert.deepEqual(optionsRuntimeRequest.runtime_config_mounts, [{ source: '/host/options-config', target: '/runtime/options-config', mode: 'readonly' }]);
+
+const previousHomeboySettingsJson = process.env.HOMEBOY_SETTINGS_JSON;
+process.env.HOMEBOY_SETTINGS_JSON = JSON.stringify({
+  wp_codebox_provider: 'settings-fixture-provider',
+  wp_codebox_runtime_env: { SETTINGS_PROVIDER_HOME: '/runtime/settings-provider' },
+  wp_codebox_runtime_state_mounts: [{ source: '/host/settings-state', target: '/runtime/settings-state', mode: 'readonly' }],
+  wp_codebox_runtime_config_mounts: [{ source: '/host/settings-config', target: '/runtime/settings-config', mode: 'readonly' }],
+});
+try {
+  const settingsRuntimeRequest = codeboxTaskRequestFromAgentTaskRequest({
+    ...request,
+    task_id: 'settings-runtime-env-task-123',
+    executor: {
+      backend: 'codebox',
+      config: {},
+    },
+  });
+  assert.equal(settingsRuntimeRequest.provider, 'settings-fixture-provider');
+  assert.deepEqual(settingsRuntimeRequest.runtime_env, { SETTINGS_PROVIDER_HOME: '/runtime/settings-provider' });
+  assert.deepEqual(settingsRuntimeRequest.runtime_state_mounts, [{ source: '/host/settings-state', target: '/runtime/settings-state', mode: 'readonly' }]);
+  assert.deepEqual(settingsRuntimeRequest.runtime_config_mounts, [{ source: '/host/settings-config', target: '/runtime/settings-config', mode: 'readonly' }]);
+} finally {
+  if (previousHomeboySettingsJson === undefined) {
+    delete process.env.HOMEBOY_SETTINGS_JSON;
+  } else {
+    process.env.HOMEBOY_SETTINGS_JSON = previousHomeboySettingsJson;
+  }
+}
+
+assert.equal(fs.readFileSync(path.join(__dirname, '..', 'lib', 'codebox-agent-task-executor.js'), 'utf8').includes('opencode'), false);
 
 const recipePackRequest = codeboxTaskRequestFromAgentTaskRequest({
   ...request,

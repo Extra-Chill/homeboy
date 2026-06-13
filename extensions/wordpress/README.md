@@ -530,10 +530,10 @@ extension handles the audit source with:
 homeboy refactor <component> \
   --from audit \
   --setting refactor.audit.extension=wordpress \
-  --setting wp_codebox_provider=opencode \
-  --setting wp_codebox_model=opencode-go/kimi-k2.6 \
-  --setting wp_codebox_provider_plugin_paths=/Users/chubes/Developer/ai-provider-for-opencode \
-  --setting wp_codebox_secret_env=OPENCODE_API_KEY
+  --setting wp_codebox_provider=provider-slug \
+  --setting wp_codebox_model=provider/model \
+  --setting wp_codebox_provider_plugin_paths=/components/ai-provider-example \
+  --setting wp_codebox_secret_env=PROVIDER_API_KEY
 ```
 
 `scripts/agent/homeboy-audit-wp-codebox-fanout.cjs` turns a structured audit
@@ -562,6 +562,15 @@ Discovery exposes the required request fields, outcome status vocabulary,
 failure classifications, capability list, and metadata redaction keys so Lab
 offload and runner transport consumers can select providers without importing
 Codebox-specific request or recipe details.
+
+Provider stacks stay generic at the Homeboy boundary. Executor config, options,
+or `HOMEBOY_SETTINGS_JSON` may provide `runtime_env`, `runtime_state_mounts`,
+and `runtime_config_mounts` (or the settings names `wp_codebox_runtime_env`,
+`wp_codebox_runtime_state_mounts`, and `wp_codebox_runtime_config_mounts`). The
+executor forwards those values unchanged to the WP Codebox task input alongside
+`provider_plugin_paths`, `runtime_overlays`, `runtime_overlay_profiles`, and
+`secret_env`; provider plugins own any model/auth/config discovery inside the
+sandbox.
 
 The outcome preserves the Homeboy decision evidence needed for Codebox worker
 canaries: why the Codebox executor was selected, which capabilities were used,
