@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.121.11] - 2026-06-13
+
+### Fixed
+- prefer stable WP Codebox recipe builder imports
+- unify WP Codebox recipe builder loading
+
 ## [2.121.10] - 2026-06-13
 
 ### Fixed
