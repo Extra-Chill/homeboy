@@ -343,7 +343,7 @@ function defaultCodeboxRuntimeConfig(request, config, inputs, options = {}) {
     model,
     secretEnv: defaultSecretEnv(provider, settings),
     wpCodeboxBin: firstValue(settings.wp_codebox_bin, settings.wpCodeboxBin, process.env.HOMEBOY_WP_CODEBOX_BIN, ''),
-    runtimeOverlayProfiles: defaultRuntimeOverlayProfiles(provider),
+    runtimeOverlayProfiles: [],
     mounts: defaultWorkspaceMounts(workspaceRoot, request, config, inputs, options),
     workspaces: defaultWorkspaces(config, inputs, options),
     allowedTools: defaultWorkspaceAllowedTools(workspaceRoot, workspaceMode(request, config, inputs)),
@@ -360,10 +360,6 @@ function defaultProviderPluginPaths(provider, settings, fallbackProviderPluginPa
     return [];
   }
   return fallbackProviderPluginPath ? [fallbackProviderPluginPath] : [];
-}
-
-function defaultRuntimeOverlayProfiles(provider) {
-  return provider === 'codex' ? ['codex-subscription'] : [];
 }
 
 function firstDefined(...values) {

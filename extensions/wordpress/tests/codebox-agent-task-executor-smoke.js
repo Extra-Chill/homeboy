@@ -492,7 +492,7 @@ try {
   assert.equal(defaultedRequest.runtime_component_paths.agent_runtime, dataMachinePath);
   assert.equal(defaultedRequest.runtime_component_paths.agent_runtime_tools, dataMachineCodePath);
   assert.deepEqual(defaultedRequest.provider_plugin_paths, []);
-  assert.deepEqual(defaultedRequest.runtime_overlay_profiles, ['codex-subscription']);
+  assert.deepEqual(defaultedRequest.runtime_overlay_profiles, []);
   assert.deepEqual(defaultedRequest.runtime_overlays, []);
   assert.deepEqual(defaultedRequest.secret_env, [
     'AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN',
@@ -519,7 +519,7 @@ try {
   }));
   const codexSubscriptionDefaultedRequest = codeboxTaskRequestFromAgentTaskRequest({
     ...request,
-    task_id: 'codex-subscription-default-task-123',
+    task_id: 'codex-secret-default-task-123',
     executor: {
       backend: 'codebox',
       config: {},
@@ -528,12 +528,14 @@ try {
       target: { root: workspaceRoot },
     },
   }, {
-    settings: { wp_codebox_codex_auth_path: codexAuthPath },
+    settings: {
+      wp_codebox_codex_auth_path: codexAuthPath,
+    },
   });
   assert.equal(codexSubscriptionDefaultedRequest.provider, 'codex');
   assert.equal(codexSubscriptionDefaultedRequest.model, 'gpt-5.5');
   assert.deepEqual(codexSubscriptionDefaultedRequest.provider_plugin_paths, []);
-  assert.deepEqual(codexSubscriptionDefaultedRequest.runtime_overlay_profiles, ['codex-subscription']);
+  assert.deepEqual(codexSubscriptionDefaultedRequest.runtime_overlay_profiles, []);
   assert.deepEqual(codexSubscriptionDefaultedRequest.runtime_overlays, []);
   assert.deepEqual(codexSubscriptionDefaultedRequest.secret_env, codexSecretEnv);
 
@@ -686,6 +688,8 @@ try {
           agent_runtime_tools: '/explicit/data-machine-code',
         },
         provider_plugin_paths: ['/explicit/provider'],
+        runtime_overlay_profiles: ['explicit-profile'],
+        runtime_overlays: [{ type: 'bundled-library', library: 'php-ai-client', source: '/explicit/php-ai-client' }],
         secret_env: ['EXPLICIT_SECRET'],
         mounts: [{ source: '/explicit/worktree', target: '/workspace', mode: 'readonly' }],
         workspaces: [{ target: '/explicit-workspace', mode: 'readonly' }],
@@ -699,6 +703,8 @@ try {
   assert.equal(explicitOverrideRequest.runtime_component_paths.agent_runtime, '/explicit/data-machine');
   assert.equal(explicitOverrideRequest.runtime_component_paths.agent_runtime_tools, '/explicit/data-machine-code');
   assert.deepEqual(explicitOverrideRequest.provider_plugin_paths, ['/explicit/provider']);
+  assert.deepEqual(explicitOverrideRequest.runtime_overlay_profiles, ['explicit-profile']);
+  assert.deepEqual(explicitOverrideRequest.runtime_overlays, [{ type: 'bundled-library', library: 'php-ai-client', source: '/explicit/php-ai-client' }]);
   assert.deepEqual(explicitOverrideRequest.secret_env, ['EXPLICIT_SECRET']);
   assert.deepEqual(explicitOverrideRequest.mounts, [{ source: '/explicit/worktree', target: '/workspace', mode: 'readonly' }]);
   assert.deepEqual(explicitOverrideRequest.workspaces, [{ target: '/explicit-workspace', mode: 'readonly' }]);
