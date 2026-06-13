@@ -624,7 +624,7 @@ fn controller(args: AgentTaskControllerArgs) -> CmdResult<Value> {
             0,
         )),
         AgentTaskControllerCommand::Status(status_args) => Ok((
-            command_json_value(agent_task_loop_controller::load_controller(
+            command_json_value(agent_task_loop_controller::controller_status(
                 &status_args.loop_id,
             )?)?,
             0,
