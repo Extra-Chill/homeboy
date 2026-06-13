@@ -1118,6 +1118,19 @@ if [ -f "$PREPARED_DEPENDENCIES_METADATA_FILE" ]; then
     fi
 fi
 
+FAILED_DEPENDENCIES_METADATA_FILE="${ARTIFACTS_DIR%/}/failed-bench-dependencies.json"
+if [ -f "$FAILED_DEPENDENCIES_METADATA_FILE" ]; then
+    FAILED_DEPENDENCIES_RESULTS_FILE=$(mktemp "${TMPDIR:-/tmp}/homeboy-wp-codebox-failed-dependencies.XXXXXX")
+    if jq --slurpfile failedDependencies "$FAILED_DEPENDENCIES_METADATA_FILE" \
+        '. + {dependency_build_failures: ($failedDependencies[0] // [])}' \
+        "$RESULTS_FILE" > "$FAILED_DEPENDENCIES_RESULTS_FILE"; then
+        mv "$FAILED_DEPENDENCIES_RESULTS_FILE" "$RESULTS_FILE"
+    else
+        rm -f "$FAILED_DEPENDENCIES_RESULTS_FILE"
+        echo "Warning: failed to attach dependency build failures to bench results." >&2
+    fi
+fi
+
 if [ -f "$BENCH_BROWSER_METRICS_HELPER" ]; then
     ENRICHED_RESULTS_FILE=$(mktemp "${TMPDIR:-/tmp}/homeboy-wp-codebox-browser-metrics.XXXXXX")
     if node "$BENCH_BROWSER_METRICS_HELPER" "$RESULTS_FILE" "$ARTIFACTS_DIR" "$WP_CODEBOX_BIN" > "$ENRICHED_RESULTS_FILE"; then

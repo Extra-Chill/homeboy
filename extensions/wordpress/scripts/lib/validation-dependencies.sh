@@ -1249,6 +1249,101 @@ _homeboy_record_prepared_dependency_metadata() {
     mv "$tmp_file" "$metadata_file"
 }
 
+_homeboy_command_version() {
+    local command_name="${1:-}"
+
+    [ -n "$command_name" ] || return 0
+    command -v "$command_name" >/dev/null 2>&1 || return 0
+    "$command_name" --version 2>/dev/null | head -1 || true
+}
+
+_homeboy_package_engine_requirements() {
+    local package_path="${1:-}"
+
+    [ -n "$package_path" ] && [ -f "${package_path%/}/package.json" ] || {
+        printf '{}\n'
+        return 0
+    }
+
+    jq -c '.engines // {}' "${package_path%/}/package.json" 2>/dev/null || printf '{}\n'
+}
+
+_homeboy_tail_file() {
+    local file_path="${1:-}"
+    local byte_limit="${2:-4000}"
+
+    [ -n "$file_path" ] && [ -f "$file_path" ] || return 0
+    tail -c "$byte_limit" "$file_path" 2>/dev/null || true
+}
+
+_homeboy_record_bench_dependency_build_failure() {
+    local artifacts_dir="${1:-}"
+    local dependency_slug="${2:-}"
+    local dependency_path="${3:-}"
+    local package_root="${4:-}"
+    local prepare_root="${5:-}"
+    local package_path="${6:-}"
+    local attempted_command="${7:-}"
+    local exit_code="${8:-}"
+    local output_file="${9:-}"
+
+    [ -n "$artifacts_dir" ] || return 0
+    command -v jq >/dev/null 2>&1 || return 0
+
+    local failures_file diagnostics_file tmp_file existing_json stderr_tail node_version npm_version engines_json
+    failures_file="${artifacts_dir%/}/failed-bench-dependencies.json"
+    diagnostics_file="${artifacts_dir%/}/wordpress-dependency-build-diagnostics.json"
+    mkdir -p "$artifacts_dir"
+    existing_json="[]"
+    if [ -f "$failures_file" ]; then
+        existing_json=$(jq -c 'if type == "array" then . else [] end' "$failures_file" 2>/dev/null || echo '[]')
+    fi
+    stderr_tail=$(_homeboy_tail_file "$output_file" 4000)
+    node_version=$(_homeboy_command_version node)
+    npm_version=$(_homeboy_command_version npm)
+    engines_json=$(_homeboy_package_engine_requirements "$package_path")
+
+    tmp_file=$(mktemp "${failures_file}.XXXXXX")
+    jq -n \
+        --argjson existing "$existing_json" \
+        --arg schema 'homeboy/wordpress-bench-dependency-build-failure/v1' \
+        --arg code 'wordpress-bench-dependency-build-failed' \
+        --arg slug "$dependency_slug" \
+        --arg dependencyPath "$dependency_path" \
+        --arg packageRoot "$package_root" \
+        --arg prepareRoot "$prepare_root" \
+        --arg packagePath "$package_path" \
+        --arg attemptedCommand "$attempted_command" \
+        --arg exitCode "$exit_code" \
+        --arg nodeVersion "$node_version" \
+        --arg npmVersion "$npm_version" \
+        --argjson engineRequirements "$engines_json" \
+        --arg stderrTail "$stderr_tail" \
+        '$existing + [{
+            schema: $schema,
+            code: $code,
+            severity: "error",
+            phase: "dependency-build",
+            dependency_slug: (if $slug == "" then null else $slug end),
+            dependency_path: (if $dependencyPath == "" then null else $dependencyPath end),
+            package_root: (if $packageRoot == "" then null else $packageRoot end),
+            prepare_root: (if $prepareRoot == "" then null else $prepareRoot end),
+            package_path: (if $packagePath == "" then null else $packagePath end),
+            node_version: (if $nodeVersion == "" then null else $nodeVersion end),
+            npm_version: (if $npmVersion == "" then null else $npmVersion end),
+            engine_requirements: $engineRequirements,
+            attempted_command: (if $attemptedCommand == "" then null else $attemptedCommand end),
+            exit_code: (if $exitCode == "" then null else ($exitCode | tonumber) end),
+            stderr_tail: (if $stderrTail == "" then null else $stderrTail end)
+        }]' > "$tmp_file"
+    mv "$tmp_file" "$failures_file"
+
+    jq -n \
+        --arg schema 'homeboy/wordpress-bench-diagnostic/v1' \
+        --slurpfile failures "$failures_file" \
+        '{schema: $schema, diagnostics: ($failures[0] // [])}' > "$diagnostics_file"
+}
+
 homeboy_prepare_validation_dependency_for_wp_codebox_bench() {
     local dependency_path="${1:-}"
     local artifacts_dir="${2:-}"
@@ -1275,6 +1370,7 @@ homeboy_prepare_validation_dependency_for_wp_codebox_bench() {
     fi
 
     if ! command -v composer >/dev/null 2>&1; then
+        _homeboy_record_bench_dependency_build_failure "$artifacts_dir" "$dependency_slug" "$dependency_path" "$package_root" "$package_root" "$package_root" 'composer install --no-dev --no-interaction --no-progress --prefer-dist' 127 ''
         echo "Error: WordPress bench dependency '${dependency_path}' has composer.json but no vendor autoload files, and composer is not available." >&2
         return 1
     fi
@@ -1339,11 +1435,21 @@ homeboy_prepare_validation_dependency_for_wp_codebox_bench() {
     fi
 
     echo "Preparing WordPress bench dependency '${dependency_slug}' with Composer at ${tmp_prepared_plugin_path}" >&2
-    if ! composer install --working-dir="$tmp_prepared_plugin_path" --no-dev --no-interaction --no-progress --prefer-dist; then
+    local composer_output composer_exit
+    composer_output=$(mktemp "${TMPDIR:-/tmp}/homeboy-wp-bench-dependency-composer-${dependency_slug}.XXXXXX")
+    set +e
+    composer install --working-dir="$tmp_prepared_plugin_path" --no-dev --no-interaction --no-progress --prefer-dist >"$composer_output" 2>&1
+    composer_exit=$?
+    set -e
+    if [ "$composer_exit" -ne 0 ]; then
+        cat "$composer_output" >&2
+        _homeboy_record_bench_dependency_build_failure "$artifacts_dir" "$dependency_slug" "$dependency_path" "$package_root" "$prepare_root" "$tmp_prepared_plugin_path" "composer install --working-dir=${tmp_prepared_plugin_path} --no-dev --no-interaction --no-progress --prefer-dist" "$composer_exit" "$composer_output"
         rm -rf "$tmp_entry"
+        rm -f "$composer_output"
         echo "Error: Could not prepare WordPress bench dependency '${dependency_slug}' with Composer at ${tmp_prepared_plugin_path}." >&2
         return 1
     fi
+    rm -f "$composer_output"
 
     if [ ! -f "${tmp_prepared_plugin_path}/vendor/autoload.php" ] && [ ! -f "${tmp_prepared_plugin_path}/vendor/autoload_packages.php" ]; then
         rm -rf "$tmp_entry"
@@ -1379,8 +1485,11 @@ homeboy_prepare_validation_dependency_paths_for_wp_codebox_bench() {
     while IFS= read -r dependency_path; do
         [ -n "$dependency_path" ] || continue
         [ -d "$dependency_path" ] || continue
-        prepared_path=$(homeboy_prepare_validation_dependency_for_wp_codebox_bench "$dependency_path" "$artifacts_dir")
-        [ -n "$prepared_path" ] && printf '%s\n' "$prepared_path"
+        if prepared_path=$(homeboy_prepare_validation_dependency_for_wp_codebox_bench "$dependency_path" "$artifacts_dir"); then
+            [ -n "$prepared_path" ] && printf '%s\n' "$prepared_path"
+        else
+            echo "Warning: WordPress bench dependency provider skipped failed dependency: ${dependency_path}" >&2
+        fi
     done <<< "$dependency_paths"
 }
 
