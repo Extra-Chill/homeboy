@@ -102,6 +102,8 @@ pub struct AgentTaskScheduleOptions {
     #[serde(default)]
     pub resource_budget: AgentTaskResourceBudget,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adaptive_concurrency: Option<AgentTaskAdaptiveConcurrencyPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
     #[serde(default)]
     pub retry: AgentTaskRetryPolicy,
@@ -116,10 +118,64 @@ impl Default for AgentTaskScheduleOptions {
             per_executor_concurrency: HashMap::new(),
             per_model_concurrency: HashMap::new(),
             resource_budget: AgentTaskResourceBudget::default(),
+            adaptive_concurrency: None,
             timeout_ms: None,
             retry: AgentTaskRetryPolicy::default(),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskAdaptiveConcurrencyPolicy {
+    #[serde(default = "default_adaptive_min_concurrency")]
+    pub min_concurrency: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrency: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner_capacity: Option<usize>,
+    #[serde(default)]
+    pub active_leases: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_depth: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_pressure: Option<AgentTaskResourcePressure>,
+    #[serde(default)]
+    pub recent_failures: usize,
+    #[serde(default)]
+    pub recent_timeouts: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pause_on_pressure: Option<AgentTaskResourcePressure>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pause_after_recent_failures: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pause_after_recent_timeouts: Option<usize>,
+}
+
+impl Default for AgentTaskAdaptiveConcurrencyPolicy {
+    fn default() -> Self {
+        Self {
+            min_concurrency: default_adaptive_min_concurrency(),
+            max_concurrency: None,
+            runner_capacity: None,
+            active_leases: 0,
+            queue_depth: None,
+            resource_pressure: None,
+            recent_failures: 0,
+            recent_timeouts: 0,
+            pause_on_pressure: None,
+            pause_after_recent_failures: None,
+            pause_after_recent_timeouts: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentTaskResourcePressure {
+    Low,
+    Normal,
+    High,
+    Critical,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -239,6 +295,8 @@ pub enum AgentTaskState {
 pub struct AgentTaskQueueStatus {
     pub max_concurrency: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adaptive_concurrency: Option<AgentTaskAdaptiveConcurrencyStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tasks: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_queue_depth: Option<usize>,
@@ -256,6 +314,55 @@ pub struct AgentTaskQueueStatus {
     pub backpressure: Vec<AgentTaskBackpressureStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_budget_remaining: Option<u32>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskAdaptiveConcurrencyStatus {
+    pub configured_max_concurrency: usize,
+    pub effective_concurrency: usize,
+    pub min_concurrency: usize,
+    pub max_concurrency: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decisions: Vec<AgentTaskAdaptiveConcurrencyDecision>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskAdaptiveConcurrencyDecision {
+    pub action: AgentTaskAdaptiveConcurrencyAction,
+    pub effective_concurrency: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_effective_concurrency: Option<usize>,
+    pub reason: String,
+    pub inputs: AgentTaskAdaptiveConcurrencyInputs,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentTaskAdaptiveConcurrencyAction {
+    Increased,
+    Decreased,
+    Held,
+    Paused,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskAdaptiveConcurrencyInputs {
+    pub queued: usize,
+    pub running: usize,
+    pub configured_max_concurrency: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner_capacity: Option<usize>,
+    pub active_leases: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_depth: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_pressure: Option<AgentTaskResourcePressure>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_active_units: Option<u32>,
+    pub active_units: u32,
+    pub default_task_units: u32,
+    pub recent_failures: usize,
+    pub recent_timeouts: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -310,6 +417,10 @@ fn aggregate_schema() -> String {
 }
 
 fn default_max_concurrency() -> usize {
+    1
+}
+
+fn default_adaptive_min_concurrency() -> usize {
     1
 }
 
