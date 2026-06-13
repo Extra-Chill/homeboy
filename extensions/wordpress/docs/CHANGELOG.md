@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.121.16] - 2026-06-13
+
+### Changed
+- Add WP Codebox visual compare helper
+
 ## [2.121.15] - 2026-06-13
 
 ### Fixed
