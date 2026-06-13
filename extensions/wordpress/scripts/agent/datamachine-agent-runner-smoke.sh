@@ -2,7 +2,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+EXTENSION_PATH="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-bash "$SCRIPT_DIR/datamachine-agent-wp-codebox-runner-smoke.sh"
+node "$EXTENSION_PATH/tests/datamachine-agent-task-runner-smoke.js"
 
 echo "✓ Data Machine agent runner smoke test PASSED via WP Codebox"

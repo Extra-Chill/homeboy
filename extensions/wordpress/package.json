@@ -33,7 +33,7 @@
     "test:admin-page-scenarios": "node tests/admin-page-scenarios-smoke.js",
     "test:page-profiler": "node tests/page-profiler-smoke.js",
     "test:wordpress-route-latency": "node tests/wordpress-route-latency-smoke.js",
-    "test:datamachine-agent-wp-codebox-runner": "bash scripts/agent/datamachine-agent-wp-codebox-runner-smoke.sh",
+    "test:datamachine-agent-wp-codebox-runner": "node tests/datamachine-agent-task-runner-smoke.js",
     "test:project-wpgym-eval-row": "bash scripts/agent/project-wpgym-eval-row-smoke.sh",
     "test:validate-wpgym-eval-row": "bash scripts/agent/validate-wpgym-eval-row-smoke.sh",
     "test:agent-terminal-actions": "node tests/agent-terminal-actions-smoke.js",

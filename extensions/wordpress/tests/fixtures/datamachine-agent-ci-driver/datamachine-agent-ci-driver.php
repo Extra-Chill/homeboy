@@ -16,8 +16,8 @@
  * Data Machine agent CI runs a stable plugin path:
  *   /wordpress/wp-content/plugins/datamachine-agent-ci-driver/
  *
- * The Homeboy Data Machine agent runner (run-datamachine-agent.sh) mounts
- * this file into WP Codebox via wp_codebox_mounts so consumers do
+ * The Homeboy WP Codebox agent-task executor mounts this file into WP Codebox
+ * via wp_codebox_mounts so consumers do
  * not have to ship their own CI driver plugin.
  */
 

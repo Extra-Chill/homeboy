@@ -1064,8 +1064,9 @@ jobs:
           PROVIDER_SECRET_4: ${{ secrets.PROVIDER_SECRET_4 }}
           PROVIDER_SECRET_5: ${{ secrets.PROVIDER_SECRET_5 }}
           HOMEBOY_DATAMACHINE_AGENT_RESULTS_FILE: ${{ runner.temp }}/run-results.json
+          HOMEBOY_AGENT_TASK_OUTCOME_FILE: ${{ runner.temp }}/agent-task-outcome.json
           HOMEBOY_DATAMACHINE_AGENT_REPLAY_BUNDLE_DIR: ${{ inputs.replay_bundle_artifact_name != '' && format('{0}/datamachine-agent-replay-bundles', runner.temp) || '' }}
-        run: bash .ci/homeboy-extensions/wordpress/scripts/agent/run-datamachine-agent.sh "${{ steps.config.outputs.config_path }}"
+        run: node .ci/homeboy-extensions/wordpress/scripts/agent/run-datamachine-agent-task.cjs "${{ steps.config.outputs.config_path }}"
 
       - name: Run host runner lifecycle
         if: ${{ inputs.run_agent && ! inputs.dry_run }}
