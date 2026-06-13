@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.121.8] - 2026-06-13
+
+### Fixed
+- normalize runner publication status
+
 ## [2.121.7] - 2026-06-13
 
 ### Fixed
