@@ -1,4 +1,7 @@
 use homeboy::cli_surface::{Cli, Commands};
+use homeboy::command_contract::{
+    LabCommandPortability, LabCommandRequiredTool, LabWorkspaceModePolicy,
+};
 use homeboy::core::observation::RunStatus;
 use serde_json::json;
 use std::time::Duration;
@@ -230,34 +233,29 @@ fn lab_offload_command(
     };
     Ok(Some(homeboy::core::runner::LabOffloadCommand {
         hot_label: contract.hot_label,
-        portable: matches!(
-            contract.portability,
-            homeboy::cli_surface::LabCommandPortability::Portable
-        ),
+        portable: matches!(contract.portability, LabCommandPortability::Portable),
         default_lab_offload: contract.default_lab_offload,
         unsupported_reason: match contract.portability {
-            homeboy::cli_surface::LabCommandPortability::Portable => None,
-            homeboy::cli_surface::LabCommandPortability::LocalOnly(reason) => Some(reason),
+            LabCommandPortability::Portable => None,
+            LabCommandPortability::LocalOnly(reason) => Some(reason),
         },
         workspace_mode_policy: match contract.workspace_mode_policy {
-            homeboy::cli_surface::LabWorkspaceModePolicy::ChangedSinceGitElseSnapshot => {
+            LabWorkspaceModePolicy::ChangedSinceGitElseSnapshot => {
                 homeboy::core::runner::LabOffloadWorkspaceModePolicy::ChangedSinceGitElseSnapshot
             }
-            homeboy::cli_surface::LabWorkspaceModePolicy::Git => {
+            LabWorkspaceModePolicy::Git => {
                 homeboy::core::runner::LabOffloadWorkspaceModePolicy::Git
             }
-            homeboy::cli_surface::LabWorkspaceModePolicy::GitCheckoutRequired => {
+            LabWorkspaceModePolicy::GitCheckoutRequired => {
                 homeboy::core::runner::LabOffloadWorkspaceModePolicy::GitCheckoutRequired
             }
         },
         requires_extension_parity: contract.requires_extension_parity,
         required_extensions,
-        requires_playwright: contract.extra_required_tools.iter().any(|tool| {
-            matches!(
-                tool,
-                homeboy::cli_surface::LabCommandRequiredTool::Playwright
-            )
-        }),
+        requires_playwright: contract
+            .extra_required_tools
+            .iter()
+            .any(|tool| matches!(tool, LabCommandRequiredTool::Playwright)),
         infer_source_path_tools: contract.infer_source_path_tools,
     }))
 }

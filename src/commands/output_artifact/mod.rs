@@ -1,6 +1,7 @@
 use serde_json::Value;
 
-use crate::cli_surface::{CommandOutputFileMode, Commands};
+use crate::cli_surface::Commands;
+use crate::command_contract::CommandOutputFileMode;
 
 use super::utils::response as output;
 use super::{review, trace, GlobalArgs};
