@@ -1,5 +1,5 @@
 use clap::{Args, Subcommand, ValueEnum};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use homeboy::core::preview_client::{self, PreviewClientReport, PreviewClientStartSpec};
@@ -30,7 +30,7 @@ pub struct TunnelExtra {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub preview_ingress: Option<PreviewIngressActionOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub wpcom_edit_page: Option<WpcomEditPageOutput>,
+    pub preview_consumer: Option<PreviewConsumerOutput>,
 }
 
 #[derive(Debug, Serialize)]
@@ -59,24 +59,52 @@ pub enum PreviewIngressActionOutput {
 }
 
 #[derive(Debug, Serialize)]
-pub struct WpcomEditPageOutput {
+pub struct PreviewConsumerOutput {
     pub schema: String,
-    pub selected_url: String,
+    pub consumer_id: String,
     pub preview_public_url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub service_id: Option<String>,
-    pub wpcom_codebox_dir: String,
     pub artifacts_dir: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub logical_routed_editor_url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub local_preview_editor_url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub public_preview_editor_url: Option<String>,
-    pub edit_page_exit_code: i32,
+    pub public_result_url: Option<String>,
+    pub exit_code: i32,
     pub stdout: String,
     pub stderr: String,
     pub artifact_path: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct PreviewConsumerConfig {
+    pub id: String,
+    pub command: PreviewConsumerCommandConfig,
+    #[serde(default)]
+    pub output: PreviewConsumerOutputConfig,
+    #[serde(default)]
+    pub artifact_file: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PreviewConsumerCommandConfig {
+    pub program: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub cwd: Option<PathBuf>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    #[serde(default)]
+    pub artifacts_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct PreviewConsumerOutputConfig {
+    #[serde(default)]
+    pub public_result_json_file: Option<PathBuf>,
+    #[serde(default)]
+    pub public_result_json_pointer: Option<String>,
+    #[serde(default)]
+    pub public_result_stdout_prefix: Option<String>,
 }
 
 pub type TunnelOutput = EntityCrudOutput<ServiceTunnel, TunnelExtra>;
@@ -106,63 +134,34 @@ enum TunnelCommand {
         #[command(subcommand)]
         command: TunnelPreviewIngressCommand,
     },
-    /// Open a named WordPress.com page in a held Codebox editor through a Homeboy public URL
-    #[command(name = "wpcom-edit-page")]
-    WpcomEditPage(WpcomEditPageArgs),
+    /// Run a configured preview consumer with a Homeboy-owned public URL
+    #[command(name = "preview-consumer")]
+    PreviewConsumer {
+        #[command(subcommand)]
+        command: TunnelPreviewConsumerCommand,
+    },
 }
 
-#[derive(Args)]
-struct WpcomEditPageArgs {
-    /// WordPress.com or developer.wordpress.com page URL to open
-    page_url: String,
+#[derive(Subcommand)]
+enum TunnelPreviewConsumerCommand {
+    /// Run a command described by a preview-consumer JSON config
+    Run {
+        /// JSON config containing command, args, env, artifact, and extraction rules
+        #[arg(long)]
+        config: PathBuf,
 
-    /// Path to the wpcom-codebox checkout/worktree containing scripts/edit-page.mjs
-    #[arg(long)]
-    wpcom_codebox_dir: PathBuf,
+        /// Service ID whose started tunnel status contains the public preview URL
+        #[arg(long, conflicts_with = "preview_public_url")]
+        service_id: Option<String>,
 
-    /// Homeboy service ID whose started tunnel status contains the public preview URL
-    #[arg(long, conflicts_with = "preview_public_url")]
-    service_id: Option<String>,
+        /// Public/tunnel preview origin owned by Homeboy
+        #[arg(long, conflicts_with = "service_id")]
+        preview_public_url: Option<String>,
 
-    /// Public/tunnel preview origin owned by Homeboy
-    #[arg(long, conflicts_with = "service_id")]
-    preview_public_url: Option<String>,
-
-    /// Duration passed to wpcom-codebox edit-page so WP Codebox keeps the runtime alive
-    #[arg(long, default_value = "30m")]
-    preview_hold: String,
-
-    /// Optional fixed preview port forwarded to wpcom-codebox edit-page
-    #[arg(long)]
-    preview_port: Option<u16>,
-
-    /// Optional preview bind address forwarded to wpcom-codebox edit-page
-    #[arg(long)]
-    preview_bind: Option<String>,
-
-    /// Make wpcom-codebox hold the preview process in blocking mode
-    #[arg(long)]
-    preview_hold_blocking: bool,
-
-    /// Node.js binary used to execute scripts/edit-page.mjs
-    #[arg(long, default_value = "node")]
-    node: String,
-
-    /// Optional wp-codebox CLI path forwarded to wpcom-codebox edit-page
-    #[arg(long)]
-    cli: Option<PathBuf>,
-
-    /// Optional wpcom checkout path forwarded to wpcom-codebox edit-page
-    #[arg(long)]
-    wpcom: Option<PathBuf>,
-
-    /// Optional exported page source directory forwarded to wpcom-codebox edit-page
-    #[arg(long)]
-    source_dir: Option<PathBuf>,
-
-    /// Directory for wpcom-codebox edit-page artifacts. Defaults under Homeboy artifact root.
-    #[arg(long)]
-    artifacts: Option<PathBuf>,
+        /// Override the config artifact directory
+        #[arg(long)]
+        artifacts_dir: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -542,18 +541,38 @@ pub fn run(args: TunnelArgs, _global: &super::GlobalArgs) -> CmdResult<TunnelOut
         TunnelCommand::Service { command } => run_service(command),
         TunnelCommand::PreviewClient { command } => run_preview_client(command),
         TunnelCommand::PreviewIngress { command } => run_preview_ingress(command),
-        TunnelCommand::WpcomEditPage(args) => run_wpcom_edit_page(args),
+        TunnelCommand::PreviewConsumer { command } => run_preview_consumer(command),
     }
 }
 
-fn run_wpcom_edit_page(args: WpcomEditPageArgs) -> CmdResult<TunnelOutput> {
-    let public_url = resolve_wpcom_edit_page_public_url(&args)?;
-    let artifacts_dir = args.artifacts.clone().unwrap_or_else(|| {
-        homeboy::core::artifact_root()
-            .unwrap_or_else(|_| std::env::temp_dir().join("homeboy-artifacts"))
-            .join("wpcom-edit-page")
-            .join(safe_artifact_slug(&args.page_url))
-    });
+fn run_preview_consumer(command: TunnelPreviewConsumerCommand) -> CmdResult<TunnelOutput> {
+    match command {
+        TunnelPreviewConsumerCommand::Run {
+            config,
+            service_id,
+            preview_public_url,
+            artifacts_dir,
+        } => run_preview_consumer_config(config, service_id, preview_public_url, artifacts_dir),
+    }
+}
+
+fn run_preview_consumer_config(
+    config_path: PathBuf,
+    service_id: Option<String>,
+    preview_public_url: Option<String>,
+    artifacts_dir_override: Option<PathBuf>,
+) -> CmdResult<TunnelOutput> {
+    let config = read_preview_consumer_config(&config_path)?;
+    let public_url =
+        resolve_preview_consumer_public_url(service_id.as_deref(), preview_public_url.as_deref())?;
+    let artifacts_dir = artifacts_dir_override
+        .or_else(|| config.command.artifacts_dir.clone())
+        .unwrap_or_else(|| {
+            homeboy::core::artifact_root()
+                .unwrap_or_else(|_| std::env::temp_dir().join("homeboy-artifacts"))
+                .join("preview-consumer")
+                .join(safe_artifact_slug(&config.id))
+        });
     fs::create_dir_all(&artifacts_dir).map_err(|err| {
         homeboy::core::Error::internal_io(
             err.to_string(),
@@ -561,88 +580,61 @@ fn run_wpcom_edit_page(args: WpcomEditPageArgs) -> CmdResult<TunnelOutput> {
         )
     })?;
 
-    let script = args.wpcom_codebox_dir.join("scripts/edit-page.mjs");
-    if !script.exists() {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "wpcom-codebox-dir",
-            "scripts/edit-page.mjs was not found",
-            None,
-            Some(vec![script.display().to_string()]),
+    let mut command = Command::new(render_preview_consumer_template(
+        &config.command.program,
+        &public_url,
+        &artifacts_dir,
+    ));
+    for arg in &config.command.args {
+        command.arg(render_preview_consumer_template(
+            arg,
+            &public_url,
+            &artifacts_dir,
         ));
     }
-
-    let mut command = Command::new(&args.node);
-    command
-        .arg(&script)
-        .arg(&args.page_url)
-        .arg("--preview-hold")
-        .arg(&args.preview_hold)
-        .arg("--preview-public-url")
-        .arg(&public_url)
-        .arg("--artifacts")
-        .arg(&artifacts_dir)
-        .current_dir(&args.wpcom_codebox_dir);
-    if let Some(port) = args.preview_port {
-        command.arg("--preview-port").arg(port.to_string());
+    for (key, value) in &config.command.env {
+        command.env(
+            key,
+            render_preview_consumer_template(value, &public_url, &artifacts_dir),
+        );
     }
-    if let Some(bind) = &args.preview_bind {
-        command.arg("--preview-bind").arg(bind);
-    }
-    if args.preview_hold_blocking {
-        command.arg("--preview-hold-blocking").arg("true");
-    }
-    if let Some(cli) = &args.cli {
-        command.arg("--cli").arg(cli);
-    }
-    if let Some(wpcom) = &args.wpcom {
-        command.arg("--wpcom").arg(wpcom);
-    }
-    if let Some(source_dir) = &args.source_dir {
-        command.arg("--source-dir").arg(source_dir);
+    if let Some(cwd) = &config.command.cwd {
+        command.current_dir(cwd);
     }
 
     let output = command.output().map_err(|err| {
         homeboy::core::Error::internal_io(
             err.to_string(),
-            Some(format!("run {}", script.display())),
+            Some(format!("run preview consumer {}", config.id)),
         )
     })?;
     let exit_code = output.status.code().unwrap_or(1);
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
-    let summary = read_wpcom_edit_page_summary(&artifacts_dir);
-    let result = WpcomEditPageOutput {
-        schema: "homeboy/wpcom-edit-page-orchestration/v1".to_string(),
-        selected_url: args.page_url.clone(),
+    let public_result_url =
+        extract_preview_consumer_public_result_url(&config.output, &artifacts_dir, &stdout);
+    let artifact_file = config
+        .artifact_file
+        .as_deref()
+        .unwrap_or("homeboy-preview-consumer.json");
+    let result = PreviewConsumerOutput {
+        schema: "homeboy/preview-consumer-run/v1".to_string(),
+        consumer_id: config.id.clone(),
         preview_public_url: public_url,
-        service_id: args.service_id.clone(),
-        wpcom_codebox_dir: args.wpcom_codebox_dir.display().to_string(),
+        service_id,
         artifacts_dir: artifacts_dir.display().to_string(),
-        logical_routed_editor_url: summary
-            .as_ref()
-            .and_then(|value| json_pointer_string(value, "/editor/logical_routed_editor_url")),
-        local_preview_editor_url: summary
-            .as_ref()
-            .and_then(|value| json_pointer_string(value, "/editor/local_preview_editor_url"))
-            .or_else(|| parse_prefixed_line(&stdout, "Local preview editor URL:")),
-        public_preview_editor_url: summary
-            .as_ref()
-            .and_then(|value| json_pointer_string(value, "/editor/public_preview_editor_url"))
-            .or_else(|| parse_prefixed_line(&stdout, "Public preview editor URL:")),
-        edit_page_exit_code: exit_code,
+        public_result_url,
+        exit_code,
         stdout,
         stderr,
-        artifact_path: artifacts_dir
-            .join("homeboy-wpcom-edit-page.json")
-            .display()
-            .to_string(),
+        artifact_path: artifacts_dir.join(artifact_file).display().to_string(),
     };
 
     let artifact_json = serde_json::to_string_pretty(&result).map_err(|err| {
         homeboy::core::Error::internal_json(
             err.to_string(),
-            Some("serialize wpcom edit-page orchestration artifact".to_string()),
+            Some("serialize preview consumer run artifact".to_string()),
         )
     })?;
     fs::write(&result.artifact_path, format!("{artifact_json}\n")).map_err(|err| {
@@ -654,10 +646,10 @@ fn run_wpcom_edit_page(args: WpcomEditPageArgs) -> CmdResult<TunnelOutput> {
 
     Ok((
         TunnelOutput {
-            command: "tunnel.wpcom_edit_page".to_string(),
-            id: Some(args.page_url),
+            command: "tunnel.preview_consumer.run".to_string(),
+            id: Some(config.id),
             extra: TunnelExtra {
-                wpcom_edit_page: Some(result),
+                preview_consumer: Some(result),
                 ..Default::default()
             },
             ..Default::default()
@@ -666,11 +658,32 @@ fn run_wpcom_edit_page(args: WpcomEditPageArgs) -> CmdResult<TunnelOutput> {
     ))
 }
 
-fn resolve_wpcom_edit_page_public_url(args: &WpcomEditPageArgs) -> homeboy::core::Result<String> {
-    if let Some(public_url) = &args.preview_public_url {
-        return Ok(public_url.clone());
+fn read_preview_consumer_config(
+    path: &std::path::Path,
+) -> homeboy::core::Result<PreviewConsumerConfig> {
+    let raw = fs::read_to_string(path).map_err(|err| {
+        homeboy::core::Error::internal_io(
+            err.to_string(),
+            Some(format!("read preview consumer config {}", path.display())),
+        )
+    })?;
+    serde_json::from_str(&raw).map_err(|err| {
+        homeboy::core::Error::validation_invalid_json(
+            err,
+            Some(format!("parse preview consumer config {}", path.display())),
+            Some(raw),
+        )
+    })
+}
+
+fn resolve_preview_consumer_public_url(
+    service_id: Option<&str>,
+    preview_public_url: Option<&str>,
+) -> homeboy::core::Result<String> {
+    if let Some(public_url) = preview_public_url {
+        return Ok(public_url.to_string());
     }
-    let Some(service_id) = &args.service_id else {
+    let Some(service_id) = service_id else {
         return Err(homeboy::core::Error::validation_missing_argument(vec![
             "--service-id or --preview-public-url".to_string(),
         ]));
@@ -683,17 +696,52 @@ fn resolve_wpcom_edit_page_public_url(args: &WpcomEditPageArgs) -> homeboy::core
         .ok_or_else(|| {
             homeboy::core::Error::validation_invalid_argument(
                 "service-id",
-                "service status does not contain a public preview URL; start the service with a Homeboy public tunnel backend first",
-                Some(service_id.clone()),
+                "service status does not contain a public preview URL; start the service with a public tunnel backend first",
+                Some(service_id.to_string()),
                 None,
             )
         })
 }
 
-fn read_wpcom_edit_page_summary(artifacts_dir: &std::path::Path) -> Option<Value> {
-    let path = artifacts_dir.join("summary.json");
-    let raw = fs::read_to_string(path).ok()?;
-    serde_json::from_str(&raw).ok()
+fn render_preview_consumer_template(
+    value: &str,
+    public_url: &str,
+    artifacts_dir: &std::path::Path,
+) -> String {
+    value
+        .replace("${preview_public_url}", public_url)
+        .replace("${artifacts_dir}", &artifacts_dir.to_string_lossy())
+}
+
+fn extract_preview_consumer_public_result_url(
+    config: &PreviewConsumerOutputConfig,
+    artifacts_dir: &std::path::Path,
+    stdout: &str,
+) -> Option<String> {
+    config
+        .public_result_json_file
+        .as_ref()
+        .and_then(|path| {
+            let path = if path.is_absolute() {
+                path.clone()
+            } else {
+                artifacts_dir.join(path)
+            };
+            let raw = fs::read_to_string(path).ok()?;
+            serde_json::from_str::<Value>(&raw).ok()
+        })
+        .and_then(|value| {
+            config
+                .public_result_json_pointer
+                .as_deref()
+                .and_then(|pointer| json_pointer_string(&value, pointer))
+        })
+        .or_else(|| {
+            config
+                .public_result_stdout_prefix
+                .as_deref()
+                .and_then(|prefix| parse_prefixed_line(stdout, prefix))
+        })
 }
 
 fn json_pointer_string(value: &Value, pointer: &str) -> Option<String> {
@@ -1207,77 +1255,88 @@ mod tests {
     }
 
     #[test]
-    fn parses_public_editor_url_from_edit_page_stdout() {
-        let stdout = "Selected page: https://wordpress.com/ai\nPublic preview editor URL: https://run.example.test/wp-admin/post.php?post=24117035&action=edit\n";
+    fn parses_public_result_url_from_configured_stdout_prefix() {
+        let stdout = "Consumer ready\nPublic result URL: https://run.example.test/result\n";
 
         assert_eq!(
-            parse_prefixed_line(stdout, "Public preview editor URL:").as_deref(),
-            Some("https://run.example.test/wp-admin/post.php?post=24117035&action=edit")
+            parse_prefixed_line(stdout, "Public result URL:").as_deref(),
+            Some("https://run.example.test/result")
         );
     }
 
     #[test]
-    fn safe_artifact_slug_keeps_named_page_url_human_readable() {
+    fn safe_artifact_slug_keeps_consumer_id_human_readable() {
         assert_eq!(
-            safe_artifact_slug("https://wordpress.com/ai"),
-            "https---wordpress-com-ai"
+            safe_artifact_slug("preview consumer: sample"),
+            "preview-consumer--sample"
         );
     }
 
     #[test]
-    fn wpcom_edit_page_command_returns_public_editor_url_and_artifact() {
+    fn preview_consumer_run_uses_configured_public_url_and_artifacts() {
         test_support::with_isolated_home(|_| {
             let checkout = tempfile::tempdir().expect("checkout");
-            let scripts_dir = checkout.path().join("scripts");
-            fs::create_dir_all(&scripts_dir).expect("scripts dir");
+            let script = checkout.path().join("consumer.mjs");
             fs::write(
-                scripts_dir.join("edit-page.mjs"),
+                &script,
                 r#"
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 const artifacts = process.argv[process.argv.indexOf('--artifacts') + 1];
+const publicUrl = process.argv[process.argv.indexOf('--public-url') + 1];
 mkdirSync(artifacts, { recursive: true });
-writeFileSync(join(artifacts, 'summary.json'), JSON.stringify({
-  editor: {
-    logical_routed_editor_url: 'https://wordpress.com/wp-admin/post.php?post=24117035&action=edit',
-    public_preview_editor_url: 'https://run.example.test/wp-admin/post.php?post=24117035&action=edit'
-  }
-}));
-console.log('Public preview editor URL: https://run.example.test/wp-admin/post.php?post=24117035&action=edit');
+writeFileSync(join(artifacts, 'result.json'), JSON.stringify({ public_result_url: `${publicUrl}/result` }));
+console.log(`Public result URL: ${publicUrl}/result`);
 "#,
             )
             .expect("script");
             let artifacts = tempfile::tempdir().expect("artifacts");
+            let config = tempfile::NamedTempFile::new().expect("config");
+            fs::write(
+                config.path(),
+                serde_json::json!({
+                    "id": "sample-consumer",
+                    "command": {
+                        "program": "node",
+                        "args": [
+                            script.display().to_string(),
+                            "--public-url",
+                            "${preview_public_url}",
+                            "--artifacts",
+                            "${artifacts_dir}"
+                        ],
+                        "artifacts_dir": artifacts.path()
+                    },
+                    "output": {
+                        "public_result_json_file": "result.json",
+                        "public_result_json_pointer": "/public_result_url",
+                        "public_result_stdout_prefix": "Public result URL:"
+                    }
+                })
+                .to_string(),
+            )
+            .expect("config json");
 
-            let (output, exit_code) = run_wpcom_edit_page(WpcomEditPageArgs {
-                page_url: "https://wordpress.com/ai".to_string(),
-                wpcom_codebox_dir: checkout.path().to_path_buf(),
-                service_id: None,
-                preview_public_url: Some("https://run.example.test".to_string()),
-                preview_hold: "5m".to_string(),
-                preview_port: None,
-                preview_bind: None,
-                preview_hold_blocking: false,
-                node: "node".to_string(),
-                cli: None,
-                wpcom: None,
-                source_dir: None,
-                artifacts: Some(artifacts.path().to_path_buf()),
-            })
-            .expect("wpcom edit-page command succeeds");
+            let (output, exit_code) = run_preview_consumer_config(
+                config.path().to_path_buf(),
+                None,
+                Some("https://run.example.test".to_string()),
+                None,
+            )
+            .expect("preview consumer command succeeds");
 
             assert_eq!(exit_code, 0);
             let result = output
                 .extra
-                .wpcom_edit_page
-                .expect("wpcom edit-page output");
+                .preview_consumer
+                .expect("preview consumer output");
             assert_eq!(
-                result.public_preview_editor_url.as_deref(),
-                Some("https://run.example.test/wp-admin/post.php?post=24117035&action=edit")
+                result.public_result_url.as_deref(),
+                Some("https://run.example.test/result")
             );
             assert!(artifacts
                 .path()
-                .join("homeboy-wpcom-edit-page.json")
+                .join("homeboy-preview-consumer.json")
                 .exists());
         });
     }
