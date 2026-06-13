@@ -301,8 +301,12 @@ adaptation and redaction logic in this extension.
 
 Callers that need a provider stack supply WP Codebox's generic fields directly:
 `provider_plugin_paths`, `runtime_overlays`, `runtime_overlay_profiles`, and
-`secret_env`. HBEX forwards those fields without expanding provider-specific
-runtime stacks; WP Codebox owns sandbox recipe expansion and artifact capture.
+`secret_env`. HBEX forwards explicit values without expanding named profiles;
+for default Codex subscription runs, HBEX expands the generic provider stack
+primitives itself: an OpenAI provider plugin path, a `php-ai-client` bundled
+library overlay when available, and the Codex credential env names. WP Codebox
+owns sandbox recipe expansion and artifact capture, not provider-specific named
+profiles.
 
 ## Runner config surface
 

@@ -468,7 +468,8 @@ try {
   const dataMachineCodePath = path.join(defaultsRoot, 'data-machine-code');
   const staleStandaloneAgentsApiPath = path.join(defaultsRoot, 'agents-api');
   const providerPath = path.join(defaultsRoot, 'ai-provider-for-openai');
-  for (const directory of [workspaceRoot, bundledAgentsApiPath, dataMachineCodePath, staleStandaloneAgentsApiPath, providerPath]) {
+  const phpAiClientPath = path.join(defaultsRoot, 'php-ai-client');
+  for (const directory of [workspaceRoot, bundledAgentsApiPath, dataMachineCodePath, staleStandaloneAgentsApiPath, providerPath, phpAiClientPath]) {
     fs.mkdirSync(directory, { recursive: true });
   }
 
@@ -489,9 +490,15 @@ try {
   assert.equal(defaultedRequest.runtime_component_paths.agents_api, bundledAgentsApiPath);
   assert.equal(defaultedRequest.runtime_component_paths.agent_runtime, dataMachinePath);
   assert.equal(defaultedRequest.runtime_component_paths.agent_runtime_tools, dataMachineCodePath);
-  assert.deepEqual(defaultedRequest.provider_plugin_paths, []);
+  assert.deepEqual(defaultedRequest.provider_plugin_paths, [providerPath]);
   assert.deepEqual(defaultedRequest.runtime_overlay_profiles, []);
-  assert.deepEqual(defaultedRequest.runtime_overlays, []);
+  assert.deepEqual(defaultedRequest.runtime_overlays, [{
+    type: 'bundled-library',
+    library: 'php-ai-client',
+    source: phpAiClientPath,
+    target: '/wordpress/wp-includes/php-ai-client',
+    metadata: { component: 'php-ai-client', ref: 'codex-provider-stack' },
+  }]);
   assert.deepEqual(defaultedRequest.secret_env, [
     'AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN',
     'AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN',
@@ -532,9 +539,15 @@ try {
   });
   assert.equal(codexSubscriptionDefaultedRequest.provider, 'codex');
   assert.equal(codexSubscriptionDefaultedRequest.model, 'gpt-5.5');
-  assert.deepEqual(codexSubscriptionDefaultedRequest.provider_plugin_paths, []);
+  assert.deepEqual(codexSubscriptionDefaultedRequest.provider_plugin_paths, [providerPath]);
   assert.deepEqual(codexSubscriptionDefaultedRequest.runtime_overlay_profiles, []);
-  assert.deepEqual(codexSubscriptionDefaultedRequest.runtime_overlays, []);
+  assert.deepEqual(codexSubscriptionDefaultedRequest.runtime_overlays, [{
+    type: 'bundled-library',
+    library: 'php-ai-client',
+    source: phpAiClientPath,
+    target: '/wordpress/wp-includes/php-ai-client',
+    metadata: { component: 'php-ai-client', ref: 'codex-provider-stack' },
+  }]);
   assert.deepEqual(codexSubscriptionDefaultedRequest.secret_env, codexSecretEnv);
 
   const openAiDefaultedRequest = codeboxTaskRequestFromAgentTaskRequest({
@@ -672,6 +685,36 @@ try {
     settings: {},
   });
   assert.equal(alternateDefaultedRequest.agents_api_path, alternateBundledAgentsApiPath);
+
+  const configuredProviderPath = path.join(defaultsRoot, 'configured-ai-provider-for-openai');
+  const configuredPhpAiClientPath = path.join(defaultsRoot, 'configured-php-ai-client');
+  fs.mkdirSync(configuredProviderPath, { recursive: true });
+  fs.mkdirSync(configuredPhpAiClientPath, { recursive: true });
+  const configuredCodexStackRequest = codeboxTaskRequestFromAgentTaskRequest({
+    ...request,
+    task_id: 'configured-codex-runtime-stack-task-123',
+    executor: {
+      backend: 'codebox',
+      config: { provider: 'codex' },
+    },
+    inputs: {
+      target: { root: workspaceRoot },
+    },
+  }, {
+    settings: {
+      wp_codebox_provider_plugin_path: configuredProviderPath,
+      wp_codebox_php_ai_client_path: configuredPhpAiClientPath,
+    },
+  });
+  assert.deepEqual(configuredCodexStackRequest.provider_plugin_paths, [configuredProviderPath]);
+  assert.deepEqual(configuredCodexStackRequest.runtime_overlay_profiles, []);
+  assert.deepEqual(configuredCodexStackRequest.runtime_overlays, [{
+    type: 'bundled-library',
+    library: 'php-ai-client',
+    source: configuredPhpAiClientPath,
+    target: '/wordpress/wp-includes/php-ai-client',
+    metadata: { component: 'php-ai-client', ref: 'codex-provider-stack' },
+  }]);
 
   const explicitOverrideRequest = codeboxTaskRequestFromAgentTaskRequest({
     ...request,
