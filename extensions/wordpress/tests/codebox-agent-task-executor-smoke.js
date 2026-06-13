@@ -671,12 +671,12 @@ try {
     'workspace_ls',
     'workspace_read',
     'workspace_git_status',
+    'workspace_run_runner_command',
     'workspace_write',
     'workspace_edit',
     'workspace_apply_patch',
     'workspace_delete',
     'workspace_git_add',
-    'workspace_run_runner_command',
   ];
   assert.deepEqual(bareOpenAiDefaultedRequest.allowed_tools, writableWorkspaceTools);
   assert.equal(bareOpenAiDefaultedRequest.sandbox_tool_policy.schema, 'wp-codebox/sandbox-tool-policy/v1');

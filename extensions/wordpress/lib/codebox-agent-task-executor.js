@@ -39,12 +39,12 @@ const DEFAULT_WORKSPACE_READONLY_TOOLS = [
 // read-write, so a coding task can actually edit files instead of only
 // inspecting them. These ids are registered by the data-machine-code runtime.
 const DEFAULT_WORKSPACE_WRITE_TOOLS = [
+  'workspace_run_runner_command',
   'workspace_write',
   'workspace_edit',
   'workspace_apply_patch',
   'workspace_delete',
   'workspace_git_add',
-  'workspace_run_runner_command',
 ];
 
 const CODEX_SECRET_ENV = [
