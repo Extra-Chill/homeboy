@@ -181,7 +181,15 @@ homeboy_project_ensure_dependencies() {
             (cd "$_dir" && yarn install --frozen-lockfile)
             ;;
         npm|*)
-            if [ -f "$_dir/package-lock.json" ]; then
+            # `npm ci` only makes sense for a committed, authoritative
+            # lockfile. A gitignored/untracked package-lock.json is a local
+            # artifact that nothing keeps in sync with package.json, so a stale
+            # leftover would make `npm ci` fail on an unfixable desync. Use
+            # `npm install` to refresh it in that case.
+            if [ -f "$_dir/package-lock.json" ] \
+                && command -v git >/dev/null 2>&1 \
+                && git -C "$_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+                && git -C "$_dir" ls-files --error-unmatch package-lock.json >/dev/null 2>&1; then
                 (cd "$_dir" && npm ci)
             else
                 (cd "$_dir" && npm install)

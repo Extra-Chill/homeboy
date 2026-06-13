@@ -127,6 +127,29 @@ npm_install_flags() {
     printf '%s\n' "${flags[@]}"
 }
 
+# Decide whether package-lock.json is an authoritative, committed artifact.
+#
+# `npm ci` strictly enforces that package.json and package-lock.json are in
+# sync and aborts otherwise. That guarantee is only meaningful when the
+# lockfile is committed to git — then it is the reproducible source of truth.
+#
+# When the lockfile is gitignored (or otherwise untracked), it is just a local
+# build artifact that nothing keeps in sync with package.json. A stale leftover
+# lockfile from a prior install then makes `npm ci` fail for a desync that no
+# committed change could ever fix (e.g. a dependency was bumped in package.json
+# but the ignored lockfile was never regenerated). In that case `npm install`
+# is correct: it refreshes the local lockfile to match package.json.
+#
+# Returns 0 (true) when package-lock.json is tracked by git → use `npm ci`.
+# Returns 1 (false) when missing, untracked, or gitignored → use `npm install`.
+npm_lockfile_is_committed() {
+    [ -f "package-lock.json" ] || return 1
+    command -v git >/dev/null 2>&1 || return 1
+    git rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 1
+    # A tracked file is listed by ls-files; gitignored/untracked files are not.
+    [ -n "$(git ls-files --error-unmatch package-lock.json 2>/dev/null)" ]
+}
+
 run_npm_install() {
     local command_name="$1"
     shift
@@ -367,9 +390,17 @@ install_frontend_dependencies() {
     fi
 
     if [ "$need_install" -eq 1 ]; then
-        if [ -f "package-lock.json" ]; then
+        # Only use `npm ci` when the lockfile is a committed, authoritative
+        # artifact. A gitignored/untracked lockfile is a local leftover that
+        # nothing keeps in sync with package.json — `npm ci` would fail on a
+        # desync no committed change could fix. Fall back to `npm install`,
+        # which refreshes the local lockfile to match package.json.
+        if npm_lockfile_is_committed; then
             run_npm_install ci 2>&1
         else
+            if [ -f "package-lock.json" ]; then
+                print_warning "${scope_label}package-lock.json is not committed (gitignored or untracked); using 'npm install' to refresh it instead of 'npm ci'."
+            fi
             run_npm_install install 2>&1
         fi
         print_success "${scope_label}npm dependencies ready"

@@ -78,4 +78,90 @@ JSON
 
 assert_contains "$npm_log" "install --no-audit --no-fund --legacy-peer-deps"
 
+assert_not_contains() {
+    local file="$1"
+    local unexpected="$2"
+    if grep -Fq -- "$unexpected" "$file"; then
+        echo "Expected $file to NOT contain: $unexpected" >&2
+        sed 's/^/  /' "$file" >&2
+        exit 1
+    fi
+}
+
+# Lockfile-aware install command selection.
+#
+# A committed package-lock.json is authoritative → `npm ci` (strict).
+# A gitignored/untracked package-lock.json is a local artifact → `npm install`
+# (refresh), because nothing keeps an ignored lockfile in sync with
+# package.json and `npm ci` would fail on an unfixable desync.
+make_lockfile_component() {
+    local dir="$1"
+    mkdir -p "$dir"
+    cat > "${dir}/plugin.php" <<'PHP'
+<?php
+/**
+ * Plugin Name: Lockfile Plugin
+ * Version: 1.0.0
+ */
+PHP
+    cat > "${dir}/package.json" <<'JSON'
+{
+  "scripts": {
+    "build": "wp-scripts build"
+  },
+  "devDependencies": {
+    "@wordpress/scripts": "^30.0.0"
+  }
+}
+JSON
+    printf '{"lockfileVersion":3}\n' > "${dir}/package-lock.json"
+}
+
+run_build() {
+    local dir="$1"
+    local log="$2"
+    (
+        cd "$dir"
+        PATH="${fake_bin}:$PATH" \
+        NPM_LOG="$log" \
+        HOMEBOY_EXTENSION_PATH="$EXTENSION_DIR" \
+        HOMEBOY_COMPONENT_ID="lockfile-plugin" \
+        HOMEBOY_SKIP_TESTS=1 \
+            bash "${EXTENSION_DIR}/scripts/build/build.sh" >/dev/null
+    )
+}
+
+# Case 1: committed lockfile → npm ci
+committed_dir="${TMP_DIR}/committed-lockfile"
+committed_log="${TMP_DIR}/committed-npm.log"
+make_lockfile_component "$committed_dir"
+(
+    cd "$committed_dir"
+    git init -q
+    git config user.email smoke@example.com
+    git config user.name smoke
+    git add -A
+    git commit -qm "initial"
+)
+run_build "$committed_dir" "$committed_log"
+assert_contains "$committed_log" "ci --no-audit --no-fund"
+assert_not_contains "$committed_log" "install --no-audit --no-fund"
+
+# Case 2: gitignored lockfile → npm install (refresh), never npm ci
+ignored_dir="${TMP_DIR}/ignored-lockfile"
+ignored_log="${TMP_DIR}/ignored-npm.log"
+make_lockfile_component "$ignored_dir"
+printf 'package-lock.json\nnode_modules/\n' > "${ignored_dir}/.gitignore"
+(
+    cd "$ignored_dir"
+    git init -q
+    git config user.email smoke@example.com
+    git config user.name smoke
+    git add -A
+    git commit -qm "initial"
+)
+run_build "$ignored_dir" "$ignored_log"
+assert_contains "$ignored_log" "install --no-audit --no-fund"
+assert_not_contains "$ignored_log" "ci --no-audit --no-fund"
+
 echo "WordPress build helper smoke passed."
