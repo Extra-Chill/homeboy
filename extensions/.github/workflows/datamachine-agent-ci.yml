@@ -83,7 +83,7 @@ name: Data Machine Agent CI (reusable)
         type: string
         default: ""
       workspace_contract_checks:
-        description: JSON object of generic host-side post-run workspace checks. Supports paths_exist and glob_min_count.
+        description: JSON object of generic host-side post-run workspace checks. Supports paths_exist, glob_min_count, entry_points, and forbidden_phrases.
         type: string
         default: "{}"
       include_agent_runtime_dependencies:
