@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.121.17] - 2026-06-13
+
+### Fixed
+- forward generic Codebox runtime config
+
 ## [2.121.16] - 2026-06-13
 
 ### Changed
