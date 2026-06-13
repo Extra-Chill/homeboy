@@ -735,9 +735,20 @@ function recordLifecycle(results, scenario, lifecycle) {
   scenario.metrics.writable_paths_satisfied = !lifecycle.writablePaths.enabled || lifecycle.writablePaths.success ? 1 : 0;
   scenario.metrics.workspace_contract_satisfied = !lifecycle.workspaceContract.enabled || lifecycle.workspaceContract.success ? 1 : 0;
   scenario.metrics.pr_opened = lifecycle.publication.opened ? 1 : 0;
+  scenario.metrics.pr_opened_mean = scenario.metrics.pr_opened;
   scenario.metrics.file_written = lifecycle.capture.changed ? 1 : 0;
+  scenario.metrics.file_written_mean = scenario.metrics.file_written;
   if (lifecycle.success && lifecycle.publication.opened) {
     metadata.success_status = 'pr_opened';
+  }
+  if (metadata.success_status) {
+    metadata.engine_data.success_status = metadata.success_status;
+    if (plainObject(metadata.engine_data.eval_artifact)) {
+      metadata.engine_data.eval_artifact.run = plainObject(metadata.engine_data.eval_artifact.run)
+        ? metadata.engine_data.eval_artifact.run
+        : {};
+      metadata.engine_data.eval_artifact.run.success_status = metadata.success_status;
+    }
   }
   if (!lifecycle.success) {
     scenario.status = 'failed';
