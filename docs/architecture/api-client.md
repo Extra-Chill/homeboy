@@ -40,7 +40,7 @@ Project auth variables choose their source in `api.auth.variables`:
 {
   "api": {
     "enabled": true,
-    "base_url": "https://atomic-api.wordpress.com/api/v1.0",
+    "base_url": "https://api.example.test/v1",
     "auth": {
       "header": "Auth: {{token}}",
       "variables": {

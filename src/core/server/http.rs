@@ -481,7 +481,7 @@ mod tests {
     fn builds_client_with_socks_proxy() {
         let config = ApiConfig {
             enabled: true,
-            base_url: "https://atomic-api.wordpress.com/api/v1.0".to_string(),
+            base_url: "https://api.example.test/v1".to_string(),
             proxy_url: Some("socks5://127.0.0.1:8080".to_string()),
             auth: None,
         };
