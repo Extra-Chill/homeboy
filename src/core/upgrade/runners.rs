@@ -571,7 +571,7 @@ fn runner_recovery_commands(
             "homeboy runner exec {} --ssh -- sh -lc {}",
             shell_arg(runner_id),
             shell_arg(&format!(
-                "ln -sf {} $(command -v homeboy)",
+                "ln -sf $(command -v homeboy) {}",
                 shell_arg(homeboy_path)
             ))
         ));
@@ -1339,7 +1339,7 @@ mod tests {
             .recovery_commands
             .contains(&"homeboy upgrade --force --upgrade-runner lab".to_string()));
         assert!(updated[0].recovery_commands.contains(&
-            "homeboy runner exec lab --ssh -- sh -lc 'ln -sf /home/chubes/.cargo/bin/homeboy $(command -v homeboy)'"
+            "homeboy runner exec lab --ssh -- sh -lc 'ln -sf $(command -v homeboy) /home/chubes/.cargo/bin/homeboy'"
                 .to_string()
         ));
         assert!(updated[0].detail.contains("runner PATH drift detected"));

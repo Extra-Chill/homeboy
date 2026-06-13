@@ -147,6 +147,7 @@ pub fn run_bench_list_workflow(
 ) -> Result<BenchListWorkflowResult> {
     let results_file = run_dir.step_file(run_dir::files::BENCH_RESULTS);
     if component.has_script(ExtensionCapability::Bench) {
+        let list_env = bench_component_script_list_env(&args)?;
         let source_path = crate::core::extension::component_script::source_path(
             component,
             args.path_override.as_deref(),
@@ -157,7 +158,7 @@ pub fn run_bench_list_workflow(
             &source_path,
             run_dir,
             true,
-            &[("HOMEBOY_BENCH_LIST_ONLY".to_string(), "1".to_string())],
+            &list_env,
             &args.passthrough_args,
         )?;
         ensure_bench_list_success(
@@ -573,6 +574,7 @@ pub fn run_main_bench_workflow(
 
     if component.has_script(ExtensionCapability::Bench) {
         clear_responsiveness_file(run_dir)?;
+        let component_env = bench_component_script_env(&args)?;
         let script_output =
             crate::core::extension::component_script::run_component_scripts_with_run_dir(
                 component,
@@ -580,7 +582,7 @@ pub fn run_main_bench_workflow(
                 source_path,
                 run_dir,
                 true,
-                &bench_component_script_env(&args),
+                &component_env,
                 &args.passthrough_args,
             )?;
         preserve_memory_timeline_artifacts(script_output.child_resource.as_ref(), run_dir, None)?;
@@ -925,7 +927,21 @@ pub fn run_main_bench_workflow(
     })
 }
 
-fn bench_component_script_env(args: &BenchRunWorkflowArgs) -> Vec<(String, String)> {
+fn bench_component_script_list_env(args: &BenchListWorkflowArgs) -> Result<Vec<(String, String)>> {
+    let mut env = vec![("HOMEBOY_BENCH_LIST_ONLY".to_string(), "1".to_string())];
+    env.push((
+        "HOMEBOY_SETTINGS_JSON".to_string(),
+        crate::core::extension::build_settings_json_from_manifest(
+            &serde_json::json!({}),
+            &[],
+            &args.settings,
+            &args.settings_json,
+        )?,
+    ));
+    Ok(env)
+}
+
+fn bench_component_script_env(args: &BenchRunWorkflowArgs) -> Result<Vec<(String, String)>> {
     let mut env = vec![
         (
             "HOMEBOY_BENCH_ITERATIONS".to_string(),
@@ -943,9 +959,18 @@ fn bench_component_script_env(args: &BenchRunWorkflowArgs) -> Vec<(String, Strin
             "HOMEBOY_BENCH_SCENARIOS".to_string(),
             args.scenario_ids.join(","),
         ),
+        (
+            "HOMEBOY_SETTINGS_JSON".to_string(),
+            crate::core::extension::build_settings_json_from_manifest(
+                &serde_json::json!({}),
+                &[],
+                &args.settings,
+                &args.settings_json,
+            )?,
+        ),
     ];
     env.extend(args.ci_env.iter().cloned());
-    env
+    Ok(env)
 }
 
 fn format_diagnostic_hint(diagnostic: &BenchDiagnostic) -> String {
@@ -1878,6 +1903,84 @@ mod tests {
                 PathBuf::from("/tmp/bench/studio-agent-runtime.bench.mjs"),
                 PathBuf::from("/tmp/bench/WpAdminLoad.php"),
             ]
+        );
+    }
+
+    #[test]
+    fn component_script_bench_env_includes_typed_settings_json() {
+        let env = bench_component_script_env(&BenchRunWorkflowArgs {
+            component_label: "studio-web".to_string(),
+            component_id: "studio-web".to_string(),
+            path_override: None,
+            settings: vec![("workflow_bench_env.FOO".to_string(), "bar".to_string())],
+            settings_json: vec![
+                (
+                    "workflow_bench_env".to_string(),
+                    serde_json::json!({ "WORKFLOW_BENCH_RUN_ID": "component-script-run" }),
+                ),
+            ],
+            iterations: 10,
+            warmup_iterations: None,
+            execution: BenchRunExecution { runs: 1, concurrency: 1 },
+            baseline_flags: BaselineFlags {
+                baseline: false,
+                ignore_baseline: true,
+                ratchet: false,
+            },
+            regression_threshold_percent: 5.0,
+            json_summary: false,
+            ci_env: Vec::new(),
+            passthrough_args: Vec::new(),
+            scenario_ids: Vec::new(),
+            rig_id: None,
+            shared_state: None,
+            extra_workloads: Vec::new(),
+            invocation_requirements: InvocationRequirements::default(),
+        })
+        .expect("component-script env");
+
+        let settings = env
+            .iter()
+            .find_map(|(key, value)| (key == "HOMEBOY_SETTINGS_JSON").then_some(value))
+            .expect("settings json env");
+        let parsed: serde_json::Value = serde_json::from_str(settings).expect("settings json");
+        assert_eq!(
+            parsed["workflow_bench_env"]["WORKFLOW_BENCH_RUN_ID"],
+            "component-script-run"
+        );
+        assert!(parsed["workflow_bench_env"]["FOO"].is_null());
+    }
+
+    #[test]
+    fn component_script_bench_list_env_includes_typed_settings_json() {
+        let env = bench_component_script_list_env(&BenchListWorkflowArgs {
+            component_label: "studio-web".to_string(),
+            component_id: "studio-web".to_string(),
+            path_override: None,
+            settings: Vec::new(),
+            settings_json: vec![
+                (
+                    "workflow_bench_env".to_string(),
+                    serde_json::json!({ "WORKFLOW_BENCH_SCENARIO": "plain-site-data-machine" }),
+                ),
+            ],
+            passthrough_args: Vec::new(),
+            scenario_ids: Vec::new(),
+            extra_workloads: Vec::new(),
+        })
+        .expect("component-script list env");
+
+        assert!(env
+            .iter()
+            .any(|(key, value)| key == "HOMEBOY_BENCH_LIST_ONLY" && value == "1"));
+        let settings = env
+            .iter()
+            .find_map(|(key, value)| (key == "HOMEBOY_SETTINGS_JSON").then_some(value))
+            .expect("settings json env");
+        let parsed: serde_json::Value = serde_json::from_str(settings).expect("settings json");
+        assert_eq!(
+            parsed["workflow_bench_env"]["WORKFLOW_BENCH_SCENARIO"],
+            "plain-site-data-machine"
         );
     }
 
