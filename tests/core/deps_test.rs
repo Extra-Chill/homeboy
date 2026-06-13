@@ -202,21 +202,53 @@ fn stack_plan_walks_declared_downstream_edges_in_order() {
 
     let plan = deps::stack_plan_from_components("chubes4/html-to-blocks-converter", &components).unwrap();
 
-    assert_eq!(plan.step_count, 2);
-    assert_eq!(plan.step_count, plan.plan.steps.len());
-    assert_eq!(plan.planned_steps(), plan.steps);
-    assert_eq!(plan.steps[0].downstream, "block-format-bridge");
-    assert_eq!(plan.steps[0].package, "chubes4/html-to-blocks-converter");
+    let steps = plan.planned_steps();
+
+    assert_eq!(plan.step_count(), 2);
+    assert_eq!(plan.step_count(), plan.plan.steps.len());
+    assert_eq!(steps[0].downstream, "block-format-bridge");
+    assert_eq!(steps[0].package, "chubes4/html-to-blocks-converter");
     assert_eq!(
-        plan.steps[0].update_command,
+        steps[0].update_command,
         "homeboy deps update chubes4/html-to-blocks-converter --path /repo/block-format-bridge"
     );
-    assert_eq!(plan.steps[0].post_update, vec!["composer build"]);
-    assert_eq!(plan.steps[1].downstream, "static-site-importer");
+    assert_eq!(steps[0].post_update, vec!["composer build"]);
+    assert_eq!(steps[1].downstream, "static-site-importer");
     assert_eq!(
-        plan.steps[1].update_command,
+        steps[1].update_command,
         "composer update chubes4/block-format-bridge"
     );
+}
+
+#[test]
+fn stack_plan_compatibility_fields_are_serialized_from_homeboy_plan() {
+    let components = vec![
+        stack_component(
+            "upstream",
+            "/repo/upstream",
+            vec![DependencyStackEdge {
+                upstream: "upstream".to_string(),
+                downstream: "downstream".to_string(),
+                package: "fixture/upstream".to_string(),
+                update: None,
+                rebuild: false,
+                post_update: Vec::new(),
+                test: Vec::new(),
+            }],
+        ),
+        stack_component("downstream", "/repo/downstream", Vec::new()),
+    ];
+    let mut plan = deps::stack_plan_from_components("upstream", &components).unwrap();
+
+    plan.plan.subject.component_id = Some("renamed-upstream".to_string());
+    plan.plan.steps.clear();
+    plan.plan.summary = None;
+
+    let json = serde_json::to_value(&plan).unwrap();
+
+    assert_eq!(json["upstream"], "renamed-upstream");
+    assert_eq!(json["step_count"], 0);
+    assert_eq!(json["steps"], serde_json::json!([]));
 }
 
 #[test]
@@ -257,13 +289,15 @@ fn stack_plan_derives_edges_from_provider_reported_dependency_identities() {
 
     let plan = deps::stack_plan_from_components("upstream", &components).unwrap();
 
-    assert_eq!(plan.step_count, 1);
-    assert_eq!(plan.steps[0].declaring_component_id, "downstream");
-    assert_eq!(plan.steps[0].upstream, "upstream");
-    assert_eq!(plan.steps[0].downstream, "downstream");
-    assert_eq!(plan.steps[0].package, "fixture/upstream");
+    let steps = plan.planned_steps();
+
+    assert_eq!(plan.step_count(), 1);
+    assert_eq!(steps[0].declaring_component_id, "downstream");
+    assert_eq!(steps[0].upstream, "upstream");
+    assert_eq!(steps[0].downstream, "downstream");
+    assert_eq!(steps[0].package, "fixture/upstream");
     assert_eq!(
-        plan.steps[0].update_command,
+        steps[0].update_command,
         format!(
             "homeboy deps update fixture/upstream --path {}",
             downstream_path.display()
@@ -318,10 +352,12 @@ fn stack_plan_keeps_explicit_edge_config_when_provider_edge_matches() {
 
     let plan = deps::stack_plan_from_components("upstream", &components).unwrap();
 
-    assert_eq!(plan.step_count, 1);
-    assert_eq!(plan.steps[0].update_command, "fixture-provider update fixture/upstream");
-    assert_eq!(plan.steps[0].post_update, vec!["fixture-provider build"]);
-    assert_eq!(plan.steps[0].test, vec!["fixture-provider test"]);
+    let steps = plan.planned_steps();
+
+    assert_eq!(plan.step_count(), 1);
+    assert_eq!(steps[0].update_command, "fixture-provider update fixture/upstream");
+    assert_eq!(steps[0].post_update, vec!["fixture-provider build"]);
+    assert_eq!(steps[0].test, vec!["fixture-provider test"]);
 }
 
 #[test]
@@ -357,9 +393,11 @@ fn stack_plan_dedupes_cycles_by_edge_identity() {
 
     let plan = deps::stack_plan_from_components("a", &components).unwrap();
 
-    assert_eq!(plan.step_count, 2);
-    assert_eq!(plan.steps[0].downstream, "b");
-    assert_eq!(plan.steps[1].downstream, "a");
+    let steps = plan.planned_steps();
+
+    assert_eq!(plan.step_count(), 2);
+    assert_eq!(steps[0].downstream, "b");
+    assert_eq!(steps[1].downstream, "a");
 }
 
 #[test]

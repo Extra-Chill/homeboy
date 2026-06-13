@@ -3,7 +3,8 @@ use crate::core::deps::{update, DependencyUpdateOptions};
 use crate::core::plan::{HomeboyPlan, PlanKind, PlanStep, PlanValues};
 use crate::core::{Error, Result};
 use crate::extensions::deps_provider;
-use serde::{Deserialize, Serialize};
+use serde::ser::Error as SerializeError;
+use serde::{Deserialize, Serialize, Serializer};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::process::Command;
@@ -26,13 +27,36 @@ pub struct DependencyStackEdgeStatus {
     pub test: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DependencyStackPlan {
-    #[serde(flatten)]
     pub plan: HomeboyPlan,
-    pub upstream: String,
-    pub step_count: usize,
-    pub steps: Vec<DependencyStackPlanStep>,
+}
+
+impl Serialize for DependencyStackPlan {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut value = serde_json::to_value(&self.plan).map_err(S::Error::custom)?;
+        let object = value.as_object_mut().ok_or_else(|| {
+            S::Error::custom("dependency stack plan did not serialize to a JSON object")
+        })?;
+
+        object.insert(
+            "upstream".to_string(),
+            serde_json::Value::String(self.upstream().to_string()),
+        );
+        object.insert(
+            "step_count".to_string(),
+            serde_json::Value::Number(self.step_count().into()),
+        );
+        object.insert(
+            "steps".to_string(),
+            serde_json::to_value(self.planned_steps()).map_err(S::Error::custom)?,
+        );
+
+        value.serialize(serializer)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -165,7 +189,7 @@ pub fn stack_apply_plan(
     }
 
     Ok(DependencyStackApplyResult {
-        upstream: plan.upstream,
+        upstream: plan.upstream().to_string(),
         dry_run,
         step_count: steps.len(),
         steps,
@@ -310,18 +334,28 @@ impl DependencyStackPlan {
             .steps(steps.iter().map(stack_step))
             .summarize()
             .build();
-        let steps = stack_steps_from_plan(&plan);
+        Self::from_plan(plan)
+    }
 
-        Self {
-            step_count: plan
-                .summary
-                .as_ref()
-                .map(|summary| summary.total_steps)
-                .unwrap_or_else(|| plan.steps.len()),
-            plan,
-            upstream,
-            steps,
-        }
+    pub fn from_plan(plan: HomeboyPlan) -> Self {
+        Self { plan }
+    }
+
+    pub fn upstream(&self) -> &str {
+        self.plan
+            .subject
+            .component_id
+            .as_deref()
+            .or(self.plan.subject.description.as_deref())
+            .unwrap_or_default()
+    }
+
+    pub fn step_count(&self) -> usize {
+        self.plan
+            .summary
+            .as_ref()
+            .map(|summary| summary.total_steps)
+            .unwrap_or_else(|| self.plan.steps.len())
     }
 
     pub fn planned_steps(&self) -> Vec<DependencyStackPlanStep> {

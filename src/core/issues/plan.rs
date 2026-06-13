@@ -4,7 +4,8 @@
 //! function consumes them; [`apply_plan`](super::apply::apply_plan) turns the
 //! resulting [`ReconcilePlan`] into tracker calls.
 
-use serde::{Deserialize, Serialize};
+use serde::ser::Error as SerializeError;
+use serde::{Deserialize, Serialize, Serializer};
 
 use crate::core::code_audit::FindingConfidence;
 use crate::core::plan::{HomeboyPlan, PlanKind, PlanStep, PlanStepStatus, PlanValues};
@@ -169,11 +170,29 @@ pub enum ReconcileSkipReason {
 }
 
 /// The full reconciliation plan: every action, in execution order.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
 pub struct ReconcilePlan {
-    #[serde(flatten)]
     pub plan: HomeboyPlan,
     pub actions: Vec<ReconcileAction>,
+}
+
+impl Serialize for ReconcilePlan {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut value = serde_json::to_value(&self.plan).map_err(S::Error::custom)?;
+        let object = value.as_object_mut().ok_or_else(|| {
+            S::Error::custom("issue reconcile plan did not serialize to a JSON object")
+        })?;
+
+        object.insert(
+            "actions".to_string(),
+            serde_json::to_value(self.planned_actions()).map_err(S::Error::custom)?,
+        );
+
+        value.serialize(serializer)
+    }
 }
 
 impl ReconcilePlan {
@@ -408,5 +427,23 @@ mod tests {
 
         assert_eq!(plan.actions, actions);
         assert_eq!(plan.planned_actions(), actions);
+    }
+
+    #[test]
+    fn issue_reconcile_serializes_actions_from_homeboy_plan_steps() {
+        let action = ReconcileAction::Close {
+            number: 42,
+            category: "resolved".to_string(),
+            comment: "Resolved by latest run.".to_string(),
+        };
+        let mut plan = ReconcilePlan::new("homeboy", vec![action]);
+
+        plan.actions.clear();
+
+        let json = serde_json::to_value(&plan).unwrap();
+
+        assert_eq!(json["actions"].as_array().map(Vec::len), Some(1));
+        assert_eq!(json["actions"][0]["kind"], "close");
+        assert_eq!(json["actions"][0]["number"], 42);
     }
 }
