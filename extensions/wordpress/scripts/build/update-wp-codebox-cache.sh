@@ -104,6 +104,14 @@ fail() {
 command -v git >/dev/null 2>&1 || fail "git is required to update WP Codebox cache"
 command -v "$NPM_BIN" >/dev/null 2>&1 || fail "npm executable not found on runner: $NPM_BIN"
 
+case "$NPM_BIN" in
+    */*)
+        NPM_DIR="$(cd "$(dirname "$NPM_BIN")" && pwd -P)" || fail "failed to resolve npm executable directory: $NPM_BIN"
+        PATH="$NPM_DIR:$PATH"
+        export PATH
+        ;;
+esac
+
 if [ -d "$CACHE_DIR" ] && [ ! -d "$CACHE_DIR/.git" ]; then
     fail "cache dir exists but is not a git checkout: $CACHE_DIR"
 fi

@@ -15,8 +15,13 @@ FAKE_BIN="${WORK_DIR}/bin"
 mkdir -p "$FAKE_BIN"
 
 cat > "${FAKE_BIN}/npm" <<'NPM'
+#!/usr/bin/env node
+NPM
+
+cat > "${FAKE_BIN}/node" <<'NODE'
 #!/usr/bin/env bash
 set -euo pipefail
+shift
 prefix=""
 args=()
 while [ "$#" -gt 0 ]; do
@@ -45,8 +50,8 @@ case "${args[*]}" in
         exit 2
         ;;
 esac
-NPM
-chmod +x "${FAKE_BIN}/npm"
+NODE
+chmod +x "${FAKE_BIN}/npm" "${FAKE_BIN}/node"
 
 git init --bare --quiet "$REMOTE_REPO"
 git clone --quiet "$REMOTE_REPO" "$SOURCE_WORK"
@@ -93,6 +98,17 @@ case "$DRY_RUN_OUTPUT" in
     *)
         echo "Dry-run output did not include target and ref" >&2
         echo "$DRY_RUN_OUTPUT" >&2
+        exit 1
+        ;;
+esac
+
+PATH_WITHOUT_FAKE_BIN="$(printf '%s' "$PATH" | tr ':' '\n' | grep -v -F "$FAKE_BIN" | paste -sd ':' -)"
+OUTPUT="$(PATH="$PATH_WITHOUT_FAKE_BIN" "$SCRIPT" --source "$REMOTE_REPO" --ref fixture-ref --cache-dir "$CACHE_DIR" --npm "${FAKE_BIN}/npm")"
+case "$OUTPUT" in
+    *"WP Codebox cache SHA: ${UPDATED_SHA}"*) ;;
+    *)
+        echo "Expected absolute npm path run to succeed" >&2
+        echo "$OUTPUT" >&2
         exit 1
         ;;
 esac
