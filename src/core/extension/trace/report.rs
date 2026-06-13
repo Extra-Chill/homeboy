@@ -371,8 +371,22 @@ pub struct TraceCompareRunOrderOutput {
 pub struct TraceBrowserProofOutput {
     pub baseline_dirs: Vec<String>,
     pub candidate_dirs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub baseline_runs: Vec<TraceBrowserProofRunRefOutput>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub candidate_runs: Vec<TraceBrowserProofRunRefOutput>,
     pub markdown: String,
     pub report: serde_json::Value,
+}
+
+#[derive(Serialize, Clone)]
+pub struct TraceBrowserProofRunRefOutput {
+    pub index: usize,
+    pub status: String,
+    pub exit_code: i32,
+    pub artifact_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact_dir: Option<String>,
 }
 
 #[derive(Serialize, Clone)]

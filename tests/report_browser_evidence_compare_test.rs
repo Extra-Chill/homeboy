@@ -34,6 +34,11 @@ fn args(root: &Path, include_local_paths: bool) -> BrowserEvidenceCompareArgs {
         candidate_label: "candidate-pr".to_string(),
         include_local_paths,
         format: "markdown".to_string(),
+        visual_compare: false,
+        visual_artifacts_dir: None,
+        visual_compare_provider: None,
+        visual_provider_args: Vec::new(),
+        visual_threshold: None,
     }
 }
 
@@ -394,6 +399,117 @@ fn promotes_wp_codebox_browser_summary_metrics() {
         .iter()
         .any(|artifact| artifact.target == "files/browser/screenshot.png"));
 
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn can_run_visual_compare_through_declared_provider() {
+    let root = tmp_dir("visual-compare");
+    let baseline_browser = root.join("baseline/files/browser");
+    let candidate_browser = root.join("candidate/files/browser");
+    fs::create_dir_all(&baseline_browser).expect("baseline browser dir");
+    fs::create_dir_all(&candidate_browser).expect("candidate browser dir");
+    fs::write(baseline_browser.join("screenshot.png"), "baseline image").expect("baseline image");
+    fs::write(candidate_browser.join("screenshot.png"), "candidate image")
+        .expect("candidate image");
+    write_fixture_file(
+        &root.join("baseline"),
+        "summary.json",
+        r#"{
+            "schema":"wp-codebox/browser-probe/v1",
+            "summary": { "assertions": {"total":1,"passed":1,"failed":0,"skipped":0}, "networkEvents": 1 },
+            "files": { "screenshot": "files/browser/screenshot.png" }
+        }"#,
+    );
+    write_fixture_file(
+        &root.join("candidate"),
+        "summary.json",
+        r#"{
+            "schema":"wp-codebox/browser-probe/v1",
+            "summary": { "assertions": {"total":1,"passed":1,"failed":0,"skipped":0}, "networkEvents": 1 },
+            "files": { "screenshot": "files/browser/screenshot.png" }
+        }"#,
+    );
+    let provider = root.join("fake-visual-provider.js");
+    fs::write(
+        &provider,
+        r#"
+const fs = require('node:fs');
+const input = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+fs.writeFileSync(process.env.HOMEBOY_FAKE_VISUAL_INPUT, JSON.stringify({ input }));
+process.stdout.write(JSON.stringify({
+    status: 'different',
+    metrics: {
+      visual_mismatch_ratio: 0.125,
+      visual_mismatch_pixels: 25,
+      visual_total_pixels: 200,
+      visual_dimension_mismatch: false
+    },
+    artifacts: {
+      visual_source_screenshot: { path: 'visual/source.png', kind: 'png' },
+      visual_candidate_screenshot: { path: 'visual/candidate.png', kind: 'png' },
+      visual_diff_screenshot: { path: 'visual/diff.png', kind: 'png' },
+      visual_diff_json: { path: 'visual/diff.json', kind: 'json' }
+    }
+  }));
+"#,
+    )
+    .expect("provider should write");
+    let input_capture = root.join("visual-input-capture.json");
+    let previous_capture = std::env::var_os("HOMEBOY_FAKE_VISUAL_INPUT");
+    unsafe {
+        std::env::set_var("HOMEBOY_FAKE_VISUAL_INPUT", &input_capture);
+    }
+
+    let mut compare_args = args(&root, false);
+    compare_args.visual_compare = true;
+    compare_args.visual_artifacts_dir =
+        Some(root.join("visual-output").to_string_lossy().to_string());
+    compare_args.visual_compare_provider = Some("node".to_string());
+    compare_args.visual_provider_args = vec![provider.to_string_lossy().to_string()];
+    compare_args.visual_threshold = Some(0.1);
+    let report = browser_evidence_compare_from_args(&compare_args).expect("report renders");
+
+    let variant = report.variants.first().expect("variant should exist");
+    let visual = variant.visual_compare.as_ref().expect("visual result");
+    assert_eq!(visual.status.as_deref(), Some("different"));
+    assert_eq!(visual.mismatch_ratio, Some(0.125));
+    assert_eq!(visual.mismatch_pixels, Some(25));
+    assert_eq!(visual.total_pixels, Some(200));
+    assert!(visual
+        .artifacts
+        .iter()
+        .any(|artifact| artifact.label == "visual_diff_screenshot"));
+    assert!(report.markdown.contains("**Visual compare**"));
+    assert!(report
+        .markdown
+        .contains("visual_diff_json: visual/diff.json"));
+
+    let captured: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(&input_capture).expect("captured input should exist"),
+    )
+    .expect("captured input should parse");
+    assert_eq!(captured["input"]["threshold"], 0.1);
+    assert_eq!(
+        captured["input"]["schema"],
+        "homeboy/visual-compare-request/v1"
+    );
+    assert!(captured["input"]["source_screenshot"]
+        .as_str()
+        .expect("source screenshot")
+        .ends_with("baseline/files/browser/screenshot.png"));
+    assert!(captured["input"]["candidate_screenshot"]
+        .as_str()
+        .expect("candidate screenshot")
+        .ends_with("candidate/files/browser/screenshot.png"));
+
+    unsafe {
+        if let Some(value) = previous_capture {
+            std::env::set_var("HOMEBOY_FAKE_VISUAL_INPUT", value);
+        } else {
+            std::env::remove_var("HOMEBOY_FAKE_VISUAL_INPUT");
+        }
+    }
     let _ = fs::remove_dir_all(&root);
 }
 

@@ -13,8 +13,8 @@ pub use bench_coverage::{
 };
 pub use browser_evidence_compare::{
     browser_evidence_compare_from_args, browser_evidence_compare_from_dirs,
-    render_browser_evidence_compare_from_args, BrowserEvidenceCompareArgs,
-    BrowserEvidenceCompareReport,
+    browser_evidence_compare_from_dirs_with_visual, render_browser_evidence_compare_from_args,
+    BrowserEvidenceCompareArgs, BrowserEvidenceCompareReport, VisualCompareOptions,
 };
 pub use failure_digest::{render_failure_digest_from_args, FailureDigestArgs};
 pub use performance_digest::{

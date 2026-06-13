@@ -129,6 +129,8 @@ pub(super) fn run_compare_targets(args: TraceArgs) -> CmdResult<TraceCommandOutp
         &candidate_target.input,
         &baseline_aggregate,
         &candidate_aggregate,
+        &output_dir,
+        &args,
     )?;
     write_json_artifact(&compare_path, &compare)?;
     std::fs::write(
@@ -542,18 +544,22 @@ fn browser_proof_for_runs(
     candidate_label: &str,
     baseline: &extension_trace::TraceAggregateOutput,
     candidate: &extension_trace::TraceAggregateOutput,
+    output_dir: &Path,
+    args: &TraceArgs,
 ) -> homeboy::core::Result<Option<extension_trace::TraceBrowserProofOutput>> {
     let baseline_dirs = run_artifact_dirs(baseline);
     let candidate_dirs = run_artifact_dirs(candidate);
     if baseline_dirs.is_empty() && candidate_dirs.is_empty() {
         return Ok(None);
     }
-    let report = crate::commands::report::browser_evidence_compare_from_dirs(
+    let visual_options = visual_compare_options(args, output_dir)?;
+    let report = crate::commands::report::browser_evidence_compare_from_dirs_with_visual(
         &baseline_dirs,
         &candidate_dirs,
         baseline_label,
         candidate_label,
         false,
+        visual_options,
     )?;
     if !has_promoted_browser_evidence(&report) {
         return Ok(None);
@@ -574,8 +580,52 @@ fn browser_proof_for_runs(
             .iter()
             .map(|path| path.to_string_lossy().to_string())
             .collect(),
+        baseline_runs: browser_proof_run_refs(baseline),
+        candidate_runs: browser_proof_run_refs(candidate),
         markdown,
         report: report_json,
+    }))
+}
+
+fn browser_proof_run_refs(
+    aggregate: &extension_trace::TraceAggregateOutput,
+) -> Vec<extension_trace::TraceBrowserProofRunRefOutput> {
+    aggregate
+        .runs
+        .iter()
+        .filter(|run| !run.artifact_path.is_empty())
+        .map(|run| extension_trace::TraceBrowserProofRunRefOutput {
+            index: run.index,
+            status: run.status.clone(),
+            exit_code: run.exit_code,
+            artifact_path: run.artifact_path.clone(),
+            artifact_dir: Path::new(&run.artifact_path)
+                .parent()
+                .map(|path| path.to_string_lossy().to_string()),
+        })
+        .collect()
+}
+
+fn visual_compare_options(
+    args: &TraceArgs,
+    output_dir: &Path,
+) -> homeboy::core::Result<Option<crate::commands::report::VisualCompareOptions>> {
+    if !args.visual_compare {
+        return Ok(None);
+    }
+    let Some(provider_command) = args.visual_compare_provider.clone() else {
+        return Err(homeboy::core::Error::validation_missing_argument(vec![
+            "--visual-compare-provider".to_string(),
+        ]));
+    };
+    Ok(Some(crate::commands::report::VisualCompareOptions {
+        artifacts_dir: args
+            .visual_artifacts_dir
+            .clone()
+            .unwrap_or_else(|| output_dir.join("visual-compare")),
+        provider_command,
+        provider_args: args.visual_provider_args.clone(),
+        threshold: args.visual_threshold,
     }))
 }
 
@@ -784,6 +834,11 @@ mod tests {
             axes: Vec::new(),
             matrix_env: Vec::new(),
             output_dir: None,
+            visual_compare: false,
+            visual_artifacts_dir: None,
+            visual_compare_provider: None,
+            visual_provider_args: Vec::new(),
+            visual_threshold: None,
             keep_overlay: false,
             canonical: false,
             allow_local_toolchain: true,
@@ -904,5 +959,52 @@ mod tests {
                 .expect("active leases")
                 .is_empty());
         });
+    }
+
+    #[test]
+    fn browser_proof_run_refs_include_child_artifact_addresses() {
+        let aggregate = extension_trace::TraceAggregateOutput {
+            command: "trace.aggregate",
+            passed: true,
+            status: "pass".to_string(),
+            component: "woo-stripe".to_string(),
+            scenario_id: "ece-visual".to_string(),
+            phase_preset: None,
+            repeat: 1,
+            run_count: 1,
+            failure_count: 0,
+            exit_code: 0,
+            schedule: None,
+            run_order: Vec::new(),
+            rig_state: None,
+            overlays: Vec::new(),
+            runs: vec![extension_trace::TraceAggregateRunOutput {
+                index: 1,
+                passed: true,
+                status: "pass".to_string(),
+                exit_code: 0,
+                artifact_path: "/tmp/homeboy/run-1/trace.json".to_string(),
+                scenario_id: Some("ece-visual".to_string()),
+                summary: None,
+                failure: None,
+            }],
+            spans: Vec::new(),
+            metrics: Vec::new(),
+            guardrails: Vec::new(),
+            guardrail_failure_count: 0,
+            focus_span_ids: Vec::new(),
+            focus_spans: Vec::new(),
+            classification_summaries: Vec::new(),
+            unmatched_span_metadata_ids: Vec::new(),
+            profile: None,
+        };
+
+        let refs = browser_proof_run_refs(&aggregate);
+
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].index, 1);
+        assert_eq!(refs[0].status, "pass");
+        assert_eq!(refs[0].artifact_path, "/tmp/homeboy/run-1/trace.json");
+        assert_eq!(refs[0].artifact_dir.as_deref(), Some("/tmp/homeboy/run-1"));
     }
 }
