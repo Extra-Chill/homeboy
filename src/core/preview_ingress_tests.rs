@@ -374,6 +374,29 @@ fn install_plan_renders_generic_non_secret_operator_config() {
         .any(|item| item.contains("Wildcard DNS")));
     assert!(plan.dry_run);
     assert!(!plan.applied);
+    assert_eq!(plan.plan.mode.as_deref(), Some("preview"));
+    assert_eq!(plan.plan.policy["would_mutate"], json!(false));
+    assert_eq!(plan.plan.summary.as_ref().expect("summary").ready, 8);
+    assert!(plan
+        .plan
+        .steps
+        .iter()
+        .any(|step| step.id == "preview_ingress.rollback_commands"));
+    assert!(plan
+        .plan
+        .steps
+        .iter()
+        .any(|step| step.id == "preview_ingress.smoke_checks"));
+    assert!(plan
+        .plan
+        .artifacts
+        .iter()
+        .any(|artifact| artifact.id == "preview_ingress.systemd_unit"));
+
+    let json = serde_json::to_value(&plan).expect("serialize install plan");
+    assert_eq!(json["server_id"], "preview-vps");
+    assert_eq!(json["writes"].as_array().expect("writes").len(), 3);
+    assert_eq!(json["plan"]["policy"]["dry_run"], true);
 }
 
 #[test]
@@ -386,6 +409,20 @@ fn install_status_plan_is_machine_readable_without_live_probe() {
         .checks
         .iter()
         .all(|check| check.status == PreviewIngressInstallCheckStatus::Planned));
+    assert_eq!(status.plan.mode.as_deref(), Some("preview"));
+    assert_eq!(status.plan.policy["would_mutate"], json!(false));
+    assert_eq!(status.plan.policy["probed"], json!(false));
+    assert_eq!(status.plan.summary.as_ref().expect("summary").ready, 5);
+    assert_eq!(status.plan.steps.len(), status.checks.len());
+    assert!(status
+        .plan
+        .artifacts
+        .iter()
+        .any(|artifact| artifact.id == "preview_ingress.status_commands"));
+
+    let json = serde_json::to_value(&status).expect("serialize status plan");
+    assert_eq!(json["checks"].as_array().expect("checks").len(), 5);
+    assert_eq!(json["plan"]["summary"]["ready"], 5);
 }
 
 #[test]

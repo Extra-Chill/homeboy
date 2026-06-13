@@ -14,6 +14,9 @@ use crate::core::preview_client::{PreviewIngressRequest, PreviewIngressResponse}
 
 use crate::core::error::{Error, Result};
 use crate::core::paths;
+use crate::core::plan::{
+    HomeboyPlan, PlanArtifact, PlanKind, PlanStep, PlanStepStatus, PlanValues,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PreviewIngressRoute {
@@ -99,9 +102,10 @@ impl Default for PreviewIngressInstallOptions {
     }
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct PreviewIngressInstallPlan {
     pub command: String,
+    pub plan: HomeboyPlan,
     pub server_id: String,
     pub domain: String,
     pub public_host_pattern: String,
@@ -133,9 +137,10 @@ pub struct PreviewIngressWrite {
     pub description: String,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct PreviewIngressInstallStatusPlan {
     pub command: String,
+    pub plan: HomeboyPlan,
     pub server_id: String,
     pub domain: String,
     pub public_host_pattern: String,
@@ -322,8 +327,9 @@ pub fn render_install_plan(
     let local_status_url = format!("http://{}/_homeboy/preview-ingress/status", normalized.bind);
     let public_status_url = format!("https://{}/_homeboy/preview-ingress/status", dns_probe_host);
 
-    Ok(PreviewIngressInstallPlan {
+    let mut install_plan = PreviewIngressInstallPlan {
         command: "tunnel.preview_ingress.install".to_string(),
+        plan: HomeboyPlan::default(),
         server_id: normalized.server_id.clone(),
         domain: normalized.domain.clone(),
         public_host_pattern: normalized.public_host_pattern.clone(),
@@ -370,7 +376,10 @@ pub fn render_install_plan(
             "Store ingress pairing/client secrets through Homeboy secret/config surfaces before enabling live routes.".to_string(),
             "This generated plan contains only non-secret operator configuration.".to_string(),
         ],
-    })
+    };
+    install_plan.plan = install_homeboy_plan(&install_plan);
+
+    Ok(install_plan)
 }
 
 pub fn render_install_status_plan(
@@ -382,8 +391,9 @@ pub fn render_install_status_plan(
     let public_status_url = format!("https://{}/_homeboy/preview-ingress/status", dns_probe_host);
     let commands = install_status_commands(&normalized, &dns_probe_host);
 
-    Ok(PreviewIngressInstallStatusPlan {
+    let mut status_plan = PreviewIngressInstallStatusPlan {
         command: "tunnel.preview_ingress.install_status".to_string(),
+        plan: HomeboyPlan::default(),
         server_id: normalized.server_id,
         domain: normalized.domain,
         public_host_pattern: normalized.public_host_pattern,
@@ -405,7 +415,287 @@ pub fn render_install_status_plan(
             })
             .collect(),
         status_commands: commands,
-    })
+    };
+    status_plan.plan = install_status_homeboy_plan(&status_plan);
+
+    Ok(status_plan)
+}
+
+fn install_homeboy_plan(install: &PreviewIngressInstallPlan) -> HomeboyPlan {
+    let mut plan = HomeboyPlan::builder_for_description(
+        PlanKind::Custom,
+        format!("preview ingress install for {}", install.server_id),
+    )
+    .mode("preview")
+    .inputs(
+        PlanValues::new()
+            .string("command", &install.command)
+            .string("server_id", &install.server_id)
+            .string("domain", &install.domain)
+            .string("public_host_pattern", &install.public_host_pattern)
+            .string("dns_probe_host", &install.dns_probe_host)
+            .string("bind", &install.bind)
+            .string("service_name", &install.service_name)
+            .string("service_user", &install.service_user)
+            .string("service_group", &install.service_group)
+            .string("binary_path", &install.binary_path),
+    )
+    .policy_value("would_mutate", serde_json::json!(false))
+    .policy_value("dry_run", serde_json::json!(install.dry_run))
+    .policy_value("applied", serde_json::json!(install.applied))
+    .policy_value("secrets", serde_json::json!(&install.secrets_policy))
+    .policy_value(
+        "required_operator_config",
+        serde_json::json!(&install.required_operator_config),
+    )
+    .steps(install_plan_steps(install))
+    .summarize()
+    .build();
+
+    plan.artifacts = install_plan_artifacts(install);
+    plan.hints = vec![
+        "Preview only: this command renders operator work and does not write remote files."
+            .to_string(),
+    ];
+    plan
+}
+
+fn install_status_homeboy_plan(status: &PreviewIngressInstallStatusPlan) -> HomeboyPlan {
+    let mut plan = HomeboyPlan::builder_for_description(
+        PlanKind::Custom,
+        format!("preview ingress install status for {}", status.server_id),
+    )
+    .mode("preview")
+    .inputs(
+        PlanValues::new()
+            .string("command", &status.command)
+            .string("server_id", &status.server_id)
+            .string("domain", &status.domain)
+            .string("public_host_pattern", &status.public_host_pattern)
+            .string("dns_probe_host", &status.dns_probe_host)
+            .string("bind", &status.bind)
+            .string("service_name", &status.service_name),
+    )
+    .policy_value("would_mutate", serde_json::json!(false))
+    .policy_value("probed", serde_json::json!(status.probed))
+    .steps(install_status_plan_steps(status))
+    .summarize()
+    .build();
+
+    plan.artifacts = vec![plan_artifact(
+        "preview_ingress.status_commands",
+        None,
+        "command_list",
+        vec![
+            (
+                "description",
+                serde_json::json!("non-mutating status commands"),
+            ),
+            ("commands", serde_json::json!(&status.status_commands)),
+        ],
+    )];
+    plan.hints = vec![
+        "Status plan only: checks are rendered for operators and are not executed here."
+            .to_string(),
+    ];
+    plan
+}
+
+fn install_plan_steps(install: &PreviewIngressInstallPlan) -> Vec<PlanStep> {
+    let write_steps = install.writes.iter().enumerate().map(|(index, write)| {
+        PlanStep::ready(
+            format!("preview_ingress.write.{}", plan_slug(&write.path, index)),
+            "preview_ingress.write",
+        )
+        .label(format!("Plan write: {}", write.description))
+        .inputs(
+            PlanValues::new()
+                .string("path", &write.path)
+                .string("description", &write.description),
+        )
+        .build()
+    });
+
+    let grouped_steps = [
+        (
+            "preview_ingress.install_commands",
+            "preview_ingress.command_group",
+            "Plan install commands",
+            serde_json::json!(&install.install_commands),
+        ),
+        (
+            "preview_ingress.status_commands",
+            "preview_ingress.command_group",
+            "Plan status commands",
+            serde_json::json!(&install.status_commands),
+        ),
+        (
+            "preview_ingress.rollback_commands",
+            "preview_ingress.rollback",
+            "Plan rollback commands",
+            serde_json::json!(&install.rollback_commands),
+        ),
+        (
+            "preview_ingress.smoke_checks",
+            "preview_ingress.smoke_check",
+            "Plan smoke checks",
+            serde_json::json!(&install.smoke_checks),
+        ),
+        (
+            "preview_ingress.operator_config",
+            "preview_ingress.operator_config",
+            "Plan required operator config",
+            serde_json::json!(&install.required_operator_config),
+        ),
+    ]
+    .into_iter()
+    .map(|(id, kind, label, values)| {
+        PlanStep::ready(id, kind)
+            .label(label)
+            .inputs(PlanValues::new().json("items", values))
+            .build()
+    });
+
+    write_steps.chain(grouped_steps).collect()
+}
+
+fn install_status_plan_steps(status: &PreviewIngressInstallStatusPlan) -> Vec<PlanStep> {
+    status
+        .checks
+        .iter()
+        .enumerate()
+        .map(|(index, check)| {
+            PlanStep::builder(
+                format!(
+                    "preview_ingress.status_check.{}",
+                    plan_slug(&check.name, index)
+                ),
+                "preview_ingress.status_check",
+                match check.status {
+                    PreviewIngressInstallCheckStatus::Planned => PlanStepStatus::Ready,
+                    PreviewIngressInstallCheckStatus::Passed => PlanStepStatus::Success,
+                    PreviewIngressInstallCheckStatus::Failed => PlanStepStatus::Failed,
+                },
+            )
+            .label(format!("Check {}", check.name))
+            .inputs(
+                PlanValues::new()
+                    .string("name", &check.name)
+                    .string("command", &check.command),
+            )
+            .output_value("exit_code", serde_json::json!(check.exit_code))
+            .output_value("stdout", serde_json::json!(check.stdout))
+            .output_value("stderr", serde_json::json!(check.stderr))
+            .build()
+        })
+        .collect()
+}
+
+fn install_plan_artifacts(install: &PreviewIngressInstallPlan) -> Vec<PlanArtifact> {
+    let mut artifacts = vec![
+        plan_artifact(
+            "preview_ingress.systemd_unit",
+            Some(format!(
+                "/etc/systemd/system/{}.service",
+                install.service_name
+            )),
+            "systemd_unit",
+            vec![
+                ("description", serde_json::json!("systemd unit preview")),
+                ("content", serde_json::json!(&install.systemd_unit)),
+            ],
+        ),
+        plan_artifact(
+            "preview_ingress.nginx_site",
+            Some(format!(
+                "/etc/nginx/sites-available/{}",
+                install.service_name
+            )),
+            "nginx_site",
+            vec![
+                ("description", serde_json::json!("Nginx site preview")),
+                ("content", serde_json::json!(&install.nginx_site)),
+            ],
+        ),
+        plan_artifact(
+            "preview_ingress.caddy_site",
+            Some(format!("/etc/caddy/sites/{}.caddy", install.service_name)),
+            "caddy_site",
+            vec![
+                ("description", serde_json::json!("Caddy site preview")),
+                ("content", serde_json::json!(&install.caddy_site)),
+            ],
+        ),
+    ];
+
+    artifacts.extend([
+        plan_artifact(
+            "preview_ingress.install_commands",
+            None,
+            "command_list",
+            vec![("commands", serde_json::json!(&install.install_commands))],
+        ),
+        plan_artifact(
+            "preview_ingress.status_commands",
+            None,
+            "command_list",
+            vec![("commands", serde_json::json!(&install.status_commands))],
+        ),
+        plan_artifact(
+            "preview_ingress.rollback_commands",
+            None,
+            "command_list",
+            vec![("commands", serde_json::json!(&install.rollback_commands))],
+        ),
+        plan_artifact(
+            "preview_ingress.smoke_checks",
+            None,
+            "smoke_checks",
+            vec![("commands", serde_json::json!(&install.smoke_checks))],
+        ),
+    ]);
+
+    artifacts
+}
+
+fn plan_artifact(
+    id: impl Into<String>,
+    path: Option<String>,
+    artifact_type: impl Into<String>,
+    data: Vec<(&'static str, serde_json::Value)>,
+) -> PlanArtifact {
+    PlanArtifact {
+        id: id.into(),
+        path,
+        artifact_type: Some(artifact_type.into()),
+        data: data
+            .into_iter()
+            .map(|(key, value)| (key.to_string(), value))
+            .collect(),
+    }
+}
+
+fn plan_slug(value: &str, fallback: usize) -> String {
+    let slug = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .split('-')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+
+    if slug.is_empty() {
+        format!("item-{fallback}")
+    } else {
+        slug.chars().take(72).collect()
+    }
 }
 
 fn status_with_failures(
