@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.121.6] - 2026-06-13
+
+### Fixed
+- materialize WordPress bench dependency packages
+- enforce full workspace contract checks
+
 ## [2.121.5] - 2026-06-13
 
 ### Fixed
