@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.121.21] - 2026-06-13
+
+### Fixed
+- expose codebox runner command tool
+
 ## [2.121.20] - 2026-06-13
 
 ### Fixed
