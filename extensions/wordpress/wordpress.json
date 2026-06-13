@@ -977,7 +977,7 @@
       "label": "Validation Dependencies",
       "type": "string",
       "default": "",
-      "description": "Local component IDs or paths to load during PHPStan, autoload validation, and PHPUnit. Accepts comma-separated, newline-separated, or JSON-array string values."
+      "description": "Local component IDs or paths to load during PHPStan, autoload validation, PHPUnit, and bench. Accepts comma-separated, newline-separated, JSON-array string values, or bench-scoped array objects shaped like {dependency,path|slug,scenarios,profiles,profile_env}. Scoped objects let selected bench scenarios/profiles opt into expensive gateway dependencies without blocking unrelated profiles."
     },
     {
       "id": "user",
