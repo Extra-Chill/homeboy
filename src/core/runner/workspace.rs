@@ -156,6 +156,7 @@ pub fn sync_workspace(
             )?;
             let remote_path = deterministic_remote_path(workspace_root, &local_path, &git.head);
             if options.controller_routed_git
+                || git.branch.is_none()
                 || super::source_materialization::requires_controller_routed_workspace_sync(
                     &git.remote_url,
                 )
@@ -1266,6 +1267,98 @@ mod tests {
             assert_eq!(
                 fs::read_to_string(remote.join("file.txt")).expect("read synced file"),
                 "source-upgrade\n"
+            );
+        });
+    }
+
+    #[test]
+    fn git_sync_of_detached_extension_source_preserves_source_revision() {
+        crate::test_support::with_isolated_home(|_| {
+            let source = tempfile::tempdir().expect("source tempdir");
+            let runner_root = tempfile::tempdir().expect("runner root tempdir");
+            git(source.path(), &["init"]);
+            git(source.path(), &["config", "user.email", "test@example.com"]);
+            git(source.path(), &["config", "user.name", "Test User"]);
+            fs::create_dir_all(source.path().join("wordpress")).expect("extension dir");
+            fs::write(
+                source.path().join("wordpress/wordpress.json"),
+                r#"{"name":"WordPress","version":"1.0.0"}"#,
+            )
+            .expect("write extension manifest");
+            git(source.path(), &["add", "."]);
+            git(source.path(), &["commit", "-m", "base"]);
+            git(source.path(), &["checkout", "--detach", "HEAD"]);
+            fs::write(
+                source.path().join("wordpress/wordpress.json"),
+                r#"{"name":"WordPress","version":"2.0.0"}"#,
+            )
+            .expect("write detached extension manifest");
+            git(source.path(), &["add", "."]);
+            git(
+                source.path(),
+                &["commit", "-m", "detached extension update"],
+            );
+            git(
+                source.path(),
+                &[
+                    "remote",
+                    "add",
+                    "origin",
+                    "https://github.com/Extra-Chill/homeboy-extensions.git",
+                ],
+            );
+            let detached_head = git_output(source.path(), &["rev-parse", "HEAD"]).unwrap();
+            let detached_short =
+                git_output(source.path(), &["rev-parse", "--short", "HEAD"]).unwrap();
+
+            super::super::create(
+                &format!(
+                    r#"{{"id":"lab-local-detached-extension","kind":"local","workspace_root":"{}"}}"#,
+                    runner_root.path().display()
+                ),
+                false,
+            )
+            .expect("create runner");
+
+            let (output, exit_code) = sync_workspace(
+                "lab-local-detached-extension",
+                RunnerWorkspaceSyncOptions {
+                    path: source.path().display().to_string(),
+                    mode: RunnerWorkspaceSyncMode::Git,
+                    controller_routed_git: false,
+                    changed_since_base: None,
+                    git_fetch_refs: Vec::new(),
+                    snapshot_includes: Vec::new(),
+                },
+            )
+            .expect("sync workspace");
+
+            assert_eq!(exit_code, 0);
+            assert_eq!(output.sync_mode, RunnerWorkspaceSyncMode::Git);
+            assert_eq!(output.snapshot_identity, detached_head);
+            let remote = Path::new(&output.remote_path);
+            assert_eq!(
+                git_output(remote, &["rev-parse", "HEAD"]).unwrap(),
+                detached_head
+            );
+            assert_eq!(
+                git_output(remote, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap(),
+                "HEAD"
+            );
+
+            let install = crate::core::extension::install(
+                &remote.join("wordpress").display().to_string(),
+                Some("wordpress"),
+            )
+            .expect("install extension from synced detached workspace");
+
+            assert_eq!(
+                install.source_revision.as_deref(),
+                Some(detached_short.as_str())
+            );
+            assert_eq!(
+                crate::core::extension::read_source_revision("wordpress").as_deref(),
+                Some(detached_short.as_str())
             );
         });
     }
