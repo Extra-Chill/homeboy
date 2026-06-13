@@ -400,6 +400,51 @@ homeboy_wp_codebox_selected_scenarios_json() {
     ' <<< "$selected_value"
 }
 
+homeboy_wp_codebox_filter_scoped_validation_dependencies() {
+    local selected_scenarios_json
+    selected_scenarios_json="$(homeboy_wp_codebox_selected_scenarios_json)"
+
+    settings_json=$(jq -nc \
+        --argjson settings "$settings_json" \
+        --argjson selectedScenarios "$selected_scenarios_json" \
+        --arg envProfiles "${HOMEBOY_BENCH_PROFILES:-}" \
+        'def list($value):
+            if ($value | type) == "array" then $value
+            elif ($value | type) == "string" then ($value | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(. != "")))
+            elif $value == null then []
+            else [] end;
+        def selected_profiles($entry):
+            ($entry.profile_env // $entry.profiles_env // "WC_CHECKOUT_GATEWAY_MATRIX_PROFILES") as $envName |
+            (($settings.bench_env // {})[$envName] // env[$envName] // $envProfiles // "") | list(.);
+        def scenario_matches($entry):
+            list($entry.scenarios // $entry.scenario_ids // $entry.scenario // $entry.scenario_id // null) as $scopes |
+            ($scopes | length) == 0
+            or ($selectedScenarios | length) == 0
+            or any($scopes[]; $selectedScenarios[.] == true);
+        def profile_matches($entry):
+            list($entry.profiles // $entry.profile_ids // $entry.profile // $entry.profile_id // null) as $scopes |
+            selected_profiles($entry) as $selectedProfiles |
+            ($scopes | length) == 0
+            or ($selectedProfiles | length) == 0
+            or any($scopes[]; . as $scope | any($selectedProfiles[]; . == $scope));
+        def dependency_value($entry):
+            if ($entry | type) == "object" then ($entry.dependency // $entry.path // $entry.slug // $entry.id // $entry.source // $entry.value // empty)
+            else $entry end;
+        if (($settings.validation_dependencies? // null) | type) == "array" then
+            $settings + {
+                validation_dependencies: (
+                    $settings.validation_dependencies
+                    | map(select((type != "object") or (scenario_matches(.) and profile_matches(.))))
+                    | map(dependency_value(.))
+                    | map(select((type == "string" and . != "") or type != "string"))
+                )
+            }
+        else
+            $settings
+        end')
+    export HOMEBOY_SETTINGS_JSON="$settings_json"
+}
+
 homeboy_wp_codebox_filter_extra_bench_workloads() {
     local workloads_value="${HOMEBOY_BENCH_EXTRA_WORKLOADS:-}"
     local selected_value="${HOMEBOY_BENCH_SCENARIOS:-}"
@@ -708,6 +753,7 @@ homeboy_wp_codebox_compile_bootstrap_files
 homeboy_wp_codebox_compile_bootstrap_steps
 homeboy_wp_codebox_compile_prepare_steps
 homeboy_wp_codebox_filter_extra_bench_workloads
+homeboy_wp_codebox_filter_scoped_validation_dependencies
 
 WP_CODEBOX_WORDPRESS_VERSION=""
 if [ "$settings_json" != "{}" ]; then

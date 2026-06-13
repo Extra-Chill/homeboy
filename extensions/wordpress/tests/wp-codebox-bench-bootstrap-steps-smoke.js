@@ -133,18 +133,59 @@ homeboy_require_bash_version() { :; }
   assert.ok(successResults.prepared_dependencies.some((dependency) => dependency.slug === 'woocommerce' && dependency.source_path === fs.realpathSync(monorepoDependencyPath) && dependency.package_root === fs.realpathSync(monorepoPluginPath) && dependency.mounted_plugin_dir === '/wordpress/wp-content/plugins/woocommerce'), JSON.stringify(successResults.prepared_dependencies, null, 2));
   assert.ok(successResults.prepared_dependencies.some((dependency) => dependency.slug === 'woocommerce-gateway-stripe' && dependency.source_path === fs.realpathSync(stripeDependencyPath) && dependency.package_root === fs.realpathSync(stripeDependencyPath)), JSON.stringify(successResults.prepared_dependencies, null, 2));
 
+  const scopedCoreResult = spawnSync('bash', [path.join(extensionPath, 'scripts', 'bench', 'bench-runner.sh')], {
+    cwd: componentPath,
+    encoding: 'utf8',
+    env: {
+      ...baseEnv,
+      HOMEBOY_BENCH_SCENARIOS: 'assert-bootstrap',
+      HOMEBOY_BENCH_RESULTS_FILE: path.join(root, 'scoped-core-results.json'),
+      HOMEBOY_CAPTURE_RECIPE: path.join(root, 'captured-scoped-core-recipe.json'),
+      HOMEBOY_SETTINGS_JSON: JSON.stringify({
+        ...settings,
+        bench_env: { WC_CHECKOUT_GATEWAY_MATRIX_PROFILES: 'core_bacs,core_cheque,core_cod' },
+        validation_dependencies: [
+          dependencyPath,
+          {
+            dependency: failingDependencyPath,
+            scenarios: ['assert-bootstrap'],
+            profiles: ['plugin_stripe'],
+            profile_env: 'WC_CHECKOUT_GATEWAY_MATRIX_PROFILES',
+          },
+        ],
+      }),
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH}`,
+    },
+  });
+
+  assert.equal(scopedCoreResult.status, 0, scopedCoreResult.stderr || scopedCoreResult.stdout);
+  const scopedCoreResults = JSON.parse(fs.readFileSync(path.join(root, 'scoped-core-results.json'), 'utf8'));
+  assert.equal(scopedCoreResults.prepared_dependencies.some((dependency) => dependency.slug === 'generic-dependency'), true);
+  assert.equal(scopedCoreResults.prepared_dependencies.some((dependency) => dependency.slug === 'gateway-build-fails'), false);
+  assert.equal(scopedCoreResults.dependency_build_failures, undefined);
+
   const buildFailureArtifactsDir = path.join(root, 'build-failure-artifacts');
   const buildFailureResult = spawnSync('bash', [path.join(extensionPath, 'scripts', 'bench', 'bench-runner.sh')], {
     cwd: componentPath,
     encoding: 'utf8',
     env: {
       ...baseEnv,
+      HOMEBOY_BENCH_SCENARIOS: 'assert-bootstrap',
       HOMEBOY_BENCH_RESULTS_FILE: path.join(root, 'build-failure-results.json'),
       HOMEBOY_CAPTURE_RECIPE: path.join(root, 'captured-build-failure-recipe.json'),
       HOMEBOY_WP_CODEBOX_ARTIFACTS_DIR: buildFailureArtifactsDir,
       HOMEBOY_SETTINGS_JSON: JSON.stringify({
         ...settings,
-        validation_dependencies: [dependencyPath, failingDependencyPath],
+        bench_env: { WC_CHECKOUT_GATEWAY_MATRIX_PROFILES: 'plugin_stripe' },
+        validation_dependencies: [
+          dependencyPath,
+          {
+            dependency: failingDependencyPath,
+            scenarios: ['assert-bootstrap'],
+            profiles: ['plugin_stripe'],
+            profile_env: 'WC_CHECKOUT_GATEWAY_MATRIX_PROFILES',
+          },
+        ],
       }),
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH}`,
     },
