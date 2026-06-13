@@ -113,6 +113,11 @@ pub struct Runner {
     pub env: HashMap<String, String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub secret_env: HashMap<String, RunnerSecretEnvRef>,
+    #[serde(
+        default,
+        skip_serializing_if = "server::CodeboxProviderStack::is_empty"
+    )]
+    pub codebox_provider_stack: server::CodeboxProviderStack,
     #[serde(default)]
     pub resources: HashMap<String, Value>,
     #[serde(default, skip_serializing_if = "RunnerPolicy::is_empty")]
@@ -422,6 +427,7 @@ fn runner_from_server(server_id: &str, runner: ServerRunner) -> Runner {
         settings: runner.settings,
         env: runner.env,
         secret_env: runner.secret_env,
+        codebox_provider_stack: runner.codebox_provider_stack,
         resources: runner.resources,
         policy: runner.policy,
     }
@@ -735,6 +741,7 @@ mod tests {
                 settings: RunnerSettings::default(),
                 env: HashMap::new(),
                 secret_env: HashMap::new(),
+                codebox_provider_stack: server::CodeboxProviderStack::default(),
                 resources: HashMap::new(),
                 policy: RunnerPolicy::default(),
             };

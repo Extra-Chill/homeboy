@@ -29,6 +29,20 @@ Server configuration defines SSH server connections stored in `servers/<id>.json
     },
     "env": {},
     "secret_env": {},
+    "codebox_provider_stack": {
+      "provider": "string",
+      "model": "string",
+      "provider_plugin_paths": ["string"],
+      "secret_env": ["string"],
+      "runtime_env": {},
+      "runtime_state_mounts": [
+        {
+          "source": "string",
+          "target": "string",
+          "mode": "string"
+        }
+      ]
+    },
     "resources": {}
   },
   "forward_agent": boolean
@@ -80,6 +94,22 @@ Server configuration defines SSH server connections stored in `servers/<id>.json
     },
     "env": {},
     "secret_env": {},
+    "codebox_provider_stack": {
+      "provider": "generic-provider",
+      "model": "generic/model-default",
+      "provider_plugin_paths": ["/home/deploy/Developer/generic-provider-plugin"],
+      "secret_env": ["GENERIC_PROVIDER_API_KEY"],
+      "runtime_env": {
+        "GENERIC_PROVIDER_CONFIG": "/home/wp/.config/generic-provider/config.json"
+      },
+      "runtime_state_mounts": [
+        {
+          "source": "/home/deploy/.config/generic-provider/config.json",
+          "target": "/home/wp/.config/generic-provider/config.json",
+          "mode": "readonly"
+        }
+      ]
+    },
     "resources": {}
   },
   "forward_agent": true
@@ -118,6 +148,37 @@ Use `runner.secret_env` for values that must be read at execution time instead o
 ```
 
 Homeboy command output redacts sensitive names in `env` and keeps `secret_env` as references only. Secret file contents and referenced environment variable values are not printed by runner config/status diagnostics.
+
+### Codebox Provider Stack
+
+Use `runner.codebox_provider_stack` when a runner should provide a generic runtime stack for Codebox-backed Lab/offload tasks. Homeboy stores and inspects this provider-agnostic declaration, then forwards it to offloaded Homeboy commands as the `codebox_provider_stack` JSON setting after syncing/remapping local paths. Downstream HBEX/WP Codebox adapters consume the setting; Homeboy does not branch on OpenCode, Codex, or any other provider.
+
+```json
+{
+  "runner": {
+    "codebox_provider_stack": {
+      "provider": "generic-provider",
+      "model": "generic/model-default",
+      "provider_plugin_paths": ["/home/deploy/Developer/generic-provider-plugin"],
+      "secret_env": ["GENERIC_PROVIDER_API_KEY"],
+      "runtime_env": {
+        "GENERIC_PROVIDER_CONFIG": "/home/wp/.config/generic-provider/config.json",
+        "XDG_DATA_HOME": "/home/wp/.local/share",
+        "XDG_STATE_HOME": "/home/wp/.local/state"
+      },
+      "runtime_state_mounts": [
+        {
+          "source": "/home/deploy/.config/generic-provider/config.json",
+          "target": "/home/wp/.config/generic-provider/config.json",
+          "mode": "readonly"
+        }
+      ]
+    }
+  }
+}
+```
+
+`secret_env` contains names only. Store secret values in `runner.secret_env` refs or the runner process environment. `homeboy runner show` redacts sensitive-looking `runtime_env` values, and `homeboy runner env` reports stack secret names as configured while keeping values redacted.
 
 ## Managed SSH Sessions
 

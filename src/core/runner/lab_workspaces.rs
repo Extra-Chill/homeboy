@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::core::component::{self, TargetSpec};
+use crate::core::server::CodeboxProviderStack;
 use crate::core::{Error, Result};
 
 use super::{
@@ -212,6 +213,40 @@ pub(super) fn provider_config_extra_workspaces(
         add_candidate_extra_workspace(
             &candidate,
             "provider_config",
+            &source_canon,
+            &mut seen,
+            &mut workspaces,
+        )?;
+    }
+    Ok(workspaces)
+}
+
+pub(super) fn codebox_provider_stack_extra_workspaces(
+    stack: &CodeboxProviderStack,
+    source_path: &Path,
+) -> Result<Vec<ExtraLabWorkspace>> {
+    if stack.is_empty() {
+        return Ok(Vec::new());
+    }
+    let value = serde_json::to_value(stack).map_err(|err| {
+        Error::validation_invalid_argument(
+            "codebox_provider_stack",
+            format!("failed to inspect runner Codebox provider stack: {err}"),
+            None,
+            None,
+        )
+    })?;
+
+    let source_canon = source_path
+        .canonicalize()
+        .unwrap_or_else(|_| source_path.to_path_buf());
+
+    let mut seen = BTreeSet::new();
+    let mut workspaces: Vec<ExtraLabWorkspace> = Vec::new();
+    for candidate in provider_config_candidate_paths(&value) {
+        add_candidate_extra_workspace(
+            &candidate,
+            "codebox_provider_stack",
             &source_canon,
             &mut seen,
             &mut workspaces,

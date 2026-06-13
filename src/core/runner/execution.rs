@@ -821,6 +821,7 @@ pub(crate) fn prepare_daemon_local_process(
             settings: server::RunnerSettings::default(),
             env: HashMap::new(),
             secret_env: HashMap::new(),
+            codebox_provider_stack: server::CodeboxProviderStack::default(),
             resources: HashMap::new(),
             policy: server::RunnerPolicy::default(),
         });
@@ -1158,6 +1159,7 @@ mod tests {
             },
             env: Default::default(),
             secret_env: Default::default(),
+            codebox_provider_stack: Default::default(),
             resources: Default::default(),
             policy: RunnerPolicy::default(),
         }

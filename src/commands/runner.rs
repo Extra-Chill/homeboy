@@ -10,7 +10,10 @@ use homeboy::core::runner::{
     Runner, RunnerConnectReport, RunnerDisconnectReport, RunnerExecOutput, RunnerKind,
     RunnerStatusReport,
 };
-use homeboy::core::server::{RunnerPolicy, RunnerSecretEnvRef, RunnerSettings};
+use homeboy::core::server::{
+    CodeboxProviderStack, CodeboxRuntimeStateMount, RunnerPolicy, RunnerSecretEnvRef,
+    RunnerSettings,
+};
 use homeboy::core::{EntityCrudOutput, MergeOutput};
 
 use super::{CmdResult, DynamicSetArgs};
@@ -59,6 +62,8 @@ pub struct RunnerEnvOutput {
     pub env: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub secret_env: BTreeMap<String, RunnerSecretEnvReferenceOutput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub codebox_provider_stack: Option<RunnerCodeboxProviderStackOutput>,
     pub diagnostics: RunnerEnvDiagnostics,
 }
 
@@ -75,6 +80,29 @@ pub struct RunnerSecretEnvReferenceOutput {
 pub struct RunnerEnvDiagnostics {
     pub server_shell_env: String,
     pub runner_job_env: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RunnerCodeboxProviderStackOutput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub provider_plugin_paths: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub secret_env: Vec<RunnerCodeboxSecretEnvOutput>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub runtime_env: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub runtime_state_mounts: Vec<CodeboxRuntimeStateMount>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RunnerCodeboxSecretEnvOutput {
+    pub name: String,
+    pub configured: bool,
+    pub values_redacted: bool,
 }
 
 #[derive(Args)]
@@ -552,6 +580,17 @@ fn redact_runner_env(runner: &mut Runner) {
             *value = policy.redact_string(value);
         }
     }
+    redact_codebox_provider_stack(&mut runner.codebox_provider_stack, &policy);
+}
+
+fn redact_codebox_provider_stack(stack: &mut CodeboxProviderStack, policy: &RedactionPolicy) {
+    for (key, value) in stack.runtime_env.iter_mut() {
+        if policy.is_sensitive_key(key) {
+            *value = REDACTED_ENV_VALUE.to_string();
+        } else {
+            *value = policy.redact_string(value);
+        }
+    }
 }
 
 fn map_doctor(result: CmdResult<doctor::RunnerDoctorOutput>) -> CmdResult<RunnerCommandOutput> {
@@ -607,6 +646,7 @@ fn add(input: RunnerAddInput) -> CmdResult<RunnerOutput> {
             settings: input.settings,
             env: HashMap::new(),
             secret_env: HashMap::new(),
+            codebox_provider_stack: CodeboxProviderStack::default(),
             resources: HashMap::<String, Value>::new(),
             policy: RunnerPolicy::default(),
         };
@@ -891,6 +931,8 @@ fn env(runner_id: &str, show_values: bool) -> CmdResult<RunnerEnvOutput> {
         .into_iter()
         .map(|(key, reference)| (key, secret_env_reference_output(reference)))
         .collect();
+    let codebox_provider_stack = (!runner.codebox_provider_stack.is_empty())
+        .then(|| codebox_provider_stack_output(runner.codebox_provider_stack, show_values));
 
     Ok((
         RunnerEnvOutput {
@@ -900,6 +942,7 @@ fn env(runner_id: &str, show_values: bool) -> CmdResult<RunnerEnvOutput> {
             values_redacted: !show_values,
             env,
             secret_env,
+            codebox_provider_stack,
             diagnostics: RunnerEnvDiagnostics {
                 server_shell_env: "Use `homeboy ssh <server> -- printenv NAME` to inspect the server login shell environment; it does not include runner job env by default.".to_string(),
                 runner_job_env: "This output shows configured public env Homeboy injects into runner jobs. secret_env entries are shown as refs only; their values resolve on the runner at execution time and are never printed here.".to_string(),
@@ -914,6 +957,38 @@ fn secret_env_reference_output(reference: RunnerSecretEnvRef) -> RunnerSecretEnv
         env: reference.env,
         file: reference.file,
         values_redacted: true,
+    }
+}
+
+fn codebox_provider_stack_output(
+    mut stack: CodeboxProviderStack,
+    show_values: bool,
+) -> RunnerCodeboxProviderStackOutput {
+    let policy = RedactionPolicy::default();
+    redact_codebox_provider_stack(&mut stack, &policy);
+
+    let mut runtime_env = stack.runtime_env.into_iter().collect::<BTreeMap<_, _>>();
+    if !show_values {
+        for value in runtime_env.values_mut() {
+            *value = REDACTED_ENV_VALUE.to_string();
+        }
+    }
+
+    RunnerCodeboxProviderStackOutput {
+        provider: stack.provider,
+        model: stack.model,
+        provider_plugin_paths: stack.provider_plugin_paths,
+        secret_env: stack
+            .secret_env
+            .into_iter()
+            .map(|name| RunnerCodeboxSecretEnvOutput {
+                name,
+                configured: true,
+                values_redacted: true,
+            })
+            .collect(),
+        runtime_env,
+        runtime_state_mounts: stack.runtime_state_mounts,
     }
 }
 
@@ -936,6 +1011,7 @@ mod tests {
                 ),
             ]),
             secret_env: HashMap::new(),
+            codebox_provider_stack: CodeboxProviderStack::default(),
             resources: HashMap::new(),
             policy: RunnerPolicy::default(),
         }
@@ -991,6 +1067,46 @@ mod tests {
     }
 
     #[test]
+    fn registry_entity_output_redacts_codebox_provider_stack_runtime_env() {
+        let mut runner = runner_with_env("lab");
+        runner.codebox_provider_stack = CodeboxProviderStack {
+            provider: Some("generic-provider".to_string()),
+            model: Some("generic-model".to_string()),
+            provider_plugin_paths: vec!["/srv/providers/generic".to_string()],
+            secret_env: vec!["GENERIC_API_KEY".to_string()],
+            runtime_env: HashMap::from([(
+                "GENERIC_API_TOKEN".to_string(),
+                "secret-token".to_string(),
+            )]),
+            runtime_state_mounts: vec![CodeboxRuntimeStateMount {
+                source: "/srv/state/config.json".to_string(),
+                target: "/home/wp/.config/provider/config.json".to_string(),
+                mode: Some("readonly".to_string()),
+            }],
+        };
+        let (output, _) = map_registry(Ok((
+            RunnerOutput {
+                command: "runner.show".to_string(),
+                entity: Some(runner),
+                ..Default::default()
+            },
+            0,
+        )))
+        .expect("map output");
+
+        let value = serde_json::to_value(output).expect("serialize output");
+        assert_eq!(
+            value["entity"]["codebox_provider_stack"]["runtime_env"]["GENERIC_API_TOKEN"],
+            REDACTED_ENV_VALUE
+        );
+        assert_eq!(
+            value["entity"]["codebox_provider_stack"]["secret_env"][0],
+            "GENERIC_API_KEY"
+        );
+        assert!(!value.to_string().contains("secret-token"));
+    }
+
+    #[test]
     fn runner_env_output_redacts_values_by_default() {
         let output = RunnerEnvOutput {
             command: "runner.env".to_string(),
@@ -999,6 +1115,7 @@ mod tests {
             values_redacted: true,
             env: BTreeMap::from([("TOKEN".to_string(), REDACTED_ENV_VALUE.to_string())]),
             secret_env: BTreeMap::new(),
+            codebox_provider_stack: None,
             diagnostics: RunnerEnvDiagnostics {
                 server_shell_env: "shell".to_string(),
                 runner_job_env: "runner".to_string(),
@@ -1032,6 +1149,7 @@ mod tests {
                     values_redacted: true,
                 },
             )]),
+            codebox_provider_stack: None,
             diagnostics: RunnerEnvDiagnostics {
                 server_shell_env: "shell".to_string(),
                 runner_job_env: "runner".to_string(),
@@ -1053,5 +1171,30 @@ mod tests {
             true
         );
         assert!(!value.to_string().contains("dummy-secret"));
+    }
+
+    #[test]
+    fn runner_env_output_reports_codebox_provider_stack_presence() {
+        let output = codebox_provider_stack_output(
+            CodeboxProviderStack {
+                provider: Some("generic-provider".to_string()),
+                model: Some("generic-model".to_string()),
+                provider_plugin_paths: vec!["/srv/providers/generic".to_string()],
+                secret_env: vec!["GENERIC_API_KEY".to_string()],
+                runtime_env: HashMap::from([(
+                    "GENERIC_CONFIG".to_string(),
+                    "/srv/config.json".to_string(),
+                )]),
+                runtime_state_mounts: Vec::new(),
+            },
+            false,
+        );
+
+        let value = serde_json::to_value(output).expect("serialize output");
+        assert_eq!(value["provider"], "generic-provider");
+        assert_eq!(value["runtime_env"]["GENERIC_CONFIG"], REDACTED_ENV_VALUE);
+        assert_eq!(value["secret_env"][0]["name"], "GENERIC_API_KEY");
+        assert_eq!(value["secret_env"][0]["configured"], true);
+        assert_eq!(value["secret_env"][0]["values_redacted"], true);
     }
 }

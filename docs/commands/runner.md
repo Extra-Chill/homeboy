@@ -12,6 +12,7 @@ Runner configuration separates printable environment from secrets:
 
 - `env` is for non-secret values that are useful in diagnostics, such as `HOMEBOY_PUBLIC_ARTIFACT_BASE_URL`.
 - `secret_env` is for execution-time secret references like `{ "env": "NAME" }` or `{ "file": "~/.config/homeboy/secrets/name" }`.
+- `codebox_provider_stack` is a provider-agnostic Codebox runtime declaration for Lab/offload jobs. It describes provider/model defaults, provider plugin checkouts, secret env names, runtime env, and state mounts without hardcoding any provider in Homeboy.
 - Command output redacts sensitive names in `env` and prints only `secret_env` references, never resolved secret values.
 
 ## Subcommands
@@ -87,6 +88,54 @@ Configure a preferred runner with:
 ```sh
 homeboy config set /lab/preferred_runner '"<runner-id>"'
 ```
+
+### Codebox Provider Stack
+
+Runners can persist a generic provider stack for Codebox-backed Lab/offload execution. Homeboy owns runner-local configuration and forwards the stack to the offloaded command as `--setting-json codebox_provider_stack=<json>` after syncing/remapping local paths referenced by the stack. HBEX and WP Codebox consume the generic setting; Homeboy does not branch on provider names.
+
+Example runner patch:
+
+```sh
+homeboy runner set lab --json '{
+  "codebox_provider_stack": {
+    "provider": "generic-provider",
+    "model": "generic/model-default",
+    "provider_plugin_paths": ["/home/chubes/Developer/generic-provider-plugin"],
+    "secret_env": ["GENERIC_PROVIDER_API_KEY"],
+    "runtime_env": {
+      "GENERIC_PROVIDER_CONFIG": "/home/wp/.config/generic-provider/config.json",
+      "XDG_DATA_HOME": "/home/wp/.local/share",
+      "XDG_STATE_HOME": "/home/wp/.local/state"
+    },
+    "runtime_state_mounts": [
+      {
+        "source": "/home/chubes/.config/generic-provider/config.json",
+        "target": "/home/wp/.config/generic-provider/config.json",
+        "mode": "readonly"
+      }
+    ]
+  }
+}'
+```
+
+Fields:
+
+- `provider`: provider identifier passed through to downstream Codebox/HBEX contracts.
+- `model`: default model identifier for that provider stack.
+- `provider_plugin_paths`: runner-local provider plugin checkout paths. Lab offload syncs and remaps these paths when needed.
+- `secret_env`: env var names required by the provider. Values live in runner `secret_env` refs or the runner process environment; diagnostics show names/presence only.
+- `runtime_env`: non-secret runtime env values passed as provider stack data. `homeboy runner show` redacts sensitive-looking values; `homeboy runner env` redacts values by default.
+- `runtime_state_mounts`: runner-local state/config mounts for the sandbox, with `source`, `target`, and optional `mode`.
+
+Inspect the persisted stack with:
+
+```sh
+homeboy runner show lab
+homeboy runner env lab
+homeboy runner env lab --show-values
+```
+
+`runner env` always reports stack `secret_env` entries as configured names with `values_redacted: true`; it never resolves or prints secret values.
 
 ### `doctor`
 

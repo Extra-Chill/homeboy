@@ -1429,6 +1429,7 @@ mod tests {
             },
             env: HashMap::new(),
             secret_env: HashMap::new(),
+            codebox_provider_stack: Default::default(),
             resources: HashMap::new(),
             policy: Default::default(),
         }

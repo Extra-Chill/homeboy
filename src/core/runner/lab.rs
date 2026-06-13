@@ -23,8 +23,9 @@ use super::lab_apply::apply_lab_offload_patch;
 #[cfg(test)]
 use super::lab_args::EXPLICIT_PASSTHROUGH_SENTINEL;
 use super::lab_args::{
-    lab_offload_source_path, remap_agent_task_plan_in_args, remap_path_settings_in_args,
-    remap_provider_config_in_args, rewrite_lab_offload_args, LabPathRemap,
+    append_codebox_provider_stack_setting, lab_offload_source_path, remap_agent_task_plan_in_args,
+    remap_path_settings_in_args, remap_provider_config_in_args, rewrite_lab_offload_args,
+    LabPathRemap,
 };
 use super::lab_capabilities::lab_runner_capability_contract;
 use super::lab_command::lab_offload_command_prefix;
@@ -40,11 +41,11 @@ use super::lab_selection::{
     LabRunnerPreparation, LabRunnerSelection,
 };
 use super::lab_workspaces::{
-    agent_task_plan_extra_workspaces, lab_extra_workspaces, lab_workspace_mapping_metadata,
-    path_setting_extra_workspaces, preflight_provider_config_source_cli_dependencies,
-    provider_config_extra_workspaces, rig_component_path_env_extra_workspaces,
-    sync_extra_lab_workspaces, workspace_mapping_entries_for_git_dependency,
-    workspace_mapping_entry,
+    agent_task_plan_extra_workspaces, codebox_provider_stack_extra_workspaces,
+    lab_extra_workspaces, lab_workspace_mapping_metadata, path_setting_extra_workspaces,
+    preflight_provider_config_source_cli_dependencies, provider_config_extra_workspaces,
+    rig_component_path_env_extra_workspaces, sync_extra_lab_workspaces,
+    workspace_mapping_entries_for_git_dependency, workspace_mapping_entry,
 };
 
 pub struct LabOffloadRequest<'a> {
@@ -662,6 +663,10 @@ fn run_lab_offload_inner(
         &changed_since_preflight.args,
         &source_path,
     )?);
+    extra_workspaces.extend(codebox_provider_stack_extra_workspaces(
+        &runner.codebox_provider_stack,
+        &source_path,
+    )?);
     extra_workspaces.extend(agent_task_plan_extra_workspaces(
         &changed_since_preflight.args,
         &source_path,
@@ -807,6 +812,11 @@ fn run_lab_offload_inner(
     let remapped_args =
         remap_agent_task_plan_in_args(&remapped_args, &path_remaps, Path::new(&synced.local_path))?;
     let remapped_args = remap_path_settings_in_args(&remapped_args, &path_remaps);
+    let remapped_args = append_codebox_provider_stack_setting(
+        &remapped_args,
+        &runner.codebox_provider_stack,
+        &path_remaps,
+    )?;
     let (remapped_args, synced_remapped_plan) =
         materialize_inline_agent_task_plan_arg(runner_id, &remapped_args)?;
     if let Some(entry) = synced_remapped_plan {

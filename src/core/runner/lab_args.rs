@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use serde_json::Value;
 
 use crate::core::config::read_json_spec_to_string;
+use crate::core::server::CodeboxProviderStack;
 use crate::core::worktree;
 use crate::core::{Error, Result};
 
@@ -185,6 +186,46 @@ pub(super) fn remap_path_settings_in_args(
         out.push(arg.clone());
     }
     out
+}
+
+pub(super) fn append_codebox_provider_stack_setting(
+    args: &[String],
+    stack: &CodeboxProviderStack,
+    mappings: &[LabPathRemap],
+) -> Result<Vec<String>> {
+    if stack.is_empty() {
+        return Ok(args.to_vec());
+    }
+
+    let mut value = serde_json::to_value(stack).map_err(|err| {
+        Error::validation_invalid_argument(
+            "codebox_provider_stack",
+            format!("failed to serialize runner Codebox provider stack: {err}"),
+            None,
+            None,
+        )
+    })?;
+    let mut ordered: Vec<&LabPathRemap> = mappings.iter().collect();
+    ordered.sort_by_key(|mapping| {
+        (
+            std::cmp::Reverse(mapping.local.len()),
+            std::cmp::Reverse(mapping.remote.len()),
+        )
+    });
+    remap_paths_in_value(&mut value, &ordered);
+    let encoded = serde_json::to_string(&value).map_err(|err| {
+        Error::validation_invalid_argument(
+            "codebox_provider_stack",
+            format!("failed to encode runner Codebox provider stack: {err}"),
+            None,
+            None,
+        )
+    })?;
+
+    let mut out = args.to_vec();
+    out.push("--setting-json".to_string());
+    out.push(format!("codebox_provider_stack={encoded}"));
+    Ok(out)
 }
 
 /// Resolve an agent-task plan spec, remap every controller-local path embedded
@@ -880,6 +921,54 @@ mod tests {
         assert_eq!(
             out[4],
             "--setting-json=depends_on={\"plugins\":[\"/home/chubes/_lab_workspaces/woocommerce-gateway-stripe/includes\"],\"token\":\"keep-secret-like-string\"}"
+        );
+    }
+
+    #[test]
+    fn append_codebox_provider_stack_setting_remaps_paths() {
+        let mappings = vec![LabPathRemap {
+            local: "/Users/chubes/Developer/generic-provider".to_string(),
+            remote: "/home/chubes/_lab_workspaces/generic-provider".to_string(),
+        }];
+        let stack = CodeboxProviderStack {
+            provider: Some("generic".to_string()),
+            model: Some("generic/model".to_string()),
+            provider_plugin_paths: vec!["/Users/chubes/Developer/generic-provider".to_string()],
+            secret_env: vec!["GENERIC_API_KEY".to_string()],
+            runtime_env: std::collections::HashMap::from([(
+                "GENERIC_CONFIG".to_string(),
+                "/Users/chubes/Developer/generic-provider/config.json".to_string(),
+            )]),
+            runtime_state_mounts: vec![crate::core::server::CodeboxRuntimeStateMount {
+                source: "/Users/chubes/Developer/generic-provider/state.json".to_string(),
+                target: "/home/wp/.config/generic/state.json".to_string(),
+                mode: Some("readonly".to_string()),
+            }],
+        };
+
+        let out = append_codebox_provider_stack_setting(
+            &["homeboy".to_string(), "agent-task".to_string()],
+            &stack,
+            &mappings,
+        )
+        .expect("append setting");
+
+        assert_eq!(out[2], "--setting-json");
+        let (_, raw) = out[3].split_once('=').expect("setting pair");
+        let value: serde_json::Value = serde_json::from_str(raw).expect("stack json");
+        assert_eq!(value["provider"], "generic");
+        assert_eq!(value["secret_env"][0], "GENERIC_API_KEY");
+        assert_eq!(
+            value["provider_plugin_paths"][0],
+            "/home/chubes/_lab_workspaces/generic-provider"
+        );
+        assert_eq!(
+            value["runtime_env"]["GENERIC_CONFIG"],
+            "/home/chubes/_lab_workspaces/generic-provider/config.json"
+        );
+        assert_eq!(
+            value["runtime_state_mounts"][0]["source"],
+            "/home/chubes/_lab_workspaces/generic-provider/state.json"
         );
     }
 

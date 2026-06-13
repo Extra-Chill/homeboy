@@ -551,6 +551,7 @@ mod tests {
             },
             env: Default::default(),
             secret_env: Default::default(),
+            codebox_provider_stack: Default::default(),
             resources: Default::default(),
             policy: RunnerPolicy::default(),
         }

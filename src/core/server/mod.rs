@@ -77,6 +77,41 @@ pub struct RunnerSecretEnvRef {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CodeboxProviderStack {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provider_plugin_paths: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secret_env: Vec<String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub runtime_env: HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runtime_state_mounts: Vec<CodeboxRuntimeStateMount>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CodeboxRuntimeStateMount {
+    pub source: String,
+    pub target: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+}
+
+impl CodeboxProviderStack {
+    pub fn is_empty(&self) -> bool {
+        self.provider.is_none()
+            && self.model.is_none()
+            && self.provider_plugin_paths.is_empty()
+            && self.secret_env.is_empty()
+            && self.runtime_env.is_empty()
+            && self.runtime_state_mounts.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RunnerPolicy {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub accepted_peer_ids: Vec<String>,
@@ -110,6 +145,8 @@ pub struct ServerRunner {
     pub env: HashMap<String, String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub secret_env: HashMap<String, RunnerSecretEnvRef>,
+    #[serde(default, skip_serializing_if = "CodeboxProviderStack::is_empty")]
+    pub codebox_provider_stack: CodeboxProviderStack,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub resources: HashMap<String, serde_json::Value>,
     #[serde(default, skip_serializing_if = "RunnerPolicy::is_empty")]
