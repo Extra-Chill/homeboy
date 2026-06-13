@@ -44,9 +44,9 @@ pub use apply::{
     RunnerWorkspaceApplyOutput, RunnerWorkspaceApplyStatus,
 };
 pub use capabilities::{
-    evaluate_lab_runner_capabilities_for_runner, lab_runner_capability_plan,
-    lab_runner_capability_preflight, LabRunnerCapabilityContract, LabRunnerCapabilityPlan,
-    LabRunnerGateDecision, LabRunnerGateMode, RunnerCapabilityPreflight, RunnerRequiredTool,
+    evaluate_lab_runner_capabilities_for_runner, lab_runner_capability_preflight,
+    prepare_lab_runner_capability, LabRunnerCapabilityContract, LabRunnerGateDecision,
+    LabRunnerGateMode, PreparedLabRunnerCapability, RunnerCapabilityPreflight, RunnerRequiredTool,
 };
 pub(crate) use command_path::{
     normalize_runner_command_env, quote_runner_env_value, remote_shell_path_preamble,

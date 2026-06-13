@@ -11,11 +11,11 @@ use crate::core::{agent_task_secrets, config, Error, ErrorCode, Result};
 
 use super::{
     evaluate_lab_runner_capabilities_for_runner, exec, lab_offload_changed_since_ref,
-    lab_offload_metadata, lab_offload_metadata_with_workspace_mapping, lab_runner_capability_plan,
-    load, preflight_lab_offload_changed_since, prepare_git_lab_offload_changed_since,
-    rig_materialization, status, sync_workspace, LabRunnerGateDecision, RunnerCapabilityPreflight,
-    RunnerExecOptions, RunnerStatusReport, RunnerTunnelMode, RunnerWorkspaceSyncMode,
-    RunnerWorkspaceSyncOptions,
+    lab_offload_metadata, lab_offload_metadata_with_workspace_mapping, load,
+    preflight_lab_offload_changed_since, prepare_git_lab_offload_changed_since,
+    prepare_lab_runner_capability, rig_materialization, status, sync_workspace,
+    LabRunnerGateDecision, RunnerCapabilityPreflight, RunnerExecOptions, RunnerStatusReport,
+    RunnerTunnelMode, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
 };
 
 use super::daemon_health::runner_daemon_health_failure;
@@ -564,7 +564,9 @@ fn run_lab_offload_inner(
     let command_prefix = lab_offload_command_prefix(&source_path, homeboy_path);
     let capability_contract =
         lab_runner_capability_contract(&contract, &source_path, &command_prefix.required_tools);
-    let capability_plan = capability_contract.clone().map(lab_runner_capability_plan);
+    let capability_plan = capability_contract
+        .clone()
+        .map(prepare_lab_runner_capability);
     if let Some(capability_plan) = &capability_plan {
         let decision = match evaluate_lab_runner_capabilities_for_runner(
             &runner,

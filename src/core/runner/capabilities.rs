@@ -18,7 +18,7 @@ pub struct RunnerCapabilityPreflight {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LabRunnerCapabilityPlan {
+pub struct PreparedLabRunnerCapability {
     pub command: &'static str,
     pub required_tools: Vec<RunnerRequiredTool>,
 }
@@ -62,9 +62,9 @@ pub enum RunnerRequiredTool {
     Playwright,
 }
 
-pub fn lab_runner_capability_plan(
+pub fn prepare_lab_runner_capability(
     contract: LabRunnerCapabilityContract,
-) -> LabRunnerCapabilityPlan {
+) -> PreparedLabRunnerCapability {
     let mut required_tools = vec![RunnerRequiredTool::Git];
     for tool in contract.required_tools {
         push_unique(&mut required_tools, tool);
@@ -74,7 +74,7 @@ pub fn lab_runner_capability_plan(
         push_unique(&mut required_tools, RunnerRequiredTool::Playwright);
     }
 
-    LabRunnerCapabilityPlan {
+    PreparedLabRunnerCapability {
         command: contract.command,
         required_tools,
     }
@@ -83,12 +83,12 @@ pub fn lab_runner_capability_plan(
 pub fn lab_runner_capability_preflight(
     contract: LabRunnerCapabilityContract,
 ) -> RunnerCapabilityPreflight {
-    lab_runner_capability_plan(contract).into()
+    prepare_lab_runner_capability(contract).into()
 }
 
 pub fn evaluate_lab_runner_capabilities_for_runner(
     runner: &Runner,
-    plan: &LabRunnerCapabilityPlan,
+    plan: &PreparedLabRunnerCapability,
     mode: LabRunnerGateMode,
 ) -> Result<LabRunnerGateDecision> {
     let capabilities = RunnerCapabilitySnapshot::from_runner_probe_with_commands(runner, &[])?;
@@ -321,7 +321,7 @@ impl RunnerCapabilitySnapshot {
 
 fn evaluate_lab_runner_capabilities(
     runner_id: &str,
-    plan: &LabRunnerCapabilityPlan,
+    plan: &PreparedLabRunnerCapability,
     capabilities: &RunnerCapabilitySnapshot,
     mode: LabRunnerGateMode,
 ) -> LabRunnerGateDecision {
@@ -413,8 +413,8 @@ fn tool_list(tools: &[RunnerRequiredTool]) -> String {
         .join(", ")
 }
 
-impl From<LabRunnerCapabilityPlan> for RunnerCapabilityPreflight {
-    fn from(plan: LabRunnerCapabilityPlan) -> Self {
+impl From<PreparedLabRunnerCapability> for RunnerCapabilityPreflight {
+    fn from(plan: PreparedLabRunnerCapability) -> Self {
         Self {
             command: plan.command.to_string(),
             required_tools: plan.required_tools,
@@ -557,8 +557,8 @@ mod tests {
     }
 
     #[test]
-    fn lab_runner_capability_plan_detects_project_tool_needs() {
-        let plan = lab_runner_capability_plan(LabRunnerCapabilityContract {
+    fn prepare_lab_runner_capability_detects_project_tool_needs() {
+        let plan = prepare_lab_runner_capability(LabRunnerCapabilityContract {
             command: "lint",
             required_tools: vec![
                 RunnerRequiredTool::Node,
@@ -608,7 +608,7 @@ mod tests {
 
     #[test]
     fn lab_runner_gate_allows_capable_runner() {
-        let plan = LabRunnerCapabilityPlan {
+        let plan = PreparedLabRunnerCapability {
             command: "lint",
             required_tools: vec![
                 RunnerRequiredTool::Git,
@@ -641,7 +641,7 @@ mod tests {
 
     #[test]
     fn lab_runner_gate_reports_missing_tool_for_explicit_runner() {
-        let plan = LabRunnerCapabilityPlan {
+        let plan = PreparedLabRunnerCapability {
             command: "test",
             required_tools: vec![RunnerRequiredTool::Git, RunnerRequiredTool::Pnpm],
         };
@@ -711,7 +711,7 @@ mod tests {
 
     #[test]
     fn lab_runner_gate_reports_local_fallback_for_auto_runner() {
-        let plan = LabRunnerCapabilityPlan {
+        let plan = PreparedLabRunnerCapability {
             command: "trace",
             required_tools: vec![RunnerRequiredTool::Git, RunnerRequiredTool::Playwright],
         };
