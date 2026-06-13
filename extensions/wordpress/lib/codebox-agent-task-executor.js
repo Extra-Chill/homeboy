@@ -44,6 +44,7 @@ const DEFAULT_WORKSPACE_WRITE_TOOLS = [
   'workspace_apply_patch',
   'workspace_delete',
   'workspace_git_add',
+  'workspace_run_runner_command',
 ];
 
 const CODEX_SECRET_ENV = [
