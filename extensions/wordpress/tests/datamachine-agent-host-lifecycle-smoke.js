@@ -132,7 +132,9 @@ function makeRunFiles(tmp, config) {
   assert.equal(scenario.metrics.drift_checks_succeeded, 1);
   assert.equal(scenario.metrics.writable_paths_satisfied, 1);
   assert.equal(scenario.metrics.pr_opened, 1);
+  assert.equal(scenario.metrics.pr_opened_mean, 1);
   assert.equal(scenario.metadata.success_status, 'pr_opened');
+  assert.equal(scenario.metadata.engine_data.success_status, 'pr_opened');
   assert.equal(scenario.metadata.runner_workspace_publication.url, 'https://github.com/owner/repo/pull/1291');
   assert.match(fs.readFileSync(gh.log, 'utf8'), /pr create .*--base trunk/);
   checked('git', ['fetch', 'origin', 'agent-artifacts/docs-agent-host-lifecycle'], { cwd: repo });
@@ -323,7 +325,14 @@ function makeRunFiles(tmp, config) {
   checked('git', ['push', '-u', 'origin', 'agent-artifacts/docs-agent-host-lifecycle'], { cwd: repo });
   fs.writeFileSync(path.join(repo, 'generated.txt'), 'hello from agent on stale branch\n');
   const { configPath, resultsPath } = makeRunFiles(tmp, {
-    initial_metadata: { success_status: 'write_without_pr', completion_outcome_satisfied: false },
+    initial_metadata: {
+      success_status: 'write_without_pr',
+      completion_outcome_satisfied: false,
+      engine_data: {
+        success_status: 'write_without_pr',
+        eval_artifact: { run: { success_status: 'write_without_pr' } },
+      },
+    },
     verification_commands: [{ command: 'test -f generated.txt', description: 'Generated file exists' }],
   });
 
@@ -333,6 +342,8 @@ function makeRunFiles(tmp, config) {
   assert.equal(result.status, 0, result.stderr || result.stdout);
   const output = readJson(resultsPath);
   assert.equal(output.scenarios[0].metadata.success_status, 'pr_opened');
+  assert.equal(output.scenarios[0].metadata.engine_data.success_status, 'pr_opened');
+  assert.equal(output.scenarios[0].metadata.engine_data.eval_artifact.run.success_status, 'pr_opened');
   assert.equal(output.scenarios[0].metadata.completion_outcome_satisfied, false);
   const publication = output.scenarios[0].metadata.runner_workspace_publication;
   assert.equal(publication.url, 'https://github.com/owner/repo/pull/47');
