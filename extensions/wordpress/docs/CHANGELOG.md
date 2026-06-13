@@ -2,6 +2,13 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.121.13] - 2026-06-13
+
+### Fixed
+- default codex codebox stack to generic primitives
+- keep codebox runtime stack generic
+- expand codex codebox defaults
+
 ## [2.121.12] - 2026-06-13
 
 ### Fixed
