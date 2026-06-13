@@ -427,15 +427,11 @@ homeboy_wp_codebox_filter_scoped_validation_dependencies() {
             ($scopes | length) == 0
             or ($selectedProfiles | length) == 0
             or any($scopes[]; . as $scope | any($selectedProfiles[]; . == $scope));
-        def dependency_value($entry):
-            if ($entry | type) == "object" then ($entry.dependency // $entry.path // $entry.slug // $entry.id // $entry.source // $entry.value // empty)
-            else $entry end;
         if (($settings.validation_dependencies? // null) | type) == "array" then
             $settings + {
                 validation_dependencies: (
                     $settings.validation_dependencies
                     | map(select((type != "object") or (scenario_matches(.) and profile_matches(.))))
-                    | map(dependency_value(.))
                     | map(select((type == "string" and . != "") or type != "string"))
                 )
             }
