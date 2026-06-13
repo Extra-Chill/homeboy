@@ -932,9 +932,6 @@ where
             0,
         )),
         AgentTaskLoopPolicyAction::RouteFinding { .. }
-        | AgentTaskLoopPolicyAction::SpawnController { .. }
-        | AgentTaskLoopPolicyAction::SpawnSubloop { .. }
-        | AgentTaskLoopPolicyAction::WaitForController { .. }
         | AgentTaskLoopPolicyAction::ValidateCandidatePatch { .. }
         | AgentTaskLoopPolicyAction::Retry { .. }
         | AgentTaskLoopPolicyAction::RequestChanges { .. } => {
@@ -2256,7 +2253,6 @@ mod tests {
     use homeboy::core::agent_task_lifecycle::{
         status as lifecycle_status, AgentTaskRunRecord, AgentTaskRunState,
     };
-    use homeboy::core::agent_task_loop_controller::{AgentTaskLoopWait, AgentTaskLoopWaitStatus};
     use homeboy::core::agent_task_scheduler::{AgentTaskExecutionContext, AgentTaskState};
     use serde_json::{json, Value};
     use std::sync::{Arc, Mutex};
