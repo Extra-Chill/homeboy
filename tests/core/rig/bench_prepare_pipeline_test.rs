@@ -176,7 +176,7 @@ fn failing_bench_prepare_aborts_before_check_and_workload() {
 }
 
 #[test]
-fn bench_list_rig_does_not_run_bench_prepare() {
+fn bench_list_rig_discovers_scenarios_without_preflight_or_bench_prepare() {
     with_isolated_home(|home| {
         let component = tempfile::TempDir::new().expect("component");
         let log_dir = tempfile::TempDir::new().expect("log dir");
@@ -195,9 +195,16 @@ fn bench_list_rig_does_not_run_bench_prepare() {
             None,
             vec!["list-rig".to_string()],
         )));
-        let (_output, exit_code) = run(args, &GlobalArgs {}).expect("bench list should run");
+        let (output, exit_code) = run(args, &GlobalArgs {}).expect("bench list should run");
 
         assert_eq!(exit_code, 0);
-        assert_eq!(log_lines(&log_path), vec!["check"]);
+        match output {
+            BenchOutput::List(result) => {
+                assert_eq!(result.count, 1);
+                assert_eq!(result.scenarios[0].id, "ordered");
+            }
+            _ => panic!("expected bench list output"),
+        }
+        assert_eq!(log_lines(&log_path), Vec::<String>::new());
     });
 }
