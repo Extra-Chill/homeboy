@@ -32,6 +32,19 @@ pub struct PreviewClientReport {
     pub stopped: bool,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PreviewClientAuthDiagnostic {
+    pub command: &'static str,
+    pub token_env: String,
+    pub token_present: bool,
+    pub token_empty: bool,
+    pub local_token_sha256: Option<String>,
+    pub expected_sha256_env: String,
+    pub expected_sha256: Option<String>,
+    pub matches_expected: Option<bool>,
+    pub hashing_semantics: &'static str,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PreviewIngressRequest {
     pub request_id: String,
@@ -157,6 +170,36 @@ pub fn start(spec: PreviewClientStartSpec) -> Result<PreviewClientReport> {
     })
 }
 
+pub fn diagnose_auth(
+    token_env: &str,
+    expected_sha256_env: &str,
+) -> Result<PreviewClientAuthDiagnostic> {
+    require_non_empty("token_env", token_env)?;
+    require_non_empty("expected_sha256_env", expected_sha256_env)?;
+    let token = std::env::var(token_env).ok();
+    let expected = std::env::var(expected_sha256_env)
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    let local = token
+        .as_ref()
+        .filter(|value| !value.is_empty())
+        .map(|value| sha256_hex(value.as_bytes()));
+    Ok(PreviewClientAuthDiagnostic {
+        command: "tunnel.preview_client.diagnose_auth",
+        token_env: token_env.to_string(),
+        token_present: token.is_some(),
+        token_empty: token.as_ref().is_some_and(|value| value.is_empty()),
+        local_token_sha256: local.clone(),
+        expected_sha256_env: expected_sha256_env.to_string(),
+        expected_sha256: expected.clone(),
+        matches_expected: local
+            .zip(expected)
+            .map(|(local, expected)| local.eq_ignore_ascii_case(&expected)),
+        hashing_semantics:
+            "sha256 over exact token bytes; shell equivalent: printf %s \"$TOKEN\" | sha256sum",
+    })
+}
+
 pub fn forward_to_local_origin(
     client: &Client,
     local_origin: &str,
@@ -185,6 +228,15 @@ fn forward_to_local_origin_result(
     local_origin: &str,
     request: &PreviewIngressRequest,
 ) -> std::result::Result<PreviewIngressResponse, PreviewClientForwardError> {
+    if request.method.eq_ignore_ascii_case("OPTIONS") {
+        return Ok(PreviewIngressResponse {
+            request_id: request.request_id.clone(),
+            status: 204,
+            headers: cors_headers(BTreeMap::new(), &request.path),
+            body_base64: base64::engine::general_purpose::STANDARD.encode([]),
+            error: None,
+        });
+    }
     let method = request
         .method
         .parse()
@@ -207,7 +259,7 @@ fn forward_to_local_origin_result(
             message: err.to_string(),
         })?;
     let status = response.status().as_u16();
-    let headers = response_headers(response.headers());
+    let headers = cors_headers(response_headers(response.headers()), &request.path);
     let body = response.bytes().map_err(|err| PreviewClientForwardError {
         kind: "local_origin_response_failed".to_string(),
         message: err.to_string(),
@@ -315,10 +367,16 @@ fn post_json(
         .text()
         .map_err(|err| Error::internal_unexpected(format!("read {context} response: {err}")))?;
     if !status.is_success() {
+        let hint = if status.as_u16() == 401 {
+            " Hint: run `homeboy tunnel preview-client diagnose-auth` and compare no-newline SHA-256 digests without printing token material."
+        } else {
+            ""
+        };
         return Err(Error::internal_unexpected(format!(
-            "{context} failed with HTTP {}: {}",
+            "{context} failed with HTTP {}: {}{}",
             status.as_u16(),
-            text
+            text,
+            hint
         )));
     }
     if text.trim().is_empty() {
@@ -393,6 +451,30 @@ fn response_headers(headers: &HeaderMap) -> BTreeMap<String, String> {
                 .map(|value| (normalized, value.to_string()))
         })
         .collect()
+}
+
+fn cors_headers(mut headers: BTreeMap<String, String>, path: &str) -> BTreeMap<String, String> {
+    headers
+        .entry("access-control-allow-origin".to_string())
+        .or_insert_with(|| "*".to_string());
+    headers
+        .entry("access-control-allow-methods".to_string())
+        .or_insert_with(|| "GET, HEAD, OPTIONS".to_string());
+    headers
+        .entry("access-control-allow-headers".to_string())
+        .or_insert_with(|| "*".to_string());
+    if path.split('?').next().unwrap_or(path).ends_with(".json") {
+        headers
+            .entry("content-type".to_string())
+            .or_insert_with(|| "application/json".to_string());
+    }
+    headers
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(bytes);
+    format!("{digest:x}")
 }
 
 fn validate_start_spec(spec: &PreviewClientStartSpec) -> Result<()> {
@@ -547,5 +629,49 @@ mod tests {
         assert_eq!(response.status, 502);
         let error = response.error.expect("error");
         assert_eq!(error.kind, "local_origin_request_failed");
+    }
+
+    #[test]
+    fn options_preflight_returns_cors_without_local_origin() {
+        let client = Client::builder()
+            .timeout(Duration::from_millis(100))
+            .build()
+            .expect("client");
+        let response = forward_to_local_origin(
+            &client,
+            "http://127.0.0.1:9",
+            PreviewIngressRequest {
+                request_id: "req-options".to_string(),
+                method: "OPTIONS".to_string(),
+                path: "/homeboy/workflow-bench/runs/run/artifacts/blueprint.after.json".to_string(),
+                headers: BTreeMap::new(),
+                body_base64: None,
+            },
+        );
+
+        assert_eq!(response.status, 204);
+        assert_eq!(response.headers["access-control-allow-origin"], "*");
+        assert_eq!(response.headers["content-type"], "application/json");
+    }
+
+    #[test]
+    fn auth_diagnostic_hashes_exact_token_bytes() {
+        std::env::set_var("HOMEBOY_TEST_PREVIEW_TOKEN", "abc");
+        std::env::set_var(
+            "HOMEBOY_TEST_PREVIEW_TOKEN_SHA256",
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        );
+
+        let diagnostic = diagnose_auth(
+            "HOMEBOY_TEST_PREVIEW_TOKEN",
+            "HOMEBOY_TEST_PREVIEW_TOKEN_SHA256",
+        )
+        .expect("diagnostic");
+
+        assert_eq!(diagnostic.local_token_sha256, diagnostic.expected_sha256);
+        assert_eq!(diagnostic.matches_expected, Some(true));
+
+        std::env::remove_var("HOMEBOY_TEST_PREVIEW_TOKEN");
+        std::env::remove_var("HOMEBOY_TEST_PREVIEW_TOKEN_SHA256");
     }
 }

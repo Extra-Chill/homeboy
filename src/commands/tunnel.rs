@@ -2,7 +2,10 @@ use clap::{Args, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use homeboy::core::preview_client::{self, PreviewClientReport, PreviewClientStartSpec};
+use homeboy::core::artifact_origin::{self, ArtifactOriginServeSpec, ArtifactOriginStatus};
+use homeboy::core::preview_client::{
+    self, PreviewClientAuthDiagnostic, PreviewClientReport, PreviewClientStartSpec,
+};
 use homeboy::core::preview_ingress::{
     self, PreviewIngressInstallOptions, PreviewIngressInstallPlan, PreviewIngressInstallStatusPlan,
     PreviewIngressRoute, PreviewIngressServeSpec, PreviewIngressStatus,
@@ -31,6 +34,8 @@ pub struct TunnelExtra {
     pub preview_ingress: Option<PreviewIngressActionOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub preview_consumer: Option<PreviewConsumerOutput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact_origin: Option<ArtifactOriginActionOutput>,
 }
 
 #[derive(Debug, Serialize)]
@@ -45,7 +50,10 @@ pub enum ServiceTunnelActionOutput {
 
 #[derive(Debug, Serialize)]
 pub struct PreviewClientActionOutput {
-    pub report: PreviewClientReport,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub report: Option<PreviewClientReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_diagnostic: Option<PreviewClientAuthDiagnostic>,
 }
 
 #[derive(Debug, Serialize)]
@@ -107,6 +115,12 @@ struct PreviewConsumerOutputConfig {
     pub public_result_stdout_prefix: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum ArtifactOriginActionOutput {
+    Serve(ArtifactOriginStatus),
+}
+
 pub type TunnelOutput = EntityCrudOutput<ServiceTunnel, TunnelExtra>;
 
 #[derive(Args)]
@@ -139,6 +153,12 @@ enum TunnelCommand {
     PreviewConsumer {
         #[command(subcommand)]
         command: TunnelPreviewConsumerCommand,
+    },
+    /// Serve the artifact root as a browser/reviewer-facing static origin
+    #[command(name = "artifact-origin")]
+    ArtifactOrigin {
+        #[command(subcommand)]
+        command: TunnelArtifactOriginCommand,
     },
 }
 
@@ -196,6 +216,16 @@ enum TunnelPreviewClientCommand {
         #[arg(long)]
         ready_stdout: bool,
     },
+    /// Compare preview-client token digests without printing token material
+    DiagnoseAuth {
+        /// Environment variable that contains the preview tunnel bearer token
+        #[arg(long, default_value = "HOMEBOY_PREVIEW_TUNNEL_TOKEN")]
+        token_env: String,
+
+        /// Environment variable containing the allowed client token SHA-256 digest
+        #[arg(long, default_value = "HOMEBOY_PREVIEW_TUNNEL_TOKEN_SHA256")]
+        token_sha256_env: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -245,6 +275,10 @@ enum TunnelPreviewIngressCommand {
         /// Public host pattern routed to this ingress
         #[arg(long)]
         public_host_pattern: Option<String>,
+
+        /// Public host to inspect for preview-client registration state
+        #[arg(long)]
+        host: Option<String>,
     },
     /// Run the blocking HTTP ingress server behind a TLS terminator
     Serve {
@@ -263,6 +297,20 @@ enum TunnelPreviewIngressCommand {
         /// Environment variable containing the allowed client token SHA-256 digest
         #[arg(long, default_value = "HOMEBOY_PREVIEW_TUNNEL_TOKEN_SHA256")]
         token_sha256_env: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum TunnelArtifactOriginCommand {
+    /// Serve Homeboy artifact-root paths with CORS headers for browser consumers
+    Serve {
+        /// Loopback bind address for the local static artifact origin
+        #[arg(long, default_value = "127.0.0.1:7351")]
+        bind: String,
+
+        /// Artifact root to serve. Defaults to Homeboy's configured artifact root.
+        #[arg(long)]
+        root: Option<PathBuf>,
     },
 }
 
@@ -542,6 +590,30 @@ pub fn run(args: TunnelArgs, _global: &super::GlobalArgs) -> CmdResult<TunnelOut
         TunnelCommand::PreviewClient { command } => run_preview_client(command),
         TunnelCommand::PreviewIngress { command } => run_preview_ingress(command),
         TunnelCommand::PreviewConsumer { command } => run_preview_consumer(command),
+        TunnelCommand::ArtifactOrigin { command } => run_artifact_origin(command),
+    }
+}
+
+fn run_artifact_origin(command: TunnelArtifactOriginCommand) -> CmdResult<TunnelOutput> {
+    match command {
+        TunnelArtifactOriginCommand::Serve { bind, root } => {
+            let status = artifact_origin::status(
+                bind.clone(),
+                root.clone().unwrap_or(homeboy::core::artifact_root()?),
+            );
+            artifact_origin::serve(ArtifactOriginServeSpec { bind, root })?;
+            Ok((
+                TunnelOutput {
+                    command: "tunnel.artifact_origin.serve".to_string(),
+                    extra: TunnelExtra {
+                        artifact_origin: Some(ArtifactOriginActionOutput::Serve(status)),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                0,
+            ))
+        }
     }
 }
 
@@ -790,7 +862,31 @@ fn run_preview_client(command: TunnelPreviewClientCommand) -> CmdResult<TunnelOu
                     command: "tunnel.preview_client.start".to_string(),
                     id: Some(report.public_host.clone()),
                     extra: TunnelExtra {
-                        preview_client: Some(PreviewClientActionOutput { report }),
+                        preview_client: Some(PreviewClientActionOutput {
+                            report: Some(report.clone()),
+                            auth_diagnostic: None,
+                        }),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                0,
+            ))
+        }
+        TunnelPreviewClientCommand::DiagnoseAuth {
+            token_env,
+            token_sha256_env,
+        } => {
+            let diagnostic = preview_client::diagnose_auth(&token_env, &token_sha256_env)?;
+            Ok((
+                TunnelOutput {
+                    command: "tunnel.preview_client.diagnose_auth".to_string(),
+                    id: Some(token_env),
+                    extra: TunnelExtra {
+                        preview_client: Some(PreviewClientActionOutput {
+                            report: None,
+                            auth_diagnostic: Some(diagnostic),
+                        }),
                         ..Default::default()
                     },
                     ..Default::default()
@@ -893,8 +989,9 @@ fn run_preview_ingress(command: TunnelPreviewIngressCommand) -> CmdResult<Tunnel
             bind,
             domain,
             public_host_pattern,
+            host,
         } => {
-            let status = preview_ingress::status(bind, domain, public_host_pattern)?;
+            let status = preview_ingress::status_for_host(bind, domain, public_host_pattern, host)?;
             Ok((
                 TunnelOutput {
                     command: "tunnel.preview_ingress.status".to_string(),

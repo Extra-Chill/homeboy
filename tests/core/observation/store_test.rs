@@ -701,6 +701,68 @@ fn publication_manifest_artifact_store_refs_are_indexed() {
 }
 
 #[test]
+fn publication_manifest_public_url_refs_are_indexed_from_artifact_origin() {
+    with_isolated_home(|home| {
+        let _xdg = XdgGuard::unset();
+        let store = ObservationStore::open_initialized().expect("init store");
+        let run = store
+            .start_run(sample_run("bench", "homeboy"))
+            .expect("start run");
+        let locator = "homeboy/workflow-bench/runs/run-1/artifacts/scenario/adapter/attempt-1/blueprint.after.json";
+        let artifact_root = home.path().join(".local/share/homeboy/artifacts");
+        let nested_path = artifact_root.join(locator);
+        std::fs::create_dir_all(nested_path.parent().expect("nested parent"))
+            .expect("create artifact-store parent");
+        std::fs::write(&nested_path, br#"{"steps":[]}"#).expect("nested artifact");
+        let manifest_path = home.path().join("publication-manifest.json");
+        std::fs::write(
+            &manifest_path,
+            serde_json::json!({
+                "schema": "example/publication-manifest/v1",
+                "id": "publish-run-1",
+                "publication": {
+                    "public_base_url": "https://homeboy-artifacts-tunnel.dev.chubes.net",
+                    "artifact_base": "homeboy/workflow-bench"
+                },
+                "artifacts": [{
+                    "schema": "example/artifact-reference/v1",
+                    "id": "scenario/adapter/attempt-1/blueprint.after",
+                    "kind": "published-blueprint-after",
+                    "role": "output",
+                    "locator": {
+                        "type": "url",
+                        "value": "https://homeboy-artifacts-tunnel.dev.chubes.net/homeboy/workflow-bench/runs/run-1/artifacts/scenario/adapter/attempt-1/blueprint.after.json"
+                    },
+                    "media_type": "application/json",
+                    "bytes": 12,
+                    "sha256": "abc123",
+                    "created_at": "2026-06-11T15:42:42Z"
+                }]
+            })
+            .to_string(),
+        )
+        .expect("manifest artifact");
+
+        let source = store
+            .record_artifact(&run.id, "publication_manifest", &manifest_path)
+            .expect("record manifest");
+        let artifacts = store.list_artifacts(&run.id).expect("list artifacts");
+        let nested = artifacts
+            .iter()
+            .find(|artifact| artifact.id != source.id)
+            .expect("nested artifact indexed");
+
+        assert_eq!(artifacts.len(), 2);
+        assert_eq!(nested.kind, "published-blueprint-after");
+        assert_eq!(nested.path, nested_path.to_string_lossy());
+        assert_eq!(
+            nested.metadata_json["locator"]["value"].as_str(),
+            Some(locator)
+        );
+    });
+}
+
+#[test]
 fn test_record_directory_artifact() {
     with_isolated_home(|home| {
         let _xdg = XdgGuard::unset();

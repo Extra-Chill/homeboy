@@ -116,8 +116,8 @@ fn index_manifest_refs(
             .reference
             .get("id")
             .and_then(Value::as_str)
-            .unwrap_or(locator);
-        let id = published_artifact_id(&source.id, original_manifest_id, locator);
+            .unwrap_or(&locator);
+        let id = published_artifact_id(&source.id, original_manifest_id, &locator);
         if store.get_artifact(&id)?.is_some() {
             continue;
         }
