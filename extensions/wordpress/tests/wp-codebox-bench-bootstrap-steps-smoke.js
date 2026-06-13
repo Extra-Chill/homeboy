@@ -15,17 +15,31 @@ try {
   const monorepoDependencyPath = path.join(root, 'woocommerce@fix-test-branch');
   const monorepoPluginPath = path.join(monorepoDependencyPath, 'plugins', 'woocommerce');
   const stripeDependencyPath = path.join(root, 'woocommerce-gateway-stripe');
+  const failingDependencyPath = path.join(root, 'gateway-build-fails');
   const fixtureCoreModule = path.join(__dirname, 'fixtures', 'wp-codebox-core-bench-runner.mjs');
   const benchDir = path.join(componentPath, 'tests', 'bench');
+  const fakeBinDir = path.join(root, 'bin');
   fs.mkdirSync(benchDir, { recursive: true });
   fs.mkdirSync(dependencyPath, { recursive: true });
   fs.mkdirSync(monorepoPluginPath, { recursive: true });
   fs.mkdirSync(stripeDependencyPath, { recursive: true });
+  fs.mkdirSync(failingDependencyPath, { recursive: true });
+  fs.mkdirSync(fakeBinDir, { recursive: true });
   fs.writeFileSync(path.join(componentPath, 'bootstrap-steps-fixture.php'), "<?php\n/* Plugin Name: Bootstrap Steps Fixture */\n");
   fs.writeFileSync(path.join(dependencyPath, 'generic-dependency.php'), "<?php\n/* Plugin Name: Generic Dependency */\n");
   fs.writeFileSync(path.join(monorepoPluginPath, 'woocommerce.php'), "<?php\n/* Plugin Name: WooCommerce */\n");
   fs.writeFileSync(path.join(stripeDependencyPath, 'woocommerce-gateway-stripe.php'), "<?php\n/* Plugin Name: WooCommerce Stripe Gateway */\nhomeboy_missing_wordpress_runtime_function();\n");
+  fs.writeFileSync(path.join(failingDependencyPath, 'gateway-build-fails.php'), "<?php\n/* Plugin Name: Gateway Build Fails */\n");
+  fs.writeFileSync(path.join(failingDependencyPath, 'composer.json'), JSON.stringify({ scripts: { postInstall: 'npm install' } }, null, 2));
+  fs.writeFileSync(path.join(failingDependencyPath, 'package.json'), JSON.stringify({ engines: { node: '>=99', npm: '>=99' } }, null, 2));
   fs.writeFileSync(path.join(benchDir, 'assert-bootstrap.php'), "<?php\nreturn static fn() => ['metrics' => ['bootstrap_seen' => 1]];\n");
+  const fakeComposer = path.join(fakeBinDir, 'composer');
+  fs.writeFileSync(fakeComposer, `#!/usr/bin/env bash
+printf 'npm error code EBADENGINE\n' >&2
+printf 'npm error engine Unsupported engine for woocommerce-gateway-stripe\n' >&2
+exit 1
+`);
+  fs.chmodSync(fakeComposer, 0o755);
 
   const successCaptureFile = path.join(root, 'captured-success-recipe.json');
   const failureArtifactsDir = path.join(root, 'failure-artifacts');
@@ -118,6 +132,37 @@ homeboy_require_bash_version() { :; }
   const successResults = JSON.parse(fs.readFileSync(path.join(root, 'success-results.json'), 'utf8'));
   assert.ok(successResults.prepared_dependencies.some((dependency) => dependency.slug === 'woocommerce' && dependency.source_path === fs.realpathSync(monorepoDependencyPath) && dependency.package_root === fs.realpathSync(monorepoPluginPath) && dependency.mounted_plugin_dir === '/wordpress/wp-content/plugins/woocommerce'), JSON.stringify(successResults.prepared_dependencies, null, 2));
   assert.ok(successResults.prepared_dependencies.some((dependency) => dependency.slug === 'woocommerce-gateway-stripe' && dependency.source_path === fs.realpathSync(stripeDependencyPath) && dependency.package_root === fs.realpathSync(stripeDependencyPath)), JSON.stringify(successResults.prepared_dependencies, null, 2));
+
+  const buildFailureArtifactsDir = path.join(root, 'build-failure-artifacts');
+  const buildFailureResult = spawnSync('bash', [path.join(extensionPath, 'scripts', 'bench', 'bench-runner.sh')], {
+    cwd: componentPath,
+    encoding: 'utf8',
+    env: {
+      ...baseEnv,
+      HOMEBOY_BENCH_RESULTS_FILE: path.join(root, 'build-failure-results.json'),
+      HOMEBOY_CAPTURE_RECIPE: path.join(root, 'captured-build-failure-recipe.json'),
+      HOMEBOY_WP_CODEBOX_ARTIFACTS_DIR: buildFailureArtifactsDir,
+      HOMEBOY_SETTINGS_JSON: JSON.stringify({
+        ...settings,
+        validation_dependencies: [dependencyPath, failingDependencyPath],
+      }),
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH}`,
+    },
+  });
+
+  assert.equal(buildFailureResult.status, 0, buildFailureResult.stderr || buildFailureResult.stdout);
+  const buildFailureResults = JSON.parse(fs.readFileSync(path.join(root, 'build-failure-results.json'), 'utf8'));
+  assert.equal(buildFailureResults.prepared_dependencies.some((dependency) => dependency.slug === 'generic-dependency'), true);
+  assert.equal(buildFailureResults.prepared_dependencies.some((dependency) => dependency.slug === 'gateway-build-fails'), false);
+  assert.equal(buildFailureResults.dependency_build_failures.length, 1);
+  assert.equal(buildFailureResults.dependency_build_failures[0].dependency_slug, 'gateway-build-fails');
+  assert.equal(path.basename(buildFailureResults.dependency_build_failures[0].dependency_path), 'gateway-build-fails');
+  assert.match(buildFailureResults.dependency_build_failures[0].package_path, /gateway-build-fails/);
+  assert.equal(buildFailureResults.dependency_build_failures[0].engine_requirements.node, '>=99');
+  assert.match(buildFailureResults.dependency_build_failures[0].attempted_command, /composer install/);
+  assert.match(buildFailureResults.dependency_build_failures[0].stderr_tail, /EBADENGINE/);
+  const buildDiagnostics = JSON.parse(fs.readFileSync(path.join(buildFailureArtifactsDir, 'wordpress-dependency-build-diagnostics.json'), 'utf8'));
+  assert.equal(buildDiagnostics.diagnostics[0].code, 'wordpress-bench-dependency-build-failed');
 
   const failureResult = spawnSync('bash', [path.join(extensionPath, 'scripts', 'bench', 'bench-runner.sh')], {
     cwd: componentPath,
