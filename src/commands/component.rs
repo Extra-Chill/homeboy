@@ -1019,6 +1019,20 @@ fn component_discovery_value(
         map.insert("id".to_string(), Value::String(component.id.clone()));
         // Always surface remote_owner so missing config is visible (#602).
         map.entry("remote_owner".to_string()).or_insert(Value::Null);
+        let local_path_diagnostic = component::inventory::local_path_diagnostic(component);
+        if local_path_diagnostic.status != "ok" {
+            map.insert(
+                "local_path_diagnostic".to_string(),
+                serde_json::to_value(local_path_diagnostic).map_err(|error| {
+                    homeboy::core::Error::validation_invalid_argument(
+                        "component",
+                        "Failed to serialize local_path diagnostic",
+                        Some(error.to_string()),
+                        None,
+                    )
+                })?,
+            );
+        }
         summarize_large_component_metadata(map);
         if let Some(drift_files) = drift_files {
             // Computed: extension-declared lockfiles + component extras + the
@@ -1314,6 +1328,43 @@ mod tests {
             value["metadata_summary"]["baseline_keys"],
             serde_json::json!(["audit"])
         );
+    }
+
+    #[test]
+    fn component_discovery_value_flags_temp_local_path() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let checkout = temp.path().join("opencode").join("homeboy-temp");
+        fs::create_dir_all(checkout.join(".git")).expect("git dir");
+        fs::write(checkout.join("homeboy.json"), r#"{"id":"homeboy"}"#).expect("homeboy.json");
+        let component = Component::new(
+            "homeboy".to_string(),
+            checkout.to_string_lossy().to_string(),
+            String::new(),
+            None,
+        );
+
+        let value = component_discovery_value(&component, None).expect("discovery value");
+
+        assert_eq!(
+            value["local_path_diagnostic"]["status"],
+            serde_json::json!("temp_checkout")
+        );
+        assert_eq!(
+            value["local_path_diagnostic"]["exists"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["local_path_diagnostic"]["is_git_checkout"],
+            serde_json::json!(true)
+        );
+        assert!(value["local_path_diagnostic"]["warning"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("temporary/opencode checkout"));
+        assert!(value["local_path_diagnostic"]["repair_command"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("homeboy component set homeboy --local-path"));
     }
 
     #[test]
