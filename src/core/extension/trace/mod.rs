@@ -47,13 +47,14 @@ pub use probes::{ActiveTraceProbes, TraceProbeConfig};
 pub use report::{
     from_list_workflow, from_main_workflow, from_main_workflow_outputs, TraceAggregateMetricOutput,
     TraceAggregateMetricSampleOutput, TraceAggregateOutput, TraceAggregateRunOutput,
-    TraceAggregateSpanOutput, TraceBrowserProofOutput, TraceClassificationSummaryOutput,
-    TraceCommandOutput, TraceCompareClassificationSummaryOutput, TraceCompareMetricOutput,
-    TraceCompareOutput, TraceCompareRunOrderOutput, TraceCompareSpanOutput, TraceGuardrailOutput,
-    TraceListOutput, TraceMetricGuardrailOutput, TraceOverlayLocksOutput, TraceProfileListItem,
-    TraceResolvedProfileOutput, TraceRunOrderEntryOutput, TraceScenarioMatrixAxisOutput,
-    TraceScenarioMatrixCellOutput, TraceScenarioMatrixOutput, TraceSpanMetadata,
-    TraceVariantMatrixOutput, TraceVariantMatrixRunOutput,
+    TraceAggregateSpanOutput, TraceBrowserProofOutput, TraceBrowserProofRunRefOutput,
+    TraceClassificationSummaryOutput, TraceCommandOutput, TraceCompareClassificationSummaryOutput,
+    TraceCompareMetricOutput, TraceCompareOutput, TraceCompareRunOrderOutput,
+    TraceCompareSpanOutput, TraceGuardrailOutput, TraceListOutput, TraceMetricGuardrailOutput,
+    TraceOverlayLocksOutput, TraceProfileListItem, TraceResolvedProfileOutput,
+    TraceRunOrderEntryOutput, TraceScenarioMatrixAxisOutput, TraceScenarioMatrixCellOutput,
+    TraceScenarioMatrixOutput, TraceSpanMetadata, TraceVariantMatrixOutput,
+    TraceVariantMatrixRunOutput,
 };
 pub use report::{push_overlay_markdown, render_markdown};
 pub use run::TraceOverlay;

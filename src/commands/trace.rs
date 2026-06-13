@@ -203,6 +203,26 @@ pub struct TraceArgs {
     #[arg(long = "output-dir", value_name = "DIR")]
     pub output_dir: Option<PathBuf>,
 
+    /// Run visual screenshot comparisons for trace compare browser artifacts.
+    #[arg(long)]
+    pub visual_compare: bool,
+
+    /// Directory where visual compare artifacts should be written.
+    #[arg(long, value_name = "DIR")]
+    pub visual_artifacts_dir: Option<PathBuf>,
+
+    /// Executable implementing the generic Homeboy visual compare provider contract.
+    #[arg(long, value_name = "COMMAND")]
+    pub visual_compare_provider: Option<String>,
+
+    /// Extra argument forwarded to the visual compare provider before the input JSON path.
+    #[arg(long = "visual-provider-arg", value_name = "ARG")]
+    pub visual_provider_args: Vec<String>,
+
+    /// Visual mismatch threshold forwarded to the visual compare provider.
+    #[arg(long, value_name = "RATIO")]
+    pub visual_threshold: Option<f64>,
+
     /// Leave overlay changes in place after the trace run.
     #[arg(long)]
     pub keep_overlay: bool,

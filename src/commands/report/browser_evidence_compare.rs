@@ -4,6 +4,7 @@ use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use crate::commands::escape_markdown_table_cell;
 
@@ -32,6 +33,26 @@ pub struct BrowserEvidenceCompareArgs {
     /// Output format. Markdown is direct-rendered; JSON uses the normal command envelope.
     #[arg(long, value_parser = ["markdown", "json"], default_value = "markdown")]
     pub format: String,
+
+    /// Run visual screenshot comparisons through a declared visual compare provider.
+    #[arg(long)]
+    pub visual_compare: bool,
+
+    /// Directory where visual compare artifacts should be written.
+    #[arg(long, value_name = "DIR")]
+    pub visual_artifacts_dir: Option<String>,
+
+    /// Executable implementing the generic Homeboy visual compare provider contract.
+    #[arg(long, value_name = "COMMAND")]
+    pub visual_compare_provider: Option<String>,
+
+    /// Extra argument forwarded to the visual compare provider before the input JSON path.
+    #[arg(long = "visual-provider-arg", value_name = "ARG")]
+    pub visual_provider_args: Vec<String>,
+
+    /// Visual mismatch threshold forwarded to the visual compare provider.
+    #[arg(long, value_name = "RATIO")]
+    pub visual_threshold: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -74,6 +95,8 @@ pub struct BrowserEvidenceVariantComparison {
     pub console_errors: MetricComparison,
     pub page_errors: MetricComparison,
     pub artifacts: ArtifactComparison,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub visual_compare: Option<VisualCompareResult>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
 }
@@ -143,6 +166,17 @@ pub struct ArtifactRef {
     pub target: String,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct VisualCompareResult {
+    pub status: Option<String>,
+    pub mismatch_ratio: Option<f64>,
+    pub mismatch_pixels: Option<u64>,
+    pub total_pixels: Option<u64>,
+    pub dimension_mismatch: Option<bool>,
+    pub artifacts_directory: String,
+    pub artifacts: Vec<ArtifactRef>,
+}
+
 fn is_default_u64(value: &u64) -> bool {
     value.eq(&u64::default())
 }
@@ -158,12 +192,13 @@ pub fn browser_evidence_compare_from_args(
 ) -> homeboy::core::Result<BrowserEvidenceCompareReport> {
     let baseline_dir = PathBuf::from(&args.baseline_dir);
     let candidate_dir = PathBuf::from(&args.candidate_dir);
-    browser_evidence_compare_from_dirs(
+    browser_evidence_compare_from_dirs_with_visual(
         &[baseline_dir],
         &[candidate_dir],
         &args.baseline_label,
         &args.candidate_label,
         args.include_local_paths,
+        visual_compare_options(args)?,
     )
 }
 
@@ -173,6 +208,24 @@ pub fn browser_evidence_compare_from_dirs(
     baseline_label: &str,
     candidate_label: &str,
     include_local_paths: bool,
+) -> homeboy::core::Result<BrowserEvidenceCompareReport> {
+    browser_evidence_compare_from_dirs_with_visual(
+        baseline_dirs,
+        candidate_dirs,
+        baseline_label,
+        candidate_label,
+        include_local_paths,
+        None,
+    )
+}
+
+pub fn browser_evidence_compare_from_dirs_with_visual(
+    baseline_dirs: &[PathBuf],
+    candidate_dirs: &[PathBuf],
+    baseline_label: &str,
+    candidate_label: &str,
+    include_local_paths: bool,
+    visual_options: Option<VisualCompareOptions>,
 ) -> homeboy::core::Result<BrowserEvidenceCompareReport> {
     let baseline = implementation::read_evidence_dirs(baseline_dirs, include_local_paths)?;
     let candidate = implementation::read_evidence_dirs(candidate_dirs, include_local_paths)?;
@@ -194,7 +247,20 @@ pub fn browser_evidence_compare_from_dirs(
         baseline: baseline.artifacts.iter().cloned().collect(),
         candidate: candidate.artifacts.iter().cloned().collect(),
     };
-    let variants = implementation::compare_variants(&baseline.samples, &candidate.samples);
+    let mut variants = implementation::compare_variants(&baseline.samples, &candidate.samples);
+    if let Some(visual_options) = visual_options {
+        let baseline_local = implementation::read_evidence_dirs(baseline_dirs, true)?;
+        let candidate_local = implementation::read_evidence_dirs(candidate_dirs, true)?;
+        let local_variants =
+            implementation::compare_variants(&baseline_local.samples, &candidate_local.samples);
+        implementation::attach_visual_comparisons(
+            &mut variants,
+            &local_variants,
+            &visual_options,
+            baseline_label,
+            candidate_label,
+        )?;
+    }
     let totals = BrowserEvidenceCompareTotals {
         baseline_samples: baseline.samples.len(),
         candidate_samples: candidate.samples.len(),
@@ -227,6 +293,37 @@ pub fn browser_evidence_compare_from_dirs(
         variants,
         notes,
     })
+}
+
+#[derive(Debug, Clone)]
+pub struct VisualCompareOptions {
+    pub artifacts_dir: PathBuf,
+    pub provider_command: String,
+    pub provider_args: Vec<String>,
+    pub threshold: Option<f64>,
+}
+
+fn visual_compare_options(
+    args: &BrowserEvidenceCompareArgs,
+) -> homeboy::core::Result<Option<VisualCompareOptions>> {
+    if !args.visual_compare {
+        return Ok(None);
+    }
+    let Some(provider_command) = args.visual_compare_provider.clone() else {
+        return Err(homeboy::core::Error::validation_missing_argument(vec![
+            "--visual-compare-provider".to_string(),
+        ]));
+    };
+    Ok(Some(VisualCompareOptions {
+        artifacts_dir: args
+            .visual_artifacts_dir
+            .as_ref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(".homeboy/browser-visual-compare")),
+        provider_command,
+        provider_args: args.visual_provider_args.clone(),
+        threshold: args.visual_threshold,
+    }))
 }
 
 mod implementation {
@@ -715,6 +812,7 @@ mod implementation {
                 baseline: artifact_refs(baseline),
                 candidate: artifact_refs(candidate),
             },
+            visual_compare: None,
             notes,
         }
     }
@@ -789,6 +887,7 @@ mod implementation {
                 &variant.lifecycle_metrics,
             );
             render_artifacts(&mut out, variant);
+            render_visual_compare(&mut out, variant);
             if !variant.notes.is_empty() {
                 out.push_str("**Notes**\n");
                 for note in &variant.notes {
@@ -938,6 +1037,268 @@ mod implementation {
             let _ = writeln!(out, "- {}: {}", label, rendered);
         }
         out.push('\n');
+    }
+
+    fn render_visual_compare(out: &mut String, variant: &BrowserEvidenceVariantComparison) {
+        let Some(visual) = variant.visual_compare.as_ref() else {
+            return;
+        };
+        out.push_str("**Visual compare**\n");
+        let _ = writeln!(
+            out,
+            "- Status: `{}`",
+            visual.status.as_deref().unwrap_or("unknown")
+        );
+        let _ = writeln!(
+            out,
+            "- Mismatch: {} pixels / {} total ({})",
+            visual
+                .mismatch_pixels
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+            visual
+                .total_pixels
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+            visual
+                .mismatch_ratio
+                .map(|value| format!("{:.4}", value))
+                .unwrap_or_else(|| "unknown".to_string())
+        );
+        if let Some(dimension_mismatch) = visual.dimension_mismatch {
+            let _ = writeln!(out, "- Dimension mismatch: `{}`", dimension_mismatch);
+        }
+        if !visual.artifacts.is_empty() {
+            let rendered = visual
+                .artifacts
+                .iter()
+                .map(|artifact| format!("{}: {}", artifact.label, artifact.target))
+                .collect::<Vec<_>>()
+                .join("; ");
+            let _ = writeln!(out, "- Artifacts: {}", rendered);
+        }
+        out.push('\n');
+    }
+
+    pub(super) fn attach_visual_comparisons(
+        variants: &mut [BrowserEvidenceVariantComparison],
+        local_variants: &[BrowserEvidenceVariantComparison],
+        options: &VisualCompareOptions,
+        baseline_label: &str,
+        candidate_label: &str,
+    ) -> homeboy::core::Result<()> {
+        for variant in variants {
+            let Some(local_variant) = local_variants
+                .iter()
+                .find(|candidate| candidate.variant == variant.variant)
+            else {
+                continue;
+            };
+            let Some(source_screenshot) = screenshot_path(&local_variant.artifacts.baseline) else {
+                variant.notes.push(
+                    "visual compare skipped: baseline screenshot artifact missing".to_string(),
+                );
+                continue;
+            };
+            let Some(candidate_screenshot) = screenshot_path(&local_variant.artifacts.candidate)
+            else {
+                variant.notes.push(
+                    "visual compare skipped: candidate screenshot artifact missing".to_string(),
+                );
+                continue;
+            };
+            let slug = visual_variant_slug(&variant.variant);
+            let artifacts_dir = options.artifacts_dir.join(&slug);
+            let result = run_visual_compare_provider(
+                options,
+                &artifacts_dir,
+                &source_screenshot,
+                &candidate_screenshot,
+                baseline_label,
+                candidate_label,
+            )?;
+            variant.visual_compare = Some(result);
+        }
+        Ok(())
+    }
+
+    fn screenshot_path(artifacts: &[ArtifactRef]) -> Option<String> {
+        let source_parent = artifacts.iter().find_map(|artifact| {
+            (artifact.label == "source")
+                .then(|| PathBuf::from(&artifact.target))
+                .filter(|path| path.is_absolute())
+                .and_then(|path| path.parent().map(Path::to_path_buf))
+        });
+        artifacts
+            .iter()
+            .find(|artifact| artifact.label.to_ascii_lowercase().contains("screenshot"))
+            .map(|artifact| {
+                let path = PathBuf::from(&artifact.target);
+                if path.is_absolute() {
+                    path
+                } else if let Some(parent) = &source_parent {
+                    parent.join(path)
+                } else {
+                    path
+                }
+                .to_string_lossy()
+                .to_string()
+            })
+    }
+
+    fn visual_variant_slug(variant: &BrowserEvidenceVariant) -> String {
+        let mut raw = format!("{}-{}", variant.scenario, variant.profile);
+        for (key, value) in &variant.matrix {
+            raw.push('-');
+            raw.push_str(key);
+            raw.push('-');
+            raw.push_str(value);
+        }
+        let slug = raw
+            .chars()
+            .map(|ch| {
+                if ch.is_ascii_alphanumeric() {
+                    ch.to_ascii_lowercase()
+                } else {
+                    '-'
+                }
+            })
+            .collect::<String>()
+            .split('-')
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("-");
+        if slug.is_empty() {
+            "browser-variant".to_string()
+        } else {
+            slug
+        }
+    }
+
+    fn run_visual_compare_provider(
+        options: &VisualCompareOptions,
+        artifacts_dir: &Path,
+        source_screenshot: &str,
+        candidate_screenshot: &str,
+        baseline_label: &str,
+        candidate_label: &str,
+    ) -> homeboy::core::Result<VisualCompareResult> {
+        std::fs::create_dir_all(artifacts_dir).map_err(|err| {
+            homeboy::core::Error::internal_io(
+                format!(
+                    "Failed to create visual compare artifact directory {}: {}",
+                    artifacts_dir.display(),
+                    err
+                ),
+                Some("report.browser_evidence_compare.visual_artifacts".to_string()),
+            )
+        })?;
+        let input_path = artifacts_dir.join("homeboy-visual-compare-input.json");
+        let mut input = serde_json::json!({
+            "schema": "homeboy/visual-compare-request/v1",
+            "source_screenshot": source_screenshot,
+            "candidate_screenshot": candidate_screenshot,
+            "source_label": baseline_label,
+            "candidate_label": candidate_label,
+            "artifacts_directory": artifacts_dir,
+        });
+        if let Some(threshold) = options.threshold {
+            input["threshold"] = serde_json::json!(threshold);
+        }
+        std::fs::write(
+            &input_path,
+            serde_json::to_string_pretty(&input).map_err(|err| {
+                homeboy::core::Error::internal_json(
+                    err.to_string(),
+                    Some("report.browser_evidence_compare.visual_input".to_string()),
+                )
+            })?,
+        )
+        .map_err(|err| {
+            homeboy::core::Error::internal_io(
+                format!(
+                    "Failed to write visual compare input {}: {}",
+                    input_path.display(),
+                    err
+                ),
+                Some("report.browser_evidence_compare.visual_input".to_string()),
+            )
+        })?;
+
+        let output = Command::new(&options.provider_command)
+            .args(&options.provider_args)
+            .arg(&input_path)
+            .output()
+            .map_err(|err| {
+                homeboy::core::Error::internal_unexpected(format!(
+                    "Failed to invoke visual compare provider `{}`: {}",
+                    options.provider_command, err
+                ))
+            })?;
+        if !output.status.success() {
+            return Err(homeboy::core::Error::internal_unexpected(format!(
+                "Visual compare provider `{}` failed with status {:?}: {}{}",
+                options.provider_command,
+                output.status.code(),
+                String::from_utf8_lossy(&output.stderr),
+                String::from_utf8_lossy(&output.stdout)
+            )));
+        }
+        let value = serde_json::from_slice::<Value>(&output.stdout).map_err(|err| {
+            homeboy::core::Error::internal_json(
+                format!("Failed to parse visual compare provider output: {}", err),
+                Some("report.browser_evidence_compare.visual_output".to_string()),
+            )
+        })?;
+        Ok(visual_compare_result_from_value(&value, artifacts_dir))
+    }
+
+    fn visual_compare_result_from_value(
+        value: &Value,
+        artifacts_dir: &Path,
+    ) -> VisualCompareResult {
+        let metrics = value.get("metrics").and_then(Value::as_object);
+        let artifacts = value
+            .get("artifacts")
+            .and_then(Value::as_object)
+            .map(|artifacts| {
+                artifacts
+                    .iter()
+                    .filter_map(|(label, value)| {
+                        let path = value
+                            .get("path")
+                            .and_then(Value::as_str)
+                            .or_else(|| value.as_str())?;
+                        Some(ArtifactRef {
+                            label: label.clone(),
+                            target: path.to_string(),
+                        })
+                    })
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        VisualCompareResult {
+            status: value
+                .get("status")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            mismatch_ratio: metrics
+                .and_then(|metrics| metrics.get("visual_mismatch_ratio"))
+                .and_then(Value::as_f64),
+            mismatch_pixels: metrics
+                .and_then(|metrics| metrics.get("visual_mismatch_pixels"))
+                .and_then(Value::as_u64),
+            total_pixels: metrics
+                .and_then(|metrics| metrics.get("visual_total_pixels"))
+                .and_then(Value::as_u64),
+            dimension_mismatch: metrics
+                .and_then(|metrics| metrics.get("visual_dimension_mismatch"))
+                .and_then(Value::as_bool),
+            artifacts_directory: artifacts_dir.to_string_lossy().to_string(),
+            artifacts,
+        }
     }
 
     fn variant_for_sample(sample: &BrowserEvidenceSample) -> BrowserEvidenceVariant {
