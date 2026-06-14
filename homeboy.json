@@ -423,9 +423,11 @@
   "baselines": {
     "audit": {
       "context_id": "homeboy",
-      "created_at": "2026-06-14T00:58:24Z",
-      "item_count": 741,
+      "created_at": "2026-06-14T01:52:03Z",
+      "item_count": 747,
       "known_fingerprints": [
+        "Commands::src/commands/adapter.rs::NamingMismatch",
+        "Commands::src/commands/output_runtime.rs::NamingMismatch",
         "Runs (Tests)::src/commands/runs/corpus_tests.rs::MissingMethod",
         "artifact_portability::artifact_portability/local_artifact_path/$.run_dir::NonPortableArtifactPath",
         "core_boundary_leak:core-agnostic-source::src/commands/component.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `wordpress` appears at line 100 in behavioral context `top-level`::CoreBoundaryLeak",
@@ -1033,8 +1035,12 @@
         "core_boundary_leak:detector-agnostic-source::src/core/code_audit/detectors/wrapper_inference.rs::Core boundary leak (detector-agnostic-source) configured ecosystem term `php` appears at line 35 in behavioral context `top-level`::CoreBoundaryLeak",
         "core_boundary_leak:detector-agnostic-source::src/core/code_audit/detectors/wrapper_inference.rs::Core boundary leak (detector-agnostic-source) configured ecosystem term `rust` appears at line 161 in behavioral context `has_field`::CoreBoundaryLeak",
         "dead_code::src/command_contract.rs::UnreferencedExport",
+        "dead_code::src/commands/adapter.rs::DeadCodeMarker",
+        "dead_code::src/commands/adapter.rs::UnreferencedExport",
+        "dead_code::src/commands/output_runtime.rs::UnreferencedExport",
         "dead_code::src/core/agent_task_fanout.rs::UnreferencedExport",
         "dead_code::src/core/agent_task_loop_controller.rs::UnreferencedExport",
+        "dead_code::src/core/agent_task_service.rs::UnreferencedExport",
         "dead_code::src/core/artifact_links.rs::UnreferencedExport",
         "dead_code::src/core/extension/bench/parsing.rs::UnreferencedExport",
         "dead_code::src/core/fleet/exec.rs::UnreferencedExport",
@@ -1053,6 +1059,7 @@
         "field_patterns::src/core/agent_task_lifecycle.rs::RepeatedFieldPattern",
         "field_patterns::src/core/agent_task_promotion.rs::RepeatedFieldPattern",
         "field_patterns::src/core/agent_task_schedule.rs::RepeatedFieldPattern",
+        "field_patterns::src/core/agent_task_service.rs::RepeatedFieldPattern",
         "field_patterns::src/core/artifact_origin.rs::RepeatedFieldPattern",
         "field_patterns::src/core/context/report.rs::RepeatedFieldPattern",
         "field_patterns::src/core/daemon/broker_config.rs::RepeatedFieldPattern",
@@ -1102,7 +1109,6 @@
         "parallel-implementation::src/core/artifact_links.rs::ParallelImplementation",
         "parallel-implementation::src/core/extension/trace/run.rs::ParallelImplementation",
         "parallel-implementation::src/core/release/executor/publish.rs::ParallelImplementation",
-        "remote_execution_preflight::src/commands/route.rs::RemoteExecutionPreflight",
         "remote_execution_preflight::src/core/runner/execution/policy.rs::RemoteExecutionPreflight",
         "remote_execution_preflight::src/core/runner/lab.rs::RemoteExecutionPreflight",
         "remote_execution_preflight::src/core/runner/lab_workspaces.rs::RemoteExecutionPreflight",
@@ -1169,8 +1175,10 @@
         "test_quality::src/commands/trace/rig_tests.rs::VacuousTest"
       ],
       "metadata": {
-        "alignment_score": 0.8888888955116272,
+        "alignment_score": 0.8695651888847351,
         "known_outliers": [
+          "src/commands/output_runtime.rs",
+          "src/commands/adapter.rs",
           "src/core/observation/records/triage_items.rs",
           "src/core/observation/records/run_status.rs",
           "src/core/observation/records/run_builder.rs",
@@ -1182,7 +1190,7 @@
           "src/core/engine/undo/snapshot.rs",
           "src/core/engine/undo/entry.rs"
         ],
-        "outliers_count": 10,
+        "outliers_count": 12,
         "policy_sections": [
           {
             "audit_policy": "core_boundary_leak:core-agnostic-source",
