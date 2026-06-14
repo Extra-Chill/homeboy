@@ -1,17 +1,18 @@
 use clap::Args;
 use serde_json::Value;
 
-use homeboy::core::agent_task::{
+use homeboy::core::agent_tasks::lifecycle as agent_task_lifecycle;
+use homeboy::core::agent_tasks::provider::{
+    provider_requires_cwd_git_checkout, ExtensionProviderAgentTaskExecutor,
+};
+use homeboy::core::agent_tasks::scheduler::{
+    AgentTaskExecutorAdapter, AgentTaskPlan, AgentTaskRetryPolicy, AgentTaskScheduler,
+};
+use homeboy::core::agent_tasks::secrets::validate_secret_env;
+use homeboy::core::agent_tasks::{
     AgentTaskExecutor, AgentTaskLimits, AgentTaskPolicy, AgentTaskRequest, AgentTaskSourceRef,
     AgentTaskWorkspace, AgentTaskWorkspaceMode, AGENT_TASK_REQUEST_SCHEMA,
 };
-use homeboy::core::agent_task_lifecycle;
-use homeboy::core::agent_task_provider::provider_requires_cwd_git_checkout;
-use homeboy::core::agent_task_provider::ExtensionProviderAgentTaskExecutor;
-use homeboy::core::agent_task_scheduler::{
-    AgentTaskExecutorAdapter, AgentTaskPlan, AgentTaskRetryPolicy, AgentTaskScheduler,
-};
-use homeboy::core::agent_task_secrets::validate_secret_env;
 use homeboy::core::config;
 use homeboy::core::worktree;
 
@@ -725,10 +726,10 @@ fn sanitize_slug(value: &str) -> String {
 mod tests {
     use super::*;
     use crate::test_support::with_isolated_home;
-    use homeboy::core::agent_task::{
+    use homeboy::core::agent_tasks::scheduler::AgentTaskExecutionContext;
+    use homeboy::core::agent_tasks::{
         AgentTaskOutcome, AgentTaskOutcomeStatus, AGENT_TASK_OUTCOME_SCHEMA,
     };
-    use homeboy::core::agent_task_scheduler::AgentTaskExecutionContext;
 
     #[test]
     fn builds_repo_cooking_plan_from_prompt_file_and_client_context() {

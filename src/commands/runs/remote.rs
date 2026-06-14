@@ -1,4 +1,4 @@
-use homeboy::core::runner;
+use homeboy::core::runners as runner;
 use homeboy::core::Error;
 
 use super::{CmdResult, RunsListArgs, RunsListOutput, RunsOutput};

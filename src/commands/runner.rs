@@ -5,10 +5,10 @@ use serde::Serialize;
 use serde_json::Value;
 
 use homeboy::core::redaction::RedactionPolicy;
-use homeboy::core::runner::{
-    self, ReverseRunnerConnectOptions, ReverseRunnerWorkerOptions, ReverseRunnerWorkerOutput,
-    Runner, RunnerConnectReport, RunnerDisconnectReport, RunnerExecOutput, RunnerKind,
-    RunnerStatusReport,
+use homeboy::core::runners::{
+    self as runner, ReverseRunnerConnectOptions, ReverseRunnerWorkerOptions,
+    ReverseRunnerWorkerOutput, Runner, RunnerConnectReport, RunnerDisconnectReport,
+    RunnerExecOutput, RunnerKind, RunnerStatusReport,
 };
 use homeboy::core::server::{RunnerPolicy, RunnerSecretEnvRef, RunnerSettings};
 use homeboy::core::{EntityCrudOutput, MergeOutput};

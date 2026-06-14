@@ -1,6 +1,15 @@
+// Stable domain facades for new command/core integrations.
+pub mod agent_tasks;
+pub mod artifacts;
+pub mod runners;
+
 // Public extensions (config first — exports entity_crud! macro used by entity extensions)
 #[macro_use]
 pub mod config;
+
+// Compatibility exports for existing `homeboy::core::<module>` consumers. Prefer the
+// facade modules above for new code so implementation files can move without
+// becoming accidental public API.
 pub mod agent_task;
 pub mod agent_task_aggregate;
 pub mod agent_task_cook_loop;

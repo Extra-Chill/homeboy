@@ -10,7 +10,7 @@ use homeboy::core::observation::{
     ArtifactRecord, FindingRecord, ObservationStore, RecordedHomeboyFinding, RunRecord,
     TraceSpanRecord,
 };
-use homeboy::core::runner::is_reportable_artifact_evidence_path;
+use homeboy::core::runners::is_reportable_artifact_evidence_path;
 use homeboy::core::Error;
 
 use super::common::since_threshold;

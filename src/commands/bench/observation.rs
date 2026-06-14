@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-use homeboy::core::artifact_links;
+use homeboy::core::artifacts as artifact_links;
 use homeboy::core::engine::run_dir::{self, RunDir};
 use homeboy::core::extension::bench::{
     BenchDiagnostic, BenchDiagnosticSource, BenchResults, BenchRunWorkflowResult,
@@ -827,7 +827,7 @@ mod tests {
     fn recorded_bench_artifact_reports_unreachable_public_viewer_url() {
         let public_artifact_base = "https://artifacts.example.test/homeboy";
         let _public_artifact_base = EnvGuard::set(
-            homeboy::core::artifact_links::PUBLIC_ARTIFACT_BASE_URL_ENV,
+            homeboy::core::artifacts::PUBLIC_ARTIFACT_BASE_URL_ENV,
             public_artifact_base,
         );
         let mut artifact = BenchArtifact::default();
@@ -942,7 +942,7 @@ mod tests {
             let _xdg = XdgGuard::unset();
             let public_artifact_base = serve_public_artifact_base_once(200);
             let _public_artifact_base = EnvGuard::set(
-                homeboy::core::artifact_links::PUBLIC_ARTIFACT_BASE_URL_ENV,
+                homeboy::core::artifacts::PUBLIC_ARTIFACT_BASE_URL_ENV,
                 &public_artifact_base,
             );
             let run_dir = RunDir::create().expect("run dir");

@@ -1,12 +1,12 @@
 use serde::Serialize;
 
-use homeboy::core::agent_task::{
+use homeboy::core::agent_tasks::scheduler::{
+    AgentTaskExecutionContext, AgentTaskPlan, AgentTaskScheduleOptions, AgentTaskScheduler,
+};
+use homeboy::core::agent_tasks::{
     expand_agent_task_matrix, AgentTaskExecutor, AgentTaskMatrixAggregate, AgentTaskMatrixAxis,
     AgentTaskOutcomeStatus, AgentTaskRequest, AgentTaskWorkspace, AGENT_TASK_OUTCOME_SCHEMA,
     AGENT_TASK_REQUEST_SCHEMA,
-};
-use homeboy::core::agent_task_scheduler::{
-    AgentTaskExecutionContext, AgentTaskPlan, AgentTaskScheduleOptions, AgentTaskScheduler,
 };
 
 use super::{matrix, BenchReportFormat, BenchRunArgs};
@@ -18,7 +18,7 @@ pub struct BenchMatrixFanoutOutput {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub rigs: Vec<String>,
     pub executor_backend: String,
-    pub scheduler: homeboy::core::agent_task_scheduler::AgentTaskAggregate,
+    pub scheduler: homeboy::core::agent_tasks::AgentTaskAggregate,
     pub matrix: AgentTaskMatrixAggregate,
     pub report: BenchMatrixFanoutReport,
 }
@@ -220,16 +220,16 @@ fn matrix_template_request(
 #[derive(Clone)]
 struct LocalBenchMatrixExecutor;
 
-impl homeboy::core::agent_task_scheduler::AgentTaskExecutorAdapter for LocalBenchMatrixExecutor {
+impl homeboy::core::agent_tasks::AgentTaskExecutorAdapter for LocalBenchMatrixExecutor {
     fn execute(
         &self,
         request: AgentTaskRequest,
         context: AgentTaskExecutionContext,
-    ) -> homeboy::core::agent_task::AgentTaskOutcome {
-        homeboy::core::agent_task::AgentTaskOutcome {
+    ) -> homeboy::core::agent_tasks::AgentTaskOutcome {
+        homeboy::core::agent_tasks::AgentTaskOutcome {
             schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
             task_id: request.task_id.clone(),
-            status: homeboy::core::agent_task::AgentTaskOutcomeStatus::NoOp,
+            status: homeboy::core::agent_tasks::AgentTaskOutcomeStatus::NoOp,
             summary: Some(format!(
                 "matrix cell scheduled for executor '{}'",
                 request.executor.backend
