@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.121.28] - 2026-06-14
+
+### Fixed
+- keep WordPress bench dependency provenance parseable
+
 ## [2.121.27] - 2026-06-14
 
 ### Fixed
