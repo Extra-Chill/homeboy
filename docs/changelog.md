@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.229.6] - 2026-06-14
+
+### Changed
+- Extract agent-task service orchestration
+- Narrow core access behind facade modules
+- Refactor command output handling
+- Introduce typed command adapter contract
+
 ## [0.229.5] - 2026-06-14
 
 ### Changed
