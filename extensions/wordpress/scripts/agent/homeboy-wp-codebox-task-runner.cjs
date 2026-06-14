@@ -238,6 +238,82 @@ function writePreflightEvidence(artifacts, evidence) {
   }
 }
 
+function safePluginSlug(slug, source) {
+  const candidate = slug || path.basename(source || 'plugin');
+  return candidate.replace(/[^A-Za-z0-9_.-]+/g, '-').replace(/^-+|-+$/g, '') || 'plugin';
+}
+
+function preparePluginDirectory(source, slug, preparedRoot, artifacts) {
+  if (!source || !path.isAbsolute(source) || !fs.existsSync(source) || !fs.statSync(source).isDirectory()) {
+    return { source, prepared: false };
+  }
+
+  const safeSlug = safePluginSlug(slug, source);
+  if (!fs.existsSync(path.join(source, `${safeSlug}.php`))) {
+    return { source, prepared: false };
+  }
+
+  const target = path.join(preparedRoot, safeSlug);
+  fs.mkdirSync(preparedRoot, { recursive: true });
+  if (!pathInside(preparedRoot, target)) {
+    throw new Error(`Refusing to prepare plugin outside prepared root: ${target}`);
+  }
+  if (pathInside(target, source)) {
+    return { source, prepared: false };
+  }
+
+  fs.rmSync(target, { recursive: true, force: true });
+  fs.cpSync(source, target, {
+    recursive: true,
+    filter: (sourcePath) => !pathInside(artifacts, sourcePath),
+  });
+  return { source: target, prepared: true, original_source: source, slug: safeSlug };
+}
+
+function prepareStableTaskInput(taskInput, artifacts) {
+  const preparedRoot = path.join(artifacts, 'prepared-plugins');
+  const preparedBySource = new Map();
+  const prepare = (source, slug) => {
+    if (!source || preparedBySource.has(source)) {
+      return preparedBySource.get(source) || { source, prepared: false };
+    }
+    const prepared = preparePluginDirectory(source, slug, preparedRoot, artifacts);
+    preparedBySource.set(source, prepared);
+    return prepared;
+  };
+
+  const preparedExtraPlugins = Array.isArray(taskInput.extra_plugins)
+    ? taskInput.extra_plugins.map((plugin) => {
+        const prepared = prepare(plugin?.source, plugin?.slug);
+        return prepared.prepared ? { ...plugin, source: prepared.source } : plugin;
+      })
+    : taskInput.extra_plugins;
+
+  const preparedComponentContracts = Array.isArray(taskInput.component_contracts)
+    ? taskInput.component_contracts.map((contract) => {
+        const prepared = prepare(contract?.path || contract?.source, contract?.slug);
+        return prepared.prepared ? { ...contract, path: prepared.source } : contract;
+      })
+    : taskInput.component_contracts;
+
+  const runtimeComponentPaths = plainObject(taskInput.runtime_component_paths)
+    ? Object.fromEntries(Object.entries(taskInput.runtime_component_paths).map(([key, value]) => {
+        const prepared = preparedBySource.get(value);
+        return [key, prepared?.prepared ? prepared.source : value];
+      }))
+    : taskInput.runtime_component_paths;
+
+  return {
+    input: {
+      ...taskInput,
+      extra_plugins: preparedExtraPlugins,
+      component_contracts: preparedComponentContracts,
+      runtime_component_paths: runtimeComponentPaths,
+    },
+    prepared_plugins: [...preparedBySource.values()].filter((item) => item.prepared),
+  };
+}
+
 function secretEnvValues(secretNames) {
   return Object.fromEntries(secretNames
     .filter((name) => typeof name === 'string' && name !== '' && process.env[name])
@@ -1270,7 +1346,8 @@ function runWpCodeboxParentTask(request) {
     return 1;
   }
 
-  const inputPath = writeJsonFile('homeboy-wp-codebox-agent-task-input-', stableTaskInput(input));
+  const preparedInput = prepareStableTaskInput(stableTaskInput(input), artifacts);
+  const inputPath = writeJsonFile('homeboy-wp-codebox-agent-task-input-', preparedInput.input);
   const args = ['agent-task-run', `--input-file=${inputPath}`, '--json'];
   const previewHold = argValue('--preview-hold');
   if (previewHold) {
@@ -1289,6 +1366,7 @@ function runWpCodeboxParentTask(request) {
     artifacts,
     command: resolved.command,
     args: resolved.args,
+    prepared_plugins: preparedInput.prepared_plugins,
     timeout_ms: timeoutMs,
     task_id: request.orchestrator?.agent_task_id,
     sandbox_session_id: request.sandbox_session_id,

@@ -460,6 +460,33 @@ try {
   assert.equal(implicitRuntimeInput.extra_plugins.find((plugin) => plugin.slug === 'data-machine').source, defaultDataMachinePath);
   assert.equal(implicitRuntimeInput.extra_plugins.find((plugin) => plugin.slug === 'data-machine-code').source, defaultDataMachineCodePath);
 
+  const runtimeComponentSource = path.join(root, 'runtime-components', 'data-machine-code');
+  const runtimeComponentArtifacts = path.join(root, 'prepared-runtime-component-artifacts');
+  fs.mkdirSync(runtimeComponentSource, { recursive: true });
+  fs.writeFileSync(path.join(runtimeComponentSource, 'data-machine-code.php'), "<?php\n/* Plugin Name: Data Machine Code */\n");
+  const preparedRuntimeCapturePath = path.join(root, 'capture-prepared-runtime-component.json');
+  const preparedRuntimeResult = spawnSync(process.execPath, [
+    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-wp-codebox-task-runner.cjs'),
+    '--wp-codebox-bin', fixtureWpCodebox,
+    '--artifacts', runtimeComponentArtifacts,
+  ], {
+    encoding: 'utf8',
+    input: JSON.stringify({
+      ...request,
+      runtime_component_paths: {
+        agent_runtime_tools: runtimeComponentSource,
+      },
+    }),
+    env: { ...process.env, FIXTURE_WP_CODEBOX_CAPTURE: preparedRuntimeCapturePath, OPENCODE_API_KEY: 'redacted-test-key' },
+  });
+  assert.equal(preparedRuntimeResult.status, 0, preparedRuntimeResult.stderr || preparedRuntimeResult.stdout);
+  const preparedRuntimeInput = readJson(preparedRuntimeCapturePath).input;
+  const preparedRuntimePath = path.join(runtimeComponentArtifacts, 'prepared-plugins', 'data-machine-code');
+  assert.equal(preparedRuntimeInput.extra_plugins.find((plugin) => plugin.slug === 'data-machine-code').source, preparedRuntimePath);
+  assert.equal(preparedRuntimeInput.component_contracts.find((contract) => contract.slug === 'data-machine-code').path, preparedRuntimePath);
+  assert.equal(preparedRuntimeInput.runtime_component_paths.agent_runtime_tools, preparedRuntimePath);
+  assert.equal(fs.existsSync(path.join(preparedRuntimePath, 'data-machine-code.php')), true);
+
   const legacyRuntimeCapturePath = path.join(root, 'capture-legacy-runtime-stack.json');
   const legacyRuntimeResult = spawnSync(process.execPath, [
     path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-wp-codebox-task-runner.cjs'),
