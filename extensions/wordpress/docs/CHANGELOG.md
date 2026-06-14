@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.121.26] - 2026-06-14
+
+### Fixed
+- preserve WP Codebox bench recipe fixture inputs
+
 ## [2.121.25] - 2026-06-14
 
 ### Fixed
