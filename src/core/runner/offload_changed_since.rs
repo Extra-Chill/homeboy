@@ -8,7 +8,9 @@ use super::RunnerWorkspaceSyncMode;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LabOffloadChangedSincePreflight {
     pub args: Vec<String>,
+    pub requested_ref: Option<String>,
     pub resolved_base: Option<String>,
+    pub git_fetch_refs: Vec<String>,
 }
 
 pub fn preflight_lab_offload_changed_since(
@@ -18,14 +20,18 @@ pub fn preflight_lab_offload_changed_since(
     let Some(git_ref) = lab_offload_changed_since_ref(args) else {
         return Ok(LabOffloadChangedSincePreflight {
             args: args.to_vec(),
+            requested_ref: None,
             resolved_base: None,
+            git_fetch_refs: Vec::new(),
         });
     };
 
     if sync_mode != RunnerWorkspaceSyncMode::Snapshot {
         return Ok(LabOffloadChangedSincePreflight {
             args: args.to_vec(),
+            requested_ref: Some(git_ref.clone()),
             resolved_base: Some(git_ref),
+            git_fetch_refs: Vec::new(),
         });
     }
 
@@ -49,16 +55,23 @@ pub fn prepare_git_lab_offload_changed_since(
     let Some(git_ref) = lab_offload_changed_since_ref(args) else {
         return Ok(LabOffloadChangedSincePreflight {
             args: args.to_vec(),
+            requested_ref: None,
             resolved_base: None,
+            git_fetch_refs: Vec::new(),
         });
     };
 
     let resolved_base = resolve_changed_since_base(source_path, &git_ref)?;
     ensure_local_merge_base(source_path, &git_ref)?;
+    let git_fetch_refs = advertised_origin_ref_for_commit(source_path, &resolved_base)?
+        .into_iter()
+        .collect();
 
     Ok(LabOffloadChangedSincePreflight {
         args: rewrite_changed_since_ref(args, &resolved_base),
+        requested_ref: Some(git_ref),
         resolved_base: Some(resolved_base),
+        git_fetch_refs,
     })
 }
 
@@ -116,6 +129,54 @@ fn resolve_changed_since_base(path: &Path, git_ref: &str) -> Result<String> {
         path,
         &["rev-parse", "--verify", &format!("{git_ref}^{{commit}}")],
     )
+}
+
+fn advertised_origin_ref_for_commit(path: &Path, commit: &str) -> Result<Option<String>> {
+    let output = Command::new("git")
+        .args(["ls-remote", "origin"])
+        .current_dir(path)
+        .output()
+        .map_err(|err| {
+            Error::internal_io(err.to_string(), Some("run git ls-remote".to_string()))
+        })?;
+    if !output.status.success() {
+        return Err(Error::validation_invalid_argument(
+            "changed_since",
+            "Lab offload could not inspect origin refs for changed-since base materialization",
+            Some(commit.to_string()),
+            Some(vec![
+                String::from_utf8_lossy(&output.stderr).trim().to_string(),
+                "Run with --force-hot to execute the changed-since command locally while investigating remote ref availability.".to_string(),
+            ]),
+        ));
+    }
+
+    let refs = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let (sha, git_ref) = line.split_once('\t')?;
+            (sha == commit && !git_ref.ends_with("^{}")).then(|| git_ref.to_string())
+        })
+        .collect::<Vec<_>>();
+
+    Ok(best_advertised_ref(refs))
+}
+
+fn best_advertised_ref(refs: Vec<String>) -> Option<String> {
+    refs.iter()
+        .find(|git_ref| git_ref.starts_with("refs/pull/") && git_ref.ends_with("/head"))
+        .cloned()
+        .or_else(|| {
+            refs.iter()
+                .find(|git_ref| git_ref.starts_with("refs/heads/"))
+                .cloned()
+        })
+        .or_else(|| {
+            refs.iter()
+                .find(|git_ref| git_ref.starts_with("refs/tags/"))
+                .cloned()
+        })
+        .or_else(|| refs.into_iter().next())
 }
 
 fn ensure_local_merge_base(path: &Path, git_ref: &str) -> Result<()> {
@@ -237,13 +298,25 @@ mod tests {
     #[test]
     fn rewrites_changed_since_to_resolved_commit_for_git_lab_offload() {
         let dir = tempfile::tempdir().expect("repo");
+        let origin = tempfile::tempdir().expect("origin");
+        git(origin.path(), &["init", "--bare"]);
         git(dir.path(), &["init"]);
         git(dir.path(), &["config", "user.email", "test@example.com"]);
         git(dir.path(), &["config", "user.name", "Test User"]);
+        git(
+            dir.path(),
+            &[
+                "remote",
+                "add",
+                "origin",
+                origin.path().to_str().expect("origin path"),
+            ],
+        );
         std::fs::write(dir.path().join("file.txt"), "base\n").expect("write base");
         git(dir.path(), &["add", "."]);
         git(dir.path(), &["commit", "-m", "base"]);
         git(dir.path(), &["branch", "base"]);
+        git(dir.path(), &["push", "origin", "base"]);
         std::fs::write(dir.path().join("file.txt"), "head\n").expect("write head");
         git(dir.path(), &["commit", "-am", "head"]);
         let base_sha = git_stdout(dir.path(), &["rev-parse", "base"]);
@@ -259,6 +332,8 @@ mod tests {
             .expect("changed-since preflight");
 
         assert_eq!(preflight.resolved_base.as_deref(), Some(base_sha.as_str()));
+        assert_eq!(preflight.requested_ref.as_deref(), Some("base"));
+        assert_eq!(preflight.git_fetch_refs, vec!["refs/heads/base"]);
         assert_eq!(
             preflight.args,
             vec![
