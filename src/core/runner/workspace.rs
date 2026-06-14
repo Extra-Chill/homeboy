@@ -815,7 +815,7 @@ fn materialize_git_command(
     let dirty_guard = dirty_lab_workspace_guard("$dest", allow_dirty_lab_workspace);
 
     format!(
-        "parent={parent}; dest={dest}; {owner_capture}; mkdir -p \"$parent\" && if [ -d \"$dest\"/.git ]; then {dirty_guard} && git -C \"$dest\" reset --hard && git -C \"$dest\" clean -ffdqx && git -C \"$dest\" fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'; else rm -rf \"$dest\" && git clone {url} \"$dest\" && git -C \"$dest\" fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'; fi{fetch_changed_since}{fetch_extra_refs} && git -C \"$dest\" checkout --detach {head} && git -C \"$dest\" reset --hard {head} && git -C \"$dest\" clean -ffdqx && {owner_restore}",
+        "parent={parent}; dest={dest}; {owner_capture}; mkdir -p \"$parent\" && if [ -d \"$dest\"/.git ]; then {dirty_guard} && git -C \"$dest\" reset --hard && git -C \"$dest\" clean -ffdqx && git -C \"$dest\" fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'; else rm -rf \"$dest\" && git clone {url} \"$dest\" && git -C \"$dest\" fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'; fi{fetch_extra_refs}{fetch_changed_since} && git -C \"$dest\" checkout --detach {head} && git -C \"$dest\" reset --hard {head} && git -C \"$dest\" clean -ffdqx && {owner_restore}",
         parent = shell::quote_arg(parent.as_str()),
         dest = dest,
         url = shell::quote_arg(remote_url),
@@ -1514,6 +1514,27 @@ mod tests {
 
         assert!(command.contains("fetch origin refs/pull/5530/head"));
         assert!(command.contains("checkout --detach abc123"));
+    }
+
+    #[test]
+    fn git_materialization_fetches_extra_refs_before_changed_since_sha() {
+        let command = materialize_git_command(
+            "/srv/homeboy/_lab_workspaces/homeboy-abc",
+            "https://github.com/Extra-Chill/homeboy.git",
+            "abc123",
+            Some("def456"),
+            &["refs/heads/main".to_string()],
+            false,
+        );
+
+        let extra_ref_index = command
+            .find("fetch origin refs/heads/main")
+            .expect("fetches advertised ref");
+        let changed_since_index = command
+            .find("rev-parse --verify -q 'def456^{commit}'")
+            .expect("verifies changed-since commit");
+
+        assert!(extra_ref_index < changed_since_index);
     }
 
     #[test]

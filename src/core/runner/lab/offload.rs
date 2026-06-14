@@ -670,6 +670,29 @@ fn run_lab_offload_inner(
     } else {
         preflight_lab_offload_changed_since(request.normalized_args, sync_mode)?
     };
+    let mut git_fetch_refs = changed_since_preflight.git_fetch_refs.clone();
+    for git_ref in
+        lab_offload_git_fetch_refs(&changed_since_preflight.args, &source_path, sync_mode)?
+    {
+        if !git_fetch_refs.contains(&git_ref) {
+            git_fetch_refs.push(git_ref);
+        }
+    }
+    if let Some(resolved_base) = &changed_since_preflight.resolved_base {
+        eprintln!(
+            "Lab offload: changed-since requested `{}` resolved to `{}`; runner fetch refs: {}.",
+            changed_since_preflight
+                .requested_ref
+                .as_deref()
+                .unwrap_or(resolved_base),
+            resolved_base,
+            if git_fetch_refs.is_empty() {
+                "<none>".to_string()
+            } else {
+                git_fetch_refs.join(", ")
+            }
+        );
+    }
     let mut extra_workspaces = lab_extra_workspaces(&source_path)?;
     // Sync any controller-local directories referenced by --provider-config
     // (runtime components, provider plugins, extra mount sources) so the cook
@@ -694,11 +717,7 @@ fn run_lab_offload_inner(
             mode: sync_mode,
             controller_routed_git: false,
             changed_since_base: changed_since_preflight.resolved_base.clone(),
-            git_fetch_refs: lab_offload_git_fetch_refs(
-                &changed_since_preflight.args,
-                &source_path,
-                sync_mode,
-            )?,
+            git_fetch_refs: git_fetch_refs.clone(),
             snapshot_includes: Vec::new(),
             allow_dirty_lab_workspace: request.allow_dirty_lab_workspace,
         },
@@ -718,6 +737,15 @@ fn run_lab_offload_inner(
                         "allow_dirty_lab_workspace",
                         request.allow_dirty_lab_workspace,
                     )
+                    .json(
+                        "changed_since_requested_ref",
+                        &changed_since_preflight.requested_ref,
+                    )
+                    .json(
+                        "changed_since_resolved_base",
+                        &changed_since_preflight.resolved_base,
+                    )
+                    .json("git_fetch_refs", &git_fetch_refs)
                     .string("workspace_cleanliness", &synced.workspace_cleanliness),
             )
             .build(),
