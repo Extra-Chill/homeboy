@@ -1075,6 +1075,7 @@ fn run_lab_offload_inner(
             let failure_message = lab_pre_dispatch_failure_message(&exec_output.stderr)
                 .or_else(|| lab_pre_dispatch_failure_message(&exec_output.stdout))
                 .unwrap_or_else(|| format!("offloaded agent-task command exited with {exit_code}"));
+            stderr.push_str(&format!("Lab pre-dispatch failure: {failure_message}\n"));
             let record = agent_task_lifecycle::record_pre_dispatch_failure(
                 agent_task_lifecycle::AgentTaskPreDispatchFailure {
                     run_id: &run_id,
