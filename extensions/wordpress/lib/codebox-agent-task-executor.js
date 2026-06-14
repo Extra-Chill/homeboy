@@ -439,6 +439,9 @@ function defaultPhpAiClientPath(settings, workspaceBase, options = {}) {
     siblingPath(path.dirname(workspaceBase), 'php-ai-client@custom-provider-auth-live'),
     siblingPath(path.dirname(workspaceBase), 'php-ai-client@custom-provider-auth'),
     siblingPath(path.dirname(workspaceBase), 'php-ai-client'),
+    siblingPath(path.dirname(path.dirname(workspaceBase)), 'php-ai-client@custom-provider-auth-live'),
+    siblingPath(path.dirname(path.dirname(workspaceBase)), 'php-ai-client@custom-provider-auth'),
+    siblingPath(path.dirname(path.dirname(workspaceBase)), 'php-ai-client'),
   );
 }
 
