@@ -608,7 +608,7 @@ Configure per-component in the component's homeboy/component config under
 | Setting | Type | Default | Purpose |
 |---|---|---|---|
 | `test_backend` | string | `wp-codebox` | `wp-codebox` (default) or `host-smoke` for standalone non-WordPress smoke scripts |
-| `validation_dependencies` | string | `""` | Comma / newline / JSON list of local components to mount during PHPStan, autoload validation, and PHPUnit |
+| `validation_dependencies` | array | `[]` | Component IDs, paths, or scoped objects to mount during PHPStan, autoload validation, PHPUnit, and bench |
 | `user` | string | `""` | WP-CLI user (email/login/ID); appended as `--user` when set |
 | `wp_config_defines` | object | `{}` | `CONSTANT_NAME => value` map appended to the runtime `wp-tests-config.php`; PHP type preserved via `var_export` |
 | `bench_env` | object | `{}` | `NAME => value` env vars forwarded into the runtime (workloads/fixtures read via `getenv()`) |
