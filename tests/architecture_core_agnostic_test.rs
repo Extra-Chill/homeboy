@@ -370,6 +370,7 @@ fn core_facades_expose_explicit_groups_not_wildcards() {
     // modules cannot leak new public names through `pub use module::*` blocks.
     let agent_tasks = source_file("src/core/agent_tasks.rs");
     let runners = source_file("src/core/runners.rs");
+    let artifacts = source_file("src/core/artifacts.rs");
 
     let forbidden_wildcards = [
         "pub use super::agent_task::*",
@@ -401,6 +402,24 @@ fn core_facades_expose_explicit_groups_not_wildcards() {
          list the API names explicitly so the facade documents its surface."
     );
 
+    let forbidden_artifact_wildcards = [
+        "pub use super::artifact_inputs::*",
+        "pub use super::artifact_links::*",
+        "pub use super::artifact_manifest::*",
+        "pub use super::artifact_origin::*",
+        "pub use super::browser_evidence::*",
+        "pub use super::change_artifact::*",
+        "pub use super::publication_artifacts::*",
+        "pub use super::structured_sidecar::*",
+    ];
+    for wildcard in forbidden_artifact_wildcards {
+        assert!(
+            !artifacts.contains(wildcard),
+            "src/core/artifacts.rs must not re-export implementation modules via \
+             `{wildcard}`; list the API names explicitly so the facade documents its surface."
+        );
+    }
+
     assert!(
         agent_tasks.contains("pub mod scheduler")
             && agent_tasks.contains("pub mod lifecycle")
@@ -417,6 +436,16 @@ fn core_facades_expose_explicit_groups_not_wildcards() {
             && runners.contains("pub mod lab_offload"),
         "src/core/runners.rs must keep the explicit API group modules (registry, connection, \
          execution, workspace, lab_offload, ...) so callers depend on operation contracts."
+    );
+    assert!(
+        artifacts.contains("pub use super::artifact_links::{")
+            && artifacts.contains("PublicArtifactUrlValidation")
+            && artifacts.contains("pub use super::artifact_manifest::{")
+            && artifacts.contains("ArtifactManifest")
+            && artifacts.contains("pub use super::artifact_origin::{")
+            && artifacts.contains("ArtifactOriginServeSpec"),
+        "src/core/artifacts.rs must keep explicit artifact API re-export groups so callers depend on \
+         the facade without wildcard-leaking implementation modules."
     );
 }
 
