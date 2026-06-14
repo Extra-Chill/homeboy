@@ -1,5 +1,5 @@
 use crate::cli_surface::Commands;
-use crate::commands::{changelog, file, logs, report, review, trace};
+use crate::commands::{changelog, file, logs, report, review, trace, version};
 
 mod lab_contract;
 pub use lab_contract::{
@@ -200,6 +200,7 @@ impl Commands {
                 output_file_mode,
                 CommandOutputContractKind::JsonEnvelope,
             ),
+            Commands::Version(_) => version::adapter(output_file_mode).contract.to_descriptor(),
             Commands::AgentTask(_)
             | Commands::Project(_)
             | Commands::Component(_)
@@ -207,7 +208,6 @@ impl Commands {
             | Commands::Extension(_)
             | Commands::Changelog(_)
             | Commands::Cleanup(_)
-            | Commands::Version(_)
             | Commands::Build(_)
             | Commands::Changes(_)
             | Commands::Release(_)
