@@ -9,6 +9,7 @@ use homeboy::core::runners::{
 };
 use homeboy::core::source_snapshot::SourceSnapshot;
 use homeboy::core::Error;
+use serde_json::Value;
 
 #[derive(Args)]
 pub struct LabArgs {
@@ -261,6 +262,18 @@ fn sync_lab_extension(
         },
     )?;
 
+    if exit_code == 0 {
+        let installed_revision = installed_extension_source_revision(&execution.stdout)
+            .ok_or_else(|| extension_sync_revision_error(extension_id, revision, None))?;
+        if !revision_matches(revision, &installed_revision) {
+            return Err(extension_sync_revision_error(
+                extension_id,
+                revision,
+                Some(installed_revision),
+            ));
+        }
+    }
+
     if let Some(err) = runner_exec_failure_error(&execution) {
         return Err(err);
     }
@@ -361,6 +374,65 @@ fn runner_extension_install_command(
     command
 }
 
+fn installed_extension_source_revision(stdout: &str) -> Option<String> {
+    let value = parse_trailing_json(stdout)?;
+    if value.get("success").and_then(Value::as_bool) == Some(false) {
+        return None;
+    }
+
+    let extension = value
+        .get("data")
+        .and_then(|data| data.get("extension"))
+        .or_else(|| value.get("data"));
+
+    extension
+        .and_then(|data| data.get("source_revision"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|revision| !revision.is_empty())
+        .map(str::to_string)
+}
+
+fn parse_trailing_json(stdout: &str) -> Option<Value> {
+    if let Ok(value) = serde_json::from_str(stdout) {
+        return Some(value);
+    }
+
+    stdout
+        .char_indices()
+        .rev()
+        .filter(|(_, ch)| *ch == '{')
+        .find_map(|(index, _)| serde_json::from_str(&stdout[index..]).ok())
+}
+
+fn revision_matches(requested: &str, installed: &str) -> bool {
+    requested == installed || requested.starts_with(installed) || installed.starts_with(requested)
+}
+
+fn extension_sync_revision_error(
+    extension_id: &str,
+    requested: &str,
+    installed: Option<String>,
+) -> Error {
+    let installed_display = installed.as_deref().unwrap_or("<missing>");
+    Error::validation_invalid_argument(
+        "ref",
+        format!(
+            "Runner extension '{}' did not install requested ref {}; installed source revision is {}",
+            extension_id, requested, installed_display
+        ),
+        Some(requested.to_string()),
+        Some(vec![
+            "Inspect the runner command stdout/stderr before rerunning downstream Lab tasks."
+                .to_string(),
+            format!(
+                "Verify with: homeboy runner exec <runner> -- homeboy extension show {}",
+                extension_id
+            ),
+        ]),
+    )
+}
+
 fn lab_followups(runner_id: Option<&str>, current_workspace: Option<&str>) -> Vec<LabFollowup> {
     let Some(runner_id) = runner_id else {
         return Vec::new();
@@ -410,7 +482,10 @@ fn shell_arg(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{controller_local_source_path, lab_followups, runner_extension_install_command};
+    use super::{
+        controller_local_source_path, installed_extension_source_revision, lab_followups,
+        revision_matches, runner_extension_install_command,
+    };
     use std::fs;
 
     #[test]
@@ -461,6 +536,23 @@ mod tests {
     }
 
     #[test]
+    fn lab_extension_sync_reads_installed_revision_from_replace_output() {
+        let stdout = r#"{
+  "success": true,
+  "data": {
+    "command": "extension.replace",
+    "extension_id": "wordpress",
+    "source_revision": "941bf8c"
+  }
+}"#;
+
+        assert_eq!(
+            installed_extension_source_revision(stdout).as_deref(),
+            Some("941bf8c")
+        );
+    }
+
+    #[test]
     fn lab_extension_sync_detects_controller_local_source_directories() {
         let tempdir = tempfile::tempdir().expect("creates temp extension source");
         fs::write(tempdir.path().join("homeboy-extension.json"), "{}").expect("writes marker");
@@ -469,6 +561,26 @@ mod tests {
         assert_eq!(
             controller_local_source_path(tempdir.path().to_str().unwrap()).as_deref(),
             Some(expected.as_path())
+        );
+    }
+
+    #[test]
+    fn lab_extension_sync_reads_installed_revision_after_setup_logs() {
+        let stdout = r#"Setting up WordPress extension...
+Installing npm dependencies...
+{
+  "success": true,
+  "data": {
+    "command": "extension.replace",
+    "extension_id": "wordpress",
+    "source_revision": "941bf8cf"
+  }
+}
+"#;
+
+        assert_eq!(
+            installed_extension_source_revision(stdout).as_deref(),
+            Some("941bf8cf")
         );
     }
 
@@ -485,6 +597,37 @@ mod tests {
         assert!(
             controller_local_source_path("/runner/only/homeboy-extensions/wordpress").is_none()
         );
+    }
+
+    #[test]
+    fn lab_extension_sync_reads_installed_revision_from_show_style_output() {
+        let stdout = r#"{
+  "success": true,
+  "data": {
+    "extension": {
+      "id": "wordpress",
+      "source_revision": "941bf8c"
+    }
+  }
+}"#;
+
+        assert_eq!(
+            installed_extension_source_revision(stdout).as_deref(),
+            Some("941bf8c")
+        );
+    }
+
+    #[test]
+    fn lab_extension_sync_accepts_short_full_revision_matches() {
+        assert!(revision_matches(
+            "941bf8cff9f88758123db837ed12bb6f6de5d00f",
+            "941bf8c"
+        ));
+        assert!(revision_matches(
+            "941bf8c",
+            "941bf8cff9f88758123db837ed12bb6f6de5d00f"
+        ));
+        assert!(!revision_matches("941bf8c", "f36543e"));
     }
 
     #[test]

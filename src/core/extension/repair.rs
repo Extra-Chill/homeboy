@@ -702,6 +702,12 @@ mod tests {
                 result.source_revision.as_deref(),
                 Some(pinned_revision.as_str())
             );
+            assert_eq!(
+                fs::read_to_string(home.join(".config/homeboy/extensions/swift/.source-revision"))
+                    .expect("source revision metadata")
+                    .trim(),
+                pinned_revision
+            );
         });
     }
 }
