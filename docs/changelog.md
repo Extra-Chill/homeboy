@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.229.5] - 2026-06-14
+
+### Changed
+- refactor cli runtime orchestration
+- move command contracts out of cli surface
+
 ## [0.229.4] - 2026-06-14
 
 ### Changed
