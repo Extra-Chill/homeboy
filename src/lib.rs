@@ -17,6 +17,7 @@ macro_rules! log_status {
 extern crate self as homeboy;
 
 pub mod cli_surface;
+pub mod command_contract;
 #[doc(hidden)]
 pub mod commands;
 pub mod core;
