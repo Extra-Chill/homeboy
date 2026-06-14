@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.121.27] - 2026-06-14
+
+### Fixed
+- publish WordPress bench review summaries
+
 ## [2.121.26] - 2026-06-14
 
 ### Fixed
