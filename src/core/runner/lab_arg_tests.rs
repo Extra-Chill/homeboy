@@ -1,4 +1,6 @@
-use super::*;
+use super::super::lab_args::{
+    lab_offload_source_path, rewrite_lab_offload_args, EXPLICIT_PASSTHROUGH_SENTINEL,
+};
 
 fn args(items: &[&str]) -> Vec<String> {
     items.iter().map(|item| (*item).to_string()).collect()
