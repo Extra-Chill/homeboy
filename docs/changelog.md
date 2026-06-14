@@ -4,6 +4,17 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.229.10] - 2026-06-14
+
+### Fixed
+- route Lab extension sync locally
+- surface managed Lab follow-up commands
+- add lab offload runner doctor scope
+- add lab extension sync command
+- install active binary for source upgrades
+- tighten release and project orchestration UX
+- fix lab cook runtime drift diagnostics
+
 ## [0.229.9] - 2026-06-14
 
 ### Changed
