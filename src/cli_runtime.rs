@@ -4,6 +4,7 @@ use std::io::IsTerminal;
 use crate::cli_surface::{Cli, Commands};
 use crate::commands;
 use crate::commands::cli;
+use crate::commands::output_runtime;
 use crate::commands::utils::{args, entity_suggest, resource_policy, response as output};
 use crate::commands::GlobalArgs;
 use crate::core::extension::load_all_extensions;
@@ -67,13 +68,6 @@ impl CliRuntime {
             .flatten()
             .map(|path| path.to_string_lossy().to_string());
 
-        if let Some(path) = output_file.as_deref() {
-            if let Some(err) = validate_output_file_path(path) {
-                emit_json_result(Err(err), None, 2);
-                return std::process::ExitCode::from(exit_code_to_u8(2));
-            }
-        }
-
         let artifact_root_override = matches
             .try_get_one::<std::path::PathBuf>("artifact_root")
             .ok()
@@ -82,6 +76,13 @@ impl CliRuntime {
         crate::core::set_artifact_root_override(artifact_root_override.clone());
 
         if let Some(extension_cmd) = self.try_parse_extension_cli_command(&matches) {
+            if let Some(path) = output_file.as_deref() {
+                if let Some(err) = output_runtime::validate_output_file_path(path) {
+                    output_runtime::emit_json_result(Err(err), None, 2);
+                    return std::process::ExitCode::from(exit_code_to_u8(2));
+                }
+            }
+
             let cli_args = cli::CliArgs {
                 tool: extension_cmd.tool,
                 identifier: extension_cmd.project_id,
@@ -90,7 +91,7 @@ impl CliRuntime {
             let result = cli::run(cli_args, &global);
 
             let (json_result, exit_code) = output::map_cmd_result_to_json(result);
-            emit_json_result(json_result, output_file.as_deref(), exit_code);
+            output_runtime::emit_json_result(json_result, output_file.as_deref(), exit_code);
             return std::process::ExitCode::from(exit_code_to_u8(exit_code));
         }
 
@@ -100,21 +101,6 @@ impl CliRuntime {
         };
         normalize_runs_list_runner(&mut cli, &normalized);
 
-        match crate::commands::route::route_after_parse(&cli, &normalized, output_file.as_deref()) {
-            Ok(None) => {}
-            Ok(Some(exit_code)) => {
-                return std::process::ExitCode::from(exit_code_to_u8(exit_code));
-            }
-            Err(err) => {
-                emit_json_result(Err(err), output_file.as_deref(), 2);
-                return std::process::ExitCode::from(exit_code_to_u8(2));
-            }
-        }
-
-        crate::core::set_artifact_root_override(
-            cli.artifact_root.clone().or(artifact_root_override),
-        );
-
         if matches!(&cli.command, Commands::Runs(args) if args.is_bundle_export()) {
             output_file = None;
         }
@@ -122,7 +108,27 @@ impl CliRuntime {
         if cli.command.consumes_output_file_as_command_arg() {
             // This command owns `--output/-o`; it is not the global JSON envelope.
             output_file = None;
+        } else if let Some(path) = output_file.as_deref() {
+            if let Some(err) = output_runtime::validate_output_file_path(path) {
+                output_runtime::emit_json_result(Err(err), None, 2);
+                return std::process::ExitCode::from(exit_code_to_u8(2));
+            }
         }
+
+        match crate::commands::route::route_after_parse(&cli, &normalized, output_file.as_deref()) {
+            Ok(None) => {}
+            Ok(Some(exit_code)) => {
+                return std::process::ExitCode::from(exit_code_to_u8(exit_code));
+            }
+            Err(err) => {
+                output_runtime::emit_json_result(Err(err), output_file.as_deref(), 2);
+                return std::process::ExitCode::from(exit_code_to_u8(2));
+            }
+        }
+
+        crate::core::set_artifact_root_override(
+            cli.artifact_root.clone().or(artifact_root_override),
+        );
 
         if let Some(exit_code) = preflight_hot_command(&cli, output_file.as_deref()) {
             return std::process::ExitCode::from(exit_code_to_u8(exit_code));
@@ -283,7 +289,7 @@ fn preflight_hot_command(cli: &Cli, output_file: Option<&str>) -> Option<i32> {
                     cli.force_hot,
                     is_interactive_shell(),
                 ) {
-                    emit_json_result(Err(err), output_file, 2);
+                    output_runtime::emit_json_result(Err(err), output_file, 2);
                     return Some(2);
                 }
             }
@@ -316,42 +322,6 @@ fn exit_code_to_u8(code: i32) -> u8 {
 
 fn is_interactive_shell() -> bool {
     std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
-}
-
-fn emit_json_result(
-    result: crate::core::Result<serde_json::Value>,
-    output_file: Option<&str>,
-    exit_code: i32,
-) {
-    if let Some(path) = output_file {
-        output::write_json_to_file(&result, path, exit_code);
-    }
-    output::print_json_result(result, exit_code).ok();
-}
-
-fn validate_output_file_path(path: &str) -> Option<crate::core::Error> {
-    let value = path.trim();
-    let looks_like_format = matches!(
-        value.to_ascii_lowercase().as_str(),
-        "json" | "yaml" | "yml" | "table" | "csv" | "text" | "markdown" | "md"
-    );
-
-    if !looks_like_format {
-        return None;
-    }
-
-    Some(crate::core::Error::validation_invalid_argument(
-        "output",
-        format!(
-            "`--output {value}` looks like an output format, but --output writes to a file path"
-        ),
-        None,
-        Some(vec![
-            "Use an explicit file path, for example: --output ./homeboy-output.json".to_string(),
-            "Use command-specific --format flags where available, for example: --format=json"
-                .to_string(),
-        ]),
-    ))
 }
 
 fn normalize_runs_list_runner(cli: &mut Cli, normalized_args: &[String]) {
@@ -511,7 +481,8 @@ mod tests {
 
     #[test]
     fn output_format_names_are_rejected_as_global_output_paths() {
-        let err = validate_output_file_path("json").expect("format-like path should be rejected");
+        let err = output_runtime::validate_output_file_path("json")
+            .expect("format-like path should be rejected");
 
         assert_eq!(err.code.as_str(), "validation.invalid_argument");
         assert!(err.message.contains("--output json"));
@@ -519,7 +490,7 @@ mod tests {
 
     #[test]
     fn normal_output_file_paths_are_allowed() {
-        assert!(validate_output_file_path("./homeboy-output.json").is_none());
+        assert!(output_runtime::validate_output_file_path("./homeboy-output.json").is_none());
     }
 
     #[test]
