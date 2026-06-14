@@ -295,10 +295,43 @@ pub(super) fn agent_task_dispatch_requested_run_id(args: &[String]) -> Option<St
 }
 
 pub(super) fn lab_pre_dispatch_failure_message(output: &str) -> Option<String> {
+    if let Some(message) = lab_pre_dispatch_dependency_failure_message(output) {
+        return Some(message);
+    }
+
     output
         .lines()
         .map(str::trim)
         .find(|line| !line.is_empty())
+        .map(str::to_string)
+}
+
+fn lab_pre_dispatch_dependency_failure_message(output: &str) -> Option<String> {
+    if !looks_like_prepared_dependency_failure(output) {
+        return None;
+    }
+
+    let missing_path = first_quoted_prepared_dependency_path(output)
+        .unwrap_or_else(|| "prepared dependency path".to_string());
+    Some(format!(
+        "Lab runtime failed before agent dispatch while staging dependency `{missing_path}`. The selected Lab runner has a stale or misconfigured runtime dependency; repair or refresh the runner runtime, then retry this cook run."
+    ))
+}
+
+fn looks_like_prepared_dependency_failure(output: &str) -> bool {
+    let lower = output.to_lowercase();
+    lower.contains("prepared-plugins/")
+        && (lower.contains("enoent")
+            || lower.contains("no such file or directory")
+            || lower.contains("lstat"))
+}
+
+fn first_quoted_prepared_dependency_path(output: &str) -> Option<String> {
+    output
+        .split(['\'', '"'])
+        .find(|part| part.contains("prepared-plugins/"))
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
         .map(str::to_string)
 }
 
@@ -366,11 +399,11 @@ mod tests {
             "      \"outcomes\": [{\n",
             "        \"task_id\": \"cook-conductor\",\n",
             "        \"status\": \"failed\",\n",
-            "        \"summary\": \"WP Codebox agent task failed.\",\n",
+            "        \"summary\": \"Remote agent task failed.\",\n",
             "        \"metadata\": {\n",
-            "          \"provider\": \"wordpress.codebox-agent-task-executor\",\n",
-            "          \"codebox_run_result\": {\n",
-            "            \"schema\": \"wp-codebox/agent-task-run-result/v1\",\n",
+            "          \"provider\": \"remote.agent-task-executor\",\n",
+            "          \"runtime_run_result\": {\n",
+            "            \"schema\": \"remote/agent-task-run-result/v1\",\n",
             "            \"status\": \"failed\",\n",
             "            \"failure_classification\": \"runtime\"\n",
             "          }\n",
@@ -395,10 +428,10 @@ mod tests {
         );
         assert_eq!(
             parsed["aggregate"]["outcomes"][0]["metadata"]["provider"],
-            "wordpress.codebox-agent-task-executor"
+            "remote.agent-task-executor"
         );
         assert_eq!(
-            parsed["aggregate"]["outcomes"][0]["metadata"]["codebox_run_result"]
+            parsed["aggregate"]["outcomes"][0]["metadata"]["runtime_run_result"]
                 ["failure_classification"],
             "runtime"
         );
@@ -464,5 +497,16 @@ mod tests {
             ]),
             Some("dispatch-run".to_string())
         );
+    }
+
+    #[test]
+    fn pre_dispatch_failure_message_summarizes_prepared_dependency_staging_failure() {
+        let output = "ENOENT: no such file or directory, lstat '/home/chubes/Developer/.tmp/homeboy-artifacts/prepared-plugins/agents-api'";
+
+        let message = lab_pre_dispatch_failure_message(output).expect("message");
+
+        assert!(message.contains("Lab runtime failed before agent dispatch"));
+        assert!(message.contains("prepared-plugins/agents-api"));
+        assert!(message.contains("repair or refresh the runner runtime"));
     }
 }
