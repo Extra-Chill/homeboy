@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.121.24] - 2026-06-14
+
+### Fixed
+- forward Codebox structured task fields
+
 ## [2.121.23] - 2026-06-14
 
 ### Fixed
