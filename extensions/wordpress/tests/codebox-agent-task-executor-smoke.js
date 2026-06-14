@@ -375,6 +375,48 @@ assert.deepEqual(runtimeTaskRequest.agent_bundles, [{ source: '/workspace/bundle
 assert.equal(runtimeTaskRequest.structured_artifacts[0].name, 'concept_packet');
 assert.equal(runtimeTaskRequest.workspaces[0].target, '/workspace/codebox-canary');
 
+const runtimeTaskProviderDefaultRequest = codeboxTaskRequestFromAgentTaskRequest({
+  ...request,
+  task_id: 'runtime-task-provider-defaults-123',
+  executor: {
+    backend: 'codebox',
+    model: 'openai/gpt-5.5',
+    config: {
+      provider: 'opencode',
+      agent_bundles: [{ source: '/workspace/bundles/canary-agent', slug: 'canary-agent' }],
+    },
+  },
+  inputs: {
+    runtime_task: {
+      ability: 'runtime/run-agent-bundle',
+      input: { source: '/workspace/bundles/canary-agent' },
+    },
+  },
+});
+assert.equal(runtimeTaskProviderDefaultRequest.runtime_task.input.provider, 'opencode', 'agent bundle runtime tasks inherit the selected provider');
+assert.equal(runtimeTaskProviderDefaultRequest.runtime_task.input.model, 'openai/gpt-5.5', 'agent bundle runtime tasks inherit the selected model');
+
+const runtimeTaskExplicitProviderRequest = codeboxTaskRequestFromAgentTaskRequest({
+  ...request,
+  task_id: 'runtime-task-explicit-provider-123',
+  executor: {
+    backend: 'codebox',
+    model: 'openai/gpt-5.5',
+    config: {
+      provider: 'opencode',
+      agent_bundles: [{ source: '/workspace/bundles/canary-agent', slug: 'canary-agent' }],
+    },
+  },
+  inputs: {
+    runtime_task: {
+      ability: 'runtime/run-agent-bundle',
+      input: { source: '/workspace/bundles/canary-agent', provider: 'explicit-provider', model: 'explicit-model' },
+    },
+  },
+});
+assert.equal(runtimeTaskExplicitProviderRequest.runtime_task.input.provider, 'explicit-provider', 'explicit runtime task provider wins');
+assert.equal(runtimeTaskExplicitProviderRequest.runtime_task.input.model, 'explicit-model', 'explicit runtime task model wins');
+
 const abilityBridgeRequest = codeboxTaskRequestFromAgentTaskRequest({
   ...request,
   task_id: 'ability-bridge-task-123',
