@@ -21,21 +21,93 @@ impl JsonCommandRun {
     }
 }
 
-pub fn run_and_print(
+pub fn run_command(
     command: Commands,
     global: &GlobalArgs,
-    mode: CommandOutputFileMode,
-    output_file: Option<&str>,
+    requested_output_file: Option<&str>,
 ) -> i32 {
-    let json_run = run_json(command, global, mode);
+    let output_file = command_runtime_output_file(&command, requested_output_file);
+    let plan = command.response_plan(output_file.is_some());
 
-    if let Some(path) = output_file {
-        write_to_file(&json_run, mode, path);
+    match super::raw_output::prepare_command_run(command, global, plan.stdout) {
+        super::raw_output::CommandRunPreparation::Handled(exit_code) => exit_code,
+        super::raw_output::CommandRunPreparation::Json(command) => {
+            let run = run_json(*command, global, plan.output_file);
+            emit_run(run, plan.output_file, output_file)
+        }
+        super::raw_output::CommandRunPreparation::Raw(raw_run) => {
+            let exit_code = raw_run.exit_code;
+            let output_file_result = match raw_run.output_file_result {
+                Some(result) => result,
+                None => match raw_run.stdout_result.as_ref() {
+                    Ok(content) => Ok(Value::String(content.clone())),
+                    Err(err) => Err(err.clone()),
+                },
+            };
+            let json_run = JsonCommandRun {
+                stdout_result: output_file_result,
+                exit_code,
+                output_file_result: None,
+            };
+
+            write_output_file(&json_run, plan.output_file, output_file);
+
+            match raw_run.stdout_result {
+                Ok(content) => print!("{}", content),
+                Err(err) => {
+                    output::print_result::<Value>(Err(err)).ok();
+                }
+            }
+
+            exit_code
+        }
+    }
+}
+
+pub fn emit_json_result(
+    result: homeboy::core::Result<Value>,
+    output_file: Option<&str>,
+    exit_code: i32,
+) {
+    let run = JsonCommandRun::from_stdout_result(result, exit_code);
+    write_output_file(&run, CommandOutputFileMode::GenericEnvelope, output_file);
+    output::print_json_result(run.stdout_result, run.exit_code).ok();
+}
+
+pub fn validate_output_file_path(path: &str) -> Option<homeboy::core::Error> {
+    let value = path.trim();
+    let looks_like_format = matches!(
+        value.to_ascii_lowercase().as_str(),
+        "json" | "yaml" | "yml" | "table" | "csv" | "text" | "markdown" | "md"
+    );
+
+    if !looks_like_format {
+        return None;
     }
 
-    output::print_json_result(json_run.stdout_result, json_run.exit_code).ok();
+    Some(homeboy::core::Error::validation_invalid_argument(
+        "output",
+        format!(
+            "`--output {value}` looks like an output format, but --output writes to a file path"
+        ),
+        None,
+        Some(vec![
+            "Use an explicit file path, for example: --output ./homeboy-output.json".to_string(),
+            "Use command-specific --format flags where available, for example: --format=json"
+                .to_string(),
+        ]),
+    ))
+}
 
-    json_run.exit_code
+pub fn command_runtime_output_file<'a>(
+    command: &Commands,
+    requested_output_file: Option<&'a str>,
+) -> Option<&'a str> {
+    if command.consumes_output_file_as_command_arg() {
+        None
+    } else {
+        requested_output_file
+    }
 }
 
 pub fn run_json(
@@ -62,7 +134,18 @@ pub fn run_json(
     }
 }
 
-pub fn write_to_file(run: &JsonCommandRun, mode: CommandOutputFileMode, path: &str) {
+fn emit_run(run: JsonCommandRun, mode: CommandOutputFileMode, output_file: Option<&str>) -> i32 {
+    write_output_file(&run, mode, output_file);
+    output::print_json_result(run.stdout_result, run.exit_code).ok();
+
+    run.exit_code
+}
+
+pub fn write_output_file(run: &JsonCommandRun, mode: CommandOutputFileMode, path: Option<&str>) {
+    let Some(path) = path else {
+        return;
+    };
+
     match mode {
         CommandOutputFileMode::None => {}
         CommandOutputFileMode::ReviewStableArtifact => {
@@ -79,7 +162,7 @@ pub fn write_to_file(run: &JsonCommandRun, mode: CommandOutputFileMode, path: &s
     }
 }
 
-fn select_output_file_result(
+pub fn select_output_file_result(
     run: &JsonCommandRun,
     mode: CommandOutputFileMode,
 ) -> &homeboy::core::Result<Value> {
@@ -151,10 +234,10 @@ mod tests {
         let path = dir.path().join("status.json");
         let run = run_with_output_file_result(None);
 
-        write_to_file(
+        write_output_file(
             &run,
             CommandOutputFileMode::GenericEnvelope,
-            path.to_str().expect("utf8 path"),
+            Some(path.to_str().expect("utf8 path")),
         );
 
         let written = std::fs::read_to_string(path).expect("artifact written");
@@ -179,10 +262,10 @@ mod tests {
             0,
         );
 
-        write_to_file(
+        write_output_file(
             &run,
             CommandOutputFileMode::ReviewStableArtifact,
-            path.to_str().expect("utf8 path"),
+            Some(path.to_str().expect("utf8 path")),
         );
 
         let written = std::fs::read_to_string(path).expect("artifact written");

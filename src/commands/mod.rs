@@ -197,7 +197,7 @@ pub mod lab;
 pub mod lint;
 pub mod logs;
 pub mod observe;
-pub mod output_artifact;
+pub mod output_runtime;
 pub mod project;
 pub mod raw_output;
 pub mod refactor;

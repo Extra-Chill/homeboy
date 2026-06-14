@@ -7,6 +7,7 @@ use homeboy::commands::GlobalArgs;
 
 use homeboy::commands;
 use homeboy::commands::cli;
+use homeboy::commands::output_runtime;
 use homeboy::commands::utils::{args, entity_suggest, resource_policy, response as output};
 use homeboy::core::extension::load_all_extensions;
 
@@ -140,13 +141,6 @@ fn main() -> std::process::ExitCode {
         .flatten()
         .map(|path| path.to_string_lossy().to_string());
 
-    if let Some(path) = output_file.as_deref() {
-        if let Some(err) = validate_output_file_path(path) {
-            emit_json_result(Err(err), None, 2);
-            return std::process::ExitCode::from(exit_code_to_u8(2));
-        }
-    }
-
     let artifact_root_override = matches
         .try_get_one::<std::path::PathBuf>("artifact_root")
         .ok()
@@ -155,6 +149,13 @@ fn main() -> std::process::ExitCode {
     homeboy::core::set_artifact_root_override(artifact_root_override.clone());
 
     if let Some(extension_cmd) = try_parse_extension_cli_command(&matches, &extension_info) {
+        if let Some(path) = output_file.as_deref() {
+            if let Some(err) = output_runtime::validate_output_file_path(path) {
+                output_runtime::emit_json_result(Err(err), None, 2);
+                return std::process::ExitCode::from(exit_code_to_u8(2));
+            }
+        }
+
         let cli_args = cli::CliArgs {
             tool: extension_cmd.tool,
             identifier: extension_cmd.project_id,
@@ -163,7 +164,7 @@ fn main() -> std::process::ExitCode {
         let result = cli::run(cli_args, &global);
 
         let (json_result, exit_code) = output::map_cmd_result_to_json(result);
-        emit_json_result(json_result, output_file.as_deref(), exit_code);
+        output_runtime::emit_json_result(json_result, output_file.as_deref(), exit_code);
         return std::process::ExitCode::from(exit_code_to_u8(exit_code));
     }
 
@@ -173,27 +174,31 @@ fn main() -> std::process::ExitCode {
     };
     normalize_runs_list_runner(&mut cli, &normalized);
 
+    if matches!(&cli.command, Commands::Runs(args) if args.is_bundle_export()) {
+        output_file = None;
+    }
+
+    if cli.command.consumes_output_file_as_command_arg() {
+        output_file = None;
+    } else if let Some(path) = output_file.as_deref() {
+        if let Some(err) = output_runtime::validate_output_file_path(path) {
+            output_runtime::emit_json_result(Err(err), None, 2);
+            return std::process::ExitCode::from(exit_code_to_u8(2));
+        }
+    }
+
     match homeboy::commands::route::route_after_parse(&cli, &normalized, output_file.as_deref()) {
         Ok(None) => {}
         Ok(Some(exit_code)) => {
             return std::process::ExitCode::from(exit_code_to_u8(exit_code));
         }
         Err(err) => {
-            emit_json_result(Err(err), output_file.as_deref(), 2);
+            output_runtime::emit_json_result(Err(err), output_file.as_deref(), 2);
             return std::process::ExitCode::from(exit_code_to_u8(2));
         }
     }
 
     homeboy::core::set_artifact_root_override(cli.artifact_root.clone().or(artifact_root_override));
-
-    if matches!(&cli.command, Commands::Runs(args) if args.is_bundle_export()) {
-        output_file = None;
-    }
-
-    if cli.command.consumes_output_file_as_command_arg() {
-        // This command owns `--output/-o`; it is not the global JSON envelope.
-        output_file = None;
-    }
 
     if let Some(hot_command) = resource_policy::hot_command(&cli.command) {
         if let Ok((resources, _)) = homeboy::commands::doctor::resources::run(
@@ -222,7 +227,7 @@ fn main() -> std::process::ExitCode {
                     cli.force_hot,
                     is_interactive_shell(),
                 ) {
-                    emit_json_result(Err(err), output_file.as_deref(), 2);
+                    output_runtime::emit_json_result(Err(err), output_file.as_deref(), 2);
                     return std::process::ExitCode::from(exit_code_to_u8(2));
                 }
             }
@@ -274,42 +279,6 @@ fn exit_code_to_u8(code: i32) -> u8 {
 
 fn is_interactive_shell() -> bool {
     std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
-}
-
-fn emit_json_result(
-    result: homeboy::core::Result<serde_json::Value>,
-    output_file: Option<&str>,
-    exit_code: i32,
-) {
-    if let Some(path) = output_file {
-        output::write_json_to_file(&result, path, exit_code);
-    }
-    output::print_json_result(result, exit_code).ok();
-}
-
-fn validate_output_file_path(path: &str) -> Option<homeboy::core::Error> {
-    let value = path.trim();
-    let looks_like_format = matches!(
-        value.to_ascii_lowercase().as_str(),
-        "json" | "yaml" | "yml" | "table" | "csv" | "text" | "markdown" | "md"
-    );
-
-    if !looks_like_format {
-        return None;
-    }
-
-    Some(homeboy::core::Error::validation_invalid_argument(
-        "output",
-        format!(
-            "`--output {value}` looks like an output format, but --output writes to a file path"
-        ),
-        None,
-        Some(vec![
-            "Use an explicit file path, for example: --output ./homeboy-output.json".to_string(),
-            "Use command-specific --format flags where available, for example: --format=json"
-                .to_string(),
-        ]),
-    ))
 }
 
 fn normalize_runs_list_runner(cli: &mut Cli, normalized_args: &[String]) {
