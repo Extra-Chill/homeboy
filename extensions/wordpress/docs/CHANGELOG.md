@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.121.25] - 2026-06-14
+
+### Fixed
+- default provider for runtime bundle tasks
+
 ## [2.121.24] - 2026-06-14
 
 ### Fixed
