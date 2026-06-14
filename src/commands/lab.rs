@@ -1,10 +1,13 @@
 use clap::{Args, Subcommand};
 use serde::Serialize;
+use std::path::{Path, PathBuf};
 
 use super::{CmdResult, GlobalArgs};
 use homeboy::core::runners::{
     self as runner, RunnerExecOptions, RunnerExecOutput, RunnerRequiredTool,
+    RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
 };
+use homeboy::core::source_snapshot::SourceSnapshot;
 use homeboy::core::Error;
 
 #[derive(Args)]
@@ -78,6 +81,8 @@ pub struct LabExtensionSyncOutput {
     runner_homeboy_path: String,
     extension_id: String,
     source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    runner_source: Option<String>,
     source_revision: String,
     replace: bool,
     install_command: Vec<String>,
@@ -177,8 +182,14 @@ fn sync_lab_extension(
         .homeboy_path
         .clone()
         .unwrap_or_else(|| "homeboy".to_string());
-    let install_command =
-        runner_extension_install_command(&homeboy_path, source, extension_id, revision, replace);
+    let materialized_source = materialize_lab_extension_source(&runner_id, source)?;
+    let install_command = runner_extension_install_command(
+        &homeboy_path,
+        &materialized_source.runner_source,
+        extension_id,
+        revision,
+        replace,
+    );
     let (execution, exit_code) = runner::exec(
         &runner_id,
         RunnerExecOptions {
@@ -189,7 +200,7 @@ fn sync_lab_extension(
             env: runner_config.env.clone(),
             capture_patch: false,
             raw_exec: false,
-            source_snapshot: None,
+            source_snapshot: materialized_source.source_snapshot.clone(),
             capability_preflight: Some(homeboy::core::runners::RunnerCapabilityPreflight {
                 command: "homeboy lab extension-sync".to_string(),
                 required_tools: vec![RunnerRequiredTool::Homeboy],
@@ -209,6 +220,8 @@ fn sync_lab_extension(
             runner_homeboy_path: homeboy_path,
             extension_id: extension_id.to_string(),
             source: source.to_string(),
+            runner_source: (materialized_source.runner_source != source)
+                .then_some(materialized_source.runner_source),
             source_revision: revision.to_string(),
             replace,
             install_command,
@@ -216,6 +229,61 @@ fn sync_lab_extension(
         }),
         exit_code,
     ))
+}
+
+struct MaterializedLabExtensionSource {
+    runner_source: String,
+    source_snapshot: Option<SourceSnapshot>,
+}
+
+fn materialize_lab_extension_source(
+    runner_id: &str,
+    source: &str,
+) -> homeboy::core::Result<MaterializedLabExtensionSource> {
+    let Some(local_source) = controller_local_source_path(source) else {
+        return Ok(MaterializedLabExtensionSource {
+            runner_source: source.to_string(),
+            source_snapshot: None,
+        });
+    };
+
+    let (synced, _) = runner::sync_workspace(
+        runner_id,
+        RunnerWorkspaceSyncOptions {
+            path: local_source.display().to_string(),
+            mode: RunnerWorkspaceSyncMode::Snapshot,
+            controller_routed_git: false,
+            changed_since_base: None,
+            git_fetch_refs: Vec::new(),
+            snapshot_includes: Vec::new(),
+            allow_dirty_lab_workspace: false,
+        },
+    )?;
+
+    Ok(MaterializedLabExtensionSource {
+        source_snapshot: Some(SourceSnapshot::collect_local(
+            runner_id,
+            Path::new(&synced.local_path),
+            Some(&synced.remote_path),
+            "lab_extension_sync",
+        )),
+        runner_source: synced.remote_path,
+    })
+}
+
+fn controller_local_source_path(source: &str) -> Option<PathBuf> {
+    if looks_like_remote_source(source) {
+        return None;
+    }
+
+    let expanded = shellexpand::tilde(source).to_string();
+    let path = Path::new(&expanded);
+    path.is_dir().then(|| path.canonicalize().ok()).flatten()
+}
+
+fn looks_like_remote_source(source: &str) -> bool {
+    let lower = source.to_ascii_lowercase();
+    lower.contains("://") || lower.starts_with("git@") || lower.starts_with("ssh://")
 }
 
 fn runner_extension_install_command(
@@ -290,7 +358,8 @@ fn shell_arg(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{lab_followups, runner_extension_install_command};
+    use super::{controller_local_source_path, lab_followups, runner_extension_install_command};
+    use std::fs;
 
     #[test]
     fn lab_extension_sync_command_replaces_by_default() {
@@ -336,6 +405,33 @@ mod tests {
                 "--ref",
                 "main",
             ]
+        );
+    }
+
+    #[test]
+    fn lab_extension_sync_detects_controller_local_source_directories() {
+        let tempdir = tempfile::tempdir().expect("creates temp extension source");
+        fs::write(tempdir.path().join("homeboy-extension.json"), "{}").expect("writes marker");
+        let expected = tempdir.path().canonicalize().expect("canonical tempdir");
+
+        assert_eq!(
+            controller_local_source_path(tempdir.path().to_str().unwrap()).as_deref(),
+            Some(expected.as_path())
+        );
+    }
+
+    #[test]
+    fn lab_extension_sync_leaves_urls_and_runner_local_paths_unmaterialized() {
+        assert!(controller_local_source_path(
+            "https://github.com/Extra-Chill/homeboy-extensions.git"
+        )
+        .is_none());
+        assert!(
+            controller_local_source_path("git@github.com:Extra-Chill/homeboy-extensions.git")
+                .is_none()
+        );
+        assert!(
+            controller_local_source_path("/runner/only/homeboy-extensions/wordpress").is_none()
         );
     }
 
