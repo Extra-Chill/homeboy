@@ -1,31 +1,31 @@
 use clap::{Args, Subcommand};
-use homeboy::core::agent_task_cook_loop::{
+use homeboy::core::agent_tasks::cook_loop::{
     evaluate_cook_loop, AgentTaskCookLoopOptions, AgentTaskCookLoopStatus,
 };
-use homeboy::core::agent_task_finalization::{
+use homeboy::core::agent_tasks::finalization::{
     finalize_pr, AgentTaskPrEvidence, AgentTaskPrFinalizationOptions, AgentTaskPrRuntimeGuardrails,
     AgentTaskPrSourceRelationship, AgentTaskPrVerification,
 };
-use homeboy::core::agent_task_gate::AgentTaskGateRevealPolicy;
-use homeboy::core::agent_task_promotion::{
+use homeboy::core::agent_tasks::gate::AgentTaskGateRevealPolicy;
+use homeboy::core::agent_tasks::promotion::{
     promote, AgentTaskPromotionOptions, AgentTaskPromotionReport, AgentTaskPromotionStatus,
 };
 use serde::Serialize;
 use serde_json::Value;
 use std::io::Read;
 
-use homeboy::core::agent_task::AgentTaskRequest;
-use homeboy::core::agent_task_lifecycle;
-use homeboy::core::agent_task_loop_controller::{
-    self, AgentTaskLoopActionStatus, AgentTaskLoopControllerRecord, AgentTaskLoopExternalEvent,
-    AgentTaskLoopHistoryEvent, AgentTaskLoopPolicyAction, AgentTaskLoopPolicyActionRecord,
-    AgentTaskLoopRunRef,
+use homeboy::core::agent_tasks::lifecycle as agent_task_lifecycle;
+use homeboy::core::agent_tasks::loop_controller::{
+    self as agent_task_loop_controller, AgentTaskLoopActionStatus, AgentTaskLoopControllerRecord,
+    AgentTaskLoopExternalEvent, AgentTaskLoopHistoryEvent, AgentTaskLoopPolicyAction,
+    AgentTaskLoopPolicyActionRecord, AgentTaskLoopRunRef,
 };
-use homeboy::core::agent_task_provider::ExtensionProviderAgentTaskExecutor;
-use homeboy::core::agent_task_scheduler::{
+use homeboy::core::agent_tasks::provider::ExtensionProviderAgentTaskExecutor;
+use homeboy::core::agent_tasks::scheduler::{
     AgentTaskExecutorAdapter, AgentTaskPlan, AgentTaskScheduler,
 };
-use homeboy::core::agent_task_secrets;
+use homeboy::core::agent_tasks::secrets as agent_task_secrets;
+use homeboy::core::agent_tasks::AgentTaskRequest;
 use homeboy::core::config;
 
 use super::agent_task_dispatch::{dispatch_with_executor, run as dispatch, DispatchArgs};
@@ -1017,7 +1017,7 @@ fn execute_wait_for_controller_action(
     loop_id: &str,
     entity_id: Option<&str>,
     wait_key: Option<&str>,
-    terminal_states: &[homeboy::core::agent_task_loop_controller::AgentTaskLoopControllerState],
+    terminal_states: &[homeboy::core::agent_tasks::AgentTaskLoopControllerState],
 ) -> CmdResult<Value> {
     let child_state = agent_task_loop_controller::load_controller(loop_id)
         .ok()
@@ -1320,8 +1320,9 @@ fn record_controller_spawn(
         .iter()
         .any(|lineage| lineage.run_id == run_id)
     {
-        record.task_lineage.push(
-            homeboy::core::agent_task_loop_controller::AgentTaskLoopTaskLineage {
+        record
+            .task_lineage
+            .push(homeboy::core::agent_tasks::AgentTaskLoopTaskLineage {
                 run_id: run_id.to_string(),
                 task_id: None,
                 parent_run_id: None,
@@ -1331,8 +1332,7 @@ fn record_controller_spawn(
                 artifact_refs: Vec::new(),
                 inputs: request.clone(),
                 outputs: Value::Null,
-            },
-        );
+            });
     }
     push_controller_history(
         record,
@@ -1663,7 +1663,7 @@ struct AgentTaskLoopAttemptReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     promotion: Option<AgentTaskPromotionReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    feedback: Option<homeboy::core::agent_task_cook_loop::AgentTaskCookLoopReport>,
+    feedback: Option<homeboy::core::agent_tasks::AgentTaskCookLoopReport>,
 }
 
 fn run_loop(args: AgentTaskLoopArgs) -> CmdResult<Value> {
@@ -2220,7 +2220,7 @@ fn normalize_component_worktree_workspace(
     };
 
     request.workspace.kind = None;
-    request.workspace.mode = homeboy::core::agent_task::AgentTaskWorkspaceMode::Existing;
+    request.workspace.mode = homeboy::core::agent_tasks::AgentTaskWorkspaceMode::Existing;
     request.workspace.root = Some(root);
     request.workspace.slug = Some(component_id);
     request.workspace.component_id = None;
@@ -2244,16 +2244,16 @@ fn materialization_string(materialization: &Value, key: &str) -> Option<String> 
 mod tests {
     use super::*;
     use crate::test_support::with_isolated_home;
-    use homeboy::core::agent_task::{
+    use homeboy::core::agent_tasks::lifecycle::{
+        status as lifecycle_status, AgentTaskRunRecord, AgentTaskRunState,
+    };
+    use homeboy::core::agent_tasks::scheduler::{AgentTaskExecutionContext, AgentTaskState};
+    use homeboy::core::agent_tasks::{
         AgentTaskArtifact, AgentTaskEvidenceRef, AgentTaskExecutor, AgentTaskLimits,
         AgentTaskOutcome, AgentTaskOutcomeStatus, AgentTaskPolicy, AgentTaskRequest,
         AgentTaskWorkspace, AGENT_TASK_ARTIFACT_SCHEMA, AGENT_TASK_OUTCOME_SCHEMA,
         AGENT_TASK_REQUEST_SCHEMA,
     };
-    use homeboy::core::agent_task_lifecycle::{
-        status as lifecycle_status, AgentTaskRunRecord, AgentTaskRunState,
-    };
-    use homeboy::core::agent_task_scheduler::{AgentTaskExecutionContext, AgentTaskState};
     use serde_json::{json, Value};
     use std::sync::{Arc, Mutex};
 
@@ -2490,7 +2490,7 @@ mod tests {
         assert_eq!(exit_code, 0);
         assert_eq!(
             observed.workspace.mode,
-            homeboy::core::agent_task::AgentTaskWorkspaceMode::Existing
+            homeboy::core::agent_tasks::AgentTaskWorkspaceMode::Existing
         );
         assert_eq!(
             observed.workspace.root.as_deref(),

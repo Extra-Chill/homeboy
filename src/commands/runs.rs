@@ -29,7 +29,7 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 use serde_json::Value;
 
-use homeboy::core::artifact_links::{cached_validated_viewer_links, public_artifact_url};
+use homeboy::core::artifacts::{cached_validated_viewer_links, public_artifact_url};
 use homeboy::core::observation::{ArtifactRecord, ObservationStore, RunListFilter, RunRecord};
 use homeboy::core::Error;
 
@@ -475,9 +475,7 @@ pub fn artifacts(run_id: &str) -> CmdResult<RunsOutput> {
     let store = ObservationStore::open_initialized()?;
     let run = require_run(&store, run_id)?;
     refresh_mirrored_daemon_evidence_best_effort(run_id);
-    homeboy::core::publication_artifacts::index_remote_published_artifact_refs_for_run(
-        &store, run_id,
-    )?;
+    homeboy::core::artifacts::index_remote_published_artifact_refs_for_run(&store, run_id)?;
     let mut artifacts = store.list_artifacts(run_id)?;
     artifacts.extend(related_lab_artifacts_for_runner_job(&store, &run)?);
     Ok((
@@ -491,7 +489,7 @@ pub fn artifacts(run_id: &str) -> CmdResult<RunsOutput> {
 }
 
 fn refresh_mirrored_daemon_evidence_best_effort(run_id: &str) {
-    if let Err(err) = homeboy::core::runner::refresh_mirrored_daemon_evidence(run_id) {
+    if let Err(err) = homeboy::core::runners::refresh_mirrored_daemon_evidence(run_id) {
         eprintln!(
             "Warning: could not refresh mirrored Lab runner evidence for `{run_id}`: {}",
             err.message
@@ -503,7 +501,7 @@ fn related_lab_artifacts_for_runner_job(
     store: &ObservationStore,
     run: &RunRecord,
 ) -> homeboy::core::Result<Vec<ArtifactRecord>> {
-    let Some((_runner_id, job_id)) = homeboy::core::runner::mirrored_runner_job_identity(run)
+    let Some((_runner_id, job_id)) = homeboy::core::runners::mirrored_runner_job_identity(run)
     else {
         return Ok(Vec::new());
     };
@@ -542,10 +540,7 @@ fn artifact_command(args: RunsArtifactArgs) -> CmdResult<RunsOutput> {
 fn artifact_get(args: RunsArtifactGetArgs) -> CmdResult<RunsOutput> {
     let store = ObservationStore::open_initialized()?;
     require_run(&store, &args.run_id)?;
-    homeboy::core::publication_artifacts::index_remote_published_artifact_refs_for_run(
-        &store,
-        &args.run_id,
-    )?;
+    homeboy::core::artifacts::index_remote_published_artifact_refs_for_run(&store, &args.run_id)?;
     let artifact = store
         .get_artifact_for_run_token(&args.run_id, &args.artifact_id)?
         .ok_or_else(|| {
@@ -1276,7 +1271,7 @@ mod tests {
             let _xdg = XdgGuard::unset();
             let public_artifact_base = serve_public_artifact_base_once(200);
             let _artifact_url = EnvGuard::set(
-                homeboy::core::artifact_links::PUBLIC_ARTIFACT_BASE_URL_ENV,
+                homeboy::core::artifacts::PUBLIC_ARTIFACT_BASE_URL_ENV,
                 &public_artifact_base,
             );
             let store = ObservationStore::open_initialized().expect("store");
@@ -1383,7 +1378,7 @@ mod tests {
             let _xdg = XdgGuard::unset();
             let public_artifact_base = serve_public_artifact_base_once(404);
             let _artifact_url = EnvGuard::set(
-                homeboy::core::artifact_links::PUBLIC_ARTIFACT_BASE_URL_ENV,
+                homeboy::core::artifacts::PUBLIC_ARTIFACT_BASE_URL_ENV,
                 &public_artifact_base,
             );
             let store = ObservationStore::open_initialized().expect("store");
