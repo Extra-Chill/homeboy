@@ -144,9 +144,10 @@ homeboy_require_bash_version() { :; }
   assert.equal(recipe.workflow.steps[0].command, 'wordpress.bench');
 
   const successResults = JSON.parse(fs.readFileSync(path.join(root, 'success-results.json'), 'utf8'));
-  assert.ok(successResults.prepared_dependencies.some((dependency) => dependency.slug === 'woocommerce' && dependency.source_path === fs.realpathSync(monorepoDependencyPath) && dependency.package_root === fs.realpathSync(monorepoPluginPath) && dependency.mounted_plugin_dir === '/wordpress/wp-content/plugins/woocommerce'), JSON.stringify(successResults.prepared_dependencies, null, 2));
-  assert.ok(successResults.prepared_dependencies.some((dependency) => dependency.slug === 'woocommerce-gateway-stripe' && dependency.source_path === fs.realpathSync(stripeDependencyPath) && dependency.package_root === fs.realpathSync(stripeDependencyPath)), JSON.stringify(successResults.prepared_dependencies, null, 2));
-  const stripePrepared = successResults.prepared_dependencies.find((dependency) => dependency.slug === 'woocommerce-gateway-stripe');
+  assert.equal(successResults.prepared_dependencies, undefined);
+  assert.ok(successResults.metadata.prepared_dependencies.some((dependency) => dependency.slug === 'woocommerce' && dependency.source_path === fs.realpathSync(monorepoDependencyPath) && dependency.package_root === fs.realpathSync(monorepoPluginPath) && dependency.mounted_plugin_dir === '/wordpress/wp-content/plugins/woocommerce'), JSON.stringify(successResults.metadata.prepared_dependencies, null, 2));
+  assert.ok(successResults.metadata.prepared_dependencies.some((dependency) => dependency.slug === 'woocommerce-gateway-stripe' && dependency.source_path === fs.realpathSync(stripeDependencyPath) && dependency.package_root === fs.realpathSync(stripeDependencyPath)), JSON.stringify(successResults.metadata.prepared_dependencies, null, 2));
+  const stripePrepared = successResults.metadata.prepared_dependencies.find((dependency) => dependency.slug === 'woocommerce-gateway-stripe');
   assert.equal(stripePrepared.source_type, 'local');
   assert.equal(stripePrepared.requested_version, '9.9.0-test');
   assert.equal(stripePrepared.requested_revision, 'fixture-revision');
@@ -183,8 +184,9 @@ homeboy_require_bash_version() { :; }
 
   assert.equal(scopedCoreResult.status, 0, scopedCoreResult.stderr || scopedCoreResult.stdout);
   const scopedCoreResults = JSON.parse(fs.readFileSync(path.join(root, 'scoped-core-results.json'), 'utf8'));
-  assert.equal(scopedCoreResults.prepared_dependencies.some((dependency) => dependency.slug === 'generic-dependency'), true);
-  assert.equal(scopedCoreResults.prepared_dependencies.some((dependency) => dependency.slug === 'gateway-build-fails'), false);
+  assert.equal(scopedCoreResults.prepared_dependencies, undefined);
+  assert.equal(scopedCoreResults.metadata.prepared_dependencies.some((dependency) => dependency.slug === 'generic-dependency'), true);
+  assert.equal(scopedCoreResults.metadata.prepared_dependencies.some((dependency) => dependency.slug === 'gateway-build-fails'), false);
   assert.equal(scopedCoreResults.dependency_build_failures, undefined);
 
   const buildFailureArtifactsDir = path.join(root, 'build-failure-artifacts');
@@ -216,15 +218,17 @@ homeboy_require_bash_version() { :; }
 
   assert.equal(buildFailureResult.status, 0, buildFailureResult.stderr || buildFailureResult.stdout);
   const buildFailureResults = JSON.parse(fs.readFileSync(path.join(root, 'build-failure-results.json'), 'utf8'));
-  assert.equal(buildFailureResults.prepared_dependencies.some((dependency) => dependency.slug === 'generic-dependency'), true);
-  assert.equal(buildFailureResults.prepared_dependencies.some((dependency) => dependency.slug === 'gateway-build-fails'), false);
-  assert.equal(buildFailureResults.dependency_build_failures.length, 1);
-  assert.equal(buildFailureResults.dependency_build_failures[0].dependency_slug, 'gateway-build-fails');
-  assert.equal(path.basename(buildFailureResults.dependency_build_failures[0].dependency_path), 'gateway-build-fails');
-  assert.match(buildFailureResults.dependency_build_failures[0].package_path, /gateway-build-fails/);
-  assert.equal(buildFailureResults.dependency_build_failures[0].engine_requirements.node, '>=99');
-  assert.match(buildFailureResults.dependency_build_failures[0].attempted_command, /composer install/);
-  assert.match(buildFailureResults.dependency_build_failures[0].stderr_tail, /EBADENGINE/);
+  assert.equal(buildFailureResults.prepared_dependencies, undefined);
+  assert.equal(buildFailureResults.dependency_build_failures, undefined);
+  assert.equal(buildFailureResults.metadata.prepared_dependencies.some((dependency) => dependency.slug === 'generic-dependency'), true);
+  assert.equal(buildFailureResults.metadata.prepared_dependencies.some((dependency) => dependency.slug === 'gateway-build-fails'), false);
+  assert.equal(buildFailureResults.metadata.dependency_build_failures.length, 1);
+  assert.equal(buildFailureResults.metadata.dependency_build_failures[0].dependency_slug, 'gateway-build-fails');
+  assert.equal(path.basename(buildFailureResults.metadata.dependency_build_failures[0].dependency_path), 'gateway-build-fails');
+  assert.match(buildFailureResults.metadata.dependency_build_failures[0].package_path, /gateway-build-fails/);
+  assert.equal(buildFailureResults.metadata.dependency_build_failures[0].engine_requirements.node, '>=99');
+  assert.match(buildFailureResults.metadata.dependency_build_failures[0].attempted_command, /composer install/);
+  assert.match(buildFailureResults.metadata.dependency_build_failures[0].stderr_tail, /EBADENGINE/);
   const buildDiagnostics = JSON.parse(fs.readFileSync(path.join(buildFailureArtifactsDir, 'wordpress-dependency-build-diagnostics.json'), 'utf8'));
   assert.equal(buildDiagnostics.diagnostics[0].code, 'wordpress-bench-dependency-build-failed');
 

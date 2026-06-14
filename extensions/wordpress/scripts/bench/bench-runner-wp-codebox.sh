@@ -1218,7 +1218,7 @@ PREPARED_DEPENDENCIES_METADATA_FILE="${ARTIFACTS_DIR%/}/prepared-bench-dependenc
 if [ -f "$PREPARED_DEPENDENCIES_METADATA_FILE" ]; then
     PREPARED_RESULTS_FILE=$(mktemp "${TMPDIR:-/tmp}/homeboy-wp-codebox-prepared-dependencies.XXXXXX")
     if jq --slurpfile preparedDependencies "$PREPARED_DEPENDENCIES_METADATA_FILE" \
-        '. + {prepared_dependencies: ($preparedDependencies[0] // [])}' \
+        '. + {metadata: ((.metadata // {}) + {prepared_dependencies: ($preparedDependencies[0] // [])})}' \
         "$RESULTS_FILE" > "$PREPARED_RESULTS_FILE"; then
         mv "$PREPARED_RESULTS_FILE" "$RESULTS_FILE"
     else
@@ -1231,7 +1231,7 @@ FAILED_DEPENDENCIES_METADATA_FILE="${ARTIFACTS_DIR%/}/failed-bench-dependencies.
 if [ -f "$FAILED_DEPENDENCIES_METADATA_FILE" ]; then
     FAILED_DEPENDENCIES_RESULTS_FILE=$(mktemp "${TMPDIR:-/tmp}/homeboy-wp-codebox-failed-dependencies.XXXXXX")
     if jq --slurpfile failedDependencies "$FAILED_DEPENDENCIES_METADATA_FILE" \
-        '. + {dependency_build_failures: ($failedDependencies[0] // [])}' \
+        '. + {metadata: ((.metadata // {}) + {dependency_build_failures: ($failedDependencies[0] // [])})}' \
         "$RESULTS_FILE" > "$FAILED_DEPENDENCIES_RESULTS_FILE"; then
         mv "$FAILED_DEPENDENCIES_RESULTS_FILE" "$RESULTS_FILE"
     else

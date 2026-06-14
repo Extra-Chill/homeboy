@@ -29,13 +29,15 @@ cat > "$RESULTS_FILE" <<'JSON'
 {
   "component_id": "wp-rl-fixture",
   "iterations": 1,
-  "prepared_dependencies": [
-    {
-      "slug": "wp-codebox-fixture",
-      "source": "/tmp/wp-codebox-fixture",
-      "state": "prepared"
-    }
-  ],
+  "metadata": {
+    "prepared_dependencies": [
+      {
+        "slug": "wp-codebox-fixture",
+        "source": "/tmp/wp-codebox-fixture",
+        "state": "prepared"
+      }
+    ]
+  },
   "scenarios": [
     {
       "id": "__bootstrap",
