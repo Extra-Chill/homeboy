@@ -18,6 +18,7 @@ pub use super::agent_task_provider::*;
 pub use super::agent_task_schedule::*;
 pub use super::agent_task_scheduler::*;
 pub use super::agent_task_secrets::*;
+pub use super::agent_task_service::*;
 
 pub mod cook_loop {
     pub use super::super::agent_task_cook_loop::*;
@@ -53,4 +54,8 @@ pub mod scheduler {
 
 pub mod secrets {
     pub use super::super::agent_task_secrets::*;
+}
+
+pub mod service {
+    pub use super::super::agent_task_service::*;
 }
