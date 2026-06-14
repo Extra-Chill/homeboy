@@ -12,6 +12,7 @@ pub mod config;
 // becoming accidental public API.
 pub mod agent_task;
 pub mod agent_task_aggregate;
+pub mod agent_task_controller_service;
 pub mod agent_task_cook_loop;
 pub mod agent_task_fanout;
 pub mod agent_task_finalization;
