@@ -52,6 +52,7 @@ pub fn route_after_parse(
             cli.force_hot,
             cli.allow_local_hot,
             cli.allow_local_fallback,
+            cli.allow_dirty_lab_workspace,
             cli.command.lab_offload_mutation_flag().is_some(),
             lab_trace_dispatch_timeout(),
         )
@@ -63,6 +64,7 @@ pub fn route_after_parse(
             force_hot: cli.force_hot,
             allow_local_hot: cli.allow_local_hot,
             allow_local_fallback: cli.allow_local_fallback,
+            allow_dirty_lab_workspace: cli.allow_dirty_lab_workspace,
             capture_patch: cli.command.lab_offload_mutation_flag().is_some(),
         })
     };
@@ -169,6 +171,7 @@ fn execute_trace_lab_offload_with_timeout(
     force_hot: bool,
     allow_local_hot: bool,
     allow_local_fallback: bool,
+    allow_dirty_lab_workspace: bool,
     capture_patch: bool,
     timeout: Duration,
 ) -> homeboy::core::Result<homeboy::core::runner::LabOffloadOutcome> {
@@ -182,6 +185,7 @@ fn execute_trace_lab_offload_with_timeout(
                 force_hot,
                 allow_local_hot,
                 allow_local_fallback,
+                allow_dirty_lab_workspace,
                 capture_patch,
             });
         let _ = tx.send(result);

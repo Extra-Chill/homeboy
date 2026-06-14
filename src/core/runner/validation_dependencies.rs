@@ -482,6 +482,7 @@ mod tests {
                     changed_since_base: None,
                     git_fetch_refs: Vec::new(),
                     snapshot_includes: Vec::new(),
+                    allow_dirty_lab_workspace: false,
                 },
             )
             .expect("sync workspace");
@@ -569,6 +570,7 @@ mod tests {
                     changed_since_base: None,
                     git_fetch_refs: Vec::new(),
                     snapshot_includes: Vec::new(),
+                    allow_dirty_lab_workspace: false,
                 },
             )
             .expect("sync workspace");
@@ -643,6 +645,7 @@ mod tests {
                     changed_since_base: None,
                     git_fetch_refs: Vec::new(),
                     snapshot_includes: Vec::new(),
+                    allow_dirty_lab_workspace: false,
                 },
             )
             .expect("sync workspace");
@@ -714,6 +717,7 @@ mod tests {
                     changed_since_base: None,
                     git_fetch_refs: Vec::new(),
                     snapshot_includes: Vec::new(),
+                    allow_dirty_lab_workspace: false,
                 },
             )
             .expect_err("failed dependency build should fail sync");
@@ -793,6 +797,7 @@ mod tests {
                     changed_since_base: None,
                     git_fetch_refs: Vec::new(),
                     snapshot_includes: Vec::new(),
+                    allow_dirty_lab_workspace: false,
                 },
             )
             .expect("sync workspace");

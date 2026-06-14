@@ -48,6 +48,10 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub allow_local_fallback: bool,
 
+    /// Permit Lab git workspace materialization to overwrite a dirty runner-side checkout.
+    #[arg(long, global = true)]
+    pub allow_dirty_lab_workspace: bool,
+
     #[command(subcommand)]
     pub command: Commands,
 }
@@ -1184,6 +1188,16 @@ mod tests {
         ]);
         assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
         assert!(cli.allow_local_fallback);
+
+        let cli = parsed_cli(&[
+            "homeboy",
+            "trace",
+            "--runner",
+            "homeboy-lab",
+            "--allow-dirty-lab-workspace",
+        ]);
+        assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
+        assert!(cli.allow_dirty_lab_workspace);
 
         let cli = parsed_cli(&["homeboy", "--force-hot", "--allow-local-hot", "bench"]);
         assert!(cli.force_hot);

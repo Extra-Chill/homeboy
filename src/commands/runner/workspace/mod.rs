@@ -28,6 +28,10 @@ pub(super) enum RunnerWorkspaceCommand {
         /// Sync mode. snapshot streams source from the controller; git is only for public/runner-accessible remotes.
         #[arg(long, value_enum, default_value_t = RunnerWorkspaceSyncModeArg::Snapshot)]
         mode: RunnerWorkspaceSyncModeArg,
+
+        /// Permit git sync to overwrite a dirty runner-side workspace.
+        #[arg(long)]
+        allow_dirty_lab_workspace: bool,
     },
     /// Apply a Lab-generated patch/delta back to its local source worktree
     Apply {
@@ -53,7 +57,8 @@ pub(super) fn run(command: RunnerWorkspaceCommand) -> CmdResult<RunnerWorkspaceO
             runner_id,
             path,
             mode,
-        } => sync(&runner_id, path, mode)
+            allow_dirty_lab_workspace,
+        } => sync(&runner_id, path, mode, allow_dirty_lab_workspace)
             .map(|(output, exit_code)| (RunnerWorkspaceOutput::Sync(output), exit_code)),
         RunnerWorkspaceCommand::Apply { input, force } => {
             runner::apply_workspace_patch(runner::RunnerWorkspaceApplyOptions { input, force })
@@ -75,6 +80,7 @@ fn sync(
     runner_id: &str,
     path: String,
     mode: RunnerWorkspaceSyncModeArg,
+    allow_dirty_lab_workspace: bool,
 ) -> CmdResult<RunnerWorkspaceSyncOutput> {
     runner::sync_workspace(
         runner_id,
@@ -85,6 +91,7 @@ fn sync(
             changed_since_base: None,
             git_fetch_refs: Vec::new(),
             snapshot_includes: Vec::new(),
+            allow_dirty_lab_workspace,
         },
     )
 }

@@ -54,6 +54,7 @@ pub struct LabOffloadRequest<'a> {
     pub force_hot: bool,
     pub allow_local_hot: bool,
     pub allow_local_fallback: bool,
+    pub allow_dirty_lab_workspace: bool,
     pub capture_patch: bool,
 }
 
@@ -686,6 +687,7 @@ fn run_lab_offload_inner(
                 sync_mode,
             )?,
             snapshot_includes: Vec::new(),
+            allow_dirty_lab_workspace: request.allow_dirty_lab_workspace,
         },
     )?
     .0;
@@ -698,7 +700,12 @@ fn run_lab_offload_inner(
                 PlanValues::new()
                     .string("local_path", &synced.local_path)
                     .string("remote_path", &remote_cwd)
-                    .string("mode", sync_mode.label()),
+                    .string("mode", sync_mode.label())
+                    .json(
+                        "allow_dirty_lab_workspace",
+                        request.allow_dirty_lab_workspace,
+                    )
+                    .string("workspace_cleanliness", &synced.workspace_cleanliness),
             )
             .build(),
     );
@@ -873,6 +880,13 @@ fn run_lab_offload_inner(
         "source_snapshot_remote_path": remote_cwd,
         "rigs": synced_rigs,
         "selected_before_remote_settings_resolution": true,
+    });
+    lab_metadata["workspace_cleanliness"] = serde_json::json!({
+        "schema": "homeboy/lab-workspace-cleanliness/v1",
+        "mode": sync_mode.label(),
+        "remote_workspace": remote_cwd,
+        "status": synced.workspace_cleanliness,
+        "allow_dirty_lab_workspace": request.allow_dirty_lab_workspace,
     });
     env = build_lab_offload_env(&lab_metadata);
     forward_env_if_present(&mut env, PREVIEW_METADATA_ENV);
@@ -1155,6 +1169,7 @@ fn sync_inline_agent_task_plan(
             changed_since_base: None,
             git_fetch_refs: Vec::new(),
             snapshot_includes: Vec::new(),
+            allow_dirty_lab_workspace: false,
         },
     )?
     .0;
@@ -2344,6 +2359,7 @@ mod tests {
             bytes: 12,
             excludes: Vec::new(),
             includes: Vec::new(),
+            workspace_cleanliness: "snapshot_unique_workspace".to_string(),
         };
         let git = RunnerWorkspaceSyncOutput {
             command: "runner.workspace.sync",
@@ -2356,6 +2372,7 @@ mod tests {
             bytes: 0,
             excludes: Vec::new(),
             includes: Vec::new(),
+            workspace_cleanliness: "clean_remote_required".to_string(),
         };
 
         let entries = vec![
@@ -3153,6 +3170,7 @@ mod tests {
             force_hot: true,
             allow_local_hot: true,
             allow_local_fallback: false,
+            allow_dirty_lab_workspace: false,
             capture_patch: false,
         })
         .expect("outcome");
