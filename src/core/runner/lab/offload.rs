@@ -56,7 +56,8 @@ use super::super::{
     preflight_lab_offload_changed_since, prepare_git_lab_offload_changed_since,
     prepare_lab_runner_capability, rig_materialization, status, sync_workspace,
     LabRunnerGateDecision, RunnerCapabilityPreflight, RunnerExecOptions, RunnerStatusReport,
-    RunnerTunnelMode, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
+    RunnerTunnelMode, RunnerWorkspaceApplyOutput, RunnerWorkspaceSyncMode,
+    RunnerWorkspaceSyncOptions,
 };
 
 use super::agent_task_bridge::{
@@ -1002,22 +1003,7 @@ fn run_lab_offload_inner(
     }
     if request.capture_patch && exit_code == 0 {
         let apply_output = apply_lab_offload_patch(&exec_output)?;
-        if let Some(apply_output) = apply_output {
-            plan = with_step(
-                plan,
-                PlanStep::builder(
-                    "lab.apply_patch",
-                    "lab.apply_patch",
-                    PlanStepStatus::Success,
-                )
-                .inputs(PlanValues::new().json("apply", &apply_output))
-                .build(),
-            );
-        } else {
-            return Err(Error::internal_unexpected(
-                "Lab offload command required source-tree mutation return, but the runner returned no patch to apply",
-            ));
-        }
+        plan = with_lab_apply_patch_step(plan, apply_output);
     }
     mirror_agent_task_run_plan_lifecycle(request.normalized_args, &exec_output.stdout)?;
 
@@ -1087,6 +1073,35 @@ fn run_lab_offload_inner(
         stderr,
         exit_code,
     })
+}
+
+fn with_lab_apply_patch_step(
+    plan: HomeboyPlan,
+    apply_output: Option<RunnerWorkspaceApplyOutput>,
+) -> HomeboyPlan {
+    let mut inputs = PlanValues::new();
+    if let Some(apply_output) = apply_output {
+        inputs = inputs.json("apply", &apply_output);
+    } else {
+        inputs = inputs.json(
+            "apply",
+            &serde_json::json!({
+                "applied": false,
+                "reason": "no_patch",
+            }),
+        );
+    }
+
+    with_step(
+        plan,
+        PlanStep::builder(
+            "lab.apply_patch",
+            "lab.apply_patch",
+            PlanStepStatus::Success,
+        )
+        .inputs(inputs)
+        .build(),
+    )
 }
 
 fn in_flight_daemon_disconnect_error(
@@ -1816,6 +1831,25 @@ mod tests {
             .message
             .contains("cannot yet return source-tree mutations"));
         assert_eq!(err.details["id"], "lab");
+    }
+
+    #[test]
+    fn apply_patch_step_accepts_noop_mutation_return() {
+        let plan = base_lab_plan(Some(&portable_lab_command("refactor")));
+
+        let plan = with_lab_apply_patch_step(plan, None);
+
+        let step = plan
+            .steps
+            .iter()
+            .find(|step| step.id == "lab.apply_patch")
+            .expect("apply patch step");
+        assert_eq!(step.status, PlanStepStatus::Success);
+        assert_eq!(step.inputs["apply"]["applied"], serde_json::json!(false));
+        assert_eq!(
+            step.inputs["apply"]["reason"],
+            serde_json::json!("no_patch")
+        );
     }
 
     #[test]
