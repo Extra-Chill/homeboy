@@ -11,6 +11,7 @@
 //   HOMEBOY_BENCH_WARMUP_ITERATIONS — discarded warmups per workload (default 1)
 //   HOMEBOY_BENCH_RESULTS_FILE   — where to write the envelope
 //   HOMEBOY_BENCH_LIST_ONLY      — when 1, emit scenario inventory only
+//   HOMEBOY_BENCH_PUBLIC_ARTIFACT_BASE_URL — optional public URL base for artifacts
 //
 // Discovers `bench/**/*.bench.{ts,mjs,js}` under the project root.
 // Each workload file must export a default async function. The function may
@@ -41,7 +42,7 @@
 // bench/parsing.rs::BenchResults shape) to HOMEBOY_BENCH_RESULTS_FILE.
 
 import { mkdir, readdir, writeFile } from 'node:fs/promises';
-import { resolve, relative, basename, delimiter, dirname } from 'node:path';
+import { resolve, relative, basename, delimiter, dirname, isAbsolute } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { pathToFileURL } from 'node:url';
 
@@ -64,6 +65,10 @@ const ITERATIONS = Math.max(1, Number(process.env.HOMEBOY_BENCH_ITERATIONS) || 1
 const LIST_ONLY = process.env.HOMEBOY_BENCH_LIST_ONLY === '1';
 const WARMUP = LIST_ONLY ? 0 : parseWarmupIterations(process.env.HOMEBOY_BENCH_WARMUP_ITERATIONS);
 const DEBUG = process.env.HOMEBOY_DEBUG === '1';
+const ARTIFACTS_DIR = process.env.HOMEBOY_BENCH_ARTIFACTS_DIR
+    ? resolve(process.env.HOMEBOY_BENCH_ARTIFACTS_DIR)
+    : undefined;
+const PUBLIC_ARTIFACT_BASE_URL = publicArtifactBaseUrl();
 
 const TIMING_METRIC_KEYS = new Set([
     'mean_ms',
@@ -172,14 +177,75 @@ function validateWorkloadArtifacts(artifacts, iterationLabel) {
         if (artifact.label !== undefined && typeof artifact.label !== 'string') {
             throw new Error(`${iterationLabel} returned artifact "${key}" with non-string label`);
         }
+        if (artifact.url !== undefined && typeof artifact.url !== 'string') {
+            throw new Error(`${iterationLabel} returned artifact "${key}" with non-string url`);
+        }
 
         const normalized = { path: artifact.path };
         if (artifact.kind !== undefined) normalized.kind = artifact.kind;
         if (artifact.label !== undefined) normalized.label = artifact.label;
+        for (const [field, value] of Object.entries(artifact)) {
+            if (field === 'path' || field === 'kind' || field === 'label' || field === 'url') {
+                continue;
+            }
+            normalized[field] = validateJsonField(value, `${iterationLabel} returned artifact "${key}" field "${field}"`);
+        }
+        const publicUrl = artifact.url || resolvePublicArtifactUrl(artifact.path);
+        if (publicUrl) normalized.url = publicUrl;
         validated[key] = normalized;
     }
 
     return validated;
+}
+
+function validateJsonField(value, label) {
+    try {
+        return JSON.parse(JSON.stringify(value));
+    } catch (err) {
+        throw new Error(`${label} that is not JSON-serializable: ${err.message}`);
+    }
+}
+
+function publicArtifactBaseUrl() {
+    return (
+        process.env.HOMEBOY_BENCH_PUBLIC_ARTIFACT_BASE_URL
+        || process.env.HOMEBOY_PUBLIC_ARTIFACT_BASE_URL
+        || process.env.HOMEBOY_ARTIFACT_PUBLIC_BASE_URL
+        || ''
+    ).trim();
+}
+
+function resolvePublicArtifactUrl(artifactPath) {
+    if (/^https?:\/\//i.test(artifactPath)) {
+        return artifactPath;
+    }
+    if (!PUBLIC_ARTIFACT_BASE_URL) {
+        return undefined;
+    }
+
+    const relativePath = publicArtifactRelativePath(artifactPath);
+    if (!relativePath) {
+        return undefined;
+    }
+
+    const base = PUBLIC_ARTIFACT_BASE_URL.endsWith('/') ? PUBLIC_ARTIFACT_BASE_URL : `${PUBLIC_ARTIFACT_BASE_URL}/`;
+    return new URL(relativePath.split('/').map(encodeURIComponent).join('/'), base).toString();
+}
+
+function publicArtifactRelativePath(artifactPath) {
+    if (!isAbsolute(artifactPath)) {
+        return artifactPath.replace(/^\.\//, '').replace(/^\/+/, '');
+    }
+    if (!ARTIFACTS_DIR) {
+        return undefined;
+    }
+
+    const resolvedArtifactPath = resolve(artifactPath);
+    const relativePath = relative(ARTIFACTS_DIR, resolvedArtifactPath);
+    if (relativePath.startsWith('..') || isAbsolute(relativePath)) {
+        return undefined;
+    }
+    return relativePath.split(/[/\\]+/).join('/');
 }
 
 function aggregateCustomMetrics(iterationMetrics) {

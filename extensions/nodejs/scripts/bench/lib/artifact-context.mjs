@@ -39,6 +39,8 @@ export function createBenchArtifactContext(options = {}) {
             path: file,
             ...(descriptorOptions.kind ? { kind: descriptorOptions.kind } : {}),
             ...(descriptorOptions.label ? { label: descriptorOptions.label } : {}),
+            ...(descriptorOptions.url ? { url: descriptorOptions.url } : {}),
+            ...(descriptorOptions.viewer ? { viewer: descriptorOptions.viewer } : {}),
         };
     }
 
