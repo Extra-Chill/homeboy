@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.229.4] - 2026-06-14
+
+### Changed
+- Auto-sync stale runner extension parity
+- Preserve detached runner git workspace revisions
+
+### Fixed
+- Fix invocation temp root user collisions
+- exclude stale TypeScript build info from Lab snapshots
+
 ## [0.229.3] - 2026-06-13
 
 ### Changed
