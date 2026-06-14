@@ -861,6 +861,26 @@ try {
   assert.deepEqual(configuredGenericStackRequest.runtime_overlays, configuredRuntimeOverlays);
   assert.deepEqual(configuredGenericStackRequest.secret_env, ['CONFIGURED_SECRET']);
 
+  const labWorkspaceRoot = path.join(defaultsRoot, '_lab_workspaces', 'target-repo@issue-1161');
+  const labPhpAiClientPath = path.join(defaultsRoot, 'php-ai-client@custom-provider-auth');
+  fs.mkdirSync(labWorkspaceRoot, { recursive: true });
+  fs.mkdirSync(labPhpAiClientPath, { recursive: true });
+  const labDefaultedRequest = codeboxTaskRequestFromAgentTaskRequest({
+    ...request,
+    task_id: 'lab-default-runtime-stack-task-123',
+    executor: {
+      backend: 'codebox',
+      config: { provider: 'codex' },
+    },
+    inputs: {
+      target: { root: labWorkspaceRoot },
+    },
+  }, {
+    settings: {},
+  });
+  assert.equal(labDefaultedRequest.runtime_overlays[0].source, labPhpAiClientPath);
+  assert.equal(labDefaultedRequest.runtime_overlays[0].strategy, 'wordpress-scoped-bundle');
+
   const explicitOverrideRequest = codeboxTaskRequestFromAgentTaskRequest({
     ...request,
     task_id: 'explicit-runtime-stack-task-123',
