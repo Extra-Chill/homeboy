@@ -8,8 +8,9 @@
 
 use std::collections::HashMap;
 
-use crate::core::agent_task_scheduler::AgentTaskPlan;
-use crate::core::{agent_task_secrets, config, Error, Result};
+use crate::core::agent_tasks::scheduler::AgentTaskPlan;
+use crate::core::agent_tasks::secrets as agent_task_secrets;
+use crate::core::{config, Error, Result};
 
 use super::args_util::{non_empty_arg, subcommand_index};
 
