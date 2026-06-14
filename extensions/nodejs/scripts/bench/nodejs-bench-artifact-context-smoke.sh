@@ -46,6 +46,15 @@ if (descriptor.kind !== 'json') throw new Error('writeJson descriptor kind missi
 if (descriptor.label !== 'Raw result') throw new Error('writeJson descriptor label missing');
 if (context.artifacts.raw_result.path !== descriptor.path) throw new Error('descriptor not recorded on context');
 
+const viewerDescriptor = context.addArtifact('viewer_input', join(context.artifactDir, 'viewer-input.json'), {
+  kind: 'json',
+  label: 'Viewer input',
+  url: 'https://artifacts.example.test/runs/smoke/viewer-input.json',
+  viewer: { kind: 'opaque-viewer', url: 'https://viewer.example.test/runs/smoke' },
+});
+if (viewerDescriptor.url !== 'https://artifacts.example.test/runs/smoke/viewer-input.json') throw new Error('artifact URL not preserved');
+if (viewerDescriptor.viewer.kind !== 'opaque-viewer') throw new Error('viewer metadata not preserved');
+
 const written = JSON.parse(await readFile(descriptor.path, 'utf8'));
 if (written.elapsed_ms !== null) throw new Error('non-finite number was not normalized');
 if (written.url.includes('abc123')) throw new Error('URL token was not redacted in JSON artifact');

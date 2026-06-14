@@ -56,6 +56,13 @@ SSH forward / Traforo / broker session alive. `managed-preview` owns the
 upstream-facing diagnostics contract so browser trace rigs can opt in without
 copying custom environment-variable glue.
 
+Relay-only preview ingress should be treated as disposable routing
+infrastructure. It must not own run state, artifact contents, viewer metadata, or
+cleanup semantics for published evidence. Operators should clean up relay
+processes, forwarding sessions, DNS/route registrations, and temporary access
+rules after the Homeboy-managed service stops, while keeping durable artifacts
+available from the artifact store until that store's retention policy expires.
+
 ## Hostname-Preserving Broker Backend
 
 Use the helper as Homeboy's backend command when a preview broker can create a reviewer-accessible session while preserving the browser-effective origin inside that session:
