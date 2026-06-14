@@ -109,6 +109,12 @@ homeboy_require_bash_version() { :; }
       { command: 'wordpress.wp-cli', args: ['command=option update generic_dependency_bootstrap yes'] },
     ],
   };
+
+  const extensionManifest = JSON.parse(fs.readFileSync(path.join(extensionPath, 'wordpress.json'), 'utf8'));
+  const validationDependenciesSetting = extensionManifest.settings.find((setting) => setting.id === 'validation_dependencies');
+  assert.equal(validationDependenciesSetting.type, 'array');
+  assert.deepEqual(validationDependenciesSetting.default, []);
+
   const baseEnv = {
     ...process.env,
     HOMEBOY_BENCH_ITERATIONS: '1',
