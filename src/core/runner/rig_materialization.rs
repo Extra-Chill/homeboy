@@ -185,8 +185,8 @@ fn is_bench_rig_run(args: &[String]) -> bool {
 }
 
 fn has_path_arg(args: &[String]) -> bool {
-    let mut iter = args.iter().skip(1);
-    while let Some(arg) = iter.next() {
+    let iter = args.iter().skip(1);
+    for arg in iter {
         if arg == "--" {
             return false;
         }

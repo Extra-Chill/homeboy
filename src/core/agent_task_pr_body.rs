@@ -132,7 +132,7 @@ fn verification_bullets(options: &AgentTaskPrFinalizationOptions) -> String {
         return format!("- `{TARGETED_CHECKS_RUN_LABEL}`: see gate results above");
     }
 
-    let lines = vec![
+    let lines = [
         format!(
             "- `{TARGETED_CHECKS_RUN_LABEL}`: {}",
             inline_code_list(&verification.targeted_checks_run)

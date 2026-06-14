@@ -1096,7 +1096,7 @@ fn artifact_refs_for_outcomes(outcomes: &[AgentTaskOutcome]) -> Vec<AgentTaskArt
 fn provider_handles_for_outcomes(outcomes: &[AgentTaskOutcome]) -> Vec<AgentTaskRunProviderHandle> {
     outcomes
         .iter()
-        .flat_map(|outcome| provider_handles_for_outcome(outcome))
+        .flat_map(provider_handles_for_outcome)
         .collect()
 }
 
