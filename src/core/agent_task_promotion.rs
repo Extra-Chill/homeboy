@@ -5,6 +5,7 @@ use std::process::{Command, Stdio};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use tempfile::NamedTempFile;
 
 use crate::core::agent_task::{
     AgentTaskArtifact, AgentTaskOutcome, AgentTaskOutcomeStatus, AGENT_TASK_OUTCOME_SCHEMA,
@@ -135,15 +136,23 @@ fn promote_with_provider(
         )
     })?;
     validate_artifact_content(&artifact, &patch)?;
-    let changed_files = validate_patch(&patch)?;
+    let normalized_patch = normalize_promotion_patch(&patch, &options.to_worktree)?;
+    let changed_files = normalized_patch.changed_files.clone();
 
     let mut command_evidence = Vec::new();
     let mut applied_worktree_path = None;
     if !options.dry_run {
+        let normalized_patch_file;
+        let provider_patch_path = if normalized_patch.content == patch {
+            patch_path.display().to_string()
+        } else {
+            normalized_patch_file = write_normalized_patch(&normalized_patch.content)?;
+            normalized_patch_file.path().display().to_string()
+        };
         let target = provider.apply_patch(AgentTaskPromotionApplyRequest {
             schema: AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA.to_string(),
             to_workspace: options.to_worktree.clone(),
-            patch_path: patch_path.display().to_string(),
+            patch_path: provider_patch_path,
             changed_files: changed_files.clone(),
         })?;
         command_evidence.extend(target.command_evidence);
@@ -437,7 +446,16 @@ fn resolve_artifact_path(
     }
 }
 
-fn validate_patch(patch: &str) -> Result<Vec<String>> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NormalizedPromotionPatch {
+    content: String,
+    changed_files: Vec<String>,
+}
+
+fn normalize_promotion_patch(
+    patch: &str,
+    target_workspace: &str,
+) -> Result<NormalizedPromotionPatch> {
     if patch.trim().is_empty() {
         return Err(Error::validation_invalid_argument(
             "patch",
@@ -447,14 +465,22 @@ fn validate_patch(patch: &str) -> Result<Vec<String>> {
         ));
     }
 
+    let repo_slug = target_workspace_repo_slug(target_workspace);
     let mut changed_files = Vec::new();
+    let mut normalized_lines = Vec::new();
     for line in patch.lines() {
+        let normalized_line = normalize_patch_header_line(line, &repo_slug)?;
         if let Some(path) = line
             .strip_prefix("+++ ")
             .or_else(|| line.strip_prefix("--- "))
         {
-            let path = path.trim();
+            let path = normalized_line
+                .strip_prefix("+++ ")
+                .or_else(|| normalized_line.strip_prefix("--- "))
+                .unwrap_or(path)
+                .trim();
             if path == "/dev/null" {
+                normalized_lines.push(normalized_line);
                 continue;
             }
             let path = path
@@ -466,6 +492,7 @@ fn validate_patch(patch: &str) -> Result<Vec<String>> {
                 changed_files.push(path.to_string());
             }
         }
+        normalized_lines.push(normalized_line);
     }
 
     if changed_files.is_empty() {
@@ -477,7 +504,128 @@ fn validate_patch(patch: &str) -> Result<Vec<String>> {
         ));
     }
 
-    Ok(changed_files)
+    let mut content = normalized_lines.join("\n");
+    if patch.ends_with('\n') {
+        content.push('\n');
+    }
+
+    Ok(NormalizedPromotionPatch {
+        content,
+        changed_files,
+    })
+}
+
+fn write_normalized_patch(content: &str) -> Result<NamedTempFile> {
+    let mut file = NamedTempFile::new().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("create normalized promotion patch".to_string()),
+        )
+    })?;
+    file.write_all(content.as_bytes()).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!(
+                "write normalized promotion patch {}",
+                file.path().display()
+            )),
+        )
+    })?;
+    Ok(file)
+}
+
+fn normalize_patch_header_line(line: &str, repo_slug: &str) -> Result<String> {
+    if let Some(rest) = line.strip_prefix("diff --git ") {
+        let mut parts = rest.split_whitespace();
+        let Some(old_path) = parts.next() else {
+            return Ok(line.to_string());
+        };
+        let Some(new_path) = parts.next() else {
+            return Ok(line.to_string());
+        };
+        if parts.next().is_some() {
+            return Ok(line.to_string());
+        }
+        return Ok(format!(
+            "diff --git {} {}",
+            normalize_prefixed_diff_path(old_path, repo_slug)?,
+            normalize_prefixed_diff_path(new_path, repo_slug)?
+        ));
+    }
+
+    for prefix in ["--- ", "+++ "] {
+        if let Some(path) = line.strip_prefix(prefix) {
+            return Ok(format!(
+                "{prefix}{}",
+                normalize_prefixed_diff_path(path.trim(), repo_slug)?
+            ));
+        }
+    }
+
+    for prefix in ["rename from ", "rename to ", "copy from ", "copy to "] {
+        if let Some(path) = line.strip_prefix(prefix) {
+            return Ok(format!(
+                "{prefix}{}",
+                normalize_sandbox_path(path.trim(), repo_slug)?
+            ));
+        }
+    }
+
+    Ok(line.to_string())
+}
+
+fn normalize_prefixed_diff_path(path: &str, repo_slug: &str) -> Result<String> {
+    if path == "/dev/null" {
+        return Ok(path.to_string());
+    }
+    if let Some(path) = path.strip_prefix("a/") {
+        return Ok(format!("a/{}", normalize_sandbox_path(path, repo_slug)?));
+    }
+    if let Some(path) = path.strip_prefix("b/") {
+        return Ok(format!("b/{}", normalize_sandbox_path(path, repo_slug)?));
+    }
+    normalize_sandbox_path(path, repo_slug)
+}
+
+fn normalize_sandbox_path(path: &str, repo_slug: &str) -> Result<String> {
+    let Some(rest) = path.strip_prefix("workspace/") else {
+        return Ok(path.to_string());
+    };
+    let Some((sandbox, repo_relative)) = rest.split_once('/') else {
+        if sandbox_belongs_to_repo(rest, repo_slug) {
+            return Err(Error::validation_invalid_argument(
+                "patch",
+                format!("Lab sandbox patch path has no repo-relative suffix: {path}"),
+                None,
+                Some(vec![
+                    "Expected paths shaped like workspace/<sandbox-worktree>/<repo-relative-path>.".to_string(),
+                    "Regenerate the patch from the repository root or include Lab workspace mapping metadata.".to_string(),
+                ]),
+            ));
+        }
+        return Ok(path.to_string());
+    };
+    if !sandbox_belongs_to_repo(sandbox, repo_slug) {
+        return Ok(path.to_string());
+    }
+    validate_patch_path(repo_relative)?;
+    Ok(repo_relative.to_string())
+}
+
+fn sandbox_belongs_to_repo(sandbox: &str, repo_slug: &str) -> bool {
+    sandbox == repo_slug
+        || sandbox
+            .strip_prefix(repo_slug)
+            .is_some_and(|rest| rest.starts_with('-') || rest.starts_with('@'))
+}
+
+fn target_workspace_repo_slug(handle: &str) -> String {
+    handle
+        .split('@')
+        .next()
+        .unwrap_or(handle)
+        .trim()
+        .to_string()
 }
 
 fn validate_artifact_content(artifact: &AgentTaskArtifact, patch: &str) -> Result<()> {
@@ -662,6 +810,7 @@ mod tests {
     struct FakePromotionWorkspaceProvider {
         workspace_path: Option<PathBuf>,
         apply_calls: Vec<AgentTaskPromotionApplyRequest>,
+        applied_patch_contents: Vec<String>,
         verify_calls: Vec<(
             PathBuf,
             String,
@@ -675,6 +824,9 @@ mod tests {
             &mut self,
             request: AgentTaskPromotionApplyRequest,
         ) -> Result<AgentTaskPromotionWorkspace> {
+            self.applied_patch_contents.push(
+                std::fs::read_to_string(&request.patch_path).unwrap_or_else(|_| String::new()),
+            );
             self.apply_calls.push(request.clone());
             let path = self.workspace_path.clone().ok_or_else(|| {
                 Error::validation_invalid_argument(
@@ -760,14 +912,42 @@ mod tests {
 
     #[test]
     fn validate_patch_extracts_safe_changed_files() {
-        let files = validate_patch(VALID_PATCH).expect("valid patch");
+        let patch =
+            normalize_promotion_patch(VALID_PATCH, "repo@promoted-task").expect("valid patch");
 
-        assert_eq!(files, vec!["src/lib.rs"]);
+        assert_eq!(patch.changed_files, vec!["src/lib.rs"]);
+        assert_eq!(patch.content, VALID_PATCH);
+    }
+
+    #[test]
+    fn normalize_promotion_patch_strips_lab_sandbox_workspace_prefix() {
+        let patch = "diff --git a/workspace/homeboy-refactor-command-contract-boundaries-abc/src/lib.rs b/workspace/homeboy-refactor-command-contract-boundaries-abc/src/lib.rs\n--- a/workspace/homeboy-refactor-command-contract-boundaries-abc/src/lib.rs\n+++ b/workspace/homeboy-refactor-command-contract-boundaries-abc/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n";
+
+        let normalized = normalize_promotion_patch(patch, "homeboy@promoted-task")
+            .expect("sandbox-prefixed patch normalizes");
+
+        assert_eq!(normalized.changed_files, vec!["src/lib.rs"]);
+        assert_eq!(
+            normalized.content,
+            "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n"
+        );
+    }
+
+    #[test]
+    fn normalize_promotion_patch_leaves_unrelated_workspace_paths() {
+        let patch = "diff --git a/workspace/fixture.txt b/workspace/fixture.txt\n--- a/workspace/fixture.txt\n+++ b/workspace/fixture.txt\n@@ -1 +1 @@\n-old\n+new\n";
+
+        let normalized = normalize_promotion_patch(patch, "homeboy@promoted-task")
+            .expect("unrelated workspace path remains repo-relative");
+
+        assert_eq!(normalized.changed_files, vec!["workspace/fixture.txt"]);
+        assert_eq!(normalized.content, patch);
     }
 
     #[test]
     fn validate_patch_rejects_empty_patch() {
-        let err = validate_patch("\n\t").expect_err("empty patch rejected");
+        let err = normalize_promotion_patch("\n\t", "repo@promoted-task")
+            .expect_err("empty patch rejected");
 
         assert!(err.message.contains("empty patch"));
     }
@@ -812,9 +992,20 @@ mod tests {
     fn validate_patch_rejects_path_traversal() {
         let patch = "--- a/src/lib.rs\n+++ b/../secret\n@@ -1 +1 @@\n-old\n+new\n";
 
-        let err = validate_patch(patch).expect_err("unsafe path rejected");
+        let err = normalize_promotion_patch(patch, "repo@promoted-task")
+            .expect_err("unsafe path rejected");
 
         assert!(err.message.contains("unsafe patch path"));
+    }
+
+    #[test]
+    fn normalize_promotion_patch_rejects_repo_sandbox_without_relative_suffix() {
+        let patch = "diff --git a/workspace/homeboy-refactor b/workspace/homeboy-refactor\n--- a/workspace/homeboy-refactor\n+++ b/workspace/homeboy-refactor\n@@ -1 +1 @@\n-old\n+new\n";
+
+        let err = normalize_promotion_patch(patch, "homeboy@promoted-task")
+            .expect_err("repo sandbox path without suffix rejected");
+
+        assert!(err.message.contains("no repo-relative suffix"));
     }
 
     #[test]
@@ -983,6 +1174,61 @@ mod tests {
             report.deterministic_gates[1].visibility,
             AgentTaskGateVisibility::Private
         );
+    }
+
+    #[test]
+    fn promote_applies_normalized_lab_sandbox_patch_with_fake_workspace_provider() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let patch = "diff --git a/workspace/homeboy-refactor-command-contract-boundaries-abc/src/lib.rs b/workspace/homeboy-refactor-command-contract-boundaries-abc/src/lib.rs\n--- a/workspace/homeboy-refactor-command-contract-boundaries-abc/src/lib.rs\n+++ b/workspace/homeboy-refactor-command-contract-boundaries-abc/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n";
+        let patch_path = temp.path().join("changes.patch");
+        std::fs::write(&patch_path, patch).expect("write patch");
+        let source_path = temp.path().join("outcome.json");
+        let source = serde_json::json!({
+            "schema": AGENT_TASK_OUTCOME_SCHEMA,
+            "task_id": "task-1",
+            "status": "succeeded",
+            "artifacts": [{
+                "schema": AGENT_TASK_ARTIFACT_SCHEMA,
+                "id": "patch",
+                "kind": "patch",
+                "path": "changes.patch",
+                "size_bytes": patch.len(),
+                "sha256": sha256_hex(patch)
+            }]
+        })
+        .to_string();
+        std::fs::write(&source_path, &source).expect("write source");
+        let mut provider = FakePromotionWorkspaceProvider {
+            workspace_path: Some(temp.path().join("worktree")),
+            ..Default::default()
+        };
+
+        let report = promote_with_provider(
+            AgentTaskPromotionOptions {
+                source,
+                source_path: Some(source_path),
+                to_worktree: "homeboy@promoted-task".to_string(),
+                task_id: None,
+                artifact_id: None,
+                dry_run: false,
+                verify: Vec::new(),
+                private_verify: Vec::new(),
+                private_gate_reveal: AgentTaskGateRevealPolicy::SummaryOnly,
+                provider_command: None,
+            },
+            &mut provider,
+        )
+        .expect("promote applies normalized patch");
+
+        assert_eq!(report.changed_files, vec!["src/lib.rs"]);
+        assert_eq!(provider.apply_calls[0].changed_files, vec!["src/lib.rs"]);
+        assert_ne!(
+            provider.apply_calls[0].patch_path,
+            patch_path.display().to_string()
+        );
+        let provider_patch = &provider.applied_patch_contents[0];
+        assert!(provider_patch.contains("diff --git a/src/lib.rs b/src/lib.rs"));
+        assert!(!provider_patch.contains("workspace/homeboy-refactor-command-contract-boundaries"));
     }
 
     #[test]
