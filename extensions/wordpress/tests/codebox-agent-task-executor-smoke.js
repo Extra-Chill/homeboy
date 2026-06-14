@@ -878,8 +878,30 @@ try {
   }, {
     settings: {},
   });
-  assert.equal(labDefaultedRequest.runtime_overlays[0].source, labPhpAiClientPath);
+  assert.equal(fs.realpathSync(labDefaultedRequest.runtime_overlays[0].source), fs.realpathSync(labPhpAiClientPath));
   assert.equal(labDefaultedRequest.runtime_overlays[0].strategy, 'wordpress-scoped-bundle');
+
+  const originalCwd = process.cwd();
+  const labOffloadCwd = path.join(defaultsRoot, '_lab_workspaces', 'wp-site-generator-pilot-homeboy-ssi-loop');
+  fs.mkdirSync(labOffloadCwd, { recursive: true });
+  try {
+    process.chdir(labOffloadCwd);
+    const labNoTargetDefaultedRequest = codeboxTaskRequestFromAgentTaskRequest({
+      ...request,
+      task_id: 'lab-no-target-default-runtime-stack-task-123',
+      executor: {
+        backend: 'codebox',
+        config: { provider: 'codex' },
+      },
+      inputs: {},
+    }, {
+      settings: {},
+    });
+    assert.equal(fs.realpathSync(labNoTargetDefaultedRequest.runtime_overlays[0].source), fs.realpathSync(labPhpAiClientPath));
+    assert.equal(labNoTargetDefaultedRequest.runtime_overlays[0].strategy, 'wordpress-scoped-bundle');
+  } finally {
+    process.chdir(originalCwd);
+  }
 
   const explicitOverrideRequest = codeboxTaskRequestFromAgentTaskRequest({
     ...request,
