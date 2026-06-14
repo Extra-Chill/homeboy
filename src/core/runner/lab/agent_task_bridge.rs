@@ -11,8 +11,9 @@
 
 use std::fs;
 
-use crate::core::agent_task_scheduler::{AgentTaskAggregate, AgentTaskPlan};
-use crate::core::{agent_task_lifecycle, config, Error, Result};
+use crate::core::agent_tasks::lifecycle as agent_task_lifecycle;
+use crate::core::agent_tasks::scheduler::{AgentTaskAggregate, AgentTaskPlan};
+use crate::core::{config, Error, Result};
 
 use super::super::lab_workspaces::{workspace_mapping_entry, LabWorkspaceMappingEntry};
 use super::super::{sync_workspace, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions};
