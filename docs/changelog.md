@@ -4,6 +4,20 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.229.9] - 2026-06-14
+
+### Changed
+- extract run/artifact observation service from CLI adapter
+- Extract agent-task controller execution into core service
+- split Lab offload into focused service modules (#4304)
+- make core::agent_tasks/runners facades explicit API groups (#4306)
+- split command_contract by domain (#4307)
+
+### Fixed
+- accept noop lab mutation patches
+- fix Lab changed-since base materialization
+- fix final runner path realignment
+
 ## [0.229.8] - 2026-06-14
 
 ### Fixed
