@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.121.30] - 2026-06-14
+
+### Fixed
+- detect custom provider auth php ai client overlay
+
 ## [2.121.29] - 2026-06-14
 
 ### Fixed
