@@ -1,5 +1,5 @@
 use super::*;
-use types::RunnerDoctorStatus;
+use types::{HomeboyProbe, RunnerDoctorStatus};
 
 #[test]
 fn local_alias_report_has_stable_top_level_shape() {
@@ -165,6 +165,93 @@ fn required_tool_check_errors_with_actionable_remediation() {
         .remediation
         .as_deref()
         .is_some_and(|value| value.contains("Install zip on the runner")));
+}
+
+#[test]
+fn required_homeboy_tools_capture_versions() {
+    assert_eq!(
+        probes::required_tool_version_args("homeboy"),
+        &["--version"]
+    );
+    assert_eq!(
+        probes::required_tool_version_args("/home/chubes/.cargo/bin/homeboy"),
+        &["--version"]
+    );
+    assert!(probes::required_tool_version_args("git").is_empty());
+}
+
+#[test]
+fn lab_homeboy_path_shadow_warns_when_bare_homeboy_is_older() {
+    let mut details = BTreeMap::new();
+    details.insert(
+        "configured_command".to_string(),
+        "/home/chubes/.cargo/bin/homeboy".to_string(),
+    );
+    details.insert(
+        "configured_path".to_string(),
+        "/home/chubes/.cargo/bin/homeboy".to_string(),
+    );
+    details.insert("configured_version".to_string(), "0.229.9".to_string());
+    details.insert(
+        "bare_path".to_string(),
+        "/home/chubes/.local/bin/homeboy".to_string(),
+    );
+    details.insert("bare_version".to_string(), "0.228.22".to_string());
+
+    let check = probes::homeboy_path_shadow_check(
+        "homeboy-lab",
+        "lab-server",
+        "/home/chubes/.cargo/bin/homeboy",
+        "0.229.9",
+        &HomeboyProbe {
+            version: "0.229.9".to_string(),
+            path: Some("/home/chubes/.cargo/bin/homeboy".to_string()),
+        },
+        &probes::RemoteHomeboyCandidateProbe {
+            path: Some("/home/chubes/.local/bin/homeboy".to_string()),
+            version: Some("0.228.22".to_string()),
+        },
+        details,
+    )
+    .expect("stale bare homeboy warning");
+
+    assert_eq!(check.id, "lab.homeboy.path_shadow");
+    assert_eq!(check.status, RunnerDoctorStatus::Warning);
+    assert!(check.message.contains("0.229.9"));
+    assert!(check.message.contains("0.228.22"));
+    assert_eq!(
+        check.details.get("configured_path").map(String::as_str),
+        Some("/home/chubes/.cargo/bin/homeboy")
+    );
+    assert_eq!(
+        check.details.get("bare_path").map(String::as_str),
+        Some("/home/chubes/.local/bin/homeboy")
+    );
+    assert!(check
+        .remediation
+        .as_deref()
+        .is_some_and(|value| value.contains("Fix PATH ordering")));
+}
+
+#[test]
+fn lab_homeboy_path_shadow_accepts_matching_bare_homeboy() {
+    let check = probes::homeboy_path_shadow_check(
+        "homeboy-lab",
+        "lab-server",
+        "/home/chubes/.cargo/bin/homeboy",
+        "0.229.9",
+        &HomeboyProbe {
+            version: "0.229.9".to_string(),
+            path: Some("/home/chubes/.cargo/bin/homeboy".to_string()),
+        },
+        &probes::RemoteHomeboyCandidateProbe {
+            path: Some("/home/chubes/.cargo/bin/homeboy".to_string()),
+            version: Some("0.229.9".to_string()),
+        },
+        BTreeMap::new(),
+    );
+
+    assert!(check.is_none());
 }
 
 #[test]

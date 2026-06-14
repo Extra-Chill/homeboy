@@ -353,7 +353,8 @@ mod local {
         }
 
         for command in normalized_required_tools(&options.required_tools) {
-            let probe = probes::local_tool_probe(&command, &[]);
+            let version_args = probes::required_tool_version_args(&command);
+            let probe = probes::local_tool_probe(&command, version_args);
             checks.push(checks::required_tool_check(&command, &probe));
             tools.entry(command).or_insert(probe);
         }
@@ -561,7 +562,8 @@ mod remote {
         }
 
         for command in normalized_required_tools(&options.required_tools) {
-            let probe = probes::remote_tool_probe(client, &command, &[]);
+            let version_args = probes::required_tool_version_args(&command);
+            let probe = probes::remote_tool_probe(client, &command, version_args);
             checks.push(checks::required_tool_check(&command, &probe));
             tools.entry(command).or_insert(probe);
         }
@@ -807,6 +809,18 @@ mod probes {
         tools.get(id).map(|tool| tool.available).unwrap_or(false)
     }
 
+    pub fn required_tool_version_args(command: &str) -> &'static [&'static str] {
+        let name = Path::new(command)
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or(command);
+        if name == "homeboy" {
+            &["--version"]
+        } else {
+            &[]
+        }
+    }
+
     pub fn local_tool_probe(command: &str, version_args: &[&str]) -> ToolProbe {
         let path = common::local_command_line(
             "sh",
@@ -950,24 +964,96 @@ mod probes {
             }
         }
 
-        if configured_command == "homeboy" {
-            if let Some(bare_version) = bare.version.as_deref() {
-                if bare_version.trim() != local_version.trim() {
-                    checks.push(checks::warning_with_details(
-                        "lab.homeboy.path_shadow",
-                        format!(
-                            "Runner PATH resolves bare `homeboy` to {bare_version}, but local Homeboy is {local_version}"
-                        ),
-                        Some(format!(
-                            "Configure runner `{runner_id}` with an absolute current homeboy_path, or fix PATH ordering on server `{server_id}`"
-                        )),
-                        configured_details,
-                    ));
-                }
-            }
+        if let Some(check) = homeboy_path_shadow_check(
+            runner_id,
+            server_id,
+            configured_command,
+            local_version,
+            configured_probe,
+            &bare,
+            configured_details,
+        ) {
+            checks.push(check);
         }
 
         checks
+    }
+
+    pub(super) fn homeboy_path_shadow_check(
+        runner_id: &str,
+        server_id: &str,
+        configured_command: &str,
+        local_version: &str,
+        configured_probe: &HomeboyProbe,
+        bare: &RemoteHomeboyCandidateProbe,
+        details: BTreeMap<String, String>,
+    ) -> Option<RunnerCheck> {
+        let bare_version = bare.version.as_deref()?.trim();
+        if bare_version.is_empty() {
+            return None;
+        }
+
+        if configured_command == "homeboy" {
+            let local_version = local_version.trim();
+            if bare_version == local_version {
+                return None;
+            }
+            return Some(checks::warning_with_details(
+                "lab.homeboy.path_shadow",
+                format!(
+                    "Runner PATH resolves bare `homeboy` to {bare_version}, but local Homeboy is {local_version}"
+                ),
+                Some(format!(
+                    "Configure runner `{runner_id}` with an absolute current homeboy_path, or fix PATH ordering on server `{server_id}`"
+                )),
+                details,
+            ));
+        }
+
+        let configured_version = configured_probe.version.trim();
+        if configured_version.is_empty()
+            || configured_version == "unknown"
+            || !version_is_older(bare_version, configured_version)
+        {
+            return None;
+        }
+
+        let configured_path = configured_probe
+            .path
+            .as_deref()
+            .unwrap_or(configured_command);
+        let bare_path = bare.path.as_deref().unwrap_or("homeboy");
+        Some(checks::warning_with_details(
+            "lab.homeboy.path_shadow",
+            format!(
+                "Configured runner Homeboy {configured_version} at {configured_path} is newer than bare PATH `homeboy` {bare_version} at {bare_path}"
+            ),
+            Some(format!(
+                "Fix PATH ordering on server `{server_id}` or update/remove the stale bare `homeboy`; keep runner `{runner_id}` configured with `{configured_command}` until bare `homeboy` resolves current"
+            )),
+            details,
+        ))
+    }
+
+    fn version_is_older(candidate: &str, baseline: &str) -> bool {
+        let candidate = semantic_version_parts(candidate);
+        let baseline = semantic_version_parts(baseline);
+        !candidate.is_empty() && !baseline.is_empty() && candidate < baseline
+    }
+
+    fn semantic_version_parts(version: &str) -> Vec<u64> {
+        version
+            .trim()
+            .trim_start_matches('v')
+            .split('.')
+            .map(|part| {
+                part.chars()
+                    .take_while(|ch| ch.is_ascii_digit())
+                    .collect::<String>()
+            })
+            .take_while(|part| !part.is_empty())
+            .filter_map(|part| part.parse::<u64>().ok())
+            .collect()
     }
 
     pub fn wp_codebox_checks(client: &SshClient) -> Vec<RunnerCheck> {
@@ -1033,9 +1119,9 @@ mod probes {
         }
     }
 
-    struct RemoteHomeboyCandidateProbe {
-        path: Option<String>,
-        version: Option<String>,
+    pub(super) struct RemoteHomeboyCandidateProbe {
+        pub(super) path: Option<String>,
+        pub(super) version: Option<String>,
     }
 
     fn remote_preferred_homeboy_candidate(
