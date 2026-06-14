@@ -7,6 +7,7 @@
 
 pub use super::agent_task::*;
 pub use super::agent_task_aggregate::*;
+pub use super::agent_task_controller_service::*;
 pub use super::agent_task_cook_loop::*;
 pub use super::agent_task_fanout::*;
 pub use super::agent_task_finalization::*;
@@ -19,6 +20,10 @@ pub use super::agent_task_schedule::*;
 pub use super::agent_task_scheduler::*;
 pub use super::agent_task_secrets::*;
 pub use super::agent_task_service::*;
+
+pub mod controller_service {
+    pub use super::super::agent_task_controller_service::*;
+}
 
 pub mod cook_loop {
     pub use super::super::agent_task_cook_loop::*;
