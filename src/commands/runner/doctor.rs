@@ -20,6 +20,15 @@ pub struct RunnerDoctorOptions {
     pub path: Option<String>,
     pub extensions: Vec<String>,
     pub required_tools: Vec<String>,
+    pub scope: RunnerDoctorScope,
+    pub repair: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RunnerDoctorScope {
+    #[default]
+    General,
+    LabOffload,
 }
 
 pub fn run(runner_id: &str) -> CmdResult<RunnerDoctorOutput> {
@@ -31,7 +40,7 @@ pub fn run_with_options(
     options: RunnerDoctorOptions,
 ) -> CmdResult<RunnerDoctorOutput> {
     let target = target::resolve(runner_id)?;
-    let report = match &target {
+    let mut report = match &target {
         target::RunnerTarget::Local { id, runner } => local::report(id, runner.as_ref(), &options),
         target::RunnerTarget::Ssh {
             id,
@@ -40,6 +49,12 @@ pub fn run_with_options(
             client,
         } => remote::report(id, runner, server, client, &options),
     };
+
+    if options.repair {
+        repair::apply(&target, &options, &mut report);
+    }
+
+    report.status = checks::overall_status(&report.checks);
     Ok((report, 0))
 }
 
@@ -64,6 +79,17 @@ mod types {
         pub capabilities: RunnerCapabilities,
         pub resources: RunnerResources,
         pub checks: Vec<RunnerCheck>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        pub repairs: Vec<RunnerRepair>,
+    }
+
+    #[derive(Debug, Serialize)]
+    pub struct RunnerRepair {
+        pub id: String,
+        pub status: RunnerDoctorStatus,
+        pub message: String,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        pub commands: Vec<String>,
     }
 
     #[derive(Debug, Serialize)]
@@ -399,6 +425,7 @@ mod local {
             capabilities,
             resources,
             checks,
+            repairs: Vec::new(),
         }
     }
 }
@@ -568,6 +595,18 @@ mod remote {
             "Create the artifact root or configure HOMEBOY_ARTIFACT_ROOT to a writable directory",
         ));
 
+        if options.scope == RunnerDoctorScope::LabOffload {
+            checks.extend(probes::lab_homeboy_path_checks(
+                client,
+                runner_id,
+                &server.id,
+                homeboy_command,
+                local_homeboy_version,
+                &homeboy,
+            ));
+            checks.extend(probes::wp_codebox_checks(client));
+        }
+
         checks.extend(probes::connected_daemon_exec_checks(
             runner_id,
             &workspace_root,
@@ -612,6 +651,7 @@ mod remote {
             capabilities,
             resources,
             checks,
+            repairs: Vec::new(),
         }
     }
 
@@ -643,7 +683,7 @@ mod remote {
 
 mod probes {
     use super::*;
-    use types::{DiskProbe, MemoryProbe, RunnerCapabilities, RunnerCheck, ToolProbe};
+    use types::{DiskProbe, HomeboyProbe, MemoryProbe, RunnerCapabilities, RunnerCheck, ToolProbe};
 
     #[derive(Clone, Copy)]
     pub struct ToolSpec {
@@ -846,6 +886,194 @@ mod probes {
             version,
             error: None,
         }
+    }
+
+    pub fn lab_homeboy_path_checks(
+        client: &SshClient,
+        runner_id: &str,
+        server_id: &str,
+        configured_command: &str,
+        local_version: &str,
+        configured_probe: &HomeboyProbe,
+    ) -> Vec<RunnerCheck> {
+        let mut checks = Vec::new();
+        let bare = remote_homeboy_probe(client, "homeboy");
+        let candidate = remote_preferred_homeboy_candidate(client, local_version);
+
+        let mut configured_details = BTreeMap::new();
+        configured_details.insert(
+            "configured_command".to_string(),
+            configured_command.to_string(),
+        );
+        configured_details.insert(
+            "configured_version".to_string(),
+            configured_probe.version.clone(),
+        );
+        if let Some(path) = &configured_probe.path {
+            configured_details.insert("configured_path".to_string(), path.clone());
+        }
+        if let Some(path) = &bare.path {
+            configured_details.insert("bare_path".to_string(), path.clone());
+        }
+        if let Some(version) = &bare.version {
+            configured_details.insert("bare_version".to_string(), version.clone());
+        }
+        if let Some(candidate) = &candidate {
+            configured_details.insert("preferred_path".to_string(), candidate.path.clone());
+            configured_details.insert("preferred_version".to_string(), candidate.version.clone());
+        }
+
+        checks.push(checks::ok_with_details(
+            "lab.homeboy.configured",
+            format!(
+                "Lab runner configured Homeboy command reports {}",
+                configured_probe.version
+            ),
+            configured_details.clone(),
+        ));
+
+        if let Some(candidate) = candidate {
+            let configured_version = configured_probe.version.trim();
+            if configured_version != candidate.version.trim() {
+                checks.push(checks::warning_with_details(
+                    "lab.homeboy.path_drift",
+                    format!(
+                        "Configured runner Homeboy {configured_version} differs from preferred runner binary {} at {}",
+                        candidate.version, candidate.path
+                    ),
+                    Some(format!(
+                        "Point runner `{runner_id}` at the preferred binary with `homeboy runner set {runner_id} --json '{{\"homeboy_path\":\"{}\"}}'`",
+                        candidate.path
+                    )),
+                    configured_details.clone(),
+                ));
+            }
+        }
+
+        if configured_command == "homeboy" {
+            if let Some(bare_version) = bare.version.as_deref() {
+                if bare_version.trim() != local_version.trim() {
+                    checks.push(checks::warning_with_details(
+                        "lab.homeboy.path_shadow",
+                        format!(
+                            "Runner PATH resolves bare `homeboy` to {bare_version}, but local Homeboy is {local_version}"
+                        ),
+                        Some(format!(
+                            "Configure runner `{runner_id}` with an absolute current homeboy_path, or fix PATH ordering on server `{server_id}`"
+                        )),
+                        configured_details,
+                    ));
+                }
+            }
+        }
+
+        checks
+    }
+
+    pub fn wp_codebox_checks(client: &SshClient) -> Vec<RunnerCheck> {
+        let mut details = BTreeMap::new();
+        let bin = common::remote_line(
+            client,
+            "printf '%s\n' \"${HOMEBOY_WP_CODEBOX_BIN:-${HOMEBOY_SETTINGS_WP_CODEBOX_BIN:-}}\"",
+        )
+        .filter(|value| !value.trim().is_empty());
+        let Some(bin) = bin else {
+            return vec![checks::warning(
+                "lab.wp_codebox.cache",
+                "WP Codebox runner path is not configured in the Lab runner environment".to_string(),
+                Some("Set HOMEBOY_WP_CODEBOX_BIN or HOMEBOY_SETTINGS_WP_CODEBOX_BIN when Lab commands depend on WP Codebox".to_string()),
+            )];
+        };
+
+        details.insert("path".to_string(), bin.clone());
+        let exists = client
+            .execute(&format!("test -e {}", common::shell_word(&bin)))
+            .success;
+        if !exists {
+            return vec![checks::error(
+                "lab.wp_codebox.cache",
+                "Configured WP Codebox runner path does not exist on the Lab runner".to_string(),
+                Some(
+                    "Refresh the WP Codebox cache before running WP Codebox-backed Lab evidence"
+                        .to_string(),
+                ),
+                details,
+            )];
+        }
+
+        if let Some(revision) = common::remote_line(
+            client,
+            &format!(
+                "p={}; if [ -d \"$p/.git\" ]; then git -C \"$p\" rev-parse --short HEAD 2>/dev/null; elif [ -d \"$(dirname \"$p\")/.git\" ]; then git -C \"$(dirname \"$p\")\" rev-parse --short HEAD 2>/dev/null; fi",
+                common::shell_word(&bin)
+            ),
+        ) {
+            details.insert("revision".to_string(), revision);
+        }
+
+        vec![checks::ok_with_details(
+            "lab.wp_codebox.cache",
+            "WP Codebox runner path exists on the Lab runner".to_string(),
+            details,
+        )]
+    }
+
+    struct RemoteHomeboyCandidate {
+        path: String,
+        version: String,
+    }
+
+    fn remote_homeboy_probe(client: &SshClient, command: &str) -> RemoteHomeboyCandidateProbe {
+        RemoteHomeboyCandidateProbe {
+            path: common::remote_line(
+                client,
+                &format!("command -v {}", common::shell_word(command)),
+            ),
+            version: remote_homeboy_version(client, command),
+        }
+    }
+
+    struct RemoteHomeboyCandidateProbe {
+        path: Option<String>,
+        version: Option<String>,
+    }
+
+    fn remote_preferred_homeboy_candidate(
+        client: &SshClient,
+        local_version: &str,
+    ) -> Option<RemoteHomeboyCandidate> {
+        let command = "for p in \"$HOME/.cargo/bin/homeboy\" \"$HOME/.local/bin/homeboy\" /usr/local/bin/homeboy; do [ -x \"$p\" ] || continue; v=$(\"$p\" --version 2>/dev/null | awk '{print $2}'); [ -n \"$v\" ] || continue; printf '%s %s\n' \"$p\" \"$v\"; done";
+        let output = client.execute(command);
+        if !output.success {
+            return None;
+        }
+        let mut first = None;
+        for line in output
+            .stdout
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+        {
+            let mut parts = line.split_whitespace();
+            let path = parts.next()?.to_string();
+            let version = parts.next()?.to_string();
+            let candidate = RemoteHomeboyCandidate { path, version };
+            if candidate.version.trim() == local_version.trim() {
+                return Some(candidate);
+            }
+            first.get_or_insert(candidate);
+        }
+        first
+    }
+
+    fn remote_homeboy_version(client: &SshClient, command: &str) -> Option<String> {
+        common::remote_line(
+            client,
+            &format!(
+                "{} --version 2>/dev/null | awk '{{print $2}}'",
+                common::shell_word(command)
+            ),
+        )
     }
 
     pub fn local_memory_probe() -> Option<MemoryProbe> {
@@ -1341,7 +1569,7 @@ mod checks {
         }
     }
 
-    fn warning_with_details(
+    pub(super) fn warning_with_details(
         id: impl Into<String>,
         message: String,
         remediation: Option<String>,
@@ -1398,6 +1626,96 @@ mod checks {
             message,
             remediation: None,
             details,
+        }
+    }
+}
+
+mod repair {
+    use super::*;
+    use types::{RunnerDoctorOutput, RunnerDoctorStatus, RunnerRepair};
+
+    pub fn apply(
+        target: &target::RunnerTarget,
+        options: &RunnerDoctorOptions,
+        report: &mut RunnerDoctorOutput,
+    ) {
+        if options.scope != RunnerDoctorScope::LabOffload {
+            report.repairs.push(RunnerRepair {
+                id: "repair.scope".to_string(),
+                status: RunnerDoctorStatus::Warning,
+                message: "No repairs were applied because --repair is only active for --scope lab-offload".to_string(),
+                commands: Vec::new(),
+            });
+            return;
+        }
+
+        let target::RunnerTarget::Ssh {
+            id,
+            runner: runner_config,
+            ..
+        } = target
+        else {
+            report.repairs.push(RunnerRepair {
+                id: "repair.runner".to_string(),
+                status: RunnerDoctorStatus::Warning,
+                message: "No Lab daemon repair is available for local runner targets".to_string(),
+                commands: Vec::new(),
+            });
+            return;
+        };
+
+        let daemon_failed = report
+            .checks
+            .iter()
+            .any(|check| check.id == "daemon.exec" && check.status == RunnerDoctorStatus::Error);
+        if !daemon_failed {
+            report.repairs.push(RunnerRepair {
+                id: "repair.daemon".to_string(),
+                status: RunnerDoctorStatus::Ok,
+                message: "Connected Lab daemon did not require repair".to_string(),
+                commands: Vec::new(),
+            });
+            return;
+        }
+
+        let commands = vec![
+            format!("homeboy runner disconnect {id}"),
+            format!("homeboy runner connect {id}"),
+        ];
+        let disconnected = runner::disconnect(id);
+        if let Err(err) = disconnected {
+            report.repairs.push(RunnerRepair {
+                id: "repair.daemon".to_string(),
+                status: RunnerDoctorStatus::Error,
+                message: format!("Could not disconnect stale Lab daemon: {}", err.message),
+                commands,
+            });
+            return;
+        }
+
+        match runner::connect(id) {
+            Ok(_) => {
+                report.checks.retain(|check| check.id != "daemon.exec");
+                let workspace_root = runner_config.workspace_root.as_deref().unwrap_or(".");
+                report
+                    .checks
+                    .extend(probes::connected_daemon_exec_checks(id, workspace_root));
+                report.repairs.push(RunnerRepair {
+                    id: "repair.daemon".to_string(),
+                    status: RunnerDoctorStatus::Ok,
+                    message: "Reconnected the Lab runner daemon and reran the daemon exec probe"
+                        .to_string(),
+                    commands,
+                });
+            }
+            Err(err) => {
+                report.repairs.push(RunnerRepair {
+                    id: "repair.daemon".to_string(),
+                    status: RunnerDoctorStatus::Error,
+                    message: format!("Could not reconnect Lab daemon: {}", err.message),
+                    commands,
+                });
+            }
         }
     }
 }
