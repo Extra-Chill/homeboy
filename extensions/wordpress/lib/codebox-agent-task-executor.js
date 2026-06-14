@@ -374,6 +374,7 @@ function defaultCodeboxRuntimeConfig(request, config, inputs, options = {}) {
     process.env.HOMEBOY_WP_CODEBOX_AGENTS_API_PATH,
     bundledAgentsApiPath(dataMachinePath),
   );
+  const phpAiClientPath = defaultPhpAiClientPath(settings, workspaceBase, options);
 
   return {
     agentsApi: agentsApiPath,
@@ -385,7 +386,7 @@ function defaultCodeboxRuntimeConfig(request, config, inputs, options = {}) {
     secretEnv: defaultSecretEnv(provider, settings),
     wpCodeboxBin: firstValue(settings.wp_codebox_bin, settings.wpCodeboxBin, process.env.HOMEBOY_WP_CODEBOX_BIN, ''),
     runtimeOverlayProfiles: defaultRuntimeOverlayProfiles(settings),
-    runtimeOverlays: defaultRuntimeOverlays(settings),
+    runtimeOverlays: defaultRuntimeOverlays(settings, phpAiClientPath),
     runtimeEnv: defaultRuntimeEnv(settings),
     runtimeStateMounts: defaultRuntimeStateMounts(settings),
     runtimeConfigMounts: defaultRuntimeConfigMounts(settings),
@@ -411,8 +412,32 @@ function defaultRuntimeOverlayProfiles(settings) {
   return normalizeArray(settings.wp_codebox_runtime_overlay_profiles || settings.runtime_overlay_profiles);
 }
 
-function defaultRuntimeOverlays(settings) {
-  return normalizeArray(settings.wp_codebox_runtime_overlays || settings.runtime_overlays);
+function defaultRuntimeOverlays(settings, phpAiClientPath = '') {
+  const explicit = normalizeArray(settings.wp_codebox_runtime_overlays || settings.runtime_overlays);
+  if (explicit.length > 0) {
+    return explicit;
+  }
+
+  return phpAiClientPath ? [{
+    type: 'bundled-library',
+    library: 'php-ai-client',
+    source: phpAiClientPath,
+    target: '/wordpress/wp-includes/php-ai-client',
+    metadata: { component: 'php-ai-client', source: 'homeboy-extensions-default' },
+  }] : [];
+}
+
+function defaultPhpAiClientPath(settings, workspaceBase, options = {}) {
+  return firstExistingPath(
+    options.phpAiClient,
+    settings.wp_codebox_php_ai_client_path,
+    settings.php_ai_client_path,
+    process.env.HOMEBOY_WP_CODEBOX_PHP_AI_CLIENT_PATH,
+    process.env.PHP_AI_CLIENT_PATH,
+    siblingPath(workspaceBase, 'php-ai-client'),
+    siblingPath(path.dirname(workspaceBase), 'php-ai-client@custom-provider-auth-live'),
+    siblingPath(path.dirname(workspaceBase), 'php-ai-client'),
+  );
 }
 
 function defaultRuntimeEnv(settings) {

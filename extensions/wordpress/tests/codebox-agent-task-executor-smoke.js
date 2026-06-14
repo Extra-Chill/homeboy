@@ -616,7 +616,15 @@ try {
   const dataMachineCodePath = path.join(defaultsRoot, 'data-machine-code');
   const staleStandaloneAgentsApiPath = path.join(defaultsRoot, 'agents-api');
   const providerPath = path.join(defaultsRoot, 'ai-provider-for-openai');
-  for (const directory of [workspaceRoot, bundledAgentsApiPath, dataMachineCodePath, staleStandaloneAgentsApiPath, providerPath]) {
+  const phpAiClientPath = path.join(defaultsRoot, 'php-ai-client');
+  const defaultPhpAiClientOverlay = [{
+    type: 'bundled-library',
+    library: 'php-ai-client',
+    source: phpAiClientPath,
+    target: '/wordpress/wp-includes/php-ai-client',
+    metadata: { component: 'php-ai-client', source: 'homeboy-extensions-default' },
+  }];
+  for (const directory of [workspaceRoot, bundledAgentsApiPath, dataMachineCodePath, staleStandaloneAgentsApiPath, providerPath, phpAiClientPath]) {
     fs.mkdirSync(directory, { recursive: true });
   }
 
@@ -638,7 +646,7 @@ try {
   assert.equal(defaultedRequest.runtime_component_paths.agent_runtime_tools, dataMachineCodePath);
   assert.deepEqual(defaultedRequest.provider_plugin_paths, []);
   assert.deepEqual(defaultedRequest.runtime_overlay_profiles, []);
-  assert.deepEqual(defaultedRequest.runtime_overlays, []);
+  assert.deepEqual(defaultedRequest.runtime_overlays, defaultPhpAiClientOverlay);
   assert.deepEqual(defaultedRequest.secret_env, [
     'AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN',
     'AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN',
@@ -681,7 +689,7 @@ try {
   assert.equal(codexSubscriptionDefaultedRequest.model, 'gpt-5.5');
   assert.deepEqual(codexSubscriptionDefaultedRequest.provider_plugin_paths, []);
   assert.deepEqual(codexSubscriptionDefaultedRequest.runtime_overlay_profiles, []);
-  assert.deepEqual(codexSubscriptionDefaultedRequest.runtime_overlays, []);
+  assert.deepEqual(codexSubscriptionDefaultedRequest.runtime_overlays, defaultPhpAiClientOverlay);
   assert.deepEqual(codexSubscriptionDefaultedRequest.secret_env, codexSecretEnv);
 
   const openAiDefaultedRequest = codeboxTaskRequestFromAgentTaskRequest({
