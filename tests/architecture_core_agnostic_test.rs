@@ -259,7 +259,13 @@ fn command_layer_uses_explicit_core_facades_only() {
     // - `homeboy::core::runner` and its submodules.
     // - `homeboy::core::artifact_*` (e.g. `artifact_links`, `artifact_manifest`).
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let scanned_roots = ["src/commands", "src/cli_runtime.rs", "src/cli_surface.rs"];
+    let scanned_roots = [
+        "src/commands",
+        "src/cli_runtime.rs",
+        "src/cli_surface.rs",
+        "src/command_contract.rs",
+        "src/command_contract",
+    ];
     let forbidden = [
         // agent task implementation modules
         "homeboy::core::agent_task::",
