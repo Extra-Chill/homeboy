@@ -175,6 +175,7 @@ pub(crate) fn review(args: ReviewArgs) -> CmdResult<Value> {
 }
 
 pub(crate) fn promote_artifact(args: PromoteArgs) -> CmdResult<Value> {
+    let to_worktree = args.to_worktree.clone();
     let (raw, source_path) = read_promotion_source(&args.source)?;
     let report = promote(AgentTaskPromotionOptions {
         source: raw,
@@ -193,11 +194,10 @@ pub(crate) fn promote_artifact(args: PromoteArgs) -> CmdResult<Value> {
     } else {
         0
     };
+    let mut value = serde_json::to_value(&report).unwrap_or(Value::Null);
+    value["handoff"] = promotion_handoff(&report, &to_worktree);
 
-    Ok((
-        serde_json::to_value(report).unwrap_or(Value::Null),
-        exit_code,
-    ))
+    Ok((value, exit_code))
 }
 
 pub(crate) fn finalize_pull_request(args: FinalizePrArgs) -> CmdResult<Value> {
@@ -227,10 +227,10 @@ pub(crate) fn finalize_pull_request(args: FinalizePrArgs) -> CmdResult<Value> {
         1
     };
 
-    Ok((
-        serde_json::to_value(report).unwrap_or(Value::Null),
-        exit_code,
-    ))
+    let mut value = serde_json::to_value(&report).unwrap_or(Value::Null);
+    value["handoff"] = finalization_handoff(&report.status, report.pr_url.as_deref());
+
+    Ok((value, exit_code))
 }
 
 pub(crate) fn gate_feedback(args: GateFeedbackArgs) -> CmdResult<Value> {
@@ -396,6 +396,69 @@ fn review_next_actions(
     actions
 }
 
+fn promotion_handoff(report: &AgentTaskPromotionReport, to_worktree: &str) -> Value {
+    let patch_promoted = matches!(
+        report.status,
+        AgentTaskPromotionStatus::Applied | AgentTaskPromotionStatus::GateFailed
+    );
+    let finalize_path = report
+        .provenance
+        .get("worktree_path")
+        .and_then(Value::as_str)
+        .unwrap_or(to_worktree);
+    let mut next_actions = Vec::new();
+    if report.status == AgentTaskPromotionStatus::GateFailed {
+        next_actions.push(
+            "patch promoted but deterministic gates failed; use gate feedback before finalizing"
+                .to_string(),
+        );
+    } else if patch_promoted {
+        next_actions.push(
+            "patch promoted into the target worktree; verify, then finalize a PR".to_string(),
+        );
+    } else {
+        next_actions
+            .push("dry run only; rerun promote without `--dry-run` before finalizing".to_string());
+    }
+
+    serde_json::json!({
+        "schema": "homeboy/agent-task-promotion-handoff/v1",
+        "states": {
+            "patch_artifact_produced": true,
+            "patch_promoted": patch_promoted,
+            "pr_opened": false
+        },
+        "boundary": match report.status {
+            AgentTaskPromotionStatus::Applied => "patch_promoted_no_pr",
+            AgentTaskPromotionStatus::GateFailed => "patch_promoted_gates_failed",
+            AgentTaskPromotionStatus::DryRun => "patch_not_promoted_dry_run",
+        },
+        "finalize_command": format!(
+            "homeboy agent-task finalize-pr --run-id <run-id> --path {finalize_path} --title <title> --commit-message <message>"
+        ),
+        "next_actions": next_actions
+    })
+}
+
+fn finalization_handoff(status: &str, pr_url: Option<&str>) -> Value {
+    let pr_opened = status == "review_ready" && pr_url.is_some();
+    serde_json::json!({
+        "schema": "homeboy/agent-task-finalization-handoff/v1",
+        "states": {
+            "patch_artifact_produced": true,
+            "patch_promoted": true,
+            "pr_opened": pr_opened
+        },
+        "boundary": if pr_opened { "pr_opened" } else { "pr_not_opened" },
+        "pr_url": pr_url,
+        "next_actions": if pr_opened {
+            vec!["PR opened or updated; continue review in GitHub".to_string()]
+        } else {
+            vec!["PR was not opened; inspect finalization status and git/PR errors".to_string()]
+        }
+    })
+}
+
 fn parse_gate_results(raw: &[String]) -> homeboy::core::Result<Vec<AgentTaskGateResult>> {
     raw.iter()
         .map(|item| {
@@ -433,4 +496,65 @@ pub(crate) fn read_promotion_source(
     spec: &str,
 ) -> homeboy::core::Result<(String, Option<std::path::PathBuf>)> {
     agent_task_service::promotion_source(spec)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use homeboy::core::agent_tasks::promotion::{
+        AgentTaskPromotionArtifactRef, AgentTaskPromotionCommandReport, AgentTaskPromotionSource,
+    };
+
+    #[test]
+    fn promotion_handoff_marks_promoted_patch_without_pr_claim() {
+        let report = AgentTaskPromotionReport {
+            schema: "homeboy/agent-task-promotion-report/v1".to_string(),
+            status: AgentTaskPromotionStatus::Applied,
+            source: AgentTaskPromotionSource {
+                kind: "aggregate".to_string(),
+                task_id: "cook-homeboy".to_string(),
+                path: Some("/tmp/aggregate.json".to_string()),
+            },
+            to_worktree: "homeboy@fix-runtime".to_string(),
+            patch_artifact: AgentTaskPromotionArtifactRef {
+                id: "patch-1".to_string(),
+                kind: "patch".to_string(),
+                path: "/tmp/changes.patch".to_string(),
+                sha256: None,
+            },
+            changed_files: vec!["src/lib.rs".to_string()],
+            command_evidence: Vec::<AgentTaskPromotionCommandReport>::new(),
+            deterministic_gates: Vec::new(),
+            gate_results: Vec::new(),
+            provenance: serde_json::json!({ "worktree_path": "/Users/chubes/Developer/homeboy@fix-runtime" }),
+        };
+
+        let handoff = promotion_handoff(&report, "homeboy@fix-runtime");
+
+        assert_eq!(handoff["states"]["patch_artifact_produced"], true);
+        assert_eq!(handoff["states"]["patch_promoted"], true);
+        assert_eq!(handoff["states"]["pr_opened"], false);
+        assert_eq!(handoff["boundary"], "patch_promoted_no_pr");
+        assert!(handoff["finalize_command"]
+            .as_str()
+            .expect("finalize command")
+            .contains("--path /Users/chubes/Developer/homeboy@fix-runtime"));
+    }
+
+    #[test]
+    fn finalization_handoff_marks_pr_opened_when_review_ready_has_url() {
+        let handoff = finalization_handoff(
+            "review_ready",
+            Some("https://github.com/Extra-Chill/homeboy/pull/9999"),
+        );
+
+        assert_eq!(handoff["states"]["patch_artifact_produced"], true);
+        assert_eq!(handoff["states"]["patch_promoted"], true);
+        assert_eq!(handoff["states"]["pr_opened"], true);
+        assert_eq!(handoff["boundary"], "pr_opened");
+        assert_eq!(
+            handoff["pr_url"],
+            "https://github.com/Extra-Chill/homeboy/pull/9999"
+        );
+    }
 }
