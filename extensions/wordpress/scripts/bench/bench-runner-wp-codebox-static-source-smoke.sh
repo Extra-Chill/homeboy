@@ -76,6 +76,7 @@ WP_CODEBOX_CORE_MODULE="${TMP_ROOT}/wp-codebox-core.mjs"
 cat > "$WP_CODEBOX_CORE_MODULE" <<'STUB'
 export function buildWordPressBenchRecipe(options) {
   const defines = options.wpConfigDefines || {};
+  const extraPlugins = options.extra_plugins || options.extraPlugins || [];
   const blueprint = options.blueprint && typeof options.blueprint === 'object' && !Array.isArray(options.blueprint)
     ? {...options.blueprint, steps: [...(Array.isArray(options.blueprint.steps) ? options.blueprint.steps : [])]}
     : {steps: []};
@@ -85,7 +86,7 @@ export function buildWordPressBenchRecipe(options) {
   return {
     schema: 'wp-codebox/workspace-recipe/v1',
     runtime: {wp: options.wordpressVersion, blueprint},
-    inputs: {extraPlugins: options.extraPlugins || [], mounts: options.mounts || []},
+    inputs: {extraPlugins, mounts: options.mounts || []},
     workflow: {steps: [{
       command: 'wordpress.bench',
       args: [
@@ -110,6 +111,10 @@ const fs = require('node:fs');
 const recipeIndex = process.argv.indexOf('--recipe');
 const recipePath = recipeIndex >= 0 ? process.argv[recipeIndex + 1] : '';
 const recipe = recipePath ? JSON.parse(fs.readFileSync(recipePath, 'utf8')) : null;
+if (process.argv[2] !== 'recipe-run') {
+  process.stdout.write(JSON.stringify({success: true, artifacts: []}));
+  process.exit(0);
+}
 const args = recipe?.workflow?.steps?.[0]?.args || [];
 const workloadsArg = args.find((arg) => arg.startsWith('workloads-json='));
 const workloads = workloadsArg ? JSON.parse(workloadsArg.slice('workloads-json='.length)) : [];
@@ -240,7 +245,7 @@ HOMEBOY_BENCH_WARMUP_ITERATIONS=0 \
 bash "$SCRIPT_DIR/bench-runner-wp-codebox.sh" >/dev/null
 rm -f "${SOURCE_ROOT}/tests/bench/rig-workload.php"
 jq -e --arg sourceRoot "$SOURCE_ROOT" '
-    (.recipe.inputs.mounts[] | select(.source | endswith("/rig-workloads/rig-workload.php") and .target == "/wordpress/wp-content/plugins/wp-site-generator/.homeboy/bench-rig/rig-workload.php"))
+    (.recipe.inputs.mounts[] | select((.source | endswith("/rig-workloads/rig-workload.php")) and .target == "/wordpress/wp-content/plugins/wp-site-generator/.homeboy/bench-rig/rig-workload.php"))
 ' "$DUPLICATE_CAPTURE_FILE" >/dev/null
 jq -e '
     (.scenarios[] | select(.id == "rig-workload" and .source == "rig" and .provenance.workload_index == 0))
@@ -322,10 +327,14 @@ HOMEBOY_BENCH_ITERATIONS=1 \
 HOMEBOY_BENCH_WARMUP_ITERATIONS=0 \
 bash "$SCRIPT_DIR/bench-runner-wp-codebox.sh" >/dev/null
 
-jq -e --arg sourceRoot "$PLUGIN_ROOT" '
+if ! jq -e --arg sourceRoot "$PLUGIN_ROOT" '
     .recipe.inputs.extraPlugins == [{source: $sourceRoot, slug: "wp-site-generator", pluginFile: "wp-site-generator/plugin-main.php", activate: false}]
     and ([.recipe.inputs.mounts[] | select(.source == $sourceRoot and .target == "/wordpress/wp-content/plugins/wp-site-generator")] | length == 0)
-' "$PLUGIN_CAPTURE_FILE" >/dev/null
+' "$PLUGIN_CAPTURE_FILE" >/dev/null; then
+    echo "ERROR: generated WP Codebox recipe did not include expected plugin bench inputs" >&2
+    cat "$PLUGIN_CAPTURE_FILE" >&2
+    exit 1
+fi
 
 mkdir -p "${PLUGIN_ROOT}/tests/bench"
 printf '<?php return function (): array { return array("metrics" => array("shadow" => 1)); };\n' > "${PLUGIN_ROOT}/tests/bench/rig-workload.php"
@@ -350,7 +359,7 @@ bash "$SCRIPT_DIR/bench-runner-wp-codebox.sh" >/dev/null
 
 jq -e '
     .recipe.inputs.extraPlugins[0].pluginFile == "wp-site-generator/plugin-main.php"
-    and (.recipe.inputs.mounts[] | select(.source | endswith("/rig-workloads/rig-workload.php") and .target == "/wordpress/wp-content/plugins/wp-site-generator/.homeboy/bench-rig/rig-workload.php"))
+    and (.recipe.inputs.mounts[] | select((.source | endswith("/rig-workloads/rig-workload.php")) and .target == "/wordpress/wp-content/plugins/wp-site-generator/.homeboy/bench-rig/rig-workload.php"))
     and ([.recipe.workflow.steps[0].args[] | select(startswith("workloads-json=") and contains("\"source\":\"rig\"") and contains("\"overridesDiscovered\":true") and contains(".homeboy/bench-rig/rig-workload.php"))] | length) == 1
     and ([.recipe.workflow.steps[0].args[] | select(startswith("scenario-ids-json=") and contains("rig-workload"))] | length) == 1
 ' "$PLUGIN_DUPLICATE_CAPTURE_FILE" >/dev/null
