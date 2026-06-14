@@ -8,6 +8,7 @@ mod budget_findings;
 pub mod context;
 mod lifecycle;
 pub mod records;
+pub mod runs_service;
 pub mod store;
 mod test_findings;
 pub mod timeline;

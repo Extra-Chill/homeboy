@@ -13,11 +13,6 @@ use super::{
     RunsArtifactCleanupPersistedRow, RunsArtifactGetOutput, RunsOutput,
 };
 
-pub fn is_remote_artifact(artifact: &ArtifactRecord) -> bool {
-    artifact.artifact_type == "remote_file"
-        || runner::is_remote_runner_artifact_path(&artifact.path)
-}
-
 pub fn get(artifact: ArtifactRecord, output: Option<PathBuf>) -> CmdResult<RunsOutput> {
     let download = runner::download_remote_artifact(&artifact.path, output)?;
     Ok((
