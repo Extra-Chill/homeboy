@@ -625,7 +625,7 @@ if (result.code !== 0) throw new Error(`phase command failed: ${result.code}`);
         serde_json::from_str(&std::fs::read_to_string(child_file).expect("read child resource"))
             .expect("json");
     assert_eq!(value["phase"], "install");
-    assert_eq!(value["command_label"].as_str().is_some(), true);
+    assert!(value["command_label"].as_str().is_some());
     assert!(value["samples"].as_array().is_some_and(|samples| !samples.is_empty()));
     assert_eq!(value["samples"][0]["phase"], "install");
 }

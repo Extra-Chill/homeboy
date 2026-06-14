@@ -87,7 +87,7 @@ pub fn collect_exec_run(
         let results = plan
             .steps
             .iter()
-            .filter_map(|step| project_result_from_planned_step(step))
+            .filter_map(project_result_from_planned_step)
             .collect::<Vec<_>>();
         summary.skipped = summary.total;
         let steps = results

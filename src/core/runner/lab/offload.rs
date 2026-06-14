@@ -987,7 +987,7 @@ fn with_lab_apply_patch_step(
     } else {
         inputs = inputs.json(
             "apply",
-            &serde_json::json!({
+            serde_json::json!({
                 "applied": false,
                 "reason": "no_patch",
             }),
