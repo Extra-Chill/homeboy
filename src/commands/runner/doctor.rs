@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use homeboy::core::runner::{self, Runner, RunnerKind, RunnerTunnelMode};
+use homeboy::core::runners::{self as runner, Runner, RunnerKind, RunnerTunnelMode};
 use homeboy::core::server::{self, Server, SshClient};
 use serde::Serialize;
 

@@ -1,19 +1,19 @@
 use clap::Args;
 use serde_json::Value;
 
-use homeboy::core::agent_task::{AgentTaskAggregateReport, AgentTaskRequest};
-use homeboy::core::agent_task_cook_loop::{evaluate_cook_loop, AgentTaskCookLoopOptions};
-use homeboy::core::agent_task_finalization::{
+use homeboy::core::agent_tasks::cook_loop::{evaluate_cook_loop, AgentTaskCookLoopOptions};
+use homeboy::core::agent_tasks::finalization::{
     finalize_pr, AgentTaskGateResult, AgentTaskPrEvidence, AgentTaskPrFinalizationOptions,
     AgentTaskPrRuntimeGuardrails, AgentTaskPrSourceRelationship, AgentTaskPrVerification,
 };
-use homeboy::core::agent_task_lifecycle;
-use homeboy::core::agent_task_promotion::{
+use homeboy::core::agent_tasks::lifecycle as agent_task_lifecycle;
+use homeboy::core::agent_tasks::promotion::{
     promote, AgentTaskPromotionOptions, AgentTaskPromotionReport, AgentTaskPromotionStatus,
 };
-use homeboy::core::agent_task_provider::ExtensionProviderAgentTaskExecutor;
-use homeboy::core::agent_task_scheduler::AgentTaskAggregate;
-use homeboy::core::agent_task_service;
+use homeboy::core::agent_tasks::provider::ExtensionProviderAgentTaskExecutor;
+use homeboy::core::agent_tasks::scheduler::AgentTaskAggregate;
+use homeboy::core::agent_tasks::service as agent_task_service;
+use homeboy::core::agent_tasks::{AgentTaskAggregateReport, AgentTaskRequest};
 use homeboy::core::config;
 use homeboy::core::gate::HomeboyGateResult;
 
@@ -277,7 +277,7 @@ pub(crate) fn providers(args: ProvidersArgs) -> CmdResult<Value> {
         serde_json::json!({
             "schema": "homeboy/agent-task-providers/v1",
             "providers": executor.providers(),
-            "secret_env": homeboy::core::agent_task_secrets::secret_env_status(&args.secret_env),
+            "secret_env": homeboy::core::agent_tasks::secret_env_status(&args.secret_env),
         }),
         0,
     ))

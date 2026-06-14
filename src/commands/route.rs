@@ -3,6 +3,7 @@ use homeboy::command_contract::{
     LabCommandPortability, LabCommandRequiredTool, LabWorkspaceModePolicy,
 };
 use homeboy::core::observation::RunStatus;
+use homeboy::core::runners;
 use serde_json::json;
 use std::time::Duration;
 
@@ -29,11 +30,9 @@ pub fn route_after_parse(
     let lab_command = lab_offload_command(&cli.command)?;
 
     let trace_runner_id = if matches!(cli.command, Commands::Trace(_)) {
-        cli.runner.clone().or_else(|| {
-            homeboy::core::runner::resolve_default_lab_runner()
-                .ok()
-                .flatten()
-        })
+        cli.runner
+            .clone()
+            .or_else(|| runners::resolve_default_lab_runner().ok().flatten())
     } else {
         None
     };
@@ -59,7 +58,7 @@ pub fn route_after_parse(
             lab_trace_dispatch_timeout(),
         )
     } else {
-        homeboy::core::runner::execute_lab_offload(homeboy::core::runner::LabOffloadRequest {
+        runners::execute_lab_offload(runners::LabOffloadRequest {
             command: lab_command,
             normalized_args,
             explicit_runner: cli.runner.as_deref(),
@@ -92,7 +91,7 @@ pub fn route_after_parse(
             return Err(err);
         }
         Ok(outcome) => match outcome {
-            homeboy::core::runner::LabOffloadOutcome::RunLocal {
+            runners::LabOffloadOutcome::RunLocal {
                 metadata, messages, ..
             } => {
                 crate::commands::trace::finish_lab_dispatch_observation(
@@ -109,14 +108,14 @@ pub fn route_after_parse(
                     }),
                 );
                 if let Some(metadata) = metadata {
-                    homeboy::core::runner::capture_lab_offload_subprocess_metadata(metadata);
+                    runners::capture_lab_offload_subprocess_metadata(metadata);
                 }
                 for message in messages {
                     eprintln!("{message}");
                 }
                 Ok(None)
             }
-            homeboy::core::runner::LabOffloadOutcome::Offloaded {
+            runners::LabOffloadOutcome::Offloaded {
                 stdout,
                 stderr,
                 exit_code,
@@ -166,7 +165,7 @@ fn is_runs_list_runner_option(args: &[String]) -> bool {
 }
 
 fn execute_trace_lab_offload_with_timeout(
-    command: Option<homeboy::core::runner::LabOffloadCommand>,
+    command: Option<runners::LabOffloadCommand>,
     normalized_args: Vec<String>,
     explicit_runner: Option<String>,
     force_hot: bool,
@@ -174,19 +173,18 @@ fn execute_trace_lab_offload_with_timeout(
     allow_local_fallback: bool,
     capture_patch: bool,
     timeout: Duration,
-) -> homeboy::core::Result<homeboy::core::runner::LabOffloadOutcome> {
+) -> homeboy::core::Result<runners::LabOffloadOutcome> {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let result =
-            homeboy::core::runner::execute_lab_offload(homeboy::core::runner::LabOffloadRequest {
-                command,
-                normalized_args: &normalized_args,
-                explicit_runner: explicit_runner.as_deref(),
-                force_hot,
-                allow_local_hot,
-                allow_local_fallback,
-                capture_patch,
-            });
+        let result = runners::execute_lab_offload(runners::LabOffloadRequest {
+            command,
+            normalized_args: &normalized_args,
+            explicit_runner: explicit_runner.as_deref(),
+            force_hot,
+            allow_local_hot,
+            allow_local_fallback,
+            capture_patch,
+        });
         let _ = tx.send(result);
     });
 
@@ -222,7 +220,7 @@ fn write_offloaded_stdout(path: &str, stdout: &str) -> homeboy::core::Result<()>
 
 fn lab_offload_command(
     command: &Commands,
-) -> homeboy::core::Result<Option<homeboy::core::runner::LabOffloadCommand>> {
+) -> homeboy::core::Result<Option<runners::LabOffloadCommand>> {
     let Some(contract) = command.lab_contract() else {
         return Ok(None);
     };
@@ -231,7 +229,7 @@ fn lab_offload_command(
     } else {
         Vec::new()
     };
-    Ok(Some(homeboy::core::runner::LabOffloadCommand {
+    Ok(Some(runners::LabOffloadCommand {
         hot_label: contract.hot_label,
         portable: matches!(contract.portability, LabCommandPortability::Portable),
         default_lab_offload: contract.default_lab_offload,
@@ -241,13 +239,11 @@ fn lab_offload_command(
         },
         workspace_mode_policy: match contract.workspace_mode_policy {
             LabWorkspaceModePolicy::ChangedSinceGitElseSnapshot => {
-                homeboy::core::runner::LabOffloadWorkspaceModePolicy::ChangedSinceGitElseSnapshot
+                runners::LabOffloadWorkspaceModePolicy::ChangedSinceGitElseSnapshot
             }
-            LabWorkspaceModePolicy::Git => {
-                homeboy::core::runner::LabOffloadWorkspaceModePolicy::Git
-            }
+            LabWorkspaceModePolicy::Git => runners::LabOffloadWorkspaceModePolicy::Git,
             LabWorkspaceModePolicy::GitCheckoutRequired => {
-                homeboy::core::runner::LabOffloadWorkspaceModePolicy::GitCheckoutRequired
+                runners::LabOffloadWorkspaceModePolicy::GitCheckoutRequired
             }
         },
         requires_extension_parity: contract.requires_extension_parity,
@@ -290,8 +286,8 @@ fn agent_task_lab_extension_ids(
         return Ok(Vec::new());
     }
     let raw = homeboy::core::config::read_json_spec_to_string(&run_plan.plan)?;
-    let plan: homeboy::core::agent_task_scheduler::AgentTaskPlan = serde_json::from_str(&raw)
-        .map_err(|error| {
+    let plan: homeboy::core::agent_tasks::AgentTaskPlan =
+        serde_json::from_str(&raw).map_err(|error| {
             homeboy::core::Error::validation_invalid_json(
                 error,
                 Some("agent-task run-plan Lab extension inference".to_string()),
@@ -299,7 +295,9 @@ fn agent_task_lab_extension_ids(
             )
         })?;
 
-    Ok(homeboy::core::agent_task_provider::required_extension_ids_for_plan(&plan))
+    Ok(homeboy::core::agent_tasks::required_extension_ids_for_plan(
+        &plan,
+    ))
 }
 
 fn test_lab_extension_ids(

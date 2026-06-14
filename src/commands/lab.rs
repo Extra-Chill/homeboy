@@ -32,7 +32,7 @@ pub struct LabOutput {
 }
 
 pub fn run(args: LabArgs, _global: &GlobalArgs) -> CmdResult<LabOutput> {
-    let preferred_runner = homeboy::core::runner::resolve_default_lab_runner()?;
+    let preferred_runner = homeboy::core::runners::resolve_default_lab_runner()?;
     let config_path = homeboy::core::defaults::config_path()?;
     let command = match args.command.unwrap_or(LabCommand::Status) {
         LabCommand::Status => "lab.status",
