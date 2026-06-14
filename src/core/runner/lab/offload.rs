@@ -13,11 +13,10 @@
 //! 4. Translating runner failures into either a structured fallback outcome or
 //!    a precise validation error, via the helpers at the bottom of the file.
 //!
-//! The trace-target git-fetch helpers also live here because they are part of
-//! the workspace-sync decision the orchestrator makes before remote exec.
+//! Trace-target git-fetch calculation lives in `trace_fetch_refs`; this module
+//! only decides when those refs participate in workspace sync.
 
 use std::path::Path;
-use std::process::Command;
 
 use crate::core::agent_task_lifecycle;
 use crate::core::observation::{PREVIEW_METADATA_ENV, PREVIEW_PUBLIC_URL_ENV};
@@ -67,6 +66,7 @@ use super::agent_task_bridge::{
 };
 use super::evidence::terminal_lab_run_evidence;
 use super::secrets::{hydrate_agent_task_secret_env, hydrate_trace_secret_env};
+use super::trace_fetch_refs::lab_offload_git_fetch_refs;
 
 pub struct LabOffloadRequest<'a> {
     pub command: Option<LabOffloadCommand>,
@@ -111,133 +111,6 @@ pub enum LabOffloadOutcome {
         stderr: String,
         exit_code: i32,
     },
-}
-
-fn lab_offload_git_fetch_refs(
-    args: &[String],
-    source_path: &Path,
-    sync_mode: RunnerWorkspaceSyncMode,
-) -> Result<Vec<String>> {
-    if sync_mode != RunnerWorkspaceSyncMode::Git {
-        return Ok(Vec::new());
-    }
-
-    let mut refs = Vec::new();
-    for target in lab_offload_trace_compare_targets(args) {
-        if trace_compare_target_is_local_path(&target) || target.starts_with("origin/") {
-            continue;
-        }
-        let git_ref = if target.starts_with("refs/") {
-            Some(target.clone())
-        } else {
-            advertised_origin_ref_for_local_target(source_path, &target)?
-        };
-        if let Some(git_ref) = git_ref {
-            if !refs.contains(&git_ref) {
-                refs.push(git_ref);
-            }
-        }
-    }
-    Ok(refs)
-}
-
-fn lab_offload_trace_compare_targets(args: &[String]) -> Vec<String> {
-    let mut targets = Vec::new();
-    let mut iter = args.iter().skip(1).peekable();
-    while let Some(arg) = iter.next() {
-        if arg == "--" {
-            break;
-        }
-        let target = if arg == "--baseline-target" || arg == "--candidate" {
-            iter.next().cloned()
-        } else {
-            arg.strip_prefix("--baseline-target=")
-                .or_else(|| arg.strip_prefix("--candidate="))
-                .map(str::to_string)
-        };
-        if let Some(target) = target {
-            targets.push(target);
-        }
-    }
-    targets
-}
-
-fn trace_compare_target_is_local_path(target: &str) -> bool {
-    let expanded = shellexpand::tilde(target).to_string();
-    Path::new(&expanded).exists()
-}
-
-fn advertised_origin_ref_for_local_target(
-    source_path: &Path,
-    target: &str,
-) -> Result<Option<String>> {
-    let commit = match super::super::workspace::git_output(
-        source_path,
-        &["rev-parse", "--verify", &format!("{target}^{{commit}}")],
-    ) {
-        Ok(commit) => commit,
-        Err(_) => return Ok(None),
-    };
-    let output = Command::new("git")
-        .args(["ls-remote", "origin"])
-        .current_dir(source_path)
-        .output()
-        .map_err(|err| {
-            Error::internal_io(err.to_string(), Some("run git ls-remote".to_string()))
-        })?;
-    if !output.status.success() {
-        return Err(Error::validation_invalid_argument(
-            "trace_compare_target",
-            "Lab offload could not inspect origin refs for trace compare target materialization",
-            Some(target.to_string()),
-            Some(vec![
-                String::from_utf8_lossy(&output.stderr).trim().to_string(),
-                "Run with --force-hot to execute trace compare locally while investigating remote ref availability.".to_string(),
-            ]),
-        ));
-    }
-
-    let refs = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| {
-            let (sha, git_ref) = line.split_once('\t')?;
-            (sha == commit && !git_ref.ends_with("^{}")).then(|| git_ref.to_string())
-        })
-        .collect::<Vec<_>>();
-    if refs.is_empty() && is_full_hex_sha(target) {
-        return Err(Error::validation_invalid_argument(
-            "trace_compare_target",
-            "Lab offload could not find an advertised origin ref for the trace compare target commit",
-            Some(target.to_string()),
-            Some(vec![
-                "Push the candidate commit to origin or pass an advertised ref such as refs/pull/<id>/head.".to_string(),
-                "Run with --force-hot to execute trace compare locally while investigating remote ref availability.".to_string(),
-            ]),
-        ));
-    }
-
-    Ok(best_advertised_ref(refs))
-}
-
-fn best_advertised_ref(refs: Vec<String>) -> Option<String> {
-    refs.iter()
-        .find(|git_ref| git_ref.starts_with("refs/pull/") && git_ref.ends_with("/head"))
-        .cloned()
-        .or_else(|| {
-            refs.iter()
-                .find(|git_ref| git_ref.starts_with("refs/heads/"))
-                .cloned()
-        })
-        .or_else(|| {
-            refs.iter()
-                .find(|git_ref| git_ref.starts_with("refs/tags/"))
-                .cloned()
-        })
-        .or_else(|| refs.into_iter().next())
-}
-
-fn is_full_hex_sha(value: &str) -> bool {
-    value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn requested_lab_workspace_sync_mode(
@@ -1299,40 +1172,6 @@ mod tests {
             requires_playwright: false,
             infer_source_path_tools: false,
         }
-    }
-
-    #[test]
-    fn trace_compare_targets_are_extracted_before_passthrough_args() {
-        let args = vec![
-            "homeboy".to_string(),
-            "trace".to_string(),
-            "compare".to_string(),
-            "--baseline-target".to_string(),
-            "origin/develop".to_string(),
-            "--candidate=32f68bb07ac0efa1d754f78e2adc8de115ddca6f".to_string(),
-            "--".to_string(),
-            "--candidate".to_string(),
-            "ignored".to_string(),
-        ];
-
-        assert_eq!(
-            lab_offload_trace_compare_targets(&args),
-            vec![
-                "origin/develop".to_string(),
-                "32f68bb07ac0efa1d754f78e2adc8de115ddca6f".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn compare_target_ref_selection_prefers_pull_head_refs() {
-        let selected = best_advertised_ref(vec![
-            "refs/heads/fix-branch".to_string(),
-            "refs/pull/5530/head".to_string(),
-            "refs/tags/v1".to_string(),
-        ]);
-
-        assert_eq!(selected, Some("refs/pull/5530/head".to_string()));
     }
 
     #[test]
