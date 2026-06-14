@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.121.31] - 2026-06-14
+
+### Fixed
+- detect php ai client overlay from lab cwd
+
 ## [2.121.30] - 2026-06-14
 
 ### Fixed
