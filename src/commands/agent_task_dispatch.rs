@@ -6,12 +6,14 @@ use homeboy::core::agent_tasks::provider::{
     provider_requires_cwd_git_checkout, ExtensionProviderAgentTaskExecutor,
 };
 use homeboy::core::agent_tasks::scheduler::{
-    AgentTaskExecutorAdapter, AgentTaskPlan, AgentTaskRetryPolicy, AgentTaskScheduler,
+    AgentTaskAggregate, AgentTaskExecutorAdapter, AgentTaskPlan, AgentTaskRetryPolicy,
+    AgentTaskScheduler,
 };
 use homeboy::core::agent_tasks::secrets::validate_secret_env;
 use homeboy::core::agent_tasks::{
-    AgentTaskExecutor, AgentTaskLimits, AgentTaskPolicy, AgentTaskRequest, AgentTaskSourceRef,
-    AgentTaskWorkspace, AgentTaskWorkspaceMode, AGENT_TASK_REQUEST_SCHEMA,
+    AgentTaskAggregateReport, AgentTaskExecutor, AgentTaskLimits, AgentTaskPolicy,
+    AgentTaskRequest, AgentTaskSourceRef, AgentTaskWorkspace, AgentTaskWorkspaceMode,
+    AGENT_TASK_REQUEST_SCHEMA,
 };
 use homeboy::core::config;
 use homeboy::core::worktree;
@@ -93,6 +95,20 @@ pub struct DispatchArgs {
 
 pub fn run(args: DispatchArgs, _global: &GlobalArgs) -> CmdResult<Value> {
     dispatch_with_executor(args, ExtensionProviderAgentTaskExecutor::discover())
+}
+
+pub(crate) fn cook(args: DispatchArgs, _global: &GlobalArgs) -> CmdResult<Value> {
+    cook_with_executor(args, ExtensionProviderAgentTaskExecutor::discover())
+}
+
+fn cook_with_executor<E>(args: DispatchArgs, executor: E) -> CmdResult<Value>
+where
+    E: AgentTaskExecutorAdapter,
+{
+    let target_worktree = args.workspace.clone();
+    let (mut value, exit_code) = dispatch_with_executor(args, executor)?;
+    value["handoff"] = cook_handoff(&value, target_worktree.as_deref());
+    Ok((value, exit_code))
 }
 
 pub(crate) fn dispatch_with_executor<E>(args: DispatchArgs, executor: E) -> CmdResult<Value>
@@ -702,6 +718,94 @@ fn dispatch_task_id(repo: Option<&str>, index: usize) -> String {
     }
 }
 
+fn cook_handoff(value: &Value, to_worktree: Option<&str>) -> Value {
+    let run_id = value["run_id"].as_str().unwrap_or("<run-id>");
+    let aggregate_path = value["aggregate_path"].as_str().unwrap_or(run_id);
+    let aggregate_review = value
+        .get("aggregate")
+        .and_then(|aggregate| serde_json::from_value::<AgentTaskAggregate>(aggregate.clone()).ok())
+        .map(|aggregate| AgentTaskAggregateReport::from(aggregate.outcomes))
+        .unwrap_or_else(|| AgentTaskAggregateReport::from(Vec::new()));
+    let promotion_commands =
+        cook_promotion_commands(aggregate_path, to_worktree, &aggregate_review);
+    let patch_artifact_produced = !promotion_commands.is_empty();
+    let mut next_actions = Vec::new();
+
+    if patch_artifact_produced {
+        next_actions.push("patch artifact produced; promote one candidate before claiming worktree changes or PR completion".to_string());
+        if to_worktree.is_some() {
+            next_actions.push(
+                "run one `promote_commands` entry to apply the patch into the target worktree"
+                    .to_string(),
+            );
+        } else {
+            next_actions.push(format!(
+                "run `homeboy agent-task review {run_id} --to-worktree <handle>` to generate exact promote commands"
+            ));
+        }
+        next_actions.push(format!(
+            "after promotion and verification, run `homeboy agent-task finalize-pr --run-id {run_id} --path <promoted-worktree-path> --title <title> --commit-message <message>`"
+        ));
+    } else if value["queued"].as_bool().unwrap_or(false) {
+        next_actions.push(format!(
+            "queued only; run `homeboy agent-task run {run_id}` or let a daemon claim it with `homeboy agent-task run-next`"
+        ));
+    } else {
+        next_actions.push("no patch artifact was produced; inspect `aggregate` candidates before retrying or reporting".to_string());
+    }
+
+    serde_json::json!({
+        "schema": "homeboy/agent-task-cook-handoff/v1",
+        "states": {
+            "patch_artifact_produced": patch_artifact_produced,
+            "patch_promoted": false,
+            "pr_opened": false
+        },
+        "boundary": if value["queued"].as_bool().unwrap_or(false) {
+            "queued"
+        } else if patch_artifact_produced {
+            "patch_artifact_only"
+        } else {
+            "no_patch_artifact"
+        },
+        "promote_commands": promotion_commands,
+        "finalize_command": format!(
+            "homeboy agent-task finalize-pr --run-id {run_id} --path <promoted-worktree-path> --title <title> --commit-message <message>"
+        ),
+        "next_actions": next_actions
+    })
+}
+
+fn cook_promotion_commands(
+    source: &str,
+    to_worktree: Option<&str>,
+    review: &AgentTaskAggregateReport,
+) -> Vec<Vec<String>> {
+    review
+        .apply_candidates
+        .iter()
+        .flat_map(|candidate| {
+            candidate.artifact_ids.iter().map(move |artifact_id| {
+                let mut command = vec![
+                    "homeboy".to_string(),
+                    "agent-task".to_string(),
+                    "promote".to_string(),
+                    source.to_string(),
+                    "--task-id".to_string(),
+                    candidate.task_id.clone(),
+                    "--artifact-id".to_string(),
+                    artifact_id.clone(),
+                ];
+                if let Some(to_worktree) = to_worktree {
+                    command.push("--to-worktree".to_string());
+                    command.push(to_worktree.to_string());
+                }
+                command
+            })
+        })
+        .collect()
+}
+
 fn sanitize_slug(value: &str) -> String {
     let slug: String = value
         .chars()
@@ -728,7 +832,8 @@ mod tests {
     use crate::test_support::with_isolated_home;
     use homeboy::core::agent_tasks::scheduler::AgentTaskExecutionContext;
     use homeboy::core::agent_tasks::{
-        AgentTaskOutcome, AgentTaskOutcomeStatus, AGENT_TASK_OUTCOME_SCHEMA,
+        AgentTaskArtifact, AgentTaskOutcome, AgentTaskOutcomeStatus, AGENT_TASK_ARTIFACT_SCHEMA,
+        AGENT_TASK_OUTCOME_SCHEMA,
     };
 
     #[test]
@@ -860,6 +965,74 @@ mod tests {
                 .as_str()
                 .expect("plan path")
                 .ends_with("plan.json"));
+        });
+    }
+
+    #[test]
+    fn cook_output_marks_patch_artifact_handoff_boundary() {
+        with_isolated_home(|_| {
+            register_worktree_record("homeboy@fix-runtime");
+
+            let (value, exit_code) = cook_with_executor(
+                dispatch_args(DispatchArgOverrides {
+                    prompt: Some("Cook a patch.".to_string()),
+                    workspace: Some("homeboy@fix-runtime".to_string()),
+                    run_id: Some("cook-handoff".to_string()),
+                    ..DispatchArgOverrides::default()
+                }),
+                PatchExecutor,
+            )
+            .expect("cook run");
+
+            assert_eq!(exit_code, 0);
+            assert_eq!(value["handoff"]["states"]["patch_artifact_produced"], true);
+            assert_eq!(value["handoff"]["states"]["patch_promoted"], false);
+            assert_eq!(value["handoff"]["states"]["pr_opened"], false);
+            assert_eq!(value["handoff"]["boundary"], "patch_artifact_only");
+            assert_eq!(
+                value["handoff"]["promote_commands"][0],
+                serde_json::json!([
+                    "homeboy",
+                    "agent-task",
+                    "promote",
+                    value["aggregate_path"].as_str().expect("aggregate path"),
+                    "--task-id",
+                    "cook-task",
+                    "--artifact-id",
+                    "patch-1",
+                    "--to-worktree",
+                    "homeboy@fix-runtime"
+                ])
+            );
+            assert!(value["handoff"]["finalize_command"]
+                .as_str()
+                .expect("finalize command")
+                .contains("homeboy agent-task finalize-pr --run-id cook-handoff"));
+        });
+    }
+
+    #[test]
+    fn queued_cook_handoff_surfaces_run_command_without_patch_claims() {
+        with_isolated_home(|_| {
+            let (value, exit_code) = cook_with_executor(
+                dispatch_args(DispatchArgOverrides {
+                    prompt: Some("Queue this cook.".to_string()),
+                    queue_only: true,
+                    run_id: Some("cook-queued".to_string()),
+                    ..DispatchArgOverrides::default()
+                }),
+                PatchExecutor,
+            )
+            .expect("queued cook");
+
+            assert_eq!(exit_code, 0);
+            assert_eq!(value["handoff"]["states"]["patch_artifact_produced"], false);
+            assert_eq!(value["handoff"]["states"]["patch_promoted"], false);
+            assert_eq!(value["handoff"]["states"]["pr_opened"], false);
+            assert!(value["handoff"]["next_actions"][0]
+                .as_str()
+                .expect("next action")
+                .contains("homeboy agent-task run cook-queued"));
         });
     }
 
@@ -1073,6 +1246,42 @@ mod tests {
         }
     }
 
+    struct PatchExecutor;
+
+    impl AgentTaskExecutorAdapter for PatchExecutor {
+        fn execute(
+            &self,
+            _request: AgentTaskRequest,
+            _context: AgentTaskExecutionContext,
+        ) -> AgentTaskOutcome {
+            AgentTaskOutcome {
+                schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+                task_id: "cook-task".to_string(),
+                status: AgentTaskOutcomeStatus::Succeeded,
+                summary: Some("patch ready".to_string()),
+                failure_classification: None,
+                artifacts: vec![AgentTaskArtifact {
+                    schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+                    id: "patch-1".to_string(),
+                    kind: "patch".to_string(),
+                    name: Some("changes.patch".to_string()),
+                    path: Some("/tmp/changes.patch".to_string()),
+                    url: None,
+                    mime: None,
+                    size_bytes: None,
+                    sha256: None,
+                    metadata: Value::Null,
+                }],
+                evidence_refs: Vec::new(),
+                diagnostics: Vec::new(),
+                outputs: Value::Null,
+                workflow: None,
+                follow_up: None,
+                metadata: Value::Null,
+            }
+        }
+    }
+
     #[derive(Default)]
     struct DispatchArgOverrides {
         prompt: Option<String>,
@@ -1133,5 +1342,40 @@ mod tests {
             args.join(" "),
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    fn register_worktree_record(id: &str) {
+        let root = tempfile::tempdir().expect("workspace root").keep();
+        let source = root.join("homeboy");
+        let worktree_path = root.join(id);
+        std::fs::create_dir(&source).expect("source dir");
+        std::fs::create_dir(&worktree_path).expect("worktree dir");
+        let record = worktree::TaskWorktreeRecord {
+            id: id.to_string(),
+            component_id: "homeboy".to_string(),
+            source_checkout: source.display().to_string(),
+            worktree_path: worktree_path.display().to_string(),
+            branch: "fix/runtime".to_string(),
+            base_ref: "origin/main".to_string(),
+            task_url: Some("https://github.com/Extra-Chill/homeboy/issues/4344".to_string()),
+            run_id: None,
+            cleanup_policy: worktree::CleanupPolicy::PreserveOnFailure,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            state: worktree::TaskWorktreeState::Active,
+        };
+        let store = homeboy::core::paths::observation_db()
+            .expect("observation db")
+            .parent()
+            .expect("data root")
+            .join("task-worktrees");
+        std::fs::create_dir_all(&store).expect("store dir");
+        std::fs::write(
+            store.join(format!(
+                "{}.json",
+                homeboy::core::paths::sanitize_path_segment(id)
+            )),
+            serde_json::to_string_pretty(&record).expect("record json"),
+        )
+        .expect("write record");
     }
 }
