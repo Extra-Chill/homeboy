@@ -58,6 +58,7 @@ pub fn route_after_parse(
         _ => None,
     };
 
+    let mutation_flag = cli.command.lab_offload_mutation_flag();
     let lab_result = lab_routing::route_lab_offload(LabRoutingRequest {
         command: lab_command,
         normalized_args,
@@ -66,7 +67,8 @@ pub fn route_after_parse(
         allow_local_hot: cli.allow_local_hot,
         allow_local_fallback: cli.allow_local_fallback,
         allow_dirty_lab_workspace: cli.allow_dirty_lab_workspace,
-        capture_patch: cli.command.lab_offload_mutation_flag().is_some(),
+        capture_patch: mutation_flag.is_some(),
+        mutation_flag,
         timeout: None,
         active_run_id: crate::commands::trace::lab_dispatch_observation_run_id(&trace_observation),
     });

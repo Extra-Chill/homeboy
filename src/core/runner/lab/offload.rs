@@ -78,6 +78,10 @@ pub struct LabOffloadRequest<'a> {
     pub allow_local_fallback: bool,
     pub allow_dirty_lab_workspace: bool,
     pub capture_patch: bool,
+    /// Human-readable flag (e.g. `--write`, `--fix`) that requested the
+    /// source-tree mutation. Used to render actionable diagnostics when the
+    /// remote runner finishes cleanly but returns no patch to apply.
+    pub mutation_flag: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -931,6 +935,13 @@ fn run_lab_offload_inner(
     }
     if request.capture_patch && exit_code == 0 {
         let apply_output = apply_lab_offload_patch(&exec_output)?;
+        if apply_output.is_none() {
+            return Err(missing_mutation_patch_error(
+                request.normalized_args,
+                request.mutation_flag,
+                &exec_output,
+            ));
+        }
         plan = with_lab_apply_patch_step(plan, apply_output);
     }
     mirror_agent_task_run_plan_lifecycle(request.normalized_args, &exec_output.stdout)?;
@@ -1131,6 +1142,71 @@ fn selected_runner_fallback_error(
     )
 }
 
+/// Build an actionable diagnostic when a Lab offload write/fix command
+/// finished cleanly but the runner returned no source-tree patch.
+fn missing_mutation_patch_error(
+    normalized_args: &[String],
+    mutation_flag: Option<&str>,
+    exec_output: &super::super::RunnerExecOutput,
+) -> Error {
+    let flag_label = mutation_flag.unwrap_or("write");
+    let original_command = normalized_args.join(" ");
+    let remote_command = exec_output.argv.join(" ");
+    let patch_artifact_id = exec_output
+        .patch
+        .as_ref()
+        .and_then(|patch| patch.get("patch_artifact_id"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|id| !id.trim().is_empty());
+    let patch_artifact_path = exec_output
+        .patch
+        .as_ref()
+        .and_then(|patch| patch.get("patch_artifact_path"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|path| !path.trim().is_empty());
+    let mut error = Error::new(
+        ErrorCode::ValidationInvalidArgument,
+        format!(
+            "Lab offload write command completed on runner `{}` but returned no source-tree patch to apply for `{flag_label}`",
+            exec_output.runner_id
+        ),
+        serde_json::json!({
+            "field": "lab_offload_patch",
+            "problem": "missing required source-tree mutation patch",
+            "runner_id": exec_output.runner_id,
+            "job_id": exec_output.job_id,
+            "mirror_run_id": exec_output.mirror_run_id,
+            "remote_workspace": exec_output.remote_cwd,
+            "remote_command": remote_command,
+            "original_command": original_command,
+            "mutation_flag": mutation_flag,
+            "patch_artifact_id": patch_artifact_id,
+            "patch_artifact_path": patch_artifact_path,
+            "patch": exec_output.patch,
+        }),
+    );
+
+    if let Some(run_id) = exec_output.mirror_run_id.as_deref() {
+        error = error
+            .with_hint(format!("Inspect the Lab run with `homeboy runs show {run_id}`."))
+            .with_hint(format!(
+                "List mirrored Lab artifacts with `homeboy runs artifacts {run_id}` and verify the runner produced a lint/refactor patch artifact."
+            ));
+    } else if let Some(job_id) = exec_output.job_id.as_deref() {
+        error = error.with_hint(format!(
+            "Runner daemon job `{job_id}` finished without a patch artifact; inspect runner job evidence before retrying."
+        ));
+    }
+
+    if !original_command.is_empty() {
+        error = error.with_hint(format!(
+            "After runner patch capture is available, retry the intended Homeboy write path: `{original_command}`."
+        ));
+    }
+
+    error
+}
+
 fn mutation_return_unavailable_outcome(
     plan: HomeboyPlan,
     selection: &LabRunnerSelection,
@@ -1169,8 +1245,8 @@ mod tests {
     use crate::core::observation::LAB_OFFLOAD_METADATA_ENV;
     use crate::core::plan::PlanKind;
     use crate::core::runner::{
-        RunnerRequiredTool, RunnerSession, RunnerSessionState, RunnerTunnelMode,
-        RunnerWorkspaceSyncOutput,
+        RunnerExecMode, RunnerExecOutput, RunnerRequiredTool, RunnerSession, RunnerSessionState,
+        RunnerTunnelMode, RunnerWorkspaceSyncOutput,
     };
 
     pub(super) fn portable_lab_command(label: &'static str) -> LabOffloadCommand {
@@ -1773,6 +1849,72 @@ mod tests {
     }
 
     #[test]
+    fn missing_mutation_patch_error_points_to_runner_evidence_and_retry() {
+        let exec_output = RunnerExecOutput {
+            command: "runner.exec",
+            runner_id: "lab-default".to_string(),
+            mode: RunnerExecMode::Daemon,
+            argv: vec![
+                "homeboy".to_string(),
+                "refactor".to_string(),
+                "--from".to_string(),
+                "lint".to_string(),
+                "--write".to_string(),
+                "data-machine-code".to_string(),
+            ],
+            remote_cwd: "/srv/homeboy/_lab_workspaces/data-machine-code".to_string(),
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+            source_snapshot: None,
+            job: None,
+            job_id: Some("job-123".to_string()),
+            job_events: None,
+            mirror_run_id: Some("runner-exec-lab-default-job-123".to_string()),
+            patch: None,
+            metrics: None,
+            capture: None,
+            diagnostics: None,
+        };
+
+        let err = missing_mutation_patch_error(
+            &[
+                "homeboy".to_string(),
+                "refactor".to_string(),
+                "--from".to_string(),
+                "lint".to_string(),
+                "--write".to_string(),
+                "data-machine-code".to_string(),
+            ],
+            Some("--write"),
+            &exec_output,
+        );
+
+        assert_eq!(err.code.as_str(), "validation.invalid_argument");
+        assert!(err.message.contains("returned no source-tree patch"));
+        assert_eq!(err.details["runner_id"], "lab-default");
+        assert_eq!(err.details["job_id"], "job-123");
+        assert_eq!(
+            err.details["mirror_run_id"],
+            "runner-exec-lab-default-job-123"
+        );
+        let hints = err
+            .hints
+            .iter()
+            .map(|hint| hint.message.as_str())
+            .collect::<Vec<_>>();
+        assert!(hints
+            .iter()
+            .any(|hint| hint.contains("homeboy runs show runner-exec-lab-default-job-123")));
+        assert!(hints
+            .iter()
+            .any(|hint| hint.contains("homeboy runs artifacts runner-exec-lab-default-job-123")));
+        assert!(hints
+            .iter()
+            .any(|hint| hint.contains("homeboy refactor --from lint --write data-machine-code")));
+    }
+
+    #[test]
     fn default_runner_missing_capabilities_fails_without_local_fallback_opt_in() {
         let plan = base_lab_plan(Some(&portable_lab_command("trace")));
         let selection = LabRunnerSelection {
@@ -1847,6 +1989,7 @@ mod tests {
             allow_local_fallback: false,
             allow_dirty_lab_workspace: false,
             capture_patch: false,
+            mutation_flag: None,
         })
         .expect("outcome");
 
