@@ -13,6 +13,7 @@ use homeboy::core::agent_task_promotion::{
 };
 use homeboy::core::agent_task_provider::ExtensionProviderAgentTaskExecutor;
 use homeboy::core::agent_task_scheduler::AgentTaskAggregate;
+use homeboy::core::agent_task_service;
 use homeboy::core::config;
 use homeboy::core::gate::HomeboyGateResult;
 
@@ -431,38 +432,5 @@ fn parse_gate_results(raw: &[String]) -> homeboy::core::Result<Vec<AgentTaskGate
 pub(crate) fn read_promotion_source(
     spec: &str,
 ) -> homeboy::core::Result<(String, Option<std::path::PathBuf>)> {
-    if spec != "-" {
-        let path = std::path::PathBuf::from(spec.strip_prefix('@').unwrap_or(spec));
-        if path.is_file() {
-            let raw = std::fs::read_to_string(&path).map_err(|error| {
-                homeboy::core::Error::internal_io(
-                    error.to_string(),
-                    Some(format!(
-                        "read agent-task promotion source {}",
-                        path.display()
-                    )),
-                )
-            })?;
-            return Ok((raw, Some(path)));
-        }
-    }
-
-    if let Ok((raw, path)) = agent_task_lifecycle::aggregate_source(spec) {
-        return Ok((raw, Some(path)));
-    }
-
-    Ok((
-        config::read_json_spec_to_string(spec)?,
-        source_spec_path(spec),
-    ))
-}
-
-fn source_spec_path(spec: &str) -> Option<std::path::PathBuf> {
-    if spec == "-" {
-        return None;
-    }
-
-    Some(std::path::PathBuf::from(
-        spec.strip_prefix('@').unwrap_or(spec),
-    ))
+    agent_task_service::promotion_source(spec)
 }

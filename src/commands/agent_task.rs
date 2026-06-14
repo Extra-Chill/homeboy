@@ -1,20 +1,9 @@
 use clap::{Args, Subcommand};
-use homeboy::core::agent_task_cook_loop::{
-    evaluate_cook_loop, AgentTaskCookLoopOptions, AgentTaskCookLoopStatus,
-};
-use homeboy::core::agent_task_finalization::{
-    finalize_pr, AgentTaskPrEvidence, AgentTaskPrFinalizationOptions, AgentTaskPrRuntimeGuardrails,
-    AgentTaskPrSourceRelationship, AgentTaskPrVerification,
-};
 use homeboy::core::agent_task_gate::AgentTaskGateRevealPolicy;
-use homeboy::core::agent_task_promotion::{
-    promote, AgentTaskPromotionOptions, AgentTaskPromotionReport, AgentTaskPromotionStatus,
-};
 use serde::Serialize;
 use serde_json::Value;
 use std::io::Read;
 
-use homeboy::core::agent_task::AgentTaskRequest;
 use homeboy::core::agent_task_lifecycle;
 use homeboy::core::agent_task_loop_controller::{
     self, AgentTaskLoopActionStatus, AgentTaskLoopControllerRecord, AgentTaskLoopExternalEvent,
@@ -22,10 +11,9 @@ use homeboy::core::agent_task_loop_controller::{
     AgentTaskLoopRunRef,
 };
 use homeboy::core::agent_task_provider::ExtensionProviderAgentTaskExecutor;
-use homeboy::core::agent_task_scheduler::{
-    AgentTaskExecutorAdapter, AgentTaskPlan, AgentTaskScheduler,
-};
+use homeboy::core::agent_task_scheduler::{AgentTaskExecutorAdapter, AgentTaskPlan};
 use homeboy::core::agent_task_secrets;
+use homeboy::core::agent_task_service;
 use homeboy::core::config;
 
 use super::agent_task_dispatch::{dispatch_with_executor, run as dispatch, DispatchArgs};
@@ -1641,31 +1629,6 @@ fn read_agent_task_secret_value(
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
-struct AgentTaskLoopReport {
-    schema: &'static str,
-    loop_id: String,
-    status: String,
-    attempts: Vec<AgentTaskLoopAttemptReport>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    finalization: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    stop_reason: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct AgentTaskLoopAttemptReport {
-    attempt: u32,
-    run_id: String,
-    run_state: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    aggregate_path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    promotion: Option<AgentTaskPromotionReport>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    feedback: Option<homeboy::core::agent_task_cook_loop::AgentTaskCookLoopReport>,
-}
-
 fn run_loop(args: AgentTaskLoopArgs) -> CmdResult<Value> {
     run_loop_with_executor(args, ExtensionProviderAgentTaskExecutor::discover())
 }
@@ -1683,15 +1646,13 @@ where
         ));
     }
 
-    let max_attempts = args.max_attempts.max(1);
-    let mut attempts = Vec::new();
     let mut dispatch_args = args.dispatch.clone();
     if dispatch_args.prompt.is_none() {
         dispatch_args.prompt = args.goal.clone();
     }
     dispatch_args.queue_only = false;
     let (dispatch_value, _dispatch_exit) = dispatch_with_executor(dispatch_args, executor.clone())?;
-    let mut run_id = dispatch_value["run_id"]
+    let run_id = dispatch_value["run_id"]
         .as_str()
         .ok_or_else(|| {
             homeboy::core::Error::internal_unexpected(
@@ -1700,279 +1661,44 @@ where
         })?
         .to_string();
     let loop_id = run_id.clone();
-
-    for attempt in 1..=max_attempts {
-        let record = agent_task_lifecycle::status(&run_id)?;
-        let plan = agent_task_lifecycle::load_plan(&run_id)?;
-        let Some(source_request) = plan.tasks.first().cloned() else {
-            return Ok(loop_report(
-                loop_id,
-                "policy_failure",
-                attempts,
-                None,
-                Some("agent-task loop requires a plan with one source task".to_string()),
-                1,
-            ));
-        };
-        if plan.tasks.len() != 1 {
-            return Ok(loop_report(
-                loop_id,
-                "policy_failure",
-                attempts,
-                None,
-                Some("agent-task loop currently supports one task per cook attempt".to_string()),
-                1,
-            ));
-        }
-
-        if !matches!(
-            record.state,
-            agent_task_lifecycle::AgentTaskRunState::Succeeded
-        ) {
-            attempts.push(AgentTaskLoopAttemptReport {
-                attempt,
-                run_id: run_id.clone(),
-                run_state: format!("{:?}", record.state),
-                aggregate_path: record.aggregate_path,
-                promotion: None,
-                feedback: None,
-            });
-            return Ok(loop_report(
-                loop_id,
-                "provider_failure",
-                attempts,
-                None,
-                Some(format!(
-                    "agent-task run {run_id} ended in state {:?}",
-                    record.state
-                )),
-                1,
-            ));
-        }
-
-        let promotion = match promote_attempt(&args, &run_id) {
-            Ok(report) => report,
-            Err(error) => {
-                attempts.push(AgentTaskLoopAttemptReport {
-                    attempt,
-                    run_id: run_id.clone(),
-                    run_state: format!("{:?}", record.state),
-                    aggregate_path: record.aggregate_path,
-                    promotion: None,
-                    feedback: None,
-                });
-                return Ok(loop_report(
-                    loop_id,
-                    "policy_failure",
-                    attempts,
-                    None,
-                    Some(error.to_string()),
-                    1,
-                ));
-            }
-        };
-
-        let feedback = evaluate_cook_loop(AgentTaskCookLoopOptions {
-            source_request,
-            promotion_report: promotion.clone(),
-            attempt,
-            max_attempts,
-            source_run_id: Some(run_id.clone()),
-            current_diff: String::new(),
-            metadata: Value::Null,
-        });
-        let feedback_status = feedback.status;
-        let follow_up_request = feedback.follow_up_request.clone();
-        attempts.push(AgentTaskLoopAttemptReport {
-            attempt,
-            run_id: run_id.clone(),
-            run_state: format!("{:?}", record.state),
-            aggregate_path: record.aggregate_path,
-            promotion: Some(promotion.clone()),
-            feedback: Some(feedback.clone()),
-        });
-
-        match feedback_status {
-            AgentTaskCookLoopStatus::GreenCompleted => {
-                if args.no_finalize {
-                    return Ok(loop_report(
-                        loop_id,
-                        "green_no_finalize",
-                        attempts,
-                        None,
-                        Some(
-                            "deterministic gates completed green; --no-finalize skipped commit, push, and PR finalization"
-                                .to_string(),
-                        ),
-                        0,
-                    ));
-                }
-                let finalization = finalize_loop_pr(&args, &loop_id, &promotion)?;
-                let final_status = finalization["status"]
-                    .as_str()
-                    .unwrap_or("unknown")
-                    .to_string();
-                let exit_code = if matches!(final_status.as_str(), "review_ready" | "no_changes") {
-                    0
-                } else {
-                    1
-                };
-                return Ok(loop_report(
-                    loop_id,
-                    &final_status,
-                    attempts,
-                    Some(finalization),
-                    None,
-                    exit_code,
-                ));
-            }
-            AgentTaskCookLoopStatus::RetryRequested => {
-                let Some(follow_up_request) = follow_up_request else {
-                    return Ok(loop_report(
-                        loop_id,
-                        "policy_failure",
-                        attempts,
-                        None,
-                        Some(
-                            "cook-loop feedback requested retry without a follow-up request"
-                                .to_string(),
-                        ),
-                        1,
-                    ));
-                };
-                let next_run_id = format!("{loop_id}-attempt-{}", attempt + 1);
-                let follow_up_plan = AgentTaskPlan::new(
-                    format!("{loop_id}-cook-loop-attempt-{}", attempt + 1),
-                    vec![follow_up_request],
-                );
-                run_loaded_plan(follow_up_plan, Some(&next_run_id), executor.clone())?;
-                run_id = next_run_id;
-            }
-            AgentTaskCookLoopStatus::RetriesExhausted => {
-                return Ok(loop_report(
-                    loop_id,
-                    "retries_exhausted",
-                    attempts,
-                    None,
-                    Some(
-                        "deterministic gates stayed red after the configured attempt budget"
-                            .to_string(),
-                    ),
-                    1,
-                ));
-            }
-        }
-    }
-
-    Ok(loop_report(
-        loop_id,
-        "retries_exhausted",
-        attempts,
-        None,
-        Some("cook-loop attempt budget exhausted".to_string()),
-        1,
-    ))
-}
-
-fn promote_attempt(
-    args: &AgentTaskLoopArgs,
-    run_id: &str,
-) -> homeboy::core::Result<AgentTaskPromotionReport> {
-    let (source, source_path) = review::read_promotion_source(run_id)?;
-    promote(AgentTaskPromotionOptions {
-        source,
-        source_path,
-        to_worktree: args.to_worktree.clone(),
-        task_id: None,
-        artifact_id: None,
-        dry_run: false,
-        verify: args.verify.clone(),
-        private_verify: args.private_verify.clone(),
-        private_gate_reveal: args.private_gate_reveal,
-        provider_command: args.provider_command.clone(),
-    })
-}
-
-fn finalize_loop_pr(
-    args: &AgentTaskLoopArgs,
-    loop_id: &str,
-    promotion: &AgentTaskPromotionReport,
-) -> homeboy::core::Result<Value> {
-    if promotion.status != AgentTaskPromotionStatus::Applied {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "promotion",
-            "agent-task loop finalization requires an applied promotion with green gates",
-            None,
-            None,
-        ));
-    }
-    let path = promotion
-        .provenance
-        .get("worktree_path")
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            homeboy::core::Error::validation_invalid_argument(
-                "promotion.provenance.worktree_path",
-                "promotion provider did not report the applied worktree path",
-                None,
-                None,
-            )
-        })?
-        .to_string();
     let title = args
         .title
         .clone()
-        .unwrap_or_else(|| default_loop_title(args));
+        .unwrap_or_else(|| default_loop_title(&args));
     let commit_message = args
         .commit_message
         .clone()
-        .unwrap_or_else(|| default_loop_commit_message(args));
-    let source_refs = args
-        .dispatch
-        .task_url
-        .iter()
-        .cloned()
-        .chain(std::iter::once(format!(
-            "homeboy://agent-task/run/{loop_id}"
-        )))
-        .collect();
-    let artifact_refs = std::iter::once(promotion.patch_artifact.path.clone()).collect();
-    let report = finalize_pr(AgentTaskPrFinalizationOptions {
-        path,
-        run_id: loop_id.to_string(),
-        base: args.base.clone(),
-        head: args.head.clone(),
-        title,
-        commit_message,
-        gate_results: Vec::new(),
-        normalized_gate_results: promotion.gate_results.clone(),
-        changed_files: promotion.changed_files.clone(),
-        evidence: AgentTaskPrEvidence {
-            source_refs,
-            artifact_refs,
-            attempt_summary: format!(
-                "{} deterministic cook-loop gate attempt(s) completed green",
-                promotion.deterministic_gates.len()
-            ),
+        .unwrap_or_else(|| default_loop_commit_message(&args));
+    let result = agent_task_service::run_cook_loop(
+        agent_task_service::AgentTaskLoopServiceOptions {
+            loop_id,
+            initial_run_id: run_id,
+            to_worktree: args.to_worktree,
+            provider_command: args.provider_command,
+            verify: args.verify,
+            private_verify: args.private_verify,
+            private_gate_reveal: args.private_gate_reveal,
+            max_attempts: args.max_attempts,
+            no_finalize: args.no_finalize,
+            base: args.base,
+            head: args.head,
+            title,
+            commit_message,
+            source_refs: args.dispatch.task_url.into_iter().collect(),
+            protected_branches: args.protected_branches,
             ai_tool: args.ai_tool.clone(),
             ai_model: args
                 .dispatch
                 .model
-                .clone()
                 .or_else(|| ai_model_from_tool(&args.ai_tool)),
-            source_relationship: AgentTaskPrSourceRelationship::default(),
-            verification: AgentTaskPrVerification {
-                targeted_checks_run: args.verify.clone(),
-                targeted_checks_unavailable: None,
-                ci_expected: vec!["Homeboy CI after push".to_string()],
-                manual_reviewer_check: None,
-            },
-            runtime_guardrails: AgentTaskPrRuntimeGuardrails::default(),
+            ai_used_for: args.ai_used_for,
         },
-        ai_used_for: args.ai_used_for.clone(),
-        protected_branches: args.protected_branches.clone(),
-    })?;
-    Ok(serde_json::to_value(report).unwrap_or(Value::Null))
+        executor,
+    )?;
+    Ok((
+        serde_json::to_value(result.value).unwrap_or(Value::Null),
+        result.exit_code,
+    ))
 }
 
 fn ai_model_from_tool(ai_tool: &str) -> Option<String> {
@@ -1997,30 +1723,8 @@ fn default_loop_commit_message(args: &AgentTaskLoopArgs) -> String {
     format!("fix: cook {target}")
 }
 
-fn loop_report(
-    loop_id: String,
-    status: &str,
-    attempts: Vec<AgentTaskLoopAttemptReport>,
-    finalization: Option<Value>,
-    stop_reason: Option<String>,
-    exit_code: i32,
-) -> (Value, i32) {
-    let report = AgentTaskLoopReport {
-        schema: "homeboy/agent-task-loop/v1",
-        loop_id,
-        status: status.to_string(),
-        attempts,
-        finalization,
-        stop_reason,
-    };
-    (
-        serde_json::to_value(report).unwrap_or(Value::Null),
-        exit_code,
-    )
-}
-
 fn run_plan(args: RunPlanArgs) -> CmdResult<Value> {
-    let plan = read_plan(&args.plan)?;
+    let plan = agent_task_service::read_plan(&args.plan)?;
     run_loaded_plan(
         plan,
         args.record_run_id.as_deref(),
@@ -2029,36 +1733,17 @@ fn run_plan(args: RunPlanArgs) -> CmdResult<Value> {
 }
 
 fn run_loaded_plan<E>(
-    mut plan: AgentTaskPlan,
+    plan: AgentTaskPlan,
     record_run_id: Option<&str>,
     executor: E,
 ) -> CmdResult<Value>
 where
     E: AgentTaskExecutorAdapter,
 {
-    normalize_plan_workspaces(&mut plan)?;
-
-    if let Some(run_id) = record_run_id {
-        agent_task_lifecycle::submit_plan(&plan, Some(run_id))?;
-        agent_task_lifecycle::mark_running(run_id)?;
-    }
-
-    let scheduler = AgentTaskScheduler::new(executor);
-    let aggregate = scheduler.run(plan.clone());
-    if let Some(run_id) = record_run_id {
-        agent_task_lifecycle::record_run_aggregate(run_id, &plan, &aggregate)?;
-    }
-    let exit_code = if aggregate.totals.failed == 0
-        && aggregate.totals.cancelled == 0
-        && aggregate.totals.timed_out == 0
-    {
-        0
-    } else {
-        1
-    };
+    let result = agent_task_service::run_loaded_plan(plan, record_run_id, executor)?;
     Ok((
-        serde_json::to_value(aggregate).unwrap_or(Value::Null),
-        exit_code,
+        serde_json::to_value(result.value).unwrap_or(Value::Null),
+        result.exit_code,
     ))
 }
 
@@ -2070,8 +1755,11 @@ fn run_submitted_with_executor<E>(run_id: String, executor: E) -> CmdResult<Valu
 where
     E: AgentTaskExecutorAdapter,
 {
-    agent_task_lifecycle::mark_running(&run_id)?;
-    run_claimed(run_id, executor)
+    let result = agent_task_service::run_submitted(run_id, executor)?;
+    Ok((
+        serde_json::to_value(result.value).unwrap_or(Value::Null),
+        result.exit_code,
+    ))
 }
 
 fn run_next() -> CmdResult<Value> {
@@ -2082,58 +1770,38 @@ fn run_next_with_executor<E>(executor: E) -> CmdResult<Value>
 where
     E: AgentTaskExecutorAdapter,
 {
-    let Some(record) = agent_task_lifecycle::claim_next_queued_run()? else {
+    let result = agent_task_service::run_next(executor)?;
+    let Some(aggregate) = result.value else {
         return Ok((serde_json::json!({ "claimed": false }), 0));
-    };
-
-    run_claimed(record.run_id, executor)
-}
-
-fn run_claimed<E>(run_id: String, executor: E) -> CmdResult<Value>
-where
-    E: AgentTaskExecutorAdapter,
-{
-    let plan = agent_task_lifecycle::load_plan(&run_id)?;
-    let scheduler = AgentTaskScheduler::new(executor);
-    let aggregate = scheduler.run(plan.clone());
-    agent_task_lifecycle::record_run_aggregate(&run_id, &plan, &aggregate)?;
-    let exit_code = if aggregate.totals.failed == 0
-        && aggregate.totals.cancelled == 0
-        && aggregate.totals.timed_out == 0
-    {
-        0
-    } else {
-        1
     };
     Ok((
         serde_json::to_value(aggregate).unwrap_or(Value::Null),
-        exit_code,
+        result.exit_code,
     ))
 }
 
 fn submit(args: SubmitArgs) -> CmdResult<Value> {
-    let plan = read_plan(&args.plan)?;
-    let record = agent_task_lifecycle::submit_plan(&plan, args.run_id.as_deref())?;
+    let record = agent_task_service::submit_plan_spec(&args.plan, args.run_id.as_deref())?;
     Ok((serde_json::to_value(record).unwrap_or(Value::Null), 0))
 }
 
 fn status(args: StatusArgs) -> CmdResult<Value> {
-    let record = agent_task_lifecycle::status(&args.run_id)?;
+    let record = agent_task_service::status(&args.run_id)?;
     Ok((serde_json::to_value(record).unwrap_or(Value::Null), 0))
 }
 
 fn logs(args: StatusArgs) -> CmdResult<Value> {
-    let log = agent_task_lifecycle::logs(&args.run_id)?;
+    let log = agent_task_service::logs(&args.run_id)?;
     Ok((serde_json::to_value(log).unwrap_or(Value::Null), 0))
 }
 
 fn artifacts(args: StatusArgs) -> CmdResult<Value> {
-    let artifacts = agent_task_lifecycle::artifacts(&args.run_id)?;
+    let artifacts = agent_task_service::artifacts(&args.run_id)?;
     Ok((serde_json::to_value(artifacts).unwrap_or(Value::Null), 0))
 }
 
 fn cancel(args: CancelArgs) -> CmdResult<Value> {
-    let record = agent_task_lifecycle::cancel_run(&args.run_id, args.reason.as_deref())?;
+    let record = agent_task_service::cancel(&args.run_id, args.reason.as_deref())?;
     Ok((serde_json::to_value(record).unwrap_or(Value::Null), 0))
 }
 
@@ -2145,99 +1813,25 @@ fn run_resume_with_executor<E>(run_id: String, executor: E) -> CmdResult<Value>
 where
     E: AgentTaskExecutorAdapter,
 {
-    agent_task_lifecycle::mark_resuming(&run_id)?;
-    run_claimed(run_id, executor)
+    let result = agent_task_service::resume(run_id, executor)?;
+    Ok((
+        serde_json::to_value(result.value).unwrap_or(Value::Null),
+        result.exit_code,
+    ))
 }
 
 fn retry(args: RetryArgs) -> CmdResult<Value> {
-    let record = agent_task_lifecycle::retry(&args.run_id, args.new_run_id.as_deref())?;
-    if args.run {
+    let result = agent_task_service::retry(&args.run_id, args.new_run_id.as_deref(), args.run)?;
+    if result.run {
         return run_submitted_with_executor(
-            record.run_id,
+            result.record.run_id,
             ExtensionProviderAgentTaskExecutor::discover(),
         );
     }
-    Ok((serde_json::to_value(record).unwrap_or(Value::Null), 0))
-}
-
-fn read_plan(spec: &str) -> homeboy::core::Result<AgentTaskPlan> {
-    let raw = config::read_json_spec_to_string(spec)?;
-    let mut plan: AgentTaskPlan = serde_json::from_str(&raw).map_err(|error| {
-        homeboy::core::Error::validation_invalid_json(
-            error,
-            Some("agent-task plan".to_string()),
-            Some(raw.clone()),
-        )
-    })?;
-    normalize_plan_workspaces(&mut plan)?;
-    Ok(plan)
-}
-
-fn normalize_plan_workspaces(plan: &mut AgentTaskPlan) -> homeboy::core::Result<()> {
-    for request in &mut plan.tasks {
-        normalize_component_worktree_workspace(request)?;
-    }
-
-    Ok(())
-}
-
-fn normalize_component_worktree_workspace(
-    request: &mut AgentTaskRequest,
-) -> homeboy::core::Result<()> {
-    if request.workspace.kind.as_deref() != Some("component-worktree") {
-        return Ok(());
-    }
-
-    let Some(component_id) = request.workspace.component_id.clone() else {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "workspace.component_id",
-            format!(
-                "agent-task task '{}' component-worktree workspace requires component_id",
-                request.task_id
-            ),
-            None,
-            None,
-        ));
-    };
-
-    let resolved_root = request
-        .workspace
-        .root
-        .clone()
-        .or_else(|| materialization_string(&request.workspace.materialization, "root"))
-        .or_else(|| materialization_string(&request.workspace.materialization, "resolved_root"));
-
-    let Some(root) = resolved_root else {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "workspace.root",
-            format!(
-                "agent-task task '{}' requested component-worktree workspace for component '{}' but no resolved root was provided; creating component worktrees depends on the generic Homeboy worktree primitive tracked by Extra-Chill/homeboy#3362",
-                request.task_id, component_id
-            ),
-            None,
-            None,
-        ));
-    };
-
-    request.workspace.kind = None;
-    request.workspace.mode = homeboy::core::agent_task::AgentTaskWorkspaceMode::Existing;
-    request.workspace.root = Some(root);
-    request.workspace.slug = Some(component_id);
-    request.workspace.component_id = None;
-    request.workspace.branch = None;
-    request.workspace.base_ref = None;
-    request.workspace.task_url = None;
-    request.workspace.cleanup = None;
-    request.workspace.materialization = Value::Null;
-
-    Ok(())
-}
-
-fn materialization_string(materialization: &Value, key: &str) -> Option<String> {
-    materialization
-        .get(key)
-        .and_then(Value::as_str)
-        .map(str::to_string)
+    Ok((
+        serde_json::to_value(result.record).unwrap_or(Value::Null),
+        0,
+    ))
 }
 
 #[cfg(test)]
