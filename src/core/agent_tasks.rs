@@ -1,66 +1,245 @@
 //! Stable facade for agent task orchestration APIs.
 //!
-//! New command/core code should import agent task contracts from this module
-//! instead of depending on the underlying implementation file layout.
+//! New command and integration code MUST import agent task contracts from this
+//! module instead of reaching into the underlying implementation files
+//! (`core::agent_task`, `core::agent_task_lifecycle`, `core::agent_task_service`,
+//! etc.). The implementation modules remain public for backward compatibility
+//! with existing external callers (see `core/mod.rs`), but new code should
+//! depend on the explicit API groups defined here so that internal layout can
+//! evolve without becoming accidental public contract.
+//!
+//! The exports are organised into nested API groups by operation:
+//!
+//! - top-level: stable request/outcome/workflow contracts that callers reach
+//!   for most often.
+//! - [`aggregate`]: aggregate reports and matrix/reconciliation types.
+//! - [`cook_loop`]: cook-loop evaluation contracts.
+//! - [`fanout`]: matrix/fanout scheduling primitives.
+//! - [`finalization`]: PR finalization contracts and backends.
+//! - [`gate`]: gate report contracts and visibility/reveal policies.
+//! - [`lifecycle`]: durable run record lifecycle helpers.
+//! - [`loop_controller`]: cook/agent-task loop controller state contracts.
+//! - [`promotion`]: promotion-report contracts and entry points.
+//! - [`provider`]: executor provider contracts used by extensions.
+//! - [`scheduler`]: scheduling/plan/concurrency primitives.
+//! - [`secrets`]: secret-env mapping helpers.
+//! - [`service`]: high-level service entry points combining lifecycle and
+//!   scheduling.
 
-#![allow(ambiguous_glob_reexports)]
+// ----------------------------------------------------------------------------
+// Stable top-level contracts
+// ----------------------------------------------------------------------------
+//
+// These names are intentionally re-exported at the facade root because they
+// form the most common surface for callers (request envelopes, outcomes, the
+// workspace contract, schema identifiers, matrix expansion, fanout aggregates).
+// Adding a new name here is an intentional API decision.
 
-pub use super::agent_task::*;
-pub use super::agent_task_aggregate::*;
-pub use super::agent_task_controller_service::*;
-pub use super::agent_task_cook_loop::*;
-pub use super::agent_task_fanout::*;
-pub use super::agent_task_finalization::*;
-pub use super::agent_task_gate::*;
-pub use super::agent_task_lifecycle::*;
-pub use super::agent_task_loop_controller::*;
-pub use super::agent_task_promotion::*;
-pub use super::agent_task_provider::*;
-pub use super::agent_task_schedule::*;
-pub use super::agent_task_scheduler::*;
-pub use super::agent_task_secrets::*;
-pub use super::agent_task_service::*;
+pub use super::agent_task::{
+    AgentTaskArtifact, AgentTaskDiagnostic, AgentTaskEvidenceRef, AgentTaskExecutionHandle,
+    AgentTaskExecutionState, AgentTaskExecutor, AgentTaskExecutorCapabilities,
+    AgentTaskFailureClassification, AgentTaskFollowUp, AgentTaskLimits, AgentTaskMatrixAggregate,
+    AgentTaskMatrixAggregateCell, AgentTaskMatrixAxis, AgentTaskMatrixCell, AgentTaskMatrixError,
+    AgentTaskMatrixPlan, AgentTaskOutcome, AgentTaskOutcomeStatus, AgentTaskPolicy,
+    AgentTaskPreparedWorkspace, AgentTaskProgress, AgentTaskRequest, AgentTaskSourceRef,
+    AgentTaskStart, AgentTaskWorkflowEvidence, AgentTaskWorkflowStepEvidence,
+    AgentTaskWorkflowStepStatus, AgentTaskWorkflowStepSuggestion, AgentTaskWorkspace,
+    AgentTaskWorkspaceMode, AGENT_TASK_ARTIFACT_SCHEMA, AGENT_TASK_MATRIX_AGGREGATE_SCHEMA,
+    AGENT_TASK_MATRIX_PLAN_SCHEMA, AGENT_TASK_OUTCOME_SCHEMA, AGENT_TASK_REQUEST_SCHEMA,
+    AGENT_TASK_WORKFLOW_SCHEMA,
+};
 
+pub use super::agent_task_aggregate::{
+    AgentTaskAggregateReport, AgentTaskAggregateSummary, AgentTaskArtifactInventoryItem,
+    AgentTaskDecisionRef, AgentTaskMatrixRow, AgentTaskReconciliationDecision,
+    AgentTaskReconciliationItem, AGENT_TASK_AGGREGATE_SCHEMA,
+};
+
+pub use super::agent_task_fanout::{
+    AgentTaskFanoutAggregate, AgentTaskFanoutPlan, AgentTaskFanoutPlane, AgentTaskFanoutScheduler,
+    AGENT_TASK_FANOUT_AGGREGATE_SCHEMA, AGENT_TASK_FANOUT_PLAN_SCHEMA,
+};
+
+// Plan/scheduler/execution context types are widely consumed and stay at the
+// facade root for ergonomics.
+pub use super::agent_task_schedule::{
+    AgentTaskAdaptiveConcurrencyAction, AgentTaskAdaptiveConcurrencyDecision,
+    AgentTaskAdaptiveConcurrencyInputs, AgentTaskAdaptiveConcurrencyPolicy,
+    AgentTaskAdaptiveConcurrencyStatus, AgentTaskAggregate, AgentTaskAggregateStatus,
+    AgentTaskAggregateTotals, AgentTaskArtifactBinding, AgentTaskArtifactLineage,
+    AgentTaskArtifactOutputDeclaration, AgentTaskBackpressureStatus, AgentTaskCancellationToken,
+    AgentTaskExecutionContext, AgentTaskOutputBinding, AgentTaskOutputDependencies, AgentTaskPlan,
+    AgentTaskQueueStatus, AgentTaskResourceBudget, AgentTaskResourceBudgetStatus,
+    AgentTaskResourcePressure, AgentTaskRetryPolicy, AgentTaskScheduleOptions, AgentTaskState,
+    AGENT_TASK_PLAN_SCHEMA,
+};
+
+// `AgentTaskProgressEvent` is defined in both `agent_task` and
+// `agent_task_schedule`. Historically the wildcard facade picked whichever the
+// glob resolved last; the canonical type for orchestration callers is the
+// schedule-side variant, so name it explicitly here.
+pub use super::agent_task_schedule::AgentTaskProgressEvent;
+
+pub use super::agent_task_scheduler::{AgentTaskExecutorAdapter, AgentTaskScheduler};
+
+// Matrix expansion is `pub(crate)` on the implementation module; expose it
+// through the facade for callers inside the crate that need to expand a plan
+// matrix without depending on the implementation path.
+pub(crate) use super::agent_task::expand_agent_task_matrix;
+
+// Convenience re-exports of the loop-controller state enum and lineage record
+// that appear on the loop-controller surface and the durable run surface.
+pub use super::agent_task_loop_controller::{
+    AgentTaskLoopControllerState, AgentTaskLoopTaskLineage,
+};
+
+// Secret-env status type is referenced from review/dispatch commands.
+pub use super::agent_task_secrets::{secret_env_status, AgentTaskSecretEnvStatus};
+
+// Provider helpers used directly from the facade root for common callers.
+pub use super::agent_task_provider::required_extension_ids_for_plan;
+
+// ----------------------------------------------------------------------------
+// Explicit API groups
+// ----------------------------------------------------------------------------
+//
+// Each submodule below exposes the intentional surface of one implementation
+// area. Callers can import either the top-level names above or use the group
+// modules to disambiguate where contracts overlap (e.g. `lifecycle::status`
+// vs `service::status`).
+
+/// Cook-loop evaluation contracts and entry points.
+/// Durable controller execution service entry points and report contracts.
 pub mod controller_service {
-    pub use super::super::agent_task_controller_service::*;
+    pub use super::super::agent_task_controller_service::{
+        apply_event, init, list, mark_human_ready, optional_bool, optional_string,
+        optional_string_array, optional_u32, optional_usize, plan_from_controller_request, resume,
+        run_action, run_next, status, ControllerActionReport, ControllerApplyEventRequest,
+        ControllerDispatchHook, ControllerEventReport, ControllerInitRequest, ControllerListReport,
+        ControllerMarkHumanReadyRequest, ControllerResumeReport, NoopDispatchHook,
+        ACTION_RESULT_SCHEMA, APPLY_EVENT_RESULT_SCHEMA, LIST_RESULT_SCHEMA, RESUME_RESULT_SCHEMA,
+    };
 }
 
+/// Cook-loop evaluation contracts and entry points.
 pub mod cook_loop {
-    pub use super::super::agent_task_cook_loop::*;
+    pub use super::super::agent_task_cook_loop::{
+        evaluate_cook_loop, AgentTaskCookLoopGateFailure, AgentTaskCookLoopOptions,
+        AgentTaskCookLoopReport, AgentTaskCookLoopStatus, AGENT_TASK_COOK_LOOP_REPORT_SCHEMA,
+    };
 }
 
+/// PR finalization contracts and backends.
 pub mod finalization {
-    pub use super::super::agent_task_finalization::*;
+    pub use super::super::agent_task_finalization::{
+        finalize_pr, finalize_pr_with_backend, AgentTaskGateResult, AgentTaskPrEvidence,
+        AgentTaskPrFinalizationBackend, AgentTaskPrFinalizationOptions,
+        AgentTaskPrFinalizationReport, AgentTaskPrRef, AgentTaskPrRuntimeGuardrails,
+        AgentTaskPrSourceRelationship, AgentTaskPrVerification, RealAgentTaskPrFinalizationBackend,
+        AGENT_TASK_PR_FINALIZATION_SCHEMA,
+    };
 }
 
+/// Gate report contracts, visibility, and reveal policies.
 pub mod gate {
-    pub use super::super::agent_task_gate::*;
+    pub use super::super::agent_task_gate::{
+        AgentTaskGateEnvironment, AgentTaskGateEnvironmentVariable, AgentTaskGateFailureEvidence,
+        AgentTaskGateReport, AgentTaskGateRevealPolicy, AgentTaskGateStatus,
+        AgentTaskGateVisibility, AGENT_TASK_GATE_REPORT_SCHEMA,
+    };
 }
 
+/// Durable run lifecycle: submit, run-record state, log/artifact loaders.
 pub mod lifecycle {
-    pub use super::super::agent_task_lifecycle::*;
+    pub use super::super::agent_task_lifecycle::{
+        aggregate_source, artifacts, cancel, cancel_run, claim_next_queued_run, load_plan, logs,
+        mark_resuming, mark_running, record_completed_run, record_pre_dispatch_failure,
+        record_remote_dispatch_failure, record_run_aggregate, retry, run_record_exists, status,
+        submit_plan, AgentTaskArtifactRef, AgentTaskPreDispatchFailure,
+        AgentTaskRemoteDispatchFailure, AgentTaskRunArtifacts, AgentTaskRunLog,
+        AgentTaskRunProviderHandle, AgentTaskRunRecord, AgentTaskRunState, AgentTaskRunTask,
+    };
 }
 
+/// Cook/agent-task loop controller state, events, and policy.
 pub mod loop_controller {
-    pub use super::super::agent_task_loop_controller::*;
+    pub use super::super::agent_task_loop_controller::{
+        apply_external_event, controller_status, controller_status_diagnostics,
+        controller_status_report, create_controller, list_controllers, load_controller,
+        write_controller, AgentTaskGateBundle, AgentTaskGateBundleCheck,
+        AgentTaskGateBundleCheckKind, AgentTaskGateBundleResult, AgentTaskGateBundleStatus,
+        AgentTaskGateCheckResult, AgentTaskLoopActionDiagnostic, AgentTaskLoopActionStatus,
+        AgentTaskLoopArtifactRef, AgentTaskLoopCandidateLoopLimits, AgentTaskLoopCandidatePatch,
+        AgentTaskLoopCandidateValidation, AgentTaskLoopCandidateValidationStatus,
+        AgentTaskLoopControllerDiagnosticSummary, AgentTaskLoopControllerDiagnostics,
+        AgentTaskLoopControllerRecord, AgentTaskLoopControllerState,
+        AgentTaskLoopControllerStatusReport, AgentTaskLoopDedupeRecord, AgentTaskLoopEntity,
+        AgentTaskLoopExternalEvent, AgentTaskLoopFeedbackArtifact, AgentTaskLoopFeedbackStatus,
+        AgentTaskLoopFindingPacket, AgentTaskLoopHistoryEvent, AgentTaskLoopLocalFallbackPolicy,
+        AgentTaskLoopPendingActionDiagnostic, AgentTaskLoopPolicy, AgentTaskLoopPolicyAction,
+        AgentTaskLoopPolicyActionRecord, AgentTaskLoopProvenanceRef, AgentTaskLoopReviewFinding,
+        AgentTaskLoopRunRef, AgentTaskLoopRunnerAvailability, AgentTaskLoopRunnerExecutionTarget,
+        AgentTaskLoopRunnerPolicy, AgentTaskLoopRunnerPolicyDecision,
+        AgentTaskLoopSubcontrollerRef, AgentTaskLoopTaskLineage, AgentTaskLoopTransition,
+        AgentTaskLoopWait, AgentTaskLoopWaitStatus, AGENT_TASK_LOOP_CONTROLLER_SCHEMA,
+        AGENT_TASK_LOOP_CONTROLLER_STATUS_SCHEMA,
+    };
 }
 
+/// Promotion reports and entry point.
 pub mod promotion {
-    pub use super::super::agent_task_promotion::*;
+    pub use super::super::agent_task_promotion::{
+        promote, AgentTaskPromotionArtifactRef, AgentTaskPromotionCommandReport,
+        AgentTaskPromotionOptions, AgentTaskPromotionReport, AgentTaskPromotionSource,
+        AgentTaskPromotionStatus, AGENT_TASK_PROMOTION_REPORT_SCHEMA,
+    };
 }
 
+/// Executor provider contracts used by extensions and routing.
 pub mod provider {
-    pub use super::super::agent_task_provider::*;
+    pub use super::super::agent_task_provider::{
+        provider_requires_cwd_git_checkout, required_extension_ids_for_plan,
+        AgentTaskExecutorProvider, AgentTaskProviderWorkspaceMaterialization,
+        ExtensionProviderAgentTaskExecutor,
+    };
 }
 
+/// Scheduling primitives: plans, scheduler, execution context, retry/concurrency.
+///
+/// Some types here (such as `AgentTaskPlan`) are also re-exported at the
+/// facade root for ergonomics. The `scheduler` group provides a stable named
+/// import location for callers that prefer the explicit grouping.
 pub mod scheduler {
-    pub use super::super::agent_task_scheduler::*;
+    pub use super::super::agent_task_schedule::{
+        AgentTaskAdaptiveConcurrencyAction, AgentTaskAdaptiveConcurrencyDecision,
+        AgentTaskAdaptiveConcurrencyInputs, AgentTaskAdaptiveConcurrencyPolicy,
+        AgentTaskAdaptiveConcurrencyStatus, AgentTaskAggregate, AgentTaskAggregateStatus,
+        AgentTaskAggregateTotals, AgentTaskArtifactBinding, AgentTaskArtifactLineage,
+        AgentTaskArtifactOutputDeclaration, AgentTaskBackpressureStatus,
+        AgentTaskCancellationToken, AgentTaskExecutionContext, AgentTaskOutputBinding,
+        AgentTaskOutputDependencies, AgentTaskPlan, AgentTaskProgressEvent, AgentTaskQueueStatus,
+        AgentTaskResourceBudget, AgentTaskResourceBudgetStatus, AgentTaskResourcePressure,
+        AgentTaskRetryPolicy, AgentTaskScheduleOptions, AgentTaskState, AGENT_TASK_PLAN_SCHEMA,
+    };
+    pub use super::super::agent_task_scheduler::{AgentTaskExecutorAdapter, AgentTaskScheduler};
 }
 
+/// Secret-env mapping and resolution helpers.
 pub mod secrets {
-    pub use super::super::agent_task_secrets::*;
+    pub use super::super::agent_task_secrets::{
+        map_secret_to_env, map_secret_to_keychain_bundle, remove_secret_mapping,
+        resolve_secret_env, secret_env_status, set_config_secret, set_keychain_bundle,
+        set_keychain_secret, validate_secret_env, AgentTaskSecretEnvStatus,
+        AgentTaskSecretResolutionError,
+    };
 }
 
+/// High-level service entry points combining lifecycle and scheduling.
 pub mod service {
-    pub use super::super::agent_task_service::*;
+    pub use super::super::agent_task_service::{
+        aggregate_exit_code, artifacts, cancel, logs, normalize_plan_workspaces, promotion_source,
+        read_plan, resume, retry, run_cook_loop, run_loaded_plan, run_next, run_submitted, status,
+        submit_plan_spec, AgentTaskLoopAttemptReport, AgentTaskLoopReport,
+        AgentTaskLoopServiceOptions, AgentTaskRetryServiceResult, AgentTaskRunResult,
+    };
 }

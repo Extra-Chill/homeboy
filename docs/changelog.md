@@ -4,6 +4,19 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.229.8] - 2026-06-14
+
+### Fixed
+- fix runner path realignment after upgrade
+
+## [0.229.7] - 2026-06-14
+
+### Changed
+- guard dirty Lab git workspaces
+
+### Fixed
+- fix runner upgrade path realignment
+
 ## [0.229.6] - 2026-06-14
 
 ### Changed

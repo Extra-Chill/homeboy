@@ -297,6 +297,53 @@ fn upgrade_runner_with_executor(
 
     let (extensions_synced, mut extensions_skipped, mut extensions_failed) =
         sync_runner_extensions(runner, &homeboy_path, extension_updates, exec);
+    if path_drift.is_some() && is_versioned_homeboy_path(&homeboy_path) {
+        let refreshed_bare_homeboy_version =
+            runner_bare_homeboy_version(runner, &homeboy_path, exec);
+        if refreshed_bare_homeboy_version.is_some() {
+            bare_homeboy_version = refreshed_bare_homeboy_version;
+            match runner_homeboy_path_alignment(
+                &runner.id,
+                &homeboy_path,
+                new_version.as_deref(),
+                bare_homeboy_version.as_deref(),
+            ) {
+                Some(alignment) => {
+                    path_drift = alignment.drift.clone();
+                    if let Some(new_path) = alignment.update_to.as_deref() {
+                        match update_homeboy_path(&runner.id, new_path) {
+                            Ok(()) => {
+                                homeboy_path = new_path.to_string();
+                                new_version = bare_homeboy_version.clone();
+                                path_drift = None;
+                                path_update_detail = Some(format!(
+                                    "runner homeboy_path updated from `{}` to `{}` because bare `homeboy` reports {}",
+                                    original_homeboy_path,
+                                    new_path,
+                                    bare_homeboy_version.as_deref().unwrap_or("an upgraded version")
+                                ));
+                            }
+                            Err(err) => {
+                                path_drift = Some(format!(
+                                    "{}; automatic runner homeboy_path update failed: {}",
+                                    alignment.drift.unwrap_or_else(|| {
+                                        format!(
+                                            "configured runner executable `{}` is stale",
+                                            original_homeboy_path
+                                        )
+                                    }),
+                                    err.message
+                                ));
+                            }
+                        }
+                    }
+                }
+                None => {
+                    path_drift = None;
+                }
+            }
+        }
+    }
     if bare_homeboy_version.is_none() {
         bare_homeboy_version = runner_bare_homeboy_version(runner, &homeboy_path, exec);
     }
@@ -1529,6 +1576,65 @@ mod tests {
         assert!(updated[0]
             .detail
             .contains("runner homeboy_path updated from `/home/chubes/.cargo/bin/homeboy-0.229.1` to `homeboy`"));
+    }
+
+    #[test]
+    fn realigns_versioned_runner_homeboy_path_using_final_bare_homeboy_state() {
+        let runner = ssh_runner("lab", Some("/home/chubes/.cargo/bin/homeboy-0.229.1"));
+        let mut commands = Vec::new();
+        let mut path_updates = Vec::new();
+
+        let (updated, skipped) = upgrade_runners_with_executor_source_materializer_and_path_updater(
+            &[runner],
+            false,
+            None,
+            None,
+            &[],
+            |runner_id, options| {
+                commands.push(options.command.clone());
+                let stdout = match commands.len() {
+                    1 => "homeboy 0.229.1\n",
+                    2 => "{\"success\":true}\n",
+                    3 => "homeboy 0.229.1\n",
+                    4 => "homeboy 0.228.22\n",
+                    5 => "homeboy 0.229.6\n",
+                    _ => "",
+                };
+                Ok((exec_output(runner_id, options.command, stdout, "", 0), 0))
+            },
+            runner_status,
+            |_runner, _path| unreachable!("source materialization not used"),
+            |runner_id, homeboy_path| {
+                path_updates.push((runner_id.to_string(), homeboy_path.to_string()));
+                Ok(())
+            },
+        );
+
+        assert!(skipped.is_empty());
+        assert_eq!(updated.len(), 1);
+        assert!(updated[0].success);
+        assert!(updated[0].upgraded);
+        assert_eq!(updated[0].homeboy_path, "homeboy");
+        assert_eq!(updated[0].previous_version.as_deref(), Some("0.229.1"));
+        assert_eq!(updated[0].new_version.as_deref(), Some("0.229.6"));
+        assert_eq!(updated[0].bare_homeboy_version.as_deref(), Some("0.229.6"));
+        assert_eq!(updated[0].path_drift, None);
+        assert_eq!(
+            path_updates,
+            vec![("lab".to_string(), "homeboy".to_string())]
+        );
+        assert_eq!(
+            commands[3],
+            vec!["homeboy", "--version"],
+            "the first bare probe reproduces the stale pre-upgrade state"
+        );
+        assert_eq!(
+            commands[4],
+            vec!["homeboy", "--version"],
+            "final drift detection re-checks the remote bare binary"
+        );
+        assert!(updated[0].detail.contains("bare `homeboy` reports 0.229.6"));
+        assert!(!updated[0].detail.contains("0.228.22"));
     }
 
     #[test]
