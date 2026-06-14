@@ -18,6 +18,22 @@ fn local_alias_report_has_stable_top_level_shape() {
 }
 
 #[test]
+fn doctor_options_default_to_general_read_only_scope() {
+    let options = RunnerDoctorOptions::default();
+
+    assert_eq!(options.scope, RunnerDoctorScope::General);
+    assert!(!options.repair);
+}
+
+#[test]
+fn doctor_output_omits_empty_repairs() {
+    let (report, _) = run("local").expect("local doctor report");
+    let value = serde_json::to_value(report).expect("serialize report");
+
+    assert!(value.get("repairs").is_none());
+}
+
+#[test]
 fn overall_status_promotes_errors_over_warnings() {
     let checks = vec![
         checks::warning("optional", "optional missing".to_string(), None),
@@ -186,6 +202,7 @@ fn local_doctor_honors_required_tool_errors() {
             path: None,
             extensions: Vec::new(),
             required_tools: vec!["homeboy-definitely-missing-tool".to_string()],
+            ..Default::default()
         },
     )
     .expect("local doctor report");

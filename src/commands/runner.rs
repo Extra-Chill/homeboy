@@ -243,6 +243,14 @@ enum RunnerCommand {
         /// Required command to resolve on the runner PATH. Repeat for provider/job-specific tools.
         #[arg(long = "require-tool")]
         required_tools: Vec<String>,
+
+        /// Readiness scope. `lab-offload` adds Lab-specific binary, daemon, and WP Codebox checks.
+        #[arg(long, value_enum, default_value_t = RunnerDoctorScopeArg::General)]
+        scope: RunnerDoctorScopeArg,
+
+        /// Safely repair issues in the selected scope, such as reconnecting a stale Lab daemon.
+        #[arg(long)]
+        repair: bool,
     },
     /// Connect to a runner by starting a loopback-only remote daemon and SSH tunnel
     Connect {
@@ -361,6 +369,21 @@ enum RunnerKindArg {
     Ssh,
 }
 
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum RunnerDoctorScopeArg {
+    General,
+    LabOffload,
+}
+
+impl From<RunnerDoctorScopeArg> for doctor::RunnerDoctorScope {
+    fn from(value: RunnerDoctorScopeArg) -> Self {
+        match value {
+            RunnerDoctorScopeArg::General => doctor::RunnerDoctorScope::General,
+            RunnerDoctorScopeArg::LabOffload => doctor::RunnerDoctorScope::LabOffload,
+        }
+    }
+}
+
 impl From<RunnerKindArg> for RunnerKind {
     fn from(value: RunnerKindArg) -> Self {
         match value {
@@ -466,12 +489,16 @@ pub fn run(
             path,
             required_extensions,
             required_tools,
+            scope,
+            repair,
         } => map_doctor(doctor::run_with_options(
             &runner_id,
             doctor::RunnerDoctorOptions {
                 path,
                 extensions: required_extensions,
                 required_tools,
+                scope: scope.into(),
+                repair,
             },
         )),
         RunnerCommand::Connect {

@@ -95,6 +95,8 @@ homeboy runner doctor local
 homeboy runner doctor <runner-id>
 homeboy runner doctor <runner-id> --path <component-path> --extension rust
 homeboy runner doctor <runner-id> --require-tool zip --require-tool unzip
+homeboy runner doctor <runner-id> --scope lab-offload
+homeboy runner doctor <runner-id> --scope lab-offload --repair
 ```
 
 Diagnoses a local or configured SSH runner without mutating it. Use `local`,
@@ -104,6 +106,19 @@ The JSON payload uses `command: "runner.doctor"` and includes `runner_id`,
 
 Use `doctor` before `connect` when you need to know whether Homeboy, Git, SSH,
 and the configured workspace root are usable on the target machine.
+
+Use `--scope lab-offload` before serious Lab evidence runs. It adds checks for
+the configured runner Homeboy command, bare `homeboy` PATH resolution, preferred
+runner binaries, connected daemon exec readiness, and WP Codebox runner-path
+freshness signals. When Homeboy can identify a safe exact recovery command, the
+check includes that remediation instead of leaving the operator to infer it from
+logs.
+
+Use `--scope lab-offload --repair` for the narrow self-healing path. Today this
+reconnects a failing direct Lab runner daemon and reruns the daemon exec probe.
+It does not upgrade binaries, rewrite runner paths, or refresh WP Codebox caches;
+those remain explicit operator actions because they can be expensive or depend
+on environment-specific paths.
 
 Pass one or more `--require-tool <command>` values when a provider or job path
 knows it needs additional runner-side commands before starting expensive work.
