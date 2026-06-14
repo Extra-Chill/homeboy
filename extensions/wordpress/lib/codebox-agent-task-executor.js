@@ -419,10 +419,11 @@ function defaultRuntimeOverlays(settings, phpAiClientPath = '') {
   }
 
   return phpAiClientPath ? [{
-    type: 'bundled-library',
+    kind: 'bundled-library',
     library: 'php-ai-client',
     source: phpAiClientPath,
     target: '/wordpress/wp-includes/php-ai-client',
+    strategy: 'wordpress-scoped-bundle',
     metadata: { component: 'php-ai-client', source: 'homeboy-extensions-default' },
   }] : [];
 }

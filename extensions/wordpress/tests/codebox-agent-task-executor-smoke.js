@@ -618,10 +618,11 @@ try {
   const providerPath = path.join(defaultsRoot, 'ai-provider-for-openai');
   const phpAiClientPath = path.join(defaultsRoot, 'php-ai-client');
   const defaultPhpAiClientOverlay = [{
-    type: 'bundled-library',
+    kind: 'bundled-library',
     library: 'php-ai-client',
     source: phpAiClientPath,
     target: '/wordpress/wp-includes/php-ai-client',
+    strategy: 'wordpress-scoped-bundle',
     metadata: { component: 'php-ai-client', source: 'homeboy-extensions-default' },
   }];
   for (const directory of [workspaceRoot, bundledAgentsApiPath, dataMachineCodePath, staleStandaloneAgentsApiPath, providerPath, phpAiClientPath]) {
