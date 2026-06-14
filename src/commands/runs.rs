@@ -21,15 +21,13 @@ mod reconcile;
 mod remote;
 mod remote_artifact;
 
-use std::fs::File;
-use std::io;
 use std::path::PathBuf;
 
 use clap::{Args, Subcommand};
 use serde::Serialize;
 use serde_json::Value;
 
-use homeboy::core::artifacts::{cached_validated_viewer_links, public_artifact_url};
+use homeboy::core::observation::runs_service;
 use homeboy::core::observation::{ArtifactRecord, ObservationStore, RunListFilter, RunRecord};
 use homeboy::core::Error;
 
@@ -459,9 +457,9 @@ pub fn list_runs(args: RunsListArgs, command: &'static str) -> CmdResult<RunsOut
 fn show_run(run_id: &str) -> CmdResult<RunsOutput> {
     let store = ObservationStore::open_initialized()?;
     reconcile::reconcile_owned_stale_running_runs(&store, 1000)?;
-    require_run(&store, run_id)?;
-    refresh_mirrored_daemon_evidence_best_effort(run_id);
-    let run = require_run(&store, run_id)?;
+    runs_service::require_run(&store, run_id)?;
+    runs_service::refresh_mirrored_daemon_evidence_best_effort(run_id);
+    let run = runs_service::require_run(&store, run_id)?;
     Ok((
         RunsOutput::Show(RunsShowOutput {
             command: "runs.show",
@@ -473,60 +471,15 @@ fn show_run(run_id: &str) -> CmdResult<RunsOutput> {
 
 pub fn artifacts(run_id: &str) -> CmdResult<RunsOutput> {
     let store = ObservationStore::open_initialized()?;
-    let run = require_run(&store, run_id)?;
-    refresh_mirrored_daemon_evidence_best_effort(run_id);
-    homeboy::core::artifacts::index_remote_published_artifact_refs_for_run(&store, run_id)?;
-    let mut artifacts = store.list_artifacts(run_id)?;
-    artifacts.extend(related_lab_artifacts_for_runner_job(&store, &run)?);
+    let artifacts = runs_service::list_artifacts_for_run(&store, run_id)?;
     Ok((
         RunsOutput::Artifacts(RunsArtifactsOutput {
             command: "runs.artifacts",
             run_id: run_id.to_string(),
-            artifacts: enrich_artifact_links(artifacts),
+            artifacts,
         }),
         0,
     ))
-}
-
-fn refresh_mirrored_daemon_evidence_best_effort(run_id: &str) {
-    if let Err(err) = homeboy::core::runners::refresh_mirrored_daemon_evidence(run_id) {
-        eprintln!(
-            "Warning: could not refresh mirrored Lab runner evidence for `{run_id}`: {}",
-            err.message
-        );
-    }
-}
-
-fn related_lab_artifacts_for_runner_job(
-    store: &ObservationStore,
-    run: &RunRecord,
-) -> homeboy::core::Result<Vec<ArtifactRecord>> {
-    let Some((_runner_id, job_id)) = homeboy::core::runners::mirrored_runner_job_identity(run)
-    else {
-        return Ok(Vec::new());
-    };
-    let mut artifacts = Vec::new();
-    for candidate in store.list_runs(RunListFilter {
-        kind: None,
-        component_id: None,
-        status: None,
-        rig_id: None,
-        limit: Some(1000),
-    })? {
-        if candidate.id == run.id {
-            continue;
-        }
-        if candidate
-            .metadata_json
-            .pointer("/lab/remote_job_id")
-            .and_then(Value::as_str)
-            != Some(job_id.as_str())
-        {
-            continue;
-        }
-        artifacts.extend(store.list_artifacts(&candidate.id)?);
-    }
-    Ok(artifacts)
 }
 
 fn artifact_command(args: RunsArtifactArgs) -> CmdResult<RunsOutput> {
@@ -539,161 +492,64 @@ fn artifact_command(args: RunsArtifactArgs) -> CmdResult<RunsOutput> {
 
 fn artifact_get(args: RunsArtifactGetArgs) -> CmdResult<RunsOutput> {
     let store = ObservationStore::open_initialized()?;
-    require_run(&store, &args.run_id)?;
-    homeboy::core::artifacts::index_remote_published_artifact_refs_for_run(&store, &args.run_id)?;
-    let artifact = store
-        .get_artifact_for_run_token(&args.run_id, &args.artifact_id)?
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "artifact_id",
-                format!("artifact record not found: {}", args.artifact_id),
-                Some(args.artifact_id.clone()),
-                None,
-            )
-        })?;
+    let artifact = runs_service::resolve_artifact_for_run(&store, &args.run_id, &args.artifact_id)?;
 
-    if artifact.run_id != args.run_id {
-        return Err(Error::validation_invalid_argument(
+    match runs_service::classify_artifact_storage(&artifact) {
+        runs_service::ArtifactStorage::LocalFile => {
+            let outcome = runs_service::copy_local_file_artifact(artifact, args.output)?;
+            Ok((
+                RunsOutput::ArtifactGet(RunsArtifactGetOutput {
+                    command: "runs.artifact.get",
+                    run_id: outcome.run_id,
+                    artifact_id: outcome.artifact_id,
+                    output_path: outcome.output_path.display().to_string(),
+                    content_type: outcome.content_type,
+                    size_bytes: outcome.size_bytes,
+                    sha256: outcome.sha256,
+                }),
+                0,
+            ))
+        }
+        runs_service::ArtifactStorage::Remote => remote_artifact::get(artifact, args.output),
+        runs_service::ArtifactStorage::MetadataOnly => Err(Error::validation_invalid_argument(
             "artifact_id",
-            "artifact does not belong to requested run",
-            Some(args.artifact_id),
+            format!(
+                "artifact {} was imported as metadata only; artifact bytes are not available in this bundle",
+                artifact.id
+            ),
+            Some(artifact.id),
             None,
-        ));
-    }
-    if artifact.artifact_type != "file" {
-        if remote_artifact::is_remote_artifact(&artifact) {
-            return remote_artifact::get(artifact, args.output);
-        }
-        if artifact.artifact_type == "metadata-only" {
-            return Err(Error::validation_invalid_argument(
-                "artifact_id",
-                format!(
-                    "artifact {} was imported as metadata only; artifact bytes are not available in this bundle",
-                    artifact.id
-                ),
-                Some(artifact.id),
-                None,
-            ));
-        }
-        return Err(Error::validation_invalid_argument(
+        )),
+        runs_service::ArtifactStorage::Other => Err(Error::validation_invalid_argument(
             "artifact_id",
             format!(
                 "artifact {} is {}, not a downloadable file",
                 artifact.id, artifact.artifact_type
             ),
-            Some(artifact.id),
+            Some(artifact.id.clone()),
             None,
-        ));
+        )),
     }
-
-    let source = PathBuf::from(&artifact.path);
-    if !source.is_file() {
-        return Err(Error::validation_invalid_argument(
-            "artifact_id",
-            format!(
-                "artifact {} file is missing or unreadable at {}; rerun the source command or import a bundle that includes artifact bytes",
-                artifact.id,
-                source.display()
-            ),
-            Some(artifact.id),
-            None,
-        ));
-    }
-    let file_name = source
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or(&artifact.id)
-        .to_string();
-    let output = args.output.unwrap_or_else(|| PathBuf::from(file_name));
-    if let Some(parent) = output
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            Error::internal_io(e.to_string(), Some(format!("create {}", parent.display())))
-        })?;
-    }
-
-    let mut reader = File::open(&source).map_err(|e| {
-        Error::internal_io(
-            e.to_string(),
-            Some(format!("open artifact {}", source.display())),
-        )
-    })?;
-    let mut writer = File::create(&output).map_err(|e| {
-        Error::internal_io(e.to_string(), Some(format!("create {}", output.display())))
-    })?;
-    io::copy(&mut reader, &mut writer).map_err(|e| {
-        Error::internal_io(
-            e.to_string(),
-            Some(format!(
-                "copy artifact {} to {}",
-                artifact.id,
-                output.display()
-            )),
-        )
-    })?;
-
-    Ok((
-        RunsOutput::ArtifactGet(RunsArtifactGetOutput {
-            command: "runs.artifact.get",
-            run_id: artifact.run_id,
-            artifact_id: artifact.id,
-            output_path: output.display().to_string(),
-            content_type: artifact.mime,
-            size_bytes: artifact.size_bytes,
-            sha256: artifact.sha256,
-        }),
-        0,
-    ))
 }
 
 pub(super) fn require_run(
     store: &ObservationStore,
     run_id: &str,
 ) -> homeboy::core::Result<RunRecord> {
-    store.get_run(run_id)?.ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "run_id",
-            format!("run record not found: {run_id}"),
-            Some(run_id.to_string()),
-            None,
-        )
-    })
+    runs_service::require_run(store, run_id)
 }
 
 pub(super) fn run_detail(
     store: &ObservationStore,
     run: RunRecord,
 ) -> homeboy::core::Result<RunDetail> {
-    let artifacts = enrich_artifact_links(store.list_artifacts(&run.id)?);
+    let artifacts = runs_service::enrich_artifact_links(store.list_artifacts(&run.id)?);
     Ok(RunDetail {
         summary: run_summary(run.clone()),
         homeboy_version: run.homeboy_version,
         metadata: run.metadata_json,
         artifacts,
     })
-}
-
-fn enrich_artifact_links(artifacts: Vec<ArtifactRecord>) -> Vec<ArtifactRecord> {
-    artifacts.into_iter().map(enrich_artifact_link).collect()
-}
-
-fn enrich_artifact_link(mut artifact: ArtifactRecord) -> ArtifactRecord {
-    let public_url =
-        public_artifact_url(&artifact).or_else(|| public_url_for_url_artifact(&artifact));
-    if let Some(url) = public_url.clone() {
-        artifact.public_url = Some(url.clone());
-        artifact.viewer_links = cached_validated_viewer_links(&artifact, &url);
-        artifact.viewer_url = artifact.viewer_links.first().map(|link| link.url.clone());
-    }
-    artifact
-}
-
-fn public_url_for_url_artifact(artifact: &ArtifactRecord) -> Option<String> {
-    (artifact.artifact_type == "url")
-        .then(|| artifact.url.clone().or_else(|| Some(artifact.path.clone())))
-        .flatten()
 }
 
 pub(crate) fn run_summary(run: RunRecord) -> RunSummary {
@@ -1067,7 +923,7 @@ mod tests {
                 .record_artifact(&remote_run.id, "homeboy_summary", &summary)
                 .expect("artifact");
 
-            let artifacts = related_lab_artifacts_for_runner_job(&store, &runner_run)
+            let artifacts = runs_service::related_lab_artifacts_for_runner_job(&store, &runner_run)
                 .expect("related artifacts");
 
             assert_eq!(artifacts.len(), 1);
