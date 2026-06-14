@@ -303,6 +303,18 @@ The generated recipe is the single WP Codebox entry point for benchmarks:
 `wp_codebox_blueprint` becomes `runtime.blueprint`, dependencies become recipe
 plugin inputs, and scenario manifests compile into configured workloads.
 
+Each run also emits `${HOMEBOY_BENCH_RESULTS_ARTIFACT_DIR}/bench-summary.json`
+when result artifacts are enabled. The summary is the canonical reviewer
+entry point: it records pass/fail score, replayability status, dependency
+provenance, core artifact paths, and any caller-provided next-step commands.
+Dependency inputs are also captured in `bench-dependency-provenance.json` so
+reviewers can see which WP Codebox plugin inputs, mounts, and declared
+dependency paths shaped the run.
+
+`bench_env` must be a JSON object and is the extension-level setting forwarded
+into the WP Codebox runtime. Unknown caller/orchestrator settings remain opaque;
+the runner only validates the shape of settings it consumes directly.
+
 The browser bench target is a two-extension handoff: the WordPress
 extension prepares/describes the WordPress target by writing
 `${HOMEBOY_BENCH_SHARED_STATE}/browser-target.json`; a Node-side browser
