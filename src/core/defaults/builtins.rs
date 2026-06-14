@@ -33,7 +33,8 @@ pub(super) fn default_cargo_config() -> InstallMethodConfig {
 pub(super) fn default_source_config() -> InstallMethodConfig {
     InstallMethodConfig {
         path_patterns: vec!["/target/release/".to_string(), "/target/debug/".to_string()],
-        upgrade_command: "git pull && . \"$HOME/.cargo/env\" && cargo build --release".to_string(),
+        upgrade_command: "git pull && . \"$HOME/.cargo/env\" && cargo install --path . --force"
+            .to_string(),
         list_command: None,
     }
 }
@@ -191,5 +192,20 @@ pub(super) fn default_remote_permissions() -> PermissionModes {
     PermissionModes {
         file_mode: "g+w".to_string(),
         dir_mode: "g+w".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_upgrade_installs_active_binary() {
+        let config = default_source_config();
+
+        assert!(config
+            .upgrade_command
+            .contains("cargo install --path . --force"));
+        assert!(!config.upgrade_command.contains("cargo build --release"));
     }
 }
