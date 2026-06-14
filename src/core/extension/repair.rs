@@ -12,6 +12,8 @@ use super::lifecycle::{
 };
 use super::manifest::ExtensionManifest;
 
+const REPLACE_CLONE_TEMP_PREFIX: &str = ".replace-clone-tmp";
+
 #[derive(Debug, Clone)]
 pub struct ReplaceResult {
     pub extension_id: String,
@@ -61,15 +63,21 @@ fn replace_from_url(
 
     local_files::ensure_app_dirs()?;
     let extensions_dir = paths::extensions()?;
-    let clone_dir = extensions_dir.join(format!(".replace-clone-tmp-{}", extension_id));
+    let clone_dir = unique_replace_clone_temp(&extensions_dir, &extension_id)?;
     let staged_dir = extensions_dir.join(format!(".replace-stage-tmp-{}", extension_id));
     let backup_dir = extensions_dir.join(format!(".replace-backup-tmp-{}", extension_id));
 
-    clean_replace_temp(&clone_dir)?;
+    clean_stale_replace_clone_temps(&extensions_dir, &extension_id)?;
     clean_replace_temp(&staged_dir)?;
     clean_replace_temp(&backup_dir)?;
 
-    git::clone_repo_at_ref(url, &clone_dir, revision)?;
+    if let Err(err) = git::clone_repo_at_ref(url, &clone_dir, revision) {
+        let _ = clean_replace_temp(&clone_dir);
+        return Err(err.with_hint(format!(
+            "Homeboy cloned into a fresh replace temp directory and removed it after failure. If git still reports corrupt tmp_pack files, inspect disk/git health and remove stale replace clone temps with: rm -rf {}",
+            replace_clone_temp_glob(&extensions_dir, &extension_id)
+        )));
+    }
     let source_revision = git::short_head_revision(&clone_dir);
 
     let result = resolve_cloned_extension(&clone_dir, &extension_id, &staged_dir, url);
@@ -308,9 +316,75 @@ fn clean_replace_temp(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn replace_clone_temp_prefix(extension_id: &str) -> String {
+    format!("{}-{}", REPLACE_CLONE_TEMP_PREFIX, extension_id)
+}
+
+fn replace_clone_temp_glob(extensions_dir: &Path, extension_id: &str) -> String {
+    let prefix = replace_clone_temp_prefix(extension_id);
+    let legacy = extensions_dir.join(&prefix).to_string_lossy().to_string();
+    let unique = extensions_dir
+        .join(format!("{}-*", prefix))
+        .to_string_lossy()
+        .to_string();
+
+    format!("{} {}", legacy, unique)
+}
+
+fn is_replace_clone_temp_for_id(file_name: &str, extension_id: &str) -> bool {
+    let prefix = replace_clone_temp_prefix(extension_id);
+    file_name == prefix || file_name.starts_with(&format!("{}-", prefix))
+}
+
+fn unique_replace_clone_temp(extensions_dir: &Path, extension_id: &str) -> Result<PathBuf> {
+    let prefix = replace_clone_temp_prefix(extension_id);
+    let pid = std::process::id();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+
+    for attempt in 0..100 {
+        let path = extensions_dir.join(format!("{}-{}-{}-{}", prefix, pid, nanos, attempt));
+        if !path_exists_or_symlink(&path) {
+            return Ok(path);
+        }
+    }
+
+    Err(Error::internal_io(
+        "could not allocate unique replace clone temp directory",
+        Some(replace_clone_temp_glob(extensions_dir, extension_id)),
+    ))
+}
+
+fn clean_stale_replace_clone_temps(extensions_dir: &Path, extension_id: &str) -> Result<()> {
+    for entry in std::fs::read_dir(extensions_dir).map_err(|e| {
+        Error::internal_io(
+            e.to_string(),
+            Some("read extension directory for stale replace clone temps".to_string()),
+        )
+    })? {
+        let entry = entry.map_err(|e| {
+            Error::internal_io(
+                e.to_string(),
+                Some("read stale replace clone temp entry".to_string()),
+            )
+        })?;
+        let file_name = entry.file_name();
+        if is_replace_clone_temp_for_id(&file_name.to_string_lossy(), extension_id) {
+            clean_replace_temp(&entry.path())?;
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{relink, replace, replace_with_revision};
+    use super::{
+        clean_stale_replace_clone_temps, relink, replace, replace_with_revision,
+        unique_replace_clone_temp,
+    };
     use crate::core::extension::{install, load_extension};
     use crate::test_support::with_isolated_home;
     use std::fs;
@@ -437,6 +511,61 @@ mod tests {
         }
 
         Some(remote_parent)
+    }
+
+    #[test]
+    fn replace_clone_temp_paths_are_unique_per_run() {
+        with_isolated_home(|home| {
+            let extensions_dir = home.path().join(".config/homeboy/extensions");
+            fs::create_dir_all(&extensions_dir).expect("extensions dir");
+
+            let first =
+                unique_replace_clone_temp(&extensions_dir, "swift").expect("first temp clone path");
+            fs::create_dir_all(&first).expect("reserve first temp clone path");
+            let second = unique_replace_clone_temp(&extensions_dir, "swift")
+                .expect("second temp clone path");
+
+            assert_ne!(first, second);
+            assert!(first
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with(".replace-clone-tmp-swift-"));
+            assert!(second
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with(".replace-clone-tmp-swift-"));
+        });
+    }
+
+    #[test]
+    fn replace_cleans_stale_clone_temp_dirs_before_clone() {
+        with_isolated_home(|home| {
+            let extensions_dir = home.path().join(".config/homeboy/extensions");
+            fs::create_dir_all(&extensions_dir).expect("extensions dir");
+            let stale_legacy = extensions_dir.join(".replace-clone-tmp-swift");
+            let stale_unique = extensions_dir.join(".replace-clone-tmp-swift-123-456-0");
+            let unrelated = extensions_dir.join(".replace-clone-tmp-rust");
+            let similarly_prefixed = extensions_dir.join(".replace-clone-tmp-swiftly");
+            fs::create_dir_all(stale_legacy.join(".git/objects/pack")).expect("stale legacy temp");
+            fs::write(
+                stale_legacy.join(".git/objects/pack/tmp_pack_stale"),
+                "partial pack",
+            )
+            .expect("stale pack");
+            fs::create_dir_all(&stale_unique).expect("stale unique temp");
+            fs::create_dir_all(&unrelated).expect("unrelated temp");
+            fs::create_dir_all(&similarly_prefixed).expect("similarly prefixed temp");
+
+            clean_stale_replace_clone_temps(&extensions_dir, "swift")
+                .expect("clean stale clone temps");
+
+            assert!(!stale_legacy.exists());
+            assert!(!stale_unique.exists());
+            assert!(unrelated.exists());
+            assert!(similarly_prefixed.exists());
+        });
     }
 
     #[test]

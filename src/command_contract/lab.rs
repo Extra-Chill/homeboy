@@ -11,7 +11,7 @@
 use crate::cli_surface::Commands;
 use crate::command_contract::CommandDescriptor;
 use crate::commands::agent_task;
-use crate::core::agent_task_provider::provider_requires_cwd_git_checkout;
+use crate::core::agent_tasks::provider::provider_requires_cwd_git_checkout;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LabCommandContract {

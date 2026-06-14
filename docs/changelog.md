@@ -4,6 +4,35 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.229.11] - 2026-06-14
+
+### Changed
+- extract Lab trace fetch refs
+- harden artifact facade exports
+- harden command contract facade boundaries
+- route Lab agent-task bridge through facades
+
+### Fixed
+- surface agent task cook handoff
+- summarize agent task cook output
+- allow lab status runner selector
+- detect stale PATH homeboy shadows
+- promote runner JSON errors in Lab failures
+- normalize Lab promotion patch paths
+- classify cook output quality
+- materialize lab extension sync sources
+
+## [0.229.10] - 2026-06-14
+
+### Fixed
+- route Lab extension sync locally
+- surface managed Lab follow-up commands
+- add lab offload runner doctor scope
+- add lab extension sync command
+- install active binary for source upgrades
+- tighten release and project orchestration UX
+- fix lab cook runtime drift diagnostics
+
 ## [0.229.9] - 2026-06-14
 
 ### Changed

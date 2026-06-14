@@ -3,6 +3,7 @@ use std::process::Command;
 
 use crate::core::error::{Error, Result};
 
+use super::origin_refs::{advertised_origin_refs_for_commit, best_advertised_ref};
 use super::RunnerWorkspaceSyncMode;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,51 +133,15 @@ fn resolve_changed_since_base(path: &Path, git_ref: &str) -> Result<String> {
 }
 
 fn advertised_origin_ref_for_commit(path: &Path, commit: &str) -> Result<Option<String>> {
-    let output = Command::new("git")
-        .args(["ls-remote", "origin"])
-        .current_dir(path)
-        .output()
-        .map_err(|err| {
-            Error::internal_io(err.to_string(), Some("run git ls-remote".to_string()))
-        })?;
-    if !output.status.success() {
-        return Err(Error::validation_invalid_argument(
-            "changed_since",
-            "Lab offload could not inspect origin refs for changed-since base materialization",
-            Some(commit.to_string()),
-            Some(vec![
-                String::from_utf8_lossy(&output.stderr).trim().to_string(),
-                "Run with --force-hot to execute the changed-since command locally while investigating remote ref availability.".to_string(),
-            ]),
-        ));
-    }
-
-    let refs = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| {
-            let (sha, git_ref) = line.split_once('\t')?;
-            (sha == commit && !git_ref.ends_with("^{}")).then(|| git_ref.to_string())
-        })
-        .collect::<Vec<_>>();
-
+    let refs = advertised_origin_refs_for_commit(
+        path,
+        commit,
+        "changed_since",
+        "Lab offload could not inspect origin refs for changed-since base materialization",
+        commit.to_string(),
+        vec!["Run with --force-hot to execute the changed-since command locally while investigating remote ref availability.".to_string()],
+    )?;
     Ok(best_advertised_ref(refs))
-}
-
-fn best_advertised_ref(refs: Vec<String>) -> Option<String> {
-    refs.iter()
-        .find(|git_ref| git_ref.starts_with("refs/pull/") && git_ref.ends_with("/head"))
-        .cloned()
-        .or_else(|| {
-            refs.iter()
-                .find(|git_ref| git_ref.starts_with("refs/heads/"))
-                .cloned()
-        })
-        .or_else(|| {
-            refs.iter()
-                .find(|git_ref| git_ref.starts_with("refs/tags/"))
-                .cloned()
-        })
-        .or_else(|| refs.into_iter().next())
 }
 
 fn ensure_local_merge_base(path: &Path, git_ref: &str) -> Result<()> {

@@ -29,6 +29,7 @@ mod lab_selection;
 mod lab_workspaces;
 mod offload_changed_since;
 mod offload_metadata;
+mod origin_refs;
 mod resource_metrics;
 mod rig_materialization;
 mod session;
@@ -63,7 +64,9 @@ pub(crate) use execution::{
     daemon_api_get, execute_runner_process_until_cancelled, prepare_daemon_local_process,
     RunnerProcessRequest,
 };
-pub use execution::{exec, RunnerExecMode, RunnerExecOptions, RunnerExecOutput};
+pub use execution::{
+    exec, runner_exec_failure_error, RunnerExecMode, RunnerExecOptions, RunnerExecOutput,
+};
 pub(crate) use git_dependency_materialization::{
     materialize_git_dependency, RunnerGitDependencyMaterializationOptions,
     RunnerGitDependencyMaterializationOutput,

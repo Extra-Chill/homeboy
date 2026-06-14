@@ -12,6 +12,7 @@ use crate::core::agent_task_promotion::{AgentTaskPromotionReport, AgentTaskPromo
 use crate::core::gate::{HomeboyGateResult, HomeboyGateStatus};
 
 pub const AGENT_TASK_COOK_LOOP_REPORT_SCHEMA: &str = "homeboy/agent-task-cook-loop-report/v1";
+const RISKY_CHANGED_FILE_THRESHOLD: usize = 20;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgentTaskCookLoopOptions {
@@ -38,6 +39,7 @@ pub struct AgentTaskCookLoopReport {
     pub source_task_id: String,
     pub source_run_id: Option<String>,
     pub promotion_status: AgentTaskPromotionStatus,
+    pub quality: AgentTaskCookLoopQualityReport,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failed_gates: Vec<AgentTaskCookLoopGateFailure>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -52,8 +54,26 @@ pub struct AgentTaskCookLoopReport {
 #[serde(rename_all = "snake_case")]
 pub enum AgentTaskCookLoopStatus {
     GreenCompleted,
+    NoChanges,
     RetryRequested,
     RetriesExhausted,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskCookLoopQualityReport {
+    pub classification: AgentTaskCookLoopQualityClassification,
+    pub summary: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub signals: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentTaskCookLoopQualityClassification {
+    NoChanges,
+    PatchProduced,
+    LargeOrRiskyPatch,
+    VerifiedPatch,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -87,12 +107,15 @@ pub fn evaluate_cook_loop(options: AgentTaskCookLoopOptions) -> AgentTaskCookLoo
             .filter(|gate| gate.status == HomeboyGateStatus::Failed)
             .collect();
     let retry_budget_remaining = options.max_attempts.saturating_sub(options.attempt);
+    let quality = classify_cook_loop_quality(&options.promotion_report);
     let should_retry = options.promotion_report.status == AgentTaskPromotionStatus::GateFailed
         && !failed_gates.is_empty()
         && retry_budget_remaining > 0;
     let follow_up_request = should_retry.then(|| build_follow_up_request(&options, &failed_gates));
     let status = if follow_up_request.is_some() {
         AgentTaskCookLoopStatus::RetryRequested
+    } else if quality.classification == AgentTaskCookLoopQualityClassification::NoChanges {
+        AgentTaskCookLoopStatus::NoChanges
     } else if failed_gates.is_empty() {
         AgentTaskCookLoopStatus::GreenCompleted
     } else {
@@ -108,10 +131,51 @@ pub fn evaluate_cook_loop(options: AgentTaskCookLoopOptions) -> AgentTaskCookLoo
         source_task_id: options.source_request.task_id.clone(),
         source_run_id: options.source_run_id.clone(),
         promotion_status: options.promotion_report.status,
+        quality,
         failed_gates,
         failed_gate_results,
         follow_up_request,
         metadata: options.metadata,
+    }
+}
+
+fn classify_cook_loop_quality(report: &AgentTaskPromotionReport) -> AgentTaskCookLoopQualityReport {
+    let changed_file_count = report.changed_files.len();
+    if changed_file_count == 0 {
+        return AgentTaskCookLoopQualityReport {
+            classification: AgentTaskCookLoopQualityClassification::NoChanges,
+            summary: "cook produced no changed files; task likely still requires review or retry"
+                .to_string(),
+            signals: vec!["changed_files=0".to_string()],
+        };
+    }
+
+    let mut signals = vec![format!("changed_files={changed_file_count}")];
+    if changed_file_count > RISKY_CHANGED_FILE_THRESHOLD {
+        signals.push(format!("changed_files>{RISKY_CHANGED_FILE_THRESHOLD}"));
+        return AgentTaskCookLoopQualityReport {
+            classification: AgentTaskCookLoopQualityClassification::LargeOrRiskyPatch,
+            summary: format!(
+                "cook changed {changed_file_count} files; review patch shape before treating it as ready"
+            ),
+            signals,
+        };
+    }
+
+    let has_passed_gate = normalized_promotion_gate_results(report)
+        .any(|gate| gate.status == HomeboyGateStatus::Passed);
+    if report.status == AgentTaskPromotionStatus::Applied && has_passed_gate {
+        return AgentTaskCookLoopQualityReport {
+            classification: AgentTaskCookLoopQualityClassification::VerifiedPatch,
+            summary: "cook produced a patch and deterministic gates passed".to_string(),
+            signals,
+        };
+    }
+
+    AgentTaskCookLoopQualityReport {
+        classification: AgentTaskCookLoopQualityClassification::PatchProduced,
+        summary: "cook produced a patch that needs promotion or verification".to_string(),
+        signals,
     }
 }
 
@@ -461,6 +525,65 @@ mod tests {
         assert_eq!(report.status, AgentTaskCookLoopStatus::GreenCompleted);
         assert!(report.failed_gates.is_empty());
         assert!(report.follow_up_request.is_none());
+        assert_eq!(
+            report.quality.classification,
+            AgentTaskCookLoopQualityClassification::VerifiedPatch
+        );
+    }
+
+    #[test]
+    fn no_changed_files_are_terminal_noop_feedback() {
+        let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
+            source_request: source_request(),
+            promotion_report: promotion_report_with_changed_files(
+                AgentTaskPromotionStatus::Applied,
+                vec![green_gate()],
+                Vec::new(),
+            ),
+            attempt: 1,
+            max_attempts: 3,
+            source_run_id: Some("run-4324".to_string()),
+            current_diff: String::new(),
+            metadata: Value::Null,
+        });
+
+        assert_eq!(report.status, AgentTaskCookLoopStatus::NoChanges);
+        assert_eq!(
+            report.quality.classification,
+            AgentTaskCookLoopQualityClassification::NoChanges
+        );
+        assert!(report.quality.summary.contains("no changed files"));
+        assert!(report.follow_up_request.is_none());
+    }
+
+    #[test]
+    fn large_patch_shape_is_flagged_before_success() {
+        let changed_files = (0..=20)
+            .map(|index| format!("src/generated/file_{index}.rs"))
+            .collect();
+        let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
+            source_request: source_request(),
+            promotion_report: promotion_report_with_changed_files(
+                AgentTaskPromotionStatus::Applied,
+                vec![green_gate()],
+                changed_files,
+            ),
+            attempt: 1,
+            max_attempts: 3,
+            source_run_id: Some("run-4327".to_string()),
+            current_diff: String::new(),
+            metadata: Value::Null,
+        });
+
+        assert_eq!(report.status, AgentTaskCookLoopStatus::GreenCompleted);
+        assert_eq!(
+            report.quality.classification,
+            AgentTaskCookLoopQualityClassification::LargeOrRiskyPatch
+        );
+        assert!(report
+            .quality
+            .signals
+            .contains(&"changed_files=21".to_string()));
     }
 
     #[test]
@@ -569,6 +692,18 @@ mod tests {
         status: AgentTaskPromotionStatus,
         deterministic_gates: Vec<AgentTaskGateReport>,
     ) -> AgentTaskPromotionReport {
+        promotion_report_with_changed_files(
+            status,
+            deterministic_gates,
+            vec!["src/core/agent_task_gate.rs".to_string()],
+        )
+    }
+
+    fn promotion_report_with_changed_files(
+        status: AgentTaskPromotionStatus,
+        deterministic_gates: Vec<AgentTaskGateReport>,
+        changed_files: Vec<String>,
+    ) -> AgentTaskPromotionReport {
         AgentTaskPromotionReport {
             schema: AGENT_TASK_PROMOTION_REPORT_SCHEMA.to_string(),
             status,
@@ -584,7 +719,7 @@ mod tests {
                 path: "changes.patch".to_string(),
                 sha256: Some("abc123".to_string()),
             },
-            changed_files: vec!["src/core/agent_task_gate.rs".to_string()],
+            changed_files,
             command_evidence: Vec::new(),
             deterministic_gates,
             gate_results: Vec::new(),

@@ -34,17 +34,18 @@ pub use super::runner::{
     mirrored_runner_job_identity, preflight_lab_offload_changed_since,
     prepare_git_lab_offload_changed_since, prepare_lab_runner_capability,
     refresh_mirrored_daemon_evidence, reportable_artifact_evidence_path,
-    resolve_default_lab_runner, run_reverse_worker, runner_artifact_store_token, status, statuses,
-    sync_workspace, LabOffloadCommand, LabOffloadOutcome, LabOffloadRequest,
-    LabOffloadWorkspaceModePolicy, LabRunnerCapabilityContract, LabRunnerGateDecision,
-    LabRunnerGateMode, LabRunnerSelectionSource, PreparedLabRunnerCapability,
-    RemoteArtifactDownload, ReverseRunnerConnectOptions, ReverseRunnerWorkerOptions,
-    ReverseRunnerWorkerOutput, Runner, RunnerCapabilityPreflight, RunnerConnectReport,
-    RunnerDisconnectReport, RunnerExecMode, RunnerExecOptions, RunnerExecOutput, RunnerFailureKind,
-    RunnerKind, RunnerRequiredTool, RunnerResourceMetrics, RunnerSession, RunnerSessionRole,
-    RunnerSessionState, RunnerStaleDaemonWarning, RunnerStatusReport, RunnerTunnelMode,
-    RunnerWorkspaceApplyOptions, RunnerWorkspaceApplyOutput, RunnerWorkspaceApplyStatus,
-    RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
+    resolve_default_lab_runner, run_reverse_worker, runner_artifact_store_token,
+    runner_exec_failure_error, status, statuses, sync_workspace, LabOffloadCommand,
+    LabOffloadOutcome, LabOffloadRequest, LabOffloadWorkspaceModePolicy,
+    LabRunnerCapabilityContract, LabRunnerGateDecision, LabRunnerGateMode,
+    LabRunnerSelectionSource, PreparedLabRunnerCapability, RemoteArtifactDownload,
+    ReverseRunnerConnectOptions, ReverseRunnerWorkerOptions, ReverseRunnerWorkerOutput, Runner,
+    RunnerCapabilityPreflight, RunnerConnectReport, RunnerDisconnectReport, RunnerExecMode,
+    RunnerExecOptions, RunnerExecOutput, RunnerFailureKind, RunnerKind, RunnerRequiredTool,
+    RunnerResourceMetrics, RunnerSession, RunnerSessionRole, RunnerSessionState,
+    RunnerStaleDaemonWarning, RunnerStatusReport, RunnerTunnelMode, RunnerWorkspaceApplyOptions,
+    RunnerWorkspaceApplyOutput, RunnerWorkspaceApplyStatus, RunnerWorkspaceSyncMode,
+    RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
 };
 
 // Registry CRUD entry points (re-exported at the root for ergonomics; also
@@ -85,7 +86,8 @@ pub mod connection {
 /// Exec entry points and option/output contracts.
 pub mod execution {
     pub use super::super::runner::{
-        exec, RunnerExecMode, RunnerExecOptions, RunnerExecOutput, RunnerResourceMetrics,
+        exec, runner_exec_failure_error, RunnerExecMode, RunnerExecOptions, RunnerExecOutput,
+        RunnerResourceMetrics,
     };
 }
 

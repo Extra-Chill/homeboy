@@ -27,6 +27,10 @@ pub fn route_after_parse(
         return Ok(None);
     }
 
+    if is_lab_command_local_runner_option(&cli.command) {
+        return Ok(None);
+    }
+
     let lab_command = lab_offload_command(&cli.command)?;
 
     let trace_runner_id = if matches!(cli.command, Commands::Trace(_)) {
@@ -164,6 +168,10 @@ fn is_runs_list_runner_option(args: &[String]) -> bool {
         && args.iter().enumerate().any(|(index, arg)| {
             index > list_index && (arg == "--runner" || arg.starts_with("--runner="))
         })
+}
+
+fn is_lab_command_local_runner_option(command: &Commands) -> bool {
+    matches!(command, Commands::Lab(_))
 }
 
 fn execute_trace_lab_offload_with_timeout(
@@ -493,6 +501,30 @@ mod tests {
         ];
 
         let outcome = route_after_parse(&cli, &normalized, None).unwrap();
+
+        assert_eq!(outcome, None);
+    }
+
+    #[test]
+    fn lab_extension_sync_runner_option_routes_to_lab_command_handler() {
+        let _env = EnvGuard::remove(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV);
+        let normalized = vec![
+            "homeboy".to_string(),
+            "lab".to_string(),
+            "extension-sync".to_string(),
+            "--runner".to_string(),
+            "homeboy-lab".to_string(),
+            "--source".to_string(),
+            "/tmp/wordpress-extension".to_string(),
+            "--id".to_string(),
+            "wordpress".to_string(),
+            "--ref".to_string(),
+            "main".to_string(),
+        ];
+        let cli = Cli::parse_from(&normalized);
+
+        let outcome = route_after_parse(&cli, &normalized, None)
+            .expect("lab extension-sync owns its runner option locally");
 
         assert_eq!(outcome, None);
     }

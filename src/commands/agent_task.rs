@@ -577,7 +577,9 @@ pub struct GateFeedbackArgs {
 
 pub fn run(args: AgentTaskArgs, global: &GlobalArgs) -> CmdResult<Value> {
     match args.command {
-        AgentTaskCommand::Cook(dispatch_args) => dispatch(dispatch_args, global),
+        AgentTaskCommand::Cook(dispatch_args) => {
+            super::agent_task_dispatch::cook(dispatch_args, global)
+        }
         AgentTaskCommand::Loop(loop_args) => run_loop(loop_args),
         AgentTaskCommand::Dispatch(dispatch_args) => dispatch(dispatch_args, global),
         AgentTaskCommand::RunPlan(run_args) => run_plan(run_args),

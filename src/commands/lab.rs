@@ -1,10 +1,13 @@
 use clap::{Args, Subcommand};
 use serde::Serialize;
+use std::path::{Path, PathBuf};
 
 use super::{CmdResult, GlobalArgs};
 use homeboy::core::runners::{
-    self as runner, RunnerExecOptions, RunnerExecOutput, RunnerRequiredTool,
+    self as runner, runner_exec_failure_error, RunnerExecOptions, RunnerExecOutput,
+    RunnerRequiredTool, RunnerStatusReport, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
 };
+use homeboy::core::source_snapshot::SourceSnapshot;
 use homeboy::core::Error;
 use serde_json::Value;
 
@@ -17,7 +20,11 @@ pub struct LabArgs {
 #[derive(Subcommand)]
 enum LabCommand {
     /// Show Lab routing status and benchmark commands
-    Status,
+    Status {
+        /// Runner ID to inspect. Defaults to lab.preferred_runner or inferred default Lab runner.
+        #[arg(long)]
+        runner: Option<String>,
+    },
     /// Print the runner-backed benchmark command for the provided bench args
     Bench {
         /// Arguments to pass after `homeboy bench`
@@ -49,6 +56,8 @@ pub struct LabOutput {
     command: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     preferred_runner: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    selected_runner: Option<LabSelectedRunnerOutput>,
     config_key: &'static str,
     config_path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -66,6 +75,19 @@ pub struct LabFollowup {
 }
 
 #[derive(Serialize)]
+pub struct LabSelectedRunnerOutput {
+    runner_id: String,
+    kind: String,
+    configured_executable: String,
+    daemon_enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workspace_root: Option<String>,
+    readiness_state: String,
+    connected: bool,
+    status: RunnerStatusReport,
+}
+
+#[derive(Serialize)]
 #[serde(untagged)]
 pub enum LabCommandOutput {
     Status(LabOutput),
@@ -79,6 +101,8 @@ pub struct LabExtensionSyncOutput {
     runner_homeboy_path: String,
     extension_id: String,
     source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    runner_source: Option<String>,
     source_revision: String,
     replace: bool,
     install_command: Vec<String>,
@@ -91,11 +115,35 @@ pub fn run(args: LabArgs, _global: &GlobalArgs) -> CmdResult<LabCommandOutput> {
     let current_workspace = std::env::current_dir()
         .ok()
         .map(|path| path.display().to_string());
-    let managed_followups =
-        lab_followups(preferred_runner.as_deref(), current_workspace.as_deref());
-    let command = match args.command.unwrap_or(LabCommand::Status) {
-        LabCommand::Status => "lab.status",
+    match args.command.unwrap_or(LabCommand::Status { runner: None }) {
+        LabCommand::Status { runner } => {
+            let selected_runner = selected_lab_runner_status(runner.as_deref())?;
+            let followup_runner = runner.as_deref().or(preferred_runner.as_deref());
+            let managed_followups = lab_followups(followup_runner, current_workspace.as_deref());
+            return Ok((
+                LabCommandOutput::Status(LabOutput {
+                    command: "lab.status",
+                    preferred_runner,
+                    selected_runner,
+                    config_key: "/lab/preferred_runner",
+                    config_path,
+                    current_workspace,
+                    managed_followups,
+                    guidance: vec![
+                        "Use `homeboy bench <component>` to run benchmarks on the default Lab runner."
+                            .to_string(),
+                        "Use the `managed_followups` commands when a Lab run needs runner diagnostics, environment inspection, workspace materialization, or managed execution.".to_string(),
+                        "Use `homeboy config set /lab/preferred_runner '\"<runner-id>\"'` to set the default Lab runner.".to_string(),
+                        "Use `homeboy config set /bench/local_execution '\"denied\"'` to make local benchmark execution fail closed.".to_string(),
+                        "Use `--runner <runner-id>` only when multiple Lab runners are available and no default should be inferred.".to_string(),
+                    ],
+                }),
+                0,
+            ));
+        }
         LabCommand::Bench { args } => {
+            let managed_followups =
+                lab_followups(preferred_runner.as_deref(), current_workspace.as_deref());
             let mut bench_command = "homeboy bench".to_string();
             if !args.is_empty() {
                 bench_command.push(' ');
@@ -105,6 +153,7 @@ pub fn run(args: LabArgs, _global: &GlobalArgs) -> CmdResult<LabCommandOutput> {
                 LabCommandOutput::Status(LabOutput {
                     command: "lab.bench",
                     preferred_runner,
+                    selected_runner: None,
                     config_key: "/lab/preferred_runner",
                     config_path,
                     current_workspace,
@@ -128,26 +177,30 @@ pub fn run(args: LabArgs, _global: &GlobalArgs) -> CmdResult<LabCommandOutput> {
             return sync_lab_extension(runner, &source, &id, &revision, !no_replace);
         }
     };
+}
 
-    Ok((
-        LabCommandOutput::Status(LabOutput {
-            command,
-            preferred_runner,
-            config_key: "/lab/preferred_runner",
-            config_path,
-            current_workspace,
-            managed_followups,
-            guidance: vec![
-                "Use `homeboy bench <component>` to run benchmarks on the default Lab runner."
-                    .to_string(),
-                "Use the `managed_followups` commands when a Lab run needs runner diagnostics, environment inspection, workspace materialization, or managed execution.".to_string(),
-                "Use `homeboy config set /lab/preferred_runner '\"<runner-id>\"'` to set the default Lab runner.".to_string(),
-                "Use `homeboy config set /bench/local_execution '\"denied\"'` to make local benchmark execution fail closed.".to_string(),
-                "Use `--runner <runner-id>` only when multiple Lab runners are available and no default should be inferred.".to_string(),
-            ],
-        }),
-        0,
-    ))
+fn selected_lab_runner_status(
+    runner_id: Option<&str>,
+) -> homeboy::core::Result<Option<LabSelectedRunnerOutput>> {
+    let Some(runner_id) = runner_id else {
+        return Ok(None);
+    };
+    let runner_config = runner::load(runner_id)?;
+    let status = runner::status(runner_id)?;
+    Ok(Some(LabSelectedRunnerOutput {
+        runner_id: runner_id.to_string(),
+        kind: format!("{:?}", runner_config.kind).to_ascii_lowercase(),
+        configured_executable: runner_config
+            .settings
+            .homeboy_path
+            .clone()
+            .unwrap_or_else(|| "homeboy".to_string()),
+        daemon_enabled: runner_config.settings.daemon,
+        workspace_root: runner_config.workspace_root.clone(),
+        readiness_state: format!("{:?}", status.state).to_ascii_lowercase(),
+        connected: status.connected,
+        status,
+    }))
 }
 
 fn sync_lab_extension(
@@ -178,8 +231,14 @@ fn sync_lab_extension(
         .homeboy_path
         .clone()
         .unwrap_or_else(|| "homeboy".to_string());
-    let install_command =
-        runner_extension_install_command(&homeboy_path, source, extension_id, revision, replace);
+    let materialized_source = materialize_lab_extension_source(&runner_id, source)?;
+    let install_command = runner_extension_install_command(
+        &homeboy_path,
+        &materialized_source.runner_source,
+        extension_id,
+        revision,
+        replace,
+    );
     let (execution, exit_code) = runner::exec(
         &runner_id,
         RunnerExecOptions {
@@ -190,7 +249,7 @@ fn sync_lab_extension(
             env: runner_config.env.clone(),
             capture_patch: false,
             raw_exec: false,
-            source_snapshot: None,
+            source_snapshot: materialized_source.source_snapshot.clone(),
             capability_preflight: Some(homeboy::core::runners::RunnerCapabilityPreflight {
                 command: "homeboy lab extension-sync".to_string(),
                 required_tools: vec![RunnerRequiredTool::Homeboy],
@@ -215,6 +274,10 @@ fn sync_lab_extension(
         }
     }
 
+    if let Some(err) = runner_exec_failure_error(&execution) {
+        return Err(err);
+    }
+
     Ok((
         LabCommandOutput::ExtensionSync(LabExtensionSyncOutput {
             command: "lab.extension_sync",
@@ -222,6 +285,8 @@ fn sync_lab_extension(
             runner_homeboy_path: homeboy_path,
             extension_id: extension_id.to_string(),
             source: source.to_string(),
+            runner_source: (materialized_source.runner_source != source)
+                .then_some(materialized_source.runner_source),
             source_revision: revision.to_string(),
             replace,
             install_command,
@@ -229,6 +294,61 @@ fn sync_lab_extension(
         }),
         exit_code,
     ))
+}
+
+struct MaterializedLabExtensionSource {
+    runner_source: String,
+    source_snapshot: Option<SourceSnapshot>,
+}
+
+fn materialize_lab_extension_source(
+    runner_id: &str,
+    source: &str,
+) -> homeboy::core::Result<MaterializedLabExtensionSource> {
+    let Some(local_source) = controller_local_source_path(source) else {
+        return Ok(MaterializedLabExtensionSource {
+            runner_source: source.to_string(),
+            source_snapshot: None,
+        });
+    };
+
+    let (synced, _) = runner::sync_workspace(
+        runner_id,
+        RunnerWorkspaceSyncOptions {
+            path: local_source.display().to_string(),
+            mode: RunnerWorkspaceSyncMode::Snapshot,
+            controller_routed_git: false,
+            changed_since_base: None,
+            git_fetch_refs: Vec::new(),
+            snapshot_includes: Vec::new(),
+            allow_dirty_lab_workspace: false,
+        },
+    )?;
+
+    Ok(MaterializedLabExtensionSource {
+        source_snapshot: Some(SourceSnapshot::collect_local(
+            runner_id,
+            Path::new(&synced.local_path),
+            Some(&synced.remote_path),
+            "lab_extension_sync",
+        )),
+        runner_source: synced.remote_path,
+    })
+}
+
+fn controller_local_source_path(source: &str) -> Option<PathBuf> {
+    if looks_like_remote_source(source) {
+        return None;
+    }
+
+    let expanded = shellexpand::tilde(source).to_string();
+    let path = Path::new(&expanded);
+    path.is_dir().then(|| path.canonicalize().ok()).flatten()
+}
+
+fn looks_like_remote_source(source: &str) -> bool {
+    let lower = source.to_ascii_lowercase();
+    lower.contains("://") || lower.starts_with("git@") || lower.starts_with("ssh://")
 }
 
 fn runner_extension_install_command(
@@ -363,9 +483,10 @@ fn shell_arg(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        installed_extension_source_revision, lab_followups, revision_matches,
-        runner_extension_install_command,
+        controller_local_source_path, installed_extension_source_revision, lab_followups,
+        revision_matches, runner_extension_install_command,
     };
+    use std::fs;
 
     #[test]
     fn lab_extension_sync_command_replaces_by_default() {
@@ -432,6 +553,18 @@ mod tests {
     }
 
     #[test]
+    fn lab_extension_sync_detects_controller_local_source_directories() {
+        let tempdir = tempfile::tempdir().expect("creates temp extension source");
+        fs::write(tempdir.path().join("homeboy-extension.json"), "{}").expect("writes marker");
+        let expected = tempdir.path().canonicalize().expect("canonical tempdir");
+
+        assert_eq!(
+            controller_local_source_path(tempdir.path().to_str().unwrap()).as_deref(),
+            Some(expected.as_path())
+        );
+    }
+
+    #[test]
     fn lab_extension_sync_reads_installed_revision_after_setup_logs() {
         let stdout = r#"Setting up WordPress extension...
 Installing npm dependencies...
@@ -448,6 +581,21 @@ Installing npm dependencies...
         assert_eq!(
             installed_extension_source_revision(stdout).as_deref(),
             Some("941bf8cf")
+        );
+    }
+
+    #[test]
+    fn lab_extension_sync_leaves_urls_and_runner_local_paths_unmaterialized() {
+        assert!(controller_local_source_path(
+            "https://github.com/Extra-Chill/homeboy-extensions.git"
+        )
+        .is_none());
+        assert!(
+            controller_local_source_path("git@github.com:Extra-Chill/homeboy-extensions.git")
+                .is_none()
+        );
+        assert!(
+            controller_local_source_path("/runner/only/homeboy-extensions/wordpress").is_none()
         );
     }
 

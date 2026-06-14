@@ -5,7 +5,9 @@
 //!
 //! - `offload` — request execution + runner-selection orchestration
 //!   (`execute_lab_offload`, `LabOffloadRequest`, fallback policy, workspace
-//!   sync mode decisions, trace target git-fetch refs).
+//!   sync mode decisions).
+//! - `trace_fetch_refs` — trace compare target materialization refs for git
+//!   workspace sync.
 //! - `agent_task_bridge` — inline AgentTask plan remapping and run-plan
 //!   lifecycle mirroring.
 //! - `secrets` — command-specific secret env hydration (agent-task vs trace).
@@ -22,6 +24,7 @@ mod args_util;
 mod evidence;
 mod offload;
 mod secrets;
+mod trace_fetch_refs;
 
 pub use super::lab_selection::LabRunnerSelectionSource;
 pub use offload::{

@@ -168,6 +168,7 @@ pub fn finalize_set_spec(
 pub(crate) mod adapter;
 pub mod agent_task;
 pub(crate) mod agent_task_dispatch;
+pub(crate) mod agent_task_summary;
 pub mod api;
 pub mod audit;
 pub mod audit_baseline;
