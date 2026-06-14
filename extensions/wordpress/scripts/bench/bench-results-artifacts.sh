@@ -233,8 +233,8 @@ homeboy_wordpress_bench_summary_filter() {
 				artifacts: $replayArtifacts
 			},
 			dependencies: {
-				prepared: ($root.prepared_dependencies // []),
-				build_failures: ($root.dependency_build_failures // []),
+				prepared: ($root.metadata.prepared_dependencies // $root.prepared_dependencies // []),
+				build_failures: ($root.metadata.dependency_build_failures // $root.dependency_build_failures // []),
 				provenance_artifact: (if $dependencyProvenanceFile == "" then null else $dependencyProvenanceFile end)
 			},
 			artifacts: {
