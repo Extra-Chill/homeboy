@@ -29,6 +29,13 @@ cat > "$RESULTS_FILE" <<'JSON'
 {
   "component_id": "wp-rl-fixture",
   "iterations": 1,
+  "prepared_dependencies": [
+    {
+      "slug": "wp-codebox-fixture",
+      "source": "/tmp/wp-codebox-fixture",
+      "state": "prepared"
+    }
+  ],
   "scenarios": [
     {
       "id": "__bootstrap",
@@ -79,7 +86,8 @@ cat > "$RESULTS_FILE" <<'JSON'
               "value": { "source": "public-artifact-url" },
               "encoding": "url"
             }
-          }
+          },
+          "status": "partial"
         },
         "runtime_url": { "path": "https://example.test", "kind": "url" }
       }
@@ -128,6 +136,7 @@ homeboy_wordpress_emit_bench_results_artifacts "$RESULTS_FILE"
 JSONL_FILE="${TMP_ROOT}/results.jsonl"
 LEADERBOARD_FILE="${TMP_ROOT}/leaderboard.md"
 SERIES_FILE="${TMP_ROOT}/series.json"
+SUMMARY_FILE="${TMP_ROOT}/bench-summary.json"
 WEBPERF_SUMMARY_JSON_FILE="${TMP_ROOT}/webperf-evidence-summary.json"
 WEBPERF_SUMMARY_MARKDOWN_FILE="${TMP_ROOT}/webperf-evidence-summary.md"
 PUBLIC_ROOT="${TMP_ROOT}/public"
@@ -143,6 +152,10 @@ if [ ! -s "$LEADERBOARD_FILE" ]; then
 fi
 if [ ! -s "$SERIES_FILE" ]; then
     echo "ERROR: missing series.json artifact" >&2
+    exit 1
+fi
+if [ ! -s "$SUMMARY_FILE" ]; then
+    echo "ERROR: missing bench-summary.json artifact" >&2
     exit 1
 fi
 if [ ! -s "$WEBPERF_SUMMARY_JSON_FILE" ] || [ ! -s "$WEBPERF_SUMMARY_MARKDOWN_FILE" ]; then
@@ -199,6 +212,20 @@ artifact_path=$(jq -r '.series[] | select(.scenario_id == "block-markup/query-00
 if [ "$series_schema" != "homeboy/wordpress-bench-step-series/v1" ] || [ "$series_count" -ne 2 ] || [ "$request_success" != "true" ] || [ "$option_failure" != "transient grew past budget" ] || [ "$artifact_path" != "artifacts/query-series.json" ]; then
     echo "ERROR: series.json did not preserve normalized step-series rows and artifact refs" >&2
     cat "$SERIES_FILE" >&2
+    exit 1
+fi
+
+summary_schema=$(jq -r '.schema' "$SUMMARY_FILE")
+summary_verdict=$(jq -r '.verdict' "$SUMMARY_FILE")
+summary_rate=$(jq -r '.score.rate' "$SUMMARY_FILE")
+summary_replay_status=$(jq -r '.replayability.status' "$SUMMARY_FILE")
+summary_replay_artifact=$(jq -r '.replayability.artifacts[] | select(.name == "blueprint.after") | .path' "$SUMMARY_FILE")
+summary_dependency_slug=$(jq -r '.dependencies.prepared[0].slug' "$SUMMARY_FILE")
+summary_artifact_command=$(jq -r '.next_steps.artifact_fetch_command' "$SUMMARY_FILE")
+
+if [ "$summary_schema" != "homeboy/wordpress-bench-summary/v1" ] || [ "$summary_verdict" != "fail" ] || [ "$summary_rate" != "0.5" ] || [ "$summary_replay_status" != "partial" ] || [ "$summary_replay_artifact" != "artifacts/blueprint.after.json" ] || [ "$summary_dependency_slug" != "wp-codebox-fixture" ] || [ "$summary_artifact_command" != "null" ]; then
+    echo "ERROR: bench-summary.json did not capture canonical result state" >&2
+    cat "$SUMMARY_FILE" >&2
     exit 1
 fi
 

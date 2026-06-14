@@ -185,7 +185,7 @@ HOMEBOY_BENCH_ITERATIONS=1 \
 HOMEBOY_BENCH_WARMUP_ITERATIONS=0 \
 bash "$SCRIPT_DIR/bench-runner-wp-codebox.sh" >/dev/null
 
-jq -e --arg sourceRoot "$SOURCE_ROOT" '
+if ! jq -e --arg sourceRoot "$SOURCE_ROOT" '
     .recipe.inputs.extraPlugins == []
     and (.recipe.inputs.mounts[] | select(.source == $sourceRoot and .target == "/wordpress/wp-content/plugins/wp-site-generator" and .mode == "readonly"))
     and (.recipe.inputs.mounts[] | select(.source | endswith("/rig-workloads/rig-workload.php")) | .target == "/wordpress/wp-content/plugins/wp-site-generator/.homeboy/bench-rig/rig-workload.php")
@@ -195,7 +195,11 @@ jq -e --arg sourceRoot "$SOURCE_ROOT" '
     and (.recipe.workflow.steps[0].args[] | select(startswith("bootstrap-files-json=") and contains("bootstrap.php")))
     and (.recipe.workflow.steps[0].args[] | select(startswith("workloads-json=") and contains("static-site-importer import-theme")))
     and (.recipe.workflow.steps[0].args[] | select(startswith("workloads-json=") and contains("manifest-navigation") and contains("scenario-manifest")))
-' "$CAPTURE_FILE" >/dev/null
+' "$CAPTURE_FILE" >/dev/null; then
+    echo "ERROR: generated WP Codebox recipe did not include expected static-source bench inputs" >&2
+    cat "$CAPTURE_FILE" >&2
+    exit 1
+fi
 
 SELECTED_CAPTURE_FILE="${TMP_ROOT}/selected-extra-workload-capture.json"
 HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$RESOLVE_HELPER" \
@@ -394,5 +398,41 @@ jq -e --arg pluginRoot "$PLUGIN_ROOT" --arg dependencyRoot "${DEPENDENCY_ROOT}/p
         {source: $dependencyRoot, slug: "wp-codebox", pluginFile: "wp-codebox/wp-codebox.php", activate: false}
     ]
 ' "$DEPENDENCY_CAPTURE_FILE" >/dev/null
+
+DEPENDENCY_PROVENANCE_FILE="${TMP_ROOT}/dependency-artifacts/bench-dependency-provenance.json"
+if [ ! -s "$DEPENDENCY_PROVENANCE_FILE" ]; then
+    echo "ERROR: missing bench dependency provenance artifact" >&2
+    exit 1
+fi
+jq -e --arg dependencyRoot "${DEPENDENCY_ROOT}/packages/wordpress-plugin" '
+    .schema == "homeboy/wordpress-bench-dependency-provenance/v1"
+    and (.dependency_slugs == ["wp-codebox"])
+    and (.plugin_inputs[] | select(.source == $dependencyRoot and .slug == "wp-codebox" and .pluginFile == "wp-codebox/wp-codebox.php"))
+    and (.settings.has_bench_env == true)
+' "$DEPENDENCY_PROVENANCE_FILE" >/dev/null
+
+INVALID_SETTINGS_OUTPUT="${TMP_ROOT}/invalid-settings-output.txt"
+INVALID_SETTINGS_JSON=$(jq -nc '{bench_env: ["HOMEBOY_FIXTURE_ENV=yes"]}')
+set +e
+HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$RESOLVE_HELPER" \
+HOMEBOY_RUNTIME_BENCH_HELPER_SH="$BENCH_HELPER" \
+HOMEBOY_WORDPRESS_DEPENDENCY_HELPER="$DEPENDENCY_HELPER" \
+HOMEBOY_SMOKE_SOURCE_ROOT="$PLUGIN_ROOT" \
+HOMEBOY_SETTINGS_JSON="$INVALID_SETTINGS_JSON" \
+HOMEBOY_WP_CODEBOX_BIN="$WP_CODEBOX_BIN" \
+HOMEBOY_WP_CODEBOX_CORE_MODULE="$WP_CODEBOX_CORE_MODULE" \
+HOMEBOY_BENCH_RESULTS_FILE="${TMP_ROOT}/invalid-settings-results.json" \
+HOMEBOY_WP_CODEBOX_ARTIFACTS_DIR="${TMP_ROOT}/invalid-settings-artifacts" \
+HOMEBOY_RUNTIME_FAILURE_TRAP="" \
+HOMEBOY_BENCH_ITERATIONS=1 \
+HOMEBOY_BENCH_WARMUP_ITERATIONS=0 \
+bash "$SCRIPT_DIR/bench-runner-wp-codebox.sh" >"$INVALID_SETTINGS_OUTPUT" 2>&1
+invalid_settings_status=$?
+set -e
+if [ "$invalid_settings_status" -eq 0 ] || ! grep -q 'bench_env must be a JSON object' "$INVALID_SETTINGS_OUTPUT"; then
+    echo "ERROR: invalid bench_env settings shape was not rejected with an actionable error" >&2
+    cat "$INVALID_SETTINGS_OUTPUT" >&2
+    exit 1
+fi
 
 echo "WP Codebox static-source bench smoke passed"

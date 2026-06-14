@@ -61,6 +61,45 @@ WP_CODEBOX_BIN="$(homeboy_wp_codebox_resolve_bin "${HOMEBOY_SETTINGS_JSON:-}")" 
 settings_json="${HOMEBOY_SETTINGS_JSON:-}"
 [ -n "$settings_json" ] || settings_json="{}"
 
+homeboy_wp_codebox_validate_bench_settings() {
+    local invalid_type
+
+    if ! printf '%s' "$settings_json" | jq -e 'type == "object"' >/dev/null 2>&1; then
+        echo "Error: HOMEBOY_SETTINGS_JSON for wordpress.bench must be a JSON object." >&2
+        FAILED_STEP="WP Codebox bench settings validation"
+        exit 1
+    fi
+
+    invalid_type=$(jq -nr --argjson settings "$settings_json" '
+        [
+            ["bench_env", "object"],
+            ["wp_config_defines", "object"],
+            ["wp_codebox_blueprint", "object"],
+            ["playground_blueprint", "object"],
+            ["wp_codebox_workloads", "array"],
+            ["playground_workloads", "array"],
+            ["wp_codebox_file_mounts", "array"],
+            ["playground_file_mounts", "array"],
+            ["wp_codebox_extra_plugins", "array"],
+            ["validation_dependencies", "array"],
+            ["wp_codebox_prepare_steps", "array"],
+            ["wp_codebox_bootstrap_steps", "array"],
+            ["wp_codebox_scenario_manifests", "array"],
+            ["scenario_manifests", "array"]
+        ]
+        | map(select(($settings[.[0]] // null) != null and (($settings[.[0]] | type) != .[1])))
+        | first
+        | if . == null then "" else .[0] + " must be a JSON " + .[1] end
+    ' 2>/dev/null || true)
+    if [ -n "$invalid_type" ]; then
+        echo "Error: $invalid_type." >&2
+        FAILED_STEP="WP Codebox bench settings validation"
+        exit 1
+    fi
+}
+
+homeboy_wp_codebox_validate_bench_settings
+
 WP_CODEBOX_CORE_MODULE="${HOMEBOY_WP_CODEBOX_CORE_MODULE:-}"
 if [ -z "$WP_CODEBOX_CORE_MODULE" ] && [ "$settings_json" != "{}" ]; then
     WP_CODEBOX_CORE_MODULE=$(printf '%s' "$settings_json" | jq -r '.wp_codebox_core_module // empty' 2>/dev/null || true)
@@ -1068,7 +1107,45 @@ homeboy_wp_codebox_emit_memory_fatal_diagnostic() {
     echo "  Raw output: $output_artifact" >&2
 }
 
+homeboy_wp_codebox_emit_dependency_provenance() {
+    local provenance_file="${ARTIFACTS_DIR%/}/bench-dependency-provenance.json"
+    local declared_dependency_paths_json
+
+    declared_dependency_paths_json=$(printf '%s\n' "$DEPENDENCY_PATHS" | jq -R -s 'split("\n") | map(select(. != ""))')
+
+    jq -n \
+        --arg schema "homeboy/wordpress-bench-dependency-provenance/v1" \
+        --arg component "$COMPONENT_ID" \
+        --arg pluginSlug "$PLUGIN_SLUG" \
+        --arg wpCodeboxBin "$WP_CODEBOX_RESOLVED_BIN" \
+        --arg artifactsDir "$ARTIFACTS_DIR" \
+        --argjson declaredDependencyPaths "$declared_dependency_paths_json" \
+        --argjson dependencySlugs "$(printf '%s\n' "$DEPENDENCY_SLUGS_CSV" | jq -R 'split(",") | map(select(. != ""))')" \
+        --argjson extraPlugins "$EXTRA_PLUGINS_JSON" \
+        --argjson mounts "$MOUNTS_JSON" \
+        --argjson settings "$settings_json" \
+        '{
+            schema: $schema,
+            component_id: $component,
+            plugin_slug: $pluginSlug,
+            wp_codebox_bin: $wpCodeboxBin,
+            artifacts_dir: $artifactsDir,
+            dependency_slugs: $dependencySlugs,
+            declared_dependency_paths: $declaredDependencyPaths,
+            plugin_inputs: ($extraPlugins | map({slug, pluginFile, source, activate})),
+            mounts: ($mounts | map({target, mode, source})),
+            settings: {
+                keys: ($settings | keys | sort),
+                has_bench_env: (($settings.bench_env // null) != null),
+                has_wp_config_defines: (($settings.wp_config_defines // null) != null),
+                has_configured_workloads: ((($settings.wp_codebox_workloads // $settings.playground_workloads // []) | length) > 0),
+                has_scenario_manifests: ((($settings.wp_codebox_scenario_manifests // $settings.scenario_manifests // []) | length) > 0)
+            }
+        }' > "$provenance_file"
+}
+
 RECIPE_FILE=$(mktemp "${ARTIFACTS_DIR}/homeboy-wp-codebox-bench-recipe.XXXXXX")
+homeboy_wp_codebox_emit_dependency_provenance
 jq -n \
     --arg wpCodeboxBin "$WP_CODEBOX_RESOLVED_BIN" \
     --arg wp "$WP_CODEBOX_WORDPRESS_VERSION" \
