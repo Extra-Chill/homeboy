@@ -7,7 +7,7 @@ use crate::core::paths;
 use crate::core::server;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub mod component;
 pub mod files;
@@ -34,10 +34,11 @@ pub use pins::{
 pub use readiness::calculate_deploy_readiness;
 pub use report::{
     build_components_output, build_create_output, build_delete_output, build_init_output,
-    build_list_output, build_pin_output, build_remove_output, build_rename_output,
-    build_set_output, build_show_output, build_status_output, list_report, show_report,
-    status_report, ProjectComponentVersion, ProjectListItem, ProjectListReport, ProjectReportExtra,
-    ProjectReportOutput, ProjectShowReport, ProjectStatusReport,
+    build_list_output, build_path_resolution_output, build_pin_output, build_remove_output,
+    build_rename_output, build_set_output, build_show_output, build_status_output, list_report,
+    show_report, status_report, ProjectComponentVersion, ProjectListItem, ProjectListReport,
+    ProjectPathResolutionReport, ProjectReportExtra, ProjectReportOutput, ProjectShowReport,
+    ProjectStatusReport,
 };
 pub use status::{collect_status, ProjectComponentStatus, ProjectStatusSnapshot};
 pub use types::*;
@@ -198,6 +199,61 @@ pub fn init_project_dir(id: &str) -> Result<PathBuf> {
 /// Get the project directory path for a given project ID.
 pub fn project_dir_path(id: &str) -> Result<PathBuf> {
     paths::project_dir(id)
+}
+
+pub fn resolve_path(path: &Path) -> Result<ProjectPathResolutionReport> {
+    let requested_path = expand_path(path);
+    let requested_canonical = canonical_or_original(&requested_path);
+    let projects = list()?;
+
+    let mut matches = Vec::new();
+    for project in projects {
+        let Some(base_path) = project.base_path.as_deref() else {
+            continue;
+        };
+        let base = expand_path(Path::new(base_path));
+        let base_canonical = canonical_or_original(&base);
+
+        if requested_canonical == base_canonical || requested_canonical.starts_with(&base_canonical)
+        {
+            matches.push((project, base_canonical));
+        }
+    }
+
+    matches.sort_by(|(_, a), (_, b)| b.to_string_lossy().len().cmp(&a.to_string_lossy().len()));
+
+    let (project, matched_base_path) = matches.into_iter().next().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "path",
+            format!(
+                "No configured Homeboy project base_path contains {}",
+                requested_path.display()
+            ),
+            Some(requested_path.display().to_string()),
+            Some(vec![
+                "List configured projects with: homeboy project list".to_string(),
+                "Set a project base path with: homeboy project set <project> --json '{\"base_path\":\"/path/to/site\"}'".to_string(),
+            ]),
+        )
+    })?;
+
+    Ok(ProjectPathResolutionReport {
+        requested_path: requested_path.display().to_string(),
+        resolved_path: requested_canonical.display().to_string(),
+        project_id: project.id,
+        project_domain: project.domain,
+        base_path: matched_base_path.display().to_string(),
+    })
+}
+
+fn expand_path(path: &Path) -> PathBuf {
+    let raw = path.to_string_lossy();
+    let expanded = shellexpand::tilde(&raw);
+    PathBuf::from(expanded.as_ref())
+}
+
+fn canonical_or_original(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 pub fn pin(project_id: &str, pin_type: PinType, path: &str, options: PinOptions) -> Result<()> {
