@@ -49,14 +49,21 @@ passes the runner-side `_lab_workspaces/...` path to `homeboy extension install`
 URL sources and paths that do not exist on the controller are forwarded as-is,
 which preserves runner-local source paths.
 
+When runner-backed Lab commands fail, Homeboy promotes runner-side Homeboy JSON
+errors from stdout, stderr, or job event messages into the top-level command
+error. The promoted error includes the runner id, job id, remote cwd, command,
+exit code, parsed `runner_error`, and the full runner execution payload for deep
+debugging.
+
 ## Commands
 
 - `status`: Show configured Lab runners and benchmark routing guidance.
 - `bench`: Run a benchmark through the standard benchmark pipeline with Lab
   routing intent.
 - `extension-sync`: Install or replace a Lab runner extension from a source and
-  ref, returning the runner id, runner `homeboy_path`, install command, and
-  remote execution output.
+  ref. Successful output returns the runner id, runner `homeboy_path`, install
+  command, and remote execution output; failures surface the runner-side root
+  cause in the top-level error.
 
 ## Related
 

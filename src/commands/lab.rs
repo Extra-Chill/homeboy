@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 
 use super::{CmdResult, GlobalArgs};
 use homeboy::core::runners::{
-    self as runner, RunnerExecOptions, RunnerExecOutput, RunnerRequiredTool,
-    RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
+    self as runner, runner_exec_failure_error, RunnerExecOptions, RunnerExecOutput,
+    RunnerRequiredTool, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
 };
 use homeboy::core::source_snapshot::SourceSnapshot;
 use homeboy::core::Error;
@@ -212,6 +212,10 @@ fn sync_lab_extension(
             require_paths: Vec::new(),
         },
     )?;
+
+    if let Some(err) = runner_exec_failure_error(&execution) {
+        return Err(err);
+    }
 
     Ok((
         LabCommandOutput::ExtensionSync(LabExtensionSyncOutput {

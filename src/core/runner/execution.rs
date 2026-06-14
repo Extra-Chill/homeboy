@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 use crate::core::api_jobs::{Job, JobEvent, JobStatus, RemoteRunnerJobRequest};
 use crate::core::engine::command::CommandCaptureMetadata;
 use crate::core::engine::shell;
-use crate::core::error::{Error, Result};
+use crate::core::error::{Error, ErrorCode, Result};
 use crate::core::server::{self, SshClient};
 use crate::core::source_snapshot::SourceSnapshot;
 
@@ -220,6 +220,59 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
             ]),
         )),
     }
+}
+
+pub fn runner_exec_failure_error(output: &RunnerExecOutput) -> Option<Error> {
+    if output.exit_code == 0 {
+        return None;
+    }
+
+    let runner_error = find_runner_homeboy_error(output);
+    let runner_code = runner_error
+        .as_ref()
+        .and_then(|error| error.get("code"))
+        .and_then(Value::as_str);
+    let runner_message = runner_error
+        .as_ref()
+        .and_then(|error| error.get("message"))
+        .and_then(Value::as_str);
+    let cause = runner_message
+        .or(runner_code)
+        .or_else(|| first_non_empty_line(&output.stderr))
+        .or_else(|| first_non_empty_line(&output.stdout))
+        .unwrap_or("runner command exited non-zero")
+        .to_string();
+    let execution = serde_json::to_value(output).unwrap_or(Value::Null);
+    let command = output.argv.join(" ");
+    let mut details = json!({
+        "runner_id": output.runner_id,
+        "job_id": output.job_id,
+        "remote_cwd": output.remote_cwd,
+        "command": output.argv,
+        "exit_code": output.exit_code,
+        "execution": execution,
+    });
+    if let Some(runner_error) = runner_error {
+        details["runner_error"] = runner_error;
+    }
+
+    Some(
+        Error::new(
+            ErrorCode::RemoteCommandFailed,
+            format!(
+                "Runner command failed on `{}` with exit code {}: {}",
+                output.runner_id, output.exit_code, cause
+            ),
+            details,
+        )
+        .with_hint(format!(
+            "Runner `{}` executed `{}` from `{}`.", output.runner_id, command, output.remote_cwd
+        ))
+        .with_hint(
+            "Homeboy parsed runner-side JSON errors from stdout, stderr, and job event messages when present; inspect error.details.execution for the full job evidence."
+                .to_string(),
+        ),
+    )
 }
 
 fn exec_via_reverse_broker(
@@ -1122,6 +1175,67 @@ fn string_field(value: &Value, key: &str) -> String {
         .to_string()
 }
 
+fn first_non_empty_line(value: &str) -> Option<&str> {
+    value.lines().map(str::trim).find(|line| !line.is_empty())
+}
+
+fn find_runner_homeboy_error(output: &RunnerExecOutput) -> Option<Value> {
+    find_homeboy_error_in_text(&output.stdout)
+        .or_else(|| find_homeboy_error_in_text(&output.stderr))
+        .or_else(|| {
+            output.job_events.as_ref().and_then(|events| {
+                events.iter().find_map(|event| {
+                    event
+                        .message
+                        .as_deref()
+                        .and_then(find_homeboy_error_in_text)
+                        .or_else(|| event.data.as_ref().and_then(homeboy_error_from_envelope))
+                })
+            })
+        })
+}
+
+fn find_homeboy_error_in_text(text: &str) -> Option<Value> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    parse_homeboy_error_json(trimmed)
+        .or_else(|| {
+            trimmed
+                .lines()
+                .find_map(|line| parse_homeboy_error_json(line.trim()))
+        })
+        .or_else(|| {
+            let start = trimmed.find('{')?;
+            let end = trimmed.rfind('}')?;
+            if end <= start {
+                return None;
+            }
+            parse_homeboy_error_json(&trimmed[start..=end])
+        })
+}
+
+fn parse_homeboy_error_json(candidate: &str) -> Option<Value> {
+    serde_json::from_str::<Value>(candidate)
+        .ok()
+        .and_then(|value| homeboy_error_from_envelope(&value))
+}
+
+fn homeboy_error_from_envelope(value: &Value) -> Option<Value> {
+    if value.get("success").and_then(Value::as_bool) != Some(false) {
+        return None;
+    }
+    let error = value.get("error")?;
+    if error.is_null() {
+        return None;
+    }
+    if error.is_object() {
+        return Some(error.clone());
+    }
+    Some(json!({ "message": error }))
+}
+
 fn daemon_failure_message(status_code: u16, envelope: &DaemonEnvelope) -> String {
     let payload = envelope
         .error
@@ -1163,6 +1277,85 @@ mod tests {
             resources: Default::default(),
             policy: RunnerPolicy::default(),
         }
+    }
+
+    fn failed_runner_exec_output(stdout: &str, stderr: &str) -> RunnerExecOutput {
+        RunnerExecOutput {
+            command: "runner.exec",
+            runner_id: "lab".to_string(),
+            mode: RunnerExecMode::Daemon,
+            argv: vec![
+                "homeboy".to_string(),
+                "extension".to_string(),
+                "install".to_string(),
+            ],
+            remote_cwd: "/srv/homeboy/project".to_string(),
+            exit_code: 2,
+            stdout: stdout.to_string(),
+            stderr: stderr.to_string(),
+            source_snapshot: None,
+            job: None,
+            job_id: Some("job-123".to_string()),
+            job_events: None,
+            mirror_run_id: None,
+            patch: None,
+            metrics: None,
+            capture: None,
+            diagnostics: None,
+        }
+    }
+
+    #[test]
+    fn runner_exec_failure_error_promotes_homeboy_stdout_error() {
+        let output = failed_runner_exec_output(
+            r#"{"success":false,"error":{"code":"validation.invalid_argument","message":"Invalid argument 'source': Path does not exist: /Users/chubes/Developer/homeboy-extensions/wordpress","details":{"field":"source"}}}"#,
+            "",
+        );
+
+        let err = runner_exec_failure_error(&output).expect("runner failure error");
+
+        assert_eq!(err.code, ErrorCode::RemoteCommandFailed);
+        assert!(err.message.contains("Path does not exist"));
+        assert_eq!(
+            err.details["runner_error"]["code"].as_str(),
+            Some("validation.invalid_argument")
+        );
+        assert_eq!(err.details["runner_id"].as_str(), Some("lab"));
+        assert_eq!(err.details["job_id"].as_str(), Some("job-123"));
+        assert_eq!(
+            err.details["remote_cwd"].as_str(),
+            Some("/srv/homeboy/project")
+        );
+        assert_eq!(err.details["exit_code"].as_i64(), Some(2));
+        assert_eq!(
+            err.details["execution"]["stdout"].as_str(),
+            Some(output.stdout.as_str())
+        );
+    }
+
+    #[test]
+    fn runner_exec_failure_error_promotes_homeboy_job_event_message_error() {
+        let mut output = failed_runner_exec_output("", "generic stderr");
+        output.job_events = Some(vec![crate::core::api_jobs::JobEvent {
+            sequence: 1,
+            job_id: uuid::Uuid::new_v4(),
+            kind: crate::core::api_jobs::JobEventKind::Error,
+            timestamp_ms: 1,
+            message: Some(
+                r#"runner emitted: {"success":false,"error":{"code":"extension.not_found","message":"Extension not found: wordpress"}}"#
+                    .to_string(),
+            ),
+            data: None,
+        }]);
+
+        let err = runner_exec_failure_error(&output).expect("runner failure error");
+
+        assert!(err.message.contains("Extension not found: wordpress"));
+        assert_eq!(
+            err.details["runner_error"]["code"].as_str(),
+            Some("extension.not_found")
+        );
+        assert!(err.details["execution"]["job_events"].is_array());
     }
 
     fn policy_request(options: &RunnerExecOptions) -> RunnerPolicyRequest<'_> {
