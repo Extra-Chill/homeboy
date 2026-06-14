@@ -548,6 +548,7 @@ fn materialize_runner_source_path(runner: &Runner, source_path: &Path) -> Result
             changed_since_base: None,
             git_fetch_refs: Vec::new(),
             snapshot_includes: Vec::new(),
+            allow_dirty_lab_workspace: false,
         },
     )?;
 

@@ -42,6 +42,10 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub allow_local_fallback: bool,
 
+    /// Permit Lab git workspace materialization to overwrite a dirty runner-side checkout.
+    #[arg(long, global = true)]
+    pub allow_dirty_lab_workspace: bool,
+
     #[command(subcommand)]
     pub command: Commands,
 }
@@ -312,6 +316,21 @@ mod tests {
 
         assert!(surface.contains_path(&["self"]));
         assert!(!surface.contains_path(&["self", "missing"]));
+    }
+
+    #[test]
+    fn allow_dirty_lab_workspace_global_flag_parses() {
+        let cli = Cli::try_parse_from([
+            "homeboy",
+            "trace",
+            "--runner",
+            "homeboy-lab",
+            "--allow-dirty-lab-workspace",
+        ])
+        .expect("global dirty Lab workspace override should parse");
+
+        assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
+        assert!(cli.allow_dirty_lab_workspace);
     }
 
     #[test]

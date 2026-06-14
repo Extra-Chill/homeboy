@@ -70,6 +70,7 @@ pub(super) fn sync_extra_lab_workspaces(
                 changed_since_base: None,
                 git_fetch_refs: Vec::new(),
                 snapshot_includes: extra.snapshot_includes.clone(),
+                allow_dirty_lab_workspace: false,
             },
         )?
         .0;

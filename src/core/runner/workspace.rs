@@ -66,6 +66,7 @@ pub struct RunnerWorkspaceSyncOptions {
     pub changed_since_base: Option<String>,
     pub git_fetch_refs: Vec<String>,
     pub snapshot_includes: Vec<String>,
+    pub allow_dirty_lab_workspace: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -80,6 +81,7 @@ pub struct RunnerWorkspaceSyncOutput {
     pub bytes: u64,
     pub excludes: Vec<String>,
     pub includes: Vec<String>,
+    pub workspace_cleanliness: String,
 }
 
 pub fn sync_workspace(
@@ -144,6 +146,7 @@ pub fn sync_workspace(
                     bytes: stats.bytes,
                     excludes,
                     includes,
+                    workspace_cleanliness: "snapshot_unique_workspace".to_string(),
                 },
                 0,
             ))
@@ -170,6 +173,7 @@ pub fn sync_workspace(
                     &git.remote_url,
                     git.changed_since_base.as_deref(),
                     &git.git_fetch_refs,
+                    options.allow_dirty_lab_workspace,
                 )?;
             } else {
                 if runner.kind != RunnerKind::Local {
@@ -185,6 +189,7 @@ pub fn sync_workspace(
                     &git.head,
                     git.changed_since_base.as_deref(),
                     &git.git_fetch_refs,
+                    options.allow_dirty_lab_workspace,
                 )?;
             }
             super::validation_dependencies::sync_validation_dependency_workspaces(
@@ -205,6 +210,11 @@ pub fn sync_workspace(
                     bytes: 0,
                     excludes,
                     includes,
+                    workspace_cleanliness: if options.allow_dirty_lab_workspace {
+                        "dirty_remote_overwrite_allowed".to_string()
+                    } else {
+                        "clean_remote_required".to_string()
+                    },
                 },
                 0,
             ))
@@ -604,6 +614,7 @@ fn materialize_git(
     head: &str,
     changed_since_base: Option<&str>,
     git_fetch_refs: &[String],
+    allow_dirty_lab_workspace: bool,
 ) -> Result<()> {
     let command = materialize_git_command(
         remote_path,
@@ -611,6 +622,7 @@ fn materialize_git(
         head,
         changed_since_base,
         git_fetch_refs,
+        allow_dirty_lab_workspace,
     );
     match runner.kind {
         RunnerKind::Local => run_shell_command(&command, "materialize local git workspace"),
@@ -645,6 +657,7 @@ fn materialize_git_from_controller_bundle(
     remote_url: &str,
     changed_since_base: Option<&str>,
     git_fetch_refs: &[String],
+    allow_dirty_lab_workspace: bool,
 ) -> Result<()> {
     let bundle_dir = tempfile::tempdir().map_err(|err| {
         Error::internal_io(
@@ -681,7 +694,13 @@ fn materialize_git_from_controller_bundle(
         )));
     }
 
-    let install_command = git_bundle_install_command(remote_path, head, branch, remote_url);
+    let install_command = git_bundle_install_command(
+        remote_path,
+        head,
+        branch,
+        remote_url,
+        allow_dirty_lab_workspace,
+    );
     let result = match runner.kind {
         RunnerKind::Local => materialize_git_bundle_piped(
             &bundle_path,
@@ -734,6 +753,7 @@ fn git_bundle_install_command(
     head: &str,
     branch: Option<&str>,
     remote_url: &str,
+    allow_dirty_lab_workspace: bool,
 ) -> String {
     let parent = parent_remote_path(remote_path);
     let checkout = if let Some(branch) = branch {
@@ -749,13 +769,15 @@ fn git_bundle_install_command(
         )
     };
 
+    let dirty_guard = dirty_lab_workspace_guard("$dest", allow_dirty_lab_workspace);
     format!(
-        "parent={parent}; dest={dest}; tmp=\"${{dest}}.tmp.$$\"; bundle=\"${{dest}}.bundle.$$\"; {owner_capture}; mkdir -p \"$parent\" && trap 'rm -rf \"$tmp\" \"$bundle\"' EXIT; rm -rf \"$tmp\" \"$bundle\" && cat > \"$bundle\" && git clone \"$bundle\" \"$tmp\" && git -C \"$tmp\" remote set-url origin {remote_url} && {checkout} && git -C \"$tmp\" reset --hard {head} && git -C \"$tmp\" clean -ffdqx && rm -rf \"$dest\" && mv \"$tmp\" \"$dest\" && {owner_restore}",
+        "parent={parent}; dest={dest}; tmp=\"${{dest}}.tmp.$$\"; bundle=\"${{dest}}.bundle.$$\"; {owner_capture}; mkdir -p \"$parent\" && trap 'rm -rf \"$tmp\" \"$bundle\"' EXIT; rm -rf \"$tmp\" \"$bundle\" && cat > \"$bundle\" && git clone \"$bundle\" \"$tmp\" && git -C \"$tmp\" remote set-url origin {remote_url} && {checkout} && git -C \"$tmp\" reset --hard {head} && git -C \"$tmp\" clean -ffdqx && {dirty_guard} && rm -rf \"$dest\" && mv \"$tmp\" \"$dest\" && {owner_restore}",
         parent = shell::quote_arg(parent.as_str()),
         dest = shell::quote_arg(remote_path),
         remote_url = shell::quote_arg(remote_url),
         checkout = checkout,
         head = shell::quote_arg(head),
+        dirty_guard = dirty_guard,
         owner_capture = owner_capture_shell("$parent"),
         owner_restore = owner_restore_shell("$parent", "$dest"),
     )
@@ -767,6 +789,7 @@ fn materialize_git_command(
     head: &str,
     changed_since_base: Option<&str>,
     git_fetch_refs: &[String],
+    allow_dirty_lab_workspace: bool,
 ) -> String {
     let parent = parent_remote_path(remote_path);
     let dest = shell::quote_arg(remote_path);
@@ -789,17 +812,34 @@ fn materialize_git_command(
         })
         .collect::<String>();
 
+    let dirty_guard = dirty_lab_workspace_guard("$dest", allow_dirty_lab_workspace);
+
     format!(
-        "parent={parent}; dest={dest}; {owner_capture}; mkdir -p \"$parent\" && if [ -d \"$dest\"/.git ]; then git -C \"$dest\" reset --hard && git -C \"$dest\" clean -ffdqx && git -C \"$dest\" fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'; else rm -rf \"$dest\" && git clone {url} \"$dest\" && git -C \"$dest\" fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'; fi{fetch_changed_since}{fetch_extra_refs} && git -C \"$dest\" checkout --detach {head} && git -C \"$dest\" reset --hard {head} && git -C \"$dest\" clean -ffdqx && {owner_restore}",
+        "parent={parent}; dest={dest}; {owner_capture}; mkdir -p \"$parent\" && if [ -d \"$dest\"/.git ]; then {dirty_guard} && git -C \"$dest\" reset --hard && git -C \"$dest\" clean -ffdqx && git -C \"$dest\" fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'; else rm -rf \"$dest\" && git clone {url} \"$dest\" && git -C \"$dest\" fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'; fi{fetch_changed_since}{fetch_extra_refs} && git -C \"$dest\" checkout --detach {head} && git -C \"$dest\" reset --hard {head} && git -C \"$dest\" clean -ffdqx && {owner_restore}",
         parent = shell::quote_arg(parent.as_str()),
         dest = dest,
         url = shell::quote_arg(remote_url),
         head = shell::quote_arg(head),
         fetch_changed_since = fetch_changed_since,
         fetch_extra_refs = fetch_extra_refs,
+        dirty_guard = dirty_guard,
         owner_capture = owner_capture_shell("$parent"),
         owner_restore = owner_restore_shell("$parent", "$dest"),
     )
+}
+
+fn dirty_lab_workspace_guard(dest: &str, allow_dirty_lab_workspace: bool) -> String {
+    if allow_dirty_lab_workspace {
+        format!(
+            "dirty=$(git -C {dest} status --porcelain=v1 2>/dev/null || true); if [ -n \"$dirty\" ]; then printf '%s\\n' 'Homeboy Lab warning: --allow-dirty-lab-workspace is overwriting uncommitted runner workspace changes.' >&2; printf '%s\\n' \"$dirty\" >&2; fi",
+            dest = dest,
+        )
+    } else {
+        format!(
+            "dirty=$(git -C {dest} status --porcelain=v1 2>/dev/null || true); if [ -n \"$dirty\" ]; then printf '%s\\n' 'Homeboy Lab refused to overwrite a dirty runner workspace.' >&2; printf '%s\\n' \"$dirty\" >&2; printf '%s\\n' 'Commit, stash, clean, or remove the runner workspace before retrying. Pass --allow-dirty-lab-workspace only for noisy investigation that may discard runner-side changes.' >&2; exit 97; fi",
+            dest = dest,
+        )
+    }
 }
 
 fn owner_capture_shell(reference: &str) -> String {
@@ -1005,6 +1045,7 @@ mod tests {
                     changed_since_base: None,
                     git_fetch_refs: Vec::new(),
                     snapshot_includes: Vec::new(),
+                    allow_dirty_lab_workspace: false,
                 },
             )
             .expect("sync workspace");
@@ -1050,6 +1091,7 @@ mod tests {
                     changed_since_base: None,
                     git_fetch_refs: Vec::new(),
                     snapshot_includes: Vec::new(),
+                    allow_dirty_lab_workspace: false,
                 },
             )
             .expect("sync workspace");
@@ -1117,6 +1159,7 @@ mod tests {
                     changed_since_base: None,
                     git_fetch_refs: Vec::new(),
                     snapshot_includes: Vec::new(),
+                    allow_dirty_lab_workspace: false,
                 },
             )
             .expect("sync workspace");
@@ -1187,6 +1230,7 @@ mod tests {
                     changed_since_base: None,
                     git_fetch_refs: Vec::new(),
                     snapshot_includes: Vec::new(),
+                    allow_dirty_lab_workspace: false,
                 },
             )
             .expect("sync workspace");
@@ -1245,6 +1289,7 @@ mod tests {
                     changed_since_base: None,
                     git_fetch_refs: Vec::new(),
                     snapshot_includes: Vec::new(),
+                    allow_dirty_lab_workspace: false,
                 },
             )
             .expect("sync workspace");
@@ -1329,6 +1374,7 @@ mod tests {
                     changed_since_base: None,
                     git_fetch_refs: Vec::new(),
                     snapshot_includes: Vec::new(),
+                    allow_dirty_lab_workspace: false,
                 },
             )
             .expect("sync workspace");
@@ -1387,6 +1433,7 @@ mod tests {
                 changed_since_base: None,
                 git_fetch_refs: Vec::new(),
                 snapshot_includes: Vec::new(),
+                allow_dirty_lab_workspace: false,
             };
             let (first, _) = sync_workspace("lab-local", options.clone()).expect("first sync");
             let remote_path = Path::new(&first.remote_path);
@@ -1412,6 +1459,7 @@ mod tests {
             "abc123",
             Some("def456"),
             &[],
+            false,
         );
 
         assert!(command.contains("fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'"));
@@ -1430,6 +1478,7 @@ mod tests {
             "abc123",
             None,
             &[],
+            false,
         );
 
         assert!(command.contains("owner_path=$parent"));
@@ -1460,10 +1509,45 @@ mod tests {
             "abc123",
             None,
             &["refs/pull/5530/head".to_string()],
+            false,
         );
 
         assert!(command.contains("fetch origin refs/pull/5530/head"));
         assert!(command.contains("checkout --detach abc123"));
+    }
+
+    #[test]
+    fn git_materialization_refuses_dirty_remote_workspace_by_default() {
+        let command = materialize_git_command(
+            "/srv/homeboy/_lab_workspaces/homeboy-abc",
+            "https://github.com/Extra-Chill/homeboy.git",
+            "abc123",
+            None,
+            &[],
+            false,
+        );
+
+        assert!(command.contains("Homeboy Lab refused to overwrite a dirty runner workspace"));
+        assert!(command.contains("exit 97"));
+        assert!(command.contains("Pass --allow-dirty-lab-workspace"));
+        assert!(command.contains("git -C \"$dest\" reset --hard"));
+    }
+
+    #[test]
+    fn git_materialization_override_is_noisy_but_allows_reset() {
+        let command = materialize_git_command(
+            "/srv/homeboy/_lab_workspaces/homeboy-abc",
+            "https://github.com/Extra-Chill/homeboy.git",
+            "abc123",
+            None,
+            &[],
+            true,
+        );
+
+        assert!(command.contains("Homeboy Lab warning: --allow-dirty-lab-workspace"));
+        assert!(!command.contains("Homeboy Lab refused"));
+        assert!(!command.contains("exit 97"));
+        assert!(command.contains("git -C \"$dest\" reset --hard"));
     }
 
     #[test]
