@@ -210,18 +210,30 @@ where
                     .as_str()
                     .unwrap_or("unknown")
                     .to_string();
-                let exit_code = if matches!(final_status.as_str(), "review_ready" | "no_changes") {
-                    0
-                } else {
-                    1
-                };
+                let exit_code = if final_status == "review_ready" { 0 } else { 1 };
+                let stop_reason = (final_status == "no_changes").then(|| {
+                    "cook completed provider execution and gates, but finalization found no changed files; task likely still requires review or retry".to_string()
+                });
                 return Ok(loop_report(
                     loop_id,
                     &final_status,
                     attempts,
                     Some(finalization),
-                    None,
+                    stop_reason,
                     exit_code,
+                ));
+            }
+            AgentTaskCookLoopStatus::NoChanges => {
+                return Ok(loop_report(
+                    loop_id,
+                    "no_changes",
+                    attempts,
+                    None,
+                    Some(
+                        "cook completed provider execution but produced no changed files; task likely still requires review or retry"
+                            .to_string(),
+                    ),
+                    1,
                 ));
             }
             AgentTaskCookLoopStatus::RetryRequested => {
