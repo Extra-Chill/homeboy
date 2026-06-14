@@ -4,7 +4,10 @@ use serde::Serialize;
 use homeboy::core::component;
 use homeboy::core::release::version::{read_component_version, read_version, VersionTargetInfo};
 
-use super::CmdResult;
+use super::{adapter, CmdResult};
+use crate::command_contract::{
+    CommandJsonFamily, CommandOutputContractKind, CommandOutputFileMode,
+};
 
 #[derive(Serialize)]
 #[serde(untagged)]
@@ -51,6 +54,21 @@ pub struct VersionShowOutput {
 pub fn run(args: VersionArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<VersionOutput> {
     let VersionCommand::Show { component_id, path } = args.command;
     show(VersionShowArgs { component_id, path })
+}
+
+pub(crate) fn adapter(
+    output_file_mode: CommandOutputFileMode,
+) -> adapter::TypedCommandAdapter<VersionArgs> {
+    adapter::TypedCommandAdapter::json_only(
+        CommandJsonFamily::Workspace,
+        output_file_mode,
+        CommandOutputContractKind::JsonEnvelope,
+        run_json,
+    )
+}
+
+fn run_json(args: VersionArgs, global: &crate::commands::GlobalArgs) -> adapter::JsonCommandRun {
+    crate::commands::utils::response::map_cmd_result_to_json(run(args, global))
 }
 
 fn show(args: VersionShowArgs) -> CmdResult<VersionOutput> {

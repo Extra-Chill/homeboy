@@ -384,9 +384,9 @@ The structured context currently has this substrate-agnostic shape:
 ```json
 {
   "id": "inv-0123456789",
-  "state_dir": "/tmp/hb/0123456789",
-  "artifact_dir": "/tmp/hb/0123456789.a",
-  "tmp_dir": "/tmp/hb/0123456789.t",
+  "state_dir": "/tmp/hb-501/0123456789",
+  "artifact_dir": "/tmp/hb-501/0123456789.a",
+  "tmp_dir": "/tmp/hb-501/0123456789.t",
   "port_range": { "base": 20000, "max": 20007 },
   "named_leases": ["playground-browser-profile"]
 }
@@ -421,8 +421,9 @@ own the path-length budget at that point.
 
 - `HOMEBOY_INVOCATION_RUNTIME_DIR` env override (tests and unusual host
   configurations).
-- `/tmp/hb` on every Unix host when `/tmp` is a writable directory. macOS
-  apps that respect `$TMPDIR` get per-user isolation under
+- `/tmp/hb-<uid>` on every Unix host when `/tmp` is a writable directory. The
+  UID suffix keeps root and unprivileged invocations from colliding on one
+  runtime root. macOS apps that respect `$TMPDIR` get per-user isolation under
   `/var/folders/<14>/T/...` (~50 bytes), which leaves no realistic
   `sockaddr_un` budget. Anchoring to `/tmp` saves ~35 bytes of headroom and
   is writable on every standard macOS / Linux configuration.

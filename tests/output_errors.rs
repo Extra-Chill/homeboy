@@ -115,6 +115,35 @@ fn output_equals_json_is_rejected_as_format_footgun() {
 }
 
 #[test]
+fn command_owned_output_path_is_not_rejected_as_global_format() {
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    let output = Command::new(homeboy_bin())
+        .args([
+            "runs",
+            "artifact",
+            "get",
+            "missing-run",
+            "missing-artifact",
+            "--output",
+            "json",
+        ])
+        .current_dir(dir.path())
+        .env("HOME", dir.path())
+        .output()
+        .expect("run homeboy");
+
+    assert!(!output.status.success());
+
+    let stdout_json: Value = serde_json::from_slice(&output.stdout).expect("stdout json");
+    let message = stdout_json["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        !message.contains("looks like an output format"),
+        "command-owned --output should not be validated as the global envelope path: {message}"
+    );
+}
+
+#[test]
 fn explicit_json_path_is_allowed() {
     let dir = tempfile::tempdir().expect("tempdir");
     register_local_runner(dir.path());

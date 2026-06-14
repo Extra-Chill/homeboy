@@ -12,6 +12,7 @@ use homeboy::test_support::with_isolated_home;
 
 use super::bundle::{RunsExportArgs, RunsImportArgs};
 use super::{bundle::import_runs, drift, query, RunsOutput};
+use serde_json::Value;
 
 /// Restore `XDG_DATA_HOME` for the test scope so the observation store
 /// resolves under the temporary home created by `with_isolated_home`.
