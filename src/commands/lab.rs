@@ -50,7 +50,18 @@ pub struct LabOutput {
     preferred_runner: Option<String>,
     config_key: &'static str,
     config_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    current_workspace: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    managed_followups: Vec<LabFollowup>,
     guidance: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct LabFollowup {
+    label: &'static str,
+    command: String,
+    purpose: &'static str,
 }
 
 #[derive(Serialize)]
@@ -76,6 +87,11 @@ pub struct LabExtensionSyncOutput {
 pub fn run(args: LabArgs, _global: &GlobalArgs) -> CmdResult<LabCommandOutput> {
     let preferred_runner = homeboy::core::runners::resolve_default_lab_runner()?;
     let config_path = homeboy::core::defaults::config_path()?;
+    let current_workspace = std::env::current_dir()
+        .ok()
+        .map(|path| path.display().to_string());
+    let managed_followups =
+        lab_followups(preferred_runner.as_deref(), current_workspace.as_deref());
     let command = match args.command.unwrap_or(LabCommand::Status) {
         LabCommand::Status => "lab.status",
         LabCommand::Bench { args } => {
@@ -90,6 +106,8 @@ pub fn run(args: LabArgs, _global: &GlobalArgs) -> CmdResult<LabCommandOutput> {
                     preferred_runner,
                     config_key: "/lab/preferred_runner",
                     config_path,
+                    current_workspace,
+                    managed_followups,
                     guidance: vec![
                         bench_command,
                         "Homeboy auto-routes portable benchmarks to `lab.preferred_runner`, or to the only configured SSH Lab runner when there is exactly one.".to_string(),
@@ -116,8 +134,12 @@ pub fn run(args: LabArgs, _global: &GlobalArgs) -> CmdResult<LabCommandOutput> {
             preferred_runner,
             config_key: "/lab/preferred_runner",
             config_path,
+            current_workspace,
+            managed_followups,
             guidance: vec![
-                "Use `homeboy bench <component>` to run benchmarks on the default Lab runner.".to_string(),
+                "Use `homeboy bench <component>` to run benchmarks on the default Lab runner."
+                    .to_string(),
+                "Use the `managed_followups` commands when a Lab run needs runner diagnostics, environment inspection, workspace materialization, or managed execution.".to_string(),
                 "Use `homeboy config set /lab/preferred_runner '\"<runner-id>\"'` to set the default Lab runner.".to_string(),
                 "Use `homeboy config set /bench/local_execution '\"denied\"'` to make local benchmark execution fail closed.".to_string(),
                 "Use `--runner <runner-id>` only when multiple Lab runners are available and no default should be inferred.".to_string(),
@@ -219,9 +241,56 @@ fn runner_extension_install_command(
     command
 }
 
+fn lab_followups(runner_id: Option<&str>, current_workspace: Option<&str>) -> Vec<LabFollowup> {
+    let Some(runner_id) = runner_id else {
+        return Vec::new();
+    };
+    let runner_arg = shell_arg(runner_id);
+    let mut followups = vec![
+        LabFollowup {
+            label: "doctor",
+            command: format!("homeboy runner doctor {runner_arg}"),
+            purpose: "Probe runner tools, workspace writability, artifact storage, and browser readiness without raw SSH.",
+        },
+        LabFollowup {
+            label: "env",
+            command: format!("homeboy runner env {runner_arg}"),
+            purpose: "Show the redacted environment Homeboy injects into runner jobs.",
+        },
+        LabFollowup {
+            label: "exec",
+            command: format!("homeboy runner exec {runner_arg} -- <command>"),
+            purpose: "Run a managed follow-up command through Homeboy instead of opening an ad-hoc shell.",
+        },
+    ];
+
+    if let Some(path) = current_workspace {
+        followups.push(LabFollowup {
+            label: "workspace_sync",
+            command: format!(
+                "homeboy runner workspace sync {runner_arg} --path {} --mode snapshot",
+                shell_arg(path)
+            ),
+            purpose: "Materialize the current checkout into the Lab runner workspace before a replay or follow-up run.",
+        });
+    }
+
+    followups
+}
+
+fn shell_arg(value: &str) -> String {
+    if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | ':' | '='))
+    {
+        return value.to_string();
+    }
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::runner_extension_install_command;
+    use super::{lab_followups, runner_extension_install_command};
 
     #[test]
     fn lab_extension_sync_command_replaces_by_default() {
@@ -268,5 +337,23 @@ mod tests {
                 "main",
             ]
         );
+    }
+
+    #[test]
+    fn lab_followups_name_managed_runner_commands() {
+        let followups = lab_followups(Some("homeboy-lab"), Some("/tmp/example workspace"));
+        let commands: Vec<_> = followups.iter().map(|step| step.command.as_str()).collect();
+
+        assert!(commands.contains(&"homeboy runner doctor homeboy-lab"));
+        assert!(commands.contains(&"homeboy runner env homeboy-lab"));
+        assert!(commands.contains(&"homeboy runner exec homeboy-lab -- <command>"));
+        assert!(commands.contains(
+            &"homeboy runner workspace sync homeboy-lab --path '/tmp/example workspace' --mode snapshot"
+        ));
+    }
+
+    #[test]
+    fn lab_followups_are_empty_without_a_selected_runner() {
+        assert!(lab_followups(None, Some("/tmp/workspace")).is_empty());
     }
 }
