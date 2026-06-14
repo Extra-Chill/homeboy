@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use super::{CmdResult, GlobalArgs};
 use homeboy::core::runners::{
     self as runner, runner_exec_failure_error, RunnerExecOptions, RunnerExecOutput,
-    RunnerRequiredTool, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
+    RunnerRequiredTool, RunnerStatusReport, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
 };
 use homeboy::core::source_snapshot::SourceSnapshot;
 use homeboy::core::Error;
@@ -19,7 +19,11 @@ pub struct LabArgs {
 #[derive(Subcommand)]
 enum LabCommand {
     /// Show Lab routing status and benchmark commands
-    Status,
+    Status {
+        /// Runner ID to inspect. Defaults to lab.preferred_runner or inferred default Lab runner.
+        #[arg(long)]
+        runner: Option<String>,
+    },
     /// Print the runner-backed benchmark command for the provided bench args
     Bench {
         /// Arguments to pass after `homeboy bench`
@@ -51,6 +55,8 @@ pub struct LabOutput {
     command: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     preferred_runner: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    selected_runner: Option<LabSelectedRunnerOutput>,
     config_key: &'static str,
     config_path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -65,6 +71,19 @@ pub struct LabFollowup {
     label: &'static str,
     command: String,
     purpose: &'static str,
+}
+
+#[derive(Serialize)]
+pub struct LabSelectedRunnerOutput {
+    runner_id: String,
+    kind: String,
+    configured_executable: String,
+    daemon_enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workspace_root: Option<String>,
+    readiness_state: String,
+    connected: bool,
+    status: RunnerStatusReport,
 }
 
 #[derive(Serialize)]
@@ -95,11 +114,35 @@ pub fn run(args: LabArgs, _global: &GlobalArgs) -> CmdResult<LabCommandOutput> {
     let current_workspace = std::env::current_dir()
         .ok()
         .map(|path| path.display().to_string());
-    let managed_followups =
-        lab_followups(preferred_runner.as_deref(), current_workspace.as_deref());
-    let command = match args.command.unwrap_or(LabCommand::Status) {
-        LabCommand::Status => "lab.status",
+    match args.command.unwrap_or(LabCommand::Status { runner: None }) {
+        LabCommand::Status { runner } => {
+            let selected_runner = selected_lab_runner_status(runner.as_deref())?;
+            let followup_runner = runner.as_deref().or(preferred_runner.as_deref());
+            let managed_followups = lab_followups(followup_runner, current_workspace.as_deref());
+            return Ok((
+                LabCommandOutput::Status(LabOutput {
+                    command: "lab.status",
+                    preferred_runner,
+                    selected_runner,
+                    config_key: "/lab/preferred_runner",
+                    config_path,
+                    current_workspace,
+                    managed_followups,
+                    guidance: vec![
+                        "Use `homeboy bench <component>` to run benchmarks on the default Lab runner."
+                            .to_string(),
+                        "Use the `managed_followups` commands when a Lab run needs runner diagnostics, environment inspection, workspace materialization, or managed execution.".to_string(),
+                        "Use `homeboy config set /lab/preferred_runner '\"<runner-id>\"'` to set the default Lab runner.".to_string(),
+                        "Use `homeboy config set /bench/local_execution '\"denied\"'` to make local benchmark execution fail closed.".to_string(),
+                        "Use `--runner <runner-id>` only when multiple Lab runners are available and no default should be inferred.".to_string(),
+                    ],
+                }),
+                0,
+            ));
+        }
         LabCommand::Bench { args } => {
+            let managed_followups =
+                lab_followups(preferred_runner.as_deref(), current_workspace.as_deref());
             let mut bench_command = "homeboy bench".to_string();
             if !args.is_empty() {
                 bench_command.push(' ');
@@ -109,6 +152,7 @@ pub fn run(args: LabArgs, _global: &GlobalArgs) -> CmdResult<LabCommandOutput> {
                 LabCommandOutput::Status(LabOutput {
                     command: "lab.bench",
                     preferred_runner,
+                    selected_runner: None,
                     config_key: "/lab/preferred_runner",
                     config_path,
                     current_workspace,
@@ -132,26 +176,30 @@ pub fn run(args: LabArgs, _global: &GlobalArgs) -> CmdResult<LabCommandOutput> {
             return sync_lab_extension(runner, &source, &id, &revision, !no_replace);
         }
     };
+}
 
-    Ok((
-        LabCommandOutput::Status(LabOutput {
-            command,
-            preferred_runner,
-            config_key: "/lab/preferred_runner",
-            config_path,
-            current_workspace,
-            managed_followups,
-            guidance: vec![
-                "Use `homeboy bench <component>` to run benchmarks on the default Lab runner."
-                    .to_string(),
-                "Use the `managed_followups` commands when a Lab run needs runner diagnostics, environment inspection, workspace materialization, or managed execution.".to_string(),
-                "Use `homeboy config set /lab/preferred_runner '\"<runner-id>\"'` to set the default Lab runner.".to_string(),
-                "Use `homeboy config set /bench/local_execution '\"denied\"'` to make local benchmark execution fail closed.".to_string(),
-                "Use `--runner <runner-id>` only when multiple Lab runners are available and no default should be inferred.".to_string(),
-            ],
-        }),
-        0,
-    ))
+fn selected_lab_runner_status(
+    runner_id: Option<&str>,
+) -> homeboy::core::Result<Option<LabSelectedRunnerOutput>> {
+    let Some(runner_id) = runner_id else {
+        return Ok(None);
+    };
+    let runner_config = runner::load(runner_id)?;
+    let status = runner::status(runner_id)?;
+    Ok(Some(LabSelectedRunnerOutput {
+        runner_id: runner_id.to_string(),
+        kind: format!("{:?}", runner_config.kind).to_ascii_lowercase(),
+        configured_executable: runner_config
+            .settings
+            .homeboy_path
+            .clone()
+            .unwrap_or_else(|| "homeboy".to_string()),
+        daemon_enabled: runner_config.settings.daemon,
+        workspace_root: runner_config.workspace_root.clone(),
+        readiness_state: format!("{:?}", status.state).to_ascii_lowercase(),
+        connected: status.connected,
+        status,
+    }))
 }
 
 fn sync_lab_extension(
