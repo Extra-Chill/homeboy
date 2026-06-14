@@ -356,6 +356,7 @@ pub struct ReleaseDeploymentResult {
 #[derive(Debug, Clone, Serialize)]
 pub struct ReleaseCommandResult {
     pub component_id: String,
+    pub status: String,
     pub bump_type: String,
     pub dry_run: bool,
     pub releasable_commits: usize,
@@ -371,6 +372,8 @@ pub struct ReleaseCommandResult {
     pub run: Option<ReleaseRun>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deployment: Option<ReleaseDeploymentResult>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub release_summary: Vec<String>,
 }
 
 /// Result of a batch release across multiple components.
