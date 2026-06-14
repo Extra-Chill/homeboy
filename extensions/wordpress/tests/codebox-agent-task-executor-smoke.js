@@ -350,6 +350,15 @@ const runtimeTaskRequest = codeboxTaskRequestFromAgentTaskRequest({
         version: 1,
         tools: [{ id: 'homeboy-canary/write-file', allowed: true }],
       },
+      agent_bundles: [{ source: '/workspace/bundles/canary-agent', slug: 'canary-agent' }],
+      structured_artifacts: [{
+        schema: 'wp-codebox/structured-artifact/v1',
+        name: 'concept_packet',
+        type: 'ConceptPacket',
+        payload: { title: 'Canary concept' },
+        metadata: {},
+        provenance: { source: 'test' },
+      }],
     },
   },
   inputs: {
@@ -362,6 +371,8 @@ const runtimeTaskRequest = codeboxTaskRequestFromAgentTaskRequest({
 });
 assert.equal(runtimeTaskRequest.sandbox_tool_policy.tools[0].id, 'homeboy-canary/write-file');
 assert.equal(runtimeTaskRequest.runtime_task.ability, 'homeboy-canary/write-file');
+assert.deepEqual(runtimeTaskRequest.agent_bundles, [{ source: '/workspace/bundles/canary-agent', slug: 'canary-agent' }]);
+assert.equal(runtimeTaskRequest.structured_artifacts[0].name, 'concept_packet');
 assert.equal(runtimeTaskRequest.workspaces[0].target, '/workspace/codebox-canary');
 
 const abilityBridgeRequest = codeboxTaskRequestFromAgentTaskRequest({
