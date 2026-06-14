@@ -5,7 +5,9 @@ use homeboy::core::component;
 use homeboy::core::release::version::{read_component_version, read_version, VersionTargetInfo};
 
 use super::{adapter, CmdResult};
-use crate::command_contract::{CommandJsonFamily, CommandOutputContractKind, CommandOutputFileMode};
+use crate::command_contract::{
+    CommandJsonFamily, CommandOutputContractKind, CommandOutputFileMode,
+};
 
 #[derive(Serialize)]
 #[serde(untagged)]
