@@ -184,11 +184,16 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
   const recipe = recipeConfigFromAgentTaskRequest(request, config, inputs);
   const mounts = agentBundleMounts(agentBundle, config.mounts || defaults.mounts || options.mounts || []);
   const components = runtimeComponentPaths(config, { ...defaults, ...options });
-  const runtimeTask = inputs.runtime_task || inputs.runtimeTask || config.runtime_task || config.runtimeTask || abilityRuntimeTaskFromAgentTaskRequest(config, inputs) || options.runtimeTask;
   const agentBundles = firstDefined(inputs.agent_bundles, inputs.agentBundles, config.agent_bundles, config.agentBundles, options.agentBundles, []);
   const structuredArtifacts = firstDefined(inputs.structured_artifacts, inputs.structuredArtifacts, config.structured_artifacts, config.structuredArtifacts, options.structuredArtifacts, []);
   const sandboxToolPolicy = firstDefined(inputs.sandbox_tool_policy, inputs.sandboxToolPolicy, config.sandbox_tool_policy, config.sandboxToolPolicy, options.sandboxToolPolicy, defaults.sandboxToolPolicy);
   const allowedTools = firstDefined(inputs.allowed_tools, inputs.allowedTools, config.allowed_tools, config.allowedTools, options.allowedTools, defaults.allowedTools);
+  const provider = config.provider || options.provider || defaults.provider || '';
+  const model = request.executor.model || config.model || options.model || defaults.model || '';
+  const runtimeTask = runtimeTaskWithExecutionDefaults(
+    inputs.runtime_task || inputs.runtimeTask || config.runtime_task || config.runtimeTask || abilityRuntimeTaskFromAgentTaskRequest(config, inputs) || options.runtimeTask,
+    { provider, model, agentBundles }
+  );
   const explicitSecretEnv = [
     ...normalizeArray(request.executor?.secret_env),
     ...normalizeArray(config.secret_env),
@@ -223,8 +228,8 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     session_id: config.session_id || config.sessionId || '',
     agent: config.agent || options.agent || 'wp-codebox-sandbox',
     mode: config.mode || options.mode || 'sandbox',
-    provider: config.provider || options.provider || defaults.provider || '',
-    model: request.executor.model || config.model || options.model || defaults.model || '',
+    provider,
+    model,
     provider_plugin_paths: config.provider_plugin_paths || options.providerPluginPaths || defaults.providerPluginPaths || [],
     agent_bundles: agentBundles,
     runtime_stack_mounts: config.runtime_stack_mounts || options.runtimeStackMounts || [],
@@ -270,6 +275,35 @@ function abilityRuntimeTaskFromAgentTaskRequest(config, inputs) {
   }
   const input = firstObject(inputs.ability_input, inputs.abilityInput, inputs.input, config.ability_input, config.abilityInput, config.input) || {};
   return { ability, input };
+}
+
+function runtimeTaskWithExecutionDefaults(runtimeTask, defaults = {}) {
+  if (!runtimeTask || typeof runtimeTask !== 'object' || Array.isArray(runtimeTask)) {
+    return runtimeTask;
+  }
+  if (!Array.isArray(defaults.agentBundles) || defaults.agentBundles.length === 0) {
+    return runtimeTask;
+  }
+
+  const input = runtimeTask.input && typeof runtimeTask.input === 'object' && !Array.isArray(runtimeTask.input)
+    ? runtimeTask.input
+    : {};
+  const defaultInput = Object.fromEntries(Object.entries({
+    provider: defaults.provider,
+    model: defaults.model,
+  }).filter(([, value]) => value !== '' && value !== undefined));
+
+  if (Object.keys(defaultInput).length === 0) {
+    return runtimeTask;
+  }
+
+  return {
+    ...runtimeTask,
+    input: {
+      ...defaultInput,
+      ...input,
+    },
+  };
 }
 
 function runtimeComponentPaths(config, options = {}) {
