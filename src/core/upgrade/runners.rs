@@ -348,13 +348,41 @@ fn upgrade_runner_with_executor(
         bare_homeboy_version = runner_bare_homeboy_version(runner, &homeboy_path, exec);
     }
     if path_drift.is_none() {
-        path_drift = runner_homeboy_path_alignment(
+        if let Some(alignment) = runner_homeboy_path_alignment(
             &runner.id,
             &homeboy_path,
             new_version.as_deref(),
             bare_homeboy_version.as_deref(),
-        )
-        .and_then(|alignment| alignment.drift);
+        ) {
+            path_drift = alignment.drift.clone();
+            if let Some(new_path) = alignment.update_to.as_deref() {
+                match update_homeboy_path(&runner.id, new_path) {
+                    Ok(()) => {
+                        homeboy_path = new_path.to_string();
+                        new_version = bare_homeboy_version.clone();
+                        path_drift = None;
+                        path_update_detail = Some(format!(
+                            "runner homeboy_path updated from `{}` to `{}` because bare `homeboy` reports {}",
+                            original_homeboy_path,
+                            new_path,
+                            bare_homeboy_version.as_deref().unwrap_or("an upgraded version")
+                        ));
+                    }
+                    Err(err) => {
+                        path_drift = Some(format!(
+                            "{}; automatic runner homeboy_path update failed: {}",
+                            alignment.drift.unwrap_or_else(|| {
+                                format!(
+                                    "configured runner executable `{}` is stale",
+                                    original_homeboy_path
+                                )
+                            }),
+                            err.message
+                        ));
+                    }
+                }
+            }
+        }
     }
     defer_extension_failures_for_path_drift(
         path_drift.as_deref(),
@@ -1635,6 +1663,62 @@ mod tests {
         );
         assert!(updated[0].detail.contains("bare `homeboy` reports 0.229.6"));
         assert!(!updated[0].detail.contains("0.228.22"));
+    }
+
+    #[test]
+    fn realigns_versioned_runner_homeboy_path_when_only_final_bare_probe_succeeds() {
+        let runner = ssh_runner("lab", Some("/home/chubes/.cargo/bin/homeboy-0.229.5"));
+        let mut commands = Vec::new();
+        let mut path_updates = Vec::new();
+
+        let (updated, skipped) = upgrade_runners_with_executor_source_materializer_and_path_updater(
+            &[runner],
+            false,
+            None,
+            None,
+            &[],
+            |runner_id, options| {
+                commands.push(options.command.clone());
+                let (stdout, stderr, exit_code) = match commands.len() {
+                    1 => ("homeboy 0.229.6\n", "", 0),
+                    2 => ("{\"success\":true}\n", "", 0),
+                    3 => ("homeboy 0.229.6\n", "", 0),
+                    4 => ("", "homeboy unavailable during remote upgrade\n", 1),
+                    5 => ("homeboy 0.229.7\n", "", 0),
+                    _ => ("", "", 0),
+                };
+                Ok((
+                    exec_output(runner_id, options.command, stdout, stderr, exit_code),
+                    exit_code,
+                ))
+            },
+            runner_status,
+            |_runner, _path| unreachable!("source materialization not used"),
+            |runner_id, homeboy_path| {
+                path_updates.push((runner_id.to_string(), homeboy_path.to_string()));
+                Ok(())
+            },
+        );
+
+        assert!(skipped.is_empty());
+        assert_eq!(updated.len(), 1);
+        assert!(updated[0].success);
+        assert!(updated[0].upgraded);
+        assert_eq!(updated[0].homeboy_path, "homeboy");
+        assert_eq!(updated[0].previous_version.as_deref(), Some("0.229.6"));
+        assert_eq!(updated[0].new_version.as_deref(), Some("0.229.7"));
+        assert_eq!(updated[0].bare_homeboy_version.as_deref(), Some("0.229.7"));
+        assert_eq!(updated[0].path_drift, None);
+        assert_eq!(
+            path_updates,
+            vec![("lab".to_string(), "homeboy".to_string())]
+        );
+        assert_eq!(commands[3], vec!["homeboy", "--version"]);
+        assert_eq!(commands[4], vec!["homeboy", "--version"]);
+        assert!(updated[0]
+            .detail
+            .contains("runner homeboy_path updated from `/home/chubes/.cargo/bin/homeboy-0.229.5` to `homeboy`"));
+        assert!(!updated[0].detail.contains("runner PATH drift detected"));
     }
 
     #[test]
