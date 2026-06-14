@@ -19,6 +19,11 @@ enum ProjectCommand {
         /// Project ID
         project_id: String,
     },
+    /// Resolve a filesystem path to its configured Homeboy project
+    ResolvePath {
+        /// Filesystem path inside a project base_path
+        path: String,
+    },
     /// Create a new project
     Create {
         /// JSON input spec for create/update (supports single or bulk)
@@ -210,6 +215,7 @@ pub fn run(args: ProjectArgs, _global: &crate::commands::GlobalArgs) -> CmdResul
     match args.command {
         ProjectCommand::List => list(),
         ProjectCommand::Show { project_id } => show(&project_id),
+        ProjectCommand::ResolvePath { path } => resolve_path(&path),
         ProjectCommand::Create {
             json,
             skip_existing,
@@ -283,6 +289,13 @@ fn list() -> CmdResult<ProjectOutput> {
 fn show(project_id: &str) -> CmdResult<ProjectOutput> {
     Ok((
         project::build_show_output(project::show_report(project_id)?),
+        0,
+    ))
+}
+
+fn resolve_path(path: &str) -> CmdResult<ProjectOutput> {
+    Ok((
+        project::build_path_resolution_output(project::resolve_path(Path::new(path))?),
         0,
     ))
 }

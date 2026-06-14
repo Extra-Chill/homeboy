@@ -6,7 +6,7 @@ use super::context::load_component;
 use super::types::{
     BatchReleaseComponentResult, BatchReleaseResult, BatchReleaseSummary, ReleaseBumpPolicyOptions,
     ReleaseCommandInput, ReleaseCommandResult, ReleaseOptions, ReleasePlan, ReleaseRun,
-    ReleaseStepStatus,
+    ReleaseRunResult, ReleaseStepResult, ReleaseStepStatus,
 };
 
 pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, i32)> {
@@ -150,6 +150,26 @@ pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, 
     };
 
     if options.dry_run {
+        let dry_run_preflight = run_dry_run_preflights(&input.component_id, &options)?;
+        if let Some(run) = dry_run_preflight {
+            let plan = super::plan(&input.component_id, &options).ok();
+            return Ok((
+                ReleaseCommandResult {
+                    component_id: input.component_id,
+                    bump_type,
+                    dry_run: true,
+                    releasable_commits: releasable_count,
+                    new_version: None,
+                    tag: None,
+                    skipped_reason: plan.as_ref().and_then(skipped_reason_from_plan),
+                    plan,
+                    run: Some(run),
+                    deployment: None,
+                },
+                1,
+            ));
+        }
+
         let plan = super::plan(&input.component_id, &options)?;
         let new_version = if input.pipeline.head {
             current_component_version(&component)?
@@ -240,6 +260,45 @@ pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, 
         },
         exit_code,
     ))
+}
+
+fn run_dry_run_preflights(
+    component_id: &str,
+    options: &ReleaseOptions,
+) -> Result<Option<ReleaseRun>> {
+    use std::collections::HashSet;
+
+    let preflight_plan = super::execution_plan::build_dry_run_preflight_plan(component_id, options);
+    let mut results = Vec::new();
+    let stopped = super::execution_plan::execute_plan_steps(
+        &preflight_plan.plan.steps,
+        component_id,
+        options,
+        &mut results,
+        &HashSet::new(),
+    )?;
+
+    if stopped || results.iter().any(step_failed) {
+        return Ok(Some(ReleaseRun {
+            component_id: component_id.to_string(),
+            enabled: true,
+            result: ReleaseRunResult {
+                steps: results,
+                status: ReleaseStepStatus::Failed,
+                warnings: Vec::new(),
+                summary: None,
+            },
+        }));
+    }
+
+    Ok(None)
+}
+
+fn step_failed(step: &ReleaseStepResult) -> bool {
+    matches!(
+        step.status,
+        ReleaseStepStatus::Failed | ReleaseStepStatus::Missing
+    )
 }
 
 fn dry_run_deployment_plan(

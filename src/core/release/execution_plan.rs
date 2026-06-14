@@ -25,6 +25,18 @@ pub(super) fn build_initial_preflight_plan(
     ReleasePlan::new(component_id, true, steps, None, Vec::new(), Vec::new())
 }
 
+pub(super) fn build_dry_run_preflight_plan(
+    component_id: &str,
+    options: &ReleaseOptions,
+) -> ReleasePlan {
+    let steps = build_preflight_steps(options, None, &[])
+        .into_iter()
+        .filter(|step| dry_run_executable_preflight_ids().contains(&step.id.as_str()))
+        .collect();
+
+    ReleasePlan::new(component_id, true, steps, None, Vec::new(), Vec::new())
+}
+
 pub(super) fn initial_executable_preflight_ids() -> &'static [&'static str] {
     &[
         "preflight.default_branch",
@@ -35,6 +47,10 @@ pub(super) fn initial_executable_preflight_ids() -> &'static [&'static str] {
         "preflight.test",
         "preflight.changelog_bootstrap",
     ]
+}
+
+fn dry_run_executable_preflight_ids() -> &'static [&'static str] {
+    &["preflight.default_branch", "preflight.working_tree"]
 }
 
 pub(super) fn execute_plan_steps(
@@ -159,7 +175,8 @@ fn read_current_release_notes(component: &Component) -> Result<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_initial_preflight_plan, execute_plan_steps, initial_executable_preflight_ids,
+        build_dry_run_preflight_plan, build_initial_preflight_plan, execute_plan_steps,
+        initial_executable_preflight_ids,
     };
     use crate::core::plan::PlanStepStatus;
     use crate::core::release::types::ReleaseOptions;
@@ -203,6 +220,27 @@ mod tests {
                 "preflight.test",
                 "preflight.changelog_bootstrap",
             ]
+        );
+    }
+
+    #[test]
+    fn test_build_dry_run_preflight_plan_only_includes_non_mutating_guards() {
+        let options = ReleaseOptions {
+            bump_type: "patch".to_string(),
+            ..Default::default()
+        };
+
+        let plan = build_dry_run_preflight_plan("fixture", &options);
+        let ids: Vec<&str> = plan
+            .plan
+            .steps
+            .iter()
+            .map(|step| step.id.as_str())
+            .collect();
+
+        assert_eq!(
+            ids,
+            vec!["preflight.default_branch", "preflight.working_tree"]
         );
     }
 

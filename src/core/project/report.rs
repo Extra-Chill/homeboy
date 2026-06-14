@@ -46,6 +46,16 @@ pub struct ProjectStatusReport {
     pub component_versions: Option<Vec<ProjectComponentVersion>>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ProjectPathResolutionReport {
+    pub requested_path: String,
+    pub resolved_path: String,
+    pub project_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_domain: Option<String>,
+    pub base_path: String,
+}
+
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct ProjectReportExtra {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -64,6 +74,8 @@ pub struct ProjectReportExtra {
     pub health: Option<crate::core::server::health::ServerHealth>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub component_versions: Option<Vec<ProjectComponentVersion>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path_resolution: Option<ProjectPathResolutionReport>,
 }
 
 pub type ProjectReportOutput = EntityCrudOutput<Project, ProjectReportExtra>;
@@ -297,6 +309,22 @@ pub fn build_status_output(project_id: &str, report: ProjectStatusReport) -> Pro
         extra: ProjectReportExtra {
             health: report.health,
             component_versions: report.component_versions,
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+pub fn build_path_resolution_output(report: ProjectPathResolutionReport) -> ProjectReportOutput {
+    ProjectReportOutput {
+        command: "project.resolve-path".to_string(),
+        id: Some(report.project_id.clone()),
+        hint: Some(format!(
+            "{} maps to project '{}'",
+            report.requested_path, report.project_id
+        )),
+        extra: ProjectReportExtra {
+            path_resolution: Some(report),
             ..Default::default()
         },
         ..Default::default()
