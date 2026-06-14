@@ -2,7 +2,8 @@ use std::sync::RwLock;
 
 use serde::{Deserialize, Serialize};
 
-use crate::cli_surface::{Commands, LabCommandPortability};
+use crate::cli_surface::Commands;
+use crate::command_contract::LabCommandPortability;
 
 use crate::commands::doctor::resources::{DoctorOutput, ResourceRecommendation};
 

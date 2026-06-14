@@ -1,6 +1,7 @@
 use serde_json::Value;
 
-use crate::cli_surface::{CommandJsonFamily, Commands};
+use crate::cli_surface::Commands;
+use crate::command_contract::CommandJsonFamily;
 
 use super::GlobalArgs;
 

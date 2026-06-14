@@ -388,6 +388,24 @@ fn enforce_path_budget_rejects_overlong_paths() {
 }
 
 #[test]
+fn invocation_dir_permission_error_names_runtime_root_and_remediation() {
+    let runtime_root = std::path::Path::new("/tmp/hb-owned-by-another-user");
+    let dir = runtime_root.join("abc1234567");
+    let err = invocation_dir_create_error(
+        &dir,
+        runtime_root,
+        std::io::Error::new(std::io::ErrorKind::PermissionDenied, "permission denied"),
+    );
+    let message = err.to_string();
+
+    assert!(message.contains("Homeboy cannot create invocation dir"));
+    assert!(message.contains("/tmp/hb-owned-by-another-user"));
+    assert!(message.contains("current user"));
+    assert!(message.contains(HOMEBOY_INVOCATION_RUNTIME_DIR_ENV));
+    assert!(message.contains("remove or chown"));
+}
+
+#[test]
 fn invocation_drop_cleans_up_root_directory() {
     with_isolated_home(|_| {
         let run_dir = RunDir::create().expect("run dir");

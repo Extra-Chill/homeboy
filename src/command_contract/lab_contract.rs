@@ -1,6 +1,7 @@
+use crate::cli_surface::Commands;
+use crate::command_contract::CommandDescriptor;
+use crate::commands::agent_task;
 use crate::core::agent_task_provider::provider_requires_cwd_git_checkout;
-
-use super::{CommandDescriptor, Commands};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LabCommandContract {
@@ -52,10 +53,10 @@ impl Commands {
             Commands::AgentTask(args)
                 if matches!(
                     args.command,
-                    super::agent_task::AgentTaskCommand::Cook(_)
-                        | super::agent_task::AgentTaskCommand::Dispatch(_)
-                        | super::agent_task::AgentTaskCommand::Loop(_)
-                        | super::agent_task::AgentTaskCommand::RunPlan(_)
+                    agent_task::AgentTaskCommand::Cook(_)
+                        | agent_task::AgentTaskCommand::Dispatch(_)
+                        | agent_task::AgentTaskCommand::Loop(_)
+                        | agent_task::AgentTaskCommand::RunPlan(_)
                 ) =>
             {
                 let mut contract = lab_portable_contract(
@@ -72,9 +73,9 @@ impl Commands {
             Commands::AgentTask(args)
                 if matches!(
                     args.command,
-                    super::agent_task::AgentTaskCommand::Status(_)
-                        | super::agent_task::AgentTaskCommand::Logs(_)
-                        | super::agent_task::AgentTaskCommand::Artifacts(_)
+                    agent_task::AgentTaskCommand::Status(_)
+                        | agent_task::AgentTaskCommand::Logs(_)
+                        | agent_task::AgentTaskCommand::Artifacts(_)
                 ) =>
             {
                 lab_portable_workload_contract(
@@ -158,12 +159,9 @@ impl Commands {
     }
 }
 
-fn agent_task_provider_requires_cwd_git_checkout(
-    command: &super::agent_task::AgentTaskCommand,
-) -> bool {
+fn agent_task_provider_requires_cwd_git_checkout(command: &agent_task::AgentTaskCommand) -> bool {
     match command {
-        super::agent_task::AgentTaskCommand::Cook(args)
-        | super::agent_task::AgentTaskCommand::Dispatch(args) => {
+        agent_task::AgentTaskCommand::Cook(args) | agent_task::AgentTaskCommand::Dispatch(args) => {
             args.cwd.as_ref().is_some_and(|cwd| !cwd.trim().is_empty())
                 && provider_requires_cwd_git_checkout(&args.backend, args.selector.as_deref())
         }

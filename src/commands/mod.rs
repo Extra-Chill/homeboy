@@ -165,6 +165,7 @@ pub fn finalize_set_spec(
     Ok((json_string, replace_fields))
 }
 
+pub(crate) mod adapter;
 pub mod agent_task;
 pub(crate) mod agent_task_dispatch;
 pub mod api;
