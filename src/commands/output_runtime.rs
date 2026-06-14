@@ -3,6 +3,7 @@ use serde_json::Value;
 use crate::cli_surface::Commands;
 use crate::command_contract::CommandOutputFileMode;
 
+use super::agent_task_summary::{agent_task_summary_kind, render_agent_task_summary};
 use super::utils::response as output;
 use super::{review, trace, GlobalArgs};
 
@@ -10,6 +11,7 @@ pub struct JsonCommandRun {
     pub stdout_result: homeboy::core::Result<Value>,
     pub exit_code: i32,
     pub output_file_result: Option<homeboy::core::Result<Value>>,
+    pub human_stdout: Option<String>,
 }
 
 impl JsonCommandRun {
@@ -18,6 +20,7 @@ impl JsonCommandRun {
             stdout_result,
             exit_code,
             output_file_result: None,
+            human_stdout: None,
         }
     }
 }
@@ -49,6 +52,7 @@ pub fn run_command(
                 stdout_result: output_file_result,
                 exit_code,
                 output_file_result: None,
+                human_stdout: None,
             };
 
             write_output_file(&json_run, plan.output_file, output_file);
@@ -125,6 +129,22 @@ pub fn run_json(
                 stdout_result,
                 exit_code,
                 output_file_result,
+                human_stdout: None,
+            }
+        }
+        (_, Commands::AgentTask(args)) => {
+            let summary_kind = agent_task_summary_kind(&args);
+            let (stdout_result, exit_code) =
+                super::json_output::run(Commands::AgentTask(args), global);
+            let human_stdout = stdout_result.as_ref().ok().and_then(|payload| {
+                summary_kind.and_then(|kind| render_agent_task_summary(kind, payload))
+            });
+
+            JsonCommandRun {
+                stdout_result,
+                exit_code,
+                output_file_result: None,
+                human_stdout,
             }
         }
         (_, command) => {
@@ -137,7 +157,11 @@ pub fn run_json(
 
 fn emit_run(run: JsonCommandRun, mode: CommandOutputFileMode, output_file: Option<&str>) -> i32 {
     write_output_file(&run, mode, output_file);
-    output::print_json_result(run.stdout_result, run.exit_code).ok();
+    if let Some(human_stdout) = run.human_stdout {
+        print!("{}", human_stdout);
+    } else {
+        output::print_json_result(run.stdout_result, run.exit_code).ok();
+    }
 
     run.exit_code
 }
@@ -190,6 +214,7 @@ mod tests {
             stdout_result: Ok(json!({ "kind": "stdout" })),
             exit_code: 0,
             output_file_result,
+            human_stdout: None,
         }
     }
 
