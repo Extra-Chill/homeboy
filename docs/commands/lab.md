@@ -43,6 +43,12 @@ without writing a manual `homeboy runner exec ... extension install` command.
 When `--runner` is omitted, Homeboy uses `lab.preferred_runner` or the only
 inferable SSH Lab runner.
 
+When `--source` is an existing directory on the controller, Homeboy first
+materializes that directory into the runner workspace with snapshot sync and
+passes the runner-side `_lab_workspaces/...` path to `homeboy extension install`.
+URL sources and paths that do not exist on the controller are forwarded as-is,
+which preserves runner-local source paths.
+
 ## Commands
 
 - `status`: Show configured Lab runners and benchmark routing guidance.
