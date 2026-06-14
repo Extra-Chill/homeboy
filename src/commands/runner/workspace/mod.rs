@@ -1,8 +1,8 @@
 use clap::{Subcommand, ValueEnum};
 use serde::Serialize;
 
-use homeboy::core::runner::{
-    self, RunnerWorkspaceApplyOutput, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOutput,
+use homeboy::core::runners::{
+    self as runner, RunnerWorkspaceApplyOutput, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOutput,
 };
 
 use super::CmdResult;

@@ -1,18 +1,19 @@
 use clap::Args;
 use serde_json::Value;
 
-use homeboy::core::agent_task::{AgentTaskAggregateReport, AgentTaskRequest};
-use homeboy::core::agent_task_cook_loop::{evaluate_cook_loop, AgentTaskCookLoopOptions};
-use homeboy::core::agent_task_finalization::{
+use homeboy::core::agent_tasks::cook_loop::{evaluate_cook_loop, AgentTaskCookLoopOptions};
+use homeboy::core::agent_tasks::finalization::{
     finalize_pr, AgentTaskGateResult, AgentTaskPrEvidence, AgentTaskPrFinalizationOptions,
     AgentTaskPrRuntimeGuardrails, AgentTaskPrSourceRelationship, AgentTaskPrVerification,
 };
-use homeboy::core::agent_task_lifecycle;
-use homeboy::core::agent_task_promotion::{
+use homeboy::core::agent_tasks::lifecycle as agent_task_lifecycle;
+use homeboy::core::agent_tasks::promotion::{
     promote, AgentTaskPromotionOptions, AgentTaskPromotionReport, AgentTaskPromotionStatus,
 };
-use homeboy::core::agent_task_provider::ExtensionProviderAgentTaskExecutor;
-use homeboy::core::agent_task_scheduler::AgentTaskAggregate;
+use homeboy::core::agent_tasks::provider::ExtensionProviderAgentTaskExecutor;
+use homeboy::core::agent_tasks::scheduler::AgentTaskAggregate;
+use homeboy::core::agent_tasks::service as agent_task_service;
+use homeboy::core::agent_tasks::{AgentTaskAggregateReport, AgentTaskRequest};
 use homeboy::core::config;
 use homeboy::core::gate::HomeboyGateResult;
 
@@ -276,7 +277,7 @@ pub(crate) fn providers(args: ProvidersArgs) -> CmdResult<Value> {
         serde_json::json!({
             "schema": "homeboy/agent-task-providers/v1",
             "providers": executor.providers(),
-            "secret_env": homeboy::core::agent_task_secrets::secret_env_status(&args.secret_env),
+            "secret_env": homeboy::core::agent_tasks::secret_env_status(&args.secret_env),
         }),
         0,
     ))
@@ -431,38 +432,5 @@ fn parse_gate_results(raw: &[String]) -> homeboy::core::Result<Vec<AgentTaskGate
 pub(crate) fn read_promotion_source(
     spec: &str,
 ) -> homeboy::core::Result<(String, Option<std::path::PathBuf>)> {
-    if spec != "-" {
-        let path = std::path::PathBuf::from(spec.strip_prefix('@').unwrap_or(spec));
-        if path.is_file() {
-            let raw = std::fs::read_to_string(&path).map_err(|error| {
-                homeboy::core::Error::internal_io(
-                    error.to_string(),
-                    Some(format!(
-                        "read agent-task promotion source {}",
-                        path.display()
-                    )),
-                )
-            })?;
-            return Ok((raw, Some(path)));
-        }
-    }
-
-    if let Ok((raw, path)) = agent_task_lifecycle::aggregate_source(spec) {
-        return Ok((raw, Some(path)));
-    }
-
-    Ok((
-        config::read_json_spec_to_string(spec)?,
-        source_spec_path(spec),
-    ))
-}
-
-fn source_spec_path(spec: &str) -> Option<std::path::PathBuf> {
-    if spec == "-" {
-        return None;
-    }
-
-    Some(std::path::PathBuf::from(
-        spec.strip_prefix('@').unwrap_or(spec),
-    ))
+    agent_task_service::promotion_source(spec)
 }

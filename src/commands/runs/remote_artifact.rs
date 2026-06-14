@@ -5,7 +5,7 @@ use std::path::{Component, Path, PathBuf};
 use chrono::{Duration, Utc};
 use homeboy::core::execution_contract::EXECUTION_CONTRACT;
 use homeboy::core::observation::{ArtifactCleanupFilter, ArtifactRecord, ObservationStore};
-use homeboy::core::runner;
+use homeboy::core::runners as runner;
 
 use super::{
     CmdResult, RunsArtifactCleanupDownloadsArgs, RunsArtifactCleanupDownloadsOutput,
@@ -75,7 +75,7 @@ pub fn cleanup_persisted(args: RunsArtifactCleanupPersistedArgs) -> CmdResult<Ru
         ));
     }
 
-    let artifact_root = homeboy::core::artifact_root()?;
+    let artifact_root = homeboy::core::artifacts::root()?;
     let created_before = (Utc::now() - Duration::days(args.older_than_days)).to_rfc3339();
     let store = ObservationStore::open_initialized()?;
     let candidates = store.list_artifact_cleanup_candidates(ArtifactCleanupFilter {
@@ -302,7 +302,7 @@ fn runner_download_root(
     runner: Option<&str>,
     run_id: Option<&str>,
 ) -> crate::core::Result<PathBuf> {
-    let mut root = homeboy::core::artifact_root()?.join("runner");
+    let mut root = homeboy::core::artifacts::root()?.join("runner");
     if let Some(runner) = cleanup_path_component("runner", runner)? {
         root = root.join(runner);
     }

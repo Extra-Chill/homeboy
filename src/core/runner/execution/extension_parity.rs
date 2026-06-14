@@ -61,27 +61,86 @@ fn validate_runner_extension(
     extension_id: &str,
 ) -> Result<()> {
     let homeboy_path = runner.settings.homeboy_path.as_deref().unwrap_or("homeboy");
+    let output = show_runner_extension(runner, cwd, homeboy_path, extension_id)?;
+
+    if output.success {
+        validate_runner_extension_ready(runner_id, homeboy_path, extension_id, &output.stdout)?;
+        if let Err(err) = validate_runner_extension_revision(
+            runner_id,
+            homeboy_path,
+            extension_id,
+            &output.stdout,
+        ) {
+            if !is_stale_runner_extension_parity_error(&err) {
+                return Err(err);
+            }
+            sync_runner_extension_revision(
+                runner_id,
+                runner,
+                cwd,
+                homeboy_path,
+                extension_id,
+                err,
+            )?;
+            let refreshed = show_runner_extension(runner, cwd, homeboy_path, extension_id)?;
+            if refreshed.success {
+                validate_runner_extension_ready(
+                    runner_id,
+                    homeboy_path,
+                    extension_id,
+                    &refreshed.stdout,
+                )?;
+                validate_runner_extension_revision(
+                    runner_id,
+                    homeboy_path,
+                    extension_id,
+                    &refreshed.stdout,
+                )?;
+                return Ok(());
+            }
+            return Err(missing_runner_extension_error(
+                runner_id,
+                homeboy_path,
+                extension_id,
+                &refreshed.stderr,
+                &refreshed.stdout,
+            ));
+        }
+        return Ok(());
+    }
+
+    Err(missing_runner_extension_error(
+        runner_id,
+        homeboy_path,
+        extension_id,
+        &output.stderr,
+        &output.stdout,
+    ))
+}
+
+fn show_runner_extension(
+    runner: &Runner,
+    cwd: &str,
+    homeboy_path: &str,
+    extension_id: &str,
+) -> Result<server::CommandOutput> {
     let command = format!(
         "cd {} && {} extension show {}",
         shell::quote_path(cwd),
         shell::quote_path(homeboy_path),
         shell::quote_arg(extension_id)
     );
-    let output = match runner.kind {
-        RunnerKind::Local => server::execute_local_command(&command),
-        RunnerKind::Ssh => {
-            let client = ssh_client_for_runner_extension_parity(runner)?;
-            client.execute(&command)
-        }
-    };
+    execute_runner_command(runner, &command)
+}
 
-    if output.success {
-        validate_runner_extension_ready(runner_id, homeboy_path, extension_id, &output.stdout)?;
-        validate_runner_extension_revision(runner_id, homeboy_path, extension_id, &output.stdout)?;
-        return Ok(());
-    }
-
-    Err(Error::validation_invalid_argument(
+fn missing_runner_extension_error(
+    runner_id: &str,
+    homeboy_path: &str,
+    extension_id: &str,
+    stderr: &str,
+    stdout: &str,
+) -> Error {
+    Error::validation_invalid_argument(
         "runner_extension",
         format!(
             "Runner '{runner_id}' is missing required extension parity for '{extension_id}' before command execution"
@@ -92,9 +151,78 @@ fn validate_runner_extension(
                 "Install the extension on the runner before dispatch: {homeboy_path} extension install <source> --id {extension_id}"
             ),
             format!("Remote preflight command failed: {homeboy_path} extension show {extension_id}"),
+            extension_parity_diagnostic_tail(stderr, stdout),
+        ]),
+    )
+}
+
+fn sync_runner_extension_revision(
+    runner_id: &str,
+    runner: &Runner,
+    cwd: &str,
+    homeboy_path: &str,
+    extension_id: &str,
+    parity_error: Error,
+) -> Result<()> {
+    let local_revision = extension::read_source_revision(extension_id)
+        .filter(|revision| !revision.trim().is_empty())
+        .ok_or(parity_error)?;
+    let source = extension::resolve_source_url(extension_id)?;
+    let command = runner_extension_sync_command(
+        cwd,
+        homeboy_path,
+        &source.url,
+        extension_id,
+        &local_revision,
+    );
+    let output = execute_runner_command(runner, &command)?;
+    if output.success {
+        return Ok(());
+    }
+
+    Err(Error::validation_invalid_argument(
+        "runner_extension",
+        format!(
+            "Runner '{runner_id}' could not auto-sync stale extension parity for '{extension_id}' before command execution"
+        ),
+        Some(extension_id.to_string()),
+        Some(vec![
+            format!("Local extension source_revision: {local_revision}"),
+            format!("Runner sync command failed: {homeboy_path} extension install <source> --id {extension_id} --ref {local_revision} --replace"),
             extension_parity_diagnostic_tail(&output.stderr, &output.stdout),
         ]),
     ))
+}
+
+fn execute_runner_command(runner: &Runner, command: &str) -> Result<server::CommandOutput> {
+    match runner.kind {
+        RunnerKind::Local => Ok(server::execute_local_command(command)),
+        RunnerKind::Ssh => {
+            let client = ssh_client_for_runner_extension_parity(runner)?;
+            Ok(client.execute(command))
+        }
+    }
+}
+
+fn runner_extension_sync_command(
+    cwd: &str,
+    homeboy_path: &str,
+    source_url: &str,
+    extension_id: &str,
+    local_revision: &str,
+) -> String {
+    format!(
+        "cd {} && {} extension install {} --id {} --ref {} --replace",
+        shell::quote_path(cwd),
+        shell::quote_path(homeboy_path),
+        shell::quote_arg(source_url),
+        shell::quote_arg(extension_id),
+        shell::quote_arg(local_revision)
+    )
+}
+
+fn is_stale_runner_extension_parity_error(err: &Error) -> bool {
+    err.message.contains("stale extension parity")
 }
 
 fn validate_runner_extension_ready(
@@ -217,7 +345,8 @@ fn remote_extension_source_revision(stdout: &str) -> Option<String> {
 mod tests {
     use super::{
         remote_extension_ready_status, remote_extension_source_revision,
-        validate_runner_extension_ready, validate_runner_extension_revision,
+        runner_extension_sync_command, validate_runner_extension_ready,
+        validate_runner_extension_revision,
     };
     use crate::test_support::with_isolated_home;
 
@@ -311,6 +440,22 @@ mod tests {
             assert!(err.details["tried"].to_string().contains("local123"));
             assert!(err.details["tried"].to_string().contains("<missing>"));
         });
+    }
+
+    #[test]
+    fn runner_extension_sync_command_installs_exact_local_revision() {
+        let command = runner_extension_sync_command(
+            "/tmp/project path",
+            "/usr/local/bin/homeboy",
+            "https://github.com/Extra-Chill/homeboy-extensions.git",
+            "rust",
+            "abc1234",
+        );
+
+        assert_eq!(
+            command,
+            "cd '/tmp/project path' && '/usr/local/bin/homeboy' extension install https://github.com/Extra-Chill/homeboy-extensions.git --id rust --ref abc1234 --replace"
+        );
     }
 }
 

@@ -2,7 +2,7 @@ use clap::{Args, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use homeboy::core::artifact_origin::{self, ArtifactOriginServeSpec, ArtifactOriginStatus};
+use homeboy::core::artifacts::{self, ArtifactOriginServeSpec, ArtifactOriginStatus};
 use homeboy::core::preview_client::{
     self, PreviewClientAuthDiagnostic, PreviewClientReport, PreviewClientStartSpec,
 };
@@ -597,11 +597,11 @@ pub fn run(args: TunnelArgs, _global: &super::GlobalArgs) -> CmdResult<TunnelOut
 fn run_artifact_origin(command: TunnelArtifactOriginCommand) -> CmdResult<TunnelOutput> {
     match command {
         TunnelArtifactOriginCommand::Serve { bind, root } => {
-            let status = artifact_origin::status(
+            let status = artifacts::status(
                 bind.clone(),
-                root.clone().unwrap_or(homeboy::core::artifact_root()?),
+                root.clone().unwrap_or(homeboy::core::artifacts::root()?),
             );
-            artifact_origin::serve(ArtifactOriginServeSpec { bind, root })?;
+            artifacts::serve(ArtifactOriginServeSpec { bind, root })?;
             Ok((
                 TunnelOutput {
                     command: "tunnel.artifact_origin.serve".to_string(),
@@ -640,7 +640,7 @@ fn run_preview_consumer_config(
     let artifacts_dir = artifacts_dir_override
         .or_else(|| config.command.artifacts_dir.clone())
         .unwrap_or_else(|| {
-            homeboy::core::artifact_root()
+            homeboy::core::artifacts::root()
                 .unwrap_or_else(|_| std::env::temp_dir().join("homeboy-artifacts"))
                 .join("preview-consumer")
                 .join(safe_artifact_slug(&config.id))

@@ -17,7 +17,11 @@ pub(super) fn dispatch(command: Commands, global: &GlobalArgs) -> JsonRun {
         Commands::Docs(args) => map(docs::run(args, global)),
         Commands::Changelog(args) => map(changelog::run(args, global)),
         Commands::Cleanup(args) => map(cleanup::run(args, global)),
-        Commands::Version(args) => map(version::run(args, global)),
+        Commands::Version(args) => {
+            version::adapter(crate::command_contract::CommandOutputFileMode::None)
+                .execute_json
+                .expect("version adapter supports JSON execution")(args, global)
+        }
         Commands::Build(args) => map(build::run(args, global)),
         Commands::Changes(args) => map(changes::run(args, global)),
         Commands::Release(args) => map(release::run(args, global)),

@@ -8,6 +8,7 @@ use crate::core::upgrade::ExtensionUpgradeEntry;
 use crate::core::Result;
 use std::path::Path;
 
+use super::helpers::version_is_newer;
 use super::types::{
     InstallMethod, RunnerDaemonDriftEntry, RunnerExtensionSyncEntry, RunnerUpgradeEntry,
 };
@@ -85,6 +86,30 @@ fn upgrade_runners_with_executor_and_source_materializer(
     status: impl Fn(&str) -> Result<RunnerStatusReport>,
     mut materialize_source_path: impl FnMut(&Runner, &Path) -> Result<String>,
 ) -> (Vec<RunnerUpgradeEntry>, Vec<RunnerUpgradeEntry>) {
+    upgrade_runners_with_executor_source_materializer_and_path_updater(
+        runners,
+        force,
+        method_override,
+        source_path,
+        extension_updates,
+        &mut exec,
+        status,
+        &mut materialize_source_path,
+        update_runner_homeboy_path,
+    )
+}
+
+fn upgrade_runners_with_executor_source_materializer_and_path_updater(
+    runners: &[Runner],
+    force: bool,
+    method_override: Option<InstallMethod>,
+    source_path: Option<&Path>,
+    extension_updates: &[ExtensionUpgradeEntry],
+    mut exec: impl FnMut(&str, RunnerExecOptions) -> Result<(runner::RunnerExecOutput, i32)>,
+    status: impl Fn(&str) -> Result<RunnerStatusReport>,
+    mut materialize_source_path: impl FnMut(&Runner, &Path) -> Result<String>,
+    mut update_homeboy_path: impl FnMut(&str, &str) -> Result<()>,
+) -> (Vec<RunnerUpgradeEntry>, Vec<RunnerUpgradeEntry>) {
     let mut updated = Vec::new();
     let mut skipped = Vec::new();
 
@@ -98,6 +123,7 @@ fn upgrade_runners_with_executor_and_source_materializer(
             &mut exec,
             &status,
             &mut materialize_source_path,
+            &mut update_homeboy_path,
         );
         if entry.success {
             crate::log_status!(
@@ -125,13 +151,14 @@ fn upgrade_runner_with_executor(
     exec: &mut impl FnMut(&str, RunnerExecOptions) -> Result<(runner::RunnerExecOutput, i32)>,
     status: &impl Fn(&str) -> Result<RunnerStatusReport>,
     materialize_source_path: &mut impl FnMut(&Runner, &Path) -> Result<String>,
+    update_homeboy_path: &mut impl FnMut(&str, &str) -> Result<()>,
 ) -> RunnerUpgradeEntry {
-    let homeboy_path = runner
+    let original_homeboy_path = runner
         .settings
         .homeboy_path
         .clone()
         .unwrap_or_else(|| "homeboy".to_string());
-    let previous_version = runner_homeboy_version(runner, &homeboy_path, exec)
+    let previous_version = runner_homeboy_version(runner, &original_homeboy_path, exec)
         .ok()
         .flatten();
     let command_source_path = match runner_upgrade_source_path(
@@ -144,7 +171,7 @@ fn upgrade_runner_with_executor(
         Err(err) => {
             return RunnerUpgradeEntry {
                 runner_id: runner.id.clone(),
-                homeboy_path,
+                homeboy_path: original_homeboy_path,
                 success: false,
                 upgraded: false,
                 previous_version,
@@ -166,7 +193,7 @@ fn upgrade_runner_with_executor(
         runner_exec_options(
             runner,
             runner_upgrade_command(
-                &homeboy_path,
+                &original_homeboy_path,
                 force,
                 method_override,
                 command_source_path.as_deref(),
@@ -179,7 +206,7 @@ fn upgrade_runner_with_executor(
         Ok((output, exit_code)) => {
             return RunnerUpgradeEntry {
                 runner_id: runner.id.clone(),
-                homeboy_path,
+                homeboy_path: original_homeboy_path,
                 success: false,
                 upgraded: false,
                 previous_version,
@@ -198,7 +225,7 @@ fn upgrade_runner_with_executor(
         Err(err) => {
             return RunnerUpgradeEntry {
                 runner_id: runner.id.clone(),
-                homeboy_path,
+                homeboy_path: original_homeboy_path,
                 success: false,
                 upgraded: false,
                 previous_version,
@@ -216,17 +243,72 @@ fn upgrade_runner_with_executor(
         }
     };
 
-    let new_version = runner_homeboy_version(runner, &homeboy_path, exec)
+    let configured_new_version = runner_homeboy_version(runner, &original_homeboy_path, exec)
         .ok()
         .flatten();
+    let mut bare_homeboy_version = None;
+    let alignment = if is_versioned_homeboy_path(&original_homeboy_path) {
+        bare_homeboy_version = runner_bare_homeboy_version(runner, &original_homeboy_path, exec);
+        runner_homeboy_path_alignment(
+            &runner.id,
+            &original_homeboy_path,
+            configured_new_version.as_deref(),
+            bare_homeboy_version.as_deref(),
+        )
+    } else {
+        None
+    };
+    let mut homeboy_path = original_homeboy_path.clone();
+    let mut new_version = configured_new_version.clone();
+    let mut path_drift = alignment
+        .as_ref()
+        .and_then(|alignment| alignment.drift.clone());
+    let mut path_update_detail = None;
+
+    if let Some(alignment) = alignment {
+        if let Some(new_path) = alignment.update_to.as_deref() {
+            match update_homeboy_path(&runner.id, new_path) {
+                Ok(()) => {
+                    homeboy_path = new_path.to_string();
+                    new_version = bare_homeboy_version.clone();
+                    path_drift = None;
+                    path_update_detail = Some(format!(
+                        "runner homeboy_path updated from `{}` to `{}` because bare `homeboy` reports {}",
+                        original_homeboy_path,
+                        new_path,
+                        bare_homeboy_version.as_deref().unwrap_or("an upgraded version")
+                    ));
+                }
+                Err(err) => {
+                    path_drift = Some(format!(
+                        "{}; automatic runner homeboy_path update failed: {}",
+                        alignment.drift.unwrap_or_else(|| {
+                            format!(
+                                "configured runner executable `{}` is stale",
+                                original_homeboy_path
+                            )
+                        }),
+                        err.message
+                    ));
+                }
+            }
+        }
+    }
+
     let (extensions_synced, mut extensions_skipped, mut extensions_failed) =
         sync_runner_extensions(runner, &homeboy_path, extension_updates, exec);
-    let bare_homeboy_version = runner_bare_homeboy_version(runner, &homeboy_path, exec);
-    let path_drift = runner_path_drift(
-        &homeboy_path,
-        new_version.as_deref(),
-        bare_homeboy_version.as_deref(),
-    );
+    if bare_homeboy_version.is_none() {
+        bare_homeboy_version = runner_bare_homeboy_version(runner, &homeboy_path, exec);
+    }
+    if path_drift.is_none() {
+        path_drift = runner_homeboy_path_alignment(
+            &runner.id,
+            &homeboy_path,
+            new_version.as_deref(),
+            bare_homeboy_version.as_deref(),
+        )
+        .and_then(|alignment| alignment.drift);
+    }
     defer_extension_failures_for_path_drift(
         path_drift.as_deref(),
         &mut extensions_skipped,
@@ -243,6 +325,7 @@ fn upgrade_runner_with_executor(
     let detail = runner_upgrade_final_detail(
         &runner.id,
         detail,
+        path_update_detail.as_deref(),
         path_drift.as_deref(),
         stale_daemon.as_ref(),
         &extensions_skipped,
@@ -541,11 +624,17 @@ fn runner_bare_homeboy_version(
         .flatten()
 }
 
-fn runner_path_drift(
+struct RunnerHomeboyPathAlignment {
+    drift: Option<String>,
+    update_to: Option<String>,
+}
+
+fn runner_homeboy_path_alignment(
+    runner_id: &str,
     homeboy_path: &str,
     configured_version: Option<&str>,
     bare_version: Option<&str>,
-) -> Option<String> {
+) -> Option<RunnerHomeboyPathAlignment> {
     if homeboy_path == "homeboy" {
         return None;
     }
@@ -555,10 +644,45 @@ fn runner_path_drift(
         return None;
     }
 
-    Some(format!(
+    let drift = format!(
         "configured runner executable `{}` reports {}, but bare `homeboy` reports {}",
         homeboy_path, configured_version, bare_version
-    ))
+    );
+
+    if is_versioned_homeboy_path(homeboy_path) && version_is_newer(bare_version, configured_version)
+    {
+        return Some(RunnerHomeboyPathAlignment {
+            drift: Some(drift),
+            update_to: Some("homeboy".to_string()),
+        });
+    }
+
+    Some(RunnerHomeboyPathAlignment {
+        drift: Some(format!(
+            "{}; automatic runner homeboy_path update is unsafe for this configured path. Remediate with `{}` after verifying bare `homeboy` is the intended runner binary",
+            drift,
+            runner_set_homeboy_path_command(runner_id, "homeboy")
+        )),
+        update_to: None,
+    })
+}
+
+fn is_versioned_homeboy_path(homeboy_path: &str) -> bool {
+    let Some(file_name) = Path::new(homeboy_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+    else {
+        return false;
+    };
+    Regex::new(r"^homeboy-\d+\.\d+\.\d+$")
+        .map(|re| re.is_match(file_name))
+        .unwrap_or(false)
+}
+
+fn update_runner_homeboy_path(runner_id: &str, homeboy_path: &str) -> Result<()> {
+    let spec = serde_json::json!({ "homeboy_path": homeboy_path }).to_string();
+    runner::merge(Some(runner_id), &spec, &[])?;
+    Ok(())
 }
 
 fn runner_recovery_commands(
@@ -568,16 +692,17 @@ fn runner_recovery_commands(
 ) -> Vec<String> {
     let mut commands = runner_upgrade_recovery_commands(runner_id);
     if path_drift.is_some() && homeboy_path != "homeboy" {
-        commands.push(format!(
-            "homeboy runner exec {} --ssh -- sh -lc {}",
-            shell_arg(runner_id),
-            shell_arg(&format!(
-                "ln -sf $(command -v homeboy) {}",
-                shell_arg(homeboy_path)
-            ))
-        ));
+        commands.push(runner_set_homeboy_path_command(runner_id, "homeboy"));
     }
     commands
+}
+
+fn runner_set_homeboy_path_command(runner_id: &str, homeboy_path: &str) -> String {
+    format!(
+        "homeboy runner set {} --json {}",
+        shell_arg(runner_id),
+        shell_arg(&serde_json::json!({ "homeboy_path": homeboy_path }).to_string())
+    )
 }
 
 fn runner_upgrade_recovery_commands(runner_id: &str) -> Vec<String> {
@@ -641,12 +766,17 @@ fn runner_stale_daemon(
 fn runner_upgrade_final_detail(
     runner_id: &str,
     detail: String,
+    path_update_detail: Option<&str>,
     path_drift: Option<&str>,
     stale_daemon: Option<&RunnerDaemonDriftEntry>,
     extensions_skipped: &[RunnerExtensionSyncEntry],
     extensions_failed: &[RunnerExtensionSyncEntry],
 ) -> String {
     let mut parts = vec![detail];
+
+    if let Some(path_update_detail) = path_update_detail {
+        parts.push(path_update_detail.to_string());
+    }
 
     if !extensions_skipped.is_empty() {
         parts.push(format!(
@@ -1339,11 +1469,107 @@ mod tests {
         assert!(updated[0]
             .recovery_commands
             .contains(&"homeboy upgrade --force --upgrade-runner lab".to_string()));
-        assert!(updated[0].recovery_commands.contains(&
-            "homeboy runner exec lab --ssh -- sh -lc 'ln -sf $(command -v homeboy) /home/chubes/.cargo/bin/homeboy'"
-                .to_string()
+        assert!(updated[0].recovery_commands.contains(
+            &"homeboy runner set lab --json '{\"homeboy_path\":\"homeboy\"}'".to_string()
         ));
         assert!(updated[0].detail.contains("runner PATH drift detected"));
+    }
+
+    #[test]
+    fn updates_versioned_runner_homeboy_path_to_bare_homeboy_when_newer() {
+        let runner = ssh_runner("lab", Some("/home/chubes/.cargo/bin/homeboy-0.229.1"));
+        let extension_updates = vec![extension_update("required-extension", "48517ac3")];
+        let mut commands = Vec::new();
+        let mut path_updates = Vec::new();
+
+        let (updated, skipped) = upgrade_runners_with_executor_source_materializer_and_path_updater(
+            &[runner],
+            false,
+            None,
+            None,
+            &extension_updates,
+            |runner_id, options| {
+                commands.push(options.command.clone());
+                let stdout = match commands.len() {
+                    1 => "homeboy 0.229.1\n",
+                    2 => "{\"success\":true}\n",
+                    3 => "homeboy 0.229.1\n",
+                    4 => "homeboy 0.229.3\n",
+                    5 => "{\"success\":true}\n",
+                    6 => "{\"success\":true}\n",
+                    _ => "",
+                };
+                Ok((exec_output(runner_id, options.command, stdout, "", 0), 0))
+            },
+            runner_status,
+            |_runner, _path| unreachable!("source materialization not used"),
+            |runner_id, homeboy_path| {
+                path_updates.push((runner_id.to_string(), homeboy_path.to_string()));
+                Ok(())
+            },
+        );
+
+        assert!(skipped.is_empty());
+        assert_eq!(updated.len(), 1);
+        assert!(updated[0].success);
+        assert!(updated[0].upgraded);
+        assert_eq!(updated[0].homeboy_path, "homeboy");
+        assert_eq!(updated[0].previous_version.as_deref(), Some("0.229.1"));
+        assert_eq!(updated[0].new_version.as_deref(), Some("0.229.3"));
+        assert_eq!(updated[0].bare_homeboy_version.as_deref(), Some("0.229.3"));
+        assert_eq!(updated[0].path_drift, None);
+        assert_eq!(
+            path_updates,
+            vec![("lab".to_string(), "homeboy".to_string())]
+        );
+        assert_eq!(
+            commands[4],
+            vec!["homeboy", "extension", "show", "required-extension"]
+        );
+        assert!(updated[0]
+            .detail
+            .contains("runner homeboy_path updated from `/home/chubes/.cargo/bin/homeboy-0.229.1` to `homeboy`"));
+    }
+
+    #[test]
+    fn reports_exact_runner_set_remediation_when_path_update_is_unsafe() {
+        let runner = ssh_runner("lab", Some("/opt/homeboy/custom-homeboy"));
+        let mut commands = Vec::new();
+
+        let (updated, skipped) = upgrade_runners_with_executor(
+            &[runner],
+            false,
+            None,
+            None,
+            &[],
+            |runner_id, options| {
+                commands.push(options.command.clone());
+                let stdout = match commands.len() {
+                    1 => "homeboy 0.229.1\n",
+                    2 => "{\"success\":true}\n",
+                    3 => "homeboy 0.229.1\n",
+                    4 => "homeboy 0.229.3\n",
+                    _ => "",
+                };
+                Ok((exec_output(runner_id, options.command, stdout, "", 0), 0))
+            },
+            runner_status,
+        );
+
+        assert!(skipped.is_empty());
+        assert_eq!(updated.len(), 1);
+        assert_eq!(updated[0].homeboy_path, "/opt/homeboy/custom-homeboy");
+        assert!(updated[0]
+            .path_drift
+            .as_deref()
+            .unwrap()
+            .contains("automatic runner homeboy_path update is unsafe"));
+        assert!(updated[0].recovery_commands.contains(
+            &"homeboy runner set lab --json '{\"homeboy_path\":\"homeboy\"}'".to_string()
+        ));
+        assert!(updated[0]
+            .detail
+            .contains("homeboy runner set lab --json '{\"homeboy_path\":\"homeboy\"}'"));
     }
 
     #[test]

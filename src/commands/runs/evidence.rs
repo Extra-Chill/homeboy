@@ -97,7 +97,7 @@ pub fn evidence(run_id: &str) -> CmdResult<RunsOutput> {
     let store = ObservationStore::open_initialized()?;
     let run = require_run(&store, run_id)?;
     let artifacts = store.list_artifacts(run_id)?;
-    let artifact_root = homeboy::core::artifact_root()?;
+    let artifact_root = homeboy::core::artifacts::root()?;
     let artifact_index = evidence_artifact_index(&artifacts);
     let disk_budget = disk::disk_budget(
         &artifact_root,
