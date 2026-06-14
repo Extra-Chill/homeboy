@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.121.29] - 2026-06-14
+
+### Fixed
+- use codebox php ai client overlay contract
+- default php ai client overlay for codebox tasks
+
 ## [2.121.28] - 2026-06-14
 
 ### Fixed
