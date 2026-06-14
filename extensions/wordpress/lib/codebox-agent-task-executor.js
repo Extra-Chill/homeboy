@@ -185,6 +185,8 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
   const mounts = agentBundleMounts(agentBundle, config.mounts || defaults.mounts || options.mounts || []);
   const components = runtimeComponentPaths(config, { ...defaults, ...options });
   const runtimeTask = inputs.runtime_task || inputs.runtimeTask || config.runtime_task || config.runtimeTask || abilityRuntimeTaskFromAgentTaskRequest(config, inputs) || options.runtimeTask;
+  const agentBundles = firstDefined(inputs.agent_bundles, inputs.agentBundles, config.agent_bundles, config.agentBundles, options.agentBundles, []);
+  const structuredArtifacts = firstDefined(inputs.structured_artifacts, inputs.structuredArtifacts, config.structured_artifacts, config.structuredArtifacts, options.structuredArtifacts, []);
   const sandboxToolPolicy = firstDefined(inputs.sandbox_tool_policy, inputs.sandboxToolPolicy, config.sandbox_tool_policy, config.sandboxToolPolicy, options.sandboxToolPolicy, defaults.sandboxToolPolicy);
   const allowedTools = firstDefined(inputs.allowed_tools, inputs.allowedTools, config.allowed_tools, config.allowedTools, options.allowedTools, defaults.allowedTools);
   const explicitSecretEnv = [
@@ -216,6 +218,7 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     recipe,
     sandbox_tool_policy: sandboxToolPolicy,
     runtime_task: runtimeTask,
+    structured_artifacts: structuredArtifacts,
     sandbox_session_id: config.sandbox_session_id || request.task_id,
     session_id: config.session_id || config.sessionId || '',
     agent: config.agent || options.agent || 'wp-codebox-sandbox',
@@ -223,7 +226,7 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     provider: config.provider || options.provider || defaults.provider || '',
     model: request.executor.model || config.model || options.model || defaults.model || '',
     provider_plugin_paths: config.provider_plugin_paths || options.providerPluginPaths || defaults.providerPluginPaths || [],
-    agent_bundles: config.agent_bundles || config.agentBundles || options.agentBundles || [],
+    agent_bundles: agentBundles,
     runtime_stack_mounts: config.runtime_stack_mounts || options.runtimeStackMounts || [],
     runtime_overlay_profiles: config.runtime_overlay_profiles || config.runtimeOverlayProfiles || options.runtimeOverlayProfiles || defaults.runtimeOverlayProfiles || [],
     runtime_overlays: config.runtime_overlays || options.runtimeOverlays || defaults.runtimeOverlays || [],

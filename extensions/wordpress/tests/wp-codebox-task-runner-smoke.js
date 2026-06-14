@@ -324,6 +324,15 @@ try {
         ability: 'homeboy-canary/write-file',
         input: { path: '/workspace/codebox-canary/CANARY.md', content: 'after\n' },
       },
+      agent_bundles: [{ source: '/workspace/bundles/canary-agent', slug: 'canary-agent' }],
+      structured_artifacts: [{
+        schema: 'wp-codebox/structured-artifact/v1',
+        name: 'concept_packet',
+        type: 'ConceptPacket',
+        payload: { title: 'Canary concept' },
+        metadata: {},
+        provenance: { source: 'test' },
+      }],
       workspaces: [{ target: '/workspace/codebox-canary', mode: 'readwrite' }],
     }),
     env: { ...process.env, FIXTURE_WP_CODEBOX_CAPTURE: runtimeTaskCapturePath, OPENCODE_API_KEY: 'redacted-test-key' },
@@ -332,6 +341,8 @@ try {
   const runtimeTaskCaptured = readJson(runtimeTaskCapturePath);
   assert.equal(runtimeTaskCaptured.input.sandbox_tool_policy.tools[0].id, 'homeboy-canary/write-file');
   assert.equal(runtimeTaskCaptured.input.runtime_task.ability, 'homeboy-canary/write-file');
+  assert.deepEqual(runtimeTaskCaptured.input.agent_bundles, [{ source: '/workspace/bundles/canary-agent', slug: 'canary-agent' }]);
+  assert.equal(runtimeTaskCaptured.input.structured_artifacts[0].name, 'concept_packet');
   assert.equal(runtimeTaskCaptured.input.workspaces[0].target, '/workspace/codebox-canary');
 
   const abilityBridgeResult = spawnSync(process.execPath, [
