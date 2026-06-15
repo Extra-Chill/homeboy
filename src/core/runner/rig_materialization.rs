@@ -28,6 +28,8 @@ pub(super) struct LabOffloadRigSync {
     pub rig_id: String,
     pub source: String,
     pub source_kind: LabOffloadRigSyncSource,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub removed_source: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -91,6 +93,9 @@ pub(super) fn sync_lab_offload_rigs(
             )
         };
 
+        let removed_source =
+            remove_runner_installed_rig_source(runner_id, command_path, remote_cwd, rig_id)?;
+
         let (output, exit_code) = exec(
             runner_id,
             RunnerExecOptions {
@@ -133,10 +138,129 @@ pub(super) fn sync_lab_offload_rigs(
             rig_id: rig_id.clone(),
             source,
             source_kind,
+            removed_source,
         });
     }
 
     Ok(synced_rigs)
+}
+
+fn remove_runner_installed_rig_source(
+    runner_id: &str,
+    command_path: &str,
+    remote_cwd: &str,
+    rig_id: &str,
+) -> Result<Option<String>> {
+    let (list_output, list_exit_code) = exec(
+        runner_id,
+        RunnerExecOptions {
+            cwd: Some(remote_cwd.to_string()),
+            project_id: None,
+            allow_diagnostic_ssh: false,
+            command: vec![
+                command_path.to_string(),
+                "rig".to_string(),
+                "sources".to_string(),
+                "list".to_string(),
+            ],
+            env: HashMap::new(),
+            capture_patch: false,
+            raw_exec: false,
+            source_snapshot: None,
+            capability_preflight: None,
+            required_extensions: Vec::new(),
+            require_paths: Vec::new(),
+        },
+    )?;
+    if list_exit_code != 0 {
+        return Err(Error::validation_invalid_argument(
+            "rig",
+            format!(
+                "runner dispatch could not inspect installed rig sources on runner `{runner_id}`"
+            ),
+            Some(rig_id.to_string()),
+            Some(vec![list_output.stderr.trim().to_string()]),
+        ));
+    }
+
+    let Some(selector) = installed_source_selector_for_rig(&list_output.stdout, rig_id)? else {
+        return Ok(None);
+    };
+
+    let (remove_output, remove_exit_code) = exec(
+        runner_id,
+        RunnerExecOptions {
+            cwd: Some(remote_cwd.to_string()),
+            project_id: None,
+            allow_diagnostic_ssh: false,
+            command: vec![
+                command_path.to_string(),
+                "rig".to_string(),
+                "sources".to_string(),
+                "remove".to_string(),
+                selector.clone(),
+            ],
+            env: HashMap::new(),
+            capture_patch: false,
+            raw_exec: false,
+            source_snapshot: None,
+            capability_preflight: None,
+            required_extensions: Vec::new(),
+            require_paths: Vec::new(),
+        },
+    )?;
+    if remove_exit_code != 0 {
+        return Err(Error::validation_invalid_argument(
+            "rig",
+            format!("runner dispatch could not remove stale rig source for `{rig_id}` on runner `{runner_id}`"),
+            Some(rig_id.to_string()),
+            Some(vec![remove_output.stderr.trim().to_string()]),
+        ));
+    }
+
+    Ok(Some(selector))
+}
+
+fn installed_source_selector_for_rig(stdout: &str, rig_id: &str) -> Result<Option<String>> {
+    let value: serde_json::Value = serde_json::from_str(stdout).map_err(|e| {
+        Error::validation_invalid_json(
+            e,
+            Some("parse runner rig sources list output".to_string()),
+            Some(stdout.chars().take(200).collect()),
+        )
+    })?;
+    let sources = value
+        .get("data")
+        .and_then(|data| data.get("report"))
+        .and_then(|report| report.get("sources"))
+        .and_then(|sources| sources.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    for source in sources {
+        let has_rig = source
+            .get("rigs")
+            .and_then(|rigs| rigs.as_array())
+            .is_some_and(|rigs| {
+                rigs.iter().any(|rig| {
+                    rig.get("id")
+                        .and_then(|id| id.as_str())
+                        .is_some_and(|id| id == rig_id)
+                })
+            });
+        if !has_rig {
+            continue;
+        }
+        for key in ["package_id", "package_path", "source"] {
+            if let Some(selector) = source.get(key).and_then(|value| value.as_str()) {
+                if !selector.trim().is_empty() {
+                    return Ok(Some(selector.to_string()));
+                }
+            }
+        }
+    }
+
+    Ok(None)
 }
 
 pub(super) fn remap_bench_rig_default_component_to_primary_snapshot(
@@ -488,6 +612,57 @@ fn push_unique<T: PartialEq>(items: &mut Vec<T>, item: T) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn installed_source_selector_prefers_package_id_for_matching_rig() {
+        let stdout = serde_json::json!({
+            "success": true,
+            "data": {
+                "command": "rig.sources.list",
+                "report": {
+                    "sources": [
+                        {
+                            "source": "/runner/old-source",
+                            "package_id": "old-source",
+                            "package_path": "/runner/old-source",
+                            "rigs": [{ "id": "target-rig" }]
+                        }
+                    ]
+                }
+            }
+        })
+        .to_string();
+
+        assert_eq!(
+            installed_source_selector_for_rig(&stdout, "target-rig").unwrap(),
+            Some("old-source".to_string())
+        );
+    }
+
+    #[test]
+    fn installed_source_selector_ignores_unrelated_sources() {
+        let stdout = serde_json::json!({
+            "success": true,
+            "data": {
+                "report": {
+                    "sources": [
+                        {
+                            "source": "/runner/old-source",
+                            "package_id": "old-source",
+                            "package_path": "/runner/old-source",
+                            "rigs": [{ "id": "other-rig" }]
+                        }
+                    ]
+                }
+            }
+        })
+        .to_string();
+
+        assert_eq!(
+            installed_source_selector_for_rig(&stdout, "target-rig").unwrap(),
+            None
+        );
+    }
 
     #[test]
     fn extracts_unique_bench_rig_ids_for_lab_materialization() {
