@@ -1091,6 +1091,7 @@ fn runner_exec_secret_env_names(
     }
     names.extend(super::lab::secrets::declared_agent_task_secret_env(command));
     names.extend(super::lab::secrets::declared_trace_secret_env(command));
+    names.extend(super::lab::secrets::declared_tunnel_secret_env(command));
     names.sort();
     names.dedup();
     names
@@ -1645,6 +1646,7 @@ mod tests {
                 project_id: None,
                 command: vec!["node".to_string(), "--version".to_string()],
                 env: Default::default(),
+                secret_env_names: Vec::new(),
                 capture_patch: false,
                 raw_exec: false,
                 source_snapshot: None,
@@ -1675,6 +1677,7 @@ mod tests {
                 project_id: None,
                 command: vec!["node".to_string(), "--version".to_string()],
                 env: Default::default(),
+                secret_env_names: Vec::new(),
                 capture_patch: false,
                 raw_exec: false,
                 source_snapshot: None,
@@ -1705,6 +1708,7 @@ mod tests {
                 project_id: None,
                 command: vec!["node".to_string(), "--version".to_string()],
                 env: Default::default(),
+                secret_env_names: Vec::new(),
                 capture_patch: false,
                 raw_exec: false,
                 source_snapshot: None,
@@ -1901,6 +1905,28 @@ mod tests {
             assert_eq!(err.details["field"], "secret_env");
             assert!(err.message.contains("HOMEBOY_REQUIRED_SECRET_TEST_KEY"));
         });
+    }
+
+    #[test]
+    fn runner_exec_secret_env_names_include_tunnel_preview_client_token() {
+        let names = runner_exec_secret_env_names(
+            &[
+                "homeboy".to_string(),
+                "tunnel".to_string(),
+                "preview-client".to_string(),
+                "start".to_string(),
+                "--ingress".to_string(),
+                "https://preview-broker.example.test".to_string(),
+                "--public-host".to_string(),
+                "preview.example.test".to_string(),
+                "--local-origin".to_string(),
+                "http://127.0.0.1:8888".to_string(),
+            ],
+            None,
+            &[],
+        );
+
+        assert_eq!(names, vec!["HOMEBOY_PREVIEW_TUNNEL_TOKEN".to_string()]);
     }
 
     #[test]
@@ -2536,6 +2562,7 @@ mod tests {
                 Some("extrachill".to_string()),
                 vec!["homeboy".to_string(), "test".to_string()],
                 Default::default(),
+                Vec::new(),
                 false,
                 None,
                 Vec::new(),
@@ -2587,6 +2614,7 @@ mod tests {
             None,
             vec!["homeboy".to_string(), "--version".to_string()],
             Default::default(),
+            Vec::new(),
             false,
             None,
             Vec::new(),

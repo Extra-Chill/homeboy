@@ -168,6 +168,14 @@ impl Commands {
                     LAB_NO_EXTRA_TOOLS,
                 )
             }
+            Commands::Tunnel(args) if args.is_service_start() => {
+                LabCommandContract::explicit_runner(
+                    "tunnel service start",
+                    None,
+                    false,
+                    LAB_NO_EXTRA_TOOLS,
+                )
+            }
             _ => return None,
         };
 
