@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.121.52] - 2026-06-15
+
+### Fixed
+- prepare nested runtime components
+
 ## [2.121.51] - 2026-06-15
 
 ### Fixed
