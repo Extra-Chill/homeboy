@@ -6,7 +6,8 @@ use crate::core::engine::resource::ExtensionChildResourceSummary;
 use crate::core::engine::run_dir::RunDir;
 use crate::core::error::{Error, Result};
 use crate::core::extension::{
-    env_provider, exec_context, load_extension, ExtensionCapability, RunnerOutput,
+    env_provider, exec_context, load_extension, ExtensionCapability, ExtensionPhaseTiming,
+    RunnerOutput,
 };
 
 #[derive(Debug, Clone)]
@@ -16,6 +17,7 @@ pub struct ComponentScriptOutput {
     pub stdout: String,
     pub stderr: String,
     pub child_resource: Option<ExtensionChildResourceSummary>,
+    pub extension_phase_timings: Vec<ExtensionPhaseTiming>,
 }
 
 impl From<RunnerOutput> for ComponentScriptOutput {
@@ -26,6 +28,7 @@ impl From<RunnerOutput> for ComponentScriptOutput {
             stdout: output.stdout,
             stderr: output.stderr,
             child_resource: output.child_resource,
+            extension_phase_timings: output.extension_phase_timings,
         }
     }
 }
@@ -38,6 +41,7 @@ impl From<ComponentScriptOutput> for RunnerOutput {
             stdout: output.stdout,
             stderr: output.stderr,
             child_resource: output.child_resource,
+            extension_phase_timings: output.extension_phase_timings,
         }
     }
 }
@@ -114,6 +118,7 @@ pub(crate) fn run_component_scripts_with_env(
                 stdout,
                 stderr,
                 child_resource,
+                extension_phase_timings: Vec::new(),
             });
         }
     }
@@ -124,6 +129,7 @@ pub(crate) fn run_component_scripts_with_env(
         stdout,
         stderr,
         child_resource,
+        extension_phase_timings: Vec::new(),
     })
 }
 
@@ -140,14 +146,17 @@ pub(crate) fn run_component_scripts_with_run_dir(
     let invocation = InvocationGuard::acquire(run_dir, &InvocationRequirements::default())?;
     env.extend(invocation.env_vars());
     env.extend(extra_env.iter().cloned());
-    run_component_scripts_with_env(
+    let mut output = run_component_scripts_with_env(
         component,
         capability,
         source_path,
         passthrough,
         &env,
         script_args,
-    )
+    )?;
+    output.extension_phase_timings =
+        super::runner::read_extension_phase_timings(&run_dir.path().to_path_buf())?;
+    Ok(output)
 }
 
 fn component_script_env(

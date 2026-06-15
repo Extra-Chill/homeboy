@@ -734,6 +734,7 @@ fn audit_summary_output() -> AuditCommandOutput {
             contextual_findings: 1,
         }),
         baseline_filtering: None,
+        extension_phase_timings: Vec::new(),
         exit_code: 1,
     })
 }
@@ -786,6 +787,7 @@ fn lint_findings_output() -> LintCommandOutput {
         summary: None,
         self_check_capture: None,
         ci_context: None,
+        extension_phase_timings: Vec::new(),
     }
 }
 
@@ -848,6 +850,7 @@ fn test_summary_output() -> TestCommandOutput {
             stderr_limit_bytes: 0,
         }),
         ci_context: None,
+        extension_phase_timings: Vec::new(),
     }
 }
 

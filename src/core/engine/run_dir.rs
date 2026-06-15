@@ -39,6 +39,7 @@ pub mod files {
     pub const BENCH_RESPONSIVENESS: &str = "bench-responsiveness.jsonl";
     pub const TRACE_RESULTS: &str = "trace.json";
     pub const RESOURCE_SUMMARY: &str = "resource-summary.json";
+    pub const PHASE_TIMINGS: &str = "phase-timings.json";
     pub const EXTENSION_CHILDREN_DIR: &str = "extension-children";
     pub const ANNOTATIONS_DIR: &str = "annotations";
 }
@@ -163,6 +164,12 @@ impl RunDir {
             (
                 crate::core::product_identity::PRODUCT_IDENTITY.env_var("TRACE_RESULTS_FILE"),
                 self.step_file(files::TRACE_RESULTS)
+                    .to_string_lossy()
+                    .to_string(),
+            ),
+            (
+                crate::core::product_identity::PRODUCT_IDENTITY.env_var("PHASE_TIMINGS_FILE"),
+                self.step_file(files::PHASE_TIMINGS)
                     .to_string_lossy()
                     .to_string(),
             ),

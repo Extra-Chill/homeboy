@@ -11,7 +11,9 @@ use crate::core::engine::shell;
 use crate::core::extension::lint::baseline as lint_baseline;
 use crate::core::extension::lint::build_lint_runner;
 use crate::core::extension::self_check::SelfCheckCaptureMetadata;
-use crate::core::extension::{self, ExtensionCapability, LintChangedFileRoute};
+use crate::core::extension::{
+    self, ExtensionCapability, ExtensionPhaseTiming, LintChangedFileRoute,
+};
 use crate::core::finding::{FindingProducerSummary, FindingSource, HomeboyFinding};
 use crate::core::git;
 use crate::core::refactor::AppliedRefactor;
@@ -55,6 +57,8 @@ pub struct LintRunWorkflowResult {
     pub summary: Option<LintSummaryOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub self_check_capture: Option<SelfCheckCaptureMetadata>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extension_phase_timings: Vec<ExtensionPhaseTiming>,
 }
 
 /// Compact lint summary for automation consumers.
@@ -107,6 +111,7 @@ pub fn run_main_lint_workflow(
                     None
                 },
                 self_check_capture: None,
+                extension_phase_timings: Vec::new(),
             });
         }
     }
@@ -241,6 +246,7 @@ pub fn run_main_lint_workflow(
         findings: Some(lint_findings),
         producer_summaries,
         self_check_capture: None,
+        extension_phase_timings: output.extension_phase_timings,
     })
 }
 
@@ -586,6 +592,7 @@ fn run_scoped_lint_runs(
 ) -> crate::core::Result<extension::RunnerOutput> {
     let mut success = true;
     let mut exit_code = 0;
+    let mut extension_phase_timings = Vec::new();
 
     for (index, run) in runs.iter().enumerate() {
         let scoped_run_dir;
@@ -622,6 +629,7 @@ fn run_scoped_lint_runs(
             )
             .passthrough(!args.json_summary)
             .run()?;
+        extension_phase_timings.extend(output.extension_phase_timings);
 
         if !output.success {
             success = false;
@@ -637,6 +645,7 @@ fn run_scoped_lint_runs(
         stdout: String::new(),
         stderr: String::new(),
         child_resource: None,
+        extension_phase_timings,
     })
 }
 
@@ -689,6 +698,7 @@ pub fn run_self_check_lint_workflow(
             None
         },
         self_check_capture: Some(output.capture),
+        extension_phase_timings: Vec::new(),
     })
 }
 

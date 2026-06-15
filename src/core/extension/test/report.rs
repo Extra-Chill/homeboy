@@ -62,6 +62,8 @@ pub struct TestCommandOutput {
     pub raw_output: Option<RawTestOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ci_context: Option<CiContext>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extension_phase_timings: Vec<crate::core::extension::ExtensionPhaseTiming>,
 }
 
 /// Build output from a main test workflow result.
@@ -106,6 +108,7 @@ pub fn from_main_workflow_with_ci_context(
             summary: result.summary,
             raw_output: result.raw_output,
             ci_context,
+            extension_phase_timings: result.extension_phase_timings,
         },
         exit_code,
     )
@@ -135,6 +138,7 @@ pub fn from_drift_workflow(result: DriftWorkflowResult) -> (TestCommandOutput, i
             summary: None,
             raw_output: None,
             ci_context: None,
+            extension_phase_timings: Vec::new(),
         },
         exit_code,
     )
@@ -176,6 +180,7 @@ pub fn from_auto_fix_drift_workflow(
             summary: None,
             raw_output: None,
             ci_context: None,
+            extension_phase_timings: Vec::new(),
         },
         0,
     )
@@ -282,6 +287,7 @@ mod tests {
             test_scope: None,
             summary: None,
             raw_output: None,
+            extension_phase_timings: Vec::new(),
         }
     }
 
@@ -301,6 +307,7 @@ mod tests {
             test_scope: None,
             summary: None,
             raw_output: None,
+            extension_phase_timings: Vec::new(),
         }
     }
 
@@ -320,6 +327,7 @@ mod tests {
             test_scope: None,
             summary: None,
             raw_output: None,
+            extension_phase_timings: Vec::new(),
         }
     }
 
@@ -354,6 +362,30 @@ mod tests {
             json.get("findings").is_none(),
             "findings should be omitted when unavailable: {}",
             json
+        );
+    }
+
+    #[test]
+    fn serializes_extension_phase_timings_as_opaque_metadata() {
+        let mut result = workflow_result(None);
+        result.extension_phase_timings = vec![crate::core::extension::ExtensionPhaseTiming {
+            name: "opaque-provider-phase".to_string(),
+            duration_ms: 4321,
+            artifacts: vec![serde_json::json!({ "url": "runner-artifact://phase.json" })],
+            metadata: std::collections::BTreeMap::new(),
+        }];
+
+        let (output, _) = from_main_workflow(result);
+        let json = serde_json::to_value(output).expect("serialize test command output");
+
+        assert_eq!(
+            json["extension_phase_timings"][0]["name"],
+            "opaque-provider-phase"
+        );
+        assert_eq!(json["extension_phase_timings"][0]["duration_ms"], 4321);
+        assert_eq!(
+            json["extension_phase_timings"][0]["artifacts"][0]["url"],
+            "runner-artifact://phase.json"
         );
     }
 

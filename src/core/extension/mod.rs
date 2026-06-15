@@ -93,8 +93,9 @@ pub use registry::{
 pub use repair::{relink, replace, replace_with_revision, ReplaceResult};
 pub use runner::{ExtensionRunner, RunnerOutput};
 pub use runner_contract::{
-    phase_failure_category_from_exit_code, phase_status_from_exit_code, PhaseFailure,
-    PhaseFailureCategory, PhaseReport, PhaseStatus, RunnerStepFilter, VerificationPhase,
+    phase_failure_category_from_exit_code, phase_status_from_exit_code, ExtensionPhaseTiming,
+    PhaseFailure, PhaseFailureCategory, PhaseReport, PhaseStatus, RunnerStepFilter,
+    VerificationPhase,
 };
 pub use runtime_helper::{
     helper_path, BASH_PREFLIGHT_ENV, COMMAND_CAPTURE_ENV, RUNNER_PRELUDE_ENV, RUNNER_STEPS_ENV,

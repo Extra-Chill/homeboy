@@ -9,7 +9,7 @@ use crate::core::extension::test::{
     parse_test_results_file, parse_test_results_text, parse_test_results_text_with_spec,
     CoverageOutput, TestScopeOutput, TestSummaryOutput,
 };
-use crate::core::extension::{self, ExtensionCapability};
+use crate::core::extension::{self, ExtensionCapability, ExtensionPhaseTiming};
 use crate::core::finding::HomeboyFinding;
 use crate::core::observation::homeboy_findings_from_test_analysis_input;
 use crate::core::refactor::AppliedRefactor;
@@ -53,6 +53,8 @@ pub struct TestRunWorkflowResult {
     /// can see PHPUnit/cargo output (bootstrap errors, stack traces) without
     /// having to re-run with a different flag. (#1143)
     pub raw_output: Option<RawTestOutput>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extension_phase_timings: Vec<ExtensionPhaseTiming>,
 }
 
 /// Captured tail of a test runner's stdout/stderr.
@@ -206,6 +208,7 @@ pub fn run_main_test_workflow(
                     None
                 },
                 raw_output: None,
+                extension_phase_timings: Vec::new(),
             });
         }
     }
@@ -477,6 +480,7 @@ pub fn run_main_test_workflow(
         test_scope: changed_scope,
         summary,
         raw_output,
+        extension_phase_timings: output.extension_phase_timings,
     })
 }
 
@@ -538,6 +542,7 @@ pub fn run_self_check_test_workflow(
             None
         },
         raw_output,
+        extension_phase_timings: Vec::new(),
     })
 }
 
