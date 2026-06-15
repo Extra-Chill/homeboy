@@ -550,6 +550,21 @@ function runtimeComponentPathsFromContracts(contracts) {
     .filter(([key, value]) => key && value));
 }
 
+function uniqueComponentContracts(contracts) {
+  const seen = new Set();
+  return contracts.filter((contract) => {
+    if (!contract || typeof contract !== 'object' || Array.isArray(contract)) {
+      return false;
+    }
+    const key = `${contract.slug || ''}:${contract.path || contract.source || ''}`;
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
+}
+
 function runnerInput(request, artifacts) {
   const mounts = mountEntries(request);
   const runtimeComponentPaths = {
@@ -582,6 +597,7 @@ function runnerInput(request, artifacts) {
     artifacts_path: artifacts,
     wp_codebox_bin: argValue('--wp-codebox-bin') || request.wp_codebox_bin || '',
     runtime_component_paths: runtimeComponentPaths,
+    component_contracts: uniqueComponentContracts(request.component_contracts || []),
     homeboy_path: argValue('--homeboy') || request.homeboy_path || request.homeboy || '',
     homeboy_extensions_path: argValue('--homeboy-extensions') || request.homeboy_extensions_path || request.homeboy_extensions || path.resolve(__dirname, '..', '..'),
     wp_version: request.wp_codebox_wordpress_version || request.wp_version || request.wp || undefined,
@@ -606,12 +622,13 @@ function componentContracts(input) {
   // `component_contracts` shape:
   // `{ slug, path, loadAs, activate }`. WP Codebox mounts these as mu-plugins so
   // the runtime stack can register its tools and agent/chat surfaces.
-  return runtimeComponentExtraPlugins(input).map((plugin) => ({
+  const runtimeContracts = runtimeComponentExtraPlugins(input).map((plugin) => ({
     slug: plugin.slug,
     path: plugin.source,
     loadAs: plugin.loadAs || 'mu-plugin',
     activate: Boolean(plugin.activate),
   }));
+  return uniqueComponentContracts([...(input.component_contracts || []), ...runtimeContracts]);
 }
 
 function verifySteps(input) {

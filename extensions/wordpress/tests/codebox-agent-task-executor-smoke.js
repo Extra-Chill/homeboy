@@ -455,6 +455,22 @@ assert.deepEqual(abilityBridgeRequest.runtime_task.input, { artifact: { slug: 'e
 assert.equal(abilityBridgeRequest.parent_request.executor.config.output_mappings.validation_result, 'result.import_validation_result');
 assert.deepEqual(abilityBridgeRequest.component_contracts, [{ slug: 'wp-site-generator', path: '/workspace/wp-site-generator', activate: true }]);
 
+const topLevelComponentContractsRequest = codeboxTaskRequestFromAgentTaskRequest({
+  ...request,
+  task_id: 'top-level-component-contracts-task-123',
+  component_contracts: [{ slug: 'domain-component', path: '/workspace/domain-component', activate: true }],
+  executor: {
+    backend: 'codebox',
+    config: {
+      component_contracts: [{ slug: 'config-component', path: '/workspace/config-component', activate: false }],
+    },
+  },
+});
+assert.deepEqual(topLevelComponentContractsRequest.component_contracts, [
+  { slug: 'domain-component', path: '/workspace/domain-component', activate: true },
+  { slug: 'config-component', path: '/workspace/config-component', activate: false },
+]);
+
 const genericRuntimeEnv = {
   GENERIC_PROVIDER_CONFIG: '/runtime/provider/config.json',
   XDG_DATA_HOME: '/runtime/provider/data',
