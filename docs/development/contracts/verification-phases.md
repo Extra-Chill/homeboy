@@ -85,3 +85,31 @@ test       -> homeboy test
 
 This keeps each command debuggable on its own while giving CI, future `check`
 commands, and rig workflows one stable shape to aggregate.
+
+## Extension phase timings
+
+Extensions and providers may emit a generic phase timing sidecar through
+`HOMEBOY_PHASE_TIMINGS_FILE`. Homeboy core treats phase names, messages, and
+metadata as provider-owned labels; it only preserves and renders them.
+
+```json
+{
+  "phase_timings": [
+    {
+      "name": "provider-shared-resource",
+      "duration_ms": 90000,
+      "status": "waiting",
+      "message": "waiting for exclusive provider resource",
+      "metadata": {
+        "provider": "fixture"
+      }
+    }
+  ]
+}
+```
+
+`status` is optional and free-form. Review/fleet summaries highlight generic
+waiting states when providers declare `waiting`, `blocked`, or `queued`. Tool
+specific detection, such as recognizing a package manager lock message, belongs
+in the provider or extension that understands that tool; Homeboy core only
+surfaces the declared generic phase state.
