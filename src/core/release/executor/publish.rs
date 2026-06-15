@@ -112,6 +112,10 @@ fn publish_step_result(
         .and_then(|v| v.as_bool())
         .unwrap_or(true)
     {
+        if let Some(reason) = publish_output_private_package_reason(response) {
+            return private_package_skip_result(step_id, target, extension_id, data, reason);
+        }
+
         if let Some(reason) = publish_output_auth_required_reason(response) {
             return auth_required_skip_result(step_id, target, extension_id, data, reason);
         }
@@ -168,6 +172,24 @@ fn auth_required_skip_result(
     )
 }
 
+fn private_package_skip_result(
+    step_id: &str,
+    target: &str,
+    extension_id: &str,
+    data: Option<serde_json::Value>,
+    reason: String,
+) -> ReleaseStepResult {
+    step_skipped(
+        step_id,
+        step_id,
+        data,
+        format!(
+            "Skipped publish to {} via {}: {}",
+            target, extension_id, reason
+        ),
+    )
+}
+
 fn extension_auth_required_reason(response: &serde_json::Value) -> Option<String> {
     let status = response.get("status").and_then(|v| v.as_str())?;
     if status != "auth_required" {
@@ -218,6 +240,23 @@ fn publish_output_auth_required_reason(response: &serde_json::Value) -> Option<S
 
     Some(
         "npm authentication required (ENEEDAUTH). Run `npm login` for the target registry, then retry the registry publish."
+            .to_string(),
+    )
+}
+
+/// Detect npm's EPRIVATE rejection, emitted when a package marked `"private": true`
+/// is published. Such packages must never reach a public registry, so this is treated
+/// as an intentional skip rather than a release failure.
+fn publish_output_private_package_reason(response: &serde_json::Value) -> Option<String> {
+    let output = publish_response_output(response);
+    let marked_private =
+        output.contains("EPRIVATE") || output.contains("This package has been marked as private");
+    if !marked_private {
+        return None;
+    }
+
+    Some(
+        "package marked private (\"private\": true); npm publish skipped. The build artifact is the deliverable."
             .to_string(),
     )
 }
@@ -601,6 +640,54 @@ mod tests {
 
         assert_eq!(result.status, ReleaseStepStatus::Skipped);
         assert!(result.warnings.join("\n").contains("ENEEDAUTH"));
+        assert!(result.error.is_none());
+    }
+
+    #[test]
+    fn publish_step_skips_when_npm_output_reports_eprivate() {
+        let response = serde_json::json!({
+            "success": false,
+            "exitCode": 1,
+            "stdout": "",
+            "stderr": "npm error code EPRIVATE\nnpm error This package has been marked as private",
+        });
+
+        let result = publish_step_result(
+            "publish.package-runtime",
+            "package-runtime",
+            "package-runtime",
+            None,
+            &response,
+            None,
+        );
+
+        assert_eq!(result.status, ReleaseStepStatus::Skipped);
+        assert!(result.warnings.join("\n").contains("marked private"));
+        assert!(result.error.is_none());
+    }
+
+    #[test]
+    fn publish_step_eprivate_skip_takes_precedence_over_auth_required_output() {
+        let response = serde_json::json!({
+            "success": false,
+            "exitCode": 1,
+            "stdout": "",
+            "stderr": "npm error code EPRIVATE\nnpm error This package has been marked as private\nnpm ERR! code ENEEDAUTH",
+        });
+
+        let result = publish_step_result(
+            "publish.package-runtime",
+            "package-runtime",
+            "package-runtime",
+            None,
+            &response,
+            None,
+        );
+
+        assert_eq!(result.status, ReleaseStepStatus::Skipped);
+        let warnings = result.warnings.join("\n");
+        assert!(warnings.contains("marked private"));
+        assert!(!warnings.contains("ENEEDAUTH"));
         assert!(result.error.is_none());
     }
 
