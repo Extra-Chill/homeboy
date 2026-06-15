@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.121.35] - 2026-06-15
+
+### Fixed
+- declare WordPress trace toolchain provenance
+
 ## [2.121.34] - 2026-06-15
 
 ### Fixed
