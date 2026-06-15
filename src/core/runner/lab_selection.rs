@@ -366,6 +366,22 @@ pub(super) fn resolve_lab_runner_selection_from_default(
         }));
     }
 
+    if allow_local_hot && !force_hot {
+        return Err(Error::validation_invalid_argument(
+            "allow_local_hot",
+            format!(
+                "--allow-local-hot only permits an explicit --force-hot local run for portable hot command `{}`; it does not disable automatic Lab offload by itself",
+                command.hot_label
+            ),
+            Some("--allow-local-hot".to_string()),
+            Some(vec![
+                "Use --force-hot --allow-local-hot to keep the command on the controller machine.".to_string(),
+                "Omit --allow-local-hot to let Homeboy choose the configured default Lab runner.".to_string(),
+                "Use --runner <runner-id> to offload to a specific Lab runner.".to_string(),
+            ]),
+        ));
+    }
+
     if !command.default_lab_offload {
         fail_if_local_bench_denied(command, deny_local_bench)?;
         return Ok(None);
