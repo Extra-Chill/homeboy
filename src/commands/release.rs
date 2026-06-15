@@ -39,6 +39,14 @@ pub struct ReleaseArgs {
     #[arg(long)]
     recover: bool,
 
+    /// With --recover: if the release tag exists but points at a commit behind
+    /// HEAD (e.g. config-only commits landed after tagging), move the tag to
+    /// HEAD instead of refusing. Guarded — the tagged commit must be an
+    /// ancestor of HEAD, HEAD must satisfy the version targets, and no GitHub
+    /// Release may exist for the tag.
+    #[arg(long)]
+    retag: bool,
+
     /// Finish the release pipeline for an already-versioned, already-tagged HEAD.
     /// Skips changelog/version/git mutation steps and runs package, GitHub Release,
     /// publish, cleanup, and post-release hooks against the tag pointing at HEAD.
@@ -135,6 +143,7 @@ impl ReleaseArgs {
             dry_run_args: DryRunArgs { dry_run },
             deploy,
             recover,
+            retag: false,
             head,
             from_artifacts,
             skip_checks,
@@ -162,6 +171,7 @@ pub fn run(
             path_override: args.path.clone(),
             dry_run: args.dry_run_args.dry_run,
             recover: args.recover,
+            retag: args.retag,
             skip_checks: args.skip_checks,
             bump_override: bump_override.clone(),
             force_lower_bump: args.force_lower_bump,
@@ -215,6 +225,7 @@ pub fn run(
         path_override: None,
         dry_run: args.dry_run_args.dry_run,
         recover: false,
+        retag: false,
         skip_checks: args.skip_checks,
         bump_override,
         force_lower_bump: args.force_lower_bump,

@@ -611,13 +611,177 @@ fn run_recover(input: &ReleaseCommandInput) -> Result<(ReleaseCommandResult, i32
     };
     let remote_tag_commit = git::remote_tag_commit(&component.local_path, &tag_name)?;
 
-    if local_tag_commit
+    let tag_is_stale = local_tag_commit
         .as_deref()
         .is_some_and(|commit| commit != head_commit)
         || remote_tag_commit
             .as_deref()
-            .is_some_and(|commit| commit != head_commit)
-    {
+            .is_some_and(|commit| commit != head_commit);
+
+    if tag_is_stale && input.retag {
+        // Guarded retag: only move the tag forward to HEAD when it is safe.
+        //   1. Every existing tag commit (local + remote) is a strict ancestor
+        //      of HEAD — never relocate onto divergent/unrelated history.
+        //   2. HEAD satisfies all version targets at the current version —
+        //      preserves the orphan-tag invariant (#2234): the tag must land on
+        //      a commit whose tree actually shows this version.
+        //   3. No GitHub Release exists for the tag — moving a published
+        //      release is destructive to consumers and must be done explicitly.
+        for candidate in [local_tag_commit.as_deref(), remote_tag_commit.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            let is_ancestor = git::is_ancestor(&component.local_path, candidate, &head_commit)?;
+            if !is_ancestor {
+                return Err(Error::validation_invalid_argument(
+                    "retag",
+                    format!(
+                        "Refusing to retag '{}': existing tag commit {} is not an ancestor of HEAD {}",
+                        tag_name,
+                        short_sha(candidate),
+                        short_sha(&head_commit)
+                    ),
+                    None,
+                    Some(vec![
+                        "The tag points at divergent history. Resolve manually before retagging.".to_string(),
+                    ]),
+                ));
+            }
+        }
+
+        if let Some(mismatches) =
+            crate::core::release::executor::version_targets::collect_head_version_mismatches(
+                &component,
+                current_version,
+            )
+        {
+            let detail = mismatches
+                .iter()
+                .map(|m| {
+                    format!(
+                        "{} = {}",
+                        m.file,
+                        m.found.as_deref().unwrap_or("<unreadable>")
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(Error::validation_invalid_argument(
+                "retag",
+                format!(
+                    "Refusing to retag '{}': HEAD does not show version {} for {} target(s): {}",
+                    tag_name,
+                    current_version,
+                    mismatches.len(),
+                    detail
+                ),
+                None,
+                Some(vec![
+                    "Bump the version targets at HEAD first, or run a normal release.".to_string(),
+                ]),
+            ));
+        }
+
+        if crate::core::release::executor::github_release_exists_for_tag(&component, &tag_name)
+            == Some(true)
+        {
+            return Err(Error::validation_invalid_argument(
+                "retag",
+                format!(
+                    "Refusing to retag '{}': a GitHub Release already exists for this tag",
+                    tag_name
+                ),
+                None,
+                Some(vec![
+                    format!(
+                        "Moving a published release is destructive. Delete it deliberately if intended: gh release delete {}",
+                        tag_name
+                    ),
+                ]),
+            ));
+        }
+
+        // Safe to move: delete the stale tag (local + remote) and re-create at HEAD.
+        log_status!(
+            "recover",
+            "Retagging {} from {} to HEAD {}...",
+            tag_name,
+            local_tag_commit
+                .as_deref()
+                .or(remote_tag_commit.as_deref())
+                .map(short_sha)
+                .unwrap_or("<unknown>"),
+            short_sha(&head_commit)
+        );
+
+        if tag_exists_local {
+            git::delete_local_tag(&component.local_path, &tag_name)?;
+        }
+        if tag_exists_remote {
+            git::delete_remote_tag(&component.local_path, &tag_name)?;
+        }
+
+        let tag_result = git::tag(
+            Some(&input.component_id),
+            Some(&tag_name),
+            Some(&format!("Release {}", tag_name)),
+        )?;
+        if !tag_result.success {
+            return Err(Error::git_command_failed(format!(
+                "Failed to re-create tag at HEAD: {}",
+                tag_result.stderr
+            )));
+        }
+
+        let push_result = git::push(
+            Some(&input.component_id),
+            git::PushOptions {
+                tags: true,
+                ..Default::default()
+            },
+        )?;
+        if !push_result.success {
+            return Err(Error::git_command_failed(format!(
+                "Failed to push retagged {}: {}",
+                tag_name, push_result.stderr
+            )));
+        }
+
+        let actions = vec![format!("retagged {} to HEAD", tag_name)];
+        log_status!(
+            "recover",
+            "Recovery complete for v{}: {}",
+            current_version,
+            actions.join(", ")
+        );
+        return Ok((
+            ReleaseCommandResult {
+                component_id: input.component_id.clone(),
+                status: "recovered".to_string(),
+                bump_type: "recover".to_string(),
+                dry_run: false,
+                releasable_commits: 0,
+                new_version: None,
+                tag: Some(tag_name.clone()),
+                skipped_reason: None,
+                plan: Some(recovery_release_plan(
+                    &input.component_id,
+                    current_version,
+                    &tag_name,
+                    false,
+                    true,
+                    true,
+                    &actions,
+                )),
+                run: None,
+                deployment: None,
+                release_summary: actions.clone(),
+            },
+            0,
+        ));
+    }
+
+    if tag_is_stale {
         return Err(Error::validation_invalid_argument(
             "tag",
             format!("Tag '{}' exists but does not point to HEAD", tag_name),
@@ -644,6 +808,10 @@ fn run_recover(input: &ReleaseCommandInput) -> Result<(ReleaseCommandResult, i32
                 ),
                 format!(
                     "If the tag is an abandoned partial release, delete the GitHub release/tag explicitly, then run: homeboy release {} --recover",
+                    input.component_id
+                ),
+                format!(
+                    "If config-only commits landed after tagging (tag is behind HEAD, version unchanged, no GitHub Release), move the tag to HEAD: homeboy release {} --recover --retag",
                     input.component_id
                 ),
             ]),
@@ -896,6 +1064,7 @@ pub fn run_batch(
             path_override: None,
             dry_run: input_template.dry_run,
             recover: input_template.recover,
+            retag: input_template.retag,
             skip_checks: input_template.skip_checks,
             bump_override: input_template.bump_override.clone(),
             force_lower_bump: input_template.force_lower_bump,
