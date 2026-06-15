@@ -671,6 +671,8 @@ Installing declared dependencies...
         assert!(commands.contains(&"homeboy runs list --limit 5"));
         assert!(commands.contains(&"homeboy runs latest-run --kind bench"));
         assert!(commands.contains(&"homeboy runs artifacts <run-id>"));
-        assert!(!commands.iter().any(|command| command.starts_with("homeboy runner ")));
+        assert!(!commands
+            .iter()
+            .any(|command| command.starts_with("homeboy runner ")));
     }
 }
