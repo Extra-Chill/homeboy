@@ -860,15 +860,19 @@ fn materialize_git_command(
 }
 
 fn dirty_lab_workspace_guard(dest: &str, allow_dirty_lab_workspace: bool) -> String {
+    let status = format!(
+        "git -C {dest} status --porcelain=v1 2>/dev/null | while IFS= read -r line; do path=${{line#???}}; case \"$path\" in .homeboy|.homeboy/*) ;; *) printf '%s\\n' \"$line\";; esac; done || true",
+        dest = dest,
+    );
     if allow_dirty_lab_workspace {
         format!(
-            "dirty=$(git -C {dest} status --porcelain=v1 2>/dev/null || true); if [ -n \"$dirty\" ]; then printf '%s\\n' 'Homeboy Lab warning: --allow-dirty-lab-workspace is overwriting uncommitted runner workspace changes.' >&2; printf '%s\\n' \"$dirty\" >&2; fi",
-            dest = dest,
+            "dirty=$({status}); if [ -n \"$dirty\" ]; then printf '%s\\n' 'Homeboy Lab warning: --allow-dirty-lab-workspace is overwriting uncommitted runner workspace changes.' >&2; printf '%s\\n' \"$dirty\" >&2; fi",
+            status = status,
         )
     } else {
         format!(
-            "dirty=$(git -C {dest} status --porcelain=v1 2>/dev/null || true); if [ -n \"$dirty\" ]; then printf '%s\\n' 'Homeboy Lab refused to overwrite a dirty runner workspace.' >&2; printf '%s\\n' \"$dirty\" >&2; printf '%s\\n' 'Commit, stash, clean, or remove the runner workspace before retrying. Pass --allow-dirty-lab-workspace only for noisy investigation that may discard runner-side changes.' >&2; exit 97; fi",
-            dest = dest,
+            "dirty=$({status}); if [ -n \"$dirty\" ]; then printf '%s\\n' 'Homeboy Lab refused to overwrite a dirty runner workspace.' >&2; printf '%s\\n' \"$dirty\" >&2; printf '%s\\n' 'Commit, stash, clean, or remove the runner workspace before retrying. Pass --allow-dirty-lab-workspace only for noisy investigation that may discard runner-side changes.' >&2; exit 97; fi",
+            status = status,
         )
     }
 }
@@ -1277,6 +1281,74 @@ mod tests {
                 fs::read_to_string(remote.join("file.txt")).expect("read synced file"),
                 "base\n"
             );
+        });
+    }
+
+    #[test]
+    fn git_materialization_ignores_generated_homeboy_output_but_refuses_source_dirty_state() {
+        crate::test_support::with_isolated_home(|_| {
+            let source = tempfile::tempdir().expect("source tempdir");
+            let runner_root = tempfile::tempdir().expect("runner root tempdir");
+            git(source.path(), &["init"]);
+            git(source.path(), &["config", "user.email", "test@example.com"]);
+            git(source.path(), &["config", "user.name", "Test User"]);
+            fs::write(source.path().join("file.txt"), "base\n").expect("write file");
+            git(source.path(), &["add", "."]);
+            git(source.path(), &["commit", "-m", "base"]);
+            git(
+                source.path(),
+                &[
+                    "remote",
+                    "add",
+                    "origin",
+                    &source.path().display().to_string(),
+                ],
+            );
+
+            super::super::create(
+                &format!(
+                    r#"{{"id":"lab-local-generated-homeboy","kind":"local","workspace_root":"{}"}}"#,
+                    runner_root.path().display()
+                ),
+                false,
+            )
+            .expect("create runner");
+
+            let sync = || {
+                sync_workspace(
+                    "lab-local-generated-homeboy",
+                    RunnerWorkspaceSyncOptions {
+                        path: source.path().display().to_string(),
+                        mode: RunnerWorkspaceSyncMode::Git,
+                        controller_routed_git: false,
+                        changed_since_base: None,
+                        git_fetch_refs: Vec::new(),
+                        snapshot_includes: Vec::new(),
+                        allow_dirty_lab_workspace: false,
+                    },
+                )
+            };
+
+            let (output, exit_code) = sync().expect("initial sync workspace");
+            assert_eq!(exit_code, 0);
+            let remote = Path::new(&output.remote_path);
+            fs::create_dir_all(remote.join(".homeboy/experiments/stripe-ece"))
+                .expect("create generated output dir");
+            fs::write(
+                remote.join(".homeboy/experiments/stripe-ece/compare.json"),
+                "{}\n",
+            )
+            .expect("write generated output");
+
+            let (output, exit_code) = sync().expect("generated .homeboy output is ignored");
+            assert_eq!(exit_code, 0);
+            let remote = Path::new(&output.remote_path);
+            assert!(!remote.join(".homeboy").exists());
+
+            fs::write(remote.join("dirty-source.txt"), "dirty\n").expect("write dirty source file");
+            let err = sync().expect_err("real dirty runner workspace is refused");
+            assert!(err.message.contains("Homeboy Lab refused"));
+            assert!(err.message.contains("dirty-source.txt"));
         });
     }
 
