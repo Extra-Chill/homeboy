@@ -1172,7 +1172,7 @@ fn sample_child_until_stopped(root_pid: u32, stop: Arc<AtomicBool>) -> ChildProb
                 let rss_bytes = sample.rss_bytes;
                 let cpu_percent = sample.cpu_percent;
                 let child_count = sample.child_count;
-                let peak_changed = state.peak_rss_bytes.map_or(true, |peak| rss_bytes > peak);
+                let peak_changed = state.peak_rss_bytes.is_none_or(|peak| rss_bytes > peak);
                 state.peak_rss_bytes = Some(
                     state
                         .peak_rss_bytes
