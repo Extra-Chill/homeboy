@@ -388,6 +388,7 @@ JSON
             bench: None,
             trace: None,
             structured_sidecars: std::collections::BTreeMap::new(),
+            release_preflights: vec![],
             actions: vec![],
             hooks: std::collections::HashMap::new(),
             settings: vec![],

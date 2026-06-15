@@ -46,9 +46,7 @@ pub(crate) use compiler_warning_contract::{
     extensions_for_compiler_warning_contract, run_compiler_warning_contract_script,
     CompilerWarningContract,
 };
-pub(crate) use execution::{
-    build_settings_json_from_manifest, execute_action, wordpress_release_publish_token_remediation,
-};
+pub(crate) use execution::{build_settings_json_from_manifest, execute_action};
 pub use execution::{
     extension_ready_status, is_extension_compatible, run_action, run_extension, run_setup,
     ExtensionExecutionMode, ExtensionReadyStatus, ExtensionRunResult, ExtensionSetupResult,
@@ -74,11 +72,12 @@ pub use manifest::{
     DeployVerification, DepsConfig, DiscoveryConfig, DiscoveryMarkerConfig, DocTarget,
     ExecutableCapability, ExtensionManifest, FeatureContextRule, FileContainsCondition, HttpMethod,
     InputConfig, LintChangedFileRoute, LintConfig, OutputConfig, OutputSchema, PlatformCapability,
-    ProvidesConfig, RemotePathInferenceRule, RemotePathRootRule, RequirementsConfig, RuntimeConfig,
-    RuntimeRequirementsConfig, ScriptsConfig, SelectOption, SettingConfig, SinceTagConfig,
-    StructuredSidecarDeclaration, TestChangedFileExclusiveEnv, TestChangedFileRouting,
-    TestChangedFileRoutingStrategy, TestConfig, TestDriftConfig, TestMappingConfig,
-    TestPassthroughFilter, TestPassthroughFilterStrategy, TraceConfig, VersionPatternConfig,
+    ProvidesConfig, ReleasePreflightConfig, RemotePathInferenceRule, RemotePathRootRule,
+    RequirementsConfig, RuntimeConfig, RuntimeRequirementsConfig, ScriptsConfig, SelectOption,
+    SettingConfig, SinceTagConfig, StructuredSidecarDeclaration, TestChangedFileExclusiveEnv,
+    TestChangedFileRouting, TestChangedFileRoutingStrategy, TestConfig, TestDriftConfig,
+    TestMappingConfig, TestPassthroughFilter, TestPassthroughFilterStrategy, TraceConfig,
+    VersionPatternConfig,
 };
 pub use manifest_deploy_config::{DeployArchiveInstallPolicy, DeployRequiredHeader};
 pub use refactor_protocol::{

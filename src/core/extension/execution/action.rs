@@ -120,22 +120,13 @@ pub(crate) fn execute_action(
                 crate::core::engine::text::json_path_str(&payload, &["release", "local_path"])
                     .unwrap_or(extension_path);
 
-            let mut env = build_action_env(
+            let env = build_action_env(
                 extension_id,
                 project_id,
                 &payload,
                 Some(extension_path),
                 project_base_path.as_deref(),
             );
-            if let Some(response) = preflight_wordpress_release_publish_token(
-                extension_id,
-                action_id,
-                &payload,
-                &mut env,
-            ) {
-                return Ok(response);
-            }
-
             let execution = execute_extension_command(
                 command_template,
                 &vars,
@@ -152,42 +143,6 @@ pub(crate) fn execute_action(
             }))
         }
     }
-}
-
-pub(crate) fn wordpress_release_publish_token_remediation() -> &'static str {
-    "GH_TOKEN is required to push the WordPress release-latest mirror. Set GH_TOKEN with `export GH_TOKEN=\"$(gh auth token)\"`, or run `gh auth login` and rerun the release."
-}
-
-fn preflight_wordpress_release_publish_token(
-    extension_id: &str,
-    action_id: &str,
-    payload: &serde_json::Value,
-    env: &mut Vec<(String, String)>,
-) -> Option<serde_json::Value> {
-    if extension_id != "wordpress" || action_id != "release.publish" {
-        return None;
-    }
-
-    let Some(token) = crate::core::git::github_token_from_env_or_gh() else {
-        return Some(serde_json::json!({
-            "success": false,
-            "status": "missing_secret",
-            "reason": wordpress_release_publish_token_remediation(),
-            "payload": payload,
-        }));
-    };
-
-    upsert_env(env, "GH_TOKEN", token);
-    None
-}
-
-fn upsert_env(env: &mut Vec<(String, String)>, key: &str, value: String) {
-    if let Some((_, existing)) = env.iter_mut().find(|(env_key, _)| env_key == key) {
-        *existing = value;
-        return;
-    }
-
-    env.push((key.to_string(), value));
 }
 
 fn interpolate_action_payload(
@@ -266,34 +221,5 @@ fn interpolate_payload_value(
             Ok(serde_json::Value::Object(result))
         }
         _ => Ok(value.clone()),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::upsert_env;
-
-    #[test]
-    fn upsert_env_adds_missing_key() {
-        let mut env = vec![("A".to_string(), "one".to_string())];
-
-        upsert_env(&mut env, "GH_TOKEN", "token".to_string());
-
-        assert_eq!(
-            env,
-            vec![
-                ("A".to_string(), "one".to_string()),
-                ("GH_TOKEN".to_string(), "token".to_string()),
-            ]
-        );
-    }
-
-    #[test]
-    fn upsert_env_replaces_existing_key() {
-        let mut env = vec![("GH_TOKEN".to_string(), "old".to_string())];
-
-        upsert_env(&mut env, "GH_TOKEN", "new".to_string());
-
-        assert_eq!(env, vec![("GH_TOKEN".to_string(), "new".to_string())]);
     }
 }
