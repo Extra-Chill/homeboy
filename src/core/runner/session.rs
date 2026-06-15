@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::core::api_jobs::ActiveRunnerJobSummary;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RunnerTunnelMode {
@@ -125,6 +127,8 @@ pub struct RunnerStatusReport {
     pub session: Option<RunnerSession>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stale_daemon: Option<RunnerStaleDaemonWarning>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub active_jobs: Vec<ActiveRunnerJobSummary>,
     pub session_path: String,
 }
 

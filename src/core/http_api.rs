@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-use crate::core::api_jobs::JobStore;
+use crate::core::api_jobs::{ActiveRunnerJobSummary, JobStatus, JobStore};
 use crate::core::error::{Error, Result};
 use crate::core::observation::{
     running_status_note, FindingListFilter, ObservationStore, RunListFilter, RunRecord,
@@ -322,7 +322,8 @@ where
         }
         HttpEndpoint::Runs => json!({
             "command": "api.runs.list",
-            "runs": list_runs(&request.path, None)?,
+            "runs": list_runs(&request.path, None, job_store)?,
+            "active_runner_jobs": active_runner_jobs_for_path(&request.path, job_store),
         }),
         HttpEndpoint::Run { id } => json!({
             "command": "api.runs.show",
@@ -357,15 +358,16 @@ where
         }
         HttpEndpoint::AuditRuns => json!({
             "command": "api.audit.runs",
-            "runs": list_runs(&request.path, Some("audit"))?,
+            "runs": list_runs(&request.path, Some("audit"), job_store)?,
         }),
         HttpEndpoint::BenchRuns => json!({
             "command": "api.bench.runs",
-            "runs": list_runs(&request.path, Some("bench"))?,
+            "runs": list_runs(&request.path, Some("bench"), job_store)?,
         }),
         HttpEndpoint::Jobs => json!({
             "command": "api.jobs.list",
             "jobs": job_store.list(),
+            "active_runner_jobs": job_store.active_runner_jobs(),
         }),
         HttpEndpoint::Job { id } => json!({
             "command": "api.jobs.show",
@@ -534,7 +536,11 @@ fn path_segments(path: &str) -> Vec<String> {
         .collect()
 }
 
-fn list_runs(path: &str, kind_override: Option<&str>) -> Result<Vec<RunSummary>> {
+fn list_runs(
+    path: &str,
+    kind_override: Option<&str>,
+    job_store: &JobStore,
+) -> Result<Vec<RunSummary>> {
     let store = ObservationStore::open_initialized()?;
     let filter = RunListFilter {
         kind: kind_override
@@ -548,11 +554,100 @@ fn list_runs(path: &str, kind_override: Option<&str>) -> Result<Vec<RunSummary>>
             .map(|limit| limit.clamp(1, 1000)),
     };
 
-    Ok(store
+    let mut runs: Vec<RunSummary> = store
         .list_runs(filter)?
         .into_iter()
         .map(run_summary)
-        .collect())
+        .collect();
+
+    if kind_override.is_none() {
+        runs.extend(
+            active_runner_jobs_for_path(path, job_store)
+                .into_iter()
+                .map(active_runner_job_run_summary),
+        );
+    }
+
+    Ok(runs)
+}
+
+fn active_runner_jobs_for_path(path: &str, job_store: &JobStore) -> Vec<ActiveRunnerJobSummary> {
+    let status = query_value(path, "status");
+    let limit = query_value(path, "limit")
+        .and_then(|value| value.parse::<usize>().ok())
+        .map(|limit| limit.clamp(1, 1000));
+    let mut jobs: Vec<_> = job_store
+        .active_runner_jobs()
+        .into_iter()
+        .filter(|job| match status.as_deref() {
+            Some(status) => status == active_job_status_label(job.status),
+            None => true,
+        })
+        .collect();
+    if let Some(limit) = limit {
+        jobs.truncate(limit);
+    }
+    jobs
+}
+
+fn active_runner_job_run_summary(job: ActiveRunnerJobSummary) -> RunSummary {
+    RunSummary {
+        id: job
+            .durable_run_id
+            .clone()
+            .unwrap_or_else(|| format!("runner-job-{}", job.job_id)),
+        kind: "lab-runner-job".to_string(),
+        status: active_job_status_label(job.status).to_string(),
+        started_at: ms_to_rfc3339(job.started_at_ms),
+        finished_at: None,
+        component_id: None,
+        rig_id: None,
+        git_sha: None,
+        command: Some(format!(
+            "{} [runner={}, job={}, durable_run={}, elapsed_ms={}, active_child_count={}, active_cell_count={}]",
+            job.command,
+            job.runner_id,
+            job.job_id,
+            job.durable_run_id.as_deref().unwrap_or("unknown"),
+            job.elapsed_ms,
+            job.active_child_count
+                .map(|count| count.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+            job.active_cell_count
+                .map(|count| count.to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        )),
+        cwd: job.cwd,
+        status_note: Some(format!(
+            "active Lab runner job: runner={} job={} durable_run={} elapsed_ms={} active_child_count={} active_cell_count={}",
+            job.runner_id,
+            job.job_id,
+            job.durable_run_id.as_deref().unwrap_or("unknown"),
+            job.elapsed_ms,
+            job.active_child_count
+                .map(|count| count.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+            job.active_cell_count
+                .map(|count| count.to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        )),
+    }
+}
+
+fn active_job_status_label(status: JobStatus) -> &'static str {
+    match status {
+        JobStatus::Queued => "queued",
+        JobStatus::Running => "running",
+        JobStatus::Succeeded => "pass",
+        JobStatus::Failed => "fail",
+        JobStatus::Cancelled => "cancelled",
+    }
+}
+
+fn ms_to_rfc3339(ms: u64) -> String {
+    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms as i64)
+        .unwrap_or_else(chrono::Utc::now)
+        .to_rfc3339()
 }
 
 fn show_run(run_id: &str) -> Result<RunDetail> {

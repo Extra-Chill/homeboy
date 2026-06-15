@@ -1032,7 +1032,7 @@ fn in_flight_daemon_disconnect_error(
         "If daemon polling is unavailable, inspect from the runner with `homeboy runner exec {runner_id} -- homeboy runs list --status running --limit 20`."
     ))
     .with_hint(format!(
-        "Runner daemon job id `{job_id}` was already dispatched; use runner/job logs to decide whether to wait, cancel, or clean up."
+        "Runner daemon job id `{job_id}` was already dispatched; tail it with `homeboy runner job logs {runner_id} {job_id} --follow` to decide whether to wait, cancel, or clean up."
     ));
     disconnected.retryable = Some(false);
     disconnected
@@ -1324,6 +1324,7 @@ mod tests {
                 connected_at: "2026-06-03T00:00:00Z".to_string(),
             }),
             stale_daemon: None,
+            active_jobs: Vec::new(),
             session_path: "/tmp/lab.json".to_string(),
         }
     }
