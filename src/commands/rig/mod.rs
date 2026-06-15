@@ -33,6 +33,13 @@ impl RigArgs {
     pub fn is_check_command(&self) -> bool {
         matches!(self.command, RigCommand::Check { .. })
     }
+
+    pub fn is_runner_source_management_command(&self) -> bool {
+        matches!(
+            self.command,
+            RigCommand::Install { .. } | RigCommand::Sources { .. }
+        )
+    }
 }
 
 #[derive(Subcommand)]

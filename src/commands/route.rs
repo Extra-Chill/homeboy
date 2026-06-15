@@ -1,8 +1,10 @@
 use homeboy::cli_surface::{Cli, Commands};
 use homeboy::core::lab_routing::{self, LabRoutingRequest};
 use homeboy::core::observation::RunStatus;
+use homeboy::core::runner::RunnerExecOptions;
 use homeboy::core::runners;
 use serde_json::json;
+use std::collections::HashMap;
 
 pub fn route_after_parse(
     cli: &Cli,
@@ -23,6 +25,18 @@ pub fn route_after_parse(
 
     if is_lab_command_local_runner_option(&cli.command) {
         return Ok(None);
+    }
+
+    if let (Some(runner_id), Commands::Rig(args)) = (cli.runner.as_deref(), &cli.command) {
+        if args.is_runner_source_management_command() {
+            let (stdout, stderr, exit_code) =
+                run_rig_source_management_on_runner(runner_id, normalized_args, output_file)?;
+            if !stderr.is_empty() {
+                eprint!("{stderr}");
+            }
+            print!("{stdout}");
+            return Ok(Some(exit_code));
+        }
     }
 
     let lab_command = lab_offload_command(&cli.command)?;
@@ -149,6 +163,66 @@ pub fn route_after_parse(
             }
         },
     }
+}
+
+fn run_rig_source_management_on_runner(
+    runner_id: &str,
+    normalized_args: &[String],
+    output_file: Option<&str>,
+) -> homeboy::core::Result<(String, String, i32)> {
+    let runner = runners::load(runner_id)?;
+    let homeboy_path = runner.settings.homeboy_path.as_deref().unwrap_or("homeboy");
+    let command = runner_rig_source_management_command(homeboy_path, normalized_args);
+    let (output, exit_code) = runners::exec(
+        runner_id,
+        RunnerExecOptions {
+            cwd: runner.workspace_root.clone(),
+            project_id: None,
+            allow_diagnostic_ssh: false,
+            command,
+            env: HashMap::new(),
+            capture_patch: false,
+            raw_exec: false,
+            source_snapshot: None,
+            capability_preflight: None,
+            required_extensions: Vec::new(),
+            require_paths: Vec::new(),
+        },
+    )?;
+
+    if let Some(path) = output_file {
+        write_offloaded_stdout(path, &output.stdout)?;
+    }
+
+    Ok((output.stdout, output.stderr, exit_code))
+}
+
+fn runner_rig_source_management_command(
+    homeboy_path: &str,
+    normalized_args: &[String],
+) -> Vec<String> {
+    let mut command = vec![homeboy_path.to_string()];
+    let mut iter = normalized_args.iter().skip(1).peekable();
+    while let Some(arg) = iter.next() {
+        if arg == "--runner" || arg == "--output" || arg == "--artifact-root" {
+            iter.next();
+            continue;
+        }
+        if arg == "--allow-local-fallback"
+            || arg == "--allow-dirty-lab-workspace"
+            || arg == "--allow-local-hot"
+        {
+            continue;
+        }
+        if arg.starts_with("--runner=")
+            || arg.starts_with("--output=")
+            || arg.starts_with("--artifact-root=")
+        {
+            continue;
+        }
+        command.push(arg.clone());
+    }
+    command
 }
 
 fn is_runs_list_runner_option(args: &[String]) -> bool {
@@ -388,6 +462,30 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(output_path).unwrap(),
             "{\"ok\":true}\n"
+        );
+    }
+
+    #[test]
+    fn runner_rig_source_management_command_strips_controller_globals() {
+        let normalized = vec![
+            "homeboy".to_string(),
+            "rig".to_string(),
+            "sources".to_string(),
+            "list".to_string(),
+            "--runner".to_string(),
+            "homeboy-lab".to_string(),
+            "--output=./sources.json".to_string(),
+            "--allow-local-fallback".to_string(),
+        ];
+
+        assert_eq!(
+            runner_rig_source_management_command("/usr/local/bin/homeboy", &normalized),
+            vec![
+                "/usr/local/bin/homeboy".to_string(),
+                "rig".to_string(),
+                "sources".to_string(),
+                "list".to_string(),
+            ]
         );
     }
 
