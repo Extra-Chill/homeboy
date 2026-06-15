@@ -169,6 +169,8 @@ mod tests {
             install_method: upgrade::InstallMethod::Cargo,
             previous_version: "0.228.6".to_string(),
             new_version: Some("0.228.7".to_string()),
+            previous_build_identity: None,
+            new_build_identity: None,
             upgraded: true,
             message: "Upgraded to 0.228.7".to_string(),
             restart_required: false,

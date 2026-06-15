@@ -9,8 +9,8 @@ mod validation;
 
 pub(crate) use constants::VERSION;
 pub use helpers::{
-    current_version, detect_install_method, fetch_latest_version, restart_with_new_binary,
-    run_upgrade_with_method,
+    current_build_version, current_version, detect_install_method, fetch_latest_version,
+    restart_with_new_binary, run_upgrade_with_method,
 };
 pub use planning::resolve_binary_on_path;
 pub use types::{
