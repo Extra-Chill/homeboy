@@ -34,6 +34,8 @@ pub struct DeriveRule {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ParseSpec {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extension_script: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub adapters: Vec<String>,
     #[serde(default)]

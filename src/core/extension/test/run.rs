@@ -1,12 +1,14 @@
 use crate::core::component::Component;
 use crate::core::engine::baseline::BaselineFlags;
+use crate::core::engine::local_files;
+use crate::core::engine::output_parse::ParseSpec;
 use crate::core::engine::run_dir::{self, RunDir};
 use crate::core::extension::test::analyze::{analyze, TestAnalysis, TestAnalysisInput};
 use crate::core::extension::test::baseline::{self, TestBaselineComparison, TestCounts};
 use crate::core::extension::test::{
     build_test_runner, build_test_summary, compute_changed_test_scope,
     normalize_test_passthrough_args, parse_coverage_file, parse_failures_file,
-    parse_test_results_file, parse_test_results_text, parse_test_results_text_with_spec,
+    parse_test_results_file_with_spec, parse_test_results_text, parse_test_results_text_with_spec,
     CoverageOutput, TestScopeOutput, TestSummaryOutput,
 };
 use crate::core::extension::{self, ExtensionCapability, ExtensionPhaseTiming};
@@ -213,8 +215,9 @@ pub fn run_main_test_workflow(
         }
     }
 
-    let result_parse = crate::core::extension::test::resolve_test_command(component)
-        .ok()
+    let test_context = crate::core::extension::test::resolve_test_command(component).ok();
+    let result_parse = test_context
+        .as_ref()
         .and_then(|context| crate::core::extension::load_extension(&context.extension_id).ok())
         .and_then(|extension| extension.test.and_then(|test| test.result_parse));
 
@@ -248,12 +251,17 @@ pub fn run_main_test_workflow(
         .script_args(&passthrough_args)
         .run()?;
 
-    let mut test_counts = parse_test_results_file(&results_file).or_else(|| {
-        result_parse
-            .as_ref()
-            .and_then(|spec| parse_test_results_text_with_spec(&output.stdout, spec))
-            .or_else(|| parse_test_results_text(&output.stdout))
-    });
+    if let (Some(context), Some(spec)) = (test_context.as_ref(), result_parse.as_ref()) {
+        run_declared_result_parser(component, context, spec, &output.stdout, run_dir)?;
+    }
+
+    let mut test_counts = parse_test_results_file_with_spec(&results_file, result_parse.as_ref())
+        .or_else(|| {
+            result_parse
+                .as_ref()
+                .and_then(|spec| parse_test_results_text_with_spec(&output.stdout, spec))
+                .or_else(|| parse_test_results_text(&output.stdout))
+        });
     let phpunit_no_discovery = phpunit_no_discovery(&output.stdout, &output.stderr);
     if phpunit_no_discovery && test_counts.is_none() {
         test_counts = Some(TestCounts::new(0, 0, 0, 0));
@@ -484,6 +492,62 @@ pub fn run_main_test_workflow(
     })
 }
 
+fn run_declared_result_parser(
+    component: &Component,
+    context: &crate::core::extension::ExtensionExecutionContext,
+    spec: &ParseSpec,
+    stdout: &str,
+    run_dir: &RunDir,
+) -> crate::core::Result<()> {
+    let Some(script_path) = spec.extension_script.as_deref() else {
+        return Ok(());
+    };
+    let resolved_script = context.extension_path.join(script_path);
+    if !resolved_script.is_file() {
+        return Ok(());
+    }
+
+    let results_file = run_dir.step_file(run_dir::files::TEST_RESULTS);
+    let source_file = if results_file.is_file() {
+        results_file
+    } else {
+        let stdout_file = run_dir.path().join("test-output.txt");
+        local_files::write_file_atomic(&stdout_file, stdout, "write test runner stdout")?;
+        stdout_file
+    };
+
+    let mut args = vec![source_file.to_string_lossy().to_string()];
+    args.extend(spec.adapters.iter().cloned());
+    let settings_json = "{}";
+    let mut env_vars = crate::core::extension::execution::build_capability_env(
+        &context.extension_id,
+        &component.id,
+        &context.extension_path,
+        std::path::Path::new(&component.local_path),
+        settings_json,
+        &run_dir.legacy_env_vars(),
+    )?;
+    env_vars.push((
+        "HOMEBOY_RESULT_PARSE_ADAPTERS".to_string(),
+        spec.adapters.join(" "),
+    ));
+
+    let _ = crate::core::extension::execution::execute_capability_script(
+        &context.extension_path,
+        script_path,
+        &args,
+        &env_vars,
+        None,
+        None,
+        crate::core::extension::execution::CapabilityScriptOptions {
+            passthrough: false,
+            stderr_passthrough: false,
+        },
+    )?;
+
+    Ok(())
+}
+
 pub fn run_self_check_test_workflow(
     component: &Component,
     source_path: &Path,
@@ -642,6 +706,112 @@ mod tests {
     fn setting_truthy_accepts_boolean_spellings() {
         let settings = vec![(REQUIRE_PHPUNIT_TESTS_SETTING.to_string(), "yes".to_string())];
         assert!(setting_truthy(&settings, REQUIRE_PHPUNIT_TESTS_SETTING));
+    }
+
+    #[test]
+    fn declared_result_parser_script_normalizes_wp_codebox_json() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let extension_dir = temp_dir.path().join("extension");
+        std::fs::create_dir_all(&extension_dir).expect("extension dir");
+        let parser_script = extension_dir.join("parse-results.sh");
+        std::fs::write(
+            &parser_script,
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+if [ "${2:-}" != "wp-codebox-json" ]; then
+    exit 7
+fi
+source "$HOMEBOY_RUNTIME_WRITE_TEST_RESULTS"
+parsed=$(python3 - "$1" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    data = json.load(handle)
+
+summary = data.get("summary") if isinstance(data.get("summary"), dict) else {}
+total = int(summary.get("total") or 0)
+passed = int(summary.get("passed") or 0)
+failed = int(summary.get("failed") or 0)
+skipped = int(summary.get("skipped") or 0)
+
+if total == 0:
+    for suite in data.get("suites") or []:
+        if not isinstance(suite, dict):
+            continue
+        total += int(suite.get("tests") or suite.get("total") or 0)
+        passed += int(suite.get("passed") or 0)
+        failed += int(suite.get("failed") or 0)
+        skipped += int(suite.get("skipped") or 0)
+
+print(f"{total}\t{passed}\t{failed}\t{skipped}")
+PY
+)
+IFS=$'\t' read -r total passed failed skipped <<EOF
+$parsed
+EOF
+homeboy_write_test_results "$total" "$passed" "$failed" "$skipped"
+"#,
+        )
+        .expect("parser script");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&parser_script, std::fs::Permissions::from_mode(0o755))
+                .expect("parser script permissions");
+        }
+
+        let component = Component::new(
+            "fixture".to_string(),
+            temp_dir.path().to_string_lossy().to_string(),
+            "fixture-extension".to_string(),
+            None,
+        );
+        let context = crate::core::extension::ExtensionExecutionContext {
+            component: component.clone(),
+            capability: ExtensionCapability::Test,
+            extension_id: "fixture-extension".to_string(),
+            extension_path: extension_dir,
+            script_path: "test.sh".to_string(),
+            settings: Vec::new(),
+        };
+        let spec = ParseSpec {
+            extension_script: Some("parse-results.sh".to_string()),
+            adapters: vec!["wp-codebox-json".to_string()],
+            rules: Vec::new(),
+            defaults: std::collections::HashMap::new(),
+            derive: Vec::new(),
+        };
+        let run_dir = RunDir::create().expect("run dir");
+
+        run_declared_result_parser(
+            &component,
+            &context,
+            &spec,
+            r#"{
+                "schema": "wp-codebox/test-results/v1",
+                "summary": { "total": 0 },
+                "suites": [
+                    { "tests": 3, "passed": 2, "failed": 1 },
+                    { "total": 2, "passed": 1, "skipped": 1 }
+                ]
+            }"#,
+            &run_dir,
+        )
+        .expect("declared parser should run");
+
+        let counts = parse_test_results_file_with_spec(
+            &run_dir.step_file(run_dir::files::TEST_RESULTS),
+            Some(&spec),
+        )
+        .expect("declared parser should write normalized counts");
+
+        run_dir.cleanup();
+
+        assert_eq!(counts.total, 5);
+        assert_eq!(counts.passed, 3);
+        assert_eq!(counts.failed, 1);
+        assert_eq!(counts.skipped, 1);
     }
 
     #[test]
