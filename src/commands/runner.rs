@@ -15,6 +15,7 @@ use homeboy::core::runners::{
 use homeboy::core::server::{RunnerPolicy, RunnerSecretEnvRef, RunnerSettings};
 use homeboy::core::{EntityCrudOutput, MergeOutput};
 
+use super::output_runtime::JsonCommandRun;
 use super::{CmdResult, DynamicSetArgs};
 
 pub mod doctor;
@@ -319,6 +320,11 @@ enum RunnerCommand {
         #[arg(long = "require-path")]
         require_paths: Vec<String>,
 
+        /// Print remote stdout/stderr directly instead of the structured JSON envelope.
+        /// Use global --output to still write the full structured envelope to a file.
+        #[arg(long)]
+        raw: bool,
+
         /// Command and arguments to execute on the runner
         #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<String>,
@@ -562,6 +568,7 @@ pub fn run(
             ssh,
             capture_patch,
             require_paths,
+            raw: _,
             command,
         } => map_execution(exec(
             &id,
@@ -597,6 +604,77 @@ pub fn run(
         })),
         RunnerCommand::Workspace { command } => workspace::run(command)
             .map(|(output, exit_code)| (RunnerCommandOutput::Workspace(output), exit_code)),
+    }
+}
+
+pub fn run_command_output(args: RunnerArgs, _global: &super::GlobalArgs) -> JsonCommandRun {
+    crate::commands::utils::tty::status("homeboy is working...");
+
+    match args.command {
+        RunnerCommand::Exec {
+            id,
+            cwd,
+            project,
+            ssh,
+            capture_patch,
+            require_paths,
+            raw: true,
+            command,
+        } => run_raw_exec(id, cwd, project, ssh, capture_patch, require_paths, command),
+        command => {
+            let (stdout_result, exit_code) =
+                crate::commands::utils::response::map_cmd_result_to_json(run(
+                    RunnerArgs { command },
+                    _global,
+                ));
+            JsonCommandRun::from_stdout_result(stdout_result, exit_code)
+        }
+    }
+}
+
+fn run_raw_exec(
+    id: String,
+    cwd: Option<String>,
+    project: Option<String>,
+    ssh: bool,
+    capture_patch: bool,
+    require_paths: Vec<String>,
+    command: Vec<String>,
+) -> JsonCommandRun {
+    match exec(
+        &id,
+        cwd,
+        project,
+        ssh,
+        capture_patch,
+        require_paths,
+        command,
+    ) {
+        Ok((output, exit_code)) => raw_exec_command_run(output, exit_code),
+        Err(err) => {
+            let (stdout_result, exit_code) =
+                crate::commands::utils::response::map_cmd_result_to_json::<RunnerCommandOutput>(
+                    Err(err),
+                );
+            JsonCommandRun::from_stdout_result(stdout_result, exit_code)
+        }
+    }
+}
+
+fn raw_exec_command_run(output: RunnerExecOutput, exit_code: i32) -> JsonCommandRun {
+    let human_stdout = output.stdout.clone();
+    let human_stderr = output.stderr.clone();
+    let (stdout_result, _) = crate::commands::utils::response::map_cmd_result_to_json(Ok((
+        RunnerCommandOutput::Execution(output),
+        exit_code,
+    )));
+
+    JsonCommandRun {
+        stdout_result,
+        exit_code,
+        output_file_result: None,
+        human_stdout: Some(human_stdout),
+        human_stderr: Some(human_stderr),
     }
 }
 
@@ -1186,6 +1264,42 @@ mod tests {
             "https://artifacts.example.test"
         );
         assert!(!value.to_string().contains("secret-token"));
+    }
+
+    #[test]
+    fn raw_exec_command_run_keeps_structured_output_and_human_streams() {
+        let run = raw_exec_command_run(
+            RunnerExecOutput {
+                command: "runner.exec",
+                runner_id: "lab".to_string(),
+                mode: runner::RunnerExecMode::Daemon,
+                argv: vec!["printf".to_string(), "hello".to_string()],
+                remote_cwd: "/workspace".to_string(),
+                exit_code: 7,
+                stdout: "hello\n".to_string(),
+                stderr: "warn\n".to_string(),
+                source_snapshot: None,
+                job: None,
+                job_id: Some("job-123".to_string()),
+                job_events: None,
+                mirror_run_id: None,
+                patch: None,
+                metrics: None,
+                capture: None,
+                diagnostics: None,
+            },
+            7,
+        );
+
+        assert_eq!(run.exit_code, 7);
+        assert_eq!(run.human_stdout.as_deref(), Some("hello\n"));
+        assert_eq!(run.human_stderr.as_deref(), Some("warn\n"));
+
+        let value = run.stdout_result.expect("structured output");
+        assert_eq!(value["command"], "runner.exec");
+        assert_eq!(value["stdout"], "hello\n");
+        assert_eq!(value["stderr"], "warn\n");
+        assert_eq!(value["job_id"], "job-123");
     }
 
     #[test]
