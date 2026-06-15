@@ -877,6 +877,8 @@ impl AgentTaskScheduleSupport {
         mut outcome: AgentTaskOutcome,
         running: Option<&RunningTask>,
     ) -> AgentTaskOutcome {
+        Self::classify_incomplete_executor_result(&mut outcome);
+
         if let Some(running) = running {
             if let Some(timeout_ms) = running.timeout_ms {
                 if running.started_at.elapsed() > Duration::from_millis(timeout_ms) {
@@ -899,6 +901,32 @@ impl AgentTaskScheduleSupport {
             }
         }
         outcome
+    }
+
+    fn classify_incomplete_executor_result(outcome: &mut AgentTaskOutcome) {
+        if outcome.status != AgentTaskOutcomeStatus::Succeeded {
+            return;
+        }
+        let Some(result) = outcome.outputs.get("provider_run_result") else {
+            return;
+        };
+        if !provider_run_result_is_empty_incomplete(result) {
+            return;
+        }
+        let result = result.clone();
+
+        let message = "executor completed without a usable agent result: completed=false, empty reply, no assistant message, and no tool calls"
+            .to_string();
+        outcome.status = AgentTaskOutcomeStatus::ProviderError;
+        outcome.failure_classification = Some(AgentTaskFailureClassification::Provider);
+        outcome.summary = Some(message.clone());
+        outcome.diagnostics.push(AgentTaskDiagnostic {
+            class: "agent_task.executor_incomplete_empty_result".to_string(),
+            message,
+            data: serde_json::json!({
+                "provider_run_result": result,
+            }),
+        });
     }
 
     fn cancelled_outcome(task_id: String, summary: String) -> AgentTaskOutcome {
@@ -1460,6 +1488,84 @@ fn render_value_templates(value: &mut Value, bindings: &HashMap<String, Value>) 
             }
         }
         _ => {}
+    }
+}
+
+fn provider_run_result_is_empty_incomplete(result: &Value) -> bool {
+    result.get("completed").and_then(Value::as_bool) == Some(false)
+        && value_text_is_empty(result.get("reply"))
+        && !has_assistant_message(result)
+        && !has_tool_calls(result)
+}
+
+fn value_text_is_empty(value: Option<&Value>) -> bool {
+    value
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default()
+        .is_empty()
+}
+
+fn has_assistant_message(result: &Value) -> bool {
+    ["assistant_message", "assistantMessage"]
+        .into_iter()
+        .any(|key| value_has_text(result.get(key)))
+        || ["assistant_messages", "assistantMessages"]
+            .into_iter()
+            .any(|key| array_has_message_text(result.get(key)))
+        || array_has_assistant_role_message(result.get("messages"))
+}
+
+fn value_has_text(value: Option<&Value>) -> bool {
+    match value {
+        Some(Value::String(raw)) => !raw.trim().is_empty(),
+        Some(Value::Object(object)) => ["content", "text", "message", "reply"]
+            .into_iter()
+            .any(|key| value_has_text(object.get(key))),
+        Some(Value::Array(items)) => items.iter().any(|item| value_has_text(Some(item))),
+        _ => false,
+    }
+}
+
+fn array_has_message_text(value: Option<&Value>) -> bool {
+    match value {
+        Some(Value::Array(items)) => items.iter().any(|item| value_has_text(Some(item))),
+        other => value_has_text(other),
+    }
+}
+
+fn array_has_assistant_role_message(value: Option<&Value>) -> bool {
+    let Some(Value::Array(messages)) = value else {
+        return false;
+    };
+    messages.iter().any(|message| {
+        message.get("role").and_then(Value::as_str) == Some("assistant")
+            && value_has_text(Some(message))
+    })
+}
+
+fn has_tool_calls(result: &Value) -> bool {
+    ["tool_calls", "toolCalls"]
+        .into_iter()
+        .any(|key| value_has_items(result.get(key)))
+        || result
+            .get("messages")
+            .and_then(Value::as_array)
+            .map(|messages| {
+                messages.iter().any(|message| {
+                    value_has_items(message.get("tool_calls"))
+                        || value_has_items(message.get("toolCalls"))
+                })
+            })
+            .unwrap_or(false)
+}
+
+fn value_has_items(value: Option<&Value>) -> bool {
+    match value {
+        Some(Value::Array(items)) => !items.is_empty(),
+        Some(Value::Object(object)) => !object.is_empty(),
+        Some(Value::String(raw)) => !raw.trim().is_empty(),
+        _ => false,
     }
 }
 
@@ -2137,6 +2243,50 @@ mod tests {
     }
 
     #[test]
+    fn incomplete_empty_executor_result_is_retryable_provider_failure() {
+        let executor = EmptyIncompleteThenSuccessExecutor::default();
+        let attempts = Arc::clone(&executor.attempts);
+        let scheduler = AgentTaskScheduler::new(executor);
+        let mut plan = plan_with_tasks(1);
+        plan.options.retry.max_attempts = 2;
+        plan.options.retry.retryable_failure_classifications =
+            vec![AgentTaskFailureClassification::Provider];
+
+        let aggregate = scheduler.run(plan);
+
+        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+        assert_eq!(aggregate.totals.succeeded, 1);
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert!(aggregate.events.iter().any(|event| {
+            event.state == AgentTaskState::Queued
+                && event.attempt == 2
+                && event.message.as_deref() == Some("retry queued")
+        }));
+    }
+
+    #[test]
+    fn incomplete_empty_executor_result_fails_when_retries_are_unavailable() {
+        let scheduler = AgentTaskScheduler::new(EmptyIncompleteExecutor);
+
+        let aggregate = scheduler.run(plan_with_tasks(1));
+
+        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Failed);
+        assert_eq!(aggregate.totals.failed, 1);
+        assert_eq!(
+            aggregate.outcomes[0].status,
+            AgentTaskOutcomeStatus::ProviderError
+        );
+        assert_eq!(
+            aggregate.outcomes[0].failure_classification,
+            Some(AgentTaskFailureClassification::Provider)
+        );
+        assert_eq!(
+            aggregate.outcomes[0].diagnostics[0].class,
+            "agent_task.executor_incomplete_empty_result"
+        );
+    }
+
+    #[test]
     fn templates_prior_output_into_downstream_task_request() {
         let observed = Arc::new(Mutex::new(Vec::new()));
         let scheduler = AgentTaskScheduler::new(OutputTemplateExecutor {
@@ -2556,6 +2706,13 @@ mod tests {
         attempts: Arc<AtomicUsize>,
     }
 
+    #[derive(Default)]
+    struct EmptyIncompleteThenSuccessExecutor {
+        attempts: Arc<AtomicUsize>,
+    }
+
+    struct EmptyIncompleteExecutor;
+
     impl AgentTaskExecutorAdapter for RetryOnceExecutor {
         fn execute(
             &self,
@@ -2570,6 +2727,31 @@ mod tests {
             };
 
             outcome(request.task_id, status)
+        }
+    }
+
+    impl AgentTaskExecutorAdapter for EmptyIncompleteThenSuccessExecutor {
+        fn execute(
+            &self,
+            request: AgentTaskRequest,
+            _context: AgentTaskExecutionContext,
+        ) -> AgentTaskOutcome {
+            let attempt = self.attempts.fetch_add(1, Ordering::SeqCst) + 1;
+            if attempt == 1 {
+                return empty_incomplete_outcome(request.task_id);
+            }
+
+            outcome(request.task_id, AgentTaskOutcomeStatus::Succeeded)
+        }
+    }
+
+    impl AgentTaskExecutorAdapter for EmptyIncompleteExecutor {
+        fn execute(
+            &self,
+            request: AgentTaskRequest,
+            _context: AgentTaskExecutionContext,
+        ) -> AgentTaskOutcome {
+            empty_incomplete_outcome(request.task_id)
         }
     }
 
@@ -2745,5 +2927,19 @@ mod tests {
             follow_up: None,
             metadata: json!({}),
         }
+    }
+
+    fn empty_incomplete_outcome(task_id: String) -> AgentTaskOutcome {
+        let mut outcome = outcome(task_id, AgentTaskOutcomeStatus::Succeeded);
+        outcome.summary = Some("provider wrapper exited successfully".to_string());
+        outcome.outputs = json!({
+            "provider_run_result": {
+                "completed": false,
+                "reply": "",
+                "messages": [],
+                "tool_calls": []
+            }
+        });
+        outcome
     }
 }
