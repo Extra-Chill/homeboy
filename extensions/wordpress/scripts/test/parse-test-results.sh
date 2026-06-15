@@ -22,6 +22,7 @@ OUTPUT_FILE="${1:-}"
 if [ -z "$OUTPUT_FILE" ]; then
     exit 0
 fi
+shift || true
 
 if [ -d "$OUTPUT_FILE" ] && [ -f "$OUTPUT_FILE/files/test-results.json" ]; then
     OUTPUT_FILE="$OUTPUT_FILE/files/test-results.json"
@@ -40,4 +41,8 @@ fi
 ADAPTERS_HELPER="${HOMEBOY_RUNTIME_TEST_RESULT_ADAPTERS:-${SCRIPT_DIR}/../lib/test-result-adapters.sh}"
 # shellcheck source=../lib/test-result-adapters.sh
 source "$ADAPTERS_HELPER"
-homeboy_parse_test_results_with_adapters "$OUTPUT_FILE" wp-codebox-json host-smoke phpunit phpunit-testdox
+if [ "$#" -gt 0 ]; then
+    homeboy_parse_test_results_with_adapters "$OUTPUT_FILE" "$@"
+else
+    homeboy_parse_test_results_with_adapters "$OUTPUT_FILE" wp-codebox-json host-smoke phpunit phpunit-testdox
+fi
