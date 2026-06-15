@@ -653,6 +653,7 @@ fn bench_artifact_diagnostic(
     BenchDiagnostic {
         class: class.to_string(),
         message: Some(message),
+        severity: None,
         source: Some(match run_index {
             Some(run_index) => BenchDiagnosticSource::ScenarioRun {
                 scenario_id: scenario_id.to_string(),

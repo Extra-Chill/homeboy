@@ -15,6 +15,8 @@ pub struct BenchDiagnostic {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub severity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<BenchDiagnosticSource>,
     #[serde(default, alias = "details", skip_serializing_if = "BTreeMap::is_empty")]
     pub metadata: BTreeMap<String, serde_json::Value>,
@@ -172,16 +174,18 @@ mod tests {
     #[test]
     fn diagnostic_accepts_code_as_class_alias() {
         let diagnostic: BenchDiagnostic = serde_json::from_str(
-            r#"{"code":"wordpress.bench.stdout_noise","message":"captured non-JSON stdout","details":{"line_count":3}}"#,
+            r#"{"code":"wordpress.bench.stdout_noise","message":"captured non-JSON stdout","severity":"warning","details":{"line_count":3}}"#,
         )
         .expect("diagnostic with code alias parses");
 
         assert_eq!(diagnostic.class, "wordpress.bench.stdout_noise");
         assert_eq!(diagnostic.message.as_deref(), Some("captured non-JSON stdout"));
+        assert_eq!(diagnostic.severity.as_deref(), Some("warning"));
         assert_eq!(diagnostic.metadata["line_count"], 3);
 
         let serialized = serde_json::to_value(&diagnostic).expect("diagnostic serializes");
         assert_eq!(serialized["class"], "wordpress.bench.stdout_noise");
+        assert_eq!(serialized["severity"], "warning");
         assert_eq!(serialized["metadata"]["line_count"], 3);
         assert!(serialized.get("code").is_none());
         assert!(serialized.get("details").is_none());
@@ -191,6 +195,7 @@ mod tests {
         BenchDiagnostic {
             class: class.to_string(),
             message: None,
+            severity: None,
             source: None,
             metadata: BTreeMap::new(),
         }

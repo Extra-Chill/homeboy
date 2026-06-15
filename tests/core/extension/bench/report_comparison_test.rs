@@ -238,6 +238,7 @@ mod fixtures {
         BenchDiagnostic {
             class: class.to_string(),
             message: Some("database setup failed".to_string()),
+            severity: None,
             source: Some(BenchDiagnosticSource::Run),
             metadata: BTreeMap::new(),
         }
