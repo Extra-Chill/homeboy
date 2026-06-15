@@ -62,6 +62,44 @@ except Exception:
 PYEOF
 }
 
+homeboy_sidecar_write_json_object() {
+    local target="${1:-}"
+    local item="${2:-}"
+
+    if [ -z "$target" ]; then
+        return 0
+    fi
+
+    local python_bin
+    python_bin="$(homeboy_sidecar_python)" || return 1
+
+    "$python_bin" - "$target" "$item" <<'PYEOF'
+import json
+import os
+import sys
+import tempfile
+
+target = sys.argv[1]
+item = json.loads(sys.argv[2])
+if not isinstance(item, dict):
+    raise ValueError("sidecar must contain a JSON object")
+directory = os.path.dirname(target) or "."
+os.makedirs(directory, exist_ok=True)
+fd, tmp = tempfile.mkstemp(prefix=".homeboy-sidecar-", suffix=".json", dir=directory)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(item, handle, separators=(",", ":"), ensure_ascii=False)
+        handle.write("\n")
+    os.replace(tmp, target)
+except Exception:
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
+    raise
+PYEOF
+}
+
 homeboy_sidecar_append_json() {
     local target="${1:-}"
     local item="${2:-}"
@@ -166,6 +204,9 @@ homeboy_sidecar_target_for_type() {
         test.failure|test.failures)
             printf '%s\n' "${HOMEBOY_TEST_FAILURES_FILE:-}"
             ;;
+        test.result|test.results)
+            printf '%s\n' "${HOMEBOY_TEST_RESULTS_FILE:-}"
+            ;;
         fix.result|fix.results)
             printf '%s\n' "${HOMEBOY_FIX_RESULTS_FILE:-}"
             ;;
@@ -192,6 +233,12 @@ homeboy_sidecar_write() {
 
     local target
     target="$(homeboy_sidecar_target_for_type "$type")" || return 1
+    case "$type" in
+        test.result|test.results)
+            homeboy_sidecar_write_json_object "$target" "${1:-}"
+            return $?
+            ;;
+    esac
     homeboy_sidecar_write_json_array "$target" "$@"
 }
 
@@ -232,6 +279,10 @@ homeboy_merge_lint_findings() {
 
 homeboy_write_test_failures() {
     homeboy_sidecar_write test.failures "$@"
+}
+
+homeboy_write_test_results_json() {
+    homeboy_sidecar_write test.results "$1"
 }
 
 homeboy_append_test_failure() {

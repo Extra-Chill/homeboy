@@ -537,6 +537,13 @@ fn run_declared_result_parser(
         }
     }
 
+    std::fs::create_dir_all(run_dir.path()).map_err(|err| {
+        Error::internal_io(
+            err.to_string(),
+            Some("create declared result parser run dir".to_string()),
+        )
+    })?;
+
     let results_file = run_dir.step_file(run_dir::files::TEST_RESULTS);
     let source_file = if results_file.is_file() {
         results_file
@@ -867,6 +874,14 @@ mod tests {
 set -euo pipefail
 if [ "${2:-}" != "custom-json" ]; then
     exit 7
+fi
+if [ ! -f "$1" ]; then
+    printf 'expected parser input file to exist: %s\n' "$1" >&2
+    exit 8
+fi
+if ! grep -q 'custom-provider/test-results/v1' "$1"; then
+    printf 'expected parser input file to contain provider JSON\n' >&2
+    exit 9
 fi
 source "$HOMEBOY_RUNTIME_WRITE_TEST_RESULTS"
 parsed=$(python3 - "$1" <<'PY'
