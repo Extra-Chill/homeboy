@@ -592,3 +592,61 @@ fn keeps_runtime_and_artifact_manifests_out_of_variant_matrix() {
 
     let _ = fs::remove_dir_all(&root);
 }
+
+#[test]
+fn promotes_metrics_from_declared_trace_artifact_files() {
+    let root = tmp_dir("trace-artifact-metrics");
+    for (side, response_count, cls) in [("baseline", 7, 0.01), ("candidate", 11, 0.03)] {
+        write_fixture_file(
+            &root.join(side),
+            "trace.json",
+            r#"{
+                "summary":"trace producer wrote detailed metrics to an artifact file",
+                "artifacts":[{"label":"waterfall_metrics","path":"artifacts/ece-waterfall-metrics.json"}]
+            }"#,
+        );
+        write_fixture_file(
+            &root.join(side).join("artifacts"),
+            "ece-waterfall-metrics.json",
+            &format!(
+                r#"{{
+                    "scenario_id":"checkout-flow",
+                    "profile":"desktop",
+                    "stripe_response_count":{},
+                    "network_response_count":{},
+                    "browser_dom_content_loaded_ms":1200,
+                    "browser_cls":{}
+                }}"#,
+                response_count - 2,
+                response_count,
+                cls
+            ),
+        );
+    }
+
+    let report = browser_evidence_compare_from_args(&args(&root, false)).expect("report renders");
+    let variant = report
+        .variants
+        .iter()
+        .find(|variant| variant.variant.scenario == "checkout-flow")
+        .expect("artifact metric variant should exist");
+
+    assert_eq!(report.totals.baseline_samples, 1);
+    assert_eq!(report.totals.candidate_samples, 1);
+    assert_eq!(variant.variant.scenario, "checkout-flow");
+    assert_eq!(variant.variant.profile, "desktop");
+    assert_eq!(variant.request_totals.median_delta, Some(4.0));
+    assert_eq!(
+        variant.browser_metrics["stripe_response_count"].median_delta,
+        Some(4.0)
+    );
+    let cls_delta = variant.browser_metrics["browser_cls"]
+        .median_delta
+        .expect("CLS delta should be comparable");
+    assert!((cls_delta - 0.02).abs() < f64::EPSILON);
+    assert!(report
+        .markdown
+        .contains("artifacts/ece-waterfall-metrics.json"));
+
+    let _ = fs::remove_dir_all(&root);
+}
