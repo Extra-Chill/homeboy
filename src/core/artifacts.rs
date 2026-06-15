@@ -5,16 +5,20 @@
 
 pub use super::artifact_inputs::ResolvedArtifactInput;
 pub use super::artifact_links::{
-    annotate_public_artifact_url_validation, cached_validated_viewer_links, public_artifact_url,
-    public_artifact_url_validation_json, validate_public_artifact_url, validated_viewer_links,
-    viewer_links, PublicArtifactUrlValidation, PUBLIC_ARTIFACT_BASE_URL_ENV,
+    annotate_public_artifact_url_validation, cached_validated_viewer_links,
+    public_artifact_path_url, public_artifact_url, public_artifact_url_validation_json,
+    validate_public_artifact_url, validated_viewer_links, viewer_links,
+    PublicArtifactUrlValidation, PUBLIC_ARTIFACT_BASE_URL_ENV,
 };
 pub use super::artifact_manifest::{
     manifest_for_existing_files, read_manifest_from_root, write_manifest_to_root, ArtifactManifest,
     ArtifactManifestEntry, ArtifactRedactionState, ValidatedArtifactManifestEntry,
     ARTIFACT_MANIFEST_FILE, ARTIFACT_MANIFEST_SCHEMA,
 };
-pub use super::artifact_origin::{serve, status, ArtifactOriginServeSpec, ArtifactOriginStatus};
+pub use super::artifact_origin::{
+    inspect, serve, status, status_with_command, ArtifactOriginInspect, ArtifactOriginServeSpec,
+    ArtifactOriginStatus,
+};
 pub use super::browser_evidence::{
     validate_bench_results_payload, validate_trace_results_payload, BrowserArtifactMetadata,
     BrowserBottleneckRow, BrowserNetworkRequestRow, BrowserOriginDeclaredService,

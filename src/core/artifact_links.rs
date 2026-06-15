@@ -1,4 +1,5 @@
 use serde_json::Value;
+use std::path::Path;
 use std::time::Duration;
 
 use crate::core::execution_contract::encode_uri_component;
@@ -25,12 +26,40 @@ pub fn public_artifact_url(artifact: &ArtifactRecord) -> Option<String> {
         return None;
     }
 
+    if let Ok(root) = crate::core::artifacts::root() {
+        if let Some(url) = public_artifact_path_url(&root, base, Path::new(&artifact.path)) {
+            return Some(url);
+        }
+    }
+
     Some(format!(
         "{}/runs/{}/artifacts/{}",
         base,
         encode_uri_component(&artifact.run_id),
         encode_uri_component(&artifact.id)
     ))
+}
+
+pub fn public_artifact_path_url(root: &Path, base: &str, path: &Path) -> Option<String> {
+    let base = base.trim().trim_end_matches('/');
+    if base.is_empty() {
+        return None;
+    }
+    let relative = path.strip_prefix(root).ok()?;
+    let segments = relative
+        .components()
+        .map(|component| match component {
+            std::path::Component::Normal(segment) => segment
+                .to_str()
+                .map(encode_uri_component)
+                .filter(|segment| !segment.is_empty()),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    if segments.is_empty() {
+        return None;
+    }
+    Some(format!("{}/{}", base, segments.join("/")))
 }
 
 pub fn viewer_links(
@@ -251,6 +280,20 @@ mod tests {
         assert_eq!(links.len(), 1);
         assert!(links[0].url.contains("artifact-url="));
         assert!(validation.expect("validation result").reachable);
+    }
+
+    #[test]
+    fn public_artifact_path_url_uses_artifact_root_relative_path() {
+        let root = tempfile::tempdir().expect("artifact root");
+        let path = root
+            .path()
+            .join("workflow-bench/studio web replay/report.html");
+
+        assert_eq!(
+            public_artifact_path_url(root.path(), "https://artifacts.example.test/base/", &path)
+                .as_deref(),
+            Some("https://artifacts.example.test/base/workflow-bench/studio%20web%20replay/report.html")
+        );
     }
 
     fn viewer_artifact() -> ArtifactRecord {

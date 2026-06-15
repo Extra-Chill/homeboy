@@ -2,7 +2,9 @@ use clap::{Args, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use homeboy::core::artifacts::{self, ArtifactOriginServeSpec, ArtifactOriginStatus};
+use homeboy::core::artifacts::{
+    self, ArtifactOriginInspect, ArtifactOriginServeSpec, ArtifactOriginStatus,
+};
 use homeboy::core::preview_client::{
     self, PreviewClientAuthDiagnostic, PreviewClientReport, PreviewClientStartSpec,
 };
@@ -119,6 +121,8 @@ struct PreviewConsumerOutputConfig {
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum ArtifactOriginActionOutput {
     Serve(ArtifactOriginStatus),
+    Status(ArtifactOriginStatus),
+    Inspect(ArtifactOriginInspect),
 }
 
 pub type TunnelOutput = EntityCrudOutput<ServiceTunnel, TunnelExtra>;
@@ -331,6 +335,29 @@ enum TunnelArtifactOriginCommand {
         /// Artifact root to serve. Defaults to Homeboy's configured artifact root.
         #[arg(long)]
         root: Option<PathBuf>,
+    },
+    /// Print the artifact origin root and public URL mapping without starting a server
+    Status {
+        /// Loopback bind address expected by the local static artifact origin
+        #[arg(long, default_value = "127.0.0.1:7351")]
+        bind: String,
+
+        /// Artifact root to inspect. Defaults to Homeboy's configured artifact root.
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
+    /// Map an artifact-origin request path or file path to its served file and public URL
+    Inspect {
+        /// Request path, artifact-root-relative path, or filesystem path to inspect
+        path: String,
+
+        /// Artifact root to inspect. Defaults to Homeboy's configured artifact root.
+        #[arg(long)]
+        root: Option<PathBuf>,
+
+        /// Return a non-zero exit code when the mapped file is missing
+        #[arg(long)]
+        fail_on_missing: bool,
     },
 }
 
@@ -673,6 +700,48 @@ fn run_artifact_origin(command: TunnelArtifactOriginCommand) -> CmdResult<Tunnel
                     ..Default::default()
                 },
                 0,
+            ))
+        }
+        TunnelArtifactOriginCommand::Status { bind, root } => {
+            let status = artifacts::status_with_command(
+                "tunnel.artifact_origin.status",
+                bind,
+                root.unwrap_or(homeboy::core::artifacts::root()?),
+            );
+            Ok((
+                TunnelOutput {
+                    command: "tunnel.artifact_origin.status".to_string(),
+                    extra: TunnelExtra {
+                        artifact_origin: Some(ArtifactOriginActionOutput::Status(status)),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                0,
+            ))
+        }
+        TunnelArtifactOriginCommand::Inspect {
+            path,
+            root,
+            fail_on_missing,
+        } => {
+            let output =
+                artifacts::inspect(root.unwrap_or(homeboy::core::artifacts::root()?), &path);
+            let exit_code = if fail_on_missing && !output.exists {
+                1
+            } else {
+                0
+            };
+            Ok((
+                TunnelOutput {
+                    command: "tunnel.artifact_origin.inspect".to_string(),
+                    extra: TunnelExtra {
+                        artifact_origin: Some(ArtifactOriginActionOutput::Inspect(output)),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                exit_code,
             ))
         }
     }

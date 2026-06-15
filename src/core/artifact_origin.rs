@@ -17,8 +17,31 @@ pub struct ArtifactOriginStatus {
     pub command: &'static str,
     pub bind: String,
     pub root: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub public_base_url: Option<String>,
     pub public_base_url_shape: String,
+    pub mapping: ArtifactOriginMapping,
     pub cors: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ArtifactOriginMapping {
+    pub request_path: String,
+    pub filesystem_path: String,
+    pub public_url: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ArtifactOriginInspect {
+    pub command: &'static str,
+    pub root: String,
+    pub input: String,
+    pub request_path: String,
+    pub filesystem_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub public_url: Option<String>,
+    pub exists: bool,
+    pub status_code: u16,
 }
 
 pub fn serve(spec: ArtifactOriginServeSpec) -> Result<ArtifactOriginStatus> {
@@ -47,12 +70,60 @@ pub fn serve(spec: ArtifactOriginServeSpec) -> Result<ArtifactOriginStatus> {
 }
 
 pub fn status(bind: String, root: PathBuf) -> ArtifactOriginStatus {
+    status_with_command("tunnel.artifact_origin.serve", bind, root)
+}
+
+pub fn status_with_command(
+    command: &'static str,
+    bind: String,
+    root: PathBuf,
+) -> ArtifactOriginStatus {
+    let public_base_url = std::env::var(crate::core::artifacts::PUBLIC_ARTIFACT_BASE_URL_ENV)
+        .ok()
+        .map(|value| value.trim().trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty());
+    let public_base_url_shape = public_base_url
+        .as_deref()
+        .unwrap_or("https://<public-host>")
+        .to_string();
     ArtifactOriginStatus {
-        command: "tunnel.artifact_origin.serve",
+        command,
         bind,
         root: root.display().to_string(),
-        public_base_url_shape: "https://<public-host>".to_string(),
+        public_base_url,
+        public_base_url_shape: format!("{public_base_url_shape}/<artifact-root-relative-path>"),
+        mapping: ArtifactOriginMapping {
+            request_path: "/workflow-bench/<bundle>/report.html".to_string(),
+            filesystem_path: root
+                .join("workflow-bench/<bundle>/report.html")
+                .display()
+                .to_string(),
+            public_url: format!("{public_base_url_shape}/workflow-bench/<bundle>/report.html"),
+        },
         cors: true,
+    }
+}
+
+pub fn inspect(root: PathBuf, input: &str) -> ArtifactOriginInspect {
+    let request_path = request_path_from_input(&root, input);
+    let filesystem_path = safe_target_path(&root, &request_path).unwrap_or_else(|| root.clone());
+    let public_base_url = std::env::var(crate::core::artifacts::PUBLIC_ARTIFACT_BASE_URL_ENV)
+        .ok()
+        .map(|value| value.trim().trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty());
+    let public_url = public_base_url.as_deref().and_then(|base| {
+        crate::core::artifacts::public_artifact_path_url(&root, base, &filesystem_path)
+    });
+    let exists = filesystem_path.is_file();
+    ArtifactOriginInspect {
+        command: "tunnel.artifact_origin.inspect",
+        root: root.display().to_string(),
+        input: input.to_string(),
+        request_path,
+        filesystem_path: filesystem_path.display().to_string(),
+        public_url,
+        exists,
+        status_code: if exists { 200 } else { 404 },
     }
 }
 
@@ -246,6 +317,23 @@ fn sanitize_header_value(value: &str) -> String {
         .collect()
 }
 
+fn request_path_from_input(root: &Path, input: &str) -> String {
+    let trimmed = input.trim();
+    let path = if let Ok(path) = PathBuf::from(trimmed).strip_prefix(root) {
+        path.to_string_lossy().to_string()
+    } else if let Ok(url) = reqwest::Url::parse(trimmed) {
+        url.path().trim_start_matches('/').to_string()
+    } else {
+        trimmed
+            .split('?')
+            .next()
+            .unwrap_or(trimmed)
+            .trim_start_matches('/')
+            .to_string()
+    };
+    format!("/{}", path.trim_start_matches('/'))
+}
+
 fn reason(status: u16) -> &'static str {
     match status {
         200 => "OK",
@@ -356,5 +444,45 @@ mod tests {
                 .headers
                 .contains(&("content-length".to_string(), "11".to_string())));
         });
+    }
+
+    #[test]
+    fn serves_workflow_bench_bundle_paths_under_artifact_root() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp
+            .path()
+            .join("workflow-bench/studio-web-r15-replay-export/report.html");
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&path, b"<html>report</html>").expect("write report");
+
+        let response = response_for_request(
+            temp.path(),
+            "GET",
+            "/workflow-bench/studio-web-r15-replay-export/report.html",
+        )
+        .expect("response");
+
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, b"<html>report</html>");
+    }
+
+    #[test]
+    fn inspect_reports_404_for_missing_workflow_bench_bundle_path() {
+        let temp = tempfile::tempdir().expect("tempdir");
+
+        let output = inspect(
+            temp.path().to_path_buf(),
+            "/workflow-bench/missing-replay-export/report.html",
+        );
+
+        assert_eq!(output.status_code, 404);
+        assert!(!output.exists);
+        assert_eq!(
+            output.filesystem_path,
+            temp.path()
+                .join("workflow-bench/missing-replay-export/report.html")
+                .display()
+                .to_string()
+        );
     }
 }

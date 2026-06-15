@@ -7,11 +7,68 @@ homeboy tunnel service <COMMAND>
 homeboy tunnel preview-client <COMMAND>
 homeboy tunnel preview-ingress <COMMAND>
 homeboy tunnel preview-consumer <COMMAND>
+homeboy tunnel artifact-origin <COMMAND>
 ```
 
 `tunnel` manages Homeboy-native private service tunnel declarations, local managed service lifecycle, and the VPS-side public preview ingress used by generic preview URLs. Homeboy can start a long-running local command, record safe command/process/log evidence, report readiness, and stop the process group without relying on an external chat or tunnel wrapper.
 
 `preview-client` connects a local/lab preview origin to a Homeboy-owned preview ingress over an outbound authenticated reverse channel. It is the local side of native public browser preview tunnels and does not use external tunnel providers.
+
+## Artifact Origin
+
+`artifact-origin` serves the configured Homeboy artifact root as a static, CORS-enabled HTTP origin for browser/reviewer consumers. Public URLs map directly from the artifact-root-relative path:
+
+```text
+HOMEBOY_ARTIFACT_ROOT/workflow-bench/<bundle>/report.html
+  -> ${HOMEBOY_PUBLIC_ARTIFACT_BASE_URL}/workflow-bench/<bundle>/report.html
+```
+
+Inspect the configured root and URL mapping without starting or restarting the origin:
+
+```sh
+HOMEBOY_PUBLIC_ARTIFACT_BASE_URL=https://homeboy-artifacts-tunnel.dev.chubes.net \
+  homeboy tunnel artifact-origin status
+```
+
+Check one published Workflow Bench path locally before sharing a public URL:
+
+```sh
+HOMEBOY_PUBLIC_ARTIFACT_BASE_URL=https://homeboy-artifacts-tunnel.dev.chubes.net \
+  homeboy tunnel artifact-origin inspect \
+  workflow-bench/studio-web-plain-site-data-machine-live-20260615-r15-pr995-replay-export/report.html \
+  --fail-on-missing
+```
+
+Serve the artifact root behind an operator-managed TLS/proxy/tunnel:
+
+```sh
+HOMEBOY_PUBLIC_ARTIFACT_BASE_URL=https://homeboy-artifacts-tunnel.dev.chubes.net \
+  homeboy tunnel artifact-origin serve --bind 127.0.0.1:7351
+```
+
+For Lab-generated Workflow Bench artifacts, publish the bundle under the configured artifact root first, then inspect, then serve:
+
+```sh
+# 1. Keep Lab output under the configured artifact root.
+export HOMEBOY_ARTIFACT_ROOT=/home/chubes/Developer/.tmp/homeboy-artifacts
+export HOMEBOY_PUBLIC_ARTIFACT_BASE_URL=https://homeboy-artifacts-tunnel.dev.chubes.net
+
+# 2. Publish/copy the Lab-generated replay bundle preserving its workflow-bench path.
+mkdir -p "$HOMEBOY_ARTIFACT_ROOT/workflow-bench"
+cp -R \
+  /home/chubes/Developer/studio-web-eval-runs/studio-web-plain-site-data-machine-live-20260615-r15-pr995-replay-export \
+  "$HOMEBOY_ARTIFACT_ROOT/workflow-bench/"
+
+# 3. Smoke-check the exact public path before handing it to reviewers.
+homeboy tunnel artifact-origin inspect \
+  workflow-bench/studio-web-plain-site-data-machine-live-20260615-r15-pr995-replay-export/report.html \
+  --fail-on-missing
+
+# 4. Serve the root through the long-running artifact origin process.
+homeboy tunnel artifact-origin serve --bind 127.0.0.1:7351
+```
+
+The same path convention covers `report.html`, `report.md`, `evidence.json`, compact WP Codebox replay files such as `blueprint.after.json`, and external bundle files such as `files/runtime-snapshot.json`.
 
 ## Service Tunnels
 
