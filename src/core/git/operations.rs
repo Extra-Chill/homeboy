@@ -407,6 +407,58 @@ pub fn get_head_commit(path: &str) -> Result<String> {
     crate::core::engine::command::run_in(path, "git", &["rev-parse", "HEAD"], "get HEAD commit")
 }
 
+/// Return true when `ancestor` is an ancestor of (i.e. reachable from)
+/// `descendant`. Used to confirm a stale tag's commit is strictly behind HEAD
+/// before moving it, so a tag is never relocated onto an unrelated/divergent
+/// history.
+pub fn is_ancestor(path: &str, ancestor: &str, descendant: &str) -> Result<bool> {
+    let output = execute_git_for_release(
+        path,
+        &["merge-base", "--is-ancestor", ancestor, descendant],
+    )
+    .map_err(|e| {
+        Error::internal_io(
+            format!("Failed to check ancestry: {}", e),
+            Some(format!(
+                "git merge-base --is-ancestor {} {}",
+                ancestor, descendant
+            )),
+        )
+    })?;
+    // `--is-ancestor` exits 0 when true, 1 when false. Any other code is an error.
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        other => Err(Error::git_command_failed(format!(
+            "git merge-base --is-ancestor exited with {:?}: {}",
+            other,
+            String::from_utf8_lossy(&output.stderr)
+        ))),
+    }
+}
+
+/// Delete a local tag. No-op-safe: returns the git output for inspection.
+pub fn delete_local_tag(path: &str, tag_name: &str) -> Result<GitOutput> {
+    let (id, resolved) = resolve_target(None, Some(path))?;
+    let output = execute_git(&resolved, &["tag", "-d", tag_name])
+        .map_err(|e| Error::git_command_failed(e.to_string()))?;
+    Ok(GitOutput::from_output(id, resolved, "tag.delete", output))
+}
+
+/// Delete a tag on the `origin` remote.
+pub fn delete_remote_tag(path: &str, tag_name: &str) -> Result<GitOutput> {
+    let (id, resolved) = resolve_target(None, Some(path))?;
+    let refspec = format!(":refs/tags/{}", tag_name);
+    let output = execute_git(&resolved, &["push", "origin", &refspec])
+        .map_err(|e| Error::git_command_failed(e.to_string()))?;
+    Ok(GitOutput::from_output(
+        id,
+        resolved,
+        "tag.delete_remote",
+        output,
+    ))
+}
+
 /// Get the current HEAD short commit SHA, returning `None` outside git checkouts.
 pub fn short_head_revision_at(path: &Path) -> Option<String> {
     let output = Command::new("git")
@@ -487,5 +539,65 @@ pub fn fetch_and_fast_forward(path: &str) -> Result<Option<u32>> {
 
             Ok(Some(n))
         }
+    }
+}
+
+#[cfg(test)]
+mod is_ancestor_tests {
+    use super::*;
+
+    fn run_in(dir: &std::path::Path, args: &[&str]) {
+        let output = Command::new(args[0])
+            .args(&args[1..])
+            .current_dir(dir)
+            .output()
+            .expect("spawn git");
+        assert!(
+            output.status.success(),
+            "command {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn rev(dir: &std::path::Path, refname: &str) -> String {
+        let output = Command::new("git")
+            .args(["rev-parse", refname])
+            .current_dir(dir)
+            .output()
+            .expect("spawn git");
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    /// A linear two-commit history: the first commit must be an ancestor of the
+    /// second, but not vice versa. This is the exact safety check that gates a
+    /// stale-tag retag (the tagged commit must be strictly behind HEAD).
+    #[test]
+    fn test_is_ancestor() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dir = temp.path();
+        run_in(dir, &["git", "init", "-q"]);
+        run_in(dir, &["git", "config", "user.email", "t@example.com"]);
+        run_in(dir, &["git", "config", "user.name", "T"]);
+        run_in(dir, &["git", "config", "commit.gpgsign", "false"]);
+
+        std::fs::write(dir.join("f.txt"), "one").unwrap();
+        run_in(dir, &["git", "add", "."]);
+        run_in(dir, &["git", "commit", "-q", "-m", "first"]);
+        let first = rev(dir, "HEAD");
+
+        std::fs::write(dir.join("f.txt"), "two").unwrap();
+        run_in(dir, &["git", "add", "."]);
+        run_in(dir, &["git", "commit", "-q", "-m", "second"]);
+        let second = rev(dir, "HEAD");
+
+        let path = dir.to_str().unwrap();
+
+        // first is behind second -> ancestor
+        assert!(is_ancestor(path, &first, &second).unwrap());
+        // second is ahead -> NOT an ancestor of first
+        assert!(!is_ancestor(path, &second, &first).unwrap());
+        // a commit is its own ancestor (git treats reflexive as true)
+        assert!(is_ancestor(path, &second, &second).unwrap());
     }
 }

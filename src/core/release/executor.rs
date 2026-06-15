@@ -28,7 +28,7 @@ mod github_release;
 pub(crate) mod package_preflight;
 pub(crate) mod prepare;
 mod publish;
-mod version_targets;
+pub(crate) mod version_targets;
 
 pub(crate) use github_release::run_github_release;
 pub(crate) use publish::{publish_response_output, run_publish};
@@ -454,6 +454,42 @@ fn inspect_release_tag_state(component: &Component, tag_name: &str) -> Result<Re
         remote_tag_commit,
         github_release,
     })
+}
+
+/// Best-effort check for whether a published GitHub Release exists for `tag_name`.
+///
+/// Returns `Some(true)`/`Some(false)` when GitHub is reachable and the
+/// repository resolves, or `None` when it cannot be determined (no remote, `gh`
+/// unavailable/unauthenticated, or a non-GitHub remote). Callers that must not
+/// move a published release should treat `None` conservatively.
+pub(crate) fn github_release_exists_for_tag(
+    component: &Component,
+    tag_name: &str,
+) -> Option<bool> {
+    component
+        .remote_url
+        .clone()
+        .or_else(|| {
+            crate::core::deploy::release_download::detect_remote_url(std::path::Path::new(
+                &component.local_path,
+            ))
+        })
+        .and_then(|remote_url| crate::core::deploy::release_download::parse_github_url(&remote_url))
+        .and_then(|github| {
+            if !github_release::gh_is_available()
+                || !github_release::gh_is_authenticated(&github, &component.github)
+            {
+                return None;
+            }
+
+            let repo_flag = format!("{}/{}", github.owner, github.repo);
+            Some(github_release::gh_release_exists(
+                &github,
+                &component.github,
+                tag_name,
+                &repo_flag,
+            ))
+        })
 }
 
 fn build_existing_tag_failure(
