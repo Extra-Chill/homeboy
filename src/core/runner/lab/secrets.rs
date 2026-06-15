@@ -18,31 +18,44 @@ pub(super) fn hydrate_agent_task_secret_env(
     args: &[String],
     env: &mut HashMap<String, String>,
 ) -> Result<serde_json::Value> {
-    let names = declared_agent_task_secret_env(args);
-    if names.is_empty() {
+    let names = declared_agent_task_controller_secret_env(args);
+    let mut runner_deferred_names = declared_agent_task_run_plan_secret_env(args);
+    runner_deferred_names.sort();
+    runner_deferred_names.dedup();
+    if names.is_empty() && runner_deferred_names.is_empty() {
         return Ok(serde_json::json!({
             "schema": "homeboy/lab-agent-task-secret-env/v1",
             "secret_env": [],
+            "runner_deferred_secret_env": [],
         }));
     }
 
-    let resolved = agent_task_secrets::resolve_secret_env(&names).map_err(|error| {
-        Error::validation_invalid_argument(
-            "secret-env",
-            error.message,
-            None,
-            Some(vec![
-                "Configure provider secrets with Homeboy's global agent-task secret config, for example `homeboy agent-task auth map-env` or `homeboy agent-task auth set-keychain`.".to_string(),
-            ]),
-        )
-    })?;
-    for (name, value) in resolved {
-        env.insert(name, value);
+    if !names.is_empty() {
+        let resolved = agent_task_secrets::resolve_secret_env(&names).map_err(|error| {
+            Error::validation_invalid_argument(
+                "secret-env",
+                error.message,
+                None,
+                Some(vec![
+                    "Configure provider secrets with Homeboy's global agent-task secret config, for example `homeboy agent-task auth map-env` or `homeboy agent-task auth set-keychain`.".to_string(),
+                ]),
+            )
+        })?;
+        for (name, value) in resolved {
+            env.insert(name, value);
+        }
     }
 
     Ok(serde_json::json!({
         "schema": "homeboy/lab-agent-task-secret-env/v1",
         "secret_env": agent_task_secrets::secret_env_status(&names),
+        "runner_deferred_secret_env": runner_deferred_names
+            .into_iter()
+            .map(|name| serde_json::json!({
+                "name": name,
+                "source": "runner",
+            }))
+            .collect::<Vec<_>>(),
     }))
 }
 
@@ -66,6 +79,14 @@ pub(super) fn hydrate_trace_secret_env(
 }
 
 pub(super) fn declared_agent_task_secret_env(args: &[String]) -> Vec<String> {
+    let mut names = declared_agent_task_controller_secret_env(args);
+    names.extend(declared_agent_task_run_plan_secret_env(args));
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn declared_agent_task_controller_secret_env(args: &[String]) -> Vec<String> {
     if subcommand_index(args, "agent-task").is_none() {
         return Vec::new();
     }
@@ -96,7 +117,6 @@ pub(super) fn declared_agent_task_secret_env(args: &[String]) -> Vec<String> {
         }
         index += 1;
     }
-    names.extend(declared_agent_task_run_plan_secret_env(args));
     names.sort();
     names.dedup();
     names
@@ -522,5 +542,56 @@ mod tests {
         ]);
 
         assert_eq!(names, vec!["GITHUB_TOKEN".to_string()]);
+    }
+
+    #[test]
+    fn hydrate_agent_task_secret_env_defers_run_plan_secrets_to_runner() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let plan_path = temp.path().join("plan.json");
+        std::fs::write(
+            &plan_path,
+            serde_json::json!({
+                "schema": "homeboy/agent-task-plan/v1",
+                "plan_id": "runner-owned-secret-env-plan",
+                "tasks": [
+                    {
+                        "schema": "homeboy/agent-task-request/v1",
+                        "task_id": "runner-owned",
+                        "executor": {
+                            "backend": "example",
+                            "secret_env": ["HOMEBOY_RUNNER_ONLY_SECRET_ENV_TEST"]
+                        },
+                        "instructions": "Use runner-owned credentials."
+                    }
+                ]
+            })
+            .to_string(),
+        )
+        .expect("write plan");
+
+        let mut env = HashMap::new();
+        let diagnostics = hydrate_agent_task_secret_env(
+            &[
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "run-plan".to_string(),
+                "--plan".to_string(),
+                format!("@{}", plan_path.display()),
+            ],
+            &mut env,
+        )
+        .expect("plan-declared secrets should not require controller auth");
+
+        assert!(env.is_empty());
+        assert_eq!(diagnostics["secret_env"].as_array().unwrap().len(), 0);
+        assert_eq!(
+            diagnostics["runner_deferred_secret_env"],
+            serde_json::json!([
+                {
+                    "name": "HOMEBOY_RUNNER_ONLY_SECRET_ENV_TEST",
+                    "source": "runner"
+                }
+            ])
+        );
     }
 }
