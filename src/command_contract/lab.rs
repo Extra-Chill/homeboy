@@ -85,10 +85,11 @@ impl Commands {
                     agent_task::AgentTaskCommand::Status(_)
                         | agent_task::AgentTaskCommand::Logs(_)
                         | agent_task::AgentTaskCommand::Artifacts(_)
+                        | agent_task::AgentTaskCommand::Review(_)
                 ) =>
             {
                 LabCommandContract::portable_workload(
-                    "agent-task status/logs/artifacts",
+                    "agent-task status/logs/artifacts/review",
                     None,
                     false,
                     LAB_NO_EXTRA_TOOLS,
@@ -428,6 +429,10 @@ mod tests {
             parsed_command(&["homeboy", "agent-task", "artifacts", "agent-task-123"])
                 .supports_lab_runner()
         );
+        assert!(
+            parsed_command(&["homeboy", "agent-task", "review", "agent-task-123"])
+                .supports_lab_runner()
+        );
         assert!(parsed_command(&["homeboy", "agent-task", "providers"]).supports_lab_runner());
         assert!(parsed_command(&[
             "homeboy",
@@ -535,15 +540,19 @@ mod tests {
             ),
             (
                 parsed_command(&["homeboy", "agent-task", "status", "agent-task-123"]),
-                "agent-task status/logs/artifacts",
+                "agent-task status/logs/artifacts/review",
             ),
             (
                 parsed_command(&["homeboy", "agent-task", "logs", "agent-task-123"]),
-                "agent-task status/logs/artifacts",
+                "agent-task status/logs/artifacts/review",
             ),
             (
                 parsed_command(&["homeboy", "agent-task", "artifacts", "agent-task-123"]),
-                "agent-task status/logs/artifacts",
+                "agent-task status/logs/artifacts/review",
+            ),
+            (
+                parsed_command(&["homeboy", "agent-task", "review", "agent-task-123"]),
+                "agent-task status/logs/artifacts/review",
             ),
             (
                 parsed_command(&["homeboy", "agent-task", "providers"]),
@@ -608,12 +617,16 @@ mod tests {
         assert!(lint.requires_extension_parity);
         assert!(lint.infer_source_path_tools);
 
-        let agent_task_status =
-            parsed_command(&["homeboy", "agent-task", "status", "agent-task-123"])
+        for args in [
+            ["homeboy", "agent-task", "status", "agent-task-123"].as_slice(),
+            ["homeboy", "agent-task", "review", "agent-task-123"].as_slice(),
+        ] {
+            let agent_task_inspection = parsed_command(args)
                 .lab_contract()
-                .expect("agent-task status contract");
-        assert!(!agent_task_status.requires_extension_parity);
-        assert!(!agent_task_status.infer_source_path_tools);
+                .expect("agent-task inspection contract");
+            assert!(!agent_task_inspection.requires_extension_parity);
+            assert!(!agent_task_inspection.infer_source_path_tools);
+        }
 
         let rig = parsed_command(&["homeboy", "rig", "up", "studio"])
             .lab_contract()
@@ -663,6 +676,7 @@ mod tests {
             "auth",
             "map-env",
             "OPENAI_API_KEY",
+            "--from",
             "OPENAI_API_KEY",
         ])
         .lab_contract()
