@@ -119,6 +119,8 @@ pub struct TraceToolchainProvenance {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reasons: Vec<String>,
     pub homeboy: TraceGitProvenance,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub toolchains: BTreeMap<String, TraceGitProvenance>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wp_codebox: Option<TraceGitProvenance>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

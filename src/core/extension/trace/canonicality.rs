@@ -2,7 +2,8 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::core::component::Component;
-use crate::core::error::Result;
+use crate::core::error::{ErrorCode, Result};
+use crate::core::extension::manifest_config::TraceToolchainProvenanceConfig;
 use crate::core::extension::ExtensionExecutionContext;
 
 use super::parsing::{
@@ -136,9 +137,6 @@ pub(crate) fn refused_trace_result(
     }
 }
 
-const WP_CODEBOX_BIN_ENV_KEYS: &[&str] =
-    &["HOMEBOY_WP_CODEBOX_BIN", "HOMEBOY_SETTINGS_WP_CODEBOX_BIN"];
-
 pub(crate) fn evaluate_trace_canonicality(
     execution_context: Option<&ExtensionExecutionContext>,
     component: &Component,
@@ -192,34 +190,8 @@ pub(crate) fn evaluate_trace_canonicality(
         checks.push(check_extension_checkout(context, &mut reasons));
     }
 
-    for key in WP_CODEBOX_BIN_ENV_KEYS {
-        let explicit = args.runner_inputs.env.iter().any(|(name, _)| name == key);
-        let inherited = std::env::var_os(key);
-        if explicit || inherited.is_some() {
-            let source = if explicit {
-                "trace runner env"
-            } else {
-                "process env"
-            };
-            let value = args
-                .runner_inputs
-                .env
-                .iter()
-                .find_map(|(name, value)| (name == key).then_some(value.as_str()))
-                .or_else(|| inherited.as_deref().and_then(|value| value.to_str()));
-            match value {
-                Some(path) if !path.trim().is_empty() => checks.push(check_git_checkout(
-                    &format!("toolchain:wp-codebox ({key}, {source})"),
-                    &git_probe_path(Path::new(path)),
-                    None,
-                    &mut reasons,
-                )),
-                _ => reasons.push(format!(
-                    "WP Codebox toolchain path `{}` is empty via {}",
-                    key, source
-                )),
-            }
-        }
+    for requirement in trace_toolchain_provenance_requirements(execution_context)? {
+        check_declared_toolchain_provenance(&requirement, args, &mut checks, &mut reasons);
     }
 
     Ok(TraceCanonicalityReport {
@@ -227,6 +199,58 @@ pub(crate) fn evaluate_trace_canonicality(
         reasons,
         checks,
     })
+}
+
+pub(crate) fn trace_toolchain_provenance_requirements(
+    execution_context: Option<&ExtensionExecutionContext>,
+) -> Result<Vec<TraceToolchainProvenanceConfig>> {
+    let Some(context) = execution_context else {
+        return Ok(Vec::new());
+    };
+    let manifest = match crate::core::extension::load_extension(&context.extension_id) {
+        Ok(manifest) => manifest,
+        Err(error) if error.code == ErrorCode::ExtensionNotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    Ok(manifest.trace_toolchain_provenance().to_vec())
+}
+
+fn check_declared_toolchain_provenance(
+    requirement: &TraceToolchainProvenanceConfig,
+    args: &TraceRunWorkflowArgs,
+    checks: &mut Vec<TraceCanonicalCheck>,
+    reasons: &mut Vec<String>,
+) {
+    for key in &requirement.env_keys {
+        let explicit = args.runner_inputs.env.iter().any(|(name, _)| name == key);
+        let inherited = std::env::var_os(key);
+        if !explicit && inherited.is_none() {
+            continue;
+        }
+        let source = if explicit {
+            "trace runner env"
+        } else {
+            "process env"
+        };
+        let value = args
+            .runner_inputs
+            .env
+            .iter()
+            .find_map(|(name, value)| (name == key).then_some(value.as_str()))
+            .or_else(|| inherited.as_deref().and_then(|value| value.to_str()));
+        match value {
+            Some(path) if !path.trim().is_empty() => checks.push(check_git_checkout(
+                &format!("toolchain:{} ({key}, {source})", requirement.id),
+                &git_probe_path(Path::new(path)),
+                None,
+                reasons,
+            )),
+            _ => reasons.push(format!(
+                "{} toolchain path `{}` is empty via {}",
+                requirement.label, key, source
+            )),
+        }
+    }
 }
 
 fn git_probe_path(path: &Path) -> std::path::PathBuf {
@@ -520,6 +544,7 @@ mod tests {
     use crate::core::engine::run_dir::RunDir;
     use crate::core::extension::trace::run::{run_trace_workflow, TraceRunnerInputs};
     use crate::core::extension::ExtensionCapability;
+    use std::path::Path;
 
     #[test]
     fn trace_canonical_policy_defaults_to_canonical() {
@@ -635,79 +660,80 @@ mod tests {
     }
 
     #[test]
-    fn canonical_trace_refuses_missing_wp_codebox_runner_env() {
-        let temp = tempfile::tempdir().unwrap();
-        init_git_repo(temp.path());
-        let component = test_component(temp.path());
-        let run_dir = RunDir::create().unwrap();
-        let mut args = test_run_args(temp.path());
-        args.canonical_policy = TraceCanonicalPolicy::Canonical;
-        args.runner_inputs.env.push((
-            "HOMEBOY_WP_CODEBOX_BIN".to_string(),
-            "/tmp/other-wp-codebox".to_string(),
-        ));
+    fn canonical_trace_refuses_missing_declared_toolchain_runner_env() {
+        crate::test_support::with_isolated_home(|home| {
+            let temp = tempfile::tempdir().unwrap();
+            init_git_repo(temp.path());
+            let component = test_component(temp.path());
+            let context = write_trace_extension(home.path(), &component);
+            let mut args = test_run_args(temp.path());
+            args.canonical_policy = TraceCanonicalPolicy::Canonical;
+            args.runner_inputs.env.push((
+                "FIXTURE_TOOLCHAIN_BIN".to_string(),
+                "/tmp/other-fixture-toolchain".to_string(),
+            ));
 
-        let result = run_trace_workflow(&component, args, &run_dir, None).unwrap();
+            let report = evaluate_trace_canonicality(Some(&context), &component, &args).unwrap();
 
-        assert_eq!(result.exit_code, 1);
-        assert!(result.evidence.reasons.iter().any(|reason| {
-            reason.contains("toolchain:wp-codebox (HOMEBOY_WP_CODEBOX_BIN, trace runner env) checkout path is missing")
-        }));
-        run_dir.cleanup();
+            assert!(!report.is_canonical());
+            assert!(report.reasons.iter().any(|reason| {
+                reason.contains("toolchain:fixture-toolchain (FIXTURE_TOOLCHAIN_BIN, trace runner env) checkout path is missing")
+            }));
+        });
     }
 
     #[test]
-    fn canonical_trace_accepts_clean_wp_codebox_runner_env() {
-        let component_dir = tempfile::tempdir().unwrap();
-        let component_remote = tempfile::tempdir().unwrap();
-        let codebox_dir = tempfile::tempdir().unwrap();
-        let codebox_remote = tempfile::tempdir().unwrap();
-        init_git_repo(component_dir.path());
-        init_bare_repo(component_remote.path());
-        git(
-            component_dir.path(),
-            &[
-                "remote",
-                "add",
-                "origin",
-                component_remote.path().to_str().unwrap(),
-            ],
-        );
-        git(component_dir.path(), &["push", "-u", "origin", "main"]);
-        init_git_repo(codebox_dir.path());
-        init_bare_repo(codebox_remote.path());
-        git(
-            codebox_dir.path(),
-            &[
-                "remote",
-                "add",
-                "origin",
-                codebox_remote.path().to_str().unwrap(),
-            ],
-        );
-        git(codebox_dir.path(), &["push", "-u", "origin", "main"]);
-        let bin = codebox_dir.path().join("packages/cli/dist/index.js");
-        std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
-        std::fs::write(&bin, "#!/usr/bin/env node\n").unwrap();
-        git(codebox_dir.path(), &["add", "."]);
-        git(codebox_dir.path(), &["commit", "-m", "add cli bin"]);
-        git(codebox_dir.path(), &["push", "origin", "main"]);
+    fn canonical_trace_accepts_clean_declared_toolchain_runner_env() {
+        crate::test_support::with_isolated_home(|home| {
+            let component_dir = tempfile::tempdir().unwrap();
+            let component_remote = tempfile::tempdir().unwrap();
+            let toolchain_dir = tempfile::tempdir().unwrap();
+            let toolchain_remote = tempfile::tempdir().unwrap();
+            init_git_repo(component_dir.path());
+            init_bare_repo(component_remote.path());
+            git(
+                component_dir.path(),
+                &[
+                    "remote",
+                    "add",
+                    "origin",
+                    component_remote.path().to_str().unwrap(),
+                ],
+            );
+            git(component_dir.path(), &["push", "-u", "origin", "main"]);
+            init_git_repo(toolchain_dir.path());
+            init_bare_repo(toolchain_remote.path());
+            git(
+                toolchain_dir.path(),
+                &[
+                    "remote",
+                    "add",
+                    "origin",
+                    toolchain_remote.path().to_str().unwrap(),
+                ],
+            );
+            git(toolchain_dir.path(), &["push", "-u", "origin", "main"]);
+            let bin = toolchain_dir.path().join("packages/cli/dist/index.js");
+            std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+            std::fs::write(&bin, "#!/usr/bin/env node\n").unwrap();
+            git(toolchain_dir.path(), &["add", "."]);
+            git(toolchain_dir.path(), &["commit", "-m", "add cli bin"]);
+            git(toolchain_dir.path(), &["push", "origin", "main"]);
 
-        let component = test_component(component_dir.path());
-        let run_dir = RunDir::create().unwrap();
-        let mut args = test_run_args(component_dir.path());
-        args.canonical_policy = TraceCanonicalPolicy::Canonical;
-        args.runner_inputs.env.push((
-            "HOMEBOY_WP_CODEBOX_BIN".to_string(),
-            bin.to_string_lossy().to_string(),
-        ));
+            let component = test_component(component_dir.path());
+            let context = write_trace_extension(home.path(), &component);
+            let mut args = test_run_args(component_dir.path());
+            args.canonical_policy = TraceCanonicalPolicy::Canonical;
+            args.runner_inputs.env.push((
+                "FIXTURE_TOOLCHAIN_BIN".to_string(),
+                bin.to_string_lossy().to_string(),
+            ));
 
-        let result = run_trace_workflow(&component, args, &run_dir, None).unwrap();
+            let report = evaluate_trace_canonicality(Some(&context), &component, &args).unwrap();
 
-        assert_eq!(result.exit_code, 3);
-        assert!(result.evidence.canonical);
-        assert!(result.evidence.reasons.is_empty());
-        run_dir.cleanup();
+            assert!(report.is_canonical());
+            assert!(report.reasons.is_empty());
+        });
     }
 
     #[test]
@@ -891,14 +917,11 @@ mod tests {
     fn allow_local_toolchain_marks_result_non_canonical_without_refusing() {
         let temp = tempfile::tempdir().unwrap();
         init_git_repo(temp.path());
+        std::fs::write(temp.path().join("dirty.txt"), "dirty\n").unwrap();
         let component = test_component(temp.path());
         let run_dir = RunDir::create().unwrap();
         let mut args = test_run_args(temp.path());
         args.canonical_policy = TraceCanonicalPolicy::AllowLocalToolchain;
-        args.runner_inputs.env.push((
-            "HOMEBOY_WP_CODEBOX_BIN".to_string(),
-            "/tmp/other-wp-codebox".to_string(),
-        ));
 
         let result = run_trace_workflow(&component, args, &run_dir, None).unwrap();
 
@@ -917,6 +940,42 @@ mod tests {
             id: "example".to_string(),
             local_path: path.to_string_lossy().to_string(),
             ..Default::default()
+        }
+    }
+
+    fn write_trace_extension(home: &Path, component: &Component) -> ExtensionExecutionContext {
+        let extension_id = "fixture-extension";
+        let extension_dir = home.join(".config/homeboy/extensions").join(extension_id);
+        std::fs::create_dir_all(&extension_dir).expect("extension dir");
+        std::fs::write(
+            extension_dir.join(format!("{extension_id}.json")),
+            serde_json::json!({
+                "name": "Fixture Extension",
+                "version": "0.0.0",
+                "trace": {
+                    "extension_script": "trace.js",
+                    "toolchain_provenance": [
+                        {
+                            "id": "fixture-toolchain",
+                            "label": "Fixture Toolchain",
+                            "legacy_field": "wp_codebox",
+                            "env_keys": ["FIXTURE_TOOLCHAIN_BIN"]
+                        }
+                    ]
+                }
+            })
+            .to_string(),
+        )
+        .expect("extension manifest");
+        std::fs::write(extension_dir.join("trace.js"), "#!/usr/bin/env node\n").unwrap();
+
+        ExtensionExecutionContext {
+            component: component.clone(),
+            capability: ExtensionCapability::Trace,
+            extension_id: extension_id.to_string(),
+            extension_path: extension_dir,
+            script_path: "trace.js".to_string(),
+            settings: Vec::new(),
         }
     }
 
