@@ -1627,6 +1627,30 @@ mod tests {
     }
 
     #[test]
+    fn lab_runner_selection_rejects_allow_local_hot_without_force_hot() {
+        let command = portable_lab_command("rig check");
+
+        let err = resolve_lab_runner_selection_from_default(
+            &command,
+            None,
+            false,
+            true,
+            false,
+            Some("lab-default".to_string()),
+        )
+        .expect_err("allow-local-hot alone must not silently auto-offload");
+
+        assert_eq!(err.code.as_str(), "validation.invalid_argument");
+        assert!(err.message.contains("--allow-local-hot only permits"));
+        assert!(err.message.contains("--force-hot"));
+        assert!(err.message.contains("automatic Lab offload"));
+        let tried = err.details["tried"].as_array().expect("tried");
+        assert!(tried.iter().any(|hint| hint
+            .as_str()
+            .is_some_and(|hint| hint.contains("--force-hot --allow-local-hot"))));
+    }
+
+    #[test]
     fn lab_runner_selection_allow_local_hot_overrides_default_runner_gate() {
         let command = portable_lab_command("test");
 

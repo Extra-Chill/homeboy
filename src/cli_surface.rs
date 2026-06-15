@@ -25,7 +25,8 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub force_hot: bool,
 
-    /// Allow --force-hot portable Lab commands to stay local even when a default Lab runner exists.
+    /// Permit --force-hot portable Lab commands to stay local even when a default Lab runner exists.
+    /// This flag does not disable automatic Lab offload unless --force-hot is also set.
     #[arg(long, global = true)]
     pub allow_local_hot: bool,
 
