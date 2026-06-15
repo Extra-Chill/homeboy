@@ -1331,7 +1331,12 @@ mod tests {
                 .find(|artifact| artifact.kind == "replay-artifact")
                 .expect("replay artifact");
             let artifact_url = replay.public_url.as_deref().expect("public url");
-            assert!(artifact_url.starts_with(&format!("{public_artifact_base}/runs/")));
+            assert_eq!(
+                artifact_url,
+                format!(
+                    "{public_artifact_base}/homeboy/workflow-bench/runs/run-1/artifacts/scenario/adapter/attempt-1/replay.json"
+                )
+            );
             assert!(!artifact_url.ends_with("/content"));
             assert_eq!(replay.mime.as_deref(), Some("application/json"));
             assert_eq!(replay.sha256.as_deref(), Some("abc123"));
