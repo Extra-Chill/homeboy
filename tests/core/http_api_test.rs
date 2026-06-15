@@ -1,4 +1,4 @@
-use homeboy::core::api_jobs::{JobEventKind, JobStatus, JobStore};
+use homeboy::core::api_jobs::{JobEventKind, JobStatus, JobStore, RemoteRunnerJobRequest};
 use homeboy::core::http_api::{
     self, AnalysisJobRunOutput, AnalysisJobRunner, HttpApiRequest, HttpEndpoint, HttpMethod,
     JobReadyRunKind,
@@ -285,6 +285,67 @@ fn test_handle_with_jobs() {
     assert_eq!(cancel.endpoint, "jobs.cancel");
     assert_eq!(cancel.body["job"]["status"], "cancelled");
     assert_eq!(store.get(job.id).expect("job").status, JobStatus::Cancelled);
+}
+
+#[test]
+fn runs_list_includes_active_runner_jobs() {
+    with_isolated_home(|_home| {
+        let _xdg = XdgGuard::unset();
+        ObservationStore::open_initialized().expect("store");
+        let store = JobStore::default();
+        let job = store
+            .submit_remote_runner_job(RemoteRunnerJobRequest {
+                runner_id: "homeboy-lab".to_string(),
+                project_id: None,
+                operation: "runner.exec".to_string(),
+                command: vec![
+                    "homeboy".to_string(),
+                    "agent-task".to_string(),
+                    "cook".to_string(),
+                    "--run-id".to_string(),
+                    "cook-durable-run".to_string(),
+                ],
+                cwd: Some("/workspace/homeboy".to_string()),
+                env: Default::default(),
+                capture_patch: false,
+                source_snapshot: None,
+                require_paths: Vec::new(),
+                metadata: None,
+            })
+            .expect("submit runner job");
+        store.start(job.id).expect("start runner job");
+
+        let response = http_api::handle_with_jobs(
+            HttpApiRequest {
+                method: HttpMethod::Get,
+                path: "/runs?status=running".to_string(),
+                body: None,
+            },
+            &store,
+        )
+        .expect("runs list");
+
+        let runs = response.body["runs"].as_array().expect("runs");
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0]["id"], "cook-durable-run");
+        assert_eq!(runs[0]["kind"], "lab-runner-job");
+        assert_eq!(runs[0]["status"], "running");
+        let note = runs[0]["status_note"].as_str().expect("status note");
+        assert!(note.contains("runner=homeboy-lab"));
+        assert!(note.contains(&format!("job={}", job.id)));
+        assert!(note.contains("durable_run=cook-durable-run"));
+        assert!(note.contains("elapsed_ms="));
+        assert!(note.contains("active_child_count="));
+        assert!(note.contains("active_cell_count="));
+        assert_eq!(
+            response.body["active_runner_jobs"][0]["runner_id"],
+            "homeboy-lab"
+        );
+        assert_eq!(
+            response.body["active_runner_jobs"][0]["durable_run_id"],
+            "cook-durable-run"
+        );
+    });
 }
 
 #[test]

@@ -1324,6 +1324,7 @@ mod tests {
                 connected_at: "2026-06-03T00:00:00Z".to_string(),
             }),
             stale_daemon: None,
+            active_jobs: Vec::new(),
             session_path: "/tmp/lab.json".to_string(),
         }
     }

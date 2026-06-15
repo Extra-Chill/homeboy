@@ -81,6 +81,25 @@ pub struct Job {
     pub artifacts: Vec<JobArtifactMetadata>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActiveRunnerJobSummary {
+    pub runner_id: String,
+    pub job_id: String,
+    pub operation: String,
+    pub status: JobStatus,
+    pub command: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    pub started_at_ms: u64,
+    pub elapsed_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub durable_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_child_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_cell_count: Option<u64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobEvent {
     pub sequence: u64,
@@ -232,6 +251,22 @@ impl JobStore {
             .map(|stored| stored.job.clone())
             .collect();
         jobs.sort_by_key(|job| (job.created_at_ms, job.id));
+        jobs
+    }
+
+    pub(crate) fn active_runner_jobs(&self) -> Vec<ActiveRunnerJobSummary> {
+        let now = timestamp_ms();
+        let inner = self.inner.lock().expect("job store mutex poisoned");
+        let mut jobs: Vec<ActiveRunnerJobSummary> = inner
+            .jobs
+            .values()
+            .filter(|stored| matches!(stored.job.status, JobStatus::Queued | JobStatus::Running))
+            .filter_map(|stored| {
+                let request = stored.remote_runner.as_ref()?.request.clone();
+                Some(active_runner_job_summary(&stored.job, &request, now))
+            })
+            .collect();
+        jobs.sort_by_key(|job| (job.started_at_ms, job.job_id.clone()));
         jobs
     }
 
@@ -430,6 +465,58 @@ impl JobStore {
 
         write_durable_store(&persistence.path, &durable)
     }
+}
+
+fn active_runner_job_summary(
+    job: &Job,
+    request: &remote_runner::RemoteRunnerJobRequest,
+    now_ms: u64,
+) -> ActiveRunnerJobSummary {
+    let started_at_ms = job.started_at_ms.unwrap_or(job.created_at_ms);
+    ActiveRunnerJobSummary {
+        runner_id: request.runner_id.clone(),
+        job_id: job.id.to_string(),
+        operation: job.operation.clone(),
+        status: job.status,
+        command: request.command.join(" "),
+        cwd: request.cwd.clone(),
+        started_at_ms,
+        elapsed_ms: now_ms.saturating_sub(started_at_ms),
+        durable_run_id: durable_agent_task_run_id(&request.command).or_else(|| {
+            request
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("durable_run_id"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        }),
+        active_child_count: None,
+        active_cell_count: request
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("active_cell_count"))
+            .and_then(Value::as_u64),
+    }
+}
+
+fn durable_agent_task_run_id(command: &[String]) -> Option<String> {
+    let action_index = command.iter().position(|arg| arg == "agent-task")? + 1;
+    command
+        .get(action_index)
+        .filter(|arg| matches!(arg.as_str(), "cook" | "dispatch"))?;
+    let mut iter = command.iter().skip(action_index + 1);
+    while let Some(arg) = iter.next() {
+        if arg == "--" {
+            break;
+        }
+        if arg == "--run-id" {
+            return iter.next().cloned();
+        }
+        if let Some(value) = arg.strip_prefix("--run-id=") {
+            return (!value.is_empty()).then(|| value.to_string());
+        }
+    }
+    None
 }
 
 fn read_durable_store(path: &Path) -> Result<DurableJobStore> {

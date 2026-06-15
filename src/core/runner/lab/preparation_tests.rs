@@ -23,6 +23,7 @@ fn lab_runner_preparation_falls_back_for_unreachable_default_runner() {
                 state: super::super::RunnerSessionState::Disconnected,
                 session: None,
                 stale_daemon: None,
+                active_jobs: Vec::new(),
                 session_path: "/tmp/lab.json".to_string(),
             })
         },
@@ -80,6 +81,7 @@ fn lab_runner_preparation_uses_already_connected_runner() {
                     Some("http://127.0.0.1:1234"),
                 )),
                 stale_daemon: None,
+                active_jobs: Vec::new(),
                 session_path: "/tmp/lab.json".to_string(),
             })
         },
@@ -110,6 +112,7 @@ fn lab_runner_preparation_falls_back_for_stale_default_daemon_version() {
                     Some("http://127.0.0.1:1234"),
                 )),
                 stale_daemon: Some(stale_daemon_warning(runner_id)),
+                active_jobs: Vec::new(),
                 session_path: "/tmp/lab.json".to_string(),
             })
         },
@@ -145,6 +148,7 @@ fn lab_runner_preparation_errors_for_explicit_stale_daemon_version() {
                     Some("http://127.0.0.1:1234"),
                 )),
                 stale_daemon: Some(stale_daemon_warning(runner_id)),
+                active_jobs: Vec::new(),
                 session_path: "/tmp/lab.json".to_string(),
             })
         },
@@ -187,6 +191,7 @@ fn lab_runner_preparation_falls_back_for_stale_default_direct_session_without_da
                 state: super::super::RunnerSessionState::Connected,
                 session: Some(connected_direct_session(runner_id, None)),
                 stale_daemon: None,
+                active_jobs: Vec::new(),
                 session_path: "/tmp/lab.json".to_string(),
             })
         },
@@ -219,6 +224,7 @@ fn lab_runner_preparation_errors_for_explicit_direct_session_without_daemon_url(
                 state: super::super::RunnerSessionState::Connected,
                 session: Some(connected_direct_session(runner_id, None)),
                 stale_daemon: None,
+                active_jobs: Vec::new(),
                 session_path: "/tmp/lab.json".to_string(),
             })
         },
@@ -256,6 +262,7 @@ fn lab_runner_preparation_connects_disconnected_runner() {
                 state: super::super::RunnerSessionState::Disconnected,
                 session: None,
                 stale_daemon: None,
+                active_jobs: Vec::new(),
                 session_path: "/tmp/lab.json".to_string(),
             })
         },
@@ -305,6 +312,7 @@ fn lab_runner_preparation_errors_for_unreachable_explicit_runner() {
                 state: super::super::RunnerSessionState::Disconnected,
                 session: None,
                 stale_daemon: None,
+                active_jobs: Vec::new(),
                 session_path: "/tmp/lab.json".to_string(),
             })
         },

@@ -30,6 +30,7 @@ use serde_json::Value;
 use homeboy::core::observation::runs_service;
 use homeboy::core::observation::{ArtifactRecord, ObservationStore, RunListFilter, RunRecord};
 use homeboy::core::Error;
+use homeboy::core::{api_jobs::ActiveRunnerJobSummary, api_jobs::JobStatus, runners as runner};
 
 use super::{CmdResult, GlobalArgs};
 pub use bench::{bench_compare, bench_history, BenchCompareOutput, BenchHistoryOutput};
@@ -424,7 +425,8 @@ pub fn list_runs(args: RunsListArgs, command: &'static str) -> CmdResult<RunsOut
 
     let store = ObservationStore::open_initialized()?;
     reconcile::reconcile_owned_stale_running_runs(&store, 1000)?;
-    let runs = store
+    let status_filter = args.status.clone();
+    let mut runs: Vec<RunSummary> = store
         .list_runs(RunListFilter {
             kind: args.kind,
             component_id: args.component_id,
@@ -436,7 +438,91 @@ pub fn list_runs(args: RunsListArgs, command: &'static str) -> CmdResult<RunsOut
         .map(|run| run_summary_with_artifact_index(&store, run))
         .collect();
 
+    runs.extend(active_runner_job_summaries(status_filter.as_deref()));
+
     Ok((RunsOutput::List(RunsListOutput { command, runs }), 0))
+}
+
+fn active_runner_job_summaries(status: Option<&str>) -> Vec<RunSummary> {
+    runner::statuses()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|report| report.connected)
+        .flat_map(|report| active_runner_jobs(&report.runner_id))
+        .filter(|job| match status {
+            Some(status) => status == active_job_status_label(job.status),
+            None => true,
+        })
+        .map(active_runner_job_run_summary)
+        .collect()
+}
+
+fn active_runner_jobs(runner_id: &str) -> Vec<ActiveRunnerJobSummary> {
+    runner::daemon_api_get(runner_id, "/jobs")
+        .ok()
+        .and_then(|data| data.get("body").cloned())
+        .and_then(|body| body.get("active_runner_jobs").cloned())
+        .and_then(|jobs| serde_json::from_value(jobs).ok())
+        .unwrap_or_default()
+}
+
+fn active_runner_job_run_summary(job: ActiveRunnerJobSummary) -> RunSummary {
+    RunSummary {
+        id: job
+            .durable_run_id
+            .clone()
+            .unwrap_or_else(|| format!("runner-job-{}", job.job_id)),
+        kind: "lab-runner-job".to_string(),
+        status: active_job_status_label(job.status).to_string(),
+        started_at: ms_to_rfc3339(job.started_at_ms),
+        finished_at: None,
+        component_id: None,
+        rig_id: None,
+        git_sha: None,
+        command: Some(format!(
+            "{} [runner={}, job={}, durable_run={}, elapsed_ms={}, active_child_count={}, active_cell_count={}]",
+            job.command,
+            job.runner_id,
+            job.job_id,
+            job.durable_run_id.as_deref().unwrap_or("unknown"),
+            job.elapsed_ms,
+            optional_count(job.active_child_count),
+            optional_count(job.active_cell_count)
+        )),
+        cwd: job.cwd,
+        status_note: Some(format!(
+            "active Lab runner job: runner={} job={} durable_run={} elapsed_ms={} active_child_count={} active_cell_count={}",
+            job.runner_id,
+            job.job_id,
+            job.durable_run_id.as_deref().unwrap_or("unknown"),
+            job.elapsed_ms,
+            optional_count(job.active_child_count),
+            optional_count(job.active_cell_count)
+        )),
+        artifact_index: None,
+    }
+}
+
+fn active_job_status_label(status: JobStatus) -> &'static str {
+    match status {
+        JobStatus::Queued => "queued",
+        JobStatus::Running => "running",
+        JobStatus::Succeeded => "pass",
+        JobStatus::Failed => "fail",
+        JobStatus::Cancelled => "cancelled",
+    }
+}
+
+fn optional_count(count: Option<u64>) -> String {
+    count
+        .map(|count| count.to_string())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn ms_to_rfc3339(ms: u64) -> String {
+    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms as i64)
+        .unwrap_or_else(chrono::Utc::now)
+        .to_rfc3339()
 }
 
 fn show_run(run_id: &str) -> CmdResult<RunsOutput> {
