@@ -1,0 +1,142 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WORKDIR="$(mktemp -d)"
+trap 'rm -rf "$WORKDIR"' EXIT
+
+PROJECT_DIR="$WORKDIR/project"
+HELPER_DIR="$WORKDIR/helpers"
+BIN_DIR="$WORKDIR/bin"
+SIDECAR_DIR="$WORKDIR/sidecars"
+mkdir -p "$PROJECT_DIR/tests" "$HELPER_DIR" "$BIN_DIR" "$SIDECAR_DIR"
+
+cat > "$PROJECT_DIR/Cargo.toml" <<'EOF'
+[package]
+name = "rust-nextest-smoke"
+version = "0.1.0"
+edition = "2021"
+EOF
+
+cat > "$PROJECT_DIR/tests/integration_scope.rs" <<'EOF'
+#[test]
+fn integration_scope_runs() {
+    assert_eq!(1, 1);
+}
+EOF
+
+cat > "$HELPER_DIR/resolve-context.sh" <<'EOF'
+homeboy_resolve_context() {
+    PROJECT_PATH="${HOMEBOY_COMPONENT_PATH}"
+    EXTENSION_PATH="${HOMEBOY_EXTENSION_PATH}"
+}
+EOF
+
+cat > "$HELPER_DIR/runner-steps.sh" <<'EOF'
+should_run_step() {
+    return 0
+}
+EOF
+
+cat > "$HELPER_DIR/sidecar-writer.sh" <<'EOF'
+homeboy_sidecar_merge() {
+    local target="$1"
+    local source="$2"
+    local safe_target="${target//[^A-Za-z0-9_.-]/_}"
+    cp "$source" "${HOMEBOY_SIDECAR_DIR}/${safe_target}.json"
+}
+EOF
+
+cat > "$BIN_DIR/cargo" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ "${1:-}" = "nextest" ] && [ "${2:-}" = "--version" ]; then
+    echo "cargo-nextest 0.9.0"
+    exit 0
+fi
+
+printf '%s\n' "$@" > "${HOMEBOY_FAKE_CARGO_ARGS}"
+echo "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out"
+EOF
+chmod +x "$BIN_DIR/cargo"
+
+OUTPUT=$(
+    PATH="$BIN_DIR:$PATH" \
+    HOMEBOY_EXTENSION_PATH="$(cd "$SCRIPT_DIR/.." && pwd)" \
+    HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
+    HOMEBOY_SKIP_LINT=1 \
+    HOMEBOY_RUST_TEST_RUNNER=nextest \
+    HOMEBOY_CHANGED_TEST_FILES='tests/integration_scope.rs' \
+    HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$HELPER_DIR/resolve-context.sh" \
+    HOMEBOY_RUNTIME_RUNNER_STEPS="$HELPER_DIR/runner-steps.sh" \
+    HOMEBOY_RUNTIME_SIDECAR_WRITER="$HELPER_DIR/sidecar-writer.sh" \
+    HOMEBOY_SIDECAR_DIR="$SIDECAR_DIR" \
+    HOMEBOY_FAKE_CARGO_ARGS="$WORKDIR/cargo-args.txt" \
+    bash "$SCRIPT_DIR/test-runner.sh"
+)
+
+if [[ "$OUTPUT" != *"Running cargo nextest"* ]]; then
+    printf 'Expected nextest runner selection. Output:\n%s\n' "$OUTPUT" >&2
+    exit 1
+fi
+
+EXPECTED_ARGS=$'nextest\nrun\n--manifest-path\n'"$PROJECT_DIR"$'/Cargo.toml\n-p\nrust-nextest-smoke\n--test\nintegration_scope'
+ACTUAL_ARGS="$(cat "$WORKDIR/cargo-args.txt")"
+if [ "$ACTUAL_ARGS" != "$EXPECTED_ARGS" ]; then
+    printf 'Expected nextest command shape:\n%s\nActual:\n%s\n' "$EXPECTED_ARGS" "$ACTUAL_ARGS" >&2
+    exit 1
+fi
+
+if [ ! -f "$SIDECAR_DIR/test.results.json" ]; then
+    printf 'Expected test.results sidecar metadata. Output:\n%s\n' "$OUTPUT" >&2
+    exit 1
+fi
+
+python3 - "$SIDECAR_DIR/test.results.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    data = json.load(handle)
+
+record = data[0]
+assert record["runner"] == "nextest", record
+assert record["scope"] == "file", record
+assert record["package"] == "rust-nextest-smoke", record
+assert record["test_target"] == "integration_scope", record
+assert record["args"] == ["-p", "rust-nextest-smoke", "--test", "integration_scope"], record
+PY
+
+cat > "$BIN_DIR/cargo" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ "${1:-}" = "nextest" ] && [ "${2:-}" = "--version" ]; then
+    exit 1
+fi
+
+echo "unexpected cargo invocation: $*" >&2
+exit 2
+EOF
+chmod +x "$BIN_DIR/cargo"
+
+OUTPUT=$(
+    PATH="$BIN_DIR:$PATH" \
+    HOMEBOY_EXTENSION_PATH="$(cd "$SCRIPT_DIR/.." && pwd)" \
+    HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
+    HOMEBOY_SKIP_LINT=1 \
+    HOMEBOY_RUST_TEST_RUNNER=nextest \
+    HOMEBOY_RUST_NEXTEST_FALLBACK=0 \
+    HOMEBOY_CHANGED_TEST_FILES='tests/integration_scope.rs' \
+    HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$HELPER_DIR/resolve-context.sh" \
+    HOMEBOY_RUNTIME_RUNNER_STEPS="$HELPER_DIR/runner-steps.sh" \
+    bash "$SCRIPT_DIR/test-runner.sh" 2>&1 || true
+)
+
+if [[ "$OUTPUT" != *"Error: cargo-nextest requested but not available."* ]]; then
+    printf 'Expected actionable missing nextest diagnostic. Output:\n%s\n' "$OUTPUT" >&2
+    exit 1
+fi
+
+echo "rust nextest runner smoke ok"

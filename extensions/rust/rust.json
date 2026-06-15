@@ -50,6 +50,20 @@
   },
   "settings": [
     {
+      "id": "rust_test_runner",
+      "label": "Rust test runner",
+      "type": "string",
+      "default": "cargo",
+      "description": "Select the Rust extension test runner: cargo or nextest. Set HOMEBOY_RUST_TEST_RUNNER=nextest or configure this setting to use cargo nextest run."
+    },
+    {
+      "id": "rust_nextest_fallback",
+      "label": "Rust nextest fallback",
+      "type": "boolean",
+      "default": true,
+      "description": "When cargo-nextest is selected but unavailable, fall back to cargo test. Set false or HOMEBOY_RUST_NEXTEST_FALLBACK=0 to fail with an install diagnostic instead."
+    },
+    {
       "id": "bench_criterion",
       "label": "Criterion bench adapter",
       "type": "boolean",

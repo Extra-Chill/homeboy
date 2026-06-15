@@ -172,3 +172,85 @@ if [[ "$OUTPUT" != *"2 passed"* || "$OUTPUT" != *"1 passed"* ]]; then
     printf 'Expected full fallback to run top-level and inline tests. Output:\n%s\n' "$OUTPUT" >&2
     exit 1
 fi
+
+WORKSPACE_DIR="$WORKDIR/workspace"
+mkdir -p "$WORKSPACE_DIR/crates/targeted/src" "$WORKSPACE_DIR/crates/skipped/src"
+
+cat > "$WORKSPACE_DIR/Cargo.toml" <<'EOF'
+[workspace]
+members = ["crates/targeted", "crates/skipped"]
+resolver = "2"
+EOF
+
+cat > "$WORKSPACE_DIR/crates/targeted/Cargo.toml" <<'EOF'
+[package]
+name = "targeted-pkg"
+version = "0.1.0"
+edition = "2021"
+EOF
+
+cat > "$WORKSPACE_DIR/crates/targeted/src/lib.rs" <<'EOF'
+pub fn value() -> u8 {
+    1
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn targeted_package_runs() {
+        assert_eq!(super::value(), 1);
+    }
+}
+EOF
+
+cat > "$WORKSPACE_DIR/crates/skipped/Cargo.toml" <<'EOF'
+[package]
+name = "skipped-pkg"
+version = "0.1.0"
+edition = "2021"
+EOF
+
+cat > "$WORKSPACE_DIR/crates/skipped/src/lib.rs" <<'EOF'
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn skipped_package_would_fail() {
+        panic!("full workspace cargo test should not run this package");
+    }
+}
+EOF
+
+OUTPUT=$(
+    HOMEBOY_EXTENSION_PATH="$(cd "$SCRIPT_DIR/.." && pwd)" \
+    HOMEBOY_COMPONENT_PATH="$WORKSPACE_DIR" \
+    HOMEBOY_SKIP_LINT=1 \
+    HOMEBOY_CHANGED_TEST_FILES='crates/targeted/src/lib.rs' \
+    HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$HELPER_DIR/resolve-context.sh" \
+    HOMEBOY_RUNTIME_RUNNER_STEPS="$HELPER_DIR/runner-steps.sh" \
+    bash "$SCRIPT_DIR/test-runner.sh"
+)
+
+if [[ "$OUTPUT" != *"Rust test scope: Scoped to changed Cargo package: targeted-pkg."* ]]; then
+    printf 'Expected changed package scope. Output:\n%s\n' "$OUTPUT" >&2
+    exit 1
+fi
+
+if [[ "$OUTPUT" != *"1 passed"* || "$OUTPUT" == *"full workspace cargo test should not run this package"* ]]; then
+    printf 'Expected package-scoped cargo test to avoid the failing sibling package. Output:\n%s\n' "$OUTPUT" >&2
+    exit 1
+fi
+
+OUTPUT=$(
+    HOMEBOY_EXTENSION_PATH="$(cd "$SCRIPT_DIR/.." && pwd)" \
+    HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
+    HOMEBOY_SKIP_LINT=1 \
+    HOMEBOY_CHANGED_TEST_FILES='Cargo.toml' \
+    HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$HELPER_DIR/resolve-context.sh" \
+    HOMEBOY_RUNTIME_RUNNER_STEPS="$HELPER_DIR/runner-steps.sh" \
+    bash "$SCRIPT_DIR/test-runner.sh"
+)
+
+if [[ "$OUTPUT" != *"Rust test scope fallback: Changed path is cross-cutting for Cargo: Cargo.toml"* ]]; then
+    printf 'Expected explicit Cargo.toml fallback. Output:\n%s\n' "$OUTPUT" >&2
+    exit 1
+fi
