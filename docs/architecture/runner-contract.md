@@ -87,6 +87,15 @@ variables most runners care about:
 | `HOMEBOY_FIX_ONLY` | `homeboy refactor --from lint --write` | `"1"` → run fixers, skip validation |
 | `HOMEBOY_DEBUG` | user | `"1"` → verbose runner output |
 | `HOMEBOY_RUNTIME_*` | core | Paths to core-provided runtime helpers (see below) |
+| `HOMEBOY_DELEGATED_RUN_STATUS_FILE` | core | Optional delegated-runtime status JSON path for extension runners that hand work to a child provider |
+
+When an extension runner delegates to another runtime process that can outlive
+or stall the wrapper, it may write `HOMEBOY_DELEGATED_RUN_STATUS_FILE` with a
+JSON object containing a top-level `status` string. Core treats terminal failure
+statuses such as `failed`, `error`, `canceled`, or `timed_out` as authoritative:
+the wrapper process group is terminated and the runner command returns failure
+evidence promptly instead of waiting forever. Runners may include `message`,
+`error`, `summary`, or `failure.message` for the stderr detail surfaced by core.
 
 Trace runners also receive trace-specific variables when invoked by `homeboy trace`:
 
