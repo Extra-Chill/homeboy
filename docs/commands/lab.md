@@ -41,6 +41,14 @@ routine lifecycle work:
   materializes the current checkout into the Lab workspace before a replay or
   follow-up run.
 
+Component or extension settings can declare runner-managed dependency sources
+with `validation_dependencies`. Lab workspace sync resolves those dependencies,
+checks freshness, runs install/build lifecycle, materializes them beside the
+primary workspace, and returns dependency provenance in the generic
+`validation_dependencies` output field. Use that contract for eval/bench source
+overrides instead of ad-hoc workflow-specific environment exports or hardcoded
+runner paths.
+
 `homeboy lab bench` delegates to the same benchmark path while making the Lab
 intent explicit at the command surface. Its output includes the same managed
 follow-up hints so the operator can keep a failed bench inside the Homeboy

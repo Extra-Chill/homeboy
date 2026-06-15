@@ -10,6 +10,7 @@ use crate::core::engine::{shell, temp};
 use crate::core::error::{Error, Result};
 use crate::core::server::{self, Server, SshClient};
 
+use super::validation_dependencies::RunnerValidationDependencySyncOutput;
 use super::{load, Runner, RunnerKind};
 
 pub(super) const DEFAULT_EXCLUDES: &[&str] = &[
@@ -82,6 +83,7 @@ pub struct RunnerWorkspaceSyncOutput {
     pub excludes: Vec<String>,
     pub includes: Vec<String>,
     pub workspace_cleanliness: String,
+    pub validation_dependencies: Vec<RunnerValidationDependencySyncOutput>,
 }
 
 pub fn sync_workspace(
@@ -128,12 +130,13 @@ pub fn sync_workspace(
             );
             let stats = local_snapshot_stats(&local_path, &excludes, &includes)?;
             materialize_snapshot(&runner, &local_path, &remote_path, &excludes)?;
-            super::validation_dependencies::sync_validation_dependency_workspaces(
-                &runner,
-                &local_path,
-                &remote_path,
-                &excludes,
-            )?;
+            let validation_dependencies =
+                super::validation_dependencies::sync_validation_dependency_workspaces(
+                    &runner,
+                    &local_path,
+                    &remote_path,
+                    &excludes,
+                )?;
             Ok((
                 RunnerWorkspaceSyncOutput {
                     command: "runner.workspace.sync",
@@ -147,6 +150,7 @@ pub fn sync_workspace(
                     excludes,
                     includes,
                     workspace_cleanliness: "snapshot_unique_workspace".to_string(),
+                    validation_dependencies,
                 },
                 0,
             ))
@@ -192,12 +196,13 @@ pub fn sync_workspace(
                     options.allow_dirty_lab_workspace,
                 )?;
             }
-            super::validation_dependencies::sync_validation_dependency_workspaces(
-                &runner,
-                &local_path,
-                &remote_path,
-                &excludes,
-            )?;
+            let validation_dependencies =
+                super::validation_dependencies::sync_validation_dependency_workspaces(
+                    &runner,
+                    &local_path,
+                    &remote_path,
+                    &excludes,
+                )?;
             Ok((
                 RunnerWorkspaceSyncOutput {
                     command: "runner.workspace.sync",
@@ -215,6 +220,7 @@ pub fn sync_workspace(
                     } else {
                         "clean_remote_required".to_string()
                     },
+                    validation_dependencies,
                 },
                 0,
             ))

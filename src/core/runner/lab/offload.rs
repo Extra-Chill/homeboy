@@ -1623,6 +1623,7 @@ mod tests {
             excludes: Vec::new(),
             includes: Vec::new(),
             workspace_cleanliness: "snapshot_unique_workspace".to_string(),
+            validation_dependencies: Vec::new(),
         };
         let git = RunnerWorkspaceSyncOutput {
             command: "runner.workspace.sync",
@@ -1636,6 +1637,7 @@ mod tests {
             excludes: Vec::new(),
             includes: Vec::new(),
             workspace_cleanliness: "clean_remote_required".to_string(),
+            validation_dependencies: Vec::new(),
         };
 
         let entries = vec![
