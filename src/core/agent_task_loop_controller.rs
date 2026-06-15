@@ -2427,6 +2427,59 @@ mod tests {
     }
 
     #[test]
+    fn deterministic_policy_transition_can_start_pr_ownership_once() {
+        let mut record = AgentTaskLoopControllerRecord::new("loop", "finalize", "v1");
+        let ownership = AgentTaskPrOwnershipRequest {
+            ownership_id: "branch:fix-pr-owner".to_string(),
+            component_id: Some("homeboy".to_string()),
+            path: None,
+            base: "main".to_string(),
+            head: "fix/pr-owner".to_string(),
+            pr_number: Some(42),
+            pr_url: None,
+            max_retries: 3,
+            merge_required: false,
+        };
+        let policy = AgentTaskLoopPolicy {
+            policy_id: "own-pr-after-finalization".to_string(),
+            transitions: vec![AgentTaskLoopTransition {
+                transition_id: "finalized-branch".to_string(),
+                from_phase: Some("finalize".to_string()),
+                on_event_type: Some("agent_task.finalized".to_string()),
+                when_json_path: Some("$.event.payload.branch".to_string()),
+                actions: vec![AgentTaskLoopPolicyAction::OwnPrUntilGreen {
+                    ownership: ownership.clone(),
+                    entity_id: Some("pr:42".to_string()),
+                }],
+            }],
+        };
+        let event = AgentTaskLoopExternalEvent {
+            event_id: "event-1".to_string(),
+            event_type: "agent_task.finalized".to_string(),
+            event_key: None,
+            entity_id: None,
+            payload: json!({ "branch": "fix/pr-owner" }),
+        };
+
+        let first = record.evaluate_policy(&policy, Some(&event));
+        let second = record.evaluate_policy(&policy, Some(&event));
+
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].status, AgentTaskLoopActionStatus::Pending);
+        assert_eq!(
+            first[0].dedupe_key.as_deref(),
+            Some("pr-ownership:branch:fix-pr-owner")
+        );
+        assert_eq!(second.len(), 1);
+        assert_eq!(
+            second[0].status,
+            AgentTaskLoopActionStatus::AlreadySatisfied
+        );
+        assert_eq!(record.pr_ownerships.len(), 1);
+        assert_eq!(record.pr_ownerships[0].entity_id.as_deref(), Some("pr:42"));
+    }
+
+    #[test]
     fn pr_ownership_red_checks_increment_until_retry_limit() {
         let mut record = AgentTaskLoopControllerRecord::new("loop", "review", "v1");
         let request = AgentTaskPrOwnershipRequest {
