@@ -6,8 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
-// Keep broad manifest examples on this baselined module while leaf config
-// structs live in focused files: PHP extensions, cargo checks, phpcs/phpstan steps.
+// Keep broad manifest wiring here while leaf config structs live in focused files.
 pub use super::manifest_action_config::{
     ActionConfig, InputConfig, OutputConfig, OutputSchema, RuntimeConfig, SelectOption,
     SettingConfig,
@@ -90,20 +89,17 @@ pub struct DeployCapability {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TestMappingConfig {
     /// Source directories to scan (relative to component root).
-    /// Example: `["src"]` for Rust, `["inc"]` for WordPress.
     pub source_dirs: Vec<String>,
     /// Test directories to scan (relative to component root).
-    /// Example: `["tests"]` for both Rust and WordPress.
     pub test_dirs: Vec<String>,
     /// How source file paths map to test file paths.
     /// Template variables: `{dir}` (relative dir), `{name}` (filename without ext), `{ext}` (extension).
-    /// Example Rust: `"tests/{dir}/{name}_test.{ext}"` or inline `#[cfg(test)]`
-    /// Example WordPress: `"tests/Unit/{dir}/{name}Test.{ext}"`
+    /// Extension manifests own the concrete template for each ecosystem.
     pub test_file_pattern: String,
-    /// Prefix for test method names (e.g., `"test_"` for both Rust and PHP).
+    /// Prefix for test method names.
     #[serde(default = "default_test_prefix")]
     pub method_prefix: String,
-    /// Whether the language uses inline tests (e.g., Rust `#[cfg(test)]` in the same file).
+    /// Whether the language uses inline tests in the same file.
     #[serde(default)]
     pub inline_tests: bool,
     /// Directory path patterns that indicate high-priority test coverage.
@@ -145,7 +141,7 @@ pub struct AuditCapability {
     /// `HOMEBOY_AUDIT_REFERENCE_PATHS` (newline-separated directory paths).
     /// Reference dependencies are fingerprinted for cross-reference analysis
     /// (dead code detection) but excluded from convention and duplication detection.
-    /// Example: WordPress core + plugin dependencies.
+    /// Example: framework or package dependencies declared by an extension.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub setup_references: Option<String>,
     /// Detector rules supplied by this extension for its language/framework.
@@ -235,8 +231,7 @@ pub struct PlatformCapability {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComponentEnvConfig {
     /// Script path relative to the extension directory.
-    /// Runs from the component root and emits JSON such as
-    /// {"runtimes":{"php":{"version":"8.1"}}}.
+    /// Runs from the component root and emits runtime metadata as JSON.
     pub detect_script: String,
 }
 
@@ -311,7 +306,7 @@ pub struct CiLocalContext {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProvidesConfig {
-    /// File extensions this extension can process (e.g., ["php", "inc"]).
+    /// File extensions this extension can process.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub file_extensions: Vec<String>,
     /// Capabilities this extension supports (e.g., ["fingerprint", "refactor"]).
@@ -355,26 +350,18 @@ pub struct ScriptsConfig {
     /// Receives `{root, changed_files}` JSON on stdin, exits 0 on success, non-zero with
     /// compiler output on stderr on failure.
     ///
-    /// Language examples:
-    /// - Rust: `cargo check`
-    /// - PHP: `php -l` on each changed file
-    /// - TypeScript: `tsc --noEmit`
     #[serde(skip_serializing_if = "Option::is_none")]
     pub validate: Option<String>,
     /// Script that formats source code after automated writes.
     /// Runs from the project root. Exit 0 on success, non-zero on failure.
     /// Formatting failure is non-fatal — it logs a warning but never rolls back.
     ///
-    /// Language examples:
-    /// - Rust: `cargo fmt`
-    /// - TypeScript: `npx prettier --write .`
-    /// - PHP: `vendor/bin/phpcbf`
     #[serde(skip_serializing_if = "Option::is_none")]
     pub format: Option<String>,
     /// Script that collects compiler warnings.
     /// Runs from the project root and receives `{root}` JSON on stdin.
     /// Outputs `{warnings:[...]}` JSON using Homeboy's generic warning envelope.
-    /// Split lint runners may use step selectors such as `phpcs,phpstan`.
+    /// Split lint runners may use step selectors supplied by the extension.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compiler_warnings: Option<String>,
     /// Script that converts compiler warnings into machine-applicable fixes.

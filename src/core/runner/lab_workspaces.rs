@@ -859,7 +859,7 @@ fn bootstrap_source_cli_node_dependencies(runner_id: &str, remote_path: &str) ->
         ),
         Some(remote_path.to_string()),
         Some(vec![
-            format!("npm ci stderr: {}", output.stderr.trim()),
+            format!("dependency install stderr: {}", output.stderr.trim()),
             "Build or package the CLI as a self-contained artifact, or make the source-built workspace installable on the runner.".to_string(),
         ]),
     ))

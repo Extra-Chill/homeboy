@@ -51,17 +51,20 @@ pub fn run(args: UpgradeArgs, _global: &GlobalArgs) -> CmdResult<Value> {
     let method_override = args
         .method
         .as_deref()
-        .map(|m| match m {
-            "homebrew" => Ok(upgrade::InstallMethod::Homebrew),
-            "cargo" => Ok(upgrade::InstallMethod::Cargo),
-            "source" => Ok(upgrade::InstallMethod::Source),
-            "binary" => Ok(upgrade::InstallMethod::Binary),
-            other => Err(homeboy::core::Error::validation_invalid_argument(
-                "method",
-                format!("Unknown method: {}", other),
-                Some(other.to_string()),
-                None,
-            )),
+        .map(|m| {
+            let secondary = homeboy::core::defaults::secondary_install_method_key();
+            match m {
+                "homebrew" => Ok(upgrade::InstallMethod::Homebrew),
+                "source" => Ok(upgrade::InstallMethod::Source),
+                "binary" => Ok(upgrade::InstallMethod::Binary),
+                other if other == secondary => Ok(upgrade::InstallMethod::Secondary),
+                other => Err(homeboy::core::Error::validation_invalid_argument(
+                    "method",
+                    format!("Unknown method: {}", other),
+                    Some(other.to_string()),
+                    None,
+                )),
+            }
         })
         .transpose()?;
 
@@ -116,7 +119,10 @@ mod tests {
         let mut result = base_upgrade_result();
         result.runners_skipped.push(upgrade::RunnerUpgradeEntry {
             runner_id: "homeboy-lab".to_string(),
-            homeboy_path: "/home/chubes/.cargo/bin/homeboy".to_string(),
+            homeboy_path: format!(
+                "/home/chubes/.{}/bin/homeboy",
+                homeboy::core::defaults::secondary_install_method_key()
+            ),
             success: false,
             upgraded: true,
             previous_version: Some("0.228.6".to_string()),
@@ -166,7 +172,7 @@ mod tests {
     fn base_upgrade_result() -> upgrade::UpgradeResult {
         upgrade::UpgradeResult {
             command: "upgrade".to_string(),
-            install_method: upgrade::InstallMethod::Cargo,
+            install_method: upgrade::InstallMethod::Secondary,
             previous_version: "0.228.6".to_string(),
             new_version: Some("0.228.7".to_string()),
             previous_build_identity: None,

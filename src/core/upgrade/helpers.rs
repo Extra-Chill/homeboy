@@ -67,7 +67,7 @@ pub(crate) fn fetch_latest_github_version() -> Result<String> {
 
 pub fn fetch_latest_version(method: InstallMethod) -> Result<String> {
     match method {
-        InstallMethod::Cargo => fetch_latest_crates_io_version(),
+        InstallMethod::Secondary => fetch_latest_crates_io_version(),
         InstallMethod::Homebrew
         | InstallMethod::Source
         | InstallMethod::Binary
@@ -107,7 +107,7 @@ where
     }
     for pattern in &defaults.install_methods.secondary.path_patterns {
         if exe_path.contains(pattern) {
-            return InstallMethod::Cargo;
+            return InstallMethod::Secondary;
         }
     }
     for pattern in &defaults.install_methods.source.path_patterns {
@@ -175,7 +175,10 @@ pub fn run_upgrade_with_method(
         )
         .with_hint("Try: homeboy upgrade --method binary")
         .with_hint("Or reinstall using: brew install homeboy")
-        .with_hint("Or: cargo install homeboy"));
+        .with_hint(format!(
+            "Or: {} install homeboy",
+            defaults::secondary_install_method_key()
+        )));
     }
 
     // Check if update is available (unless forcing)

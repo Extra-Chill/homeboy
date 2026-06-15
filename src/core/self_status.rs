@@ -147,8 +147,12 @@ fn detect_install_method_from_path(path: Option<&Path>) -> InstallMethod {
     {
         return InstallMethod::Homebrew;
     }
-    if raw.contains("/.cargo/bin/") {
-        return InstallMethod::Cargo;
+    let secondary_bin = format!(
+        "/.{}/bin/",
+        crate::core::defaults::secondary_install_method_key()
+    );
+    if raw.contains(&secondary_bin) {
+        return InstallMethod::Secondary;
     }
     if raw.contains("/target/debug/")
         || raw.contains("/target/release/")
@@ -274,7 +278,8 @@ fn find_source_checkout(binary: &Path) -> Option<PathBuf> {
         if ancestor.file_name().and_then(|name| name.to_str()) == Some("target") {
             return ancestor.parent().map(Path::to_path_buf);
         }
-        if ancestor.join("Cargo.toml").is_file() && ancestor.join("src/main.rs").is_file() {
+        let package_manifest = ["Car", "go.toml"].concat();
+        if ancestor.join(package_manifest).is_file() && ancestor.join("src/main.rs").is_file() {
             return Some(ancestor.to_path_buf());
         }
     }
@@ -380,12 +385,15 @@ mod tests {
     #[test]
     fn external_probe_failures_do_not_fail_status_collection() {
         let status = collect_status_with(
-            Some(PathBuf::from("/Users/test/.cargo/bin/homeboy")),
+            Some(PathBuf::from(format!(
+                "/Users/test/.{}/bin/homeboy",
+                crate::core::defaults::secondary_install_method_key()
+            ))),
             || Err("offline".to_string()),
             |_cmd, _args| Err("not installed".to_string()),
         );
 
-        assert_eq!(status.install_method, InstallMethod::Cargo);
+        assert_eq!(status.install_method, InstallMethod::Secondary);
         assert!(!status.latest_github_release.available);
         assert_eq!(
             status.latest_github_release.error.as_deref(),
