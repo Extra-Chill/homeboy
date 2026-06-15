@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 #[cfg(test)]
 use crate::core::redaction::RedactionPolicy;
@@ -128,6 +128,8 @@ pub struct AgentTaskRequest {
     pub source_refs: Vec<AgentTaskSourceRef>,
     #[serde(default)]
     pub workspace: AgentTaskWorkspace,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub component_contracts: Vec<AgentTaskComponentContract>,
     #[serde(default)]
     pub policy: AgentTaskPolicy,
     #[serde(default)]
@@ -136,6 +138,25 @@ pub struct AgentTaskRequest {
     pub expected_artifacts: Vec<String>,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub metadata: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentTaskComponentContract {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slug: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(
+        default,
+        rename = "loadAs",
+        alias = "load_as",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub load_as: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activate: Option<bool>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
 }
 
 #[cfg(test)]
@@ -572,6 +593,7 @@ mod tests {
                 cleanup: None,
                 materialization: json!({ "component": "repo" }),
             },
+            component_contracts: Vec::new(),
             policy: AgentTaskPolicy {
                 read: "workspace".to_string(),
                 write: "workspace".to_string(),
@@ -773,6 +795,7 @@ mod tests {
             inputs: json!({ "authorization": "Bearer abc123", "safe": "value" }),
             source_refs: Vec::new(),
             workspace: AgentTaskWorkspace::default(),
+            component_contracts: Vec::new(),
             policy: AgentTaskPolicy::default(),
             limits: AgentTaskLimits::default(),
             expected_artifacts: Vec::new(),

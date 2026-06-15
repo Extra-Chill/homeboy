@@ -4,7 +4,9 @@ use std::sync::Arc;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
-use crate::core::agent_task::{AgentTaskFailureClassification, AgentTaskOutcome, AgentTaskRequest};
+use crate::core::agent_task::{
+    AgentTaskComponentContract, AgentTaskFailureClassification, AgentTaskOutcome, AgentTaskRequest,
+};
 use crate::core::plan::{HomeboyPlan, PlanArtifact, PlanKind, PlanStep, PlanStepStatus};
 
 pub const AGENT_TASK_PLAN_SCHEMA: &str = "homeboy/agent-task-plan/v1";
@@ -16,6 +18,7 @@ pub struct AgentTaskPlan {
     pub plan_id: String,
     pub group_key: Option<String>,
     pub tasks: Vec<AgentTaskRequest>,
+    pub component_contracts: Vec<AgentTaskComponentContract>,
     pub output_dependencies: HashMap<String, AgentTaskOutputDependencies>,
     pub artifact_outputs: HashMap<String, Vec<AgentTaskArtifactOutputDeclaration>>,
     pub options: AgentTaskScheduleOptions,
@@ -30,6 +33,7 @@ impl AgentTaskPlan {
             plan_id: plan_id.into(),
             group_key: None,
             tasks,
+            component_contracts: Vec::new(),
             output_dependencies: HashMap::new(),
             artifact_outputs: HashMap::new(),
             options: AgentTaskScheduleOptions::default(),
@@ -51,6 +55,11 @@ impl AgentTaskPlan {
             .iter()
             .filter_map(|step| value_as(&step.inputs, "agent_task_request"))
             .collect();
+        let component_contracts = homeboy_plan
+            .inputs
+            .get("component_contracts")
+            .and_then(|value| serde_json::from_value(value.clone()).ok())
+            .unwrap_or_default();
         let output_dependencies = homeboy_plan
             .steps
             .iter()
@@ -101,6 +110,7 @@ impl AgentTaskPlan {
             plan_id,
             group_key,
             tasks,
+            component_contracts,
             output_dependencies,
             artifact_outputs,
             options,
@@ -132,6 +142,12 @@ impl AgentTaskPlan {
         if !self.metadata.is_null() {
             plan.inputs
                 .insert("metadata".to_string(), self.metadata.clone());
+        }
+        if !self.component_contracts.is_empty() {
+            plan.inputs.insert(
+                "component_contracts".to_string(),
+                serde_json::to_value(&self.component_contracts).unwrap_or(Value::Null),
+            );
         }
         plan.policy.insert(
             "agent_task_schedule_options".to_string(),
@@ -219,6 +235,8 @@ struct AgentTaskPlanJson {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     group_key: Option<String>,
     tasks: Vec<AgentTaskRequest>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    component_contracts: Vec<AgentTaskComponentContract>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     output_dependencies: HashMap<String, AgentTaskOutputDependencies>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
@@ -231,11 +249,21 @@ struct AgentTaskPlanJson {
 
 impl AgentTaskPlanJson {
     fn into_plan(self) -> AgentTaskPlan {
+        let mut tasks = self.tasks;
+        if !self.component_contracts.is_empty() {
+            for task in &mut tasks {
+                if task.component_contracts.is_empty() {
+                    task.component_contracts = self.component_contracts.clone();
+                }
+            }
+        }
+
         let mut plan = AgentTaskPlan {
             schema: self.schema,
             plan_id: self.plan_id,
             group_key: self.group_key,
-            tasks: self.tasks,
+            tasks,
+            component_contracts: self.component_contracts,
             output_dependencies: self.output_dependencies,
             artifact_outputs: self.artifact_outputs,
             options: self.options,
@@ -254,6 +282,7 @@ impl From<&AgentTaskPlan> for AgentTaskPlanJson {
             plan_id: plan.plan_id.clone(),
             group_key: plan.group_key.clone(),
             tasks: plan.tasks.clone(),
+            component_contracts: plan.component_contracts.clone(),
             output_dependencies: plan.output_dependencies.clone(),
             artifact_outputs: plan.artifact_outputs.clone(),
             options: plan.options.clone(),

@@ -434,6 +434,7 @@ fn build_agent_task_matrix_summary(
             }),
             source_refs: Vec::new(),
             workspace: AgentTaskWorkspace::default(),
+            component_contracts: Vec::new(),
             policy: AgentTaskPolicy::default(),
             limits: AgentTaskLimits::default(),
             expected_artifacts: vec!["bench-results".to_string()],

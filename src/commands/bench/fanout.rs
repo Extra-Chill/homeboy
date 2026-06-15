@@ -210,6 +210,7 @@ fn matrix_template_request(
         }),
         source_refs: Vec::new(),
         workspace: AgentTaskWorkspace::default(),
+        component_contracts: Vec::new(),
         policy: Default::default(),
         limits: Default::default(),
         expected_artifacts: run_args.expected_artifact.clone(),
