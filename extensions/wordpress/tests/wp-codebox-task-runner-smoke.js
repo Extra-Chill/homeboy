@@ -213,6 +213,7 @@ try {
       agent_runtime: '/components/data-machine',
       agent_runtime_tools: '/components/data-machine-code',
     },
+    component_contracts: [{ slug: 'domain-component', path: '/workspace/domain-component', activate: true }],
     runtime_env: {
       GENERIC_PROVIDER_CONFIG: '/runtime/provider/config.json',
       XDG_DATA_HOME: '/runtime/provider/data',
@@ -299,6 +300,29 @@ try {
   assert.equal(captured.input.component_contracts.find((contract) => contract.slug === 'data-machine-code').path, '/components/data-machine-code');
   assert.equal(captured.input.component_contracts.find((contract) => contract.slug === 'data-machine').loadAs, 'mu-plugin');
   assert.equal(captured.input.component_contracts.find((contract) => contract.slug === 'data-machine-code').activate, false);
+  assert.equal(captured.input.component_contracts.find((contract) => contract.slug === 'domain-component').path, '/workspace/domain-component');
+  assert.equal(captured.input.component_contracts.find((contract) => contract.slug === 'domain-component').activate, true);
+
+  const nestedOnlyCapturePath = path.join(root, 'capture-nested-component-contracts.json');
+  const requestWithoutComponentContracts = { ...request };
+  delete requestWithoutComponentContracts.component_contracts;
+  const nestedOnlyResult = spawnSync(process.execPath, [
+    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-wp-codebox-task-runner.cjs'),
+    '--wp-codebox-bin', fixtureWpCodebox,
+    '--agents-api', '/components/agents-api',
+  ], {
+    encoding: 'utf8',
+    input: JSON.stringify({
+      ...requestWithoutComponentContracts,
+      parent_request: {
+        component_contracts: [{ slug: 'nested-only-domain-component', path: '/workspace/nested-only-domain-component', activate: true }],
+      },
+    }),
+    env: { ...process.env, FIXTURE_WP_CODEBOX_CAPTURE: nestedOnlyCapturePath, OPENCODE_API_KEY: 'redacted-test-key' },
+  });
+  assert.equal(nestedOnlyResult.status, 0, nestedOnlyResult.stderr || nestedOnlyResult.stdout);
+  const nestedOnlyInput = readJson(nestedOnlyCapturePath).input;
+  assert.equal(nestedOnlyInput.component_contracts.some((contract) => contract.slug === 'nested-only-domain-component'), false);
 
   // Verification gate flows through to the agent-task-run input so WP Codebox
   // can emit it as a recipe workflow.after step and fail the run if it is red.

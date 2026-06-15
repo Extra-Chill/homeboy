@@ -200,7 +200,8 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
   const agentBundle = agentBundleConfigFromAgentTaskRequest(request, config, inputs);
   const recipe = recipeConfigFromAgentTaskRequest(request, config, inputs);
   const mounts = agentBundleMounts(agentBundle, config.mounts || defaults.mounts || options.mounts || []);
-  const components = runtimeComponentPaths(config, { ...defaults, ...options });
+  const componentContracts = componentContractsFromAgentTaskRequest(request, config, options);
+  const components = runtimeComponentPaths(config, { ...defaults, ...options, componentContracts });
   const agentBundles = firstDefined(inputs.agent_bundles, inputs.agentBundles, config.agent_bundles, config.agentBundles, options.agentBundles, []);
   const structuredArtifacts = firstDefined(inputs.structured_artifacts, inputs.structuredArtifacts, config.structured_artifacts, config.structuredArtifacts, options.structuredArtifacts, []);
   const sandboxToolPolicy = firstDefined(inputs.sandbox_tool_policy, inputs.sandboxToolPolicy, config.sandbox_tool_policy, config.sandboxToolPolicy, options.sandboxToolPolicy, defaults.sandboxToolPolicy);
@@ -263,7 +264,7 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     mounts,
     workspaces: inputs.workspaces || config.workspaces || options.workspaces || defaults.workspaces || [],
     runtime_component_paths: components,
-    component_contracts: Array.isArray(config.component_contracts) ? config.component_contracts : [],
+    component_contracts: componentContracts,
     homeboy_path: config.homeboy || config.homeboy_path || options.homeboy || '',
     homeboy_extensions_path: config.homeboy_extensions || config.homeboy_extensions_path || options.homeboyExtensions || '',
     wp_codebox_bin: firstValue(config.wp_codebox_bin, config.wpCodeboxBin, options.wpCodeboxBin, defaults.wpCodeboxBin, ''),
@@ -280,6 +281,29 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     agent_bundle: agentBundle,
     parent_request: request,
   };
+}
+
+function componentContractsFromAgentTaskRequest(request, config, options = {}) {
+  return uniqueComponentContracts([
+    ...normalizeArray(request.component_contracts),
+    ...normalizeArray(config.component_contracts),
+    ...normalizeArray(options.componentContracts),
+  ]);
+}
+
+function uniqueComponentContracts(contracts) {
+  const seen = new Set();
+  return contracts.filter((contract) => {
+    if (!contract || typeof contract !== 'object' || Array.isArray(contract)) {
+      return false;
+    }
+    const key = `${contract.slug || ''}:${contract.path || contract.source || ''}`;
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
 }
 
 function abilityRuntimeTaskFromAgentTaskRequest(config, inputs) {
