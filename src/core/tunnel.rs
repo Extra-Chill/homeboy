@@ -18,7 +18,7 @@ use crate::core::{CreateOutput, MergeOutput, RemoveResult};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ServiceTunnel {
-    #[serde(skip)]
+    #[serde(skip_deserializing, default)]
     pub id: String,
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
