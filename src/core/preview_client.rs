@@ -1,7 +1,8 @@
 use base64::Engine;
 use reqwest::blocking::Client;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
-use serde::{Deserialize, Serialize};
+use serde::de::{self, SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -66,8 +67,8 @@ pub struct PreviewIngressNextResponse {
 pub struct PreviewIngressResponse {
     pub request_id: String,
     pub status: u16,
-    #[serde(default)]
-    pub headers: BTreeMap<String, String>,
+    #[serde(default, deserialize_with = "deserialize_response_headers")]
+    pub headers: Vec<(String, String)>,
     pub body_base64: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<PreviewClientForwardError>,
@@ -108,6 +109,7 @@ pub fn start(spec: PreviewClientStartSpec) -> Result<PreviewClientReport> {
         })?;
     let local_client = Client::builder()
         .timeout(Duration::from_secs(60))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|err| {
             Error::internal_unexpected(format!("build local-origin HTTP client: {err}"))
@@ -210,7 +212,7 @@ pub fn forward_to_local_origin(
         Err(error) => PreviewIngressResponse {
             request_id: request.request_id,
             status: 502,
-            headers: BTreeMap::from([("content-type".to_string(), "application/json".to_string())]),
+            headers: vec![("content-type".to_string(), "application/json".to_string())],
             body_base64: base64::engine::general_purpose::STANDARD.encode(
                 json!({
                     "error": error.kind,
@@ -232,7 +234,7 @@ fn forward_to_local_origin_result(
         return Ok(PreviewIngressResponse {
             request_id: request.request_id.clone(),
             status: 204,
-            headers: cors_headers(BTreeMap::new(), &request.path),
+            headers: cors_headers(Vec::new(), &request.path),
             body_base64: base64::engine::general_purpose::STANDARD.encode([]),
             error: None,
         });
@@ -434,7 +436,7 @@ fn forward_request_headers(headers: &BTreeMap<String, String>) -> HeaderMap {
     forwarded
 }
 
-fn response_headers(headers: &HeaderMap) -> BTreeMap<String, String> {
+fn response_headers(headers: &HeaderMap) -> Vec<(String, String)> {
     headers
         .iter()
         .filter_map(|(name, value)| {
@@ -453,22 +455,68 @@ fn response_headers(headers: &HeaderMap) -> BTreeMap<String, String> {
         .collect()
 }
 
-fn cors_headers(mut headers: BTreeMap<String, String>, path: &str) -> BTreeMap<String, String> {
-    headers
-        .entry("access-control-allow-origin".to_string())
-        .or_insert_with(|| "*".to_string());
-    headers
-        .entry("access-control-allow-methods".to_string())
-        .or_insert_with(|| "GET, HEAD, OPTIONS".to_string());
-    headers
-        .entry("access-control-allow-headers".to_string())
-        .or_insert_with(|| "*".to_string());
+fn cors_headers(mut headers: Vec<(String, String)>, path: &str) -> Vec<(String, String)> {
+    push_header_if_missing(&mut headers, "access-control-allow-origin", "*");
+    push_header_if_missing(
+        &mut headers,
+        "access-control-allow-methods",
+        "GET, HEAD, OPTIONS",
+    );
+    push_header_if_missing(&mut headers, "access-control-allow-headers", "*");
     if path.split('?').next().unwrap_or(path).ends_with(".json") {
-        headers
-            .entry("content-type".to_string())
-            .or_insert_with(|| "application/json".to_string());
+        push_header_if_missing(&mut headers, "content-type", "application/json");
     }
     headers
+}
+
+fn push_header_if_missing(headers: &mut Vec<(String, String)>, name: &str, value: &str) {
+    if !headers
+        .iter()
+        .any(|(header_name, _)| header_name.eq_ignore_ascii_case(name))
+    {
+        headers.push((name.to_string(), value.to_string()));
+    }
+}
+
+fn deserialize_response_headers<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Vec<(String, String)>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct ResponseHeadersVisitor;
+
+    impl<'de> Visitor<'de> for ResponseHeadersVisitor {
+        type Value = Vec<(String, String)>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a header object or ordered [name, value] header pairs")
+        }
+
+        fn visit_map<A>(self, mut map: A) -> std::result::Result<Self::Value, A::Error>
+        where
+            A: de::MapAccess<'de>,
+        {
+            let mut headers = Vec::new();
+            while let Some((name, value)) = map.next_entry::<String, String>()? {
+                headers.push((name, value));
+            }
+            Ok(headers)
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> std::result::Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            let mut headers = Vec::new();
+            while let Some((name, value)) = seq.next_element::<(String, String)>()? {
+                headers.push((name, value));
+            }
+            Ok(headers)
+        }
+    }
+
+    deserializer.deserialize_any(ResponseHeadersVisitor)
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -597,8 +645,14 @@ mod tests {
         server.join().expect("server finished");
         assert_eq!(response.request_id, "req-1");
         assert_eq!(response.status, 201);
-        assert_eq!(response.headers["content-type"], "text/plain");
-        assert_eq!(response.headers["x-origin"], "local-service");
+        assert_eq!(
+            header_value(&response.headers, "content-type"),
+            Some("text/plain")
+        );
+        assert_eq!(
+            header_value(&response.headers, "x-origin"),
+            Some("local-service")
+        );
         assert_eq!(
             base64::engine::general_purpose::STANDARD
                 .decode(response.body_base64)
@@ -650,8 +704,62 @@ mod tests {
         );
 
         assert_eq!(response.status, 204);
-        assert_eq!(response.headers["access-control-allow-origin"], "*");
-        assert_eq!(response.headers["content-type"], "application/json");
+        assert_eq!(
+            header_value(&response.headers, "access-control-allow-origin"),
+            Some("*")
+        );
+        assert_eq!(
+            header_value(&response.headers, "content-type"),
+            Some("application/json")
+        );
+    }
+
+    #[test]
+    fn forwards_redirect_location_and_multiple_set_cookie_headers_without_following() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local origin");
+        let port = listener.local_addr().expect("local addr").port();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept request");
+            let mut buffer = [0_u8; 4096];
+            let read = stream.read(&mut buffer).expect("read request");
+            let request = String::from_utf8_lossy(&buffer[..read]);
+            assert!(request
+                .starts_with("GET /__wp-codebox/reviewer-auth-bootstrap?token=redacted HTTP/1.1"));
+            stream
+                .write_all(
+                    b"HTTP/1.1 302 Found\r\nLocation: /wp-admin/\r\nSet-Cookie: reviewer_auth=one; Path=/; HttpOnly\r\nSet-Cookie: wordpress_test_cookie=WP%20Cookie%20check; Path=/\r\nContent-Length: 0\r\n\r\n",
+                )
+                .expect("write response");
+        });
+        let client = Client::builder()
+            .timeout(Duration::from_secs(5))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("client");
+
+        let response = forward_to_local_origin(
+            &client,
+            &format!("http://127.0.0.1:{port}"),
+            PreviewIngressRequest {
+                request_id: "req-bootstrap".to_string(),
+                method: "GET".to_string(),
+                path: "/__wp-codebox/reviewer-auth-bootstrap?token=redacted".to_string(),
+                headers: BTreeMap::new(),
+                body_base64: None,
+            },
+        );
+
+        server.join().expect("server finished");
+        assert_eq!(response.status, 302);
+        assert_eq!(
+            header_value(&response.headers, "location"),
+            Some("/wp-admin/")
+        );
+        let cookies = header_values(&response.headers, "set-cookie");
+        assert_eq!(cookies.len(), 2);
+        assert!(cookies[0].starts_with("reviewer_auth="));
+        assert!(cookies[1].starts_with("wordpress_test_cookie="));
+        assert!(response.error.is_none());
     }
 
     #[test]
@@ -673,5 +781,20 @@ mod tests {
 
         std::env::remove_var("HOMEBOY_TEST_PREVIEW_TOKEN");
         std::env::remove_var("HOMEBOY_TEST_PREVIEW_TOKEN_SHA256");
+    }
+
+    fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+        headers
+            .iter()
+            .find(|(header_name, _)| header_name.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
+
+    fn header_values<'a>(headers: &'a [(String, String)], name: &str) -> Vec<&'a str> {
+        headers
+            .iter()
+            .filter(|(header_name, _)| header_name.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+            .collect()
     }
 }

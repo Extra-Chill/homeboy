@@ -203,6 +203,107 @@ fn reverse_channel_client_serves_public_request() {
 }
 
 #[test]
+fn reverse_channel_client_forwards_bootstrap_redirect_and_repeated_cookies() {
+    test_support::with_isolated_home(|_| {
+        let token = "test-preview-token";
+        std::env::set_var(
+            "HOMEBOY_TEST_PREVIEW_TOKEN_SHA256",
+            native_preview_token_sha256(token),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").expect("reserve port");
+        let port = listener.local_addr().expect("local addr").port();
+        thread::spawn(move || {
+            serve_listener(
+                PreviewIngressServeSpec {
+                    bind: format!("127.0.0.1:{port}"),
+                    domain: "example.com".to_string(),
+                    public_host_pattern: "*-tunnel.example.com".to_string(),
+                    token_sha256_env: "HOMEBOY_TEST_PREVIEW_TOKEN_SHA256".to_string(),
+                },
+                listener,
+            )
+            .expect("serve ingress");
+        });
+        thread::sleep(Duration::from_millis(100));
+
+        let register = http_request(
+            port,
+            "POST",
+            "/preview/client/register",
+            "homeboy-health-tunnel.example.com",
+            Some(token),
+            json!({
+                "public_host": "run-1-tunnel.example.com",
+                "local_origin": "http://127.0.0.1:49999",
+                "session_id": "run-1"
+            })
+            .to_string(),
+        );
+        assert!(register.contains("200 OK"), "{register}");
+
+        let browser = thread::spawn(move || {
+            raw_http_request(
+                port,
+                "GET /__wp-codebox/reviewer-auth-bootstrap?token=fake HTTP/1.1\r\nHost: run-1-tunnel.example.com\r\n\r\n",
+            )
+        });
+        thread::sleep(Duration::from_millis(100));
+
+        let next = http_request(
+            port,
+            "POST",
+            "/preview/client/next",
+            "homeboy-health-tunnel.example.com",
+            Some(token),
+            json!({ "public_host": "run-1-tunnel.example.com", "timeout_secs": 2 }).to_string(),
+        );
+        assert!(
+            next.contains("/__wp-codebox/reviewer-auth-bootstrap?token=fake"),
+            "{next}"
+        );
+        let request_id = response_json(&next)["request"]["request_id"]
+            .as_str()
+            .expect("request id")
+            .to_string();
+
+        let respond = http_request(
+            port,
+            "POST",
+            "/preview/client/respond",
+            "homeboy-health-tunnel.example.com",
+            Some(token),
+            json!({
+                "public_host": "run-1-tunnel.example.com",
+                "response": {
+                    "request_id": request_id,
+                    "status": 302,
+                    "headers": [
+                        ["location", "/wp-admin/"],
+                        ["set-cookie", "reviewer_auth=fake; Path=/; HttpOnly"],
+                        ["set-cookie", "wordpress_test_cookie=fake; Path=/"]
+                    ],
+                    "body_base64": base64::engine::general_purpose::STANDARD.encode("")
+                }
+            })
+            .to_string(),
+        );
+        assert!(respond.contains("200 OK"), "{respond}");
+
+        let browser_response = browser.join().expect("browser response");
+        assert!(browser_response.contains("302 Found"), "{browser_response}");
+        assert!(
+            browser_response.contains("location: /wp-admin/"),
+            "{browser_response}"
+        );
+        assert_eq!(browser_response.matches("set-cookie:").count(), 2);
+        assert!(
+            browser_response.contains("content-length: 0"),
+            "{browser_response}"
+        );
+    });
+}
+
+#[test]
 fn route_proxy_serves_artifact_json_with_cors_headers() {
     test_support::with_isolated_home(|_| {
         let upstream = TcpListener::bind("127.0.0.1:0").expect("upstream bind");
