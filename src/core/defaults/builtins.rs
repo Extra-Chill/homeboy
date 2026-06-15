@@ -4,6 +4,7 @@ use super::{
 };
 use crate::core::extension::TestDriftConfig;
 use serde::Deserialize;
+use std::fs;
 use std::sync::OnceLock;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -17,13 +18,29 @@ struct ExtensionProvidedDefaults {
 fn extension_provided_defaults() -> &'static ExtensionProvidedDefaults {
     static DEFAULTS: OnceLock<ExtensionProvidedDefaults> = OnceLock::new();
 
-    DEFAULTS.get_or_init(|| {
-        serde_json::from_str(include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/assets/defaults/extension-provided-defaults.json"
-        )))
-        .expect("extension-provided defaults asset should parse")
-    })
+    DEFAULTS.get_or_init(load_extension_provided_defaults)
+}
+
+fn load_extension_provided_defaults() -> ExtensionProvidedDefaults {
+    if let Some(defaults) = load_external_extension_provided_defaults() {
+        return defaults;
+    }
+
+    parse_extension_provided_defaults(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/assets/defaults/extension-provided-defaults.json"
+    )))
+}
+
+fn load_external_extension_provided_defaults() -> Option<ExtensionProvidedDefaults> {
+    let path = std::env::var(["HOMEBOY", "EXTENSION_DEFAULTS_PATH"].join("_")).ok()?;
+    let content = fs::read_to_string(path).ok()?;
+
+    Some(parse_extension_provided_defaults(&content))
+}
+
+fn parse_extension_provided_defaults(content: &str) -> ExtensionProvidedDefaults {
+    serde_json::from_str(content).expect("extension-provided defaults asset should parse")
 }
 
 pub(super) fn default_install_methods() -> InstallMethodsConfig {
@@ -151,5 +168,24 @@ mod tests {
         assert!(suffixes.contains(&["Test.", "p", "hp"].concat()));
         assert!(suffixes.contains(&".test.js".to_string()));
         assert!(suffixes.contains(&".spec.tsx".to_string()));
+    }
+
+    #[test]
+    fn parses_homeboy_extensions_owned_defaults_contract() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("worktree has parent")
+            .join("homeboy-extensions@fix-4436-extension-owned-defaults")
+            .join("defaults/extension-provided-defaults.json");
+
+        if !path.exists() {
+            return;
+        }
+
+        let content = fs::read_to_string(path).expect("read extension-owned defaults");
+        let defaults = parse_extension_provided_defaults(&content);
+
+        assert_eq!(defaults.version_candidates.len(), 4);
+        assert_eq!(defaults.test_drift.test_dirs, ["tests"]);
     }
 }
