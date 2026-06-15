@@ -1395,6 +1395,13 @@ mod tests {
         config.force = true;
         config.head = true;
 
+        let (build_exit_code, build_error) = crate::core::build::build_component(&component);
+        assert_eq!(build_exit_code, Some(42));
+        assert!(
+            build_error.is_some(),
+            "fixture build must fail before deploy cleanup can validate failure handling"
+        );
+
         let failures = match prepare_component_deployments(
             &[component],
             &config,
