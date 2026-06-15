@@ -248,7 +248,7 @@ const request = {
 };
 
 const provider = providerContract();
-assert.equal(provider.backend, 'codebox');
+assert.equal(provider.backend, 'wordpress');
 assert.equal(provider.request_schema, 'homeboy/agent-task-request/v1');
 assert.equal(provider.outcome_schema, 'homeboy/agent-task-outcome/v1');
 assert.deepEqual(provider.request_required_fields, ['schema', 'task_id', 'executor.backend', 'instructions']);
@@ -271,7 +271,7 @@ assert.deepEqual(provider.role_aliases, {
   },
 });
 assert.equal(provider.status, 'active');
-assert.equal(provider.integration_contract, 'wp-codebox-cli/agent-task-run');
+assert.equal(provider.integration_contract, 'homeboy-wordpress-agent-task/v1');
 assert.equal(provider.capabilities.includes('browser_runtime'), true);
 assert.equal(provider.capabilities.includes('workspace_tools'), true);
 assert.equal(provider.capabilities.includes('patch_artifacts'), true);

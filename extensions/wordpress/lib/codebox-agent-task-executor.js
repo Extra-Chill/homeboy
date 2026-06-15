@@ -10,6 +10,8 @@ const AGENT_TASK_REQUEST_SCHEMA = 'homeboy/agent-task-request/v1';
 const AGENT_TASK_OUTCOME_SCHEMA = 'homeboy/agent-task-outcome/v1';
 const AGENT_TASK_ARTIFACT_SCHEMA = 'homeboy/agent-task-artifact/v1';
 const WP_CODEBOX_TASK_REQUEST_SCHEMA = 'wp-codebox/task-input/v1';
+const HOMEBOY_WORDPRESS_BACKEND = 'wordpress';
+const LEGACY_CODEBOX_BACKEND = 'codebox';
 
 const PROVIDER_CAPABILITIES = [
   'browser_runtime',
@@ -163,17 +165,18 @@ function assertAgentTaskRequest(request) {
   if (!request.task_id) {
     throw new Error('Agent task request requires task_id.');
   }
-  if (!request.executor || request.executor.backend !== 'codebox') {
-    throw new Error('Codebox executor provider only accepts executor.backend "codebox".');
+  const backend = request.executor?.backend;
+  if (![HOMEBOY_WORDPRESS_BACKEND, LEGACY_CODEBOX_BACKEND].includes(backend)) {
+    throw new Error('WordPress executor provider only accepts executor.backend "wordpress".');
   }
 }
 
 function providerContract(options = {}) {
   return {
     schema: 'homeboy/agent-task-executor-provider/v1',
-    id: options.id || 'wordpress.codebox-agent-task-executor',
-    label: options.label || 'WP Codebox agent task executor',
-    backend: 'codebox',
+    id: options.id || 'wordpress.agent-task-executor',
+    label: options.label || 'WordPress agent task executor',
+    backend: HOMEBOY_WORDPRESS_BACKEND,
     command: options.command || 'node {{extension_path}}/scripts/agent/homeboy-codebox-agent-task-executor.cjs',
     request_schema: AGENT_TASK_REQUEST_SCHEMA,
     outcome_schema: AGENT_TASK_OUTCOME_SCHEMA,
@@ -187,7 +190,7 @@ function providerContract(options = {}) {
     },
     role_aliases: WP_CODEBOX_ROLE_ALIASES,
     status: 'active',
-    integration_contract: 'wp-codebox-cli/agent-task-run',
+    integration_contract: 'homeboy-wordpress-agent-task/v1',
     runtime_gap_trackers: WP_CODEBOX_RUNTIME_GAP_TRACKERS,
   };
 }
@@ -204,8 +207,8 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
   const components = runtimeComponentPaths(config, { ...defaults, ...options, componentContracts });
   const agentBundles = firstDefined(inputs.agent_bundles, inputs.agentBundles, config.agent_bundles, config.agentBundles, options.agentBundles, []);
   const structuredArtifacts = firstDefined(inputs.structured_artifacts, inputs.structuredArtifacts, config.structured_artifacts, config.structuredArtifacts, options.structuredArtifacts, []);
-  const sandboxToolPolicy = firstDefined(inputs.sandbox_tool_policy, inputs.sandboxToolPolicy, config.sandbox_tool_policy, config.sandboxToolPolicy, options.sandboxToolPolicy, defaults.sandboxToolPolicy);
-  const allowedTools = firstDefined(inputs.allowed_tools, inputs.allowedTools, config.allowed_tools, config.allowedTools, options.allowedTools, defaults.allowedTools);
+  const allowedTools = allowedToolsFromAgentTaskRequest(request, config, inputs, options, defaults);
+  const sandboxToolPolicy = sandboxToolPolicyFromAgentTaskRequest(config, inputs, options, defaults, allowedTools);
   const provider = config.provider || options.provider || defaults.provider || '';
   const model = request.executor.model || config.model || options.model || defaults.model || '';
   const runtimeTask = runtimeTaskWithExecutionDefaults(
@@ -307,6 +310,11 @@ function uniqueComponentContracts(contracts) {
 }
 
 function abilityRuntimeTaskFromAgentTaskRequest(config, inputs) {
+  const genericAbilityTask = genericAbilityRuntimeTask(config, inputs);
+  if (genericAbilityTask) {
+    return genericAbilityTask;
+  }
+
   const executionKind = firstValue(inputs.execution_kind, inputs.executionKind, config.execution_kind, config.executionKind);
   if (!['wp_codebox_ability', 'wordpress_ability'].includes(executionKind)) {
     return null;
@@ -317,6 +325,114 @@ function abilityRuntimeTaskFromAgentTaskRequest(config, inputs) {
   }
   const input = firstObject(inputs.ability_input, inputs.abilityInput, inputs.input, config.ability_input, config.abilityInput, config.input) || {};
   return { ability, input };
+}
+
+function genericAbilityRuntimeTask(config, inputs) {
+  const rawAbility = firstValue(inputs.ability, config.ability);
+  const abilityRequest = firstObject(
+    inputs.ability_request,
+    inputs.abilityRequest,
+    config.ability_request,
+    config.abilityRequest,
+  );
+  const declared = abilityRequest || firstObject(rawAbility);
+  const ability = typeof declared === 'string'
+    ? declared
+    : firstValue(declared?.id, declared?.name, declared?.ability, typeof rawAbility === 'string' ? rawAbility : '', inputs.ability_name, inputs.abilityName, config.ability_name, config.abilityName);
+  if (!ability || typeof ability !== 'string') {
+    return null;
+  }
+  const input = firstObject(declared?.input, declared?.args, inputs.ability_input, inputs.abilityInput, inputs.input, config.ability_input, config.abilityInput, config.input) || {};
+  return { ability, input };
+}
+
+function allowedToolsFromAgentTaskRequest(request, config, inputs, options, defaults) {
+  const explicit = firstDefined(inputs.allowed_tools, inputs.allowedTools, config.allowed_tools, config.allowedTools, options.allowedTools);
+  if (explicit !== undefined) {
+    return normalizeToolIds(explicit);
+  }
+
+  const declared = normalizeToolIds([
+    ...normalizeArray(request.tools),
+    ...normalizeArray(request.tool_requirements),
+    ...normalizeArray(request.toolRequirements),
+    ...normalizeArray(request.abilities),
+    ...normalizeArray(request.ability_requirements),
+    ...normalizeArray(request.abilityRequirements),
+    ...normalizeArray(inputs.tools),
+    ...normalizeArray(inputs.tool_requirements),
+    ...normalizeArray(inputs.toolRequirements),
+    ...normalizeArray(inputs.abilities),
+    ...normalizeArray(inputs.ability_requirements),
+    ...normalizeArray(inputs.abilityRequirements),
+    ...normalizeArray(config.tools),
+    ...normalizeArray(config.tool_requirements),
+    ...normalizeArray(config.toolRequirements),
+    ...normalizeArray(config.abilities),
+    ...normalizeArray(config.ability_requirements),
+    ...normalizeArray(config.abilityRequirements),
+  ]);
+  return uniqueStrings([...(defaults.allowedTools || []), ...declared]);
+}
+
+function sandboxToolPolicyFromAgentTaskRequest(config, inputs, options, defaults, allowedTools) {
+  const explicit = firstDefined(inputs.sandbox_tool_policy, inputs.sandboxToolPolicy, config.sandbox_tool_policy, config.sandboxToolPolicy, options.sandboxToolPolicy);
+  if (explicit !== undefined) {
+    return explicit;
+  }
+  return workspaceSandboxToolPolicyWithAllowedTools(defaults.sandboxToolPolicy, allowedTools);
+}
+
+function normalizeToolIds(value) {
+  return uniqueStrings(normalizeArray(value).flatMap((entry) => {
+    if (typeof entry === 'string') {
+      return [entry];
+    }
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      return [];
+    }
+    return [entry.id, entry.name, entry.tool, entry.ability, entry.capability].filter(Boolean);
+  }));
+}
+
+function uniqueStrings(values) {
+  const seen = new Set();
+  return values.filter((value) => {
+    const normalized = typeof value === 'string' ? value.trim() : '';
+    if (!normalized || seen.has(normalized)) {
+      return false;
+    }
+    seen.add(normalized);
+    return true;
+  });
+}
+
+function workspaceSandboxToolPolicyWithAllowedTools(basePolicy, allowedTools) {
+  if (!basePolicy || typeof basePolicy !== 'object' || !Array.isArray(allowedTools)) {
+    return basePolicy;
+  }
+  const existingRuntimeToolIds = new Set((basePolicy.tools || []).map((tool) => tool?.runtime_tool_id || tool?.id).filter(Boolean));
+  const extraTools = allowedTools
+    .filter((tool) => !existingRuntimeToolIds.has(tool))
+    .map((tool) => ({
+      id: tool,
+      runtime_tool_id: tool,
+      execution_location: 'sandbox',
+      transport_visibility: 'sandbox',
+      allowed: true,
+      runtime: {
+        environment: 'runtime_local',
+        capability_scope: 'runtime_local',
+      },
+      metadata: { source: 'homeboy.wordpress-agent-task.generic-tool-requirement' },
+    }));
+  if (extraTools.length === 0) {
+    return basePolicy;
+  }
+  return {
+    ...basePolicy,
+    tools: [...(basePolicy.tools || []), ...extraTools],
+  };
 }
 
 function runtimeTaskWithExecutionDefaults(runtimeTask, defaults = {}) {
@@ -1713,6 +1829,7 @@ module.exports = {
   AGENT_TASK_OUTCOME_STATUSES,
   AGENT_TASK_FAILURE_CLASSIFICATIONS,
   AGENT_TASK_REDACTED_METADATA_KEYS,
+  HOMEBOY_WORDPRESS_BACKEND,
   providerContract,
   codeboxTaskRequestFromAgentTaskRequest,
   agentTaskOutcomeFromCodeboxResult,

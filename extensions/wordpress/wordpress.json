@@ -21,9 +21,9 @@
   "agent_task_executors": [
     {
       "schema": "homeboy/agent-task-executor-provider/v1",
-      "id": "wordpress.codebox-agent-task-executor",
-      "label": "WP Codebox agent task executor",
-      "backend": "codebox",
+      "id": "wordpress.agent-task-executor",
+      "label": "WordPress agent task executor",
+      "backend": "wordpress",
       "command": "node {{extension_path}}/scripts/agent/homeboy-codebox-agent-task-executor.cjs",
       "request_schema": "homeboy/agent-task-request/v1",
       "outcome_schema": "homeboy/agent-task-outcome/v1",
@@ -83,7 +83,7 @@
         }
       },
       "status": "active",
-      "integration_contract": "wp-codebox-cli/agent-task-run",
+      "integration_contract": "homeboy-wordpress-agent-task/v1",
       "runtime_gap_trackers": []
     }
   ],
