@@ -13,8 +13,8 @@ use homeboy::core::preview_ingress::{
 use homeboy::core::tunnel::{
     self, ExposeServiceTunnelSpec, ServiceTunnel, ServiceTunnelAuth, ServiceTunnelAuthMode,
     ServiceTunnelExposure, ServiceTunnelPolicy, ServiceTunnelPreviewPolicy,
-    ServiceTunnelPreviewPolicyMode, ServiceTunnelStatus, ServiceTunnelTarget,
-    ServiceTunnelTunnelBackend, StartServiceTunnelSpec,
+    ServiceTunnelPreviewPolicyMode, ServiceTunnelReadinessCheck, ServiceTunnelReadinessKind,
+    ServiceTunnelStatus, ServiceTunnelTarget, ServiceTunnelTunnelBackend, StartServiceTunnelSpec,
 };
 use homeboy::core::{EntityCrudOutput, MergeOutput};
 use std::collections::BTreeMap;
@@ -487,6 +487,30 @@ enum TunnelServiceCommand {
         #[arg(long, default_value_t = 30)]
         readiness_timeout: u64,
 
+        /// Readiness contract label reported in service status
+        #[arg(long, value_enum, default_value_t = ServiceTunnelReadinessKindArg::Process)]
+        readiness_kind: ServiceTunnelReadinessKindArg,
+
+        /// Require the declared local URL host:port to accept TCP connections
+        #[arg(long)]
+        require_listener: bool,
+
+        /// Artifact file whose JSON value proves readiness
+        #[arg(long)]
+        readiness_artifact: Option<PathBuf>,
+
+        /// JSON Pointer inside --readiness-artifact whose value must match
+        #[arg(long, requires = "readiness_artifact")]
+        readiness_artifact_json_pointer: Option<String>,
+
+        /// Expected string/JSON value for --readiness-artifact-json-pointer
+        #[arg(long, requires = "readiness_artifact_json_pointer")]
+        readiness_artifact_json_equals: Option<String>,
+
+        /// Regex that must match captured service stdout before readiness is true
+        #[arg(long)]
+        readiness_stdout_regex: Option<String>,
+
         /// Public tunnel backend adapter.
         #[arg(long, value_enum, default_value_t = ServiceTunnelBackendArg::None)]
         public_tunnel_backend: ServiceTunnelBackendArg,
@@ -538,6 +562,13 @@ enum ServiceTunnelPreviewPolicyArg {
     KeepAliveUntil,
 }
 
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ServiceTunnelReadinessKindArg {
+    Process,
+    Preview,
+    Proof,
+}
+
 impl From<ServiceTunnelPreviewPolicyArg> for ServiceTunnelPreviewPolicyMode {
     fn from(value: ServiceTunnelPreviewPolicyArg) -> Self {
         match value {
@@ -550,6 +581,16 @@ impl From<ServiceTunnelPreviewPolicyArg> for ServiceTunnelPreviewPolicyMode {
             ServiceTunnelPreviewPolicyArg::KeepAliveUntil => {
                 ServiceTunnelPreviewPolicyMode::KeepAliveUntil
             }
+        }
+    }
+}
+
+impl From<ServiceTunnelReadinessKindArg> for ServiceTunnelReadinessKind {
+    fn from(value: ServiceTunnelReadinessKindArg) -> Self {
+        match value {
+            ServiceTunnelReadinessKindArg::Process => ServiceTunnelReadinessKind::Process,
+            ServiceTunnelReadinessKindArg::Preview => ServiceTunnelReadinessKind::Preview,
+            ServiceTunnelReadinessKindArg::Proof => ServiceTunnelReadinessKind::Proof,
         }
     }
 }
@@ -1091,30 +1132,80 @@ fn run_service(command: TunnelServiceCommand) -> CmdResult<TunnelOutput> {
             health_url,
             health_path,
             readiness_timeout,
+            readiness_kind,
+            require_listener,
+            readiness_artifact,
+            readiness_artifact_json_pointer,
+            readiness_artifact_json_equals,
+            readiness_stdout_regex,
             public_tunnel_backend,
             public_tunnel_command,
             public_tunnel_public_url,
             source_run_id,
             source_workflow_id,
-        } => start_service(StartServiceTunnelSpec {
-            id,
-            command,
-            cwd,
-            env: parse_env_assignments(env)?,
-            host,
-            port,
-            scheme,
-            health_url,
-            health_path,
-            readiness_timeout_secs: readiness_timeout,
-            backend: public_tunnel_backend.into(),
-            backend_command: public_tunnel_command,
-            backend_public_url: public_tunnel_public_url,
-            source_run_id,
-            source_workflow_id,
-        }),
+        } => {
+            let readiness_checks = build_readiness_checks(
+                require_listener,
+                readiness_artifact,
+                readiness_artifact_json_pointer,
+                readiness_artifact_json_equals,
+                readiness_stdout_regex,
+            )?;
+            start_service(StartServiceTunnelSpec {
+                id,
+                command,
+                cwd,
+                env: parse_env_assignments(env)?,
+                host,
+                port,
+                scheme,
+                health_url,
+                health_path,
+                readiness_timeout_secs: readiness_timeout,
+                backend: public_tunnel_backend.into(),
+                backend_command: public_tunnel_command,
+                backend_public_url: public_tunnel_public_url,
+                source_run_id,
+                source_workflow_id,
+                readiness_kind: readiness_kind.into(),
+                readiness_checks,
+            })
+        }
         TunnelServiceCommand::Stop { id } => stop_service(&id),
     }
+}
+
+fn build_readiness_checks(
+    require_listener: bool,
+    readiness_artifact: Option<PathBuf>,
+    readiness_artifact_json_pointer: Option<String>,
+    readiness_artifact_json_equals: Option<String>,
+    readiness_stdout_regex: Option<String>,
+) -> homeboy::core::Result<Vec<ServiceTunnelReadinessCheck>> {
+    let mut checks = Vec::new();
+    if require_listener {
+        checks.push(ServiceTunnelReadinessCheck::TcpListener);
+    }
+    if let Some(pattern) = readiness_stdout_regex {
+        checks.push(ServiceTunnelReadinessCheck::StdoutRegex { pattern });
+    }
+    if let Some(path) = readiness_artifact {
+        let Some(pointer) = readiness_artifact_json_pointer else {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                "readiness_artifact_json_pointer",
+                "artifact readiness requires a JSON pointer",
+                Some(path.display().to_string()),
+                None,
+            ));
+        };
+        let equals = readiness_artifact_json_equals.unwrap_or_else(|| "ready".to_string());
+        checks.push(ServiceTunnelReadinessCheck::ArtifactJsonPointer {
+            path: path.display().to_string(),
+            pointer,
+            equals,
+        });
+    }
+    Ok(checks)
 }
 
 fn expose_service(spec: ExposeServiceTunnelSpec) -> CmdResult<TunnelOutput> {

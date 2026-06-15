@@ -63,6 +63,22 @@ homeboy tunnel service start context-a8c \
 
 The `command` backend is a generic adapter seam. Homeboy starts and supervises the backend command, injects `HOMEBOY_SERVICE_ID`, `HOMEBOY_SERVICE_LOCAL_URL`, and `HOMEBOY_TUNNEL_PUBLIC_URL`, records backend PID/process/log evidence, and stops it with the managed service. Provider-specific behavior such as Traforo, Cloudflare, ngrok, or a Homeboy VPS broker belongs in the backend command or a future extension, not in Homeboy core semantics.
 
+Proof/preview workflows can opt into stricter readiness before Homeboy reports the service as ready:
+
+```sh
+homeboy tunnel service start site-preview \
+  --command './tools/start-held-preview.sh' \
+  --port 7331 \
+  --readiness-kind proof \
+  --require-listener \
+  --readiness-artifact artifacts/proof.json \
+  --readiness-artifact-json-pointer /status \
+  --readiness-artifact-json-equals ready \
+  --readiness-stdout-regex 'Preview ready:'
+```
+
+Without those opt-in checks, generic services keep the existing process/health readiness behavior. With them, `service start` and `service status` include `readiness.process_running`, `readiness.preview_ready`, and `readiness.proof_ready` so callers can distinguish wrapper liveness from usable preview/proof artifacts.
+
 When a service's preview policy is relevant, `service status` and `service start` include a structured `preview` artifact with schema `homeboy/preview-url/v1`. The artifact records the service ID, local URL, optional public URL, backend, policy, cleanup/expiry metadata, and owning run/workflow IDs when the start command supplied them.
 
 ## Preview Consumer Orchestration
