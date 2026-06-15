@@ -4,6 +4,17 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.231.0] - 2026-06-15
+
+### Added
+- initialize controllers from repo loop specs
+- add guarded --retag to recover a stale release tag
+
+### Fixed
+- recover stale runner homeboy paths
+- skip repeated failed release attempts
+- materialize runner-local preview services
+
 ## [0.230.0] - 2026-06-15
 
 ### Added
