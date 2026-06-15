@@ -617,6 +617,39 @@ WordPress substrate. See
 [`../../wordpress/docs/AGENT_CI_WP_CODEBOX.md`](../../wordpress/docs/AGENT_CI_WP_CODEBOX.md)
 for the dedicated agent sandbox guide.
 
+## WP Codebox Validation Profile
+
+The WordPress extension declares a `wp-codebox-validation` CI profile for
+reviewer-facing validation of WP Codebox changes. The profile keeps cheap,
+non-benchmark checks local and routes benchmark work through Homeboy Lab/runner
+offload so controller machines do not execute benchmark workloads.
+
+Reviewer rerun sequence:
+
+```bash
+homeboy build <component>
+homeboy test <component> --ci-job wp-codebox-phpunit
+homeboy config set /bench/local_execution '"denied"'
+homeboy bench <component> --ci-profile wp-codebox-validation-bench --runner <runner-id>
+```
+
+Use `wp-codebox-validation-bench` for `homeboy bench --ci-profile` because the
+generic bench command requires exactly one bench job. Keep the full
+`wp-codebox-validation` profile as the human-readable checklist that ties local
+smoke coverage, offloaded benchmarks, durable artifacts, and rerun commands
+together.
+
+Evidence expectations:
+
+- Local checks may include build/package validation and the WP Codebox PHPUnit
+  smoke runner.
+- Benchmark evidence must come from a connected Homeboy Lab/runner run. Set
+  `/bench/local_execution` to `denied` first so missing runner/offload setup
+  fails closed instead of falling back to local execution.
+- Reviewer-facing summaries should link the Homeboy run/artifact bundle and
+  include the rerun commands above. Do not cite machine-local paths as PR
+  evidence.
+
 ## WP Codebox Scenario Manifests
 
 Repos can declare first-class scenario manifests and let the WordPress runner

@@ -960,6 +960,22 @@
       "wp-codebox-runtime": {
         "label": "WP Codebox runtime checks",
         "jobs": ["wp-codebox-phpunit", "wp-codebox-bench"]
+      },
+      "wp-codebox-validation": {
+        "label": "WP Codebox validation profile",
+        "jobs": ["wp-codebox-build-smoke", "wp-codebox-phpunit", "wp-codebox-bench-offloaded"],
+        "summary": "Run safe local build/PHPUnit smoke coverage first, then route WP Codebox benchmark work through Homeboy Lab/runner offload with durable run artifacts.",
+        "rerun_commands": [
+          "homeboy build <component>",
+          "homeboy test <component> --ci-job wp-codebox-phpunit",
+          "homeboy config set /bench/local_execution '\"denied\"'",
+          "homeboy bench <component> --ci-profile wp-codebox-validation-bench --runner <runner-id>"
+        ],
+        "artifact_contract": "Use Homeboy run artifacts from the build/test invocation plus the offloaded bench run artifact bundle; do not cite machine-local paths in PR evidence."
+      },
+      "wp-codebox-validation-bench": {
+        "label": "WP Codebox validation benchmark offload",
+        "jobs": ["wp-codebox-bench-offloaded"]
       }
     },
     "jobs": {
@@ -983,6 +999,17 @@
         "fidelity": "local-partial",
         "limitations": ["Runs the local WP Codebox-backed WordPress test runner; CI checkout/setup details such as a freshly built external wp-codebox checkout are not reproduced by the profile itself."]
       },
+      "wp-codebox-build-smoke": {
+        "check_names": ["WP Codebox build smoke", "WordPress package build"],
+        "command": "build",
+        "env": {
+          "CI": "1"
+        },
+        "provider": "local",
+        "workflow": "wp-codebox-validation",
+        "fidelity": "local-partial",
+        "limitations": ["Runs only safe local build/package validation. It must not run benchmark workloads or Cargo/Rust validation on the Studio controller."]
+      },
       "wp-codebox-bench": {
         "check_names": ["WP Codebox bench", "WordPress bench"],
         "command": "bench",
@@ -994,6 +1021,18 @@
         "workflow": "homeboy.yml",
         "fidelity": "local-partial",
         "limitations": ["Runs local WP Codebox bench recipes for the current component; provider matrices, hosted runner hardware, and remote artifacts are not reproduced."]
+      },
+      "wp-codebox-bench-offloaded": {
+        "check_names": ["WP Codebox bench", "WordPress bench", "Homeboy Lab bench offload"],
+        "command": "bench",
+        "env": {
+          "CI": "1",
+          "HOMEBOY_BENCH_ITERATIONS": "3"
+        },
+        "provider": "homeboy-lab",
+        "workflow": "homeboy bench --ci-profile wp-codebox-validation-bench --runner <runner-id>",
+        "fidelity": "remote-only",
+        "limitations": ["Benchmark validation is remote-only. Set /bench/local_execution to denied and pass a connected Lab/runner id so fallback cannot execute benchmarks on the controller."]
       }
     }
   },
