@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.21.1] - 2026-06-15
+
+### Fixed
+- stabilize Rust release gates
+
 ## [1.21.0] - 2026-06-15
 
 ### Added
