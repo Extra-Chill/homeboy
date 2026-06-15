@@ -628,7 +628,12 @@ function componentContracts(input) {
     loadAs: plugin.loadAs || 'mu-plugin',
     activate: Boolean(plugin.activate),
   }));
-  return uniqueComponentContracts([...(input.component_contracts || []), ...runtimeContracts]);
+  return uniqueComponentContracts([
+    ...(input.component_contracts || []),
+    ...(input.parent_request?.component_contracts || []),
+    ...(input.parent_request?.parent_request?.component_contracts || []),
+    ...runtimeContracts,
+  ]);
 }
 
 function verifySteps(input) {
