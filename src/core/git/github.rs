@@ -453,7 +453,7 @@ pub fn pr_view(
         "-R".into(),
         repo_flag,
         "--json".into(),
-        "author,baseRefName,headRefName,headRepository".into(),
+        "author,baseRefName,headRefName,headRepository,state,mergedAt,headRefOid,reviewDecision,mergeStateStatus,statusCheckRollup".into(),
     ];
     let raw = run_gh(&args)?;
     let parsed: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
@@ -481,16 +481,34 @@ pub fn pr_view(
         .or_else(|| parsed.pointer("/headRepository/name"))
         .and_then(|v| v.as_str())
         .map(|v| v.to_string());
+    let state = string_value(&parsed, "state").unwrap_or_default();
+    let head_sha = string_value(&parsed, "headRefOid");
+    let merged_at = string_value(&parsed, "mergedAt");
+    let review_decision = string_value(&parsed, "reviewDecision");
+    let merge_state = string_value(&parsed, "mergeStateStatus");
+    let status_check_rollup = parsed
+        .get("statusCheckRollup")
+        .and_then(|v| v.as_array())
+        .map(|v| v.as_slice())
+        .unwrap_or(&[]);
+    let (ci_state, ci_summary) = classify_pr_ci(&state, merged_at.as_deref(), status_check_rollup);
 
     Ok(GithubPrView {
         component_id: id,
         owner: repo.owner,
         repo: repo.repo,
         number,
+        state,
         author,
         base,
         head,
         head_repository,
+        head_sha,
+        merged_at,
+        review_decision,
+        merge_state,
+        ci_state,
+        ci_summary,
     })
 }
 
@@ -719,6 +737,83 @@ fn parse_issue_number_from_url(url: &str) -> Option<u64> {
     url.trim_end_matches('/').rsplit('/').next()?.parse().ok()
 }
 
+fn string_value(value: &serde_json::Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+}
+
+fn classify_pr_ci(
+    pr_state: &str,
+    merged_at: Option<&str>,
+    checks: &[serde_json::Value],
+) -> (String, String) {
+    if checks.is_empty() {
+        return (
+            "no_checks".to_string(),
+            "GitHub reported no status checks for this PR head.".to_string(),
+        );
+    }
+
+    let mut pending = 0usize;
+    let mut failed = 0usize;
+    let mut green = 0usize;
+    let mut unknown = 0usize;
+
+    for check in checks {
+        let status = check.get("status").and_then(serde_json::Value::as_str);
+        let conclusion = check
+            .get("conclusion")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|v| !v.is_empty());
+
+        match (status, conclusion) {
+            (
+                _,
+                Some("FAILURE" | "CANCELLED" | "TIMED_OUT" | "ACTION_REQUIRED" | "STARTUP_FAILURE"),
+            ) => {
+                failed += 1;
+            }
+            (Some("COMPLETED"), Some("SUCCESS" | "SKIPPED" | "NEUTRAL")) => {
+                green += 1;
+            }
+            (Some("COMPLETED"), Some(_)) => {
+                unknown += 1;
+            }
+            (Some("COMPLETED"), None) => {
+                unknown += 1;
+            }
+            _ => {
+                pending += 1;
+            }
+        }
+    }
+
+    let state = if failed > 0 || unknown > 0 {
+        "terminal_failed"
+    } else if pending > 0 && (pr_state == "MERGED" || merged_at.is_some()) {
+        "stale"
+    } else if pending > 0 {
+        "pending"
+    } else {
+        "terminal_green"
+    };
+
+    let summary = format!(
+        "{} check(s): {} terminal-green, {} failed/unknown, {} pending",
+        checks.len(),
+        green,
+        failed + unknown,
+        pending
+    );
+
+    (state.to_string(), summary)
+}
+
 fn parse_issue_list_json(raw: &str, options: &IssueFindOptions) -> Result<Vec<GithubFindItem>> {
     #[derive(serde::Deserialize)]
     struct RawIssue {
@@ -862,6 +957,56 @@ mod tests {
             parse_issue_number_from_url("https://github.com/owner/repo/issues/not-a-number"),
             None
         );
+    }
+
+    #[test]
+    fn classify_pr_ci_distinguishes_terminal_green() {
+        let checks = serde_json::json!([
+            {"status":"COMPLETED","conclusion":"SUCCESS"},
+            {"status":"COMPLETED","conclusion":"SKIPPED"}
+        ]);
+        let (state, summary) = classify_pr_ci("OPEN", None, checks.as_array().unwrap());
+
+        assert_eq!(state, "terminal_green");
+        assert!(summary.contains("2 terminal-green"));
+    }
+
+    #[test]
+    fn classify_pr_ci_distinguishes_terminal_failed() {
+        let checks = serde_json::json!([
+            {"status":"COMPLETED","conclusion":"SUCCESS"},
+            {"status":"COMPLETED","conclusion":"FAILURE"}
+        ]);
+        let (state, summary) = classify_pr_ci("OPEN", None, checks.as_array().unwrap());
+
+        assert_eq!(state, "terminal_failed");
+        assert!(summary.contains("1 failed/unknown"));
+    }
+
+    #[test]
+    fn classify_pr_ci_distinguishes_pending_open_pr() {
+        let checks = serde_json::json!([
+            {"status":"IN_PROGRESS","conclusion":""}
+        ]);
+        let (state, summary) = classify_pr_ci("OPEN", None, checks.as_array().unwrap());
+
+        assert_eq!(state, "pending");
+        assert!(summary.contains("1 pending"));
+    }
+
+    #[test]
+    fn classify_pr_ci_marks_merged_pending_checks_as_stale() {
+        let checks = serde_json::json!([
+            {"name":"homeboy / Test","status":"IN_PROGRESS","conclusion":""}
+        ]);
+        let (state, summary) = classify_pr_ci(
+            "MERGED",
+            Some("2026-06-15T12:47:01Z"),
+            checks.as_array().unwrap(),
+        );
+
+        assert_eq!(state, "stale");
+        assert!(summary.contains("1 pending"));
     }
 
     #[test]

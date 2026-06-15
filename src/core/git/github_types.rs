@@ -54,10 +54,21 @@ pub struct GithubPrView {
     pub owner: String,
     pub repo: String,
     pub number: u64,
+    pub state: String,
     pub author: Option<String>,
     pub base: String,
     pub head: String,
     pub head_repository: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub head_sha: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub merged_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub review_decision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub merge_state: Option<String>,
+    pub ci_state: String,
+    pub ci_summary: String,
 }
 
 /// Result of a find-many operation (list of matches).
