@@ -13,7 +13,7 @@ fn route_registers_host_to_upstream_origin() {
     test_support::with_isolated_home(|_| {
         let route = register_route(PreviewIngressRoute {
             session_id: "run-123".to_string(),
-            public_host: "run-123-tunnel.chubes.net".to_string(),
+            public_host: "run-123-tunnel.preview.example.test".to_string(),
             upstream_origin: "http://127.0.0.1:7331".to_string(),
             expires_at: None,
             active: true,
@@ -23,8 +23,8 @@ fn route_registers_host_to_upstream_origin() {
         assert_eq!(route.session_id, "run-123");
         let status = status(
             Some("127.0.0.1:7350".to_string()),
-            Some("chubes.net".to_string()),
-            Some("*-tunnel.chubes.net".to_string()),
+            Some("preview.example.test".to_string()),
+            Some("*-tunnel.preview.example.test".to_string()),
         )
         .expect("status");
         assert_eq!(status.routes.len(), 1);
@@ -34,7 +34,7 @@ fn route_registers_host_to_upstream_origin() {
         );
         assert_eq!(
             status.routes[0].route.public_host,
-            "run-123-tunnel.chubes.net"
+            "run-123-tunnel.preview.example.test"
         );
     });
 }
@@ -44,7 +44,7 @@ fn route_status_reports_expired_and_disconnected_sessions() {
     test_support::with_isolated_home(|_| {
         register_route(PreviewIngressRoute {
             session_id: "expired".to_string(),
-            public_host: "expired-tunnel.chubes.net".to_string(),
+            public_host: "expired-tunnel.preview.example.test".to_string(),
             upstream_origin: "http://127.0.0.1:7331".to_string(),
             expires_at: Some("2000-01-01T00:00:00Z".to_string()),
             active: true,
@@ -52,7 +52,7 @@ fn route_status_reports_expired_and_disconnected_sessions() {
         .expect("register expired route");
         register_route(PreviewIngressRoute {
             session_id: "disconnected".to_string(),
-            public_host: "disconnected-tunnel.chubes.net".to_string(),
+            public_host: "disconnected-tunnel.preview.example.test".to_string(),
             upstream_origin: "http://127.0.0.1:7332".to_string(),
             expires_at: None,
             active: false,
@@ -74,7 +74,7 @@ fn status_for_host_reports_route_registration_state() {
     test_support::with_isolated_home(|_| {
         register_route(PreviewIngressRoute {
             session_id: "run-123".to_string(),
-            public_host: "run-123-tunnel.chubes.net".to_string(),
+            public_host: "run-123-tunnel.preview.example.test".to_string(),
             upstream_origin: "http://127.0.0.1:7331".to_string(),
             expires_at: None,
             active: true,
@@ -85,13 +85,13 @@ fn status_for_host_reports_route_registration_state() {
             None,
             None,
             None,
-            Some("RUN-123-TUNNEL.CHUBES.NET:443".to_string()),
+            Some("RUN-123-TUNNEL.PREVIEW.EXAMPLE.TEST:443".to_string()),
         )
         .expect("status");
 
         assert_eq!(
             status.inspected_host.as_deref(),
-            Some("run-123-tunnel.chubes.net")
+            Some("run-123-tunnel.preview.example.test")
         );
         assert_eq!(status.inspected_state.as_deref(), Some("registered"));
     });
@@ -102,7 +102,7 @@ fn route_validation_rejects_non_http_upstream_origin() {
     test_support::with_isolated_home(|_| {
         let err = register_route(PreviewIngressRoute {
             session_id: "bad".to_string(),
-            public_host: "bad-tunnel.chubes.net".to_string(),
+            public_host: "bad-tunnel.preview.example.test".to_string(),
             upstream_origin: "ssh://127.0.0.1:22".to_string(),
             expires_at: None,
             active: true,
