@@ -1010,19 +1010,32 @@ mod probes {
             ));
         }
 
-        let configured_version = configured_probe.version.trim();
-        if configured_version.is_empty()
-            || configured_version == "unknown"
-            || !version_is_older(bare_version, configured_version)
-        {
-            return None;
-        }
-
         let configured_path = configured_probe
             .path
             .as_deref()
             .unwrap_or(configured_command);
         let bare_path = bare.path.as_deref().unwrap_or("homeboy");
+        let configured_version = configured_probe.version.trim();
+        if configured_version.is_empty()
+            || configured_version == "unknown"
+            || !version_is_older(bare_version, configured_version)
+        {
+            if configured_command != "homeboy" && configured_path != bare_path {
+                return Some(checks::warning_with_details(
+                    "lab.homeboy.path_shadow",
+                    format!(
+                        "Configured runner Homeboy at {configured_path} differs from bare PATH `homeboy` at {bare_path}"
+                    ),
+                    Some(format!(
+                        "Fix PATH ordering on server `{server_id}` or update runner `{runner_id}` so configured homeboy_path and bare `homeboy` resolve to the same binary"
+                    )),
+                    details,
+                ));
+            }
+
+            return None;
+        }
+
         Some(checks::warning_with_details(
             "lab.homeboy.path_shadow",
             format!(
