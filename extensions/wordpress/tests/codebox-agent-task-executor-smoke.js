@@ -443,6 +443,7 @@ const abilityBridgeRequest = codeboxTaskRequestFromAgentTaskRequest({
       output_mappings: {
         validation_result: 'result.import_validation_result',
       },
+      component_contracts: [{ slug: 'wp-site-generator', path: '/workspace/wp-site-generator', activate: true }],
       engine_data_outputs: {
         validation_result: 'metadata.artifacts.ImportValidationResult',
       },
@@ -452,6 +453,7 @@ const abilityBridgeRequest = codeboxTaskRequestFromAgentTaskRequest({
 assert.equal(abilityBridgeRequest.runtime_task.ability, 'example/validate-artifact');
 assert.deepEqual(abilityBridgeRequest.runtime_task.input, { artifact: { slug: 'example-site' }, report: '/artifacts/import-report.json' });
 assert.equal(abilityBridgeRequest.parent_request.executor.config.output_mappings.validation_result, 'result.import_validation_result');
+assert.deepEqual(abilityBridgeRequest.component_contracts, [{ slug: 'wp-site-generator', path: '/workspace/wp-site-generator', activate: true }]);
 
 const genericRuntimeEnv = {
   GENERIC_PROVIDER_CONFIG: '/runtime/provider/config.json',

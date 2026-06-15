@@ -263,6 +263,7 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     mounts,
     workspaces: inputs.workspaces || config.workspaces || options.workspaces || defaults.workspaces || [],
     runtime_component_paths: components,
+    component_contracts: Array.isArray(config.component_contracts) ? config.component_contracts : [],
     homeboy_path: config.homeboy || config.homeboy_path || options.homeboy || '',
     homeboy_extensions_path: config.homeboy_extensions || config.homeboy_extensions_path || options.homeboyExtensions || '',
     wp_codebox_bin: firstValue(config.wp_codebox_bin, config.wpCodeboxBin, options.wpCodeboxBin, defaults.wpCodeboxBin, ''),
