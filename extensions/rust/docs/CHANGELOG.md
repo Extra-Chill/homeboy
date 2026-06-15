@@ -2,6 +2,14 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.21.0] - 2026-06-15
+
+### Added
+- add Rust toolchain acceleration knobs
+
+### Fixed
+- speed up Rust test targeting
+
 ## [1.20.8] - 2026-06-06
 
 ### Changed
