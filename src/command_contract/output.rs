@@ -152,28 +152,13 @@ impl Commands {
                 lab_offload_mutation_flag: None,
                 output_contract: CommandOutputContractKind::RawOnly,
             },
-            Commands::Test(args) => quality_json_descriptor(
+            Commands::Test(args) => args.output_descriptor(output_file_mode),
+            Commands::Bench(args) => args.output_descriptor(output_file_mode),
+            Commands::Lint(args) => args.output_descriptor(output_file_mode),
+            Commands::Audit(args) => args.output_descriptor(output_file_mode),
+            Commands::Observe(_) => quality_json_descriptor(
                 output_file_mode,
-                true,
-                args.write.then_some("--write"),
-                CommandOutputContractKind::JsonEnvelope,
-            ),
-            Commands::Bench(args) => quality_json_descriptor(
-                output_file_mode,
-                args.is_lab_offload_command(),
-                args.lab_offload_writes_local_state()
-                    .then_some("--baseline/--ratchet"),
-                CommandOutputContractKind::JsonEnvelope,
-            ),
-            Commands::Lint(args) => quality_json_descriptor(
-                output_file_mode,
-                true,
-                args.fix.then_some("--fix"),
-                CommandOutputContractKind::JsonEnvelope,
-            ),
-            Commands::Audit(_) | Commands::Observe(_) => quality_json_descriptor(
-                output_file_mode,
-                matches!(self, Commands::Audit(_)),
+                false,
                 None,
                 CommandOutputContractKind::JsonEnvelope,
             ),
@@ -255,12 +240,7 @@ impl Commands {
             | Commands::Http(_)
             | Commands::Upgrade(_)
             | Commands::Ssh(_) => ops_json_descriptor(output_file_mode, None),
-            Commands::Fleet(args) => ops_json_descriptor(
-                output_file_mode,
-                args.is_hot_resource_command().then_some(
-                    "`fleet exec` stays local because it depends on local fleet, project, and server configuration before opening SSH sessions to each project; runner-side config parity is not guaranteed.",
-                ),
-            ),
+            Commands::Fleet(args) => args.output_descriptor(output_file_mode),
             Commands::Triage(_) => ops_json_descriptor(output_file_mode, None),
         };
 

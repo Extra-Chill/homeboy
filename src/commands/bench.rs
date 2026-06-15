@@ -20,6 +20,10 @@ use super::utils::args::{
     PositionalComponentArgs, SettingArgs,
 };
 use super::{runs, CmdResult, GlobalArgs};
+use crate::command_contract::{
+    CommandDescriptor, CommandJsonFamily, CommandOutputContractKind, CommandOutputFileMode,
+    CommandResponseMode, LabCommandContract,
+};
 
 mod fanout;
 mod matrix;
@@ -36,6 +40,35 @@ pub struct BenchArgs {
 }
 
 impl BenchArgs {
+    pub(crate) fn output_descriptor(
+        &self,
+        output_file_mode: CommandOutputFileMode,
+    ) -> CommandDescriptor {
+        CommandDescriptor {
+            response_mode: CommandResponseMode::Json,
+            output_file_mode,
+            json_family: CommandJsonFamily::Quality,
+            supports_lab_runner: self.is_lab_offload_command(),
+            lab_runner_unsupported_reason: None,
+            lab_offload_mutation_flag: self
+                .lab_offload_writes_local_state()
+                .then_some("--baseline/--ratchet"),
+            output_contract: CommandOutputContractKind::JsonEnvelope,
+        }
+    }
+
+    pub(crate) fn lab_contract(&self) -> Option<LabCommandContract> {
+        self.is_lab_offload_command().then(|| {
+            LabCommandContract::portable(
+                "bench",
+                self.lab_offload_writes_local_state()
+                    .then_some("--baseline/--ratchet"),
+                true,
+                &[],
+            )
+        })
+    }
+
     pub fn is_lab_offload_command(&self) -> bool {
         matches!(
             self.command,

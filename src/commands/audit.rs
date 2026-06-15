@@ -18,6 +18,11 @@ use super::utils::observed_workflow::{
     finish_adapted_observed_workflow, WorkflowObservationAdapter,
 };
 use super::{CmdResult, GlobalArgs};
+use crate::command_contract::{
+    CommandDescriptor, CommandOutputContractKind, CommandOutputFileMode, LabCommandContract,
+};
+
+const AUDIT_CHANGED_SINCE_LAB_UNSUPPORTED_REASON: &str = "`audit --changed-since` is not Lab-portable yet because changed-since audit depends on git base refs that the current Lab workspace sync may not have fetched.";
 
 #[derive(Args)]
 pub struct AuditArgs {
@@ -54,6 +59,44 @@ pub struct AuditArgs {
     /// runs the refactor planner after audit completes.
     #[arg(long)]
     pub fixability: bool,
+}
+
+impl AuditArgs {
+    pub(crate) fn output_descriptor(
+        &self,
+        output_file_mode: CommandOutputFileMode,
+    ) -> CommandDescriptor {
+        CommandDescriptor {
+            response_mode: crate::command_contract::CommandResponseMode::Json,
+            output_file_mode,
+            json_family: crate::command_contract::CommandJsonFamily::Quality,
+            supports_lab_runner: true,
+            lab_runner_unsupported_reason: None,
+            lab_offload_mutation_flag: (self.baseline_args.baseline || self.baseline_args.ratchet)
+                .then_some("--baseline/--ratchet"),
+            output_contract: CommandOutputContractKind::JsonEnvelope,
+        }
+    }
+
+    pub(crate) fn lab_contract(&self) -> Option<LabCommandContract> {
+        if self.changed_since.is_some() {
+            return Some(LabCommandContract::local_only(
+                "audit",
+                AUDIT_CHANGED_SINCE_LAB_UNSUPPORTED_REASON,
+            ));
+        }
+        if self.conventions {
+            return None;
+        }
+
+        Some(LabCommandContract::portable(
+            "audit",
+            (self.baseline_args.baseline || self.baseline_args.ratchet)
+                .then_some("--baseline/--ratchet"),
+            true,
+            &[],
+        ))
+    }
 }
 
 fn parse_finding_kinds(

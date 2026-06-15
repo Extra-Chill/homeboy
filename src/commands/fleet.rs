@@ -8,6 +8,9 @@ use homeboy::core::project::Project;
 use homeboy::core::EntityCrudOutput;
 
 use super::{CmdResult, DynamicSetArgs};
+use crate::command_contract::{CommandDescriptor, CommandOutputFileMode, LabCommandContract};
+
+const FLEET_EXEC_LAB_UNSUPPORTED_REASON: &str = "`fleet exec` stays local because it depends on local fleet, project, and server configuration before opening SSH sessions to each project; runner-side config parity is not guaranteed.";
 
 #[derive(Args)]
 pub struct FleetArgs {
@@ -16,6 +19,29 @@ pub struct FleetArgs {
 }
 
 impl FleetArgs {
+    pub(crate) fn output_descriptor(
+        &self,
+        output_file_mode: CommandOutputFileMode,
+    ) -> CommandDescriptor {
+        CommandDescriptor {
+            response_mode: crate::command_contract::CommandResponseMode::Json,
+            output_file_mode,
+            json_family: crate::command_contract::CommandJsonFamily::Ops,
+            supports_lab_runner: false,
+            lab_runner_unsupported_reason: self
+                .is_hot_resource_command()
+                .then_some(FLEET_EXEC_LAB_UNSUPPORTED_REASON),
+            lab_offload_mutation_flag: None,
+            output_contract: crate::command_contract::CommandOutputContractKind::JsonEnvelope,
+        }
+    }
+
+    pub(crate) fn lab_contract(&self) -> Option<LabCommandContract> {
+        self.is_hot_resource_command().then(|| {
+            LabCommandContract::local_only("fleet exec", FLEET_EXEC_LAB_UNSUPPORTED_REASON)
+        })
+    }
+
     pub fn is_hot_resource_command(&self) -> bool {
         matches!(self.command, FleetCommand::Exec { check: false, .. })
     }

@@ -1,21 +1,15 @@
 use homeboy::cli_surface::{Cli, Commands};
-use homeboy::command_contract::{
-    LabCommandPortability, LabCommandRequiredTool, LabWorkspaceModePolicy,
-};
+use homeboy::core::lab_routing::{self, LabRoutingRequest};
 use homeboy::core::observation::RunStatus;
 use homeboy::core::runners;
 use serde_json::json;
-use std::time::Duration;
-
-const DEFAULT_LAB_TRACE_DISPATCH_TIMEOUT_SECS: u64 = 9 * 60;
-const LAB_TRACE_DISPATCH_TIMEOUT_ENV: &str = "HOMEBOY_LAB_TRACE_DISPATCH_TIMEOUT_SECS";
 
 pub fn route_after_parse(
     cli: &Cli,
     normalized_args: &[String],
     output_file: Option<&str>,
 ) -> homeboy::core::Result<Option<i32>> {
-    if is_lab_offload_subprocess() {
+    if lab_routing::is_lab_offload_subprocess() {
         return Ok(None);
     }
 
@@ -51,19 +45,7 @@ pub fn route_after_parse(
     };
 
     let lab_result = if matches!(cli.command, Commands::Trace(_)) {
-        execute_trace_lab_offload_with_timeout(
-            lab_command,
-            normalized_args.to_vec(),
-            cli.runner.clone(),
-            cli.force_hot,
-            cli.allow_local_hot,
-            cli.allow_local_fallback,
-            cli.allow_dirty_lab_workspace,
-            cli.command.lab_offload_mutation_flag().is_some(),
-            lab_trace_dispatch_timeout(),
-        )
-    } else {
-        runners::execute_lab_offload(runners::LabOffloadRequest {
+        lab_routing::route_lab_offload(LabRoutingRequest {
             command: lab_command,
             normalized_args,
             explicit_runner: cli.runner.as_deref(),
@@ -72,6 +54,19 @@ pub fn route_after_parse(
             allow_local_fallback: cli.allow_local_fallback,
             allow_dirty_lab_workspace: cli.allow_dirty_lab_workspace,
             capture_patch: cli.command.lab_offload_mutation_flag().is_some(),
+            timeout: Some(lab_routing::lab_trace_dispatch_timeout()),
+        })
+    } else {
+        lab_routing::route_lab_offload(LabRoutingRequest {
+            command: lab_command,
+            normalized_args,
+            explicit_runner: cli.runner.as_deref(),
+            force_hot: cli.force_hot,
+            allow_local_hot: cli.allow_local_hot,
+            allow_local_fallback: cli.allow_local_fallback,
+            allow_dirty_lab_workspace: cli.allow_dirty_lab_workspace,
+            capture_patch: cli.command.lab_offload_mutation_flag().is_some(),
+            timeout: None,
         })
     };
 
@@ -174,56 +169,6 @@ fn is_lab_command_local_runner_option(command: &Commands) -> bool {
     matches!(command, Commands::Lab(_))
 }
 
-fn execute_trace_lab_offload_with_timeout(
-    command: Option<runners::LabOffloadCommand>,
-    normalized_args: Vec<String>,
-    explicit_runner: Option<String>,
-    force_hot: bool,
-    allow_local_hot: bool,
-    allow_local_fallback: bool,
-    allow_dirty_lab_workspace: bool,
-    capture_patch: bool,
-    timeout: Duration,
-) -> homeboy::core::Result<runners::LabOffloadOutcome> {
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let result = runners::execute_lab_offload(runners::LabOffloadRequest {
-            command,
-            normalized_args: &normalized_args,
-            explicit_runner: explicit_runner.as_deref(),
-            force_hot,
-            allow_local_hot,
-            allow_local_fallback,
-            allow_dirty_lab_workspace,
-            capture_patch,
-        });
-        let _ = tx.send(result);
-    });
-
-    rx.recv_timeout(timeout).map_err(|_| {
-        homeboy::core::Error::internal_unexpected(format!(
-            "Lab trace dispatch did not finish before timeout after {}s",
-            timeout.as_secs()
-        ))
-        .with_hint("Inspect the controller trace run record for the last Lab dispatch phase.".to_string())
-        .with_hint("Run `homeboy runner doctor <runner-id>` and retry after the runner is healthy.".to_string())
-        .with_hint("Use `--force-hot --allow-local-hot` only for development-only investigation while fixing Lab routing.".to_string())
-    })?
-}
-
-fn lab_trace_dispatch_timeout() -> Duration {
-    std::env::var(LAB_TRACE_DISPATCH_TIMEOUT_ENV)
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .map(Duration::from_secs)
-        .unwrap_or_else(|| Duration::from_secs(DEFAULT_LAB_TRACE_DISPATCH_TIMEOUT_SECS))
-}
-
-fn is_lab_offload_subprocess() -> bool {
-    std::env::var(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV)
-        .is_ok_and(|value| !value.trim().is_empty())
-}
-
 fn write_offloaded_stdout(path: &str, stdout: &str) -> homeboy::core::Result<()> {
     std::fs::write(path, stdout).map_err(|err| {
         homeboy::core::Error::internal_io(err.to_string(), Some(format!("write {path}")))
@@ -236,117 +181,11 @@ fn lab_offload_command(
     let Some(contract) = command.lab_contract() else {
         return Ok(None);
     };
-    let required_extensions = if contract.requires_extension_parity {
-        lab_required_extensions(command)?
-    } else {
-        Vec::new()
-    };
-    Ok(Some(runners::LabOffloadCommand {
-        hot_label: contract.hot_label,
-        portable: matches!(contract.portability, LabCommandPortability::Portable),
-        default_lab_offload: contract.default_lab_offload,
-        unsupported_reason: match contract.portability {
-            LabCommandPortability::Portable => None,
-            LabCommandPortability::LocalOnly(reason) => Some(reason),
-        },
-        workspace_mode_policy: match contract.workspace_mode_policy {
-            LabWorkspaceModePolicy::ChangedSinceGitElseSnapshot => {
-                runners::LabOffloadWorkspaceModePolicy::ChangedSinceGitElseSnapshot
-            }
-            LabWorkspaceModePolicy::Git => runners::LabOffloadWorkspaceModePolicy::Git,
-            LabWorkspaceModePolicy::GitCheckoutRequired => {
-                runners::LabOffloadWorkspaceModePolicy::GitCheckoutRequired
-            }
-        },
-        requires_extension_parity: contract.requires_extension_parity,
+    let required_extensions = command.lab_required_extensions()?;
+    Ok(Some(lab_routing::lab_offload_command_from_contract(
+        contract,
         required_extensions,
-        requires_playwright: contract
-            .extra_required_tools
-            .iter()
-            .any(|tool| matches!(tool, LabCommandRequiredTool::Playwright)),
-        infer_source_path_tools: contract.infer_source_path_tools,
-    }))
-}
-
-fn lab_required_extensions(command: &Commands) -> homeboy::core::Result<Vec<String>> {
-    let mut extension_ids = std::collections::BTreeSet::new();
-
-    match command {
-        Commands::Audit(args) => extension_ids.extend(args.extension_override.extensions.clone()),
-        Commands::Bench(args) => {
-            extension_ids.extend(args.extension_override_ids().iter().cloned())
-        }
-        Commands::Lint(args) => extension_ids.extend(args.extension_override.extensions.clone()),
-        Commands::Test(args) => {
-            extension_ids.extend(args.extension_override.extensions.clone());
-            extension_ids.extend(test_lab_extension_ids(args)?);
-        }
-        Commands::AgentTask(args) => extension_ids.extend(agent_task_lab_extension_ids(args)?),
-        _ => {}
-    }
-
-    Ok(extension_ids.into_iter().collect())
-}
-
-fn agent_task_lab_extension_ids(
-    args: &homeboy::commands::agent_task::AgentTaskArgs,
-) -> homeboy::core::Result<Vec<String>> {
-    let homeboy::commands::agent_task::AgentTaskCommand::RunPlan(run_plan) = &args.command else {
-        return Ok(Vec::new());
-    };
-    if run_plan.plan.trim() == "-" {
-        return Ok(Vec::new());
-    }
-    let raw = homeboy::core::config::read_json_spec_to_string(&run_plan.plan)?;
-    let plan: homeboy::core::agent_tasks::AgentTaskPlan =
-        serde_json::from_str(&raw).map_err(|error| {
-            homeboy::core::Error::validation_invalid_json(
-                error,
-                Some("agent-task run-plan Lab extension inference".to_string()),
-                Some(raw.clone()),
-            )
-        })?;
-
-    Ok(homeboy::core::agent_tasks::required_extension_ids_for_plan(
-        &plan,
-    ))
-}
-
-fn test_lab_extension_ids(
-    args: &homeboy::commands::test::TestArgs,
-) -> homeboy::core::Result<Vec<String>> {
-    let source_context = homeboy::core::engine::execution_context::resolve(
-        &homeboy::core::engine::execution_context::ResolveOptions {
-            component_id: args.comp.component.clone(),
-            path_override: args.comp.path.clone(),
-            capability: None,
-            settings_overrides: args.setting_args.setting.clone(),
-            settings_json_overrides: args.setting_args.setting_json.clone(),
-            extension_overrides: args.extension_override.extensions.clone(),
-        },
-    )?;
-
-    if !args.drift
-        && args.ci_job.is_none()
-        && source_context
-            .component
-            .has_script(homeboy::core::extension::ExtensionCapability::Test)
-    {
-        return Ok(Vec::new());
-    }
-
-    let context = homeboy::core::engine::execution_context::resolve(
-        &homeboy::core::engine::execution_context::ResolveOptions {
-            component_id: args.comp.component.clone(),
-            path_override: args.comp.path.clone(),
-            capability: Some(homeboy::core::extension::ExtensionCapability::Test),
-            settings_overrides: args.setting_args.setting.clone(),
-            settings_json_overrides: args.setting_args.setting_json.clone(),
-            extension_overrides: args.extension_override.extensions.clone(),
-        },
-    )?;
-
-    Ok(context.extension_id.into_iter().collect())
+    )))
 }
 
 #[cfg(test)]
@@ -531,9 +370,12 @@ mod tests {
 
     #[test]
     fn trace_lab_dispatch_timeout_reads_env_override() {
-        let _env = EnvGuard::set(LAB_TRACE_DISPATCH_TIMEOUT_ENV, "7");
+        let _env = EnvGuard::set(lab_routing::LAB_TRACE_DISPATCH_TIMEOUT_ENV, "7");
 
-        assert_eq!(lab_trace_dispatch_timeout(), Duration::from_secs(7));
+        assert_eq!(
+            lab_routing::lab_trace_dispatch_timeout(),
+            std::time::Duration::from_secs(7)
+        );
     }
 
     #[test]
