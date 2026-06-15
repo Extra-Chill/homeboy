@@ -117,8 +117,8 @@ pub fn run(args: LabArgs, _global: &GlobalArgs) -> CmdResult<LabCommandOutput> {
         .map(|path| path.display().to_string());
     match args.command.unwrap_or(LabCommand::Status { runner: None }) {
         LabCommand::Status { runner } => {
-            let selected_runner = selected_lab_runner_status(runner.as_deref())?;
             let followup_runner = runner.as_deref().or(preferred_runner.as_deref());
+            let selected_runner = selected_lab_runner_status(followup_runner)?;
             let managed_followups = lab_followups(followup_runner, current_workspace.as_deref());
             Ok((
                 LabCommandOutput::Status(LabOutput {
@@ -432,11 +432,29 @@ fn extension_sync_revision_error(
 }
 
 fn lab_followups(runner_id: Option<&str>, current_workspace: Option<&str>) -> Vec<LabFollowup> {
+    let mut followups = vec![
+        LabFollowup {
+            label: "recent_runs",
+            command: "homeboy runs list --limit 5".to_string(),
+            purpose: "Find recent persisted Lab/offload runs before opening runner shells or artifact directories.",
+        },
+        LabFollowup {
+            label: "latest_bench_run",
+            command: "homeboy runs latest-run --kind bench".to_string(),
+            purpose: "Resolve the latest benchmark run id for status, evidence, and artifact inspection.",
+        },
+        LabFollowup {
+            label: "run_artifacts",
+            command: "homeboy runs artifacts <run-id>".to_string(),
+            purpose: "List recorded artifacts for a run through Homeboy instead of spelunking runner paths.",
+        },
+    ];
+
     let Some(runner_id) = runner_id else {
-        return Vec::new();
+        return followups;
     };
     let runner_arg = shell_arg(runner_id);
-    let mut followups = vec![
+    followups.extend([
         LabFollowup {
             label: "doctor",
             command: format!("homeboy runner doctor {runner_arg}"),
@@ -452,7 +470,7 @@ fn lab_followups(runner_id: Option<&str>, current_workspace: Option<&str>) -> Ve
             command: format!("homeboy runner exec {runner_arg} -- <command>"),
             purpose: "Run a managed follow-up command through Homeboy instead of opening an ad-hoc shell.",
         },
-    ];
+    ]);
 
     if let Some(path) = current_workspace {
         followups.push(LabFollowup {
@@ -633,6 +651,9 @@ Installing declared dependencies...
         let followups = lab_followups(Some("homeboy-lab"), Some("/tmp/example workspace"));
         let commands: Vec<_> = followups.iter().map(|step| step.command.as_str()).collect();
 
+        assert!(commands.contains(&"homeboy runs list --limit 5"));
+        assert!(commands.contains(&"homeboy runs latest-run --kind bench"));
+        assert!(commands.contains(&"homeboy runs artifacts <run-id>"));
         assert!(commands.contains(&"homeboy runner doctor homeboy-lab"));
         assert!(commands.contains(&"homeboy runner env homeboy-lab"));
         assert!(commands.contains(&"homeboy runner exec homeboy-lab -- <command>"));
@@ -642,7 +663,13 @@ Installing declared dependencies...
     }
 
     #[test]
-    fn lab_followups_are_empty_without_a_selected_runner() {
-        assert!(lab_followups(None, Some("/tmp/workspace")).is_empty());
+    fn lab_followups_include_run_context_without_a_selected_runner() {
+        let followups = lab_followups(None, Some("/tmp/workspace"));
+        let commands: Vec<_> = followups.iter().map(|step| step.command.as_str()).collect();
+
+        assert!(commands.contains(&"homeboy runs list --limit 5"));
+        assert!(commands.contains(&"homeboy runs latest-run --kind bench"));
+        assert!(commands.contains(&"homeboy runs artifacts <run-id>"));
+        assert!(!commands.iter().any(|command| command.starts_with("homeboy runner ")));
     }
 }
