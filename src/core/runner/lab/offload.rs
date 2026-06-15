@@ -61,8 +61,8 @@ use super::super::{
 
 use super::agent_task_bridge::{
     agent_task_dispatch_requested_run_id, lab_pre_dispatch_failure_message,
-    materialize_inline_agent_task_plan_arg, materialize_inline_agent_task_tasks_arg,
-    mirror_agent_task_run_plan_lifecycle, parse_offloaded_dispatch_envelope_from_outputs,
+    materialize_inline_agent_task_plan_arg, mirror_agent_task_run_plan_lifecycle,
+    parse_offloaded_dispatch_envelope_from_outputs,
 };
 use super::evidence::terminal_lab_run_evidence;
 use super::secrets::{hydrate_agent_task_secret_env, hydrate_trace_secret_env};
@@ -731,20 +731,6 @@ fn run_lab_offload_inner(
     let remapped_args =
         remap_agent_task_plan_in_args(&remapped_args, &path_remaps, Path::new(&synced.local_path))?;
     let remapped_args = remap_path_settings_in_args(&remapped_args, &path_remaps);
-    let (remapped_args, synced_remapped_tasks) =
-        materialize_inline_agent_task_tasks_arg(runner_id, &remapped_args)?;
-    if let Some(entry) = synced_remapped_tasks {
-        workspace_mapping.push(entry.clone());
-        plan = with_step(
-            plan,
-            PlanStep::ready(
-                "lab.sync_remapped_agent_task_tasks",
-                "lab.sync_remapped_agent_task_tasks",
-            )
-            .inputs(PlanValues::new().json("workspace", &entry))
-            .build(),
-        );
-    }
     let (remapped_args, synced_remapped_plan) =
         materialize_inline_agent_task_plan_arg(runner_id, &remapped_args)?;
     if let Some(entry) = synced_remapped_plan {
