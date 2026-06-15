@@ -58,31 +58,18 @@ pub fn route_after_parse(
         _ => None,
     };
 
-    let lab_result = if matches!(cli.command, Commands::Trace(_)) {
-        lab_routing::route_lab_offload(LabRoutingRequest {
-            command: lab_command,
-            normalized_args,
-            explicit_runner: cli.runner.as_deref(),
-            force_hot: cli.force_hot,
-            allow_local_hot: cli.allow_local_hot,
-            allow_local_fallback: cli.allow_local_fallback,
-            allow_dirty_lab_workspace: cli.allow_dirty_lab_workspace,
-            capture_patch: cli.command.lab_offload_mutation_flag().is_some(),
-            timeout: Some(lab_routing::lab_trace_dispatch_timeout()),
-        })
-    } else {
-        lab_routing::route_lab_offload(LabRoutingRequest {
-            command: lab_command,
-            normalized_args,
-            explicit_runner: cli.runner.as_deref(),
-            force_hot: cli.force_hot,
-            allow_local_hot: cli.allow_local_hot,
-            allow_local_fallback: cli.allow_local_fallback,
-            allow_dirty_lab_workspace: cli.allow_dirty_lab_workspace,
-            capture_patch: cli.command.lab_offload_mutation_flag().is_some(),
-            timeout: None,
-        })
-    };
+    let lab_result = lab_routing::route_lab_offload(LabRoutingRequest {
+        command: lab_command,
+        normalized_args,
+        explicit_runner: cli.runner.as_deref(),
+        force_hot: cli.force_hot,
+        allow_local_hot: cli.allow_local_hot,
+        allow_local_fallback: cli.allow_local_fallback,
+        allow_dirty_lab_workspace: cli.allow_dirty_lab_workspace,
+        capture_patch: cli.command.lab_offload_mutation_flag().is_some(),
+        timeout: None,
+        active_run_id: crate::commands::trace::lab_dispatch_observation_run_id(&trace_observation),
+    });
 
     match lab_result {
         Err(err) => {

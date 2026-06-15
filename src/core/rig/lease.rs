@@ -25,6 +25,10 @@ pub struct RigRunLease {
     pub command: String,
     pub pid: u32,
     pub started_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner_id: Option<String>,
     pub resources: RigResourcesSpec,
 }
 
@@ -79,6 +83,8 @@ pub fn acquire_active_run_lease(rig: &RigSpec, command: &str) -> Result<Option<A
             held_by_command: conflict.lease.command,
             held_by_pid: conflict.lease.pid,
             held_since: conflict.lease.started_at,
+            held_by_run_id: conflict.lease.run_id,
+            held_by_runner_id: conflict.lease.runner_id,
         }));
     }
 
@@ -88,6 +94,8 @@ pub fn acquire_active_run_lease(rig: &RigSpec, command: &str) -> Result<Option<A
         command: command.to_string(),
         pid,
         started_at: now_rfc3339(),
+        run_id: active_run_id(),
+        runner_id: active_lab_runner_id(),
         resources,
     };
     let json = serde_json::to_string_pretty(&lease)
@@ -143,6 +151,51 @@ fn has_covering_parent_lease(rig: &RigSpec, command: &str) -> Result<bool> {
 
 fn lease_allows_child_command(lease: &RigRunLease, command: &str) -> bool {
     lease.pid == std::process::id() && lease.command == "trace compare" && command == "trace"
+}
+
+fn active_run_id() -> Option<String> {
+    non_empty_env(crate::core::observation::ACTIVE_RUN_ID_ENV)
+        .or_else(|| non_empty_env("HOMEBOY_RUN_ID"))
+        .or_else(|| lab_metadata_string("run_id"))
+        .or_else(|| lab_metadata_string_pointer("/proof/provenance/run_id"))
+}
+
+fn active_lab_runner_id() -> Option<String> {
+    lab_metadata_string("runner_id")
+}
+
+fn non_empty_env(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+}
+
+fn lab_metadata_string(key: &str) -> Option<String> {
+    lab_metadata_value()
+        .and_then(|metadata| {
+            metadata
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .filter(|value| !value.trim().is_empty())
+}
+
+fn lab_metadata_string_pointer(pointer: &str) -> Option<String> {
+    lab_metadata_value()
+        .and_then(|metadata| {
+            metadata
+                .pointer(pointer)
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .filter(|value| !value.trim().is_empty())
+}
+
+fn lab_metadata_value() -> Option<serde_json::Value> {
+    std::env::var(crate::core::observation::LAB_OFFLOAD_METADATA_ENV)
+        .ok()
+        .and_then(|value| serde_json::from_str(&value).ok())
 }
 
 fn overlapping_resource(

@@ -613,12 +613,15 @@ fn execute_trace_run(args: TraceArgs) -> homeboy::core::Result<TraceRunExecution
                     .build(),
             )
             .ok()
-            .map(|run| ActiveTraceObservation {
-                store,
-                run_id: run.id,
-                component_id: ctx.component_id.clone(),
-                rig_id: rig_id.clone(),
-                scenario_id: scenario_id.clone(),
+            .map(|run| {
+                std::env::set_var(homeboy::core::observation::ACTIVE_RUN_ID_ENV, &run.id);
+                ActiveTraceObservation {
+                    store,
+                    run_id: run.id,
+                    component_id: ctx.component_id.clone(),
+                    rig_id: rig_id.clone(),
+                    scenario_id: scenario_id.clone(),
+                }
             })
     });
     let (extra_workloads, trace_dependencies, runner_capabilities, invocation_requirements) =
@@ -1545,6 +1548,14 @@ pub(super) fn finish_lab_dispatch_observation(
     let _ = observation
         .store
         .finish_run(&observation.run_id, status, Some(metadata));
+}
+
+pub(super) fn lab_dispatch_observation_run_id(
+    observation: &Option<LabTraceDispatchObservation>,
+) -> Option<&str> {
+    observation
+        .as_ref()
+        .map(|observation| observation.run_id.as_str())
 }
 
 fn persist_trace_workflow_result(

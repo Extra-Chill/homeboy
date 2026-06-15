@@ -8,7 +8,8 @@ use crate::command_contract::{
 use crate::core::runners;
 use crate::core::Result;
 
-pub const DEFAULT_LAB_TRACE_DISPATCH_TIMEOUT_SECS: u64 = 9 * 60;
+pub const DEFAULT_LAB_DISPATCH_TIMEOUT_SECS: u64 = 9 * 60;
+pub const LAB_DISPATCH_TIMEOUT_ENV: &str = "HOMEBOY_LAB_DISPATCH_TIMEOUT_SECS";
 pub const LAB_TRACE_DISPATCH_TIMEOUT_ENV: &str = "HOMEBOY_LAB_TRACE_DISPATCH_TIMEOUT_SECS";
 
 pub struct LabRoutingRequest<'a> {
@@ -21,6 +22,7 @@ pub struct LabRoutingRequest<'a> {
     pub allow_dirty_lab_workspace: bool,
     pub capture_patch: bool,
     pub timeout: Option<Duration>,
+    pub active_run_id: Option<&'a str>,
 }
 
 pub fn route_lab_offload(request: LabRoutingRequest<'_>) -> Result<runners::LabOffloadOutcome> {
@@ -72,11 +74,16 @@ pub fn lab_offload_command_from_contract(
 }
 
 pub fn lab_trace_dispatch_timeout() -> Duration {
-    std::env::var(LAB_TRACE_DISPATCH_TIMEOUT_ENV)
+    lab_dispatch_timeout()
+}
+
+pub fn lab_dispatch_timeout() -> Duration {
+    std::env::var(LAB_DISPATCH_TIMEOUT_ENV)
+        .or_else(|_| std::env::var(LAB_TRACE_DISPATCH_TIMEOUT_ENV))
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .map(Duration::from_secs)
-        .unwrap_or_else(|| Duration::from_secs(DEFAULT_LAB_TRACE_DISPATCH_TIMEOUT_SECS))
+        .unwrap_or_else(|| Duration::from_secs(DEFAULT_LAB_DISPATCH_TIMEOUT_SECS))
 }
 
 pub fn is_lab_offload_subprocess() -> bool {
@@ -96,6 +103,7 @@ fn execute_lab_offload_with_timeout(
     let allow_local_fallback = request.allow_local_fallback;
     let allow_dirty_lab_workspace = request.allow_dirty_lab_workspace;
     let capture_patch = request.capture_patch;
+    let active_run_id = request.active_run_id.map(str::to_string);
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let result = runners::execute_lab_offload(runners::LabOffloadRequest {
@@ -112,13 +120,22 @@ fn execute_lab_offload_with_timeout(
     });
 
     rx.recv_timeout(timeout).map_err(|_| {
-        crate::core::Error::internal_unexpected(format!(
-            "Lab trace dispatch did not finish before timeout after {}s",
+        let mut error = crate::core::Error::internal_unexpected(format!(
+            "Lab offload dispatch did not finish before timeout after {}s",
             timeout.as_secs()
         ))
-        .with_hint("Inspect the controller trace run record for the last Lab dispatch phase.".to_string())
-        .with_hint("Run `homeboy runner doctor <runner-id>` and retry after the runner is healthy.".to_string())
-        .with_hint("Use `--force-hot --allow-local-hot` only for development-only investigation while fixing Lab routing.".to_string())
+        .with_hint("The Lab worker thread may still be dispatching or waiting on the remote runner; do not retry blindly while rig resources may still be leased.".to_string())
+        .with_hint("Inspect active remote work with `homeboy runs list --status running --limit 20` and `homeboy runs list --status running --runner <runner-id> --limit 20`.".to_string())
+        .with_hint("Wait/reconnect by following the runner daemon job when known: `homeboy runner job logs <runner-id> <job-id> --follow`.".to_string())
+        .with_hint("Cancel a known daemon job with `homeboy runner job cancel <runner-id> <job-id>`; then confirm the rig lease clears before retrying.".to_string())
+        .with_hint("Run `homeboy runner doctor <runner-id>` if the runner daemon no longer responds.".to_string());
+        if let Some(run_id) = active_run_id {
+            error.details["active_run_id"] = serde_json::Value::String(run_id.clone());
+            error = error.with_hint(format!(
+                "Controller dispatch run `{run_id}` remains discoverable; inspect it with `homeboy runs show {run_id}`."
+            ));
+        }
+        error
     })?
 }
 
@@ -208,6 +225,7 @@ mod tests {
             allow_dirty_lab_workspace: false,
             capture_patch: false,
             timeout: None,
+            active_run_id: None,
         })
         .unwrap();
 

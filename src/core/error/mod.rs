@@ -209,6 +209,8 @@ pub struct RigResourceConflictInfo {
     pub held_by_command: String,
     pub held_by_pid: u32,
     pub held_since: String,
+    pub held_by_run_id: Option<String>,
+    pub held_by_runner_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -530,7 +532,9 @@ impl Error {
     }
 
     pub fn rig_resource_conflict(info: RigResourceConflictInfo) -> Self {
-        Self::new(
+        let held_by_run_id = info.held_by_run_id.clone();
+        let held_by_runner_id = info.held_by_runner_id.clone();
+        let mut error = Self::new(
             ErrorCode::RigResourceConflict,
             format!(
                 "Rig '{}' cannot run '{}': {} resource '{}' is already held by rig '{}' running '{}' (pid {}, since {})",
@@ -553,13 +557,34 @@ impl Error {
                     "command": info.held_by_command,
                     "pid": info.held_by_pid,
                     "since": info.held_since,
+                    "run_id": info.held_by_run_id,
+                    "runner_id": info.held_by_runner_id,
                 }
             }),
         )
         .with_hint(
             "If this parallel run is intentional, give each run a distinct namespace or port range so their rig resources no longer overlap."
                 .to_string(),
-        )
+        );
+        if let Some(run_id) = held_by_run_id {
+            error = error
+                .with_hint(format!(
+                    "Active holding run `{run_id}` is discoverable with `homeboy runs show {run_id}`."
+                ))
+                .with_hint(format!(
+                    "Wait for the holding run with `homeboy runs show {run_id}` or `homeboy runs list --status running --limit 20` before retrying."
+                ));
+        } else {
+            error = error.with_hint(
+                "No active run id was recorded for the holding lease; inspect running work with `homeboy runs list --status running --limit 20`.".to_string(),
+            );
+        }
+        if let Some(runner_id) = held_by_runner_id {
+            error = error.with_hint(format!(
+                "If the conflict came from a Lab daemon job, inspect active jobs with `homeboy runs list --runner {runner_id} --status running --limit 20`; cancel a known job with `homeboy runner job cancel {runner_id} <job-id>`."
+            ));
+        }
+        error
     }
 
     pub fn docs_topic_not_found(topic: impl Into<String>) -> Self {

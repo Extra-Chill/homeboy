@@ -399,6 +399,14 @@ enum RunnerJobCommand {
         #[arg(long = "poll-ms", default_value_t = 1000)]
         poll_ms: u64,
     },
+    /// Cancel a queued or running durable runner daemon job
+    Cancel {
+        /// Runner ID with an active daemon connection
+        runner_id: String,
+
+        /// Runner daemon job ID from runner exec/Lab output or error details
+        job_id: String,
+    },
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -1004,7 +1012,43 @@ fn job(command: RunnerJobCommand) -> CmdResult<RunnerJobOutput> {
             follow,
             poll_ms,
         } => job_logs(&runner_id, &job_id, follow, poll_ms),
+        RunnerJobCommand::Cancel { runner_id, job_id } => job_cancel(&runner_id, &job_id),
     }
+}
+
+fn job_cancel(runner_id: &str, job_id: &str) -> CmdResult<RunnerJobOutput> {
+    let body = runner::daemon_api_post(runner_id, &format!("/jobs/{job_id}/cancel"))?;
+    let canonical = body.get("body").unwrap_or(&body);
+    let job: Job = serde_json::from_value(canonical["job"].clone()).map_err(|err| {
+        homeboy::core::Error::internal_json(
+            err.to_string(),
+            Some("parse runner job cancel response".to_string()),
+        )
+    })?;
+    let events = canonical
+        .get("events")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|err| {
+            homeboy::core::Error::internal_json(
+                err.to_string(),
+                Some("parse runner job cancel events".to_string()),
+            )
+        })?
+        .unwrap_or_default();
+
+    Ok((
+        RunnerJobOutput {
+            command: "runner.job.cancel",
+            runner_id: runner_id.to_string(),
+            job_id: job_id.to_string(),
+            follow: false,
+            job,
+            events,
+        },
+        0,
+    ))
 }
 
 fn job_logs(
