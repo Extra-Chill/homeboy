@@ -8,7 +8,7 @@ use homeboy::core::project::Project;
 use homeboy::core::EntityCrudOutput;
 
 use super::{CmdResult, DynamicSetArgs};
-use crate::command_contract::{CommandDescriptor, CommandOutputFileMode, LabCommandContract};
+use crate::command_contract::{CommandOutputDescriptor, CommandOutputFileMode, LabCommandContract};
 
 const FLEET_EXEC_LAB_UNSUPPORTED_REASON: &str = "`fleet exec` stays local because it depends on local fleet, project, and server configuration before opening SSH sessions to each project; runner-side config parity is not guaranteed.";
 
@@ -22,16 +22,11 @@ impl FleetArgs {
     pub(crate) fn output_descriptor(
         &self,
         output_file_mode: CommandOutputFileMode,
-    ) -> CommandDescriptor {
-        CommandDescriptor {
+    ) -> CommandOutputDescriptor {
+        CommandOutputDescriptor {
             response_mode: crate::command_contract::CommandResponseMode::Json,
             output_file_mode,
             json_family: crate::command_contract::CommandJsonFamily::Ops,
-            supports_lab_runner: false,
-            lab_runner_unsupported_reason: self
-                .is_hot_resource_command()
-                .then_some(FLEET_EXEC_LAB_UNSUPPORTED_REASON),
-            lab_offload_mutation_flag: None,
             output_contract: crate::command_contract::CommandOutputContractKind::JsonEnvelope,
         }
     }

@@ -2,9 +2,10 @@
 //!
 //! This module owns the shapes that describe how a command emits output
 //! (`CommandResponseMode`, `CommandStdoutMode`, `CommandOutputFileMode`,
-//! `CommandJsonFamily`, `CommandOutputContractKind`) plus the
-//! [`CommandDescriptor`] / [`CommandResponsePlan`] aggregates and the
-//! `Commands` impl that resolves a parsed CLI command into a descriptor.
+//! `CommandJsonFamily`, `CommandOutputContractKind`) plus the output-only
+//! [`CommandOutputDescriptor`], aggregate [`CommandDescriptor`],
+//! [`CommandResponsePlan`], and the `Commands` impl that resolves a parsed CLI
+//! command into these contracts.
 //!
 //! Lab-specific fields on [`CommandDescriptor`] are populated by
 //! [`crate::command_contract::lab`], which post-processes the descriptor
@@ -57,6 +58,14 @@ pub enum CommandOutputContractKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommandOutputDescriptor {
+    pub response_mode: CommandResponseMode,
+    pub output_file_mode: CommandOutputFileMode,
+    pub json_family: CommandJsonFamily,
+    pub output_contract: CommandOutputContractKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CommandDescriptor {
     pub response_mode: CommandResponseMode,
     pub output_file_mode: CommandOutputFileMode,
@@ -67,6 +76,25 @@ pub struct CommandDescriptor {
     pub output_contract: CommandOutputContractKind,
 }
 
+impl CommandOutputDescriptor {
+    pub fn with_lab_contract(
+        self,
+        contract: Option<super::lab::LabCommandContract>,
+    ) -> CommandDescriptor {
+        let mut descriptor = CommandDescriptor {
+            response_mode: self.response_mode,
+            output_file_mode: self.output_file_mode,
+            json_family: self.json_family,
+            supports_lab_runner: false,
+            lab_runner_unsupported_reason: None,
+            lab_offload_mutation_flag: None,
+            output_contract: self.output_contract,
+        };
+        apply_lab_contract_to_descriptor(&mut descriptor, contract);
+        descriptor
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CommandResponsePlan {
     pub stdout: CommandStdoutMode,
@@ -75,6 +103,11 @@ pub struct CommandResponsePlan {
 
 impl Commands {
     pub fn descriptor(&self, has_output_file: bool) -> CommandDescriptor {
+        self.output_descriptor(has_output_file)
+            .with_lab_contract(self.lab_contract())
+    }
+
+    pub fn output_descriptor(&self, has_output_file: bool) -> CommandOutputDescriptor {
         let output_file_mode = if !has_output_file {
             CommandOutputFileMode::None
         } else {
@@ -87,13 +120,17 @@ impl Commands {
             }
         };
 
-        let mut descriptor = match self {
+        match self {
             Commands::Ssh(args) if args.subcommand.is_none() && args.command.is_empty() => {
-                raw_ops_descriptor(CommandRawOutputMode::InteractivePassthrough, output_file_mode)
+                raw_ops_descriptor(
+                    CommandRawOutputMode::InteractivePassthrough,
+                    output_file_mode,
+                )
             }
-            Commands::Logs(args) if logs::is_interactive(args) => {
-                raw_ops_descriptor(CommandRawOutputMode::InteractivePassthrough, output_file_mode)
-            }
+            Commands::Logs(args) if logs::is_interactive(args) => raw_ops_descriptor(
+                CommandRawOutputMode::InteractivePassthrough,
+                output_file_mode,
+            ),
             Commands::File(args) if file::is_raw_read(args) => {
                 raw_ops_descriptor(CommandRawOutputMode::PlainText, output_file_mode)
             }
@@ -111,22 +148,16 @@ impl Commands {
                 output_file_mode,
                 CommandOutputContractKind::JsonEnvelope,
             ),
-            Commands::Review(args) => CommandDescriptor {
+            Commands::Review(args) => CommandOutputDescriptor {
                 response_mode: markdown_or_json_response(review::is_markdown_mode(args)),
                 output_file_mode,
                 json_family: CommandJsonFamily::Quality,
-                supports_lab_runner: false,
-                lab_runner_unsupported_reason: None,
-                lab_offload_mutation_flag: None,
                 output_contract: CommandOutputContractKind::JsonEnvelope,
             },
-            Commands::Trace(args) => CommandDescriptor {
+            Commands::Trace(args) => CommandOutputDescriptor {
                 response_mode: markdown_or_json_response(trace::is_markdown_mode(args)),
                 output_file_mode,
                 json_family: CommandJsonFamily::Quality,
-                supports_lab_runner: true,
-                lab_runner_unsupported_reason: None,
-                lab_offload_mutation_flag: args.keep_overlay.then_some("--keep-overlay"),
                 output_contract: CommandOutputContractKind::JsonEnvelope,
             },
             Commands::Runs(args) => workspace_descriptor(
@@ -143,40 +174,26 @@ impl Commands {
                 output_file_mode,
                 CommandOutputContractKind::JsonEnvelope,
             ),
-            Commands::List => CommandDescriptor {
+            Commands::List => CommandOutputDescriptor {
                 response_mode: CommandResponseMode::Raw(CommandRawOutputMode::Markdown),
                 output_file_mode,
                 json_family: CommandJsonFamily::RawOnly,
-                supports_lab_runner: false,
-                lab_runner_unsupported_reason: None,
-                lab_offload_mutation_flag: None,
                 output_contract: CommandOutputContractKind::RawOnly,
             },
             Commands::Test(args) => args.output_descriptor(output_file_mode),
             Commands::Bench(args) => args.output_descriptor(output_file_mode),
             Commands::Lint(args) => args.output_descriptor(output_file_mode),
             Commands::Audit(args) => args.output_descriptor(output_file_mode),
-            Commands::Observe(_) => quality_json_descriptor(
-                output_file_mode,
-                false,
-                None,
-                CommandOutputContractKind::JsonEnvelope,
-            ),
-            Commands::AuditBaseline(_) => quality_json_descriptor(
-                output_file_mode,
-                false,
-                None,
-                CommandOutputContractKind::JsonEnvelope,
-            ),
-            Commands::Refactor(args) => CommandDescriptor {
+            Commands::Observe(_) => {
+                quality_json_descriptor(output_file_mode, CommandOutputContractKind::JsonEnvelope)
+            }
+            Commands::AuditBaseline(_) => {
+                quality_json_descriptor(output_file_mode, CommandOutputContractKind::JsonEnvelope)
+            }
+            Commands::Refactor(_) => CommandOutputDescriptor {
                 response_mode: CommandResponseMode::Json,
                 output_file_mode,
                 json_family: CommandJsonFamily::Workspace,
-                supports_lab_runner: args.is_hot_resource_command(),
-                lab_runner_unsupported_reason: None,
-                lab_offload_mutation_flag: args
-                    .lab_offload_writes_local_state()
-                    .then_some("--write/--commit"),
                 output_contract: CommandOutputContractKind::JsonEnvelope,
             },
             Commands::Refs(_) => workspace_descriptor(
@@ -184,7 +201,9 @@ impl Commands {
                 output_file_mode,
                 CommandOutputContractKind::JsonEnvelope,
             ),
-            Commands::Version(_) => version::adapter(output_file_mode).contract.to_descriptor(),
+            Commands::Version(_) => version::adapter(output_file_mode)
+                .contract
+                .to_output_descriptor(),
             Commands::AgentTask(_)
             | Commands::Project(_)
             | Commands::Component(_)
@@ -202,24 +221,16 @@ impl Commands {
             | Commands::Worktree(_)
             | Commands::Tunnel(_)
             | Commands::Stack(_)
-            | Commands::Undo(_) => CommandDescriptor {
+            | Commands::Undo(_) => CommandOutputDescriptor {
                 response_mode: CommandResponseMode::Json,
                 output_file_mode,
                 json_family: CommandJsonFamily::Workspace,
-                supports_lab_runner: false,
-                lab_runner_unsupported_reason: None,
-                lab_offload_mutation_flag: None,
                 output_contract: CommandOutputContractKind::JsonEnvelope,
             },
-            Commands::Rig(args) => CommandDescriptor {
+            Commands::Rig(_) => CommandOutputDescriptor {
                 response_mode: CommandResponseMode::Json,
                 output_file_mode,
                 json_family: CommandJsonFamily::Workspace,
-                supports_lab_runner: false,
-                lab_runner_unsupported_reason: args.is_hot_resource_command().then_some(
-                    "`rig up` stays local because rig pipelines manage local services, leases, ports, and declared filesystem paths that the current single-workspace Lab snapshot cannot safely mirror.",
-                ),
-                lab_offload_mutation_flag: None,
                 output_contract: CommandOutputContractKind::JsonEnvelope,
             },
             Commands::Status(_)
@@ -242,14 +253,11 @@ impl Commands {
             | Commands::Ssh(_) => ops_json_descriptor(output_file_mode, None),
             Commands::Fleet(args) => args.output_descriptor(output_file_mode),
             Commands::Triage(_) => ops_json_descriptor(output_file_mode, None),
-        };
-
-        apply_lab_contract_to_descriptor(&mut descriptor, self.lab_contract());
-        descriptor
+        }
     }
 
     pub fn response_plan(&self, has_output_file: bool) -> CommandResponsePlan {
-        let descriptor = self.descriptor(has_output_file);
+        let descriptor = self.output_descriptor(has_output_file);
 
         CommandResponsePlan {
             stdout: match descriptor.response_mode {
@@ -261,11 +269,11 @@ impl Commands {
     }
 
     pub fn response_mode(&self, has_output_file: bool) -> CommandResponseMode {
-        self.descriptor(has_output_file).response_mode
+        self.output_descriptor(has_output_file).response_mode
     }
 
     pub fn output_file_mode(&self, has_output_file: bool) -> CommandOutputFileMode {
-        self.descriptor(has_output_file).output_file_mode
+        self.output_descriptor(has_output_file).output_file_mode
     }
 
     pub fn consumes_output_file_as_command_arg(&self) -> bool {
@@ -276,14 +284,11 @@ impl Commands {
 fn raw_ops_descriptor(
     raw_mode: CommandRawOutputMode,
     output_file_mode: CommandOutputFileMode,
-) -> CommandDescriptor {
-    CommandDescriptor {
+) -> CommandOutputDescriptor {
+    CommandOutputDescriptor {
         response_mode: CommandResponseMode::Raw(raw_mode),
         output_file_mode,
         json_family: CommandJsonFamily::Ops,
-        supports_lab_runner: false,
-        lab_runner_unsupported_reason: None,
-        lab_offload_mutation_flag: None,
         output_contract: CommandOutputContractKind::JsonEnvelope,
     }
 }
@@ -292,14 +297,11 @@ fn workspace_descriptor(
     response_mode: CommandResponseMode,
     output_file_mode: CommandOutputFileMode,
     output_contract: CommandOutputContractKind,
-) -> CommandDescriptor {
-    CommandDescriptor {
+) -> CommandOutputDescriptor {
+    CommandOutputDescriptor {
         response_mode,
         output_file_mode,
         json_family: CommandJsonFamily::Workspace,
-        supports_lab_runner: false,
-        lab_runner_unsupported_reason: None,
-        lab_offload_mutation_flag: None,
         output_contract,
     }
 }
@@ -314,32 +316,24 @@ fn markdown_or_json_response(markdown: bool) -> CommandResponseMode {
 
 fn quality_json_descriptor(
     output_file_mode: CommandOutputFileMode,
-    supports_lab_runner: bool,
-    lab_offload_mutation_flag: Option<&'static str>,
     output_contract: CommandOutputContractKind,
-) -> CommandDescriptor {
-    CommandDescriptor {
+) -> CommandOutputDescriptor {
+    CommandOutputDescriptor {
         response_mode: CommandResponseMode::Json,
         output_file_mode,
         json_family: CommandJsonFamily::Quality,
-        supports_lab_runner,
-        lab_runner_unsupported_reason: None,
-        lab_offload_mutation_flag,
         output_contract,
     }
 }
 
 fn ops_json_descriptor(
     output_file_mode: CommandOutputFileMode,
-    lab_runner_unsupported_reason: Option<&'static str>,
-) -> CommandDescriptor {
-    CommandDescriptor {
+    _lab_runner_unsupported_reason: Option<&'static str>,
+) -> CommandOutputDescriptor {
+    CommandOutputDescriptor {
         response_mode: CommandResponseMode::Json,
         output_file_mode,
         json_family: CommandJsonFamily::Ops,
-        supports_lab_runner: false,
-        lab_runner_unsupported_reason,
-        lab_offload_mutation_flag: None,
         output_contract: CommandOutputContractKind::JsonEnvelope,
     }
 }
@@ -402,6 +396,25 @@ mod tests {
             list_descriptor.response_mode,
             CommandResponseMode::Raw(CommandRawOutputMode::Markdown)
         );
+    }
+
+    #[test]
+    fn output_descriptor_excludes_lab_policy() {
+        let scoped_lint = parsed_command(&["homeboy", "lint", "--changed-since", "origin/main"]);
+        let output_descriptor = scoped_lint.output_descriptor(false);
+
+        assert_eq!(output_descriptor.json_family, CommandJsonFamily::Quality);
+        assert_eq!(output_descriptor.response_mode, CommandResponseMode::Json);
+        assert_eq!(
+            output_descriptor.output_contract,
+            CommandOutputContractKind::JsonEnvelope
+        );
+
+        let aggregate_descriptor = scoped_lint.descriptor(false);
+        assert!(!aggregate_descriptor.supports_lab_runner);
+        assert!(aggregate_descriptor
+            .lab_runner_unsupported_reason
+            .is_some_and(|reason| reason.contains("Changed-scope lint")));
     }
 
     #[test]

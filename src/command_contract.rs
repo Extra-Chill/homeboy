@@ -6,8 +6,9 @@
 //! `crate::command_contract::*` or `homeboy::command_contract::*` — and put
 //! implementation details in the matching submodule:
 //!
-//! - [`output`] owns response-mode, output-file, JSON-family, descriptor,
-//!   response-plan types, and the `Commands` impl that resolves them.
+//! - [`output`] owns response-mode, output-file, JSON-family,
+//!   output-descriptor, aggregate-descriptor, response-plan types, and the
+//!   `Commands` impl that resolves them.
 //! - [`lab`] owns Lab portability contracts and the `Commands` accessors
 //!   that surface Lab fields on a descriptor.
 //! - [`public_variants`] owns [`PublicOutputVariantContract`] and the
@@ -23,7 +24,8 @@ pub use lab::{
     LabWorkspaceModePolicy, LAB_TRACE_EXTRA_TOOLS,
 };
 pub use output::{
-    CommandDescriptor, CommandJsonFamily, CommandOutputContractKind, CommandOutputFileMode,
-    CommandRawOutputMode, CommandResponseMode, CommandResponsePlan, CommandStdoutMode,
+    CommandDescriptor, CommandJsonFamily, CommandOutputContractKind, CommandOutputDescriptor,
+    CommandOutputFileMode, CommandRawOutputMode, CommandResponseMode, CommandResponsePlan,
+    CommandStdoutMode,
 };
 pub use public_variants::{PublicOutputVariantContract, PUBLIC_OUTPUT_VARIANT_CONTRACTS};

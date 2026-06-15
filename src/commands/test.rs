@@ -22,7 +22,7 @@ use super::utils::args::{
 use super::utils::observed_workflow::{finish_observed_workflow, ObservedWorkflowRunner};
 use super::{CmdResult, GlobalArgs};
 use crate::command_contract::{
-    CommandDescriptor, CommandJsonFamily, CommandOutputContractKind, CommandOutputFileMode,
+    CommandJsonFamily, CommandOutputContractKind, CommandOutputDescriptor, CommandOutputFileMode,
     CommandResponseMode, LabCommandContract,
 };
 
@@ -91,14 +91,11 @@ impl TestArgs {
     pub(crate) fn output_descriptor(
         &self,
         output_file_mode: CommandOutputFileMode,
-    ) -> CommandDescriptor {
-        CommandDescriptor {
+    ) -> CommandOutputDescriptor {
+        CommandOutputDescriptor {
             response_mode: CommandResponseMode::Json,
             output_file_mode,
             json_family: CommandJsonFamily::Quality,
-            supports_lab_runner: true,
-            lab_runner_unsupported_reason: None,
-            lab_offload_mutation_flag: self.write.then_some("--write"),
             output_contract: CommandOutputContractKind::JsonEnvelope,
         }
     }
