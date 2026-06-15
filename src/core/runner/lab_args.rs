@@ -802,6 +802,62 @@ mod tests {
     }
 
     #[test]
+    fn remap_agent_task_run_plan_remaps_component_contract_paths() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let plan = temp.path().join("plan.json");
+        std::fs::write(
+            &plan,
+            serde_json::json!({
+                "schema": "homeboy/agent-task-plan/v1",
+                "plan_id": "plan-1",
+                "component_contracts": [{
+                    "slug": "generic-component",
+                    "path": "/Users/chubes/Developer/generic-component",
+                    "loadAs": "plugin",
+                    "activate": true,
+                    "opaque": { "preserved": true }
+                }],
+                "tasks": [{
+                    "task_id": "task-1",
+                    "executor": { "backend": "tool-runner" },
+                    "instructions": "test"
+                }]
+            })
+            .to_string(),
+        )
+        .expect("write plan");
+        let mappings = vec![LabPathRemap {
+            local: "/Users/chubes/Developer/generic-component".to_string(),
+            remote: "/srv/homeboy/_lab_workspaces/generic-component-snapshot".to_string(),
+        }];
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "run-plan".to_string(),
+            format!("--plan=@{}", plan.display()),
+        ];
+
+        let out = remap_agent_task_plan_in_args(&args, &mappings, temp.path()).expect("remap plan");
+        let remapped: serde_json::Value = serde_json::from_str(
+            out.iter()
+                .find(|arg| arg.starts_with("--plan="))
+                .and_then(|arg| arg.strip_prefix("--plan="))
+                .expect("inline plan"),
+        )
+        .expect("inline plan json");
+
+        assert_eq!(
+            remapped["component_contracts"][0]["path"],
+            "/srv/homeboy/_lab_workspaces/generic-component-snapshot"
+        );
+        assert_eq!(remapped["component_contracts"][0]["loadAs"], "plugin");
+        assert_eq!(
+            remapped["component_contracts"][0]["opaque"]["preserved"],
+            true
+        );
+    }
+
+    #[test]
     #[cfg(unix)]
     fn remap_agent_task_run_plan_prefers_canonical_symlink_target() {
         let temp = tempfile::tempdir().expect("tempdir");

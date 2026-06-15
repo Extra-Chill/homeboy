@@ -157,6 +157,35 @@ homeboy agent-task cancel "$run_id" --reason "not selected by controller"
 durable lifecycle store. It refuses to claim live provider cancellation for an
 active runner process until a provider-owned cancellation channel is available.
 
+## Component Contracts
+
+Agent-task plans may declare generic top-level `component_contracts`. Homeboy
+preserves these objects as executor request inputs and does not attach product,
+provider, or sandbox-specific semantics to them:
+
+```json
+{
+  "schema": "homeboy/agent-task-plan/v1",
+  "plan_id": "site-generation-loop",
+  "component_contracts": [
+    {
+      "slug": "domain-component",
+      "path": "/workspace/domain-component",
+      "loadAs": "plugin",
+      "activate": true
+    }
+  ],
+  "tasks": []
+}
+```
+
+When a plan is Lab-offloaded, controller-local `component_contracts[].path`
+values are discovered, synced, and remapped with the same local-to-remote
+workspace mapping used for provider configs, runtime component paths, provider
+plugin paths, workspace roots, and path-valued settings. Lab offload evidence
+records the original and remapped paths in `workspace_mapping.workspaces` using
+the `component_contract` role.
+
 ## Dispatch Workspaces
 
 `agent-task dispatch` accepts generic Homeboy workspace inputs and does not

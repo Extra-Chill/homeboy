@@ -262,6 +262,15 @@ pub(super) fn agent_task_plan_extra_workspaces(
         Ok(value) => value,
         Err(_) => return Ok(workspaces),
     };
+    for candidate in component_contract_candidate_paths(&value) {
+        add_candidate_extra_workspace(
+            &candidate,
+            "component_contract",
+            &source_canon,
+            &mut seen,
+            &mut workspaces,
+        )?;
+    }
     for candidate in provider_config_candidate_paths(&value) {
         add_candidate_extra_workspace(
             &candidate,
@@ -520,6 +529,12 @@ fn provider_config_candidate_paths(value: &serde_json::Value) -> Vec<String> {
     paths
 }
 
+fn component_contract_candidate_paths(value: &serde_json::Value) -> Vec<String> {
+    let mut paths = Vec::new();
+    collect_component_contract_candidate_paths(value, &mut paths);
+    paths
+}
+
 fn add_candidate_extra_workspace(
     candidate: &str,
     role: &str,
@@ -588,6 +603,45 @@ fn collect_provider_config_candidate_paths(value: &serde_json::Value, paths: &mu
         serde_json::Value::Object(map) => {
             for item in map.values() {
                 collect_provider_config_candidate_paths(item, paths);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_component_contract_candidate_paths(value: &serde_json::Value, paths: &mut Vec<String>) {
+    match value {
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_component_contract_candidate_paths(item, paths);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            if let Some(contracts) = map.get("component_contracts") {
+                collect_component_contract_paths(contracts, paths);
+            }
+            for item in map.values() {
+                collect_component_contract_candidate_paths(item, paths);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_component_contract_paths(value: &serde_json::Value, paths: &mut Vec<String>) {
+    match value {
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_component_contract_paths(item, paths);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            if let Some(path) = map
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .filter(|path| is_controller_path_like(path))
+            {
+                paths.push(path.to_string());
             }
         }
         _ => {}
@@ -1088,6 +1142,45 @@ mod provider_config_candidate_paths_tests {
             .snapshot_includes
             .contains(&"packages/cli/dist/**".to_string()));
         assert!(workspaces[1].bootstrap_node_dependencies);
+    }
+
+    #[test]
+    fn agent_task_run_plan_component_contract_paths_get_component_contract_evidence_role() {
+        let controller = tempfile::tempdir().expect("controller");
+        let source = controller.path().join("primary");
+        let component = controller.path().join("domain-component");
+        let plan = source.join(".ci/plan.json");
+        std::fs::create_dir_all(plan.parent().unwrap()).expect("plan dir");
+        std::fs::create_dir_all(&component).expect("component dir");
+        std::fs::write(
+            &plan,
+            serde_json::json!({
+                "schema": "homeboy/agent-task-plan/v1",
+                "plan_id": "plan-with-components",
+                "component_contracts": [{
+                    "slug": "domain-component",
+                    "path": component,
+                    "loadAs": "plugin",
+                    "activate": true
+                }],
+                "tasks": [{ "task_id": "task-1", "instructions": "test", "executor": { "backend": "test" } }]
+            })
+            .to_string(),
+        )
+        .expect("plan file");
+
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "run-plan".to_string(),
+            format!("--plan=@{}", plan.display()),
+        ];
+
+        let workspaces = agent_task_plan_extra_workspaces(&args, &source).expect("workspaces");
+
+        assert_eq!(workspaces.len(), 1);
+        assert_eq!(workspaces[0].role, "component_contract");
+        assert_eq!(workspaces[0].path, component.canonicalize().unwrap());
     }
 
     #[test]

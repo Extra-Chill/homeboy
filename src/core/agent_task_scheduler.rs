@@ -2576,6 +2576,56 @@ mod tests {
     }
 
     #[test]
+    fn plan_level_component_contracts_are_preserved_on_executor_requests() {
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let scheduler = AgentTaskScheduler::new(OutputTemplateExecutor {
+            observed: Arc::clone(&observed),
+            include_issue_number: true,
+        });
+        let raw = serde_json::json!({
+            "schema": AGENT_TASK_PLAN_SCHEMA,
+            "plan_id": "plan-components",
+            "component_contracts": [{
+                "slug": "generic-component",
+                "path": "/workspace/generic-component",
+                "loadAs": "plugin",
+                "activate": true,
+                "opaque_executor_hint": { "preserve": true }
+            }],
+            "tasks": [{
+                "task_id": "task-components",
+                "executor": { "backend": "test" },
+                "instructions": "run"
+            }]
+        });
+        let plan: AgentTaskPlan = serde_json::from_value(raw).expect("plan parses");
+
+        let aggregate = scheduler.run(plan);
+        let observed = observed.lock().expect("observed requests");
+        let request = observed.first().expect("request dispatched");
+
+        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+        assert_eq!(request.component_contracts.len(), 1);
+        assert_eq!(
+            request.component_contracts[0].slug.as_deref(),
+            Some("generic-component")
+        );
+        assert_eq!(
+            request.component_contracts[0].path.as_deref(),
+            Some("/workspace/generic-component")
+        );
+        assert_eq!(
+            request.component_contracts[0].load_as.as_deref(),
+            Some("plugin")
+        );
+        assert_eq!(request.component_contracts[0].activate, Some(true));
+        assert_eq!(
+            request.component_contracts[0].extra["opaque_executor_hint"]["preserve"],
+            true
+        );
+    }
+
+    #[test]
     fn legacy_agent_task_plan_json_round_trips_through_homeboy_plan_projection() {
         let mut plan =
             AgentTaskPlan::new("plan-projection", vec![request("idea"), request("design")]);
@@ -2896,6 +2946,7 @@ mod tests {
             inputs: Value::Null,
             source_refs: Vec::new(),
             workspace: AgentTaskWorkspace::default(),
+            component_contracts: Vec::new(),
             policy: AgentTaskPolicy::default(),
             limits: AgentTaskLimits::default(),
             expected_artifacts: Vec::new(),
