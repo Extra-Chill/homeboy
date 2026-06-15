@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.121.42] - 2026-06-15
+
+### Fixed
+- use production composer autoload for wp codebox
+
 ## [2.121.41] - 2026-06-15
 
 ### Fixed
