@@ -1106,7 +1106,25 @@
       "description": "Component-relative glob patterns for intentional package ZIP artifacts that should be included in the production build even though arbitrary *.zip files are excluded by default. Each declared pattern must match at least one file."
     }
   ],
+  "release_preflights": [
+    {
+      "id": "publish_token",
+      "label": "Validate WordPress release publish token",
+      "action": "release.preflight.publish-token",
+      "needs": ["preflight.bump_policy"]
+    }
+  ],
   "actions": [
+    {
+      "id": "release.preflight.publish-token",
+      "label": "Validate WordPress release publish token",
+      "type": "command",
+      "command": "bash \"{{extension_path}}/scripts/release/preflight-publish-token.sh\"",
+      "payload": {
+        "release": "{{payload.release}}",
+        "config": "{{payload.config}}"
+      }
+    },
     {
       "id": "release.package",
       "label": "Build WordPress plugin/theme ZIP",

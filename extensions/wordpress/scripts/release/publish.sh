@@ -101,6 +101,18 @@ apply_github_host_env() {
   done < <(echo "${PAYLOAD}" | jq -r --arg host "${host}" '.config.github.hosts[$host].env // {} | to_entries[] | [.key, .value] | @tsv')
 }
 
+resolve_github_token() {
+  if [[ -n "${GH_TOKEN:-}" ]]; then
+    return 0
+  fi
+
+  local token=""
+  token="$(gh auth token 2>/dev/null || true)"
+  if [[ -n "${token}" ]]; then
+    export GH_TOKEN="${token}"
+  fi
+}
+
 if ! command -v gh >/dev/null 2>&1; then
   echo "Error: gh CLI is required to upload release assets" >&2
   exit 1
@@ -167,6 +179,7 @@ if [[ -z "${REPO_SLUG}" ]]; then
 fi
 
 apply_github_host_env "${GITHUB_HOST}"
+resolve_github_token
 
 # Assert the artifact's internal version matches the release tag before
 # uploading. This is the last chokepoint before a ZIP becomes the GitHub
