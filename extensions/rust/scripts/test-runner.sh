@@ -50,6 +50,16 @@ rust_nextest_fallback_enabled() {
     [ "$(homeboy_setting_bool rust_nextest_fallback true '.rust_nextest_fallback // .nextest_fallback')" = "true" ]
 }
 
+rust_cargo_test_threads() {
+    local value
+    value="${HOMEBOY_RUST_CARGO_TEST_THREADS:-$(homeboy_setting rust_cargo_test_threads '.rust_cargo_test_threads // .cargo_test_threads' '')}"
+    case "$value" in
+        ''|0) return 1 ;;
+        *[!0-9]*) return 1 ;;
+        *) printf '%s' "$value" ;;
+    esac
+}
+
 rust_resolve_changed_scope_json() {
     python3 - "$PROJECT_PATH" "${HOMEBOY_CHANGED_TEST_FILES:-}" "${HOMEBOY_TEST_RUNNER_ARGS:-}" <<'PY'
 import json
@@ -479,6 +489,13 @@ rust_append_scope_args "$SCOPE_JSON"
 
 COMMAND_LABEL="cargo test"
 COMMAND_BINARY=(cargo "${TEST_ARGS[@]}")
+
+if [ "$SELECTED_RUNNER" = "cargo" ]; then
+    CARGO_TEST_THREADS="$(rust_cargo_test_threads || true)"
+    if [ -n "$CARGO_TEST_THREADS" ]; then
+        COMMAND_BINARY+=(-- --test-threads="$CARGO_TEST_THREADS")
+    fi
+fi
 
 if [ "$SELECTED_RUNNER" = "nextest" ]; then
     NEXTEST_ARGS=(
