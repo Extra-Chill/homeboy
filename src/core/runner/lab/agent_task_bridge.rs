@@ -74,91 +74,9 @@ pub(super) fn materialize_inline_agent_task_plan_arg(
     Ok((out, None))
 }
 
-pub(super) fn materialize_inline_agent_task_tasks_arg(
-    runner_id: &str,
-    args: &[String],
-) -> Result<(Vec<String>, Option<LabWorkspaceMappingEntry>)> {
-    materialize_inline_agent_task_tasks_arg_with(args, |spec| {
-        sync_inline_agent_task_file(
-            runner_id,
-            spec,
-            "agent-task-tasks.json",
-            "agent_task_tasks_remapped",
-        )
-    })
-}
-
-fn materialize_inline_agent_task_tasks_arg_with(
-    args: &[String],
-    mut sync: impl FnMut(&str) -> Result<Option<(String, LabWorkspaceMappingEntry)>>,
-) -> Result<(Vec<String>, Option<LabWorkspaceMappingEntry>)> {
-    if subcommand_index(args, "agent-task")
-        .and_then(|index| {
-            args.get(index + 1)
-                .filter(|arg| matches!(arg.as_str(), "dispatch" | "cook"))
-                .map(|_| index + 1)
-        })
-        .is_none()
-    {
-        return Ok((args.to_vec(), None));
-    }
-
-    let mut out = Vec::with_capacity(args.len());
-    let mut iter = args.iter().peekable();
-    let mut passthrough = false;
-
-    while let Some(arg) = iter.next() {
-        if passthrough {
-            out.push(arg.clone());
-            continue;
-        }
-        if arg == "--" {
-            passthrough = true;
-            out.push(arg.clone());
-            continue;
-        }
-        if arg == "--tasks" {
-            out.push(arg.clone());
-            if let Some(spec) = iter.next() {
-                if let Some((remapped_spec, entry)) = sync(spec)? {
-                    out.push(remapped_spec);
-                    out.extend(iter.cloned());
-                    return Ok((out, Some(entry)));
-                }
-                out.push(spec.clone());
-            }
-            continue;
-        }
-        if let Some(spec) = arg.strip_prefix("--tasks=") {
-            if let Some((remapped_spec, entry)) = sync(spec)? {
-                out.push(format!("--tasks={remapped_spec}"));
-                out.extend(iter.cloned());
-                return Ok((out, Some(entry)));
-            }
-        }
-        out.push(arg.clone());
-    }
-
-    Ok((out, None))
-}
-
 fn sync_inline_agent_task_plan(
     runner_id: &str,
     spec: &str,
-) -> Result<Option<(String, LabWorkspaceMappingEntry)>> {
-    sync_inline_agent_task_file(
-        runner_id,
-        spec,
-        "agent-task-plan.json",
-        "agent_task_plan_remapped",
-    )
-}
-
-fn sync_inline_agent_task_file(
-    runner_id: &str,
-    spec: &str,
-    filename: &str,
-    role: &str,
 ) -> Result<Option<(String, LabWorkspaceMappingEntry)>> {
     if spec == "-" || spec.starts_with('@') || !looks_like_inline_json(spec) {
         return Ok(None);
@@ -176,7 +94,7 @@ fn sync_inline_agent_task_file(
             Some("create remapped agent-task plan workspace".to_string()),
         )
     })?;
-    let plan_file = temp.path().join(filename);
+    let plan_file = temp.path().join("agent-task-plan.json");
     fs::write(&plan_file, spec).map_err(|err| {
         Error::internal_io(
             err.to_string(),
@@ -196,8 +114,11 @@ fn sync_inline_agent_task_file(
         },
     )?
     .0;
-    let remote_spec = format!("@{}/{}", synced.remote_path.trim_end_matches('/'), filename);
-    let entry = workspace_mapping_entry(role, &synced);
+    let remote_spec = format!(
+        "@{}/agent-task-plan.json",
+        synced.remote_path.trim_end_matches('/')
+    );
+    let entry = workspace_mapping_entry("agent_task_plan_remapped", &synced);
     Ok(Some((remote_spec, entry)))
 }
 
