@@ -21,6 +21,12 @@ use super::utils::args::{
 };
 use super::utils::observed_workflow::{finish_observed_workflow, ObservedWorkflowRunner};
 use super::{CmdResult, GlobalArgs};
+use crate::command_contract::{
+    CommandDescriptor, CommandJsonFamily, CommandOutputContractKind, CommandOutputFileMode,
+    CommandResponseMode, LabCommandContract,
+};
+
+const TEST_CHANGED_SINCE_LAB_UNSUPPORTED_REASON: &str = "`test --changed-since` is not Lab-portable yet because changed-since test selection depends on git base refs that the current Lab workspace sync may not have fetched.";
 
 #[derive(Args)]
 pub struct TestArgs {
@@ -79,6 +85,31 @@ pub struct TestArgs {
     /// Print compact machine-readable summary (for CI wrappers)
     #[arg(long)]
     pub json_summary: bool,
+}
+
+impl TestArgs {
+    pub(crate) fn output_descriptor(
+        &self,
+        output_file_mode: CommandOutputFileMode,
+    ) -> CommandDescriptor {
+        CommandDescriptor {
+            response_mode: CommandResponseMode::Json,
+            output_file_mode,
+            json_family: CommandJsonFamily::Quality,
+            supports_lab_runner: true,
+            lab_runner_unsupported_reason: None,
+            lab_offload_mutation_flag: self.write.then_some("--write"),
+            output_contract: CommandOutputContractKind::JsonEnvelope,
+        }
+    }
+
+    pub(crate) fn lab_contract(&self) -> LabCommandContract {
+        if self.changed_since.is_none() {
+            LabCommandContract::portable("test", self.write.then_some("--write"), true, &[])
+        } else {
+            LabCommandContract::local_only("test", TEST_CHANGED_SINCE_LAB_UNSUPPORTED_REASON)
+        }
+    }
 }
 
 /// Filter out homeboy-owned flags from trailing args before passing to extension scripts.

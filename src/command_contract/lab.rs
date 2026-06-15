@@ -12,6 +12,9 @@ use crate::cli_surface::Commands;
 use crate::command_contract::CommandDescriptor;
 use crate::commands::agent_task;
 use crate::core::agent_tasks::provider::provider_requires_cwd_git_checkout;
+use crate::core::engine::execution_context::{self, ResolveOptions};
+use crate::core::extension::ExtensionCapability;
+use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LabCommandContract {
@@ -51,11 +54,7 @@ pub enum LabCommandRequiredTool {
 
 pub const LAB_TRACE_EXTRA_TOOLS: &[LabCommandRequiredTool] = &[LabCommandRequiredTool::Playwright];
 const LAB_NO_EXTRA_TOOLS: &[LabCommandRequiredTool] = &[];
-const AUDIT_CHANGED_SINCE_LAB_UNSUPPORTED_REASON: &str = "`audit --changed-since` is not Lab-portable yet because changed-since audit depends on git base refs that the current Lab workspace sync may not have fetched.";
-const LINT_CHANGED_SCOPE_LAB_UNSUPPORTED_REASON: &str = "Changed-scope lint runs stay local because changed-file scopes are not represented in the current Lab portability contract yet.";
-const TEST_CHANGED_SINCE_LAB_UNSUPPORTED_REASON: &str = "`test --changed-since` is not Lab-portable yet because changed-since test selection depends on git base refs that the current Lab workspace sync may not have fetched.";
 const RIG_UP_LAB_UNSUPPORTED_REASON: &str = "`rig up` stays local because rig pipelines manage local services, leases, ports, and declared filesystem paths that the current single-workspace Lab snapshot cannot safely mirror.";
-const FLEET_EXEC_LAB_UNSUPPORTED_REASON: &str = "`fleet exec` stays local because it depends on local fleet, project, and server configuration before opening SSH sessions to each project; runner-side config parity is not guaranteed.";
 
 impl Commands {
     pub fn lab_contract(&self) -> Option<LabCommandContract> {
@@ -69,7 +68,7 @@ impl Commands {
                         | agent_task::AgentTaskCommand::RunPlan(_)
                 ) =>
             {
-                let mut contract = lab_portable_contract(
+                let mut contract = LabCommandContract::portable(
                     "agent-task dispatch/cook/loop/run-plan",
                     None,
                     true,
@@ -88,70 +87,43 @@ impl Commands {
                         | agent_task::AgentTaskCommand::Artifacts(_)
                 ) =>
             {
-                lab_portable_workload_contract(
+                LabCommandContract::portable_workload(
                     "agent-task status/logs/artifacts",
                     None,
                     false,
                     LAB_NO_EXTRA_TOOLS,
                 )
             }
-            Commands::Audit(args) if args.changed_since.is_some() => {
-                lab_local_only_contract("audit", AUDIT_CHANGED_SINCE_LAB_UNSUPPORTED_REASON)
-            }
-            Commands::Audit(args) if args.conventions => return None,
-            Commands::Audit(args) => lab_portable_contract(
-                "audit",
-                (args.baseline_args.baseline || args.baseline_args.ratchet)
-                    .then_some("--baseline/--ratchet"),
-                true,
-                LAB_NO_EXTRA_TOOLS,
-            ),
-            Commands::Bench(args) if args.is_lab_offload_command() => lab_portable_contract(
-                "bench",
-                args.lab_offload_writes_local_state()
-                    .then_some("--baseline/--ratchet"),
-                true,
-                LAB_NO_EXTRA_TOOLS,
-            ),
+            Commands::Audit(args) => args.lab_contract()?,
+            Commands::Bench(args) => args.lab_contract()?,
             Commands::Extension(args) if args.is_update_command() => {
-                lab_explicit_runner_contract("extension update", None, false, LAB_NO_EXTRA_TOOLS)
+                LabCommandContract::explicit_runner(
+                    "extension update",
+                    None,
+                    false,
+                    LAB_NO_EXTRA_TOOLS,
+                )
             }
-            Commands::Fleet(args) if args.is_hot_resource_command() => {
-                lab_local_only_contract("fleet exec", FLEET_EXEC_LAB_UNSUPPORTED_REASON)
+            Commands::Fleet(args) => args.lab_contract()?,
+            Commands::Lint(args) => args.lab_contract()?,
+            Commands::Refactor(args) if args.is_hot_resource_command() => {
+                LabCommandContract::portable(
+                    "refactor",
+                    args.lab_offload_writes_local_state()
+                        .then_some("--write/--commit"),
+                    false,
+                    LAB_NO_EXTRA_TOOLS,
+                )
             }
-            Commands::Lint(args) if args.is_full_workspace_run() => lab_portable_contract(
-                "lint",
-                args.fix.then_some("--fix"),
-                true,
-                LAB_NO_EXTRA_TOOLS,
-            ),
-            Commands::Lint(args) if args.changed_since.is_some() || args.changed_only => {
-                lab_local_only_contract("lint", LINT_CHANGED_SCOPE_LAB_UNSUPPORTED_REASON)
-            }
-            Commands::Refactor(args) if args.is_hot_resource_command() => lab_portable_contract(
-                "refactor",
-                args.lab_offload_writes_local_state()
-                    .then_some("--write/--commit"),
-                false,
-                LAB_NO_EXTRA_TOOLS,
-            ),
             Commands::Rig(args) if args.is_check_command() => {
-                lab_portable_workload_contract("rig check", None, false, LAB_NO_EXTRA_TOOLS)
+                LabCommandContract::portable_workload("rig check", None, false, LAB_NO_EXTRA_TOOLS)
             }
             Commands::Rig(args) if args.is_hot_resource_command() => {
-                lab_local_only_contract("rig up", RIG_UP_LAB_UNSUPPORTED_REASON)
+                LabCommandContract::local_only("rig up", RIG_UP_LAB_UNSUPPORTED_REASON)
             }
-            Commands::Test(args) if args.changed_since.is_none() => lab_portable_contract(
-                "test",
-                args.write.then_some("--write"),
-                true,
-                LAB_NO_EXTRA_TOOLS,
-            ),
-            Commands::Test(_) => {
-                lab_local_only_contract("test", TEST_CHANGED_SINCE_LAB_UNSUPPORTED_REASON)
-            }
+            Commands::Test(args) => args.lab_contract(),
             Commands::Trace(args) => {
-                let mut contract = lab_portable_workload_contract(
+                let mut contract = LabCommandContract::portable_workload(
                     "trace",
                     args.keep_overlay.then_some("--keep-overlay"),
                     false,
@@ -193,70 +165,72 @@ pub(super) fn apply_lab_contract_to_descriptor(
     descriptor.lab_offload_mutation_flag = contract.and_then(|contract| contract.mutation_flag);
 }
 
-fn lab_portable_contract(
-    hot_label: &'static str,
-    mutation_flag: Option<&'static str>,
-    requires_extension_parity: bool,
-    extra_required_tools: &'static [LabCommandRequiredTool],
-) -> LabCommandContract {
-    LabCommandContract {
-        hot_label,
-        portability: LabCommandPortability::Portable,
-        default_lab_offload: true,
-        source_path_mode: LabSourcePathMode::CwdOrPathFlag,
-        workspace_mode_policy: LabWorkspaceModePolicy::ChangedSinceGitElseSnapshot,
-        mutation_flag,
-        requires_extension_parity,
-        extra_required_tools,
-        infer_source_path_tools: true,
-    }
-}
-
-fn lab_portable_workload_contract(
-    hot_label: &'static str,
-    mutation_flag: Option<&'static str>,
-    requires_extension_parity: bool,
-    extra_required_tools: &'static [LabCommandRequiredTool],
-) -> LabCommandContract {
-    LabCommandContract {
-        infer_source_path_tools: false,
-        ..lab_portable_contract(
+impl LabCommandContract {
+    pub(crate) fn portable(
+        hot_label: &'static str,
+        mutation_flag: Option<&'static str>,
+        requires_extension_parity: bool,
+        extra_required_tools: &'static [LabCommandRequiredTool],
+    ) -> Self {
+        Self {
             hot_label,
+            portability: LabCommandPortability::Portable,
+            default_lab_offload: true,
+            source_path_mode: LabSourcePathMode::CwdOrPathFlag,
+            workspace_mode_policy: LabWorkspaceModePolicy::ChangedSinceGitElseSnapshot,
             mutation_flag,
             requires_extension_parity,
             extra_required_tools,
-        )
+            infer_source_path_tools: true,
+        }
     }
-}
 
-fn lab_explicit_runner_contract(
-    hot_label: &'static str,
-    mutation_flag: Option<&'static str>,
-    requires_extension_parity: bool,
-    extra_required_tools: &'static [LabCommandRequiredTool],
-) -> LabCommandContract {
-    LabCommandContract {
-        default_lab_offload: false,
-        ..lab_portable_workload_contract(
+    pub(crate) fn portable_workload(
+        hot_label: &'static str,
+        mutation_flag: Option<&'static str>,
+        requires_extension_parity: bool,
+        extra_required_tools: &'static [LabCommandRequiredTool],
+    ) -> Self {
+        Self {
+            infer_source_path_tools: false,
+            ..Self::portable(
+                hot_label,
+                mutation_flag,
+                requires_extension_parity,
+                extra_required_tools,
+            )
+        }
+    }
+
+    pub(crate) fn explicit_runner(
+        hot_label: &'static str,
+        mutation_flag: Option<&'static str>,
+        requires_extension_parity: bool,
+        extra_required_tools: &'static [LabCommandRequiredTool],
+    ) -> Self {
+        Self {
+            default_lab_offload: false,
+            ..Self::portable_workload(
+                hot_label,
+                mutation_flag,
+                requires_extension_parity,
+                extra_required_tools,
+            )
+        }
+    }
+
+    pub(crate) fn local_only(hot_label: &'static str, reason: &'static str) -> Self {
+        Self {
             hot_label,
-            mutation_flag,
-            requires_extension_parity,
-            extra_required_tools,
-        )
-    }
-}
-
-fn lab_local_only_contract(hot_label: &'static str, reason: &'static str) -> LabCommandContract {
-    LabCommandContract {
-        hot_label,
-        portability: LabCommandPortability::LocalOnly(reason),
-        default_lab_offload: false,
-        source_path_mode: LabSourcePathMode::CwdOrPathFlag,
-        workspace_mode_policy: LabWorkspaceModePolicy::ChangedSinceGitElseSnapshot,
-        mutation_flag: None,
-        requires_extension_parity: false,
-        extra_required_tools: LAB_NO_EXTRA_TOOLS,
-        infer_source_path_tools: false,
+            portability: LabCommandPortability::LocalOnly(reason),
+            default_lab_offload: false,
+            source_path_mode: LabSourcePathMode::CwdOrPathFlag,
+            workspace_mode_policy: LabWorkspaceModePolicy::ChangedSinceGitElseSnapshot,
+            mutation_flag: None,
+            requires_extension_parity: false,
+            extra_required_tools: LAB_NO_EXTRA_TOOLS,
+            infer_source_path_tools: false,
+        }
     }
 }
 
@@ -278,6 +252,85 @@ impl Commands {
         self.lab_contract()
             .and_then(|contract| contract.mutation_flag)
     }
+
+    pub fn lab_required_extensions(&self) -> crate::core::Result<Vec<String>> {
+        let Some(contract) = self.lab_contract() else {
+            return Ok(Vec::new());
+        };
+        if !contract.requires_extension_parity {
+            return Ok(Vec::new());
+        }
+
+        let mut extension_ids = BTreeSet::new();
+        match self {
+            Commands::Audit(args) => {
+                extension_ids.extend(args.extension_override.extensions.clone())
+            }
+            Commands::Bench(args) => {
+                extension_ids.extend(args.extension_override_ids().iter().cloned())
+            }
+            Commands::Lint(args) => {
+                extension_ids.extend(args.extension_override.extensions.clone())
+            }
+            Commands::Test(args) => {
+                extension_ids.extend(args.extension_override.extensions.clone());
+                extension_ids.extend(test_lab_extension_ids(args)?);
+            }
+            Commands::AgentTask(args) => extension_ids.extend(agent_task_lab_extension_ids(args)?),
+            _ => {}
+        }
+
+        Ok(extension_ids.into_iter().collect())
+    }
+}
+
+fn agent_task_lab_extension_ids(
+    args: &agent_task::AgentTaskArgs,
+) -> crate::core::Result<Vec<String>> {
+    let agent_task::AgentTaskCommand::RunPlan(run_plan) = &args.command else {
+        return Ok(Vec::new());
+    };
+    if run_plan.plan.trim() == "-" {
+        return Ok(Vec::new());
+    }
+
+    let plan = crate::core::agent_tasks::service::read_plan(&run_plan.plan)?;
+    Ok(crate::core::agent_tasks::required_extension_ids_for_plan(
+        &plan,
+    ))
+}
+
+fn test_lab_extension_ids(
+    args: &crate::commands::test::TestArgs,
+) -> crate::core::Result<Vec<String>> {
+    let source_context = execution_context::resolve(&ResolveOptions {
+        component_id: args.comp.component.clone(),
+        path_override: args.comp.path.clone(),
+        capability: None,
+        settings_overrides: args.setting_args.setting.clone(),
+        settings_json_overrides: args.setting_args.setting_json.clone(),
+        extension_overrides: args.extension_override.extensions.clone(),
+    })?;
+
+    if !args.drift
+        && args.ci_job.is_none()
+        && source_context
+            .component
+            .has_script(ExtensionCapability::Test)
+    {
+        return Ok(Vec::new());
+    }
+
+    let context = execution_context::resolve(&ResolveOptions {
+        component_id: args.comp.component.clone(),
+        path_override: args.comp.path.clone(),
+        capability: Some(ExtensionCapability::Test),
+        settings_overrides: args.setting_args.setting.clone(),
+        settings_json_overrides: args.setting_args.setting_json.clone(),
+        extension_overrides: args.extension_override.extensions.clone(),
+    })?;
+
+    Ok(context.extension_id.into_iter().collect())
 }
 
 #[cfg(test)]
