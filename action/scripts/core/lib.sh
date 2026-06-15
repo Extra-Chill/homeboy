@@ -372,6 +372,43 @@ autofix_synthesize_source_report() {
   printf 'source_change\t%s\t%s\n' "${count}" "${joined}"
 }
 
+autofix_reconcile_source_report_to_changed_files() {
+  local changed_file
+  local changed_files="${AUTOFIX_CHANGED_FILES:-}"
+  local reconciled=""
+
+  [ -n "${AUTOFIX_REPORT:-}" ] || return 0
+  [ -n "${changed_files}" ] || return 0
+
+  while IFS=$'\t' read -r cat count files; do
+    [ -n "${cat}" ] || continue
+
+    if [ "${cat}" != "source_change" ]; then
+      reconciled+="${cat}"$'\t'"${count}"$'\t'"${files}"$'\n'
+      continue
+    fi
+
+    local kept=""
+    local kept_count=0
+    while IFS= read -r changed_file; do
+      [ -n "${changed_file}" ] || continue
+      if printf '%s\n' "${files}" | tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -Fx -- "${changed_file}" >/dev/null 2>&1; then
+        if [ -n "${kept}" ]; then
+          kept+=", "
+        fi
+        kept+="${changed_file}"
+        kept_count=$((kept_count + 1))
+      fi
+    done <<< "$(autofix_changed_files_list)"
+
+    if [ "${kept_count}" -gt 0 ]; then
+      reconciled+="${cat}"$'\t'"${kept_count}"$'\t'"${kept}"$'\n'
+    fi
+  done <<< "${AUTOFIX_REPORT}"
+
+  AUTOFIX_REPORT="$(printf '%s' "${reconciled}" | sed '/^[[:space:]]*$/d')"
+}
+
 autofix_prepare_pr_report() {
   local workspace="${1:-$(resolve_workspace)}"
   local total_fixes="${AUTOFIX_TOTAL_FIXES:-0}"
@@ -379,6 +416,8 @@ autofix_prepare_pr_report() {
   if [ -z "${AUTOFIX_REPORT:-}" ] && [ "${total_fixes}" != "0" ]; then
     AUTOFIX_REPORT="$(autofix_synthesize_source_report "${workspace}")"
   fi
+
+  autofix_reconcile_source_report_to_changed_files
 }
 
 autofix_pr_has_unsafe_unreported_changes() {

@@ -183,6 +183,20 @@ assert_contains "${FALLBACK_BODY}" '| `source_change` | 2 | `src/core/code_audit
 assert_not_contains "${FALLBACK_BODY}" 'No source fixes were reported by the autofix output.' "fallback avoids false no-source-fixes summary"
 assert_not_contains "${FALLBACK_BODY}" 'changed outside the reported source-fix set' "fallback does not misclassify source files as other changes"
 
+BODY_CAPTURE="${TMP_DIR}/stale-source-report-create.md"
+export BODY_CAPTURE
+export AUTOFIX_FILE_COUNT="1"
+export AUTOFIX_TOTAL_FIXES="2"
+export AUTOFIX_CHANGED_FILES="src/core/code_audit/duplication.rs"
+export AUTOFIX_REPORT="${FALLBACK_REPORT}"
+
+bash "${ROOT}/scripts/autofix/open-autofix-pr.sh" >/tmp/homeboy-action-test-stale-source-report.log
+STALE_SOURCE_BODY="$(<"${BODY_CAPTURE}")"
+
+assert_contains "${STALE_SOURCE_BODY}" 'Applied autofix changes to **1** source file.' "stale source report summary follows committed files"
+assert_contains "${STALE_SOURCE_BODY}" '| `source_change` | 1 | `src/core/code_audit/duplication.rs` |' "stale source report table drops uncommitted files"
+assert_not_contains "${STALE_SOURCE_BODY}" 'src/core/code_audit/requested_detectors.rs' "stale source report omits uncommitted source file"
+
 LINT_FIX_OUTPUT_DIR="${TMP_DIR}/lint-fix-output"
 mkdir -p "${LINT_FIX_OUTPUT_DIR}"
 cat > "${LINT_FIX_OUTPUT_DIR}/fix.json" <<'JSON'
