@@ -16,15 +16,20 @@
 //! `commands::runs` callers are thin wrappers that map the returned data
 //! into `RunsOutput` variants.
 
-use std::fs::File;
+use std::fs::{self, File};
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
+use chrono::{Duration, Utc};
 use serde::Serialize;
 use serde_json::Value;
 
-use super::{ArtifactRecord, ObservationStore, RunListFilter, RunRecord};
+use super::{
+    ArtifactCleanupCandidateRecord, ArtifactCleanupFilter, ArtifactRecord, ObservationStore,
+    RunListFilter, RunRecord,
+};
 use crate::core::artifact_links::{cached_validated_viewer_links, public_artifact_url};
+use crate::core::execution_contract::EXECUTION_CONTRACT;
 use crate::core::Error;
 use crate::core::Result;
 
@@ -268,6 +273,485 @@ pub fn copy_local_file_artifact(
         size_bytes: artifact.size_bytes,
         sha256: artifact.sha256,
     })
+}
+
+/// Download a remote runner artifact and report the same normalized fetch
+/// outcome used by local artifact copies.
+pub fn download_remote_artifact(
+    artifact: ArtifactRecord,
+    output: Option<PathBuf>,
+) -> Result<ArtifactFetchOutcome> {
+    let download = crate::core::runners::download_remote_artifact(&artifact.path, output)?;
+    Ok(ArtifactFetchOutcome {
+        run_id: artifact.run_id,
+        artifact_id: artifact.id,
+        output_path: download.output_path,
+        content_type: download.content_type,
+        size_bytes: download.size_bytes,
+        sha256: download.sha256,
+    })
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RunnerDownloadCleanupOptions {
+    pub apply: bool,
+    pub runner: Option<String>,
+    pub run_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RunnerDownloadCleanupOutcome {
+    pub dry_run: bool,
+    pub root: PathBuf,
+    pub removed: bool,
+    pub file_count: usize,
+    pub directory_count: usize,
+    pub size_bytes: u64,
+    pub paths: Vec<String>,
+}
+
+pub fn cleanup_runner_downloads(
+    options: RunnerDownloadCleanupOptions,
+) -> Result<RunnerDownloadCleanupOutcome> {
+    if options.run_id.is_some() && options.runner.is_none() {
+        return Err(Error::validation_invalid_argument(
+            "run_id",
+            "--run-id requires --runner so cleanup stays inside one runner cache",
+            options.run_id,
+            None,
+        ));
+    }
+
+    let root = runner_download_root(options.runner.as_deref(), options.run_id.as_deref())?;
+    let plan = plan_runner_download_cleanup(&root)?;
+    if options.apply && root.exists() {
+        remove_runner_download_root(&root)?;
+    }
+
+    Ok(RunnerDownloadCleanupOutcome {
+        dry_run: !options.apply,
+        removed: options.apply && !root.exists(),
+        root,
+        file_count: plan.file_count,
+        directory_count: plan.directory_count,
+        size_bytes: plan.size_bytes,
+        paths: plan.paths,
+    })
+}
+
+#[derive(Debug, Clone)]
+pub struct PersistedArtifactCleanupOptions {
+    pub apply: bool,
+    pub older_than_days: i64,
+    pub run_id: Option<String>,
+    pub kind: Option<String>,
+    pub artifact_type: Option<String>,
+    pub run_kind: Option<String>,
+    pub component_id: Option<String>,
+    pub limit: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PersistedArtifactCleanupOutcome {
+    pub dry_run: bool,
+    pub artifact_root: PathBuf,
+    pub older_than_days: i64,
+    pub inspected_count: usize,
+    pub planned_record_count: usize,
+    pub planned_file_count: usize,
+    pub planned_directory_count: usize,
+    pub planned_size_bytes: u64,
+    pub removed_record_count: usize,
+    pub removed_file_count: usize,
+    pub removed_directory_count: usize,
+    pub removed_size_bytes: u64,
+    pub skipped_count: usize,
+    pub rows: Vec<PersistedArtifactCleanupRow>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PersistedArtifactCleanupRow {
+    pub artifact_id: String,
+    pub run_id: String,
+    pub run_kind: String,
+    pub component_id: Option<String>,
+    pub kind: String,
+    #[serde(rename = "type")]
+    pub artifact_type: String,
+    pub path: String,
+    pub created_at: String,
+    pub exists: bool,
+    pub action: String,
+    pub reason: String,
+    pub size_bytes: u64,
+}
+
+pub fn cleanup_persisted_artifacts(
+    options: PersistedArtifactCleanupOptions,
+) -> Result<PersistedArtifactCleanupOutcome> {
+    if options.older_than_days < 0 {
+        return Err(Error::validation_invalid_argument(
+            "older_than_days",
+            "--older-than-days must be zero or greater",
+            Some(options.older_than_days.to_string()),
+            None,
+        ));
+    }
+
+    let artifact_root = crate::core::artifacts::root()?;
+    let created_before = (Utc::now() - Duration::days(options.older_than_days)).to_rfc3339();
+    let store = ObservationStore::open_initialized()?;
+    let candidates = store.list_artifact_cleanup_candidates(ArtifactCleanupFilter {
+        created_before: Some(created_before),
+        run_id: options.run_id.clone(),
+        kind: options.kind.clone(),
+        artifact_type: options.artifact_type.clone(),
+        run_kind: options.run_kind.clone(),
+        component_id: options.component_id.clone(),
+        limit: Some(options.limit),
+    })?;
+
+    let mut rows = Vec::new();
+    let mut planned_record_count = 0;
+    let mut planned_file_count = 0;
+    let mut planned_directory_count = 0;
+    let mut planned_size_bytes = 0;
+    let mut removed_record_count = 0;
+    let mut removed_file_count = 0;
+    let mut removed_directory_count = 0;
+    let mut removed_size_bytes = 0;
+    let mut skipped_count = 0;
+
+    for candidate in candidates.iter() {
+        let mut row = classify_persisted_artifact(candidate, &artifact_root)?;
+        if row.action == "remove" {
+            planned_record_count += 1;
+            planned_size_bytes += row.size_bytes;
+            match row.artifact_type.as_str() {
+                "directory" => planned_directory_count += 1,
+                _ => planned_file_count += usize::from(row.exists),
+            }
+            if options.apply {
+                apply_persisted_artifact_cleanup(&store, &candidate.artifact, &artifact_root)?;
+                removed_record_count += 1;
+                removed_size_bytes += row.size_bytes;
+                match row.artifact_type.as_str() {
+                    "directory" => removed_directory_count += 1,
+                    _ => removed_file_count += usize::from(row.exists),
+                }
+                row.action = "removed".to_string();
+            }
+        } else {
+            skipped_count += 1;
+        }
+        rows.push(row);
+    }
+
+    Ok(PersistedArtifactCleanupOutcome {
+        dry_run: !options.apply,
+        artifact_root,
+        older_than_days: options.older_than_days,
+        inspected_count: candidates.len(),
+        planned_record_count,
+        planned_file_count,
+        planned_directory_count,
+        planned_size_bytes,
+        removed_record_count,
+        removed_file_count,
+        removed_directory_count,
+        removed_size_bytes,
+        skipped_count,
+        rows,
+    })
+}
+
+fn classify_persisted_artifact(
+    candidate: &ArtifactCleanupCandidateRecord,
+    artifact_root: &Path,
+) -> Result<PersistedArtifactCleanupRow> {
+    let artifact = &candidate.artifact;
+    let path = persisted_artifact_path_from_record(artifact_root, &artifact.path);
+    let mut exists = false;
+    let mut size_bytes = 0;
+    let (action, reason) = if artifact.artifact_type == "url"
+        || crate::core::runners::is_remote_runner_artifact_path(&artifact.path)
+        || EXECUTION_CONTRACT
+            .artifacts
+            .is_metadata_only_ref(&artifact.path)
+    {
+        ("skip", "artifact is not local persisted bytes")
+    } else if let Some(metadata) = symlink_metadata_if_exists(&path)? {
+        exists = true;
+        if !path_is_within_root(&path, artifact_root) {
+            ("skip", "existing artifact path is outside artifact root")
+        } else if metadata.file_type().is_symlink() {
+            ("skip", "artifact path is a symlink")
+        } else {
+            size_bytes = path_size_bytes(&path, &metadata)?;
+            ("remove", "artifact bytes and DB row are eligible")
+        }
+    } else {
+        ("remove", "artifact bytes are missing; DB row is stale")
+    };
+
+    Ok(PersistedArtifactCleanupRow {
+        artifact_id: artifact.id.clone(),
+        run_id: artifact.run_id.clone(),
+        run_kind: candidate.run_kind.clone(),
+        component_id: candidate.component_id.clone(),
+        kind: artifact.kind.clone(),
+        artifact_type: artifact.artifact_type.clone(),
+        path: artifact.path.clone(),
+        created_at: artifact.created_at.clone(),
+        exists,
+        action: action.to_string(),
+        reason: reason.to_string(),
+        size_bytes,
+    })
+}
+
+fn apply_persisted_artifact_cleanup(
+    store: &ObservationStore,
+    artifact: &ArtifactRecord,
+    artifact_root: &Path,
+) -> Result<()> {
+    let path = persisted_artifact_path_from_record(artifact_root, &artifact.path);
+    if let Some(metadata) = symlink_metadata_if_exists(&path)? {
+        if metadata.file_type().is_symlink() || !path_is_within_root(&path, artifact_root) {
+            return Err(Error::validation_invalid_argument(
+                "path",
+                "artifact path failed cleanup safety revalidation",
+                Some(path.display().to_string()),
+                None,
+            ));
+        }
+        if metadata.is_dir() {
+            fs::remove_dir_all(&path).map_err(|err| persisted_artifact_remove_error(&path, err))?;
+        } else {
+            fs::remove_file(&path).map_err(|err| persisted_artifact_remove_error(&path, err))?;
+        }
+    }
+    store.delete_artifact_record(&artifact.id)?;
+    Ok(())
+}
+
+fn persisted_artifact_path_from_record(artifact_root: &Path, raw: &str) -> PathBuf {
+    let path = PathBuf::from(raw);
+    if path.is_absolute() {
+        path
+    } else {
+        artifact_root.join(path)
+    }
+}
+
+fn symlink_metadata_if_exists(path: &Path) -> Result<Option<fs::Metadata>> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(Error::internal_io(
+            err.to_string(),
+            Some(format!("read persisted artifact {}", path.display())),
+        )),
+    }
+}
+
+fn path_is_within_root(path: &Path, artifact_root: &Path) -> bool {
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return false;
+    }
+    let root = fs::canonicalize(artifact_root).unwrap_or_else(|_| artifact_root.to_path_buf());
+    let candidate = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    candidate.starts_with(root)
+}
+
+fn path_size_bytes(path: &Path, metadata: &fs::Metadata) -> Result<u64> {
+    if metadata.is_dir() {
+        let mut total = 0;
+        for entry in
+            fs::read_dir(path).map_err(|err| persisted_artifact_read_dir_error(path, err))?
+        {
+            let entry = entry.map_err(|err| persisted_artifact_read_dir_error(path, err))?;
+            let entry_path = entry.path();
+            let metadata = fs::symlink_metadata(&entry_path).map_err(|err| {
+                Error::internal_io(
+                    err.to_string(),
+                    Some(format!("read persisted artifact {}", entry_path.display())),
+                )
+            })?;
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
+            total += path_size_bytes(&entry_path, &metadata)?;
+        }
+        Ok(total)
+    } else {
+        Ok(metadata.len())
+    }
+}
+
+fn persisted_artifact_read_dir_error(path: &Path, err: io::Error) -> Error {
+    Error::internal_io(
+        err.to_string(),
+        Some(format!(
+            "read persisted artifact directory {}",
+            path.display()
+        )),
+    )
+}
+
+fn persisted_artifact_remove_error(path: &Path, err: io::Error) -> Error {
+    Error::internal_io(
+        err.to_string(),
+        Some(format!("remove persisted artifact {}", path.display())),
+    )
+}
+
+#[derive(Debug, Default)]
+struct RunnerDownloadCleanupPreview {
+    file_count: usize,
+    directory_count: usize,
+    size_bytes: u64,
+    paths: Vec<String>,
+}
+
+fn runner_download_root(runner: Option<&str>, run_id: Option<&str>) -> Result<PathBuf> {
+    let mut root = crate::core::artifacts::root()?.join("runner");
+    if let Some(runner) = cleanup_path_component("runner", runner)? {
+        root = root.join(runner);
+    }
+    if let Some(run_id) = cleanup_path_component("run_id", run_id)? {
+        root = root.join(run_id);
+    }
+    Ok(root)
+}
+
+fn cleanup_path_component(name: &str, value: Option<&str>) -> Result<Option<String>> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let path = Path::new(value);
+    if path.is_absolute()
+        || path
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(Error::validation_invalid_argument(
+            name,
+            format!("{name} must be a single path component"),
+            Some(value.to_string()),
+            None,
+        ));
+    }
+    Ok(Some(value.to_string()))
+}
+
+fn plan_runner_download_cleanup(root: &Path) -> Result<RunnerDownloadCleanupPreview> {
+    let mut plan = RunnerDownloadCleanupPreview::default();
+    if !root.exists() {
+        return Ok(plan);
+    }
+
+    let metadata = fs::symlink_metadata(root).map_err(|err| {
+        Error::internal_io(
+            err.to_string(),
+            Some(format!("read runner artifact cache {}", root.display())),
+        )
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(Error::validation_invalid_argument(
+            "artifact_root",
+            format!(
+                "runner artifact cache root must be a real directory: {}",
+                root.display()
+            ),
+            Some(root.display().to_string()),
+            None,
+        ));
+    }
+
+    collect_runner_download_cleanup(root, root, &mut plan)?;
+    plan.paths.sort();
+    Ok(plan)
+}
+
+fn collect_runner_download_cleanup(
+    root: &Path,
+    path: &Path,
+    plan: &mut RunnerDownloadCleanupPreview,
+) -> Result<()> {
+    let metadata = fs::symlink_metadata(path).map_err(|err| {
+        Error::internal_io(
+            err.to_string(),
+            Some(format!(
+                "read runner artifact cache entry {}",
+                path.display()
+            )),
+        )
+    })?;
+
+    if path != root {
+        plan.paths.push(relative_cleanup_path(root, path));
+    }
+
+    if metadata.is_dir() && !metadata.file_type().is_symlink() {
+        plan.directory_count += usize::from(path != root);
+        for entry in fs::read_dir(path).map_err(|err| runner_cache_directory_error(path, err))? {
+            let entry = entry.map_err(|err| runner_cache_directory_error(path, err))?;
+            collect_runner_download_cleanup(root, &entry.path(), plan)?;
+        }
+    } else {
+        plan.file_count += 1;
+        plan.size_bytes += metadata.len();
+    }
+
+    Ok(())
+}
+
+fn runner_cache_directory_error(path: &Path, err: io::Error) -> Error {
+    Error::internal_io(
+        err.to_string(),
+        Some(format!(
+            "read runner artifact cache directory {}",
+            path.display()
+        )),
+    )
+}
+
+fn remove_runner_download_root(root: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(root).map_err(|err| {
+        Error::internal_io(
+            err.to_string(),
+            Some(format!("read runner artifact cache {}", root.display())),
+        )
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(Error::validation_invalid_argument(
+            "artifact_root",
+            format!(
+                "runner artifact cache root must be a real directory: {}",
+                root.display()
+            ),
+            Some(root.display().to_string()),
+            None,
+        ));
+    }
+    fs::remove_dir_all(root).map_err(|err| {
+        Error::internal_io(
+            err.to_string(),
+            Some(format!("remove runner artifact cache {}", root.display())),
+        )
+    })
+}
+
+fn relative_cleanup_path(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .trim_start_matches('/')
+        .to_string()
 }
 
 /// Classify an artifact's storage so callers can decide between local

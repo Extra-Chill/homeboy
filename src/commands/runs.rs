@@ -284,22 +284,7 @@ pub struct RunsArtifactCleanupPersistedOutput {
     pub rows: Vec<RunsArtifactCleanupPersistedRow>,
 }
 
-#[derive(Serialize)]
-pub struct RunsArtifactCleanupPersistedRow {
-    pub artifact_id: String,
-    pub run_id: String,
-    pub run_kind: String,
-    pub component_id: Option<String>,
-    pub kind: String,
-    #[serde(rename = "type")]
-    pub artifact_type: String,
-    pub path: String,
-    pub created_at: String,
-    pub exists: bool,
-    pub action: String,
-    pub reason: String,
-    pub size_bytes: u64,
-}
+pub type RunsArtifactCleanupPersistedRow = runs_service::PersistedArtifactCleanupRow;
 
 #[derive(Serialize)]
 pub struct RunDetail {
