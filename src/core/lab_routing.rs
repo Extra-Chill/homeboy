@@ -21,6 +21,7 @@ pub struct LabRoutingRequest<'a> {
     pub allow_local_fallback: bool,
     pub allow_dirty_lab_workspace: bool,
     pub capture_patch: bool,
+    pub mutation_flag: Option<&'a str>,
     pub timeout: Option<Duration>,
     pub active_run_id: Option<&'a str>,
 }
@@ -39,6 +40,7 @@ pub fn route_lab_offload(request: LabRoutingRequest<'_>) -> Result<runners::LabO
         allow_local_fallback: request.allow_local_fallback,
         allow_dirty_lab_workspace: request.allow_dirty_lab_workspace,
         capture_patch: request.capture_patch,
+        mutation_flag: request.mutation_flag,
     })
 }
 
@@ -104,6 +106,7 @@ fn execute_lab_offload_with_timeout(
     let allow_dirty_lab_workspace = request.allow_dirty_lab_workspace;
     let capture_patch = request.capture_patch;
     let active_run_id = request.active_run_id.map(str::to_string);
+    let mutation_flag = request.mutation_flag.map(str::to_string);
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let result = runners::execute_lab_offload(runners::LabOffloadRequest {
@@ -115,6 +118,7 @@ fn execute_lab_offload_with_timeout(
             allow_local_fallback,
             allow_dirty_lab_workspace,
             capture_patch,
+            mutation_flag: mutation_flag.as_deref(),
         });
         let _ = tx.send(result);
     });
@@ -224,6 +228,7 @@ mod tests {
             allow_local_fallback: false,
             allow_dirty_lab_workspace: false,
             capture_patch: false,
+            mutation_flag: None,
             timeout: None,
             active_run_id: None,
         })

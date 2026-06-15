@@ -127,6 +127,37 @@ pub(super) fn current_version_tag_name(
         .unwrap_or_else(|| format!("v{}", current_version))
 }
 
+/// Detect whether the release for `current_version` is already published at
+/// HEAD: the expected tag exists locally and points at the same commit as HEAD.
+///
+/// Used by the planner to short-circuit forced re-runs after a prior release
+/// already created the tag/release commit, so the operator sees a clear
+/// "release already exists" message instead of a downstream changelog
+/// contract error for the next version (issue #4316).
+pub(super) fn current_version_tag_at_head(
+    local_path: &str,
+    monorepo: Option<&git::MonorepoContext>,
+    current_version: &str,
+) -> Result<Option<String>> {
+    let git_root = monorepo
+        .map(|ctx| ctx.git_root.as_str())
+        .unwrap_or(local_path);
+    let tag_name = current_version_tag_name(monorepo, current_version);
+
+    if !git::tag_exists_locally(git_root, &tag_name)? {
+        return Ok(None);
+    }
+
+    let tag_commit = git::get_tag_commit(git_root, &tag_name)?;
+    let head_commit = git::get_head_commit(git_root)?;
+
+    if tag_commit == head_commit {
+        Ok(Some(tag_name))
+    } else {
+        Ok(None)
+    }
+}
+
 /// Resolve the latest tag and commits since that tag for a component.
 ///
 /// In a monorepo, uses component-prefixed tags and path-scoped commits.

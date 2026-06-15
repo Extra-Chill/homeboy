@@ -396,6 +396,7 @@ fn release_result(
 ) -> ReleaseCommandResult {
     ReleaseCommandResult {
         component_id: component_id.to_string(),
+        status: if dry_run { "planned" } else { "released" }.to_string(),
         bump_type: bump_type.to_string(),
         dry_run,
         releasable_commits: 1,
@@ -405,6 +406,15 @@ fn release_result(
         plan,
         run: None,
         deployment: None,
+        release_summary: if dry_run {
+            vec![
+                "No release commit created".to_string(),
+                "No tag created".to_string(),
+                "No GitHub Release created".to_string(),
+            ]
+        } else {
+            Vec::new()
+        },
     }
 }
 
