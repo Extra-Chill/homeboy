@@ -122,8 +122,6 @@ pub struct TraceToolchainProvenance {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub toolchains: BTreeMap<String, TraceGitProvenance>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub wp_codebox: Option<TraceGitProvenance>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub runtime_assets: BTreeMap<String, TraceRuntimeAssetProvenance>,
@@ -360,7 +358,7 @@ mod tests {
                 "timeline":[{"t_ms":0,"source":"desktop","event":"window.closed","data":{"id":1}}],
                 "span_definitions":[{"id":"close_to_assertion","from":"desktop.window.closed","to":"assertion.checked"}],
                 "assertions":[{"id":"no-window-reopen","status":"fail","message":"Window reopened"}],
-                "metrics":{"assertion_count":1,"producer":"wp-codebox"},
+                "metrics":{"assertion_count":1,"producer":"custom-provider"},
                 "artifacts":[{"label":"main log","path":"artifacts/main.log","kind":"log"}]
             }"#,
         )

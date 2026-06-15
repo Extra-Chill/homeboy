@@ -12,8 +12,12 @@
 use std::fs;
 
 use crate::core::agent_tasks::lifecycle as agent_task_lifecycle;
+use crate::core::agent_tasks::provider::{
+    dependency_failure_patterns, AgentTaskProviderDependencyFailurePattern,
+};
 use crate::core::agent_tasks::scheduler::{AgentTaskAggregate, AgentTaskPlan};
 use crate::core::{config, Error, Result};
+use serde::Deserialize;
 
 use super::super::lab_workspaces::{workspace_mapping_entry, LabWorkspaceMappingEntry};
 use super::super::{sync_workspace, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions};
@@ -395,7 +399,13 @@ pub(super) fn ensure_agent_task_dispatch_run_id(args: &[String]) -> Option<(Vec<
 }
 
 pub(super) fn lab_pre_dispatch_failure_message(output: &str) -> Option<String> {
-    if let Some(message) = lab_pre_dispatch_dependency_failure_message(output) {
+    if let Some(message) = lab_pre_dispatch_structured_dependency_failure_message(output) {
+        return Some(message);
+    }
+
+    if let Some(message) =
+        lab_pre_dispatch_dependency_failure_message(output, &dependency_failure_patterns())
+    {
         return Some(message);
     }
 
@@ -406,30 +416,97 @@ pub(super) fn lab_pre_dispatch_failure_message(output: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-fn lab_pre_dispatch_dependency_failure_message(output: &str) -> Option<String> {
-    if !looks_like_prepared_dependency_failure(output) {
-        return None;
-    }
+#[derive(Debug, Deserialize)]
+struct LabDependencyFailureEnvelope {
+    #[serde(default)]
+    schema: Option<String>,
+    dependency: LabDependencyFailureDependency,
+    #[serde(default)]
+    message: Option<String>,
+    #[serde(default)]
+    remediation: Option<String>,
+}
 
-    let missing_path = first_quoted_prepared_dependency_path(output)
-        .unwrap_or_else(|| "prepared dependency path".to_string());
+#[derive(Debug, Default, Deserialize)]
+struct LabDependencyFailureDependency {
+    id: String,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    path: Option<String>,
+}
+
+fn lab_pre_dispatch_structured_dependency_failure_message(output: &str) -> Option<String> {
+    output
+        .lines()
+        .filter_map(|line| serde_json::from_str::<LabDependencyFailureEnvelope>(line.trim()).ok())
+        .find(|envelope| envelope.schema.as_deref() == Some("homeboy/lab-dependency-failure/v1"))
+        .map(|envelope| structured_dependency_failure_message(&envelope))
+}
+
+fn structured_dependency_failure_message(envelope: &LabDependencyFailureEnvelope) -> String {
+    let dependency = envelope
+        .dependency
+        .path
+        .as_deref()
+        .filter(|path| !path.trim().is_empty())
+        .unwrap_or(&envelope.dependency.id);
+    let kind = envelope
+        .dependency
+        .kind
+        .as_deref()
+        .filter(|kind| !kind.trim().is_empty())
+        .unwrap_or("dependency");
+    let reason = envelope
+        .message
+        .as_deref()
+        .filter(|message| !message.trim().is_empty())
+        .unwrap_or("runtime dependency staging failed");
+    let remediation = envelope
+        .remediation
+        .as_deref()
+        .filter(|remediation| !remediation.trim().is_empty())
+        .unwrap_or("repair or refresh the runner runtime");
+    format!(
+        "Lab runtime failed before agent dispatch while staging {kind} `{dependency}`: {reason}. {remediation}, then retry this cook run."
+    )
+}
+
+fn lab_pre_dispatch_dependency_failure_message(
+    output: &str,
+    patterns: &[AgentTaskProviderDependencyFailurePattern],
+) -> Option<String> {
+    let pattern = patterns
+        .iter()
+        .find(|pattern| dependency_failure_pattern_matches(output, pattern))?;
+    let missing_path = first_quoted_dependency_path(output, &pattern.path_contains)
+        .unwrap_or_else(|| pattern.label.clone());
     Some(format!(
-        "Lab runtime failed before agent dispatch while staging dependency `{missing_path}`. The selected Lab runner has a stale or misconfigured runtime dependency; repair or refresh the runner runtime, then retry this cook run."
+        "Lab runtime failed before agent dispatch while staging dependency `{missing_path}`. The selected Lab runner has a stale or misconfigured runtime dependency; {}, then retry this cook run.",
+        pattern
+            .remediation
+            .as_deref()
+            .unwrap_or("repair or refresh the runner runtime")
     ))
 }
 
-fn looks_like_prepared_dependency_failure(output: &str) -> bool {
+fn dependency_failure_pattern_matches(
+    output: &str,
+    pattern: &AgentTaskProviderDependencyFailurePattern,
+) -> bool {
     let lower = output.to_lowercase();
-    lower.contains("prepared-plugins/")
-        && (lower.contains("enoent")
-            || lower.contains("no such file or directory")
-            || lower.contains("lstat"))
+    lower.contains(&pattern.path_contains.to_lowercase())
+        && (pattern.error_contains_any.is_empty()
+            || pattern
+                .error_contains_any
+                .iter()
+                .any(|needle| lower.contains(&needle.to_lowercase())))
 }
 
-fn first_quoted_prepared_dependency_path(output: &str) -> Option<String> {
+fn first_quoted_dependency_path(output: &str, path_contains: &str) -> Option<String> {
     output
         .split(['\'', '"'])
-        .find(|part| part.contains("prepared-plugins/"))
+        .find(|part| part.contains(path_contains))
         .map(str::trim)
         .filter(|part| !part.is_empty())
         .map(str::to_string)
@@ -442,8 +519,8 @@ mod tests {
     #[test]
     fn offloaded_run_plan_envelope_parser_tolerates_extension_stdout_chatter() {
         let stdout = concat!(
-            "Setting up WordPress extension...\n",
-            "Installing npm dependencies...\n",
+            "Preparing extension runtime...\n",
+            "Installing declared dependencies...\n",
             "{\"success\":false,\"data\":{\"status\":\"failed\"}}\n",
             "trailing diagnostic\n"
         );
@@ -731,13 +808,33 @@ mod tests {
     }
 
     #[test]
-    fn pre_dispatch_failure_message_summarizes_prepared_dependency_staging_failure() {
-        let output = "ENOENT: no such file or directory, lstat '/home/chubes/Developer/.tmp/homeboy-artifacts/prepared-plugins/agents-api'";
+    fn pre_dispatch_failure_message_uses_structured_dependency_failure_envelope() {
+        let output = r#"runtime setup log
+{"schema":"homeboy/lab-dependency-failure/v1","dependency":{"id":"runtime-a","kind":"runtime component","path":"/remote/cache/runtime-a"},"message":"path missing","remediation":"refresh runtime cache"}
+trailing log"#;
 
         let message = lab_pre_dispatch_failure_message(output).expect("message");
 
-        assert!(message.contains("Lab runtime failed before agent dispatch"));
-        assert!(message.contains("prepared-plugins/agents-api"));
-        assert!(message.contains("repair or refresh the runner runtime"));
+        assert!(message.contains("runtime component `/remote/cache/runtime-a`"));
+        assert!(message.contains("path missing"));
+        assert!(message.contains("refresh runtime cache"));
+    }
+
+    #[test]
+    fn pre_dispatch_failure_message_uses_declared_dependency_pattern() {
+        let output = "Error: lstat '/remote/cache/prepared-dependencies/runtime-a': no such file or directory";
+        let patterns = vec![AgentTaskProviderDependencyFailurePattern {
+            id: "fixture.dependency".to_string(),
+            label: "Fixture dependency".to_string(),
+            path_contains: "prepared-dependencies/".to_string(),
+            error_contains_any: vec!["no such file or directory".to_string()],
+            remediation: Some("refresh fixture dependencies".to_string()),
+        }];
+
+        let message =
+            lab_pre_dispatch_dependency_failure_message(output, &patterns).expect("message");
+
+        assert!(message.contains("prepared-dependencies/runtime-a"));
+        assert!(message.contains("refresh fixture dependencies"));
     }
 }

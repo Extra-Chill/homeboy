@@ -681,7 +681,7 @@ fn dispatch_args_from_controller_request(request: &Value) -> homeboy::core::Resu
         workspace: optional_string(dispatch, "workspace"),
         repo: optional_string(dispatch, "repo"),
         task_url: optional_string(dispatch, "task_url"),
-        backend: optional_string(dispatch, "backend").unwrap_or_else(|| "codebox".to_string()),
+        backend: optional_string(dispatch, "backend"),
         selector: optional_string(dispatch, "selector"),
         model: optional_string(dispatch, "model"),
         secret_env: optional_string_array(dispatch, "secret_env")?,
@@ -1644,7 +1644,7 @@ mod tests {
                         task_url: Some(
                             "https://github.com/Extra-Chill/homeboy/issues/3675".to_string(),
                         ),
-                        backend: "fixture".to_string(),
+                        backend: Some("fixture".to_string()),
                         selector: None,
                         model: None,
                         secret_env: Vec::new(),

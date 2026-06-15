@@ -958,7 +958,6 @@ mod tests {
                         {
                             "id": "fixture-toolchain",
                             "label": "Fixture Toolchain",
-                            "legacy_field": "wp_codebox",
                             "env_keys": ["FIXTURE_TOOLCHAIN_BIN"]
                         }
                     ]

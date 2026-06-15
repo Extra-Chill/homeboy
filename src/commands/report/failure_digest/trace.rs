@@ -31,7 +31,7 @@ pub(super) fn render_trace_section(out: &mut String, output_dir: &Path, run_url:
 
     render_trace_summary(out, &data, &results, &failure, &error);
     render_trace_toolchain(out, &data, &results);
-    render_wp_codebox_trace_diagnostics(out, &data, &results, &failure, &error);
+    render_trace_runtime_diagnostics(out, &data, &results, &failure, &error);
     render_trace_artifacts(out, &data, &results);
     render_full_log(out, "trace", run_url);
     out.push('\n');
@@ -94,9 +94,11 @@ fn render_trace_toolchain(
     if !homeboy.is_empty() {
         render_trace_git_provenance(out, "Homeboy", &homeboy);
     }
-    let wp_codebox = object_value(toolchain, "wp_codebox");
-    if !wp_codebox.is_empty() {
-        render_trace_git_provenance(out, "WP Codebox", &wp_codebox);
+    let toolchains = object_value(toolchain, "toolchains");
+    for (id, value) in toolchains {
+        if let Some(provenance) = value.as_object() {
+            render_trace_git_provenance(out, &id, provenance);
+        }
     }
     if let Some(components) = components.as_ref() {
         let target = object_value(components, "target");
@@ -270,7 +272,7 @@ fn render_trace_artifacts(
     }
 }
 
-fn render_wp_codebox_trace_diagnostics(
+fn render_trace_runtime_diagnostics(
     out: &mut String,
     data: &Map<String, Value>,
     results: &Map<String, Value>,
@@ -278,7 +280,7 @@ fn render_wp_codebox_trace_diagnostics(
     error: &Map<String, Value>,
 ) {
     let candidates = trace_diagnostic_candidates(data, results, failure, error);
-    let artifact_paths = collect_wp_codebox_manifest_paths(&candidates);
+    let artifact_paths = collect_runtime_manifest_paths(&candidates);
     let phase = first_string_by_keys(
         &candidates,
         &["failure_phase", "current_phase", "last_phase", "phase"],
@@ -304,7 +306,7 @@ fn render_wp_codebox_trace_diagnostics(
         return;
     }
 
-    out.push_str("**WP Codebox runtime diagnostics**\n");
+    out.push_str("**Runtime diagnostics**\n");
     if let Some(classification) = classification {
         let _ = writeln!(out, "- Failure phase: **{classification}**");
     }
@@ -341,9 +343,9 @@ fn collect_nested_diagnostic_objects<'a>(
     candidates: &mut Vec<&'a Map<String, Value>>,
 ) {
     for key in [
-        "wp_codebox",
-        "wp_codebox_artifacts",
-        "wp_codebox_runtime",
+        "provider_runtime",
+        "runtime_artifacts",
+        "runtime_diagnostics",
         "artifact_manifest",
         "artifacts_manifest",
         "runtime_manifest",
@@ -368,12 +370,12 @@ fn collect_nested_diagnostic_objects<'a>(
     }
 }
 
-fn collect_wp_codebox_manifest_paths(candidates: &[&Map<String, Value>]) -> Vec<(String, String)> {
+fn collect_runtime_manifest_paths(candidates: &[&Map<String, Value>]) -> Vec<(String, String)> {
     let mut seen = BTreeSet::new();
     let mut rows = Vec::new();
     for (label, keys) in [
         (
-            "WP Codebox manifest",
+            "Artifact manifest",
             &[
                 "manifest_path",
                 "artifact_manifest_path",

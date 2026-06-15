@@ -307,7 +307,7 @@ pub struct ApplyResult {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApplyAdapterContract {
     /// Stable adapter id, for example `homeboy/lab-apply-adapter/v1` or
-    /// `homeboy/wp-codebox-apply-adapter/v1`.
+    /// `provider/custom-apply-adapter/v1`.
     pub id: String,
     #[serde(default = "apply_phase")]
     pub phase: ExecutionPhase,
@@ -347,8 +347,7 @@ impl Default for ApplyPreflightPolicy {
     }
 }
 
-/// Machine-readable preflight checks shared by Lab and WP Codebox-style apply
-/// adapters.
+/// Machine-readable preflight checks shared by Lab and provider-owned apply adapters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApplyPreflightCheck {
@@ -591,14 +590,11 @@ mod tests {
     }
 
     #[test]
-    fn apply_adapter_contract_documents_wp_codebox_boundaries() {
+    fn apply_adapter_contract_documents_provider_boundaries() {
         let contract = ApplyAdapterContract {
-            id: "homeboy/wp-codebox-apply-adapter/v1".to_string(),
+            id: "provider/custom-apply-adapter/v1".to_string(),
             phase: ExecutionPhase::Apply,
-            artifact_types: vec![
-                "wp_codebox.bundle".to_string(),
-                "wp_codebox.file".to_string(),
-            ],
+            artifact_types: vec!["provider.bundle".to_string(), "provider.file".to_string()],
             preflight_policy: ApplyPreflightPolicy::default(),
             publish_boundaries: vec![
                 PublishOperation::Commit,

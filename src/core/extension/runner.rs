@@ -133,6 +133,13 @@ impl ExtensionRunner {
     /// per-file env vars so extension scripts work with either pattern.
     pub fn with_run_dir(mut self, run_dir: &crate::core::engine::run_dir::RunDir) -> Self {
         self.env_vars.extend(run_dir.legacy_env_vars());
+        self.env_vars.push((
+            crate::core::server::DELEGATED_RUN_STATUS_FILE_ENV.to_string(),
+            run_dir
+                .step_file("delegated-run-status.json")
+                .to_string_lossy()
+                .to_string(),
+        ));
         self.run_dir_path = Some(run_dir.path().to_path_buf());
         self
     }
@@ -381,6 +388,12 @@ mod tests {
             .iter()
             .any(|(key, value)| key == "HOMEBOY_RUN_DIR"
                 && value == &run_dir.path().to_string_lossy()));
+        assert!(runner.env_vars.iter().any(|(key, value)| key
+            == crate::core::server::DELEGATED_RUN_STATUS_FILE_ENV
+            && value
+                == &run_dir
+                    .step_file("delegated-run-status.json")
+                    .to_string_lossy()));
 
         run_dir.cleanup();
     }

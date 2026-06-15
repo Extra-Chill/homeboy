@@ -179,7 +179,9 @@ fn agent_task_provider_requires_cwd_git_checkout(command: &agent_task::AgentTask
     match command {
         agent_task::AgentTaskCommand::Cook(args) | agent_task::AgentTaskCommand::Dispatch(args) => {
             args.cwd.as_ref().is_some_and(|cwd| !cwd.trim().is_empty())
-                && provider_requires_cwd_git_checkout(&args.backend, args.selector.as_deref())
+                && args.backend.as_ref().is_some_and(|backend| {
+                    provider_requires_cwd_git_checkout(backend, args.selector.as_deref())
+                })
         }
         _ => false,
     }

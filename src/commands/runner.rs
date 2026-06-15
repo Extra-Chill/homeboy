@@ -257,7 +257,7 @@ enum RunnerCommand {
         #[arg(long = "require-tool")]
         required_tools: Vec<String>,
 
-        /// Readiness scope. `lab-offload` adds Lab-specific binary, daemon, and WP Codebox checks.
+        /// Readiness scope. `lab-offload` adds Lab-specific binary, daemon, and provider readiness checks.
         #[arg(long, value_enum, default_value_t = RunnerDoctorScopeArg::General)]
         scope: RunnerDoctorScopeArg,
 

@@ -582,12 +582,6 @@ fn trace_provenance(
         browser_runtime_asset_provenance(),
     );
 
-    let wp_codebox = toolchain_requirements.iter().find_map(|requirement| {
-        (requirement.legacy_field.as_deref() == Some("wp_codebox"))
-            .then(|| toolchains.get(&requirement.id).cloned())
-            .flatten()
-    });
-
     Ok((
         TraceToolchainProvenance {
             canonical,
@@ -600,7 +594,6 @@ fn trace_provenance(
             reasons,
             homeboy,
             toolchains,
-            wp_codebox,
             node: command_version("node", &["--version"]),
             runtime_assets,
         },
@@ -1286,7 +1279,7 @@ mod tests {
                 crate::core::engine::resource::ExtensionChildResourceSummary {
                     child: crate::core::engine::resource::ChildProcessIdentity {
                         root_pid: 4242,
-                        command_label: "wp-codebox recipe-run recipes/stripe-ece.yml".to_string(),
+                        command_label: "custom-provider run recipes/browser.yml".to_string(),
                     },
                     phase: None,
                     started_at: "2026-06-06T00:00:00Z".to_string(),
@@ -1333,7 +1326,7 @@ mod tests {
         assert_eq!(failure.child_pid, Some(4242));
         assert_eq!(
             failure.child_command.as_deref(),
-            Some("wp-codebox recipe-run recipes/stripe-ece.yml")
+            Some("custom-provider run recipes/browser.yml")
         );
         assert_eq!(
             failure.recipe_path.as_deref(),
@@ -1545,7 +1538,7 @@ mod tests {
             .output()
             .expect("git commit runs");
 
-        let provenance = git_provenance(&bin, Some("wp_codebox"));
+        let provenance = git_provenance(&bin, Some("fixture-toolchain"));
 
         assert_eq!(
             provenance.path,
@@ -1591,7 +1584,10 @@ mod tests {
                 provenance.source.as_deref(),
                 Some("env:FIXTURE_TOOLCHAIN_BIN")
             );
-            assert_eq!(toolchain.wp_codebox.as_ref(), Some(provenance));
+            assert_eq!(
+                toolchain.toolchains.get("fixture-toolchain"),
+                Some(provenance)
+            );
         });
     }
 
@@ -1640,7 +1636,6 @@ mod tests {
                         {
                             "id": "fixture-toolchain",
                             "label": "Fixture Toolchain",
-                            "legacy_field": "wp_codebox",
                             "env_keys": ["FIXTURE_TOOLCHAIN_BIN"]
                         }
                     ]

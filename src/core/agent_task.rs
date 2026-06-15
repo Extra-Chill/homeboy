@@ -731,7 +731,7 @@ mod tests {
                         metadata: json!({ "phase": "diagnostics" }),
                     },
                 ],
-                metadata: json!({ "executor": "wp-codebox" }),
+                metadata: json!({ "executor": "custom-provider" }),
             }),
             follow_up: None,
             metadata: json!({}),

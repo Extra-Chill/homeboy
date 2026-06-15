@@ -3,13 +3,11 @@ use serde::Serialize;
 use serde_json::Value;
 
 use homeboy::core::agent_tasks::dispatch_service::{self, AgentTaskDispatchRequest};
-use homeboy::core::agent_tasks::provider::ExtensionProviderAgentTaskExecutor;
+use homeboy::core::agent_tasks::provider::{default_backend, ExtensionProviderAgentTaskExecutor};
 use homeboy::core::agent_tasks::scheduler::{AgentTaskAggregate, AgentTaskExecutorAdapter};
 use homeboy::core::agent_tasks::AgentTaskAggregateReport;
 
 use super::{CmdResult, GlobalArgs};
-
-pub(crate) const DEFAULT_AGENT_TASK_BACKEND: &str = "codebox";
 
 #[derive(Args, Debug, Clone)]
 pub struct DispatchArgs {
@@ -42,8 +40,8 @@ pub struct DispatchArgs {
     pub task_url: Option<String>,
 
     /// Executor backend to request. Defaults to the configured coding backend.
-    #[arg(long, default_value = DEFAULT_AGENT_TASK_BACKEND, value_name = "BACKEND")]
-    pub backend: String,
+    #[arg(long, value_name = "BACKEND")]
+    pub backend: Option<String>,
 
     /// Optional provider selector/id when more than one backend provider exists.
     #[arg(long, value_name = "SELECTOR")]
@@ -104,12 +102,21 @@ pub(crate) fn dispatch_with_executor<E>(args: DispatchArgs, executor: E) -> CmdR
 where
     E: AgentTaskExecutorAdapter,
 {
-    let result = dispatch_service::dispatch(dispatch_request_from_args(args), executor)?;
+    let result = dispatch_service::dispatch(dispatch_request_from_args(args)?, executor)?;
     Ok((command_json_value(result.value)?, result.exit_code))
 }
 
-pub(crate) fn dispatch_request_from_args(args: DispatchArgs) -> AgentTaskDispatchRequest {
-    AgentTaskDispatchRequest {
+pub(crate) fn dispatch_request_from_args(
+    args: DispatchArgs,
+) -> homeboy::core::Result<AgentTaskDispatchRequest> {
+    dispatch_request_from_args_with_default(args, default_backend)
+}
+
+fn dispatch_request_from_args_with_default(
+    args: DispatchArgs,
+    default_backend: impl FnOnce() -> Option<String>,
+) -> homeboy::core::Result<AgentTaskDispatchRequest> {
+    Ok(AgentTaskDispatchRequest {
         prompt: args.prompt,
         tasks: args.tasks,
         tasks_json: args.tasks_json,
@@ -117,7 +124,16 @@ pub(crate) fn dispatch_request_from_args(args: DispatchArgs) -> AgentTaskDispatc
         workspace: args.workspace,
         repo: args.repo,
         task_url: args.task_url,
-        backend: args.backend,
+        backend: args.backend.or_else(default_backend).ok_or_else(|| {
+            homeboy::core::Error::validation_invalid_argument(
+                "backend",
+                "agent-task dispatch requires --backend because no default backend provider is declared",
+                None,
+                Some(vec![
+                    "Declare an agent_task_executors entry with default_backend=true in an extension manifest, or pass --backend explicitly.".to_string(),
+                ]),
+            )
+        })?,
         selector: args.selector,
         model: args.model,
         secret_env: args.secret_env,
@@ -127,7 +143,7 @@ pub(crate) fn dispatch_request_from_args(args: DispatchArgs) -> AgentTaskDispatc
         attempts: args.attempts,
         run_id: args.run_id,
         queue_only: args.queue_only,
-    }
+    })
 }
 
 fn command_json_value<T: Serialize>(value: T) -> homeboy::core::Result<Value> {
@@ -334,6 +350,64 @@ mod tests {
         });
     }
 
+    #[test]
+    fn dispatch_request_uses_declared_default_backend_when_backend_is_absent() {
+        let request = dispatch_request_from_args_with_default(
+            DispatchArgs {
+                prompt: Some("run with default".to_string()),
+                tasks: Vec::new(),
+                tasks_json: None,
+                cwd: None,
+                workspace: None,
+                repo: None,
+                task_url: None,
+                backend: None,
+                selector: None,
+                model: None,
+                secret_env: Vec::new(),
+                provider_config: None,
+                client_context: None,
+                concurrency: 1,
+                attempts: 1,
+                run_id: None,
+                queue_only: false,
+            },
+            || Some("fake-default".to_string()),
+        )
+        .expect("default backend request");
+
+        assert_eq!(request.backend, "fake-default");
+    }
+
+    #[test]
+    fn dispatch_request_errors_when_backend_and_default_are_absent() {
+        let error = dispatch_request_from_args_with_default(
+            DispatchArgs {
+                prompt: Some("run without default".to_string()),
+                tasks: Vec::new(),
+                tasks_json: None,
+                cwd: None,
+                workspace: None,
+                repo: None,
+                task_url: None,
+                backend: None,
+                selector: None,
+                model: None,
+                secret_env: Vec::new(),
+                provider_config: None,
+                client_context: None,
+                concurrency: 1,
+                attempts: 1,
+                run_id: None,
+                queue_only: false,
+            },
+            || None,
+        )
+        .expect_err("missing backend should fail");
+
+        assert!(error.message.contains("requires --backend"));
+    }
+
     struct NoopExecutor;
 
     impl AgentTaskExecutorAdapter for NoopExecutor {
@@ -422,7 +496,7 @@ mod tests {
             workspace: overrides.workspace,
             repo: overrides.repo,
             task_url: overrides.task_url,
-            backend: overrides.backend.unwrap_or_else(|| "fixture".to_string()),
+            backend: Some(overrides.backend.unwrap_or_else(|| "fixture".to_string())),
             selector: None,
             model: None,
             secret_env: overrides.secret_env,

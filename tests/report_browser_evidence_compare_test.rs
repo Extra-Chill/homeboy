@@ -3,7 +3,12 @@ use std::path::{Path, PathBuf};
 
 use homeboy::commands::report::{
     browser_evidence_compare_from_args, browser_evidence_compare_from_dirs,
-    BrowserEvidenceCompareArgs,
+    browser_evidence_compare_from_dirs_with_visual_and_adapters, BrowserEvidenceCompareArgs,
+    VisualCompareOptions,
+};
+use homeboy::core::extension::{
+    TraceBrowserArtifactMapConfig, TraceBrowserEvidenceAdapterConfig,
+    TraceBrowserMetricAliasConfig, TraceBrowserSummaryAliasConfig,
 };
 
 fn tmp_dir(name: &str) -> PathBuf {
@@ -24,6 +29,33 @@ fn write_fixture_file(dir: &Path, name: &str, body: &str) {
             err
         )
     });
+}
+
+fn browser_evidence_adapter() -> TraceBrowserEvidenceAdapterConfig {
+    TraceBrowserEvidenceAdapterConfig {
+        id: "custom-provider.browser-summary".to_string(),
+        summary_aliases: vec![TraceBrowserSummaryAliasConfig {
+            request_total_keys: vec!["networkEvents".to_string()],
+            page_error_keys: vec!["errors".to_string()],
+            metrics: vec![
+                TraceBrowserMetricAliasConfig {
+                    metric: "browser_console_message_count".to_string(),
+                    keys: vec!["consoleMessages".to_string()],
+                },
+                TraceBrowserMetricAliasConfig {
+                    metric: "browser_page_error_count".to_string(),
+                    keys: vec!["errors".to_string()],
+                },
+                TraceBrowserMetricAliasConfig {
+                    metric: "browser_network_event_count".to_string(),
+                    keys: vec!["networkEvents".to_string()],
+                },
+            ],
+        }],
+        artifact_maps: vec![TraceBrowserArtifactMapConfig {
+            field: "files".to_string(),
+        }],
+    }
 }
 
 fn args(root: &Path, include_local_paths: bool) -> BrowserEvidenceCompareArgs {
@@ -310,13 +342,13 @@ fn surfaces_failed_advisory_assertions_in_json_and_markdown() {
 }
 
 #[test]
-fn promotes_wp_codebox_browser_summary_metrics() {
-    let root = tmp_dir("wp-codebox-summary");
+fn promotes_declared_browser_summary_metrics() {
+    let root = tmp_dir("provider-summary");
     write_fixture_file(
         &root.join("baseline"),
         "summary.json",
         r#"{
-            "schema":"wp-codebox/browser-probe/v1",
+            "schema":"custom-provider/browser-probe/v1",
             "summary": {
                 "assertions": {"total": 1, "passed": 1, "failed": 0, "skipped": 0},
                 "consoleMessages": 0,
@@ -341,7 +373,7 @@ fn promotes_wp_codebox_browser_summary_metrics() {
         &root.join("candidate"),
         "summary.json",
         r#"{
-            "schema":"wp-codebox/browser-probe/v1",
+            "schema":"custom-provider/browser-probe/v1",
             "summary": {
                 "assertions": {"total": 1, "passed": 1, "failed": 0, "skipped": 0},
                 "consoleMessages": 1,
@@ -363,7 +395,16 @@ fn promotes_wp_codebox_browser_summary_metrics() {
         }"#,
     );
 
-    let report = browser_evidence_compare_from_args(&args(&root, false)).expect("report renders");
+    let report = browser_evidence_compare_from_dirs_with_visual_and_adapters(
+        &[root.join("baseline")],
+        &[root.join("candidate")],
+        "baseline-main",
+        "candidate-pr",
+        false,
+        None,
+        &[browser_evidence_adapter()],
+    )
+    .expect("report renders");
     let variant = report.variants.first().expect("variant should exist");
 
     assert_eq!(report.totals.baseline_samples, 1);
@@ -416,7 +457,7 @@ fn can_run_visual_compare_through_declared_provider() {
         &root.join("baseline"),
         "summary.json",
         r#"{
-            "schema":"wp-codebox/browser-probe/v1",
+            "schema":"custom-provider/browser-probe/v1",
             "summary": { "assertions": {"total":1,"passed":1,"failed":0,"skipped":0}, "networkEvents": 1 },
             "files": { "screenshot": "files/browser/screenshot.png" }
         }"#,
@@ -425,7 +466,7 @@ fn can_run_visual_compare_through_declared_provider() {
         &root.join("candidate"),
         "summary.json",
         r#"{
-            "schema":"wp-codebox/browser-probe/v1",
+            "schema":"custom-provider/browser-probe/v1",
             "summary": { "assertions": {"total":1,"passed":1,"failed":0,"skipped":0}, "networkEvents": 1 },
             "files": { "screenshot": "files/browser/screenshot.png" }
         }"#,
@@ -461,14 +502,21 @@ process.stdout.write(JSON.stringify({
         std::env::set_var("HOMEBOY_FAKE_VISUAL_INPUT", &input_capture);
     }
 
-    let mut compare_args = args(&root, false);
-    compare_args.visual_compare = true;
-    compare_args.visual_artifacts_dir =
-        Some(root.join("visual-output").to_string_lossy().to_string());
-    compare_args.visual_compare_provider = Some("node".to_string());
-    compare_args.visual_provider_args = vec![provider.to_string_lossy().to_string()];
-    compare_args.visual_threshold = Some(0.1);
-    let report = browser_evidence_compare_from_args(&compare_args).expect("report renders");
+    let report = browser_evidence_compare_from_dirs_with_visual_and_adapters(
+        &[root.join("baseline")],
+        &[root.join("candidate")],
+        "baseline-main",
+        "candidate-pr",
+        false,
+        Some(VisualCompareOptions {
+            artifacts_dir: root.join("visual-output"),
+            provider_command: "node".to_string(),
+            provider_args: vec![provider.to_string_lossy().to_string()],
+            threshold: Some(0.1),
+        }),
+        &[browser_evidence_adapter()],
+    )
+    .expect("report renders");
 
     let variant = report.variants.first().expect("variant should exist");
     let visual = variant.visual_compare.as_ref().expect("visual result");
