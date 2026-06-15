@@ -510,7 +510,7 @@ fn artifact_store_content(
     artifact_id: &str,
     decoded_artifact_id: &str,
 ) -> Result<Value> {
-    let locator = runner::artifact_store_locator_from_runner_artifact_id(&decoded_artifact_id)
+    let locator = runner::artifact_store_locator_from_runner_artifact_id(decoded_artifact_id)
         .ok_or_else(|| {
             Error::validation_invalid_argument(
                 "artifact_id",
