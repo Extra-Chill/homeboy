@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.121.33] - 2026-06-15
+
+### Fixed
+- preflight Codex provider plugin paths
+
 ## [2.121.32] - 2026-06-14
 
 ### Fixed
