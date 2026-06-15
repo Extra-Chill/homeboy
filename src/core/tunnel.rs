@@ -11,11 +11,13 @@ use std::time::{Duration, Instant};
 use std::os::unix::process::CommandExt;
 
 use crate::core::config::{self, ConfigEntity};
-use crate::core::error::{Error, Result};
+use crate::core::error::{Error, ErrorCode, Result};
 use crate::core::paths;
 use crate::core::process::{pid_is_running, process_group_is_running};
 use crate::core::server;
 use crate::core::{CreateOutput, MergeOutput, RemoveResult};
+
+const RUNNER_LOCAL_SERVICE_SERVER_ID: &str = "__runner_local__";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ServiceTunnel {
@@ -539,7 +541,7 @@ pub fn status(id: &str) -> Result<ServiceTunnelStatus> {
 }
 
 pub fn start(spec: StartServiceTunnelSpec) -> Result<ServiceTunnelStatus> {
-    let mut tunnel = load(&spec.id)?;
+    let mut tunnel = load_or_materialize_start_tunnel(&spec)?;
     validate_backend_spec(&spec)?;
 
     let existing = load_runtime_state(&tunnel.id)?;
@@ -659,6 +661,73 @@ pub fn start(spec: StartServiceTunnelSpec) -> Result<ServiceTunnelStatus> {
     };
     save_runtime_state(&state)?;
     status(&tunnel.id)
+}
+
+fn load_or_materialize_start_tunnel(spec: &StartServiceTunnelSpec) -> Result<ServiceTunnel> {
+    match load(&spec.id) {
+        Ok(tunnel) => Ok(tunnel),
+        Err(error) if error.code == ErrorCode::ServiceTunnelNotFound => {
+            materialize_runner_local_start_tunnel(spec)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn materialize_runner_local_start_tunnel(spec: &StartServiceTunnelSpec) -> Result<ServiceTunnel> {
+    let host = spec.host.as_deref().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "host",
+            "starting an undeclared runner-local service tunnel requires --host",
+            Some(spec.id.clone()),
+            Some(vec!["Pass --host 127.0.0.1 or declare the service with `homeboy tunnel service expose` before starting it.".to_string()]),
+        )
+    })?;
+    validate_loopback_host(host, &spec.id)?;
+    let port = spec.port.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "port",
+            "starting an undeclared runner-local service tunnel requires --port",
+            Some(spec.id.clone()),
+            Some(vec!["Pass the local service port or declare the service with `homeboy tunnel service expose` before starting it.".to_string()]),
+        )
+    })?;
+    if port == 0 {
+        return Err(Error::validation_invalid_argument(
+            "port",
+            "local port must be greater than zero",
+            Some(spec.id.clone()),
+            None,
+        ));
+    }
+
+    let tunnel = ServiceTunnel {
+        id: spec.id.clone(),
+        aliases: Vec::new(),
+        description: Some("Runner-local service materialized by tunnel service start".to_string()),
+        server_id: RUNNER_LOCAL_SERVICE_SERVER_ID.to_string(),
+        target: ServiceTunnelTarget {
+            host: host.to_string(),
+            port,
+        },
+        scheme: spec.scheme.clone().unwrap_or_else(default_scheme),
+        local_host: host.to_string(),
+        local_port: Some(port),
+        auth: ServiceTunnelAuth {
+            mode: ServiceTunnelAuthMode::SshOnly,
+            env_var: None,
+            header: None,
+        },
+        policy: ServiceTunnelPolicy {
+            exposure: ServiceTunnelExposure::PrivateLoopback,
+            require_auth: true,
+            allowed_clients: Vec::new(),
+            preview: ServiceTunnelPreviewPolicy::default(),
+            native_preview_auth: Default::default(),
+        },
+    };
+    validate_service_tunnel(&tunnel)?;
+    save(&tunnel)?;
+    load(&tunnel.id)
 }
 
 pub fn stop(id: &str) -> Result<ServiceTunnelStatus> {
@@ -1010,7 +1079,7 @@ fn local_url_for(tunnel: &ServiceTunnel) -> String {
 }
 
 fn validate_service_tunnel(tunnel: &ServiceTunnel) -> Result<()> {
-    if !server::exists(&tunnel.server_id) {
+    if tunnel.server_id != RUNNER_LOCAL_SERVICE_SERVER_ID && !server::exists(&tunnel.server_id) {
         let suggestions = config::find_similar_ids::<server::Server>(&tunnel.server_id);
         return Err(Error::server_not_found(
             tunnel.server_id.clone(),
@@ -1657,5 +1726,66 @@ fn runtime_evidence(state: &ServiceTunnelRuntimeState) -> ServiceTunnelEvidence 
             .map(|path| path.display().to_string())
             .unwrap_or_default(),
         logs: state.logs.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn start_spec(id: &str) -> StartServiceTunnelSpec {
+        StartServiceTunnelSpec {
+            id: id.to_string(),
+            command: "node server.js".to_string(),
+            cwd: None,
+            env: BTreeMap::new(),
+            host: Some("127.0.0.1".to_string()),
+            port: Some(48631),
+            scheme: Some("http".to_string()),
+            health_url: None,
+            health_path: None,
+            readiness_timeout_secs: 1,
+            backend: ServiceTunnelTunnelBackend::None,
+            backend_command: None,
+            backend_public_url: None,
+            source_run_id: None,
+            source_workflow_id: None,
+            readiness_kind: ServiceTunnelReadinessKind::Process,
+            readiness_checks: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn start_materializes_runner_local_service_without_server_declaration() {
+        crate::test_support::with_isolated_home(|_| {
+            let tunnel = materialize_runner_local_start_tunnel(&start_spec("preview-service"))
+                .expect("materialize runner-local service");
+
+            assert_eq!(tunnel.id, "preview-service");
+            assert_eq!(tunnel.server_id, RUNNER_LOCAL_SERVICE_SERVER_ID);
+            assert_eq!(tunnel.target.host, "127.0.0.1");
+            assert_eq!(tunnel.target.port, 48631);
+            assert_eq!(tunnel.local_port, Some(48631));
+            assert!(load("preview-service").is_ok());
+        });
+    }
+
+    #[test]
+    fn undeclared_runner_local_service_requires_host_and_port() {
+        crate::test_support::with_isolated_home(|_| {
+            let mut missing_host = start_spec("missing-host");
+            missing_host.host = None;
+            let err =
+                materialize_runner_local_start_tunnel(&missing_host).expect_err("host required");
+            assert_eq!(err.code, ErrorCode::ValidationInvalidArgument);
+            assert!(err.message.contains("requires --host"));
+
+            let mut missing_port = start_spec("missing-port");
+            missing_port.port = None;
+            let err =
+                materialize_runner_local_start_tunnel(&missing_port).expect_err("port required");
+            assert_eq!(err.code, ErrorCode::ValidationInvalidArgument);
+            assert!(err.message.contains("requires --port"));
+        });
     }
 }

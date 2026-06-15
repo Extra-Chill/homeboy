@@ -259,7 +259,7 @@ enum TunnelPreviewIngressCommand {
         /// Preview session ID
         session_id: String,
 
-        /// Public host routed by the TLS/proxy layer, e.g. run-123-tunnel.chubes.net
+        /// Public host routed by the TLS/proxy layer, e.g. run-123-tunnel.preview.example.test
         #[arg(long)]
         public_host: String,
 

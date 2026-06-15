@@ -63,9 +63,9 @@ external provider command:
     "local_origin": "http://127.0.0.1:49823",
     "require_https": true,
     "native": {
-      "operator_domain": "chubes.net",
+      "operator_domain": "preview.example.test",
       "session_id": "wc-stripe-real-wallet",
-      "ingress_url": "https://preview-broker.chubes.net",
+      "ingress_url": "https://preview-broker.example.test",
       "token_env": "HOMEBOY_PREVIEW_TUNNEL_TOKEN"
     },
     "required_asset_paths": [
@@ -81,10 +81,10 @@ native client with the minimal internal command contract:
 
 ```sh
 homeboy tunnel preview-client start \
-  --public-host wc-stripe-real-wallet-tunnel.chubes.net \
+  --public-host wc-stripe-real-wallet-tunnel.preview.example.test \
   --local-origin http://127.0.0.1:49823 \
   --session-id wc-stripe-real-wallet \
-  --ingress https://preview-broker.chubes.net \
+  --ingress https://preview-broker.example.test \
   --token-env HOMEBOY_PREVIEW_TUNNEL_TOKEN \
   --ready-stdout
 ```
