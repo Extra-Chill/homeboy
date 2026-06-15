@@ -60,7 +60,7 @@ use super::super::{
 };
 
 use super::agent_task_bridge::{
-    agent_task_dispatch_requested_run_id, lab_pre_dispatch_failure_message,
+    ensure_agent_task_dispatch_run_id, lab_pre_dispatch_failure_message,
     materialize_inline_agent_task_plan_arg, mirror_agent_task_run_plan_lifecycle,
     parse_offloaded_dispatch_envelope_from_outputs,
 };
@@ -745,6 +745,8 @@ fn run_lab_offload_inner(
             .build(),
         );
     }
+    let (remapped_args, agent_task_run_id) = ensure_agent_task_dispatch_run_id(&remapped_args)
+        .map_or((remapped_args, None), |(args, run_id)| (args, Some(run_id)));
 
     let mut command = command_prefix.argv;
     command.extend(
@@ -766,6 +768,14 @@ fn run_lab_offload_inner(
         runner_id,
         remote_cwd
     );
+    if let Some(run_id) = &agent_task_run_id {
+        eprintln!(
+            "Lab offload: agent-task run id `{run_id}` will be persisted before provider execution. Inspect with `homeboy agent-task status {run_id}`."
+        );
+        messages.push(format!(
+            "Lab offload: agent-task run id `{run_id}`. Inspect with `homeboy agent-task status {run_id}`."
+        ));
+    }
     let workspace_mapping_metadata = lab_workspace_mapping_metadata(&workspace_mapping);
     let mut lab_metadata = lab_offload_metadata_with_workspace_mapping(
         &plan,
@@ -915,7 +925,7 @@ fn run_lab_offload_inner(
     }
     stderr.push_str(&exec_output.stderr);
     if exit_code != 0 {
-        if let Some(run_id) = agent_task_dispatch_requested_run_id(request.normalized_args) {
+        if let Some(run_id) = agent_task_run_id.as_deref() {
             if let Some(envelope) = parse_offloaded_dispatch_envelope_from_outputs(
                 &exec_output.stdout,
                 &exec_output.stderr,
