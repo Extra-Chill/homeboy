@@ -322,7 +322,7 @@ fn evidence_failure_summary(run: &RunRecord) -> RunsEvidenceFailureSummary {
         .and_then(|value| value.as_str())
         .map(str::to_string);
     RunsEvidenceFailureSummary {
-        failed: !matches!(run.status.as_str(), "pass" | "passed"),
+        failed: matches!(run.status.as_str(), "fail" | "failed" | "error" | "stale"),
         status: run.status.clone(),
         exit_code,
         error,
@@ -519,6 +519,34 @@ mod tests {
                     || output.disk_budget.warning.is_some()
             );
             homeboy::core::set_artifact_root_override(None);
+        });
+    }
+
+    #[test]
+    fn evidence_failure_summary_does_not_mark_running_run_failed() {
+        with_isolated_home(|_home| {
+            let _xdg = XdgGuard::unset();
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(sample_run(
+                    "trace",
+                    "homeboy",
+                    "studio",
+                    serde_json::json!({
+                        "status": "running",
+                        "phase": "waiting-for-child"
+                    }),
+                ))
+                .expect("run");
+
+            let (output, _) = evidence(&run.id).expect("evidence");
+            let RunsOutput::Evidence(output) = output else {
+                panic!("expected evidence output");
+            };
+
+            assert_eq!(output.run.status, "running");
+            assert_eq!(output.failure.status, "running");
+            assert!(!output.failure.failed);
         });
     }
 }
