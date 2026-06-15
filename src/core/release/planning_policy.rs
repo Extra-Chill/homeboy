@@ -162,7 +162,7 @@ mod tests {
             "skip hint should explicitly state no release artifacts were produced: {hint}"
         );
         assert!(
-            hint.contains("no tag"),
+            hint.contains("No tag created"),
             "skip hint should explicitly say no tag was created: {hint}"
         );
         assert!(
