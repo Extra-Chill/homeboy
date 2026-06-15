@@ -582,12 +582,6 @@ fn trace_provenance(
         browser_runtime_asset_provenance(),
     );
 
-    let wp_codebox = toolchain_requirements.iter().find_map(|requirement| {
-        (requirement.legacy_field.as_deref() == Some("wp_codebox"))
-            .then(|| toolchains.get(&requirement.id).cloned())
-            .flatten()
-    });
-
     Ok((
         TraceToolchainProvenance {
             canonical,
@@ -600,7 +594,6 @@ fn trace_provenance(
             reasons,
             homeboy,
             toolchains,
-            wp_codebox,
             node: command_version("node", &["--version"]),
             runtime_assets,
         },
@@ -1591,7 +1584,10 @@ mod tests {
                 provenance.source.as_deref(),
                 Some("env:FIXTURE_TOOLCHAIN_BIN")
             );
-            assert_eq!(toolchain.wp_codebox.as_ref(), Some(provenance));
+            assert_eq!(
+                toolchain.toolchains.get("fixture-toolchain"),
+                Some(provenance)
+            );
         });
     }
 

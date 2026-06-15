@@ -25,6 +25,8 @@ pub struct AgentTaskExecutorProvider {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     pub backend: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub default_backend: bool,
     pub command: String,
     pub request_schema: String,
     pub outcome_schema: String,
@@ -32,6 +34,10 @@ pub struct AgentTaskExecutorProvider {
     pub capabilities: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_materialization: Option<AgentTaskProviderWorkspaceMaterialization>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runner_readiness: Vec<AgentTaskProviderRunnerReadiness>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependency_failure_patterns: Vec<AgentTaskProviderDependencyFailurePattern>,
     #[serde(
         default,
         skip_serializing_if = "AgentTaskProviderRoleAliases::is_empty"
@@ -41,6 +47,38 @@ pub struct AgentTaskExecutorProvider {
     pub extension_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extension_path: Option<String>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskProviderRunnerReadiness {
+    pub id: String,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_path: Option<AgentTaskProviderEnvPathReadiness>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remediation: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskProviderEnvPathReadiness {
+    pub env: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskProviderDependencyFailurePattern {
+    pub id: String,
+    pub label: String,
+    pub path_contains: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub error_contains_any: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remediation: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -153,9 +191,31 @@ impl ExtensionProviderAgentTaskExecutor {
         &self.providers
     }
 
+    pub fn default_backend(&self) -> Option<String> {
+        default_backend_from_providers(&self.providers)
+    }
+
     pub fn required_extension_ids_for_plan(&self, plan: &AgentTaskPlan) -> Vec<String> {
         required_extension_ids_for_plan_with_providers(plan, &self.providers)
     }
+}
+
+pub fn default_backend() -> Option<String> {
+    default_backend_from_providers(&discover_agent_task_executor_providers())
+}
+
+pub fn provider_runner_readiness_contracts() -> Vec<AgentTaskProviderRunnerReadiness> {
+    discover_agent_task_executor_providers()
+        .into_iter()
+        .flat_map(|provider| provider.runner_readiness)
+        .collect()
+}
+
+pub fn dependency_failure_patterns() -> Vec<AgentTaskProviderDependencyFailurePattern> {
+    discover_agent_task_executor_providers()
+        .into_iter()
+        .flat_map(|provider| provider.dependency_failure_patterns)
+        .collect()
 }
 
 pub fn required_extension_ids_for_plan(plan: &AgentTaskPlan) -> Vec<String> {
@@ -201,6 +261,14 @@ fn provider_requires_cwd_git_checkout_with_providers(
         .and_then(|provider| provider.workspace_materialization.as_ref())
         .and_then(|materialization| materialization.cwd.as_deref())
         == Some("git_checkout")
+}
+
+fn default_backend_from_providers(providers: &[AgentTaskExecutorProvider]) -> Option<String> {
+    providers
+        .iter()
+        .find(|provider| provider.default_backend)
+        .or_else(|| providers.first())
+        .map(|provider| provider.backend.clone())
 }
 
 impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
@@ -800,11 +868,14 @@ mod tests {
             id: "test.provider".to_string(),
             label: None,
             backend: "test".to_string(),
+            default_backend: false,
             command,
             request_schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
             outcome_schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
             capabilities: vec!["structured_outcome".to_string()],
             workspace_materialization: None,
+            runner_readiness: Vec::new(),
+            dependency_failure_patterns: Vec::new(),
             role_aliases: AgentTaskProviderRoleAliases::default(),
             extension_id: None,
             extension_path: None,
@@ -860,6 +931,7 @@ mod tests {
             "schema": "homeboy/agent-task-executor-provider/v1",
             "id": "custom.provider",
             "backend": "custom",
+            "default_backend": true,
             "command": "custom-agent-task",
             "request_schema": AGENT_TASK_REQUEST_SCHEMA,
             "outcome_schema": AGENT_TASK_OUTCOME_SCHEMA,
@@ -880,6 +952,7 @@ mod tests {
         }))
         .expect("provider manifest");
 
+        assert!(provider.default_backend);
         assert!(provider
             .role_aliases
             .artifact_kind_matches_role("patch", "custom-patch"));
@@ -892,6 +965,56 @@ mod tests {
                 .output_aliases_for_role("provider_run_result"),
             vec!["custom_run_result"]
         );
+    }
+
+    #[test]
+    fn provider_manifest_parses_runner_and_dependency_contracts() {
+        let provider: AgentTaskExecutorProvider = serde_json::from_value(json!({
+            "schema": "homeboy/agent-task-executor-provider/v1",
+            "id": "custom.provider",
+            "backend": "custom",
+            "command": "custom-agent-task",
+            "request_schema": AGENT_TASK_REQUEST_SCHEMA,
+            "outcome_schema": AGENT_TASK_OUTCOME_SCHEMA,
+            "runner_readiness": [{
+                "id": "custom.runtime_cache",
+                "label": "Custom runtime cache",
+                "env_path": { "env": ["CUSTOM_RUNTIME_BIN"], "revision": true },
+                "remediation": "Refresh the custom runtime cache."
+            }],
+            "dependency_failure_patterns": [{
+                "id": "custom.prepared_dependency",
+                "label": "Custom prepared dependency",
+                "path_contains": "prepared-dependencies/",
+                "error_contains_any": ["enoent", "no such file or directory"],
+                "remediation": "Refresh prepared dependencies."
+            }]
+        }))
+        .expect("provider manifest");
+
+        assert_eq!(provider.runner_readiness[0].id, "custom.runtime_cache");
+        assert_eq!(
+            provider.runner_readiness[0].env_path.as_ref().unwrap().env,
+            vec!["CUSTOM_RUNTIME_BIN"]
+        );
+        assert_eq!(
+            provider.dependency_failure_patterns[0].path_contains,
+            "prepared-dependencies/"
+        );
+    }
+
+    #[test]
+    fn default_backend_prefers_provider_declaration() {
+        let (_request, mut provider_a) = request("task-a", "node provider-a.js".to_string());
+        provider_a.backend = "first".to_string();
+        let (_request, mut provider_b) = request("task-b", "node provider-b.js".to_string());
+        provider_b.backend = "preferred".to_string();
+        provider_b.default_backend = true;
+
+        let executor =
+            ExtensionProviderAgentTaskExecutor::with_providers(vec![provider_a, provider_b]);
+
+        assert_eq!(executor.default_backend().as_deref(), Some("preferred"));
     }
 
     #[test]

@@ -207,9 +207,12 @@ pub mod promotion {
 /// Executor provider contracts used by extensions and routing.
 pub mod provider {
     pub use super::super::agent_task_provider::{
-        provider_requires_cwd_git_checkout, required_extension_ids_for_plan,
-        AgentTaskExecutorProvider, AgentTaskProviderRoleAliases,
-        AgentTaskProviderWorkspaceMaterialization, ExtensionProviderAgentTaskExecutor,
+        default_backend, dependency_failure_patterns, provider_requires_cwd_git_checkout,
+        provider_runner_readiness_contracts, required_extension_ids_for_plan,
+        AgentTaskExecutorProvider, AgentTaskProviderDependencyFailurePattern,
+        AgentTaskProviderEnvPathReadiness, AgentTaskProviderRoleAliases,
+        AgentTaskProviderRunnerReadiness, AgentTaskProviderWorkspaceMaterialization,
+        ExtensionProviderAgentTaskExecutor,
     };
 }
 

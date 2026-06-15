@@ -642,7 +642,7 @@ mod implementation {
         artifacts: &mut BTreeSet<ArtifactRef>,
     ) {
         collect_artifacts(object, artifacts);
-        collect_wp_codebox_files(object.get("files"), artifacts);
+        collect_provider_file_artifacts(object.get("files"), artifacts);
     }
 
     fn sample_from_object(
@@ -699,7 +699,7 @@ mod implementation {
             &lifecycle_metric_names(),
         );
         if let Some(summary) = object.get("summary").and_then(Value::as_object) {
-            collect_wp_codebox_summary(summary, &mut sample);
+            collect_legacy_browser_summary_aliases(summary, &mut sample);
         }
         sample.console_errors = sample
             .console_errors
@@ -708,7 +708,7 @@ mod implementation {
             .page_errors
             .or_else(|| error_count(object, &["page_errors", "pageErrors", "errors"]));
         collect_artifacts(object, &mut sample.artifacts);
-        collect_wp_codebox_files(object.get("files"), &mut sample.artifacts);
+        collect_provider_file_artifacts(object.get("files"), &mut sample.artifacts);
         if sample.browser_metrics.is_empty() && sample.lifecycle_metrics.is_empty() {
             sample
                 .notes
@@ -1410,7 +1410,7 @@ mod implementation {
         }
     }
 
-    fn collect_wp_codebox_summary(
+    fn collect_legacy_browser_summary_aliases(
         summary: &Map<String, Value>,
         sample: &mut BrowserEvidenceSample,
     ) {
@@ -1445,7 +1445,10 @@ mod implementation {
         }
     }
 
-    fn collect_wp_codebox_files(value: Option<&Value>, artifacts: &mut BTreeSet<ArtifactRef>) {
+    fn collect_provider_file_artifacts(
+        value: Option<&Value>,
+        artifacts: &mut BTreeSet<ArtifactRef>,
+    ) {
         let Some(files) = value.and_then(Value::as_object) else {
             return;
         };

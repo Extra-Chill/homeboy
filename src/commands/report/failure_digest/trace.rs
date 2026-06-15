@@ -94,9 +94,11 @@ fn render_trace_toolchain(
     if !homeboy.is_empty() {
         render_trace_git_provenance(out, "Homeboy", &homeboy);
     }
-    let wp_codebox = object_value(toolchain, "wp_codebox");
-    if !wp_codebox.is_empty() {
-        render_trace_git_provenance(out, "WP Codebox", &wp_codebox);
+    let toolchains = object_value(toolchain, "toolchains");
+    for (id, value) in toolchains {
+        if let Some(provenance) = value.as_object() {
+            render_trace_git_provenance(out, &id, provenance);
+        }
     }
     if let Some(components) = components.as_ref() {
         let target = object_value(components, "target");
