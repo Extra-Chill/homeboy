@@ -4,12 +4,21 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::helpers::{current_version, version_is_newer};
+use super::planning::resolve_binary_on_path;
 use super::types::InstallMethod;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ActiveBinaryInfo {
+    pub version: Option<String>,
+    pub build_identity: Option<String>,
+}
 
 pub(crate) fn execute_upgrade(
     method: InstallMethod,
     source_path: Option<&Path>,
-) -> Result<(bool, Option<String>)> {
+    force: bool,
+    previous_build_identity: Option<&str>,
+) -> Result<(bool, Option<String>, Option<String>)> {
     let defaults = defaults::load_defaults();
 
     let output = match method {
@@ -67,10 +76,19 @@ pub(crate) fn execute_upgrade(
         return Err(upgrade_failure_error(method, &error_detail));
     }
 
-    let new_version = active_binary_version().ok().flatten();
-    let success = upgrade_verification_result(current_version(), new_version.as_deref());
+    let active_binary = active_binary_info().ok().flatten();
+    let new_version = active_binary.as_ref().and_then(|info| info.version.clone());
+    let new_build_identity = active_binary.and_then(|info| info.build_identity);
+    let success = upgrade_verification_result(
+        method,
+        force,
+        current_version(),
+        new_version.as_deref(),
+        previous_build_identity,
+        new_build_identity.as_deref(),
+    );
 
-    Ok((success, new_version))
+    Ok((success, new_version, new_build_identity))
 }
 
 fn upgrade_failure_error(method: InstallMethod, error_detail: &str) -> Error {
@@ -193,13 +211,8 @@ fn find_homeboy_source_checkout(path: &Path) -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
-fn active_binary_version() -> Result<Option<String>> {
-    let exe_path = std::env::current_exe().map_err(|e| {
-        Error::internal_io(
-            e.to_string(),
-            Some("get current executable path".to_string()),
-        )
-    })?;
+fn active_binary_info() -> Result<Option<ActiveBinaryInfo>> {
+    let exe_path = active_binary_path()?;
 
     let output = Command::new(exe_path)
         .arg("--version")
@@ -215,23 +228,67 @@ fn active_binary_version() -> Result<Option<String>> {
         return Ok(None);
     }
 
-    Ok(parse_cli_version_output(&String::from_utf8_lossy(
+    Ok(Some(parse_cli_version_info(&String::from_utf8_lossy(
         &output.stdout,
-    )))
+    ))))
+}
+
+fn active_binary_path() -> Result<PathBuf> {
+    if let Some(path) = resolve_binary_on_path() {
+        return Ok(path);
+    }
+
+    std::env::current_exe().map_err(|e| {
+        Error::internal_io(
+            e.to_string(),
+            Some("get current executable path".to_string()),
+        )
+    })
 }
 
 pub(crate) fn upgrade_verification_result(
+    method: InstallMethod,
+    force: bool,
     previous_version: &str,
     active_version: Option<&str>,
+    previous_build_identity: Option<&str>,
+    active_build_identity: Option<&str>,
 ) -> bool {
-    active_version
-        .map(|version| version_is_newer(version, previous_version))
-        .unwrap_or(false)
+    let Some(active_version) = active_version else {
+        return false;
+    };
+
+    if version_is_newer(active_version, previous_version) {
+        return true;
+    }
+
+    method == InstallMethod::Source
+        && force
+        && active_version == previous_version
+        && previous_build_identity.is_some()
+        && active_build_identity.is_some()
+        && previous_build_identity != active_build_identity
+}
+
+fn parse_cli_version_info(output: &str) -> ActiveBinaryInfo {
+    ActiveBinaryInfo {
+        version: parse_cli_version_output(output),
+        build_identity: parse_cli_build_identity_output(output),
+    }
 }
 
 fn parse_cli_version_output(output: &str) -> Option<String> {
     let re = regex::Regex::new(r"(\d+\.\d+\.\d+)").ok()?;
     re.find(output).map(|m| m.as_str().to_string())
+}
+
+fn parse_cli_build_identity_output(output: &str) -> Option<String> {
+    let identity = output.trim();
+    if identity.is_empty() || !identity.contains('+') {
+        None
+    } else {
+        Some(identity.to_string())
+    }
 }
 
 #[cfg(test)]
@@ -252,29 +309,113 @@ mod tests {
             parse_cli_version_output("homeboy 0.158.0").as_deref(),
             Some("0.158.0")
         );
-        assert!(!upgrade_verification_result("0.157.1", Some("0.157.1")));
+        assert!(!upgrade_verification_result(
+            InstallMethod::Source,
+            false,
+            "0.157.1",
+            Some("0.157.1"),
+            Some("commit old, dirty=false"),
+            Some("commit new, dirty=false"),
+        ));
     }
 
     #[test]
     fn test_upgrade_verification_result() {
-        assert!(upgrade_verification_result("0.157.1", Some("0.158.0")));
-        assert!(!upgrade_verification_result("0.157.1", Some("0.157.1")));
-        assert!(!upgrade_verification_result("0.157.1", None));
+        assert!(upgrade_verification_result(
+            InstallMethod::Cargo,
+            false,
+            "0.157.1",
+            Some("0.158.0"),
+            None,
+            None,
+        ));
+        assert!(!upgrade_verification_result(
+            InstallMethod::Cargo,
+            true,
+            "0.157.1",
+            Some("0.157.1"),
+            Some("commit old, dirty=false"),
+            Some("commit new, dirty=false"),
+        ));
+        assert!(!upgrade_verification_result(
+            InstallMethod::Source,
+            true,
+            "0.157.1",
+            None,
+            Some("commit old, dirty=false"),
+            Some("commit new, dirty=false"),
+        ));
     }
 
     #[test]
     fn verification_rejects_unchanged_active_binary() {
-        assert!(!upgrade_verification_result("0.157.1", Some("0.157.1")));
+        assert!(!upgrade_verification_result(
+            InstallMethod::Source,
+            true,
+            "0.157.1",
+            Some("0.157.1"),
+            Some("commit same, dirty=false"),
+            Some("commit same, dirty=false"),
+        ));
     }
 
     #[test]
     fn verification_accepts_newer_active_binary() {
-        assert!(upgrade_verification_result("0.157.1", Some("0.158.0")));
+        assert!(upgrade_verification_result(
+            InstallMethod::Cargo,
+            false,
+            "0.157.1",
+            Some("0.158.0"),
+            None,
+            None,
+        ));
     }
 
     #[test]
     fn verification_rejects_missing_active_binary_version() {
-        assert!(!upgrade_verification_result("0.157.1", None));
+        assert!(!upgrade_verification_result(
+            InstallMethod::Source,
+            true,
+            "0.157.1",
+            None,
+            Some("commit old, dirty=false"),
+            Some("commit new, dirty=false"),
+        ));
+    }
+
+    #[test]
+    fn forced_source_upgrade_accepts_same_version_with_new_build_identity() {
+        assert!(upgrade_verification_result(
+            InstallMethod::Source,
+            true,
+            "0.157.1",
+            Some("0.157.1"),
+            Some("homeboy 0.157.1+old"),
+            Some("homeboy 0.157.1+new"),
+        ));
+    }
+
+    #[test]
+    fn forced_source_upgrade_requires_build_identity_for_same_version() {
+        assert!(!upgrade_verification_result(
+            InstallMethod::Source,
+            true,
+            "0.157.1",
+            Some("0.157.1"),
+            None,
+            Some("homeboy 0.157.1+new"),
+        ));
+    }
+
+    #[test]
+    fn parses_homeboy_version_output_with_build_identity() {
+        let info = parse_cli_version_info("homeboy 0.158.0+abc123-dirty");
+
+        assert_eq!(info.version.as_deref(), Some("0.158.0"));
+        assert_eq!(
+            info.build_identity.as_deref(),
+            Some("homeboy 0.158.0+abc123-dirty")
+        );
     }
 
     #[test]

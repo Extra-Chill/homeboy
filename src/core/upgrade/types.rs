@@ -30,6 +30,10 @@ pub struct UpgradeResult {
     pub install_method: InstallMethod,
     pub previous_version: String,
     pub new_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous_build_identity: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub new_build_identity: Option<String>,
     pub upgraded: bool,
     pub message: String,
     pub restart_required: bool,
