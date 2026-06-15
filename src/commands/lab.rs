@@ -91,7 +91,7 @@ pub struct LabSelectedRunnerOutput {
 #[serde(untagged)]
 pub enum LabCommandOutput {
     Status(LabOutput),
-    ExtensionSync(LabExtensionSyncOutput),
+    ExtensionSync(Box<LabExtensionSyncOutput>),
 }
 
 #[derive(Serialize)]
@@ -277,7 +277,7 @@ fn sync_lab_extension(
     }
 
     Ok((
-        LabCommandOutput::ExtensionSync(LabExtensionSyncOutput {
+        LabCommandOutput::ExtensionSync(Box::new(LabExtensionSyncOutput {
             command: "lab.extension_sync",
             runner_id,
             runner_homeboy_path: homeboy_path,
@@ -289,7 +289,7 @@ fn sync_lab_extension(
             replace,
             install_command,
             execution,
-        }),
+        })),
         exit_code,
     ))
 }
