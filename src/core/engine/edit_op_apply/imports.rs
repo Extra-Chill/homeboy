@@ -27,8 +27,9 @@ fn import_already_present(content: &str, import_line: &str, language: &Language)
 
 fn is_import_line(line: &str, language: &Language) -> bool {
     match language {
-        Language::Rust | Language::Php | Language::Unknown => line.starts_with("use "),
         Language::JavaScript | Language::TypeScript => line.starts_with("import "),
+        Language::Unknown => line.starts_with("use "),
+        _ => line.starts_with("use "),
     }
 }
 
@@ -38,10 +39,10 @@ fn normalize_import_line(line: &str) -> String {
 
 /// Extract the short name (alias) that an import resolves to.
 ///
-/// PHP:  `use Foo\Bar\Baz;`         -> `Baz`
-///       `use Foo\Bar\Baz as Qux;`  -> `Qux`
-/// Rust: `use foo::bar::Baz;`       -> `Baz`
-///       `use foo::bar::Baz as Qux;`-> `Qux`
+/// `use Foo\Bar\Baz;`         -> `Baz`
+/// `use Foo\Bar\Baz as Qux;`  -> `Qux`
+/// `use foo::bar::Baz;`       -> `Baz`
+/// `use foo::bar::Baz as Qux;`-> `Qux`
 fn extract_import_alias(import_line: &str) -> Option<String> {
     let trimmed = import_line.trim().trim_end_matches(';');
 

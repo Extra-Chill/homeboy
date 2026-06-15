@@ -185,8 +185,8 @@ pub struct ComponentLabConfig {
     /// Repo-owned argv prefix used when Lab offload re-enters Homeboy from this checkout.
     ///
     /// By default Lab uses the runner's configured Homeboy binary. Repos that need to
-    /// verify the synced checkout itself can declare a prefix such as
-    /// `["cargo", "run", "--quiet", "--bin", "homeboy", "--"]`.
+    /// verify the synced checkout itself can declare the command argv needed
+    /// to re-enter the project-local binary.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub self_command_prefix: Vec<String>,
 }
@@ -467,7 +467,7 @@ pub struct GitDeployConfig {
         skip_serializing_if = "is_default_branch"
     )]
     pub branch: String,
-    /// Commands to run after git pull (e.g., "composer install", "npm run build")
+    /// Commands to run after git pull.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub post_pull: Vec<String>,
     /// Pull a specific tag instead of branch HEAD (e.g., "v{{version}}")

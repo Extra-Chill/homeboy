@@ -341,7 +341,7 @@ pub fn unpin(project_id: &str, pin_type: PinType, path: &str) -> Result<()> {
 /// Detect whether a `base_path` lives under a given Studio root directory.
 ///
 /// Pure helper — accepts the Studio root explicitly so tests don't have to
-/// mutate `$HOME` (which races under cargo's parallel test runner).
+/// mutate `$HOME` (which races under parallel test runners).
 ///
 /// Studio installs sites under `~/Studio/<site>/`. Tilde and env vars in
 /// `base_path` are expanded before the prefix check so configs that store

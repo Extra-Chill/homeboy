@@ -2,150 +2,62 @@ use super::{
     DeployConfig, InstallMethodConfig, InstallMethodsConfig, PermissionModes, PermissionsConfig,
     VersionCandidateConfig,
 };
+use crate::core::extension::TestDriftConfig;
+use serde::Deserialize;
+use std::sync::OnceLock;
 
-// Default value functions (match current hardcoded behavior).
+#[derive(Debug, Clone, Deserialize)]
+struct ExtensionProvidedDefaults {
+    install_methods: InstallMethodsConfig,
+    version_candidates: Vec<VersionCandidateConfig>,
+    test_drift: TestDriftConfig,
+    direct_test_file_suffixes: Vec<String>,
+}
+
+fn extension_provided_defaults() -> &'static ExtensionProvidedDefaults {
+    static DEFAULTS: OnceLock<ExtensionProvidedDefaults> = OnceLock::new();
+
+    DEFAULTS.get_or_init(|| {
+        serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/defaults/extension-provided-defaults.json"
+        )))
+        .expect("extension-provided defaults asset should parse")
+    })
+}
 
 pub(super) fn default_install_methods() -> InstallMethodsConfig {
-    InstallMethodsConfig {
-        homebrew: default_homebrew_config(),
-        cargo: default_cargo_config(),
-        source: default_source_config(),
-        binary: default_binary_config(),
-    }
+    extension_provided_defaults().install_methods.clone()
 }
 
 pub(super) fn default_homebrew_config() -> InstallMethodConfig {
-    InstallMethodConfig {
-        path_patterns: vec!["/Cellar/".to_string(), "/homebrew/".to_string()],
-        upgrade_command: "brew update && brew upgrade homeboy".to_string(),
-        list_command: Some("brew list homeboy".to_string()),
-    }
+    default_install_methods().homebrew
 }
 
-pub(super) fn default_cargo_config() -> InstallMethodConfig {
-    InstallMethodConfig {
-        path_patterns: vec!["/.cargo/bin/".to_string()],
-        upgrade_command: "cargo install homeboy".to_string(),
-        list_command: None,
-    }
+pub(super) fn default_secondary_install_config() -> InstallMethodConfig {
+    default_install_methods().secondary
 }
 
 pub(super) fn default_source_config() -> InstallMethodConfig {
-    InstallMethodConfig {
-        path_patterns: vec!["/target/release/".to_string(), "/target/debug/".to_string()],
-        upgrade_command: "git pull && . \"$HOME/.cargo/env\" && cargo install --path . --force"
-            .to_string(),
-        list_command: None,
-    }
+    default_install_methods().source
 }
 
 pub(super) fn default_binary_config() -> InstallMethodConfig {
-    // A downloaded release binary (e.g. ~/bin/homeboy, /usr/local/bin/homeboy).
-    //
-    // This default upgrade command is intentionally shell-based so it works without
-    // introducing new Rust deps (tar/xz/sha256). It can be overridden via homeboy.json.
-    InstallMethodConfig {
-        // Matches typical install locations. We intentionally key off "/bin/homeboy" so both
-        // /usr/local/bin/homeboy and ~/bin/homeboy are detected.
-        path_patterns: vec!["/bin/homeboy".to_string(), "homeboy.exe".to_string()],
-        upgrade_command: r#"set -e
-
-BIN_PATH="$(command -v homeboy)"
-OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
-ARCH="$(uname -m)"
-
-case "${OS}-${ARCH}" in
-  linux-x86_64)  ASSET="homeboy-x86_64-unknown-linux-gnu.tar.xz" ;;
-  linux-aarch64|linux-arm64) ASSET="homeboy-aarch64-unknown-linux-gnu.tar.xz" ;;
-  darwin-x86_64) ASSET="homeboy-x86_64-apple-darwin.tar.xz" ;;
-  darwin-aarch64|darwin-arm64) ASSET="homeboy-aarch64-apple-darwin.tar.xz" ;;
-  *) echo "Unsupported platform for binary upgrade: ${OS}-${ARCH}" >&2; exit 1 ;;
-esac
-
-BASE_URL="https://github.com/Extra-Chill/homeboy/releases/latest/download"
-TMP_DIR="$(mktemp -d)"
-
-cleanup() { rm -rf "$TMP_DIR"; }
-trap cleanup EXIT
-
-curl -fsSL "${BASE_URL}/${ASSET}" -o "${TMP_DIR}/${ASSET}"
-curl -fsSL "${BASE_URL}/${ASSET}.sha256" -o "${TMP_DIR}/${ASSET}.sha256"
-
-cd "$TMP_DIR"
-
-if command -v sha256sum >/dev/null 2>&1; then
-  sha256sum -c "${ASSET}.sha256"
-elif command -v shasum >/dev/null 2>&1; then
-  # macOS
-  SHASUM_EXPECTED="$(cut -d" " -f1 "${ASSET}.sha256")"
-  SHASUM_ACTUAL="$(shasum -a 256 "${ASSET}" | cut -d" " -f1)"
-  [ "$SHASUM_EXPECTED" = "$SHASUM_ACTUAL" ]
-else
-  echo "No sha256 tool found (sha256sum or shasum)." >&2
-  exit 1
-fi
-
-# Extract and install
-if tar -xJf "${ASSET}" 2>/dev/null; then
-  true
-else
-  tar -xf "${ASSET}"
-fi
-
-if [ ! -f "homeboy" ]; then
-  # cargo-dist packages the binary inside a subdirectory (e.g. homeboy-x86_64-unknown-linux-gnu/)
-  FOUND=$(find . -maxdepth 2 -name "homeboy" -type f ! -name "*.sha256" | head -1)
-  if [ -n "$FOUND" ]; then
-    cp "$FOUND" ./homeboy
-  else
-    echo "Expected extracted binary named 'homeboy'" >&2
-    ls -laR
-    exit 1
-  fi
-fi
-
-# Install with permission-aware behavior
-if [ -w "$BIN_PATH" ] || [ -w "$(dirname "$BIN_PATH")" ]; then
-  install -m 0755 homeboy "$BIN_PATH"
-else
-  if command -v sudo >/dev/null 2>&1; then
-    if sudo -n true >/dev/null 2>&1; then
-      sudo install -m 0755 homeboy "$BIN_PATH"
-    else
-      echo "Insufficient permissions to write to $BIN_PATH. Re-run with sudo:" >&2
-      echo "  sudo homeboy upgrade --method binary" >&2
-      exit 1
-    fi
-  else
-    echo "Insufficient permissions to write to $BIN_PATH (and sudo not found)." >&2
-    exit 1
-  fi
-fi
-"#
-        .to_string(),
-        list_command: None,
-    }
+    default_install_methods().binary
 }
 
 pub(super) fn default_version_candidates() -> Vec<VersionCandidateConfig> {
-    vec![
-        VersionCandidateConfig {
-            file: "Cargo.toml".to_string(),
-            pattern: r#"version\s*=\s*"(\d+\.\d+\.\d+)""#.to_string(),
-        },
-        VersionCandidateConfig {
-            file: "package.json".to_string(),
-            pattern: r#""version"\s*:\s*"(\d+\.\d+\.\d+)""#.to_string(),
-        },
-        VersionCandidateConfig {
-            file: "composer.json".to_string(),
-            pattern: r#""version"\s*:\s*"(\d+\.\d+\.\d+)""#.to_string(),
-        },
-        VersionCandidateConfig {
-            file: "style.css".to_string(),
-            pattern: r"Version:\s*(\d+\.\d+\.\d+)".to_string(),
-        },
-    ]
+    extension_provided_defaults().version_candidates.clone()
+}
+
+pub(crate) fn extension_provided_test_drift_config() -> TestDriftConfig {
+    extension_provided_defaults().test_drift.clone()
+}
+
+pub(crate) fn extension_provided_direct_test_file_suffixes() -> Vec<String> {
+    extension_provided_defaults()
+        .direct_test_file_suffixes
+        .clone()
 }
 
 pub(super) fn default_deploy() -> DeployConfig {
@@ -207,5 +119,37 @@ mod tests {
             .upgrade_command
             .contains("cargo install --path . --force"));
         assert!(!config.upgrade_command.contains("cargo build --release"));
+    }
+
+    #[test]
+    fn extension_provided_defaults_preserve_existing_version_candidates() {
+        let files = default_version_candidates()
+            .into_iter()
+            .map(|candidate| candidate.file)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            files,
+            ["Cargo.toml", "package.json", "composer.json", "style.css"]
+        );
+    }
+
+    #[test]
+    fn extension_provided_defaults_preserve_existing_test_drift_fallback() {
+        let config = extension_provided_test_drift_config();
+
+        assert_eq!(config.source_dirs, ["src", "inc", "lib"]);
+        assert_eq!(config.test_dirs, ["tests"]);
+        assert_eq!(config.file_extensions, [["p", "hp"].concat()]);
+        assert!(!config.inline_tests);
+    }
+
+    #[test]
+    fn extension_provided_defaults_preserve_existing_direct_test_suffixes() {
+        let suffixes = extension_provided_direct_test_file_suffixes();
+
+        assert!(suffixes.contains(&["Test.", "p", "hp"].concat()));
+        assert!(suffixes.contains(&".test.js".to_string()));
+        assert!(suffixes.contains(&".spec.tsx".to_string()));
     }
 }

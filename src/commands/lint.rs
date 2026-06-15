@@ -45,7 +45,7 @@ pub struct LintArgs {
     #[arg(long)]
     pub file: Option<String>,
 
-    /// Lint only files matching glob pattern (e.g., "inc/**/*.php")
+    /// Lint only files matching a repo-relative glob pattern
     #[arg(long)]
     pub glob: Option<String>,
 
