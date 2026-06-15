@@ -13,17 +13,20 @@ use serde_json::Value;
 
 use crate::core::agent_task_lifecycle as lifecycle;
 use crate::core::agent_task_loop_controller::{
-    self as controller, AgentTaskGateBundle, AgentTaskLoopActionStatus, AgentTaskLoopArtifactRef,
-    AgentTaskLoopControllerRecord, AgentTaskLoopControllerState, AgentTaskLoopExternalEvent,
+    self as controller, AgentTaskGateBundle, AgentTaskGateBundleCheckKind,
+    AgentTaskGateBundleResult, AgentTaskGateBundleStatus, AgentTaskGateCheckResult,
+    AgentTaskLoopActionStatus, AgentTaskLoopArtifactRef, AgentTaskLoopControllerRecord,
+    AgentTaskLoopControllerState, AgentTaskLoopEntity, AgentTaskLoopExternalEvent,
     AgentTaskLoopHistoryEvent, AgentTaskLoopPolicy, AgentTaskLoopPolicyAction,
-    AgentTaskLoopPolicyActionRecord, AgentTaskLoopRunRef, AgentTaskLoopTaskLineage,
-    AgentTaskLoopTransition, AgentTaskPrOwnershipRequest, AgentTaskPrOwnershipState,
-    AgentTaskPrOwnershipStatusUpdate,
+    AgentTaskLoopPolicyActionRecord, AgentTaskLoopProvenanceRef, AgentTaskLoopRunRef,
+    AgentTaskLoopTaskLineage, AgentTaskLoopTransition, AgentTaskPrOwnershipRequest,
+    AgentTaskPrOwnershipState, AgentTaskPrOwnershipStatusUpdate,
 };
 use crate::core::agent_task_scheduler::{AgentTaskExecutorAdapter, AgentTaskPlan};
 use crate::core::agent_task_service::{self, AgentTaskRunResult};
 use crate::core::git::{pr_find, pr_view, PrFindOptions, PrState};
 use crate::core::{Error, Result};
+use std::process::Command;
 
 /// Schema for the apply-event report envelope.
 pub const APPLY_EVENT_RESULT_SCHEMA: &str = "homeboy/agent-task-loop-controller-event-result/v1";
@@ -437,7 +440,7 @@ where
     E: AgentTaskExecutorAdapter + Clone,
     D: ControllerDispatchHook,
 {
-    let mut record = controller::load_controller(loop_id)?;
+    let mut record = controller::controller_status(loop_id)?;
     let Some(action_id) = first_pending_action_id(&record) else {
         return Ok(AgentTaskRunResult {
             value: ControllerActionReport {
@@ -482,7 +485,7 @@ where
 {
     let mut results = Vec::new();
     loop {
-        let record = controller::load_controller(loop_id)?;
+        let record = controller::controller_status(loop_id)?;
         let Some(action_id) = first_pending_action_id(&record) else {
             return Ok(AgentTaskRunResult {
                 value: ControllerResumeReport {
@@ -500,7 +503,7 @@ where
             .map_err(|error| Error::internal_json(error.to_string(), None))?;
         results.push(value);
         if action_result.exit_code != 0 {
-            let record = controller::load_controller(loop_id)?;
+            let record = controller::controller_status(loop_id)?;
             return Ok(AgentTaskRunResult {
                 value: ControllerResumeReport {
                     schema: RESUME_RESULT_SCHEMA,
@@ -647,6 +650,7 @@ where
             wait_key,
             terminal_states,
         } => execute_wait_for_controller_action(
+            record,
             loop_id,
             entity_id.as_deref(),
             wait_key.as_deref(),
@@ -655,16 +659,7 @@ where
         AgentTaskLoopPolicyAction::RunGates {
             bundle_id,
             entity_id,
-        } => Ok((
-            serde_json::json!({
-                "mode": "run_gates",
-                "bundle_id": bundle_id,
-                "entity_id": entity_id,
-                "queued": true,
-                "note": "gate bundle execution is represented in controller state; concrete gate runners consume gate_bundles"
-            }),
-            0,
-        )),
+        } => execute_run_gates_action(record, bundle_id, entity_id.as_deref()),
         AgentTaskLoopPolicyAction::OwnPrUntilGreen {
             ownership,
             entity_id,
@@ -676,20 +671,43 @@ where
                 0,
             ))
         }
-        AgentTaskLoopPolicyAction::Complete { reason } => Ok((
-            serde_json::json!({ "mode": "complete", "reason": reason }),
-            0,
-        )),
-        AgentTaskLoopPolicyAction::Abandon { reason } => Ok((
-            serde_json::json!({ "mode": "abandon", "reason": reason }),
-            0,
-        )),
-        AgentTaskLoopPolicyAction::Escalate { reason } => Ok((
-            serde_json::json!({ "mode": "escalate", "reason": reason }),
-            0,
-        )),
-        AgentTaskLoopPolicyAction::RouteFinding { .. }
-        | AgentTaskLoopPolicyAction::ValidateCandidatePatch { .. }
+        AgentTaskLoopPolicyAction::Complete { reason } => {
+            record.state = AgentTaskLoopControllerState::Completed;
+            Ok((
+                serde_json::json!({ "mode": "complete", "reason": reason }),
+                0,
+            ))
+        }
+        AgentTaskLoopPolicyAction::Abandon { reason } => {
+            record.state = AgentTaskLoopControllerState::Abandoned;
+            Ok((
+                serde_json::json!({ "mode": "abandon", "reason": reason }),
+                0,
+            ))
+        }
+        AgentTaskLoopPolicyAction::Escalate { reason } => {
+            record.state = AgentTaskLoopControllerState::Escalated;
+            Ok((
+                serde_json::json!({ "mode": "escalate", "reason": reason }),
+                0,
+            ))
+        }
+        AgentTaskLoopPolicyAction::RouteFinding {
+            finding,
+            dedupe_key,
+            entity_id,
+            request_template,
+        } => execute_route_finding_action(
+            record,
+            action,
+            finding,
+            dedupe_key,
+            entity_id.as_deref(),
+            request_template,
+            executor,
+            dispatch,
+        ),
+        AgentTaskLoopPolicyAction::ValidateCandidatePatch { .. }
         | AgentTaskLoopPolicyAction::Retry { .. }
         | AgentTaskLoopPolicyAction::RequestChanges { .. } => {
             Err(Error::validation_invalid_argument(
@@ -944,14 +962,45 @@ fn execute_spawn_controller_action(
 }
 
 fn execute_wait_for_controller_action(
+    record: &mut AgentTaskLoopControllerRecord,
     loop_id: &str,
     entity_id: Option<&str>,
     wait_key: Option<&str>,
     terminal_states: &[AgentTaskLoopControllerState],
 ) -> Result<(Value, i32)> {
-    let child_state = controller::load_controller(loop_id)
+    let wait_key = wait_key
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("controller:{}:terminal", loop_id.replace(['/', ':'], "_")));
+    let terminal_states = if terminal_states.is_empty() {
+        vec![
+            AgentTaskLoopControllerState::Completed,
+            AgentTaskLoopControllerState::Failed,
+            AgentTaskLoopControllerState::HumanReady,
+            AgentTaskLoopControllerState::Abandoned,
+            AgentTaskLoopControllerState::Escalated,
+        ]
+    } else {
+        terminal_states.to_vec()
+    };
+    let child_state = controller::controller_status(loop_id)
         .ok()
-        .map(|child| format!("{:?}", child.state));
+        .map(|child| child.state);
+    let satisfied = child_state.is_some_and(|state| terminal_states.contains(&state));
+    if satisfied {
+        for wait in &mut record.waits {
+            if wait.wait_key == wait_key && wait.status == controller::AgentTaskLoopWaitStatus::Open
+            {
+                wait.status = controller::AgentTaskLoopWaitStatus::Satisfied;
+                wait.satisfied_by_event_id =
+                    child_state.map(|state| format!("controller-terminal:{loop_id}:{state:?}"));
+            }
+        }
+        if record.state == AgentTaskLoopControllerState::Waiting {
+            record.state = AgentTaskLoopControllerState::Running;
+        }
+    } else {
+        record.state = AgentTaskLoopControllerState::Waiting;
+    }
     Ok((
         serde_json::json!({
             "mode": "wait_for_controller",
@@ -960,9 +1009,249 @@ fn execute_wait_for_controller_action(
             "wait_key": wait_key,
             "terminal_states": terminal_states,
             "child_state": child_state,
+            "satisfied": satisfied,
         }),
         0,
     ))
+}
+
+fn execute_run_gates_action(
+    record: &mut AgentTaskLoopControllerRecord,
+    bundle_id: &str,
+    entity_id: Option<&str>,
+) -> Result<(Value, i32)> {
+    if let Some(existing) = record
+        .gate_results
+        .iter()
+        .rev()
+        .find(|result| result.bundle_id == bundle_id && result.entity_id.as_deref() == entity_id)
+        .cloned()
+    {
+        let exit_code = if existing.status == AgentTaskGateBundleStatus::Failed {
+            1
+        } else {
+            0
+        };
+        return Ok((
+            serde_json::json!({ "mode": "run_gates", "bundle_id": bundle_id, "entity_id": entity_id, "result": existing }),
+            exit_code,
+        ));
+    }
+
+    let bundle = record
+        .gate_bundles
+        .iter()
+        .find(|bundle| bundle.bundle_id == bundle_id)
+        .cloned()
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "bundle_id",
+                format!("gate bundle '{bundle_id}' does not exist"),
+                Some(bundle_id.to_string()),
+                None,
+            )
+        })?;
+
+    let mut checks = Vec::new();
+    for check in &bundle.checks {
+        let result = match check.kind {
+            AgentTaskGateBundleCheckKind::Command => run_command_gate_check(check)?,
+            AgentTaskGateBundleCheckKind::Manual => AgentTaskGateCheckResult {
+                check_id: check.check_id.clone(),
+                status: AgentTaskGateBundleStatus::Warn,
+                retryable: check.retryable,
+                classification: Some("manual_gate_requires_external_result".to_string()),
+                evidence: Vec::new(),
+                details: serde_json::json!({ "input": check.input }),
+            },
+            AgentTaskGateBundleCheckKind::Api | AgentTaskGateBundleCheckKind::Tool => {
+                AgentTaskGateCheckResult {
+                    check_id: check.check_id.clone(),
+                    status: AgentTaskGateBundleStatus::Failed,
+                    retryable: check.retryable,
+                    classification: Some("unsupported_generic_gate_kind".to_string()),
+                    evidence: Vec::new(),
+                    details: serde_json::json!({ "kind": check.kind, "input": check.input }),
+                }
+            }
+        };
+        checks.push(result);
+    }
+
+    let status = if checks
+        .iter()
+        .any(|check| check.status == AgentTaskGateBundleStatus::Failed)
+    {
+        AgentTaskGateBundleStatus::Failed
+    } else if checks
+        .iter()
+        .any(|check| check.status == AgentTaskGateBundleStatus::Warn)
+    {
+        AgentTaskGateBundleStatus::Warn
+    } else {
+        AgentTaskGateBundleStatus::Passed
+    };
+    let result = AgentTaskGateBundleResult {
+        result_id: format!("gate-result-{}", record.gate_results.len() + 1),
+        bundle_id: bundle_id.to_string(),
+        entity_id: entity_id.map(str::to_string),
+        run_id: None,
+        status,
+        checks,
+        recorded_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+    };
+    record.gate_results.push(result.clone());
+    let exit_code = if status == AgentTaskGateBundleStatus::Failed {
+        1
+    } else {
+        0
+    };
+    Ok((
+        serde_json::json!({ "mode": "run_gates", "bundle_id": bundle_id, "entity_id": entity_id, "result": result }),
+        exit_code,
+    ))
+}
+
+fn run_command_gate_check(
+    check: &crate::core::agent_task_loop_controller::AgentTaskGateBundleCheck,
+) -> Result<AgentTaskGateCheckResult> {
+    let command = check
+        .input
+        .get("command")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "command",
+                "command gate check requires input.command",
+                Some(check.input.to_string()),
+                None,
+            )
+        })?;
+    let output = Command::new("sh")
+        .arg("-lc")
+        .arg(command)
+        .output()
+        .map_err(|error| {
+            Error::internal_io(
+                format!("failed to execute gate command '{command}': {error}"),
+                None,
+            )
+        })?;
+    let status = if output.status.success() {
+        AgentTaskGateBundleStatus::Passed
+    } else {
+        AgentTaskGateBundleStatus::Failed
+    };
+    Ok(AgentTaskGateCheckResult {
+        check_id: check.check_id.clone(),
+        status,
+        retryable: check.retryable,
+        classification: None,
+        evidence: Vec::new(),
+        details: serde_json::json!({
+            "command": command,
+            "exit_code": output.status.code(),
+            "stdout": String::from_utf8_lossy(&output.stdout),
+            "stderr": String::from_utf8_lossy(&output.stderr),
+        }),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_route_finding_action<E, D>(
+    record: &mut AgentTaskLoopControllerRecord,
+    action: &AgentTaskLoopPolicyActionRecord,
+    finding: &controller::AgentTaskLoopFindingPacket,
+    dedupe_key: &str,
+    entity_id: Option<&str>,
+    request_template: &Value,
+    executor: E,
+    dispatch: &D,
+) -> Result<(Value, i32)>
+where
+    E: AgentTaskExecutorAdapter + Clone,
+    D: ControllerDispatchHook,
+{
+    let entity_id = ensure_finding_entity(record, finding, entity_id);
+    let request = materialize_route_finding_request(request_template, finding, &entity_id);
+    execute_spawn_task_action(
+        record,
+        action,
+        dedupe_key,
+        Some(&entity_id),
+        &request,
+        executor,
+        dispatch,
+    )
+}
+
+fn ensure_finding_entity(
+    record: &mut AgentTaskLoopControllerRecord,
+    finding: &controller::AgentTaskLoopFindingPacket,
+    entity_id: Option<&str>,
+) -> String {
+    if let Some(entity_id) = entity_id {
+        return entity_id.to_string();
+    }
+    let key = finding
+        .reproduction_key
+        .as_deref()
+        .unwrap_or(&finding.finding_id);
+    let entity_id = format!("finding:{}", key.replace(['/', ':', '#', ' '], "_"));
+    record
+        .entities
+        .entry(entity_id.clone())
+        .or_insert_with(|| AgentTaskLoopEntity {
+            entity_id: entity_id.clone(),
+            entity_type: "finding".to_string(),
+            key: key.to_string(),
+            dedupe_key: format!("entity:finding:{key}"),
+            state: Some("routed".to_string()),
+            human_ready: false,
+            parent_entity_ids: Vec::new(),
+            run_refs: Vec::new(),
+            artifact_refs: finding.lineage.clone(),
+            provenance: finding
+                .lineage
+                .iter()
+                .map(|artifact| AgentTaskLoopProvenanceRef {
+                    kind: artifact
+                        .kind
+                        .clone()
+                        .unwrap_or_else(|| "artifact".to_string()),
+                    uri: artifact.uri.clone(),
+                    caused_by: Some(finding.finding_id.clone()),
+                })
+                .collect(),
+            metadata: serde_json::json!({
+                "severity": finding.severity,
+                "owner": finding.owner,
+                "source_transformer": finding.source_transformer,
+            }),
+        });
+    entity_id
+}
+
+fn materialize_route_finding_request(
+    template: &Value,
+    finding: &controller::AgentTaskLoopFindingPacket,
+    entity_id: &str,
+) -> Value {
+    let mut request = template.clone();
+    if let Some(object) = request.as_object_mut() {
+        object.insert(
+            "entity_id".to_string(),
+            Value::String(entity_id.to_string()),
+        );
+        object.insert(
+            "finding_id".to_string(),
+            Value::String(finding.finding_id.clone()),
+        );
+        object
+            .entry("finding".to_string())
+            .or_insert_with(|| serde_json::to_value(finding).unwrap_or(Value::Null));
+    }
+    request
 }
 
 fn execute_own_pr_until_green_action(
@@ -1321,6 +1610,9 @@ fn record_controller_spawn(
 }
 
 fn first_pending_action_id(record: &AgentTaskLoopControllerRecord) -> Option<String> {
+    if !matches!(record.state, AgentTaskLoopControllerState::Running) {
+        return None;
+    }
     record
         .next_actions
         .iter()
@@ -1483,7 +1775,9 @@ mod tests {
         AGENT_TASK_REQUEST_SCHEMA,
     };
     use crate::core::agent_task_loop_controller::{
-        AgentTaskLoopPolicyAction, AgentTaskLoopWait, AgentTaskLoopWaitStatus,
+        AgentTaskGateBundle, AgentTaskGateBundleCheck, AgentTaskGateBundleCheckKind,
+        AgentTaskGateBundleStatus, AgentTaskLoopFindingPacket, AgentTaskLoopPolicyAction,
+        AgentTaskLoopWait, AgentTaskLoopWaitStatus,
     };
     use crate::core::agent_task_scheduler::AgentTaskExecutionContext;
     use crate::test_support::with_isolated_home;
@@ -1834,6 +2128,237 @@ mod tests {
             assert_eq!(
                 loaded.next_actions[1].status,
                 AgentTaskLoopActionStatus::Completed
+            );
+        });
+    }
+
+    #[test]
+    fn complete_action_transitions_only_when_executed() {
+        with_isolated_home(|_| {
+            let mut record = init(ControllerInitRequest {
+                loop_id: "loop-service-complete".to_string(),
+                phase: "repair".to_string(),
+                config_version: "v1".to_string(),
+            })
+            .expect("controller initialized");
+
+            record.record_action(
+                AgentTaskLoopPolicyAction::Complete {
+                    reason: Some("done".to_string()),
+                },
+                "complete",
+            );
+            assert_eq!(record.state, AgentTaskLoopControllerState::Running);
+            controller::write_controller(&record).expect("controller written");
+
+            let result = run_next(
+                "loop-service-complete",
+                CapturingExecutor::default(),
+                &NoopDispatchHook,
+            )
+            .expect("complete action executed");
+
+            assert_eq!(result.exit_code, 0);
+            assert_eq!(
+                result.value.controller.state,
+                AgentTaskLoopControllerState::Completed
+            );
+            assert_eq!(result.value.status.as_deref(), Some("completed"));
+        });
+    }
+
+    #[test]
+    fn resume_stops_when_wait_action_blocks_controller() {
+        with_isolated_home(|_| {
+            let mut record = init(ControllerInitRequest {
+                loop_id: "loop-service-wait-stop".to_string(),
+                phase: "delegate".to_string(),
+                config_version: "v1".to_string(),
+            })
+            .expect("controller initialized");
+            record.record_action(
+                AgentTaskLoopPolicyAction::WaitForController {
+                    loop_id: "missing-child".to_string(),
+                    entity_id: None,
+                    wait_key: None,
+                    terminal_states: Vec::new(),
+                },
+                "wait for child",
+            );
+            record.record_action(
+                AgentTaskLoopPolicyAction::Complete {
+                    reason: Some("must not run yet".to_string()),
+                },
+                "complete after wait",
+            );
+            record.state = AgentTaskLoopControllerState::Running;
+            controller::write_controller(&record).expect("controller written");
+
+            let result = resume(
+                "loop-service-wait-stop",
+                CapturingExecutor::default(),
+                &NoopDispatchHook,
+            )
+            .expect("controller resumed");
+
+            assert_eq!(result.exit_code, 0);
+            assert_eq!(result.value.results.len(), 1);
+            assert_eq!(
+                result.value.controller.state,
+                AgentTaskLoopControllerState::Waiting
+            );
+            assert_eq!(
+                result.value.controller.next_actions[1].status,
+                AgentTaskLoopActionStatus::Pending
+            );
+        });
+    }
+
+    #[test]
+    fn wait_for_controller_resumes_after_child_terminal_state() {
+        with_isolated_home(|_| {
+            let mut parent = init(ControllerInitRequest {
+                loop_id: "loop-service-parent".to_string(),
+                phase: "delegate".to_string(),
+                config_version: "v1".to_string(),
+            })
+            .expect("parent initialized");
+            parent.record_action(
+                AgentTaskLoopPolicyAction::WaitForController {
+                    loop_id: "loop-service-child".to_string(),
+                    entity_id: None,
+                    wait_key: None,
+                    terminal_states: Vec::new(),
+                },
+                "wait for child",
+            );
+            parent.record_action(
+                AgentTaskLoopPolicyAction::Complete {
+                    reason: Some("child done".to_string()),
+                },
+                "complete after child",
+            );
+            parent.state = AgentTaskLoopControllerState::Running;
+            controller::write_controller(&parent).expect("parent written");
+
+            let mut child = init(ControllerInitRequest {
+                loop_id: "loop-service-child".to_string(),
+                phase: "work".to_string(),
+                config_version: "v1".to_string(),
+            })
+            .expect("child initialized");
+            child.state = AgentTaskLoopControllerState::Completed;
+            controller::write_controller(&child).expect("child written");
+
+            let result = resume(
+                "loop-service-parent",
+                CapturingExecutor::default(),
+                &NoopDispatchHook,
+            )
+            .expect("controller resumed");
+
+            assert_eq!(result.exit_code, 0);
+            assert_eq!(result.value.results.len(), 2);
+            assert_eq!(
+                result.value.controller.state,
+                AgentTaskLoopControllerState::Completed
+            );
+        });
+    }
+
+    #[test]
+    fn run_gates_executes_command_bundle_and_records_result() {
+        with_isolated_home(|_| {
+            let mut record = init(ControllerInitRequest {
+                loop_id: "loop-service-gates".to_string(),
+                phase: "validate".to_string(),
+                config_version: "v1".to_string(),
+            })
+            .expect("controller initialized");
+            record.gate_bundles.push(AgentTaskGateBundle {
+                bundle_id: "quality".to_string(),
+                description: "quality gates".to_string(),
+                checks: vec![AgentTaskGateBundleCheck {
+                    check_id: "true-command".to_string(),
+                    kind: AgentTaskGateBundleCheckKind::Command,
+                    input: json!({ "command": "true" }),
+                    retryable: false,
+                }],
+            });
+            record.record_action(
+                AgentTaskLoopPolicyAction::RunGates {
+                    bundle_id: "quality".to_string(),
+                    entity_id: None,
+                },
+                "run quality gates",
+            );
+            controller::write_controller(&record).expect("controller written");
+
+            let result = run_next(
+                "loop-service-gates",
+                CapturingExecutor::default(),
+                &NoopDispatchHook,
+            )
+            .expect("gates executed");
+
+            assert_eq!(result.exit_code, 0);
+            let loaded = controller::load_controller("loop-service-gates").expect("controller");
+            assert_eq!(loaded.gate_results.len(), 1);
+            assert_eq!(
+                loaded.gate_results[0].status,
+                AgentTaskGateBundleStatus::Passed
+            );
+        });
+    }
+
+    #[test]
+    fn route_finding_action_spawns_materialized_plan() {
+        with_isolated_home(|_| {
+            let mut record = init(ControllerInitRequest {
+                loop_id: "loop-service-route-finding".to_string(),
+                phase: "triage".to_string(),
+                config_version: "v1".to_string(),
+            })
+            .expect("controller initialized");
+            let plan = test_plan();
+            record.record_action(
+                AgentTaskLoopPolicyAction::RouteFinding {
+                    finding: AgentTaskLoopFindingPacket {
+                        finding_id: "finding-1".to_string(),
+                        severity: "high".to_string(),
+                        summary: "broken".to_string(),
+                        owner: None,
+                        source_transformer: None,
+                        reproduction_key: Some("repo-loop-gap".to_string()),
+                        lineage: Vec::new(),
+                        payload: Value::Null,
+                    },
+                    dedupe_key: "finding:repo-loop-gap".to_string(),
+                    entity_id: None,
+                    request_template: json!({
+                        "mode": "run_plan",
+                        "run_id": "controller-service-route-finding-a",
+                        "plan": plan,
+                    }),
+                },
+                "route finding",
+            );
+            controller::write_controller(&record).expect("controller written");
+
+            let result = run_next(
+                "loop-service-route-finding",
+                CapturingExecutor::default(),
+                &NoopDispatchHook,
+            )
+            .expect("route finding executed");
+
+            assert_eq!(result.exit_code, 0);
+            let loaded =
+                controller::load_controller("loop-service-route-finding").expect("controller");
+            assert!(loaded.entities.contains_key("finding:repo-loop-gap"));
+            assert_eq!(
+                loaded.task_lineage[0].run_id,
+                "controller-service-route-finding-a"
             );
         });
     }
