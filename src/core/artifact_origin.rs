@@ -4,7 +4,7 @@ use std::path::{Component, Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::core::{paths, Error, Result};
+use crate::core::{daemon, paths, Error, Result};
 
 #[derive(Debug, Clone)]
 pub struct ArtifactOriginServeSpec {
@@ -116,6 +116,9 @@ fn response_for_request(root: &Path, method: &str, target: &str) -> Result<Artif
             body,
         });
     }
+    if let Some(response) = artifact_route_response(method, target, headers.clone())? {
+        return Ok(response);
+    }
     let Some(path) = safe_target_path(root, target) else {
         let body = br#"{"error":"not_found"}"#.to_vec();
         headers.push(("content-type".to_string(), "application/json".to_string()));
@@ -176,6 +179,73 @@ fn safe_target_path(root: &Path, target: &str) -> Option<PathBuf> {
     Some(root.join(relative))
 }
 
+fn artifact_route_response(
+    method: &str,
+    target: &str,
+    mut headers: Vec<(String, String)>,
+) -> Result<Option<ArtifactOriginResponse>> {
+    let Some(response) = daemon::artifact_response_for_path(target) else {
+        return Ok(None);
+    };
+    let Some(artifact) = response.artifact else {
+        let body = serde_json::to_vec(&response.body).map_err(|err| {
+            Error::internal_json(
+                err.to_string(),
+                Some("serialize artifact route response".to_string()),
+            )
+        })?;
+        headers.push(("content-type".to_string(), "application/json".to_string()));
+        headers.push(("content-length".to_string(), body.len().to_string()));
+        return Ok(Some(ArtifactOriginResponse {
+            status: response.status_code,
+            headers,
+            body: if method.eq_ignore_ascii_case("HEAD") {
+                Vec::new()
+            } else {
+                body
+            },
+        }));
+    };
+
+    let body = std::fs::read(&artifact.path).map_err(|err| {
+        Error::internal_io(err.to_string(), Some("read routed artifact".to_string()))
+    })?;
+    headers.push(("content-type".to_string(), artifact.content_type));
+    headers.push(("content-length".to_string(), body.len().to_string()));
+    headers.push((
+        "content-disposition".to_string(),
+        format!(
+            "attachment; filename=\"{}\"",
+            sanitize_header_value(&artifact.filename)
+        ),
+    ));
+    headers.push(("x-homeboy-artifact-id".to_string(), artifact.record.id));
+    headers.push(("x-homeboy-run-id".to_string(), artifact.record.run_id));
+    headers.push((
+        "x-homeboy-artifact-kind".to_string(),
+        sanitize_header_value(&artifact.record.kind),
+    ));
+    if let Some(sha256) = artifact.record.sha256 {
+        headers.push(("x-homeboy-artifact-sha256".to_string(), sha256));
+    }
+    Ok(Some(ArtifactOriginResponse {
+        status: response.status_code,
+        headers,
+        body: if method.eq_ignore_ascii_case("HEAD") {
+            Vec::new()
+        } else {
+            body
+        },
+    }))
+}
+
+fn sanitize_header_value(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| !matches!(ch, '\r' | '\n' | '"'))
+        .collect()
+}
+
 fn reason(status: u16) -> &'static str {
     match status {
         200 => "OK",
@@ -188,6 +258,7 @@ fn reason(status: u16) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::observation::{NewRunRecord, ObservationStore};
 
     #[test]
     fn serves_json_with_cors_headers() {
@@ -229,5 +300,61 @@ mod tests {
             "access-control-allow-methods".to_string(),
             "GET, HEAD, OPTIONS".to_string()
         )));
+    }
+
+    #[test]
+    fn serves_run_scoped_artifact_routes() {
+        crate::test_support::with_isolated_home(|home| {
+            let artifact_path = home.path().join("report.json");
+            std::fs::write(&artifact_path, br#"{"ok":true}"#).expect("write artifact");
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(NewRunRecord::builder("bench").build())
+                .expect("run");
+            let artifact = store
+                .record_artifact(&run.id, "report", &artifact_path)
+                .expect("artifact");
+
+            let response = response_for_request(
+                home.path(),
+                "GET",
+                &format!("/runs/{}/artifacts/{}", run.id, artifact.id),
+            )
+            .expect("artifact route response");
+
+            assert_eq!(response.status, 200);
+            assert_eq!(response.body, br#"{"ok":true}"#);
+            assert!(response
+                .headers
+                .contains(&("x-homeboy-run-id".to_string(), run.id)));
+        });
+    }
+
+    #[test]
+    fn serves_head_for_run_scoped_artifact_routes() {
+        crate::test_support::with_isolated_home(|home| {
+            let artifact_path = home.path().join("report.json");
+            std::fs::write(&artifact_path, br#"{"ok":true}"#).expect("write artifact");
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(NewRunRecord::builder("bench").build())
+                .expect("run");
+            let artifact = store
+                .record_artifact(&run.id, "report", &artifact_path)
+                .expect("artifact");
+
+            let response = response_for_request(
+                home.path(),
+                "HEAD",
+                &format!("/runs/{}/artifacts/{}", run.id, artifact.id),
+            )
+            .expect("artifact route response");
+
+            assert_eq!(response.status, 200);
+            assert!(response.body.is_empty());
+            assert!(response
+                .headers
+                .contains(&("content-length".to_string(), "11".to_string())));
+        });
     }
 }
