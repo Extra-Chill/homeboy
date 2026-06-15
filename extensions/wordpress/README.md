@@ -15,7 +15,7 @@ extension scripts for these verbs:
 
 | Homeboy verb | What it does | Entry script |
 |---|---|---|
-| `test` | PHPUnit via WP Codebox (default) or host-PHP smoke scripts | `scripts/test/test-runner.sh` |
+| `test` | PHPUnit and real-WordPress host smokes via WP Codebox | `scripts/test/test-runner.sh` |
 | `lint` | PHPCS + PHPStan (PHP) and ESLint (JS/TS) | `scripts/lint/lint-runner.sh` |
 | `build` | Production ZIP with composer `--no-dev`, asset build, syntax check | `scripts/build/build.sh` |
 | `bench` | Benchmark workloads via WP Codebox; optional browser handoff | `scripts/bench/bench-runner.sh` |
@@ -129,17 +129,23 @@ class Test_My_Feature extends WP_UnitTestCase {
 Available factories from the WordPress test framework: `user`, `post`,
 `comment`, `term`, `category`, `tag`, `attachment`.
 
-### Host-smoke backend
+### Real-WordPress host smokes
 
-Pure PHP smoke suites that don't need WordPress can opt out of WP Codebox:
+Standalone smoke files matching `tests/**/*-smoke.php` run through the same WP
+Codebox-backed real WordPress harness as CI. Each file is mounted with the
+component and executed via `wordpress.run-php`, so WordPress functions and
+runtime dependencies are available.
+
+To rerun one existing smoke on demand before pushing:
 
 ```bash
-homeboy component set <component-id> test_backend host-smoke
+homeboy test <component-id> -- --host-smoke-file tests/example-smoke.php
 ```
 
-The host-smoke backend discovers `tests/**/*-smoke.php`, runs each script
-in its own host `php` process, emits `HOST_SMOKE_*` markers, and fails
-fast with the failing script name. It does not bootstrap WordPress.
+The focused command is opt-in and does not change default test discovery or add
+smokes to CI. Output preserves the machine-readable `HOST_SMOKE_BEGIN`,
+`HOST_SMOKE_PROGRESS`, `HOST_SMOKE_OK`, `HOST_SMOKE_FAIL`, and
+`HOST_SMOKE_SUMMARY` markers.
 
 ### Runtime dependencies
 

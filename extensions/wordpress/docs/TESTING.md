@@ -19,12 +19,15 @@ homeboy test <project-id>
 
 # Verbose diagnostics
 HOMEBOY_DEBUG=1 homeboy test <component-id>
+
+# Rerun one real-WordPress host smoke through the CI-equivalent WP Codebox path
+homeboy test <component-id> -- --host-smoke-file tests/example-smoke.php
 ```
 
 Tests run through `scripts/test/test-runner.sh`, which dispatches to the WP
-Codebox runner for WordPress PHPUnit. The runner mounts the component under
-`/wordpress/wp-content/plugins/<slug>`, boots WordPress in-process, discovers
-test files, and runs PHPUnit.
+Codebox runner for WordPress PHPUnit and real-WordPress host smokes. The runner
+mounts the component under `/wordpress/wp-content/plugins/<slug>`, boots
+WordPress in-process, discovers test files, and routes files by type.
 
 ## Requirements
 
@@ -39,20 +42,24 @@ A component **must not** carry its own `tests/bootstrap.php` or
 `phpunit.xml` — the extension owns bootstrap. Local PHPUnit configs are
 rejected with a clear error.
 
-## Host smoke backend
+## Real-WordPress host smokes
 
-Pure PHP smoke suites can run directly under host PHP when they are genuinely
-standalone and do not require a WordPress bootstrap:
+Standalone PHP smoke files can live under `tests/**/*-smoke.php`. They run
+through WP Codebox against real WordPress, using the same component mounts,
+dependency mounts, drop-in handling, WordPress version selection, and
+`wordpress.run-php` recipe execution path CI uses.
+
+The default test command discovers existing smoke files when present. To rerun
+one failed smoke without the full CI loop, pass the file explicitly:
 
 ```bash
-homeboy component set <component-id> test_backend host-smoke
+homeboy test <component-id> -- --host-smoke-file tests/example-smoke.php
 ```
 
-The host-smoke backend discovers `tests/**/*-smoke.php`, runs each script in a
-separate `php` process, emits `HOST_SMOKE_*` markers, and fails fast with the
-failing script name. It remains separate because these scripts are non-WordPress
-PHP checks by contract: they do not bootstrap WordPress, connect to MySQL, or
-start a sandbox runtime.
+This focused path is opt-in and does not add default smokes or broaden CI
+coverage. It preserves the machine-readable `HOST_SMOKE_BEGIN`,
+`HOST_SMOKE_PROGRESS`, `HOST_SMOKE_OK`, `HOST_SMOKE_FAIL`, and
+`HOST_SMOKE_SUMMARY` markers, and fails fast with the selected script name.
 
 ## Data Machine agent bundle validator
 
@@ -74,11 +81,10 @@ For full CI agent runs on the WP Codebox WordPress execution substrate, see
 
 ## WP Codebox test runtime status
 
-WordPress PHPUnit runs through WP Codebox by default. The WP Codebox path owns
-the same component mounts, dependency mounts, drop-ins, file routing, WordPress
-version selection, and artifact parsing contract that the direct Playground
-runner previously handled. `host-smoke` remains available for standalone PHP
-smoke scripts that do not bootstrap WordPress.
+WordPress PHPUnit and standalone `tests/**/*-smoke.php` files run through WP
+Codebox by default. The WP Codebox path owns the same component mounts,
+dependency mounts, drop-ins, file routing, WordPress version selection, and
+artifact parsing contract that the direct Playground runner previously handled.
 
 ## Dependencies
 

@@ -33,10 +33,33 @@ fi
 # bare-host/no-WordPress backend and no test_backend toggle; the runtime is
 # always WP Codebox.
 
+show_usage() {
+    cat <<'EOF'
+Usage: homeboy test <component-id> [-- --file <path>]
+       homeboy test <component-id> [-- --host-smoke-file <tests/...-smoke.php>]
+
+Options passed after `--` are handled by the WordPress extension runner:
+  --file <path>             Run one test file, routed by file type.
+  --host-smoke-file <path>  Run one real-WordPress host smoke through the same
+                            WP Codebox/wordpress.run-php harness used by CI.
+                            The file must match tests/**/*-smoke.php.
+  --help                    Show this help.
+
+Real-WordPress host smokes preserve the HOST_SMOKE_BEGIN,
+HOST_SMOKE_PROGRESS, HOST_SMOKE_OK, HOST_SMOKE_FAIL, and
+HOST_SMOKE_SUMMARY markers for machine parsing.
+EOF
+}
+
 TARGET_FILE=""
+TARGET_HOST_SMOKE_FILE=""
 PASSTHROUGH_ARGS=()
 while [ "$#" -gt 0 ]; do
     case "$1" in
+        --help|-h)
+            show_usage
+            exit 0
+            ;;
         --file)
             shift
             if [ "$#" -eq 0 ] || [ -z "${1:-}" ]; then
@@ -48,12 +71,28 @@ while [ "$#" -gt 0 ]; do
         --file=*)
             TARGET_FILE="${1#--file=}"
             ;;
+        --host-smoke-file)
+            shift
+            if [ "$#" -eq 0 ] || [ -z "${1:-}" ]; then
+                echo "ERROR: --host-smoke-file requires a path" >&2
+                exit 2
+            fi
+            TARGET_HOST_SMOKE_FILE="$1"
+            ;;
+        --host-smoke-file=*)
+            TARGET_HOST_SMOKE_FILE="${1#--host-smoke-file=}"
+            ;;
         *)
             PASSTHROUGH_ARGS+=("$1")
             ;;
     esac
     shift
 done
+
+if [ -n "$TARGET_FILE" ] && [ -n "$TARGET_HOST_SMOKE_FILE" ]; then
+    echo "ERROR: use either --file or --host-smoke-file, not both" >&2
+    exit 2
+fi
 
 COMPONENT_SHAPE="${HOMEBOY_COMPONENT_SHAPE:-}"
 if [ -z "$COMPONENT_SHAPE" ]; then
@@ -220,6 +259,23 @@ homeboy_wordpress_is_shell_smoke_file() {
             ;;
     esac
 }
+
+if [ -n "$TARGET_HOST_SMOKE_FILE" ]; then
+    if ! target_rel="$(homeboy_wordpress_rel_test_file "$TARGET_HOST_SMOKE_FILE")"; then
+        echo "ERROR: requested real-WordPress host smoke file not found: ${TARGET_HOST_SMOKE_FILE}" >&2
+        exit 2
+    fi
+
+    case "$target_rel" in
+        tests/*-smoke.php|tests/*/*-smoke.php|tests/*/*/*-smoke.php|tests/*/*/*/*-smoke.php)
+            HOMEBOY_WORDPRESS_HOST_SMOKE_FILE="$target_rel" exec bash "$SMOKE_RUNNER" "${PASSTHROUGH_ARGS[@]}"
+            ;;
+        *)
+            echo "ERROR: --host-smoke-file requires tests/**/*-smoke.php, got: ${target_rel}" >&2
+            exit 2
+            ;;
+    esac
+fi
 
 if [ -z "$TARGET_FILE" ] && [ "${HOMEBOY_TEST_SCOPE_KIND:-}" = "exclusive_env" ]; then
     if [ "${HOMEBOY_TEST_SCOPE_ENV_NAME:-}" = "HOMEBOY_WORDPRESS_HOST_SMOKE_FILES" ] && [ -n "${HOMEBOY_TEST_SCOPE_ENV_VALUE:-}" ]; then
