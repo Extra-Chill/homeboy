@@ -574,6 +574,12 @@ mod implementation {
                 ],
             )
             .is_some()
+            || has_browser_prefixed_number(object)
+            || has_network_or_request_count(object)
+            || object
+                .get("metrics")
+                .and_then(Value::as_object)
+                .is_some_and(has_numeric_metric)
             || object
                 .get("summary")
                 .and_then(Value::as_object)
@@ -586,16 +592,31 @@ mod implementation {
             || summary
                 .get("metrics")
                 .and_then(Value::as_object)
-                .is_some_and(|metrics| {
-                    has_metric_object_signal(metrics, &browser_metric_names())
-                        || has_metric_object_signal(metrics, &lifecycle_metric_names())
-                })
+                .is_some_and(has_numeric_metric)
     }
 
-    fn has_metric_object_signal(object: &Map<String, Value>, names: &[&str]) -> bool {
+    fn has_numeric_metric(object: &Map<String, Value>) -> bool {
+        object.values().any(|value| value.as_f64().is_some())
+    }
+
+    fn has_browser_prefixed_number(object: &Map<String, Value>) -> bool {
         object
             .iter()
-            .any(|(key, value)| names.contains(&key.as_str()) && value.as_f64().is_some())
+            .any(|(key, value)| key.starts_with("browser_") && value.as_f64().is_some())
+    }
+
+    fn has_network_or_request_count(object: &Map<String, Value>) -> bool {
+        first_number(
+            object,
+            &[
+                "network_response_count",
+                "network_request_count",
+                "network_event_count",
+                "request_total",
+                "response_count",
+            ],
+        )
+        .is_some()
     }
 
     fn has_provenance_signal(object: &Map<String, Value>) -> bool {
@@ -674,6 +695,7 @@ mod implementation {
             &mut sample.browser_metrics,
             &browser_metric_names(),
         );
+        collect_generic_metric_object(object.get("metrics"), &mut sample.browser_metrics);
         collect_metric_object(
             object
                 .get("summary")
@@ -682,7 +704,15 @@ mod implementation {
             &mut sample.browser_metrics,
             &browser_metric_names(),
         );
+        collect_generic_metric_object(
+            object
+                .get("summary")
+                .and_then(Value::as_object)
+                .and_then(|summary| summary.get("metrics")),
+            &mut sample.browser_metrics,
+        );
         collect_top_level_numbers(object, &mut sample.browser_metrics, &browser_metric_names());
+        collect_top_level_metric_numbers(object, &mut sample.browser_metrics);
         collect_metric_object(
             object.get("lifecycle_metrics"),
             &mut sample.lifecycle_metrics,
@@ -1382,7 +1412,18 @@ mod implementation {
     }
 
     fn collect_requests(object: &Map<String, Value>, sample: &mut BrowserEvidenceSample) {
-        sample.request_total = first_number(object, &["request_count", "requests_total"]);
+        sample.request_total = first_number(
+            object,
+            &[
+                "request_count",
+                "requests_total",
+                "request_total",
+                "network_response_count",
+                "network_request_count",
+                "network_event_count",
+                "response_count",
+            ],
+        );
         if let Some(requests) = object
             .get("requests")
             .or_else(|| object.get("network_requests"))
@@ -1588,6 +1629,17 @@ mod implementation {
         collect_top_level_numbers(object, out, names);
     }
 
+    fn collect_generic_metric_object(value: Option<&Value>, out: &mut BTreeMap<String, f64>) {
+        let Some(object) = value.and_then(Value::as_object) else {
+            return;
+        };
+        for (name, value) in object {
+            if let Some(value) = value.as_f64() {
+                out.insert(name.clone(), value);
+            }
+        }
+    }
+
     fn collect_top_level_numbers(
         object: &Map<String, Value>,
         out: &mut BTreeMap<String, f64>,
@@ -1605,6 +1657,32 @@ mod implementation {
                 }
             }
         }
+    }
+
+    fn collect_top_level_metric_numbers(
+        object: &Map<String, Value>,
+        out: &mut BTreeMap<String, f64>,
+    ) {
+        for (name, value) in object {
+            if is_reportable_top_level_metric_name(name) {
+                if let Some(value) = value.as_f64() {
+                    out.insert(name.clone(), value);
+                }
+            }
+        }
+    }
+
+    fn is_reportable_top_level_metric_name(name: &str) -> bool {
+        name.starts_with("browser_")
+            || name.starts_with("network_")
+            || name.starts_with("request_")
+            || name.ends_with("_ms")
+            || name.ends_with("_bytes")
+            || name.ends_with("_count")
+            || name.ends_with("_ratio")
+            || name.ends_with("_pct")
+            || name.ends_with("_percent")
+            || name.ends_with("_score")
     }
 
     fn collect_count_map(value: Option<&Value>, out: &mut BTreeMap<String, f64>) {
