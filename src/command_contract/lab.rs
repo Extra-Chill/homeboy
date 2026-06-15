@@ -160,6 +160,14 @@ impl Commands {
                 }
                 contract
             }
+            Commands::Tunnel(args) if args.is_preview_consumer_run() => {
+                LabCommandContract::explicit_runner(
+                    "tunnel preview-consumer run",
+                    None,
+                    false,
+                    LAB_NO_EXTRA_TOOLS,
+                )
+            }
             _ => return None,
         };
 
@@ -434,6 +442,17 @@ mod tests {
                 .supports_lab_runner()
         );
         assert!(parsed_command(&["homeboy", "agent-task", "providers"]).supports_lab_runner());
+        assert!(parsed_command(&[
+            "homeboy",
+            "tunnel",
+            "preview-consumer",
+            "run",
+            "--config",
+            "preview-consumer.json",
+            "--preview-public-url",
+            "https://preview.example.test/"
+        ])
+        .supports_lab_runner());
         assert!(parsed_command(&[
             "homeboy",
             "agent-task",
