@@ -111,6 +111,29 @@ fn preflight_trace_dependency(
         }
     }
 
+    if dependency.kind == "wordpress-plugin" {
+        if let Some(missing) =
+            crate::extensions::wordpress_plugin_runtime::missing_composer_autoload_runtime(root)
+        {
+            return Err(trace_preflight_error(
+                "trace.dependencies",
+                format!(
+                    "trace dependency '{}' plugin source has composer.json autoload entries but no {}",
+                    dependency.id, missing.required_path
+                ),
+                serde_json::json!({
+                    "kind": "trace-dependency",
+                    "dependency_kind": dependency.kind,
+                    "dependency_id": dependency.id,
+                    "failure": "missing_composer_autoload_runtime",
+                    "path": root.to_string_lossy(),
+                    "required_path": missing.required_path,
+                    "composer_manifest": "composer.json"
+                }),
+            ));
+        }
+    }
+
     Ok(TraceDependencyProvenance {
         id: dependency.id.clone(),
         kind: dependency.kind.clone(),
@@ -264,6 +287,48 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("missing_required_path"));
+    }
+
+    #[test]
+    fn trace_dependency_preflight_rejects_wp_plugin_autoload_without_vendor() {
+        let temp = tempfile::tempdir().unwrap();
+        let plugin_root = temp.path().join("sample-plugin");
+        std::fs::create_dir_all(&plugin_root).unwrap();
+        std::fs::write(plugin_root.join("sample-plugin.php"), "<?php\n").unwrap();
+        std::fs::write(
+            plugin_root.join("composer.json"),
+            r#"{
+                "autoload": {
+                    "classmap": ["includes/"]
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let err = preflight_trace_dependencies(&[TraceDependencySpec {
+            id: "sample-plugin".to_string(),
+            kind: "wordpress-plugin".to_string(),
+            source: "source-checkout".to_string(),
+            path: Some(plugin_root.to_string_lossy().to_string()),
+            plugin_file: Some("sample-plugin.php".to_string()),
+            requires_built_assets: false,
+            required_paths: Vec::new(),
+            source_url: None,
+            version: None,
+            r#ref: None,
+            package_marker: None,
+        }])
+        .expect_err("autoloaded WordPress plugin source should fail before runner activation");
+
+        assert_eq!(err.code, ErrorCode::ValidationInvalidArgument);
+        assert_eq!(err.details["field"], "trace.dependencies");
+        assert!(err
+            .message
+            .contains("composer.json autoload entries but no vendor/autoload.php"));
+        assert!(err.details["tried"][0]
+            .as_str()
+            .unwrap()
+            .contains("missing_composer_autoload_runtime"));
     }
 
     #[test]
