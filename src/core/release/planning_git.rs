@@ -23,6 +23,7 @@ pub(super) fn validate_remote_sync(component: &Component) -> Result<()> {
 }
 
 pub(super) fn validate_default_branch(component: &Component) -> Result<()> {
+    let path = std::path::Path::new(&component.local_path);
     let current_branch = command::run_in_optional(
         &component.local_path,
         "git",
@@ -52,6 +53,24 @@ pub(super) fn validate_default_branch(component: &Component) -> Result<()> {
         return Ok(());
     }
 
+    let remote_default_ref = format!("origin/{default_branch}");
+    let head_revision = git::run_git(path, &["rev-parse", "HEAD"], "git rev-parse HEAD")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let remote_default_revision = git::run_git(
+        path,
+        &["rev-parse", &remote_default_ref],
+        "git rev-parse remote default branch",
+    )
+    .ok()
+    .map(|value| value.trim().to_string())
+    .filter(|value| !value.is_empty());
+
+    if head_revision.is_some() && head_revision == remote_default_revision {
+        return Ok(());
+    }
+
     Err(Error::validation_invalid_argument(
         "release",
         format!(
@@ -61,6 +80,10 @@ pub(super) fn validate_default_branch(component: &Component) -> Result<()> {
         None,
         Some(vec![
             format!("Check out '{}' before releasing", default_branch),
+            format!(
+                "A managed release worktree on another local branch is allowed only when HEAD exactly matches {}",
+                remote_default_ref
+            ),
             "If you only want a preview, use --dry-run".to_string(),
         ]),
     ))
@@ -120,6 +143,68 @@ mod tests {
 
         assert_eq!(err.code.as_str(), "validation.invalid_argument");
         assert!(err.message.contains("non-default branch 'feature'"));
+    }
+
+    #[test]
+    fn test_validate_default_branch_allows_release_branch_at_remote_default_tip() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let remote = temp.path().join("remote.git");
+        let seed = temp.path().join("seed");
+        let checkout = temp.path().join("checkout");
+        let remote_str = remote.to_string_lossy().to_string();
+
+        run_git(
+            temp.path(),
+            &["init", "--bare", "--initial-branch", "main", &remote_str],
+        );
+        run_git(temp.path(), &["clone", &remote_str, "seed"]);
+        configure_git_user(&seed);
+        std::fs::write(seed.join("README.md"), "fixture\n").expect("write fixture");
+        run_git(&seed, &["add", "."]);
+        run_git(&seed, &["commit", "-q", "-m", "Initial commit"]);
+        run_git(&seed, &["push", "-q", "origin", "main"]);
+
+        run_git(temp.path(), &["clone", &remote_str, "checkout"]);
+        run_git(&checkout, &["checkout", "-q", "-b", "release-local"]);
+
+        validate_default_branch(&git_component(&checkout))
+            .expect("release branch at origin/main tip should be allowed");
+    }
+
+    #[test]
+    fn test_validate_default_branch_blocks_feature_branch_ahead_of_remote_default() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let remote = temp.path().join("remote.git");
+        let seed = temp.path().join("seed");
+        let checkout = temp.path().join("checkout");
+        let remote_str = remote.to_string_lossy().to_string();
+
+        run_git(
+            temp.path(),
+            &["init", "--bare", "--initial-branch", "main", &remote_str],
+        );
+        run_git(temp.path(), &["clone", &remote_str, "seed"]);
+        configure_git_user(&seed);
+        std::fs::write(seed.join("README.md"), "fixture\n").expect("write fixture");
+        run_git(&seed, &["add", "."]);
+        run_git(&seed, &["commit", "-q", "-m", "Initial commit"]);
+        run_git(&seed, &["push", "-q", "origin", "main"]);
+
+        run_git(temp.path(), &["clone", &remote_str, "checkout"]);
+        configure_git_user(&checkout);
+        run_git(&checkout, &["checkout", "-q", "-b", "feature"]);
+        std::fs::write(checkout.join("README.md"), "fixture\nfeature\n").expect("write feature");
+        run_git(&checkout, &["add", "."]);
+        run_git(&checkout, &["commit", "-q", "-m", "Feature commit"]);
+
+        let err = validate_default_branch(&git_component(&checkout))
+            .expect_err("feature branch ahead of origin/main should fail");
+
+        assert!(err.message.contains("non-default branch 'feature'"));
+        assert!(err
+            .details
+            .to_string()
+            .contains("HEAD exactly matches origin/main"));
     }
 
     #[test]
