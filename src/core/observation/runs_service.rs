@@ -882,7 +882,7 @@ mod tests {
         with_isolated_home(|_home| {
             let _xdg = XdgGuard::unset();
             let store = ObservationStore::open_initialized().expect("store");
-            let err = require_run(&store, "missing-run").err().expect("missing");
+            let err = require_run(&store, "missing-run").expect_err("missing");
             assert_eq!(err.code.as_str(), "validation.invalid_argument");
             assert!(err.message.contains("run record not found"));
         });
@@ -931,8 +931,7 @@ mod tests {
             let store = ObservationStore::open_initialized().expect("store");
             let run = store.start_run(sample_run("bench")).expect("run");
             let err = resolve_artifact_for_run(&store, &run.id, "missing-artifact")
-                .err()
-                .expect("missing artifact");
+                .expect_err("missing artifact");
             assert_eq!(err.code.as_str(), "validation.invalid_argument");
             assert!(err.message.contains("artifact record not found"));
         });

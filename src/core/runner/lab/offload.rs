@@ -966,7 +966,7 @@ fn run_lab_offload_inner(
             )? {
                 if let Some(record) = agent_task_lifecycle::record_remote_dispatch_failure(
                     agent_task_lifecycle::AgentTaskRemoteDispatchFailure {
-                        run_id: &run_id,
+                        run_id,
                         local_command: request.normalized_args.to_vec(),
                         remote_command: remote_command.clone(),
                         runner_id,
@@ -995,7 +995,7 @@ fn run_lab_offload_inner(
             stderr.push_str(&format!("Lab pre-dispatch failure: {failure_message}\n"));
             let record = agent_task_lifecycle::record_pre_dispatch_failure(
                 agent_task_lifecycle::AgentTaskPreDispatchFailure {
-                    run_id: &run_id,
+                    run_id,
                     local_command: request.normalized_args.to_vec(),
                     remote_command: remote_command.clone(),
                     runner_id,
@@ -1031,7 +1031,7 @@ fn with_lab_apply_patch_step(
     } else {
         inputs = inputs.json(
             "apply",
-            &serde_json::json!({
+            serde_json::json!({
                 "applied": false,
                 "reason": "no_patch",
             }),
