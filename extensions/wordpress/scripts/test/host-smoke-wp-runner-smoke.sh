@@ -43,6 +43,8 @@ const recipeIdx = args.indexOf('--recipe');
 const recipe = JSON.parse(fs.readFileSync(args[recipeIdx + 1], 'utf8'));
 const captureDir = process.env.FAKE_CODEBOX_CAPTURE_DIR;
 fs.writeFileSync(`${captureDir}/recipe-${Date.now()}-${Math.random().toString(36).slice(2)}.json`, JSON.stringify(recipe, null, 2));
+const codeFileArg = recipe.workflow.steps[0].args.find((arg) => arg.startsWith('code-file='));
+fs.copyFileSync(codeFileArg.slice('code-file='.length), `${captureDir}/wrapper.php`);
 // The run-php step's code-file is a wrapper that requires the smoke; we emit a
 // successful run with an OK stdout to mirror a passing smoke.
 process.stdout.write(JSON.stringify({
@@ -83,6 +85,9 @@ captured_recipe="$(ls "${CAPTURE_DIR}"/recipe-*.json | head -1)"
 assert_contains "$captured_recipe" "wordpress.run-php"
 assert_contains "$captured_recipe" "/wordpress/wp-content/plugins/component"
 assert_contains "$captured_recipe" "workspace-recipe/v1"
+assert_contains "${CAPTURE_DIR}/wrapper.php" "\$homeboy_smoke_stderr = defined(\"STDERR\") ? STDERR : fopen(\"php://stderr\", \"w\");"
+assert_contains "${CAPTURE_DIR}/wrapper.php" "fwrite(\$homeboy_smoke_stderr"
+assert_not_contains "${CAPTURE_DIR}/wrapper.php" "fwrite(STDERR"
 
 # --- Failure propagation: a fake codebox returning success=false fails the run.
 FAKE_CODEBOX_FAIL="${TMPDIR}/fake-wp-codebox-fail.cjs"

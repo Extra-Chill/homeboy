@@ -140,9 +140,11 @@ homeboy_wordpress_smoke_wrapper() {
         $smoke = $argv[1];
         echo "<?php\n";
         echo "\$smoke = " . var_export($smoke, true) . ";\n";
-        echo "if (!file_exists(\$smoke)) { fwrite(STDERR, \"smoke file missing in sandbox: \" . \$smoke . \"\\n\"); exit(3); }\n";
+        echo "\$homeboy_smoke_stderr = defined(\"STDERR\") ? STDERR : fopen(\"php://stderr\", \"w\");\n";
+        echo "if (!is_resource(\$homeboy_smoke_stderr)) { \$homeboy_smoke_stderr = fopen(\"php://output\", \"w\"); }\n";
+        echo "if (!file_exists(\$smoke)) { fwrite(\$homeboy_smoke_stderr, \"smoke file missing in sandbox: \" . \$smoke . \"\\n\"); exit(3); }\n";
         echo "register_shutdown_function(function () { \$e = error_get_last(); if (\$e && in_array(\$e[\"type\"], array(E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR), true)) { exit(1); } });\n";
-        echo "try { require \$smoke; } catch (\\Throwable \$e) { fwrite(STDERR, \"smoke threw: \" . \$e->getMessage() . \"\\n\"); exit(1); }\n";
+        echo "try { require \$smoke; } catch (\\Throwable \$e) { fwrite(\$homeboy_smoke_stderr, \"smoke threw: \" . \$e->getMessage() . \"\\n\"); exit(1); }\n";
     ' "$sandbox_smoke_path"
 }
 
