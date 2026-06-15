@@ -2031,6 +2031,31 @@ mod tests {
         observed_request: Arc<Mutex<Option<AgentTaskRequest>>>,
     }
 
+    #[derive(Clone, Default)]
+    struct CapturingDispatchHook {
+        observed_requests: Arc<Mutex<Vec<Value>>>,
+    }
+
+    impl ControllerDispatchHook for CapturingDispatchHook {
+        fn dispatch(&self, request: &Value) -> Result<(Value, i32)> {
+            self.observed_requests
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(request.clone());
+            let entity_id = request
+                .get("entity_id")
+                .and_then(Value::as_str)
+                .unwrap_or("workflow");
+            Ok((
+                json!({
+                    "schema": "homeboy/test-generic-dispatch-result/v1",
+                    "run_id": format!("generic-run-{}", entity_id.replace([':', '/', '#', ' '], "_")),
+                }),
+                0,
+            ))
+        }
+    }
+
     impl AgentTaskExecutorAdapter for CapturingExecutor {
         fn execute(
             &self,
@@ -2625,6 +2650,189 @@ mod tests {
                 loaded.gate_results[0].status,
                 AgentTaskGateBundleStatus::Passed
             );
+        });
+    }
+
+    #[test]
+    fn from_spec_resume_drives_generic_workflow_gates_completion_and_lineage() {
+        with_isolated_home(|_| {
+            let spec = AgentTaskRepoLoopSpec {
+                schema: Some("example/repo-loop/v1".to_string()),
+                loop_id: "repo-loop-generic-execution".to_string(),
+                phase: "repair".to_string(),
+                config_version: "repo-v1".to_string(),
+                metadata: json!({ "domain": "example" }),
+                entities: vec![
+                    AgentTaskRepoLoopSpecEntity {
+                        entity_type: "finding".to_string(),
+                        key: "alpha".to_string(),
+                        parent_entity_ids: Vec::new(),
+                        metadata: json!({ "severity": "high" }),
+                    },
+                    AgentTaskRepoLoopSpecEntity {
+                        entity_type: "finding".to_string(),
+                        key: "beta".to_string(),
+                        parent_entity_ids: Vec::new(),
+                        metadata: json!({ "severity": "medium" }),
+                    },
+                ],
+                agents: vec![AgentTaskRepoLoopSpecAgent {
+                    agent_id: "repair-agent".to_string(),
+                    role: Some("repair".to_string()),
+                    instructions: Some("repair findings and return artifacts".to_string()),
+                    tools: vec!["repo-inspector".to_string()],
+                    abilities: vec!["patch-writer".to_string()],
+                    metadata: Value::Null,
+                }],
+                tools: vec![AgentTaskRepoLoopSpecTool {
+                    tool_id: "repo-inspector".to_string(),
+                    description: Some("inspect repository state".to_string()),
+                    input_schema: Value::Null,
+                }],
+                abilities: vec![AgentTaskRepoLoopSpecAbility {
+                    ability_id: "patch-writer".to_string(),
+                    description: Some("write candidate patches".to_string()),
+                    input: Value::Null,
+                }],
+                workflows: vec![AgentTaskRepoLoopSpecWorkflow {
+                    workflow_id: "repair-findings".to_string(),
+                    agent_id: Some("repair-agent".to_string()),
+                    prompt: Some("Repair each routed finding and report evidence.".to_string()),
+                    tasks: Vec::new(),
+                    entity_ids: vec!["finding:alpha".to_string(), "finding:beta".to_string()],
+                    tools: vec!["repo-inspector".to_string()],
+                    abilities: vec!["patch-writer".to_string()],
+                    artifacts: vec!["candidate-patch".to_string()],
+                    dependencies: vec!["source-tree".to_string()],
+                    gates: vec!["quality".to_string()],
+                    metrics: vec!["coverage".to_string()],
+                    inputs: json!({ "scope": "changed findings" }),
+                }],
+                artifacts: vec![AgentTaskRepoLoopSpecArtifact {
+                    artifact_id: "candidate-patch".to_string(),
+                    kind: "diff".to_string(),
+                    description: Some("candidate patch".to_string()),
+                    required: true,
+                }],
+                dependencies: vec![AgentTaskRepoLoopSpecDependency {
+                    dependency_id: "source-tree".to_string(),
+                    kind: "repo".to_string(),
+                    value: None,
+                    required: true,
+                }],
+                gates: vec![AgentTaskRepoLoopSpecGate {
+                    gate_id: "quality".to_string(),
+                    description: Some("repo quality gate".to_string()),
+                    metrics: vec!["coverage".to_string()],
+                    input: Value::Null,
+                }],
+                metrics: vec![AgentTaskRepoLoopSpecMetric {
+                    metric_id: "coverage".to_string(),
+                    description: Some("coverage should not regress".to_string()),
+                    target: Some("maintained".to_string()),
+                    input: Value::Null,
+                }],
+                gate_bundles: vec![AgentTaskGateBundle {
+                    bundle_id: "quality".to_string(),
+                    description: "repo quality gate bundle".to_string(),
+                    checks: vec![AgentTaskGateBundleCheck {
+                        check_id: "external-quality-signal".to_string(),
+                        kind: AgentTaskGateBundleCheckKind::Manual,
+                        input: json!({ "metric": "coverage" }),
+                        retryable: false,
+                    }],
+                }],
+                policy: None,
+                phases: Vec::new(),
+                actions: vec![
+                    AgentTaskLoopPolicyAction::RunGates {
+                        bundle_id: "quality".to_string(),
+                        entity_id: Some("finding:alpha".to_string()),
+                    },
+                    AgentTaskLoopPolicyAction::Complete {
+                        reason: Some("repo loop contract executed".to_string()),
+                    },
+                ],
+                initial_event: None,
+            };
+
+            let initialized = init_from_spec(ControllerFromSpecRequest { spec })
+                .expect("repo loop spec initialized");
+            assert!(initialized.initialized);
+            assert_eq!(initialized.actions.len(), 3);
+            assert_eq!(
+                initialized.actions[0].status,
+                AgentTaskLoopActionStatus::Pending
+            );
+            match &initialized.actions[0].action {
+                AgentTaskLoopPolicyAction::FanOut {
+                    request_template, ..
+                } => {
+                    assert_eq!(request_template["mode"], "dispatch");
+                    let dispatch = request_template["dispatch"]
+                        .as_object()
+                        .expect("compiled dispatch request");
+                    assert!(dispatch.get("backend").is_none());
+                    assert!(dispatch.get("provider_config").is_none());
+                    assert!(dispatch.get("executor").is_none());
+                }
+                other => panic!("expected compiled workflow fan-out, got {other:?}"),
+            }
+
+            let dispatch = CapturingDispatchHook::default();
+            let result = resume(
+                "repo-loop-generic-execution",
+                CapturingExecutor::default(),
+                &dispatch,
+            )
+            .expect("controller resumed");
+
+            assert_eq!(result.exit_code, 0);
+            assert_eq!(result.value.results.len(), 3);
+            assert_eq!(
+                result.value.controller.state,
+                AgentTaskLoopControllerState::Completed
+            );
+            assert!(result
+                .value
+                .controller
+                .next_actions
+                .iter()
+                .all(|action| action.status == AgentTaskLoopActionStatus::Completed));
+            assert_eq!(result.value.controller.gate_results.len(), 1);
+            assert_eq!(
+                result.value.controller.gate_results[0].status,
+                AgentTaskGateBundleStatus::Warn
+            );
+            assert_eq!(result.value.controller.task_lineage.len(), 2);
+            assert!(result.value.controller.task_lineage.iter().any(|lineage| {
+                lineage.run_id == "generic-run-finding_alpha"
+                    && lineage.entity_id.as_deref() == Some("finding:alpha")
+                    && lineage.dedupe_key.as_deref()
+                        == Some("workflow:repair-findings:finding:alpha")
+                    && lineage.inputs["dispatch"]["client_context"]
+                        .as_str()
+                        .is_some_and(|context| context.contains("repair-findings"))
+            }));
+            assert!(result.value.controller.task_lineage.iter().any(|lineage| {
+                lineage.run_id == "generic-run-finding_beta"
+                    && lineage.entity_id.as_deref() == Some("finding:beta")
+                    && lineage.dedupe_key.as_deref()
+                        == Some("workflow:repair-findings:finding:beta")
+            }));
+
+            let observed = dispatch
+                .observed_requests
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone();
+            assert_eq!(observed.len(), 2);
+            assert!(observed.iter().all(|request| {
+                let dispatch = request["dispatch"].as_object().expect("dispatch object");
+                dispatch.get("backend").is_none()
+                    && dispatch.get("provider_config").is_none()
+                    && dispatch.get("executor").is_none()
+            }));
         });
     }
 
