@@ -86,7 +86,7 @@ pub fn route_after_parse(
 
     match lab_result {
         Err(err) => {
-            crate::commands::trace::finish_lab_dispatch_observation(
+            let _ = crate::commands::trace::finish_lab_dispatch_observation(
                 trace_observation,
                 RunStatus::Error,
                 json!({
@@ -109,7 +109,7 @@ pub fn route_after_parse(
             runners::LabOffloadOutcome::RunLocal {
                 metadata, messages, ..
             } => {
-                crate::commands::trace::finish_lab_dispatch_observation(
+                let _ = crate::commands::trace::finish_lab_dispatch_observation(
                     trace_observation,
                     RunStatus::Skipped,
                     json!({
@@ -136,7 +136,7 @@ pub fn route_after_parse(
                 exit_code,
                 ..
             } => {
-                crate::commands::trace::finish_lab_dispatch_observation(
+                let retrieval = crate::commands::trace::finish_lab_dispatch_observation(
                     trace_observation,
                     if exit_code == 0 {
                         RunStatus::Pass
@@ -155,6 +155,7 @@ pub fn route_after_parse(
                 if !stderr.is_empty() {
                     eprint!("{stderr}");
                 }
+                let stdout = stdout_with_persisted_run_retrieval(&stdout, retrieval.as_ref());
                 if let Some(path) = output_file {
                     write_offloaded_stdout(path, &stdout)?;
                 }
@@ -247,6 +248,55 @@ fn write_offloaded_stdout(path: &str, stdout: &str) -> homeboy::core::Result<()>
     std::fs::write(path, stdout).map_err(|err| {
         homeboy::core::Error::internal_io(err.to_string(), Some(format!("write {path}")))
     })
+}
+
+fn stdout_with_persisted_run_retrieval(
+    stdout: &str,
+    retrieval: Option<&crate::commands::trace::PersistedRunRetrieval>,
+) -> String {
+    let Some(retrieval) = retrieval else {
+        return stdout.to_string();
+    };
+
+    if let Ok(mut json) = serde_json::from_str::<serde_json::Value>(stdout) {
+        attach_persisted_run_retrieval_json(&mut json, retrieval);
+        if let Ok(mut rendered) = serde_json::to_string_pretty(&json) {
+            rendered.push('\n');
+            return rendered;
+        }
+    }
+
+    let mut rendered = stdout.to_string();
+    if !rendered.ends_with('\n') {
+        rendered.push('\n');
+    }
+    rendered.push('\n');
+    rendered.push_str("# Homeboy persisted run\n\n");
+    rendered.push_str(&format!(
+        "- **Persisted Homeboy run ID:** `{}`\n",
+        retrieval.run_id
+    ));
+    rendered.push_str("- **ID scope:** runtime, temp, and artifact identifiers above are offload context; use the persisted Homeboy run ID for local retrieval.\n");
+    rendered.push_str("- **Retrieve evidence:** `");
+    rendered.push_str(&retrieval.evidence_command);
+    rendered.push_str("`\n");
+    rendered.push_str("- **List artifacts:** `");
+    rendered.push_str(&retrieval.artifacts_command);
+    rendered.push_str("`\n");
+    rendered.push_str("- **Export run bundle:** `");
+    rendered.push_str(&retrieval.export_command);
+    rendered.push_str("`\n");
+    rendered
+}
+
+fn attach_persisted_run_retrieval_json(
+    json: &mut serde_json::Value,
+    retrieval: &crate::commands::trace::PersistedRunRetrieval,
+) {
+    let retrieval_json = retrieval.to_json();
+    if let Some(object) = json.as_object_mut() {
+        object.insert("homeboy_persisted_run".to_string(), retrieval_json);
+    }
 }
 
 fn lab_offload_command(
@@ -463,6 +513,76 @@ mod tests {
             std::fs::read_to_string(output_path).unwrap(),
             "{\"ok\":true}\n"
         );
+    }
+
+    #[test]
+    fn offloaded_json_stdout_labels_persisted_homeboy_run_id() {
+        let retrieval = crate::commands::trace::PersistedRunRetrieval::for_run("trace-run-123");
+
+        let stdout = stdout_with_persisted_run_retrieval(
+            r#"{"success":true,"data":{"runtime_id":"runtime-abc","artifact_id":"artifact-xyz"}}"#,
+            Some(&retrieval),
+        );
+        let json: serde_json::Value = serde_json::from_str(&stdout).expect("json stdout");
+
+        assert_eq!(json["data"]["runtime_id"], "runtime-abc");
+        assert_eq!(json["data"]["artifact_id"], "artifact-xyz");
+        assert_eq!(
+            json["homeboy_persisted_run"]["persisted_run_id"],
+            "trace-run-123"
+        );
+        assert_eq!(
+            json["homeboy_persisted_run"]["retrieval_commands"]["evidence"],
+            "homeboy runs evidence trace-run-123"
+        );
+        assert_eq!(
+            json["homeboy_persisted_run"]["retrieval_commands"]["artifacts"],
+            "homeboy runs artifacts trace-run-123"
+        );
+        assert_eq!(
+            json["homeboy_persisted_run"]["retrieval_commands"]["export"],
+            "homeboy runs export --run trace-run-123 --output homeboy-run-trace-run-123"
+        );
+    }
+
+    #[test]
+    fn offloaded_error_json_stdout_labels_persisted_homeboy_run_id() {
+        let retrieval = crate::commands::trace::PersistedRunRetrieval::for_run("trace-run-err");
+
+        let stdout = stdout_with_persisted_run_retrieval(
+            r#"{"success":false,"error":{"code":"remote.command_failed","message":"failed","details":{"temp_id":"tmp-1"}}}"#,
+            Some(&retrieval),
+        );
+        let json: serde_json::Value = serde_json::from_str(&stdout).expect("json stdout");
+
+        assert_eq!(json["error"]["details"]["temp_id"], "tmp-1");
+        assert_eq!(
+            json["homeboy_persisted_run"]["persisted_run_id"],
+            "trace-run-err"
+        );
+        assert_eq!(
+            json["homeboy_persisted_run"]["id_scope"],
+            "persisted_homeboy_run"
+        );
+    }
+
+    #[test]
+    fn offloaded_text_stdout_appends_persisted_run_retrieval_commands() {
+        let retrieval = crate::commands::trace::PersistedRunRetrieval::for_run("trace-run-text");
+
+        let stdout = stdout_with_persisted_run_retrieval(
+            "runtime_id=runtime-abc\nartifact_id=artifact-xyz\n",
+            Some(&retrieval),
+        );
+
+        assert!(stdout.contains("runtime_id=runtime-abc"));
+        assert!(stdout.contains("artifact_id=artifact-xyz"));
+        assert!(stdout.contains("**Persisted Homeboy run ID:** `trace-run-text`"));
+        assert!(stdout.contains("`homeboy runs evidence trace-run-text`"));
+        assert!(stdout.contains("`homeboy runs artifacts trace-run-text`"));
+        assert!(stdout.contains(
+            "`homeboy runs export --run trace-run-text --output homeboy-run-trace-run-text`"
+        ));
     }
 
     #[test]
