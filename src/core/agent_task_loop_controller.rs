@@ -1440,15 +1440,6 @@ impl AgentTaskLoopControllerRecord {
             AgentTaskLoopPolicyAction::MarkHumanReady { entity_id, reason } => {
                 let _ = self.mark_human_ready(entity_id, reason.clone());
             }
-            AgentTaskLoopPolicyAction::Complete { .. } => {
-                self.state = AgentTaskLoopControllerState::Completed;
-            }
-            AgentTaskLoopPolicyAction::Abandon { .. } => {
-                self.state = AgentTaskLoopControllerState::Abandoned;
-            }
-            AgentTaskLoopPolicyAction::Escalate { .. } => {
-                self.state = AgentTaskLoopControllerState::Escalated;
-            }
             _ => {}
         }
     }
@@ -2312,12 +2303,7 @@ mod tests {
             write_controller(&parent).expect("parent written");
 
             let mut child = create_controller("child-loop", "implement", "v1").expect("child");
-            child.record_action(
-                AgentTaskLoopPolicyAction::Complete {
-                    reason: Some("child finished".to_string()),
-                },
-                "child finished",
-            );
+            child.state = AgentTaskLoopControllerState::Completed;
             write_controller(&child).expect("child written");
 
             let refreshed = controller_status("parent-loop").expect("refreshed");
