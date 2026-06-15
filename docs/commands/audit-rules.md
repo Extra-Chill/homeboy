@@ -135,6 +135,20 @@ Use source policies for architecture boundaries such as core-layer purity,
 detector implementation neutrality, or product/domain terms that belong in
 component-owned config rather than generic core code.
 
+Homeboy's own `homeboy.json` also uses this primitive for the
+`thin-command-adapters` rule. The expected boundary is:
+
+```text
+src/commands/* = clap args + typed request construction + output adaptation
+src/core/* = domain policy, orchestration, persistence, execution, artifacts
+```
+
+That rule scans command modules for direct process execution, filesystem
+mutation, run-artifact persistence, and runner orchestration markers. Existing
+orchestration-heavy command modules are allowlisted as transitional extraction
+targets; new command modules should delegate those responsibilities to `core`
+services instead of adding local exceptions.
+
 Example:
 
 ```json

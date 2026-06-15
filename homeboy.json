@@ -383,6 +383,94 @@
           }
         ],
         "type": "forbidden_terms"
+      },
+      {
+        "allow_line_contains": [
+          "homeboy-audit: allow-thin-command-adapter"
+        ],
+        "case_insensitive": false,
+        "convention": "thin_command_adapters",
+        "default_match": "regex",
+        "description": "Command adapter boundary violation: `{term}` appears at line {line} in {classification} context `{context}`",
+        "exclude_path_contains": [
+          "src/commands/agent_task.rs",
+          "src/commands/agent_task_summary.rs",
+          "src/commands/api.rs",
+          "src/commands/auth.rs",
+          "src/commands/bench.rs",
+          "src/commands/build.rs",
+          "src/commands/cargo.rs",
+          "src/commands/changelog.rs",
+          "src/commands/daemon.rs",
+          "src/commands/db.rs",
+          "src/commands/deploy.rs",
+          "src/commands/deps.rs",
+          "src/commands/file.rs",
+          "src/commands/fleet.rs",
+          "src/commands/git.rs",
+          "src/commands/http.rs",
+          "src/commands/issues.rs",
+          "src/commands/lab.rs",
+          "src/commands/logs.rs",
+          "src/commands/observe.rs",
+          "src/commands/project.rs",
+          "src/commands/refactor.rs",
+          "src/commands/release.rs",
+          "src/commands/report.rs",
+          "src/commands/review/",
+          "src/commands/rig/",
+          "src/commands/runner/",
+          "src/commands/runs/",
+          "src/commands/self_cmd.rs",
+          "src/commands/server.rs",
+          "src/commands/ssh.rs",
+          "src/commands/stack.rs",
+          "src/commands/status.rs",
+          "src/commands/test.rs",
+          "src/commands/trace.rs",
+          "src/commands/triage.rs",
+          "src/commands/undo.rs",
+          "src/commands/version.rs",
+          "src/commands/worktree.rs"
+        ],
+        "id": "thin-command-adapters",
+        "ignore_after_line_equals": [
+          "#[cfg(test)]"
+        ],
+        "ignore_line_prefixes": [
+          "//",
+          "///",
+          "//!"
+        ],
+        "include_path_contains": [
+          "src/commands/"
+        ],
+        "kind": "source_policy_violation",
+        "severity": "warning",
+        "suggestion": "Keep command modules to clap args, typed request construction, and output adaptation; move orchestration, persistence, process execution, filesystem mutation, and artifact handling into src/core/ services.",
+        "terms": [
+          {
+            "label": "direct process execution",
+            "value": "\\bstd::process::Command\\b|\\bCommand::new\\s*\\("
+          },
+          {
+            "label": "direct filesystem mutation",
+            "value": "\\bstd::fs::(write|create_dir|create_dir_all|remove_file|remove_dir|remove_dir_all|rename|copy)\\s*\\(|\\bfs::(write|create_dir|create_dir_all|remove_file|remove_dir|remove_dir_all|rename|copy)\\s*\\("
+          },
+          {
+            "label": "direct file writer construction",
+            "value": "\\b(File::create|OpenOptions::new)\\s*\\("
+          },
+          {
+            "label": "run artifact persistence",
+            "value": "\\b(RunDir::create|write_to_run_dir|ObservationBuilder|finish_run|persist_[A-Za-z0-9_]+)\\b"
+          },
+          {
+            "label": "runner execution orchestration",
+            "value": "\\b(runner::exec|execute_[A-Za-z0-9_]+|dispatch_[A-Za-z0-9_]+)\\s*\\("
+          }
+        ],
+        "type": "forbidden_terms"
       }
     ],
     "test_wiring": {
