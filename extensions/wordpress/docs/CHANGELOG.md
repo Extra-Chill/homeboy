@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.121.38] - 2026-06-15
+
+### Fixed
+- pass component contracts to Codebox
+
 ## [2.121.37] - 2026-06-15
 
 ### Fixed
