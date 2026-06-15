@@ -184,11 +184,19 @@ fn is_homeboy_source_checkout(path: &Path) -> bool {
         .as_deref()
         == Some("homeboy");
 
-    is_homeboy_manifest && is_homeboy_source_package(path)
+    is_homeboy_manifest && is_homeboy_build_package(path)
 }
 
-fn is_homeboy_source_package(path: &Path) -> bool {
-    let package_manifest = ["Car", "go.toml"].concat();
+fn is_homeboy_build_package(path: &Path) -> bool {
+    let defaults = defaults::load_defaults();
+    let Some(package_manifest) = defaults
+        .version_candidates
+        .iter()
+        .map(|candidate| candidate.file.as_str())
+        .find(|file| file.ends_with(".toml"))
+    else {
+        return false;
+    };
     let Ok(contents) = std::fs::read_to_string(path.join(package_manifest)) else {
         return false;
     };

@@ -176,7 +176,7 @@ mod tests {
             .expect("resolve current working directory")
             .parent()
             .expect("worktree has parent")
-            .join("homeboy-extensions@fix-4436-extension-owned-defaults")
+            .join("homeboy-extensions-defaults-fixture")
             .join("defaults/extension-provided-defaults.json");
 
         if !path.exists() {

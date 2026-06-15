@@ -19,7 +19,7 @@ pub fn current_build_version() -> String {
     build_identity::current().display
 }
 
-pub(crate) fn fetch_latest_crates_io_version() -> Result<String> {
+pub(crate) fn fetch_latest_secondary_version() -> Result<String> {
     let client = reqwest::blocking::Client::builder()
         .user_agent(format!("homeboy/{}", VERSION))
         .timeout(std::time::Duration::from_secs(10))
@@ -67,7 +67,7 @@ pub(crate) fn fetch_latest_github_version() -> Result<String> {
 
 pub fn fetch_latest_version(method: InstallMethod) -> Result<String> {
     match method {
-        InstallMethod::Secondary => fetch_latest_crates_io_version(),
+        InstallMethod::Secondary => fetch_latest_secondary_version(),
         InstallMethod::Homebrew
         | InstallMethod::Source
         | InstallMethod::Binary

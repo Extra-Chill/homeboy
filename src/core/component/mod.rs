@@ -53,9 +53,8 @@ pub struct VersionTarget {
     ///
     /// `file` is bumped in the workspace (git-tracked source), while `artifact_path`
     /// is what the verifier looks for inside the shipped artifact. This is needed for
-    /// `@wordpress/scripts` plugins that bump source `blocks/<block>/block.json` but
-    /// ship compiled `build/<block>/block.json` (the `blocks/` source dir is excluded
-    /// from the ZIP). When unset, the verifier falls back to `file`.
+    /// components that bump source manifests but ship compiled manifests from a
+    /// different artifact path. When unset, the verifier falls back to `file`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub artifact_path: Option<String>,
 }
