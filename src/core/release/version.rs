@@ -730,6 +730,7 @@ mod tests {
         component.version_targets = Some(vec![VersionTarget {
             file: "package.json".to_string(),
             pattern: Some(r#""version"\s*:\s*"([^"]+)""#.to_string()),
+            artifact_path: None,
         }]);
         component.hooks.insert(
             hooks::events::POST_VERSION_BUMP.to_string(),

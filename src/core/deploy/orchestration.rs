@@ -1316,6 +1316,7 @@ mod tests {
         component.version_targets = Some(vec![crate::core::component::VersionTarget {
             file: "package.json".to_string(),
             pattern: Some(r#""version"\s*:\s*"([^"]+)""#.to_string()),
+            artifact_path: None,
         }]);
 
         let err = verify_expected_version(&[component], "1.0.1")

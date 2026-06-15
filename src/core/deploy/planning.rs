@@ -708,6 +708,7 @@ mod tests {
         component.version_targets = Some(vec![VersionTarget {
             file: "VERSION".to_string(),
             pattern: Some(r"^(.+)$".to_string()),
+            artifact_path: None,
         }]);
         component
     }

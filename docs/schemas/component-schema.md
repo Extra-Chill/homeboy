@@ -15,7 +15,8 @@ Component configuration defines buildable and deployable units stored in `compon
   "version_targets": [
     {
       "file": "string",
-      "pattern": "string"
+      "pattern": "string",
+      "artifact_path": "string"
     }
   ],
   "changelog_target": "string",
@@ -54,8 +55,9 @@ Component configuration defines buildable and deployable units stored in `compon
 - **`extract_command`** (string): Command to execute after artifact upload, runs inside target directory
   - Supports template variables: `{artifact}`, `{targetDir}`
 - **`version_targets`** (array): List of version detection patterns
-  - **`file`** (string): Path to file containing version (relative to `local_path`)
+  - **`file`** (string): Path to file containing version (relative to `local_path`). This is the **source** path that the version bump writes to.
   - **`pattern`** (string): Regex pattern to extract version (first capture group)
+  - **`artifact_path`** (string, optional): Path to verify inside the deploy artifact (ZIP) when it differs from `file`. The bump writes `file` (git-tracked source), while pre-deploy verification looks for `artifact_path` inside the shipped artifact. Use this for `@wordpress/scripts` plugins that bump source `blocks/<block>/block.json` but ship the compiled `build/<block>/block.json` (the `blocks/` source dir is excluded from the ZIP). When unset, verification falls back to `file`.
 - **`changelog_target`** (string): Path to changelog file (relative to `local_path`)
 - **`extensions`** (object): Extension-specific settings
   - Keys are extension IDs (e.g., `"wordpress"`, `"rust"`)
