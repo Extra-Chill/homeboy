@@ -1,4 +1,7 @@
 use super::*;
+use homeboy::core::agent_tasks::provider::{
+    AgentTaskProviderEnvPathReadiness, AgentTaskProviderRunnerReadiness,
+};
 use types::{HomeboyProbe, RunnerDoctorStatus};
 
 #[test]
@@ -178,6 +181,38 @@ fn required_homeboy_tools_capture_versions() {
         &["--version"]
     );
     assert!(probes::required_tool_version_args("git").is_empty());
+}
+
+#[test]
+fn provider_readiness_renderer_uses_fake_provider_contract() {
+    let contract = AgentTaskProviderRunnerReadiness {
+        id: "lab.fake_runtime.cache".to_string(),
+        label: "Fake runtime cache".to_string(),
+        env_path: Some(AgentTaskProviderEnvPathReadiness {
+            env: vec!["FAKE_RUNTIME_BIN".to_string()],
+            revision: Some(true),
+        }),
+        remediation: Some("Refresh the fake runtime cache".to_string()),
+    };
+
+    let check = probes::provider_env_path_readiness_check_from_probe(
+        &contract,
+        Some("/opt/fake-runtime/bin".to_string()),
+        true,
+        Some("abc123".to_string()),
+    );
+
+    assert_eq!(check.id, "lab.fake_runtime.cache");
+    assert_eq!(check.status, RunnerDoctorStatus::Ok);
+    assert!(check.message.contains("Fake runtime cache"));
+    assert_eq!(
+        check.details.get("env").map(String::as_str),
+        Some("FAKE_RUNTIME_BIN")
+    );
+    assert_eq!(
+        check.details.get("revision").map(String::as_str),
+        Some("abc123")
+    );
 }
 
 #[test]

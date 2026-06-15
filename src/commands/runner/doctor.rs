@@ -1102,13 +1102,8 @@ mod probes {
         )
         .filter(|value| !value.trim().is_empty());
         let Some(path) = path else {
-            return Some(checks::warning(
-                contract.id.clone(),
-                format!(
-                    "{} path is not configured in the Lab runner environment",
-                    contract.label
-                ),
-                contract.remediation.clone(),
+            return Some(provider_env_path_readiness_check_from_probe(
+                contract, None, false, None,
             ));
         };
 
@@ -1119,14 +1114,11 @@ mod probes {
             .execute(&format!("test -e {}", common::shell_word(&path)))
             .success;
         if !exists {
-            return Some(checks::error(
-                contract.id.clone(),
-                format!(
-                    "Configured {} path does not exist on the Lab runner",
-                    contract.label
-                ),
-                contract.remediation.clone(),
-                details,
+            return Some(provider_env_path_readiness_check_from_probe(
+                contract,
+                Some(path),
+                false,
+                None,
             ));
         }
 
@@ -1142,11 +1134,65 @@ mod probes {
             }
         }
 
-        Some(checks::ok_with_details(
+        Some(provider_env_path_readiness_check_from_probe(
+            contract,
+            Some(path),
+            true,
+            details.get("revision").cloned(),
+        ))
+    }
+
+    pub(super) fn provider_env_path_readiness_check_from_probe(
+        contract: &AgentTaskProviderRunnerReadiness,
+        path: Option<String>,
+        exists: bool,
+        revision: Option<String>,
+    ) -> RunnerCheck {
+        let env = contract
+            .env_path
+            .as_ref()
+            .map(|env_path| env_path.env.join(","))
+            .unwrap_or_default();
+        let mut details = BTreeMap::new();
+        if !env.is_empty() {
+            details.insert("env".to_string(), env);
+        }
+        if let Some(path) = path {
+            details.insert("path".to_string(), path);
+        }
+        if let Some(revision) = revision {
+            details.insert("revision".to_string(), revision);
+        }
+
+        if !details.contains_key("path") {
+            return checks::warning_with_details(
+                contract.id.clone(),
+                format!(
+                    "{} path is not configured in the Lab runner environment",
+                    contract.label
+                ),
+                contract.remediation.clone(),
+                details,
+            );
+        }
+
+        if !exists {
+            return checks::error(
+                contract.id.clone(),
+                format!(
+                    "Configured {} path does not exist on the Lab runner",
+                    contract.label
+                ),
+                contract.remediation.clone(),
+                details,
+            );
+        }
+
+        checks::ok_with_details(
             contract.id.clone(),
             format!("{} path exists on the Lab runner", contract.label),
             details,
-        ))
+        )
     }
 
     struct RemoteHomeboyCandidate {

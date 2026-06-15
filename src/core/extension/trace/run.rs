@@ -1279,7 +1279,7 @@ mod tests {
                 crate::core::engine::resource::ExtensionChildResourceSummary {
                     child: crate::core::engine::resource::ChildProcessIdentity {
                         root_pid: 4242,
-                        command_label: "wp-codebox recipe-run recipes/stripe-ece.yml".to_string(),
+                        command_label: "custom-provider run recipes/browser.yml".to_string(),
                     },
                     phase: None,
                     started_at: "2026-06-06T00:00:00Z".to_string(),
@@ -1326,7 +1326,7 @@ mod tests {
         assert_eq!(failure.child_pid, Some(4242));
         assert_eq!(
             failure.child_command.as_deref(),
-            Some("wp-codebox recipe-run recipes/stripe-ece.yml")
+            Some("custom-provider run recipes/browser.yml")
         );
         assert_eq!(
             failure.recipe_path.as_deref(),
@@ -1538,7 +1538,7 @@ mod tests {
             .output()
             .expect("git commit runs");
 
-        let provenance = git_provenance(&bin, Some("wp_codebox"));
+        let provenance = git_provenance(&bin, Some("fixture-toolchain"));
 
         assert_eq!(
             provenance.path,
@@ -1636,7 +1636,7 @@ mod tests {
                         {
                             "id": "fixture-toolchain",
                             "label": "Fixture Toolchain",
-                            "legacy_field": "wp_codebox",
+                            "legacy_field": "fixture_toolchain",
                             "env_keys": ["FIXTURE_TOOLCHAIN_BIN"]
                         }
                     ]

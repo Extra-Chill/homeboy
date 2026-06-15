@@ -582,7 +582,9 @@ mod implementation {
 
     fn summary_has_browser_signal(summary: &Map<String, Value>) -> bool {
         summary.contains_key("assertions")
-            || first_number(summary, &["networkEvents", "consoleMessages", "errors"]).is_some()
+            || browser_summary_adapters()
+                .iter()
+                .any(|adapter| adapter.has_signal(summary))
             || summary
                 .get("metrics")
                 .and_then(Value::as_object)
@@ -642,7 +644,7 @@ mod implementation {
         artifacts: &mut BTreeSet<ArtifactRef>,
     ) {
         collect_artifacts(object, artifacts);
-        collect_provider_file_artifacts(object.get("files"), artifacts);
+        collect_declared_artifact_map_adapters(object, artifacts);
     }
 
     fn sample_from_object(
@@ -699,7 +701,7 @@ mod implementation {
             &lifecycle_metric_names(),
         );
         if let Some(summary) = object.get("summary").and_then(Value::as_object) {
-            collect_legacy_browser_summary_aliases(summary, &mut sample);
+            collect_declared_browser_summary_adapters(summary, &mut sample);
         }
         sample.console_errors = sample
             .console_errors
@@ -708,7 +710,7 @@ mod implementation {
             .page_errors
             .or_else(|| error_count(object, &["page_errors", "pageErrors", "errors"]));
         collect_artifacts(object, &mut sample.artifacts);
-        collect_provider_file_artifacts(object.get("files"), &mut sample.artifacts);
+        collect_declared_artifact_map_adapters(object, &mut sample.artifacts);
         if sample.browser_metrics.is_empty() && sample.lifecycle_metrics.is_empty() {
             sample
                 .notes
@@ -1410,24 +1412,68 @@ mod implementation {
         }
     }
 
-    fn collect_legacy_browser_summary_aliases(
+    struct BrowserSummaryAdapter {
+        request_total_keys: &'static [&'static str],
+        page_error_keys: &'static [&'static str],
+        metric_aliases: &'static [(&'static str, &'static [&'static str])],
+    }
+
+    impl BrowserSummaryAdapter {
+        fn has_signal(&self, summary: &Map<String, Value>) -> bool {
+            first_number(summary, self.request_total_keys).is_some()
+                || first_number(summary, self.page_error_keys).is_some()
+                || self
+                    .metric_aliases
+                    .iter()
+                    .any(|(_, keys)| first_number(summary, keys).is_some())
+        }
+    }
+
+    fn browser_summary_adapters() -> Vec<BrowserSummaryAdapter> {
+        vec![BrowserSummaryAdapter {
+            request_total_keys: &["networkEvents"],
+            page_error_keys: &["errors"],
+            metric_aliases: &[
+                ("browser_console_message_count", &["consoleMessages"]),
+                ("browser_page_error_count", &["errors"]),
+                ("browser_network_event_count", &["networkEvents"]),
+            ],
+        }]
+    }
+
+    fn collect_declared_browser_summary_adapters(
         summary: &Map<String, Value>,
         sample: &mut BrowserEvidenceSample,
     ) {
-        if sample.request_total.is_none() {
-            sample.request_total = first_number(summary, &["networkEvents"]);
-        }
-        sample.page_errors = sample
-            .page_errors
-            .or_else(|| first_number(summary, &["errors"]));
-        for (metric, keys) in [
-            ("browser_console_message_count", ["consoleMessages"]),
-            ("browser_page_error_count", ["errors"]),
-            ("browser_network_event_count", ["networkEvents"]),
-        ] {
-            if let Some(value) = first_number(summary, &keys) {
-                sample.browser_metrics.insert(metric.to_string(), value);
+        for adapter in browser_summary_adapters() {
+            if sample.request_total.is_none() {
+                sample.request_total = first_number(summary, adapter.request_total_keys);
             }
+            sample.page_errors = sample
+                .page_errors
+                .or_else(|| first_number(summary, adapter.page_error_keys));
+            for (metric, keys) in adapter.metric_aliases {
+                if let Some(value) = first_number(summary, keys) {
+                    sample.browser_metrics.insert(metric.to_string(), value);
+                }
+            }
+        }
+    }
+
+    struct ArtifactMapAdapter {
+        field: &'static str,
+    }
+
+    fn artifact_map_adapters() -> &'static [ArtifactMapAdapter] {
+        &[ArtifactMapAdapter { field: "files" }]
+    }
+
+    fn collect_declared_artifact_map_adapters(
+        object: &Map<String, Value>,
+        artifacts: &mut BTreeSet<ArtifactRef>,
+    ) {
+        for adapter in artifact_map_adapters() {
+            collect_artifact_map(object.get(adapter.field), artifacts);
         }
     }
 
@@ -1445,10 +1491,7 @@ mod implementation {
         }
     }
 
-    fn collect_provider_file_artifacts(
-        value: Option<&Value>,
-        artifacts: &mut BTreeSet<ArtifactRef>,
-    ) {
+    fn collect_artifact_map(value: Option<&Value>, artifacts: &mut BTreeSet<ArtifactRef>) {
         let Some(files) = value.and_then(Value::as_object) else {
             return;
         };

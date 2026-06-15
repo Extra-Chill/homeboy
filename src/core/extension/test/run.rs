@@ -856,7 +856,7 @@ mod tests {
     }
 
     #[test]
-    fn declared_result_parser_script_normalizes_wp_codebox_json() {
+    fn declared_result_parser_script_normalizes_provider_json() {
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let extension_dir = temp_dir.path().join("extension");
         std::fs::create_dir_all(&extension_dir).expect("extension dir");
@@ -865,7 +865,7 @@ mod tests {
             &parser_script,
             r#"#!/usr/bin/env bash
 set -euo pipefail
-if [ "${2:-}" != "wp-codebox-json" ]; then
+if [ "${2:-}" != "custom-json" ]; then
     exit 7
 fi
 source "$HOMEBOY_RUNTIME_WRITE_TEST_RESULTS"
@@ -925,7 +925,7 @@ printf 'legacy helper log line\n'
         };
         let spec = ParseSpec {
             extension_script: Some("parse-results.sh".to_string()),
-            adapters: vec!["wp-codebox-json".to_string()],
+            adapters: vec!["custom-json".to_string()],
             rules: Vec::new(),
             defaults: std::collections::HashMap::new(),
             derive: Vec::new(),
@@ -937,7 +937,7 @@ printf 'legacy helper log line\n'
             &context,
             &spec,
             r#"{
-                "schema": "wp-codebox/test-results/v1",
+                "schema": "custom-provider/test-results/v1",
                 "summary": { "total": 0 },
                 "suites": [
                     { "tests": 3, "passed": 2, "failed": 1 },

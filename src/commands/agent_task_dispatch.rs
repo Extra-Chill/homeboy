@@ -109,6 +109,13 @@ where
 pub(crate) fn dispatch_request_from_args(
     args: DispatchArgs,
 ) -> homeboy::core::Result<AgentTaskDispatchRequest> {
+    dispatch_request_from_args_with_default(args, default_backend)
+}
+
+fn dispatch_request_from_args_with_default(
+    args: DispatchArgs,
+    default_backend: impl FnOnce() -> Option<String>,
+) -> homeboy::core::Result<AgentTaskDispatchRequest> {
     Ok(AgentTaskDispatchRequest {
         prompt: args.prompt,
         tasks: args.tasks,
@@ -341,6 +348,64 @@ mod tests {
                 .expect("next action")
                 .contains("homeboy agent-task run cook-queued"));
         });
+    }
+
+    #[test]
+    fn dispatch_request_uses_declared_default_backend_when_backend_is_absent() {
+        let request = dispatch_request_from_args_with_default(
+            DispatchArgs {
+                prompt: Some("run with default".to_string()),
+                tasks: Vec::new(),
+                tasks_json: None,
+                cwd: None,
+                workspace: None,
+                repo: None,
+                task_url: None,
+                backend: None,
+                selector: None,
+                model: None,
+                secret_env: Vec::new(),
+                provider_config: None,
+                client_context: None,
+                concurrency: 1,
+                attempts: 1,
+                run_id: None,
+                queue_only: false,
+            },
+            || Some("fake-default".to_string()),
+        )
+        .expect("default backend request");
+
+        assert_eq!(request.backend, "fake-default");
+    }
+
+    #[test]
+    fn dispatch_request_errors_when_backend_and_default_are_absent() {
+        let error = dispatch_request_from_args_with_default(
+            DispatchArgs {
+                prompt: Some("run without default".to_string()),
+                tasks: Vec::new(),
+                tasks_json: None,
+                cwd: None,
+                workspace: None,
+                repo: None,
+                task_url: None,
+                backend: None,
+                selector: None,
+                model: None,
+                secret_env: Vec::new(),
+                provider_config: None,
+                client_context: None,
+                concurrency: 1,
+                attempts: 1,
+                run_id: None,
+                queue_only: false,
+            },
+            || None,
+        )
+        .expect_err("missing backend should fail");
+
+        assert!(error.message.contains("requires --backend"));
     }
 
     struct NoopExecutor;

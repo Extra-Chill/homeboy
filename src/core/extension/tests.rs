@@ -16,7 +16,7 @@ fn extension_capability_owns_labels_and_scripts() {
         "test": {
             "extension_script": "test.sh",
             "result_parse": {
-                "adapters": ["wp-codebox-json"],
+                "adapters": ["custom-json"],
                 "rules": [{ "pattern": "Tests: (\\d+)", "field": "total" }]
             }
         },
@@ -49,7 +49,7 @@ fn extension_capability_owns_labels_and_scripts() {
             .as_ref()
             .and_then(|test| test.result_parse.as_ref())
             .map(|spec| spec.adapters.clone()),
-        Some(vec!["wp-codebox-json".to_string()])
+        Some(vec!["custom-json".to_string()])
     );
     assert_eq!(
         manifest.compiler_warnings_script(),

@@ -12,15 +12,16 @@
 use std::fs;
 
 use crate::core::agent_tasks::lifecycle as agent_task_lifecycle;
+use crate::core::agent_tasks::provider::{
+    dependency_failure_patterns, AgentTaskProviderDependencyFailurePattern,
+};
 use crate::core::agent_tasks::scheduler::{AgentTaskAggregate, AgentTaskPlan};
 use crate::core::{config, Error, Result};
+use serde::Deserialize;
 
 use super::super::lab_workspaces::{workspace_mapping_entry, LabWorkspaceMappingEntry};
 use super::super::{sync_workspace, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions};
 use super::args_util::subcommand_index;
-use crate::core::agent_tasks::provider::{
-    dependency_failure_patterns, AgentTaskProviderDependencyFailurePattern,
-};
 
 pub(super) fn materialize_inline_agent_task_plan_arg(
     runner_id: &str,
@@ -398,10 +399,13 @@ pub(super) fn ensure_agent_task_dispatch_run_id(args: &[String]) -> Option<(Vec<
 }
 
 pub(super) fn lab_pre_dispatch_failure_message(output: &str) -> Option<String> {
-    if let Some(message) = lab_pre_dispatch_dependency_failure_message(
-        output,
-        &dependency_failure_patterns_with_legacy_adapters(),
-    ) {
+    if let Some(message) = lab_pre_dispatch_structured_dependency_failure_message(output) {
+        return Some(message);
+    }
+
+    if let Some(message) =
+        lab_pre_dispatch_dependency_failure_message(output, &dependency_failure_patterns())
+    {
         return Some(message);
     }
 
@@ -410,6 +414,67 @@ pub(super) fn lab_pre_dispatch_failure_message(output: &str) -> Option<String> {
         .map(str::trim)
         .find(|line| !line.is_empty())
         .map(str::to_string)
+}
+
+#[derive(Debug, Deserialize)]
+struct LabDependencyFailureEnvelope {
+    #[serde(default)]
+    schema: Option<String>,
+    dependency: LabDependencyFailureDependency,
+    #[serde(default)]
+    message: Option<String>,
+    #[serde(default)]
+    remediation: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct LabDependencyFailureDependency {
+    id: String,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    path: Option<String>,
+}
+
+fn lab_pre_dispatch_structured_dependency_failure_message(output: &str) -> Option<String> {
+    output
+        .lines()
+        .filter_map(|line| serde_json::from_str::<LabDependencyFailureEnvelope>(line.trim()).ok())
+        .find(|envelope| {
+            envelope.schema.as_deref().is_none_or(|schema| {
+                schema == "homeboy/lab-dependency-failure/v1"
+                    || schema == "homeboy/lab-pre-dispatch-dependency-failure/v1"
+            })
+        })
+        .map(|envelope| structured_dependency_failure_message(&envelope))
+}
+
+fn structured_dependency_failure_message(envelope: &LabDependencyFailureEnvelope) -> String {
+    let dependency = envelope
+        .dependency
+        .path
+        .as_deref()
+        .filter(|path| !path.trim().is_empty())
+        .unwrap_or(&envelope.dependency.id);
+    let kind = envelope
+        .dependency
+        .kind
+        .as_deref()
+        .filter(|kind| !kind.trim().is_empty())
+        .unwrap_or("dependency");
+    let reason = envelope
+        .message
+        .as_deref()
+        .filter(|message| !message.trim().is_empty())
+        .unwrap_or("runtime dependency staging failed");
+    let remediation = envelope
+        .remediation
+        .as_deref()
+        .filter(|remediation| !remediation.trim().is_empty())
+        .unwrap_or("repair or refresh the runner runtime");
+    format!(
+        "Lab runtime failed before agent dispatch while staging {kind} `{dependency}`: {reason}. {remediation}, then retry this cook run."
+    )
 }
 
 fn lab_pre_dispatch_dependency_failure_message(
@@ -452,23 +517,6 @@ fn first_quoted_dependency_path(output: &str, path_contains: &str) -> Option<Str
         .map(str::to_string)
 }
 
-fn dependency_failure_patterns_with_legacy_adapters(
-) -> Vec<AgentTaskProviderDependencyFailurePattern> {
-    let mut patterns = dependency_failure_patterns();
-    patterns.push(AgentTaskProviderDependencyFailurePattern {
-        id: "legacy.prepared_dependency".to_string(),
-        label: "prepared dependency path".to_string(),
-        path_contains: "prepared-plugins/".to_string(),
-        error_contains_any: vec![
-            "enoent".to_string(),
-            "no such file or directory".to_string(),
-            "lstat".to_string(),
-        ],
-        remediation: Some("repair or refresh the runner runtime".to_string()),
-    });
-    patterns
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -476,8 +524,8 @@ mod tests {
     #[test]
     fn offloaded_run_plan_envelope_parser_tolerates_extension_stdout_chatter() {
         let stdout = concat!(
-            "Setting up WordPress extension...\n",
-            "Installing npm dependencies...\n",
+            "Preparing extension runtime...\n",
+            "Installing declared dependencies...\n",
             "{\"success\":false,\"data\":{\"status\":\"failed\"}}\n",
             "trailing diagnostic\n"
         );
@@ -765,14 +813,16 @@ mod tests {
     }
 
     #[test]
-    fn pre_dispatch_failure_message_summarizes_prepared_dependency_staging_failure() {
-        let output = "ENOENT: no such file or directory, lstat '/home/chubes/Developer/.tmp/homeboy-artifacts/prepared-plugins/agents-api'";
+    fn pre_dispatch_failure_message_uses_structured_dependency_failure_envelope() {
+        let output = r#"runtime setup log
+{"schema":"homeboy/lab-dependency-failure/v1","dependency":{"id":"runtime-a","kind":"runtime component","path":"/remote/cache/runtime-a"},"message":"path missing","remediation":"refresh runtime cache"}
+trailing log"#;
 
         let message = lab_pre_dispatch_failure_message(output).expect("message");
 
-        assert!(message.contains("Lab runtime failed before agent dispatch"));
-        assert!(message.contains("prepared-plugins/agents-api"));
-        assert!(message.contains("repair or refresh the runner runtime"));
+        assert!(message.contains("runtime component `/remote/cache/runtime-a`"));
+        assert!(message.contains("path missing"));
+        assert!(message.contains("refresh runtime cache"));
     }
 
     #[test]
