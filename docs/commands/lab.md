@@ -35,6 +35,11 @@ routine lifecycle work:
 - `homeboy runner doctor <runner>` probes runner tools, workspace writability,
   artifact storage, and browser readiness.
 - `homeboy runner env <runner>` prints the redacted runner job environment.
+- `homeboy runner disconnect <runner> && homeboy runner connect <runner>`
+  restarts the active runner daemon so Lab offload uses the currently configured
+  runner-side Homeboy binary.
+- `homeboy upgrade --force --upgrade-runner <runner>` refreshes the configured
+  runner-side Homeboy binary when the binary itself is behind merged fixes.
 - `homeboy runner exec <runner> -- <command>` runs a managed follow-up command
   through Homeboy.
 - `homeboy runner workspace sync <runner> --path <path> --mode snapshot`
@@ -48,6 +53,14 @@ primary workspace, and returns dependency provenance in the generic
 `validation_dependencies` output field. Use that contract for eval/bench source
 overrides instead of ad-hoc workflow-specific environment exports or hardcoded
 runner paths.
+
+Lab status and offloaded run metadata include `runner_homeboy`, which names the
+configured runner Homeboy executable, the active daemon version/build identity
+when connected, stale-daemon details, and the exact refresh/upgrade commands.
+For `agent-task run-plan --runner homeboy-lab`, check this field before assuming
+the Lab runner has picked up a merged CLI fix. If the daemon identity is stale,
+run the refresh command pair; if the configured executable is old, run the
+upgrade command first and reconnect the runner.
 
 `homeboy lab bench` delegates to the same benchmark path while making the Lab
 intent explicit at the command surface. Its output includes the same managed

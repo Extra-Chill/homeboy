@@ -79,12 +79,26 @@ pub struct LabSelectedRunnerOutput {
     runner_id: String,
     kind: String,
     configured_executable: String,
+    runner_homeboy: LabRunnerHomeboyOutput,
     daemon_enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     workspace_root: Option<String>,
     readiness_state: String,
     connected: bool,
     status: RunnerStatusReport,
+}
+
+#[derive(Serialize)]
+pub struct LabRunnerHomeboyOutput {
+    configured_executable: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    active_daemon_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    active_daemon_build_identity: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stale_daemon: Option<Value>,
+    refresh_commands: Vec<String>,
+    upgrade_command: String,
 }
 
 #[derive(Serialize)]
@@ -185,20 +199,57 @@ fn selected_lab_runner_status(
     };
     let runner_config = runner::load(runner_id)?;
     let status = runner::status(runner_id)?;
+    let configured_executable = runner_config
+        .settings
+        .homeboy_path
+        .clone()
+        .unwrap_or_else(|| "homeboy".to_string());
     Ok(Some(LabSelectedRunnerOutput {
         runner_id: runner_id.to_string(),
         kind: format!("{:?}", runner_config.kind).to_ascii_lowercase(),
-        configured_executable: runner_config
-            .settings
-            .homeboy_path
-            .clone()
-            .unwrap_or_else(|| "homeboy".to_string()),
+        configured_executable: configured_executable.clone(),
+        runner_homeboy: lab_runner_homeboy_output(runner_id, &configured_executable, &status),
         daemon_enabled: runner_config.settings.daemon,
         workspace_root: runner_config.workspace_root.clone(),
         readiness_state: format!("{:?}", status.state).to_ascii_lowercase(),
         connected: status.connected,
         status,
     }))
+}
+
+fn lab_runner_homeboy_output(
+    runner_id: &str,
+    configured_executable: &str,
+    status: &RunnerStatusReport,
+) -> LabRunnerHomeboyOutput {
+    LabRunnerHomeboyOutput {
+        configured_executable: configured_executable.to_string(),
+        active_daemon_version: status
+            .session
+            .as_ref()
+            .map(|session| session.homeboy_version.clone()),
+        active_daemon_build_identity: status
+            .session
+            .as_ref()
+            .and_then(|session| session.homeboy_build_identity.clone()),
+        stale_daemon: status
+            .stale_daemon
+            .as_ref()
+            .and_then(|warning| serde_json::to_value(warning).ok()),
+        refresh_commands: lab_runner_homeboy_refresh_commands(runner_id),
+        upgrade_command: format!(
+            "homeboy upgrade --force --upgrade-runner {}",
+            shell_arg(runner_id)
+        ),
+    }
+}
+
+fn lab_runner_homeboy_refresh_commands(runner_id: &str) -> Vec<String> {
+    let runner_arg = shell_arg(runner_id);
+    vec![
+        format!("homeboy runner disconnect {runner_arg}"),
+        format!("homeboy runner connect {runner_arg}"),
+    ]
 }
 
 fn sync_lab_extension(
@@ -467,6 +518,18 @@ fn lab_followups(runner_id: Option<&str>, current_workspace: Option<&str>) -> Ve
             purpose: "Show the redacted environment Homeboy injects into runner jobs.",
         },
         LabFollowup {
+            label: "homeboy_binary_refresh",
+            command: format!(
+                "homeboy runner disconnect {runner_arg} && homeboy runner connect {runner_arg}"
+            ),
+            purpose: "Restart the runner daemon so Lab offload uses the currently configured Homeboy binary.",
+        },
+        LabFollowup {
+            label: "homeboy_binary_upgrade",
+            command: format!("homeboy upgrade --force --upgrade-runner {runner_arg}"),
+            purpose: "Upgrade the Homeboy binary configured for this runner before reconnecting stale Lab runs.",
+        },
+        LabFollowup {
             label: "exec",
             command: format!("homeboy runner exec {runner_arg} -- <command>"),
             purpose: "Run a managed follow-up command through Homeboy instead of opening an ad-hoc shell.",
@@ -501,7 +564,7 @@ fn shell_arg(value: &str) -> String {
 mod tests {
     use super::{
         controller_local_source_path, installed_extension_source_revision, lab_followups,
-        revision_matches, runner_extension_install_command,
+        lab_runner_homeboy_refresh_commands, revision_matches, runner_extension_install_command,
     };
     use std::fs;
 
@@ -657,6 +720,10 @@ Installing declared dependencies...
         assert!(commands.contains(&"homeboy runs artifacts <run-id>"));
         assert!(commands.contains(&"homeboy runner doctor homeboy-lab"));
         assert!(commands.contains(&"homeboy runner env homeboy-lab"));
+        assert!(commands.contains(
+            &"homeboy runner disconnect homeboy-lab && homeboy runner connect homeboy-lab"
+        ));
+        assert!(commands.contains(&"homeboy upgrade --force --upgrade-runner homeboy-lab"));
         assert!(commands.contains(&"homeboy runner exec homeboy-lab -- <command>"));
         assert!(commands.contains(
             &"homeboy runner workspace sync homeboy-lab --path '/tmp/example workspace' --mode snapshot"
@@ -674,5 +741,16 @@ Installing declared dependencies...
         assert!(!commands
             .iter()
             .any(|command| command.starts_with("homeboy runner ")));
+    }
+
+    #[test]
+    fn lab_runner_homeboy_refresh_commands_are_shell_quoted() {
+        assert_eq!(
+            lab_runner_homeboy_refresh_commands("homeboy lab"),
+            vec![
+                "homeboy runner disconnect 'homeboy lab'".to_string(),
+                "homeboy runner connect 'homeboy lab'".to_string(),
+            ]
+        );
     }
 }

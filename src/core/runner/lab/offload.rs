@@ -19,6 +19,7 @@
 use std::path::Path;
 
 use crate::core::agent_task_lifecycle;
+use crate::core::engine::shell;
 use crate::core::observation::{PREVIEW_METADATA_ENV, PREVIEW_PUBLIC_URL_ENV};
 use crate::core::plan::{HomeboyPlan, PlanStep, PlanStepStatus, PlanValues};
 use crate::core::source_snapshot::SourceSnapshot;
@@ -457,6 +458,31 @@ fn run_lab_offload_inner(
         messages.push(warning);
     }
     let homeboy_path = runner.settings.homeboy_path.as_deref().unwrap_or("homeboy");
+    let runner_homeboy = lab_runner_homeboy_metadata(runner_id, homeboy_path, &runner_status);
+    plan = with_step(
+        plan,
+        PlanStep::ready("lab.runner_homeboy", "lab.runner_homeboy")
+            .inputs(PlanValues::new().json("runner_homeboy", &runner_homeboy))
+            .build(),
+    );
+    eprintln!(
+        "Lab offload: runner `{}` Homeboy binary `{}`; active daemon {}; refresh with `{}`.",
+        runner_id,
+        homeboy_path,
+        runner_homeboy_daemon_display(&runner_homeboy),
+        runner_homeboy["refresh_commands"]
+            .as_array()
+            .map(|commands| commands
+                .iter()
+                .filter_map(|command| command.as_str())
+                .collect::<Vec<_>>()
+                .join(" && "))
+            .unwrap_or_else(|| format!(
+                "homeboy runner disconnect {} && homeboy runner connect {}",
+                shell::quote_arg(runner_id),
+                shell::quote_arg(runner_id)
+            ))
+    );
     let command_prefix = lab_offload_command_prefix(&source_path, homeboy_path);
     let capability_contract =
         lab_runner_capability_contract(&contract, &source_path, &command_prefix.required_tools);
@@ -825,6 +851,7 @@ fn run_lab_offload_inner(
     lab_metadata["tunnel_secret_env"] = tunnel_secret_env;
     lab_metadata["rig_component_path_env"] = rig_component_path_env;
     lab_metadata["settings_env"] = settings_env_diagnostics(&remapped_args, &env);
+    lab_metadata["runner_homeboy"] = runner_homeboy.clone();
     lab_metadata["rig_sync"] = serde_json::json!({
         "step": "lab.sync_rigs",
         "synced_count": synced_rigs.len(),
@@ -1025,6 +1052,40 @@ fn run_lab_offload_inner(
         stderr,
         exit_code,
     })
+}
+
+fn lab_runner_homeboy_metadata(
+    runner_id: &str,
+    configured_executable: &str,
+    status: &RunnerStatusReport,
+) -> serde_json::Value {
+    let refresh_commands = vec![
+        format!("homeboy runner disconnect {}", shell::quote_arg(runner_id)),
+        format!("homeboy runner connect {}", shell::quote_arg(runner_id)),
+    ];
+    serde_json::json!({
+        "schema": "homeboy/lab-runner-homeboy/v1",
+        "runner_id": runner_id,
+        "configured_executable": configured_executable,
+        "active_daemon_version": status.session.as_ref().map(|session| session.homeboy_version.clone()),
+        "active_daemon_build_identity": status.session.as_ref().and_then(|session| session.homeboy_build_identity.clone()),
+        "stale_daemon": status.stale_daemon,
+        "refresh_commands": refresh_commands,
+        "upgrade_command": format!("homeboy upgrade --force --upgrade-runner {}", shell::quote_arg(runner_id)),
+    })
+}
+
+fn runner_homeboy_daemon_display(metadata: &serde_json::Value) -> String {
+    metadata
+        .get("active_daemon_build_identity")
+        .and_then(|value| value.as_str())
+        .or_else(|| {
+            metadata
+                .get("active_daemon_version")
+                .and_then(|value| value.as_str())
+        })
+        .unwrap_or("<not connected>")
+        .to_string()
 }
 
 fn with_lab_apply_patch_step(
@@ -1685,6 +1746,52 @@ mod tests {
         .expect("parse lab offload metadata");
 
         assert_eq!(parsed["workspace_mapping"], mapping);
+    }
+
+    #[test]
+    fn lab_runner_homeboy_metadata_names_binary_and_refresh_path() {
+        let status = reverse_status("homeboy lab");
+        let metadata = lab_runner_homeboy_metadata(
+            "homeboy lab",
+            "/tmp/_lab_workspaces/homeboy/target/debug/homeboy",
+            &status,
+        );
+
+        assert_eq!(metadata["schema"], "homeboy/lab-runner-homeboy/v1");
+        assert_eq!(metadata["runner_id"], "homeboy lab");
+        assert_eq!(
+            metadata["configured_executable"],
+            "/tmp/_lab_workspaces/homeboy/target/debug/homeboy"
+        );
+        assert_eq!(metadata["active_daemon_version"], "homeboy 0.0.0");
+        assert_eq!(
+            metadata["active_daemon_build_identity"],
+            "homeboy 0.0.0+test"
+        );
+        assert_eq!(
+            metadata["refresh_commands"],
+            serde_json::json!([
+                "homeboy runner disconnect 'homeboy lab'",
+                "homeboy runner connect 'homeboy lab'"
+            ])
+        );
+        assert_eq!(
+            metadata["upgrade_command"],
+            "homeboy upgrade --force --upgrade-runner 'homeboy lab'"
+        );
+    }
+
+    #[test]
+    fn runner_homeboy_daemon_display_prefers_build_identity() {
+        let metadata = serde_json::json!({
+            "active_daemon_version": "homeboy 0.1.0",
+            "active_daemon_build_identity": "homeboy 0.1.0+abc123",
+        });
+
+        assert_eq!(
+            runner_homeboy_daemon_display(&metadata),
+            "homeboy 0.1.0+abc123"
+        );
     }
 
     #[test]
