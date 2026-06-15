@@ -328,6 +328,7 @@ fn exec_via_reverse_broker(
             Some("parse reverse broker job".to_string()),
         )
     })?;
+    print_lab_offload_handoff(&runner.id, Some(&cwd), &job.id.to_string(), None);
 
     let deadline = Instant::now() + runner_exec_wait_timeout();
     while !matches!(
@@ -452,6 +453,7 @@ fn exec_via_daemon(
     let mut job: Job = serde_json::from_value(job_value.clone()).map_err(|err| {
         Error::internal_json(err.to_string(), Some("parse daemon exec job".to_string()))
     })?;
+    print_lab_offload_handoff(&runner.id, Some(&cwd), &job.id.to_string(), None);
 
     let deadline = Instant::now() + runner_exec_wait_timeout();
     while !matches!(
@@ -580,6 +582,7 @@ fn daemon_job_wait_timeout(
 ) -> Error {
     let job_id = job.id.to_string();
     let mirrored = mirror_daemon_job_progress(runner, cwd, command, job, events);
+    let mirrored_run_id = mirrored.as_ref().ok().map(|run| run.id.clone());
     let timeout_hint = format!(
         "Set controller-side `{RUNNER_EXEC_WAIT_TIMEOUT_ENV}` before invoking homeboy to change this wait budget, e.g. `{RUNNER_EXEC_WAIT_TIMEOUT_ENV}=2400 homeboy ...`; workload settings are applied inside the remote job and cannot extend the controller wait."
     );
@@ -611,20 +614,65 @@ fn daemon_job_wait_timeout(
             ));
         }
     }
-    error
-        .with_hint(format!(
-            "Check remote progress with `homeboy runs list --runner {} --status running --limit 20`.",
-            runner.id
-        ))
-        .with_hint(format!(
-            "Tail the dispatched runner daemon job with `homeboy runner job logs {} {job_id} --follow`.",
-            runner.id
-        ))
-        .with_hint(format!(
-            "Runner daemon job id `{job_id}` was already dispatched; wait for it to finish or cancel it with `homeboy runner job cancel {} {job_id}` if needed.",
-            runner.id
-        ))
-        .with_hint(timeout_hint)
+    for hint in
+        lab_offload_handoff_hints(&runner.id, Some(cwd), &job_id, mirrored_run_id.as_deref())
+    {
+        error = error.with_hint(hint);
+    }
+    error.with_hint(timeout_hint)
+}
+
+pub(crate) fn lab_offload_handoff_hints(
+    runner_id: &str,
+    remote_cwd: Option<&str>,
+    job_id: &str,
+    persisted_run_id: Option<&str>,
+) -> Vec<String> {
+    let runner_exec_prefix = match remote_cwd.filter(|cwd| !cwd.trim().is_empty()) {
+        Some(cwd) => format!(
+            "homeboy runner exec {runner_id} --cwd {} --",
+            shell::quote_arg(cwd)
+        ),
+        None => format!("homeboy runner exec {runner_id} --"),
+    };
+    let remote_run_filter =
+        format!("{runner_exec_prefix} homeboy runs list --status running --limit 20");
+    let mut hints = vec![format!(
+        "Lab offload handoff: runner `{runner_id}` has daemon job `{job_id}` still in flight; the runner-side Homeboy command may continue after this controller exits."
+    )];
+
+    if let Some(run_id) = persisted_run_id.filter(|run_id| !run_id.trim().is_empty()) {
+        hints.push(format!(
+            "Persisted run id: `{run_id}`. Status: `homeboy runs show {run_id}`; evidence: `homeboy runs evidence {run_id}`; artifacts: `homeboy runs artifacts {run_id}`."
+        ));
+    } else {
+        hints.push(format!(
+            "Persisted runner-side run id is not known yet; list active runner runs with `{remote_run_filter}`."
+        ));
+    }
+
+    hints.push(format!(
+        "Runner-side status/evidence/artifacts: `{remote_run_filter}` then `{runner_exec_prefix} homeboy runs show <run-id>`, `{runner_exec_prefix} homeboy runs evidence <run-id>`, and `{runner_exec_prefix} homeboy runs artifacts <run-id>`."
+    ));
+    hints.push(format!(
+        "Daemon job logs: `homeboy runner job logs {runner_id} {job_id} --follow`."
+    ));
+    hints.push(format!(
+        "Cancel if supported: `homeboy runner job cancel {runner_id} {job_id}`."
+    ));
+    hints
+}
+
+fn print_lab_offload_handoff(
+    runner_id: &str,
+    remote_cwd: Option<&str>,
+    job_id: &str,
+    persisted_run_id: Option<&str>,
+) {
+    eprintln!("Lab offload handoff:");
+    for hint in lab_offload_handoff_hints(runner_id, remote_cwd, job_id, persisted_run_id) {
+        eprintln!("- {hint}");
+    }
 }
 
 fn runner_exec_wait_timeout() -> Duration {
@@ -2023,6 +2071,15 @@ mod tests {
             assert!(err.hints.iter().any(|hint| hint
                 .message
                 .contains(&format!("homeboy runs artifacts {run_id}"))));
+            assert!(err.hints.iter().any(|hint| hint
+                .message
+                .contains("Lab offload handoff: runner `lab` has daemon job")));
+            assert!(err.hints.iter().any(|hint| hint.message.contains(
+                "homeboy runner exec lab --cwd /srv/homeboy/project -- homeboy runs list --status running --limit 20"
+            )));
+            assert!(err.hints.iter().any(|hint| hint
+                .message
+                .contains(&format!("homeboy runner job cancel lab {job_id}"))));
             assert!(err.hints.iter().any(|hint| {
                 hint.message.contains(RUNNER_EXEC_WAIT_TIMEOUT_ENV)
                     && hint.message.contains("controller-side")
@@ -2041,6 +2098,29 @@ mod tests {
                 Some(job_id.to_string().as_str())
             );
         });
+    }
+
+    #[test]
+    fn lab_offload_handoff_hints_render_durable_commands() {
+        let hints = lab_offload_handoff_hints(
+            "homeboy-lab",
+            Some("/home/chubes/Developer/project with spaces"),
+            "job-123",
+            Some("run-456"),
+        );
+        let joined = hints.join("\n");
+
+        assert!(joined.contains("runner `homeboy-lab`"));
+        assert!(joined.contains("daemon job `job-123`"));
+        assert!(joined.contains("Persisted run id: `run-456`"));
+        assert!(joined.contains("homeboy runs show run-456"));
+        assert!(joined.contains("homeboy runs evidence run-456"));
+        assert!(joined.contains("homeboy runs artifacts run-456"));
+        assert!(joined.contains(
+            "homeboy runner exec homeboy-lab --cwd '/home/chubes/Developer/project with spaces' -- homeboy runs list --status running --limit 20"
+        ));
+        assert!(joined.contains("homeboy runner job logs homeboy-lab job-123 --follow"));
+        assert!(joined.contains("homeboy runner job cancel homeboy-lab job-123"));
     }
 
     #[test]

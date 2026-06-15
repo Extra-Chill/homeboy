@@ -25,6 +25,7 @@ use crate::core::source_snapshot::SourceSnapshot;
 use crate::core::{Error, ErrorCode, Result};
 
 use super::super::daemon_health::runner_daemon_health_failure;
+use super::super::execution::lab_offload_handoff_hints;
 use super::super::lab_apply::apply_lab_offload_patch;
 use super::super::lab_args::{
     inline_agent_task_prompt_files_in_args, lab_offload_source_path, remap_agent_task_plan_in_args,
@@ -1070,16 +1071,10 @@ fn in_flight_daemon_disconnect_error(
             "reason": reason,
             "source": err.details,
         }),
-    )
-    .with_hint(format!(
-        "Do not retry until checking the remote run; inspect running records with `homeboy runs list --runner {runner_id} --status running --limit 20`."
-    ))
-    .with_hint(format!(
-        "If daemon polling is unavailable, inspect from the runner with `homeboy runner exec {runner_id} -- homeboy runs list --status running --limit 20`."
-    ))
-    .with_hint(format!(
-        "Runner daemon job id `{job_id}` was already dispatched; tail it with `homeboy runner job logs {runner_id} {job_id} --follow` to decide whether to wait, cancel, or clean up."
-    ));
+    );
+    for hint in lab_offload_handoff_hints(runner_id, None, job_id, None) {
+        disconnected = disconnected.with_hint(hint);
+    }
     disconnected.retryable = Some(false);
     disconnected
 }
