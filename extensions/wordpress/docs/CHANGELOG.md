@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.121.49] - 2026-06-15
+
+### Fixed
+- hide codebox behind wordpress agent executor
+
 ## [2.121.48] - 2026-06-15
 
 ### Fixed
