@@ -21,6 +21,14 @@ const codexSecretEnv = [
   'AI_PROVIDER_OPENAI_CODEX_FEDRAMP',
 ];
 const claudeCodeRefreshTokenEnv = 'AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN';
+const repoLoopCapabilities = [
+  'tool:datamachine/run-agent-bundle',
+  'tool:github_pull_request_publish',
+  'tool:wpsg_materialize_packet',
+  'ability:datamachine/run-agent-bundle',
+  'ability:github_pull_request_publish',
+  'ability:wpsg_materialize_packet',
+];
 
 function fixtureEnv(overrides = {}) {
   const env = { ...process.env, ...overrides };
@@ -280,12 +288,14 @@ assert.equal(provider.capabilities.includes('agent_bundle_execution'), true);
 assert.equal(provider.capabilities.includes('typed_bundle_outputs'), true);
 assert.equal(provider.capabilities.includes('external_recipe_packs'), true);
 assert.equal(provider.capabilities.includes('recipe_probe_artifacts'), true);
-assert.equal(provider.capabilities.includes('tool:datamachine/run-agent-bundle'), true);
-assert.equal(provider.capabilities.includes('tool:github_pull_request_publish'), true);
-assert.equal(provider.capabilities.includes('tool:wpsg_materialize_packet'), true);
-assert.equal(provider.capabilities.includes('ability:datamachine/run-agent-bundle'), true);
-assert.equal(provider.capabilities.includes('ability:github_pull_request_publish'), true);
-assert.equal(provider.capabilities.includes('ability:wpsg_materialize_packet'), true);
+for (const capability of repoLoopCapabilities) {
+  assert.equal(provider.capabilities.includes(capability), true);
+}
+const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'wordpress.json'), 'utf8'));
+const manifestProvider = manifest.agent_task_executors.find((executor) => executor.id === provider.id);
+for (const capability of repoLoopCapabilities) {
+  assert.equal(manifestProvider.capabilities.includes(capability), true);
+}
 assert.deepEqual(provider.runtime_gap_trackers, []);
 
 const codeboxRequest = codeboxTaskRequestFromAgentTaskRequest(request);

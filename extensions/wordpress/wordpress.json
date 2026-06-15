@@ -63,7 +63,17 @@
         "cleanup_observability",
         "screenshots",
         "structured_outcome",
-        "agent_bundle_execution"
+        "agent_bundle_execution",
+        "tool:datamachine/run-agent-bundle",
+        "tool:github_issue_publish",
+        "tool:github_pull_request_publish",
+        "tool:comment_github_pull_request",
+        "tool:wpsg_materialize_packet",
+        "ability:datamachine/run-agent-bundle",
+        "ability:github_issue_publish",
+        "ability:github_pull_request_publish",
+        "ability:comment_github_pull_request",
+        "ability:wpsg_materialize_packet"
       ],
       "workspace_materialization": {
         "cwd": "git_checkout"
