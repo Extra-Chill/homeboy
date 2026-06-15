@@ -4,6 +4,22 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.232.0] - 2026-06-15
+
+### Added
+- compile repo loop workflow contracts
+- compile repo workflows through controller dispatch
+
+### Changed
+- prove generic controller from-spec resume
+
+### Fixed
+- forward preview bootstrap redirects
+- surface lab runner homeboy binary refresh
+- route agent-task auth status to runners
+- execute generic controller actions
+- write output envelopes atomically
+
 ## [0.231.0] - 2026-06-15
 
 ### Added
