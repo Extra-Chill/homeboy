@@ -8,8 +8,8 @@ use crate::core::extension::{ExtensionCapability, ExtensionExecutionContext, Ext
 pub use baseline::{BaselineComparison, LintBaseline, LintBaselineMetadata};
 pub use report::LintCommandOutput;
 pub use run::{
-    run_main_lint_workflow, run_self_check_lint_workflow, LintRunWorkflowArgs,
-    LintRunWorkflowResult,
+    run_main_lint_workflow, run_self_check_lint_workflow,
+    run_self_check_lint_workflow_with_progress, LintRunWorkflowArgs, LintRunWorkflowResult,
 };
 
 use crate::core::engine::run_dir::RunDir;

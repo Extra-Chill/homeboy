@@ -16,6 +16,7 @@ use crate::core::extension::{self, ExtensionCapability, ExtensionPhaseTiming};
 use crate::core::finding::HomeboyFinding;
 use crate::core::observation::homeboy_findings_from_test_analysis_input;
 use crate::core::refactor::AppliedRefactor;
+use crate::core::validation_progress::{write_command_artifact, ValidationProgressRecorder};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
@@ -237,6 +238,12 @@ pub fn run_main_test_workflow(
         .iter()
         .fold(runner, |runner, (key, value)| runner.env(key, value));
     let passthrough_args = normalize_test_passthrough_args(component, &args.passthrough_args)?;
+    let mut progress = ValidationProgressRecorder::new(
+        run_dir,
+        None,
+        vec![("test runner".to_string(), args.component_label.clone())],
+    )?;
+    progress.start(0)?;
     let output = runner
         .env_if(args.changed_since.is_some(), "SCOPE_MODE", "changed")
         .env_if(
@@ -251,6 +258,9 @@ pub fn run_main_test_workflow(
         )
         .script_args(&passthrough_args)
         .run()?;
+    let stdout_artifact = write_command_artifact(run_dir, 0, "stdout", &output.stdout)?;
+    let stderr_artifact = write_command_artifact(run_dir, 0, "stderr", &output.stderr)?;
+    progress.finish(0, output.exit_code, stdout_artifact, stderr_artifact)?;
 
     if let (Some(context), Some(spec)) = (test_context.as_ref(), result_parse.as_ref()) {
         run_declared_result_parser(component, context, spec, &output.stdout, run_dir)?;
@@ -701,11 +711,31 @@ pub fn run_self_check_test_workflow(
     component_label: String,
     json_summary: bool,
 ) -> crate::core::Result<TestRunWorkflowResult> {
-    let output = extension::self_check::run_self_checks_with_passthrough(
+    run_self_check_test_workflow_with_progress(
+        component,
+        source_path,
+        component_label,
+        json_summary,
+        None,
+        None,
+    )
+}
+
+pub fn run_self_check_test_workflow_with_progress(
+    component: &Component,
+    source_path: &Path,
+    component_label: String,
+    json_summary: bool,
+    run_dir: Option<&RunDir>,
+    observation: Option<&crate::core::observation::ActiveObservation>,
+) -> crate::core::Result<TestRunWorkflowResult> {
+    let output = extension::self_check::run_self_checks_with_passthrough_and_progress(
         component,
         ExtensionCapability::Test,
         source_path,
         !json_summary,
+        run_dir,
+        observation,
     )?;
     let status = if output.success { "passed" } else { "failed" }.to_string();
     let raw_output = (!output.success).then(|| {

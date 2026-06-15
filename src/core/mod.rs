@@ -98,6 +98,7 @@ pub mod tunnel;
 mod tunnel_tests;
 pub mod update_check_cache;
 pub mod upgrade;
+pub mod validation_progress;
 pub mod worktree;
 
 // Internal path resolution helpers.

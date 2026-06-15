@@ -40,6 +40,7 @@ pub mod files {
     pub const TRACE_RESULTS: &str = "trace.json";
     pub const RESOURCE_SUMMARY: &str = "resource-summary.json";
     pub const PHASE_TIMINGS: &str = "phase-timings.json";
+    pub const VALIDATION_PROGRESS: &str = "validation-progress.json";
     pub const EXTENSION_CHILDREN_DIR: &str = "extension-children";
     pub const ANNOTATIONS_DIR: &str = "annotations";
 }

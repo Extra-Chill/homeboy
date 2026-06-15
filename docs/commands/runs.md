@@ -9,6 +9,7 @@ homeboy runs list [--runner <runner-id>] [--kind bench|rig|trace] [--component <
 homeboy runs distribution --field <metadata.path> [--kind bench] [--component <id>] [--rig <id>] [--scenario <id>] [--status <status>] [--limit 20]
 homeboy runs compare [--kind bench] [--component <id>] [--rig <id>] [--scenario <id>] [--metric <name>] [--limit 20] [--format table|json]
 homeboy runs show <run-id>
+homeboy runs resume-plan <run-id>
 homeboy runs artifacts <run-id>
 homeboy runs artifact cleanup-downloads [--runner <runner-id>] [--run-id <run-id>] [--apply]
 homeboy runs export --run <run-id> --output <dir>
@@ -25,6 +26,8 @@ homeboy runs import --from-gh-actions --component <id> --repo <owner/repo> --run
 `homeboy runs list --runner <runner-id>` queries a connected runner daemon instead of the local observation store, preserving the normal `runs.list` JSON payload while returning evidence from the runner machine.
 
 The JSON output includes stable run fields: run id, kind, status, timestamps, component id, rig id, git SHA, command, cwd, metadata, and artifact records where relevant.
+
+`homeboy runs resume-plan <run-id>` reads generic `validation_progress` metadata from a run and reports the last completed command, any active command, and the next pending command. Homeboy core records this ledger for Homeboy-managed validation command sets without understanding npm, smoke groups, benchmarks, or implementation-specific command names; command manifests come from project configuration or extension-provided runners.
 
 `homeboy runs artifact cleanup-downloads` plans cleanup for local runner artifact downloads under Homeboy's artifact root (`<artifact-root>/runner`). By default it is a dry run; pass `--apply` to remove the planned cache subtree. Use `--runner` and `--run-id` to narrow cleanup to a specific runner or run cache.
 
