@@ -104,6 +104,21 @@ impl Commands {
                     LAB_NO_EXTRA_TOOLS,
                 )
             }
+            Commands::AgentTask(args)
+                if matches!(
+                    args.command,
+                    agent_task::AgentTaskCommand::Auth(agent_task::AgentTaskAuthArgs {
+                        command: agent_task::AgentTaskAuthCommand::Status(_),
+                    })
+                ) =>
+            {
+                LabCommandContract::explicit_runner(
+                    "agent-task auth status",
+                    None,
+                    false,
+                    LAB_NO_EXTRA_TOOLS,
+                )
+            }
             Commands::Audit(args) => args.lab_contract()?,
             Commands::Bench(args) => args.lab_contract()?,
             Commands::Extension(args) if args.is_update_command() => {
@@ -534,6 +549,17 @@ mod tests {
                 parsed_command(&["homeboy", "agent-task", "providers"]),
                 "agent-task providers",
             ),
+            (
+                parsed_command(&[
+                    "homeboy",
+                    "agent-task",
+                    "auth",
+                    "status",
+                    "--secret-env",
+                    "OPENAI_API_KEY",
+                ]),
+                "agent-task auth status",
+            ),
         ];
 
         for (command, label) in supported {
@@ -631,6 +657,16 @@ mod tests {
         assert!(parsed_command(&["homeboy", "audit", "--conventions"])
             .lab_contract()
             .is_none());
+        assert!(parsed_command(&[
+            "homeboy",
+            "agent-task",
+            "auth",
+            "map-env",
+            "OPENAI_API_KEY",
+            "OPENAI_API_KEY",
+        ])
+        .lab_contract()
+        .is_none());
         assert!(
             parsed_command(&["homeboy", "lint", "--file", "src/main.rs"])
                 .lab_contract()

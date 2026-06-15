@@ -131,6 +131,21 @@ fn runner_job_logs_command_parses() {
     .expect("runner job logs command should parse");
 }
 
+#[test]
+fn agent_task_auth_status_accepts_global_runner_and_secret_env() {
+    Cli::try_parse_from([
+        "homeboy",
+        "--runner",
+        "homeboy-lab",
+        "agent-task",
+        "auth",
+        "status",
+        "--secret-env",
+        "OPENAI_API_KEY",
+    ])
+    .expect("agent-task auth status should accept global --runner with auth --secret-env");
+}
+
 fn documented_command_index_entries() -> BTreeSet<String> {
     let index = include_str!("../docs/commands/commands-index.md");
     let command_section = index.split("Related:").next().unwrap_or(index);
