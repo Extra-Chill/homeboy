@@ -11,6 +11,7 @@ use crate::core::agent_task::{
     AgentTaskWorkspace, AgentTaskWorkspaceMode, AGENT_TASK_OUTCOME_SCHEMA,
     AGENT_TASK_REQUEST_SCHEMA,
 };
+use crate::core::agent_task_provider::{role_aliases_for_provider, AgentTaskProviderRoleAliases};
 use crate::core::agent_task_scheduler::{
     AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals, AgentTaskPlan,
     AgentTaskProgressEvent, AgentTaskQueueStatus, AgentTaskState, AGENT_TASK_AGGREGATE_SCHEMA,
@@ -625,13 +626,7 @@ pub fn record_remote_dispatch_failure(
 fn enrich_remote_dispatch_aggregate(envelope: &Value, aggregate: &mut AgentTaskAggregate) {
     let remote_run_id = envelope.get("run_id").and_then(Value::as_str);
     for outcome in &mut aggregate.outcomes {
-        if outcome.outputs.get("codebox_run_result").is_none() {
-            if let Some(result) = outcome.metadata.get("codebox_run_result") {
-                let mut outputs = outcome.outputs.as_object().cloned().unwrap_or_default();
-                outputs.insert("codebox_run_result".to_string(), result.clone());
-                outcome.outputs = Value::Object(outputs);
-            }
-        }
+        normalize_provider_run_result(outcome);
 
         if outcome.evidence_refs.is_empty() {
             if let Some(remote_run_id) = remote_run_id {
@@ -1150,15 +1145,14 @@ fn provider_handle_from_outcome_metadata(
     outcome: &AgentTaskOutcome,
 ) -> Option<AgentTaskRunProviderHandle> {
     let provider = outcome.metadata.get("provider").and_then(Value::as_str)?;
+    let role_aliases = role_aliases_for_provider(provider);
     let provider_run_id = outcome
         .metadata
         .get("remote_run_id")
         .or_else(|| outcome.metadata.get("provider_run_id"))
         .and_then(Value::as_str)
         .or_else(|| {
-            outcome
-                .outputs
-                .get("codebox_run_result")
+            provider_run_result(outcome, &role_aliases)
                 .and_then(|result| result.get("run_id").or_else(|| result.get("id")))
                 .and_then(Value::as_str)
         })?;
@@ -1175,6 +1169,44 @@ fn provider_handle_from_outcome_metadata(
         state: Some(task_state_for_outcome_status(outcome.status)),
         metadata: outcome.metadata.clone(),
     })
+}
+
+fn normalize_provider_run_result(outcome: &mut AgentTaskOutcome) {
+    if outcome.outputs.get("provider_run_result").is_some() {
+        return;
+    }
+    let role_aliases = outcome
+        .metadata
+        .get("provider")
+        .and_then(Value::as_str)
+        .map(role_aliases_for_provider)
+        .unwrap_or_default();
+    if let Some(result) = provider_run_result(outcome, &role_aliases).cloned() {
+        let mut outputs = outcome.outputs.as_object().cloned().unwrap_or_default();
+        outputs.insert("provider_run_result".to_string(), result);
+        outcome.outputs = Value::Object(outputs);
+    }
+}
+
+fn provider_run_result<'a>(
+    outcome: &'a AgentTaskOutcome,
+    role_aliases: &AgentTaskProviderRoleAliases,
+) -> Option<&'a Value> {
+    outcome
+        .outputs
+        .get("provider_run_result")
+        .or_else(|| {
+            role_aliases
+                .output_aliases_for_role("provider_run_result")
+                .into_iter()
+                .find_map(|alias| outcome.outputs.get(alias))
+        })
+        .or_else(|| {
+            role_aliases
+                .metadata_aliases_for_role("provider_run_result")
+                .into_iter()
+                .find_map(|alias| outcome.metadata.get(alias))
+        })
 }
 
 fn provider_handle_from_value(value: &Value) -> Option<AgentTaskExecutionHandle> {
@@ -1249,6 +1281,41 @@ mod tests {
         AGENT_TASK_AGGREGATE_SCHEMA,
     };
     use crate::test_support::with_isolated_home;
+
+    #[test]
+    fn provider_run_result_reads_declared_output_alias() {
+        let role_aliases: AgentTaskProviderRoleAliases = serde_json::from_value(json!({
+            "outputs": {
+                "provider_run_result": ["custom_run_result"]
+            }
+        }))
+        .expect("role aliases");
+        let outcome = AgentTaskOutcome {
+            schema: crate::core::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+            task_id: "task-a".to_string(),
+            status: crate::core::agent_task::AgentTaskOutcomeStatus::Failed,
+            summary: None,
+            failure_classification: None,
+            artifacts: Vec::new(),
+            evidence_refs: Vec::new(),
+            diagnostics: Vec::new(),
+            outputs: json!({
+                "custom_run_result": {
+                    "run_id": "custom-run-1"
+                }
+            }),
+            workflow: None,
+            follow_up: None,
+            metadata: Value::Null,
+        };
+
+        assert_eq!(
+            provider_run_result(&outcome, &role_aliases)
+                .and_then(|result| result.get("run_id"))
+                .and_then(Value::as_str),
+            Some("custom-run-1")
+        );
+    }
 
     #[test]
     fn submit_plan_persists_queued_status() {

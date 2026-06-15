@@ -229,6 +229,17 @@ Transient broker failures sleep for `--broker-failure-backoff-ms` and exit
 non-zero after `--broker-retry-limit` consecutive failures. `SIGINT` and
 `SIGTERM` request graceful shutdown after the current claim attempt or job.
 
+### `job`
+
+```sh
+homeboy runner job logs <job-id>
+homeboy runner job logs <job-id> --follow
+```
+
+Inspects durable runner daemon job events. Use `logs` to read the persisted event
+stream for a brokered or daemon-backed runner job without connecting directly to
+the runner process.
+
 Minimal Homeboy Lab systemd unit:
 
 ```ini
