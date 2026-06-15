@@ -59,6 +59,44 @@ fn expose_records_private_loopback_declaration_without_running_tunnel() {
 }
 
 #[test]
+fn list_serializes_stable_service_ids() {
+    test_support::with_isolated_home(|_| {
+        create_server();
+
+        expose(ExposeServiceTunnelSpec {
+            id: "copy-paste-service".to_string(),
+            server_id: "private-host".to_string(),
+            target: ServiceTunnelTarget {
+                host: "127.0.0.1".to_string(),
+                port: 7331,
+            },
+            scheme: "http".to_string(),
+            local_port: Some(8831),
+            auth: ServiceTunnelAuth {
+                mode: ServiceTunnelAuthMode::BearerEnv,
+                env_var: Some("COPY_PASTE_TOKEN".to_string()),
+                header: Some("Authorization".to_string()),
+            },
+            policy: ServiceTunnelPolicy {
+                exposure: ServiceTunnelExposure::PrivateLoopback,
+                require_auth: true,
+                allowed_clients: Vec::new(),
+                preview: ServiceTunnelPreviewPolicy::default(),
+                native_preview_auth: ServiceTunnelNativePreviewAuthPolicy::default(),
+            },
+            description: Some("Copy-pasteable service".to_string()),
+        })
+        .expect("expose service");
+
+        let tunnels = list().expect("list services");
+        let value = serde_json::to_value(&tunnels).expect("serialize list");
+
+        assert_eq!(value[0]["id"], "copy-paste-service");
+        assert_eq!(tunnels[0].id, "copy-paste-service");
+    });
+}
+
+#[test]
 fn validation_rejects_auth_mode_without_env_var() {
     test_support::with_isolated_home(|_| {
         create_server();
