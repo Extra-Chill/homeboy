@@ -28,6 +28,7 @@ homeboy_write_test_results() {
 
     # Write JSON to file if requested
     if [ -n "${HOMEBOY_TEST_RESULTS_FILE:-}" ]; then
+        mkdir -p "$(dirname "$HOMEBOY_TEST_RESULTS_FILE")"
         if [ -n "${partial}" ]; then
             cat > "$HOMEBOY_TEST_RESULTS_FILE" << JSONEOF
 {

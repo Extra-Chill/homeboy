@@ -206,6 +206,62 @@ fn sidecar_writer_supports_test_failure_and_fix_result_wrappers() {
 }
 
 #[test]
+fn sidecar_writer_supports_test_results_object() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let helper_path = dir.path().join("sidecar-writer.sh");
+    let results_path = dir.path().join("nested").join("test-results.json");
+    std::fs::write(&helper_path, assets::SIDECAR_WRITER_SH).expect("write helper");
+
+    let output = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(format!(
+            "source {}; HOMEBOY_TEST_RESULTS_FILE={}; homeboy_write_test_results_json '{{\"total\":5,\"passed\":3,\"failed\":1,\"skipped\":1}}'; cat {}",
+            helper_path.display(),
+            results_path.display(),
+            results_path.display()
+        ))
+        .output()
+        .expect("run bash");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        r#"{"total":5,"passed":3,"failed":1,"skipped":1}
+"#
+    );
+}
+
+#[test]
+fn write_test_results_creates_parent_directory() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let helper_path = dir.path().join("write-test-results.sh");
+    let results_path = dir.path().join("nested").join("test-results.json");
+    std::fs::write(&helper_path, assets::WRITE_TEST_RESULTS_SH).expect("write helper");
+
+    let output = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(format!(
+            "source {}; HOMEBOY_TEST_RESULTS_FILE={}; homeboy_write_test_results 5 3 1 1; cat {}",
+            helper_path.display(),
+            results_path.display(),
+            results_path.display()
+        ))
+        .output()
+        .expect("run bash");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains(r#""total": 5"#));
+}
+
+#[test]
 fn sidecar_writer_supports_annotation_source_files() {
     let dir = tempfile::tempdir().expect("tempdir");
     let helper_path = dir.path().join("sidecar-writer.sh");
