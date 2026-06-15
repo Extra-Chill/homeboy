@@ -41,7 +41,8 @@ pub use parsing::{
 };
 pub use report::TestCommandOutput;
 pub use run::{
-    run_main_test_workflow, run_self_check_test_workflow, RawTestOutput, TestRunWorkflowArgs,
+    run_main_test_workflow, run_self_check_test_workflow,
+    run_self_check_test_workflow_with_progress, RawTestOutput, TestRunWorkflowArgs,
     TestRunWorkflowResult,
 };
 pub use workflow::{

@@ -1,6 +1,9 @@
 use crate::core::component::Component;
+use crate::core::engine::run_dir::RunDir;
 use crate::core::error::{Error, Result};
 use crate::core::extension::ExtensionCapability;
+use crate::core::observation::ActiveObservation;
+use crate::core::validation_progress::{write_command_artifact, ValidationProgressRecorder};
 use serde::Serialize;
 use std::io::{Read, Write};
 use std::path::Path;
@@ -32,11 +35,30 @@ pub struct SelfCheckStreamCaptureMetadata {
     pub truncated: bool,
 }
 
+#[cfg(test)]
 pub(crate) fn run_self_checks_with_passthrough(
     component: &Component,
     capability: ExtensionCapability,
     source_path: &Path,
     passthrough: bool,
+) -> Result<SelfCheckOutput> {
+    run_self_checks_with_passthrough_and_progress(
+        component,
+        capability,
+        source_path,
+        passthrough,
+        None,
+        None,
+    )
+}
+
+pub(crate) fn run_self_checks_with_passthrough_and_progress(
+    component: &Component,
+    capability: ExtensionCapability,
+    source_path: &Path,
+    passthrough: bool,
+    run_dir: Option<&RunDir>,
+    observation: Option<&ActiveObservation>,
 ) -> Result<SelfCheckOutput> {
     let commands = component.script_commands(capability);
     if commands.is_empty() {
@@ -55,8 +77,26 @@ pub(crate) fn run_self_checks_with_passthrough(
     let working_dir = source_path.to_string_lossy();
     let mut stdout = BoundedCapture::new(SELF_CHECK_CAPTURE_LIMIT_BYTES);
     let mut stderr = BoundedCapture::new(SELF_CHECK_CAPTURE_LIMIT_BYTES);
+    let mut progress = if let Some(run_dir) = run_dir {
+        Some(ValidationProgressRecorder::new(
+            run_dir,
+            observation,
+            commands
+                .iter()
+                .enumerate()
+                .map(|(index, command)| {
+                    (
+                        format!("{} command {}", capability.label(), index + 1),
+                        command.clone(),
+                    )
+                })
+                .collect(),
+        )?)
+    } else {
+        None
+    };
 
-    for command in commands {
+    for (index, command) in commands.iter().enumerate() {
         if passthrough {
             crate::log_status!(
                 "self-check",
@@ -66,7 +106,23 @@ pub(crate) fn run_self_checks_with_passthrough(
                 command
             );
         }
+        if let Some(progress) = progress.as_mut() {
+            progress.start(index)?;
+        }
         let output = execute_self_check_command(command, &working_dir, passthrough);
+        let stdout_artifact = if let Some(run_dir) = run_dir {
+            write_command_artifact(run_dir, index, "stdout", &output.stdout.to_string_lossy())?
+        } else {
+            None
+        };
+        let stderr_artifact = if let Some(run_dir) = run_dir {
+            write_command_artifact(run_dir, index, "stderr", &output.stderr.to_string_lossy())?
+        } else {
+            None
+        };
+        if let Some(progress) = progress.as_mut() {
+            progress.finish(index, output.exit_code, stdout_artifact, stderr_artifact)?;
+        }
         stdout.push_capture(output.stdout);
         stderr.push_capture(output.stderr);
 

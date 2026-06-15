@@ -2,25 +2,25 @@ use clap::Args;
 
 use homeboy::core::ci_profile;
 use homeboy::core::extension::lint::{
-    report, run_main_lint_workflow, run_self_check_lint_workflow, LintCommandOutput,
+    report, run_main_lint_workflow, run_self_check_lint_workflow_with_progress, LintCommandOutput,
     LintRunWorkflowArgs,
 };
 use homeboy::core::extension::ExtensionCapability;
 use homeboy::core::git;
 use homeboy::core::observation::{
-    finding_records_from_lint, NewFindingRecord, NewRunRecord, RunStatus,
+    finding_records_from_lint, merge_metadata, ActiveObservation, NewFindingRecord, NewRunRecord,
+    RunStatus,
 };
 use homeboy::core::refactor::plan::{
     collect_refactor_sources, lint_refactor_request, LintSourceOptions,
 };
+use homeboy::core::validation_progress::validation_progress_metadata;
 
 use super::source_command::{resolve_ci_job_for_command, resolve_source_context};
 use super::utils::args::{
     BaselineArgs, ExtensionOverrideArgs, PositionalComponentArgs, SettingArgs,
 };
-use super::utils::observed_workflow::{
-    finish_adapted_observed_workflow, ObservedWorkflowRunner, WorkflowObservationAdapter,
-};
+use super::utils::observed_workflow::{ObservedWorkflowRunner, WorkflowObservationAdapter};
 use super::{CmdResult, GlobalArgs};
 use crate::command_contract::{
     CommandJsonFamily, CommandOutputContractKind, CommandOutputDescriptor, CommandOutputFileMode,
@@ -144,19 +144,28 @@ pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintCommandOutput>
         && args.ci_job.is_none()
         && source_ctx.component.has_script(ExtensionCapability::Lint)
     {
+        let runner =
+            ObservedWorkflowRunner::create(format!("lint {} self-check", source_ctx.component_id))?;
         let observation = LintObservationAdapter::new(
             source_ctx.component_id.clone(),
             &source_ctx.source_path,
             lint_command_label(&source_ctx.component_id, &args),
+            Some(runner.run_dir()),
         );
-        let workflow = finish_adapted_observed_workflow(
-            observation,
-            run_self_check_lint_workflow(
-                &source_ctx.component,
-                &source_ctx.source_path,
-                source_ctx.component_id.clone(),
-                args.json_summary,
-            ),
+        let active_observation = ActiveObservation::start_best_effort(observation.start_record());
+        let workflow = run_self_check_lint_workflow_with_progress(
+            &source_ctx.component,
+            &source_ctx.source_path,
+            source_ctx.component_id.clone(),
+            args.json_summary,
+            Some(runner.run_dir()),
+            active_observation.as_ref(),
+        );
+        let workflow = runner.finish(
+            active_observation,
+            workflow,
+            |active, workflow| finish_lint_observation(active, &observation, workflow),
+            |active, error| finish_lint_observation_error(active, &observation, error),
         )?;
 
         return Ok(report::from_main_workflow(workflow));
@@ -186,6 +195,7 @@ pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintCommandOutput>
         ctx.component_id.clone(),
         &ctx.source_path,
         lint_command_label(&effective_id, &args),
+        Some(runner.run_dir()),
     );
 
     let workflow = run_main_lint_workflow(
@@ -227,15 +237,32 @@ struct LintObservationAdapter {
     component_id: String,
     source_path: std::path::PathBuf,
     command: String,
+    run_dir: Option<std::path::PathBuf>,
 }
 
 impl LintObservationAdapter {
-    fn new(component_id: String, source_path: &std::path::Path, command: String) -> Self {
+    fn new(
+        component_id: String,
+        source_path: &std::path::Path,
+        command: String,
+        run_dir: Option<&homeboy::core::engine::run_dir::RunDir>,
+    ) -> Self {
         Self {
             component_id,
             source_path: source_path.to_path_buf(),
             command,
+            run_dir: run_dir.map(|run_dir| run_dir.path().to_path_buf()),
         }
+    }
+
+    fn run_dir_metadata(&self) -> serde_json::Value {
+        self.run_dir
+            .as_ref()
+            .and_then(|path| {
+                homeboy::core::engine::run_dir::RunDir::from_existing(path.clone()).ok()
+            })
+            .map(|run_dir| validation_progress_metadata(&run_dir))
+            .unwrap_or_else(|| serde_json::json!({}))
     }
 }
 
@@ -248,7 +275,10 @@ impl WorkflowObservationAdapter<homeboy::core::extension::lint::LintRunWorkflowR
             .command(self.command.clone())
             .cwd_path(&self.source_path)
             .current_homeboy_version()
-            .metadata(serde_json::json!({ "source": "homeboy lint" }))
+            .metadata(serde_json::json!({
+                "source": "homeboy lint",
+                "run_dir": self.run_dir.as_ref().map(|path| path.to_string_lossy().to_string()),
+            }))
             .build()
     }
 
@@ -285,6 +315,37 @@ impl WorkflowObservationAdapter<homeboy::core::extension::lint::LintRunWorkflowR
             .map(|findings| finding_records_from_lint(run_id, findings))
             .unwrap_or_default()
     }
+}
+
+fn finish_lint_observation(
+    active: ActiveObservation,
+    adapter: &LintObservationAdapter,
+    workflow: &homeboy::core::extension::lint::LintRunWorkflowResult,
+) {
+    let mut metadata = merge_metadata(
+        active.initial_metadata().clone(),
+        adapter.success_metadata(workflow),
+    );
+    metadata = merge_metadata(metadata, adapter.run_dir_metadata());
+    let findings = adapter.success_findings(active.run_id(), workflow);
+    active.record_findings(&findings);
+    active.finish(adapter.success_status(workflow), Some(metadata));
+}
+
+fn finish_lint_observation_error(
+    active: ActiveObservation,
+    adapter: &LintObservationAdapter,
+    error: &homeboy::core::Error,
+) {
+    let mut metadata = merge_metadata(
+        active.initial_metadata().clone(),
+        serde_json::json!({
+            "observation_status": "error",
+            "error": error.to_string(),
+        }),
+    );
+    metadata = merge_metadata(metadata, adapter.run_dir_metadata());
+    active.finish_error(Some(metadata));
 }
 
 fn lint_command_label(component_id: &str, args: &LintArgs) -> String {
