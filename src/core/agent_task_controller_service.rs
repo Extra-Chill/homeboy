@@ -68,6 +68,22 @@ pub struct AgentTaskRepoLoopSpec {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub entities: Vec<AgentTaskRepoLoopSpecEntity>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agents: Vec<AgentTaskRepoLoopSpecAgent>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<AgentTaskRepoLoopSpecTool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub abilities: Vec<AgentTaskRepoLoopSpecAbility>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workflows: Vec<AgentTaskRepoLoopSpecWorkflow>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<AgentTaskRepoLoopSpecArtifact>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependencies: Vec<AgentTaskRepoLoopSpecDependency>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gates: Vec<AgentTaskRepoLoopSpecGate>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub metrics: Vec<AgentTaskRepoLoopSpecMetric>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gate_bundles: Vec<AgentTaskGateBundle>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy: Option<AgentTaskLoopPolicy>,
@@ -88,6 +104,116 @@ pub struct AgentTaskRepoLoopSpecEntity {
     pub parent_entity_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub metadata: Value,
+}
+
+/// Agent role declared by a repo loop spec. Homeboy maps this to an executor backend later.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentTaskRepoLoopSpecAgent {
+    pub agent_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub abilities: Vec<String>,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub metadata: Value,
+}
+
+/// Tool contract declared by a repo loop spec.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentTaskRepoLoopSpecTool {
+    pub tool_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub input_schema: Value,
+}
+
+/// Ability contract declared by a repo loop spec.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentTaskRepoLoopSpecAbility {
+    pub ability_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub input: Value,
+}
+
+/// Workflow declared by a repo loop spec and compiled by Homeboy into controller actions.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentTaskRepoLoopSpecWorkflow {
+    pub workflow_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tasks: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub entity_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub abilities: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependencies: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gates: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub metrics: Vec<String>,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub inputs: Value,
+}
+
+/// Artifact contract declared by a repo loop spec.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentTaskRepoLoopSpecArtifact {
+    pub artifact_id: String,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub required: bool,
+}
+
+/// Dependency declared by a repo loop spec.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentTaskRepoLoopSpecDependency {
+    pub dependency_id: String,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    #[serde(default)]
+    pub required: bool,
+}
+
+/// Gate declared by a repo loop spec; Homeboy owns gate orchestration and state.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentTaskRepoLoopSpecGate {
+    pub gate_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub metrics: Vec<String>,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub input: Value,
+}
+
+/// Metric definition declared by a repo loop spec; Homeboy evaluates it through gate actions.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentTaskRepoLoopSpecMetric {
+    pub metric_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub input: Value,
 }
 
 /// Phase shorthand compiled into an [`AgentTaskLoopTransition`].
@@ -263,6 +389,9 @@ pub fn init_from_spec(request: ControllerFromSpecRequest) -> Result<ControllerFr
     }
 
     let mut actions = Vec::new();
+    for action in compile_loop_spec_workflows(&spec)? {
+        actions.push(record.record_action(action, "repo loop spec workflow"));
+    }
     for action in &spec.actions {
         actions.push(record.record_action(action.clone(), "repo loop spec action"));
     }
@@ -342,7 +471,120 @@ fn validate_loop_spec(spec: &AgentTaskRepoLoopSpec) -> Result<()> {
             ));
         }
     }
+    for (index, workflow) in spec.workflows.iter().enumerate() {
+        if workflow.workflow_id.trim().is_empty() {
+            return Err(Error::validation_invalid_argument(
+                format!("workflows[{index}].workflow_id"),
+                "repo loop spec workflow requires a non-empty workflow_id",
+                None,
+                None,
+            ));
+        }
+        if workflow
+            .prompt
+            .as_deref()
+            .unwrap_or_default()
+            .trim()
+            .is_empty()
+            && workflow.tasks.is_empty()
+        {
+            return Err(Error::validation_invalid_argument(
+                format!("workflows[{index}]"),
+                "repo loop spec workflow requires prompt or tasks",
+                None,
+                None,
+            ));
+        }
+    }
     Ok(())
+}
+
+fn compile_loop_spec_workflows(
+    spec: &AgentTaskRepoLoopSpec,
+) -> Result<Vec<AgentTaskLoopPolicyAction>> {
+    spec.workflows
+        .iter()
+        .map(|workflow| compile_loop_spec_workflow(spec, workflow))
+        .collect()
+}
+
+fn compile_loop_spec_workflow(
+    spec: &AgentTaskRepoLoopSpec,
+    workflow: &AgentTaskRepoLoopSpecWorkflow,
+) -> Result<AgentTaskLoopPolicyAction> {
+    let request = workflow_dispatch_request(spec, workflow)?;
+    let dedupe_key = format!("workflow:{}", workflow.workflow_id);
+    if workflow.entity_ids.is_empty() {
+        Ok(AgentTaskLoopPolicyAction::SpawnTask {
+            dedupe_key,
+            entity_id: None,
+            request,
+        })
+    } else {
+        Ok(AgentTaskLoopPolicyAction::FanOut {
+            dedupe_key,
+            entity_ids: workflow.entity_ids.clone(),
+            request_template: request,
+        })
+    }
+}
+
+fn workflow_dispatch_request(
+    spec: &AgentTaskRepoLoopSpec,
+    workflow: &AgentTaskRepoLoopSpecWorkflow,
+) -> Result<Value> {
+    let mut dispatch = serde_json::Map::new();
+    if let Some(prompt) = workflow.prompt.as_ref().filter(|prompt| !prompt.is_empty()) {
+        dispatch.insert("prompt".to_string(), Value::String(prompt.clone()));
+    }
+    if !workflow.tasks.is_empty() {
+        dispatch.insert(
+            "tasks".to_string(),
+            Value::Array(workflow.tasks.iter().cloned().map(Value::String).collect()),
+        );
+    }
+    let context = workflow_client_context(spec, workflow)?;
+    dispatch.insert(
+        "client_context".to_string(),
+        Value::String(context.to_string()),
+    );
+    Ok(serde_json::json!({
+        "mode": "dispatch",
+        "dispatch": Value::Object(dispatch),
+    }))
+}
+
+fn workflow_client_context(
+    spec: &AgentTaskRepoLoopSpec,
+    workflow: &AgentTaskRepoLoopSpecWorkflow,
+) -> Result<Value> {
+    Ok(serde_json::json!({
+        "schema": "homeboy/repo-loop-workflow-context/v1",
+        "loop_id": spec.loop_id,
+        "workflow_id": workflow.workflow_id,
+        "agent": workflow.agent_id.as_ref().and_then(|agent_id| {
+            spec.agents.iter().find(|agent| &agent.agent_id == agent_id)
+        }),
+        "tools": select_by_id(&spec.tools, &workflow.tools, |tool| &tool.tool_id),
+        "abilities": select_by_id(&spec.abilities, &workflow.abilities, |ability| &ability.ability_id),
+        "artifacts": select_by_id(&spec.artifacts, &workflow.artifacts, |artifact| &artifact.artifact_id),
+        "dependencies": select_by_id(&spec.dependencies, &workflow.dependencies, |dependency| &dependency.dependency_id),
+        "gates": select_by_id(&spec.gates, &workflow.gates, |gate| &gate.gate_id),
+        "metrics": select_by_id(&spec.metrics, &workflow.metrics, |metric| &metric.metric_id),
+        "inputs": workflow.inputs,
+    }))
+}
+
+fn select_by_id<'a, T, F>(items: &'a [T], ids: &[String], id: F) -> Vec<&'a T>
+where
+    F: Fn(&T) -> &String,
+{
+    if ids.is_empty() {
+        return Vec::new();
+    }
+    ids.iter()
+        .filter_map(|requested| items.iter().find(|item| id(item) == requested))
+        .collect()
 }
 
 fn compile_loop_spec_policy(spec: &AgentTaskRepoLoopSpec) -> Option<AgentTaskLoopPolicy> {
@@ -1886,7 +2128,7 @@ mod tests {
     }
 
     #[test]
-    fn init_from_spec_compiles_repo_phases_into_deduped_controller_actions() {
+    fn init_from_spec_compiles_repo_workflows_into_deduped_dispatch_actions() {
         with_isolated_home(|_| {
             let spec = AgentTaskRepoLoopSpec {
                 schema: Some("example/repo-loop/v1".to_string()),
@@ -1900,6 +2142,62 @@ mod tests {
                     parent_entity_ids: Vec::new(),
                     metadata: json!({ "severity": "high" }),
                 }],
+                agents: vec![AgentTaskRepoLoopSpecAgent {
+                    agent_id: "repair-agent".to_string(),
+                    role: Some("repair".to_string()),
+                    instructions: Some("repair the routed finding".to_string()),
+                    tools: vec!["repo-inspector".to_string()],
+                    abilities: vec!["apply_patch".to_string()],
+                    metadata: Value::Null,
+                }],
+                tools: vec![AgentTaskRepoLoopSpecTool {
+                    tool_id: "repo-inspector".to_string(),
+                    description: Some("inspect repo files".to_string()),
+                    input_schema: Value::Null,
+                }],
+                abilities: vec![AgentTaskRepoLoopSpecAbility {
+                    ability_id: "apply_patch".to_string(),
+                    description: Some("apply focused patches".to_string()),
+                    input: Value::Null,
+                }],
+                workflows: vec![AgentTaskRepoLoopSpecWorkflow {
+                    workflow_id: "repair-findings".to_string(),
+                    agent_id: Some("repair-agent".to_string()),
+                    prompt: Some("Repair this finding and report evidence.".to_string()),
+                    tasks: Vec::new(),
+                    entity_ids: vec!["finding:abc".to_string()],
+                    tools: vec!["repo-inspector".to_string()],
+                    abilities: vec!["apply_patch".to_string()],
+                    artifacts: vec!["patch".to_string()],
+                    dependencies: vec!["source-tree".to_string()],
+                    gates: vec!["quality".to_string()],
+                    metrics: vec!["visual-parity".to_string()],
+                    inputs: json!({ "finding_key": "abc" }),
+                }],
+                artifacts: vec![AgentTaskRepoLoopSpecArtifact {
+                    artifact_id: "patch".to_string(),
+                    kind: "diff".to_string(),
+                    description: Some("candidate patch".to_string()),
+                    required: true,
+                }],
+                dependencies: vec![AgentTaskRepoLoopSpecDependency {
+                    dependency_id: "source-tree".to_string(),
+                    kind: "repo".to_string(),
+                    value: None,
+                    required: true,
+                }],
+                gates: vec![AgentTaskRepoLoopSpecGate {
+                    gate_id: "quality".to_string(),
+                    description: Some("repo quality gate".to_string()),
+                    metrics: vec!["visual-parity".to_string()],
+                    input: Value::Null,
+                }],
+                metrics: vec![AgentTaskRepoLoopSpecMetric {
+                    metric_id: "visual-parity".to_string(),
+                    description: Some("visual parity threshold".to_string()),
+                    target: Some(">=0.98".to_string()),
+                    input: Value::Null,
+                }],
                 gate_bundles: vec![
                     crate::core::agent_task_loop_controller::AgentTaskGateBundle {
                         bundle_id: "quality".to_string(),
@@ -1908,20 +2206,7 @@ mod tests {
                     },
                 ],
                 policy: None,
-                phases: vec![AgentTaskRepoLoopSpecPhase {
-                    phase: "init".to_string(),
-                    transition_id: Some("fanout-findings".to_string()),
-                    on_event_type: None,
-                    when_json_path: None,
-                    actions: vec![AgentTaskLoopPolicyAction::FanOut {
-                        dedupe_key: "fanout:findings".to_string(),
-                        entity_ids: vec!["finding:abc".to_string()],
-                        request_template: json!({
-                            "mode": "submit",
-                            "plan": test_plan(),
-                        }),
-                    }],
-                }],
+                phases: Vec::new(),
                 actions: Vec::new(),
                 initial_event: None,
             };
@@ -1936,6 +2221,30 @@ mod tests {
             assert_eq!(report.controller.gate_bundles[0].bundle_id, "quality");
             assert_eq!(report.actions.len(), 1);
             assert_eq!(report.actions[0].status, AgentTaskLoopActionStatus::Pending);
+            match &report.actions[0].action {
+                AgentTaskLoopPolicyAction::FanOut {
+                    dedupe_key,
+                    request_template,
+                    ..
+                } => {
+                    assert_eq!(dedupe_key, "workflow:repair-findings");
+                    assert_eq!(request_template["mode"], "dispatch");
+                    assert!(request_template["dispatch"].get("backend").is_none());
+                    assert!(request_template["dispatch"]
+                        .get("provider_config")
+                        .is_none());
+                    let context: Value = serde_json::from_str(
+                        request_template["dispatch"]["client_context"]
+                            .as_str()
+                            .expect("client context string"),
+                    )
+                    .expect("client context json");
+                    assert_eq!(context["agent"]["agent_id"], "repair-agent");
+                    assert_eq!(context["gates"][0]["gate_id"], "quality");
+                    assert_eq!(context["metrics"][0]["metric_id"], "visual-parity");
+                }
+                other => panic!("expected fan_out workflow action, got {other:?}"),
+            }
 
             let resumed =
                 init_from_spec(ControllerFromSpecRequest { spec }).expect("spec reapplied");
@@ -1958,6 +2267,14 @@ mod tests {
                 config_version: "v1".to_string(),
                 metadata: Value::Null,
                 entities: Vec::new(),
+                agents: Vec::new(),
+                tools: Vec::new(),
+                abilities: Vec::new(),
+                workflows: Vec::new(),
+                artifacts: Vec::new(),
+                dependencies: Vec::new(),
+                gates: Vec::new(),
+                metrics: Vec::new(),
                 gate_bundles: Vec::new(),
                 policy: None,
                 phases: vec![AgentTaskRepoLoopSpecPhase {
