@@ -721,7 +721,7 @@ fn publication_manifest_public_url_refs_are_indexed_from_artifact_origin() {
                 "schema": "example/publication-manifest/v1",
                 "id": "publish-run-1",
                 "publication": {
-                    "public_base_url": "https://homeboy-artifacts-tunnel.dev.chubes.net",
+                    "public_base_url": "https://artifacts.example.test",
                     "artifact_base": "homeboy/workflow-bench"
                 },
                 "artifacts": [{
@@ -731,7 +731,7 @@ fn publication_manifest_public_url_refs_are_indexed_from_artifact_origin() {
                     "role": "output",
                     "locator": {
                         "type": "url",
-                        "value": "https://homeboy-artifacts-tunnel.dev.chubes.net/homeboy/workflow-bench/runs/run-1/artifacts/scenario/adapter/attempt-1/blueprint.after.json"
+                        "value": "https://artifacts.example.test/homeboy/workflow-bench/runs/run-1/artifacts/scenario/adapter/attempt-1/blueprint.after.json"
                     },
                     "media_type": "application/json",
                     "bytes": 12,
@@ -758,6 +758,10 @@ fn publication_manifest_public_url_refs_are_indexed_from_artifact_origin() {
         assert_eq!(
             nested.metadata_json["locator"]["value"].as_str(),
             Some(locator)
+        );
+        assert_eq!(
+            nested.metadata_json["public_url"].as_str(),
+            Some("https://artifacts.example.test/homeboy/workflow-bench/runs/run-1/artifacts/scenario/adapter/attempt-1/blueprint.after.json")
         );
     });
 }
