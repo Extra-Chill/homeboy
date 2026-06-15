@@ -527,6 +527,39 @@ try {
   assert.equal(preparedRuntimeInput.runtime_component_paths.agent_runtime_tools, preparedRuntimePath);
   assert.equal(fs.existsSync(path.join(preparedRuntimePath, 'data-machine-code.php')), true);
 
+  const nestedRuntimeRoot = path.join(root, 'nested-runtime-components');
+  const nestedDataMachine = path.join(nestedRuntimeRoot, 'data-machine');
+  const nestedAgentsApi = path.join(nestedDataMachine, 'vendor', 'wordpress', 'agents-api');
+  const nestedArtifacts = path.join(root, 'prepared-nested-runtime-component-artifacts');
+  fs.mkdirSync(nestedAgentsApi, { recursive: true });
+  fs.writeFileSync(path.join(nestedDataMachine, 'data-machine.php'), "<?php\n/* Plugin Name: Data Machine */\n");
+  fs.writeFileSync(path.join(nestedAgentsApi, 'agents-api.php'), "<?php\n/* Plugin Name: Agents API */\n");
+  const nestedRuntimeCapturePath = path.join(root, 'capture-nested-prepared-runtime-component.json');
+  const nestedRuntimeResult = spawnSync(process.execPath, [
+    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-wp-codebox-task-runner.cjs'),
+    '--wp-codebox-bin', fixtureWpCodebox,
+    '--artifacts', nestedArtifacts,
+  ], {
+    encoding: 'utf8',
+    input: JSON.stringify({
+      ...request,
+      runtime_component_paths: {
+        agents_api: nestedAgentsApi,
+        agent_runtime: nestedDataMachine,
+      },
+    }),
+    env: { ...process.env, FIXTURE_WP_CODEBOX_CAPTURE: nestedRuntimeCapturePath, OPENCODE_API_KEY: 'redacted-test-key' },
+  });
+  assert.equal(nestedRuntimeResult.status, 0, nestedRuntimeResult.stderr || nestedRuntimeResult.stdout);
+  const nestedRuntimeInput = readJson(nestedRuntimeCapturePath).input;
+  const preparedDataMachine = path.join(nestedArtifacts, 'prepared-plugins', 'data-machine');
+  const preparedAgentsApi = path.join(preparedDataMachine, 'vendor', 'wordpress', 'agents-api');
+  assert.equal(nestedRuntimeInput.runtime_component_paths.agent_runtime, preparedDataMachine);
+  assert.equal(nestedRuntimeInput.runtime_component_paths.agents_api, preparedAgentsApi);
+  assert.equal(nestedRuntimeInput.extra_plugins.find((plugin) => plugin.slug === 'agents-api').source, preparedAgentsApi);
+  assert.equal(nestedRuntimeInput.component_contracts.find((contract) => contract.slug === 'agents-api').path, preparedAgentsApi);
+  assert.equal(fs.existsSync(path.join(preparedAgentsApi, 'agents-api.php')), true);
+
   const legacyRuntimeCapturePath = path.join(root, 'capture-legacy-runtime-stack.json');
   const legacyRuntimeResult = spawnSync(process.execPath, [
     path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-wp-codebox-task-runner.cjs'),

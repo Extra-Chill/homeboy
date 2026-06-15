@@ -270,6 +270,35 @@ function preparePluginDirectory(source, slug, preparedRoot, artifacts) {
   return { source: target, prepared: true, original_source: source, slug: safeSlug };
 }
 
+function sourceDepth(source) {
+  return String(source || '').split(path.sep).filter(Boolean).length;
+}
+
+function nestedPreparedPath(source, preparedItems) {
+  for (const item of preparedItems) {
+    if (!item.prepared || !item.original_source || item.original_source === source || !pathInside(item.original_source, source)) {
+      continue;
+    }
+    return {
+      source: path.join(item.source, path.relative(item.original_source, source)),
+      prepared: true,
+      original_source: source,
+      nested_under: item.original_source,
+    };
+  }
+  return null;
+}
+
+function runtimePreparationSources(taskInput) {
+  return [
+    ...(Array.isArray(taskInput.extra_plugins) ? taskInput.extra_plugins.map((plugin) => [plugin?.source, plugin?.slug]) : []),
+    ...(Array.isArray(taskInput.component_contracts) ? taskInput.component_contracts.map((contract) => [contract?.path || contract?.source, contract?.slug]) : []),
+    ...(plainObject(taskInput.runtime_component_paths) ? Object.entries(taskInput.runtime_component_paths).map(([, source]) => [source, '']) : []),
+  ]
+    .filter(([source]) => source && path.isAbsolute(source))
+    .sort(([left], [right]) => sourceDepth(left) - sourceDepth(right));
+}
+
 function prepareStableTaskInput(taskInput, artifacts) {
   const preparedRoot = path.join(artifacts, 'prepared-plugins');
   const preparedBySource = new Map();
@@ -277,10 +306,14 @@ function prepareStableTaskInput(taskInput, artifacts) {
     if (!source || preparedBySource.has(source)) {
       return preparedBySource.get(source) || { source, prepared: false };
     }
-    const prepared = preparePluginDirectory(source, slug, preparedRoot, artifacts);
+    const prepared = nestedPreparedPath(source, preparedBySource.values()) || preparePluginDirectory(source, slug, preparedRoot, artifacts);
     preparedBySource.set(source, prepared);
     return prepared;
   };
+
+  for (const [source, slug] of runtimePreparationSources(taskInput)) {
+    prepare(source, slug);
+  }
 
   const preparedExtraPlugins = Array.isArray(taskInput.extra_plugins)
     ? taskInput.extra_plugins.map((plugin) => {
