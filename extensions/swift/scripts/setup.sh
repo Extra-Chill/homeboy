@@ -3,10 +3,9 @@ set -euo pipefail
 
 echo "Setting up Swift test infrastructure..."
 
-# Verify Swift is available
 if ! command -v swift &> /dev/null; then
-    echo "Error: Swift not found. Please install Xcode or Swift toolchain."
-    exit 1
+    echo "Swift unavailable; Swift extension installed but not ready on this runner. Install Xcode or Swift toolchain to enable Swift workflows."
+    exit 0
 fi
 
 SWIFT_VERSION=$(swift --version 2>&1 | head -1)
