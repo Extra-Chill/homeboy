@@ -850,6 +850,7 @@ fn run_lab_offload_inner(
             allow_diagnostic_ssh: false,
             command,
             env,
+            secret_env_names: Vec::new(),
             capture_patch: request.capture_patch,
             raw_exec: false,
             source_snapshot: Some(source_snapshot),

@@ -1375,6 +1375,7 @@ mod tests {
             command: vec!["homeboy".to_string(), "test".to_string()],
             cwd: Some("/srv/extrachill".to_string()),
             env: HashMap::new(),
+            secret_env_names: Vec::new(),
             capture_patch: true,
             source_snapshot: Some(SourceSnapshot::existing_remote(
                 runner_id,

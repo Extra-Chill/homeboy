@@ -170,6 +170,7 @@ fn run_rig_source_management_on_runner(
             allow_diagnostic_ssh: false,
             command,
             env: HashMap::new(),
+            secret_env_names: Vec::new(),
             capture_patch: false,
             raw_exec: false,
             source_snapshot: None,

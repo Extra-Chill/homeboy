@@ -39,6 +39,7 @@ pub struct RunnerExecOptions {
     pub allow_diagnostic_ssh: bool,
     pub command: Vec<String>,
     pub env: HashMap<String, String>,
+    pub secret_env_names: Vec<String>,
     pub capture_patch: bool,
     pub raw_exec: bool,
     pub source_snapshot: Option<SourceSnapshot>,
@@ -106,6 +107,7 @@ pub(crate) struct RunnerProcessRequest {
     pub project_id: Option<String>,
     pub command: Vec<String>,
     pub env: HashMap<String, String>,
+    pub secret_env_names: Vec<String>,
     pub capture_patch: bool,
     pub raw_exec: bool,
     pub source_snapshot: Option<SourceSnapshot>,
@@ -140,6 +142,11 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
         ));
     }
 
+    let secret_env_names = runner_exec_secret_env_names(
+        &options.command,
+        options.capability_preflight.as_ref(),
+        &options.secret_env_names,
+    );
     let plan = prepare_runner_process(RunnerProcessRequest {
         runner_id: runner_id.to_string(),
         runner: None,
@@ -147,6 +154,7 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
         project_id: options.project_id.clone(),
         command: options.command.clone(),
         env: options.env.clone(),
+        secret_env_names: secret_env_names.clone(),
         capture_patch: options.capture_patch,
         raw_exec: options.raw_exec,
         source_snapshot: options.source_snapshot.clone(),
@@ -177,6 +185,7 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
                     options.project_id,
                     options.command,
                     request_env,
+                    secret_env_names,
                     options.capture_patch,
                     Some(plan.source_snapshot),
                     options.require_paths,
@@ -191,6 +200,7 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
                         options.project_id,
                         options.command,
                         request_env,
+                        secret_env_names,
                         options.capture_patch,
                         Some(plan.source_snapshot),
                         options.require_paths,
@@ -282,6 +292,7 @@ fn exec_via_reverse_broker(
     project_id: Option<String>,
     command: Vec<String>,
     env: HashMap<String, String>,
+    secret_env_names: Vec<String>,
     capture_patch: bool,
     source_snapshot_override: Option<SourceSnapshot>,
     require_paths: Vec<String>,
@@ -300,6 +311,7 @@ fn exec_via_reverse_broker(
         command: command.clone(),
         cwd: Some(cwd.clone()),
         env,
+        secret_env_names,
         capture_patch,
         source_snapshot: Some(source_snapshot.clone()),
         metadata: Some(json!({
@@ -407,6 +419,7 @@ fn exec_via_daemon(
     project_id: Option<String>,
     command: Vec<String>,
     env: HashMap<String, String>,
+    secret_env_names: Vec<String>,
     capture_patch: bool,
     source_snapshot_override: Option<SourceSnapshot>,
     require_paths: Vec<String>,
@@ -427,6 +440,7 @@ fn exec_via_daemon(
             "cwd": cwd,
             "command": command,
             "env": env,
+            "secret_env_names": secret_env_names,
             "capture_patch": capture_patch,
             "source_snapshot": source_snapshot.clone(),
             "require_paths": require_paths.clone(),
@@ -922,7 +936,11 @@ pub(crate) fn prepare_runner_process(
     let mut env = runner.env.clone();
     env.extend(request.env);
     if runner.kind == RunnerKind::Local {
-        env.extend(resolve_runner_secret_env(&runner.secret_env)?);
+        env.extend(resolve_runner_secret_env_for_command(
+            &runner.secret_env,
+            &request.secret_env_names,
+            &env,
+        )?);
     }
     normalize_runner_command_env(&mut env);
 
@@ -1009,7 +1027,11 @@ pub(crate) fn prepare_daemon_local_process(
 
     let mut env = runner.env.clone();
     env.extend(request.env);
-    env.extend(resolve_runner_secret_env(&runner.secret_env)?);
+    env.extend(resolve_runner_secret_env_for_command(
+        &runner.secret_env,
+        &request.secret_env_names,
+        &env,
+    )?);
     normalize_runner_command_env(&mut env);
     let source_snapshot = request.source_snapshot.unwrap_or_else(|| {
         SourceSnapshot::collect_local(&runner.id, Path::new(&cwd), Some(&cwd), "existing_remote")
@@ -1023,6 +1045,53 @@ pub(crate) fn prepare_daemon_local_process(
         source_snapshot,
         require_paths: request.require_paths,
     })
+}
+
+fn resolve_runner_secret_env_for_command(
+    secret_env: &HashMap<String, server::RunnerSecretEnvRef>,
+    required_names: &[String],
+    env: &HashMap<String, String>,
+) -> Result<HashMap<String, String>> {
+    if required_names.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let mut refs = HashMap::new();
+    for name in required_names {
+        if env.contains_key(name.as_str()) {
+            continue;
+        }
+        let Some(source) = secret_env.get(name.as_str()) else {
+            return Err(Error::validation_invalid_argument(
+                "secret_env",
+                format!("missing runner secret env ref for {name}"),
+                Some(name.clone()),
+                Some(vec![
+                    "Configure the selected runner secret_env reference or pass the secret in the exec request environment.".to_string(),
+                ]),
+            ));
+        };
+        refs.insert(name.clone(), source.clone());
+    }
+
+    resolve_runner_secret_env(&refs)
+}
+
+fn runner_exec_secret_env_names(
+    command: &[String],
+    preflight: Option<&RunnerCapabilityPreflight>,
+    explicit_names: &[String],
+) -> Vec<String> {
+    let mut names = Vec::new();
+    names.extend(explicit_names.iter().cloned());
+    if let Some(preflight) = preflight {
+        names.extend(preflight.required_env.iter().cloned());
+    }
+    names.extend(super::lab::secrets::declared_agent_task_secret_env(command));
+    names.extend(super::lab::secrets::declared_trace_secret_env(command));
+    names.sort();
+    names.dedup();
+    names
 }
 
 fn validate_required_paths(
@@ -1550,6 +1619,7 @@ mod tests {
                 project_id: None,
                 command: vec!["homeboy".to_string(), "--version".to_string()],
                 env: Default::default(),
+                secret_env_names: Vec::new(),
                 capture_patch: false,
                 raw_exec: false,
                 source_snapshot: None,
@@ -1590,6 +1660,7 @@ mod tests {
                 project_id: None,
                 command: vec!["true".to_string()],
                 env: Default::default(),
+                secret_env_names: Vec::new(),
                 capture_patch: false,
                 raw_exec: false,
                 source_snapshot: Some(SourceSnapshot::existing_remote(
@@ -1619,8 +1690,16 @@ mod tests {
                 runner: Some(daemon_runner),
                 cwd: Some(workspace.display().to_string()),
                 project_id: None,
-                command: vec!["true".to_string()],
+                command: vec![
+                    "homeboy".to_string(),
+                    "trace".to_string(),
+                    "compare".to_string(),
+                    "demo".to_string(),
+                    "scenario".to_string(),
+                    "--secret-env=OPENAI_API_KEY".to_string(),
+                ],
                 env: Default::default(),
+                secret_env_names: vec!["OPENAI_API_KEY".to_string()],
                 capture_patch: false,
                 raw_exec: false,
                 source_snapshot: Some(SourceSnapshot::existing_remote(
@@ -1641,6 +1720,103 @@ mod tests {
     }
 
     #[test]
+    fn daemon_read_only_runner_exec_ignores_unrelated_missing_secret_env_refs() {
+        crate::test_support::with_isolated_home(|_| {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let workspace = temp.path().join("workspace");
+            std::fs::create_dir_all(&workspace).expect("workspace");
+
+            let mut runner = ssh_runner();
+            runner.workspace_root = Some(workspace.display().to_string());
+            runner.secret_env.insert(
+                "HOMEBOY_PREVIEW_TUNNEL_TOKEN".to_string(),
+                RunnerSecretEnvRef {
+                    env: Some("HOMEBOY_PREVIEW_TUNNEL_TOKEN".to_string()),
+                    file: None,
+                },
+            );
+            std::env::remove_var("HOMEBOY_PREVIEW_TUNNEL_TOKEN");
+
+            let plan = prepare_daemon_local_process(RunnerProcessRequest {
+                runner_id: "lab".to_string(),
+                runner: Some(runner),
+                cwd: Some(workspace.display().to_string()),
+                project_id: None,
+                command: vec![
+                    "/bin/ps".to_string(),
+                    "-eo".to_string(),
+                    "pid,ppid,etime,stat,pcpu,pmem,cmd".to_string(),
+                ],
+                env: Default::default(),
+                secret_env_names: Vec::new(),
+                capture_patch: false,
+                raw_exec: true,
+                source_snapshot: Some(SourceSnapshot::existing_remote(
+                    "lab",
+                    &workspace.display().to_string(),
+                    Some(&workspace.display().to_string()),
+                )),
+                require_paths: Vec::new(),
+                validate_require_paths_on_host: true,
+            })
+            .expect("read-only runner exec ignores unrelated optional secret refs");
+
+            assert!(!plan.env.contains_key("HOMEBOY_PREVIEW_TUNNEL_TOKEN"));
+        });
+    }
+
+    #[test]
+    fn daemon_runner_exec_requires_declared_missing_secret_env_refs() {
+        crate::test_support::with_isolated_home(|_| {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let workspace = temp.path().join("workspace");
+            std::fs::create_dir_all(&workspace).expect("workspace");
+            std::env::remove_var("HOMEBOY_REQUIRED_SECRET_TEST_KEY");
+
+            let mut runner = ssh_runner();
+            runner.workspace_root = Some(workspace.display().to_string());
+            runner.secret_env.insert(
+                "HOMEBOY_REQUIRED_SECRET_TEST_KEY".to_string(),
+                RunnerSecretEnvRef {
+                    env: Some("HOMEBOY_REQUIRED_SECRET_TEST_KEY".to_string()),
+                    file: None,
+                },
+            );
+
+            let err = prepare_daemon_local_process(RunnerProcessRequest {
+                runner_id: "lab".to_string(),
+                runner: Some(runner),
+                cwd: Some(workspace.display().to_string()),
+                project_id: None,
+                command: vec![
+                    "homeboy".to_string(),
+                    "trace".to_string(),
+                    "compare".to_string(),
+                    "demo".to_string(),
+                    "scenario".to_string(),
+                    "--secret-env=HOMEBOY_REQUIRED_SECRET_TEST_KEY".to_string(),
+                ],
+                env: Default::default(),
+                secret_env_names: vec!["HOMEBOY_REQUIRED_SECRET_TEST_KEY".to_string()],
+                capture_patch: false,
+                raw_exec: false,
+                source_snapshot: Some(SourceSnapshot::existing_remote(
+                    "lab",
+                    &workspace.display().to_string(),
+                    Some(&workspace.display().to_string()),
+                )),
+                require_paths: Vec::new(),
+                validate_require_paths_on_host: true,
+            })
+            .expect_err("declared missing command secret should fail validation");
+
+            assert_eq!(err.code.as_str(), "validation.invalid_argument");
+            assert_eq!(err.details["field"], "secret_env");
+            assert!(err.message.contains("HOMEBOY_REQUIRED_SECRET_TEST_KEY"));
+        });
+    }
+
+    #[test]
     fn test_exec_runs_local_runner_command() {
         crate::test_support::with_isolated_home(|_| {
             super::super::create(r#"{"id":"lab-local","kind":"local"}"#, false)
@@ -1654,6 +1830,7 @@ mod tests {
                     allow_diagnostic_ssh: false,
                     command: vec!["sh".to_string(), "-c".to_string(), "printf ok".to_string()],
                     env: Default::default(),
+                    secret_env_names: Vec::new(),
                     capture_patch: false,
                     raw_exec: false,
                     source_snapshot: None,
@@ -1707,6 +1884,7 @@ mod tests {
                         "test -z \"${HOMEBOY_TEST_AMBIENT_ONLY+x}\" && printf isolated".to_string(),
                     ],
                     env: Default::default(),
+                    secret_env_names: Vec::new(),
                     capture_patch: false,
                     raw_exec: false,
                     source_snapshot: None,
@@ -1743,6 +1921,7 @@ mod tests {
                         "HOMEBOY_TEST_EXPLICIT".to_string(),
                         "planned".to_string(),
                     )]),
+                    secret_env_names: Vec::new(),
                     capture_patch: false,
                     raw_exec: false,
                     source_snapshot: None,
@@ -1784,6 +1963,7 @@ mod tests {
                         "printf nope".to_string(),
                     ],
                     env: Default::default(),
+                    secret_env_names: Vec::new(),
                     capture_patch: false,
                     raw_exec: false,
                     source_snapshot: None,
@@ -1824,6 +2004,7 @@ mod tests {
                     allow_diagnostic_ssh: false,
                     command: vec!["sh".to_string(), "-c".to_string(), "printf ok".to_string()],
                     env: Default::default(),
+                    secret_env_names: Vec::new(),
                     capture_patch: false,
                     raw_exec: false,
                     source_snapshot: None,
@@ -1875,6 +2056,7 @@ mod tests {
                     allow_diagnostic_ssh: false,
                     command: vec!["homeboy".to_string(), "test".to_string()],
                     env: Default::default(),
+                    secret_env_names: Vec::new(),
                     capture_patch: false,
                     raw_exec: false,
                     source_snapshot: None,
@@ -1931,6 +2113,7 @@ mod tests {
             allow_diagnostic_ssh: true,
             command: vec!["sh".to_string()],
             env: Default::default(),
+            secret_env_names: Vec::new(),
             capture_patch: false,
             raw_exec: true,
             source_snapshot: None,
@@ -1964,6 +2147,7 @@ mod tests {
             allow_diagnostic_ssh: true,
             command: vec!["cargo".to_string(), "test".to_string()],
             env: Default::default(),
+            secret_env_names: Vec::new(),
             capture_patch: false,
             raw_exec: true,
             source_snapshot: None,

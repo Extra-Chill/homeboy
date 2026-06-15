@@ -920,6 +920,7 @@ fn runner_exec_options(runner: &Runner, command: Vec<String>) -> RunnerExecOptio
         allow_diagnostic_ssh: true,
         command,
         env: runner.env.clone(),
+        secret_env_names: Vec::new(),
         capture_patch: false,
         raw_exec: false,
         source_snapshot: None,
