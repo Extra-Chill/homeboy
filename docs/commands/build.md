@@ -5,8 +5,9 @@
 ```sh
 homeboy build <component_id>
 homeboy build <component_id> --path /path/to/workspace/clone
+homeboy build <component_id> --changed-since origin/main
 homeboy build --json '<spec>'
-homeboy build <project_id> --all
+homeboy build <project_id> --all --changed-since origin/main
 ```
 
 ## Description
@@ -31,6 +32,31 @@ This is useful for:
 The override is transient — it does not modify the stored component config.
 
 Build resolution checks component-owned `scripts.build` first. If absent, it requires exactly one linked extension with build support. Component-level `build_command` is not supported as configuration; the `build_command` field in command output is the command Homeboy resolved for this run.
+
+## Changed-Scope Builds
+
+Use `--changed-since <ref>` to ask the build provider whether the changed files require a build:
+
+```sh
+homeboy build data-machine --changed-since origin/main
+homeboy build intelligence-chubes4 --all --changed-since origin/main
+```
+
+Homeboy core stays language-agnostic. If the linked build provider declares `build.changed_scope_script`, Homeboy runs that script with `HOMEBOY_CHANGED_SINCE` set and expects JSON on stdout:
+
+```json
+{ "outcome": "no-op", "reason": "changed docs only" }
+{ "outcome": "scoped", "reason": "only package-a changed", "build_args": ["package-a"] }
+{ "outcome": "full", "reason": "lockfile changed" }
+```
+
+Outcomes are:
+
+- `no-op` skips the build and reports success.
+- `scoped` runs the normal provider build command with provider-supplied `build_args` appended.
+- `full` runs the normal full build.
+
+If no resolver exists, the resolver fails, or the resolver returns invalid or unknown output, Homeboy conservatively runs the full build and records that fallback in `changed_scope`.
 
 Useful remediation paths when a component is not buildable:
 
@@ -67,6 +93,13 @@ Example extension configuration:
   "command": "build.run",
   "component_id": "<component_id>",
   "build_command": "<resolved command string>",
+  "changed_scope": {
+    "changed_since": "origin/main",
+    "outcome": "scoped",
+    "reason": "only package-a changed",
+    "provider": "example-extension",
+    "build_args": ["package-a"]
+  },
   "stdout": "<stdout>",
   "stderr": "<stderr>",
   "success": true

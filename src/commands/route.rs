@@ -1,8 +1,7 @@
 use homeboy::cli_surface::{Cli, Commands};
 use homeboy::core::lab_routing::{self, LabRoutingRequest};
 use homeboy::core::observation::RunStatus;
-use homeboy::core::runner::RunnerExecOptions;
-use homeboy::core::runners;
+use homeboy::core::runners::{self, RunnerExecOptions};
 use serde_json::json;
 use std::collections::HashMap;
 

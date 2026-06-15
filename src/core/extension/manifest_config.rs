@@ -175,6 +175,13 @@ pub struct BuildConfig {
     pub extension_script: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pre_build_script: Option<String>,
+    /// Optional provider-owned resolver for `homeboy build --changed-since`.
+    ///
+    /// The script receives `HOMEBOY_CHANGED_SINCE` and reports whether the
+    /// provider can skip, scope, or must run a full build. Core treats missing
+    /// or inconclusive resolver output as a conservative full build.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub changed_scope_script: Option<String>,
     /// Default artifact path pattern with template support.
     /// Supports: {component_id}, {local_path}
     #[serde(skip_serializing_if = "Option::is_none")]
