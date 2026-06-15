@@ -76,7 +76,9 @@ pub use manifest::{
     RequirementsConfig, RuntimeConfig, RuntimeRequirementsConfig, ScriptsConfig, SelectOption,
     SettingConfig, SinceTagConfig, StructuredSidecarDeclaration, TestChangedFileExclusiveEnv,
     TestChangedFileRouting, TestChangedFileRoutingStrategy, TestConfig, TestDriftConfig,
-    TestMappingConfig, TestPassthroughFilter, TestPassthroughFilterStrategy, TraceConfig,
+    TestMappingConfig, TestPassthroughFilter, TestPassthroughFilterStrategy,
+    TraceBrowserArtifactMapConfig, TraceBrowserEvidenceAdapterConfig,
+    TraceBrowserMetricAliasConfig, TraceBrowserSummaryAliasConfig, TraceConfig,
     VersionPatternConfig,
 };
 pub use manifest_deploy_config::{DeployArchiveInstallPolicy, DeployRequiredHeader};

@@ -18,7 +18,9 @@ pub use super::manifest_config::{
     DeployVerification, DepsConfig, DiscoveryConfig, EnvProviderConfig, FileContainsCondition,
     LintChangedFileRoute, LintConfig, RemotePathInferenceRule, RemotePathRootRule,
     RequirementsConfig, SinceTagConfig, TestChangedFileExclusiveEnv, TestChangedFileRouting,
-    TestChangedFileRoutingStrategy, TestConfig, TraceConfig, VersionPatternConfig,
+    TestChangedFileRoutingStrategy, TestConfig, TraceBrowserArtifactMapConfig,
+    TraceBrowserEvidenceAdapterConfig, TraceBrowserMetricAliasConfig,
+    TraceBrowserSummaryAliasConfig, TraceConfig, VersionPatternConfig,
 };
 pub use super::manifest_deploy_config::DeployArchiveInstallPolicy;
 pub use super::manifest_sidecar::{StructuredSidecarContract, StructuredSidecarDeclaration};
@@ -606,6 +608,15 @@ impl ExtensionManifest {
         self.trace
             .as_ref()
             .map(|trace| trace.toolchain_provenance.as_slice())
+            .unwrap_or(&[])
+    }
+
+    pub fn trace_browser_evidence(
+        &self,
+    ) -> &[super::manifest_config::TraceBrowserEvidenceAdapterConfig] {
+        self.trace
+            .as_ref()
+            .map(|trace| trace.browser_evidence.as_slice())
             .unwrap_or(&[])
     }
 

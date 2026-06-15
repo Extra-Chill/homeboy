@@ -7,6 +7,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::commands::escape_markdown_table_cell;
+use homeboy::core::extension::{
+    load_all_extensions, TraceBrowserArtifactMapConfig, TraceBrowserEvidenceAdapterConfig,
+    TraceBrowserSummaryAliasConfig,
+};
 
 #[derive(Args, Debug, Clone)]
 pub struct BrowserEvidenceCompareArgs {
@@ -227,8 +231,31 @@ pub fn browser_evidence_compare_from_dirs_with_visual(
     include_local_paths: bool,
     visual_options: Option<VisualCompareOptions>,
 ) -> homeboy::core::Result<BrowserEvidenceCompareReport> {
-    let baseline = implementation::read_evidence_dirs(baseline_dirs, include_local_paths)?;
-    let candidate = implementation::read_evidence_dirs(candidate_dirs, include_local_paths)?;
+    let adapters = implementation::browser_evidence_adapters();
+    browser_evidence_compare_from_dirs_with_visual_and_adapters(
+        baseline_dirs,
+        candidate_dirs,
+        baseline_label,
+        candidate_label,
+        include_local_paths,
+        visual_options,
+        &adapters,
+    )
+}
+
+pub fn browser_evidence_compare_from_dirs_with_visual_and_adapters(
+    baseline_dirs: &[PathBuf],
+    candidate_dirs: &[PathBuf],
+    baseline_label: &str,
+    candidate_label: &str,
+    include_local_paths: bool,
+    visual_options: Option<VisualCompareOptions>,
+    adapters: &[TraceBrowserEvidenceAdapterConfig],
+) -> homeboy::core::Result<BrowserEvidenceCompareReport> {
+    let baseline =
+        implementation::read_evidence_dirs(baseline_dirs, include_local_paths, adapters)?;
+    let candidate =
+        implementation::read_evidence_dirs(candidate_dirs, include_local_paths, adapters)?;
     let mut notes = Vec::new();
     notes.extend(
         baseline
@@ -249,8 +276,8 @@ pub fn browser_evidence_compare_from_dirs_with_visual(
     };
     let mut variants = implementation::compare_variants(&baseline.samples, &candidate.samples);
     if let Some(visual_options) = visual_options {
-        let baseline_local = implementation::read_evidence_dirs(baseline_dirs, true)?;
-        let candidate_local = implementation::read_evidence_dirs(candidate_dirs, true)?;
+        let baseline_local = implementation::read_evidence_dirs(baseline_dirs, true, adapters)?;
+        let candidate_local = implementation::read_evidence_dirs(candidate_dirs, true, adapters)?;
         let local_variants =
             implementation::compare_variants(&baseline_local.samples, &candidate_local.samples);
         implementation::attach_visual_comparisons(
@@ -364,6 +391,7 @@ mod implementation {
     pub(super) fn read_evidence_set(
         root: &Path,
         include_local_paths: bool,
+        adapters: &[TraceBrowserEvidenceAdapterConfig],
     ) -> homeboy::core::Result<EvidenceSet> {
         let mut notes = Vec::new();
         let mut files = Vec::new();
@@ -409,9 +437,10 @@ mod implementation {
                 &source,
                 &mut samples,
                 &mut artifacts,
+                adapters,
             );
             if samples.len() == before {
-                collect_provenance_artifacts(&value, &source, &mut artifacts);
+                collect_provenance_artifacts(&value, &source, &mut artifacts, adapters);
             }
         }
 
@@ -433,6 +462,7 @@ mod implementation {
     pub(super) fn read_evidence_dirs(
         roots: &[PathBuf],
         include_local_paths: bool,
+        adapters: &[TraceBrowserEvidenceAdapterConfig],
     ) -> homeboy::core::Result<EvidenceSet> {
         let mut merged = EvidenceSet {
             samples: Vec::new(),
@@ -440,7 +470,7 @@ mod implementation {
             notes: Vec::new(),
         };
         for root in roots {
-            match read_evidence_set(root, include_local_paths) {
+            match read_evidence_set(root, include_local_paths, adapters) {
                 Ok(mut set) => {
                     merged.samples.append(&mut set.samples);
                     merged.artifacts.append(&mut set.artifacts);
@@ -480,14 +510,15 @@ mod implementation {
         source: &ArtifactRef,
         samples: &mut Vec<BrowserEvidenceSample>,
         artifacts: &mut BTreeSet<ArtifactRef>,
+        adapters: &[TraceBrowserEvidenceAdapterConfig],
     ) {
         match value {
             Value::Object(object) => {
-                collect_object_samples(object, inherited, source, samples, artifacts)
+                collect_object_samples(object, inherited, source, samples, artifacts, adapters)
             }
             Value::Array(array) => {
                 for item in array {
-                    collect_samples(item, inherited, source, samples, artifacts);
+                    collect_samples(item, inherited, source, samples, artifacts, adapters);
                 }
             }
             _ => {}
@@ -500,23 +531,24 @@ mod implementation {
         source: &ArtifactRef,
         samples: &mut Vec<BrowserEvidenceSample>,
         artifacts: &mut BTreeSet<ArtifactRef>,
+        adapters: &[TraceBrowserEvidenceAdapterConfig],
     ) {
         let context = context_for_object(object, inherited);
         let runs = object.get("runs").and_then(Value::as_array);
 
-        if has_browser_signal(object) && runs.is_none() {
-            samples.push(sample_from_object(object, &context, source));
+        if has_browser_signal(object, adapters) && runs.is_none() {
+            samples.push(sample_from_object(object, &context, source, adapters));
         } else if has_provenance_signal(object) {
-            collect_object_artifacts(object, artifacts);
+            collect_object_artifacts(object, artifacts, adapters);
             artifacts.insert(source.clone());
         }
 
         if let Some(data) = object.get("data") {
-            collect_samples(data, &context, source, samples, artifacts);
+            collect_samples(data, &context, source, samples, artifacts, adapters);
         }
         for key in ["scenarios", "profiles", "variants", "matrix", "results"] {
             if let Some(value) = object.get(key) {
-                collect_samples(value, &context, source, samples, artifacts);
+                collect_samples(value, &context, source, samples, artifacts, adapters);
             }
         }
         if let Some(runs) = runs {
@@ -525,7 +557,7 @@ mod implementation {
                 if run_context.profile.is_none() {
                     run_context.profile = Some(format!("repeat-{}", index + 1));
                 }
-                collect_samples(run, &run_context, source, samples, artifacts);
+                collect_samples(run, &run_context, source, samples, artifacts, adapters);
             }
         }
     }
@@ -548,7 +580,10 @@ mod implementation {
         context
     }
 
-    fn has_browser_signal(object: &Map<String, Value>) -> bool {
+    fn has_browser_signal(
+        object: &Map<String, Value>,
+        adapters: &[TraceBrowserEvidenceAdapterConfig],
+    ) -> bool {
         [
             "assertions",
             "requests",
@@ -577,12 +612,15 @@ mod implementation {
             || object
                 .get("summary")
                 .and_then(Value::as_object)
-                .is_some_and(summary_has_browser_signal)
+                .is_some_and(|summary| summary_has_browser_signal(summary, adapters))
     }
 
-    fn summary_has_browser_signal(summary: &Map<String, Value>) -> bool {
+    fn summary_has_browser_signal(
+        summary: &Map<String, Value>,
+        adapters: &[TraceBrowserEvidenceAdapterConfig],
+    ) -> bool {
         summary.contains_key("assertions")
-            || browser_summary_adapters()
+            || browser_summary_adapters(adapters)
                 .iter()
                 .any(|adapter| adapter.has_signal(summary))
             || summary
@@ -619,20 +657,21 @@ mod implementation {
         value: &Value,
         source: &ArtifactRef,
         artifacts: &mut BTreeSet<ArtifactRef>,
+        adapters: &[TraceBrowserEvidenceAdapterConfig],
     ) {
         match value {
             Value::Object(object) => {
                 if has_provenance_signal(object) {
-                    collect_object_artifacts(object, artifacts);
+                    collect_object_artifacts(object, artifacts, adapters);
                     artifacts.insert(source.clone());
                 }
                 for value in object.values() {
-                    collect_provenance_artifacts(value, source, artifacts);
+                    collect_provenance_artifacts(value, source, artifacts, adapters);
                 }
             }
             Value::Array(values) => {
                 for value in values {
-                    collect_provenance_artifacts(value, source, artifacts);
+                    collect_provenance_artifacts(value, source, artifacts, adapters);
                 }
             }
             _ => {}
@@ -642,15 +681,17 @@ mod implementation {
     fn collect_object_artifacts(
         object: &Map<String, Value>,
         artifacts: &mut BTreeSet<ArtifactRef>,
+        adapters: &[TraceBrowserEvidenceAdapterConfig],
     ) {
         collect_artifacts(object, artifacts);
-        collect_declared_artifact_map_adapters(object, artifacts);
+        collect_declared_artifact_map_adapters(object, artifacts, adapters);
     }
 
     fn sample_from_object(
         object: &Map<String, Value>,
         context: &SampleContext,
         source: &ArtifactRef,
+        adapters: &[TraceBrowserEvidenceAdapterConfig],
     ) -> BrowserEvidenceSample {
         let mut sample = BrowserEvidenceSample {
             scenario: context.scenario.clone(),
@@ -701,7 +742,7 @@ mod implementation {
             &lifecycle_metric_names(),
         );
         if let Some(summary) = object.get("summary").and_then(Value::as_object) {
-            collect_declared_browser_summary_adapters(summary, &mut sample);
+            collect_declared_browser_summary_adapters(summary, &mut sample, adapters);
         }
         sample.console_errors = sample
             .console_errors
@@ -710,7 +751,7 @@ mod implementation {
             .page_errors
             .or_else(|| error_count(object, &["page_errors", "pageErrors", "errors"]));
         collect_artifacts(object, &mut sample.artifacts);
-        collect_declared_artifact_map_adapters(object, &mut sample.artifacts);
+        collect_declared_artifact_map_adapters(object, &mut sample.artifacts, adapters);
         if sample.browser_metrics.is_empty() && sample.lifecycle_metrics.is_empty() {
             sample
                 .notes
@@ -1412,69 +1453,102 @@ mod implementation {
         }
     }
 
-    struct BrowserSummaryAdapter {
-        request_total_keys: &'static [&'static str],
-        page_error_keys: &'static [&'static str],
-        metric_aliases: &'static [(&'static str, &'static [&'static str])],
-    }
-
-    impl BrowserSummaryAdapter {
+    impl TraceBrowserSummaryAliasConfig {
         fn has_signal(&self, summary: &Map<String, Value>) -> bool {
-            first_number(summary, self.request_total_keys).is_some()
-                || first_number(summary, self.page_error_keys).is_some()
+            first_number_from_strings(summary, &self.request_total_keys).is_some()
+                || first_number_from_strings(summary, &self.page_error_keys).is_some()
                 || self
-                    .metric_aliases
+                    .metrics
                     .iter()
-                    .any(|(_, keys)| first_number(summary, keys).is_some())
+                    .any(|metric| first_number_from_strings(summary, &metric.keys).is_some())
         }
     }
 
-    fn browser_summary_adapters() -> Vec<BrowserSummaryAdapter> {
-        vec![BrowserSummaryAdapter {
-            request_total_keys: &["networkEvents"],
-            page_error_keys: &["errors"],
-            metric_aliases: &[
-                ("browser_console_message_count", &["consoleMessages"]),
-                ("browser_page_error_count", &["errors"]),
-                ("browser_network_event_count", &["networkEvents"]),
-            ],
-        }]
+    pub(super) fn browser_evidence_adapters() -> Vec<TraceBrowserEvidenceAdapterConfig> {
+        let mut adapters = load_all_extensions()
+            .unwrap_or_default()
+            .into_iter()
+            .flat_map(|extension| extension.trace_browser_evidence().to_vec())
+            .collect::<Vec<_>>();
+        adapters.push(TraceBrowserEvidenceAdapterConfig {
+            id: "homeboy.generic-browser-evidence".to_string(),
+            summary_aliases: Vec::new(),
+            artifact_maps: vec![TraceBrowserArtifactMapConfig {
+                field: "files".to_string(),
+            }],
+        });
+        adapters
+    }
+
+    fn browser_summary_adapters(
+        adapters: &[TraceBrowserEvidenceAdapterConfig],
+    ) -> Vec<TraceBrowserSummaryAliasConfig> {
+        adapters
+            .iter()
+            .cloned()
+            .flat_map(|adapter| adapter.summary_aliases)
+            .collect()
     }
 
     fn collect_declared_browser_summary_adapters(
         summary: &Map<String, Value>,
         sample: &mut BrowserEvidenceSample,
+        adapters: &[TraceBrowserEvidenceAdapterConfig],
     ) {
-        for adapter in browser_summary_adapters() {
+        for adapter in browser_summary_adapters(adapters) {
             if sample.request_total.is_none() {
-                sample.request_total = first_number(summary, adapter.request_total_keys);
+                sample.request_total =
+                    first_number_from_strings(summary, &adapter.request_total_keys);
             }
             sample.page_errors = sample
                 .page_errors
-                .or_else(|| first_number(summary, adapter.page_error_keys));
-            for (metric, keys) in adapter.metric_aliases {
-                if let Some(value) = first_number(summary, keys) {
-                    sample.browser_metrics.insert(metric.to_string(), value);
+                .or_else(|| first_number_from_strings(summary, &adapter.page_error_keys));
+            for metric in adapter.metrics {
+                if let Some(value) = first_number_from_strings(summary, &metric.keys) {
+                    sample.browser_metrics.insert(metric.metric, value);
                 }
             }
         }
     }
 
-    struct ArtifactMapAdapter {
-        field: &'static str,
-    }
-
-    fn artifact_map_adapters() -> &'static [ArtifactMapAdapter] {
-        &[ArtifactMapAdapter { field: "files" }]
+    fn artifact_map_adapters(
+        adapters: &[TraceBrowserEvidenceAdapterConfig],
+    ) -> Vec<TraceBrowserArtifactMapConfig> {
+        adapters
+            .iter()
+            .cloned()
+            .flat_map(|adapter| adapter.artifact_maps)
+            .collect()
     }
 
     fn collect_declared_artifact_map_adapters(
         object: &Map<String, Value>,
         artifacts: &mut BTreeSet<ArtifactRef>,
+        adapters: &[TraceBrowserEvidenceAdapterConfig],
     ) {
-        for adapter in artifact_map_adapters() {
-            collect_artifact_map(object.get(adapter.field), artifacts);
+        for adapter in artifact_map_adapters(adapters) {
+            collect_artifact_map(object.get(&adapter.field), artifacts);
         }
+    }
+
+    fn first_number_from_strings(object: &Map<String, Value>, keys: &[String]) -> Option<f64> {
+        keys.iter().find_map(|key| {
+            object
+                .get(key)
+                .and_then(Value::as_f64)
+                .or_else(|| {
+                    object
+                        .get(key)
+                        .and_then(Value::as_u64)
+                        .map(|value| value as f64)
+                })
+                .or_else(|| {
+                    object
+                        .get(key)
+                        .and_then(Value::as_i64)
+                        .map(|value| value as f64)
+                })
+        })
     }
 
     fn collect_artifacts(object: &Map<String, Value>, artifacts: &mut BTreeSet<ArtifactRef>) {
