@@ -593,6 +593,29 @@ fn run_declared_result_parser(
         ));
     }
 
+    if !run_dir.step_file(run_dir::files::TEST_RESULTS).is_file() {
+        let parser_stdout = output.stdout.trim();
+        if !parser_stdout.is_empty() {
+            let counts = parse_declared_parser_stdout_json(parser_stdout)?;
+            let payload = serde_json::json!({
+                "total": counts.total,
+                "passed": counts.passed,
+                "failed": counts.failed,
+                "skipped": counts.skipped,
+            });
+            local_files::write_file_atomic(
+                &run_dir.step_file(run_dir::files::TEST_RESULTS),
+                &serde_json::to_string_pretty(&payload).map_err(|err| {
+                    Error::internal_json(
+                        err.to_string(),
+                        Some("serialize parser stdout test results".to_string()),
+                    )
+                })?,
+                "write parser stdout test results",
+            )?;
+        }
+    }
+
     Ok(())
 }
 
@@ -631,6 +654,45 @@ fn declared_result_parser_error(
             "stderr_tail": stderr_tail,
         }),
     )
+}
+
+fn parse_declared_parser_stdout_json(stdout: &str) -> crate::core::Result<TestCounts> {
+    let value: serde_json::Value = serde_json::from_str(stdout).map_err(|err| {
+        Error::validation_invalid_json(
+            err,
+            Some("parse test result adapter stdout".to_string()),
+            Some(stdout.to_string()),
+        )
+    })?;
+    let object = value.as_object().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "test.result_parse.extension_script.stdout",
+            "expected a JSON object with unsigned integer total, passed, failed, and skipped fields",
+            None,
+            None,
+        )
+    })?;
+
+    let count = |field: &str| -> crate::core::Result<u64> {
+        object
+            .get(field)
+            .and_then(|value| value.as_u64())
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    format!("test.result_parse.extension_script.stdout.{field}"),
+                    "expected an unsigned integer count",
+                    None,
+                    None,
+                )
+            })
+    };
+
+    Ok(TestCounts::new(
+        count("total")?,
+        count("passed")?,
+        count("failed")?,
+        count("skipped")?,
+    ))
 }
 
 pub fn run_self_check_test_workflow(
@@ -836,6 +898,7 @@ IFS=$'\t' read -r total passed failed skipped <<EOF
 $parsed
 EOF
 homeboy_write_test_results "$total" "$passed" "$failed" "$skipped"
+printf 'legacy helper log line\n'
 "#,
         )
         .expect("parser script");
@@ -1013,6 +1076,121 @@ exit 23
             .as_str()
             .unwrap_or_default()
             .contains("parser stderr detail"));
+    }
+
+    #[test]
+    fn declared_result_parser_accepts_flat_count_stdout_json() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let extension_dir = temp_dir.path().join("extension");
+        std::fs::create_dir_all(&extension_dir).expect("extension dir");
+        let parser_script = extension_dir.join("parse-results.sh");
+        std::fs::write(
+            &parser_script,
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+printf '{"total":5,"passed":3,"failed":1,"skipped":1}\n'
+"#,
+        )
+        .expect("parser script");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&parser_script, std::fs::Permissions::from_mode(0o755))
+                .expect("parser script permissions");
+        }
+
+        let component = Component::new(
+            "fixture".to_string(),
+            temp_dir.path().to_string_lossy().to_string(),
+            "fixture-extension".to_string(),
+            None,
+        );
+        let context = crate::core::extension::ExtensionExecutionContext {
+            component: component.clone(),
+            capability: ExtensionCapability::Test,
+            extension_id: "fixture-extension".to_string(),
+            extension_path: extension_dir,
+            script_path: "test.sh".to_string(),
+            settings: Vec::new(),
+        };
+        let spec = ParseSpec {
+            extension_script: Some("parse-results.sh".to_string()),
+            adapters: vec!["fixture-json".to_string()],
+            rules: Vec::new(),
+            defaults: std::collections::HashMap::new(),
+            derive: Vec::new(),
+        };
+        let run_dir = RunDir::create().expect("run dir");
+
+        run_declared_result_parser(&component, &context, &spec, "runner output", &run_dir)
+            .expect("declared parser stdout should run");
+
+        let counts = parse_test_results_file_with_spec(
+            &run_dir.step_file(run_dir::files::TEST_RESULTS),
+            Some(&spec),
+        )
+        .expect("parser stdout JSON should be normalized to test-results.json");
+
+        run_dir.cleanup();
+
+        assert_eq!(counts.total, 5);
+        assert_eq!(counts.passed, 3);
+        assert_eq!(counts.failed, 1);
+        assert_eq!(counts.skipped, 1);
+    }
+
+    #[test]
+    fn declared_result_parser_rejects_malformed_successful_stdout_json() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let extension_dir = temp_dir.path().join("extension");
+        std::fs::create_dir_all(&extension_dir).expect("extension dir");
+        let parser_script = extension_dir.join("parse-results.sh");
+        std::fs::write(
+            &parser_script,
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+printf 'not json\n'
+"#,
+        )
+        .expect("parser script");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&parser_script, std::fs::Permissions::from_mode(0o755))
+                .expect("parser script permissions");
+        }
+
+        let component = Component::new(
+            "fixture".to_string(),
+            temp_dir.path().to_string_lossy().to_string(),
+            "fixture-extension".to_string(),
+            None,
+        );
+        let context = crate::core::extension::ExtensionExecutionContext {
+            component: component.clone(),
+            capability: ExtensionCapability::Test,
+            extension_id: "fixture-extension".to_string(),
+            extension_path: extension_dir,
+            script_path: "test.sh".to_string(),
+            settings: Vec::new(),
+        };
+        let spec = ParseSpec {
+            extension_script: Some("parse-results.sh".to_string()),
+            adapters: vec!["fixture-json".to_string()],
+            rules: Vec::new(),
+            defaults: std::collections::HashMap::new(),
+            derive: Vec::new(),
+        };
+        let run_dir = RunDir::create().expect("run dir");
+
+        let error =
+            run_declared_result_parser(&component, &context, &spec, "runner output", &run_dir)
+                .expect_err("malformed parser stdout should fail");
+
+        run_dir.cleanup();
+
+        assert!(error.message.contains("Invalid JSON"));
+        assert_eq!(error.code.as_str(), "validation.invalid_json");
     }
 
     #[test]
