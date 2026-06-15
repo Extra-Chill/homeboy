@@ -138,6 +138,15 @@ impl TunnelArgs {
             }
         )
     }
+
+    pub(crate) fn is_service_start(&self) -> bool {
+        matches!(
+            self.command,
+            TunnelCommand::Service {
+                command: TunnelServiceCommand::Start { .. }
+            }
+        )
+    }
 }
 
 #[derive(Subcommand)]

@@ -67,7 +67,9 @@ use super::agent_task_bridge::{
     mirror_agent_task_run_plan_lifecycle, parse_offloaded_dispatch_envelope_from_outputs,
 };
 use super::evidence::terminal_lab_run_evidence;
-use super::secrets::{hydrate_agent_task_secret_env, hydrate_trace_secret_env};
+use super::secrets::{
+    hydrate_agent_task_secret_env, hydrate_trace_secret_env, hydrate_tunnel_secret_env,
+};
 use super::trace_fetch_refs::lab_offload_git_fetch_refs;
 
 pub struct LabOffloadRequest<'a> {
@@ -817,8 +819,10 @@ fn run_lab_offload_inner(
     let agent_task_secret_env =
         hydrate_agent_task_secret_env(&changed_since_preflight.args, &mut env)?;
     let trace_secret_env = hydrate_trace_secret_env(&changed_since_preflight.args, &mut env)?;
+    let tunnel_secret_env = hydrate_tunnel_secret_env(&changed_since_preflight.args, &mut env)?;
     lab_metadata["agent_task_secret_env"] = agent_task_secret_env;
     lab_metadata["trace_secret_env"] = trace_secret_env;
+    lab_metadata["tunnel_secret_env"] = tunnel_secret_env;
     lab_metadata["rig_component_path_env"] = rig_component_path_env;
     lab_metadata["settings_env"] = settings_env_diagnostics(&remapped_args, &env);
     lab_metadata["rig_sync"] = serde_json::json!({
@@ -842,6 +846,7 @@ fn run_lab_offload_inner(
     forward_rig_component_path_env(&mut env, &workspace_mapping)?;
     hydrate_agent_task_secret_env(&changed_since_preflight.args, &mut env)?;
     hydrate_trace_secret_env(&changed_since_preflight.args, &mut env)?;
+    hydrate_tunnel_secret_env(&changed_since_preflight.args, &mut env)?;
     let exec_result = exec(
         runner_id,
         RunnerExecOptions {

@@ -795,6 +795,53 @@ mod tests {
     }
 
     #[test]
+    fn tunnel_service_start_supports_explicit_runner_discovery() {
+        let cli = Cli::parse_from([
+            "homeboy",
+            "--runner",
+            "homeboy-lab",
+            "tunnel",
+            "service",
+            "start",
+            "preview",
+            "--command",
+            "npm run dev",
+        ]);
+
+        let command = lab_offload_command(&cli.command).unwrap().unwrap();
+
+        assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
+        assert_eq!(command.hot_label, "tunnel service start");
+        assert!(command.portable);
+        assert!(!command.default_lab_offload);
+        assert!(!command.requires_extension_parity);
+        assert!(command.required_extensions.is_empty());
+        assert!(!command.infer_source_path_tools);
+    }
+
+    #[test]
+    fn tunnel_preview_consumer_run_keeps_explicit_runner_contract() {
+        let cli = Cli::parse_from([
+            "homeboy",
+            "--runner",
+            "homeboy-lab",
+            "tunnel",
+            "preview-consumer",
+            "run",
+            "--config",
+            "consumer.json",
+            "--preview-public-url",
+            "https://preview.example.test/run",
+        ]);
+
+        let command = lab_offload_command(&cli.command).unwrap().unwrap();
+
+        assert_eq!(command.hot_label, "tunnel preview-consumer run");
+        assert!(command.portable);
+        assert!(!command.default_lab_offload);
+    }
+
+    #[test]
     fn lab_command_with_mutation_flag_stays_portable_for_patch_capture() {
         let cli = Cli::parse_from(["homeboy", "audit", "--baseline"]);
 

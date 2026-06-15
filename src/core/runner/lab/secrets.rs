@@ -78,6 +78,23 @@ pub(super) fn hydrate_trace_secret_env(
     Ok(crate::core::trace_secrets::status_metadata(statuses))
 }
 
+pub(super) fn hydrate_tunnel_secret_env(
+    args: &[String],
+    _env: &mut HashMap<String, String>,
+) -> Result<serde_json::Value> {
+    let names = declared_tunnel_secret_env(args);
+    Ok(serde_json::json!({
+        "schema": "homeboy/lab-tunnel-secret-env/v1",
+        "runner_deferred_secret_env": names
+            .into_iter()
+            .map(|name| serde_json::json!({
+                "name": name,
+                "source": "runner",
+            }))
+            .collect::<Vec<_>>(),
+    }))
+}
+
 pub(crate) fn declared_agent_task_secret_env(args: &[String]) -> Vec<String> {
     let mut names = declared_agent_task_controller_secret_env(args);
     names.extend(declared_agent_task_run_plan_secret_env(args));
@@ -128,6 +145,73 @@ pub(crate) fn declared_trace_secret_env(args: &[String]) -> Vec<String> {
     }
 
     declared_secret_env_args(args)
+}
+
+pub(crate) fn declared_tunnel_secret_env(args: &[String]) -> Vec<String> {
+    let Some(tunnel_index) = subcommand_index(args, "tunnel") else {
+        return Vec::new();
+    };
+
+    match (
+        args.get(tunnel_index + 1).map(String::as_str),
+        args.get(tunnel_index + 2).map(String::as_str),
+    ) {
+        (Some("preview-client"), Some("start")) => declared_tunnel_preview_client_token_env(args),
+        (Some("service"), Some("start")) if tunnel_service_start_uses_preview_client(args) => {
+            vec!["HOMEBOY_PREVIEW_TUNNEL_TOKEN".to_string()]
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn declared_tunnel_preview_client_token_env(args: &[String]) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--token-env" {
+            if let Some(name) = args.get(index + 1) {
+                names.push(name.clone());
+            }
+            index += 2;
+            continue;
+        }
+        if let Some(name) = arg.strip_prefix("--token-env=") {
+            names.push(name.to_string());
+        }
+        index += 1;
+    }
+
+    if names.is_empty() {
+        names.push("HOMEBOY_PREVIEW_TUNNEL_TOKEN".to_string());
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn tunnel_service_start_uses_preview_client(args: &[String]) -> bool {
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--public-tunnel-command" {
+            if args
+                .get(index + 1)
+                .is_some_and(|command| command.contains("preview-client start"))
+            {
+                return true;
+            }
+            index += 2;
+            continue;
+        }
+        if let Some(command) = arg.strip_prefix("--public-tunnel-command=") {
+            if command.contains("preview-client start") {
+                return true;
+            }
+        }
+        index += 1;
+    }
+    false
 }
 
 pub(super) fn trace_project_id_from_args(args: &[String]) -> Option<String> {
@@ -419,6 +503,79 @@ mod tests {
         assert!(!rendered.contains("sk_test_fake_not_real"));
 
         std::env::remove_var("HOMEBOY_TRACE_SECRET_TEST_KEY");
+    }
+
+    #[test]
+    fn declared_tunnel_secret_env_reads_preview_client_default_and_override() {
+        assert_eq!(
+            declared_tunnel_secret_env(&[
+                "homeboy".to_string(),
+                "tunnel".to_string(),
+                "preview-client".to_string(),
+                "start".to_string(),
+                "--ingress".to_string(),
+                "https://preview-broker.example.test".to_string(),
+            ]),
+            vec!["HOMEBOY_PREVIEW_TUNNEL_TOKEN".to_string()]
+        );
+
+        assert_eq!(
+            declared_tunnel_secret_env(&[
+                "homeboy".to_string(),
+                "tunnel".to_string(),
+                "preview-client".to_string(),
+                "start".to_string(),
+                "--token-env=RUNNER_PREVIEW_TOKEN".to_string(),
+            ]),
+            vec!["RUNNER_PREVIEW_TOKEN".to_string()]
+        );
+    }
+
+    #[test]
+    fn declared_tunnel_secret_env_detects_service_preview_client_backend() {
+        let names = declared_tunnel_secret_env(&[
+            "homeboy".to_string(),
+            "--runner".to_string(),
+            "homeboy-lab".to_string(),
+            "tunnel".to_string(),
+            "service".to_string(),
+            "start".to_string(),
+            "runner-preview".to_string(),
+            "--command".to_string(),
+            "npm run dev".to_string(),
+            "--public-tunnel-backend".to_string(),
+            "command".to_string(),
+            "--public-tunnel-command".to_string(),
+            "homeboy tunnel preview-client start --ready-stdout".to_string(),
+        ]);
+
+        assert_eq!(names, vec!["HOMEBOY_PREVIEW_TUNNEL_TOKEN".to_string()]);
+    }
+
+    #[test]
+    fn hydrate_tunnel_secret_env_reports_runner_deferred_names_without_values() {
+        let args = vec![
+            "homeboy".to_string(),
+            "tunnel".to_string(),
+            "preview-client".to_string(),
+            "start".to_string(),
+            "--ingress".to_string(),
+            "https://preview-broker.example.test".to_string(),
+            "--public-host".to_string(),
+            "preview.example.test".to_string(),
+            "--local-origin".to_string(),
+            "http://127.0.0.1:8888".to_string(),
+        ];
+        let mut env = std::collections::HashMap::new();
+
+        let diagnostics =
+            hydrate_tunnel_secret_env(&args, &mut env).expect("hydrate tunnel secret");
+
+        assert!(env.is_empty());
+        let rendered = diagnostics.to_string();
+        assert!(rendered.contains("homeboy/lab-tunnel-secret-env/v1"));
+        assert!(rendered.contains("HOMEBOY_PREVIEW_TUNNEL_TOKEN"));
+        assert!(rendered.contains("runner"));
     }
 
     #[test]
