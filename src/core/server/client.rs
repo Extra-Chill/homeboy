@@ -25,6 +25,11 @@ use super::{
 };
 use std::process::{Command, Stdio};
 
+const DELEGATED_RUN_STATUS_FILE_ENV: &str = "HOMEBOY_DELEGATED_RUN_STATUS_FILE";
+const DELEGATED_RUN_STATUS_POINTER_ENV: &str = "HOMEBOY_DELEGATED_RUN_STATUS_POINTER";
+const DELEGATED_RUN_ERROR_POINTER_ENV: &str = "HOMEBOY_DELEGATED_RUN_ERROR_POINTER";
+const DELEGATED_RUN_POLL_MS_ENV: &str = "HOMEBOY_DELEGATED_RUN_POLL_MS";
+
 pub struct SshClient {
     pub host: String,
     pub user: String,
@@ -45,6 +50,173 @@ pub struct CommandOutput {
     pub success: bool,
     pub exit_code: i32,
     pub child_resource: Option<ExtensionChildResourceSummary>,
+}
+
+#[derive(Debug, Clone)]
+struct DelegatedRunFailureMonitor {
+    status_file: Option<String>,
+    artifact_root: Option<String>,
+    status_pointer: String,
+    error_pointer: Option<String>,
+    poll_interval: Duration,
+}
+
+#[derive(Debug, Clone)]
+struct DelegatedRunTerminalFailure {
+    status: String,
+    detail: Option<String>,
+    status_file: String,
+}
+
+impl DelegatedRunFailureMonitor {
+    fn from_env(env: Option<&[(&str, &str)]>) -> Option<Self> {
+        let status_file = env_value(env, DELEGATED_RUN_STATUS_FILE_ENV);
+        let artifact_root = env_value(env, &crate::core::engine::run_dir::run_dir_env())
+            .map(|run_dir| std::path::Path::new(&run_dir).join("artifacts"))
+            .filter(|path| path.is_dir())
+            .map(|path| path.to_string_lossy().to_string());
+        if status_file.is_none() && artifact_root.is_none() {
+            return None;
+        }
+        let status_pointer = env_value(env, DELEGATED_RUN_STATUS_POINTER_ENV)
+            .unwrap_or_else(|| "/status".to_string());
+        let error_pointer = env_value(env, DELEGATED_RUN_ERROR_POINTER_ENV);
+        let poll_interval = env_value(env, DELEGATED_RUN_POLL_MS_ENV)
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|value| *value > 0)
+            .map(Duration::from_millis)
+            .unwrap_or_else(|| Duration::from_millis(250));
+
+        Some(Self {
+            status_file,
+            artifact_root,
+            status_pointer,
+            error_pointer,
+            poll_interval,
+        })
+    }
+
+    fn terminal_failure(&self) -> Option<DelegatedRunTerminalFailure> {
+        if let Some(status_file) = &self.status_file {
+            if let Some(failure) = self.terminal_failure_from_file(status_file) {
+                return Some(failure);
+            }
+        }
+
+        self.artifact_root
+            .as_deref()
+            .and_then(|root| self.terminal_failure_from_artifacts(std::path::Path::new(root)))
+    }
+
+    fn terminal_failure_from_file(&self, status_file: &str) -> Option<DelegatedRunTerminalFailure> {
+        let content = std::fs::read_to_string(status_file).ok()?;
+        let value = serde_json::from_str::<serde_json::Value>(&content).ok()?;
+        let status = value
+            .pointer(&self.status_pointer)
+            .and_then(serde_json::Value::as_str)?
+            .trim()
+            .to_ascii_lowercase();
+
+        if !delegated_status_is_terminal_failure(&status) {
+            return None;
+        }
+
+        Some(DelegatedRunTerminalFailure {
+            status,
+            detail: self.failure_detail(&value),
+            status_file: status_file.to_string(),
+        })
+    }
+
+    fn terminal_failure_from_artifacts(
+        &self,
+        artifact_root: &std::path::Path,
+    ) -> Option<DelegatedRunTerminalFailure> {
+        let mut pending = vec![artifact_root.to_path_buf()];
+        let mut inspected = 0usize;
+
+        while let Some(path) = pending.pop() {
+            inspected += 1;
+            if inspected > 512 {
+                return None;
+            }
+            if path.is_dir() {
+                let Ok(entries) = std::fs::read_dir(&path) else {
+                    continue;
+                };
+                for entry in entries.flatten() {
+                    pending.push(entry.path());
+                }
+                continue;
+            }
+            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
+            if let Some(failure) = self.terminal_failure_from_file(&path.to_string_lossy()) {
+                return Some(failure);
+            }
+        }
+
+        None
+    }
+
+    fn failure_detail(&self, value: &serde_json::Value) -> Option<String> {
+        if let Some(pointer) = &self.error_pointer {
+            if let Some(detail) = json_pointer_string(value, pointer) {
+                return Some(detail);
+            }
+        }
+
+        ["/error", "/message", "/summary", "/failure/message"]
+            .iter()
+            .find_map(|pointer| json_pointer_string(value, pointer))
+    }
+}
+
+impl DelegatedRunTerminalFailure {
+    fn stderr_message(&self) -> String {
+        let mut message = format!(
+            "Delegated runtime reached terminal failure status `{}` from {}. Homeboy terminated the wrapper process group and returned failure evidence.",
+            self.status, self.status_file
+        );
+        if let Some(detail) = &self.detail {
+            message.push_str("\nDelegated runtime detail: ");
+            message.push_str(detail);
+        }
+        message
+    }
+}
+
+fn env_value(env: Option<&[(&str, &str)]>, name: &str) -> Option<String> {
+    env.and_then(|pairs| {
+        pairs
+            .iter()
+            .find_map(|(key, value)| (*key == name).then(|| (*value).to_string()))
+    })
+    .or_else(|| std::env::var(name).ok())
+    .filter(|value| !value.trim().is_empty())
+}
+
+fn delegated_status_is_terminal_failure(status: &str) -> bool {
+    matches!(
+        status,
+        "failed"
+            | "failure"
+            | "error"
+            | "errored"
+            | "canceled"
+            | "cancelled"
+            | "timeout"
+            | "timed_out"
+    )
+}
+
+fn json_pointer_string(value: &serde_json::Value, pointer: &str) -> Option<String> {
+    match value.pointer(pointer)? {
+        serde_json::Value::String(value) if !value.trim().is_empty() => Some(value.clone()),
+        other if !other.is_null() => Some(other.to_string()),
+        _ => None,
+    }
 }
 
 impl SshClient {
@@ -646,9 +818,13 @@ fn execute_local_command_passthrough_impl(
             };
         }
     };
-    let cleanup_guard = ProcessGroupCleanupGuard::new(child.id());
-    let _invocation_child_guard =
-        invocation_child_guard(env, child.id(), cleanup_guard.pgid(), command);
+    let mut cleanup_guard = Some(ProcessGroupCleanupGuard::new(child.id()));
+    let _invocation_child_guard = invocation_child_guard(
+        env,
+        child.id(),
+        cleanup_guard.as_ref().and_then(|guard| guard.pgid()),
+        command,
+    );
     let monitor = ChildResourceMonitor::start(child.id(), command.to_string());
 
     // Tee each stream: copy every chunk to the parent's stdout/stderr as it
@@ -684,7 +860,8 @@ fn execute_local_command_passthrough_impl(
         .take()
         .map(|pipe| thread::spawn(move || tee_to(pipe, std::io::stderr())));
 
-    let status = child.wait();
+    let (status, delegated_failure) =
+        wait_for_child_or_delegated_failure(&mut child, env, &mut cleanup_guard);
     let interrupted_signal = active_cleanup_signal();
 
     let stdout = stdout_handle
@@ -697,23 +874,33 @@ fn execute_local_command_passthrough_impl(
     let output = match status {
         Ok(status) => CommandOutput {
             stdout,
-            stderr: stderr_with_interruption(stderr, interrupted_signal),
-            success: status.success() && interrupted_signal.is_none(),
+            stderr: stderr_with_delegated_failure(
+                stderr_with_interruption(stderr, interrupted_signal),
+                delegated_failure.as_ref(),
+            ),
+            success: status.success()
+                && interrupted_signal.is_none()
+                && delegated_failure.is_none(),
             exit_code: interrupted_exit_code(interrupted_signal, status.code().unwrap_or(-1)),
             child_resource: Some(monitor.finish()),
         },
         Err(e) => CommandOutput {
             stdout,
-            stderr: stderr_with_interruption(
-                format!("{stderr}\nCommand error: {}", e),
-                interrupted_signal,
+            stderr: stderr_with_delegated_failure(
+                stderr_with_interruption(
+                    format!("{stderr}\nCommand error: {}", e),
+                    interrupted_signal,
+                ),
+                delegated_failure.as_ref(),
             ),
             success: false,
             exit_code: interrupted_exit_code(interrupted_signal, -1),
             child_resource: Some(monitor.finish()),
         },
     };
-    cleanup_guard.cleanup();
+    if let Some(cleanup_guard) = cleanup_guard.take() {
+        cleanup_guard.cleanup();
+    }
     output
 }
 
@@ -763,9 +950,13 @@ pub(crate) fn execute_local_command_stderr_passthrough(
             };
         }
     };
-    let cleanup_guard = ProcessGroupCleanupGuard::new(child.id());
-    let _invocation_child_guard =
-        invocation_child_guard(env, child.id(), cleanup_guard.pgid(), command);
+    let mut cleanup_guard = Some(ProcessGroupCleanupGuard::new(child.id()));
+    let _invocation_child_guard = invocation_child_guard(
+        env,
+        child.id(),
+        cleanup_guard.as_ref().and_then(|guard| guard.pgid()),
+        command,
+    );
     let monitor = ChildResourceMonitor::start(child.id(), command.to_string());
 
     fn read_all<R: Read>(mut src: R) -> String {
@@ -808,7 +999,8 @@ pub(crate) fn execute_local_command_stderr_passthrough(
         .take()
         .map(|pipe| thread::spawn(move || tee_to_stderr(pipe)));
 
-    let status = child.wait();
+    let (status, delegated_failure) =
+        wait_for_child_or_delegated_failure(&mut child, env, &mut cleanup_guard);
     let interrupted_signal = active_cleanup_signal();
 
     let stdout = stdout_handle
@@ -821,23 +1013,33 @@ pub(crate) fn execute_local_command_stderr_passthrough(
     let output = match status {
         Ok(status) => CommandOutput {
             stdout,
-            stderr: stderr_with_interruption(stderr, interrupted_signal),
-            success: status.success() && interrupted_signal.is_none(),
+            stderr: stderr_with_delegated_failure(
+                stderr_with_interruption(stderr, interrupted_signal),
+                delegated_failure.as_ref(),
+            ),
+            success: status.success()
+                && interrupted_signal.is_none()
+                && delegated_failure.is_none(),
             exit_code: interrupted_exit_code(interrupted_signal, status.code().unwrap_or(-1)),
             child_resource: Some(monitor.finish()),
         },
         Err(e) => CommandOutput {
             stdout,
-            stderr: stderr_with_interruption(
-                format!("{stderr}\nCommand error: {}", e),
-                interrupted_signal,
+            stderr: stderr_with_delegated_failure(
+                stderr_with_interruption(
+                    format!("{stderr}\nCommand error: {}", e),
+                    interrupted_signal,
+                ),
+                delegated_failure.as_ref(),
             ),
             success: false,
             exit_code: interrupted_exit_code(interrupted_signal, -1),
             child_resource: Some(monitor.finish()),
         },
     };
-    cleanup_guard.cleanup();
+    if let Some(cleanup_guard) = cleanup_guard.take() {
+        cleanup_guard.cleanup();
+    }
     output
 }
 
@@ -855,6 +1057,50 @@ fn invocation_child_guard(
 
     invocation::register_child_process(invocation_id, root_pid, pgid, command_label.to_string())
         .ok()
+}
+
+fn wait_for_child_or_delegated_failure(
+    child: &mut std::process::Child,
+    env: Option<&[(&str, &str)]>,
+    cleanup_guard: &mut Option<ProcessGroupCleanupGuard>,
+) -> (
+    std::io::Result<std::process::ExitStatus>,
+    Option<DelegatedRunTerminalFailure>,
+) {
+    let Some(monitor) = DelegatedRunFailureMonitor::from_env(env) else {
+        return (child.wait(), None);
+    };
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return (Ok(status), None),
+            Ok(None) => {}
+            Err(error) => return (Err(error), None),
+        }
+
+        if let Some(failure) = monitor.terminal_failure() {
+            if let Some(cleanup_guard) = cleanup_guard.take() {
+                cleanup_guard.cleanup();
+            }
+            return (child.wait(), Some(failure));
+        }
+
+        std::thread::sleep(monitor.poll_interval);
+    }
+}
+
+fn stderr_with_delegated_failure(
+    mut stderr: String,
+    failure: Option<&DelegatedRunTerminalFailure>,
+) -> String {
+    let Some(failure) = failure else {
+        return stderr;
+    };
+    if !stderr.is_empty() && !stderr.ends_with('\n') {
+        stderr.push('\n');
+    }
+    stderr.push_str(&failure.stderr_message());
+    stderr
 }
 
 struct ChildResourceMonitor {
@@ -1186,6 +1432,48 @@ mod tests {
             assert!(child.sampled_peak_at_ms.is_some());
             assert!(child.sampled_peak_child_count.is_some());
         }
+    }
+
+    #[test]
+    fn delegated_terminal_failure_stops_passthrough_wrapper() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let artifact_dir = dir.path().join("artifacts/delegated-runtime");
+        std::fs::create_dir_all(&artifact_dir).expect("create artifact dir");
+        let status_file = artifact_dir.join("run.json");
+        let status_file_for_writer = status_file.clone();
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            std::fs::write(
+                status_file_for_writer,
+                r#"{"status":"failed","message":"provider runtime failed before ready"}"#,
+            )
+            .expect("write delegated status");
+        });
+
+        let run_dir = dir.path().to_string_lossy().to_string();
+        let run_dir_env = crate::core::engine::run_dir::run_dir_env();
+        let poll_ms = "25";
+        let env = [
+            (run_dir_env.as_str(), run_dir.as_str()),
+            (DELEGATED_RUN_POLL_MS_ENV, poll_ms),
+        ];
+        let started = Instant::now();
+        let output =
+            execute_local_command_passthrough("while true; do sleep 1; done", None, Some(&env));
+        writer.join().expect("writer joins");
+
+        assert!(!output.success);
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "delegated terminal failure should stop the wrapper promptly"
+        );
+        assert!(output
+            .stderr
+            .contains("Delegated runtime reached terminal failure status `failed`"));
+        assert!(output
+            .stderr
+            .contains("provider runtime failed before ready"));
+        assert!(output.child_resource.is_some());
     }
 
     #[test]
