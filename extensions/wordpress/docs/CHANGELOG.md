@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.121.40] - 2026-06-15
+
+### Fixed
+- expose targeted WordPress host smoke reruns
+
 ## [2.121.39] - 2026-06-15
 
 ### Fixed
