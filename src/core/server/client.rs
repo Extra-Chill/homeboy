@@ -1489,8 +1489,7 @@ mod tests {
             (DELEGATED_RUN_POLL_MS_ENV, poll_ms),
         ];
         let started = Instant::now();
-        let output =
-            execute_local_command_in_dir("while true; do sleep 1; done", None, Some(&env));
+        let output = execute_local_command_in_dir("while true; do sleep 1; done", None, Some(&env));
         writer.join().expect("writer joins");
 
         assert!(!output.success);
