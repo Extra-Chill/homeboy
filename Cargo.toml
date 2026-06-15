@@ -2,6 +2,7 @@
 name = "homeboy"
 version = "0.229.11"
 edition = "2021"
+default-run = "homeboy"
 license = "MIT"
 authors = ["Chris Huber <chubes@extrachill.com>"]
 description = "Headless automation for agentic software engineering workflows"

@@ -16,7 +16,7 @@ When updating documentation, keep it concise and aligned with current implementa
 When validating changes in this workspace, always run tests using the **release target**:
 
 - `cargo test --release`
-- When running the CLI for validation, prefer `cargo run --release -p homeboy -- <args>`.
+- When running the CLI for validation, prefer `cargo run --release --bin homeboy -- <args>`.
 
 ## Agent Workflow (Critical)
 

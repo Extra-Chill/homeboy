@@ -19,4 +19,4 @@
 
 ## Workflow reminders
 - Tests are expected to run in release mode: cargo test --release (see CLAUDE.md).
-- For CLI validation, prefer: cargo run --release -p homeboy -- <args> (per CLAUDE.md).
+- For CLI validation, prefer: cargo run --release --bin homeboy -- <args> (per CLAUDE.md).
