@@ -371,7 +371,6 @@ apply_phpunit_component_prepare_profile() {
 
 component_needs_composer_autoload_prepare() {
     [ -f "${PLUGIN_PATH}/composer.json" ] || return 1
-    [ ! -f "${PLUGIN_PATH}/vendor/autoload.php" ] || return 1
 
     local settings_json="${HOMEBOY_SETTINGS_JSON:-}"
     [ -n "$settings_json" ] || settings_json="{}"
@@ -382,8 +381,16 @@ component_needs_composer_autoload_prepare() {
         0|false|off|skip|disabled)
             return 1
             ;;
-        1|true|on|auto|enabled)
+        1|true|on|enabled)
             return 0
+            ;;
+        auto)
+            [ ! -f "${PLUGIN_PATH}/vendor/autoload.php" ] && return 0
+            php -r '
+                $composer = json_decode(file_get_contents($argv[1]), true);
+                $files = $composer["autoload-dev"]["files"] ?? [];
+                exit(is_array($composer) && is_array($files) && count($files) > 0 ? 0 : 1);
+            ' "${PLUGIN_PATH}/composer.json" 2>/dev/null
             ;;
         *)
             echo "Error: wp_codebox_composer_prepare must be auto, true, or false (got '$mode')." >&2
