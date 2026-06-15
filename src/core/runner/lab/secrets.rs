@@ -78,6 +78,7 @@ pub(super) fn hydrate_trace_secret_env(
     Ok(crate::core::trace_secrets::status_metadata(statuses))
 }
 
+#[cfg(test)]
 pub(super) fn declared_agent_task_secret_env(args: &[String]) -> Vec<String> {
     let mut names = declared_agent_task_controller_secret_env(args);
     names.extend(declared_agent_task_run_plan_secret_env(args));
