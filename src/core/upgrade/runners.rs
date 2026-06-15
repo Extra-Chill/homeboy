@@ -389,14 +389,22 @@ fn upgrade_runner_with_executor(
         &mut extensions_skipped,
         &mut extensions_failed,
     );
-    let recovery_commands =
-        runner_recovery_commands(&runner.id, &homeboy_path, path_drift.as_ref());
+    let recovery_commands = runner_recovery_commands(
+        &runner.id,
+        &homeboy_path,
+        path_drift.as_ref(),
+        new_version.as_deref(),
+        bare_homeboy_version.as_deref(),
+    );
     let stale_daemon = runner_stale_daemon(runner, status);
     let upgraded = match (previous_version.as_deref(), new_version.as_deref()) {
         (Some(previous), Some(new)) => new != previous,
         _ => false,
     };
-    let success = new_version.is_some() && extensions_failed.is_empty() && stale_daemon.is_none();
+    let success = new_version.is_some()
+        && path_drift.is_none()
+        && extensions_failed.is_empty()
+        && stale_daemon.is_none();
     let detail = runner_upgrade_final_detail(
         &runner.id,
         detail,
@@ -732,6 +740,17 @@ fn runner_homeboy_path_alignment(
         });
     }
 
+    if version_is_newer(configured_version, bare_version) {
+        return Some(RunnerHomeboyPathAlignment {
+            drift: Some(format!(
+                "{}; bare `homeboy` is older than the configured runner executable, so the runner remains degraded until PATH-visible `homeboy` is upgraded or the shadowing binary is removed. Inspect with `{}`",
+                drift,
+                runner_inspect_bare_homeboy_command(runner_id)
+            )),
+            update_to: None,
+        });
+    }
+
     Some(RunnerHomeboyPathAlignment {
         drift: Some(format!(
             "{}; automatic runner homeboy_path update is unsafe for this configured path. Remediate with `{}` after verifying bare `homeboy` is the intended runner binary",
@@ -764,12 +783,29 @@ fn runner_recovery_commands(
     runner_id: &str,
     homeboy_path: &str,
     path_drift: Option<&String>,
+    configured_version: Option<&str>,
+    bare_version: Option<&str>,
 ) -> Vec<String> {
     let mut commands = runner_upgrade_recovery_commands(runner_id);
-    if path_drift.is_some() && homeboy_path != "homeboy" {
+    if path_drift.is_some() {
+        commands.push(runner_inspect_bare_homeboy_command(runner_id));
+    }
+    if path_drift.is_some()
+        && homeboy_path != "homeboy"
+        && matches!((configured_version, bare_version), (Some(configured), Some(bare)) if version_is_newer(bare, configured))
+    {
         commands.push(runner_set_homeboy_path_command(runner_id, "homeboy"));
     }
     commands
+}
+
+fn runner_inspect_bare_homeboy_command(runner_id: &str) -> String {
+    let script = "type -a homeboy; command -v homeboy; homeboy --version";
+    format!(
+        "homeboy runner exec {} --ssh -- sh -lc {}",
+        shell_arg(runner_id),
+        shell_arg(script)
+    )
 }
 
 fn runner_set_homeboy_path_command(runner_id: &str, homeboy_path: &str) -> String {
@@ -1413,31 +1449,31 @@ mod tests {
             runner_status,
         );
 
-        assert!(skipped.is_empty());
-        assert_eq!(updated.len(), 1);
-        assert!(updated[0].success);
-        assert!(!updated[0].upgraded);
-        assert_eq!(updated[0].previous_version.as_deref(), Some("0.228.18"));
-        assert_eq!(updated[0].new_version.as_deref(), Some("0.228.18"));
-        assert!(updated[0].path_drift.is_some());
-        assert!(updated[0].extensions_failed.is_empty());
-        assert_eq!(updated[0].extensions_synced.len(), 1);
+        assert!(updated.is_empty());
+        assert_eq!(skipped.len(), 1);
+        assert!(!skipped[0].success);
+        assert!(!skipped[0].upgraded);
+        assert_eq!(skipped[0].previous_version.as_deref(), Some("0.228.18"));
+        assert_eq!(skipped[0].new_version.as_deref(), Some("0.228.18"));
+        assert!(skipped[0].path_drift.is_some());
+        assert!(skipped[0].extensions_failed.is_empty());
+        assert_eq!(skipped[0].extensions_synced.len(), 1);
         assert_eq!(
-            updated[0].extensions_synced[0].extension_id,
+            skipped[0].extensions_synced[0].extension_id,
             "required-extension"
         );
-        assert_eq!(updated[0].extensions_skipped.len(), 1);
+        assert_eq!(skipped[0].extensions_skipped.len(), 1);
         assert_eq!(
-            updated[0].extensions_skipped[0].extension_id,
+            skipped[0].extensions_skipped[0].extension_id,
             "auxiliary-extension"
         );
-        let skipped_detail = updated[0].extensions_skipped[0].detail.as_deref().unwrap();
+        let skipped_detail = skipped[0].extensions_skipped[0].detail.as_deref().unwrap();
         assert!(skipped_detail.contains("deferred because runner executable drift"));
         assert!(skipped_detail.contains("extension setup failed"));
-        assert!(updated[0]
+        assert!(skipped[0]
             .detail
             .contains("runner extension sync(s) skipped"));
-        assert!(!updated[0]
+        assert!(!skipped[0]
             .detail
             .contains("runner extension sync(s) failed"));
         assert!(commands
@@ -1534,21 +1570,29 @@ mod tests {
             runner_status,
         );
 
-        assert!(skipped.is_empty());
-        assert_eq!(updated.len(), 1);
-        assert_eq!(updated[0].bare_homeboy_version.as_deref(), Some("0.228.4"));
-        assert!(updated[0]
+        assert!(updated.is_empty());
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(skipped[0].bare_homeboy_version.as_deref(), Some("0.228.4"));
+        assert!(skipped[0]
             .path_drift
             .as_deref()
             .unwrap()
             .contains("bare `homeboy` reports 0.228.4"));
-        assert!(updated[0]
+        assert!(skipped[0]
+            .path_drift
+            .as_deref()
+            .unwrap()
+            .contains("bare `homeboy` is older than the configured runner executable"));
+        assert!(skipped[0]
             .recovery_commands
             .contains(&"homeboy upgrade --force --upgrade-runner lab".to_string()));
-        assert!(updated[0].recovery_commands.contains(
+        assert!(skipped[0].recovery_commands.contains(
+            &"homeboy runner exec lab --ssh -- sh -lc 'type -a homeboy; command -v homeboy; homeboy --version'".to_string()
+        ));
+        assert!(!skipped[0].recovery_commands.contains(
             &"homeboy runner set lab --json '{\"homeboy_path\":\"homeboy\"}'".to_string()
         ));
-        assert!(updated[0].detail.contains("runner PATH drift detected"));
+        assert!(skipped[0].detail.contains("runner PATH drift detected"));
     }
 
     #[test]
@@ -1747,18 +1791,21 @@ mod tests {
             runner_status,
         );
 
-        assert!(skipped.is_empty());
-        assert_eq!(updated.len(), 1);
-        assert_eq!(updated[0].homeboy_path, "/opt/homeboy/custom-homeboy");
-        assert!(updated[0]
+        assert!(updated.is_empty());
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(skipped[0].homeboy_path, "/opt/homeboy/custom-homeboy");
+        assert!(skipped[0]
             .path_drift
             .as_deref()
             .unwrap()
             .contains("automatic runner homeboy_path update is unsafe"));
-        assert!(updated[0].recovery_commands.contains(
+        assert!(skipped[0].recovery_commands.contains(
+            &"homeboy runner exec lab --ssh -- sh -lc 'type -a homeboy; command -v homeboy; homeboy --version'".to_string()
+        ));
+        assert!(skipped[0].recovery_commands.contains(
             &"homeboy runner set lab --json '{\"homeboy_path\":\"homeboy\"}'".to_string()
         ));
-        assert!(updated[0]
+        assert!(skipped[0]
             .detail
             .contains("homeboy runner set lab --json '{\"homeboy_path\":\"homeboy\"}'"));
     }
