@@ -566,6 +566,27 @@ mod tests {
     }
 
     #[test]
+    fn agent_task_providers_supports_explicit_runner_discovery() {
+        let cli = Cli::parse_from([
+            "homeboy",
+            "--runner",
+            "homeboy-lab",
+            "agent-task",
+            "providers",
+        ]);
+
+        let command = lab_offload_command(&cli.command).unwrap().unwrap();
+
+        assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
+        assert_eq!(command.hot_label, "agent-task providers");
+        assert!(command.portable);
+        assert!(!command.default_lab_offload);
+        assert!(!command.requires_extension_parity);
+        assert!(command.required_extensions.is_empty());
+        assert!(!command.infer_source_path_tools);
+    }
+
+    #[test]
     fn lab_command_with_mutation_flag_stays_portable_for_patch_capture() {
         let cli = Cli::parse_from(["homeboy", "audit", "--baseline"]);
 
