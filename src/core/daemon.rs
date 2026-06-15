@@ -531,6 +531,10 @@ pub(super) fn error_response(status_code: u16, err: Error) -> HttpResponse {
     }
 }
 
+pub(crate) fn artifact_response_for_path(path: &str) -> Option<HttpResponse> {
+    artifact_download::route(path)
+}
+
 fn config_paths_body() -> Result<serde_json::Value> {
     Ok(json!({
         "homeboy": paths::homeboy()?.display().to_string(),

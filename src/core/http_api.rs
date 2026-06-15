@@ -185,6 +185,12 @@ pub fn route(method: HttpMethod, path: &str) -> Result<HttpEndpoint> {
                 artifact_id: (*artifact_id).to_string(),
             })
         }
+        (HttpMethod::Get, ["runs", id, "artifacts", artifact_id]) => {
+            Ok(HttpEndpoint::RunArtifactContent {
+                id: (*id).to_string(),
+                artifact_id: (*artifact_id).to_string(),
+            })
+        }
         (HttpMethod::Get, ["runs", id, "findings"]) => Ok(HttpEndpoint::RunFindings {
             id: (*id).to_string(),
         }),
@@ -237,6 +243,7 @@ pub fn route(method: HttpMethod, path: &str) -> Result<HttpEndpoint> {
                 "GET /runs".to_string(),
                 "GET /runs/:id".to_string(),
                 "GET /runs/:id/artifacts".to_string(),
+                "GET /runs/:id/artifacts/:artifact_id".to_string(),
                 "GET /runs/:id/artifacts/:artifact_id/content".to_string(),
                 "GET /runs/:id/findings".to_string(),
                 "GET /audit/runs".to_string(),
@@ -427,18 +434,44 @@ fn enqueue_sandbox_tool_job(
 fn artifact_content(run_id: &str, artifact_id: &str) -> Result<Value> {
     let store = ObservationStore::open_initialized()?;
     require_run(&store, run_id)?;
-    let Some(artifact) = store.get_artifact(artifact_id)? else {
-        return artifact_store_content(run_id, artifact_id);
+    crate::core::artifacts::index_remote_published_artifact_refs_for_run(&store, run_id)?;
+    let decoded_artifact_id = crate::core::execution_contract::decode_uri_component(artifact_id);
+    let Some(artifact) = store.get_artifact_for_run_token(run_id, &decoded_artifact_id)? else {
+        return artifact_store_content(run_id, artifact_id, &decoded_artifact_id);
     };
-    if artifact.run_id != run_id {
-        return Err(Error::validation_invalid_argument(
-            "artifact_id",
-            "artifact does not belong to requested run",
-            Some(artifact_id.to_string()),
-            None,
-        ));
-    }
     if artifact.artifact_type != "file" {
+        if artifact.artifact_type == "remote_file"
+            || runner::is_remote_runner_artifact_path(&artifact.path)
+        {
+            let download = runner::download_remote_artifact(&artifact.path, None)?;
+            let content = std::fs::read(&download.output_path).map_err(|err| {
+                Error::internal_io(
+                    err.to_string(),
+                    Some(format!(
+                        "read downloaded remote artifact {}",
+                        download.output_path.display()
+                    )),
+                )
+            })?;
+            let filename = download
+                .output_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(&artifact.id);
+            let size_bytes = download
+                .size_bytes
+                .or_else(|| i64::try_from(content.len()).ok());
+            return Ok(json!({
+                "command": "api.runs.artifact.content",
+                "run_id": run_id,
+                "artifact_id": artifact.id,
+                "filename": filename,
+                "mime": download.content_type.or_else(|| artifact.mime.clone()),
+                "size_bytes": size_bytes,
+                "sha256": download.sha256.or_else(|| artifact.sha256.clone()),
+                "content_base64": base64::engine::general_purpose::STANDARD.encode(content),
+            }));
+        }
         return Err(Error::validation_invalid_argument(
             "artifact_id",
             format!(
@@ -472,8 +505,11 @@ fn artifact_content(run_id: &str, artifact_id: &str) -> Result<Value> {
     }))
 }
 
-fn artifact_store_content(run_id: &str, artifact_id: &str) -> Result<Value> {
-    let decoded_artifact_id = crate::core::execution_contract::decode_uri_component(artifact_id);
+fn artifact_store_content(
+    run_id: &str,
+    artifact_id: &str,
+    decoded_artifact_id: &str,
+) -> Result<Value> {
     let locator = runner::artifact_store_locator_from_runner_artifact_id(&decoded_artifact_id)
         .ok_or_else(|| {
             Error::validation_invalid_argument(

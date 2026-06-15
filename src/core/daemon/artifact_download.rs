@@ -6,7 +6,9 @@ use std::path::PathBuf;
 
 use crate::core::artifact_links::{public_artifact_url, viewer_links};
 use crate::core::error::{Error, Result};
+use crate::core::execution_contract::decode_uri_component;
 use crate::core::observation::{ArtifactRecord, ObservationStore};
+use crate::core::paths;
 use crate::core::runner;
 
 use super::{error_response, HttpResponse};
@@ -93,25 +95,35 @@ fn resolve_artifact_download(
     artifact_token: &str,
 ) -> Result<ResolvedArtifactResponse> {
     let store = ObservationStore::open_initialized()?;
-    let artifact = store.get_artifact(artifact_token)?.ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "artifact_id",
-            format!("artifact record not found: {artifact_token}"),
-            Some(artifact_token.to_string()),
-            None,
-        )
-    })?;
-
-    if let Some(run_id) = expected_run_id {
-        if artifact.run_id != run_id {
+    let decoded_artifact_token = decode_uri_component(artifact_token);
+    let artifact = if let Some(run_id) = expected_run_id {
+        if store.get_run(run_id)?.is_none() {
             return Err(Error::validation_invalid_argument(
-                "artifact_id",
-                "artifact does not belong to requested run",
-                Some(artifact_token.to_string()),
+                "run_id",
+                format!("run record not found: {run_id}"),
+                Some(run_id.to_string()),
                 None,
             ));
         }
-    }
+        crate::core::artifacts::index_remote_published_artifact_refs_for_run(&store, run_id)?;
+        match store.get_artifact_for_run_token(run_id, &decoded_artifact_token)? {
+            Some(artifact) => artifact,
+            None => {
+                return artifact_store_download(run_id, artifact_token, &decoded_artifact_token)
+            }
+        }
+    } else {
+        store
+            .get_artifact(&decoded_artifact_token)?
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "artifact_id",
+                    format!("artifact record not found: {artifact_token}"),
+                    Some(artifact_token.to_string()),
+                    None,
+                )
+            })?
+    };
 
     if artifact.artifact_type != "file" {
         if artifact.artifact_type == "remote_file"
@@ -194,6 +206,89 @@ fn resolve_artifact_download(
             filename,
         },
     )))
+}
+
+fn artifact_store_download(
+    run_id: &str,
+    artifact_token: &str,
+    decoded_artifact_token: &str,
+) -> Result<ResolvedArtifactResponse> {
+    let locator = runner::artifact_store_locator_from_runner_artifact_id(decoded_artifact_token)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "artifact_id",
+                format!("artifact record not found: {artifact_token}"),
+                Some(artifact_token.to_string()),
+                None,
+            )
+        })?;
+    let path = safe_artifact_store_path(&locator)?;
+    let metadata = fs::metadata(&path).map_err(|e| {
+        Error::internal_io(
+            e.to_string(),
+            Some(format!("read artifact-store metadata {locator}")),
+        )
+    })?;
+    if !metadata.is_file() {
+        return Err(Error::validation_invalid_argument(
+            "artifact_id",
+            format!("artifact-store locator is not a file: {locator}"),
+            Some(artifact_token.to_string()),
+            None,
+        ));
+    }
+    let filename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(artifact_token)
+        .to_string();
+    let content_type = crate::core::artifact_metadata::content_type_from_path(&path)
+        .unwrap_or_else(|| "application/octet-stream".to_string());
+    let record = ArtifactRecord {
+        id: artifact_token.to_string(),
+        run_id: run_id.to_string(),
+        kind: "artifact_store".to_string(),
+        artifact_type: "file".to_string(),
+        path: locator.clone(),
+        url: None,
+        public_url: None,
+        viewer_url: None,
+        viewer_links: Vec::new(),
+        sha256: crate::core::artifact_metadata::sha256_file(&path).ok(),
+        size_bytes: i64::try_from(metadata.len()).ok(),
+        mime: Some(content_type.clone()),
+        metadata_json: json!({
+            "source": "artifact_store",
+            "locator": locator,
+        }),
+        created_at: chrono::Utc::now().to_rfc3339(),
+    };
+    Ok(ResolvedArtifactResponse::Download(Box::new(
+        ArtifactDownload {
+            record,
+            path,
+            content_type,
+            size_bytes: metadata.len(),
+            filename,
+        },
+    )))
+}
+
+fn safe_artifact_store_path(locator: &str) -> Result<PathBuf> {
+    let locator_path = PathBuf::from(locator);
+    if locator_path.is_absolute()
+        || locator_path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(Error::validation_invalid_argument(
+            "artifact_id",
+            "artifact-store locator must stay under the artifact root",
+            Some(locator.to_string()),
+            None,
+        ));
+    }
+    Ok(paths::artifact_root()?.join(locator_path))
 }
 
 fn artifact_sync_manifest(run_id: &str) -> Result<ResolvedArtifactResponse> {
