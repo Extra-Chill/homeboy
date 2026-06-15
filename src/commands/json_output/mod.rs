@@ -46,7 +46,7 @@ pub fn run_command_output(command: Commands, global: &GlobalArgs) -> JsonCommand
 }
 
 fn dispatch(command: Commands, global: &GlobalArgs) -> (homeboy::core::Result<Value>, i32) {
-    match command.descriptor(false).json_family {
+    match command.output_descriptor(false).json_family {
         CommandJsonFamily::Quality => quality::dispatch(command, global),
         CommandJsonFamily::Workspace => workspace::dispatch(command, global),
         CommandJsonFamily::Ops => ops::dispatch(command, global),

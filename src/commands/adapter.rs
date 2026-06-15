@@ -1,7 +1,7 @@
 use serde_json::Value;
 
 use crate::command_contract::{
-    CommandDescriptor, CommandJsonFamily, CommandOutputContractKind, CommandOutputFileMode,
+    CommandJsonFamily, CommandOutputContractKind, CommandOutputDescriptor, CommandOutputFileMode,
     CommandRawOutputMode, CommandResponseMode,
 };
 
@@ -35,14 +35,11 @@ pub(crate) struct CommandAdapterContract {
 }
 
 impl CommandAdapterContract {
-    pub fn to_descriptor(self) -> CommandDescriptor {
-        CommandDescriptor {
+    pub fn to_output_descriptor(self) -> CommandOutputDescriptor {
+        CommandOutputDescriptor {
             response_mode: self.response_mode,
             output_file_mode: self.output_file_mode,
             json_family: self.json_family,
-            supports_lab_runner: self.lab_runner.supports_runner,
-            lab_runner_unsupported_reason: self.lab_runner.unsupported_reason,
-            lab_offload_mutation_flag: self.lab_runner.mutation_flag,
             output_contract: self.output_contract,
         }
     }
@@ -97,7 +94,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn json_only_contract_maps_to_descriptor() {
+    fn json_only_contract_maps_to_output_descriptor() {
         let adapter = TypedCommandAdapter::<()>::json_only(
             CommandJsonFamily::Workspace,
             CommandOutputFileMode::GenericEnvelope,
@@ -105,7 +102,7 @@ mod tests {
             |_, _| (Ok(Value::Null), 0),
         );
 
-        let descriptor = adapter.contract.to_descriptor();
+        let descriptor = adapter.contract.to_output_descriptor();
 
         assert_eq!(descriptor.response_mode, CommandResponseMode::Json);
         assert_eq!(
@@ -113,7 +110,6 @@ mod tests {
             CommandOutputFileMode::GenericEnvelope
         );
         assert_eq!(descriptor.json_family, CommandJsonFamily::Workspace);
-        assert!(!descriptor.supports_lab_runner);
         assert!(adapter.execute_json.is_some());
     }
 
@@ -132,7 +128,7 @@ mod tests {
             );
 
             assert_eq!(
-                adapter.contract.to_descriptor().response_mode,
+                adapter.contract.to_output_descriptor().response_mode,
                 CommandResponseMode::Raw(raw_mode)
             );
             assert!(adapter.execute_json.is_none());
