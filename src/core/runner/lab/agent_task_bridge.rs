@@ -295,6 +295,26 @@ pub(super) fn agent_task_dispatch_requested_run_id(args: &[String]) -> Option<St
     None
 }
 
+pub(super) fn ensure_agent_task_dispatch_run_id(args: &[String]) -> Option<(Vec<String>, String)> {
+    let action_index = subcommand_index(args, "agent-task").and_then(|index| {
+        args.get(index + 1)
+            .filter(|arg| matches!(arg.as_str(), "dispatch" | "cook"))
+            .map(|_| index + 1)
+    })?;
+
+    if let Some(run_id) = agent_task_dispatch_requested_run_id(args) {
+        return Some((args.to_vec(), run_id));
+    }
+
+    let run_id = format!("agent-task-{}", uuid::Uuid::new_v4());
+    let mut out = Vec::with_capacity(args.len() + 2);
+    out.extend_from_slice(&args[..=action_index]);
+    out.push("--run-id".to_string());
+    out.push(run_id.clone());
+    out.extend_from_slice(&args[action_index + 1..]);
+    Some((out, run_id))
+}
+
 pub(super) fn lab_pre_dispatch_failure_message(output: &str) -> Option<String> {
     if let Some(message) = lab_pre_dispatch_dependency_failure_message(output) {
         return Some(message);
@@ -498,6 +518,59 @@ mod tests {
             ]),
             Some("dispatch-run".to_string())
         );
+    }
+
+    #[test]
+    fn ensure_agent_task_dispatch_run_id_preserves_existing_id() {
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--run-id".to_string(),
+            "cook-run".to_string(),
+            "--repo".to_string(),
+            "homeboy".to_string(),
+        ];
+
+        let (out, run_id) = ensure_agent_task_dispatch_run_id(&args).expect("agent task args");
+
+        assert_eq!(out, args);
+        assert_eq!(run_id, "cook-run");
+    }
+
+    #[test]
+    fn ensure_agent_task_dispatch_run_id_injects_id_before_dispatch_options() {
+        let args = vec![
+            "homeboy".to_string(),
+            "--force-hot".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--repo".to_string(),
+            "homeboy".to_string(),
+        ];
+
+        let (out, run_id) = ensure_agent_task_dispatch_run_id(&args).expect("agent task args");
+
+        assert!(run_id.starts_with("agent-task-"));
+        assert_eq!(out[0], "homeboy");
+        assert_eq!(out[1], "--force-hot");
+        assert_eq!(out[2], "agent-task");
+        assert_eq!(out[3], "cook");
+        assert_eq!(out[4], "--run-id");
+        assert_eq!(out[5], run_id);
+        assert_eq!(out[6], "--repo");
+        assert_eq!(out[7], "homeboy");
+    }
+
+    #[test]
+    fn ensure_agent_task_dispatch_run_id_ignores_other_agent_task_commands() {
+        assert!(ensure_agent_task_dispatch_run_id(&[
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "status".to_string(),
+            "run-1".to_string(),
+        ])
+        .is_none());
     }
 
     #[test]
