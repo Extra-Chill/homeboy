@@ -163,13 +163,28 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
     })?;
     let runner = plan.runner.clone();
     let cwd = plan.cwd.clone();
-    let connected = status(runner_id)?;
     let request_env = plan.env.clone();
     let required_extensions =
         required_extensions_for_command(&options.command, &options.required_extensions);
 
     validate_runner_extension_parity(runner_id, &runner, &cwd, &required_extensions)?;
 
+    if should_force_diagnostic_ssh(&runner, &options) {
+        preflight_runner_capability_plan(
+            &runner,
+            options.capability_preflight.as_ref(),
+            &request_env,
+        )?;
+        return exec_diagnostic_ssh(
+            &runner,
+            cwd,
+            options.command,
+            request_env,
+            options.require_paths,
+        );
+    }
+
+    let connected = status(runner_id)?;
     if connected.connected {
         if let Some(session) = connected.session {
             preflight_runner_capability_plan(
@@ -212,14 +227,6 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
 
     match runner.kind {
         RunnerKind::Local => exec_local(plan),
-        RunnerKind::Ssh if options.allow_diagnostic_ssh => {
-            preflight_runner_capability_plan(
-                &runner,
-                options.capability_preflight.as_ref(),
-                &request_env,
-            )?;
-            exec_diagnostic_ssh(&runner, cwd, options.command, request_env, options.require_paths)
-        }
         RunnerKind::Ssh => Err(Error::validation_invalid_argument(
             "runner",
             "runner is not connected to a daemon; run `homeboy runner connect <runner-id>` or pass `--ssh` for explicit SSH diagnostics",
@@ -230,6 +237,10 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
             ]),
         )),
     }
+}
+
+fn should_force_diagnostic_ssh(runner: &Runner, options: &RunnerExecOptions) -> bool {
+    runner.kind == RunnerKind::Ssh && options.allow_diagnostic_ssh
 }
 
 pub fn runner_exec_failure_error(output: &RunnerExecOutput) -> Option<Error> {
@@ -1645,6 +1656,7 @@ mod tests {
                 project_id: None,
                 command: vec!["node".to_string(), "--version".to_string()],
                 env: Default::default(),
+                secret_env_names: Vec::new(),
                 capture_patch: false,
                 raw_exec: false,
                 source_snapshot: None,
@@ -1675,6 +1687,7 @@ mod tests {
                 project_id: None,
                 command: vec!["node".to_string(), "--version".to_string()],
                 env: Default::default(),
+                secret_env_names: Vec::new(),
                 capture_patch: false,
                 raw_exec: false,
                 source_snapshot: None,
@@ -1705,6 +1718,7 @@ mod tests {
                 project_id: None,
                 command: vec!["node".to_string(), "--version".to_string()],
                 env: Default::default(),
+                secret_env_names: Vec::new(),
                 capture_patch: false,
                 raw_exec: false,
                 source_snapshot: None,
@@ -1737,6 +1751,7 @@ mod tests {
                 RunnerSecretEnvRef {
                     env: None,
                     file: Some(missing_controller_file.display().to_string()),
+                    secret: None,
                 },
             );
 
@@ -1769,6 +1784,7 @@ mod tests {
                 RunnerSecretEnvRef {
                     env: None,
                     file: Some(secret_file.display().to_string()),
+                    secret: None,
                 },
             );
 
@@ -1820,6 +1836,7 @@ mod tests {
                 RunnerSecretEnvRef {
                     env: Some("HOMEBOY_PREVIEW_TUNNEL_TOKEN".to_string()),
                     file: None,
+                    secret: None,
                 },
             );
             std::env::remove_var("HOMEBOY_PREVIEW_TUNNEL_TOKEN");
@@ -1867,6 +1884,7 @@ mod tests {
                 RunnerSecretEnvRef {
                     env: Some("HOMEBOY_REQUIRED_SECRET_TEST_KEY".to_string()),
                     file: None,
+                    secret: None,
                 },
             );
 
@@ -2169,6 +2187,28 @@ mod tests {
             serde_json::to_value(RunnerExecMode::DiagnosticSsh).expect("mode json"),
             json!("diagnostic_ssh")
         );
+    }
+
+    #[test]
+    fn explicit_diagnostic_ssh_wins_for_ssh_runners() {
+        let mut options = RunnerExecOptions {
+            cwd: Some("/srv/homeboy/project".to_string()),
+            project_id: None,
+            allow_diagnostic_ssh: true,
+            command: vec!["homeboy".to_string(), "--version".to_string()],
+            env: Default::default(),
+            secret_env_names: Vec::new(),
+            capture_patch: false,
+            raw_exec: true,
+            source_snapshot: None,
+            capability_preflight: None,
+            required_extensions: Vec::new(),
+            require_paths: Vec::new(),
+        };
+
+        assert!(should_force_diagnostic_ssh(&ssh_runner(), &options));
+        options.allow_diagnostic_ssh = false;
+        assert!(!should_force_diagnostic_ssh(&ssh_runner(), &options));
     }
 
     #[test]
@@ -2536,6 +2576,7 @@ mod tests {
                 Some("extrachill".to_string()),
                 vec!["homeboy".to_string(), "test".to_string()],
                 Default::default(),
+                Vec::new(),
                 false,
                 None,
                 Vec::new(),
@@ -2587,6 +2628,7 @@ mod tests {
             None,
             vec!["homeboy".to_string(), "--version".to_string()],
             Default::default(),
+            Vec::new(),
             false,
             None,
             Vec::new(),

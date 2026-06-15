@@ -761,6 +761,7 @@ fn runner_exec_rejects_requests_that_violate_runner_policy_before_daemon_dispatc
                 "printf denied".to_string(),
             ],
             env: Default::default(),
+            secret_env_names: Vec::new(),
             capture_patch: false,
             raw_exec: true,
             source_snapshot: None,
