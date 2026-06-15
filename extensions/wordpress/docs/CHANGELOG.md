@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.121.41] - 2026-06-15
+
+### Fixed
+- add wp codebox validation profile
+
 ## [2.121.40] - 2026-06-15
 
 ### Fixed
