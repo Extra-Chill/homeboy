@@ -13,7 +13,9 @@ REMOTE_DEP_PATH="${TMPDIR}/remote/dep-plugin"
 FAKE_WP_CODEBOX="${TMPDIR}/wp-codebox.js"
 ARGS_FILE="${TMPDIR}/wp-codebox-args.txt"
 ARTIFACTS_DIR="${TMPDIR}/artifacts"
-mkdir -p "${PLUGIN_PATH}/tests" "${PLUGIN_PATH}/config" "${DEP_PATH}/fixtures" "${REMOTE_DEP_PATH}/fixtures" "$ARTIFACTS_DIR"
+STUBS_DIR="${TMPDIR}/stubs"
+COMPOSER_LOG="${TMPDIR}/composer.log"
+mkdir -p "${PLUGIN_PATH}/tests" "${PLUGIN_PATH}/config" "${DEP_PATH}/fixtures" "${REMOTE_DEP_PATH}/fixtures" "$ARTIFACTS_DIR" "$STUBS_DIR"
 
 cat > "${PLUGIN_PATH}/tests/OnlyTest.php" <<'PHP'
 <?php
@@ -22,10 +24,22 @@ PHP
 printf '<?php // component drop-in\n' > "${PLUGIN_PATH}/db.php"
 printf '<?php /*\nPlugin Name: Example\nNetwork: true\n*/\n' > "${PLUGIN_PATH}/example.php"
 printf 'component-extra\n' > "${PLUGIN_PATH}/config/component-extra.php"
+cat > "${PLUGIN_PATH}/composer.json" <<'JSON'
+{"autoload":{"psr-4":{"Example\\":"src/"}}}
+JSON
 printf '<?php /*\nPlugin Name: Dep Plugin\n*/\n' > "${DEP_PATH}/dep-plugin.php"
 printf 'dependency-extra\n' > "${DEP_PATH}/fixtures/dep-extra.php"
 printf '<?php /*\nPlugin Name: Dep Plugin Remote Lab Copy\n*/\n' > "${REMOTE_DEP_PATH}/dep-plugin.php"
 printf 'remote dependency-extra\n' > "${REMOTE_DEP_PATH}/fixtures/dep-extra.php"
+
+cat > "${STUBS_DIR}/composer" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "${COMPOSER_LOG:?}"
+mkdir -p vendor
+printf '<?php // prepared autoload\n' > vendor/autoload.php
+SH
+chmod +x "${STUBS_DIR}/composer"
 
 cat > "$FAKE_WP_CODEBOX" <<'NODE'
 #!/usr/bin/env node
@@ -127,6 +141,9 @@ if (!componentMount) {
   throw new Error('component mount missing')
 }
 const componentPath = componentMount.slice(0, -':/wordpress/wp-content/plugins/example'.length)
+if (!fs.existsSync(path.join(componentPath, 'vendor/autoload.php'))) {
+  throw new Error(`component Composer autoload was not prepared before mount: ${componentPath}`)
+}
 fs.writeFileSync(path.join(componentPath, '.pg-test-result.txt'), [
   'STAGE_BEGIN:run_tests',
   'ALL TESTS PASSED',
@@ -189,6 +206,8 @@ LAB_OFFLOAD_JSON=$(jq -nc \
 bash -n "$SCRIPT_DIR/test-runner-wp-codebox.sh"
 
 output=$(FAKE_WP_CODEBOX_ARGS_FILE="$ARGS_FILE" \
+    COMPOSER_LOG="$COMPOSER_LOG" \
+    PATH="${STUBS_DIR}:${PATH}" \
     HOMEBOY_WP_CODEBOX_BIN="$FAKE_WP_CODEBOX" \
     HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
     HOMEBOY_COMPONENT_PATH="$PLUGIN_PATH" \
@@ -208,6 +227,12 @@ fi
 
 if [ ! -s "$ARGS_FILE" ]; then
     echo "Expected fake wp-codebox to capture arguments" >&2
+    exit 1
+fi
+
+if ! grep -q -- 'install --no-interaction --no-progress --prefer-dist' "$COMPOSER_LOG"; then
+    echo "Expected WP Codebox runner to prepare missing component Composer autoload" >&2
+    cat "$COMPOSER_LOG" >&2 || true
     exit 1
 fi
 

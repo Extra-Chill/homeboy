@@ -369,6 +369,41 @@ apply_phpunit_component_prepare_profile() {
     esac
 }
 
+component_needs_composer_autoload_prepare() {
+    [ -f "${PLUGIN_PATH}/composer.json" ] || return 1
+    [ ! -f "${PLUGIN_PATH}/vendor/autoload.php" ] || return 1
+
+    local settings_json="${HOMEBOY_SETTINGS_JSON:-}"
+    [ -n "$settings_json" ] || settings_json="{}"
+    local mode
+    mode=$(printf '%s' "$settings_json" | jq -r '.wp_codebox_composer_prepare // "auto"' 2>/dev/null || printf 'auto')
+
+    case "$mode" in
+        0|false|off|skip|disabled)
+            return 1
+            ;;
+        1|true|on|auto|enabled)
+            return 0
+            ;;
+        *)
+            echo "Error: wp_codebox_composer_prepare must be auto, true, or false (got '$mode')." >&2
+            FAILED_STEP="WP Codebox Composer prepare setup"
+            exit 1
+            ;;
+    esac
+}
+
+append_phpunit_component_composer_prepare_step() {
+    component_needs_composer_autoload_prepare || return 0
+
+    WP_CODEBOX_PREPARE_STEPS_JSON=$(jq -nc \
+        --argjson steps "$WP_CODEBOX_PREPARE_STEPS_JSON" \
+        '$steps + [{
+            command: "composer",
+            args: ["install", "--no-interaction", "--no-progress", "--prefer-dist"]
+        }]')
+}
+
 phpunit_prepare_step_cwd() {
     local cwd_ref="${1:-}"
     local cwd_host
@@ -485,6 +520,7 @@ run_phpunit_prepare_steps() {
 }
 
 compile_phpunit_prepare_steps
+append_phpunit_component_composer_prepare_step
 apply_phpunit_component_prepare_profile
 
 detect_phpunit_project_bootstrap() {
