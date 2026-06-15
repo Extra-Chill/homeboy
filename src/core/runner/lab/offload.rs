@@ -869,8 +869,13 @@ fn run_lab_offload_inner(
                         .build(),
                 );
                 if let Some(job_id) = health.job_id.as_deref() {
+                    if let Some(run_id) = agent_task_run_id.as_deref() {
+                        return Ok(in_flight_daemon_disconnect_outcome(
+                            plan, runner_id, job_id, run_id, &reason, &err,
+                        ));
+                    }
                     return Err(in_flight_daemon_disconnect_error(
-                        runner_id, job_id, &reason, &err,
+                        runner_id, job_id, None, &reason, &err,
                     ));
                 }
                 return match selection.source {
@@ -1047,6 +1052,7 @@ fn with_lab_apply_patch_step(
 fn in_flight_daemon_disconnect_error(
     runner_id: &str,
     job_id: &str,
+    run_id: Option<&str>,
     reason: &str,
     err: &Error,
 ) -> Error {
@@ -1057,8 +1063,10 @@ fn in_flight_daemon_disconnect_error(
             err.message
         ),
         serde_json::json!({
+            "status": "followup_required",
             "runner_id": runner_id,
             "job_id": job_id,
+            "durable_run_id": run_id,
             "reason": reason,
             "source": err.details,
         }),
@@ -1074,6 +1082,66 @@ fn in_flight_daemon_disconnect_error(
     ));
     disconnected.retryable = Some(false);
     disconnected
+}
+
+fn in_flight_daemon_disconnect_outcome(
+    plan: HomeboyPlan,
+    runner_id: &str,
+    job_id: &str,
+    run_id: &str,
+    reason: &str,
+    err: &Error,
+) -> LabOffloadOutcome {
+    let plan = with_step(
+        plan,
+        PlanStep::builder("lab.exec.detached", "lab.exec.detached", PlanStepStatus::PartialSuccess)
+            .skip_reason(format!(
+                "controller disconnected after durable run `{run_id}` dispatched to runner job `{job_id}`"
+            ))
+            .build(),
+    );
+    let error = in_flight_daemon_disconnect_error(runner_id, job_id, Some(run_id), reason, err);
+    let details = serde_json::json!({
+        "status": "dispatched_detached",
+        "followup_required": true,
+        "durable_run_id": run_id,
+        "runner_id": runner_id,
+        "job_id": job_id,
+        "reason": reason,
+        "message": error.message,
+        "retrieval_commands": {
+            "status": format!("homeboy agent-task status {run_id}"),
+            "logs": format!("homeboy agent-task logs {run_id}"),
+            "artifacts": format!("homeboy agent-task artifacts {run_id}"),
+            "runner_job_logs": format!("homeboy runner job logs {runner_id} {job_id} --follow")
+        }
+    });
+    let stdout = serde_json::to_string_pretty(&serde_json::json!({
+        "success": true,
+        "data": details,
+    }))
+    .unwrap_or_else(|_| {
+        format!(
+            "Lab offload detached after dispatch. Durable run `{run_id}` continues remotely; inspect with `homeboy agent-task status {run_id}`."
+        )
+    });
+    let mut stderr = format!(
+        "Lab offload detached after dispatch: durable agent-task run `{run_id}` continues remotely on runner `{runner_id}` daemon job `{job_id}`.\n"
+    );
+    stderr.push_str(&format!("Reason: {reason}\n"));
+    stderr.push_str(&format!("Next: homeboy agent-task status {run_id}\n"));
+    stderr.push_str(&format!("Next: homeboy agent-task logs {run_id}\n"));
+    stderr.push_str(&format!("Next: homeboy agent-task artifacts {run_id}\n"));
+    stderr.push_str(&format!(
+        "Runner job: homeboy runner job logs {runner_id} {job_id} --follow\n"
+    ));
+
+    LabOffloadOutcome::Offloaded {
+        plan,
+        stdout: format!("{stdout}\n"),
+        stderr,
+        exit_code: 0,
+    }
 }
 
 fn automatic_capability_fallback(
@@ -1387,6 +1455,7 @@ mod tests {
         let err = in_flight_daemon_disconnect_error(
             "homeboy-lab",
             "job-123",
+            None,
             "runner daemon health check failed",
             &source,
         );
@@ -1395,6 +1464,7 @@ mod tests {
         assert_eq!(err.retryable, Some(false));
         assert_eq!(err.details["runner_id"], "homeboy-lab");
         assert_eq!(err.details["job_id"], "job-123");
+        assert_eq!(err.details["status"], "followup_required");
         assert!(err.message.contains("still in flight"));
         assert!(err.hints.iter().any(|hint| hint
             .message
@@ -1403,6 +1473,57 @@ mod tests {
             .hints
             .iter()
             .any(|hint| hint.message.contains("homeboy runner exec homeboy-lab")));
+    }
+
+    #[test]
+    fn in_flight_daemon_disconnect_outcome_marks_durable_run_detached() {
+        let source = Error::new(
+            ErrorCode::InternalUnexpected,
+            "query runner daemon: error sending request for url (http://127.0.0.1:63203/jobs/job-123)",
+            serde_json::json!({
+                "runner_id": "homeboy-lab",
+                "job_id": "job-123",
+            }),
+        );
+
+        let outcome = in_flight_daemon_disconnect_outcome(
+            base_lab_plan(Some(&portable_lab_command("agent-task cook"))),
+            "homeboy-lab",
+            "job-123",
+            "run-123",
+            "runner daemon health check failed",
+            &source,
+        );
+
+        let LabOffloadOutcome::Offloaded {
+            plan,
+            stdout,
+            stderr,
+            exit_code,
+        } = outcome
+        else {
+            panic!("expected detached offloaded outcome");
+        };
+
+        assert_eq!(exit_code, 0);
+        let json: serde_json::Value = serde_json::from_str(&stdout).expect("json stdout");
+        assert_eq!(json["success"], serde_json::json!(true));
+        assert_eq!(json["data"]["status"], "dispatched_detached");
+        assert_eq!(json["data"]["followup_required"], true);
+        assert_eq!(json["data"]["durable_run_id"], "run-123");
+        assert_eq!(json["data"]["runner_id"], "homeboy-lab");
+        assert_eq!(json["data"]["job_id"], "job-123");
+        assert_eq!(
+            json["data"]["retrieval_commands"]["status"],
+            "homeboy agent-task status run-123"
+        );
+        assert!(stderr.contains("durable agent-task run `run-123` continues remotely"));
+        assert!(stderr.contains("homeboy agent-task logs run-123"));
+        assert!(plan
+            .steps
+            .iter()
+            .any(|step| step.id == "lab.exec.detached"
+                && step.status == PlanStepStatus::PartialSuccess));
     }
 
     fn reverse_status(runner_id: &str) -> RunnerStatusReport {
