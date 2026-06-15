@@ -1483,7 +1483,8 @@ fn write_preview_response(
     let body = base64::engine::general_purpose::STANDARD
         .decode(response.body_base64.as_bytes())
         .map_err(|e| Error::internal_json(e.to_string(), Some(response.request_id.clone())))?;
-    let headers = response.headers.into_iter().collect::<Vec<_>>();
+    let mut headers = response.headers;
+    push_header_if_missing(&mut headers, "content-length", &body.len().to_string());
     write_status_and_headers(
         stream,
         response.status,
@@ -1860,10 +1861,15 @@ fn write_response(
     headers: &[(&String, String)],
     body: &[u8],
 ) -> Result<()> {
-    let owned_headers = headers
+    let mut owned_headers = headers
         .iter()
         .map(|(name, value)| ((*name).clone(), value.clone()))
         .collect::<Vec<_>>();
+    push_header_if_missing(
+        &mut owned_headers,
+        "content-length",
+        &body.len().to_string(),
+    );
     write_status_and_headers(stream, status, reason, &owned_headers)?;
     stream
         .write_all(body)
@@ -1917,6 +1923,8 @@ fn push_header_if_missing(headers: &mut Vec<(String, String)>, name: &str, value
 
 fn reason_for_status(status: u16) -> &'static str {
     match status {
+        204 => "No Content",
+        302 => "Found",
         404 => "Not Found",
         410 => "Gone",
         502 => "Bad Gateway",
