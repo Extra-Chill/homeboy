@@ -125,6 +125,56 @@ pub(super) fn remap_agent_task_plan_in_args(
     Ok(out)
 }
 
+pub(super) fn inline_agent_task_prompt_files_in_args(
+    args: &[String],
+    source_path: &Path,
+) -> Result<Vec<String>> {
+    let mut out = Vec::with_capacity(args.len());
+    let mut iter = args.iter().peekable();
+    let mut passthrough = false;
+    while let Some(arg) = iter.next() {
+        if passthrough {
+            out.push(arg.clone());
+            continue;
+        }
+        if arg == "--" {
+            passthrough = true;
+            out.push(arg.clone());
+            continue;
+        }
+        if matches!(arg.as_str(), "--prompt" | "--task" | "--tasks") {
+            out.push(arg.clone());
+            if let Some(spec) = iter.next() {
+                out.push(read_agent_task_text_spec_to_inline(spec, source_path, arg)?);
+            }
+            continue;
+        }
+        if let Some(spec) = arg.strip_prefix("--prompt=") {
+            out.push(format!(
+                "--prompt={}",
+                read_agent_task_text_spec_to_inline(spec, source_path, "--prompt")?
+            ));
+            continue;
+        }
+        if let Some(spec) = arg.strip_prefix("--task=") {
+            out.push(format!(
+                "--task={}",
+                read_agent_task_text_spec_to_inline(spec, source_path, "--task")?
+            ));
+            continue;
+        }
+        if let Some(spec) = arg.strip_prefix("--tasks=") {
+            out.push(format!(
+                "--tasks={}",
+                read_agent_task_text_spec_to_inline(spec, source_path, "--tasks")?
+            ));
+            continue;
+        }
+        out.push(arg.clone());
+    }
+    Ok(out)
+}
+
 pub(super) fn remap_path_settings_in_args(
     args: &[String],
     mappings: &[LabPathRemap],
@@ -264,6 +314,65 @@ fn read_agent_task_plan_spec_to_string(spec: &str, source_path: &Path) -> Result
     Err(Error::validation_invalid_argument(
         "plan",
         "Lab offload cannot materialize agent-task run-plan @file because the controller-side file does not exist",
+        Some(spec.to_string()),
+        Some(tried),
+    ))
+}
+
+fn read_agent_task_text_spec_to_inline(
+    spec: &str,
+    source_path: &Path,
+    field: &str,
+) -> Result<String> {
+    if spec == "-" || !spec.starts_with('@') {
+        return Ok(spec.to_string());
+    }
+
+    let raw_path = spec.trim_start_matches('@');
+    if raw_path.trim().is_empty() {
+        return Err(Error::validation_invalid_argument(
+            field.trim_start_matches("--"),
+            format!("Lab offload cannot materialize empty agent-task {field} file spec '@'"),
+            Some(spec.to_string()),
+            Some(vec![
+                "Pass inline text, '-', or @path/to/prompt.md.".to_string()
+            ]),
+        ));
+    }
+    if raw_path.contains("://") {
+        return Err(Error::validation_invalid_argument(
+            field.trim_start_matches("--"),
+            format!("Lab offload only supports local filesystem {field} @file specs"),
+            Some(spec.to_string()),
+            Some(vec![
+                "Use an absolute path, a path relative to the current directory, or a path relative to --cwd/--path.".to_string(),
+                "Remote URLs must be downloaded or generated locally before Lab offload.".to_string(),
+            ]),
+        ));
+    }
+
+    let expanded = PathBuf::from(shellexpand::tilde(raw_path).to_string());
+    let mut candidates = vec![expanded.clone()];
+    if expanded.is_relative() {
+        candidates.push(source_path.join(&expanded));
+    }
+
+    let mut tried = Vec::new();
+    for candidate in candidates {
+        tried.push(candidate.display().to_string());
+        if candidate.is_file() {
+            return fs::read_to_string(&candidate).map_err(|err| {
+                Error::internal_io(
+                    err.to_string(),
+                    Some(format!("read agent-task {field} {}", candidate.display())),
+                )
+            });
+        }
+    }
+
+    Err(Error::validation_invalid_argument(
+        field.trim_start_matches("--"),
+        format!("Lab offload cannot materialize agent-task {field} @file because the controller-side file does not exist"),
         Some(spec.to_string()),
         Some(tried),
     ))
@@ -831,6 +940,66 @@ mod tests {
 
         assert_eq!(err.details["field"], "plan");
         assert!(err.message.contains("local filesystem @file"));
+    }
+
+    #[test]
+    fn inline_agent_task_prompt_files_reads_absolute_prompt_file() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let prompt = temp.path().join("prompt.md");
+        std::fs::write(&prompt, "Cook this repo\nwith care").expect("write prompt");
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--prompt".to_string(),
+            format!("@{}", prompt.display()),
+            "--backend=codebox".to_string(),
+        ];
+
+        let out =
+            inline_agent_task_prompt_files_in_args(&args, temp.path()).expect("inline prompt");
+
+        assert_eq!(out[4], "Cook this repo\nwith care");
+        assert!(out.iter().all(|arg| !arg.starts_with('@')));
+        assert_eq!(out[5], "--backend=codebox");
+    }
+
+    #[test]
+    fn inline_agent_task_prompt_files_reads_relative_task_and_tasks_files() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(temp.path().join("task.md"), "Fix issue 1").expect("write task");
+        std::fs::write(temp.path().join("tasks.json"), "[\"Fix issue 2\"]").expect("write tasks");
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--task=@task.md".to_string(),
+            "--tasks".to_string(),
+            "@tasks.json".to_string(),
+        ];
+
+        let out = inline_agent_task_prompt_files_in_args(&args, temp.path()).expect("inline files");
+
+        assert_eq!(out[3], "--task=Fix issue 1");
+        assert_eq!(out[5], "[\"Fix issue 2\"]");
+    }
+
+    #[test]
+    fn inline_agent_task_prompt_files_rejects_missing_file() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--prompt".to_string(),
+            "@missing.md".to_string(),
+        ];
+
+        let err = inline_agent_task_prompt_files_in_args(&args, temp.path())
+            .expect_err("missing prompt must fail locally");
+
+        assert_eq!(err.details["field"], "prompt");
+        assert!(err.message.contains("controller-side file does not exist"));
     }
 
     #[test]

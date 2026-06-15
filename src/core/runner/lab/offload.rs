@@ -27,8 +27,9 @@ use crate::core::{Error, ErrorCode, Result};
 use super::super::daemon_health::runner_daemon_health_failure;
 use super::super::lab_apply::apply_lab_offload_patch;
 use super::super::lab_args::{
-    lab_offload_source_path, remap_agent_task_plan_in_args, remap_path_settings_in_args,
-    remap_provider_config_in_args, rewrite_lab_offload_args, LabPathRemap,
+    inline_agent_task_prompt_files_in_args, lab_offload_source_path, remap_agent_task_plan_in_args,
+    remap_path_settings_in_args, remap_provider_config_in_args, rewrite_lab_offload_args,
+    LabPathRemap,
 };
 use super::super::lab_capabilities::lab_runner_capability_contract;
 use super::super::lab_command::lab_offload_command_prefix;
@@ -730,6 +731,8 @@ fn run_lab_offload_inner(
     let remapped_args = remap_provider_config_in_args(&remapped_args, &path_remaps);
     let remapped_args =
         remap_agent_task_plan_in_args(&remapped_args, &path_remaps, Path::new(&synced.local_path))?;
+    let remapped_args =
+        inline_agent_task_prompt_files_in_args(&remapped_args, Path::new(&synced.local_path))?;
     let remapped_args = remap_path_settings_in_args(&remapped_args, &path_remaps);
     let (remapped_args, synced_remapped_tasks) =
         materialize_inline_agent_task_tasks_arg(runner_id, &remapped_args)?;
