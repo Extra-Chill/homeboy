@@ -653,6 +653,84 @@ mod tests {
     }
 
     #[test]
+    fn materializes_inline_agent_task_cook_tasks_json() {
+        let prompt = "Cook sensitive implementation details";
+        let tasks = serde_json::json!([{ "prompt": prompt }]).to_string();
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--tasks".to_string(),
+            tasks.clone(),
+            "--concurrency".to_string(),
+            "4".to_string(),
+        ];
+
+        let (rewritten, entry) = materialize_inline_agent_task_tasks_arg_with(&args, |spec| {
+            assert_eq!(spec, tasks);
+            Ok(Some(fake_synced_file(
+                "@/remote/input/agent-task-tasks.json",
+                "agent_task_tasks_remapped",
+            )))
+        })
+        .expect("rewrite tasks arg");
+
+        assert_eq!(
+            rewritten,
+            vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                "--tasks".to_string(),
+                "@/remote/input/agent-task-tasks.json".to_string(),
+                "--concurrency".to_string(),
+                "4".to_string(),
+            ]
+        );
+        assert!(!rewritten.join(" ").contains(prompt));
+        assert_eq!(entry.expect("mapping entry").remote_path(), "/remote/input");
+    }
+
+    #[test]
+    fn leaves_agent_task_tasks_file_specs_in_argv() {
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "dispatch".to_string(),
+            "--tasks=@tasks.json".to_string(),
+        ];
+
+        let (rewritten, entry) = materialize_inline_agent_task_tasks_arg_with(&args, |spec| {
+            assert_eq!(spec, "@tasks.json");
+            Ok(None)
+        })
+        .expect("rewrite tasks arg");
+
+        assert_eq!(rewritten, args);
+        assert!(entry.is_none());
+    }
+
+    fn fake_synced_file(remote_spec: &str, role: &str) -> (String, LabWorkspaceMappingEntry) {
+        let synced = crate::core::runner::RunnerWorkspaceSyncOutput {
+            command: "runner.workspace.sync",
+            runner_id: "lab".to_string(),
+            local_path: "/local/input".to_string(),
+            remote_path: "/remote/input".to_string(),
+            sync_mode: RunnerWorkspaceSyncMode::Snapshot,
+            snapshot_identity: "snapshot".to_string(),
+            files: 1,
+            bytes: 42,
+            excludes: Vec::new(),
+            includes: Vec::new(),
+            workspace_cleanliness: "clean".to_string(),
+        };
+        (
+            remote_spec.to_string(),
+            workspace_mapping_entry(role, &synced),
+        )
+    }
+
+    #[test]
     fn pre_dispatch_failure_message_summarizes_prepared_dependency_staging_failure() {
         let output = "ENOENT: no such file or directory, lstat '/home/chubes/Developer/.tmp/homeboy-artifacts/prepared-plugins/agents-api'";
 
