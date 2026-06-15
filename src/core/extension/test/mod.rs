@@ -36,7 +36,8 @@ pub use baseline::{
 pub use drift::{ChangeType, DriftReport, DriftedTest, ProductionChange};
 pub use parsing::{
     build_test_summary, parse_coverage_file, parse_failures_file, parse_test_results_file,
-    parse_test_results_text, parse_test_results_text_with_spec, CoverageOutput, TestSummaryOutput,
+    parse_test_results_file_with_spec, parse_test_results_text, parse_test_results_text_with_spec,
+    CoverageOutput, TestSummaryOutput,
 };
 pub use report::TestCommandOutput;
 pub use run::{
