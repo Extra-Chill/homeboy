@@ -45,6 +45,12 @@ pub enum AgentTaskCommand {
     Submit(SubmitArgs),
     /// Read durable agent-task run status.
     Status(StatusArgs),
+    /// List durable agent-task runs, newest first.
+    List,
+    /// List queued and running durable agent-task runs, newest first.
+    Active,
+    /// Show the latest durable agent-task run.
+    Latest,
     /// Read durable agent-task run scheduler events.
     Logs(StatusArgs),
     /// List artifacts and evidence refs recorded for a completed run.
@@ -587,6 +593,9 @@ pub fn run(args: AgentTaskArgs, global: &GlobalArgs) -> CmdResult<Value> {
         AgentTaskCommand::RunNext => run_next(),
         AgentTaskCommand::Submit(submit_args) => submit(submit_args),
         AgentTaskCommand::Status(status_args) => status(status_args),
+        AgentTaskCommand::List => list_runs(agent_task_service::AgentTaskDiscoveryFilter::All),
+        AgentTaskCommand::Active => list_runs(agent_task_service::AgentTaskDiscoveryFilter::Active),
+        AgentTaskCommand::Latest => list_runs(agent_task_service::AgentTaskDiscoveryFilter::Latest),
         AgentTaskCommand::Logs(status_args) => logs(status_args),
         AgentTaskCommand::Artifacts(status_args) => artifacts(status_args),
         AgentTaskCommand::Cancel(cancel_args) => cancel(cancel_args),
@@ -1048,6 +1057,11 @@ fn submit(args: SubmitArgs) -> CmdResult<Value> {
 fn status(args: StatusArgs) -> CmdResult<Value> {
     let record = agent_task_service::status(&args.run_id)?;
     Ok((serde_json::to_value(record).unwrap_or(Value::Null), 0))
+}
+
+fn list_runs(filter: agent_task_service::AgentTaskDiscoveryFilter) -> CmdResult<Value> {
+    let report = agent_task_service::discover_runs(filter)?;
+    Ok((serde_json::to_value(report).unwrap_or(Value::Null), 0))
 }
 
 fn logs(args: StatusArgs) -> CmdResult<Value> {

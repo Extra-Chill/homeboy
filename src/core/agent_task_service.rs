@@ -1,7 +1,7 @@
 use serde_json::Value;
 use std::path::PathBuf;
 
-use crate::core::agent_task::{AgentTaskRequest, AgentTaskWorkspaceMode};
+use crate::core::agent_task::{AgentTaskRequest, AgentTaskSourceRef, AgentTaskWorkspaceMode};
 use crate::core::agent_task_cook_loop::{
     evaluate_cook_loop, AgentTaskCookLoopOptions, AgentTaskCookLoopReport, AgentTaskCookLoopStatus,
 };
@@ -17,7 +17,7 @@ use crate::core::agent_task_promotion::{
     promote, AgentTaskPromotionOptions, AgentTaskPromotionReport, AgentTaskPromotionStatus,
 };
 use crate::core::agent_task_scheduler::{
-    AgentTaskAggregate, AgentTaskExecutorAdapter, AgentTaskPlan, AgentTaskScheduler,
+    AgentTaskAggregate, AgentTaskExecutorAdapter, AgentTaskPlan, AgentTaskScheduler, AgentTaskState,
 };
 use crate::core::{config, Error, Result};
 
@@ -25,6 +25,61 @@ use crate::core::{config, Error, Result};
 pub struct AgentTaskRunResult<T> {
     pub value: T,
     pub exit_code: i32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentTaskDiscoveryFilter {
+    All,
+    Active,
+    Latest,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AgentTaskDiscoveryReport {
+    pub schema: &'static str,
+    pub filter: &'static str,
+    pub count: usize,
+    pub runs: Vec<AgentTaskDiscoveryRun>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AgentTaskDiscoveryRun {
+    pub run_id: String,
+    pub state: agent_task_lifecycle::AgentTaskRunState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_url: Option<String>,
+    pub counts: AgentTaskDiscoveryCounts,
+    pub submitted_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runner_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runner_job_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_run_id: Option<String>,
+    pub commands: AgentTaskDiscoveryCommands,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct AgentTaskDiscoveryCounts {
+    pub queued: usize,
+    pub running: usize,
+    pub completed: usize,
+    pub failed: usize,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AgentTaskDiscoveryCommands {
+    pub status: String,
+    pub logs: String,
+    pub artifacts: String,
+    pub review: String,
+    pub promote: String,
 }
 
 #[derive(Debug, Clone)]
@@ -85,6 +140,111 @@ pub fn read_plan(spec: &str) -> Result<AgentTaskPlan> {
     })?;
     normalize_plan_workspaces(&mut plan)?;
     Ok(plan)
+}
+
+pub fn discover_runs(filter: AgentTaskDiscoveryFilter) -> Result<AgentTaskDiscoveryReport> {
+    let mut records = agent_task_lifecycle::list_records()?;
+    if filter == AgentTaskDiscoveryFilter::Active {
+        records.retain(|record| {
+            matches!(
+                record.state,
+                agent_task_lifecycle::AgentTaskRunState::Queued
+                    | agent_task_lifecycle::AgentTaskRunState::Running
+            )
+        });
+    }
+    if filter == AgentTaskDiscoveryFilter::Latest {
+        records.truncate(1);
+    }
+
+    let runs: Vec<_> = records.into_iter().map(discovery_run).collect();
+    Ok(AgentTaskDiscoveryReport {
+        schema: "homeboy/agent-task-discovery/v1",
+        filter: match filter {
+            AgentTaskDiscoveryFilter::All => "all",
+            AgentTaskDiscoveryFilter::Active => "active",
+            AgentTaskDiscoveryFilter::Latest => "latest",
+        },
+        count: runs.len(),
+        runs,
+    })
+}
+
+fn discovery_run(record: AgentTaskRunRecord) -> AgentTaskDiscoveryRun {
+    let plan = agent_task_lifecycle::load_plan(&record.run_id).ok();
+    let first_task = plan.as_ref().and_then(|plan| plan.tasks.first());
+    let repo = plan
+        .as_ref()
+        .and_then(|plan| plan.group_key.clone())
+        .or_else(|| first_task.and_then(|task| task.group_key.clone()))
+        .or_else(|| first_task.and_then(|task| task.workspace.component_id.clone()))
+        .or_else(|| first_task.and_then(|task| task.workspace.slug.clone()));
+    let workspace = first_task
+        .and_then(|task| task.workspace.root.clone())
+        .or_else(|| metadata_string(&record.metadata, "remote_workspace"));
+    let task_url = first_task
+        .and_then(|task| task.workspace.task_url.clone())
+        .or_else(|| first_task.and_then(task_source_url));
+    let aggregate_path = record.aggregate_path.clone();
+    let run_id = record.run_id.clone();
+
+    AgentTaskDiscoveryRun {
+        run_id: run_id.clone(),
+        state: record.state,
+        repo,
+        workspace,
+        task_url,
+        counts: discovery_counts(&record.tasks),
+        submitted_at: record.submitted_at,
+        updated_at: record.updated_at,
+        runner_id: metadata_string(&record.metadata, "runner_id"),
+        runner_job_id: metadata_string(&record.metadata, "runner_job_id")
+            .or_else(|| metadata_string(&record.metadata, "job_id")),
+        remote_run_id: metadata_string(&record.metadata, "remote_run_id"),
+        commands: AgentTaskDiscoveryCommands {
+            status: format!("homeboy agent-task status {run_id}"),
+            logs: format!("homeboy agent-task logs {run_id}"),
+            artifacts: format!("homeboy agent-task artifacts {run_id}"),
+            review: format!("homeboy agent-task review {run_id}"),
+            promote: aggregate_path
+                .map(|path| format!("homeboy agent-task promote {path} --to-worktree <handle>"))
+                .unwrap_or_else(|| format!("homeboy agent-task review {run_id}")),
+        },
+    }
+}
+
+fn discovery_counts(tasks: &[agent_task_lifecycle::AgentTaskRunTask]) -> AgentTaskDiscoveryCounts {
+    let mut counts = AgentTaskDiscoveryCounts::default();
+    for task in tasks {
+        match task.state {
+            AgentTaskState::Queued | AgentTaskState::Blocked | AgentTaskState::Skipped => {
+                counts.queued += 1;
+            }
+            AgentTaskState::Running => counts.running += 1,
+            AgentTaskState::Succeeded | AgentTaskState::Cancelled => counts.completed += 1,
+            AgentTaskState::Failed | AgentTaskState::TimedOut => counts.failed += 1,
+        }
+    }
+    counts
+}
+
+fn task_source_url(task: &AgentTaskRequest) -> Option<String> {
+    task.source_refs
+        .iter()
+        .find(|source| source.kind == "task")
+        .or_else(|| task.source_refs.first())
+        .map(source_uri)
+}
+
+fn source_uri(source: &AgentTaskSourceRef) -> String {
+    source.uri.clone()
+}
+
+fn metadata_string(metadata: &Value, key: &str) -> Option<String> {
+    metadata
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::to_string)
 }
 
 pub fn run_cook_loop<E>(
@@ -627,8 +787,8 @@ mod tests {
     use super::*;
     use crate::core::agent_task::{
         AgentTaskExecutor, AgentTaskLimits, AgentTaskOutcome, AgentTaskOutcomeStatus,
-        AgentTaskPolicy, AgentTaskRequest, AgentTaskWorkspace, AGENT_TASK_OUTCOME_SCHEMA,
-        AGENT_TASK_REQUEST_SCHEMA,
+        AgentTaskPolicy, AgentTaskRequest, AgentTaskSourceRef, AgentTaskWorkspace,
+        AGENT_TASK_OUTCOME_SCHEMA, AGENT_TASK_REQUEST_SCHEMA,
     };
     use crate::core::agent_task_lifecycle::{status as lifecycle_status, AgentTaskRunState};
     use crate::core::agent_task_scheduler::{AgentTaskExecutionContext, AgentTaskState};
@@ -670,6 +830,89 @@ mod tests {
             AgentTaskWorkspaceMode::Existing
         );
         assert!(plan.tasks[0].workspace.materialization.is_null());
+    }
+
+    #[test]
+    fn discovery_lists_durable_runs_with_operator_commands() {
+        with_isolated_home(|_| {
+            let plan = discovery_plan();
+            agent_task_lifecycle::submit_plan(&plan, Some("run-discovery-list"))
+                .expect("submitted");
+
+            let report = discover_runs(AgentTaskDiscoveryFilter::All).expect("listed");
+            let run = report.runs.first().expect("run");
+
+            assert_eq!(report.schema, "homeboy/agent-task-discovery/v1");
+            assert_eq!(report.filter, "all");
+            assert_eq!(report.count, 1);
+            assert_eq!(run.run_id, "run-discovery-list");
+            assert_eq!(run.state, AgentTaskRunState::Queued);
+            assert_eq!(run.repo.as_deref(), Some("homeboy"));
+            assert_eq!(run.workspace.as_deref(), Some("/tmp/homeboy"));
+            assert_eq!(
+                run.task_url.as_deref(),
+                Some("https://github.com/Extra-Chill/homeboy/issues/4386")
+            );
+            assert_eq!(run.counts.queued, 1);
+            assert_eq!(
+                run.commands.status,
+                "homeboy agent-task status run-discovery-list"
+            );
+            assert_eq!(
+                run.commands.logs,
+                "homeboy agent-task logs run-discovery-list"
+            );
+            assert_eq!(
+                run.commands.artifacts,
+                "homeboy agent-task artifacts run-discovery-list"
+            );
+            assert_eq!(
+                run.commands.review,
+                "homeboy agent-task review run-discovery-list"
+            );
+        });
+    }
+
+    #[test]
+    fn discovery_active_filters_to_queued_and_running_runs() {
+        with_isolated_home(|_| {
+            agent_task_lifecycle::submit_plan(&discovery_plan(), Some("run-active-queued"))
+                .expect("queued submitted");
+            agent_task_lifecycle::submit_plan(&discovery_plan(), Some("run-active-running"))
+                .expect("running submitted");
+            agent_task_lifecycle::mark_running("run-active-running").expect("marked running");
+            run_loaded_plan(
+                discovery_plan(),
+                Some("run-active-complete"),
+                SucceedingExecutor,
+            )
+            .expect("completed");
+
+            let report = discover_runs(AgentTaskDiscoveryFilter::Active).expect("active listed");
+            let run_ids: Vec<_> = report.runs.iter().map(|run| run.run_id.as_str()).collect();
+
+            assert_eq!(report.filter, "active");
+            assert_eq!(report.count, 2);
+            assert!(run_ids.contains(&"run-active-queued"));
+            assert!(run_ids.contains(&"run-active-running"));
+            assert!(!run_ids.contains(&"run-active-complete"));
+        });
+    }
+
+    #[test]
+    fn discovery_latest_returns_only_newest_run() {
+        with_isolated_home(|_| {
+            agent_task_lifecycle::submit_plan(&discovery_plan(), Some("run-latest-a"))
+                .expect("first submitted");
+            agent_task_lifecycle::submit_plan(&discovery_plan(), Some("run-latest-z"))
+                .expect("second submitted");
+
+            let report = discover_runs(AgentTaskDiscoveryFilter::Latest).expect("latest listed");
+
+            assert_eq!(report.filter, "latest");
+            assert_eq!(report.count, 1);
+            assert_eq!(report.runs[0].run_id, "run-latest-z");
+        });
     }
 
     struct SucceedingExecutor;
@@ -723,5 +966,19 @@ mod tests {
                 metadata: Value::Null,
             }],
         )
+    }
+
+    fn discovery_plan() -> AgentTaskPlan {
+        let mut plan = test_plan();
+        plan.group_key = Some("homeboy".to_string());
+        plan.tasks[0].group_key = Some("homeboy".to_string());
+        plan.tasks[0].source_refs = vec![AgentTaskSourceRef {
+            kind: "task".to_string(),
+            uri: "https://github.com/Extra-Chill/homeboy/issues/4386".to_string(),
+            revision: None,
+        }];
+        plan.tasks[0].workspace.root = Some("/tmp/homeboy".to_string());
+        plan.tasks[0].workspace.slug = Some("homeboy".to_string());
+        plan
     }
 }

@@ -810,6 +810,23 @@ pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
     Ok(record)
 }
 
+pub fn list_records() -> Result<Vec<AgentTaskRunRecord>> {
+    let mut records = Vec::new();
+    for record in store::read_records()? {
+        records.push(status(&record.run_id)?);
+    }
+    records.sort_by(|left, right| {
+        right
+            .updated_at
+            .as_ref()
+            .unwrap_or(&right.submitted_at)
+            .cmp(left.updated_at.as_ref().unwrap_or(&left.submitted_at))
+            .then_with(|| right.submitted_at.cmp(&left.submitted_at))
+            .then_with(|| right.run_id.cmp(&left.run_id))
+    });
+    Ok(records)
+}
+
 pub fn run_record_exists(run_id: &str) -> Result<bool> {
     store::record_exists(run_id)
 }

@@ -161,10 +161,10 @@ pub mod gate {
 /// Durable run lifecycle: submit, run-record state, log/artifact loaders.
 pub mod lifecycle {
     pub use super::super::agent_task_lifecycle::{
-        aggregate_source, artifacts, cancel, cancel_run, claim_next_queued_run, load_plan, logs,
-        mark_resuming, mark_running, record_completed_run, record_pre_dispatch_failure,
-        record_remote_dispatch_failure, record_run_aggregate, retry, run_record_exists, status,
-        submit_plan, AgentTaskArtifactRef, AgentTaskPreDispatchFailure,
+        aggregate_source, artifacts, cancel, cancel_run, claim_next_queued_run, list_records,
+        load_plan, logs, mark_resuming, mark_running, record_completed_run,
+        record_pre_dispatch_failure, record_remote_dispatch_failure, record_run_aggregate, retry,
+        run_record_exists, status, submit_plan, AgentTaskArtifactRef, AgentTaskPreDispatchFailure,
         AgentTaskRemoteDispatchFailure, AgentTaskRunArtifacts, AgentTaskRunLog,
         AgentTaskRunProviderHandle, AgentTaskRunRecord, AgentTaskRunState, AgentTaskRunTask,
     };
@@ -246,9 +246,11 @@ pub mod secrets {
 /// High-level service entry points combining lifecycle and scheduling.
 pub mod service {
     pub use super::super::agent_task_service::{
-        aggregate_exit_code, artifacts, cancel, logs, normalize_plan_workspaces, promotion_source,
-        read_plan, resume, retry, run_cook_loop, run_loaded_plan, run_next, run_submitted, status,
-        submit_plan_spec, AgentTaskLoopAttemptReport, AgentTaskLoopReport,
+        aggregate_exit_code, artifacts, cancel, discover_runs, logs, normalize_plan_workspaces,
+        promotion_source, read_plan, resume, retry, run_cook_loop, run_loaded_plan, run_next,
+        run_submitted, status, submit_plan_spec, AgentTaskDiscoveryCommands,
+        AgentTaskDiscoveryCounts, AgentTaskDiscoveryFilter, AgentTaskDiscoveryReport,
+        AgentTaskDiscoveryRun, AgentTaskLoopAttemptReport, AgentTaskLoopReport,
         AgentTaskLoopServiceOptions, AgentTaskRetryServiceResult, AgentTaskRunResult,
     };
 }
