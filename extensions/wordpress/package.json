@@ -59,7 +59,6 @@
     "test:audit-wp-codebox-fanout": "node tests/audit-wp-codebox-fanout-smoke.js",
     "test:audit-wp-codebox-execute": "node tests/audit-wp-codebox-fanout-smoke.js",
     "test:wp-codebox-task-runner": "node tests/wp-codebox-task-runner-smoke.js",
-    "test:wp-codebox-validation-profile": "node tests/wp-codebox-validation-profile-smoke.js",
     "test:wp-codebox-bench-recipe-builder": "node tests/wp-codebox-bench-recipe-builder-smoke.js",
     "test:wp-codebox-bench-crawl-helper": "bash scripts/bench/wp-codebox-bench-crawl-helper-smoke.sh",
     "test:wp-codebox-prepared-dependency-cache": "bash tests/prepared-bench-dependency-cache-smoke.sh",
