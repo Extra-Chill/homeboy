@@ -50,7 +50,7 @@ pub struct TestRunWorkflowResult {
     pub test_scope: Option<TestScopeOutput>,
     pub summary: Option<TestSummaryOutput>,
     /// Tail of the runner's stdout/stderr, surfaced when tests fail so users
-    /// can see PHPUnit/cargo output (bootstrap errors, stack traces) without
+    /// can see runner output (bootstrap errors, stack traces) without
     /// having to re-run with a different flag. (#1143)
     pub raw_output: Option<RawTestOutput>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -59,7 +59,7 @@ pub struct TestRunWorkflowResult {
 
 /// Captured tail of a test runner's stdout/stderr.
 ///
-/// Surfaced on failure so the actual tool output (PHPUnit, cargo test, etc.)
+/// Surfaced on failure so the actual tool output
 /// is visible in the structured JSON response. The tail is bounded by
 /// `RAW_OUTPUT_TAIL_LINES` to keep JSON payloads small while still showing
 /// the last error / stack frame, which is almost always the relevant part
@@ -418,7 +418,7 @@ pub fn run_main_test_workflow(
     };
 
     // When the run failed, surface a tail of the runner's stdout/stderr so the
-    // user can see the actual PHPUnit / cargo / etc. output — including
+    // user can see the actual runner output — including
     // bootstrap errors like database connection failures that produce zero
     // parsed test results. Without this, `status: failed, exit_code: 1, 0
     // tests ran` leaves the user guessing. (#1143)
