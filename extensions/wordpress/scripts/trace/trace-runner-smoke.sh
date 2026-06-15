@@ -53,9 +53,47 @@ assert_json_field() {
 }
 
 fixture="$(mktemp -d "${TMPDIR:-/tmp}/homeboy-wordpress-trace.XXXXXX")"
-trap 'rm -rf "$fixture"' EXIT
+if [ "${HOMEBOY_KEEP_SMOKE_FIXTURE:-0}" = "1" ]; then
+    printf 'Keeping smoke fixture: %s\n' "$fixture" >&2
+else
+    trap 'rm -rf "$fixture"' EXIT
+fi
 
 mkdir -p "$fixture/traces" "$fixture/tests/traces" "$fixture/scripts/trace"
+dependency_fixture="$fixture/dependency-plugin"
+stubs_dir="$fixture/stubs"
+composer_log="$fixture/composer.log"
+mkdir -p "$dependency_fixture" "$stubs_dir"
+
+cat >"$dependency_fixture/dependency-plugin.php" <<'PHP'
+<?php
+/*
+Plugin Name: Dependency Plugin
+*/
+PHP
+cat >"$dependency_fixture/composer.json" <<'JSON'
+{"autoload":{"classmap":["includes/"]}}
+JSON
+
+cat >"$stubs_dir/composer" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "${COMPOSER_LOG:?}"
+working_dir="$(pwd)"
+install_requested=0
+for arg in "$@"; do
+    case "$arg" in
+        --working-dir=*) working_dir="${arg#--working-dir=}" ;;
+        install) install_requested=1 ;;
+    esac
+done
+if [ "$install_requested" -eq 1 ]; then
+    cd "$working_dir"
+    mkdir -p vendor
+    printf '<?php // prepared trace autoload\n' > vendor/autoload.php
+fi
+SH
+chmod +x "$stubs_dir/composer"
 
 fake_wp_codebox="$fixture/wp-codebox.cjs"
 fake_wp_codebox_capture="$fixture/wp-codebox-capture.json"
@@ -75,6 +113,13 @@ const codeFile = step.args.find((arg) => arg.startsWith('code-file=')).slice('co
 const wrapper = fs.readFileSync(codeFile, 'utf8');
 const runMount = recipe.inputs.mounts.find((mount) => mount.target === '/homeboy-trace-run');
 const componentMount = recipe.inputs.mounts.find((mount) => mount.target.startsWith('/wordpress/wp-content/plugins/'));
+const dependencyMount = recipe.inputs.mounts.find((mount) => mount.target === '/wordpress/wp-content/plugins/dependency-plugin');
+if (!dependencyMount) {
+  throw new Error('missing prepared dependency plugin mount');
+}
+if (!fs.existsSync(path.join(dependencyMount.source, 'vendor/autoload.php'))) {
+  throw new Error(`dependency Composer autoload was not prepared before trace mount: ${dependencyMount.source}`);
+}
 const resultPath = wrapper.match(/HOMEBOY_TRACE_RESULTS_FILE=([^']+)/)[1].replace('/homeboy-trace-run', runMount.source);
 const artifactDir = wrapper.match(/HOMEBOY_TRACE_ARTIFACT_DIR=([^']+)/)[1].replace('/homeboy-trace-run', runMount.source);
 
@@ -195,6 +240,9 @@ HOMEBOY_TRACE_RESULTS_FILE="$php_results" \
 HOMEBOY_TRACE_ARTIFACT_DIR="$run_dir/artifacts/php" \
 HOMEBOY_RUN_DIR="$run_dir" \
 HOMEBOY_WP_CODEBOX_BIN="$fake_wp_codebox" \
+HOMEBOY_WORDPRESS_DEPENDENCY_PATHS="$dependency_fixture" \
+COMPOSER_LOG="$composer_log" \
+PATH="$stubs_dir:$PATH" \
 FAKE_WP_CODEBOX_CAPTURE="$fake_wp_codebox_capture" \
 bash "$RUNNER"
 
@@ -209,6 +257,7 @@ assert_json_field "$php_results" "has-timeline" "PHP scenario timeline"
 assert_file "$fake_wp_codebox_capture" "WP Codebox recipe capture"
 assert_contains "$(php -r '$json = json_decode(file_get_contents($argv[1]), true); echo $json["recipe"]["workflow"]["steps"][0]["command"] ?? "";' "$fake_wp_codebox_capture")" "wordpress.run-php" "WP Codebox PHP trace command"
 assert_contains "$(php -r '$json = json_decode(file_get_contents($argv[1]), true); echo $json["runMount"]["target"] ?? "";' "$fake_wp_codebox_capture")" "/homeboy-trace-run" "WP Codebox run mount"
+assert_contains "$(cat "$composer_log")" "--no-dev --no-interaction --no-progress --prefer-dist --classmap-authoritative" "trace dependency Composer prepare"
 
 HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
 HOMEBOY_COMPONENT_PATH="$fixture" \
