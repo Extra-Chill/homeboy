@@ -82,6 +82,8 @@ pub struct RunnerSecretEnvReferenceOutput {
     pub env: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secret: Option<String>,
     pub values_redacted: bool,
 }
 
@@ -1197,6 +1199,7 @@ fn secret_env_reference_output(reference: RunnerSecretEnvRef) -> RunnerSecretEnv
     RunnerSecretEnvReferenceOutput {
         env: reference.env,
         file: reference.file,
+        secret: reference.secret,
         values_redacted: true,
     }
 }
@@ -1366,6 +1369,7 @@ mod tests {
                 RunnerSecretEnvReferenceOutput {
                     env: Some("OPENAI_API_KEY".to_string()),
                     file: None,
+                    secret: None,
                     values_redacted: true,
                 },
             )]),
@@ -1387,6 +1391,42 @@ mod tests {
         );
         assert_eq!(
             value["secret_env"]["OPENAI_API_KEY"]["values_redacted"],
+            true
+        );
+        assert!(!value.to_string().contains("dummy-secret"));
+    }
+
+    #[test]
+    fn runner_env_output_reports_secret_store_refs_without_values() {
+        let output = RunnerEnvOutput {
+            command: "runner.env".to_string(),
+            runner_id: "lab".to_string(),
+            source: "runner_job_env".to_string(),
+            values_redacted: false,
+            env: BTreeMap::new(),
+            secret_env: BTreeMap::from([(
+                "HOMEBOY_PREVIEW_TUNNEL_TOKEN".to_string(),
+                RunnerSecretEnvReferenceOutput {
+                    env: None,
+                    file: None,
+                    secret: Some("HOMEBOY_PREVIEW_TUNNEL_TOKEN".to_string()),
+                    values_redacted: true,
+                },
+            )]),
+            diagnostics: RunnerEnvDiagnostics {
+                server_shell_env: "shell".to_string(),
+                runner_job_env: "runner".to_string(),
+            },
+        };
+
+        let value = serde_json::to_value(output).expect("serialize output");
+
+        assert_eq!(
+            value["secret_env"]["HOMEBOY_PREVIEW_TUNNEL_TOKEN"]["secret"],
+            "HOMEBOY_PREVIEW_TUNNEL_TOKEN"
+        );
+        assert_eq!(
+            value["secret_env"]["HOMEBOY_PREVIEW_TUNNEL_TOKEN"]["values_redacted"],
             true
         );
         assert!(!value.to_string().contains("dummy-secret"));

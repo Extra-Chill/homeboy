@@ -1464,7 +1464,7 @@ mod tests {
         assert!(err.message.contains("still in flight"));
         assert!(err.hints.iter().any(|hint| hint
             .message
-            .contains("homeboy runs list --runner homeboy-lab")));
+            .contains("homeboy runner exec homeboy-lab -- homeboy runs list --status running")));
         assert!(err
             .hints
             .iter()
