@@ -10,7 +10,7 @@ use super::parsing::BenchResults;
 #[serde(deny_unknown_fields)]
 pub struct BenchDiagnostic {
     /// Workload-defined diagnostic class used for grouping related failures.
-    #[serde(alias = "kind")]
+    #[serde(alias = "kind", alias = "code")]
     pub class: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
@@ -167,6 +167,21 @@ mod tests {
                 run_index: 0,
             })
         );
+    }
+
+    #[test]
+    fn diagnostic_accepts_code_as_class_alias() {
+        let diagnostic: BenchDiagnostic = serde_json::from_str(
+            r#"{"code":"wordpress.bench.stdout_noise","message":"captured non-JSON stdout"}"#,
+        )
+        .expect("diagnostic with code alias parses");
+
+        assert_eq!(diagnostic.class, "wordpress.bench.stdout_noise");
+        assert_eq!(diagnostic.message.as_deref(), Some("captured non-JSON stdout"));
+
+        let serialized = serde_json::to_value(&diagnostic).expect("diagnostic serializes");
+        assert_eq!(serialized["class"], "wordpress.bench.stdout_noise");
+        assert!(serialized.get("code").is_none());
     }
 
     fn diagnostic(class: &str) -> BenchDiagnostic {
