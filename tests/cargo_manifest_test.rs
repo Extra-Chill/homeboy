@@ -27,9 +27,6 @@ fn manifest_keeps_self_audit_bench_binary_available() {
         .expect("Cargo.toml should declare binaries");
 
     assert!(binaries.iter().any(|binary| {
-        binary
-            .get("name")
-            .and_then(|name| name.as_str())
-            == Some("bench-audit-self")
+        binary.get("name").and_then(|name| name.as_str()) == Some("bench-audit-self")
     }));
 }
