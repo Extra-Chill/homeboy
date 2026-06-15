@@ -11,6 +11,7 @@ pub struct JsonCommandRun {
     pub exit_code: i32,
     pub output_file_result: Option<homeboy::core::Result<Value>>,
     pub human_stdout: Option<String>,
+    pub human_stderr: Option<String>,
 }
 
 impl JsonCommandRun {
@@ -20,6 +21,7 @@ impl JsonCommandRun {
             exit_code,
             output_file_result: None,
             human_stdout: None,
+            human_stderr: None,
         }
     }
 
@@ -42,6 +44,7 @@ impl JsonCommandRun {
                 exit_code,
                 output_file_result: None,
                 human_stdout: None,
+                human_stderr: None,
             },
             raw_stdout,
         )
@@ -65,6 +68,9 @@ impl<'a> OutputService<'a> {
 
     pub fn emit_run(&self, run: JsonCommandRun, mode: CommandOutputFileMode) -> i32 {
         self.write_output_file(&run, mode);
+        if let Some(human_stderr) = run.human_stderr {
+            eprint!("{}", human_stderr);
+        }
         if let Some(human_stdout) = run.human_stdout {
             print!("{}", human_stdout);
         } else {
@@ -178,6 +184,7 @@ pub fn run_json(
                 exit_code,
                 output_file_result,
                 human_stdout: None,
+                human_stderr: None,
             }
         }
         (_, command) => super::json_output::run_command_output(command, global),
@@ -233,6 +240,7 @@ mod tests {
             exit_code: 0,
             output_file_result,
             human_stdout: None,
+            human_stderr: None,
         }
     }
 

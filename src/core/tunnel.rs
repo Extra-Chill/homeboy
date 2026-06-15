@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs::{self, File};
+use std::net::{TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -10,11 +11,13 @@ use std::time::{Duration, Instant};
 use std::os::unix::process::CommandExt;
 
 use crate::core::config::{self, ConfigEntity};
-use crate::core::error::{Error, Result};
+use crate::core::error::{Error, ErrorCode, Result};
 use crate::core::paths;
 use crate::core::process::{pid_is_running, process_group_is_running};
 use crate::core::server;
 use crate::core::{CreateOutput, MergeOutput, RemoveResult};
+
+const RUNNER_LOCAL_SERVICE_SERVER_ID: &str = "__runner_local__";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ServiceTunnel {
@@ -153,7 +156,9 @@ pub struct ServiceTunnelPreviewPolicy {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum ServiceTunnelPreviewPolicyMode {
+    #[default]
     None,
     Always,
     OnFailure,
@@ -167,12 +172,6 @@ impl Default for ServiceTunnelPreviewPolicy {
             mode: ServiceTunnelPreviewPolicyMode::None,
             keep_alive_until: None,
         }
-    }
-}
-
-impl Default for ServiceTunnelPreviewPolicyMode {
-    fn default() -> Self {
-        Self::None
     }
 }
 
@@ -190,6 +189,8 @@ pub struct ServiceTunnelStatus {
     pub process: Option<ServiceTunnelProcessStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub health: Option<ServiceTunnelHealthStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readiness: Option<ServiceTunnelReadinessStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub evidence: Option<ServiceTunnelEvidence>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -240,6 +241,10 @@ pub struct ServiceTunnelRuntimeState {
     pub source_run_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_workflow_id: Option<String>,
+    #[serde(default)]
+    pub readiness_kind: ServiceTunnelReadinessKind,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub readiness_checks: Vec<ServiceTunnelReadinessCheck>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -278,6 +283,49 @@ pub struct ServiceTunnelHealthStatus {
     pub status_code: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+#[derive(Default)]
+pub enum ServiceTunnelReadinessKind {
+    #[default]
+    Process,
+    Preview,
+    Proof,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ServiceTunnelReadinessCheck {
+    TcpListener,
+    ArtifactJsonPointer {
+        path: String,
+        pointer: String,
+        equals: String,
+    },
+    StdoutRegex {
+        pattern: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ServiceTunnelReadinessStatus {
+    pub kind: ServiceTunnelReadinessKind,
+    pub process_running: bool,
+    pub ready: bool,
+    pub preview_ready: bool,
+    pub proof_ready: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checks: Vec<ServiceTunnelReadinessCheckStatus>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ServiceTunnelReadinessCheckStatus {
+    pub check: String,
+    pub ready: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -358,6 +406,8 @@ pub struct StartServiceTunnelSpec {
     pub backend_public_url: Option<String>,
     pub source_run_id: Option<String>,
     pub source_workflow_id: Option<String>,
+    pub readiness_kind: ServiceTunnelReadinessKind,
+    pub readiness_checks: Vec<ServiceTunnelReadinessCheck>,
 }
 
 pub struct ExposeServiceTunnelSpec {
@@ -491,7 +541,7 @@ pub fn status(id: &str) -> Result<ServiceTunnelStatus> {
 }
 
 pub fn start(spec: StartServiceTunnelSpec) -> Result<ServiceTunnelStatus> {
-    let mut tunnel = load(&spec.id)?;
+    let mut tunnel = load_or_materialize_start_tunnel(&spec)?;
     validate_backend_spec(&spec)?;
 
     let existing = load_runtime_state(&tunnel.id)?;
@@ -590,6 +640,8 @@ pub fn start(spec: StartServiceTunnelSpec) -> Result<ServiceTunnelStatus> {
         backend_process: None,
         source_run_id: spec.source_run_id,
         source_workflow_id: spec.source_workflow_id,
+        readiness_kind: spec.readiness_kind,
+        readiness_checks: spec.readiness_checks,
     };
     save_runtime_state(&state)?;
     if let Err(error) = wait_until_ready(&state, spec.readiness_timeout_secs) {
@@ -611,6 +663,73 @@ pub fn start(spec: StartServiceTunnelSpec) -> Result<ServiceTunnelStatus> {
     status(&tunnel.id)
 }
 
+fn load_or_materialize_start_tunnel(spec: &StartServiceTunnelSpec) -> Result<ServiceTunnel> {
+    match load(&spec.id) {
+        Ok(tunnel) => Ok(tunnel),
+        Err(error) if error.code == ErrorCode::ServiceTunnelNotFound => {
+            materialize_runner_local_start_tunnel(spec)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn materialize_runner_local_start_tunnel(spec: &StartServiceTunnelSpec) -> Result<ServiceTunnel> {
+    let host = spec.host.as_deref().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "host",
+            "starting an undeclared runner-local service tunnel requires --host",
+            Some(spec.id.clone()),
+            Some(vec!["Pass --host 127.0.0.1 or declare the service with `homeboy tunnel service expose` before starting it.".to_string()]),
+        )
+    })?;
+    validate_loopback_host(host, &spec.id)?;
+    let port = spec.port.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "port",
+            "starting an undeclared runner-local service tunnel requires --port",
+            Some(spec.id.clone()),
+            Some(vec!["Pass the local service port or declare the service with `homeboy tunnel service expose` before starting it.".to_string()]),
+        )
+    })?;
+    if port == 0 {
+        return Err(Error::validation_invalid_argument(
+            "port",
+            "local port must be greater than zero",
+            Some(spec.id.clone()),
+            None,
+        ));
+    }
+
+    let tunnel = ServiceTunnel {
+        id: spec.id.clone(),
+        aliases: Vec::new(),
+        description: Some("Runner-local service materialized by tunnel service start".to_string()),
+        server_id: RUNNER_LOCAL_SERVICE_SERVER_ID.to_string(),
+        target: ServiceTunnelTarget {
+            host: host.to_string(),
+            port,
+        },
+        scheme: spec.scheme.clone().unwrap_or_else(default_scheme),
+        local_host: host.to_string(),
+        local_port: Some(port),
+        auth: ServiceTunnelAuth {
+            mode: ServiceTunnelAuthMode::SshOnly,
+            env_var: None,
+            header: None,
+        },
+        policy: ServiceTunnelPolicy {
+            exposure: ServiceTunnelExposure::PrivateLoopback,
+            require_auth: true,
+            allowed_clients: Vec::new(),
+            preview: ServiceTunnelPreviewPolicy::default(),
+            native_preview_auth: Default::default(),
+        },
+    };
+    validate_service_tunnel(&tunnel)?;
+    save(&tunnel)?;
+    load(&tunnel.id)
+}
+
 pub fn stop(id: &str) -> Result<ServiceTunnelStatus> {
     let tunnel = load(id)?;
     if let Some(state) = load_runtime_state(id)? {
@@ -630,6 +749,7 @@ fn service_tunnel_status(tunnel: &ServiceTunnel) -> ServiceTunnelStatus {
     let state = load_runtime_state(&tunnel.id).ok().flatten();
     let running = state.as_ref().is_some_and(runtime_state_is_running);
     let health = state.as_ref().map(check_runtime_health);
+    let readiness = state.as_ref().map(check_runtime_readiness);
     let evidence = state.as_ref().map(runtime_evidence);
     let process = state.as_ref().map(|state| ServiceTunnelProcessStatus {
         pid: state.pid,
@@ -673,6 +793,7 @@ fn service_tunnel_status(tunnel: &ServiceTunnel) -> ServiceTunnelStatus {
         policy: tunnel.policy.clone(),
         process,
         health,
+        readiness,
         evidence,
         tunnel_backend: backend,
         preview,
@@ -958,7 +1079,7 @@ fn local_url_for(tunnel: &ServiceTunnel) -> String {
 }
 
 fn validate_service_tunnel(tunnel: &ServiceTunnel) -> Result<()> {
-    if !server::exists(&tunnel.server_id) {
+    if tunnel.server_id != RUNNER_LOCAL_SERVICE_SERVER_ID && !server::exists(&tunnel.server_id) {
         let suggestions = config::find_similar_ids::<server::Server>(&tunnel.server_id);
         return Err(Error::server_not_found(
             tunnel.server_id.clone(),
@@ -1385,7 +1506,8 @@ fn resolve_health_url(
 fn wait_until_ready(state: &ServiceTunnelRuntimeState, timeout_secs: u64) -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
     loop {
-        if !runtime_state_is_running(state) {
+        let readiness = check_runtime_readiness(state);
+        if !readiness.process_running {
             return Err(Error::validation_invalid_argument(
                 "service",
                 "service process exited before becoming ready",
@@ -1393,20 +1515,176 @@ fn wait_until_ready(state: &ServiceTunnelRuntimeState, timeout_secs: u64) -> Res
                 None,
             ));
         }
-        let health = check_runtime_health(state);
-        if health.healthy || (!health.checked && runtime_state_is_running(state)) {
+        if readiness.ready {
             return Ok(());
         }
         if Instant::now() >= deadline {
             return Err(Error::validation_invalid_argument(
                 "readiness",
-                "service did not become healthy before readiness timeout",
+                "service did not satisfy readiness before timeout",
                 Some(state.preview_identity.service_id.clone()),
-                health.error.map(|error| vec![error]),
+                Some(
+                    readiness
+                        .checks
+                        .into_iter()
+                        .filter(|check| !check.ready)
+                        .filter_map(|check| check.detail)
+                        .collect(),
+                ),
             ));
         }
         std::thread::sleep(Duration::from_millis(200));
     }
+}
+
+fn check_runtime_readiness(state: &ServiceTunnelRuntimeState) -> ServiceTunnelReadinessStatus {
+    let process_running = runtime_state_is_running(state);
+    let mut checks = Vec::new();
+
+    if state.health_url.is_some() {
+        let health = check_runtime_health(state);
+        checks.push(ServiceTunnelReadinessCheckStatus {
+            check: "health".to_string(),
+            ready: health.healthy,
+            detail: health
+                .status_code
+                .map(|status| format!("status {status}"))
+                .or(health.error),
+        });
+    }
+
+    for check in &state.readiness_checks {
+        checks.push(evaluate_readiness_check(state, check));
+    }
+
+    let checks_ready = checks.iter().all(|check| check.ready);
+    let ready = process_running && checks_ready;
+    ServiceTunnelReadinessStatus {
+        kind: state.readiness_kind.clone(),
+        process_running,
+        ready,
+        preview_ready: matches!(state.readiness_kind, ServiceTunnelReadinessKind::Preview) && ready,
+        proof_ready: matches!(state.readiness_kind, ServiceTunnelReadinessKind::Proof) && ready,
+        checks,
+    }
+}
+
+fn evaluate_readiness_check(
+    state: &ServiceTunnelRuntimeState,
+    check: &ServiceTunnelReadinessCheck,
+) -> ServiceTunnelReadinessCheckStatus {
+    match check {
+        ServiceTunnelReadinessCheck::TcpListener => tcp_listener_readiness(state),
+        ServiceTunnelReadinessCheck::ArtifactJsonPointer {
+            path,
+            pointer,
+            equals,
+        } => artifact_json_pointer_readiness(path, pointer, equals),
+        ServiceTunnelReadinessCheck::StdoutRegex { pattern } => {
+            stdout_regex_readiness(&state.logs.stdout_path, pattern)
+        }
+    }
+}
+
+fn tcp_listener_readiness(state: &ServiceTunnelRuntimeState) -> ServiceTunnelReadinessCheckStatus {
+    let Some((host, port)) = local_url_host_port(&state.local_url) else {
+        return ServiceTunnelReadinessCheckStatus {
+            check: "tcp_listener".to_string(),
+            ready: false,
+            detail: Some(format!("could not parse local URL {}", state.local_url)),
+        };
+    };
+    let address = format!("{host}:{port}");
+    match address.to_socket_addrs() {
+        Ok(mut addresses) => {
+            let ready = addresses.any(|address| {
+                TcpStream::connect_timeout(&address, Duration::from_millis(200)).is_ok()
+            });
+            ServiceTunnelReadinessCheckStatus {
+                check: "tcp_listener".to_string(),
+                ready,
+                detail: Some(address),
+            }
+        }
+        Err(error) => ServiceTunnelReadinessCheckStatus {
+            check: "tcp_listener".to_string(),
+            ready: false,
+            detail: Some(error.to_string()),
+        },
+    }
+}
+
+fn artifact_json_pointer_readiness(
+    path: &str,
+    pointer: &str,
+    equals: &str,
+) -> ServiceTunnelReadinessCheckStatus {
+    let data = match fs::read_to_string(path) {
+        Ok(data) => data,
+        Err(error) => {
+            return ServiceTunnelReadinessCheckStatus {
+                check: "artifact_json_pointer".to_string(),
+                ready: false,
+                detail: Some(format!("{}: {error}", path)),
+            };
+        }
+    };
+    let json: serde_json::Value = match serde_json::from_str(&data) {
+        Ok(json) => json,
+        Err(error) => {
+            return ServiceTunnelReadinessCheckStatus {
+                check: "artifact_json_pointer".to_string(),
+                ready: false,
+                detail: Some(format!("{}: {error}", path)),
+            };
+        }
+    };
+    let Some(value) = json.pointer(pointer) else {
+        return ServiceTunnelReadinessCheckStatus {
+            check: "artifact_json_pointer".to_string(),
+            ready: false,
+            detail: Some(format!("{path} missing {pointer}")),
+        };
+    };
+    let actual = value
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| value.to_string());
+    ServiceTunnelReadinessCheckStatus {
+        check: "artifact_json_pointer".to_string(),
+        ready: actual == equals,
+        detail: Some(format!("{path} {pointer}={actual}")),
+    }
+}
+
+fn stdout_regex_readiness(path: &str, pattern: &str) -> ServiceTunnelReadinessCheckStatus {
+    let data = match fs::read_to_string(path) {
+        Ok(data) => data,
+        Err(error) => {
+            return ServiceTunnelReadinessCheckStatus {
+                check: "stdout_regex".to_string(),
+                ready: false,
+                detail: Some(format!("{}: {error}", path)),
+            };
+        }
+    };
+    match regex::Regex::new(pattern) {
+        Ok(regex) => ServiceTunnelReadinessCheckStatus {
+            check: "stdout_regex".to_string(),
+            ready: regex.is_match(&data),
+            detail: Some(pattern.to_string()),
+        },
+        Err(error) => ServiceTunnelReadinessCheckStatus {
+            check: "stdout_regex".to_string(),
+            ready: false,
+            detail: Some(error.to_string()),
+        },
+    }
+}
+
+fn local_url_host_port(local_url: &str) -> Option<(String, u16)> {
+    let url = reqwest::Url::parse(local_url).ok()?;
+    Some((url.host_str()?.to_string(), url.port_or_known_default()?))
 }
 
 fn check_runtime_health(state: &ServiceTunnelRuntimeState) -> ServiceTunnelHealthStatus {
@@ -1448,5 +1726,66 @@ fn runtime_evidence(state: &ServiceTunnelRuntimeState) -> ServiceTunnelEvidence 
             .map(|path| path.display().to_string())
             .unwrap_or_default(),
         logs: state.logs.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn start_spec(id: &str) -> StartServiceTunnelSpec {
+        StartServiceTunnelSpec {
+            id: id.to_string(),
+            command: "node server.js".to_string(),
+            cwd: None,
+            env: BTreeMap::new(),
+            host: Some("127.0.0.1".to_string()),
+            port: Some(48631),
+            scheme: Some("http".to_string()),
+            health_url: None,
+            health_path: None,
+            readiness_timeout_secs: 1,
+            backend: ServiceTunnelTunnelBackend::None,
+            backend_command: None,
+            backend_public_url: None,
+            source_run_id: None,
+            source_workflow_id: None,
+            readiness_kind: ServiceTunnelReadinessKind::Process,
+            readiness_checks: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn start_materializes_runner_local_service_without_server_declaration() {
+        crate::test_support::with_isolated_home(|_| {
+            let tunnel = materialize_runner_local_start_tunnel(&start_spec("preview-service"))
+                .expect("materialize runner-local service");
+
+            assert_eq!(tunnel.id, "preview-service");
+            assert_eq!(tunnel.server_id, RUNNER_LOCAL_SERVICE_SERVER_ID);
+            assert_eq!(tunnel.target.host, "127.0.0.1");
+            assert_eq!(tunnel.target.port, 48631);
+            assert_eq!(tunnel.local_port, Some(48631));
+            assert!(load("preview-service").is_ok());
+        });
+    }
+
+    #[test]
+    fn undeclared_runner_local_service_requires_host_and_port() {
+        crate::test_support::with_isolated_home(|_| {
+            let mut missing_host = start_spec("missing-host");
+            missing_host.host = None;
+            let err =
+                materialize_runner_local_start_tunnel(&missing_host).expect_err("host required");
+            assert_eq!(err.code, ErrorCode::ValidationInvalidArgument);
+            assert!(err.message.contains("requires --host"));
+
+            let mut missing_port = start_spec("missing-port");
+            missing_port.port = None;
+            let err =
+                materialize_runner_local_start_tunnel(&missing_port).expect_err("port required");
+            assert_eq!(err.code, ErrorCode::ValidationInvalidArgument);
+            assert!(err.message.contains("requires --port"));
+        });
     }
 }

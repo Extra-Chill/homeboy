@@ -170,6 +170,41 @@ impl ObservationStore {
         })
     }
 
+    pub fn update_run_metadata(
+        &self,
+        run_id: &str,
+        metadata_json: serde_json::Value,
+    ) -> Result<RunRecord> {
+        validate_required("run_id", run_id)?;
+        let serialized = serialize_metadata(&metadata_json)?;
+        let rows = self
+            .connection
+            .execute(
+                r#"
+                UPDATE runs
+                SET metadata_json = ?1
+                WHERE id = ?2
+                "#,
+                params![serialized, run_id],
+            )
+            .map_err(sqlite_error("update run metadata"))?;
+
+        if rows == 0 {
+            return Err(Error::validation_invalid_argument(
+                "run_id",
+                format!("run record not found: {run_id}"),
+                Some(run_id.to_string()),
+                None,
+            ));
+        }
+
+        self.get_run(run_id)?.ok_or_else(|| {
+            Error::internal_unexpected(format!(
+                "Updated run record {run_id} but could not read it back"
+            ))
+        })
+    }
+
     pub fn get_run(&self, run_id: &str) -> Result<Option<RunRecord>> {
         validate_required("run_id", run_id)?;
         self.connection

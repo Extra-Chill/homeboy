@@ -58,9 +58,9 @@ fn test_trace_public_preview_parse_homeboy_native() {
                 "local_origin": "http://127.0.0.1:49823",
                 "require_https": true,
                 "native": {
-                    "operator_domain": "chubes.net",
+                    "operator_domain": "preview.example.test",
                     "session_id": "wc-stripe-real-wallet",
-                    "ingress_url": "https://preview-broker.chubes.net",
+                    "ingress_url": "https://preview-broker.example.test",
                     "token_env": "HOMEBOY_PREVIEW_TUNNEL_TOKEN"
                 }
             }
@@ -75,11 +75,14 @@ fn test_trace_public_preview_parse_homeboy_native() {
         crate::core::rig::TracePublicPreviewMode::HomeboyNative
     );
     let native = preview.native.as_ref().expect("native settings");
-    assert_eq!(native.operator_domain.as_deref(), Some("chubes.net"));
+    assert_eq!(
+        native.operator_domain.as_deref(),
+        Some("preview.example.test")
+    );
     assert_eq!(native.session_id.as_deref(), Some("wc-stripe-real-wallet"));
     assert_eq!(
         native.ingress_url.as_deref(),
-        Some("https://preview-broker.chubes.net")
+        Some("https://preview-broker.example.test")
     );
     assert_eq!(
         native.token_env.as_deref(),

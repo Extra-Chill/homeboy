@@ -19,9 +19,19 @@ replay. For normal benchmark runs, prefer `homeboy bench <component>`: Homeboy
 automatically selects a Lab runner when the component declares
 `lab.preferred_runner` or when exactly one Lab runner is configured.
 
-`homeboy lab status` returns `managed_followups` when Homeboy can select a Lab
-runner. Use those commands instead of raw SSH for routine lifecycle work:
+`homeboy lab status` resolves the default or inferred Lab runner and includes its
+readiness report in `selected_runner`. Pass `--runner <runner-id>` only when you
+need to inspect a specific non-default runner.
 
+`homeboy lab status` always returns run/artifact discovery commands in
+`managed_followups`, and adds runner diagnostics when Homeboy can select a Lab
+runner. Use those commands instead of raw SSH or runner path spelunking for
+routine lifecycle work:
+
+- `homeboy runs list --limit 5` finds recent persisted run records.
+- `homeboy runs latest-run --kind bench` resolves the latest benchmark run id.
+- `homeboy runs artifacts <run-id>` lists recorded run artifacts through
+  Homeboy.
 - `homeboy runner doctor <runner>` probes runner tools, workspace writability,
   artifact storage, and browser readiness.
 - `homeboy runner env <runner>` prints the redacted runner job environment.
@@ -30,6 +40,14 @@ runner. Use those commands instead of raw SSH for routine lifecycle work:
 - `homeboy runner workspace sync <runner> --path <path> --mode snapshot`
   materializes the current checkout into the Lab workspace before a replay or
   follow-up run.
+
+Component or extension settings can declare runner-managed dependency sources
+with `validation_dependencies`. Lab workspace sync resolves those dependencies,
+checks freshness, runs install/build lifecycle, materializes them beside the
+primary workspace, and returns dependency provenance in the generic
+`validation_dependencies` output field. Use that contract for eval/bench source
+overrides instead of ad-hoc workflow-specific environment exports or hardcoded
+runner paths.
 
 `homeboy lab bench` delegates to the same benchmark path while making the Lab
 intent explicit at the command surface. Its output includes the same managed

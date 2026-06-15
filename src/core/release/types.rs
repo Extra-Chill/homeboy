@@ -306,6 +306,13 @@ pub struct ReleaseCommandInput {
     pub dry_run: bool,
     #[serde(default)]
     pub recover: bool,
+    /// During `--recover`, when the release tag exists but points at a commit
+    /// strictly behind HEAD (e.g. config-only commits landed after tagging),
+    /// move the tag to HEAD instead of refusing. Guarded: the tagged commit
+    /// must be an ancestor of HEAD, HEAD must satisfy the version targets, and
+    /// no GitHub Release may exist for the tag.
+    #[serde(default)]
+    pub retag: bool,
     #[serde(default)]
     pub skip_checks: bool,
     /// Explicit bump override: "major", "minor", "patch", or a version string like "2.0.0".
@@ -356,6 +363,7 @@ pub struct ReleaseDeploymentResult {
 #[derive(Debug, Clone, Serialize)]
 pub struct ReleaseCommandResult {
     pub component_id: String,
+    pub status: String,
     pub bump_type: String,
     pub dry_run: bool,
     pub releasable_commits: usize,
@@ -371,6 +379,8 @@ pub struct ReleaseCommandResult {
     pub run: Option<ReleaseRun>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deployment: Option<ReleaseDeploymentResult>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub release_summary: Vec<String>,
 }
 
 /// Result of a batch release across multiple components.

@@ -1,8 +1,7 @@
 use homeboy::cli_surface::{Cli, Commands};
 use homeboy::core::lab_routing::{self, LabRoutingRequest};
 use homeboy::core::observation::RunStatus;
-use homeboy::core::runner::RunnerExecOptions;
-use homeboy::core::runners;
+use homeboy::core::runners::{self, RunnerExecOptions};
 use serde_json::json;
 use std::collections::HashMap;
 
@@ -58,35 +57,24 @@ pub fn route_after_parse(
         _ => None,
     };
 
-    let lab_result = if matches!(cli.command, Commands::Trace(_)) {
-        lab_routing::route_lab_offload(LabRoutingRequest {
-            command: lab_command,
-            normalized_args,
-            explicit_runner: cli.runner.as_deref(),
-            force_hot: cli.force_hot,
-            allow_local_hot: cli.allow_local_hot,
-            allow_local_fallback: cli.allow_local_fallback,
-            allow_dirty_lab_workspace: cli.allow_dirty_lab_workspace,
-            capture_patch: cli.command.lab_offload_mutation_flag().is_some(),
-            timeout: Some(lab_routing::lab_trace_dispatch_timeout()),
-        })
-    } else {
-        lab_routing::route_lab_offload(LabRoutingRequest {
-            command: lab_command,
-            normalized_args,
-            explicit_runner: cli.runner.as_deref(),
-            force_hot: cli.force_hot,
-            allow_local_hot: cli.allow_local_hot,
-            allow_local_fallback: cli.allow_local_fallback,
-            allow_dirty_lab_workspace: cli.allow_dirty_lab_workspace,
-            capture_patch: cli.command.lab_offload_mutation_flag().is_some(),
-            timeout: None,
-        })
-    };
+    let mutation_flag = cli.command.lab_offload_mutation_flag();
+    let lab_result = lab_routing::route_lab_offload(LabRoutingRequest {
+        command: lab_command,
+        normalized_args,
+        explicit_runner: cli.runner.as_deref(),
+        force_hot: cli.force_hot,
+        allow_local_hot: cli.allow_local_hot,
+        allow_local_fallback: cli.allow_local_fallback,
+        allow_dirty_lab_workspace: cli.allow_dirty_lab_workspace,
+        capture_patch: mutation_flag.is_some(),
+        mutation_flag,
+        timeout: None,
+        active_run_id: crate::commands::trace::lab_dispatch_observation_run_id(&trace_observation),
+    });
 
     match lab_result {
         Err(err) => {
-            crate::commands::trace::finish_lab_dispatch_observation(
+            let _ = crate::commands::trace::finish_lab_dispatch_observation(
                 trace_observation,
                 RunStatus::Error,
                 json!({
@@ -103,13 +91,13 @@ pub fn route_after_parse(
                     }
                 }),
             );
-            return Err(err);
+            Err(err)
         }
         Ok(outcome) => match outcome {
             runners::LabOffloadOutcome::RunLocal {
                 metadata, messages, ..
             } => {
-                crate::commands::trace::finish_lab_dispatch_observation(
+                let _ = crate::commands::trace::finish_lab_dispatch_observation(
                     trace_observation,
                     RunStatus::Skipped,
                     json!({
@@ -136,7 +124,7 @@ pub fn route_after_parse(
                 exit_code,
                 ..
             } => {
-                crate::commands::trace::finish_lab_dispatch_observation(
+                let retrieval = crate::commands::trace::finish_lab_dispatch_observation(
                     trace_observation,
                     if exit_code == 0 {
                         RunStatus::Pass
@@ -155,6 +143,7 @@ pub fn route_after_parse(
                 if !stderr.is_empty() {
                     eprint!("{stderr}");
                 }
+                let stdout = stdout_with_persisted_run_retrieval(&stdout, retrieval.as_ref());
                 if let Some(path) = output_file {
                     write_offloaded_stdout(path, &stdout)?;
                 }
@@ -181,6 +170,7 @@ fn run_rig_source_management_on_runner(
             allow_diagnostic_ssh: false,
             command,
             env: HashMap::new(),
+            secret_env_names: Vec::new(),
             capture_patch: false,
             raw_exec: false,
             source_snapshot: None,
@@ -247,6 +237,55 @@ fn write_offloaded_stdout(path: &str, stdout: &str) -> homeboy::core::Result<()>
     std::fs::write(path, stdout).map_err(|err| {
         homeboy::core::Error::internal_io(err.to_string(), Some(format!("write {path}")))
     })
+}
+
+fn stdout_with_persisted_run_retrieval(
+    stdout: &str,
+    retrieval: Option<&crate::commands::trace::PersistedRunRetrieval>,
+) -> String {
+    let Some(retrieval) = retrieval else {
+        return stdout.to_string();
+    };
+
+    if let Ok(mut json) = serde_json::from_str::<serde_json::Value>(stdout) {
+        attach_persisted_run_retrieval_json(&mut json, retrieval);
+        if let Ok(mut rendered) = serde_json::to_string_pretty(&json) {
+            rendered.push('\n');
+            return rendered;
+        }
+    }
+
+    let mut rendered = stdout.to_string();
+    if !rendered.ends_with('\n') {
+        rendered.push('\n');
+    }
+    rendered.push('\n');
+    rendered.push_str("# Homeboy persisted run\n\n");
+    rendered.push_str(&format!(
+        "- **Persisted Homeboy run ID:** `{}`\n",
+        retrieval.run_id
+    ));
+    rendered.push_str("- **ID scope:** runtime, temp, and artifact identifiers above are offload context; use the persisted Homeboy run ID for local retrieval.\n");
+    rendered.push_str("- **Retrieve evidence:** `");
+    rendered.push_str(&retrieval.evidence_command);
+    rendered.push_str("`\n");
+    rendered.push_str("- **List artifacts:** `");
+    rendered.push_str(&retrieval.artifacts_command);
+    rendered.push_str("`\n");
+    rendered.push_str("- **Export run bundle:** `");
+    rendered.push_str(&retrieval.export_command);
+    rendered.push_str("`\n");
+    rendered
+}
+
+fn attach_persisted_run_retrieval_json(
+    json: &mut serde_json::Value,
+    retrieval: &crate::commands::trace::PersistedRunRetrieval,
+) {
+    let retrieval_json = retrieval.to_json();
+    if let Some(object) = json.as_object_mut() {
+        object.insert("homeboy_persisted_run".to_string(), retrieval_json);
+    }
 }
 
 fn lab_offload_command(
@@ -466,6 +505,76 @@ mod tests {
     }
 
     #[test]
+    fn offloaded_json_stdout_labels_persisted_homeboy_run_id() {
+        let retrieval = crate::commands::trace::PersistedRunRetrieval::for_run("trace-run-123");
+
+        let stdout = stdout_with_persisted_run_retrieval(
+            r#"{"success":true,"data":{"runtime_id":"runtime-abc","artifact_id":"artifact-xyz"}}"#,
+            Some(&retrieval),
+        );
+        let json: serde_json::Value = serde_json::from_str(&stdout).expect("json stdout");
+
+        assert_eq!(json["data"]["runtime_id"], "runtime-abc");
+        assert_eq!(json["data"]["artifact_id"], "artifact-xyz");
+        assert_eq!(
+            json["homeboy_persisted_run"]["persisted_run_id"],
+            "trace-run-123"
+        );
+        assert_eq!(
+            json["homeboy_persisted_run"]["retrieval_commands"]["evidence"],
+            "homeboy runs evidence trace-run-123"
+        );
+        assert_eq!(
+            json["homeboy_persisted_run"]["retrieval_commands"]["artifacts"],
+            "homeboy runs artifacts trace-run-123"
+        );
+        assert_eq!(
+            json["homeboy_persisted_run"]["retrieval_commands"]["export"],
+            "homeboy runs export --run trace-run-123 --output homeboy-run-trace-run-123"
+        );
+    }
+
+    #[test]
+    fn offloaded_error_json_stdout_labels_persisted_homeboy_run_id() {
+        let retrieval = crate::commands::trace::PersistedRunRetrieval::for_run("trace-run-err");
+
+        let stdout = stdout_with_persisted_run_retrieval(
+            r#"{"success":false,"error":{"code":"remote.command_failed","message":"failed","details":{"temp_id":"tmp-1"}}}"#,
+            Some(&retrieval),
+        );
+        let json: serde_json::Value = serde_json::from_str(&stdout).expect("json stdout");
+
+        assert_eq!(json["error"]["details"]["temp_id"], "tmp-1");
+        assert_eq!(
+            json["homeboy_persisted_run"]["persisted_run_id"],
+            "trace-run-err"
+        );
+        assert_eq!(
+            json["homeboy_persisted_run"]["id_scope"],
+            "persisted_homeboy_run"
+        );
+    }
+
+    #[test]
+    fn offloaded_text_stdout_appends_persisted_run_retrieval_commands() {
+        let retrieval = crate::commands::trace::PersistedRunRetrieval::for_run("trace-run-text");
+
+        let stdout = stdout_with_persisted_run_retrieval(
+            "runtime_id=runtime-abc\nartifact_id=artifact-xyz\n",
+            Some(&retrieval),
+        );
+
+        assert!(stdout.contains("runtime_id=runtime-abc"));
+        assert!(stdout.contains("artifact_id=artifact-xyz"));
+        assert!(stdout.contains("**Persisted Homeboy run ID:** `trace-run-text`"));
+        assert!(stdout.contains("`homeboy runs evidence trace-run-text`"));
+        assert!(stdout.contains("`homeboy runs artifacts trace-run-text`"));
+        assert!(stdout.contains(
+            "`homeboy runs export --run trace-run-text --output homeboy-run-trace-run-text`"
+        ));
+    }
+
+    #[test]
     fn runner_rig_source_management_command_strips_controller_globals() {
         let normalized = vec![
             "homeboy".to_string(),
@@ -651,11 +760,12 @@ mod tests {
             ["homeboy", "agent-task", "status", "agent-task-123"].as_slice(),
             ["homeboy", "agent-task", "logs", "agent-task-123"].as_slice(),
             ["homeboy", "agent-task", "artifacts", "agent-task-123"].as_slice(),
+            ["homeboy", "agent-task", "review", "agent-task-123"].as_slice(),
         ] {
             let cli = Cli::parse_from(args);
             let command = lab_offload_command(&cli.command).unwrap().unwrap();
 
-            assert_eq!(command.hot_label, "agent-task status/logs/artifacts");
+            assert_eq!(command.hot_label, "agent-task status/logs/artifacts/review");
             assert!(command.portable);
             assert!(!command.requires_extension_parity);
             assert!(command.required_extensions.is_empty());
@@ -682,6 +792,53 @@ mod tests {
         assert!(!command.requires_extension_parity);
         assert!(command.required_extensions.is_empty());
         assert!(!command.infer_source_path_tools);
+    }
+
+    #[test]
+    fn tunnel_service_start_supports_explicit_runner_discovery() {
+        let cli = Cli::parse_from([
+            "homeboy",
+            "--runner",
+            "homeboy-lab",
+            "tunnel",
+            "service",
+            "start",
+            "preview",
+            "--command",
+            "npm run dev",
+        ]);
+
+        let command = lab_offload_command(&cli.command).unwrap().unwrap();
+
+        assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
+        assert_eq!(command.hot_label, "tunnel service start");
+        assert!(command.portable);
+        assert!(!command.default_lab_offload);
+        assert!(!command.requires_extension_parity);
+        assert!(command.required_extensions.is_empty());
+        assert!(!command.infer_source_path_tools);
+    }
+
+    #[test]
+    fn tunnel_preview_consumer_run_keeps_explicit_runner_contract() {
+        let cli = Cli::parse_from([
+            "homeboy",
+            "--runner",
+            "homeboy-lab",
+            "tunnel",
+            "preview-consumer",
+            "run",
+            "--config",
+            "consumer.json",
+            "--preview-public-url",
+            "https://preview.example.test/run",
+        ]);
+
+        let command = lab_offload_command(&cli.command).unwrap().unwrap();
+
+        assert_eq!(command.hot_label, "tunnel preview-consumer run");
+        assert!(command.portable);
+        assert!(!command.default_lab_offload);
     }
 
     #[test]

@@ -88,7 +88,7 @@ fn rig_trace_run_fails_fast_on_active_default_namespace_resource_lease() {
         write_trace_rig(home, "studio-rig", "studio", active_component.path());
         write_trace_rig(home, "studio-alt", "studio", blocked_component.path());
         let resources = serde_json::json!({
-            "exclusive": ["wp-codebox-preview:${env.HOMEBOY_TRACE_RESOURCE_NAMESPACE}"]
+            "exclusive": ["provider-preview:${env.HOMEBOY_TRACE_RESOURCE_NAMESPACE}"]
         });
         set_trace_rig_resources(home, "studio-rig", resources.clone());
         set_trace_rig_resources(home, "studio-alt", resources);
@@ -117,7 +117,7 @@ fn rig_trace_run_fails_fast_on_active_default_namespace_resource_lease() {
         );
         assert!(error.message.contains("studio-alt"));
         assert!(error.message.contains("studio-rig"));
-        assert!(error.message.contains("wp-codebox-preview:<default>"));
+        assert!(error.message.contains("provider-preview:<default>"));
         assert!(error.message.contains("trace"));
         assert!(error
             .hints

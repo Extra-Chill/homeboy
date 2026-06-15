@@ -15,6 +15,7 @@ use homeboy::core::runners::{
 use homeboy::core::server::{RunnerPolicy, RunnerSecretEnvRef, RunnerSettings};
 use homeboy::core::{EntityCrudOutput, MergeOutput};
 
+use super::output_runtime::JsonCommandRun;
 use super::{CmdResult, DynamicSetArgs};
 
 pub mod doctor;
@@ -81,6 +82,8 @@ pub struct RunnerSecretEnvReferenceOutput {
     pub env: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secret: Option<String>,
     pub values_redacted: bool,
 }
 
@@ -257,7 +260,7 @@ enum RunnerCommand {
         #[arg(long = "require-tool")]
         required_tools: Vec<String>,
 
-        /// Readiness scope. `lab-offload` adds Lab-specific binary, daemon, and WP Codebox checks.
+        /// Readiness scope. `lab-offload` adds Lab-specific binary, daemon, and provider readiness checks.
         #[arg(long, value_enum, default_value_t = RunnerDoctorScopeArg::General)]
         scope: RunnerDoctorScopeArg,
 
@@ -318,6 +321,11 @@ enum RunnerCommand {
         /// Runner-side path that must exist before executing the command. Repeat for multiple paths.
         #[arg(long = "require-path")]
         require_paths: Vec<String>,
+
+        /// Print remote stdout/stderr directly instead of the structured JSON envelope.
+        /// Use global --output to still write the full structured envelope to a file.
+        #[arg(long)]
+        raw: bool,
 
         /// Command and arguments to execute on the runner
         #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
@@ -398,6 +406,14 @@ enum RunnerJobCommand {
         /// Poll interval in milliseconds when --follow is set
         #[arg(long = "poll-ms", default_value_t = 1000)]
         poll_ms: u64,
+    },
+    /// Cancel a queued or running durable runner daemon job
+    Cancel {
+        /// Runner ID with an active daemon connection
+        runner_id: String,
+
+        /// Runner daemon job ID from runner exec/Lab output or error details
+        job_id: String,
     },
 }
 
@@ -554,6 +570,7 @@ pub fn run(
             ssh,
             capture_patch,
             require_paths,
+            raw: _,
             command,
         } => map_execution(exec(
             &id,
@@ -589,6 +606,77 @@ pub fn run(
         })),
         RunnerCommand::Workspace { command } => workspace::run(command)
             .map(|(output, exit_code)| (RunnerCommandOutput::Workspace(output), exit_code)),
+    }
+}
+
+pub fn run_command_output(args: RunnerArgs, _global: &super::GlobalArgs) -> JsonCommandRun {
+    crate::commands::utils::tty::status("homeboy is working...");
+
+    match args.command {
+        RunnerCommand::Exec {
+            id,
+            cwd,
+            project,
+            ssh,
+            capture_patch,
+            require_paths,
+            raw: true,
+            command,
+        } => run_raw_exec(id, cwd, project, ssh, capture_patch, require_paths, command),
+        command => {
+            let (stdout_result, exit_code) =
+                crate::commands::utils::response::map_cmd_result_to_json(run(
+                    RunnerArgs { command },
+                    _global,
+                ));
+            JsonCommandRun::from_stdout_result(stdout_result, exit_code)
+        }
+    }
+}
+
+fn run_raw_exec(
+    id: String,
+    cwd: Option<String>,
+    project: Option<String>,
+    ssh: bool,
+    capture_patch: bool,
+    require_paths: Vec<String>,
+    command: Vec<String>,
+) -> JsonCommandRun {
+    match exec(
+        &id,
+        cwd,
+        project,
+        ssh,
+        capture_patch,
+        require_paths,
+        command,
+    ) {
+        Ok((output, exit_code)) => raw_exec_command_run(output, exit_code),
+        Err(err) => {
+            let (stdout_result, exit_code) =
+                crate::commands::utils::response::map_cmd_result_to_json::<RunnerCommandOutput>(
+                    Err(err),
+                );
+            JsonCommandRun::from_stdout_result(stdout_result, exit_code)
+        }
+    }
+}
+
+fn raw_exec_command_run(output: RunnerExecOutput, exit_code: i32) -> JsonCommandRun {
+    let human_stdout = output.stdout.clone();
+    let human_stderr = output.stderr.clone();
+    let (stdout_result, _) = crate::commands::utils::response::map_cmd_result_to_json(Ok((
+        RunnerCommandOutput::Execution(output),
+        exit_code,
+    )));
+
+    JsonCommandRun {
+        stdout_result,
+        exit_code,
+        output_file_result: None,
+        human_stdout: Some(human_stdout),
+        human_stderr: Some(human_stderr),
     }
 }
 
@@ -943,6 +1031,7 @@ fn exec(
             allow_diagnostic_ssh,
             command,
             env: Default::default(),
+            secret_env_names: Vec::new(),
             capture_patch,
             raw_exec: true,
             source_snapshot: None,
@@ -1004,7 +1093,43 @@ fn job(command: RunnerJobCommand) -> CmdResult<RunnerJobOutput> {
             follow,
             poll_ms,
         } => job_logs(&runner_id, &job_id, follow, poll_ms),
+        RunnerJobCommand::Cancel { runner_id, job_id } => job_cancel(&runner_id, &job_id),
     }
+}
+
+fn job_cancel(runner_id: &str, job_id: &str) -> CmdResult<RunnerJobOutput> {
+    let body = runner::daemon_api_post(runner_id, &format!("/jobs/{job_id}/cancel"))?;
+    let canonical = body.get("body").unwrap_or(&body);
+    let job: Job = serde_json::from_value(canonical["job"].clone()).map_err(|err| {
+        homeboy::core::Error::internal_json(
+            err.to_string(),
+            Some("parse runner job cancel response".to_string()),
+        )
+    })?;
+    let events = canonical
+        .get("events")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|err| {
+            homeboy::core::Error::internal_json(
+                err.to_string(),
+                Some("parse runner job cancel events".to_string()),
+            )
+        })?
+        .unwrap_or_default();
+
+    Ok((
+        RunnerJobOutput {
+            command: "runner.job.cancel",
+            runner_id: runner_id.to_string(),
+            job_id: job_id.to_string(),
+            follow: false,
+            job,
+            events,
+        },
+        0,
+    ))
 }
 
 fn job_logs(
@@ -1074,6 +1199,7 @@ fn secret_env_reference_output(reference: RunnerSecretEnvRef) -> RunnerSecretEnv
     RunnerSecretEnvReferenceOutput {
         env: reference.env,
         file: reference.file,
+        secret: reference.secret,
         values_redacted: true,
     }
 }
@@ -1145,6 +1271,42 @@ mod tests {
     }
 
     #[test]
+    fn raw_exec_command_run_keeps_structured_output_and_human_streams() {
+        let run = raw_exec_command_run(
+            RunnerExecOutput {
+                command: "runner.exec",
+                runner_id: "lab".to_string(),
+                mode: runner::RunnerExecMode::Daemon,
+                argv: vec!["printf".to_string(), "hello".to_string()],
+                remote_cwd: "/workspace".to_string(),
+                exit_code: 7,
+                stdout: "hello\n".to_string(),
+                stderr: "warn\n".to_string(),
+                source_snapshot: None,
+                job: None,
+                job_id: Some("job-123".to_string()),
+                job_events: None,
+                mirror_run_id: None,
+                patch: None,
+                metrics: None,
+                capture: None,
+                diagnostics: None,
+            },
+            7,
+        );
+
+        assert_eq!(run.exit_code, 7);
+        assert_eq!(run.human_stdout.as_deref(), Some("hello\n"));
+        assert_eq!(run.human_stderr.as_deref(), Some("warn\n"));
+
+        let value = run.stdout_result.expect("structured output");
+        assert_eq!(value["command"], "runner.exec");
+        assert_eq!(value["stdout"], "hello\n");
+        assert_eq!(value["stderr"], "warn\n");
+        assert_eq!(value["job_id"], "job-123");
+    }
+
+    #[test]
     fn registry_list_output_redacts_runner_env_values() {
         let (output, _) = map_registry(Ok((
             RunnerOutput {
@@ -1207,6 +1369,7 @@ mod tests {
                 RunnerSecretEnvReferenceOutput {
                     env: Some("OPENAI_API_KEY".to_string()),
                     file: None,
+                    secret: None,
                     values_redacted: true,
                 },
             )]),
@@ -1228,6 +1391,42 @@ mod tests {
         );
         assert_eq!(
             value["secret_env"]["OPENAI_API_KEY"]["values_redacted"],
+            true
+        );
+        assert!(!value.to_string().contains("dummy-secret"));
+    }
+
+    #[test]
+    fn runner_env_output_reports_secret_store_refs_without_values() {
+        let output = RunnerEnvOutput {
+            command: "runner.env".to_string(),
+            runner_id: "lab".to_string(),
+            source: "runner_job_env".to_string(),
+            values_redacted: false,
+            env: BTreeMap::new(),
+            secret_env: BTreeMap::from([(
+                "HOMEBOY_PREVIEW_TUNNEL_TOKEN".to_string(),
+                RunnerSecretEnvReferenceOutput {
+                    env: None,
+                    file: None,
+                    secret: Some("HOMEBOY_PREVIEW_TUNNEL_TOKEN".to_string()),
+                    values_redacted: true,
+                },
+            )]),
+            diagnostics: RunnerEnvDiagnostics {
+                server_shell_env: "shell".to_string(),
+                runner_job_env: "runner".to_string(),
+            },
+        };
+
+        let value = serde_json::to_value(output).expect("serialize output");
+
+        assert_eq!(
+            value["secret_env"]["HOMEBOY_PREVIEW_TUNNEL_TOKEN"]["secret"],
+            "HOMEBOY_PREVIEW_TUNNEL_TOKEN"
+        );
+        assert_eq!(
+            value["secret_env"]["HOMEBOY_PREVIEW_TUNNEL_TOKEN"]["values_redacted"],
             true
         );
         assert!(!value.to_string().contains("dummy-secret"));

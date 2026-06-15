@@ -443,7 +443,7 @@ mod tests {
         std::fs::write(
             &results_file,
             r#"{
-                "schema": "wp-codebox/test-results/v1",
+                "schema": "custom-provider/test-results/v1",
                 "summary": { "total": 5, "passed": 2, "failed": 1, "skipped": 2 }
             }"#,
         )

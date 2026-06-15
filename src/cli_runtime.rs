@@ -8,6 +8,7 @@ use crate::commands::output_runtime;
 use crate::commands::utils::{args, entity_suggest, resource_policy, response as output};
 use crate::commands::GlobalArgs;
 use crate::core::extension::load_all_extensions;
+use crate::core::upgrade;
 
 pub struct CliRuntime {
     extension_info: Vec<ExtensionCliInfo>,
@@ -36,6 +37,11 @@ impl CliRuntime {
     }
 
     pub fn run_from_args(&self, args: Vec<String>) -> std::process::ExitCode {
+        if is_top_level_version_request(&args) {
+            println!("{}", upgrade::current_build_version());
+            return std::process::ExitCode::SUCCESS;
+        }
+
         let normalized = args::normalize(args);
         let matches = self.parse_matches(normalized.clone());
         self.run_matches(matches, normalized)
@@ -166,6 +172,10 @@ impl CliRuntime {
     fn try_parse_extension_cli_command(&self, matches: &ArgMatches) -> Option<ExtensionCliCommand> {
         try_parse_extension_cli_command(matches, &self.extension_info)
     }
+}
+
+fn is_top_level_version_request(args: &[String]) -> bool {
+    matches!(args, [_, flag] if flag == "--version" || flag == "-V")
 }
 
 impl Default for CliRuntime {

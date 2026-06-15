@@ -45,8 +45,10 @@ pub(super) fn deploy_components(
             message,
             None,
             Some(vec![
-                "Ensure components have a buildArtifact, an extension with artifact_pattern, or deploy_strategy: \"git\"".to_string(),
-                format!("Check with: homeboy component show <id>"),
+                "A component is deployable when it has a buildArtifact, an extension that resolves an artifact_pattern, or deploy_strategy: \"git\".".to_string(),
+                "If the component builds via an extension, declare that extension in its homeboy.json (e.g. \"extensions\": { \"<ext>\": {} }) so the artifact can be resolved.".to_string(),
+                "Sync the component's homeboy.json config into the project: homeboy project components attach-path <project> <local_path>.".to_string(),
+                "Inspect the effective config with: homeboy component show <id>".to_string(),
             ]),
         ));
     }
@@ -887,6 +889,7 @@ mod tests {
     use super::*;
     use crate::core::component::ComponentScriptsConfig;
     use crate::core::project::ProjectComponentAttachment;
+    use crate::test_support::with_isolated_home;
     use std::collections::HashMap;
     use std::path::Path;
     use tempfile::TempDir;
@@ -1315,6 +1318,7 @@ mod tests {
         component.version_targets = Some(vec![crate::core::component::VersionTarget {
             file: "package.json".to_string(),
             pattern: Some(r#""version"\s*:\s*"([^"]+)""#.to_string()),
+            artifact_path: None,
         }]);
 
         let err = verify_expected_version(&[component], "1.0.1")
@@ -1381,37 +1385,46 @@ mod tests {
 
     #[test]
     fn deploy_preflight_cleans_homeboy_build_dir_after_failed_build() {
-        let dir = TempDir::new().expect("temp dir");
-        let component = failing_build_artifact_component(
-            "failing",
-            &dir.path().to_string_lossy(),
-            ".homeboy-build/plugin.zip",
-        );
-        let project = Project {
-            id: "site".to_string(),
-            ..Project::default()
-        };
-        let mut config = base_deploy_config();
-        config.force = true;
-        config.head = true;
+        with_isolated_home(|_| {
+            let dir = TempDir::new().expect("temp dir");
+            let component = failing_build_artifact_component(
+                "failing",
+                &dir.path().to_string_lossy(),
+                ".homeboy-build/plugin.zip",
+            );
+            let project = Project {
+                id: "site".to_string(),
+                ..Project::default()
+            };
+            let mut config = base_deploy_config();
+            config.force = true;
+            config.head = true;
 
-        let failures = match prepare_component_deployments(
-            &[component],
-            &config,
-            &project,
-            "/srv/site",
-            &HashMap::new(),
-            &HashMap::new(),
-        ) {
-            Ok(_) => panic!("failed build should abort preflight"),
-            Err(failures) => failures,
-        };
+            let (build_exit_code, build_error) = crate::core::build::build_component(&component);
+            assert_eq!(build_exit_code, Some(42));
+            assert!(
+                build_error.is_some(),
+                "fixture build must fail before deploy cleanup can validate failure handling"
+            );
 
-        assert_eq!(failures.len(), 1);
-        assert_eq!(failures[0].build_exit_code, Some(42));
-        assert!(
-            !dir.path().join(".homeboy-build").exists(),
-            "deploy-context failed builds must clean Homeboy-generated build artifacts"
-        );
+            let failures = match prepare_component_deployments(
+                &[component],
+                &config,
+                &project,
+                "/srv/site",
+                &HashMap::new(),
+                &HashMap::new(),
+            ) {
+                Ok(_) => panic!("failed build should abort preflight"),
+                Err(failures) => failures,
+            };
+
+            assert_eq!(failures.len(), 1);
+            assert_eq!(failures[0].build_exit_code, Some(42));
+            assert!(
+                !dir.path().join(".homeboy-build").exists(),
+                "deploy-context failed builds must clean Homeboy-generated build artifacts"
+            );
+        });
     }
 }

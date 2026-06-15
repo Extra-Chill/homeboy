@@ -399,6 +399,7 @@ mod tests {
                 excludes: Vec::new(),
                 includes: Vec::new(),
                 workspace_cleanliness: "snapshot_unique_workspace".to_string(),
+                validation_dependencies: Vec::new(),
             },
         )];
 

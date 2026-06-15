@@ -112,12 +112,15 @@ pub use super::agent_task_provider::required_extension_ids_for_plan;
 /// Durable controller execution service entry points and report contracts.
 pub mod controller_service {
     pub use super::super::agent_task_controller_service::{
-        apply_event, init, list, mark_human_ready, optional_bool, optional_string,
+        apply_event, init, init_from_spec, list, mark_human_ready, optional_bool, optional_string,
         optional_string_array, optional_u32, optional_usize, plan_from_controller_request, resume,
-        run_action, run_next, status, ControllerActionReport, ControllerApplyEventRequest,
-        ControllerDispatchHook, ControllerEventReport, ControllerInitRequest, ControllerListReport,
-        ControllerMarkHumanReadyRequest, ControllerResumeReport, NoopDispatchHook,
-        ACTION_RESULT_SCHEMA, APPLY_EVENT_RESULT_SCHEMA, LIST_RESULT_SCHEMA, RESUME_RESULT_SCHEMA,
+        run_action, run_next, status, AgentTaskRepoLoopSpec, AgentTaskRepoLoopSpecEntity,
+        AgentTaskRepoLoopSpecEvent, AgentTaskRepoLoopSpecPhase, ControllerActionReport,
+        ControllerApplyEventRequest, ControllerDispatchHook, ControllerEventReport,
+        ControllerFromSpecReport, ControllerFromSpecRequest, ControllerInitRequest,
+        ControllerListReport, ControllerMarkHumanReadyRequest, ControllerResumeReport,
+        NoopDispatchHook, ACTION_RESULT_SCHEMA, APPLY_EVENT_RESULT_SCHEMA, FROM_SPEC_RESULT_SCHEMA,
+        LIST_RESULT_SCHEMA, RESUME_RESULT_SCHEMA,
     };
 }
 
@@ -207,9 +210,12 @@ pub mod promotion {
 /// Executor provider contracts used by extensions and routing.
 pub mod provider {
     pub use super::super::agent_task_provider::{
-        provider_requires_cwd_git_checkout, required_extension_ids_for_plan,
-        AgentTaskExecutorProvider, AgentTaskProviderRoleAliases,
-        AgentTaskProviderWorkspaceMaterialization, ExtensionProviderAgentTaskExecutor,
+        default_backend, dependency_failure_patterns, provider_requires_cwd_git_checkout,
+        provider_runner_readiness_contracts, required_extension_ids_for_plan,
+        AgentTaskExecutorProvider, AgentTaskProviderDependencyFailurePattern,
+        AgentTaskProviderEnvPathReadiness, AgentTaskProviderRoleAliases,
+        AgentTaskProviderRunnerReadiness, AgentTaskProviderWorkspaceMaterialization,
+        ExtensionProviderAgentTaskExecutor,
     };
 }
 

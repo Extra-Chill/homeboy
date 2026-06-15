@@ -111,6 +111,7 @@ pub(super) fn sync_lab_offload_rigs(
                     rig_id.clone(),
                 ],
                 env: HashMap::new(),
+                secret_env_names: Vec::new(),
                 capture_patch: false,
                 raw_exec: false,
                 source_snapshot: None,
@@ -164,6 +165,7 @@ fn remove_runner_installed_rig_source(
                 "list".to_string(),
             ],
             env: HashMap::new(),
+            secret_env_names: Vec::new(),
             capture_patch: false,
             raw_exec: false,
             source_snapshot: None,
@@ -201,6 +203,7 @@ fn remove_runner_installed_rig_source(
                 selector.clone(),
             ],
             env: HashMap::new(),
+            secret_env_names: Vec::new(),
             capture_patch: false,
             raw_exec: false,
             source_snapshot: None,
@@ -309,8 +312,8 @@ fn is_bench_rig_run(args: &[String]) -> bool {
 }
 
 fn has_path_arg(args: &[String]) -> bool {
-    let mut iter = args.iter().skip(1);
-    while let Some(arg) = iter.next() {
+    let iter = args.iter().skip(1);
+    for arg in iter {
         if arg == "--" {
             return false;
         }

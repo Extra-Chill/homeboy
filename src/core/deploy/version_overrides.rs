@@ -610,6 +610,7 @@ mod tests {
             version_targets: Some(vec![VersionTarget {
                 file: "fixture.php".to_string(),
                 pattern: Some(r"Version:\s*(\d+\.\d+\.\d+)".to_string()),
+                artifact_path: None,
             }]),
             ..Default::default()
         }
@@ -701,10 +702,12 @@ mod tests {
                 VersionTarget {
                     file: "package.json".to_string(),
                     pattern: Some(r#""version":\s*"([0-9.]+)""#.to_string()),
+                    artifact_path: None,
                 },
                 VersionTarget {
                     file: "packages/component/fixture.php".to_string(),
                     pattern: Some(r"Version:\s*([0-9.]+)".to_string()),
+                    artifact_path: None,
                 },
             ]),
             ..Default::default()

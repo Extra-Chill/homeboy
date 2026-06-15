@@ -53,6 +53,14 @@ pub struct PhaseFailure {
 pub struct ExtensionPhaseTiming {
     pub name: String,
     pub duration_ms: u64,
+    /// Provider-declared generic state for this phase, for example `running`,
+    /// `waiting`, `blocked`, `queued`, `passed`, or `failed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    /// Human-readable provider summary for the phase. Core treats this as
+    /// opaque text and does not infer tool-specific behavior from it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifacts: Vec<serde_json::Value>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]

@@ -3,6 +3,7 @@ use std::path::Path;
 use super::{NewFindingRecord, NewRunRecord, ObservationStore, RunRecord, RunStatus};
 
 const RUN_OWNER_METADATA_KEY: &str = "homeboy_run_owner";
+pub const ACTIVE_RUN_ID_ENV: &str = "HOMEBOY_ACTIVE_RUN_ID";
 
 pub struct ActiveObservation {
     store: ObservationStore,
@@ -15,6 +16,7 @@ impl ActiveObservation {
         let store = ObservationStore::open_initialized()?;
         let initial_metadata = record.metadata_json.clone();
         let run = store.start_run(record)?;
+        std::env::set_var(ACTIVE_RUN_ID_ENV, &run.id);
 
         Ok(Self {
             store,

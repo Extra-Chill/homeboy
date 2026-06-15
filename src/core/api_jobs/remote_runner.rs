@@ -42,6 +42,8 @@ pub struct RemoteRunnerJobRequest {
     pub cwd: Option<String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub env: HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secret_env_names: Vec<String>,
     #[serde(default)]
     pub capture_patch: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]

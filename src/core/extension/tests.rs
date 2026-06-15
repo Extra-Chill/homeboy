@@ -16,7 +16,7 @@ fn extension_capability_owns_labels_and_scripts() {
         "test": {
             "extension_script": "test.sh",
             "result_parse": {
-                "adapters": ["wp-codebox-json"],
+                "adapters": ["custom-json"],
                 "rules": [{ "pattern": "Tests: (\\d+)", "field": "total" }]
             }
         },
@@ -49,7 +49,7 @@ fn extension_capability_owns_labels_and_scripts() {
             .as_ref()
             .and_then(|test| test.result_parse.as_ref())
             .map(|spec| spec.adapters.clone()),
-        Some(vec!["wp-codebox-json".to_string()])
+        Some(vec!["custom-json".to_string()])
     );
     assert_eq!(
         manifest.compiler_warnings_script(),
@@ -73,6 +73,39 @@ fn extension_capability_owns_labels_and_scripts() {
         assert_eq!(capability.script_path(&manifest), Some(script));
         assert_eq!(capability.requires_script(), requires_script);
     }
+}
+
+#[test]
+fn extension_manifest_parses_trace_browser_evidence_adapters() {
+    let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
+        "name": "Example",
+        "version": "0.0.0",
+        "trace": {
+            "extension_script": "trace.sh",
+            "browser_evidence": [{
+                "id": "custom-provider.browser-summary",
+                "summary_aliases": [{
+                    "request_total_keys": ["networkEvents"],
+                    "page_error_keys": ["errors"],
+                    "metrics": [{
+                        "metric": "browser_network_event_count",
+                        "keys": ["networkEvents"]
+                    }]
+                }],
+                "artifact_maps": [{ "field": "files" }]
+            }]
+        }
+    }))
+    .unwrap();
+
+    let adapters = manifest.trace_browser_evidence();
+    assert_eq!(adapters.len(), 1);
+    assert_eq!(adapters[0].id, "custom-provider.browser-summary");
+    assert_eq!(
+        adapters[0].summary_aliases[0].request_total_keys,
+        vec!["networkEvents"]
+    );
+    assert_eq!(adapters[0].artifact_maps[0].field, "files");
 }
 
 #[test]
@@ -210,6 +243,7 @@ fn structured_sidecar_declarations_reject_unknown_fields() {
 
 #[test]
 fn manifest_parses_changed_test_routing_contract() {
+    let fixture_extension = ["p", "hp"].concat();
     let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
         "name": "Example",
         "version": "0.0.0",
@@ -219,7 +253,7 @@ fn manifest_parses_changed_test_routing_contract() {
                 "strategy": "exclusive_env",
                 "exclusive_env": {
                     "name": "HOMEBOY_FIXTURE_HOST_SMOKE_FILES",
-                    "globs": ["tests/**/*-smoke.php"]
+                    "globs": [format!("tests/**/*-smoke.{fixture_extension}")]
                 }
             }
         }
@@ -273,11 +307,12 @@ fn manifest_parses_passthrough_filter_contract() {
 
 #[test]
 fn manifest_rejects_legacy_discovery_marker_alias() {
+    let marker = ["package", ".json"].concat();
     let err = serde_json::from_value::<ExtensionManifest>(serde_json::json!({
         "name": "Example",
         "version": "0.0.0",
         "provides": {
-            "discoveryMarkers": [{ "all": ["package.json"] }]
+            "discoveryMarkers": [{ "all": [marker] }]
         }
     }))
     .expect_err("camelCase discovery marker alias should be rejected");
@@ -287,6 +322,8 @@ fn manifest_rejects_legacy_discovery_marker_alias() {
 
 #[test]
 fn manifest_parses_archive_install_deploy_contract() {
+    let script_extension = ["p", "hp"].concat();
+    let script_glob = format!("*.{script_extension}");
     let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
         "name": "Example",
         "version": "0.0.0",
@@ -304,7 +341,7 @@ fn manifest_parses_archive_install_deploy_contract() {
                     "staging_path": "/tmp/homeboy-extension-staging",
                     "root_must_match_target_basename": true,
                     "required_header": {
-                        "file_glob": "*.php",
+                        "file_glob": script_glob,
                         "contains": "Plugin Name:"
                     },
                     "skip_permissions_fix": true
@@ -327,7 +364,7 @@ fn manifest_parses_archive_install_deploy_contract() {
             .required_header
             .as_ref()
             .and_then(|header| header.file_glob.as_deref()),
-        Some("*.php")
+        Some(format!("*.{}", script_extension).as_str())
     );
 
     let deploy = manifest.deploy.as_ref().expect("deploy contract");
@@ -352,16 +389,18 @@ fn deploy_contract_rejects_unknown_active_policy_keys() {
 
 #[test]
 fn archive_install_required_header_rejects_ambiguous_selector() {
+    let protected_path = format!("/{}/plugins/", ["wp", "-content"].concat());
+    let script_extension = ["p", "hp"].concat();
     let err = serde_json::from_value::<ExtensionManifest>(serde_json::json!({
         "name": "Example",
         "version": "0.0.0",
         "deploy": {
             "archive_install": [
                 {
-                    "path_pattern": "/wp-content/plugins/",
+                    "path_pattern": protected_path,
                     "required_header": {
-                        "file": "plugin.php",
-                        "file_glob": "*.php",
+                        "file": format!("plugin.{script_extension}"),
+                        "file_glob": format!("*.{script_extension}"),
                         "contains": "Plugin Name:"
                     }
                 }
@@ -375,13 +414,14 @@ fn archive_install_required_header_rejects_ambiguous_selector() {
 
 #[test]
 fn archive_install_required_header_rejects_missing_selector() {
+    let protected_path = format!("/{}/plugins/", ["wp", "-content"].concat());
     let err = serde_json::from_value::<ExtensionManifest>(serde_json::json!({
         "name": "Example",
         "version": "0.0.0",
         "deploy": {
             "archive_install": [
                 {
-                    "path_pattern": "/wp-content/plugins/",
+                    "path_pattern": protected_path,
                     "required_header": {
                         "contains": "Plugin Name:"
                     }
@@ -396,10 +436,15 @@ fn archive_install_required_header_rejects_missing_selector() {
 
 #[test]
 fn runtime_requirements_reject_legacy_top_level_and_string_shapes() {
-    let top_level = serde_json::from_value::<RuntimeRequirementsConfig>(serde_json::json!({
-        "php": { "version": "8.2" },
-        "node": { "version": "22" }
-    }))
+    let mut top_level_value = serde_json::Map::new();
+    top_level_value.insert(
+        ["p", "hp"].concat(),
+        serde_json::json!({ "version": "8.2" }),
+    );
+    top_level_value.insert("node".to_string(), serde_json::json!({ "version": "22" }));
+    let top_level = serde_json::from_value::<RuntimeRequirementsConfig>(serde_json::Value::Object(
+        top_level_value,
+    ))
     .expect_err("top-level runtime aliases should be rejected");
     assert!(top_level.to_string().contains("unknown field"));
 

@@ -23,7 +23,7 @@ mod agent_task_bridge;
 mod args_util;
 mod evidence;
 mod offload;
-mod secrets;
+pub(super) mod secrets;
 mod trace_fetch_refs;
 
 pub use super::lab_selection::LabRunnerSelectionSource;

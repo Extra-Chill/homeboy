@@ -4,7 +4,7 @@ use homeboy::core::http_api::{
     JobReadyRunKind,
 };
 use homeboy::core::observation::{
-    NewFindingRecord, NewRunRecord, ObservationStore, RunRecord, RunStatus,
+    ArtifactRecord, NewFindingRecord, NewRunRecord, ObservationStore, RunRecord, RunStatus,
 };
 
 use crate::test_support::with_isolated_home;
@@ -307,6 +307,7 @@ fn runs_list_includes_active_runner_jobs() {
                 ],
                 cwd: Some("/workspace/homeboy".to_string()),
                 env: Default::default(),
+                secret_env_names: Vec::new(),
                 capture_patch: false,
                 source_snapshot: None,
                 require_paths: Vec::new(),
@@ -486,6 +487,58 @@ fn artifact_content_serves_encoded_artifact_store_locator() {
             response.body["content_base64"].as_str(),
             Some("eyJzdGVwcyI6W119")
         );
+
+        let response = http_api::handle(HttpApiRequest {
+            method: HttpMethod::Get,
+            path: format!("/runs/{}/artifacts/{}", run.id, token),
+            body: None,
+        })
+        .expect("artifact-store public URL content");
+
+        assert_eq!(response.endpoint, "runs.artifact.content");
+        assert_eq!(response.body["run_id"], run.id);
+        assert_eq!(response.body["filename"], "blueprint.after.json");
+    });
+}
+
+#[test]
+fn artifact_content_serves_percent_encoded_stored_artifact_ids() {
+    with_isolated_home(|home| {
+        let _xdg = XdgGuard::unset();
+        let store = ObservationStore::open_initialized().expect("store");
+        let run = store
+            .start_run(sample_run("bench", "homeboy", "studio"))
+            .expect("bench run");
+        let artifact_path = home.path().join("summary.json");
+        std::fs::write(&artifact_path, br#"{"ok":true}"#).expect("artifact file");
+        let artifact = ArtifactRecord {
+            id: "report/summary".to_string(),
+            run_id: run.id.clone(),
+            kind: "summary".to_string(),
+            artifact_type: "file".to_string(),
+            path: artifact_path.to_string_lossy().to_string(),
+            url: None,
+            public_url: None,
+            viewer_url: None,
+            viewer_links: Vec::new(),
+            sha256: None,
+            size_bytes: Some(11),
+            mime: Some("application/json".to_string()),
+            metadata_json: serde_json::json!({}),
+            created_at: chrono::Utc::now().to_rfc3339(),
+        };
+        store.import_artifact(&artifact).expect("import artifact");
+
+        let response = http_api::handle(HttpApiRequest {
+            method: HttpMethod::Get,
+            path: format!("/runs/{}/artifacts/report%2Fsummary", run.id),
+            body: None,
+        })
+        .expect("encoded artifact content");
+
+        assert_eq!(response.endpoint, "runs.artifact.content");
+        assert_eq!(response.body["artifact_id"], artifact.id);
+        assert_eq!(response.body["filename"], "summary.json");
     });
 }
 

@@ -82,6 +82,8 @@ struct ExecRequest {
     #[serde(default)]
     env: HashMap<String, String>,
     #[serde(default)]
+    secret_env_names: Vec<String>,
+    #[serde(default)]
     capture_patch: bool,
     #[serde(default)]
     raw_exec: bool,
@@ -346,6 +348,7 @@ fn enqueue_exec_job(
         project_id: request.project_id,
         command: request.command,
         env: request.env,
+        secret_env_names: request.secret_env_names,
         capture_patch: request.capture_patch,
         raw_exec: request.raw_exec,
         source_snapshot: request.source_snapshot,
@@ -529,6 +532,10 @@ pub(super) fn error_response(status_code: u16, err: Error) -> HttpResponse {
         }),
         artifact: None,
     }
+}
+
+pub(crate) fn artifact_response_for_path(path: &str) -> Option<HttpResponse> {
+    artifact_download::route(path)
 }
 
 fn config_paths_body() -> Result<serde_json::Value> {

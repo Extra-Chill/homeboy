@@ -153,18 +153,23 @@ pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, 
         let dry_run_preflight = run_dry_run_preflights(&input.component_id, &options)?;
         if let Some(run) = dry_run_preflight {
             let plan = super::plan(&input.component_id, &options).ok();
+            let skipped_reason = plan.as_ref().and_then(skipped_reason_from_plan);
+            let status = release_command_status(true, skipped_reason.as_deref(), Some(&run));
+            let release_summary = release_summary_from_run(&run);
             return Ok((
                 ReleaseCommandResult {
                     component_id: input.component_id,
+                    status,
                     bump_type,
                     dry_run: true,
                     releasable_commits: releasable_count,
                     new_version: None,
                     tag: None,
-                    skipped_reason: plan.as_ref().and_then(skipped_reason_from_plan),
+                    skipped_reason,
                     plan,
                     run: Some(run),
                     deployment: None,
+                    release_summary,
                 },
                 1,
             ));
@@ -184,6 +189,11 @@ pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, 
         return Ok((
             ReleaseCommandResult {
                 component_id: input.component_id,
+                status: release_command_status(
+                    true,
+                    skipped_reason_from_plan(&plan).as_deref(),
+                    None,
+                ),
                 bump_type,
                 dry_run: true,
                 releasable_commits: releasable_count,
@@ -193,6 +203,7 @@ pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, 
                 plan: Some(plan),
                 run: None,
                 deployment,
+                release_summary: release_summary_for_skipped_plan(),
             },
             0,
         ));
@@ -217,6 +228,8 @@ pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, 
     };
     let deployment = super::deployment::extract_deployment_from_run(&run_result);
     let skipped_reason = skipped_reason_from_plan(&plan);
+    let release_summary = release_summary_from_run(&run_result);
+    display_release_outcome_summary(&release_summary);
     let deploy_exit_code = deployment
         .as_ref()
         .filter(|deployment| deployment.summary.failed > 0)
@@ -248,6 +261,7 @@ pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, 
     Ok((
         ReleaseCommandResult {
             component_id: input.component_id,
+            status: release_command_status(false, skipped_reason.as_deref(), Some(&run_result)),
             bump_type,
             dry_run: false,
             releasable_commits: releasable_count,
@@ -257,6 +271,7 @@ pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, 
             plan: Some(plan),
             run: Some(run_result),
             deployment,
+            release_summary,
         },
         exit_code,
     ))
@@ -400,6 +415,137 @@ fn display_release_summary(run: &ReleaseRun) {
     }
 }
 
+fn display_release_outcome_summary(summary: &[String]) {
+    if summary.is_empty() {
+        return;
+    }
+
+    eprintln!();
+    for line in summary {
+        log_status!("release", "{}", line);
+    }
+}
+
+fn release_command_status(
+    dry_run: bool,
+    skipped_reason: Option<&str>,
+    run: Option<&ReleaseRun>,
+) -> String {
+    if skipped_reason.is_some() {
+        return "skipped".to_string();
+    }
+    if dry_run {
+        return "planned".to_string();
+    }
+    match run.map(|run| &run.result.status) {
+        Some(ReleaseStepStatus::Success) => "released".to_string(),
+        Some(ReleaseStepStatus::PartialSuccess) => "partial".to_string(),
+        Some(ReleaseStepStatus::Failed) => "failed".to_string(),
+        Some(ReleaseStepStatus::Missing) => "missing".to_string(),
+        Some(ReleaseStepStatus::Skipped) => "skipped".to_string(),
+        None => "unknown".to_string(),
+    }
+}
+
+fn release_summary_for_skipped_plan() -> Vec<String> {
+    vec![
+        "No release commit created".to_string(),
+        "No tag created".to_string(),
+        "No GitHub Release created".to_string(),
+    ]
+}
+
+fn release_summary_from_run(run: &ReleaseRun) -> Vec<String> {
+    let mut summary = Vec::new();
+
+    if matches!(run.result.status, ReleaseStepStatus::Success) {
+        if let Some(line) = release_created_line(run) {
+            summary.push(line);
+        }
+    }
+
+    summary.push(git_commit_summary_line(run));
+    summary.push(git_tag_summary_line(run));
+    summary.push(github_release_summary_line(run));
+    summary
+}
+
+fn release_created_line(run: &ReleaseRun) -> Option<String> {
+    let tag = successful_step(run, "git.tag")
+        .and_then(|step| step.data.as_ref())
+        .and_then(|data| data.get("tag"))
+        .and_then(|value| value.as_str());
+    let url = successful_step(run, "github.release")
+        .and_then(|step| step.data.as_ref())
+        .and_then(|data| data.get("url"))
+        .and_then(|value| value.as_str());
+
+    match (tag, url) {
+        (Some(tag), Some(url)) => Some(format!("Release created: {} ({})", tag, url)),
+        (Some(tag), None) => Some(format!("Release created: {}", tag)),
+        (None, Some(url)) => Some(format!("Release created: {}", url)),
+        (None, None) => None,
+    }
+}
+
+fn git_commit_summary_line(run: &ReleaseRun) -> String {
+    let Some(step) = successful_step(run, "git.commit") else {
+        return "No release commit created".to_string();
+    };
+    if step_data_bool(step, "skipped") {
+        "No release commit created".to_string()
+    } else {
+        "Release commit created".to_string()
+    }
+}
+
+fn git_tag_summary_line(run: &ReleaseRun) -> String {
+    let Some(step) = successful_step(run, "git.tag") else {
+        return "No tag created".to_string();
+    };
+    let tag = step
+        .data
+        .as_ref()
+        .and_then(|data| data.get("tag"))
+        .and_then(|value| value.as_str());
+    if step_data_bool(step, "skipped") {
+        tag.map(|tag| format!("Tag already exists: {}", tag))
+            .unwrap_or_else(|| "No tag created".to_string())
+    } else {
+        tag.map(|tag| format!("Tag created: {}", tag))
+            .unwrap_or_else(|| "Tag created".to_string())
+    }
+}
+
+fn github_release_summary_line(run: &ReleaseRun) -> String {
+    let Some(step) = successful_step(run, "github.release") else {
+        return "No GitHub Release created".to_string();
+    };
+    if step_data_bool(step, "skipped") {
+        return "No GitHub Release created".to_string();
+    }
+    step.data
+        .as_ref()
+        .and_then(|data| data.get("url"))
+        .and_then(|value| value.as_str())
+        .map(|url| format!("GitHub Release created: {}", url))
+        .unwrap_or_else(|| "GitHub Release created".to_string())
+}
+
+fn successful_step<'a>(run: &'a ReleaseRun, step_type: &str) -> Option<&'a ReleaseStepResult> {
+    run.result.steps.iter().find(|step| {
+        step.step_type == step_type && matches!(step.status, ReleaseStepStatus::Success)
+    })
+}
+
+fn step_data_bool(step: &ReleaseStepResult, key: &str) -> bool {
+    step.data
+        .as_ref()
+        .and_then(|data| data.get(key))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+}
+
 fn has_post_release_warnings(run: &ReleaseRun) -> bool {
     run.result.steps.iter().any(|step| {
         step.step_type == "post_release"
@@ -465,13 +611,177 @@ fn run_recover(input: &ReleaseCommandInput) -> Result<(ReleaseCommandResult, i32
     };
     let remote_tag_commit = git::remote_tag_commit(&component.local_path, &tag_name)?;
 
-    if local_tag_commit
+    let tag_is_stale = local_tag_commit
         .as_deref()
         .is_some_and(|commit| commit != head_commit)
         || remote_tag_commit
             .as_deref()
-            .is_some_and(|commit| commit != head_commit)
-    {
+            .is_some_and(|commit| commit != head_commit);
+
+    if tag_is_stale && input.retag {
+        // Guarded retag: only move the tag forward to HEAD when it is safe.
+        //   1. Every existing tag commit (local + remote) is a strict ancestor
+        //      of HEAD — never relocate onto divergent/unrelated history.
+        //   2. HEAD satisfies all version targets at the current version —
+        //      preserves the orphan-tag invariant (#2234): the tag must land on
+        //      a commit whose tree actually shows this version.
+        //   3. No GitHub Release exists for the tag — moving a published
+        //      release is destructive to consumers and must be done explicitly.
+        for candidate in [local_tag_commit.as_deref(), remote_tag_commit.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            let is_ancestor = git::is_ancestor(&component.local_path, candidate, &head_commit)?;
+            if !is_ancestor {
+                return Err(Error::validation_invalid_argument(
+                    "retag",
+                    format!(
+                        "Refusing to retag '{}': existing tag commit {} is not an ancestor of HEAD {}",
+                        tag_name,
+                        short_sha(candidate),
+                        short_sha(&head_commit)
+                    ),
+                    None,
+                    Some(vec![
+                        "The tag points at divergent history. Resolve manually before retagging.".to_string(),
+                    ]),
+                ));
+            }
+        }
+
+        if let Some(mismatches) =
+            crate::core::release::executor::version_targets::collect_head_version_mismatches(
+                &component,
+                current_version,
+            )
+        {
+            let detail = mismatches
+                .iter()
+                .map(|m| {
+                    format!(
+                        "{} = {}",
+                        m.file,
+                        m.found.as_deref().unwrap_or("<unreadable>")
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(Error::validation_invalid_argument(
+                "retag",
+                format!(
+                    "Refusing to retag '{}': HEAD does not show version {} for {} target(s): {}",
+                    tag_name,
+                    current_version,
+                    mismatches.len(),
+                    detail
+                ),
+                None,
+                Some(vec![
+                    "Bump the version targets at HEAD first, or run a normal release.".to_string(),
+                ]),
+            ));
+        }
+
+        if crate::core::release::executor::github_release_exists_for_tag(&component, &tag_name)
+            == Some(true)
+        {
+            return Err(Error::validation_invalid_argument(
+                "retag",
+                format!(
+                    "Refusing to retag '{}': a GitHub Release already exists for this tag",
+                    tag_name
+                ),
+                None,
+                Some(vec![
+                    format!(
+                        "Moving a published release is destructive. Delete it deliberately if intended: gh release delete {}",
+                        tag_name
+                    ),
+                ]),
+            ));
+        }
+
+        // Safe to move: delete the stale tag (local + remote) and re-create at HEAD.
+        log_status!(
+            "recover",
+            "Retagging {} from {} to HEAD {}...",
+            tag_name,
+            local_tag_commit
+                .as_deref()
+                .or(remote_tag_commit.as_deref())
+                .map(short_sha)
+                .unwrap_or("<unknown>"),
+            short_sha(&head_commit)
+        );
+
+        if tag_exists_local {
+            git::delete_local_tag(&component.local_path, &tag_name)?;
+        }
+        if tag_exists_remote {
+            git::delete_remote_tag(&component.local_path, &tag_name)?;
+        }
+
+        let tag_result = git::tag(
+            Some(&input.component_id),
+            Some(&tag_name),
+            Some(&format!("Release {}", tag_name)),
+        )?;
+        if !tag_result.success {
+            return Err(Error::git_command_failed(format!(
+                "Failed to re-create tag at HEAD: {}",
+                tag_result.stderr
+            )));
+        }
+
+        let push_result = git::push(
+            Some(&input.component_id),
+            git::PushOptions {
+                tags: true,
+                ..Default::default()
+            },
+        )?;
+        if !push_result.success {
+            return Err(Error::git_command_failed(format!(
+                "Failed to push retagged {}: {}",
+                tag_name, push_result.stderr
+            )));
+        }
+
+        let actions = vec![format!("retagged {} to HEAD", tag_name)];
+        log_status!(
+            "recover",
+            "Recovery complete for v{}: {}",
+            current_version,
+            actions.join(", ")
+        );
+        return Ok((
+            ReleaseCommandResult {
+                component_id: input.component_id.clone(),
+                status: "recovered".to_string(),
+                bump_type: "recover".to_string(),
+                dry_run: false,
+                releasable_commits: 0,
+                new_version: None,
+                tag: Some(tag_name.clone()),
+                skipped_reason: None,
+                plan: Some(recovery_release_plan(
+                    &input.component_id,
+                    current_version,
+                    &tag_name,
+                    false,
+                    true,
+                    true,
+                    &actions,
+                )),
+                run: None,
+                deployment: None,
+                release_summary: actions.clone(),
+            },
+            0,
+        ));
+    }
+
+    if tag_is_stale {
         return Err(Error::validation_invalid_argument(
             "tag",
             format!("Tag '{}' exists but does not point to HEAD", tag_name),
@@ -498,6 +808,10 @@ fn run_recover(input: &ReleaseCommandInput) -> Result<(ReleaseCommandResult, i32
                 ),
                 format!(
                     "If the tag is an abandoned partial release, delete the GitHub release/tag explicitly, then run: homeboy release {} --recover",
+                    input.component_id
+                ),
+                format!(
+                    "If config-only commits landed after tagging (tag is behind HEAD, version unchanged, no GitHub Release), move the tag to HEAD: homeboy release {} --recover --retag",
                     input.component_id
                 ),
             ]),
@@ -583,6 +897,11 @@ fn run_recover(input: &ReleaseCommandInput) -> Result<(ReleaseCommandResult, i32
     Ok((
         ReleaseCommandResult {
             component_id: input.component_id.clone(),
+            status: if actions.is_empty() {
+                "already_recovered".to_string()
+            } else {
+                "recovered".to_string()
+            },
             bump_type: "recover".to_string(),
             dry_run: false,
             releasable_commits: 0,
@@ -600,6 +919,11 @@ fn run_recover(input: &ReleaseCommandInput) -> Result<(ReleaseCommandResult, i32
             )),
             run: None,
             deployment: None,
+            release_summary: if actions.is_empty() {
+                vec![format!("Release already exists: {}", tag_name)]
+            } else {
+                actions.to_vec()
+            },
         },
         0,
     ))
@@ -740,6 +1064,7 @@ pub fn run_batch(
             path_override: None,
             dry_run: input_template.dry_run,
             recover: input_template.recover,
+            retag: input_template.retag,
             skip_checks: input_template.skip_checks,
             bump_override: input_template.bump_override.clone(),
             force_lower_bump: input_template.force_lower_bump,
@@ -951,6 +1276,48 @@ mod tests {
         };
 
         assert_eq!(release_run_failure_exit(&run), 1);
+    }
+
+    #[test]
+    fn release_summary_explicitly_reports_created_and_missing_release_surfaces() {
+        let run = ReleaseRun {
+            component_id: "demo".to_string(),
+            enabled: true,
+            result: ReleaseRunResult {
+                steps: vec![
+                    ReleaseStepResult {
+                        id: "git.commit".to_string(),
+                        step_type: "git.commit".to_string(),
+                        status: ReleaseStepStatus::Success,
+                        missing: vec![],
+                        warnings: vec![],
+                        hints: vec![],
+                        data: Some(serde_json::json!({ "success": true })),
+                        error: None,
+                    },
+                    ReleaseStepResult {
+                        id: "git.tag".to_string(),
+                        step_type: "git.tag".to_string(),
+                        status: ReleaseStepStatus::Success,
+                        missing: vec![],
+                        warnings: vec![],
+                        hints: vec![],
+                        data: Some(serde_json::json!({ "tag": "v1.2.3" })),
+                        error: None,
+                    },
+                ],
+                status: ReleaseStepStatus::Success,
+                warnings: vec![],
+                summary: None,
+            },
+        };
+
+        let summary = release_summary_from_run(&run);
+
+        assert!(summary.contains(&"Release created: v1.2.3".to_string()));
+        assert!(summary.contains(&"Release commit created".to_string()));
+        assert!(summary.contains(&"Tag created: v1.2.3".to_string()));
+        assert!(summary.contains(&"No GitHub Release created".to_string()));
     }
 
     // ----- Recover-time orphan-tag warning (issue #2234 ask #3) -----

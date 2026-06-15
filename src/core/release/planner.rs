@@ -10,8 +10,8 @@ use super::plan_steps::{build_preflight_steps, build_release_steps};
 use super::planning_changelog::{build_changelog_plan, generate_changelog_entries};
 use super::planning_policy::release_skip_plan;
 use super::planning_semver::{
-    build_semver_recommendation, current_version_tag_name, validate_current_version_tag_reachable,
-    validate_release_version_floor,
+    build_semver_recommendation, current_version_tag_at_head, current_version_tag_name,
+    validate_current_version_tag_reachable, validate_release_version_floor,
 };
 use super::planning_worktree::validate_release_worktree;
 use super::types::{ReleaseOptions, ReleasePlan};
@@ -65,9 +65,22 @@ pub fn plan(component_id: &str, options: &ReleaseOptions) -> Result<ReleasePlan>
     };
 
     if !options.pipeline.head {
-        if let Some(skip_plan) =
-            release_skip_plan(component_id, options, semver_recommendation.clone())
-        {
+        // Catch "release vX.Y.Z already exists at HEAD" before the bump/semver
+        // gate so a forced re-run after a prior partial release sees a clear
+        // skip plan instead of a downstream changelog contract error for the
+        // next version (issue #4316).
+        let release_already_at_head = version_info.as_ref().and_then(|info| {
+            current_version_tag_at_head(&component.local_path, monorepo.as_ref(), &info.version)
+                .ok()
+                .flatten()
+        });
+
+        if let Some(skip_plan) = release_skip_plan(
+            component_id,
+            options,
+            semver_recommendation.clone(),
+            release_already_at_head.as_deref(),
+        ) {
             return Ok(skip_plan);
         }
     }

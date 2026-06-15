@@ -1002,7 +1002,7 @@ mod tests {
         .expect("component config");
         let manifest = serde_json::json!({
             "settings": [
-                { "id": "test_backend", "default": "wp-codebox" }
+                { "id": "test_backend", "default": "custom-provider" }
             ]
         });
         let extension_settings = extract_component_extension_settings(&component, "wordpress");

@@ -395,7 +395,7 @@ fn trace_run_preserves_nested_child_artifact_directories() {
             })
             .expect("trace artifact directory is preserved");
         assert!(std::path::Path::new(&directory_artifact.path)
-            .join("wp-codebox-artifacts/runtime-fixture/files/browser/network.jsonl")
+            .join("provider-artifacts/runtime-fixture/files/browser/network.jsonl")
             .is_file());
         assert!(artifacts.iter().any(|artifact| {
             artifact.kind == "trace-artifact"
@@ -428,14 +428,14 @@ fn trace_run_fails_when_declared_artifact_is_missing() {
             .failure
             .as_deref()
             .expect("failure")
-            .contains("wp-codebox-artifacts/runtime-fixture/files/browser/network.jsonl"));
+            .contains("provider-artifacts/runtime-fixture/files/browser/network.jsonl"));
         assert!(results.assertions.iter().any(|assertion| {
             assertion.status == extension_trace::TraceAssertionStatus::Error
                 && assertion
                     .message
                     .as_deref()
                     .unwrap_or_default()
-                    .contains("wp-codebox-artifacts/runtime-fixture/files/browser/network.jsonl")
+                    .contains("provider-artifacts/runtime-fixture/files/browser/network.jsonl")
         }));
     });
 }

@@ -416,10 +416,12 @@ mod tests {
             VersionTarget {
                 file: "Cargo.toml".to_string(),
                 pattern: None,
+                artifact_path: None,
             },
             VersionTarget {
                 file: "nested/package.json".to_string(),
                 pattern: None,
+                artifact_path: None,
             },
         ]);
 
@@ -442,6 +444,7 @@ mod tests {
         component.version_targets = Some(vec![VersionTarget {
             file: "Cargo.toml".to_string(),
             pattern: None,
+            artifact_path: None,
         }]);
 
         let snapshots = capture_release_owned_files(&component, &root).unwrap();

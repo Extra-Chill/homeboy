@@ -22,6 +22,10 @@ pub(super) fn build_semver_recommendation(
 
     let recommended = git::recommended_bump_from_commits(&commits);
 
+    if requested_bump == "none" && recommended.is_none() {
+        return Ok(None);
+    }
+
     if is_explicit_version {
         return Ok(Some(ReleaseSemverRecommendation {
             latest_tag: latest_tag.clone(),
@@ -125,6 +129,37 @@ pub(super) fn current_version_tag_name(
     monorepo
         .map(|ctx| ctx.format_tag(current_version))
         .unwrap_or_else(|| format!("v{}", current_version))
+}
+
+/// Detect whether the release for `current_version` is already published at
+/// HEAD: the expected tag exists locally and points at the same commit as HEAD.
+///
+/// Used by the planner to short-circuit forced re-runs after a prior release
+/// already created the tag/release commit, so the operator sees a clear
+/// "release already exists" message instead of a downstream changelog
+/// contract error for the next version (issue #4316).
+pub(super) fn current_version_tag_at_head(
+    local_path: &str,
+    monorepo: Option<&git::MonorepoContext>,
+    current_version: &str,
+) -> Result<Option<String>> {
+    let git_root = monorepo
+        .map(|ctx| ctx.git_root.as_str())
+        .unwrap_or(local_path);
+    let tag_name = current_version_tag_name(monorepo, current_version);
+
+    if !git::tag_exists_locally(git_root, &tag_name)? {
+        return Ok(None);
+    }
+
+    let tag_commit = git::get_tag_commit(git_root, &tag_name)?;
+    let head_commit = git::get_head_commit(git_root)?;
+
+    if tag_commit == head_commit {
+        Ok(Some(tag_name))
+    } else {
+        Ok(None)
+    }
 }
 
 /// Resolve the latest tag and commits since that tag for a component.
@@ -301,6 +336,32 @@ mod tests {
         assert_eq!(recommendation.requested_bump, "2.0.0");
         assert!(!recommendation.is_underbump);
         assert!(recommendation.reasons.is_empty());
+    }
+
+    #[test]
+    fn none_request_with_only_non_releasable_commits_returns_no_recommendation() {
+        let temp = git_repo();
+        let dir = temp.path();
+        commit_file(dir, "README.md", "initial", "chore: initial");
+        run_git(dir, &["tag", "v1.0.0"]);
+        commit_file(
+            dir,
+            "baseline.txt",
+            "baseline",
+            "chore: refresh lint baseline",
+        );
+        let component = Component {
+            local_path: dir.to_string_lossy().to_string(),
+            ..Default::default()
+        };
+
+        let recommendation = build_semver_recommendation(&component, "none", None)
+            .expect("no-op recommendation should be valid");
+
+        assert!(
+            recommendation.is_none(),
+            "internal no-op bump sentinel should let the planner build a skip plan"
+        );
     }
 
     #[test]

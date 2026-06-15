@@ -11,6 +11,7 @@ mod session;
 pub mod transfer;
 
 pub(crate) use client::execute_local_command_stderr_passthrough;
+pub(crate) use client::DELEGATED_RUN_STATUS_FILE_ENV;
 pub use client::{
     execute_local_command, execute_local_command_in_dir, execute_local_command_interactive,
     execute_local_command_passthrough, CommandOutput, SshClient,
@@ -74,6 +75,8 @@ pub struct RunnerSecretEnvRef {
     pub env: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]

@@ -426,6 +426,7 @@ pub fn record_pre_dispatch_failure(
                 cleanup: Some("preserve".to_string()),
                 materialization: metadata.clone(),
             },
+            component_contracts: Vec::new(),
             policy: AgentTaskPolicy::default(),
             limits: AgentTaskLimits::default(),
             expected_artifacts: Vec::new(),
@@ -716,6 +717,7 @@ fn synthetic_remote_dispatch_plan(
                         "remote_workspace": failure.remote_workspace,
                     }),
                 },
+                component_contracts: Vec::new(),
                 policy: AgentTaskPolicy::default(),
                 limits: AgentTaskLimits::default(),
                 expected_artifacts: Vec::new(),
@@ -1108,7 +1110,7 @@ fn artifact_refs_for_outcomes(outcomes: &[AgentTaskOutcome]) -> Vec<AgentTaskArt
 fn provider_handles_for_outcomes(outcomes: &[AgentTaskOutcome]) -> Vec<AgentTaskRunProviderHandle> {
     outcomes
         .iter()
-        .flat_map(|outcome| provider_handles_for_outcome(outcome))
+        .flat_map(provider_handles_for_outcome)
         .collect()
 }
 
@@ -1395,7 +1397,7 @@ mod tests {
                     schema: crate::core::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
                     task_id: "task-a".to_string(),
                     status: crate::core::agent_task::AgentTaskOutcomeStatus::Failed,
-                    summary: Some("WP Codebox agent task failed.".to_string()),
+                    summary: Some("Remote provider agent task failed.".to_string()),
                     failure_classification: Some(AgentTaskFailureClassification::Provider),
                     artifacts: Vec::new(),
                     evidence_refs: vec![AgentTaskEvidenceRef {
@@ -1405,7 +1407,7 @@ mod tests {
                     }],
                     diagnostics: Vec::new(),
                     outputs: serde_json::json!({
-                        "codebox_run_result": {
+                        "provider_run_result": {
                             "status": "failed",
                             "failure_classification": "runtime",
                             "artifacts": [],
@@ -1415,8 +1417,8 @@ mod tests {
                     workflow: None,
                     follow_up: None,
                     metadata: serde_json::json!({
-                        "provider": "wordpress.codebox-agent-task-executor",
-                        "remote_run_id": "codebox-run-1",
+                        "provider": "fixture.agent-task-executor",
+                        "remote_run_id": "provider-run-1",
                         "remote_workspace": "/runner/workspace/repo"
                     }),
                 }],
@@ -1424,7 +1426,7 @@ mod tests {
                     task_id: "task-a".to_string(),
                     state: AgentTaskState::Failed,
                     attempt: 1,
-                    message: Some("WP Codebox agent task failed.".to_string()),
+                    message: Some("Remote provider agent task failed.".to_string()),
                 }],
                 artifact_lineage: Vec::new(),
                 queue: AgentTaskQueueStatus {
@@ -1488,10 +1490,10 @@ mod tests {
             );
             assert_eq!(
                 log.events[0].message.as_deref(),
-                Some("WP Codebox agent task failed.")
+                Some("Remote provider agent task failed.")
             );
             assert_eq!(artifacts.evidence_refs[0].kind, "logs");
-            assert!(raw_aggregate.contains("wordpress.codebox-agent-task-executor"));
+            assert!(raw_aggregate.contains("fixture.agent-task-executor"));
             assert!(raw_aggregate.contains("failure_classification"));
         });
     }
@@ -1511,19 +1513,19 @@ mod tests {
                     schema: crate::core::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
                     task_id: "cook-conductor".to_string(),
                     status: crate::core::agent_task::AgentTaskOutcomeStatus::Failed,
-                    summary: Some("WP Codebox agent task failed.".to_string()),
+                    summary: Some("Remote provider agent task failed.".to_string()),
                     failure_classification: Some(AgentTaskFailureClassification::Provider),
                     artifacts: Vec::new(),
                     evidence_refs: vec![AgentTaskEvidenceRef {
-                        kind: "codebox-run".to_string(),
-                        uri: "homeboy://codebox/runs/codebox-run-1".to_string(),
-                        label: Some("Codebox run".to_string()),
+                        kind: "provider-run".to_string(),
+                        uri: "homeboy://provider/runs/provider-run-1".to_string(),
+                        label: Some("Provider run".to_string()),
                     }],
                     diagnostics: Vec::new(),
                     outputs: serde_json::json!({
-                        "codebox_run_result": {
-                            "schema": "wp-codebox/agent-task-run-result/v1",
-                            "run_id": "codebox-run-1",
+                        "provider_run_result": {
+                            "schema": "custom-provider/agent-task-run-result/v1",
+                            "run_id": "provider-run-1",
                             "status": "failed",
                             "failure_classification": "runtime",
                             "metadata": {
@@ -1535,8 +1537,8 @@ mod tests {
                     workflow: None,
                     follow_up: None,
                     metadata: serde_json::json!({
-                        "provider": "wordpress.codebox-agent-task-executor",
-                        "remote_run_id": "codebox-run-1",
+                        "provider": "fixture.agent-task-executor",
+                        "remote_run_id": "provider-run-1",
                     }),
                 }],
                 events: Vec::new(),
@@ -1591,20 +1593,17 @@ mod tests {
             assert_eq!(loaded.state, AgentTaskRunState::Failed);
             assert_eq!(loaded.tasks[0].task_id, "cook-conductor");
             assert_eq!(loaded.tasks[0].state, AgentTaskState::Failed);
-            assert_eq!(
-                loaded.tasks[0].backend,
-                "wordpress.codebox-agent-task-executor"
-            );
+            assert_eq!(loaded.tasks[0].backend, "fixture.agent-task-executor");
             assert_eq!(loaded.provider_handles.len(), 1);
-            assert_eq!(loaded.provider_handles[0].provider_run_id, "codebox-run-1");
+            assert_eq!(loaded.provider_handles[0].provider_run_id, "provider-run-1");
             assert_eq!(loaded.metadata["remote_run_id"], "remote-run");
             assert_eq!(loaded.metadata["remote_plan_path"], "remote-plan");
             assert_eq!(
                 log.events[0].message.as_deref(),
-                Some("WP Codebox agent task failed.")
+                Some("Remote provider agent task failed.")
             );
-            assert_eq!(artifacts.evidence_refs[0].kind, "codebox-run");
-            assert!(raw_aggregate.contains("wp-codebox/agent-task-run-result/v1"));
+            assert_eq!(artifacts.evidence_refs[0].kind, "provider-run");
+            assert!(raw_aggregate.contains("custom-provider/agent-task-run-result/v1"));
             assert!(raw_aggregate.contains("failure_classification"));
             assert!(raw_aggregate.contains("remote_plan_ref"));
         });
@@ -1625,7 +1624,7 @@ mod tests {
                     schema: crate::core::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
                     task_id: "cook-conductor".to_string(),
                     status: crate::core::agent_task::AgentTaskOutcomeStatus::Failed,
-                    summary: Some("WP Codebox agent task failed.".to_string()),
+                    summary: Some("Remote provider agent task failed.".to_string()),
                     failure_classification: Some(AgentTaskFailureClassification::Provider),
                     artifacts: Vec::new(),
                     evidence_refs: Vec::new(),
@@ -1634,9 +1633,9 @@ mod tests {
                     workflow: None,
                     follow_up: None,
                     metadata: serde_json::json!({
-                        "provider": "wordpress.codebox-agent-task-executor",
-                        "codebox_run_result": {
-                            "schema": "wp-codebox/agent-task-run-result/v1",
+                        "provider": "fixture.agent-task-executor",
+                        "provider_run_result": {
+                            "schema": "custom-provider/agent-task-run-result/v1",
                             "status": "failed",
                             "failure_classification": "runtime"
                         }
@@ -1688,10 +1687,7 @@ mod tests {
                 aggregate_source("local-sparse-run").expect("aggregate source");
 
             assert_eq!(loaded.tasks[0].task_id, "cook-conductor");
-            assert_eq!(
-                loaded.tasks[0].backend,
-                "wordpress.codebox-agent-task-executor"
-            );
+            assert_eq!(loaded.tasks[0].backend, "fixture.agent-task-executor");
             assert_eq!(loaded.metadata["remote_run_id"], "remote-run");
             assert!(artifacts
                 .evidence_refs
@@ -1701,7 +1697,7 @@ mod tests {
                 .evidence_refs
                 .iter()
                 .any(|evidence| evidence.kind == "remote-agent-task-review"));
-            assert!(raw_aggregate.contains("wp-codebox/agent-task-run-result/v1"));
+            assert!(raw_aggregate.contains("custom-provider/agent-task-run-result/v1"));
             assert!(raw_aggregate.contains("failure_classification"));
         });
     }
@@ -2132,6 +2128,7 @@ mod tests {
                 inputs: Value::Null,
                 source_refs: Vec::new(),
                 workspace: AgentTaskWorkspace::default(),
+                component_contracts: Vec::new(),
                 policy: AgentTaskPolicy::default(),
                 limits: AgentTaskLimits::default(),
                 expected_artifacts: Vec::new(),

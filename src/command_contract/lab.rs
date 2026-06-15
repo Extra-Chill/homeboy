@@ -85,10 +85,11 @@ impl Commands {
                     agent_task::AgentTaskCommand::Status(_)
                         | agent_task::AgentTaskCommand::Logs(_)
                         | agent_task::AgentTaskCommand::Artifacts(_)
+                        | agent_task::AgentTaskCommand::Review(_)
                 ) =>
             {
                 LabCommandContract::portable_workload(
-                    "agent-task status/logs/artifacts",
+                    "agent-task status/logs/artifacts/review",
                     None,
                     false,
                     LAB_NO_EXTRA_TOOLS,
@@ -159,6 +160,22 @@ impl Commands {
                 }
                 contract
             }
+            Commands::Tunnel(args) if args.is_preview_consumer_run() => {
+                LabCommandContract::explicit_runner(
+                    "tunnel preview-consumer run",
+                    None,
+                    false,
+                    LAB_NO_EXTRA_TOOLS,
+                )
+            }
+            Commands::Tunnel(args) if args.is_service_start() => {
+                LabCommandContract::explicit_runner(
+                    "tunnel service start",
+                    None,
+                    false,
+                    LAB_NO_EXTRA_TOOLS,
+                )
+            }
             _ => return None,
         };
 
@@ -170,7 +187,9 @@ fn agent_task_provider_requires_cwd_git_checkout(command: &agent_task::AgentTask
     match command {
         agent_task::AgentTaskCommand::Cook(args) | agent_task::AgentTaskCommand::Dispatch(args) => {
             args.cwd.as_ref().is_some_and(|cwd| !cwd.trim().is_empty())
-                && provider_requires_cwd_git_checkout(&args.backend, args.selector.as_deref())
+                && args.backend.as_ref().is_some_and(|backend| {
+                    provider_requires_cwd_git_checkout(backend, args.selector.as_deref())
+                })
         }
         _ => false,
     }
@@ -428,7 +447,22 @@ mod tests {
             parsed_command(&["homeboy", "agent-task", "artifacts", "agent-task-123"])
                 .supports_lab_runner()
         );
+        assert!(
+            parsed_command(&["homeboy", "agent-task", "review", "agent-task-123"])
+                .supports_lab_runner()
+        );
         assert!(parsed_command(&["homeboy", "agent-task", "providers"]).supports_lab_runner());
+        assert!(parsed_command(&[
+            "homeboy",
+            "tunnel",
+            "preview-consumer",
+            "run",
+            "--config",
+            "preview-consumer.json",
+            "--preview-public-url",
+            "https://preview.example.test/"
+        ])
+        .supports_lab_runner());
         assert!(parsed_command(&[
             "homeboy",
             "agent-task",
@@ -544,15 +578,19 @@ mod tests {
             ),
             (
                 parsed_command(&["homeboy", "agent-task", "status", "agent-task-123"]),
-                "agent-task status/logs/artifacts",
+                "agent-task status/logs/artifacts/review",
             ),
             (
                 parsed_command(&["homeboy", "agent-task", "logs", "agent-task-123"]),
-                "agent-task status/logs/artifacts",
+                "agent-task status/logs/artifacts/review",
             ),
             (
                 parsed_command(&["homeboy", "agent-task", "artifacts", "agent-task-123"]),
-                "agent-task status/logs/artifacts",
+                "agent-task status/logs/artifacts/review",
+            ),
+            (
+                parsed_command(&["homeboy", "agent-task", "review", "agent-task-123"]),
+                "agent-task status/logs/artifacts/review",
             ),
             (
                 parsed_command(&["homeboy", "agent-task", "providers"]),
@@ -617,12 +655,16 @@ mod tests {
         assert!(lint.requires_extension_parity);
         assert!(lint.infer_source_path_tools);
 
-        let agent_task_status =
-            parsed_command(&["homeboy", "agent-task", "status", "agent-task-123"])
+        for args in [
+            ["homeboy", "agent-task", "status", "agent-task-123"].as_slice(),
+            ["homeboy", "agent-task", "review", "agent-task-123"].as_slice(),
+        ] {
+            let agent_task_inspection = parsed_command(args)
                 .lab_contract()
-                .expect("agent-task status contract");
-        assert!(!agent_task_status.requires_extension_parity);
-        assert!(!agent_task_status.infer_source_path_tools);
+                .expect("agent-task inspection contract");
+            assert!(!agent_task_inspection.requires_extension_parity);
+            assert!(!agent_task_inspection.infer_source_path_tools);
+        }
 
         let auth_status = parsed_command(&[
             "homeboy",

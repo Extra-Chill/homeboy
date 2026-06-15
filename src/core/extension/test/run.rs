@@ -16,6 +16,7 @@ use crate::core::extension::{self, ExtensionCapability, ExtensionPhaseTiming};
 use crate::core::finding::HomeboyFinding;
 use crate::core::observation::homeboy_findings_from_test_analysis_input;
 use crate::core::refactor::AppliedRefactor;
+use crate::core::validation_progress::{write_command_artifact, ValidationProgressRecorder};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
@@ -237,6 +238,12 @@ pub fn run_main_test_workflow(
         .iter()
         .fold(runner, |runner, (key, value)| runner.env(key, value));
     let passthrough_args = normalize_test_passthrough_args(component, &args.passthrough_args)?;
+    let mut progress = ValidationProgressRecorder::new(
+        run_dir,
+        None,
+        vec![("test runner".to_string(), args.component_label.clone())],
+    )?;
+    progress.start(0)?;
     let output = runner
         .env_if(args.changed_since.is_some(), "SCOPE_MODE", "changed")
         .env_if(
@@ -251,6 +258,9 @@ pub fn run_main_test_workflow(
         )
         .script_args(&passthrough_args)
         .run()?;
+    let stdout_artifact = write_command_artifact(run_dir, 0, "stdout", &output.stdout)?;
+    let stderr_artifact = write_command_artifact(run_dir, 0, "stderr", &output.stderr)?;
+    progress.finish(0, output.exit_code, stdout_artifact, stderr_artifact)?;
 
     if let (Some(context), Some(spec)) = (test_context.as_ref(), result_parse.as_ref()) {
         run_declared_result_parser(component, context, spec, &output.stdout, run_dir)?;
@@ -537,11 +547,26 @@ fn run_declared_result_parser(
         }
     }
 
+    std::fs::create_dir_all(run_dir.path()).map_err(|err| {
+        Error::internal_io(
+            err.to_string(),
+            Some("create declared result parser run dir".to_string()),
+        )
+    })?;
+
     let results_file = run_dir.step_file(run_dir::files::TEST_RESULTS);
     let source_file = if results_file.is_file() {
         results_file
     } else {
         let stdout_file = run_dir.path().join("test-output.txt");
+        if let Some(parent) = stdout_file.parent() {
+            std::fs::create_dir_all(parent).map_err(|err| {
+                Error::internal_io(
+                    err.to_string(),
+                    Some("create parser stdout source directory".to_string()),
+                )
+            })?;
+        }
         local_files::write_file_atomic(&stdout_file, stdout, "write test runner stdout")?;
         stdout_file
     };
@@ -557,6 +582,23 @@ fn run_declared_result_parser(
         settings_json,
         &run_dir.legacy_env_vars(),
     )?;
+    let write_results_helper = run_dir.path().join("write-test-results.sh");
+    local_files::write_file_atomic(
+        &write_results_helper,
+        include_str!("../runtime/write-test-results.sh"),
+        "write parser runtime helper",
+    )?;
+    env_vars.push((
+        "HOMEBOY_RUNTIME_WRITE_TEST_RESULTS".to_string(),
+        write_results_helper.to_string_lossy().to_string(),
+    ));
+    env_vars.push((
+        "HOMEBOY_TEST_RESULTS_FILE".to_string(),
+        run_dir
+            .step_file(run_dir::files::TEST_RESULTS)
+            .to_string_lossy()
+            .to_string(),
+    ));
     env_vars.push((
         "HOMEBOY_RESULT_PARSE_ADAPTERS".to_string(),
         spec.adapters.join(" "),
@@ -591,6 +633,38 @@ fn run_declared_result_parser(
             ),
             Some((command, output.exit_code, &output.stdout, &output.stderr)),
         ));
+    }
+
+    if !run_dir.step_file(run_dir::files::TEST_RESULTS).is_file() {
+        let parser_stdout = output.stdout.trim();
+        if !parser_stdout.is_empty() {
+            let counts = parse_declared_parser_stdout_json(parser_stdout)?;
+            let payload = serde_json::json!({
+                "total": counts.total,
+                "passed": counts.passed,
+                "failed": counts.failed,
+                "skipped": counts.skipped,
+            });
+            let results_path = run_dir.step_file(run_dir::files::TEST_RESULTS);
+            if let Some(parent) = results_path.parent() {
+                std::fs::create_dir_all(parent).map_err(|err| {
+                    Error::internal_io(
+                        err.to_string(),
+                        Some("create parser stdout test results directory".to_string()),
+                    )
+                })?;
+            }
+            local_files::write_file_atomic(
+                &results_path,
+                &serde_json::to_string_pretty(&payload).map_err(|err| {
+                    Error::internal_json(
+                        err.to_string(),
+                        Some("serialize parser stdout test results".to_string()),
+                    )
+                })?,
+                "write parser stdout test results",
+            )?;
+        }
     }
 
     Ok(())
@@ -633,17 +707,76 @@ fn declared_result_parser_error(
     )
 }
 
+fn parse_declared_parser_stdout_json(stdout: &str) -> crate::core::Result<TestCounts> {
+    let value: serde_json::Value = serde_json::from_str(stdout).map_err(|err| {
+        Error::validation_invalid_json(
+            err,
+            Some("parse test result adapter stdout".to_string()),
+            Some(stdout.to_string()),
+        )
+    })?;
+    let object = value.as_object().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "test.result_parse.extension_script.stdout",
+            "expected a JSON object with unsigned integer total, passed, failed, and skipped fields",
+            None,
+            None,
+        )
+    })?;
+
+    let count = |field: &str| -> crate::core::Result<u64> {
+        object
+            .get(field)
+            .and_then(|value| value.as_u64())
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    format!("test.result_parse.extension_script.stdout.{field}"),
+                    "expected an unsigned integer count",
+                    None,
+                    None,
+                )
+            })
+    };
+
+    Ok(TestCounts::new(
+        count("total")?,
+        count("passed")?,
+        count("failed")?,
+        count("skipped")?,
+    ))
+}
+
 pub fn run_self_check_test_workflow(
     component: &Component,
     source_path: &Path,
     component_label: String,
     json_summary: bool,
 ) -> crate::core::Result<TestRunWorkflowResult> {
-    let output = extension::self_check::run_self_checks_with_passthrough(
+    run_self_check_test_workflow_with_progress(
+        component,
+        source_path,
+        component_label,
+        json_summary,
+        None,
+        None,
+    )
+}
+
+pub fn run_self_check_test_workflow_with_progress(
+    component: &Component,
+    source_path: &Path,
+    component_label: String,
+    json_summary: bool,
+    run_dir: Option<&RunDir>,
+    observation: Option<&crate::core::observation::ActiveObservation>,
+) -> crate::core::Result<TestRunWorkflowResult> {
+    let output = extension::self_check::run_self_checks_with_passthrough_and_progress(
         component,
         ExtensionCapability::Test,
         source_path,
         !json_summary,
+        run_dir,
+        observation,
     )?;
     let status = if output.success { "passed" } else { "failed" }.to_string();
     let raw_output = (!output.success).then(|| {
@@ -700,6 +833,7 @@ mod tests {
     use super::*;
     use crate::core::component::ComponentScriptsConfig;
     use crate::core::extension::test::TestFailure;
+    use crate::test_support::with_isolated_home;
 
     #[test]
     fn tail_lines_returns_full_text_when_under_limit() {
@@ -794,17 +928,26 @@ mod tests {
     }
 
     #[test]
-    fn declared_result_parser_script_normalizes_wp_codebox_json() {
-        let temp_dir = tempfile::tempdir().expect("temp dir");
-        let extension_dir = temp_dir.path().join("extension");
-        std::fs::create_dir_all(&extension_dir).expect("extension dir");
-        let parser_script = extension_dir.join("parse-results.sh");
-        std::fs::write(
-            &parser_script,
-            r#"#!/usr/bin/env bash
+    fn declared_result_parser_script_normalizes_provider_json() {
+        with_isolated_home(|_| {
+            let temp_dir = tempfile::tempdir().expect("temp dir");
+            let extension_dir = temp_dir.path().join("extension");
+            std::fs::create_dir_all(&extension_dir).expect("extension dir");
+            let parser_script = extension_dir.join("parse-results.sh");
+            std::fs::write(
+                &parser_script,
+                r#"#!/usr/bin/env bash
 set -euo pipefail
-if [ "${2:-}" != "wp-codebox-json" ]; then
+if [ "${2:-}" != "custom-json" ]; then
     exit 7
+fi
+if [ ! -f "$1" ]; then
+    printf 'expected parser input file to exist: %s\n' "$1" >&2
+    exit 8
+fi
+if ! grep -q 'custom-provider/test-results/v1' "$1"; then
+    printf 'expected parser input file to contain provider JSON\n' >&2
+    exit 9
 fi
 source "$HOMEBOY_RUNTIME_WRITE_TEST_RESULTS"
 parsed=$(python3 - "$1" <<'PY'
@@ -836,67 +979,69 @@ IFS=$'\t' read -r total passed failed skipped <<EOF
 $parsed
 EOF
 homeboy_write_test_results "$total" "$passed" "$failed" "$skipped"
+printf '{"total":%s,"passed":%s,"failed":%s,"skipped":%s}\n' "$total" "$passed" "$failed" "$skipped"
 "#,
-        )
-        .expect("parser script");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&parser_script, std::fs::Permissions::from_mode(0o755))
-                .expect("parser script permissions");
-        }
+            )
+            .expect("parser script");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&parser_script, std::fs::Permissions::from_mode(0o755))
+                    .expect("parser script permissions");
+            }
 
-        let component = Component::new(
-            "fixture".to_string(),
-            temp_dir.path().to_string_lossy().to_string(),
-            "fixture-extension".to_string(),
-            None,
-        );
-        let context = crate::core::extension::ExtensionExecutionContext {
-            component: component.clone(),
-            capability: ExtensionCapability::Test,
-            extension_id: "fixture-extension".to_string(),
-            extension_path: extension_dir,
-            script_path: "test.sh".to_string(),
-            settings: Vec::new(),
-        };
-        let spec = ParseSpec {
-            extension_script: Some("parse-results.sh".to_string()),
-            adapters: vec!["wp-codebox-json".to_string()],
-            rules: Vec::new(),
-            defaults: std::collections::HashMap::new(),
-            derive: Vec::new(),
-        };
-        let run_dir = RunDir::create().expect("run dir");
+            let component = Component::new(
+                "fixture".to_string(),
+                temp_dir.path().to_string_lossy().to_string(),
+                "fixture-extension".to_string(),
+                None,
+            );
+            let context = crate::core::extension::ExtensionExecutionContext {
+                component: component.clone(),
+                capability: ExtensionCapability::Test,
+                extension_id: "fixture-extension".to_string(),
+                extension_path: extension_dir,
+                script_path: "test.sh".to_string(),
+                settings: Vec::new(),
+            };
+            let spec = ParseSpec {
+                extension_script: Some("parse-results.sh".to_string()),
+                adapters: vec!["custom-json".to_string()],
+                rules: Vec::new(),
+                defaults: std::collections::HashMap::new(),
+                derive: Vec::new(),
+            };
+            let run_dir = RunDir::create().expect("run dir");
 
-        run_declared_result_parser(
-            &component,
-            &context,
-            &spec,
-            r#"{
-                "schema": "wp-codebox/test-results/v1",
+            run_declared_result_parser(
+                &component,
+                &context,
+                &spec,
+                r#"{
+                "schema": "custom-provider/test-results/v1",
                 "summary": { "total": 0 },
                 "suites": [
                     { "tests": 3, "passed": 2, "failed": 1 },
                     { "total": 2, "passed": 1, "skipped": 1 }
                 ]
             }"#,
-            &run_dir,
-        )
-        .expect("declared parser should run");
+                &run_dir,
+            )
+            .expect("declared parser should run");
 
-        let counts = parse_test_results_file_with_spec(
-            &run_dir.step_file(run_dir::files::TEST_RESULTS),
-            Some(&spec),
-        )
-        .expect("declared parser should write normalized counts");
+            let counts = parse_test_results_file_with_spec(
+                &run_dir.step_file(run_dir::files::TEST_RESULTS),
+                Some(&spec),
+            )
+            .expect("declared parser should write normalized counts");
 
-        run_dir.cleanup();
+            run_dir.cleanup();
 
-        assert_eq!(counts.total, 5);
-        assert_eq!(counts.passed, 3);
-        assert_eq!(counts.failed, 1);
-        assert_eq!(counts.skipped, 1);
+            assert_eq!(counts.total, 5);
+            assert_eq!(counts.passed, 3);
+            assert_eq!(counts.failed, 1);
+            assert_eq!(counts.skipped, 1);
+        });
     }
 
     #[test]
@@ -1013,6 +1158,123 @@ exit 23
             .as_str()
             .unwrap_or_default()
             .contains("parser stderr detail"));
+    }
+
+    #[test]
+    fn declared_result_parser_accepts_flat_count_stdout_json() {
+        with_isolated_home(|_| {
+            let temp_dir = tempfile::tempdir().expect("temp dir");
+            let extension_dir = temp_dir.path().join("extension");
+            std::fs::create_dir_all(&extension_dir).expect("extension dir");
+            let parser_script = extension_dir.join("parse-results.sh");
+            std::fs::write(
+                &parser_script,
+                r#"#!/usr/bin/env bash
+set -euo pipefail
+printf '{"total":5,"passed":3,"failed":1,"skipped":1}\n'
+"#,
+            )
+            .expect("parser script");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&parser_script, std::fs::Permissions::from_mode(0o755))
+                    .expect("parser script permissions");
+            }
+
+            let component = Component::new(
+                "fixture".to_string(),
+                temp_dir.path().to_string_lossy().to_string(),
+                "fixture-extension".to_string(),
+                None,
+            );
+            let context = crate::core::extension::ExtensionExecutionContext {
+                component: component.clone(),
+                capability: ExtensionCapability::Test,
+                extension_id: "fixture-extension".to_string(),
+                extension_path: extension_dir,
+                script_path: "test.sh".to_string(),
+                settings: Vec::new(),
+            };
+            let spec = ParseSpec {
+                extension_script: Some("parse-results.sh".to_string()),
+                adapters: vec!["fixture-json".to_string()],
+                rules: Vec::new(),
+                defaults: std::collections::HashMap::new(),
+                derive: Vec::new(),
+            };
+            let run_dir = RunDir::create().expect("run dir");
+
+            run_declared_result_parser(&component, &context, &spec, "runner output", &run_dir)
+                .expect("declared parser stdout should run");
+
+            let counts = parse_test_results_file_with_spec(
+                &run_dir.step_file(run_dir::files::TEST_RESULTS),
+                Some(&spec),
+            )
+            .expect("parser stdout JSON should be normalized to test-results.json");
+
+            run_dir.cleanup();
+
+            assert_eq!(counts.total, 5);
+            assert_eq!(counts.passed, 3);
+            assert_eq!(counts.failed, 1);
+            assert_eq!(counts.skipped, 1);
+        });
+    }
+
+    #[test]
+    fn declared_result_parser_rejects_malformed_successful_stdout_json() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let extension_dir = temp_dir.path().join("extension");
+        std::fs::create_dir_all(&extension_dir).expect("extension dir");
+        let parser_script = extension_dir.join("parse-results.sh");
+        std::fs::write(
+            &parser_script,
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+printf 'not json\n'
+"#,
+        )
+        .expect("parser script");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&parser_script, std::fs::Permissions::from_mode(0o755))
+                .expect("parser script permissions");
+        }
+
+        let component = Component::new(
+            "fixture".to_string(),
+            temp_dir.path().to_string_lossy().to_string(),
+            "fixture-extension".to_string(),
+            None,
+        );
+        let context = crate::core::extension::ExtensionExecutionContext {
+            component: component.clone(),
+            capability: ExtensionCapability::Test,
+            extension_id: "fixture-extension".to_string(),
+            extension_path: extension_dir,
+            script_path: "test.sh".to_string(),
+            settings: Vec::new(),
+        };
+        let spec = ParseSpec {
+            extension_script: Some("parse-results.sh".to_string()),
+            adapters: vec!["fixture-json".to_string()],
+            rules: Vec::new(),
+            defaults: std::collections::HashMap::new(),
+            derive: Vec::new(),
+        };
+        let run_dir = RunDir::create().expect("run dir");
+
+        let error =
+            run_declared_result_parser(&component, &context, &spec, "runner output", &run_dir)
+                .expect_err("malformed parser stdout should fail");
+
+        run_dir.cleanup();
+
+        assert!(error.message.contains("Invalid JSON"));
+        assert_eq!(error.code.as_str(), "validation.invalid_json");
     }
 
     #[test]

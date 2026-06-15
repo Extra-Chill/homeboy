@@ -1120,7 +1120,7 @@ mod tests {
         let client = temp.path().join("homeboy-preview-client-fixture.sh");
         std::fs::write(
             &client,
-            "#!/bin/sh\nprintf 'ready https://run-42-tunnel.chubes.net\\n'\nsleep 5\n",
+            "#!/bin/sh\nprintf 'ready https://run-42-tunnel.preview.example.test\\n'\nsleep 5\n",
         )
         .expect("write native client fixture");
         #[cfg(unix)]
@@ -1145,9 +1145,9 @@ mod tests {
                 asset_fanout: None,
                 native: Some(TraceNativePublicPreviewSpec {
                     public_host: None,
-                    operator_domain: Some("chubes.net".to_string()),
+                    operator_domain: Some("preview.example.test".to_string()),
                     session_id: Some("run-42".to_string()),
-                    ingress_url: Some("https://preview-broker.chubes.net".to_string()),
+                    ingress_url: Some("https://preview-broker.example.test".to_string()),
                     token_env: Some("HOMEBOY_PREVIEW_TUNNEL_TOKEN".to_string()),
                     client_binary: Some(client.display().to_string()),
                 }),
@@ -1159,11 +1159,11 @@ mod tests {
         assert_eq!(session.metadata().provider, "homeboy-native");
         assert_eq!(
             session.metadata().public_origin,
-            "https://run-42-tunnel.chubes.net"
+            "https://run-42-tunnel.preview.example.test"
         );
         assert_eq!(
             session.metadata().public_host.as_deref(),
-            Some("run-42-tunnel.chubes.net")
+            Some("run-42-tunnel.preview.example.test")
         );
         assert_eq!(session.metadata().session_id.as_deref(), Some("run-42"));
         assert!(session
@@ -1180,7 +1180,7 @@ mod tests {
         )));
         assert!(env.contains(&(
             "HOMEBOY_TRACE_PREVIEW_PUBLIC_HOST".to_string(),
-            "run-42-tunnel.chubes.net".to_string()
+            "run-42-tunnel.preview.example.test".to_string()
         )));
 
         let metadata = session.finish();

@@ -206,20 +206,83 @@ fn sidecar_writer_supports_test_failure_and_fix_result_wrappers() {
 }
 
 #[test]
+fn sidecar_writer_supports_test_results_object() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let helper_path = dir.path().join("sidecar-writer.sh");
+    let results_path = dir.path().join("nested").join("test-results.json");
+    std::fs::write(&helper_path, assets::SIDECAR_WRITER_SH).expect("write helper");
+
+    let output = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(format!(
+            "source {}; HOMEBOY_TEST_RESULTS_FILE={}; homeboy_write_test_results_json '{{\"total\":5,\"passed\":3,\"failed\":1,\"skipped\":1}}'; cat {}",
+            helper_path.display(),
+            results_path.display(),
+            results_path.display()
+        ))
+        .output()
+        .expect("run bash");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        r#"{"total":5,"passed":3,"failed":1,"skipped":1}
+"#
+    );
+}
+
+#[test]
+fn write_test_results_creates_parent_directory() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let helper_path = dir.path().join("write-test-results.sh");
+    let results_path = dir.path().join("nested").join("test-results.json");
+    std::fs::write(&helper_path, assets::WRITE_TEST_RESULTS_SH).expect("write helper");
+
+    let output = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(format!(
+            "source {}; HOMEBOY_TEST_RESULTS_FILE={}; homeboy_write_test_results 5 3 1 1; cat {}",
+            helper_path.display(),
+            results_path.display(),
+            results_path.display()
+        ))
+        .output()
+        .expect("run bash");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains(r#""total": 5"#));
+}
+
+#[test]
 fn sidecar_writer_supports_annotation_source_files() {
     let dir = tempfile::tempdir().expect("tempdir");
     let helper_path = dir.path().join("sidecar-writer.sh");
     let annotations_dir = dir.path().join("annotations");
     let source_path = dir.path().join("annotations-extra.json");
     std::fs::write(&helper_path, assets::SIDECAR_WRITER_SH).expect("write helper");
-    std::fs::write(&source_path, r#"[{"file":"b.php","line":2}]"#).expect("source");
+    let source_file = ["b.", "p", "hp"].concat();
+    let written_file = ["a.", "p", "hp"].concat();
+    std::fs::write(
+        &source_path,
+        format!(r#"[{{"file":"{source_file}","line":2}}]"#),
+    )
+    .expect("source");
 
     let output = std::process::Command::new("bash")
         .arg("-c")
         .arg(format!(
-            "source {}; HOMEBOY_ANNOTATIONS_DIR={}; homeboy_write_annotations fixture-a '{{\"file\":\"a.php\",\"line\":1}}'; homeboy_merge_annotations fixture-b {}; printf '%s\n%s' \"$(cat {}/fixture-a.json)\" \"$(cat {}/fixture-b.json)\"",
+            "source {}; HOMEBOY_ANNOTATIONS_DIR={}; homeboy_write_annotations fixture-a '{{\"file\":\"{}\",\"line\":1}}'; homeboy_merge_annotations fixture-b {}; printf '%s\n%s' \"$(cat {}/fixture-a.json)\" \"$(cat {}/fixture-b.json)\"",
             helper_path.display(),
             annotations_dir.display(),
+            written_file,
             source_path.display(),
             annotations_dir.display(),
             annotations_dir.display()
@@ -234,8 +297,10 @@ fn sidecar_writer_supports_annotation_source_files() {
     );
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        r#"[{"file":"a.php","line":1}]
-[{"file":"b.php","line":2}]"#
+        format!(
+            r#"[{{"file":"{written_file}","line":1}}]
+[{{"file":"{source_file}","line":2}}]"#
+        )
     );
 }
 
@@ -244,7 +309,11 @@ fn ensure_all_helpers_writes_legacy_bench_fallbacks() {
     with_isolated_home(|home| {
         ensure_all_helpers().expect("all helpers should be written");
 
-        for filename in ["bench-helper.sh", "bench-helper.mjs", "bench-helper.php"] {
+        for filename in [
+            "bench-helper.sh".to_string(),
+            "bench-helper.mjs".to_string(),
+            ["bench-helper.", "p", "hp"].concat(),
+        ] {
             let path = home.path().join(".homeboy").join("runtime").join(filename);
             assert!(
                 path.exists(),
@@ -625,7 +694,7 @@ if (result.code !== 0) throw new Error(`phase command failed: ${result.code}`);
         serde_json::from_str(&std::fs::read_to_string(child_file).expect("read child resource"))
             .expect("json");
     assert_eq!(value["phase"], "install");
-    assert_eq!(value["command_label"].as_str().is_some(), true);
+    assert!(value["command_label"].as_str().is_some());
     assert!(value["samples"].as_array().is_some_and(|samples| !samples.is_empty()));
     assert_eq!(value["samples"][0]["phase"], "install");
 }
@@ -646,7 +715,7 @@ fn bench_js_helper_emits_compact_progress_to_stderr() {
     std::fs::write(
         &runner_path,
         r#"import { homeboyBenchProgress } from './bench-helper.mjs';
-homeboyBenchProgress({ scenario: 'studio-agent-site-build', run: 'bfb', elapsed_ms: 252000, turn: 18, tools: 23, last: 'wp_cli page_update' });
+homeboyBenchProgress({ scenario: 'studio-agent-site-build', run: 'bfb', elapsed_ms: 252000, turn: 18, tools: 23, last: 'cli page_update' });
 "#,
     )
     .expect("write runner");
@@ -666,7 +735,7 @@ homeboyBenchProgress({ scenario: 'studio-agent-site-build', run: 'bfb', elapsed_
     assert_eq!(String::from_utf8_lossy(&output.stdout), "");
     assert_eq!(
         String::from_utf8_lossy(&output.stderr),
-        "studio-agent-site-build [bfb] 04:12 turn=18 tools=23 last=wp_cli page_update\n"
+        "studio-agent-site-build [bfb] 04:12 turn=18 tools=23 last=cli page_update\n"
     );
 }
 

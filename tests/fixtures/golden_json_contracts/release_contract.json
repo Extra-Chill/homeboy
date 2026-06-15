@@ -63,7 +63,13 @@
                 "dry run only"
               ]
             },
+            "release_summary": [
+              "No release commit created",
+              "No tag created",
+              "No GitHub Release created"
+            ],
             "releasable_commits": 1,
+            "status": "planned",
             "tag": "v0.198.0"
           }
         },
@@ -138,7 +144,13 @@
                       "dry run only"
                     ]
                   },
+                  "release_summary": [
+                    "No release commit created",
+                    "No tag created",
+                    "No GitHub Release created"
+                  ],
                   "releasable_commits": 1,
+                  "status": "planned",
                   "tag": "v0.198.0"
                 },
                 "status": "planned"

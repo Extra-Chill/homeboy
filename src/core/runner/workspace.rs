@@ -10,6 +10,7 @@ use crate::core::engine::{shell, temp};
 use crate::core::error::{Error, Result};
 use crate::core::server::{self, Server, SshClient};
 
+use super::validation_dependencies::RunnerValidationDependencySyncOutput;
 use super::{load, Runner, RunnerKind};
 
 pub(super) const DEFAULT_EXCLUDES: &[&str] = &[
@@ -82,6 +83,7 @@ pub struct RunnerWorkspaceSyncOutput {
     pub excludes: Vec<String>,
     pub includes: Vec<String>,
     pub workspace_cleanliness: String,
+    pub validation_dependencies: Vec<RunnerValidationDependencySyncOutput>,
 }
 
 pub fn sync_workspace(
@@ -128,12 +130,13 @@ pub fn sync_workspace(
             );
             let stats = local_snapshot_stats(&local_path, &excludes, &includes)?;
             materialize_snapshot(&runner, &local_path, &remote_path, &excludes)?;
-            super::validation_dependencies::sync_validation_dependency_workspaces(
-                &runner,
-                &local_path,
-                &remote_path,
-                &excludes,
-            )?;
+            let validation_dependencies =
+                super::validation_dependencies::sync_validation_dependency_workspaces(
+                    &runner,
+                    &local_path,
+                    &remote_path,
+                    &excludes,
+                )?;
             Ok((
                 RunnerWorkspaceSyncOutput {
                     command: "runner.workspace.sync",
@@ -147,6 +150,7 @@ pub fn sync_workspace(
                     excludes,
                     includes,
                     workspace_cleanliness: "snapshot_unique_workspace".to_string(),
+                    validation_dependencies,
                 },
                 0,
             ))
@@ -192,12 +196,13 @@ pub fn sync_workspace(
                     options.allow_dirty_lab_workspace,
                 )?;
             }
-            super::validation_dependencies::sync_validation_dependency_workspaces(
-                &runner,
-                &local_path,
-                &remote_path,
-                &excludes,
-            )?;
+            let validation_dependencies =
+                super::validation_dependencies::sync_validation_dependency_workspaces(
+                    &runner,
+                    &local_path,
+                    &remote_path,
+                    &excludes,
+                )?;
             Ok((
                 RunnerWorkspaceSyncOutput {
                     command: "runner.workspace.sync",
@@ -215,6 +220,7 @@ pub fn sync_workspace(
                     } else {
                         "clean_remote_required".to_string()
                     },
+                    validation_dependencies,
                 },
                 0,
             ))
@@ -659,6 +665,8 @@ fn materialize_git_from_controller_bundle(
     git_fetch_refs: &[String],
     allow_dirty_lab_workspace: bool,
 ) -> Result<()> {
+    validate_controller_git_bundle_source(local_path)?;
+
     let bundle_dir = tempfile::tempdir().map_err(|err| {
         Error::internal_io(
             err.to_string(),
@@ -733,6 +741,29 @@ fn materialize_git_from_controller_bundle(
     };
 
     result
+}
+
+fn validate_controller_git_bundle_source(local_path: &Path) -> Result<()> {
+    let is_shallow = git_output(local_path, &["rev-parse", "--is-shallow-repository"])?;
+    if is_shallow.trim() != "true" {
+        return Ok(());
+    }
+
+    Err(Error::validation_invalid_argument(
+        "path",
+        "controller-routed git workspace sync requires a full source checkout before creating a runner git bundle; the selected source checkout is shallow",
+        Some(local_path.display().to_string()),
+        Some(vec![
+            format!(
+                "Deepen the source checkout with `git -C {} fetch --unshallow` before retrying.",
+                shell::quote_arg(&local_path.display().to_string())
+            ),
+            "Use a full clone for --source-path when upgrading runners with --method source."
+                .to_string(),
+            "Use snapshot workspace sync only when the remote command does not need Git history."
+                .to_string(),
+        ]),
+    ))
 }
 
 fn materialize_git_bundle_piped(
@@ -829,15 +860,19 @@ fn materialize_git_command(
 }
 
 fn dirty_lab_workspace_guard(dest: &str, allow_dirty_lab_workspace: bool) -> String {
+    let status = format!(
+        "git -C {dest} status --porcelain=v1 2>/dev/null | while IFS= read -r line; do path=${{line#???}}; case \"$path\" in .homeboy|.homeboy/*) ;; *) printf '%s\\n' \"$line\";; esac; done || true",
+        dest = dest,
+    );
     if allow_dirty_lab_workspace {
         format!(
-            "dirty=$(git -C {dest} status --porcelain=v1 2>/dev/null || true); if [ -n \"$dirty\" ]; then printf '%s\\n' 'Homeboy Lab warning: --allow-dirty-lab-workspace is overwriting uncommitted runner workspace changes.' >&2; printf '%s\\n' \"$dirty\" >&2; fi",
-            dest = dest,
+            "dirty=$({status}); if [ -n \"$dirty\" ]; then printf '%s\\n' 'Homeboy Lab warning: --allow-dirty-lab-workspace is overwriting uncommitted runner workspace changes.' >&2; printf '%s\\n' \"$dirty\" >&2; fi",
+            status = status,
         )
     } else {
         format!(
-            "dirty=$(git -C {dest} status --porcelain=v1 2>/dev/null || true); if [ -n \"$dirty\" ]; then printf '%s\\n' 'Homeboy Lab refused to overwrite a dirty runner workspace.' >&2; printf '%s\\n' \"$dirty\" >&2; printf '%s\\n' 'Commit, stash, clean, or remove the runner workspace before retrying. Pass --allow-dirty-lab-workspace only for noisy investigation that may discard runner-side changes.' >&2; exit 97; fi",
-            dest = dest,
+            "dirty=$({status}); if [ -n \"$dirty\" ]; then printf '%s\\n' 'Homeboy Lab refused to overwrite a dirty runner workspace.' >&2; printf '%s\\n' \"$dirty\" >&2; printf '%s\\n' 'Commit, stash, clean, or remove the runner workspace before retrying. Pass --allow-dirty-lab-workspace only for noisy investigation that may discard runner-side changes.' >&2; exit 97; fi",
+            status = status,
         )
     }
 }
@@ -1250,6 +1285,74 @@ mod tests {
     }
 
     #[test]
+    fn git_materialization_ignores_generated_homeboy_output_but_refuses_source_dirty_state() {
+        crate::test_support::with_isolated_home(|_| {
+            let source = tempfile::tempdir().expect("source tempdir");
+            let runner_root = tempfile::tempdir().expect("runner root tempdir");
+            git(source.path(), &["init"]);
+            git(source.path(), &["config", "user.email", "test@example.com"]);
+            git(source.path(), &["config", "user.name", "Test User"]);
+            fs::write(source.path().join("file.txt"), "base\n").expect("write file");
+            git(source.path(), &["add", "."]);
+            git(source.path(), &["commit", "-m", "base"]);
+            git(
+                source.path(),
+                &[
+                    "remote",
+                    "add",
+                    "origin",
+                    &source.path().display().to_string(),
+                ],
+            );
+
+            super::super::create(
+                &format!(
+                    r#"{{"id":"lab-local-generated-homeboy","kind":"local","workspace_root":"{}"}}"#,
+                    runner_root.path().display()
+                ),
+                false,
+            )
+            .expect("create runner");
+
+            let sync = || {
+                sync_workspace(
+                    "lab-local-generated-homeboy",
+                    RunnerWorkspaceSyncOptions {
+                        path: source.path().display().to_string(),
+                        mode: RunnerWorkspaceSyncMode::Git,
+                        controller_routed_git: false,
+                        changed_since_base: None,
+                        git_fetch_refs: Vec::new(),
+                        snapshot_includes: Vec::new(),
+                        allow_dirty_lab_workspace: false,
+                    },
+                )
+            };
+
+            let (output, exit_code) = sync().expect("initial sync workspace");
+            assert_eq!(exit_code, 0);
+            let remote = Path::new(&output.remote_path);
+            fs::create_dir_all(remote.join(".homeboy/experiments/stripe-ece"))
+                .expect("create generated output dir");
+            fs::write(
+                remote.join(".homeboy/experiments/stripe-ece/compare.json"),
+                "{}\n",
+            )
+            .expect("write generated output");
+
+            let (output, exit_code) = sync().expect("generated .homeboy output is ignored");
+            assert_eq!(exit_code, 0);
+            let remote = Path::new(&output.remote_path);
+            assert!(!remote.join(".homeboy").exists());
+
+            fs::write(remote.join("dirty-source.txt"), "dirty\n").expect("write dirty source file");
+            let err = sync().expect_err("real dirty runner workspace is refused");
+            assert!(err.message.contains("Homeboy Lab refused"));
+            assert!(err.message.contains("dirty-source.txt"));
+        });
+    }
+
+    #[test]
     fn controller_routed_git_sync_materializes_bundle_for_public_remote() {
         crate::test_support::with_isolated_home(|_| {
             let source = tempfile::tempdir().expect("source tempdir");
@@ -1313,6 +1416,80 @@ mod tests {
                 fs::read_to_string(remote.join("file.txt")).expect("read synced file"),
                 "source-upgrade\n"
             );
+        });
+    }
+
+    #[test]
+    fn controller_routed_git_sync_rejects_shallow_source_checkout() {
+        crate::test_support::with_isolated_home(|_| {
+            let origin = tempfile::tempdir().expect("origin tempdir");
+            let clone_parent = tempfile::tempdir().expect("clone parent tempdir");
+            let runner_root = tempfile::tempdir().expect("runner root tempdir");
+
+            git(origin.path(), &["init"]);
+            git(origin.path(), &["config", "user.email", "test@example.com"]);
+            git(origin.path(), &["config", "user.name", "Test User"]);
+            fs::write(origin.path().join("file.txt"), "base\n").expect("write base file");
+            git(origin.path(), &["add", "."]);
+            git(origin.path(), &["commit", "-m", "base"]);
+            fs::write(origin.path().join("file.txt"), "tip\n").expect("write tip file");
+            git(origin.path(), &["commit", "-am", "tip"]);
+
+            let source = clone_parent.path().join("source");
+            let remote_url = format!("file://{}", origin.path().display());
+            let clone_output = Command::new("git")
+                .arg("clone")
+                .arg("--depth")
+                .arg("1")
+                .arg(&remote_url)
+                .arg(&source)
+                .output()
+                .expect("run shallow clone");
+            assert!(
+                clone_output.status.success(),
+                "git clone failed: {}",
+                String::from_utf8_lossy(&clone_output.stderr)
+            );
+            assert_eq!(
+                git_output(&source, &["rev-parse", "--is-shallow-repository"]).unwrap(),
+                "true"
+            );
+
+            super::super::create(
+                &format!(
+                    r#"{{"id":"lab-local-shallow-git","kind":"local","workspace_root":"{}"}}"#,
+                    runner_root.path().display()
+                ),
+                false,
+            )
+            .expect("create runner");
+
+            let err = sync_workspace(
+                "lab-local-shallow-git",
+                RunnerWorkspaceSyncOptions {
+                    path: source.display().to_string(),
+                    mode: RunnerWorkspaceSyncMode::Git,
+                    controller_routed_git: true,
+                    changed_since_base: None,
+                    git_fetch_refs: Vec::new(),
+                    snapshot_includes: Vec::new(),
+                    allow_dirty_lab_workspace: false,
+                },
+            )
+            .expect_err("shallow source checkout should fail before bundle creation");
+
+            assert!(err.message.contains("source checkout is shallow"));
+            assert!(!err.message.contains("missing"));
+            assert!(!err.message.contains("object"));
+            let hint_text = err.details["tried"]
+                .as_array()
+                .expect("shallow checkout error includes recovery options")
+                .iter()
+                .filter_map(|value| value.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(hint_text.contains("fetch --unshallow"));
+            assert!(hint_text.contains("--method source"));
         });
     }
 

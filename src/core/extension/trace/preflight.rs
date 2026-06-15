@@ -271,7 +271,7 @@ mod tests {
         let err = preflight_trace_runner_capabilities(
             None,
             &[
-                "wp-codebox.recipe-run".to_string(),
+                "custom-provider.recipe-run".to_string(),
                 "browser-probe.capture.network".to_string(),
             ],
         )

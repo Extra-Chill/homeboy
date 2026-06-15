@@ -1,4 +1,7 @@
 use super::*;
+use homeboy::core::agent_tasks::provider::{
+    AgentTaskProviderEnvPathReadiness, AgentTaskProviderRunnerReadiness,
+};
 use types::{HomeboyProbe, RunnerDoctorStatus};
 
 #[test]
@@ -181,6 +184,38 @@ fn required_homeboy_tools_capture_versions() {
 }
 
 #[test]
+fn provider_readiness_renderer_uses_fake_provider_contract() {
+    let contract = AgentTaskProviderRunnerReadiness {
+        id: "lab.fake_runtime.cache".to_string(),
+        label: "Fake runtime cache".to_string(),
+        env_path: Some(AgentTaskProviderEnvPathReadiness {
+            env: vec!["FAKE_RUNTIME_BIN".to_string()],
+            revision: Some(true),
+        }),
+        remediation: Some("Refresh the fake runtime cache".to_string()),
+    };
+
+    let check = probes::provider_env_path_readiness_check_from_probe(
+        &contract,
+        Some("/opt/fake-runtime/bin".to_string()),
+        true,
+        Some("abc123".to_string()),
+    );
+
+    assert_eq!(check.id, "lab.fake_runtime.cache");
+    assert_eq!(check.status, RunnerDoctorStatus::Ok);
+    assert!(check.message.contains("Fake runtime cache"));
+    assert_eq!(
+        check.details.get("env").map(String::as_str),
+        Some("FAKE_RUNTIME_BIN")
+    );
+    assert_eq!(
+        check.details.get("revision").map(String::as_str),
+        Some("abc123")
+    );
+}
+
+#[test]
 fn lab_homeboy_path_shadow_warns_when_bare_homeboy_is_older() {
     let mut details = BTreeMap::new();
     details.insert(
@@ -231,6 +266,59 @@ fn lab_homeboy_path_shadow_warns_when_bare_homeboy_is_older() {
         .remediation
         .as_deref()
         .is_some_and(|value| value.contains("Fix PATH ordering")));
+}
+
+#[test]
+fn lab_homeboy_path_shadow_warns_when_bare_homeboy_resolves_different_path() {
+    let mut details = BTreeMap::new();
+    details.insert(
+        "configured_command".to_string(),
+        "/home/chubes/.cargo/bin/homeboy".to_string(),
+    );
+    details.insert(
+        "configured_path".to_string(),
+        "/home/chubes/.cargo/bin/homeboy".to_string(),
+    );
+    details.insert("configured_version".to_string(), "0.229.9".to_string());
+    details.insert(
+        "bare_path".to_string(),
+        "/home/chubes/.local/bin/homeboy".to_string(),
+    );
+    details.insert("bare_version".to_string(), "0.229.9".to_string());
+
+    let check = probes::homeboy_path_shadow_check(
+        "homeboy-lab",
+        "lab-server",
+        "/home/chubes/.cargo/bin/homeboy",
+        "0.229.9",
+        &HomeboyProbe {
+            version: "0.229.9".to_string(),
+            path: Some("/home/chubes/.cargo/bin/homeboy".to_string()),
+        },
+        &probes::RemoteHomeboyCandidateProbe {
+            path: Some("/home/chubes/.local/bin/homeboy".to_string()),
+            version: Some("0.229.9".to_string()),
+        },
+        details,
+    )
+    .expect("different bare homeboy path warning");
+
+    assert_eq!(check.id, "lab.homeboy.path_shadow");
+    assert_eq!(check.status, RunnerDoctorStatus::Warning);
+    assert!(check.message.contains("/home/chubes/.cargo/bin/homeboy"));
+    assert!(check.message.contains("/home/chubes/.local/bin/homeboy"));
+    assert_eq!(
+        check.details.get("configured_path").map(String::as_str),
+        Some("/home/chubes/.cargo/bin/homeboy")
+    );
+    assert_eq!(
+        check.details.get("bare_path").map(String::as_str),
+        Some("/home/chubes/.local/bin/homeboy")
+    );
+    assert!(check
+        .remediation
+        .as_deref()
+        .is_some_and(|value| value.contains("configured homeboy_path and bare `homeboy`")));
 }
 
 #[test]

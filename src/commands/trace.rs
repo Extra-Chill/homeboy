@@ -613,12 +613,15 @@ fn execute_trace_run(args: TraceArgs) -> homeboy::core::Result<TraceRunExecution
                     .build(),
             )
             .ok()
-            .map(|run| ActiveTraceObservation {
-                store,
-                run_id: run.id,
-                component_id: ctx.component_id.clone(),
-                rig_id: rig_id.clone(),
-                scenario_id: scenario_id.clone(),
+            .map(|run| {
+                std::env::set_var(homeboy::core::observation::ACTIVE_RUN_ID_ENV, &run.id);
+                ActiveTraceObservation {
+                    store,
+                    run_id: run.id,
+                    component_id: ctx.component_id.clone(),
+                    rig_id: rig_id.clone(),
+                    scenario_id: scenario_id.clone(),
+                }
             })
     });
     let (extra_workloads, trace_dependencies, runner_capabilities, invocation_requirements) =
@@ -1447,6 +1450,39 @@ pub(super) struct LabTraceDispatchObservation {
     scenario_id: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct PersistedRunRetrieval {
+    pub run_id: String,
+    pub evidence_command: String,
+    pub artifacts_command: String,
+    pub export_command: String,
+}
+
+impl PersistedRunRetrieval {
+    pub(super) fn for_run(run_id: &str) -> Self {
+        Self {
+            run_id: run_id.to_string(),
+            evidence_command: format!("homeboy runs evidence {run_id}"),
+            artifacts_command: format!("homeboy runs artifacts {run_id}"),
+            export_command: format!(
+                "homeboy runs export --run {run_id} --output homeboy-run-{run_id}"
+            ),
+        }
+    }
+
+    pub(super) fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "persisted_run_id": self.run_id,
+            "id_scope": "persisted_homeboy_run",
+            "retrieval_commands": {
+                "evidence": self.evidence_command,
+                "artifacts": self.artifacts_command,
+                "export": self.export_command,
+            }
+        })
+    }
+}
+
 pub(super) fn start_lab_dispatch_observation(
     args: &TraceArgs,
     normalized_args: &[String],
@@ -1527,10 +1563,11 @@ pub(super) fn finish_lab_dispatch_observation(
     observation: Option<LabTraceDispatchObservation>,
     status: RunStatus,
     metadata: serde_json::Value,
-) {
+) -> Option<PersistedRunRetrieval> {
     let Some(observation) = observation else {
-        return;
+        return None;
     };
+    let retrieval = PersistedRunRetrieval::for_run(&observation.run_id);
     let _ = observation.store.record_trace_run(
         NewTraceRunRecord::builder(
             &observation.run_id,
@@ -1545,6 +1582,15 @@ pub(super) fn finish_lab_dispatch_observation(
     let _ = observation
         .store
         .finish_run(&observation.run_id, status, Some(metadata));
+    Some(retrieval)
+}
+
+pub(super) fn lab_dispatch_observation_run_id(
+    observation: &Option<LabTraceDispatchObservation>,
+) -> Option<&str> {
+    observation
+        .as_ref()
+        .map(|observation| observation.run_id.as_str())
 }
 
 fn persist_trace_workflow_result(

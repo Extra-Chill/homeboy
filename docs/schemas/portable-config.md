@@ -13,7 +13,8 @@ A `homeboy.json` file in a repo root defines portable component configuration th
   "version_targets": [
     {
       "file": "string",
-      "pattern": "string"
+      "pattern": "string",
+      "artifact_path": "string"
     }
   ],
   "changelog_target": "string",
@@ -73,7 +74,7 @@ homeboy component create --local-path /path/to/repo --changelog-target "CHANGELO
 | `remote_path` | Deploy target relative to project `base_path` |
 | `build_artifact` | Build output path relative to repo root |
 | `extract_command` | Post-upload command (supports `{artifact}`, `{targetDir}`) |
-| `version_targets` | Version detection patterns |
+| `version_targets` | Version detection patterns (`file`, `pattern`, optional `artifact_path`) |
 | `changelog_target` | Path to changelog file |
 | `scripts` | Optional component-owned `lint`, `test`, `build`, `bench`, and `trace` shell commands |
 | `extensions` | Extension configuration (e.g., `{"wordpress": {}}`) |

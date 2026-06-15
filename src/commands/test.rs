@@ -4,7 +4,8 @@ use homeboy::core::ci_profile::{self, CiResolvedJob};
 use homeboy::core::engine::run_dir::RunDir;
 use homeboy::core::extension::test as extension_test;
 use homeboy::core::extension::test::{
-    detect_test_drift, report, run_self_check_test_workflow, TestCommandOutput, TestRunWorkflowArgs,
+    detect_test_drift, report, run_self_check_test_workflow_with_progress, TestCommandOutput,
+    TestRunWorkflowArgs,
 };
 use homeboy::core::extension::ExtensionCapability;
 use homeboy::core::git::short_head_revision_at;
@@ -19,12 +20,13 @@ use super::utils::args::{
     filter_passthrough_args, BaselineArgs, ExtensionOverrideArgs, PassthroughCommand,
     PositionalComponentArgs, SettingArgs,
 };
-use super::utils::observed_workflow::{finish_observed_workflow, ObservedWorkflowRunner};
+use super::utils::observed_workflow::ObservedWorkflowRunner;
 use super::{CmdResult, GlobalArgs};
 use crate::command_contract::{
     CommandJsonFamily, CommandOutputContractKind, CommandOutputDescriptor, CommandOutputFileMode,
     CommandResponseMode, LabCommandContract,
 };
+use homeboy::core::validation_progress::validation_progress_metadata;
 
 const TEST_CHANGED_SINCE_LAB_UNSUPPORTED_REASON: &str = "`test --changed-since` is not Lab-portable yet because changed-since test selection depends on git base refs that the current Lab workspace sync may not have fetched.";
 
@@ -137,21 +139,30 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestCommandOutput>
         && cli_passthrough_args.is_empty()
         && source_ctx.component.has_script(ExtensionCapability::Test)
     {
+        let runner =
+            ObservedWorkflowRunner::create(format!("test {} self-check", source_ctx.component_id))?;
         let observation = start_test_observation(
             &source_ctx.component_id,
             &source_ctx.source_path,
             &args,
             "self-check",
-            None,
+            Some(runner.run_dir()),
         );
-        let workflow = run_self_check_test_workflow(
+        let workflow = run_self_check_test_workflow_with_progress(
             &source_ctx.component,
             &source_ctx.source_path,
             source_ctx.component_id.clone(),
             args.json_summary,
+            Some(runner.run_dir()),
+            observation.as_ref().map(|observation| &observation.0),
         );
 
-        let workflow = finish_test_workflow_observation(observation, workflow)?;
+        let workflow = runner.finish(
+            observation,
+            workflow,
+            |observation, workflow| finish_test_observation(Some(observation), workflow),
+            |observation, error| finish_test_observation_error(Some(observation), error),
+        )?;
 
         return Ok(report::from_main_workflow(workflow));
     }
@@ -271,18 +282,6 @@ fn start_test_observation(
     .map(TestObservation)
 }
 
-fn finish_test_workflow_observation(
-    observation: Option<TestObservation>,
-    workflow: homeboy::core::Result<extension_test::TestRunWorkflowResult>,
-) -> homeboy::core::Result<extension_test::TestRunWorkflowResult> {
-    finish_observed_workflow(
-        observation,
-        workflow,
-        |observation, workflow| finish_test_observation(Some(observation), workflow),
-        |observation, error| finish_test_observation_error(Some(observation), error),
-    )
-}
-
 fn finish_test_observation(
     observation: Option<TestObservation>,
     workflow: &extension_test::TestRunWorkflowResult,
@@ -292,8 +291,9 @@ fn finish_test_observation(
     };
 
     let metadata = merge_metadata(
-        observation.0.initial_metadata().clone(),
-        serde_json::json!({
+        merge_metadata(
+            observation.0.initial_metadata().clone(),
+            serde_json::json!({
             "observation_status": workflow.status,
             "exit_code": workflow.exit_code,
             "test_counts": workflow.test_counts,
@@ -303,7 +303,9 @@ fn finish_test_observation(
             "analysis_clusters": workflow.analysis.as_ref().map(|analysis| analysis.clusters.len()).unwrap_or(0),
             "test_scope": workflow.test_scope,
             "summary": workflow.summary,
-        }),
+            }),
+        ),
+        validation_progress_metadata_from_observation(&observation),
     );
     let status = if workflow.exit_code == 0 {
         RunStatus::Pass
@@ -367,13 +369,29 @@ fn finish_test_observation_error(
     };
 
     let metadata = merge_metadata(
-        observation.0.initial_metadata().clone(),
-        serde_json::json!({
+        merge_metadata(
+            observation.0.initial_metadata().clone(),
+            serde_json::json!({
             "observation_status": "error",
             "error": error.to_string(),
-        }),
+            }),
+        ),
+        validation_progress_metadata_from_observation(&observation),
     );
     observation.0.finish_error(Some(metadata));
+}
+
+fn validation_progress_metadata_from_observation(
+    observation: &TestObservation,
+) -> serde_json::Value {
+    observation
+        .0
+        .initial_metadata()
+        .get("run_dir")
+        .and_then(|value| value.as_str())
+        .and_then(|path| RunDir::from_existing(std::path::PathBuf::from(path)).ok())
+        .map(|run_dir| validation_progress_metadata(&run_dir))
+        .unwrap_or_else(|| serde_json::json!({}))
 }
 
 fn test_observation_command(component_id: &str, args: &TestArgs) -> String {

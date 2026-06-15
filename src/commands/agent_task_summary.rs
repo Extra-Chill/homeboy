@@ -39,8 +39,7 @@ fn render_cook_summary(payload: &Value) -> Option<String> {
         .unwrap_or(0);
     let aggregate_path = string_value(payload, &["aggregate_path"])
         .or_else(|| string_value(payload, &["record", "aggregate_path"]));
-    let apply_candidates = usize_value(payload, &["aggregate", "totals", "apply_candidates"])
-        .or_else(|| array_len(payload, &["aggregate", "outcomes"]));
+    let apply_candidates = usize_value(payload, &["aggregate", "totals", "apply_candidates"]);
     let artifact_count = array_len(payload, &["aggregate", "outcomes", "0", "artifacts"]);
     let first_artifact = string_value(
         payload,
@@ -111,14 +110,18 @@ fn render_review_summary(payload: &Value) -> Option<String> {
                 &["aggregate_review", "summary", "apply_candidates"],
             )
         })
-        .unwrap_or_else(|| array_len(payload, &["promotion_candidates"]).unwrap_or(0));
+        .unwrap_or(0);
     let failed = summary
         .and_then(|_| usize_value(payload, &["aggregate_review", "summary", "failed"]))
         .unwrap_or(0);
-    let patch = string_value(payload, &["promotion_candidates", "0", "artifact_id"]);
+    let patch = (apply_candidates > 0)
+        .then(|| string_value(payload, &["promotion_candidates", "0", "artifact_id"]))
+        .flatten();
     let patch_path = patch.and_then(|artifact_id| artifact_path(payload, artifact_id));
     let next = first_string(payload, &["next_actions"]);
-    let command = command_line(payload, &["promotion_candidates", "0", "command"]);
+    let command = (apply_candidates > 0)
+        .then(|| command_line(payload, &["promotion_candidates", "0", "command"]))
+        .flatten();
 
     let outcome = if apply_candidates > 0 {
         "patch produced, not promoted"
@@ -220,9 +223,30 @@ mod tests {
 
         assert!(summary.starts_with("Agent task cook\nRun: homeboy-4345\nStatus: succeeded"));
         assert!(summary.contains("Tasks: 1\n"));
+        assert!(!summary.contains("Patch candidates:"));
         assert!(summary.contains("First artifact: /tmp/patch.diff\n"));
         assert!(summary.contains("Next: homeboy agent-task review homeboy-4345\n"));
         assert!(!summary.contains("{\n"));
+    }
+
+    #[test]
+    fn cook_summary_uses_aggregate_totals_for_patch_candidates() {
+        let payload = json!({
+            "run_id": "homeboy-4345",
+            "state": "succeeded",
+            "task_count": 1,
+            "aggregate": {
+                "totals": { "apply_candidates": 0 },
+                "outcomes": [{
+                    "task_id": "homeboy-4345",
+                    "artifacts": [{ "id": "empty-patch", "path": "/tmp/patch.diff" }]
+                }]
+            }
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Cook, &payload).unwrap();
+
+        assert!(summary.contains("Patch candidates: 0\n"));
     }
 
     #[test]
@@ -257,6 +281,37 @@ mod tests {
         assert!(summary
             .contains("Next: homeboy agent-task promote homeboy-4345 --artifact-id patch.diff\n"));
         assert!(!summary.contains("promotion_candidates"));
+    }
+
+    #[test]
+    fn review_summary_does_not_treat_stale_promotion_candidates_as_patches() {
+        let payload = json!({
+            "run_id": "homeboy-4345",
+            "state": "failed",
+            "aggregate_review": {
+                "summary": {
+                    "apply_candidates": 0,
+                    "failed": 1
+                },
+                "artifact_inventory": [{
+                    "task_id": "homeboy-4345",
+                    "artifact_id": "empty-patch",
+                    "kind": "patch",
+                    "path": "/tmp/patch.diff"
+                }]
+            },
+            "promotion_candidates": [{
+                "artifact_id": "empty-patch",
+                "command": ["homeboy", "agent-task", "promote", "homeboy-4345", "--artifact-id", "empty-patch"]
+            }]
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Review, &payload).unwrap();
+
+        assert!(summary.contains("Outcome: failed or partial failure\n"));
+        assert!(summary.contains("Patch candidates: 0\n"));
+        assert!(!summary.contains("patch produced"));
+        assert!(!summary.contains("Next: homeboy agent-task promote"));
     }
 
     #[test]

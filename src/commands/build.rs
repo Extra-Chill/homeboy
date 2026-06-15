@@ -28,6 +28,10 @@ pub struct BuildArgs {
     /// Override local_path for this build (use a workspace clone or temp checkout)
     #[arg(long)]
     pub path: Option<String>,
+
+    /// Ask the build provider to resolve the build scope from files changed since this git ref
+    #[arg(long)]
+    pub changed_since: Option<String>,
 }
 
 pub fn run(
@@ -50,7 +54,10 @@ pub fn run(
             ExtensionCapability::Build,
             Vec::new(),
         ))?;
-        return build::run_component(&ctx.component);
+        return build::run_component_with_changed_since(
+            &ctx.component,
+            args.changed_since.as_deref(),
+        );
     }
 
     let target_id = args.target_id.as_ref().ok_or_else(|| {
@@ -95,7 +102,10 @@ pub fn run(
 
         let components =
             scope::resolve_scope_component_records(&Scope::Project(target_id.clone()))?;
-        return build::run_components(&components);
+        return build::run_components_with_changed_since(
+            &components,
+            args.changed_since.as_deref(),
+        );
     }
 
     // Multiple positional args: use shared resolver
@@ -142,13 +152,16 @@ pub fn run(
             })
             .collect();
 
-        return build::run_components(&components);
+        return build::run_components_with_changed_since(
+            &components,
+            args.changed_since.as_deref(),
+        );
     }
 
     // Single target_id: treat as component ID
     if let Some(ref path) = args.path {
-        build::run_with_path(target_id, path)
+        build::run_with_path_changed_since(target_id, path, args.changed_since.as_deref())
     } else {
-        build::run(target_id)
+        build::run_changed_since(target_id, args.changed_since.as_deref())
     }
 }

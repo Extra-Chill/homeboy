@@ -15,6 +15,7 @@
 name: Release
 
 permissions:
+  actions: write
   contents: write
   issues: write
   pull-requests: write
@@ -63,9 +64,36 @@ jobs:
           ref: ${{ inputs.release_tag || github.ref }}
           fetch-depth: 0
 
+      - name: Restore failed release marker
+        id: failure-cache
+        if: inputs.release_tag == ''
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/homeboy-release-last-failed
+          key: release-last-failed-${{ github.ref_name }}-${{ github.sha }}
+          restore-keys: |
+            release-last-failed-${{ github.ref_name }}-
+
+      - name: Check failed release marker
+        id: failed-release
+        if: inputs.release_tag == ''
+        run: |
+          HEAD_SHA="$(git rev-parse HEAD)"
+          FAILURE_MARKER="${RUNNER_TEMP}/homeboy-release-last-failed"
+          if [ -f "${FAILURE_MARKER}" ]; then
+            LAST_FAILED="$(tr -d '[:space:]' < "${FAILURE_MARKER}")"
+            if [ "${HEAD_SHA}" = "${LAST_FAILED}" ]; then
+              echo "::notice::HEAD ${HEAD_SHA:0:8} matches last failed release attempt — skipping until new commits"
+              echo "blocked=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+
+          echo "blocked=false" >> "$GITHUB_OUTPUT"
+
       - name: Dry-run release check
         id: release-check
-        if: inputs.release_tag == ''
+        if: inputs.release_tag == '' && steps.failed-release.outputs.blocked != 'true'
         uses: Extra-Chill/homeboy-action@v2
         with:
           commands: release
@@ -102,7 +130,9 @@ jobs:
           RELEASE_VERSION="${{ steps.recovery.outputs.release-version || steps.release-check.outputs.release-version }}"
           BUMP_TYPE="${{ steps.recovery.outputs.release-bump-type || steps.release-check.outputs.release-bump-type }}"
 
-          if [ -n "${RECOVERY_TAG}" ]; then
+          if [ "${{ steps.failed-release.outputs.blocked }}" = "true" ]; then
+            echo "should-release=false" >> "$GITHUB_OUTPUT"
+          elif [ -n "${RECOVERY_TAG}" ]; then
             echo "should-release=true" >> "$GITHUB_OUTPUT"
             echo "release-bump-type=${BUMP_TYPE}" >> "$GITHUB_OUTPUT"
             echo "::notice::Release recovery will publish ${RECOVERY_TAG}"
@@ -729,3 +759,62 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+
+  record-failure:
+    name: Record failed release SHA
+    needs:
+      - check
+      - gate-build
+      - gate-audit
+      - gate-lint
+      - gate-test
+      - gate-refactor
+      - release-quality-policy
+      - prepare
+      - plan
+      - build-local-artifacts
+      - build-global-artifacts
+      - host
+      - publish-homebrew-formula
+      - announce
+    if: ${{ always() && github.event_name == 'push' && needs.check.outputs.should-release == 'true' && contains(toJson(needs), '"result":"failure"') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Save failed SHA
+        run: git rev-parse HEAD > "${RUNNER_TEMP}/homeboy-release-last-failed"
+
+      - name: Cache failed SHA
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/homeboy-release-last-failed
+          key: release-last-failed-${{ github.ref_name }}-${{ github.sha }}
+
+  clear-failure:
+    name: Clear failed release SHA cache
+    needs:
+      - check
+      - gate-build
+      - gate-audit
+      - gate-lint
+      - gate-test
+      - gate-refactor
+      - release-quality-policy
+      - prepare
+      - plan
+      - build-local-artifacts
+      - build-global-artifacts
+      - host
+      - publish-homebrew-formula
+      - announce
+    if: ${{ always() && github.event_name == 'push' && needs.check.outputs.should-release == 'true' && !contains(toJson(needs), '"result":"failure"') && !contains(toJson(needs), '"result":"cancelled"') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clear failed SHA cache
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh cache list --json id,key --jq '.[] | select(.key | startswith("release-last-failed-${{ github.ref_name }}-")) | .id' | while read -r id; do
+            gh cache delete "$id" 2>/dev/null || true
+          done

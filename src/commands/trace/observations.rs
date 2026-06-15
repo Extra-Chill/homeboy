@@ -321,15 +321,15 @@ mod tests {
             let run_dir = RunDir::create().expect("run dir");
             let browser_dir = run_dir
                 .path()
-                .join("artifacts/wp-codebox-artifacts/runtime-abc/files/browser");
+                .join("artifacts/provider-artifacts/runtime-abc/files/browser");
             std::fs::create_dir_all(&browser_dir).expect("mkdir browser artifacts");
             std::fs::write(browser_dir.join("network.jsonl"), "{\"url\":\"/\"}\n")
                 .expect("write network");
             std::fs::write(browser_dir.join("console.jsonl"), "{\"text\":\"ok\"}\n")
                 .expect("write console");
             let results = sample_results(vec![TraceArtifact {
-                label: "WP Codebox browser probe".to_string(),
-                path: "artifacts/wp-codebox-artifacts/runtime-abc/files/browser".to_string(),
+                label: "Provider browser probe".to_string(),
+                path: "artifacts/provider-artifacts/runtime-abc/files/browser".to_string(),
                 kind: None,
             }]);
 
@@ -370,7 +370,7 @@ mod tests {
             let run_dir = RunDir::create().expect("run dir");
             let results = sample_results(vec![TraceArtifact {
                 label: "network log".to_string(),
-                path: "artifacts/wp-codebox-artifacts/runtime-missing/files/browser/network.jsonl"
+                path: "artifacts/provider-artifacts/runtime-missing/files/browser/network.jsonl"
                     .to_string(),
                 kind: None,
             }]);
@@ -392,7 +392,7 @@ mod tests {
             );
             assert_eq!(
                 missing_finding.metadata_json["declared_artifact"]["path"],
-                "artifacts/wp-codebox-artifacts/runtime-missing/files/browser/network.jsonl"
+                "artifacts/provider-artifacts/runtime-missing/files/browser/network.jsonl"
             );
             run_dir.cleanup();
         });

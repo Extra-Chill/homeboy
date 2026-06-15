@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 
-use homeboy::core::observation::{ArtifactRecord, ObservationStore, RunRecord};
+use homeboy::core::observation::{runs_service, ArtifactRecord, ObservationStore, RunRecord};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -59,6 +59,10 @@ pub struct RunsEvidenceArtifact {
     pub artifact_type: String,
     pub path: String,
     pub url: Option<String>,
+    pub public: bool,
+    pub public_url: Option<String>,
+    pub relative_to: Option<String>,
+    pub fetch_command: Option<String>,
     pub size_bytes: Option<i64>,
     pub sha256: Option<String>,
     pub created_at: String,
@@ -96,7 +100,7 @@ pub struct RunsEvidenceLink {
 pub fn evidence(run_id: &str) -> CmdResult<RunsOutput> {
     let store = ObservationStore::open_initialized()?;
     let run = require_run(&store, run_id)?;
-    let artifacts = store.list_artifacts(run_id)?;
+    let artifacts = runs_service::enrich_artifact_links(store.list_artifacts(run_id)?);
     let artifact_root = homeboy::core::artifacts::root()?;
     let artifact_index = evidence_artifact_index(&artifacts);
     let disk_budget = disk::disk_budget(
@@ -186,6 +190,7 @@ fn evidence_artifact_index(artifacts: &[ArtifactRecord]) -> RunsEvidenceArtifact
     let artifacts = artifacts
         .iter()
         .map(|artifact| {
+            let public_url = artifact_public_url(artifact);
             let exists = artifact_exists(artifact);
             if !exists {
                 missing_count += 1;
@@ -207,6 +212,10 @@ fn evidence_artifact_index(artifacts: &[ArtifactRecord]) -> RunsEvidenceArtifact
                     .url
                     .clone()
                     .or_else(|| (artifact.artifact_type == "url").then(|| artifact.path.clone())),
+                public: public_url.is_some() || artifact.artifact_type == "url",
+                public_url,
+                relative_to: artifact_relative_to(artifact),
+                fetch_command: artifact_fetch_command(artifact),
                 size_bytes: artifact.size_bytes,
                 sha256: artifact.sha256.clone(),
                 created_at: artifact.created_at.clone(),
@@ -225,6 +234,43 @@ fn evidence_artifact_index(artifacts: &[ArtifactRecord]) -> RunsEvidenceArtifact
         total_size_bytes,
         artifacts,
     }
+}
+
+fn artifact_public_url(artifact: &ArtifactRecord) -> Option<String> {
+    if artifact.artifact_type == "url" {
+        return artifact.url.clone().or_else(|| Some(artifact.path.clone()));
+    }
+    artifact.public_url.clone().or_else(|| {
+        artifact
+            .metadata_json
+            .get("public_url")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    })
+}
+
+fn artifact_relative_to(artifact: &ArtifactRecord) -> Option<String> {
+    if artifact.artifact_type == "url" || artifact_public_url(artifact).is_some() {
+        return None;
+    }
+    if artifact.artifact_type == "file" || artifact.artifact_type == "remote_file" {
+        return Some("homeboy observation artifact store".to_string());
+    }
+    artifact
+        .metadata_json
+        .get("source")
+        .and_then(Value::as_str)
+        .map(|source| format!("{source} metadata"))
+}
+
+fn artifact_fetch_command(artifact: &ArtifactRecord) -> Option<String> {
+    if artifact.artifact_type == "file" || artifact.artifact_type == "remote_file" {
+        return Some(format!(
+            "homeboy runs artifact get {} {} -o <path>",
+            artifact.run_id, artifact.id
+        ));
+    }
+    None
 }
 
 fn artifact_exists(artifact: &ArtifactRecord) -> bool {
@@ -276,7 +322,7 @@ fn evidence_failure_summary(run: &RunRecord) -> RunsEvidenceFailureSummary {
         .and_then(|value| value.as_str())
         .map(str::to_string);
     RunsEvidenceFailureSummary {
-        failed: !matches!(run.status.as_str(), "pass" | "passed"),
+        failed: matches!(run.status.as_str(), "fail" | "failed" | "error" | "stale"),
         status: run.status.clone(),
         exit_code,
         error,
@@ -302,31 +348,18 @@ fn evidence_links(artifacts: &[ArtifactRecord]) -> Vec<RunsEvidenceLink> {
     artifacts
         .iter()
         .filter_map(|artifact| {
-            if artifact.artifact_type == "url" {
-                return Some(RunsEvidenceLink {
-                    kind: artifact.kind.clone(),
-                    target: artifact
-                        .url
-                        .clone()
-                        .unwrap_or_else(|| artifact.path.clone()),
-                    label: artifact.kind.clone(),
-                });
-            }
-            if artifact.path.is_empty() {
-                None
-            } else {
-                Some(RunsEvidenceLink {
-                    kind: artifact.kind.clone(),
-                    target: artifact.path.clone(),
-                    label: artifact.kind.clone(),
-                })
-            }
+            artifact_public_url(artifact).map(|target| RunsEvidenceLink {
+                kind: artifact.kind.clone(),
+                target,
+                label: artifact.kind.clone(),
+            })
         })
         .collect()
 }
 
 #[cfg(test)]
 mod tests {
+    use homeboy::core::artifact_links::PUBLIC_ARTIFACT_BASE_URL_ENV;
     use homeboy::core::observation::{NewRunRecord, ObservationStore, RunStatus};
     use homeboy::test_support::with_isolated_home;
     use serde_json::Value;
@@ -334,6 +367,28 @@ mod tests {
     use super::*;
 
     struct XdgGuard(Option<String>);
+
+    struct EnvGuard {
+        key: &'static str,
+        prior: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn unset(key: &'static str) -> Self {
+            let prior = std::env::var(key).ok();
+            std::env::remove_var(key);
+            Self { key, prior }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.prior {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
 
     impl XdgGuard {
         fn unset() -> Self {
@@ -368,6 +423,7 @@ mod tests {
     fn evidence_command_reports_registry_artifacts_retention_and_failure_summary() {
         with_isolated_home(|home| {
             let _xdg = XdgGuard::unset();
+            let _public_artifact_base = EnvGuard::unset(PUBLIC_ARTIFACT_BASE_URL_ENV);
             let artifact_root = home.path().join("agent-readable-artifacts");
             homeboy::core::set_artifact_root_override(Some(artifact_root.clone()));
             let store = ObservationStore::open_initialized().expect("store");
@@ -410,6 +466,41 @@ mod tests {
             assert_eq!(output.artifact_index.file_count, 1);
             assert_eq!(output.artifact_index.url_count, 1);
             assert_eq!(output.artifact_index.missing_count, 0);
+            let bench_results = output
+                .artifact_index
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.kind == "bench_results")
+                .expect("bench results artifact");
+            assert!(!bench_results.public);
+            assert_eq!(
+                bench_results.relative_to.as_deref(),
+                Some("homeboy observation artifact store")
+            );
+            let expected_fetch_command = format!(
+                "homeboy runs artifact get {} {} -o <path>",
+                run.id, bench_results.id
+            );
+            assert_eq!(
+                bench_results.fetch_command.as_deref(),
+                Some(expected_fetch_command.as_str())
+            );
+            let review = output
+                .artifact_index
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.kind == "review")
+                .expect("review artifact");
+            assert!(review.public);
+            assert_eq!(
+                review.public_url.as_deref(),
+                Some("https://example.test/evidence")
+            );
+            assert_eq!(output.evidence_links.len(), 1);
+            assert_eq!(
+                output.evidence_links[0].target,
+                "https://example.test/evidence"
+            );
             assert_eq!(output.retention.default_retention_days, 30);
             assert!(output
                 .retention
@@ -423,12 +514,39 @@ mod tests {
             assert_eq!(output.failure.exit_code, Some(1));
             assert_eq!(output.failure.gate_failures, vec!["p95_ms exceeded"]);
             assert_eq!(output.failure.hints, vec!["inspect artifacts"]);
-            assert!(!output.evidence_links.is_empty());
             assert!(
                 output.disk_budget.available_bytes.is_some()
                     || output.disk_budget.warning.is_some()
             );
             homeboy::core::set_artifact_root_override(None);
+        });
+    }
+
+    #[test]
+    fn evidence_failure_summary_does_not_mark_running_run_failed() {
+        with_isolated_home(|_home| {
+            let _xdg = XdgGuard::unset();
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(sample_run(
+                    "trace",
+                    "homeboy",
+                    "studio",
+                    serde_json::json!({
+                        "status": "running",
+                        "phase": "waiting-for-child"
+                    }),
+                ))
+                .expect("run");
+
+            let (output, _) = evidence(&run.id).expect("evidence");
+            let RunsOutput::Evidence(output) = output else {
+                panic!("expected evidence output");
+            };
+
+            assert_eq!(output.run.status, "running");
+            assert_eq!(output.failure.status, "running");
+            assert!(!output.failure.failed);
         });
     }
 }

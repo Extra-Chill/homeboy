@@ -43,12 +43,20 @@ pub use versioning::{
     validate_version_target_conflict,
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 
 pub struct VersionTarget {
     pub file: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pattern: Option<String>,
+    /// Path to verify inside the deploy artifact (ZIP), when it differs from `file`.
+    ///
+    /// `file` is bumped in the workspace (git-tracked source), while `artifact_path`
+    /// is what the verifier looks for inside the shipped artifact. This is needed for
+    /// components that bump source manifests but ship compiled manifests from a
+    /// different artifact path. When unset, the verifier falls back to `file`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -735,6 +743,7 @@ mod tests {
         let existing = vec![VersionTarget {
             file: "plugin.php".to_string(),
             pattern: Some("Version: (.*)".to_string()),
+            artifact_path: None,
         }];
 
         let result = validate_version_target_conflict(
@@ -802,6 +811,7 @@ mod tests {
         let existing = vec![VersionTarget {
             file: "plugin.php".to_string(),
             pattern: Some("Version: (.*)".to_string()),
+            artifact_path: None,
         }];
 
         let result =
@@ -814,6 +824,7 @@ mod tests {
         let existing = vec![VersionTarget {
             file: "plugin.php".to_string(),
             pattern: Some("Version: (.*)".to_string()),
+            artifact_path: None,
         }];
 
         let result = validate_version_target_conflict(

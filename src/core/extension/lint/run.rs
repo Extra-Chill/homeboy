@@ -17,6 +17,7 @@ use crate::core::extension::{
 use crate::core::finding::{FindingProducerSummary, FindingSource, HomeboyFinding};
 use crate::core::git;
 use crate::core::refactor::AppliedRefactor;
+use crate::core::validation_progress::{write_command_artifact, ValidationProgressRecorder};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -120,6 +121,11 @@ pub fn run_main_lint_workflow(
     let output = if let Some(ref runs) = scoped_runs {
         run_scoped_lint_runs(component, &args, run_dir, runs)?
     } else {
+        let mut progress = ValidationProgressRecorder::new(
+            run_dir,
+            None,
+            vec![("lint runner".to_string(), args.component_label.clone())],
+        )?;
         let runner = build_lint_runner(
             component,
             args.path_override.clone(),
@@ -138,14 +144,19 @@ pub fn run_main_lint_workflow(
             .ci_env
             .iter()
             .fold(runner, |runner, (key, value)| runner.env(key, value));
-        runner
+        progress.start(0)?;
+        let output = runner
             .env_if(
                 args.changed_since.is_some(),
                 "HOMEBOY_STRICT_VALIDATION_DEPENDENCIES",
                 "1",
             )
             .passthrough(!args.json_summary)
-            .run()?
+            .run()?;
+        let stdout_artifact = write_command_artifact(run_dir, 0, "stdout", &output.stdout)?;
+        let stderr_artifact = write_command_artifact(run_dir, 0, "stderr", &output.stderr)?;
+        progress.finish(0, output.exit_code, stdout_artifact, stderr_artifact)?;
+        output
     };
 
     let lint_findings_file = run_dir.step_file(run_dir::files::LINT_FINDINGS);
@@ -593,6 +604,21 @@ fn run_scoped_lint_runs(
     let mut success = true;
     let mut exit_code = 0;
     let mut extension_phase_timings = Vec::new();
+    let mut progress = ValidationProgressRecorder::new(
+        run_dir,
+        None,
+        runs.iter()
+            .enumerate()
+            .map(|(index, run)| {
+                (
+                    run.step
+                        .clone()
+                        .unwrap_or_else(|| format!("lint scoped command {}", index + 1)),
+                    run.glob.clone(),
+                )
+            })
+            .collect(),
+    )?;
 
     for (index, run) in runs.iter().enumerate() {
         let scoped_run_dir;
@@ -621,6 +647,7 @@ fn run_scoped_lint_runs(
             .ci_env
             .iter()
             .fold(runner, |runner, (key, value)| runner.env(key, value));
+        progress.start(index)?;
         let output = runner
             .env_if(
                 args.changed_since.is_some(),
@@ -629,6 +656,9 @@ fn run_scoped_lint_runs(
             )
             .passthrough(!args.json_summary)
             .run()?;
+        let stdout_artifact = write_command_artifact(run_dir, index, "stdout", &output.stdout)?;
+        let stderr_artifact = write_command_artifact(run_dir, index, "stderr", &output.stderr)?;
+        progress.finish(index, output.exit_code, stdout_artifact, stderr_artifact)?;
         extension_phase_timings.extend(output.extension_phase_timings);
 
         if !output.success {
@@ -655,11 +685,31 @@ pub fn run_self_check_lint_workflow(
     component_label: String,
     json_summary: bool,
 ) -> crate::core::Result<LintRunWorkflowResult> {
-    let output = extension::self_check::run_self_checks_with_passthrough(
+    run_self_check_lint_workflow_with_progress(
+        component,
+        source_path,
+        component_label,
+        json_summary,
+        None,
+        None,
+    )
+}
+
+pub fn run_self_check_lint_workflow_with_progress(
+    component: &Component,
+    source_path: &Path,
+    component_label: String,
+    json_summary: bool,
+    run_dir: Option<&RunDir>,
+    observation: Option<&crate::core::observation::ActiveObservation>,
+) -> crate::core::Result<LintRunWorkflowResult> {
+    let output = extension::self_check::run_self_checks_with_passthrough_and_progress(
         component,
         ExtensionCapability::Lint,
         source_path,
         !json_summary,
+        run_dir,
+        observation,
     )?;
     let status = if output.success { "passed" } else { "failed" }.to_string();
     let hints = (!output.success).then(|| {

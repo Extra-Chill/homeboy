@@ -493,7 +493,7 @@ fn validate_start_spec(spec: &PreviewClientStartSpec) -> Result<()> {
     let parsed_origin = reqwest::Url::parse(&spec.local_origin).map_err(|err| {
         Error::validation_invalid_argument(
             "local_origin",
-            &format!("preview client local origin must be a valid HTTP(S) URL: {err}"),
+            format!("preview client local origin must be a valid HTTP(S) URL: {err}"),
             Some(spec.local_origin.clone()),
             None,
         )

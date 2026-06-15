@@ -39,6 +39,7 @@ pub struct RunnerExecOptions {
     pub allow_diagnostic_ssh: bool,
     pub command: Vec<String>,
     pub env: HashMap<String, String>,
+    pub secret_env_names: Vec<String>,
     pub capture_patch: bool,
     pub raw_exec: bool,
     pub source_snapshot: Option<SourceSnapshot>,
@@ -106,6 +107,7 @@ pub(crate) struct RunnerProcessRequest {
     pub project_id: Option<String>,
     pub command: Vec<String>,
     pub env: HashMap<String, String>,
+    pub secret_env_names: Vec<String>,
     pub capture_patch: bool,
     pub raw_exec: bool,
     pub source_snapshot: Option<SourceSnapshot>,
@@ -140,6 +142,11 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
         ));
     }
 
+    let secret_env_names = runner_exec_secret_env_names(
+        &options.command,
+        options.capability_preflight.as_ref(),
+        &options.secret_env_names,
+    );
     let plan = prepare_runner_process(RunnerProcessRequest {
         runner_id: runner_id.to_string(),
         runner: None,
@@ -147,6 +154,7 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
         project_id: options.project_id.clone(),
         command: options.command.clone(),
         env: options.env.clone(),
+        secret_env_names: secret_env_names.clone(),
         capture_patch: options.capture_patch,
         raw_exec: options.raw_exec,
         source_snapshot: options.source_snapshot.clone(),
@@ -155,13 +163,28 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
     })?;
     let runner = plan.runner.clone();
     let cwd = plan.cwd.clone();
-    let connected = status(runner_id)?;
     let request_env = plan.env.clone();
     let required_extensions =
         required_extensions_for_command(&options.command, &options.required_extensions);
 
     validate_runner_extension_parity(runner_id, &runner, &cwd, &required_extensions)?;
 
+    if should_force_diagnostic_ssh(&runner, &options) {
+        preflight_runner_capability_plan(
+            &runner,
+            options.capability_preflight.as_ref(),
+            &request_env,
+        )?;
+        return exec_diagnostic_ssh(
+            &runner,
+            cwd,
+            options.command,
+            request_env,
+            options.require_paths,
+        );
+    }
+
+    let connected = status(runner_id)?;
     if connected.connected {
         if let Some(session) = connected.session {
             preflight_runner_capability_plan(
@@ -177,6 +200,7 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
                     options.project_id,
                     options.command,
                     request_env,
+                    secret_env_names,
                     options.capture_patch,
                     Some(plan.source_snapshot),
                     options.require_paths,
@@ -191,6 +215,7 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
                         options.project_id,
                         options.command,
                         request_env,
+                        secret_env_names,
                         options.capture_patch,
                         Some(plan.source_snapshot),
                         options.require_paths,
@@ -202,14 +227,6 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
 
     match runner.kind {
         RunnerKind::Local => exec_local(plan),
-        RunnerKind::Ssh if options.allow_diagnostic_ssh => {
-            preflight_runner_capability_plan(
-                &runner,
-                options.capability_preflight.as_ref(),
-                &request_env,
-            )?;
-            exec_diagnostic_ssh(&runner, cwd, options.command, request_env, options.require_paths)
-        }
         RunnerKind::Ssh => Err(Error::validation_invalid_argument(
             "runner",
             "runner is not connected to a daemon; run `homeboy runner connect <runner-id>` or pass `--ssh` for explicit SSH diagnostics",
@@ -220,6 +237,10 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
             ]),
         )),
     }
+}
+
+fn should_force_diagnostic_ssh(runner: &Runner, options: &RunnerExecOptions) -> bool {
+    runner.kind == RunnerKind::Ssh && options.allow_diagnostic_ssh
 }
 
 pub fn runner_exec_failure_error(output: &RunnerExecOutput) -> Option<Error> {
@@ -275,6 +296,7 @@ pub fn runner_exec_failure_error(output: &RunnerExecOutput) -> Option<Error> {
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn exec_via_reverse_broker(
     runner: &Runner,
     broker_url: &str,
@@ -282,6 +304,7 @@ fn exec_via_reverse_broker(
     project_id: Option<String>,
     command: Vec<String>,
     env: HashMap<String, String>,
+    secret_env_names: Vec<String>,
     capture_patch: bool,
     source_snapshot_override: Option<SourceSnapshot>,
     require_paths: Vec<String>,
@@ -300,6 +323,7 @@ fn exec_via_reverse_broker(
         command: command.clone(),
         cwd: Some(cwd.clone()),
         env,
+        secret_env_names,
         capture_patch,
         source_snapshot: Some(source_snapshot.clone()),
         metadata: Some(json!({
@@ -328,6 +352,13 @@ fn exec_via_reverse_broker(
             Some("parse reverse broker job".to_string()),
         )
     })?;
+    let handoff_run_id = persist_lab_offload_handoff_run(runner, &cwd, &command, &job);
+    print_lab_offload_handoff(
+        &runner.id,
+        Some(&cwd),
+        &job.id.to_string(),
+        handoff_run_id.as_deref(),
+    );
 
     let deadline = Instant::now() + runner_exec_wait_timeout();
     while !matches!(
@@ -393,6 +424,7 @@ fn exec_via_reverse_broker(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn exec_via_daemon(
     runner: &Runner,
     local_url: &str,
@@ -400,6 +432,7 @@ fn exec_via_daemon(
     project_id: Option<String>,
     command: Vec<String>,
     env: HashMap<String, String>,
+    secret_env_names: Vec<String>,
     capture_patch: bool,
     source_snapshot_override: Option<SourceSnapshot>,
     require_paths: Vec<String>,
@@ -420,6 +453,7 @@ fn exec_via_daemon(
             "cwd": cwd,
             "command": command,
             "env": env,
+            "secret_env_names": secret_env_names,
             "capture_patch": capture_patch,
             "source_snapshot": source_snapshot.clone(),
             "require_paths": require_paths.clone(),
@@ -452,6 +486,13 @@ fn exec_via_daemon(
     let mut job: Job = serde_json::from_value(job_value.clone()).map_err(|err| {
         Error::internal_json(err.to_string(), Some("parse daemon exec job".to_string()))
     })?;
+    let handoff_run_id = persist_lab_offload_handoff_run(runner, &cwd, &command, &job);
+    print_lab_offload_handoff(
+        &runner.id,
+        Some(&cwd),
+        &job.id.to_string(),
+        handoff_run_id.as_deref(),
+    );
 
     let deadline = Instant::now() + runner_exec_wait_timeout();
     while !matches!(
@@ -580,6 +621,7 @@ fn daemon_job_wait_timeout(
 ) -> Error {
     let job_id = job.id.to_string();
     let mirrored = mirror_daemon_job_progress(runner, cwd, command, job, events);
+    let mirrored_run_id = mirrored.as_ref().ok().map(|run| run.id.clone());
     let timeout_hint = format!(
         "Set controller-side `{RUNNER_EXEC_WAIT_TIMEOUT_ENV}` before invoking homeboy to change this wait budget, e.g. `{RUNNER_EXEC_WAIT_TIMEOUT_ENV}=2400 homeboy ...`; workload settings are applied inside the remote job and cannot extend the controller wait."
     );
@@ -587,8 +629,13 @@ fn daemon_job_wait_timeout(
         "{label} {job_id} on runner {} did not finish before timeout; the remote job is still in flight and was not cancelled",
         runner.id
     ));
+    error.details["runner_id"] = Value::String(runner.id.clone());
+    error.details["job_id"] = Value::String(job_id.clone());
+    error.details["remote_cwd"] = Value::String(cwd.to_string());
+    error.details["command"] = json!(command);
     match mirrored {
         Ok(run) => {
+            error.details["active_run_id"] = Value::String(run.id.clone());
             error = error
                 .with_hint(format!(
                     "Mirrored controller timeout state as run `{}`; inspect it with `homeboy runs show {}`.",
@@ -606,19 +653,83 @@ fn daemon_job_wait_timeout(
             ));
         }
     }
-    error
-        .with_hint(format!(
-            "Check remote progress with `homeboy runs list --runner {} --status running --limit 20`.",
-            runner.id
-        ))
-        .with_hint(format!(
-            "Tail the dispatched runner daemon job with `homeboy runner job logs {} {job_id} --follow`.",
-            runner.id
-        ))
-        .with_hint(format!(
-            "Runner daemon job id `{job_id}` was already dispatched; wait for it to finish or cancel it explicitly through the runner daemon if needed."
-        ))
-        .with_hint(timeout_hint)
+    for hint in
+        lab_offload_handoff_hints(&runner.id, Some(cwd), &job_id, mirrored_run_id.as_deref())
+    {
+        error = error.with_hint(hint);
+    }
+    error.with_hint(timeout_hint)
+}
+
+pub(crate) fn lab_offload_handoff_hints(
+    runner_id: &str,
+    remote_cwd: Option<&str>,
+    job_id: &str,
+    persisted_run_id: Option<&str>,
+) -> Vec<String> {
+    let runner_exec_prefix = match remote_cwd.filter(|cwd| !cwd.trim().is_empty()) {
+        Some(cwd) => format!(
+            "homeboy runner exec {runner_id} --cwd {} --",
+            shell::quote_arg(cwd)
+        ),
+        None => format!("homeboy runner exec {runner_id} --"),
+    };
+    let remote_run_filter =
+        format!("{runner_exec_prefix} homeboy runs list --status running --limit 20");
+    let mut hints = vec![format!(
+        "Lab offload handoff: runner `{runner_id}` has daemon job `{job_id}` still in flight; the runner-side Homeboy command may continue after this controller exits."
+    )];
+
+    if let Some(run_id) = persisted_run_id.filter(|run_id| !run_id.trim().is_empty()) {
+        hints.push(format!(
+            "Persisted run id: `{run_id}`. Status: `homeboy runs show {run_id}`; evidence: `homeboy runs evidence {run_id}`; artifacts: `homeboy runs artifacts {run_id}`."
+        ));
+    } else {
+        hints.push(format!(
+            "Persisted runner-side run id is not known yet; list active runner runs with `{remote_run_filter}`."
+        ));
+    }
+
+    hints.push(format!(
+        "Runner-side status/evidence/artifacts: `{remote_run_filter}` then `{runner_exec_prefix} homeboy runs show <run-id>`, `{runner_exec_prefix} homeboy runs evidence <run-id>`, and `{runner_exec_prefix} homeboy runs artifacts <run-id>`."
+    ));
+    hints.push(format!(
+        "Daemon job logs: `homeboy runner job logs {runner_id} {job_id} --follow`."
+    ));
+    hints.push(format!(
+        "Cancel if supported: `homeboy runner job cancel {runner_id} {job_id}`."
+    ));
+    hints
+}
+
+fn print_lab_offload_handoff(
+    runner_id: &str,
+    remote_cwd: Option<&str>,
+    job_id: &str,
+    persisted_run_id: Option<&str>,
+) {
+    eprintln!("Lab offload handoff:");
+    for hint in lab_offload_handoff_hints(runner_id, remote_cwd, job_id, persisted_run_id) {
+        eprintln!("- {hint}");
+    }
+}
+
+fn persist_lab_offload_handoff_run(
+    runner: &Runner,
+    cwd: &str,
+    command: &[String],
+    job: &Job,
+) -> Option<String> {
+    match mirror_daemon_job_progress(runner, cwd, command, job, &[]) {
+        Ok(run) => Some(run.id),
+        Err(err) => {
+            eprintln!(
+                "Lab offload handoff: could not persist controller-side run mirror for runner `{}` daemon job `{}`: {}",
+                runner.id, job.id, err.message
+            );
+            None
+        }
+    }
 }
 
 fn runner_exec_wait_timeout() -> Duration {
@@ -654,6 +765,14 @@ fn daemon_get(client: &Client, local_url: &str, path: &str) -> Result<Value> {
 }
 
 pub(crate) fn daemon_api_get(runner_id: &str, path: &str) -> Result<Value> {
+    daemon_api_request(runner_id, path, "GET")
+}
+
+pub fn daemon_api_post(runner_id: &str, path: &str) -> Result<Value> {
+    daemon_api_request(runner_id, path, "POST")
+}
+
+fn daemon_api_request(runner_id: &str, path: &str, method: &str) -> Result<Value> {
     let runner = load(runner_id)?;
     let connected = status(runner_id)?;
     let Some(session) = connected.session.filter(|_| connected.connected) else {
@@ -680,7 +799,32 @@ pub(crate) fn daemon_api_get(runner_id: &str, path: &str) -> Result<Value> {
             ]),
         ));
     };
-    daemon_get(&client, local_url, path)
+    match method {
+        "GET" => daemon_get(&client, local_url, path),
+        "POST" => daemon_post(&client, local_url, path),
+        _ => Err(Error::internal_unexpected(format!(
+            "unsupported daemon API method {method}"
+        ))),
+    }
+}
+
+fn daemon_post(client: &Client, local_url: &str, path: &str) -> Result<Value> {
+    let response = client
+        .post(format!("{}{}", local_url.trim_end_matches('/'), path))
+        .send()
+        .map_err(|err| Error::internal_unexpected(format!("query runner daemon: {err}")))?;
+    let envelope: DaemonEnvelope = response.json().map_err(|err| {
+        Error::internal_json(err.to_string(), Some("parse daemon response".to_string()))
+    })?;
+    if !envelope.success {
+        return Err(Error::internal_unexpected(format!(
+            "daemon request failed: {}",
+            envelope.error.unwrap_or(Value::Null)
+        )));
+    }
+    envelope
+        .data
+        .ok_or_else(|| Error::internal_unexpected("daemon response missing data"))
 }
 
 fn result_event_data(events: &[JobEvent]) -> Option<Value> {
@@ -805,9 +949,19 @@ pub(crate) fn prepare_runner_process(
     let mut env = runner.env.clone();
     env.extend(request.env);
     if runner.kind == RunnerKind::Local {
-        env.extend(resolve_runner_secret_env(&runner.secret_env)?);
+        env.extend(resolve_runner_secret_env_for_command(
+            &runner.secret_env,
+            &request.secret_env_names,
+            &env,
+        )?);
+        normalize_runner_command_env(&mut env);
+    } else {
+        env.extend(resolve_controller_secret_env_for_command(
+            &runner.secret_env,
+            &request.secret_env_names,
+            &env,
+        )?);
     }
-    normalize_runner_command_env(&mut env);
 
     let source_snapshot = request
         .source_snapshot
@@ -892,7 +1046,11 @@ pub(crate) fn prepare_daemon_local_process(
 
     let mut env = runner.env.clone();
     env.extend(request.env);
-    env.extend(resolve_runner_secret_env(&runner.secret_env)?);
+    env.extend(resolve_runner_secret_env_for_command(
+        &runner.secret_env,
+        &request.secret_env_names,
+        &env,
+    )?);
     normalize_runner_command_env(&mut env);
     let source_snapshot = request.source_snapshot.unwrap_or_else(|| {
         SourceSnapshot::collect_local(&runner.id, Path::new(&cwd), Some(&cwd), "existing_remote")
@@ -906,6 +1064,81 @@ pub(crate) fn prepare_daemon_local_process(
         source_snapshot,
         require_paths: request.require_paths,
     })
+}
+
+fn resolve_runner_secret_env_for_command(
+    secret_env: &HashMap<String, server::RunnerSecretEnvRef>,
+    required_names: &[String],
+    env: &HashMap<String, String>,
+) -> Result<HashMap<String, String>> {
+    if required_names.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let mut refs = HashMap::new();
+    for name in required_names {
+        if env.contains_key(name.as_str()) {
+            continue;
+        }
+        let Some(source) = secret_env.get(name.as_str()) else {
+            return Err(Error::validation_invalid_argument(
+                "secret_env",
+                format!("missing runner secret env ref for {name}"),
+                Some(name.clone()),
+                Some(vec![
+                    "Configure the selected runner secret_env reference or pass the secret in the exec request environment.".to_string(),
+                ]),
+            ));
+        };
+        refs.insert(name.clone(), source.clone());
+    }
+
+    resolve_runner_secret_env(&refs)
+}
+
+fn resolve_controller_secret_env_for_command(
+    secret_env: &HashMap<String, server::RunnerSecretEnvRef>,
+    required_names: &[String],
+    env: &HashMap<String, String>,
+) -> Result<HashMap<String, String>> {
+    let mut resolved = HashMap::new();
+    for name in required_names {
+        if env.contains_key(name.as_str()) {
+            continue;
+        }
+        let Some(source) = secret_env.get(name.as_str()) else {
+            continue;
+        };
+        if source
+            .secret
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+        {
+            resolved.extend(resolve_runner_secret_env(&HashMap::from([(
+                name.clone(),
+                source.clone(),
+            )]))?);
+        }
+    }
+    Ok(resolved)
+}
+
+fn runner_exec_secret_env_names(
+    command: &[String],
+    preflight: Option<&RunnerCapabilityPreflight>,
+    explicit_names: &[String],
+) -> Vec<String> {
+    let mut names = Vec::new();
+    names.extend(explicit_names.iter().cloned());
+    if let Some(preflight) = preflight {
+        names.extend(preflight.required_env.iter().cloned());
+    }
+    names.extend(super::lab::secrets::declared_agent_task_secret_env(command));
+    names.extend(super::lab::secrets::declared_trace_secret_env(command));
+    names.extend(super::lab::secrets::declared_tunnel_secret_env(command));
+    names.sort();
+    names.dedup();
+    names
 }
 
 fn validate_required_paths(
@@ -1433,6 +1666,7 @@ mod tests {
                 project_id: None,
                 command: vec!["homeboy".to_string(), "--version".to_string()],
                 env: Default::default(),
+                secret_env_names: Vec::new(),
                 capture_patch: false,
                 raw_exec: false,
                 source_snapshot: None,
@@ -1447,22 +1681,123 @@ mod tests {
     }
 
     #[test]
-    fn remote_daemon_secret_env_refs_resolve_only_on_runner_side() {
+    fn ssh_runner_prep_leaves_default_path_to_runner_side() {
+        crate::test_support::with_isolated_home(|_| {
+            let plan = prepare_runner_process(RunnerProcessRequest {
+                runner_id: "lab".to_string(),
+                runner: Some(ssh_runner()),
+                cwd: Some("/srv/homeboy/project".to_string()),
+                project_id: None,
+                command: vec!["node".to_string(), "--version".to_string()],
+                env: Default::default(),
+                secret_env_names: Vec::new(),
+                capture_patch: false,
+                raw_exec: false,
+                source_snapshot: None,
+                require_paths: Vec::new(),
+                validate_require_paths_on_host: false,
+            })
+            .expect("prepare ssh runner process");
+
+            assert!(
+                !plan.env.contains_key("PATH"),
+                "controller must not freeze PATH before daemon-side runner normalization"
+            );
+        });
+    }
+
+    #[test]
+    fn ssh_runner_prep_preserves_explicit_path() {
+        crate::test_support::with_isolated_home(|_| {
+            let mut runner = ssh_runner();
+            runner
+                .env
+                .insert("PATH".to_string(), "$HOME/custom/bin:$PATH".to_string());
+
+            let plan = prepare_runner_process(RunnerProcessRequest {
+                runner_id: "lab".to_string(),
+                runner: Some(runner),
+                cwd: Some("/srv/homeboy/project".to_string()),
+                project_id: None,
+                command: vec!["node".to_string(), "--version".to_string()],
+                env: Default::default(),
+                secret_env_names: Vec::new(),
+                capture_patch: false,
+                raw_exec: false,
+                source_snapshot: None,
+                require_paths: Vec::new(),
+                validate_require_paths_on_host: false,
+            })
+            .expect("prepare ssh runner process with explicit path");
+
+            assert_eq!(
+                plan.env.get("PATH").map(String::as_str),
+                Some("$HOME/custom/bin:$PATH")
+            );
+        });
+    }
+
+    #[test]
+    fn daemon_local_prep_normalizes_default_path_on_runner_side() {
+        crate::test_support::with_isolated_home(|_| {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let workspace = temp.path().join("project");
+            std::fs::create_dir_all(&workspace).expect("workspace");
+            let workspace = workspace.display().to_string();
+
+            let plan = prepare_daemon_local_process(RunnerProcessRequest {
+                runner_id: "lab".to_string(),
+                runner: Some(ssh_runner()),
+                cwd: Some(workspace),
+                project_id: None,
+                command: vec!["node".to_string(), "--version".to_string()],
+                env: Default::default(),
+                secret_env_names: Vec::new(),
+                capture_patch: false,
+                raw_exec: false,
+                source_snapshot: None,
+                require_paths: Vec::new(),
+                validate_require_paths_on_host: false,
+            })
+            .expect("prepare daemon-local runner process");
+
+            assert!(
+                plan.env.contains_key("PATH"),
+                "daemon-side runner prep should build the default job PATH from the runner host"
+            );
+        });
+    }
+
+    #[test]
+    fn remote_daemon_secret_env_refs_forward_controller_secrets_and_keep_runner_refs_local() {
         crate::test_support::with_isolated_home(|_| {
             let temp = tempfile::tempdir().expect("tempdir");
             let workspace = temp.path().join("workspace");
             std::fs::create_dir_all(&workspace).expect("workspace");
             let secret_file = temp.path().join("runner-secret");
             std::fs::write(&secret_file, "dummy-runner-secret\n").expect("secret file");
-            let missing_controller_file = temp.path().join("missing-controller-secret");
+            crate::core::agent_task_secrets::set_config_secret(
+                "HOMEBOY_CONTROLLER_SECRET_TEST_KEY",
+                "dummy-controller-secret",
+            )
+            .expect("configure controller secret");
 
             let mut controller_runner = ssh_runner();
             controller_runner.workspace_root = Some(workspace.display().to_string());
             controller_runner.secret_env.insert(
-                "OPENAI_API_KEY".to_string(),
+                "CONTROLLER_API_KEY".to_string(),
                 RunnerSecretEnvRef {
                     env: None,
-                    file: Some(missing_controller_file.display().to_string()),
+                    file: None,
+                    secret: Some("HOMEBOY_CONTROLLER_SECRET_TEST_KEY".to_string()),
+                },
+            );
+            controller_runner.secret_env.insert(
+                "RUNNER_API_KEY".to_string(),
+                RunnerSecretEnvRef {
+                    env: None,
+                    file: Some(secret_file.display().to_string()),
+                    secret: None,
                 },
             );
 
@@ -1473,6 +1808,10 @@ mod tests {
                 project_id: None,
                 command: vec!["true".to_string()],
                 env: Default::default(),
+                secret_env_names: vec![
+                    "CONTROLLER_API_KEY".to_string(),
+                    "RUNNER_API_KEY".to_string(),
+                ],
                 capture_patch: false,
                 raw_exec: false,
                 source_snapshot: Some(SourceSnapshot::existing_remote(
@@ -1483,17 +1822,25 @@ mod tests {
                 require_paths: Vec::new(),
                 validate_require_paths_on_host: false,
             })
-            .expect("controller prep keeps secret refs unresolved for SSH runner");
+            .expect("controller prep forwards configured secret refs for SSH runner");
 
-            assert!(!controller_plan.env.contains_key("OPENAI_API_KEY"));
+            assert_eq!(
+                controller_plan
+                    .env
+                    .get("CONTROLLER_API_KEY")
+                    .map(String::as_str),
+                Some("dummy-controller-secret")
+            );
+            assert!(!controller_plan.env.contains_key("RUNNER_API_KEY"));
 
             let mut daemon_runner = ssh_runner();
             daemon_runner.workspace_root = Some(workspace.display().to_string());
             daemon_runner.secret_env.insert(
-                "OPENAI_API_KEY".to_string(),
+                "RUNNER_API_KEY".to_string(),
                 RunnerSecretEnvRef {
                     env: None,
                     file: Some(secret_file.display().to_string()),
+                    secret: None,
                 },
             );
 
@@ -1502,8 +1849,16 @@ mod tests {
                 runner: Some(daemon_runner),
                 cwd: Some(workspace.display().to_string()),
                 project_id: None,
-                command: vec!["true".to_string()],
+                command: vec![
+                    "homeboy".to_string(),
+                    "trace".to_string(),
+                    "compare".to_string(),
+                    "demo".to_string(),
+                    "scenario".to_string(),
+                    "--secret-env=RUNNER_API_KEY".to_string(),
+                ],
                 env: Default::default(),
+                secret_env_names: vec!["RUNNER_API_KEY".to_string()],
                 capture_patch: false,
                 raw_exec: false,
                 source_snapshot: Some(SourceSnapshot::existing_remote(
@@ -1517,10 +1872,131 @@ mod tests {
             .expect("daemon prep resolves secret refs on runner side");
 
             assert_eq!(
-                daemon_plan.env.get("OPENAI_API_KEY").map(String::as_str),
+                daemon_plan.env.get("RUNNER_API_KEY").map(String::as_str),
                 Some("dummy-runner-secret")
             );
         });
+    }
+
+    #[test]
+    fn daemon_read_only_runner_exec_ignores_unrelated_missing_secret_env_refs() {
+        crate::test_support::with_isolated_home(|_| {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let workspace = temp.path().join("workspace");
+            std::fs::create_dir_all(&workspace).expect("workspace");
+
+            let mut runner = ssh_runner();
+            runner.workspace_root = Some(workspace.display().to_string());
+            runner.secret_env.insert(
+                "HOMEBOY_PREVIEW_TUNNEL_TOKEN".to_string(),
+                RunnerSecretEnvRef {
+                    env: Some("HOMEBOY_PREVIEW_TUNNEL_TOKEN".to_string()),
+                    file: None,
+                    secret: None,
+                },
+            );
+            std::env::remove_var("HOMEBOY_PREVIEW_TUNNEL_TOKEN");
+
+            let plan = prepare_daemon_local_process(RunnerProcessRequest {
+                runner_id: "lab".to_string(),
+                runner: Some(runner),
+                cwd: Some(workspace.display().to_string()),
+                project_id: None,
+                command: vec![
+                    "/bin/ps".to_string(),
+                    "-eo".to_string(),
+                    "pid,ppid,etime,stat,pcpu,pmem,cmd".to_string(),
+                ],
+                env: Default::default(),
+                secret_env_names: Vec::new(),
+                capture_patch: false,
+                raw_exec: true,
+                source_snapshot: Some(SourceSnapshot::existing_remote(
+                    "lab",
+                    &workspace.display().to_string(),
+                    Some(&workspace.display().to_string()),
+                )),
+                require_paths: Vec::new(),
+                validate_require_paths_on_host: true,
+            })
+            .expect("read-only runner exec ignores unrelated optional secret refs");
+
+            assert!(!plan.env.contains_key("HOMEBOY_PREVIEW_TUNNEL_TOKEN"));
+        });
+    }
+
+    #[test]
+    fn daemon_runner_exec_requires_declared_missing_secret_env_refs() {
+        crate::test_support::with_isolated_home(|_| {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let workspace = temp.path().join("workspace");
+            std::fs::create_dir_all(&workspace).expect("workspace");
+            std::env::remove_var("HOMEBOY_REQUIRED_SECRET_TEST_KEY");
+
+            let mut runner = ssh_runner();
+            runner.workspace_root = Some(workspace.display().to_string());
+            runner.secret_env.insert(
+                "HOMEBOY_REQUIRED_SECRET_TEST_KEY".to_string(),
+                RunnerSecretEnvRef {
+                    env: Some("HOMEBOY_REQUIRED_SECRET_TEST_KEY".to_string()),
+                    file: None,
+                    secret: None,
+                },
+            );
+
+            let err = prepare_daemon_local_process(RunnerProcessRequest {
+                runner_id: "lab".to_string(),
+                runner: Some(runner),
+                cwd: Some(workspace.display().to_string()),
+                project_id: None,
+                command: vec![
+                    "homeboy".to_string(),
+                    "trace".to_string(),
+                    "compare".to_string(),
+                    "demo".to_string(),
+                    "scenario".to_string(),
+                    "--secret-env=HOMEBOY_REQUIRED_SECRET_TEST_KEY".to_string(),
+                ],
+                env: Default::default(),
+                secret_env_names: vec!["HOMEBOY_REQUIRED_SECRET_TEST_KEY".to_string()],
+                capture_patch: false,
+                raw_exec: false,
+                source_snapshot: Some(SourceSnapshot::existing_remote(
+                    "lab",
+                    &workspace.display().to_string(),
+                    Some(&workspace.display().to_string()),
+                )),
+                require_paths: Vec::new(),
+                validate_require_paths_on_host: true,
+            })
+            .expect_err("declared missing command secret should fail validation");
+
+            assert_eq!(err.code.as_str(), "validation.invalid_argument");
+            assert_eq!(err.details["field"], "secret_env");
+            assert!(err.message.contains("HOMEBOY_REQUIRED_SECRET_TEST_KEY"));
+        });
+    }
+
+    #[test]
+    fn runner_exec_secret_env_names_include_tunnel_preview_client_token() {
+        let names = runner_exec_secret_env_names(
+            &[
+                "homeboy".to_string(),
+                "tunnel".to_string(),
+                "preview-client".to_string(),
+                "start".to_string(),
+                "--ingress".to_string(),
+                "https://preview-broker.example.test".to_string(),
+                "--public-host".to_string(),
+                "preview.example.test".to_string(),
+                "--local-origin".to_string(),
+                "http://127.0.0.1:8888".to_string(),
+            ],
+            None,
+            &[],
+        );
+
+        assert_eq!(names, vec!["HOMEBOY_PREVIEW_TUNNEL_TOKEN".to_string()]);
     }
 
     #[test]
@@ -1537,6 +2013,7 @@ mod tests {
                     allow_diagnostic_ssh: false,
                     command: vec!["sh".to_string(), "-c".to_string(), "printf ok".to_string()],
                     env: Default::default(),
+                    secret_env_names: Vec::new(),
                     capture_patch: false,
                     raw_exec: false,
                     source_snapshot: None,
@@ -1590,6 +2067,7 @@ mod tests {
                         "test -z \"${HOMEBOY_TEST_AMBIENT_ONLY+x}\" && printf isolated".to_string(),
                     ],
                     env: Default::default(),
+                    secret_env_names: Vec::new(),
                     capture_patch: false,
                     raw_exec: false,
                     source_snapshot: None,
@@ -1626,6 +2104,7 @@ mod tests {
                         "HOMEBOY_TEST_EXPLICIT".to_string(),
                         "planned".to_string(),
                     )]),
+                    secret_env_names: Vec::new(),
                     capture_patch: false,
                     raw_exec: false,
                     source_snapshot: None,
@@ -1667,6 +2146,7 @@ mod tests {
                         "printf nope".to_string(),
                     ],
                     env: Default::default(),
+                    secret_env_names: Vec::new(),
                     capture_patch: false,
                     raw_exec: false,
                     source_snapshot: None,
@@ -1707,6 +2187,7 @@ mod tests {
                     allow_diagnostic_ssh: false,
                     command: vec!["sh".to_string(), "-c".to_string(), "printf ok".to_string()],
                     env: Default::default(),
+                    secret_env_names: Vec::new(),
                     capture_patch: false,
                     raw_exec: false,
                     source_snapshot: None,
@@ -1758,6 +2239,7 @@ mod tests {
                     allow_diagnostic_ssh: false,
                     command: vec!["homeboy".to_string(), "test".to_string()],
                     env: Default::default(),
+                    secret_env_names: Vec::new(),
                     capture_patch: false,
                     raw_exec: false,
                     source_snapshot: None,
@@ -1783,6 +2265,28 @@ mod tests {
             serde_json::to_value(RunnerExecMode::DiagnosticSsh).expect("mode json"),
             json!("diagnostic_ssh")
         );
+    }
+
+    #[test]
+    fn explicit_diagnostic_ssh_wins_for_ssh_runners() {
+        let mut options = RunnerExecOptions {
+            cwd: Some("/srv/homeboy/project".to_string()),
+            project_id: None,
+            allow_diagnostic_ssh: true,
+            command: vec!["homeboy".to_string(), "--version".to_string()],
+            env: Default::default(),
+            secret_env_names: Vec::new(),
+            capture_patch: false,
+            raw_exec: true,
+            source_snapshot: None,
+            capability_preflight: None,
+            required_extensions: Vec::new(),
+            require_paths: Vec::new(),
+        };
+
+        assert!(should_force_diagnostic_ssh(&ssh_runner(), &options));
+        options.allow_diagnostic_ssh = false;
+        assert!(!should_force_diagnostic_ssh(&ssh_runner(), &options));
     }
 
     #[test]
@@ -1814,6 +2318,7 @@ mod tests {
             allow_diagnostic_ssh: true,
             command: vec!["sh".to_string()],
             env: Default::default(),
+            secret_env_names: Vec::new(),
             capture_patch: false,
             raw_exec: true,
             source_snapshot: None,
@@ -1847,6 +2352,7 @@ mod tests {
             allow_diagnostic_ssh: true,
             command: vec!["cargo".to_string(), "test".to_string()],
             env: Default::default(),
+            secret_env_names: Vec::new(),
             capture_patch: false,
             raw_exec: true,
             source_snapshot: None,
@@ -1984,6 +2490,15 @@ mod tests {
             assert!(err.hints.iter().any(|hint| hint
                 .message
                 .contains(&format!("homeboy runs artifacts {run_id}"))));
+            assert!(err.hints.iter().any(|hint| hint
+                .message
+                .contains("Lab offload handoff: runner `lab` has daemon job")));
+            assert!(err.hints.iter().any(|hint| hint.message.contains(
+                "homeboy runner exec lab --cwd /srv/homeboy/project -- homeboy runs list --status running --limit 20"
+            )));
+            assert!(err.hints.iter().any(|hint| hint
+                .message
+                .contains(&format!("homeboy runner job cancel lab {job_id}"))));
             assert!(err.hints.iter().any(|hint| {
                 hint.message.contains(RUNNER_EXEC_WAIT_TIMEOUT_ENV)
                     && hint.message.contains("controller-side")
@@ -1999,6 +2514,78 @@ mod tests {
             assert_eq!(mirrored.status, "running");
             assert_eq!(
                 mirrored.metadata_json["lab"]["remote_job"]["id"].as_str(),
+                Some(job_id.to_string().as_str())
+            );
+        });
+    }
+
+    #[test]
+    fn lab_offload_handoff_hints_render_durable_commands() {
+        let hints = lab_offload_handoff_hints(
+            "homeboy-lab",
+            Some("/home/chubes/Developer/project with spaces"),
+            "job-123",
+            Some("run-456"),
+        );
+        let joined = hints.join("\n");
+
+        assert!(joined.contains("runner `homeboy-lab`"));
+        assert!(joined.contains("daemon job `job-123`"));
+        assert!(joined.contains("Persisted run id: `run-456`"));
+        assert!(joined.contains("homeboy runs show run-456"));
+        assert!(joined.contains("homeboy runs evidence run-456"));
+        assert!(joined.contains("homeboy runs artifacts run-456"));
+        assert!(joined.contains(
+            "homeboy runner exec homeboy-lab --cwd '/home/chubes/Developer/project with spaces' -- homeboy runs list --status running --limit 20"
+        ));
+        assert!(joined.contains("homeboy runner job logs homeboy-lab job-123 --follow"));
+        assert!(joined.contains("homeboy runner job cancel homeboy-lab job-123"));
+    }
+
+    #[test]
+    fn lab_offload_handoff_persists_run_when_job_is_accepted() {
+        crate::test_support::with_isolated_home(|_| {
+            let runner = ssh_runner();
+            let job_id = uuid::Uuid::new_v4();
+            let job = Job {
+                id: job_id,
+                operation: "runner.exec".to_string(),
+                status: JobStatus::Running,
+                created_at_ms: 1_700_000_000_000,
+                updated_at_ms: 1_700_000_001_000,
+                started_at_ms: Some(1_700_000_000_000),
+                finished_at_ms: None,
+                event_count: 0,
+                source_snapshot: None,
+                stale_reason: None,
+                target_runner_id: None,
+                target_project_id: None,
+                claim_id: None,
+                claimed_by_runner_id: None,
+                claimed_at_ms: None,
+                claim_expires_at_ms: None,
+                artifacts: Vec::new(),
+            };
+
+            let run_id = persist_lab_offload_handoff_run(
+                &runner,
+                "/srv/homeboy/project",
+                &["homeboy".to_string(), "trace".to_string()],
+                &job,
+            )
+            .expect("persist handoff run");
+
+            assert_eq!(run_id, format!("runner-exec-lab-{job_id}"));
+            let store =
+                crate::core::observation::ObservationStore::open_initialized().expect("store");
+            let run = store
+                .get_run(&run_id)
+                .expect("get run")
+                .expect("persisted handoff run");
+            assert_eq!(run.status, "running");
+            assert_eq!(run.cwd.as_deref(), Some("/srv/homeboy/project"));
+            assert_eq!(
+                run.metadata_json["lab"]["remote_job"]["id"].as_str(),
                 Some(job_id.to_string().as_str())
             );
         });
@@ -2067,6 +2654,7 @@ mod tests {
                 Some("extrachill".to_string()),
                 vec!["homeboy".to_string(), "test".to_string()],
                 Default::default(),
+                Vec::new(),
                 false,
                 None,
                 Vec::new(),
@@ -2118,6 +2706,7 @@ mod tests {
             None,
             vec!["homeboy".to_string(), "--version".to_string()],
             Default::default(),
+            Vec::new(),
             false,
             None,
             Vec::new(),

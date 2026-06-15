@@ -1,6 +1,6 @@
 use crate::core::defaults;
 use crate::core::error::{Error, Result};
-use crate::core::{extension, git};
+use crate::core::{build_identity, extension, git};
 use std::path::Path;
 use std::process::Command;
 
@@ -15,7 +15,11 @@ pub fn current_version() -> &'static str {
     VERSION
 }
 
-pub(crate) fn fetch_latest_crates_io_version() -> Result<String> {
+pub fn current_build_version() -> String {
+    build_identity::current().display
+}
+
+pub(crate) fn fetch_latest_secondary_version() -> Result<String> {
     let client = reqwest::blocking::Client::builder()
         .user_agent(format!("homeboy/{}", VERSION))
         .timeout(std::time::Duration::from_secs(10))
@@ -63,7 +67,7 @@ pub(crate) fn fetch_latest_github_version() -> Result<String> {
 
 pub fn fetch_latest_version(method: InstallMethod) -> Result<String> {
     match method {
-        InstallMethod::Cargo => fetch_latest_crates_io_version(),
+        InstallMethod::Secondary => fetch_latest_secondary_version(),
         InstallMethod::Homebrew
         | InstallMethod::Source
         | InstallMethod::Binary
@@ -103,7 +107,7 @@ where
     }
     for pattern in &defaults.install_methods.secondary.path_patterns {
         if exe_path.contains(pattern) {
-            return InstallMethod::Cargo;
+            return InstallMethod::Secondary;
         }
     }
     for pattern in &defaults.install_methods.source.path_patterns {
@@ -160,6 +164,7 @@ pub fn run_upgrade_with_method(
 ) -> Result<UpgradeResult> {
     let install_method = method_override.unwrap_or_else(detect_install_method);
     let previous_version = current_version().to_string();
+    let previous_build_identity = Some(build_identity::current().display);
 
     if install_method == InstallMethod::Unknown {
         return Err(Error::validation_invalid_argument(
@@ -170,7 +175,10 @@ pub fn run_upgrade_with_method(
         )
         .with_hint("Try: homeboy upgrade --method binary")
         .with_hint("Or reinstall using: brew install homeboy")
-        .with_hint("Or: cargo install homeboy"));
+        .with_hint(format!(
+            "Or: {} install homeboy",
+            defaults::secondary_install_method_key()
+        )));
     }
 
     // Check if update is available (unless forcing)
@@ -199,6 +207,8 @@ pub fn run_upgrade_with_method(
                 install_method,
                 previous_version: previous_version.clone(),
                 new_version: Some(previous_version),
+                previous_build_identity,
+                new_build_identity: None,
                 upgraded: false,
                 message: "Already at latest version".to_string(),
                 restart_required: false,
@@ -211,7 +221,12 @@ pub fn run_upgrade_with_method(
     }
 
     // Execute the upgrade
-    let (success, new_version) = execute_upgrade(install_method, source_path)?;
+    let (success, new_version, new_build_identity) = execute_upgrade(
+        install_method,
+        source_path,
+        force,
+        previous_build_identity.as_deref(),
+    )?;
     let upgrade_completed = should_sync_after_upgrade(new_version.as_deref());
 
     // Auto-update all installed extensions after the upgrade command completes.
@@ -240,9 +255,19 @@ pub fn run_upgrade_with_method(
         install_method,
         previous_version,
         new_version: new_version.clone(),
+        previous_build_identity,
+        new_build_identity: new_build_identity.clone(),
         upgraded: success,
         message: if success {
-            format!("Upgraded to {}", new_version.as_deref().unwrap_or("latest"))
+            if let Some(identity) = &new_build_identity {
+                format!(
+                    "Upgraded to {} ({})",
+                    new_version.as_deref().unwrap_or("latest"),
+                    identity
+                )
+            } else {
+                format!("Upgraded to {}", new_version.as_deref().unwrap_or("latest"))
+            }
         } else if let Some(version) = &new_version {
             format!(
                 "Upgrade command completed but active binary is still {}",

@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::core::agent_task_secrets;
 use crate::core::config::{self, ConfigEntity};
 use crate::core::defaults;
 use crate::core::error::{Error, Result};
@@ -36,6 +37,7 @@ mod session;
 mod source_materialization;
 mod validation_dependencies;
 pub(crate) use validation_dependencies::validation_dependency_ids;
+pub use validation_dependencies::RunnerValidationDependencySyncOutput;
 mod worker;
 mod workspace;
 pub(crate) use workspace::copy_snapshot_to_directory;
@@ -57,16 +59,17 @@ pub(crate) use evidence::artifact_store_locator_from_runner_artifact_id;
 pub use evidence::runner_artifact_store_token;
 pub use evidence::{
     download_remote_artifact, is_remote_runner_artifact_path, is_reportable_artifact_evidence_path,
-    is_retrievable_runner_artifact, mirrored_runner_job_identity, refresh_mirrored_daemon_evidence,
-    reportable_artifact_evidence_path, runner_job_log_snapshot, RemoteArtifactDownload,
-    RunnerJobLogSnapshot,
+    is_retrievable_runner_artifact, mirror_connected_runner_run, mirrored_runner_job_identity,
+    refresh_mirrored_daemon_evidence, reportable_artifact_evidence_path, runner_job_log_snapshot,
+    RemoteArtifactDownload, RunnerJobLogSnapshot,
 };
 pub(crate) use execution::{
     daemon_api_get, execute_runner_process_until_cancelled, prepare_daemon_local_process,
     RunnerProcessRequest,
 };
 pub use execution::{
-    exec, runner_exec_failure_error, RunnerExecMode, RunnerExecOptions, RunnerExecOutput,
+    daemon_api_post, exec, runner_exec_failure_error, RunnerExecMode, RunnerExecOptions,
+    RunnerExecOutput,
 };
 pub(crate) use git_dependency_materialization::{
     materialize_git_dependency, RunnerGitDependencyMaterializationOptions,
@@ -444,8 +447,12 @@ pub(crate) fn resolve_runner_secret_env(
             .file
             .as_ref()
             .is_some_and(|value| !value.trim().is_empty());
-        match (has_env, has_file) {
-            (true, false) => {
+        let has_secret = source
+            .secret
+            .as_ref()
+            .is_some_and(|value| !value.trim().is_empty());
+        match (has_env, has_file, has_secret) {
+            (true, false, false) => {
                 let env_name = source.env.as_deref().unwrap_or_default();
                 let value = std::env::var(env_name).map_err(|err| {
                     Error::validation_invalid_argument(
@@ -460,7 +467,7 @@ pub(crate) fn resolve_runner_secret_env(
                 })?;
                 resolved.insert(name.clone(), value);
             }
-            (false, true) => {
+            (false, true, false) => {
                 let raw_path = source.file.as_deref().unwrap_or_default();
                 let path = shellexpand::tilde(raw_path).to_string();
                 let value = std::fs::read_to_string(&path).map_err(|err| {
@@ -474,18 +481,51 @@ pub(crate) fn resolve_runner_secret_env(
                     value.trim_end_matches(['\r', '\n']).to_string(),
                 );
             }
-            (false, false) => {
+            (false, false, true) => {
+                let secret_name = source.secret.as_deref().unwrap_or_default();
+                let values = agent_task_secrets::resolve_secret_env(&[secret_name.to_string()])
+                    .map_err(|err| {
+                        Error::validation_invalid_argument(
+                            "secret_env",
+                            format!(
+                                "failed to resolve Homeboy secret ref for {name}: {}",
+                                err.message
+                            ),
+                            Some(secret_name.to_string()),
+                            Some(vec![
+                                "Configure the named Homeboy secret before running this runner job."
+                                    .to_string(),
+                            ]),
+                        )
+                    })?;
+                let value = values
+                    .into_iter()
+                    .next()
+                    .map(|(_, value)| value)
+                    .ok_or_else(|| {
+                        Error::validation_invalid_argument(
+                            "secret_env",
+                            format!("Homeboy secret ref for {name} resolved no value"),
+                            Some(secret_name.to_string()),
+                            None,
+                        )
+                    })?;
+                resolved.insert(name.clone(), value);
+            }
+            (false, false, false) => {
                 return Err(Error::validation_invalid_argument(
                     "secret_env",
-                    format!("secret env ref for {name} requires env or file"),
+                    format!("secret env ref for {name} requires env, file, or secret"),
                     Some(name.clone()),
                     None,
                 ));
             }
-            (true, true) => {
+            _ => {
                 return Err(Error::validation_invalid_argument(
                     "secret_env",
-                    format!("secret env ref for {name} must use env or file, not both"),
+                    format!(
+                        "secret env ref for {name} must use exactly one of env, file, or secret"
+                    ),
                     Some(name.clone()),
                     None,
                 ));
@@ -769,6 +809,7 @@ mod tests {
                 server::RunnerSecretEnvRef {
                     env: Some("HOMEBOY_DUMMY_SECRET_REF".to_string()),
                     file: None,
+                    secret: None,
                 },
             ),
             (
@@ -776,6 +817,7 @@ mod tests {
                 server::RunnerSecretEnvRef {
                     env: None,
                     file: Some(secret_file.display().to_string()),
+                    secret: None,
                 },
             ),
         ]))
@@ -790,6 +832,48 @@ mod tests {
             Some("dummy-file-secret")
         );
         std::env::remove_var("HOMEBOY_DUMMY_SECRET_REF");
+    }
+
+    #[test]
+    fn runner_secret_env_refs_resolve_from_configured_homeboy_secret() {
+        crate::test_support::with_isolated_home(|_| {
+            crate::core::agent_task_secrets::set_config_secret(
+                "HOMEBOY_DUMMY_CONFIGURED_SECRET",
+                "dummy-configured-secret",
+            )
+            .expect("configure secret");
+
+            let resolved = resolve_runner_secret_env(&HashMap::from([(
+                "FROM_SECRET".to_string(),
+                server::RunnerSecretEnvRef {
+                    env: None,
+                    file: None,
+                    secret: Some("HOMEBOY_DUMMY_CONFIGURED_SECRET".to_string()),
+                },
+            )]))
+            .expect("resolve configured secret ref");
+
+            assert_eq!(
+                resolved.get("FROM_SECRET").map(String::as_str),
+                Some("dummy-configured-secret")
+            );
+        });
+    }
+
+    #[test]
+    fn runner_secret_env_refs_reject_multiple_sources() {
+        let err = resolve_runner_secret_env(&HashMap::from([(
+            "INVALID".to_string(),
+            server::RunnerSecretEnvRef {
+                env: Some("HOMEBOY_DUMMY_SECRET_REF".to_string()),
+                file: None,
+                secret: Some("HOMEBOY_DUMMY_CONFIGURED_SECRET".to_string()),
+            },
+        )]))
+        .expect_err("multiple sources rejected");
+
+        assert_eq!(err.code.as_str(), "validation.invalid_argument");
+        assert!(err.message.contains("exactly one"));
     }
 
     #[test]

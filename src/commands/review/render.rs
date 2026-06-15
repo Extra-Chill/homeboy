@@ -408,6 +408,22 @@ fn render_extension_phase_timings(out: &mut String, timings: &[ExtensionPhaseTim
         return;
     }
 
+    let mut waiting_timings = timings
+        .iter()
+        .filter(|timing| is_waiting_phase_status(timing.status.as_deref()))
+        .collect::<Vec<_>>();
+    waiting_timings.sort_by(|a, b| {
+        b.duration_ms
+            .cmp(&a.duration_ms)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    if !waiting_timings.is_empty() {
+        let _ = writeln!(out, "- _Waiting extension phases:_");
+        for timing in waiting_timings.into_iter().take(3) {
+            let _ = writeln!(out, "  - {}", format_extension_phase_timing(timing));
+        }
+    }
+
     let mut timings = timings.iter().collect::<Vec<_>>();
     timings.sort_by(|a, b| {
         b.duration_ms
@@ -417,17 +433,37 @@ fn render_extension_phase_timings(out: &mut String, timings: &[ExtensionPhaseTim
 
     let _ = writeln!(out, "- _Slowest extension phases:_");
     for timing in timings.into_iter().take(3) {
-        let artifacts = if timing.artifacts.is_empty() {
-            String::new()
-        } else {
-            format!("; {} artifact ref(s)", timing.artifacts.len())
-        };
-        let _ = writeln!(
-            out,
-            "  - `{}` — {} ms{}",
-            timing.name, timing.duration_ms, artifacts
-        );
+        let _ = writeln!(out, "  - {}", format_extension_phase_timing(timing));
     }
+}
+
+fn format_extension_phase_timing(timing: &ExtensionPhaseTiming) -> String {
+    let mut line = format!("`{}` — {} ms", timing.name, timing.duration_ms);
+    if let Some(status) = timing.status.as_deref().filter(|status| !status.is_empty()) {
+        let _ = write!(line, "; status: `{}`", status);
+    }
+    if let Some(message) = timing
+        .message
+        .as_deref()
+        .filter(|message| !message.is_empty())
+    {
+        let _ = write!(line, "; {}", message);
+    }
+    if !timing.artifacts.is_empty() {
+        let _ = write!(line, "; {} artifact ref(s)", timing.artifacts.len());
+    }
+    line
+}
+
+fn is_waiting_phase_status(status: Option<&str>) -> bool {
+    matches!(
+        status.map(normalize_phase_timing_status).as_deref(),
+        Some("waiting" | "blocked" | "queued")
+    )
+}
+
+fn normalize_phase_timing_status(status: &str) -> String {
+    status.trim().to_ascii_lowercase().replace('-', "_")
 }
 
 fn render_ci_body(out: &mut String, output: &CiRunOutput) {
@@ -741,12 +777,16 @@ mod tests {
             ExtensionPhaseTiming {
                 name: "provider-cache".to_string(),
                 duration_ms: 25,
+                status: None,
+                message: None,
                 artifacts: Vec::new(),
                 metadata: std::collections::BTreeMap::new(),
             },
             ExtensionPhaseTiming {
                 name: "opaque-slow-phase".to_string(),
                 duration_ms: 1200,
+                status: None,
+                message: None,
                 artifacts: vec![serde_json::json!({ "path": "artifacts/phase.json" })],
                 metadata: std::collections::BTreeMap::new(),
             },
@@ -761,6 +801,48 @@ mod tests {
             md
         );
         assert!(md.contains("  - `provider-cache` — 25 ms"), "{}", md);
+    }
+
+    #[test]
+    fn renders_waiting_extension_phases_from_generic_status() {
+        let mut env = passing_envelope();
+        let test = env.test.output.as_mut().expect("test output");
+        test.extension_phase_timings = vec![
+            ExtensionPhaseTiming {
+                name: "provider-shared-resource".to_string(),
+                duration_ms: 90_000,
+                status: Some("waiting".to_string()),
+                message: Some("waiting for exclusive provider resource".to_string()),
+                artifacts: Vec::new(),
+                metadata: std::collections::BTreeMap::from([(
+                    "provider".to_string(),
+                    serde_json::json!("fixture"),
+                )]),
+            },
+            ExtensionPhaseTiming {
+                name: "provider-active-work".to_string(),
+                duration_ms: 120_000,
+                status: Some("running".to_string()),
+                message: None,
+                artifacts: Vec::new(),
+                metadata: std::collections::BTreeMap::new(),
+            },
+        ];
+
+        let md = render_pr_comment(&env);
+
+        assert!(md.contains("- _Waiting extension phases:_"), "{}", md);
+        assert!(
+            md.contains("  - `provider-shared-resource` — 90000 ms; status: `waiting`; waiting for exclusive provider resource"),
+            "{}",
+            md
+        );
+        assert!(md.contains("- _Slowest extension phases:_"), "{}", md);
+        assert!(
+            md.contains("  - `provider-active-work` — 120000 ms; status: `running`"),
+            "{}",
+            md
+        );
     }
 
     #[test]

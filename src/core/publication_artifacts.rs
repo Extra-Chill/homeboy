@@ -84,6 +84,7 @@ struct ManifestArtifactRef<'a> {
     reference: &'a Value,
     locator: String,
     locator_type: &'static str,
+    public_url: Option<String>,
 }
 
 fn index_manifest_refs(
@@ -116,8 +117,8 @@ fn index_manifest_refs(
             .reference
             .get("id")
             .and_then(Value::as_str)
-            .unwrap_or(&locator);
-        let id = published_artifact_id(&source.id, original_manifest_id, &locator);
+            .unwrap_or(locator);
+        let id = published_artifact_id(&source.id, original_manifest_id, locator);
         if store.get_artifact(&id)?.is_some() {
             continue;
         }
@@ -169,6 +170,7 @@ fn index_manifest_refs(
                 "type": reference.locator_type,
                 "value": locator,
             },
+            "public_url": reference.public_url.clone(),
             "media_type": media_type,
             "bytes": size_bytes,
             "sha256": sha256,
@@ -212,12 +214,18 @@ fn collect_publication_artifact_refs<'a>(
                     reference: value,
                     locator: locator.to_string(),
                     locator_type: "artifact-store",
+                    public_url: None,
                 });
             } else if let Some(locator) = url_locator_artifact_store_locator(value, url_bases) {
                 refs.push(ManifestArtifactRef {
                     reference: value,
                     locator,
                     locator_type: "url",
+                    public_url: value
+                        .get("locator")
+                        .and_then(|locator| locator.get("value"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
                 });
             }
             for child in object.values() {

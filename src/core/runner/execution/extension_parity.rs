@@ -341,6 +341,46 @@ fn remote_extension_source_revision(stdout: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+fn ssh_client_for_runner_extension_parity(runner: &Runner) -> Result<SshClient> {
+    let server_id = runner.server_id.as_deref().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "server_id",
+            "SSH runners require server_id for runner extension parity preflight",
+            Some(runner.id.clone()),
+            None,
+        )
+    })?;
+    let server = server::load(server_id)?;
+    let mut client = SshClient::from_server(&server, server_id)?;
+    client.env.extend(runner.env.clone());
+    Ok(client)
+}
+
+fn extension_parity_diagnostic_tail(stderr: &str, stdout: &str) -> String {
+    let output = if stderr.trim().is_empty() {
+        stdout
+    } else {
+        stderr
+    };
+    let tail = output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .rev()
+        .take(3)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    if tail.is_empty() {
+        "Runner extension parity preflight produced no diagnostic output.".to_string()
+    } else {
+        format!("Runner extension parity preflight output:\n{tail}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -456,45 +496,5 @@ mod tests {
             command,
             "cd '/tmp/project path' && '/usr/local/bin/homeboy' extension install https://github.com/Extra-Chill/homeboy-extensions.git --id rust --ref abc1234 --replace"
         );
-    }
-}
-
-fn ssh_client_for_runner_extension_parity(runner: &Runner) -> Result<SshClient> {
-    let server_id = runner.server_id.as_deref().ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "server_id",
-            "SSH runners require server_id for runner extension parity preflight",
-            Some(runner.id.clone()),
-            None,
-        )
-    })?;
-    let server = server::load(server_id)?;
-    let mut client = SshClient::from_server(&server, server_id)?;
-    client.env.extend(runner.env.clone());
-    Ok(client)
-}
-
-fn extension_parity_diagnostic_tail(stderr: &str, stdout: &str) -> String {
-    let output = if stderr.trim().is_empty() {
-        stdout
-    } else {
-        stderr
-    };
-    let tail = output
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .rev()
-        .take(3)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    if tail.is_empty() {
-        "Runner extension parity preflight produced no diagnostic output.".to_string()
-    } else {
-        format!("Runner extension parity preflight output:\n{tail}")
     }
 }

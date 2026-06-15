@@ -348,14 +348,14 @@ pub(super) fn resolve_lab_runner_selection_from_default(
     if let Some(runner_id) = explicit_runner {
         if !command.portable {
             let message = command.unsupported_reason.map_or_else(
-                || "--runner is only supported for hot Lab-offload commands: agent-task dispatch/cook/loop/run-plan/status/logs/artifacts/providers, agent-task auth status, lint, test, audit, bench, trace, and refactor source runs".to_string(),
+                || "--runner is only supported for hot Lab-offload commands: agent-task dispatch/cook/loop/run-plan/status/logs/artifacts/review/providers, agent-task auth status, lint, test, audit, bench, trace, refactor source runs, and tunnel preview-consumer run".to_string(),
                 |reason| format!("--runner is unavailable for this hot command. {reason}"),
             );
             return Err(Error::validation_invalid_argument(
                 "runner",
                 message,
                 Some(runner_id.to_string()),
-                Some(vec!["Current Lab offload support: agent-task dispatch/cook/loop/run-plan/status/logs/artifacts/providers, agent-task auth status, audit, bench run, full lint, full test, trace, and refactor source runs.".to_string()]),
+                Some(vec!["Current Lab offload support: agent-task dispatch/cook/loop/run-plan/status/logs/artifacts/review/providers, agent-task auth status, audit, bench run, full lint, full test, trace, refactor source runs, and tunnel preview-consumer run.".to_string()]),
             ));
         }
 
@@ -364,6 +364,22 @@ pub(super) fn resolve_lab_runner_selection_from_default(
             source: LabRunnerSelectionSource::Explicit,
             mode: runner_status_tunnel_mode(runner_id),
         }));
+    }
+
+    if allow_local_hot && !force_hot {
+        return Err(Error::validation_invalid_argument(
+            "allow_local_hot",
+            format!(
+                "--allow-local-hot only permits an explicit --force-hot local run for portable hot command `{}`; it does not disable automatic Lab offload by itself",
+                command.hot_label
+            ),
+            Some("--allow-local-hot".to_string()),
+            Some(vec![
+                "Use --force-hot --allow-local-hot to keep the command on the controller machine.".to_string(),
+                "Omit --allow-local-hot to let Homeboy choose the configured default Lab runner.".to_string(),
+                "Use --runner <runner-id> to offload to a specific Lab runner.".to_string(),
+            ]),
+        ));
     }
 
     if !command.default_lab_offload {

@@ -29,6 +29,7 @@ use serde_json::Value;
 
 use homeboy::core::observation::runs_service;
 use homeboy::core::observation::{ArtifactRecord, ObservationStore, RunListFilter, RunRecord};
+use homeboy::core::validation_progress::{ValidationCommandSummary, ValidationProgressLedger};
 use homeboy::core::Error;
 use homeboy::core::{api_jobs::ActiveRunnerJobSummary, api_jobs::JobStatus, runners as runner};
 
@@ -82,6 +83,8 @@ enum RunsCommand {
     Reconcile(RunsReconcileArgs),
     /// Show one persisted observation run
     Show { run_id: String },
+    /// Show a generic resume plan for a validation-progress run
+    ResumePlan { run_id: String },
     /// Show stable evidence registry data for one run
     Evidence { run_id: String },
     /// List artifacts recorded for one run
@@ -137,6 +140,7 @@ pub enum RunsOutput {
     LatestRun(RunsLatestRunOutput),
     Compare(RunsCompareOutput),
     Show(RunsShowOutput),
+    ResumePlan(RunsResumePlanOutput),
     Evidence(RunsEvidenceOutput),
     Artifacts(RunsArtifactsOutput),
     ArtifactGet(RunsArtifactGetOutput),
@@ -173,6 +177,20 @@ pub struct RunsArtifactsOutput {
     pub command: &'static str,
     pub run_id: String,
     pub artifacts: Vec<ArtifactRecord>,
+}
+
+#[derive(Serialize)]
+pub struct RunsResumePlanOutput {
+    pub command: &'static str,
+    pub run_id: String,
+    pub status: String,
+    pub completed_count: usize,
+    pub command_count: usize,
+    pub failed_count: usize,
+    pub last_completed_command: Option<ValidationCommandSummary>,
+    pub active_command: Option<ValidationCommandSummary>,
+    pub next_command: Option<ValidationCommandSummary>,
+    pub hints: Vec<String>,
 }
 
 #[derive(Args, Clone)]
@@ -306,6 +324,7 @@ pub fn run(args: RunsArgs, _global: &GlobalArgs) -> CmdResult<RunsOutput> {
         RunsCommand::Compare(args) => compare_runs(args),
         RunsCommand::Reconcile(args) => reconcile_runs(args),
         RunsCommand::Show { run_id } => show_run(&run_id),
+        RunsCommand::ResumePlan { run_id } => resume_plan(&run_id),
         RunsCommand::Evidence { run_id } => evidence(&run_id),
         RunsCommand::Artifacts { run_id } => artifacts(&run_id),
         RunsCommand::Artifact(args) => artifact_command(args),
@@ -377,6 +396,7 @@ impl RunsArgs {
                 ],
             ),
             RunsCommand::Show { run_id }
+            | RunsCommand::ResumePlan { run_id }
             | RunsCommand::Evidence { run_id }
             | RunsCommand::Artifacts { run_id } => (
                 format!(
@@ -542,6 +562,51 @@ fn show_run(run_id: &str) -> CmdResult<RunsOutput> {
         }),
         0,
     ))
+}
+
+fn resume_plan(run_id: &str) -> CmdResult<RunsOutput> {
+    let store = ObservationStore::open_initialized()?;
+    reconcile::reconcile_owned_stale_running_runs(&store, 1000)?;
+    let run = runs_service::require_run(&store, run_id)?;
+    let Some(ledger) = validation_progress_ledger_for_run(&run) else {
+        return Err(Error::validation_invalid_argument(
+            "run_id",
+            format!("run `{run_id}` does not contain validation progress metadata"),
+            Some(run_id.to_string()),
+            Some(vec![
+                "Run `homeboy runs show <run-id>` to inspect available metadata.".to_string(),
+                "Validation progress is recorded for Homeboy-managed validation command sets with a run directory.".to_string(),
+            ]),
+        ));
+    };
+
+    Ok((
+        RunsOutput::ResumePlan(RunsResumePlanOutput {
+            command: "runs.resume-plan",
+            run_id: run_id.to_string(),
+            status: ledger.status.clone(),
+            completed_count: ledger.completed_count,
+            command_count: ledger.command_count,
+            failed_count: ledger.failed_count,
+            last_completed_command: ledger.last_completed_command.clone(),
+            active_command: ledger.active_command.clone(),
+            next_command: ledger.next_command.clone(),
+            hints: ledger.resume_hints(),
+        }),
+        0,
+    ))
+}
+
+fn validation_progress_ledger_for_run(run: &RunRecord) -> Option<ValidationProgressLedger> {
+    ValidationProgressLedger::from_run(run).or_else(|| {
+        run.metadata_json
+            .get("run_dir")
+            .and_then(Value::as_str)
+            .and_then(|path| {
+                homeboy::core::engine::run_dir::RunDir::from_existing(PathBuf::from(path)).ok()
+            })
+            .and_then(|run_dir| ValidationProgressLedger::read_from_run_dir(&run_dir))
+    })
 }
 
 pub fn artifacts(run_id: &str) -> CmdResult<RunsOutput> {

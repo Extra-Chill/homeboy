@@ -12,6 +12,7 @@ mod aggregate_report;
 pub mod assertions;
 mod attach;
 pub mod baseline;
+pub mod browser_evidence;
 mod canonicality;
 mod generic_runner;
 mod overlay;
@@ -30,6 +31,10 @@ use crate::core::extension::{ExtensionCapability, ExtensionExecutionContext};
 
 pub use aggregate_report::TraceAggregateSpanSampleOutput;
 pub use attach::TraceAttachment;
+pub use browser_evidence::{
+    trace_browser_artifact_map_fields, trace_browser_evidence_adapters,
+    trace_browser_summary_extract, trace_browser_summary_has_signal, TraceBrowserSummaryExtraction,
+};
 pub use canonicality::TraceCanonicalPolicy;
 pub use overlay::TraceOverlayRequest;
 pub use overlay_lock::{cleanup_stale_trace_overlay_locks, list_trace_overlay_locks};

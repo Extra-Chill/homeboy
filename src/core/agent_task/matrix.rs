@@ -646,6 +646,7 @@ mod tests {
             inputs: json!({ "component": "studio-web" }),
             source_refs: Vec::new(),
             workspace: AgentTaskWorkspace::default(),
+            component_contracts: Vec::new(),
             policy: AgentTaskPolicy::default(),
             limits: AgentTaskLimits::default(),
             expected_artifacts: vec!["bench-results".to_string()],

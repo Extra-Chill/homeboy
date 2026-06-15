@@ -483,6 +483,7 @@ mod tests {
             inputs: Value::Null,
             source_refs: Vec::new(),
             workspace: AgentTaskWorkspace::default(),
+            component_contracts: Vec::new(),
             policy: AgentTaskPolicy::default(),
             limits: Default::default(),
             expected_artifacts: Vec::new(),

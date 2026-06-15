@@ -239,6 +239,7 @@ pub fn build_dispatch_plan_with_provider_requirements(
                     &repo,
                 ),
             },
+            component_contracts: Vec::new(),
             policy: AgentTaskPolicy {
                 read: "workspace".to_string(),
                 write: "patch".to_string(),

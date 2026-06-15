@@ -573,6 +573,7 @@ mod tests {
                         RunnerSecretEnvRef {
                             env: Some("OPENAI_API_KEY".to_string()),
                             file: None,
+                            secret: None,
                         },
                     )]),
                     ..Default::default()
