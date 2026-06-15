@@ -107,7 +107,7 @@ pub mod evidence {
         is_reportable_artifact_evidence_path, is_retrievable_runner_artifact,
         mirror_connected_runner_run, mirrored_runner_job_identity,
         refresh_mirrored_daemon_evidence, reportable_artifact_evidence_path,
-        runner_artifact_store_token, RemoteArtifactDownload,
+        runner_artifact_store_token, runner_job_log_snapshot, RemoteArtifactDownload,
     };
 }
 

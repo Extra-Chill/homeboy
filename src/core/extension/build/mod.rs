@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 use crate::core::artifact_inputs::{self, ResolvedArtifactInput};
@@ -33,6 +33,7 @@ pub enum ResolvedBuildCommand {
         source: String,
     },
     LocalScript {
+        context: ExtensionExecutionContext,
         command: String,
         script_name: String,
     },
@@ -107,6 +108,7 @@ pub(crate) fn resolve_build_command(component: &Component) -> Result<ResolvedBui
                         .map(|t| t.replace("{{script}}", script_name))
                         .unwrap_or_else(|| format!("sh {}", script_name));
                     return Ok(ResolvedBuildCommand::LocalScript {
+                        context: context.clone(),
                         command,
                         script_name: script_name.clone(),
                     });
@@ -160,7 +162,42 @@ pub struct BuildOutput {
     pub artifact_inputs: Vec<ResolvedArtifactInput>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extension_phase_timings: Vec<ExtensionPhaseTiming>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub changed_scope: Option<BuildChangedScopeReport>,
     pub success: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct BuildChangedScopeReport {
+    pub changed_since: String,
+    pub outcome: String,
+    pub reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub build_args: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BuildChangedScopeOutcome {
+    NoOp,
+    Scoped { build_args: Vec<String> },
+    Full,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BuildChangedScopeDecision {
+    outcome: BuildChangedScopeOutcome,
+    report: BuildChangedScopeReport,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProviderChangedScopeResponse {
+    outcome: String,
+    #[serde(default)]
+    reason: Option<String>,
+    #[serde(default)]
+    build_args: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -176,10 +213,14 @@ pub enum BuildResult {
 /// - A single component ID: "extrachill-api"
 /// - A JSON spec: {"componentIds": ["api", "users"]}
 pub fn run(input: &str) -> Result<(BuildResult, i32)> {
+    run_changed_since(input, None)
+}
+
+pub fn run_changed_since(input: &str, changed_since: Option<&str>) -> Result<(BuildResult, i32)> {
     if is_json_input(input) {
-        run_bulk(input)
+        run_bulk_changed_since(input, changed_since)
     } else {
-        run_single(input)
+        run_single_changed_since(input, changed_since)
     }
 }
 
@@ -189,7 +230,7 @@ pub fn run(input: &str) -> Result<(BuildResult, i32)> {
 /// Thin wrapper around `execute_build_component` that adapts the return type
 /// for the deploy pipeline's error handling convention.
 pub(crate) fn build_component(component: &component::Component) -> (Option<i32>, Option<String>) {
-    let result = execute_build_component(component);
+    let result = execute_build_component(component, None);
 
     match result {
         Ok((output, exit_code)) => {
@@ -261,8 +302,11 @@ fn format_build_error(
 
 // === Internal implementation ===
 
-fn run_single(component_id: &str) -> Result<(BuildResult, i32)> {
-    let (output, exit_code) = execute_build(component_id, None)?;
+fn run_single_changed_since(
+    component_id: &str,
+    changed_since: Option<&str>,
+) -> Result<(BuildResult, i32)> {
+    let (output, exit_code) = execute_build(component_id, None, changed_since)?;
     Ok((BuildResult::Single(output), exit_code))
 }
 
@@ -271,17 +315,28 @@ fn run_single(component_id: &str) -> Result<(BuildResult, i32)> {
 /// Use this for workspace clones, temporary checkouts, or CI builds
 /// where the source lives somewhere other than the configured `local_path`.
 pub fn run_with_path(component_id: &str, path: &str) -> Result<(BuildResult, i32)> {
-    let (output, exit_code) = execute_build(component_id, Some(path))?;
+    run_with_path_changed_since(component_id, path, None)
+}
+
+pub fn run_with_path_changed_since(
+    component_id: &str,
+    path: &str,
+    changed_since: Option<&str>,
+) -> Result<(BuildResult, i32)> {
+    let (output, exit_code) = execute_build(component_id, Some(path), changed_since)?;
     Ok((BuildResult::Single(output), exit_code))
 }
 
-fn run_bulk(json_spec: &str) -> Result<(BuildResult, i32)> {
+fn run_bulk_changed_since(
+    json_spec: &str,
+    changed_since: Option<&str>,
+) -> Result<(BuildResult, i32)> {
     let input = parse_bulk_ids(json_spec)?;
 
     let mut builder = BulkResultBuilder::with_capacity("build", input.component_ids.len());
 
     for id in &input.component_ids {
-        match execute_build(id, None) {
+        match execute_build(id, None, changed_since) {
             Ok((output, _)) => {
                 if output.success {
                     builder.record_success(id.clone(), output);
@@ -303,16 +358,30 @@ fn run_bulk(json_spec: &str) -> Result<(BuildResult, i32)> {
 
 /// Build a pre-resolved component (supports both registered and discovered components).
 pub fn run_component(component: &Component) -> Result<(BuildResult, i32)> {
-    let (output, exit_code) = execute_build_component(component)?;
+    run_component_with_changed_since(component, None)
+}
+
+pub fn run_component_with_changed_since(
+    component: &Component,
+    changed_since: Option<&str>,
+) -> Result<(BuildResult, i32)> {
+    let (output, exit_code) = execute_build_component(component, changed_since)?;
     Ok((BuildResult::Single(output), exit_code))
 }
 
 /// Build multiple pre-resolved components.
 pub fn run_components(components: &[Component]) -> Result<(BuildResult, i32)> {
+    run_components_with_changed_since(components, None)
+}
+
+pub fn run_components_with_changed_since(
+    components: &[Component],
+    changed_since: Option<&str>,
+) -> Result<(BuildResult, i32)> {
     let mut builder = BulkResultBuilder::with_capacity("build", components.len());
 
     for component in components {
-        match execute_build_component(component) {
+        match execute_build_component(component, changed_since) {
             Ok((output, _)) => {
                 if output.success {
                     builder.record_success(component.id.clone(), output);
@@ -332,12 +401,19 @@ pub fn run_components(components: &[Component]) -> Result<(BuildResult, i32)> {
     Ok((BuildResult::Bulk(output), exit_code))
 }
 
-fn execute_build(component_id: &str, path_override: Option<&str>) -> Result<(BuildOutput, i32)> {
+fn execute_build(
+    component_id: &str,
+    path_override: Option<&str>,
+    changed_since: Option<&str>,
+) -> Result<(BuildOutput, i32)> {
     let comp = component::resolve_effective(Some(component_id), path_override, None)?;
-    execute_build_component(&comp)
+    execute_build_component(&comp, changed_since)
 }
 
-fn execute_build_component(comp: &Component) -> Result<(BuildOutput, i32)> {
+fn execute_build_component(
+    comp: &Component,
+    changed_since: Option<&str>,
+) -> Result<(BuildOutput, i32)> {
     comp.validate_supported_build_config()?;
 
     // Validate required extensions are installed before resolving build commands.
@@ -363,8 +439,37 @@ fn execute_build_component(comp: &Component) -> Result<(BuildOutput, i32)> {
     let build_context = match &resolved {
         ResolvedBuildCommand::ComponentScript { .. } => None,
         ResolvedBuildCommand::ExtensionProvided { context, .. } => Some(context),
-        _ => None,
+        ResolvedBuildCommand::LocalScript { context, .. } => Some(context),
     };
+
+    let changed_scope = resolve_changed_scope(comp, build_context, changed_since, &local_path_str)?;
+    if matches!(
+        changed_scope.as_ref().map(|decision| &decision.outcome),
+        Some(BuildChangedScopeOutcome::NoOp)
+    ) {
+        return Ok((
+            BuildOutput {
+                command: "build.run".to_string(),
+                component_id: comp.id.clone(),
+                build_command: build_cmd,
+                output: CapturedOutput::new(String::new(), String::new()),
+                artifact_inputs: Vec::new(),
+                extension_phase_timings: Vec::new(),
+                changed_scope: changed_scope.map(|decision| decision.report),
+                success: true,
+            },
+            0,
+        ));
+    }
+
+    let build_args = changed_scope
+        .as_ref()
+        .and_then(|decision| match &decision.outcome {
+            BuildChangedScopeOutcome::Scoped { build_args } => Some(build_args.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let build_cmd = command_with_args(&build_cmd, &build_args);
 
     // Run pre-build script if extension provides one
     if let Some((exit_code, stderr)) = run_pre_build_scripts(build_context)? {
@@ -377,6 +482,7 @@ fn execute_build_component(comp: &Component) -> Result<(BuildOutput, i32)> {
                     output: CapturedOutput::new(String::new(), stderr),
                     artifact_inputs: Vec::new(),
                     extension_phase_timings: Vec::new(),
+                    changed_scope: changed_scope.clone().map(|decision| decision.report),
                     success: false,
                 },
                 exit_code,
@@ -397,30 +503,35 @@ fn execute_build_component(comp: &Component) -> Result<(BuildOutput, i32)> {
             &validated_path,
             &run_dir,
             true,
-            &[],
+            &build_env(changed_since, changed_scope.as_ref()),
             &[],
         )?
         .into()
     } else if let Some(context) = build_context {
-        extension::ExtensionRunner::for_context(context.clone())
+        let mut runner = extension::ExtensionRunner::for_context(context.clone())
             .component(comp.clone())
             .working_dir(&local_path_str)
             .command_override(build_cmd.clone())
             .with_run_dir(&run_dir)
             // Legacy env var for backward compat with existing build scripts
-            .env("HOMEBOY_PLUGIN_PATH", &comp.local_path)
-            .run()?
+            .env("HOMEBOY_PLUGIN_PATH", &comp.local_path);
+        for (key, value) in build_env(changed_since, changed_scope.as_ref()) {
+            runner = runner.env(&key, &value);
+        }
+        runner.run()?
     } else {
-        // LocalScript variant — no extension context, run command directly
         let context =
             extension::resolve_execution_context(comp, extension::ExtensionCapability::Build)?;
-        extension::ExtensionRunner::for_context(context)
+        let mut runner = extension::ExtensionRunner::for_context(context)
             .component(comp.clone())
             .working_dir(&local_path_str)
             .command_override(build_cmd.clone())
             .with_run_dir(&run_dir)
-            .env("HOMEBOY_PLUGIN_PATH", &comp.local_path)
-            .run()?
+            .env("HOMEBOY_PLUGIN_PATH", &comp.local_path);
+        for (key, value) in build_env(changed_since, changed_scope.as_ref()) {
+            runner = runner.env(&key, &value);
+        }
+        runner.run()?
     };
 
     let success = runner_output.success;
@@ -438,10 +549,164 @@ fn execute_build_component(comp: &Component) -> Result<(BuildOutput, i32)> {
             output: CapturedOutput::new(runner_output.stdout, runner_output.stderr),
             artifact_inputs,
             extension_phase_timings: runner_output.extension_phase_timings,
+            changed_scope: changed_scope.map(|decision| decision.report),
             success,
         },
         runner_output.exit_code,
     ))
+}
+
+fn resolve_changed_scope(
+    comp: &Component,
+    build_context: Option<&ExtensionExecutionContext>,
+    changed_since: Option<&str>,
+    working_dir: &str,
+) -> Result<Option<BuildChangedScopeDecision>> {
+    let Some(changed_since) = changed_since else {
+        return Ok(None);
+    };
+
+    let Some(context) = build_context else {
+        return Ok(Some(full_scope_decision(
+            changed_since,
+            None,
+            "no build provider changed-scope resolver is configured; running full build",
+        )));
+    };
+
+    let extension = extension::load_extension(&context.extension_id)?;
+    let changed_scope_script = extension
+        .build
+        .as_ref()
+        .and_then(|build| build.changed_scope_script.as_deref());
+    let Some(changed_scope_script) = changed_scope_script else {
+        return Ok(Some(full_scope_decision(
+            changed_since,
+            Some(context.extension_id.clone()),
+            "build provider has no changed-scope resolver; running full build",
+        )));
+    };
+
+    let mut scope_context = context.clone();
+    scope_context.script_path = changed_scope_script.to_string();
+    let output = extension::ExtensionRunner::for_context(scope_context)
+        .component(comp.clone())
+        .working_dir(working_dir)
+        .env("HOMEBOY_CHANGED_SINCE", changed_since)
+        .passthrough(false)
+        .run()?;
+
+    if !output.success {
+        return Ok(Some(full_scope_decision(
+            changed_since,
+            Some(context.extension_id.clone()),
+            "changed-scope resolver failed; running full build",
+        )));
+    }
+
+    Ok(Some(provider_scope_decision(
+        changed_since,
+        Some(context.extension_id.clone()),
+        &output.stdout,
+    )))
+}
+
+fn provider_scope_decision(
+    changed_since: &str,
+    provider: Option<String>,
+    stdout: &str,
+) -> BuildChangedScopeDecision {
+    let parsed = serde_json::from_str::<ProviderChangedScopeResponse>(stdout.trim());
+    let Ok(response) = parsed else {
+        return full_scope_decision(
+            changed_since,
+            provider,
+            "changed-scope resolver did not return valid JSON; running full build",
+        );
+    };
+
+    let reason = response
+        .reason
+        .unwrap_or_else(|| "provider changed-scope decision".to_string());
+    match response.outcome.as_str() {
+        "no-op" | "noop" | "skip" => BuildChangedScopeDecision {
+            outcome: BuildChangedScopeOutcome::NoOp,
+            report: BuildChangedScopeReport {
+                changed_since: changed_since.to_string(),
+                outcome: "no-op".to_string(),
+                reason,
+                provider,
+                build_args: Vec::new(),
+            },
+        },
+        "scoped" => BuildChangedScopeDecision {
+            outcome: BuildChangedScopeOutcome::Scoped {
+                build_args: response.build_args.clone(),
+            },
+            report: BuildChangedScopeReport {
+                changed_since: changed_since.to_string(),
+                outcome: "scoped".to_string(),
+                reason,
+                provider,
+                build_args: response.build_args,
+            },
+        },
+        "full" => full_scope_decision(changed_since, provider, reason),
+        _ => full_scope_decision(
+            changed_since,
+            provider,
+            "changed-scope resolver returned an unknown outcome; running full build",
+        ),
+    }
+}
+
+fn full_scope_decision(
+    changed_since: &str,
+    provider: Option<String>,
+    reason: impl Into<String>,
+) -> BuildChangedScopeDecision {
+    BuildChangedScopeDecision {
+        outcome: BuildChangedScopeOutcome::Full,
+        report: BuildChangedScopeReport {
+            changed_since: changed_since.to_string(),
+            outcome: "full".to_string(),
+            reason: reason.into(),
+            provider,
+            build_args: Vec::new(),
+        },
+    }
+}
+
+fn build_env(
+    changed_since: Option<&str>,
+    changed_scope: Option<&BuildChangedScopeDecision>,
+) -> Vec<(String, String)> {
+    let mut env = Vec::new();
+    if let Some(changed_since) = changed_since {
+        env.push((
+            "HOMEBOY_CHANGED_SINCE".to_string(),
+            changed_since.to_string(),
+        ));
+    }
+    if let Some(changed_scope) = changed_scope {
+        env.push((
+            "HOMEBOY_BUILD_SCOPE_OUTCOME".to_string(),
+            changed_scope.report.outcome.clone(),
+        ));
+    }
+    env
+}
+
+fn command_with_args(command: &str, args: &[String]) -> String {
+    if args.is_empty() {
+        return command.to_string();
+    }
+
+    format!(
+        "{} {}",
+        command,
+        crate::core::engine::shell::quote_args(args)
+    )
 }
 
 fn apply_artifact_inputs(comp: &Component) -> Result<Vec<ResolvedArtifactInput>> {
@@ -604,5 +869,78 @@ mod tests {
             .join("packages/content-plugin/dist/component.zip")
             .exists());
         assert!(!temp.path().join("dist/generic.zip").exists());
+    }
+
+    #[test]
+    fn provider_changed_scope_can_report_no_op() {
+        let decision = provider_scope_decision(
+            "origin/main",
+            Some("fixture".to_string()),
+            r#"{"outcome":"no-op","reason":"docs only"}"#,
+        );
+
+        assert!(matches!(decision.outcome, BuildChangedScopeOutcome::NoOp));
+        assert_eq!(decision.report.outcome, "no-op");
+        assert_eq!(decision.report.reason, "docs only");
+        assert_eq!(decision.report.provider.as_deref(), Some("fixture"));
+    }
+
+    #[test]
+    fn provider_changed_scope_can_report_scoped_build_args() {
+        let decision = provider_scope_decision(
+            "origin/main",
+            Some("fixture".to_string()),
+            r#"{"outcome":"scoped","reason":"package changed","build_args":["package-a","--fast"]}"#,
+        );
+
+        match &decision.outcome {
+            BuildChangedScopeOutcome::Scoped { build_args } => {
+                assert_eq!(
+                    build_args,
+                    &vec!["package-a".to_string(), "--fast".to_string()]
+                );
+            }
+            _ => panic!("expected scoped decision"),
+        }
+        assert_eq!(decision.report.outcome, "scoped");
+        assert_eq!(decision.report.build_args, vec!["package-a", "--fast"]);
+    }
+
+    #[test]
+    fn provider_changed_scope_falls_back_to_full_for_invalid_json() {
+        let decision =
+            provider_scope_decision("origin/main", Some("fixture".to_string()), "not-json");
+
+        assert!(matches!(decision.outcome, BuildChangedScopeOutcome::Full));
+        assert_eq!(decision.report.outcome, "full");
+        assert!(decision.report.reason.contains("valid JSON"));
+    }
+
+    #[test]
+    fn provider_changed_scope_falls_back_to_full_for_unknown_outcome() {
+        let decision = provider_scope_decision(
+            "origin/main",
+            Some("fixture".to_string()),
+            r#"{"outcome":"maybe","reason":"uncertain"}"#,
+        );
+
+        assert!(matches!(decision.outcome, BuildChangedScopeOutcome::Full));
+        assert_eq!(decision.report.outcome, "full");
+        assert!(decision.report.reason.contains("unknown outcome"));
+    }
+
+    #[test]
+    fn changed_scope_env_exposes_changed_since_and_outcome() {
+        let decision = full_scope_decision("origin/main", Some("fixture".to_string()), "fallback");
+        let env = build_env(Some("origin/main"), Some(&decision));
+
+        assert!(env.contains(&(
+            "HOMEBOY_CHANGED_SINCE".to_string(),
+            "origin/main".to_string()
+        )));
+        assert!(env.contains(&(
+            "HOMEBOY_BUILD_SCOPE_OUTCOME".to_string(),
+            "full".to_string()
+        )));
     }
 }
