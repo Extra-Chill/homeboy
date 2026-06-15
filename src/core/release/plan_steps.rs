@@ -109,15 +109,7 @@ pub(super) fn build_preflight_steps(
         build_bump_policy_step(options, semver_recommendation),
     ];
 
-    if has_wordpress_release_publish_target(extensions) {
-        steps.push(ready_step(
-            "preflight.wordpress_publish_token",
-            "preflight.wordpress_publish_token",
-            "Validate WordPress release publish token",
-            vec!["preflight.bump_policy".to_string()],
-            StepConfig::new(),
-        ));
-    }
+    steps.extend(build_extension_release_preflight_steps(extensions));
 
     if let Some(identity) = options.git_identity.as_ref() {
         steps.insert(
@@ -157,14 +149,25 @@ pub(super) fn build_preflight_steps(
     steps
 }
 
-fn has_wordpress_release_publish_target(extensions: &[ExtensionManifest]) -> bool {
-    extensions.iter().any(|extension| {
-        extension.id == "wordpress"
-            && extension
-                .actions
-                .iter()
-                .any(|action| action.id == "release.publish")
-    })
+fn build_extension_release_preflight_steps(extensions: &[ExtensionManifest]) -> Vec<PlanStep> {
+    extensions
+        .iter()
+        .flat_map(|extension| {
+            extension.release_preflights.iter().map(|preflight| {
+                let step_id = format!("preflight.extension.{}.{}", extension.id, preflight.id);
+                ready_step(
+                    &step_id,
+                    &step_id,
+                    preflight.label.clone(),
+                    preflight.needs.clone(),
+                    StepConfig::new()
+                        .string("extension", extension.id.clone())
+                        .string("action", preflight.action.clone())
+                        .string("preflight", preflight.id.clone()),
+                )
+            })
+        })
+        .collect()
 }
 
 fn build_quality_steps(options: &ReleaseOptions) -> Vec<PlanStep> {
@@ -775,34 +778,57 @@ mod tests {
     }
 
     #[test]
-    fn release_plan_adds_wordpress_publish_token_preflight_for_wordpress_publish() {
+    fn release_plan_adds_extension_declared_release_preflight() {
         let options = ReleaseOptions {
             bump_type: "patch".to_string(),
             ..Default::default()
         };
         let mut extension: ExtensionManifest = serde_json::from_value(serde_json::json!({
-            "name": "WordPress",
+            "name": "Registry",
             "version": "1.0.0",
+            "release_preflights": [
+                {
+                    "id": "publish_token",
+                    "label": "Validate registry publish token",
+                    "action": "release.preflight.publish-token",
+                    "needs": ["preflight.bump_policy"]
+                }
+            ],
             "actions": [
                 {
-                    "id": "release.publish",
-                    "label": "Publish release",
+                    "id": "release.preflight.publish-token",
+                    "label": "Validate publish token",
                     "type": "command",
                     "command": "true"
                 }
             ]
         }))
         .expect("extension manifest");
-        extension.id = "wordpress".to_string();
+        extension.id = "registry".to_string();
 
         let steps = build_preflight_steps(&options, None, &[extension]);
         let token = steps
             .iter()
-            .find(|step| step.id == "preflight.wordpress_publish_token")
-            .expect("wordpress publish token preflight");
+            .find(|step| step.id == "preflight.extension.registry.publish_token")
+            .expect("extension release preflight");
 
         assert_eq!(token.status, PlanStepStatus::Ready);
+        assert_eq!(
+            token.label.as_deref(),
+            Some("Validate registry publish token")
+        );
         assert_eq!(token.needs, vec!["preflight.bump_policy"]);
+        assert_eq!(
+            token
+                .inputs
+                .get("extension")
+                .and_then(|value| value.as_str()),
+            Some("registry")
+        );
+        assert_eq!(
+            token.inputs.get("action").and_then(|value| value.as_str()),
+            Some("release.preflight.publish-token")
+        );
     }
 
     #[test]

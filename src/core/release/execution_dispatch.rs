@@ -33,9 +33,6 @@ pub(super) fn execute_release_plan_step(
         "preflight.working_tree" => Ok(Some(run_working_tree_preflight(step, context))),
         "preflight.remote_sync" => Ok(Some(run_remote_sync_preflight(step, context))),
         "preflight.bump_policy" => Ok(Some(run_bump_policy_preflight(step))),
-        "preflight.wordpress_publish_token" => {
-            Ok(Some(run_wordpress_publish_token_preflight(step)))
-        }
         "preflight.lint" => Ok(Some(run_lint_preflight(step, context))),
         "preflight.test" => Ok(Some(run_test_preflight(step, context))),
         "preflight.changelog_bootstrap" => {
@@ -61,6 +58,15 @@ pub(super) fn execute_release_plan_step(
                 tag_name,
             )
             .map(Some)
+        }
+        step_kind if step_kind.starts_with("preflight.extension.") => {
+            Ok(Some(executor::run_extension_release_preflight(
+                step,
+                context.extensions,
+                &context.state,
+                context.component_id,
+                &context.component.local_path,
+            )))
         }
         "changelog.finalize" => {
             executor::changelog::run_changelog_finalize(step, context.component, &mut context.state)
@@ -194,47 +200,14 @@ fn release_step_is_plan_only(step: &PlanStep) -> bool {
         && step.kind != "preflight.working_tree"
         && step.kind != "preflight.remote_sync"
         && step.kind != "preflight.bump_policy"
-        && step.kind != "preflight.wordpress_publish_token"
         && step.kind != "preflight.lint"
         && step.kind != "preflight.test"
         && step.kind != "preflight.changelog_bootstrap"
         && step.kind != "preflight.package"
-        && step.kind != "preflight.tag_availability")
+        && step.kind != "preflight.tag_availability"
+        && !step.kind.starts_with("preflight.extension."))
         || step.kind == "changelog.policy"
         || step.kind == "changelog.generate"
-}
-
-fn run_wordpress_publish_token_preflight(step: &PlanStep) -> ReleaseStepResult {
-    if crate::core::git::github_token_from_env_or_gh().is_some() {
-        return ReleaseStepResult {
-            id: step.id.clone(),
-            step_type: step.kind.clone(),
-            status: ReleaseStepStatus::Success,
-            missing: Vec::new(),
-            warnings: Vec::new(),
-            hints: Vec::new(),
-            data: Some(serde_json::json!({
-                "token_source": "env-or-gh-auth-token",
-            })),
-            error: None,
-        };
-    }
-
-    ReleaseStepResult {
-        id: step.id.clone(),
-        step_type: step.kind.clone(),
-        status: ReleaseStepStatus::Failed,
-        missing: Vec::new(),
-        warnings: Vec::new(),
-        hints: vec![crate::core::error::Hint {
-            message: "Run `gh auth login`, or export `GH_TOKEN=\"$(gh auth token)\"`, then rerun the release.".to_string(),
-        }],
-        data: Some(serde_json::json!({
-            "required_env": "GH_TOKEN",
-            "fallback": "gh auth token",
-        })),
-        error: Some(crate::core::extension::wordpress_release_publish_token_remediation().to_string()),
-    }
 }
 
 fn run_default_branch_preflight(
@@ -654,6 +627,9 @@ mod tests {
         assert!(!release_step_is_plan_only(&plan_step(
             "preflight.bump_policy"
         )));
+        assert!(!release_step_is_plan_only(&plan_step(
+            "preflight.extension.registry.publish_token"
+        )));
         assert!(!release_step_is_plan_only(&plan_step("preflight.lint")));
         assert!(!release_step_is_plan_only(&plan_step("preflight.test")));
         assert!(!release_step_is_plan_only(&plan_step(
@@ -862,6 +838,72 @@ mod tests {
             assert_eq!(result.data, Some(serde_json::json!({ "ran": false })));
             assert!(!release_step_is_show_stopper(&result));
         }
+    }
+
+    #[test]
+    fn extension_declared_release_preflight_executes_action() {
+        crate::test_support::with_isolated_home(|_| {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let mut extension: crate::core::extension::ExtensionManifest =
+                serde_json::from_value(serde_json::json!({
+                    "name": "Registry",
+                    "version": "1.0.0",
+                    "release_preflights": [{
+                        "id": "publish_token",
+                        "label": "Validate registry publish token",
+                        "action": "release.preflight.publish-token",
+                        "needs": ["preflight.bump_policy"]
+                    }],
+                    "actions": [{
+                        "id": "release.preflight.publish-token",
+                        "label": "Validate publish token",
+                        "type": "command",
+                        "command": "printf '{\"component\":\"%s\",\"path\":\"%s\",\"success\":true}' \"$HOMEBOY_COMPONENT_ID\" \"$HOMEBOY_COMPONENT_PATH\""
+                    }]
+                }))
+                .expect("extension manifest");
+            extension.id = "registry".to_string();
+            crate::core::extension::save_manifest(&extension).expect("save extension");
+
+            let component = Component {
+                id: "fixture".to_string(),
+                local_path: temp.path().to_string_lossy().to_string(),
+                ..Default::default()
+            };
+            let options = ReleaseOptions::default();
+            let extensions = vec![extension];
+            let mut context = ReleaseExecutionContext {
+                component: &component,
+                extensions: &extensions,
+                component_id: "fixture",
+                options: &options,
+                state: ReleaseState::default(),
+                publish_failed: false,
+            };
+            let mut step = plan_step("preflight.extension.registry.publish_token");
+            step.inputs
+                .insert("extension".to_string(), serde_json::json!("registry"));
+            step.inputs.insert(
+                "action".to_string(),
+                serde_json::json!("release.preflight.publish-token"),
+            );
+
+            let result = execute_release_plan_step(&step, &mut context)
+                .expect("dispatch")
+                .expect("result");
+
+            assert_eq!(result.status, ReleaseStepStatus::Success);
+            let stdout = result
+                .data
+                .as_ref()
+                .and_then(|data| data.get("response"))
+                .and_then(|response| response.get("stdout"))
+                .and_then(serde_json::Value::as_str)
+                .expect("preflight stdout");
+            let payload: serde_json::Value = serde_json::from_str(stdout).expect("stdout json");
+            assert_eq!(payload["component"], "fixture");
+            assert_eq!(payload["path"], temp.path().to_string_lossy().as_ref());
+        });
     }
 
     #[test]

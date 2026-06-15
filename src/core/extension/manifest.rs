@@ -389,6 +389,23 @@ pub struct ScriptsConfig {
     pub contract: Option<String>,
 }
 
+/// Extension-declared release preflight.
+///
+/// Core schedules these before release mutation and executes the declared
+/// extension action with the standard release payload.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReleasePreflightConfig {
+    /// Stable suffix for the generated plan step id.
+    pub id: String,
+    /// Human-readable plan label.
+    pub label: String,
+    /// Extension action id to execute for this preflight.
+    pub action: String,
+    /// Plan step ids that must complete before this preflight runs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub needs: Vec<String>,
+}
+
 /// Unified extension manifest decomposed into capability groups.
 ///
 /// Extension JSON files use nested capability groups that map directly to these fields.
@@ -467,6 +484,10 @@ pub struct ExtensionManifest {
     /// machine-readable contract.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub structured_sidecars: BTreeMap<String, StructuredSidecarContract>,
+
+    /// Release preflights supplied by this extension.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub release_preflights: Vec<ReleasePreflightConfig>,
 
     // Actions (cross-cutting: used by both platform and executable extensions)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

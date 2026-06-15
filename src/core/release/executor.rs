@@ -658,6 +658,97 @@ pub(crate) fn run_package(
     Ok(step_success("package", "package", Some(data), Vec::new()))
 }
 
+/// Invoke an extension-declared release preflight action.
+pub(crate) fn run_extension_release_preflight(
+    step: &crate::core::plan::PlanStep,
+    extensions: &[ExtensionManifest],
+    state: &ReleaseState,
+    component_id: &str,
+    component_local_path: &str,
+) -> ReleaseStepResult {
+    let extension_id = step
+        .inputs
+        .get("extension")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let action_id = step
+        .inputs
+        .get("action")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+
+    let Some(extension) = extensions
+        .iter()
+        .find(|extension| extension.id == extension_id)
+    else {
+        return step_failed(
+            &step.id,
+            &step.kind,
+            Some(serde_json::json!({
+                "extension": extension_id,
+                "action": action_id,
+            })),
+            Some(format!(
+                "Release preflight references missing extension '{}'",
+                extension_id
+            )),
+            Vec::new(),
+        );
+    };
+
+    if !extension
+        .actions
+        .iter()
+        .any(|action| action.id == action_id)
+    {
+        return step_failed(
+            &step.id,
+            &step.kind,
+            Some(serde_json::json!({
+                "extension": extension_id,
+                "action": action_id,
+            })),
+            Some(format!(
+                "Release preflight references missing action '{}' on extension '{}'",
+                action_id, extension_id
+            )),
+            Vec::new(),
+        );
+    }
+
+    let payload = build_release_payload(state, component_id, component_local_path, None);
+    let response =
+        match extension::execute_action(extension_id, action_id, None, None, Some(&payload)) {
+            Ok(response) => response,
+            Err(err) => {
+                return step_failed(&step.id, &step.kind, None, Some(err.message), err.hints)
+            }
+        };
+
+    let data = Some(serde_json::json!({
+        "extension": extension_id,
+        "action": action_id,
+        "response": response,
+    }));
+
+    if response.get("success").and_then(serde_json::Value::as_bool) == Some(false) {
+        let reason = response
+            .get("reason")
+            .or_else(|| response.get("error"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("extension release preflight reported failure");
+        return step_failed(
+            &step.id,
+            &step.kind,
+            data,
+            Some(reason.to_string()),
+            Vec::new(),
+        );
+    }
+
+    step_success(&step.id, &step.kind, data, Vec::new())
+}
+
 fn package_provider_error(extension_id: &str, err: Error) -> Error {
     let mut wrapped = Error::new(
         err.code,
