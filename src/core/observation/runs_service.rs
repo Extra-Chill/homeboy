@@ -48,14 +48,60 @@ pub struct ArtifactFetchOutcome {
 /// Look up a run and surface a stable validation error when it doesn't
 /// exist. Used by every observation command that takes a `run_id`.
 pub fn require_run(store: &ObservationStore, run_id: &str) -> Result<RunRecord> {
-    store.get_run(run_id)?.ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "run_id",
-            format!("run record not found: {run_id}"),
-            Some(run_id.to_string()),
-            None,
-        )
-    })
+    if let Some(run) = store.get_run(run_id)? {
+        return Ok(run);
+    }
+    if let Ok(Some(run)) = crate::core::runners::mirror_connected_runner_run(run_id) {
+        return Ok(run);
+    }
+    Err(missing_run_error(run_id))
+}
+
+fn missing_run_error(run_id: &str) -> Error {
+    Error::validation_invalid_argument(
+        "run_id",
+        format!("run record not found: {run_id}"),
+        Some(run_id.to_string()),
+        Some(missing_run_guidance(run_id)),
+    )
+}
+
+fn missing_run_guidance(run_id: &str) -> Vec<String> {
+    let mut hints = Vec::new();
+    let connected = crate::core::runners::statuses()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|report| report.connected)
+        .map(|report| report.runner_id)
+        .collect::<Vec<_>>();
+
+    if connected.is_empty() {
+        hints.push(
+            "No connected runner daemon is available for controller-side lookup; connect the offload runner or inspect it with `homeboy runner exec <runner-id> -- homeboy runs list --limit 100`.".to_string(),
+        );
+        return hints;
+    }
+
+    missing_run_guidance_for_runner_ids(run_id, connected)
+}
+
+fn missing_run_guidance_for_runner_ids(run_id: &str, runner_ids: Vec<String>) -> Vec<String> {
+    let mut hints = Vec::new();
+    for runner_id in runner_ids {
+        hints.push(format!(
+            "Check runner `{runner_id}` from the controller: `homeboy runs list --runner {runner_id} --limit 100`."
+        ));
+        hints.push(format!(
+            "Inspect run `{run_id}` directly on runner `{runner_id}`: `homeboy runner exec {runner_id} -- homeboy runs show {run_id}`."
+        ));
+        hints.push(format!(
+            "List artifacts for run `{run_id}` directly on runner `{runner_id}`: `homeboy runner exec {runner_id} -- homeboy runs artifacts {run_id}`."
+        ));
+        hints.push(format!(
+            "Export run `{run_id}` directly on runner `{runner_id}`: `homeboy runner exec {runner_id} -- homeboy runs export --run {run_id} --output <dir>`."
+        ));
+    }
+    hints
 }
 
 /// Best-effort refresh of mirrored Lab runner evidence for a run.
@@ -840,6 +886,20 @@ mod tests {
             assert_eq!(err.code.as_str(), "validation.invalid_argument");
             assert!(err.message.contains("run record not found"));
         });
+    }
+
+    #[test]
+    fn missing_run_guidance_prints_runner_routed_retrieval_commands() {
+        let hints = missing_run_guidance_for_runner_ids("run-123", vec!["homeboy-lab".to_string()]);
+        assert_eq!(
+            hints,
+            vec![
+                "Check runner `homeboy-lab` from the controller: `homeboy runs list --runner homeboy-lab --limit 100`.",
+                "Inspect run `run-123` directly on runner `homeboy-lab`: `homeboy runner exec homeboy-lab -- homeboy runs show run-123`.",
+                "List artifacts for run `run-123` directly on runner `homeboy-lab`: `homeboy runner exec homeboy-lab -- homeboy runs artifacts run-123`.",
+                "Export run `run-123` directly on runner `homeboy-lab`: `homeboy runner exec homeboy-lab -- homeboy runs export --run run-123 --output <dir>`.",
+            ]
+        );
     }
 
     #[test]

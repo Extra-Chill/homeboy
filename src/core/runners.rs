@@ -31,7 +31,7 @@ pub use super::runner::{
     is_remote_runner_artifact_path, is_reportable_artifact_evidence_path,
     is_retrievable_runner_artifact, lab_offload_changed_since_ref, lab_offload_metadata,
     lab_offload_metadata_with_workspace_mapping, lab_runner_capability_preflight,
-    mirrored_runner_job_identity, preflight_lab_offload_changed_since,
+    mirror_connected_runner_run, mirrored_runner_job_identity, preflight_lab_offload_changed_since,
     prepare_git_lab_offload_changed_since, prepare_lab_runner_capability,
     refresh_mirrored_daemon_evidence, reportable_artifact_evidence_path,
     resolve_default_lab_runner, run_reverse_worker, runner_artifact_store_token,
@@ -105,8 +105,9 @@ pub mod evidence {
     pub use super::super::runner::{
         download_remote_artifact, is_remote_runner_artifact_path,
         is_reportable_artifact_evidence_path, is_retrievable_runner_artifact,
-        mirrored_runner_job_identity, refresh_mirrored_daemon_evidence,
-        reportable_artifact_evidence_path, runner_artifact_store_token, RemoteArtifactDownload,
+        mirror_connected_runner_run, mirrored_runner_job_identity,
+        refresh_mirrored_daemon_evidence, reportable_artifact_evidence_path,
+        runner_artifact_store_token, RemoteArtifactDownload,
     };
 }
 
