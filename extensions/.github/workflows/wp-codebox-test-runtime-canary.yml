@@ -53,3 +53,9 @@ jobs:
           HOMEBOY_WP_CODEBOX_BIN: ${{ github.workspace }}/.ci/wp-codebox/packages/cli/dist/index.js
           HOMEBOY_WP_CODEBOX_CORE_MODULE: ${{ github.workspace }}/.ci/wp-codebox/packages/runtime-core/dist/index.js
         run: bash wordpress/scripts/test/playground-db-activation-smoke.sh
+
+      - name: Run raw extra_plugins Composer autoload canary
+        env:
+          HOMEBOY_WP_CODEBOX_BIN: ${{ github.workspace }}/.ci/wp-codebox/packages/cli/dist/index.js
+          HOMEBOY_WP_CODEBOX_CORE_MODULE: ${{ github.workspace }}/.ci/wp-codebox/packages/runtime-core/dist/index.js
+        run: bash wordpress/scripts/test/wp-codebox-extra-plugins-autoload-smoke.sh
