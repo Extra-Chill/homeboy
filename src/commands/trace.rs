@@ -1447,6 +1447,39 @@ pub(super) struct LabTraceDispatchObservation {
     scenario_id: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct PersistedRunRetrieval {
+    pub run_id: String,
+    pub evidence_command: String,
+    pub artifacts_command: String,
+    pub export_command: String,
+}
+
+impl PersistedRunRetrieval {
+    pub(super) fn for_run(run_id: &str) -> Self {
+        Self {
+            run_id: run_id.to_string(),
+            evidence_command: format!("homeboy runs evidence {run_id}"),
+            artifacts_command: format!("homeboy runs artifacts {run_id}"),
+            export_command: format!(
+                "homeboy runs export --run {run_id} --output homeboy-run-{run_id}"
+            ),
+        }
+    }
+
+    pub(super) fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "persisted_run_id": self.run_id,
+            "id_scope": "persisted_homeboy_run",
+            "retrieval_commands": {
+                "evidence": self.evidence_command,
+                "artifacts": self.artifacts_command,
+                "export": self.export_command,
+            }
+        })
+    }
+}
+
 pub(super) fn start_lab_dispatch_observation(
     args: &TraceArgs,
     normalized_args: &[String],
@@ -1527,10 +1560,11 @@ pub(super) fn finish_lab_dispatch_observation(
     observation: Option<LabTraceDispatchObservation>,
     status: RunStatus,
     metadata: serde_json::Value,
-) {
+) -> Option<PersistedRunRetrieval> {
     let Some(observation) = observation else {
-        return;
+        return None;
     };
+    let retrieval = PersistedRunRetrieval::for_run(&observation.run_id);
     let _ = observation.store.record_trace_run(
         NewTraceRunRecord::builder(
             &observation.run_id,
@@ -1545,6 +1579,7 @@ pub(super) fn finish_lab_dispatch_observation(
     let _ = observation
         .store
         .finish_run(&observation.run_id, status, Some(metadata));
+    Some(retrieval)
 }
 
 fn persist_trace_workflow_result(
