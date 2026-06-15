@@ -1,10 +1,13 @@
 use std::collections::{BTreeMap, HashMap};
+use std::time::Duration;
 
 use clap::{Args, Subcommand, ValueEnum};
 use serde::Serialize;
 use serde_json::Value;
 
+use homeboy::core::api_jobs::{Job, JobEvent, JobStatus};
 use homeboy::core::redaction::RedactionPolicy;
+use homeboy::core::runner::runner_job_log_snapshot;
 use homeboy::core::runners::{
     self as runner, ReverseRunnerConnectOptions, ReverseRunnerWorkerOptions,
     ReverseRunnerWorkerOutput, Runner, RunnerConnectReport, RunnerDisconnectReport,
@@ -46,8 +49,19 @@ pub enum RunnerCommandOutput {
     Doctor(doctor::RunnerDoctorOutput),
     Execution(RunnerExecOutput),
     Env(RunnerEnvOutput),
+    Job(RunnerJobOutput),
     Worker(ReverseRunnerWorkerOutput),
     Workspace(workspace::RunnerWorkspaceOutput),
+}
+
+#[derive(Debug, Serialize)]
+pub struct RunnerJobOutput {
+    pub command: &'static str,
+    pub runner_id: String,
+    pub job_id: String,
+    pub follow: bool,
+    pub job: Job,
+    pub events: Vec<JobEvent>,
 }
 
 #[derive(Debug, Serialize)]
@@ -319,6 +333,11 @@ enum RunnerCommand {
         #[arg(long)]
         show_values: bool,
     },
+    /// Inspect or follow a runner daemon job stream
+    Job {
+        #[command(subcommand)]
+        command: RunnerJobCommand,
+    },
     /// Claim and execute one brokered reverse-runner job from this machine
     Work {
         /// Runner ID on this machine
@@ -360,6 +379,26 @@ enum RunnerCommand {
     Workspace {
         #[command(subcommand)]
         command: workspace::RunnerWorkspaceCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum RunnerJobCommand {
+    /// Show or follow durable runner daemon job events
+    Logs {
+        /// Runner ID with an active daemon connection
+        runner_id: String,
+
+        /// Runner daemon job ID from runner exec/Lab output or error details
+        job_id: String,
+
+        /// Poll until the remote job reaches a terminal state, printing new events to stderr
+        #[arg(long)]
+        follow: bool,
+
+        /// Poll interval in milliseconds when --follow is set
+        #[arg(long = "poll-ms", default_value_t = 1000)]
+        poll_ms: u64,
     },
 }
 
@@ -527,6 +566,7 @@ pub fn run(
             command,
         )),
         RunnerCommand::Env { id, show_values } => map_env(env(&id, show_values)),
+        RunnerCommand::Job { command } => map_job(job(command)),
         RunnerCommand::Work {
             runner_id,
             broker_url,
@@ -591,6 +631,10 @@ fn map_execution(result: CmdResult<RunnerExecOutput>) -> CmdResult<RunnerCommand
 
 fn map_env(result: CmdResult<RunnerEnvOutput>) -> CmdResult<RunnerCommandOutput> {
     result.map(|(output, exit_code)| (RunnerCommandOutput::Env(output), exit_code))
+}
+
+fn map_job(result: CmdResult<RunnerJobOutput>) -> CmdResult<RunnerCommandOutput> {
+    result.map(|(output, exit_code)| (RunnerCommandOutput::Job(output), exit_code))
 }
 
 fn map_worker(result: CmdResult<ReverseRunnerWorkerOutput>) -> CmdResult<RunnerCommandOutput> {
@@ -953,6 +997,80 @@ fn env(runner_id: &str, show_values: bool) -> CmdResult<RunnerEnvOutput> {
     ))
 }
 
+fn job(command: RunnerJobCommand) -> CmdResult<RunnerJobOutput> {
+    match command {
+        RunnerJobCommand::Logs {
+            runner_id,
+            job_id,
+            follow,
+            poll_ms,
+        } => job_logs(&runner_id, &job_id, follow, poll_ms),
+    }
+}
+
+fn job_logs(
+    runner_id: &str,
+    job_id: &str,
+    follow: bool,
+    poll_ms: u64,
+) -> CmdResult<RunnerJobOutput> {
+    let poll_interval = Duration::from_millis(poll_ms.max(100));
+    let mut emitted_sequence = 0;
+    let mut snapshot = runner_job_log_snapshot(runner_id, job_id)?;
+
+    emit_new_job_events(&snapshot.events, &mut emitted_sequence);
+    while follow && !runner_job_terminal(snapshot.job.status) {
+        std::thread::sleep(poll_interval);
+        snapshot = runner_job_log_snapshot(runner_id, job_id)?;
+        emit_new_job_events(&snapshot.events, &mut emitted_sequence);
+    }
+
+    Ok((
+        RunnerJobOutput {
+            command: "runner.job.logs",
+            runner_id: runner_id.to_string(),
+            job_id: job_id.to_string(),
+            follow,
+            job: snapshot.job,
+            events: snapshot.events,
+        },
+        0,
+    ))
+}
+
+fn emit_new_job_events(events: &[JobEvent], emitted_sequence: &mut u64) {
+    for event in events {
+        if event.sequence <= *emitted_sequence {
+            continue;
+        }
+        eprintln!("{}", format_job_event(event));
+        *emitted_sequence = event.sequence;
+    }
+}
+
+fn format_job_event(event: &JobEvent) -> String {
+    let kind = format!("{:?}", event.kind).to_ascii_lowercase();
+    let message = event.message.as_deref().unwrap_or("");
+    let data = event
+        .data
+        .as_ref()
+        .map(|data| serde_json::to_string(data).unwrap_or_else(|_| "null".to_string()))
+        .unwrap_or_default();
+    match (message.is_empty(), data.is_empty()) {
+        (true, true) => format!("#{:04} {}", event.sequence, kind),
+        (false, true) => format!("#{:04} {} {}", event.sequence, kind, message),
+        (true, false) => format!("#{:04} {} {}", event.sequence, kind, data),
+        (false, false) => format!("#{:04} {} {} {}", event.sequence, kind, message, data),
+    }
+}
+
+fn runner_job_terminal(status: JobStatus) -> bool {
+    matches!(
+        status,
+        JobStatus::Succeeded | JobStatus::Failed | JobStatus::Cancelled
+    )
+}
+
 fn secret_env_reference_output(reference: RunnerSecretEnvRef) -> RunnerSecretEnvReferenceOutput {
     RunnerSecretEnvReferenceOutput {
         env: reference.env,
@@ -983,6 +1101,23 @@ mod tests {
             resources: HashMap::new(),
             policy: RunnerPolicy::default(),
         }
+    }
+
+    #[test]
+    fn runner_job_event_format_includes_sequence_kind_message_and_data() {
+        let event = JobEvent {
+            sequence: 7,
+            job_id: uuid::Uuid::nil(),
+            kind: homeboy::core::api_jobs::JobEventKind::Progress,
+            timestamp_ms: 123,
+            message: Some("cell started".to_string()),
+            data: Some(serde_json::json!({ "cell": "audit" })),
+        };
+
+        assert_eq!(
+            format_job_event(&event),
+            "#0007 progress cell started {\"cell\":\"audit\"}"
+        );
     }
 
     #[test]

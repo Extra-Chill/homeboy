@@ -612,6 +612,10 @@ fn daemon_job_wait_timeout(
             runner.id
         ))
         .with_hint(format!(
+            "Tail the dispatched runner daemon job with `homeboy runner job logs {} {job_id} --follow`.",
+            runner.id
+        ))
+        .with_hint(format!(
             "Runner daemon job id `{job_id}` was already dispatched; wait for it to finish or cancel it explicitly through the runner daemon if needed."
         ))
         .with_hint(timeout_hint)

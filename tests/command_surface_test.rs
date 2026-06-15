@@ -39,6 +39,7 @@ fn includes_first_level_subcommands() {
     assert!(surface.contains_path(&["file", "upload"]));
     assert!(surface.contains_path(&["file", "copy"]));
     assert!(surface.contains_path(&["file", "sync"]));
+    assert!(surface.contains_path(&["runner", "job"]));
     assert!(surface.contains_path(&["agent-task", "loop"]));
     assert!(surface.contains_path(&["version", "show"]));
     assert!(surface.contains_path(&["worktree", "create"]));
@@ -114,6 +115,20 @@ fn upgrade_runner_selector_does_not_collide_with_global_lab_runner_flag() {
     assert!(upgrade_flags.contains("--upgrade-runner"));
     Cli::try_parse_from(["homeboy", "upgrade", "--upgrade-runner", "homeboy-lab"])
         .expect("upgrade runner selector should parse without colliding with global --runner");
+}
+
+#[test]
+fn runner_job_logs_command_parses() {
+    Cli::try_parse_from([
+        "homeboy",
+        "runner",
+        "job",
+        "logs",
+        "homeboy-lab",
+        "00000000-0000-0000-0000-000000000000",
+        "--follow",
+    ])
+    .expect("runner job logs command should parse");
 }
 
 fn documented_command_index_entries() -> BTreeSet<String> {
