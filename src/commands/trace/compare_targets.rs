@@ -5,6 +5,7 @@ use homeboy::core::component;
 use homeboy::core::extension::trace as extension_trace;
 use homeboy::core::extension::trace::{TraceCheckoutProvenance, TraceCommandOutput};
 use homeboy::core::git;
+use homeboy::core::observation::{NewRunRecord, ObservationStore, RunStatus};
 
 use super::aggregate::{
     aggregate_metric, aggregate_span, TraceAggregateMetricSample, TraceAggregateSpanSample,
@@ -76,6 +77,8 @@ pub(super) fn run_compare_targets(args: TraceArgs) -> CmdResult<TraceCommandOutp
             Some("trace.compare.output_dir".to_string()),
         )
     })?;
+
+    let observation = start_compare_observation(&args, &component_id, &scenario_id, &output_dir);
 
     let baseline_target = resolve_target("baseline", baseline, &base_component.local_path)?;
     let candidate_target = resolve_target("candidate", candidate, &base_component.local_path)?;
@@ -153,10 +156,98 @@ pub(super) fn run_compare_targets(args: TraceArgs) -> CmdResult<TraceCommandOutp
         || compare.focus_status.as_deref() == Some("fail")
         || compare.guardrail_status.as_deref() == Some("fail")
         || compare.metric_guardrail_status.as_deref() == Some("fail");
+    finish_compare_observation(
+        observation,
+        if failed {
+            RunStatus::Fail
+        } else {
+            RunStatus::Pass
+        },
+        CompareArtifactPaths {
+            baseline: &baseline_path,
+            candidate: &candidate_path,
+            compare: &compare_path,
+            summary: &summary_path,
+        },
+        serde_json::json!({
+            "scenario_id": scenario_id,
+            "trace_mode": "compare_targets",
+            "compare": {
+                "baseline_target": baseline_target.input,
+                "candidate_target": candidate_target.input,
+                "baseline_git_sha": compare.before_git_sha.as_deref(),
+                "candidate_git_sha": compare.after_git_sha.as_deref(),
+                "baseline_status": compare.before_status.as_deref(),
+                "candidate_status": compare.after_status.as_deref(),
+                "output_dir": compare.output_dir.as_deref(),
+                "summary_path": compare.summary_path.as_deref(),
+                "span_count": compare.span_count,
+                "focus_status": compare.focus_status.as_deref(),
+                "guardrail_status": compare.guardrail_status.as_deref(),
+                "metric_guardrail_status": compare.metric_guardrail_status.as_deref(),
+            }
+        }),
+    );
     Ok((
         TraceCommandOutput::Compare(compare),
         if failed { 1 } else { 0 },
     ))
+}
+
+struct CompareArtifactPaths<'a> {
+    baseline: &'a Path,
+    candidate: &'a Path,
+    compare: &'a Path,
+    summary: &'a Path,
+}
+
+fn start_compare_observation(
+    args: &TraceArgs,
+    component_id: &str,
+    scenario_id: &str,
+    output_dir: &Path,
+) -> Option<(ObservationStore, String)> {
+    let store = ObservationStore::open_initialized().ok()?;
+    let cwd = std::env::current_dir().ok();
+    let run = store
+        .start_run(
+            NewRunRecord::builder("trace")
+                .component_id(component_id.to_string())
+                .command(std::env::args().collect::<Vec<_>>().join(" "))
+                .optional_cwd_path(cwd.as_deref())
+                .current_homeboy_version()
+                .optional_rig_id(args.rig.clone())
+                .metadata(serde_json::json!({
+                    "scenario_id": scenario_id,
+                    "trace_mode": "compare_targets",
+                    "baseline_target": args.baseline_target.as_deref(),
+                    "candidate_target": args.candidate.as_deref(),
+                    "output_dir": output_dir.display().to_string(),
+                }))
+                .build(),
+        )
+        .ok()?;
+    Some((store, run.id))
+}
+
+fn finish_compare_observation(
+    observation: Option<(ObservationStore, String)>,
+    status: RunStatus,
+    paths: CompareArtifactPaths<'_>,
+    metadata: serde_json::Value,
+) {
+    let Some((store, run_id)) = observation else {
+        return;
+    };
+    let _ = store.record_artifact(&run_id, "trace-compare-baseline-aggregate", paths.baseline);
+    let _ = store.record_artifact(
+        &run_id,
+        "trace-compare-candidate-aggregate",
+        paths.candidate,
+    );
+    let _ = store.record_artifact(&run_id, "trace-compare-json", paths.compare);
+    let _ = store.record_artifact(&run_id, "trace-compare-summary", paths.summary);
+    let _ = store.finish_run(&run_id, status, Some(metadata));
 }
 
 fn compare_target_component(
@@ -958,6 +1049,37 @@ mod tests {
             assert!(homeboy::core::rig::lease::active_run_leases()
                 .expect("active leases")
                 .is_empty());
+            let store = ObservationStore::open_initialized().expect("store");
+            let runs = store
+                .list_runs(homeboy::core::observation::RunListFilter {
+                    kind: Some("trace".to_string()),
+                    ..Default::default()
+                })
+                .expect("runs");
+            let compare_run = runs
+                .iter()
+                .find(|run| run.metadata_json["trace_mode"] == "compare_targets")
+                .expect("compare run persisted");
+            assert_eq!(compare_run.status, "pass");
+            assert_eq!(compare_run.component_id.as_deref(), Some("studio"));
+            assert_eq!(compare_run.rig_id.as_deref(), Some("studio-rig"));
+            assert_eq!(
+                compare_run.metadata_json["compare"]["baseline_target"],
+                baseline_dir.path().to_string_lossy().as_ref()
+            );
+            assert_eq!(
+                compare_run.metadata_json["compare"]["candidate_target"],
+                candidate_dir.path().to_string_lossy().as_ref()
+            );
+            let artifacts = store.list_artifacts(&compare_run.id).expect("artifacts");
+            let artifact_kinds: std::collections::BTreeSet<_> = artifacts
+                .iter()
+                .map(|artifact| artifact.kind.as_str())
+                .collect();
+            assert!(artifact_kinds.contains("trace-compare-baseline-aggregate"));
+            assert!(artifact_kinds.contains("trace-compare-candidate-aggregate"));
+            assert!(artifact_kinds.contains("trace-compare-json"));
+            assert!(artifact_kinds.contains("trace-compare-summary"));
         });
     }
 
