@@ -30,6 +30,7 @@ All notable changes to Homeboy CLI are documented in this file.
 - recover stale runner homeboy paths
 - skip repeated failed release attempts
 - materialize runner-local preview services
+- skip npm publish for packages marked `"private": true` (EPRIVATE) instead of failing the release
 
 ## [0.230.0] - 2026-06-15
 
