@@ -30,7 +30,8 @@ use super::overlay::{
 };
 
 use super::canonicality::{
-    evaluate_trace_canonicality, refused_trace_result, TraceCanonicalPolicy,
+    evaluate_trace_canonicality, refused_trace_result, trace_toolchain_provenance_requirements,
+    TraceCanonicalPolicy,
 };
 use super::generic_runner::run_generic_trace_runner;
 #[cfg(test)]
@@ -196,7 +197,7 @@ fn run_trace_workflow_with_component_script(
         ));
     }
     let evidence = canonicality.metadata(args.canonical_policy);
-    let (mut toolchain, components) = trace_provenance(None, &component_path);
+    let (mut toolchain, components) = trace_provenance(None, &component_path, &args)?;
     mark_non_canonical(
         &mut toolchain,
         "component script trace runs do not resolve an extension runner checkout",
@@ -343,7 +344,7 @@ fn run_trace_workflow_with_context(
         ));
     }
     let evidence = canonicality.metadata(args.canonical_policy);
-    let (toolchain, components) = trace_provenance(execution_context, &component_path);
+    let (toolchain, components) = trace_provenance(execution_context, &component_path, &args)?;
     let _overlay_locks = if args.overlays.is_empty() {
         None
     } else {
@@ -540,30 +541,24 @@ fn non_canonical_evidence_hints(evidence: &TraceEvidenceMetadata) -> Vec<String>
 fn trace_provenance(
     execution_context: Option<&ExtensionExecutionContext>,
     component_path: &str,
-) -> (TraceToolchainProvenance, TraceComponentsProvenance) {
+    args: &TraceRunWorkflowArgs,
+) -> Result<(TraceToolchainProvenance, TraceComponentsProvenance)> {
     let homeboy = homeboy_git_provenance();
     let target = git_provenance(Path::new(component_path), Some("target"));
-    let env_wp_codebox_bin = wp_codebox_bin_env();
-    let wp_codebox_path = execution_context
-        .filter(|context| {
-            context.extension_id.contains("wp-codebox")
-                || context
-                    .extension_path
-                    .to_string_lossy()
-                    .contains("wp-codebox")
-        })
-        .map(|context| context.extension_path.as_path())
-        .or_else(|| {
-            env_wp_codebox_bin
-                .as_ref()
-                .map(|(_, value)| Path::new(value.as_str()))
-        });
+    let toolchain_requirements = trace_toolchain_provenance_requirements(execution_context)?;
     let mut reasons = Vec::new();
-    let mut wp_codebox = wp_codebox_path.map(|path| git_provenance(path, Some("wp_codebox")));
+    let mut toolchains = BTreeMap::new();
 
-    if let Some((key, _)) = env_wp_codebox_bin.as_ref() {
-        if let Some(provenance) = wp_codebox.as_mut() {
+    for requirement in &toolchain_requirements {
+        if let Some((key, value)) = declared_toolchain_env_value(requirement, args) {
+            let mut provenance = git_provenance(Path::new(value.as_str()), Some(&requirement.id));
             provenance.source = Some(format!("env:{key}"));
+            toolchains.insert(requirement.id.clone(), provenance);
+        } else {
+            reasons.push(format!(
+                "{} checkout was not resolved for this trace run",
+                requirement.label
+            ));
         }
     }
     if execution_context.is_none() {
@@ -572,11 +567,13 @@ fn trace_provenance(
     for (label, provenance) in [("homeboy", &homeboy), ("target", &target)] {
         push_git_provenance_reasons(label, provenance, &mut reasons);
     }
-    if let Some(provenance) = wp_codebox.as_ref() {
-        push_git_provenance_reasons("WP Codebox", provenance, &mut reasons);
-    }
-    if wp_codebox.is_none() {
-        reasons.push("WP Codebox checkout was not resolved for this trace run".to_string());
+    for (id, provenance) in &toolchains {
+        let label = toolchain_requirements
+            .iter()
+            .find(|requirement| requirement.id == *id)
+            .map(|requirement| requirement.label.as_str())
+            .unwrap_or(id.as_str());
+        push_git_provenance_reasons(label, provenance, &mut reasons);
     }
     let canonical = reasons.is_empty();
     let mut runtime_assets = BTreeMap::new();
@@ -585,7 +582,13 @@ fn trace_provenance(
         browser_runtime_asset_provenance(),
     );
 
-    (
+    let wp_codebox = toolchain_requirements.iter().find_map(|requirement| {
+        (requirement.legacy_field.as_deref() == Some("wp_codebox"))
+            .then(|| toolchains.get(&requirement.id).cloned())
+            .flatten()
+    });
+
+    Ok((
         TraceToolchainProvenance {
             canonical,
             mode: if canonical {
@@ -596,6 +599,7 @@ fn trace_provenance(
             .to_string(),
             reasons,
             homeboy,
+            toolchains,
             wp_codebox,
             node: command_version("node", &["--version"]),
             runtime_assets,
@@ -604,7 +608,7 @@ fn trace_provenance(
             target,
             dependencies: Vec::new(),
         },
-    )
+    ))
 }
 
 fn push_git_provenance_reasons(
@@ -625,14 +629,17 @@ fn push_git_provenance_reasons(
     }
 }
 
-fn wp_codebox_bin_env() -> Option<(String, String)> {
-    ["HOMEBOY_WP_CODEBOX_BIN", "HOMEBOY_SETTINGS_WP_CODEBOX_BIN"]
-        .into_iter()
-        .find_map(|key| {
-            std::env::var(key)
-                .ok()
-                .map(|value| (key.to_string(), value))
-        })
+fn declared_toolchain_env_value(
+    requirement: &crate::core::extension::manifest_config::TraceToolchainProvenanceConfig,
+    args: &TraceRunWorkflowArgs,
+) -> Option<(String, String)> {
+    requirement.env_keys.iter().find_map(|key| {
+        args.runner_inputs
+            .env
+            .iter()
+            .find_map(|(name, value)| (name == key).then_some((key.clone(), value.clone())))
+            .or_else(|| std::env::var(key).ok().map(|value| (key.clone(), value)))
+    })
 }
 
 fn mark_non_canonical(toolchain: &mut TraceToolchainProvenance, reason: &str) {
@@ -1549,6 +1556,46 @@ mod tests {
     }
 
     #[test]
+    fn trace_provenance_records_declared_toolchain_env_path() {
+        crate::test_support::with_isolated_home(|home| {
+            let component_dir = tempfile::tempdir().unwrap();
+            let toolchain_dir = tempfile::tempdir().unwrap();
+            init_git_repo(component_dir.path());
+            init_git_repo(toolchain_dir.path());
+            let bin = toolchain_dir.path().join("packages/cli/dist/index.js");
+            std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+            std::fs::write(&bin, "#!/usr/bin/env node\n").unwrap();
+            git(toolchain_dir.path(), &["add", "."]);
+            git(toolchain_dir.path(), &["commit", "-m", "add cli bin"]);
+
+            let component = test_component(component_dir.path());
+            let context = write_trace_extension(home.path(), &component);
+            let mut args = test_run_args(component_dir.path());
+            args.runner_inputs.env.push((
+                "FIXTURE_TOOLCHAIN_BIN".to_string(),
+                bin.to_string_lossy().to_string(),
+            ));
+
+            let (toolchain, _) = trace_provenance(
+                Some(&context),
+                &component_dir.path().to_string_lossy(),
+                &args,
+            )
+            .unwrap();
+
+            let provenance = toolchain
+                .toolchains
+                .get("fixture-toolchain")
+                .expect("declared toolchain provenance");
+            assert_eq!(
+                provenance.source.as_deref(),
+                Some("env:FIXTURE_TOOLCHAIN_BIN")
+            );
+            assert_eq!(toolchain.wp_codebox.as_ref(), Some(provenance));
+        });
+    }
+
+    #[test]
     fn dirty_git_provenance_makes_toolchain_non_canonical() {
         let mut reasons = Vec::new();
         let provenance = TraceGitProvenance {
@@ -1573,6 +1620,69 @@ mod tests {
             local_path: path.to_string_lossy().to_string(),
             ..Default::default()
         }
+    }
+
+    fn write_trace_extension(
+        home: &std::path::Path,
+        component: &Component,
+    ) -> ExtensionExecutionContext {
+        let extension_id = "fixture-extension";
+        let extension_dir = home.join(".config/homeboy/extensions").join(extension_id);
+        std::fs::create_dir_all(&extension_dir).expect("extension dir");
+        std::fs::write(
+            extension_dir.join(format!("{extension_id}.json")),
+            serde_json::json!({
+                "name": "Fixture Extension",
+                "version": "0.0.0",
+                "trace": {
+                    "extension_script": "trace.js",
+                    "toolchain_provenance": [
+                        {
+                            "id": "fixture-toolchain",
+                            "label": "Fixture Toolchain",
+                            "legacy_field": "wp_codebox",
+                            "env_keys": ["FIXTURE_TOOLCHAIN_BIN"]
+                        }
+                    ]
+                }
+            })
+            .to_string(),
+        )
+        .expect("extension manifest");
+        std::fs::write(extension_dir.join("trace.js"), "#!/usr/bin/env node\n").unwrap();
+
+        ExtensionExecutionContext {
+            component: component.clone(),
+            capability: ExtensionCapability::Trace,
+            extension_id: extension_id.to_string(),
+            extension_path: extension_dir,
+            script_path: "trace.js".to_string(),
+            settings: Vec::new(),
+        }
+    }
+
+    fn init_git_repo(path: &std::path::Path) {
+        git(path, &["init", "-b", "main"]);
+        git(path, &["config", "user.email", "test@example.com"]);
+        git(path, &["config", "user.name", "Homeboy Test"]);
+        std::fs::write(path.join("README.md"), "test\n").unwrap();
+        git(path, &["add", "."]);
+        git(path, &["commit", "-m", "initial"]);
+    }
+
+    fn git(path: &std::path::Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .output()
+            .unwrap_or_else(|err| panic!("git {:?} failed to start: {}", args, err));
+        assert!(
+            output.status.success(),
+            "git {:?} failed\nstdout: {}\nstderr: {}",
+            args,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     fn test_run_args(path: &std::path::Path) -> TraceRunWorkflowArgs {

@@ -1109,6 +1109,7 @@ mod tests {
                     dirty: Some(false),
                     source: None,
                 },
+                toolchains: Default::default(),
                 wp_codebox: None,
                 node: Some("v24.0.0".to_string()),
                 runtime_assets: Default::default(),

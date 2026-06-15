@@ -600,6 +600,15 @@ impl ExtensionManifest {
             .unwrap_or(&[])
     }
 
+    pub fn trace_toolchain_provenance(
+        &self,
+    ) -> &[super::manifest_config::TraceToolchainProvenanceConfig] {
+        self.trace
+            .as_ref()
+            .map(|trace| trace.toolchain_provenance.as_slice())
+            .unwrap_or(&[])
+    }
+
     pub fn env_provider_script(&self) -> Option<&str> {
         self.env_provider
             .as_ref()

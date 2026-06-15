@@ -294,6 +294,21 @@ pub struct TraceConfig {
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub runner_capabilities: Vec<String>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub toolchain_provenance: Vec<TraceToolchainProvenanceConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceToolchainProvenanceConfig {
+    pub id: String,
+    pub label: String,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legacy_field: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env_keys: Vec<String>,
 }
 
 /// Post-write verify contract for autofix. Runs from the component root after
