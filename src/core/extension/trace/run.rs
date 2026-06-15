@@ -1636,7 +1636,6 @@ mod tests {
                         {
                             "id": "fixture-toolchain",
                             "label": "Fixture Toolchain",
-                            "legacy_field": "fixture_toolchain",
                             "env_keys": ["FIXTURE_TOOLCHAIN_BIN"]
                         }
                     ]

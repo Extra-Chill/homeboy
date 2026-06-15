@@ -8,8 +8,7 @@ use std::process::Command;
 
 use crate::commands::escape_markdown_table_cell;
 use homeboy::core::extension::{
-    load_all_extensions, TraceBrowserArtifactMapConfig, TraceBrowserEvidenceAdapterConfig,
-    TraceBrowserSummaryAliasConfig,
+    load_all_extensions, TraceBrowserEvidenceAdapterConfig, TraceBrowserSummaryAliasConfig,
 };
 
 #[derive(Args, Debug, Clone)]
@@ -640,7 +639,6 @@ mod implementation {
 
     fn has_provenance_signal(object: &Map<String, Value>) -> bool {
         object.contains_key("artifacts")
-            || object.contains_key("files")
             || first_string(
                 object,
                 &["artifact", "artifact_id", "manifest", "manifest_id"],
@@ -1465,19 +1463,11 @@ mod implementation {
     }
 
     pub(super) fn browser_evidence_adapters() -> Vec<TraceBrowserEvidenceAdapterConfig> {
-        let mut adapters = load_all_extensions()
+        load_all_extensions()
             .unwrap_or_default()
             .into_iter()
             .flat_map(|extension| extension.trace_browser_evidence().to_vec())
-            .collect::<Vec<_>>();
-        adapters.push(TraceBrowserEvidenceAdapterConfig {
-            id: "homeboy.generic-browser-evidence".to_string(),
-            summary_aliases: Vec::new(),
-            artifact_maps: vec![TraceBrowserArtifactMapConfig {
-                field: "files".to_string(),
-            }],
-        });
-        adapters
+            .collect::<Vec<_>>()
     }
 
     fn browser_summary_adapters(

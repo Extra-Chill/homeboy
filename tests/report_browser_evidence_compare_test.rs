@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use homeboy::commands::report::{
     browser_evidence_compare_from_args, browser_evidence_compare_from_dirs,
     browser_evidence_compare_from_dirs_with_visual_and_adapters, BrowserEvidenceCompareArgs,
+    VisualCompareOptions,
 };
 use homeboy::core::extension::{
     TraceBrowserArtifactMapConfig, TraceBrowserEvidenceAdapterConfig,
@@ -501,14 +502,21 @@ process.stdout.write(JSON.stringify({
         std::env::set_var("HOMEBOY_FAKE_VISUAL_INPUT", &input_capture);
     }
 
-    let mut compare_args = args(&root, false);
-    compare_args.visual_compare = true;
-    compare_args.visual_artifacts_dir =
-        Some(root.join("visual-output").to_string_lossy().to_string());
-    compare_args.visual_compare_provider = Some("node".to_string());
-    compare_args.visual_provider_args = vec![provider.to_string_lossy().to_string()];
-    compare_args.visual_threshold = Some(0.1);
-    let report = browser_evidence_compare_from_args(&compare_args).expect("report renders");
+    let report = browser_evidence_compare_from_dirs_with_visual_and_adapters(
+        &[root.join("baseline")],
+        &[root.join("candidate")],
+        "baseline-main",
+        "candidate-pr",
+        false,
+        Some(VisualCompareOptions {
+            artifacts_dir: root.join("visual-output"),
+            provider_command: "node".to_string(),
+            provider_args: vec![provider.to_string_lossy().to_string()],
+            threshold: Some(0.1),
+        }),
+        &[browser_evidence_adapter()],
+    )
+    .expect("report renders");
 
     let variant = report.variants.first().expect("variant should exist");
     let visual = variant.visual_compare.as_ref().expect("visual result");

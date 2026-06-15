@@ -440,12 +440,7 @@ fn lab_pre_dispatch_structured_dependency_failure_message(output: &str) -> Optio
     output
         .lines()
         .filter_map(|line| serde_json::from_str::<LabDependencyFailureEnvelope>(line.trim()).ok())
-        .find(|envelope| {
-            envelope.schema.as_deref().is_none_or(|schema| {
-                schema == "homeboy/lab-dependency-failure/v1"
-                    || schema == "homeboy/lab-pre-dispatch-dependency-failure/v1"
-            })
-        })
+        .find(|envelope| envelope.schema.as_deref() == Some("homeboy/lab-dependency-failure/v1"))
         .map(|envelope| structured_dependency_failure_message(&envelope))
 }
 

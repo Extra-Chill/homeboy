@@ -898,7 +898,7 @@ IFS=$'\t' read -r total passed failed skipped <<EOF
 $parsed
 EOF
 homeboy_write_test_results "$total" "$passed" "$failed" "$skipped"
-printf 'legacy helper log line\n'
+printf 'provider parser log line\n'
 "#,
         )
         .expect("parser script");
