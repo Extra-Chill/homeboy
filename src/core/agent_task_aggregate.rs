@@ -389,10 +389,11 @@ fn inventory_item(task_id: &str, artifact: &AgentTaskArtifact) -> AgentTaskArtif
 }
 
 fn is_apply_artifact(artifact: &AgentTaskArtifact) -> bool {
-    matches!(
+    let apply_kind = matches!(
         artifact.kind.as_str(),
         "patch" | "diff" | "change_artifact" | "workspace_patch" | "artifact"
-    ) || artifact_flag(artifact, "approved")
+    ) || artifact_flag(artifact, "approved");
+    apply_kind && artifact.size_bytes != Some(0)
 }
 
 fn artifact_flag(artifact: &AgentTaskArtifact, key: &str) -> bool {
@@ -529,6 +530,61 @@ mod tests {
             report.issue_report_candidates[0].reason,
             "artifact marked rejected or false-positive"
         );
+    }
+
+    #[test]
+    fn aggregate_outcomes_does_not_apply_empty_patch_artifacts() {
+        let mut empty_patch = artifact("codebox-patch", "patch", json!({}));
+        empty_patch.size_bytes = Some(0);
+
+        let report = aggregate_agent_task_outcomes(&[outcome(
+            "empty-patch",
+            AgentTaskOutcomeStatus::Succeeded,
+            vec![empty_patch],
+        )]);
+
+        assert!(report.apply_candidates.is_empty());
+        assert_eq!(report.summary.apply_candidates, 0);
+        assert_eq!(report.summary.review_candidates, 1);
+        assert_eq!(report.review_candidates[0].task_id, "empty-patch");
+        assert_eq!(
+            report.review_candidates[0].reason,
+            "succeeded without apply-back artifact"
+        );
+    }
+
+    #[test]
+    fn aggregate_outcomes_keeps_non_empty_patch_apply_candidate() {
+        let mut non_empty_patch = artifact("codebox-patch", "patch", json!({}));
+        non_empty_patch.size_bytes = Some(128);
+
+        let report = aggregate_agent_task_outcomes(&[outcome(
+            "non-empty-patch",
+            AgentTaskOutcomeStatus::Succeeded,
+            vec![non_empty_patch],
+        )]);
+
+        assert_eq!(report.summary.apply_candidates, 1);
+        assert_eq!(report.apply_candidates[0].task_id, "non-empty-patch");
+        assert_eq!(
+            report.apply_candidates[0].artifact_ids,
+            vec!["codebox-patch"]
+        );
+    }
+
+    #[test]
+    fn aggregate_outcomes_keeps_unknown_size_patch_apply_candidate() {
+        let mut unknown_size_patch = artifact("legacy-patch", "patch", json!({}));
+        unknown_size_patch.size_bytes = None;
+
+        let report = aggregate_agent_task_outcomes(&[outcome(
+            "legacy-patch",
+            AgentTaskOutcomeStatus::Succeeded,
+            vec![unknown_size_patch],
+        )]);
+
+        assert_eq!(report.summary.apply_candidates, 1);
+        assert_eq!(report.apply_candidates[0].task_id, "legacy-patch");
     }
 
     #[test]
