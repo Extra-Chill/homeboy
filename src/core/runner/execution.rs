@@ -285,6 +285,7 @@ pub fn runner_exec_failure_error(output: &RunnerExecOutput) -> Option<Error> {
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn exec_via_reverse_broker(
     runner: &Runner,
     broker_url: &str,
@@ -412,6 +413,7 @@ fn exec_via_reverse_broker(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn exec_via_daemon(
     runner: &Runner,
     local_url: &str,
