@@ -6,8 +6,8 @@ use std::io::Read;
 
 use homeboy::core::agent_tasks::controller_service as agent_task_controller_service;
 use homeboy::core::agent_tasks::controller_service::{
-    ControllerApplyEventRequest, ControllerDispatchHook, ControllerInitRequest,
-    ControllerMarkHumanReadyRequest,
+    AgentTaskRepoLoopSpec, ControllerApplyEventRequest, ControllerDispatchHook,
+    ControllerFromSpecRequest, ControllerInitRequest, ControllerMarkHumanReadyRequest,
 };
 use homeboy::core::agent_tasks::provider::ExtensionProviderAgentTaskExecutor;
 use homeboy::core::agent_tasks::scheduler::{AgentTaskExecutorAdapter, AgentTaskPlan};
@@ -93,6 +93,8 @@ pub struct AgentTaskControllerArgs {
 pub enum AgentTaskControllerCommand {
     /// Create a durable loop controller record.
     Init(AgentTaskControllerInitArgs),
+    /// Initialize or resume a durable loop controller from a repo-authored JSON spec.
+    FromSpec(AgentTaskControllerFromSpecArgs),
     /// Read a durable loop controller record.
     Status(AgentTaskControllerStatusArgs),
     /// List durable loop controller records.
@@ -121,6 +123,17 @@ pub struct AgentTaskControllerInitArgs {
     /// Declared graph/config version for resume compatibility.
     #[arg(long = "config-version", default_value = "v1", value_name = "VERSION")]
     pub config_version: String,
+}
+
+#[derive(Args, Debug)]
+pub struct AgentTaskControllerFromSpecArgs {
+    /// Repo loop spec JSON, @file, or - for stdin.
+    #[arg(value_name = "SPEC")]
+    pub spec: String,
+
+    /// Execute pending actions after applying the spec.
+    #[arg(long)]
+    pub resume: bool,
 }
 
 #[derive(Args, Debug)]
@@ -621,6 +634,7 @@ fn controller(args: AgentTaskControllerArgs) -> CmdResult<Value> {
             })?;
             Ok((command_json_value(record)?, 0))
         }
+        AgentTaskControllerCommand::FromSpec(spec_args) => controller_from_spec(spec_args),
         AgentTaskControllerCommand::Status(status_args) => {
             let report = homeboy::core::agent_tasks::loop_controller::controller_status_report(
                 &status_args.loop_id,
@@ -645,6 +659,35 @@ fn controller(args: AgentTaskControllerArgs) -> CmdResult<Value> {
             Ok((command_json_value(record)?, 0))
         }
     }
+}
+
+fn controller_from_spec(args: AgentTaskControllerFromSpecArgs) -> CmdResult<Value> {
+    let raw = config::read_json_spec_to_string(&args.spec)?;
+    let spec: AgentTaskRepoLoopSpec = serde_json::from_str(&raw).map_err(|error| {
+        homeboy::core::Error::validation_invalid_argument(
+            "spec",
+            error.to_string(),
+            Some(args.spec.clone()),
+            None,
+        )
+    })?;
+    let report = agent_task_controller_service::init_from_spec(ControllerFromSpecRequest { spec })?;
+    if !args.resume {
+        return Ok((command_json_value(report)?, 0));
+    }
+
+    let (resume_report, exit_code) = controller_resume_with_executor(
+        report.loop_id.clone(),
+        ExtensionProviderAgentTaskExecutor::discover(),
+    )?;
+    Ok((
+        serde_json::json!({
+            "schema": "homeboy/agent-task-loop-controller-from-spec-and-resume-result/v1",
+            "from_spec": report,
+            "resume": resume_report,
+        }),
+        exit_code,
+    ))
 }
 
 fn command_json_value<T: Serialize>(value: T) -> homeboy::core::Result<Value> {
