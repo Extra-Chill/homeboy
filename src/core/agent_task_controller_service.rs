@@ -633,6 +633,7 @@ fn workflow_dispatch_request(
             Value::Array(workflow.tasks.iter().cloned().map(Value::String).collect()),
         );
     }
+    apply_workflow_dispatch_defaults(spec, &mut dispatch);
     let context = workflow_client_context(spec, workflow)?;
     dispatch.insert(
         "client_context".to_string(),
@@ -654,6 +655,31 @@ fn workflow_dispatch_request(
         "mode": "dispatch",
         "dispatch": Value::Object(dispatch),
     }))
+}
+
+fn apply_workflow_dispatch_defaults(
+    spec: &AgentTaskRepoLoopSpec,
+    dispatch: &mut serde_json::Map<String, Value>,
+) {
+    let Some(defaults) = spec
+        .metadata
+        .get("dispatch_defaults")
+        .and_then(Value::as_object)
+    else {
+        return;
+    };
+    for key in ["cwd", "workspace", "repo"] {
+        if dispatch.contains_key(key) {
+            continue;
+        }
+        if let Some(value) = defaults
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+        {
+            dispatch.insert(key.to_string(), Value::String(value.to_string()));
+        }
+    }
 }
 
 fn workflow_client_context(
@@ -2390,7 +2416,13 @@ mod tests {
                 loop_id: "repo-loop-spec".to_string(),
                 phase: "init".to_string(),
                 config_version: "repo-v1".to_string(),
-                metadata: json!({ "domain": "example" }),
+                metadata: json!({
+                    "domain": "example",
+                    "dispatch_defaults": {
+                        "cwd": "/tmp/repo-loop-spec-checkout",
+                        "repo": "repo-loop-spec-checkout"
+                    }
+                }),
                 entities: vec![AgentTaskRepoLoopSpecEntity {
                     entity_type: "finding".to_string(),
                     key: "abc".to_string(),
@@ -2484,6 +2516,14 @@ mod tests {
                 } => {
                     assert_eq!(dedupe_key, "workflow:repair-findings");
                     assert_eq!(request_template["mode"], "dispatch");
+                    assert_eq!(
+                        request_template["dispatch"]["cwd"],
+                        "/tmp/repo-loop-spec-checkout"
+                    );
+                    assert_eq!(
+                        request_template["dispatch"]["repo"],
+                        "repo-loop-spec-checkout"
+                    );
                     assert!(request_template["dispatch"].get("backend").is_none());
                     assert!(request_template["dispatch"]
                         .get("provider_config")
