@@ -955,6 +955,12 @@ pub(crate) fn prepare_runner_process(
             &env,
         )?);
         normalize_runner_command_env(&mut env);
+    } else {
+        env.extend(resolve_controller_secret_env_for_command(
+            &runner.secret_env,
+            &request.secret_env_names,
+            &env,
+        )?);
     }
 
     let source_snapshot = request
@@ -1088,6 +1094,33 @@ fn resolve_runner_secret_env_for_command(
     }
 
     resolve_runner_secret_env(&refs)
+}
+
+fn resolve_controller_secret_env_for_command(
+    secret_env: &HashMap<String, server::RunnerSecretEnvRef>,
+    required_names: &[String],
+    env: &HashMap<String, String>,
+) -> Result<HashMap<String, String>> {
+    let mut resolved = HashMap::new();
+    for name in required_names {
+        if env.contains_key(name.as_str()) {
+            continue;
+        }
+        let Some(source) = secret_env.get(name.as_str()) else {
+            continue;
+        };
+        if source
+            .secret
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+        {
+            resolved.extend(resolve_runner_secret_env(&HashMap::from([(
+                name.clone(),
+                source.clone(),
+            )]))?);
+        }
+    }
+    Ok(resolved)
 }
 
 fn runner_exec_secret_env_names(
@@ -1736,22 +1769,34 @@ mod tests {
     }
 
     #[test]
-    fn remote_daemon_secret_env_refs_resolve_only_on_runner_side() {
+    fn remote_daemon_secret_env_refs_forward_controller_secrets_and_keep_runner_refs_local() {
         crate::test_support::with_isolated_home(|_| {
             let temp = tempfile::tempdir().expect("tempdir");
             let workspace = temp.path().join("workspace");
             std::fs::create_dir_all(&workspace).expect("workspace");
             let secret_file = temp.path().join("runner-secret");
             std::fs::write(&secret_file, "dummy-runner-secret\n").expect("secret file");
-            let missing_controller_file = temp.path().join("missing-controller-secret");
+            crate::core::agent_task_secrets::set_config_secret(
+                "HOMEBOY_CONTROLLER_SECRET_TEST_KEY",
+                "dummy-controller-secret",
+            )
+            .expect("configure controller secret");
 
             let mut controller_runner = ssh_runner();
             controller_runner.workspace_root = Some(workspace.display().to_string());
             controller_runner.secret_env.insert(
-                "OPENAI_API_KEY".to_string(),
+                "CONTROLLER_API_KEY".to_string(),
                 RunnerSecretEnvRef {
                     env: None,
-                    file: Some(missing_controller_file.display().to_string()),
+                    file: None,
+                    secret: Some("HOMEBOY_CONTROLLER_SECRET_TEST_KEY".to_string()),
+                },
+            );
+            controller_runner.secret_env.insert(
+                "RUNNER_API_KEY".to_string(),
+                RunnerSecretEnvRef {
+                    env: None,
+                    file: Some(secret_file.display().to_string()),
                     secret: None,
                 },
             );
@@ -1763,7 +1808,10 @@ mod tests {
                 project_id: None,
                 command: vec!["true".to_string()],
                 env: Default::default(),
-                secret_env_names: Vec::new(),
+                secret_env_names: vec![
+                    "CONTROLLER_API_KEY".to_string(),
+                    "RUNNER_API_KEY".to_string(),
+                ],
                 capture_patch: false,
                 raw_exec: false,
                 source_snapshot: Some(SourceSnapshot::existing_remote(
@@ -1774,14 +1822,21 @@ mod tests {
                 require_paths: Vec::new(),
                 validate_require_paths_on_host: false,
             })
-            .expect("controller prep keeps secret refs unresolved for SSH runner");
+            .expect("controller prep forwards configured secret refs for SSH runner");
 
-            assert!(!controller_plan.env.contains_key("OPENAI_API_KEY"));
+            assert_eq!(
+                controller_plan
+                    .env
+                    .get("CONTROLLER_API_KEY")
+                    .map(String::as_str),
+                Some("dummy-controller-secret")
+            );
+            assert!(!controller_plan.env.contains_key("RUNNER_API_KEY"));
 
             let mut daemon_runner = ssh_runner();
             daemon_runner.workspace_root = Some(workspace.display().to_string());
             daemon_runner.secret_env.insert(
-                "OPENAI_API_KEY".to_string(),
+                "RUNNER_API_KEY".to_string(),
                 RunnerSecretEnvRef {
                     env: None,
                     file: Some(secret_file.display().to_string()),
@@ -1800,10 +1855,10 @@ mod tests {
                     "compare".to_string(),
                     "demo".to_string(),
                     "scenario".to_string(),
-                    "--secret-env=OPENAI_API_KEY".to_string(),
+                    "--secret-env=RUNNER_API_KEY".to_string(),
                 ],
                 env: Default::default(),
-                secret_env_names: vec!["OPENAI_API_KEY".to_string()],
+                secret_env_names: vec!["RUNNER_API_KEY".to_string()],
                 capture_patch: false,
                 raw_exec: false,
                 source_snapshot: Some(SourceSnapshot::existing_remote(
@@ -1817,7 +1872,7 @@ mod tests {
             .expect("daemon prep resolves secret refs on runner side");
 
             assert_eq!(
-                daemon_plan.env.get("OPENAI_API_KEY").map(String::as_str),
+                daemon_plan.env.get("RUNNER_API_KEY").map(String::as_str),
                 Some("dummy-runner-secret")
             );
         });
