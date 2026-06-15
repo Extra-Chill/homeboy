@@ -3,6 +3,8 @@ use homeboy::core::agent_tasks::gate::AgentTaskGateRevealPolicy;
 use serde::Serialize;
 use serde_json::Value;
 use std::io::Read;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use homeboy::core::agent_tasks::controller_service as agent_task_controller_service;
 use homeboy::core::agent_tasks::controller_service::{
@@ -663,7 +665,7 @@ fn controller(args: AgentTaskControllerArgs) -> CmdResult<Value> {
 
 fn controller_from_spec(args: AgentTaskControllerFromSpecArgs) -> CmdResult<Value> {
     let raw = config::read_json_spec_to_string(&args.spec)?;
-    let spec: AgentTaskRepoLoopSpec = serde_json::from_str(&raw).map_err(|error| {
+    let mut spec: AgentTaskRepoLoopSpec = serde_json::from_str(&raw).map_err(|error| {
         homeboy::core::Error::validation_invalid_argument(
             "spec",
             error.to_string(),
@@ -671,6 +673,7 @@ fn controller_from_spec(args: AgentTaskControllerFromSpecArgs) -> CmdResult<Valu
             None,
         )
     })?;
+    apply_from_spec_dispatch_defaults(&mut spec, &args.spec);
     let report = agent_task_controller_service::init_from_spec(ControllerFromSpecRequest { spec })?;
     if !args.resume {
         return Ok((command_json_value(report)?, 0));
@@ -688,6 +691,67 @@ fn controller_from_spec(args: AgentTaskControllerFromSpecArgs) -> CmdResult<Valu
         }),
         exit_code,
     ))
+}
+
+fn apply_from_spec_dispatch_defaults(spec: &mut AgentTaskRepoLoopSpec, spec_arg: &str) {
+    let Some(spec_path) = spec_file_path(spec_arg) else {
+        return;
+    };
+    let Some(root) = git_root_for_spec(&spec_path) else {
+        return;
+    };
+    let repo = root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_string();
+    if repo.is_empty() {
+        return;
+    }
+
+    let metadata = match &mut spec.metadata {
+        Value::Object(metadata) => metadata,
+        _ => {
+            spec.metadata = serde_json::json!({});
+            spec.metadata.as_object_mut().expect("metadata object")
+        }
+    };
+    let defaults = metadata
+        .entry("dispatch_defaults".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    let Value::Object(defaults) = defaults else {
+        return;
+    };
+    defaults
+        .entry("cwd".to_string())
+        .or_insert_with(|| Value::String(root.display().to_string()));
+    defaults
+        .entry("repo".to_string())
+        .or_insert_with(|| Value::String(repo));
+}
+
+fn spec_file_path(spec_arg: &str) -> Option<PathBuf> {
+    if spec_arg == "-" || spec_arg.trim_start().starts_with('{') {
+        return None;
+    }
+    let path = spec_arg.strip_prefix('@').unwrap_or(spec_arg);
+    let path = PathBuf::from(path);
+    path.is_file().then_some(path)
+}
+
+fn git_root_for_spec(spec_path: &Path) -> Option<PathBuf> {
+    let dir = spec_path.parent()?;
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let root = String::from_utf8(output.stdout).ok()?.trim().to_string();
+    (!root.is_empty()).then(|| PathBuf::from(root))
 }
 
 fn command_json_value<T: Serialize>(value: T) -> homeboy::core::Result<Value> {
@@ -1172,6 +1236,59 @@ mod tests {
     };
     use serde_json::{json, Value};
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn from_spec_dispatch_defaults_use_spec_git_checkout() {
+        let repo = tempfile::tempdir().expect("repo dir");
+        let git_status = Command::new("git")
+            .arg("-C")
+            .arg(repo.path())
+            .arg("init")
+            .status()
+            .expect("git init runs");
+        assert!(git_status.success());
+        let spec_dir = repo.path().join(".github/homeboy/controllers");
+        std::fs::create_dir_all(&spec_dir).expect("spec dir");
+        let spec_path = spec_dir.join("loop.json");
+        std::fs::write(&spec_path, "{}").expect("spec file");
+        let mut spec = AgentTaskRepoLoopSpec {
+            schema: None,
+            loop_id: "repo-loop-cli-defaults".to_string(),
+            phase: "init".to_string(),
+            config_version: "v1".to_string(),
+            metadata: Value::Null,
+            entities: Vec::new(),
+            agents: Vec::new(),
+            tools: Vec::new(),
+            abilities: Vec::new(),
+            workflows: Vec::new(),
+            artifacts: Vec::new(),
+            dependencies: Vec::new(),
+            gates: Vec::new(),
+            metrics: Vec::new(),
+            gate_bundles: Vec::new(),
+            policy: None,
+            phases: Vec::new(),
+            actions: Vec::new(),
+            initial_event: None,
+        };
+
+        apply_from_spec_dispatch_defaults(&mut spec, &format!("@{}", spec_path.display()));
+        let expected_root = std::fs::canonicalize(repo.path()).expect("canonical repo path");
+
+        assert_eq!(
+            spec.metadata["dispatch_defaults"]["cwd"],
+            expected_root.display().to_string()
+        );
+        assert_eq!(
+            spec.metadata["dispatch_defaults"]["repo"],
+            repo.path()
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .to_string()
+        );
+    }
 
     #[test]
     fn submit_run_status_reports_terminal_state() {
