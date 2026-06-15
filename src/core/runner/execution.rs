@@ -328,7 +328,13 @@ fn exec_via_reverse_broker(
             Some("parse reverse broker job".to_string()),
         )
     })?;
-    print_lab_offload_handoff(&runner.id, Some(&cwd), &job.id.to_string(), None);
+    let handoff_run_id = persist_lab_offload_handoff_run(runner, &cwd, &command, &job);
+    print_lab_offload_handoff(
+        &runner.id,
+        Some(&cwd),
+        &job.id.to_string(),
+        handoff_run_id.as_deref(),
+    );
 
     let deadline = Instant::now() + runner_exec_wait_timeout();
     while !matches!(
@@ -453,7 +459,13 @@ fn exec_via_daemon(
     let mut job: Job = serde_json::from_value(job_value.clone()).map_err(|err| {
         Error::internal_json(err.to_string(), Some("parse daemon exec job".to_string()))
     })?;
-    print_lab_offload_handoff(&runner.id, Some(&cwd), &job.id.to_string(), None);
+    let handoff_run_id = persist_lab_offload_handoff_run(runner, &cwd, &command, &job);
+    print_lab_offload_handoff(
+        &runner.id,
+        Some(&cwd),
+        &job.id.to_string(),
+        handoff_run_id.as_deref(),
+    );
 
     let deadline = Instant::now() + runner_exec_wait_timeout();
     while !matches!(
@@ -672,6 +684,24 @@ fn print_lab_offload_handoff(
     eprintln!("Lab offload handoff:");
     for hint in lab_offload_handoff_hints(runner_id, remote_cwd, job_id, persisted_run_id) {
         eprintln!("- {hint}");
+    }
+}
+
+fn persist_lab_offload_handoff_run(
+    runner: &Runner,
+    cwd: &str,
+    command: &[String],
+    job: &Job,
+) -> Option<String> {
+    match mirror_daemon_job_progress(runner, cwd, command, job, &[]) {
+        Ok(run) => Some(run.id),
+        Err(err) => {
+            eprintln!(
+                "Lab offload handoff: could not persist controller-side run mirror for runner `{}` daemon job `{}`: {}",
+                runner.id, job.id, err.message
+            );
+            None
+        }
     }
 }
 
@@ -2121,6 +2151,55 @@ mod tests {
         ));
         assert!(joined.contains("homeboy runner job logs homeboy-lab job-123 --follow"));
         assert!(joined.contains("homeboy runner job cancel homeboy-lab job-123"));
+    }
+
+    #[test]
+    fn lab_offload_handoff_persists_run_when_job_is_accepted() {
+        crate::test_support::with_isolated_home(|_| {
+            let runner = ssh_runner();
+            let job_id = uuid::Uuid::new_v4();
+            let job = Job {
+                id: job_id,
+                operation: "runner.exec".to_string(),
+                status: JobStatus::Running,
+                created_at_ms: 1_700_000_000_000,
+                updated_at_ms: 1_700_000_001_000,
+                started_at_ms: Some(1_700_000_000_000),
+                finished_at_ms: None,
+                event_count: 0,
+                source_snapshot: None,
+                stale_reason: None,
+                target_runner_id: None,
+                target_project_id: None,
+                claim_id: None,
+                claimed_by_runner_id: None,
+                claimed_at_ms: None,
+                claim_expires_at_ms: None,
+                artifacts: Vec::new(),
+            };
+
+            let run_id = persist_lab_offload_handoff_run(
+                &runner,
+                "/srv/homeboy/project",
+                &["homeboy".to_string(), "trace".to_string()],
+                &job,
+            )
+            .expect("persist handoff run");
+
+            assert_eq!(run_id, format!("runner-exec-lab-{job_id}"));
+            let store =
+                crate::core::observation::ObservationStore::open_initialized().expect("store");
+            let run = store
+                .get_run(&run_id)
+                .expect("get run")
+                .expect("persisted handoff run");
+            assert_eq!(run.status, "running");
+            assert_eq!(run.cwd.as_deref(), Some("/srv/homeboy/project"));
+            assert_eq!(
+                run.metadata_json["lab"]["remote_job"]["id"].as_str(),
+                Some(job_id.to_string().as_str())
+            );
+        });
     }
 
     #[test]
