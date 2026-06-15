@@ -178,6 +178,8 @@ fn start_status_and_stop_manage_local_service_runtime_state() {
             backend_public_url: None,
             source_run_id: Some("run-123".to_string()),
             source_workflow_id: Some("workflow-abc".to_string()),
+            readiness_kind: ServiceTunnelReadinessKind::Process,
+            readiness_checks: Vec::new(),
         })
         .expect("start service");
 
@@ -253,6 +255,8 @@ fn start_cleans_runtime_state_when_readiness_fails() {
             backend_public_url: None,
             source_run_id: None,
             source_workflow_id: None,
+            readiness_kind: ServiceTunnelReadinessKind::Process,
+            readiness_checks: Vec::new(),
         })
         .expect_err("readiness should fail");
 
@@ -262,6 +266,137 @@ fn start_cleans_runtime_state_when_readiness_fails() {
         assert!(!state_path.exists());
         let stopped = status("failing-preview").expect("status");
         assert!(!stopped.running);
+    });
+}
+
+#[test]
+fn proof_readiness_waits_for_stdout_signal_not_just_process_liveness() {
+    test_support::with_isolated_home(|_| {
+        create_server();
+        expose(ExposeServiceTunnelSpec {
+            id: "proof-preview".to_string(),
+            server_id: "private-host".to_string(),
+            target: ServiceTunnelTarget {
+                host: "127.0.0.1".to_string(),
+                port: 7331,
+            },
+            scheme: "http".to_string(),
+            local_port: Some(8835),
+            auth: ServiceTunnelAuth {
+                mode: ServiceTunnelAuthMode::BearerEnv,
+                env_var: Some("PROOF_PREVIEW_TOKEN".to_string()),
+                header: Some("Authorization".to_string()),
+            },
+            policy: ServiceTunnelPolicy {
+                exposure: ServiceTunnelExposure::PrivateLoopback,
+                require_auth: true,
+                allowed_clients: Vec::new(),
+                preview: ServiceTunnelPreviewPolicy::default(),
+                native_preview_auth: ServiceTunnelNativePreviewAuthPolicy::default(),
+            },
+            description: None,
+        })
+        .expect("expose service");
+
+        let started = start(StartServiceTunnelSpec {
+            id: "proof-preview".to_string(),
+            command: "printf 'proof ready\\n'; while true; do sleep 1; done".to_string(),
+            cwd: None,
+            env: BTreeMap::new(),
+            host: Some("127.0.0.1".to_string()),
+            port: Some(8835),
+            scheme: Some("http".to_string()),
+            health_url: None,
+            health_path: None,
+            readiness_timeout_secs: 2,
+            backend: ServiceTunnelTunnelBackend::None,
+            backend_command: None,
+            backend_public_url: None,
+            source_run_id: None,
+            source_workflow_id: None,
+            readiness_kind: ServiceTunnelReadinessKind::Proof,
+            readiness_checks: vec![ServiceTunnelReadinessCheck::StdoutRegex {
+                pattern: "proof ready".to_string(),
+            }],
+        })
+        .expect("start service");
+
+        let readiness = started.readiness.expect("readiness status");
+        assert!(readiness.process_running);
+        assert!(readiness.ready);
+        assert!(!readiness.preview_ready);
+        assert!(readiness.proof_ready);
+        assert_eq!(readiness.checks[0].check, "stdout_regex");
+
+        stop("proof-preview").expect("stop service");
+    });
+}
+
+#[test]
+fn preview_readiness_can_require_artifact_status() {
+    test_support::with_isolated_home(|home| {
+        create_server();
+        let artifact = home.path().join("preview-ready.json");
+        expose(ExposeServiceTunnelSpec {
+            id: "artifact-preview".to_string(),
+            server_id: "private-host".to_string(),
+            target: ServiceTunnelTarget {
+                host: "127.0.0.1".to_string(),
+                port: 7331,
+            },
+            scheme: "http".to_string(),
+            local_port: Some(8836),
+            auth: ServiceTunnelAuth {
+                mode: ServiceTunnelAuthMode::BearerEnv,
+                env_var: Some("ARTIFACT_PREVIEW_TOKEN".to_string()),
+                header: Some("Authorization".to_string()),
+            },
+            policy: ServiceTunnelPolicy {
+                exposure: ServiceTunnelExposure::PrivateLoopback,
+                require_auth: true,
+                allowed_clients: Vec::new(),
+                preview: ServiceTunnelPreviewPolicy::default(),
+                native_preview_auth: ServiceTunnelNativePreviewAuthPolicy::default(),
+            },
+            description: None,
+        })
+        .expect("expose service");
+
+        let started = start(StartServiceTunnelSpec {
+            id: "artifact-preview".to_string(),
+            command: format!(
+                "printf '{{\"status\":\"ready\"}}' > {}; while true; do sleep 1; done",
+                artifact.display()
+            ),
+            cwd: None,
+            env: BTreeMap::new(),
+            host: Some("127.0.0.1".to_string()),
+            port: Some(8836),
+            scheme: Some("http".to_string()),
+            health_url: None,
+            health_path: None,
+            readiness_timeout_secs: 2,
+            backend: ServiceTunnelTunnelBackend::None,
+            backend_command: None,
+            backend_public_url: None,
+            source_run_id: None,
+            source_workflow_id: None,
+            readiness_kind: ServiceTunnelReadinessKind::Preview,
+            readiness_checks: vec![ServiceTunnelReadinessCheck::ArtifactJsonPointer {
+                path: artifact.display().to_string(),
+                pointer: "/status".to_string(),
+                equals: "ready".to_string(),
+            }],
+        })
+        .expect("start service");
+
+        let readiness = started.readiness.expect("readiness status");
+        assert!(readiness.process_running);
+        assert!(readiness.preview_ready);
+        assert!(!readiness.proof_ready);
+        assert_eq!(readiness.checks[0].check, "artifact_json_pointer");
+
+        stop("artifact-preview").expect("stop service");
     });
 }
 
@@ -310,6 +445,8 @@ fn command_backend_records_public_url_and_cleans_up_backend_process() {
             backend_public_url: Some("https://preview.example.test".to_string()),
             source_run_id: None,
             source_workflow_id: None,
+            readiness_kind: ServiceTunnelReadinessKind::Process,
+            readiness_checks: Vec::new(),
         })
         .expect("start service with backend");
 
@@ -592,6 +729,8 @@ fn preview_artifact_serializes_structured_reviewer_contract() {
         backend_process: None,
         source_run_id: Some("run-1".to_string()),
         source_workflow_id: Some("workflow-1".to_string()),
+        readiness_kind: ServiceTunnelReadinessKind::Process,
+        readiness_checks: Vec::new(),
     };
     let context = ServiceTunnelPreviewDecisionContext {
         run_failed: false,
