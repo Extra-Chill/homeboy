@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs::{self, File};
+use std::net::{TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -191,6 +192,8 @@ pub struct ServiceTunnelStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub health: Option<ServiceTunnelHealthStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub readiness: Option<ServiceTunnelReadinessStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub evidence: Option<ServiceTunnelEvidence>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tunnel_backend: Option<ServiceTunnelBackendStatus>,
@@ -240,6 +243,10 @@ pub struct ServiceTunnelRuntimeState {
     pub source_run_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_workflow_id: Option<String>,
+    #[serde(default)]
+    pub readiness_kind: ServiceTunnelReadinessKind,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub readiness_checks: Vec<ServiceTunnelReadinessCheck>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -278,6 +285,53 @@ pub struct ServiceTunnelHealthStatus {
     pub status_code: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceTunnelReadinessKind {
+    Process,
+    Preview,
+    Proof,
+}
+
+impl Default for ServiceTunnelReadinessKind {
+    fn default() -> Self {
+        Self::Process
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ServiceTunnelReadinessCheck {
+    TcpListener,
+    ArtifactJsonPointer {
+        path: String,
+        pointer: String,
+        equals: String,
+    },
+    StdoutRegex {
+        pattern: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ServiceTunnelReadinessStatus {
+    pub kind: ServiceTunnelReadinessKind,
+    pub process_running: bool,
+    pub ready: bool,
+    pub preview_ready: bool,
+    pub proof_ready: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checks: Vec<ServiceTunnelReadinessCheckStatus>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ServiceTunnelReadinessCheckStatus {
+    pub check: String,
+    pub ready: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -358,6 +412,8 @@ pub struct StartServiceTunnelSpec {
     pub backend_public_url: Option<String>,
     pub source_run_id: Option<String>,
     pub source_workflow_id: Option<String>,
+    pub readiness_kind: ServiceTunnelReadinessKind,
+    pub readiness_checks: Vec<ServiceTunnelReadinessCheck>,
 }
 
 pub struct ExposeServiceTunnelSpec {
