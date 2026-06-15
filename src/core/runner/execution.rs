@@ -1656,6 +1656,7 @@ mod tests {
                 project_id: None,
                 command: vec!["node".to_string(), "--version".to_string()],
                 env: Default::default(),
+                secret_env_names: Vec::new(),
                 capture_patch: false,
                 raw_exec: false,
                 source_snapshot: None,
@@ -1686,6 +1687,7 @@ mod tests {
                 project_id: None,
                 command: vec!["node".to_string(), "--version".to_string()],
                 env: Default::default(),
+                secret_env_names: Vec::new(),
                 capture_patch: false,
                 raw_exec: false,
                 source_snapshot: None,
@@ -1716,6 +1718,7 @@ mod tests {
                 project_id: None,
                 command: vec!["node".to_string(), "--version".to_string()],
                 env: Default::default(),
+                secret_env_names: Vec::new(),
                 capture_patch: false,
                 raw_exec: false,
                 source_snapshot: None,
@@ -1833,6 +1836,7 @@ mod tests {
                 RunnerSecretEnvRef {
                     env: Some("HOMEBOY_PREVIEW_TUNNEL_TOKEN".to_string()),
                     file: None,
+                    secret: None,
                 },
             );
             std::env::remove_var("HOMEBOY_PREVIEW_TUNNEL_TOKEN");
@@ -1880,6 +1884,7 @@ mod tests {
                 RunnerSecretEnvRef {
                     env: Some("HOMEBOY_REQUIRED_SECRET_TEST_KEY".to_string()),
                     file: None,
+                    secret: None,
                 },
             );
 
@@ -2192,6 +2197,7 @@ mod tests {
             allow_diagnostic_ssh: true,
             command: vec!["homeboy".to_string(), "--version".to_string()],
             env: Default::default(),
+            secret_env_names: Vec::new(),
             capture_patch: false,
             raw_exec: true,
             source_snapshot: None,
@@ -2570,6 +2576,7 @@ mod tests {
                 Some("extrachill".to_string()),
                 vec!["homeboy".to_string(), "test".to_string()],
                 Default::default(),
+                Vec::new(),
                 false,
                 None,
                 Vec::new(),
@@ -2621,6 +2628,7 @@ mod tests {
             None,
             vec!["homeboy".to_string(), "--version".to_string()],
             Default::default(),
+            Vec::new(),
             false,
             None,
             Vec::new(),
