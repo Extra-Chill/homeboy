@@ -154,7 +154,9 @@ pub struct ServiceTunnelPreviewPolicy {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum ServiceTunnelPreviewPolicyMode {
+    #[default]
     None,
     Always,
     OnFailure,
@@ -168,12 +170,6 @@ impl Default for ServiceTunnelPreviewPolicy {
             mode: ServiceTunnelPreviewPolicyMode::None,
             keep_alive_until: None,
         }
-    }
-}
-
-impl Default for ServiceTunnelPreviewPolicyMode {
-    fn default() -> Self {
-        Self::None
     }
 }
 
@@ -289,16 +285,12 @@ pub struct ServiceTunnelHealthStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum ServiceTunnelReadinessKind {
+    #[default]
     Process,
     Preview,
     Proof,
-}
-
-impl Default for ServiceTunnelReadinessKind {
-    fn default() -> Self {
-        Self::Process
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

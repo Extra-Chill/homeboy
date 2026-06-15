@@ -16,7 +16,7 @@ fn extension_capability_owns_labels_and_scripts() {
         "test": {
             "extension_script": "test.sh",
             "result_parse": {
-                "adapters": ["wp-codebox-json"],
+                "adapters": ["custom-json"],
                 "rules": [{ "pattern": "Tests: (\\d+)", "field": "total" }]
             }
         },
@@ -49,7 +49,7 @@ fn extension_capability_owns_labels_and_scripts() {
             .as_ref()
             .and_then(|test| test.result_parse.as_ref())
             .map(|spec| spec.adapters.clone()),
-        Some(vec!["wp-codebox-json".to_string()])
+        Some(vec!["custom-json".to_string()])
     );
     assert_eq!(
         manifest.compiler_warnings_script(),
@@ -73,6 +73,39 @@ fn extension_capability_owns_labels_and_scripts() {
         assert_eq!(capability.script_path(&manifest), Some(script));
         assert_eq!(capability.requires_script(), requires_script);
     }
+}
+
+#[test]
+fn extension_manifest_parses_trace_browser_evidence_adapters() {
+    let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
+        "name": "Example",
+        "version": "0.0.0",
+        "trace": {
+            "extension_script": "trace.sh",
+            "browser_evidence": [{
+                "id": "custom-provider.browser-summary",
+                "summary_aliases": [{
+                    "request_total_keys": ["networkEvents"],
+                    "page_error_keys": ["errors"],
+                    "metrics": [{
+                        "metric": "browser_network_event_count",
+                        "keys": ["networkEvents"]
+                    }]
+                }],
+                "artifact_maps": [{ "field": "files" }]
+            }]
+        }
+    }))
+    .unwrap();
+
+    let adapters = manifest.trace_browser_evidence();
+    assert_eq!(adapters.len(), 1);
+    assert_eq!(adapters[0].id, "custom-provider.browser-summary");
+    assert_eq!(
+        adapters[0].summary_aliases[0].request_total_keys,
+        vec!["networkEvents"]
+    );
+    assert_eq!(adapters[0].artifact_maps[0].field, "files");
 }
 
 #[test]

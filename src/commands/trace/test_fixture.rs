@@ -120,10 +120,10 @@ if [ "$HOMEBOY_TRACE_LIST_ONLY" = "1" ]; then
 JSON
   exit 0
 fi
-mkdir -p "$HOMEBOY_TRACE_ARTIFACT_DIR/wp-codebox-artifacts/runtime-fixture/files/browser"
-printf '{"url":"https://example.test"}\n' > "$HOMEBOY_TRACE_ARTIFACT_DIR/wp-codebox-artifacts/runtime-fixture/files/browser/network.jsonl"
+mkdir -p "$HOMEBOY_TRACE_ARTIFACT_DIR/provider-artifacts/runtime-fixture/files/browser"
+printf '{"url":"https://example.test"}\n' > "$HOMEBOY_TRACE_ARTIFACT_DIR/provider-artifacts/runtime-fixture/files/browser/network.jsonl"
 cat > "$HOMEBOY_TRACE_RESULTS_FILE" <<JSON
-{"component_id":"$HOMEBOY_COMPONENT_ID","scenario_id":"$HOMEBOY_TRACE_SCENARIO","status":"pass","timeline":[],"assertions":[],"artifacts":[{"label":"Browser network log","path":"wp-codebox-artifacts/runtime-fixture/files/browser/network.jsonl"}]}
+{"component_id":"$HOMEBOY_COMPONENT_ID","scenario_id":"$HOMEBOY_TRACE_SCENARIO","status":"pass","timeline":[],"assertions":[],"artifacts":[{"label":"Browser network log","path":"provider-artifacts/runtime-fixture/files/browser/network.jsonl"}]}
 JSON
 "#,
     );
@@ -141,7 +141,7 @@ JSON
   exit 0
 fi
 cat > "$HOMEBOY_TRACE_RESULTS_FILE" <<JSON
-{"component_id":"$HOMEBOY_COMPONENT_ID","scenario_id":"$HOMEBOY_TRACE_SCENARIO","status":"pass","timeline":[],"assertions":[],"artifacts":[{"label":"Missing browser log","path":"wp-codebox-artifacts/runtime-fixture/files/browser/network.jsonl"}]}
+{"component_id":"$HOMEBOY_COMPONENT_ID","scenario_id":"$HOMEBOY_TRACE_SCENARIO","status":"pass","timeline":[],"assertions":[],"artifacts":[{"label":"Missing browser log","path":"provider-artifacts/runtime-fixture/files/browser/network.jsonl"}]}
 JSON
 "#,
     );

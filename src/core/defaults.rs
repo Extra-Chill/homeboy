@@ -78,15 +78,11 @@ impl Default for BenchConfig {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum BenchLocalExecutionPolicy {
+    #[default]
     Allowed,
     Denied,
-}
-
-impl Default for BenchLocalExecutionPolicy {
-    fn default() -> Self {
-        Self::Allowed
-    }
 }
 
 impl BenchLocalExecutionPolicy {

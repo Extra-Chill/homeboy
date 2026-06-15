@@ -22,6 +22,11 @@ results file. Homeboy parses the results, compares declared numeric
 metrics against a saved baseline, and returns a structured report plus
 an exit code suitable for CI gates.
 
+Bench evidence surfaces artifact access explicitly. Entries that can be opened
+directly include `public_url`; bundle-relative or internal artifacts include
+`relative_to` and `fetch_command` so agents can fetch them with
+`homeboy runs artifact get` instead of guessing public URL shapes.
+
 `bench` is a sibling of `test`, `lint`, and `build` under homeboy's
 extension capability model. The runner contract, manifest shape, and
 baseline primitive (`homeboy.json` → `baselines.bench`) are shared with

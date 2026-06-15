@@ -754,8 +754,8 @@ fn push_toolchain_markdown(out: &mut String, results: &TraceResults) {
         out.push('\n');
     }
     push_git_provenance_line(out, "Homeboy", &toolchain.homeboy);
-    if let Some(wp_codebox) = &toolchain.wp_codebox {
-        push_git_provenance_line(out, "WP Codebox", wp_codebox);
+    for (id, provenance) in &toolchain.toolchains {
+        push_git_provenance_line(out, id, provenance);
     }
     if let Some(components) = &results.components {
         push_git_provenance_line(out, "Target", &components.target);
@@ -1110,7 +1110,6 @@ mod tests {
                     source: None,
                 },
                 toolchains: Default::default(),
-                wp_codebox: None,
                 node: Some("v24.0.0".to_string()),
                 runtime_assets: Default::default(),
             }),

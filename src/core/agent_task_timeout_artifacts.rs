@@ -45,7 +45,7 @@ impl TimeoutArtifactDiscovery {
     ) -> Self {
         let mut discovery = Self::default();
         for path in artifact_discovery_paths(request) {
-            discovery.scan_path(&path, request, &role_aliases);
+            discovery.scan_path(&path, request, role_aliases);
         }
         discovery
     }

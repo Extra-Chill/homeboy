@@ -4,6 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use homeboy::core::agent_tasks::provider::AgentTaskProviderRunnerReadiness;
 use homeboy::core::runners::{self as runner, Runner, RunnerKind, RunnerTunnelMode};
 use homeboy::core::server::{self, Server, SshClient};
 use serde::Serialize;
@@ -606,7 +607,10 @@ mod remote {
                 local_homeboy_version,
                 &homeboy,
             ));
-            checks.extend(probes::wp_codebox_checks(client));
+            checks.extend(probes::provider_readiness_checks(
+                client,
+                &homeboy::core::agent_tasks::provider::provider_runner_readiness_contracts(),
+            ));
         }
 
         checks.extend(probes::connected_daemon_exec_checks(
@@ -1069,52 +1073,126 @@ mod probes {
             .collect()
     }
 
-    pub fn wp_codebox_checks(client: &SshClient) -> Vec<RunnerCheck> {
-        let mut details = BTreeMap::new();
-        let bin = common::remote_line(
-            client,
-            "printf '%s\n' \"${HOMEBOY_WP_CODEBOX_BIN:-${HOMEBOY_SETTINGS_WP_CODEBOX_BIN:-}}\"",
-        )
-        .filter(|value| !value.trim().is_empty());
-        let Some(bin) = bin else {
-            return vec![checks::warning(
-                "lab.wp_codebox.cache",
-                "WP Codebox runner path is not configured in the Lab runner environment".to_string(),
-                Some("Set HOMEBOY_WP_CODEBOX_BIN or HOMEBOY_SETTINGS_WP_CODEBOX_BIN when Lab commands depend on WP Codebox".to_string()),
-            )];
-        };
+    pub fn provider_readiness_checks(
+        client: &SshClient,
+        contracts: &[AgentTaskProviderRunnerReadiness],
+    ) -> Vec<RunnerCheck> {
+        contracts
+            .iter()
+            .filter_map(|contract| provider_readiness_check(client, contract))
+            .collect()
+    }
 
-        details.insert("path".to_string(), bin.clone());
-        let exists = client
-            .execute(&format!("test -e {}", common::shell_word(&bin)))
-            .success;
-        if !exists {
-            return vec![checks::error(
-                "lab.wp_codebox.cache",
-                "Configured WP Codebox runner path does not exist on the Lab runner".to_string(),
-                Some(
-                    "Refresh the WP Codebox cache before running WP Codebox-backed Lab evidence"
-                        .to_string(),
-                ),
-                details,
-            )];
-        }
-
-        if let Some(revision) = common::remote_line(
+    fn provider_readiness_check(
+        client: &SshClient,
+        contract: &AgentTaskProviderRunnerReadiness,
+    ) -> Option<RunnerCheck> {
+        let env_path = contract.env_path.as_ref()?;
+        let env_names = env_path
+            .env
+            .iter()
+            .map(|name| common::shell_word(name))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let path = common::remote_line(
             client,
             &format!(
-                "p={}; if [ -d \"$p/.git\" ]; then git -C \"$p\" rev-parse --short HEAD 2>/dev/null; elif [ -d \"$(dirname \"$p\")/.git\" ]; then git -C \"$(dirname \"$p\")\" rev-parse --short HEAD 2>/dev/null; fi",
-                common::shell_word(&bin)
+                "for name in {env_names}; do candidate=$(printenv \"$name\" 2>/dev/null || true); [ -n \"$candidate\" ] && printf '%s\n' \"$candidate\" && exit 0; done; exit 1"
             ),
-        ) {
+        )
+        .filter(|value| !value.trim().is_empty());
+        let Some(path) = path else {
+            return Some(provider_env_path_readiness_check_from_probe(
+                contract, None, false, None,
+            ));
+        };
+
+        let mut details = BTreeMap::new();
+        details.insert("path".to_string(), path.clone());
+        details.insert("env".to_string(), env_path.env.join(","));
+        let exists = client
+            .execute(&format!("test -e {}", common::shell_word(&path)))
+            .success;
+        if !exists {
+            return Some(provider_env_path_readiness_check_from_probe(
+                contract,
+                Some(path),
+                false,
+                None,
+            ));
+        }
+
+        if env_path.revision.unwrap_or(false) {
+            if let Some(revision) = common::remote_line(
+                client,
+                &format!(
+                    "p={}; if [ -d \"$p/.git\" ]; then git -C \"$p\" rev-parse --short HEAD 2>/dev/null; elif [ -d \"$(dirname \"$p\")/.git\" ]; then git -C \"$(dirname \"$p\")\" rev-parse --short HEAD 2>/dev/null; fi",
+                    common::shell_word(&path)
+                ),
+            ) {
+                details.insert("revision".to_string(), revision);
+            }
+        }
+
+        Some(provider_env_path_readiness_check_from_probe(
+            contract,
+            Some(path),
+            true,
+            details.get("revision").cloned(),
+        ))
+    }
+
+    pub(super) fn provider_env_path_readiness_check_from_probe(
+        contract: &AgentTaskProviderRunnerReadiness,
+        path: Option<String>,
+        exists: bool,
+        revision: Option<String>,
+    ) -> RunnerCheck {
+        let env = contract
+            .env_path
+            .as_ref()
+            .map(|env_path| env_path.env.join(","))
+            .unwrap_or_default();
+        let mut details = BTreeMap::new();
+        if !env.is_empty() {
+            details.insert("env".to_string(), env);
+        }
+        if let Some(path) = path {
+            details.insert("path".to_string(), path);
+        }
+        if let Some(revision) = revision {
             details.insert("revision".to_string(), revision);
         }
 
-        vec![checks::ok_with_details(
-            "lab.wp_codebox.cache",
-            "WP Codebox runner path exists on the Lab runner".to_string(),
+        if !details.contains_key("path") {
+            return checks::warning_with_details(
+                contract.id.clone(),
+                format!(
+                    "{} path is not configured in the Lab runner environment",
+                    contract.label
+                ),
+                contract.remediation.clone(),
+                details,
+            );
+        }
+
+        if !exists {
+            return checks::error(
+                contract.id.clone(),
+                format!(
+                    "Configured {} path does not exist on the Lab runner",
+                    contract.label
+                ),
+                contract.remediation.clone(),
+                details,
+            );
+        }
+
+        checks::ok_with_details(
+            contract.id.clone(),
+            format!("{} path exists on the Lab runner", contract.label),
             details,
-        )]
+        )
     }
 
     struct RemoteHomeboyCandidate {
