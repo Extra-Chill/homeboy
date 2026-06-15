@@ -951,6 +951,7 @@ fn exec(
             allow_diagnostic_ssh,
             command,
             env: Default::default(),
+            secret_env_names: Vec::new(),
             capture_patch,
             raw_exec: true,
             source_snapshot: None,

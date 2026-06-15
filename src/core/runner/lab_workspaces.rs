@@ -839,6 +839,7 @@ fn bootstrap_source_cli_node_dependencies(runner_id: &str, remote_path: &str) ->
                 "--ignore-scripts".to_string(),
             ],
             env: HashMap::new(),
+            secret_env_names: Vec::new(),
             capture_patch: false,
             raw_exec: true,
             source_snapshot: None,

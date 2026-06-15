@@ -245,6 +245,7 @@ fn sync_lab_extension(
             allow_diagnostic_ssh: true,
             command: install_command.clone(),
             env: runner_config.env.clone(),
+            secret_env_names: Vec::new(),
             capture_patch: false,
             raw_exec: false,
             source_snapshot: materialized_source.source_snapshot.clone(),
