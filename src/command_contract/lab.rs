@@ -94,6 +94,16 @@ impl Commands {
                     LAB_NO_EXTRA_TOOLS,
                 )
             }
+            Commands::AgentTask(args)
+                if matches!(args.command, agent_task::AgentTaskCommand::Providers(_)) =>
+            {
+                LabCommandContract::explicit_runner(
+                    "agent-task providers",
+                    None,
+                    false,
+                    LAB_NO_EXTRA_TOOLS,
+                )
+            }
             Commands::Audit(args) => args.lab_contract()?,
             Commands::Bench(args) => args.lab_contract()?,
             Commands::Extension(args) if args.is_update_command() => {
@@ -403,6 +413,7 @@ mod tests {
             parsed_command(&["homeboy", "agent-task", "artifacts", "agent-task-123"])
                 .supports_lab_runner()
         );
+        assert!(parsed_command(&["homeboy", "agent-task", "providers"]).supports_lab_runner());
         assert!(parsed_command(&[
             "homeboy",
             "agent-task",
@@ -518,6 +529,10 @@ mod tests {
             (
                 parsed_command(&["homeboy", "agent-task", "artifacts", "agent-task-123"]),
                 "agent-task status/logs/artifacts",
+            ),
+            (
+                parsed_command(&["homeboy", "agent-task", "providers"]),
+                "agent-task providers",
             ),
         ];
 
