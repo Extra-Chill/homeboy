@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.7.11] - 2026-06-15
+
+### Fixed
+- reconcile autofix PR reports with committed files
+
 ## [2.7.10] - 2026-06-08
 
 ### Fixed
