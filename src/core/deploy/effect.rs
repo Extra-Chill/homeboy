@@ -72,6 +72,7 @@ mod tests {
             version_targets: Some(vec![VersionTarget {
                 file: "plugin.php".to_string(),
                 pattern: Some(r"Version:\s*([0-9.]+)".to_string()),
+                artifact_path: None,
             }]),
             ..Component::default()
         };
@@ -107,6 +108,7 @@ mod tests {
             version_targets: Some(vec![VersionTarget {
                 file: "plugin.php".to_string(),
                 pattern: Some(r"Version:\s*([0-9.]+)".to_string()),
+                artifact_path: None,
             }]),
             ..Component::default()
         };

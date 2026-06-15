@@ -90,11 +90,13 @@ pub fn parse_version_targets(targets: &[String]) -> Result<Vec<VersionTarget>> {
             parsed.push(VersionTarget {
                 file: file.to_string(),
                 pattern: Some(normalized),
+                artifact_path: None,
             });
         } else {
             parsed.push(VersionTarget {
                 file: file.to_string(),
                 pattern: None,
+                artifact_path: None,
             });
         }
     }

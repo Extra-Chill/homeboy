@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [Unreleased]
+
+### Added
+- support `artifact_path` override on version targets so deploy artifact verification resolves against the shipped path (e.g. compiled `build/<block>/block.json`) instead of the source bump path (`blocks/<block>/block.json`)
+
 ## [0.229.11] - 2026-06-14
 
 ### Changed

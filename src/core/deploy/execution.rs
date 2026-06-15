@@ -784,14 +784,19 @@ fn validate_predeploy_artifact_version(
                 )
             })?
             .replace("\\\\", "\\");
+        // The bump step writes `target.file` in the workspace (git-tracked source),
+        // but the shipped artifact may carry the bumped version at a different path
+        // (e.g. compiled `build/<block>/block.json` instead of source `blocks/...`).
+        // When `artifact_path` is set, verify against that path inside the ZIP.
+        let verify_file = target.artifact_path.as_deref().unwrap_or(&target.file);
         let Some(entry_name) = entry_names
             .iter()
-            .find(|name| zip_entry_matches_version_target(name, &target.file))
+            .find(|name| zip_entry_matches_version_target(name, verify_file))
         else {
             return Err(format!(
                 "Artifact '{}' does not contain version target '{}' for component '{}'. Refusing to deploy unverified content.",
                 artifact_path.display(),
-                target.file,
+                verify_file,
                 component.id
             ));
         };
@@ -1673,6 +1678,48 @@ mod tests {
             .expect("matching artifact version should pass");
     }
 
+    #[test]
+    fn predeploy_artifact_version_inspection_uses_artifact_path_override() {
+        // Mirrors @wordpress/scripts plugins: bump source `blocks/<block>/block.json`
+        // but ship the compiled `build/<block>/block.json` (source `blocks/` excluded
+        // from the ZIP). The verifier must check the artifact_path inside the ZIP.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let artifact = temp.path().join("fixture.zip");
+        write_zip(
+            &artifact,
+            &[(
+                "fixture/build/login-register/block.json",
+                "{\n  \"version\": \"0.17.2\"\n}\n",
+            )],
+        );
+        let component = block_json_component(temp.path());
+
+        validate_predeploy_artifact_version(&component, &artifact, "0.17.2")
+            .expect("artifact_path override should verify against the compiled build/ path");
+    }
+
+    #[test]
+    fn predeploy_artifact_version_inspection_reports_artifact_path_when_missing() {
+        // When artifact_path is set but absent from the ZIP, the error should name the
+        // artifact path (what ships), not the source bump path.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let artifact = temp.path().join("fixture.zip");
+        write_zip(&artifact, &[("fixture/fixture.php", "<?php\n")]);
+        let component = block_json_component(temp.path());
+
+        let error = validate_predeploy_artifact_version(&component, &artifact, "0.17.2")
+            .expect_err("missing artifact_path entry should fail preflight");
+
+        assert!(
+            error.contains("build/login-register/block.json"),
+            "error should reference the artifact_path, got: {error}"
+        );
+        assert!(
+            !error.contains("blocks/login-register/block.json"),
+            "error should not reference the source bump path, got: {error}"
+        );
+    }
+
     fn versioned_zip_component(local_path: &std::path::Path) -> Component {
         Component {
             id: "fixture".to_string(),
@@ -1680,6 +1727,22 @@ mod tests {
             version_targets: Some(vec![VersionTarget {
                 file: "fixture.php".to_string(),
                 pattern: Some(r"Version:\s*([0-9.]+)".to_string()),
+                artifact_path: None,
+            }]),
+            ..Component::default()
+        }
+    }
+
+    fn block_json_component(local_path: &std::path::Path) -> Component {
+        Component {
+            id: "fixture".to_string(),
+            local_path: local_path.to_string_lossy().to_string(),
+            version_targets: Some(vec![VersionTarget {
+                // Bumped in the workspace (git-tracked source).
+                file: "blocks/login-register/block.json".to_string(),
+                pattern: Some(r#""version":\s*"([0-9.]+)""#.to_string()),
+                // Verified inside the shipped artifact (compiled build/ output).
+                artifact_path: Some("build/login-register/block.json".to_string()),
             }]),
             ..Component::default()
         }
