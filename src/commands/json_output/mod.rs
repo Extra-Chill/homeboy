@@ -25,7 +25,7 @@ pub fn run_command_output(command: Commands, global: &GlobalArgs) -> JsonCommand
 
     match command {
         Commands::AgentTask(args) => {
-            let summary_kind = agent_task_summary_kind(&args);
+            let summary_kind = agent_task_summary_kind_for_output(&args);
             let (stdout_result, exit_code) = dispatch(Commands::AgentTask(args), global);
             let human_stdout = stdout_result.as_ref().ok().and_then(|payload| {
                 summary_kind.and_then(|kind| render_agent_task_summary(kind, payload))
@@ -44,6 +44,26 @@ pub fn run_command_output(command: Commands, global: &GlobalArgs) -> JsonCommand
             let (stdout_result, exit_code) = dispatch(command, global);
             JsonCommandRun::from_stdout_result(stdout_result, exit_code)
         }
+    }
+}
+
+fn agent_task_summary_kind_for_output(
+    args: &crate::commands::agent_task::AgentTaskArgs,
+) -> Option<super::agent_task_summary::AgentTaskSummaryKind> {
+    agent_task_summary_kind_for_output_mode(
+        args,
+        homeboy::core::lab_routing::is_lab_offload_subprocess(),
+    )
+}
+
+fn agent_task_summary_kind_for_output_mode(
+    args: &crate::commands::agent_task::AgentTaskArgs,
+    lab_offload_subprocess: bool,
+) -> Option<super::agent_task_summary::AgentTaskSummaryKind> {
+    if lab_offload_subprocess {
+        None
+    } else {
+        agent_task_summary_kind(args)
     }
 }
 
@@ -68,6 +88,7 @@ fn unsupported_raw_command(message: &'static str) -> JsonRun {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::agent_task::{AgentTaskArgs, AgentTaskCommand, StatusArgs};
 
     #[test]
     fn list_json_dispatch_reports_raw_output_mode() {
@@ -78,5 +99,17 @@ mod tests {
             .expect_err("list should not dispatch as JSON")
             .to_string()
             .contains("raw output mode"));
+    }
+
+    #[test]
+    fn lab_offload_agent_task_subprocess_keeps_json_stdout() {
+        let args = AgentTaskArgs {
+            command: AgentTaskCommand::Status(StatusArgs {
+                run_id: "run-1".to_string(),
+            }),
+        };
+
+        assert!(agent_task_summary_kind_for_output_mode(&args, false).is_some());
+        assert!(agent_task_summary_kind_for_output_mode(&args, true).is_none());
     }
 }
