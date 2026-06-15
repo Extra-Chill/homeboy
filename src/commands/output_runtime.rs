@@ -3,7 +3,6 @@ use serde_json::Value;
 use crate::cli_surface::Commands;
 use crate::command_contract::CommandOutputFileMode;
 
-use super::agent_task_summary::{agent_task_summary_kind, render_agent_task_summary};
 use super::utils::response as output;
 use super::{review, trace, GlobalArgs};
 
@@ -23,6 +22,80 @@ impl JsonCommandRun {
             human_stdout: None,
         }
     }
+
+    pub fn from_raw(
+        raw_run: super::raw_output::RawCommandRun,
+    ) -> (Self, homeboy::core::Result<String>) {
+        let exit_code = raw_run.exit_code;
+        let raw_stdout = raw_run.stdout_result;
+        let output_file_result = match raw_run.output_file_result {
+            Some(result) => result,
+            None => match raw_stdout.as_ref() {
+                Ok(content) => Ok(Value::String(content.clone())),
+                Err(err) => Err(err.clone()),
+            },
+        };
+
+        (
+            Self {
+                stdout_result: output_file_result,
+                exit_code,
+                output_file_result: None,
+                human_stdout: None,
+            },
+            raw_stdout,
+        )
+    }
+}
+
+pub struct OutputService<'a> {
+    output_file: Option<&'a str>,
+}
+
+impl<'a> OutputService<'a> {
+    pub fn new(output_file: Option<&'a str>) -> Self {
+        Self { output_file }
+    }
+
+    pub fn emit_json_result(&self, result: homeboy::core::Result<Value>, exit_code: i32) {
+        let run = JsonCommandRun::from_stdout_result(result, exit_code);
+        self.write_output_file(&run, CommandOutputFileMode::GenericEnvelope);
+        output::print_json_result(run.stdout_result, run.exit_code).ok();
+    }
+
+    pub fn emit_run(&self, run: JsonCommandRun, mode: CommandOutputFileMode) -> i32 {
+        self.write_output_file(&run, mode);
+        if let Some(human_stdout) = run.human_stdout {
+            print!("{}", human_stdout);
+        } else {
+            output::print_json_result(run.stdout_result, run.exit_code).ok();
+        }
+
+        run.exit_code
+    }
+
+    pub fn emit_raw_run(
+        &self,
+        raw_run: super::raw_output::RawCommandRun,
+        mode: CommandOutputFileMode,
+    ) -> i32 {
+        let (json_run, raw_stdout) = JsonCommandRun::from_raw(raw_run);
+        let exit_code = json_run.exit_code;
+        self.write_output_file(&json_run, mode);
+
+        match raw_stdout {
+            Ok(content) => print!("{}", content),
+            Err(err) => {
+                output::print_result::<Value>(Err(err)).ok();
+            }
+        }
+
+        exit_code
+    }
+
+    pub fn write_output_file(&self, run: &JsonCommandRun, mode: CommandOutputFileMode) {
+        write_output_file(run, mode, self.output_file);
+    }
 }
 
 pub fn run_command(
@@ -32,39 +105,16 @@ pub fn run_command(
 ) -> i32 {
     let output_file = command_runtime_output_file(&command, requested_output_file);
     let plan = command.response_plan(output_file.is_some());
+    let output_service = OutputService::new(output_file);
 
     match super::raw_output::prepare_command_run(command, global, plan.stdout) {
         super::raw_output::CommandRunPreparation::Handled(exit_code) => exit_code,
         super::raw_output::CommandRunPreparation::Json(command) => {
             let run = run_json(*command, global, plan.output_file);
-            emit_run(run, plan.output_file, output_file)
+            output_service.emit_run(run, plan.output_file)
         }
         super::raw_output::CommandRunPreparation::Raw(raw_run) => {
-            let exit_code = raw_run.exit_code;
-            let output_file_result = match raw_run.output_file_result {
-                Some(result) => result,
-                None => match raw_run.stdout_result.as_ref() {
-                    Ok(content) => Ok(Value::String(content.clone())),
-                    Err(err) => Err(err.clone()),
-                },
-            };
-            let json_run = JsonCommandRun {
-                stdout_result: output_file_result,
-                exit_code,
-                output_file_result: None,
-                human_stdout: None,
-            };
-
-            write_output_file(&json_run, plan.output_file, output_file);
-
-            match raw_run.stdout_result {
-                Ok(content) => print!("{}", content),
-                Err(err) => {
-                    output::print_result::<Value>(Err(err)).ok();
-                }
-            }
-
-            exit_code
+            output_service.emit_raw_run(raw_run, plan.output_file)
         }
     }
 }
@@ -74,9 +124,7 @@ pub fn emit_json_result(
     output_file: Option<&str>,
     exit_code: i32,
 ) {
-    let run = JsonCommandRun::from_stdout_result(result, exit_code);
-    write_output_file(&run, CommandOutputFileMode::GenericEnvelope, output_file);
-    output::print_json_result(run.stdout_result, run.exit_code).ok();
+    OutputService::new(output_file).emit_json_result(result, exit_code);
 }
 
 pub fn validate_output_file_path(path: &str) -> Option<homeboy::core::Error> {
@@ -132,38 +180,8 @@ pub fn run_json(
                 human_stdout: None,
             }
         }
-        (_, Commands::AgentTask(args)) => {
-            let summary_kind = agent_task_summary_kind(&args);
-            let (stdout_result, exit_code) =
-                super::json_output::run(Commands::AgentTask(args), global);
-            let human_stdout = stdout_result.as_ref().ok().and_then(|payload| {
-                summary_kind.and_then(|kind| render_agent_task_summary(kind, payload))
-            });
-
-            JsonCommandRun {
-                stdout_result,
-                exit_code,
-                output_file_result: None,
-                human_stdout,
-            }
-        }
-        (_, command) => {
-            let (stdout_result, exit_code) = super::json_output::run(command, global);
-
-            JsonCommandRun::from_stdout_result(stdout_result, exit_code)
-        }
+        (_, command) => super::json_output::run_command_output(command, global),
     }
-}
-
-fn emit_run(run: JsonCommandRun, mode: CommandOutputFileMode, output_file: Option<&str>) -> i32 {
-    write_output_file(&run, mode, output_file);
-    if let Some(human_stdout) = run.human_stdout {
-        print!("{}", human_stdout);
-    } else {
-        output::print_json_result(run.stdout_result, run.exit_code).ok();
-    }
-
-    run.exit_code
 }
 
 pub fn write_output_file(run: &JsonCommandRun, mode: CommandOutputFileMode, path: Option<&str>) {
@@ -216,6 +234,34 @@ mod tests {
             output_file_result,
             human_stdout: None,
         }
+    }
+
+    #[test]
+    fn raw_command_run_without_artifact_uses_raw_stdout_for_file_payload() {
+        let raw_run = super::super::raw_output::RawCommandRun {
+            stdout_result: Ok("plain output".to_string()),
+            exit_code: 0,
+            output_file_result: None,
+        };
+
+        let (json_run, raw_stdout) = JsonCommandRun::from_raw(raw_run);
+
+        assert_eq!(raw_stdout.unwrap(), "plain output");
+        assert_eq!(json_run.stdout_result.unwrap(), json!("plain output"));
+    }
+
+    #[test]
+    fn raw_command_run_with_artifact_uses_artifact_for_file_payload() {
+        let raw_run = super::super::raw_output::RawCommandRun {
+            stdout_result: Ok("markdown output".to_string()),
+            exit_code: 0,
+            output_file_result: Some(Ok(json!({ "artifact": true }))),
+        };
+
+        let (json_run, raw_stdout) = JsonCommandRun::from_raw(raw_run);
+
+        assert_eq!(raw_stdout.unwrap(), "markdown output");
+        assert_eq!(json_run.stdout_result.unwrap(), json!({ "artifact": true }));
     }
 
     #[test]

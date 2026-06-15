@@ -3,6 +3,8 @@ use serde_json::Value;
 use crate::cli_surface::Commands;
 use crate::command_contract::CommandJsonFamily;
 
+use super::agent_task_summary::{agent_task_summary_kind, render_agent_task_summary};
+use super::output_runtime::JsonCommandRun;
 use super::GlobalArgs;
 
 mod ops;
@@ -16,6 +18,31 @@ pub fn run(command: Commands, global: &GlobalArgs) -> (homeboy::core::Result<Val
     crate::commands::utils::tty::status("homeboy is working...");
 
     dispatch(command, global)
+}
+
+pub fn run_command_output(command: Commands, global: &GlobalArgs) -> JsonCommandRun {
+    crate::commands::utils::tty::status("homeboy is working...");
+
+    match command {
+        Commands::AgentTask(args) => {
+            let summary_kind = agent_task_summary_kind(&args);
+            let (stdout_result, exit_code) = dispatch(Commands::AgentTask(args), global);
+            let human_stdout = stdout_result.as_ref().ok().and_then(|payload| {
+                summary_kind.and_then(|kind| render_agent_task_summary(kind, payload))
+            });
+
+            JsonCommandRun {
+                stdout_result,
+                exit_code,
+                output_file_result: None,
+                human_stdout,
+            }
+        }
+        command => {
+            let (stdout_result, exit_code) = dispatch(command, global);
+            JsonCommandRun::from_stdout_result(stdout_result, exit_code)
+        }
+    }
 }
 
 fn dispatch(command: Commands, global: &GlobalArgs) -> (homeboy::core::Result<Value>, i32) {
