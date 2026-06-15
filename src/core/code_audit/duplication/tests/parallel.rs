@@ -7,7 +7,7 @@ use super::*;
 fn make_fingerprint_with_content(path: &str, methods: &[&str], content: &str) -> FileFingerprint {
     FileFingerprint {
         relative_path: path.to_string(),
-        language: Language::Rust,
+        language: Language::Unknown,
         methods: methods.iter().map(|s| s.to_string()).collect(),
         content: content.to_string(),
         ..Default::default()

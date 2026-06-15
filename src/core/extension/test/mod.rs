@@ -393,7 +393,12 @@ pub fn resolve_drift_options(
         }
     }
 
-    Ok(DriftOptions::php(&source_path, since))
+    Ok(DriftOptions::from_config(
+        &source_path,
+        since,
+        &crate::core::defaults::extension_provided_test_drift_config(),
+        &[],
+    ))
 }
 
 /// Compute which test files are impacted by changes since a git ref.
@@ -482,19 +487,9 @@ fn is_direct_changed_test_path(file: &str) -> bool {
     }
 
     let file_name = file.rsplit('/').next().unwrap_or(file);
-    file_name.ends_with("_test.rs")
-        || file_name.ends_with("_tests.rs")
-        || file_name.ends_with("Test.php")
-        || file_name.ends_with(".test.js")
-        || file_name.ends_with(".test.jsx")
-        || file_name.ends_with(".test.ts")
-        || file_name.ends_with(".test.tsx")
-        || file_name.ends_with(".test.mjs")
-        || file_name.ends_with(".spec.js")
-        || file_name.ends_with(".spec.jsx")
-        || file_name.ends_with(".spec.ts")
-        || file_name.ends_with(".spec.tsx")
-        || file_name.ends_with(".spec.mjs")
+    crate::core::defaults::extension_provided_direct_test_file_suffixes()
+        .iter()
+        .any(|suffix| file_name.ends_with(suffix))
         || (file_name.starts_with("test_") && file_name.ends_with(".py"))
 }
 

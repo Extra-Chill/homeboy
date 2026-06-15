@@ -101,7 +101,7 @@ where
             return InstallMethod::Homebrew;
         }
     }
-    for pattern in &defaults.install_methods.cargo.path_patterns {
+    for pattern in &defaults.install_methods.secondary.path_patterns {
         if exe_path.contains(pattern) {
             return InstallMethod::Cargo;
         }

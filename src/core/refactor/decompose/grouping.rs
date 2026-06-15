@@ -71,8 +71,8 @@ pub(super) fn extract_sections(content: &str) -> Vec<Section> {
 
 /// Convert a section header name to a snake_case slug suitable for filenames.
 ///
-/// Hyphens are converted to underscores because Rust module names must be
-/// valid identifiers (no hyphens). "Whole-file move" -> "whole_file_move".
+/// Hyphens are converted to underscores so generated group filenames stay
+/// identifier-like. "Whole-file move" -> "whole_file_move".
 pub(super) fn section_name_to_slug(name: &str) -> String {
     let cleaned: String = name
         .chars()
@@ -95,10 +95,9 @@ pub(super) fn section_name_to_slug(name: &str) -> String {
     truncate_module_name(&words.join("_"))
 }
 
-/// Ensure a group name is a valid Rust module name (identifier).
+/// Ensure a group name is a valid identifier-like module name.
 ///
-/// Rust identifiers allow `[a-zA-Z_][a-zA-Z0-9_]*`. This is a safety net
-/// applied at the final filename construction point.
+/// This is a safety net applied at the final filename construction point.
 pub(super) fn sanitize_module_name(name: &str) -> String {
     let sanitized: String = name
         .chars()

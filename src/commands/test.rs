@@ -40,7 +40,7 @@ pub struct TestArgs {
     #[arg(long)]
     pub skip_lint: bool,
 
-    /// Collect code coverage (requires xdebug/pcov for PHP, cargo-tarpaulin for Rust)
+    /// Collect code coverage when the selected extension supports it
     #[arg(long)]
     pub coverage: bool,
 

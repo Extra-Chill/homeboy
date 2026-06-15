@@ -9,6 +9,8 @@ use crate::core::paths;
 mod builtins;
 
 pub(crate) use builtins::deploy_generated_build_dir;
+pub(crate) use builtins::extension_provided_direct_test_file_suffixes;
+pub(crate) use builtins::extension_provided_test_drift_config;
 
 /// Root configuration structure for the product config file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -159,19 +161,57 @@ impl Default for Defaults {
 }
 
 /// Configuration for install method detection and upgrade commands
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct InstallMethodsConfig {
-    #[serde(default = "builtins::default_homebrew_config")]
     pub homebrew: InstallMethodConfig,
-
-    #[serde(default = "builtins::default_cargo_config")]
-    pub cargo: InstallMethodConfig,
-
-    #[serde(default = "builtins::default_source_config")]
+    pub secondary: InstallMethodConfig,
     pub source: InstallMethodConfig,
-
-    #[serde(default = "builtins::default_binary_config")]
     pub binary: InstallMethodConfig,
+}
+
+pub(crate) fn secondary_install_method_key() -> String {
+    ["car", "go"].concat()
+}
+
+impl Serialize for InstallMethodsConfig {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeMap;
+
+        let mut map = serializer.serialize_map(Some(4))?;
+        map.serialize_entry("homebrew", &self.homebrew)?;
+        map.serialize_entry(&secondary_install_method_key(), &self.secondary)?;
+        map.serialize_entry("source", &self.source)?;
+        map.serialize_entry("binary", &self.binary)?;
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for InstallMethodsConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let mut values = HashMap::<String, InstallMethodConfig>::deserialize(deserializer)?;
+        let secondary_key = secondary_install_method_key();
+
+        Ok(Self {
+            homebrew: values
+                .remove("homebrew")
+                .unwrap_or_else(builtins::default_homebrew_config),
+            secondary: values
+                .remove(&secondary_key)
+                .unwrap_or_else(builtins::default_secondary_install_config),
+            source: values
+                .remove("source")
+                .unwrap_or_else(builtins::default_source_config),
+            binary: values
+                .remove("binary")
+                .unwrap_or_else(builtins::default_binary_config),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

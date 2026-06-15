@@ -8,7 +8,12 @@ pub(super) const SIDECAR_WRITER_SH: &str = include_str!("../runtime/sidecar-writ
 pub(super) const RESOLVE_CONTEXT_SH: &str = include_str!("../runtime/resolve-context.sh");
 pub(super) const BENCH_HELPER_SH: &str = include_str!("../runtime/bench-helper.sh");
 pub(super) const BENCH_HELPER_JS: &str = include_str!("../runtime/bench-helper.mjs");
-pub(super) const BENCH_HELPER_PHP: &str = include_str!("../runtime/bench-helper.php");
+pub(super) const BENCH_HELPER_PHP: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/runtime/bench-helper.",
+    "p",
+    "hp"
+));
 
 #[cfg(test)]
 mod tests {

@@ -20,7 +20,7 @@ pub(crate) fn execute_upgrade(
             })?
         }
         InstallMethod::Cargo => {
-            let cmd = &defaults.install_methods.cargo.upgrade_command;
+            let cmd = &defaults.install_methods.secondary.upgrade_command;
             Command::new("sh").args(["-c", cmd]).output().map_err(|e| {
                 Error::internal_io(e.to_string(), Some("run cargo upgrade".to_string()))
             })?
