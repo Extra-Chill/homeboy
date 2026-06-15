@@ -25,7 +25,9 @@ use crate::core::agent_task_loop_controller::{
 use crate::core::agent_task_scheduler::{AgentTaskExecutorAdapter, AgentTaskPlan};
 use crate::core::agent_task_service::{self, AgentTaskRunResult};
 use crate::core::git::{pr_find, pr_view, PrFindOptions, PrState};
+use crate::core::plan::{HomeboyPlan, PlanArtifact, PlanKind, PlanStep, PlanStepStatus};
 use crate::core::{Error, Result};
+use std::collections::HashMap;
 use std::process::Command;
 
 /// Schema for the apply-event report envelope.
@@ -495,8 +497,96 @@ fn validate_loop_spec(spec: &AgentTaskRepoLoopSpec) -> Result<()> {
                 None,
             ));
         }
+        if let Some(agent_id) = &workflow.agent_id {
+            validate_declared_id(
+                format!("workflows[{index}].agent_id"),
+                agent_id,
+                &spec.agents,
+                |agent| &agent.agent_id,
+            )?;
+        }
+        validate_declared_ids(
+            format!("workflows[{index}].tools"),
+            &workflow.tools,
+            &spec.tools,
+            |tool| &tool.tool_id,
+        )?;
+        validate_declared_ids(
+            format!("workflows[{index}].abilities"),
+            &workflow.abilities,
+            &spec.abilities,
+            |ability| &ability.ability_id,
+        )?;
+        validate_declared_ids(
+            format!("workflows[{index}].artifacts"),
+            &workflow.artifacts,
+            &spec.artifacts,
+            |artifact| &artifact.artifact_id,
+        )?;
+        validate_declared_ids(
+            format!("workflows[{index}].dependencies"),
+            &workflow.dependencies,
+            &spec.dependencies,
+            |dependency| &dependency.dependency_id,
+        )?;
+        validate_declared_ids(
+            format!("workflows[{index}].gates"),
+            &workflow.gates,
+            &spec.gates,
+            |gate| &gate.gate_id,
+        )?;
+        validate_declared_ids(
+            format!("workflows[{index}].metrics"),
+            &workflow.metrics,
+            &spec.metrics,
+            |metric| &metric.metric_id,
+        )?;
+    }
+    for (index, agent) in spec.agents.iter().enumerate() {
+        validate_declared_ids(
+            format!("agents[{index}].tools"),
+            &agent.tools,
+            &spec.tools,
+            |tool| &tool.tool_id,
+        )?;
+        validate_declared_ids(
+            format!("agents[{index}].abilities"),
+            &agent.abilities,
+            &spec.abilities,
+            |ability| &ability.ability_id,
+        )?;
     }
     Ok(())
+}
+
+fn validate_declared_ids<T, F>(
+    field: String,
+    requested: &[String],
+    items: &[T],
+    id: F,
+) -> Result<()>
+where
+    F: Fn(&T) -> &String + Copy,
+{
+    for value in requested {
+        validate_declared_id(field.clone(), value, items, id)?;
+    }
+    Ok(())
+}
+
+fn validate_declared_id<T, F>(field: String, requested: &str, items: &[T], id: F) -> Result<()>
+where
+    F: Fn(&T) -> &String,
+{
+    if items.iter().any(|item| id(item) == requested) {
+        return Ok(());
+    }
+    Err(Error::validation_invalid_argument(
+        field,
+        "repo loop spec references an undeclared contract id",
+        Some(requested.to_string()),
+        None,
+    ))
 }
 
 fn compile_loop_spec_workflows(
@@ -548,6 +638,18 @@ fn workflow_dispatch_request(
         "client_context".to_string(),
         Value::String(context.to_string()),
     );
+    let required_capabilities = workflow_required_capabilities(spec, workflow);
+    if !required_capabilities.is_empty() {
+        dispatch.insert(
+            "required_capabilities".to_string(),
+            Value::Array(
+                required_capabilities
+                    .into_iter()
+                    .map(Value::String)
+                    .collect(),
+            ),
+        );
+    }
     Ok(serde_json::json!({
         "mode": "dispatch",
         "dispatch": Value::Object(dispatch),
@@ -562,6 +664,7 @@ fn workflow_client_context(
         "schema": "homeboy/repo-loop-workflow-context/v1",
         "loop_id": spec.loop_id,
         "workflow_id": workflow.workflow_id,
+        "plan": workflow_homeboy_plan(spec, workflow)?,
         "agent": workflow.agent_id.as_ref().and_then(|agent_id| {
             spec.agents.iter().find(|agent| &agent.agent_id == agent_id)
         }),
@@ -573,6 +676,133 @@ fn workflow_client_context(
         "metrics": select_by_id(&spec.metrics, &workflow.metrics, |metric| &metric.metric_id),
         "inputs": workflow.inputs,
     }))
+}
+
+fn workflow_homeboy_plan(
+    spec: &AgentTaskRepoLoopSpec,
+    workflow: &AgentTaskRepoLoopSpecWorkflow,
+) -> Result<HomeboyPlan> {
+    let mut plan = HomeboyPlan::for_description(
+        PlanKind::AgentTask,
+        format!("repo loop workflow {}", workflow.workflow_id),
+    );
+    plan.id = format!("{}:{}", spec.loop_id, workflow.workflow_id);
+    plan.inputs.insert(
+        "schema".to_string(),
+        Value::String("homeboy/repo-loop-workflow-plan/v1".to_string()),
+    );
+    plan.inputs
+        .insert("loop_id".to_string(), Value::String(spec.loop_id.clone()));
+    plan.inputs.insert(
+        "workflow_id".to_string(),
+        Value::String(workflow.workflow_id.clone()),
+    );
+    if let Some(agent_id) = &workflow.agent_id {
+        plan.inputs
+            .insert("agent_id".to_string(), Value::String(agent_id.clone()));
+    }
+    plan.inputs.insert(
+        "declarations".to_string(),
+        workflow_declaration_context(spec, workflow)?,
+    );
+    let required_capabilities = workflow_required_capabilities(spec, workflow);
+    if !required_capabilities.is_empty() {
+        plan.policy.insert(
+            "required_capabilities".to_string(),
+            Value::Array(
+                required_capabilities
+                    .into_iter()
+                    .map(Value::String)
+                    .collect(),
+            ),
+        );
+    }
+    plan.steps.push(PlanStep {
+        id: format!("dispatch:{}", workflow.workflow_id),
+        kind: "agent_task_dispatch".to_string(),
+        label: Some(workflow.workflow_id.clone()),
+        blocking: true,
+        scope: workflow.entity_ids.clone(),
+        needs: workflow.dependencies.clone(),
+        status: PlanStepStatus::Ready,
+        inputs: HashMap::from([(
+            "workflow".to_string(),
+            workflow_declaration_context(spec, workflow)?,
+        )]),
+        outputs: HashMap::new(),
+        skip_reason: None,
+        policy: HashMap::new(),
+        missing: Vec::new(),
+    });
+    for artifact in select_by_id(&spec.artifacts, &workflow.artifacts, |artifact| {
+        &artifact.artifact_id
+    }) {
+        let mut data = HashMap::new();
+        data.insert("kind".to_string(), Value::String(artifact.kind.clone()));
+        data.insert("required".to_string(), Value::Bool(artifact.required));
+        if let Some(description) = &artifact.description {
+            data.insert(
+                "description".to_string(),
+                Value::String(description.clone()),
+            );
+        }
+        plan.artifacts.push(PlanArtifact {
+            id: artifact.artifact_id.clone(),
+            path: None,
+            artifact_type: Some(artifact.kind.clone()),
+            data,
+        });
+    }
+    Ok(plan)
+}
+
+fn workflow_declaration_context(
+    spec: &AgentTaskRepoLoopSpec,
+    workflow: &AgentTaskRepoLoopSpecWorkflow,
+) -> Result<Value> {
+    Ok(serde_json::json!({
+        "agent": workflow.agent_id.as_ref().and_then(|agent_id| {
+            spec.agents.iter().find(|agent| &agent.agent_id == agent_id)
+        }),
+        "tools": select_by_id(&spec.tools, &workflow.tools, |tool| &tool.tool_id),
+        "abilities": select_by_id(&spec.abilities, &workflow.abilities, |ability| &ability.ability_id),
+        "artifacts": select_by_id(&spec.artifacts, &workflow.artifacts, |artifact| &artifact.artifact_id),
+        "dependencies": select_by_id(&spec.dependencies, &workflow.dependencies, |dependency| &dependency.dependency_id),
+        "gates": select_by_id(&spec.gates, &workflow.gates, |gate| &gate.gate_id),
+        "metrics": select_by_id(&spec.metrics, &workflow.metrics, |metric| &metric.metric_id),
+        "inputs": workflow.inputs,
+    }))
+}
+
+fn workflow_required_capabilities(
+    spec: &AgentTaskRepoLoopSpec,
+    workflow: &AgentTaskRepoLoopSpecWorkflow,
+) -> Vec<String> {
+    let mut capabilities = Vec::new();
+    if let Some(agent_id) = &workflow.agent_id {
+        if let Some(agent) = spec.agents.iter().find(|agent| &agent.agent_id == agent_id) {
+            for tool_id in &agent.tools {
+                push_capability(&mut capabilities, "tool", tool_id);
+            }
+            for ability_id in &agent.abilities {
+                push_capability(&mut capabilities, "ability", ability_id);
+            }
+        }
+    }
+    for tool_id in &workflow.tools {
+        push_capability(&mut capabilities, "tool", tool_id);
+    }
+    for ability_id in &workflow.abilities {
+        push_capability(&mut capabilities, "ability", ability_id);
+    }
+    capabilities
+}
+
+fn push_capability(capabilities: &mut Vec<String>, kind: &str, id: &str) {
+    let capability = format!("{kind}:{id}");
+    if !capabilities.contains(&capability) {
+        capabilities.push(capability);
+    }
 }
 
 fn select_by_id<'a, T, F>(items: &'a [T], ids: &[String], id: F) -> Vec<&'a T>
@@ -2258,6 +2488,10 @@ mod tests {
                     assert!(request_template["dispatch"]
                         .get("provider_config")
                         .is_none());
+                    assert_eq!(
+                        request_template["dispatch"]["required_capabilities"],
+                        json!(["tool:repo-inspector", "ability:apply_patch"])
+                    );
                     let context: Value = serde_json::from_str(
                         request_template["dispatch"]["client_context"]
                             .as_str()
@@ -2265,6 +2499,16 @@ mod tests {
                     )
                     .expect("client context json");
                     assert_eq!(context["agent"]["agent_id"], "repair-agent");
+                    assert_eq!(
+                        context["plan"]["inputs"]["schema"],
+                        "homeboy/repo-loop-workflow-plan/v1"
+                    );
+                    assert_eq!(
+                        context["plan"]["policy"]["required_capabilities"],
+                        json!(["tool:repo-inspector", "ability:apply_patch"])
+                    );
+                    assert_eq!(context["plan"]["steps"][0]["kind"], "agent_task_dispatch");
+                    assert_eq!(context["plan"]["artifacts"][0]["id"], "patch");
                     assert_eq!(context["gates"][0]["gate_id"], "quality");
                     assert_eq!(context["metrics"][0]["metric_id"], "visual-parity");
                 }
@@ -2279,6 +2523,54 @@ mod tests {
                 resumed.actions[0].status,
                 AgentTaskLoopActionStatus::AlreadySatisfied
             );
+        });
+    }
+
+    #[test]
+    fn init_from_spec_rejects_undeclared_workflow_requirements() {
+        with_isolated_home(|_| {
+            let spec = AgentTaskRepoLoopSpec {
+                schema: None,
+                loop_id: "repo-loop-invalid-reference".to_string(),
+                phase: "init".to_string(),
+                config_version: "v1".to_string(),
+                metadata: Value::Null,
+                entities: Vec::new(),
+                agents: Vec::new(),
+                tools: Vec::new(),
+                abilities: Vec::new(),
+                workflows: vec![AgentTaskRepoLoopSpecWorkflow {
+                    workflow_id: "repair".to_string(),
+                    agent_id: None,
+                    prompt: Some("Repair with a declared tool.".to_string()),
+                    tasks: Vec::new(),
+                    entity_ids: Vec::new(),
+                    tools: vec!["missing-tool".to_string()],
+                    abilities: Vec::new(),
+                    artifacts: Vec::new(),
+                    dependencies: Vec::new(),
+                    gates: Vec::new(),
+                    metrics: Vec::new(),
+                    inputs: Value::Null,
+                }],
+                artifacts: Vec::new(),
+                dependencies: Vec::new(),
+                gates: Vec::new(),
+                metrics: Vec::new(),
+                gate_bundles: Vec::new(),
+                policy: None,
+                phases: Vec::new(),
+                actions: Vec::new(),
+                initial_event: None,
+            };
+
+            let error = init_from_spec(ControllerFromSpecRequest { spec })
+                .expect_err("missing requirement declaration should fail");
+
+            assert_eq!(error.details["field"], "workflows[0].tools");
+            assert!(error
+                .message
+                .contains("references an undeclared contract id"));
         });
     }
 

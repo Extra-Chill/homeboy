@@ -51,6 +51,10 @@ pub struct DispatchArgs {
     #[arg(long, value_name = "MODEL")]
     pub model: Option<String>,
 
+    /// Controller-owned abstract executor capabilities compiled from workflow declarations.
+    #[arg(skip)]
+    pub required_capabilities: Vec<String>,
+
     /// Secret environment variable name to hydrate for the provider. Repeatable.
     #[arg(long = "secret-env", value_name = "ENV")]
     pub secret_env: Vec<String>,
@@ -136,6 +140,7 @@ fn dispatch_request_from_args_with_default(
         })?,
         selector: args.selector,
         model: args.model,
+        required_capabilities: args.required_capabilities,
         secret_env: args.secret_env,
         provider_config: args.provider_config,
         client_context: args.client_context,
@@ -364,6 +369,7 @@ mod tests {
                 backend: None,
                 selector: None,
                 model: None,
+                required_capabilities: Vec::new(),
                 secret_env: Vec::new(),
                 provider_config: None,
                 client_context: None,
@@ -393,6 +399,7 @@ mod tests {
                 backend: None,
                 selector: None,
                 model: None,
+                required_capabilities: Vec::new(),
                 secret_env: Vec::new(),
                 provider_config: None,
                 client_context: None,
@@ -499,6 +506,7 @@ mod tests {
             backend: Some(overrides.backend.unwrap_or_else(|| "fixture".to_string())),
             selector: None,
             model: None,
+            required_capabilities: Vec::new(),
             secret_env: overrides.secret_env,
             provider_config: overrides.provider_config,
             client_context: overrides.client_context,

@@ -36,6 +36,7 @@ pub struct AgentTaskDispatchRequest {
     pub backend: String,
     pub selector: Option<String>,
     pub model: Option<String>,
+    pub required_capabilities: Vec<String>,
     pub secret_env: Vec<String>,
     pub provider_config: Option<String>,
     pub client_context: Option<String>,
@@ -206,7 +207,7 @@ pub fn build_dispatch_plan_with_provider_requirements(
             executor: AgentTaskExecutor {
                 backend: request.backend.clone(),
                 selector: request.selector.clone(),
-                required_capabilities: Vec::new(),
+                required_capabilities: request.required_capabilities.clone(),
                 secret_env: secret_env.clone(),
                 model: request.model.clone(),
                 config: provider_config.clone(),
@@ -258,6 +259,7 @@ pub fn build_dispatch_plan_with_provider_requirements(
                 "task_url": request.task_url,
                 "prompt_source": prompt_spec,
                 "dispatch": "agent-task dispatch",
+                "required_capabilities": request.required_capabilities,
             }),
         });
     }
@@ -779,6 +781,25 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_plan_preserves_abstract_executor_requirements() {
+        let plan = build_dispatch_plan(&dispatch_request(DispatchRequestOverrides {
+            prompt: Some("Run the declared workflow.".to_string()),
+            required_capabilities: vec!["tool:repo-inspector".to_string()],
+            ..DispatchRequestOverrides::default()
+        }))
+        .expect("dispatch plan");
+
+        assert_eq!(
+            plan.tasks[0].executor.required_capabilities,
+            vec!["tool:repo-inspector".to_string()]
+        );
+        assert_eq!(
+            plan.tasks[0].metadata["required_capabilities"],
+            serde_json::json!(["tool:repo-inspector"])
+        );
+    }
+
+    #[test]
     fn queue_only_returns_durable_run_without_executing() {
         with_isolated_home(|_| {
             let workspace = tempfile::tempdir().expect("workspace");
@@ -996,6 +1017,7 @@ mod tests {
         secret_env: Vec<String>,
         provider_config: Option<String>,
         client_context: Option<String>,
+        required_capabilities: Vec<String>,
         concurrency: usize,
         attempts: u32,
         queue_only: bool,
@@ -1015,6 +1037,7 @@ mod tests {
             backend: overrides.backend.unwrap_or_else(|| "fixture".to_string()),
             selector: None,
             model: None,
+            required_capabilities: overrides.required_capabilities,
             secret_env: overrides.secret_env,
             provider_config: overrides.provider_config,
             client_context: overrides.client_context,
