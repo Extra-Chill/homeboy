@@ -266,16 +266,15 @@ mod tests {
     #[test]
     fn cook_output_marks_patch_artifact_handoff_boundary() {
         with_isolated_home(|_| {
+            let workspace = tempfile::tempdir()
+                .expect("workspace")
+                .keep()
+                .display()
+                .to_string();
             let (value, exit_code) = cook_with_executor(
                 dispatch_args(DispatchArgOverrides {
                     prompt: Some("Cook a patch.".to_string()),
-                    workspace: Some(
-                        tempfile::tempdir()
-                            .expect("workspace")
-                            .keep()
-                            .display()
-                            .to_string(),
-                    ),
+                    workspace: Some(workspace.clone()),
                     run_id: Some("cook-handoff".to_string()),
                     ..DispatchArgOverrides::default()
                 }),
@@ -298,7 +297,9 @@ mod tests {
                     "--task-id",
                     "cook-task",
                     "--artifact-id",
-                    "patch-1"
+                    "patch-1",
+                    "--to-worktree",
+                    workspace
                 ])
             );
             assert!(value["handoff"]["finalize_command"]

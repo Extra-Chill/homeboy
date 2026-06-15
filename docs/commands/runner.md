@@ -254,6 +254,19 @@ The unit intentionally leaves authentication out until the broker auth contract
 lands; configure the broker URL and any future auth material using the production
 mechanism for issue #2990 rather than embedding secrets in the unit file.
 
+### `job`
+
+```sh
+homeboy runner job logs <runner-id> <job-id>
+homeboy runner job logs <runner-id> <job-id> --follow --poll-ms 1000
+```
+
+Inspects durable runner daemon jobs after `runner exec` or Lab offload has
+submitted work to a connected runner. `logs` fetches the persisted job plus its
+event stream; `--follow` keeps polling until the job reaches a terminal state and
+prints newly observed events as they arrive. Use this when a controller exits
+after dispatching runner work and you need to inspect the already-started job.
+
 ### `status`
 
 ```sh
