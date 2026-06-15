@@ -160,4 +160,24 @@ FAKE_CODEBOX_CAPTURE_DIR="$CAPTURE_DIR" \
 assert_contains "${TMPDIR}/router.out" "Backend: host-smoke-wp"
 assert_contains "${TMPDIR}/router.out" "HOST_SMOKE_OK:tests/alpha-smoke.php"
 
+# --- Operator affordance: maintainers can rerun one real-WP host smoke on
+# demand without relying on changed-file routing or running the full suite.
+HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
+HOMEBOY_COMPONENT_ID="component" \
+HOMEBOY_COMPONENT_PATH="$component" \
+HOMEBOY_COMPONENT_SHAPE="plugin" \
+HOMEBOY_WP_CODEBOX_BIN="$FAKE_CODEBOX" \
+FAKE_CODEBOX_CAPTURE_DIR="$CAPTURE_DIR" \
+    bash "${EXTENSION_PATH}/scripts/test/test-runner.sh" --host-smoke-file tests/alpha-smoke.php > "${TMPDIR}/operator.out"
+assert_contains "${TMPDIR}/operator.out" "Backend: host-smoke-wp"
+assert_contains "${TMPDIR}/operator.out" "HOST_SMOKE_BEGIN:tests/alpha-smoke.php"
+assert_contains "${TMPDIR}/operator.out" "HOST_SMOKE_OK:tests/alpha-smoke.php"
+
+help_output="$(HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" HOMEBOY_COMPONENT_ID="component" HOMEBOY_COMPONENT_PATH="$component" HOMEBOY_COMPONENT_SHAPE="plugin" bash "${EXTENSION_PATH}/scripts/test/test-runner.sh" --help)"
+if [[ "$help_output" != *"--host-smoke-file <path>"* ]] || [[ "$help_output" != *"HOST_SMOKE_BEGIN"* ]]; then
+    echo "Expected runner help to document --host-smoke-file and HOST_SMOKE markers" >&2
+    printf '%s\n' "$help_output" >&2
+    exit 1
+fi
+
 echo "Real-WordPress smoke runner smoke passed"
