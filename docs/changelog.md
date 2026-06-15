@@ -4,10 +4,97 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
-## [Unreleased]
+## [0.230.0] - 2026-06-15
 
 ### Added
 - support `artifact_path` override on version targets so deploy artifact verification resolves against the shipped path (e.g. compiled `build/<block>/block.json`) instead of the source bump path (`blocks/<block>/block.json`)
+- preserve component contracts in agent tasks
+- carry extension phase timing evidence
+
+### Changed
+- Add durable PR ownership loop
+- Resolve runner secrets and force SSH exec
+- Serve run artifact URLs from artifact origin
+- report managed validation dependencies
+- Fail fast on delegated runner failures in captured exec
+- Refactor provider-specific Lab contracts out of Homeboy core defaults
+- Support Lab offload for preview consumers
+- surface waiting extension phases in review output
+- add changed-scope provider contract
+- Prove tunnel preview readiness
+- Move ecosystem defaults out of core source
+- Add agent task discovery commands
+- Keep Lab cook task payloads out of argv
+- move agent task dispatch into service
+- Surface active Lab runner jobs in run views
+- Refactor Lab routing contracts
+- move runs artifact cleanup into service
+- centralize command output and contracts
+
+### Fixed
+- ignore generated homeboy lab output in dirty guard
+- persist trace compare artifacts
+- make 'no deployable components' hint actionable
+- Fix main release gates
+- resolve artifact version verification against shipped path (#4614)
+- preserve agent-task json during lab offload
+- ignore empty agent-task patch candidates
+- forward runner secret refs to daemon jobs
+- Fix declared parser test result sidecars
+- persist validation progress ledgers
+- pin deploy cleanup build exit sentinel
+- align release skip no-tag assertion
+- degrade runner upgrades with unresolved PATH drift
+- box lab status output
+- keep running evidence out of failed state
+- support runner-owned preview tunnel orchestration
+- format lab follow-up assertion
+- normalize runner job PATH on runner host
+- Fix no-op release planning bump handling
+- surface Lab status follow-up context
+- add raw runner exec output
+- scope runner secret env resolution to selected commands
+- fix bench artifact reference contract
+- persist lab handoff run at dispatch
+- print lab offload handoff on detach
+- classify incomplete agent-task executor results
+- support runner agent-task review
+- report detached durable lab dispatch
+- prefer extension-owned defaults contract
+- Fix Lab patch and release outcome reporting
+- make cargo cli verification unambiguous
+- warn on runner doctor homeboy path drift
+- Fix Lab offload timeout recovery guidance
+- defer Lab run-plan secrets to runner
+- classify PR CI state before merge
+- accept forced source upgrades with new build identity
+- allow release worktrees at default tip
+- resolve runner-side observation runs
+- clarify allow-local-hot routing
+- label persisted trace run ids after offload
+- accept parser adapter stdout results
+- reject shallow controller git bundle sources
+- route agent-task auth status to runners
+- include service tunnel ids in list output
+- fail broken declared parser adapters
+- normalize agent task provider artifact roles
+- route test result parsing through declared adapters
+- declare trace toolchain provenance in manifests
+- stabilize main release gates
+- split output descriptors from lab policy
+- support manifest-declared release preflights
+- support runner agent task provider discovery
+- inline agent task prompt files for Lab offload
+- refresh runner rig sources before offload
+- normalize bench diagnostic producer sources
+- accept bench diagnostic severity
+- keep active runner job metadata generic
+- accept bench diagnostic details aliases
+- expose lab cook run id before execution
+- add runner job log tailing
+- accept bench diagnostic code aliases
+- verify lab extension sync revisions
+- isolate extension replace clone temps
 
 ## [0.229.11] - 2026-06-14
 
