@@ -280,6 +280,12 @@ assert.equal(provider.capabilities.includes('agent_bundle_execution'), true);
 assert.equal(provider.capabilities.includes('typed_bundle_outputs'), true);
 assert.equal(provider.capabilities.includes('external_recipe_packs'), true);
 assert.equal(provider.capabilities.includes('recipe_probe_artifacts'), true);
+assert.equal(provider.capabilities.includes('tool:datamachine/run-agent-bundle'), true);
+assert.equal(provider.capabilities.includes('tool:github_pull_request_publish'), true);
+assert.equal(provider.capabilities.includes('tool:wpsg_materialize_packet'), true);
+assert.equal(provider.capabilities.includes('ability:datamachine/run-agent-bundle'), true);
+assert.equal(provider.capabilities.includes('ability:github_pull_request_publish'), true);
+assert.equal(provider.capabilities.includes('ability:wpsg_materialize_packet'), true);
 assert.deepEqual(provider.runtime_gap_trackers, []);
 
 const codeboxRequest = codeboxTaskRequestFromAgentTaskRequest(request);
@@ -2078,7 +2084,7 @@ try {
   ], { encoding: 'utf8' });
   assert.equal(contractResult.status, 0, contractResult.stderr || contractResult.stdout);
   const printedContract = JSON.parse(contractResult.stdout);
-  assert.equal(printedContract.id, 'wordpress.codebox-agent-task-executor');
+  assert.equal(printedContract.id, provider.id);
   assert.deepEqual(printedContract.outcome_statuses, provider.outcome_statuses);
   assert.deepEqual(printedContract.failure_classifications, provider.failure_classifications);
 

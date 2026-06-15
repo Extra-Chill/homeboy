@@ -29,6 +29,16 @@ const PROVIDER_CAPABILITIES = [
   'typed_bundle_outputs',
   'external_recipe_packs',
   'recipe_probe_artifacts',
+  'tool:datamachine/run-agent-bundle',
+  'tool:github_issue_publish',
+  'tool:github_pull_request_publish',
+  'tool:comment_github_pull_request',
+  'tool:wpsg_materialize_packet',
+  'ability:datamachine/run-agent-bundle',
+  'ability:github_issue_publish',
+  'ability:github_pull_request_publish',
+  'ability:comment_github_pull_request',
+  'ability:wpsg_materialize_packet',
 ];
 
 const DEFAULT_WORKSPACE_READONLY_TOOLS = [
