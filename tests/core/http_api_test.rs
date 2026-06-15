@@ -310,7 +310,13 @@ fn runs_list_includes_active_runner_jobs() {
                 capture_patch: false,
                 source_snapshot: None,
                 require_paths: Vec::new(),
-                metadata: None,
+                metadata: Some(serde_json::json!({
+                    "source": "lab",
+                    "kind": "agent-task-cook",
+                    "durable_run_id": "cook-durable-run",
+                    "active_child_count": 2,
+                    "active_cell_count": 1
+                })),
             })
             .expect("submit runner job");
         store.start(job.id).expect("start runner job");
@@ -328,18 +334,25 @@ fn runs_list_includes_active_runner_jobs() {
         let runs = response.body["runs"].as_array().expect("runs");
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0]["id"], "cook-durable-run");
-        assert_eq!(runs[0]["kind"], "lab-runner-job");
+        assert_eq!(runs[0]["kind"], "agent-task-cook");
         assert_eq!(runs[0]["status"], "running");
         let note = runs[0]["status_note"].as_str().expect("status note");
+        assert!(note.contains("source=lab"));
+        assert!(note.contains("kind=agent-task-cook"));
         assert!(note.contains("runner=homeboy-lab"));
         assert!(note.contains(&format!("job={}", job.id)));
         assert!(note.contains("durable_run=cook-durable-run"));
         assert!(note.contains("elapsed_ms="));
-        assert!(note.contains("active_child_count="));
-        assert!(note.contains("active_cell_count="));
+        assert!(note.contains("active_child_count=2"));
+        assert!(note.contains("active_cell_count=1"));
         assert_eq!(
             response.body["active_runner_jobs"][0]["runner_id"],
             "homeboy-lab"
+        );
+        assert_eq!(response.body["active_runner_jobs"][0]["source"], "lab");
+        assert_eq!(
+            response.body["active_runner_jobs"][0]["kind"],
+            "agent-task-cook"
         );
         assert_eq!(
             response.body["active_runner_jobs"][0]["durable_run_id"],

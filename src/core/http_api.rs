@@ -596,7 +596,7 @@ fn active_runner_job_run_summary(job: ActiveRunnerJobSummary) -> RunSummary {
             .durable_run_id
             .clone()
             .unwrap_or_else(|| format!("runner-job-{}", job.job_id)),
-        kind: "lab-runner-job".to_string(),
+        kind: job.kind.clone(),
         status: active_job_status_label(job.status).to_string(),
         started_at: ms_to_rfc3339(job.started_at_ms),
         finished_at: None,
@@ -604,8 +604,10 @@ fn active_runner_job_run_summary(job: ActiveRunnerJobSummary) -> RunSummary {
         rig_id: None,
         git_sha: None,
         command: Some(format!(
-            "{} [runner={}, job={}, durable_run={}, elapsed_ms={}, active_child_count={}, active_cell_count={}]",
+            "{} [source={}, kind={}, runner={}, job={}, durable_run={}, elapsed_ms={}, active_child_count={}, active_cell_count={}]",
             job.command,
+            job.source,
+            job.kind,
             job.runner_id,
             job.job_id,
             job.durable_run_id.as_deref().unwrap_or("unknown"),
@@ -619,7 +621,9 @@ fn active_runner_job_run_summary(job: ActiveRunnerJobSummary) -> RunSummary {
         )),
         cwd: job.cwd,
         status_note: Some(format!(
-            "active Lab runner job: runner={} job={} durable_run={} elapsed_ms={} active_child_count={} active_cell_count={}",
+            "active runner job: source={} kind={} runner={} job={} durable_run={} elapsed_ms={} active_child_count={} active_cell_count={}",
+            job.source,
+            job.kind,
             job.runner_id,
             job.job_id,
             job.durable_run_id.as_deref().unwrap_or("unknown"),
