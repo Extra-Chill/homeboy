@@ -103,7 +103,7 @@ pub fn route_after_parse(
                     }
                 }),
             );
-            return Err(err);
+            Err(err)
         }
         Ok(outcome) => match outcome {
             runners::LabOffloadOutcome::RunLocal {

@@ -567,15 +567,11 @@ pub struct TracePreviewAssetFanoutSpec {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum TracePublicPreviewMode {
+    #[default]
     External,
     HomeboyNative,
-}
-
-impl Default for TracePublicPreviewMode {
-    fn default() -> Self {
-        Self::External
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]

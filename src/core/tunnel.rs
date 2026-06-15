@@ -153,7 +153,9 @@ pub struct ServiceTunnelPreviewPolicy {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum ServiceTunnelPreviewPolicyMode {
+    #[default]
     None,
     Always,
     OnFailure,
@@ -167,12 +169,6 @@ impl Default for ServiceTunnelPreviewPolicy {
             mode: ServiceTunnelPreviewPolicyMode::None,
             keep_alive_until: None,
         }
-    }
-}
-
-impl Default for ServiceTunnelPreviewPolicyMode {
-    fn default() -> Self {
-        Self::None
     }
 }
 
