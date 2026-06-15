@@ -45,8 +45,10 @@ pub(super) fn deploy_components(
             message,
             None,
             Some(vec![
-                "Ensure components have a buildArtifact, an extension with artifact_pattern, or deploy_strategy: \"git\"".to_string(),
-                format!("Check with: homeboy component show <id>"),
+                "A component is deployable when it has a buildArtifact, an extension that resolves an artifact_pattern, or deploy_strategy: \"git\".".to_string(),
+                "If the component builds via an extension, declare that extension in its homeboy.json (e.g. \"extensions\": { \"<ext>\": {} }) so the artifact can be resolved.".to_string(),
+                "Sync the component's homeboy.json config into the project: homeboy project components attach-path <project> <local_path>.".to_string(),
+                "Inspect the effective config with: homeboy component show <id>".to_string(),
             ]),
         ));
     }
