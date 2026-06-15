@@ -46,6 +46,8 @@ pub struct AgentTaskLoopControllerRecord {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub feedback: Vec<AgentTaskLoopFeedbackArtifact>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pr_ownerships: Vec<AgentTaskPrOwnershipRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub next_actions: Vec<AgentTaskLoopPolicyActionRecord>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub history: Vec<AgentTaskLoopHistoryEvent>,
@@ -262,6 +264,11 @@ pub enum AgentTaskLoopPolicyAction {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         entity_id: Option<String>,
     },
+    OwnPrUntilGreen {
+        ownership: AgentTaskPrOwnershipRequest,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        entity_id: Option<String>,
+    },
     WaitForEvent(AgentTaskLoopWait),
     WaitForController {
         loop_id: String,
@@ -364,6 +371,73 @@ pub enum AgentTaskLoopCandidateValidationStatus {
 pub struct AgentTaskLoopCandidateLoopLimits {
     #[serde(default = "default_candidate_max_attempts")]
     pub max_attempts: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentTaskPrOwnershipRequest {
+    pub ownership_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub component_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    pub base: String,
+    pub head: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_number: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_url: Option<String>,
+    #[serde(default = "default_pr_ownership_max_retries")]
+    pub max_retries: u32,
+    #[serde(default)]
+    pub merge_required: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentTaskPrOwnershipRecord {
+    pub ownership_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entity_id: Option<String>,
+    pub state: AgentTaskPrOwnershipState,
+    pub base: String,
+    pub head: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_number: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_sha: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ci_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ci_summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_decision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_state: Option<String>,
+    #[serde(default)]
+    pub retry_count: u32,
+    #[serde(default = "default_pr_ownership_max_retries")]
+    pub max_retries: u32,
+    #[serde(default)]
+    pub merge_required: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_checked_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<AgentTaskLoopArtifactRef>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentTaskPrOwnershipState {
+    Tracking,
+    WaitingForChecks,
+    ChangesRequested,
+    RetryLimitReached,
+    GreenReady,
+    WaitingForMerge,
+    Merged,
+    MissingPr,
+    Stopped,
 }
 
 impl Default for AgentTaskLoopCandidateLoopLimits {
@@ -567,6 +641,29 @@ pub struct AgentTaskLoopReviewFinding {
     pub dedupe_key: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AgentTaskPrOwnershipStatusUpdate {
+    pub pr_number: Option<u64>,
+    pub pr_url: Option<String>,
+    pub head_sha: Option<String>,
+    pub ci_state: Option<String>,
+    pub ci_summary: Option<String>,
+    pub review_decision: Option<String>,
+    pub merge_state: Option<String>,
+    pub retry_count: u32,
+    pub evidence: Vec<AgentTaskLoopArtifactRef>,
+    pub missing_pr: bool,
+}
+
+impl AgentTaskPrOwnershipStatusUpdate {
+    pub fn tracking() -> Self {
+        Self {
+            ci_state: Some("tracking".to_string()),
+            ..Self::default()
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgentTaskLoopExternalEvent {
     pub event_id: String,
@@ -660,6 +757,7 @@ impl AgentTaskLoopControllerRecord {
             waits: Vec::new(),
             subcontrollers: Vec::new(),
             feedback: Vec::new(),
+            pr_ownerships: Vec::new(),
             next_actions: Vec::new(),
             history: Vec::new(),
             metadata: Value::Null,
@@ -1124,6 +1222,75 @@ impl AgentTaskLoopControllerRecord {
         )
     }
 
+    pub fn record_pr_ownership_status(
+        &mut self,
+        request: &AgentTaskPrOwnershipRequest,
+        entity_id: Option<String>,
+        status: AgentTaskPrOwnershipStatusUpdate,
+    ) -> AgentTaskPrOwnershipRecord {
+        let state = pr_ownership_state_from_status(&status, request);
+        let record = AgentTaskPrOwnershipRecord {
+            ownership_id: request.ownership_id.clone(),
+            entity_id: entity_id.clone(),
+            state,
+            base: request.base.clone(),
+            head: request.head.clone(),
+            pr_number: status.pr_number.or(request.pr_number),
+            pr_url: status.pr_url.clone().or_else(|| request.pr_url.clone()),
+            head_sha: status.head_sha.clone(),
+            ci_state: status.ci_state.clone(),
+            ci_summary: status.ci_summary.clone(),
+            review_decision: status.review_decision.clone(),
+            merge_state: status.merge_state.clone(),
+            retry_count: status.retry_count,
+            max_retries: request.max_retries,
+            merge_required: request.merge_required,
+            last_checked_at: Some(now_timestamp()),
+            evidence: status.evidence.clone(),
+        };
+
+        if let Some(existing) = self
+            .pr_ownerships
+            .iter_mut()
+            .find(|existing| existing.ownership_id == record.ownership_id)
+        {
+            *existing = record.clone();
+        } else {
+            self.pr_ownerships.push(record.clone());
+        }
+
+        if let Some(entity_id) = &entity_id {
+            if let Some(entity) = self.entities.get_mut(entity_id) {
+                entity.state = Some(format!("pr_{:?}", state).to_ascii_lowercase());
+                entity.metadata = merge_json_object(
+                    entity.metadata.clone(),
+                    json!({
+                        "pr_ownership": {
+                            "ownership_id": record.ownership_id,
+                            "pr_number": record.pr_number,
+                            "pr_url": record.pr_url,
+                            "head": record.head,
+                            "ci_state": record.ci_state,
+                            "merge_state": record.merge_state,
+                            "review_decision": record.review_decision,
+                            "state": state,
+                        }
+                    }),
+                );
+            }
+        }
+
+        self.history.push(AgentTaskLoopHistoryEvent {
+            event_id: format!("pr-ownership-{}", self.history.len() + 1),
+            event_type: "github.pr.ownership_status".to_string(),
+            recorded_at: now_timestamp(),
+            entity_id,
+            payload: json!({ "ownership": record }),
+        });
+        self.touch();
+        record
+    }
+
     fn apply_action_side_effects(
         &mut self,
         action: &AgentTaskLoopPolicyAction,
@@ -1169,6 +1336,35 @@ impl AgentTaskLoopControllerRecord {
                         }
                     }
                 }
+            }
+            AgentTaskLoopPolicyAction::OwnPrUntilGreen {
+                ownership,
+                entity_id,
+            } => {
+                let key = format!(
+                    "{}#{}",
+                    ownership.head,
+                    ownership.pr_number.unwrap_or_default()
+                );
+                let pr_entity_id = entity_id.clone().unwrap_or_else(|| {
+                    self.upsert_entity(
+                        "pull_request",
+                        key,
+                        Vec::new(),
+                        json!({
+                            "ownership_id": ownership.ownership_id,
+                            "base": ownership.base,
+                            "head": ownership.head,
+                            "pr_number": ownership.pr_number,
+                            "pr_url": ownership.pr_url,
+                        }),
+                    )
+                });
+                self.record_pr_ownership_status(
+                    ownership,
+                    Some(pr_entity_id),
+                    AgentTaskPrOwnershipStatusUpdate::tracking(),
+                );
             }
             AgentTaskLoopPolicyAction::WaitForEvent(wait) => {
                 self.state = AgentTaskLoopControllerState::Waiting;
@@ -1531,6 +1727,9 @@ fn action_dedupe_key(action: &AgentTaskLoopPolicyAction) -> Option<String> {
         } => entity_id
             .as_ref()
             .map(|entity_id| format!("gate:{bundle_id}:{entity_id}")),
+        AgentTaskLoopPolicyAction::OwnPrUntilGreen { ownership, .. } => {
+            Some(format!("pr-ownership:{}", ownership.ownership_id))
+        }
         AgentTaskLoopPolicyAction::RequestChanges {
             target_run_id,
             feedback_id,
@@ -1615,7 +1814,8 @@ fn action_entity_id(action: &AgentTaskLoopPolicyAction) -> Option<String> {
         | AgentTaskLoopPolicyAction::SpawnSubloop { entity_id, .. }
         | AgentTaskLoopPolicyAction::WaitForController { entity_id, .. }
         | AgentTaskLoopPolicyAction::RouteFinding { entity_id, .. }
-        | AgentTaskLoopPolicyAction::RunGates { entity_id, .. } => entity_id.clone(),
+        | AgentTaskLoopPolicyAction::RunGates { entity_id, .. }
+        | AgentTaskLoopPolicyAction::OwnPrUntilGreen { entity_id, .. } => entity_id.clone(),
         AgentTaskLoopPolicyAction::MarkHumanReady { entity_id, .. } => Some(entity_id.clone()),
         _ => None,
     }
@@ -1633,6 +1833,7 @@ fn action_name(action: &AgentTaskLoopPolicyAction) -> &'static str {
         AgentTaskLoopPolicyAction::Retry { .. } => "retry",
         AgentTaskLoopPolicyAction::RequestChanges { .. } => "request_changes",
         AgentTaskLoopPolicyAction::RunGates { .. } => "run_gates",
+        AgentTaskLoopPolicyAction::OwnPrUntilGreen { .. } => "own_pr_until_green",
         AgentTaskLoopPolicyAction::WaitForEvent(_) => "wait_for_event",
         AgentTaskLoopPolicyAction::WaitForController { .. } => "wait_for_controller",
         AgentTaskLoopPolicyAction::MarkHumanReady { .. } => "mark_human_ready",
@@ -1846,6 +2047,77 @@ fn open_wait_status() -> AgentTaskLoopWaitStatus {
 
 fn default_candidate_max_attempts() -> u32 {
     3
+}
+
+fn default_pr_ownership_max_retries() -> u32 {
+    3
+}
+
+fn pr_ownership_state_from_status(
+    status: &AgentTaskPrOwnershipStatusUpdate,
+    request: &AgentTaskPrOwnershipRequest,
+) -> AgentTaskPrOwnershipState {
+    if status.missing_pr {
+        return AgentTaskPrOwnershipState::MissingPr;
+    }
+    if status
+        .merge_state
+        .as_deref()
+        .is_some_and(|state| state.eq_ignore_ascii_case("MERGED"))
+    {
+        return AgentTaskPrOwnershipState::Merged;
+    }
+    if status
+        .ci_state
+        .as_deref()
+        .is_some_and(|state| state == "terminal_failed" || state == "stale")
+    {
+        return if status.retry_count >= request.max_retries {
+            AgentTaskPrOwnershipState::RetryLimitReached
+        } else {
+            AgentTaskPrOwnershipState::ChangesRequested
+        };
+    }
+    if status
+        .review_decision
+        .as_deref()
+        .is_some_and(|decision| decision == "CHANGES_REQUESTED")
+    {
+        return if status.retry_count >= request.max_retries {
+            AgentTaskPrOwnershipState::RetryLimitReached
+        } else {
+            AgentTaskPrOwnershipState::ChangesRequested
+        };
+    }
+    if status
+        .ci_state
+        .as_deref()
+        .is_some_and(|state| state == "pending" || state == "no_checks" || state == "tracking")
+    {
+        return AgentTaskPrOwnershipState::WaitingForChecks;
+    }
+    if status
+        .ci_state
+        .as_deref()
+        .is_some_and(|state| state == "terminal_green")
+    {
+        return if request.merge_required {
+            AgentTaskPrOwnershipState::WaitingForMerge
+        } else {
+            AgentTaskPrOwnershipState::GreenReady
+        };
+    }
+    AgentTaskPrOwnershipState::Tracking
+}
+
+fn merge_json_object(left: Value, right: Value) -> Value {
+    let mut merged = left.as_object().cloned().unwrap_or_default();
+    if let Some(right) = right.as_object() {
+        for (key, value) in right {
+            merged.insert(key.clone(), value.clone());
+        }
+    }
+    Value::Object(merged)
 }
 
 fn now_timestamp() -> String {
@@ -2115,6 +2387,85 @@ mod tests {
             Some("feedback:run-repair-1:review-1")
         );
         assert_eq!(action.status, AgentTaskLoopActionStatus::Pending);
+    }
+
+    #[test]
+    fn own_pr_until_green_persists_generic_pr_lifecycle_state() {
+        let mut record = AgentTaskLoopControllerRecord::new("loop", "review", "v1");
+        let request = AgentTaskPrOwnershipRequest {
+            ownership_id: "run-123".to_string(),
+            component_id: None,
+            path: None,
+            base: "main".to_string(),
+            head: "fix/pr-owner".to_string(),
+            pr_number: Some(42),
+            pr_url: Some("https://github.com/Extra-Chill/homeboy/pull/42".to_string()),
+            max_retries: 2,
+            merge_required: true,
+        };
+        let action = record.record_action(
+            AgentTaskLoopPolicyAction::OwnPrUntilGreen {
+                ownership: request.clone(),
+                entity_id: None,
+            },
+            "own PR after finalization",
+        );
+
+        assert_eq!(action.status, AgentTaskLoopActionStatus::Pending);
+        assert_eq!(record.pr_ownerships.len(), 1);
+        assert_eq!(
+            record.pr_ownerships[0].state,
+            AgentTaskPrOwnershipState::WaitingForChecks
+        );
+        assert_eq!(record.pr_ownerships[0].head, "fix/pr-owner");
+        assert_eq!(record.pr_ownerships[0].pr_number, Some(42));
+        assert!(record.entities.contains_key("pull_request:fix_pr-owner_42"));
+
+        let serialized = serde_json::to_value(&action.action).expect("serialized action");
+        assert_eq!(serialized["action"], "own_pr_until_green");
+        assert_eq!(serialized["ownership"]["ownership_id"], "run-123");
+    }
+
+    #[test]
+    fn pr_ownership_red_checks_increment_until_retry_limit() {
+        let mut record = AgentTaskLoopControllerRecord::new("loop", "review", "v1");
+        let request = AgentTaskPrOwnershipRequest {
+            ownership_id: "run-123".to_string(),
+            component_id: None,
+            path: None,
+            base: "main".to_string(),
+            head: "fix/pr-owner".to_string(),
+            pr_number: Some(42),
+            pr_url: None,
+            max_retries: 2,
+            merge_required: false,
+        };
+
+        let first = record.record_pr_ownership_status(
+            &request,
+            Some("pr:42".to_string()),
+            AgentTaskPrOwnershipStatusUpdate {
+                pr_number: Some(42),
+                ci_state: Some("terminal_failed".to_string()),
+                retry_count: 1,
+                ..AgentTaskPrOwnershipStatusUpdate::default()
+            },
+        );
+        let second = record.record_pr_ownership_status(
+            &request,
+            Some("pr:42".to_string()),
+            AgentTaskPrOwnershipStatusUpdate {
+                pr_number: Some(42),
+                ci_state: Some("terminal_failed".to_string()),
+                retry_count: 2,
+                ..AgentTaskPrOwnershipStatusUpdate::default()
+            },
+        );
+
+        assert_eq!(first.state, AgentTaskPrOwnershipState::ChangesRequested);
+        assert_eq!(second.state, AgentTaskPrOwnershipState::RetryLimitReached);
+        assert_eq!(record.pr_ownerships.len(), 1);
+        assert_eq!(record.pr_ownerships[0].retry_count, 2);
     }
 
     #[test]

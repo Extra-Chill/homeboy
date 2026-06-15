@@ -157,27 +157,29 @@ fn component_scripts_include_linked_extension_env_provider_output() {
 
 #[test]
 fn test_run_component_scripts_with_run_dir() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let run_dir = RunDir::create().expect("run dir");
-    let component = script_component(
-        dir.path(),
-        "test -n \"$HOMEBOY_RUN_DIR\" && printf ok > marker",
-    );
+    with_isolated_home(|_| {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let run_dir = RunDir::create().expect("run dir");
+        let component = script_component(
+            dir.path(),
+            "test -n \"$HOMEBOY_RUN_DIR\" && printf ok > marker",
+        );
 
-    let output = run_component_scripts_with_run_dir(
-        &component,
-        ExtensionCapability::Test,
-        dir.path(),
-        &run_dir,
-        false,
-        &[],
-        &[],
-    )
-    .expect("component script should run with run dir");
+        let output = run_component_scripts_with_run_dir(
+            &component,
+            ExtensionCapability::Test,
+            dir.path(),
+            &run_dir,
+            false,
+            &[],
+            &[],
+        )
+        .expect("component script should run with run dir");
 
-    assert!(output.success);
-    assert_eq!(fs::read_to_string(dir.path().join("marker")).unwrap(), "ok");
-    run_dir.cleanup();
+        assert!(output.success);
+        assert_eq!(fs::read_to_string(dir.path().join("marker")).unwrap(), "ok");
+        run_dir.cleanup();
+    });
 }
 
 #[test]

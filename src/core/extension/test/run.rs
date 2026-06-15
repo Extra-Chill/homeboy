@@ -799,6 +799,7 @@ mod tests {
     use super::*;
     use crate::core::component::ComponentScriptsConfig;
     use crate::core::extension::test::TestFailure;
+    use crate::test_support::with_isolated_home;
 
     #[test]
     fn tail_lines_returns_full_text_when_under_limit() {
@@ -894,13 +895,14 @@ mod tests {
 
     #[test]
     fn declared_result_parser_script_normalizes_provider_json() {
-        let temp_dir = tempfile::tempdir().expect("temp dir");
-        let extension_dir = temp_dir.path().join("extension");
-        std::fs::create_dir_all(&extension_dir).expect("extension dir");
-        let parser_script = extension_dir.join("parse-results.sh");
-        std::fs::write(
-            &parser_script,
-            r#"#!/usr/bin/env bash
+        with_isolated_home(|_| {
+            let temp_dir = tempfile::tempdir().expect("temp dir");
+            let extension_dir = temp_dir.path().join("extension");
+            std::fs::create_dir_all(&extension_dir).expect("extension dir");
+            let parser_script = extension_dir.join("parse-results.sh");
+            std::fs::write(
+                &parser_script,
+                r#"#!/usr/bin/env bash
 set -euo pipefail
 if [ "${2:-}" != "custom-json" ]; then
     exit 7
@@ -945,43 +947,43 @@ EOF
 homeboy_write_test_results "$total" "$passed" "$failed" "$skipped"
 printf 'provider parser log line\n'
 "#,
-        )
-        .expect("parser script");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&parser_script, std::fs::Permissions::from_mode(0o755))
-                .expect("parser script permissions");
-        }
+            )
+            .expect("parser script");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&parser_script, std::fs::Permissions::from_mode(0o755))
+                    .expect("parser script permissions");
+            }
 
-        let component = Component::new(
-            "fixture".to_string(),
-            temp_dir.path().to_string_lossy().to_string(),
-            "fixture-extension".to_string(),
-            None,
-        );
-        let context = crate::core::extension::ExtensionExecutionContext {
-            component: component.clone(),
-            capability: ExtensionCapability::Test,
-            extension_id: "fixture-extension".to_string(),
-            extension_path: extension_dir,
-            script_path: "test.sh".to_string(),
-            settings: Vec::new(),
-        };
-        let spec = ParseSpec {
-            extension_script: Some("parse-results.sh".to_string()),
-            adapters: vec!["custom-json".to_string()],
-            rules: Vec::new(),
-            defaults: std::collections::HashMap::new(),
-            derive: Vec::new(),
-        };
-        let run_dir = RunDir::create().expect("run dir");
+            let component = Component::new(
+                "fixture".to_string(),
+                temp_dir.path().to_string_lossy().to_string(),
+                "fixture-extension".to_string(),
+                None,
+            );
+            let context = crate::core::extension::ExtensionExecutionContext {
+                component: component.clone(),
+                capability: ExtensionCapability::Test,
+                extension_id: "fixture-extension".to_string(),
+                extension_path: extension_dir,
+                script_path: "test.sh".to_string(),
+                settings: Vec::new(),
+            };
+            let spec = ParseSpec {
+                extension_script: Some("parse-results.sh".to_string()),
+                adapters: vec!["custom-json".to_string()],
+                rules: Vec::new(),
+                defaults: std::collections::HashMap::new(),
+                derive: Vec::new(),
+            };
+            let run_dir = RunDir::create().expect("run dir");
 
-        run_declared_result_parser(
-            &component,
-            &context,
-            &spec,
-            r#"{
+            run_declared_result_parser(
+                &component,
+                &context,
+                &spec,
+                r#"{
                 "schema": "custom-provider/test-results/v1",
                 "summary": { "total": 0 },
                 "suites": [
@@ -989,22 +991,23 @@ printf 'provider parser log line\n'
                     { "total": 2, "passed": 1, "skipped": 1 }
                 ]
             }"#,
-            &run_dir,
-        )
-        .expect("declared parser should run");
+                &run_dir,
+            )
+            .expect("declared parser should run");
 
-        let counts = parse_test_results_file_with_spec(
-            &run_dir.step_file(run_dir::files::TEST_RESULTS),
-            Some(&spec),
-        )
-        .expect("declared parser should write normalized counts");
+            let counts = parse_test_results_file_with_spec(
+                &run_dir.step_file(run_dir::files::TEST_RESULTS),
+                Some(&spec),
+            )
+            .expect("declared parser should write normalized counts");
 
-        run_dir.cleanup();
+            run_dir.cleanup();
 
-        assert_eq!(counts.total, 5);
-        assert_eq!(counts.passed, 3);
-        assert_eq!(counts.failed, 1);
-        assert_eq!(counts.skipped, 1);
+            assert_eq!(counts.total, 5);
+            assert_eq!(counts.passed, 3);
+            assert_eq!(counts.failed, 1);
+            assert_eq!(counts.skipped, 1);
+        });
     }
 
     #[test]
@@ -1125,63 +1128,65 @@ exit 23
 
     #[test]
     fn declared_result_parser_accepts_flat_count_stdout_json() {
-        let temp_dir = tempfile::tempdir().expect("temp dir");
-        let extension_dir = temp_dir.path().join("extension");
-        std::fs::create_dir_all(&extension_dir).expect("extension dir");
-        let parser_script = extension_dir.join("parse-results.sh");
-        std::fs::write(
-            &parser_script,
-            r#"#!/usr/bin/env bash
+        with_isolated_home(|_| {
+            let temp_dir = tempfile::tempdir().expect("temp dir");
+            let extension_dir = temp_dir.path().join("extension");
+            std::fs::create_dir_all(&extension_dir).expect("extension dir");
+            let parser_script = extension_dir.join("parse-results.sh");
+            std::fs::write(
+                &parser_script,
+                r#"#!/usr/bin/env bash
 set -euo pipefail
 printf '{"total":5,"passed":3,"failed":1,"skipped":1}\n'
 "#,
-        )
-        .expect("parser script");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&parser_script, std::fs::Permissions::from_mode(0o755))
-                .expect("parser script permissions");
-        }
+            )
+            .expect("parser script");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&parser_script, std::fs::Permissions::from_mode(0o755))
+                    .expect("parser script permissions");
+            }
 
-        let component = Component::new(
-            "fixture".to_string(),
-            temp_dir.path().to_string_lossy().to_string(),
-            "fixture-extension".to_string(),
-            None,
-        );
-        let context = crate::core::extension::ExtensionExecutionContext {
-            component: component.clone(),
-            capability: ExtensionCapability::Test,
-            extension_id: "fixture-extension".to_string(),
-            extension_path: extension_dir,
-            script_path: "test.sh".to_string(),
-            settings: Vec::new(),
-        };
-        let spec = ParseSpec {
-            extension_script: Some("parse-results.sh".to_string()),
-            adapters: vec!["fixture-json".to_string()],
-            rules: Vec::new(),
-            defaults: std::collections::HashMap::new(),
-            derive: Vec::new(),
-        };
-        let run_dir = RunDir::create().expect("run dir");
+            let component = Component::new(
+                "fixture".to_string(),
+                temp_dir.path().to_string_lossy().to_string(),
+                "fixture-extension".to_string(),
+                None,
+            );
+            let context = crate::core::extension::ExtensionExecutionContext {
+                component: component.clone(),
+                capability: ExtensionCapability::Test,
+                extension_id: "fixture-extension".to_string(),
+                extension_path: extension_dir,
+                script_path: "test.sh".to_string(),
+                settings: Vec::new(),
+            };
+            let spec = ParseSpec {
+                extension_script: Some("parse-results.sh".to_string()),
+                adapters: vec!["fixture-json".to_string()],
+                rules: Vec::new(),
+                defaults: std::collections::HashMap::new(),
+                derive: Vec::new(),
+            };
+            let run_dir = RunDir::create().expect("run dir");
 
-        run_declared_result_parser(&component, &context, &spec, "runner output", &run_dir)
-            .expect("declared parser stdout should run");
+            run_declared_result_parser(&component, &context, &spec, "runner output", &run_dir)
+                .expect("declared parser stdout should run");
 
-        let counts = parse_test_results_file_with_spec(
-            &run_dir.step_file(run_dir::files::TEST_RESULTS),
-            Some(&spec),
-        )
-        .expect("parser stdout JSON should be normalized to test-results.json");
+            let counts = parse_test_results_file_with_spec(
+                &run_dir.step_file(run_dir::files::TEST_RESULTS),
+                Some(&spec),
+            )
+            .expect("parser stdout JSON should be normalized to test-results.json");
 
-        run_dir.cleanup();
+            run_dir.cleanup();
 
-        assert_eq!(counts.total, 5);
-        assert_eq!(counts.passed, 3);
-        assert_eq!(counts.failed, 1);
-        assert_eq!(counts.skipped, 1);
+            assert_eq!(counts.total, 5);
+            assert_eq!(counts.passed, 3);
+            assert_eq!(counts.failed, 1);
+            assert_eq!(counts.skipped, 1);
+        });
     }
 
     #[test]
