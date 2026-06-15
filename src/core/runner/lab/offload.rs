@@ -169,7 +169,7 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
             "runner",
             message,
             Some(runner_id.to_string()),
-            Some(vec!["Current Lab offload support: agent-task dispatch/cook/loop/run-plan/status/logs/artifacts/review/providers, agent-task auth status, audit, bench run, full lint, full test, trace, and refactor source runs.".to_string()]),
+            Some(vec!["Current Lab offload support: agent-task dispatch/cook/loop/run-plan/status/logs/artifacts/review/providers, agent-task auth status, audit, bench run, full lint, full test, trace, refactor source runs, and tunnel preview-consumer run.".to_string()]),
         )
     };
     let mut plan = base_lab_plan(request.command.as_ref());
@@ -177,7 +177,7 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
         if let Some(runner_id) = request.explicit_runner {
             return Err(unsupported_runner_error(
                 runner_id,
-                "--runner is only supported for commands with portable Lab offload support: agent-task dispatch/cook/loop/run-plan/status/logs/artifacts/review/providers, agent-task auth status, lint, test, audit, bench, trace, and refactor source runs".to_string(),
+                "--runner is only supported for commands with portable Lab offload support: agent-task dispatch/cook/loop/run-plan/status/logs/artifacts/review/providers, agent-task auth status, lint, test, audit, bench, trace, refactor source runs, and tunnel preview-consumer run".to_string(),
             ));
         }
         return Ok(LabOffloadOutcome::RunLocal {
@@ -190,7 +190,7 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
     if !contract.portable {
         if let Some(runner_id) = request.explicit_runner {
             let message = contract.unsupported_reason.map_or_else(
-                || "--runner is only supported for commands with portable Lab offload support: agent-task dispatch/cook/loop/run-plan/status/logs/artifacts/review/providers, agent-task auth status, lint, test, audit, bench, trace, and refactor source runs".to_string(),
+                || "--runner is only supported for commands with portable Lab offload support: agent-task dispatch/cook/loop/run-plan/status/logs/artifacts/review/providers, agent-task auth status, lint, test, audit, bench, trace, refactor source runs, and tunnel preview-consumer run".to_string(),
                 |reason| format!("--runner is unavailable for this local-only resource-pressure command. {reason}"),
             );
             return Err(unsupported_runner_error(runner_id, message));

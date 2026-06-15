@@ -129,6 +129,17 @@ pub struct TunnelArgs {
     command: TunnelCommand,
 }
 
+impl TunnelArgs {
+    pub(crate) fn is_preview_consumer_run(&self) -> bool {
+        matches!(
+            self.command,
+            TunnelCommand::PreviewConsumer {
+                command: TunnelPreviewConsumerCommand::Run { .. }
+            }
+        )
+    }
+}
+
 #[derive(Subcommand)]
 enum TunnelCommand {
     /// Manage private service tunnel declarations
