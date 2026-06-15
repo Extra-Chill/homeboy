@@ -147,6 +147,7 @@ fn parse_bench_results_str_with_artifact_context_and_scenarios(
     }
     filter_value_scenarios_by_ids(&mut value, scenario_ids);
     normalize_extension_sample_metrics(&mut value);
+    normalize_diagnostic_producer_sources(&mut value);
     let mut parsed: BenchResults = serde_json::from_value(value).map_err(|e| {
         Error::internal_json(
             format!("Failed to parse bench results JSON: {}", e),
@@ -160,6 +161,72 @@ fn parse_bench_results_str_with_artifact_context_and_scenarios(
     evaluate_spans(&mut parsed);
     artifact_validation::validate_artifact_paths(&parsed, rig_id)?;
     Ok(parsed)
+}
+
+fn normalize_diagnostic_producer_sources(value: &mut serde_json::Value) {
+    normalize_diagnostic_array(value.get_mut("diagnostics"));
+
+    if let Some(run_metadata) = value.get_mut("run_metadata") {
+        normalize_diagnostic_array(run_metadata.get_mut("diagnostics"));
+    }
+
+    let Some(scenarios) = value
+        .get_mut("scenarios")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return;
+    };
+
+    for scenario in scenarios {
+        normalize_diagnostic_array(scenario.get_mut("diagnostics"));
+        let Some(runs) = scenario
+            .get_mut("runs")
+            .and_then(serde_json::Value::as_array_mut)
+        else {
+            continue;
+        };
+        for run in runs {
+            normalize_diagnostic_array(run.get_mut("diagnostics"));
+        }
+    }
+}
+
+fn normalize_diagnostic_array(value: Option<&mut serde_json::Value>) {
+    let Some(diagnostics) = value.and_then(serde_json::Value::as_array_mut) else {
+        return;
+    };
+
+    for diagnostic in diagnostics {
+        let Some(object) = diagnostic.as_object_mut() else {
+            continue;
+        };
+        let Some(source) = object.remove("source") else {
+            continue;
+        };
+        match source {
+            serde_json::Value::String(source) => {
+                let metadata_key = if object.contains_key("metadata") {
+                    "metadata"
+                } else if object.contains_key("details") {
+                    "details"
+                } else {
+                    "metadata"
+                };
+                let metadata = object
+                    .entry(metadata_key.to_string())
+                    .or_insert_with(|| serde_json::json!({}));
+                if let Some(metadata_object) = metadata.as_object_mut() {
+                    metadata_object.insert(
+                        "producer_source".to_string(),
+                        serde_json::Value::String(source),
+                    );
+                }
+            }
+            other => {
+                object.insert("source".to_string(), other);
+            }
+        }
+    }
 }
 
 fn filter_value_scenarios_by_ids(value: &mut serde_json::Value, scenario_ids: &[String]) {
@@ -417,6 +484,42 @@ mod tests {
         assert_eq!(
             metrics.distribution("actual_package_count"),
             Some(&[8.0][..])
+        );
+    }
+
+    #[test]
+    fn parses_extension_diagnostics_with_producer_source() {
+        let raw = r#"{
+            "component_id": "woocommerce",
+            "iterations": 1,
+            "diagnostics": [
+                {
+                    "code": "wordpress.bench.stdout_noise",
+                    "message": "captured non-JSON stdout",
+                    "severity": "warning",
+                    "source": "wordpress.bench/stdout",
+                    "details": { "line_count": 3 }
+                }
+            ],
+            "scenarios": [
+                {
+                    "id": "checkout-gateway-compatibility-matrix",
+                    "iterations": 1,
+                    "metrics": { "success_rate": 0.0 }
+                }
+            ]
+        }"#;
+
+        let parsed = parse_bench_results_str(raw).unwrap();
+        let diagnostic = &parsed.diagnostics[0];
+
+        assert_eq!(diagnostic.class, "wordpress.bench.stdout_noise");
+        assert_eq!(diagnostic.severity.as_deref(), Some("warning"));
+        assert_eq!(diagnostic.source, None);
+        assert_eq!(diagnostic.metadata["line_count"], 3);
+        assert_eq!(
+            diagnostic.metadata["producer_source"].as_str(),
+            Some("wordpress.bench/stdout")
         );
     }
 
