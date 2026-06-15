@@ -462,10 +462,7 @@ fn inspect_release_tag_state(component: &Component, tag_name: &str) -> Result<Re
 /// repository resolves, or `None` when it cannot be determined (no remote, `gh`
 /// unavailable/unauthenticated, or a non-GitHub remote). Callers that must not
 /// move a published release should treat `None` conservatively.
-pub(crate) fn github_release_exists_for_tag(
-    component: &Component,
-    tag_name: &str,
-) -> Option<bool> {
+pub(crate) fn github_release_exists_for_tag(component: &Component, tag_name: &str) -> Option<bool> {
     component
         .remote_url
         .clone()

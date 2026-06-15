@@ -412,19 +412,17 @@ pub fn get_head_commit(path: &str) -> Result<String> {
 /// before moving it, so a tag is never relocated onto an unrelated/divergent
 /// history.
 pub fn is_ancestor(path: &str, ancestor: &str, descendant: &str) -> Result<bool> {
-    let output = execute_git_for_release(
-        path,
-        &["merge-base", "--is-ancestor", ancestor, descendant],
-    )
-    .map_err(|e| {
-        Error::internal_io(
-            format!("Failed to check ancestry: {}", e),
-            Some(format!(
-                "git merge-base --is-ancestor {} {}",
-                ancestor, descendant
-            )),
-        )
-    })?;
+    let output =
+        execute_git_for_release(path, &["merge-base", "--is-ancestor", ancestor, descendant])
+            .map_err(|e| {
+                Error::internal_io(
+                    format!("Failed to check ancestry: {}", e),
+                    Some(format!(
+                        "git merge-base --is-ancestor {} {}",
+                        ancestor, descendant
+                    )),
+                )
+            })?;
     // `--is-ancestor` exits 0 when true, 1 when false. Any other code is an error.
     match output.status.code() {
         Some(0) => Ok(true),
