@@ -136,6 +136,12 @@ pub struct MirroredDaemonEvidence {
 }
 
 #[derive(Debug, Clone)]
+pub struct RunnerJobLogSnapshot {
+    pub job: Job,
+    pub events: Vec<JobEvent>,
+}
+
+#[derive(Debug, Clone)]
 struct RemoteArtifactToken {
     runner_id: String,
     run_id: String,
@@ -231,6 +237,13 @@ pub fn refresh_mirrored_daemon_evidence(run_id: &str) -> Result<Option<Vec<RunRe
         .unwrap_or_default();
     mirror_job_run(&store, &runner, cwd, &command, &job, &events, &result)?;
     Ok(Some(mirror_remote_observation_runs(&store, &runner, &job)?))
+}
+
+pub fn runner_job_log_snapshot(runner_id: &str, job_id: &str) -> Result<RunnerJobLogSnapshot> {
+    Ok(RunnerJobLogSnapshot {
+        job: fetch_daemon_job(runner_id, job_id)?,
+        events: fetch_daemon_events(runner_id, job_id)?,
+    })
 }
 
 pub fn mirrored_runner_job_identity(run: &RunRecord) -> Option<(String, String)> {
