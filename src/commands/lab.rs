@@ -120,7 +120,7 @@ pub fn run(args: LabArgs, _global: &GlobalArgs) -> CmdResult<LabCommandOutput> {
             let selected_runner = selected_lab_runner_status(runner.as_deref())?;
             let followup_runner = runner.as_deref().or(preferred_runner.as_deref());
             let managed_followups = lab_followups(followup_runner, current_workspace.as_deref());
-            return Ok((
+            Ok((
                 LabCommandOutput::Status(LabOutput {
                     command: "lab.status",
                     preferred_runner,
@@ -139,7 +139,7 @@ pub fn run(args: LabArgs, _global: &GlobalArgs) -> CmdResult<LabCommandOutput> {
                     ],
                 }),
                 0,
-            ));
+            ))
         }
         LabCommand::Bench { args } => {
             let managed_followups =
@@ -149,7 +149,7 @@ pub fn run(args: LabArgs, _global: &GlobalArgs) -> CmdResult<LabCommandOutput> {
                 bench_command.push(' ');
                 bench_command.push_str(&args.join(" "));
             }
-            return Ok((
+            Ok((
                 LabCommandOutput::Status(LabOutput {
                     command: "lab.bench",
                     preferred_runner,
@@ -165,7 +165,7 @@ pub fn run(args: LabArgs, _global: &GlobalArgs) -> CmdResult<LabCommandOutput> {
                     ],
                 }),
                 0,
-            ));
+            ))
         }
         LabCommand::ExtensionSync {
             runner,
@@ -173,10 +173,8 @@ pub fn run(args: LabArgs, _global: &GlobalArgs) -> CmdResult<LabCommandOutput> {
             id,
             revision,
             no_replace,
-        } => {
-            return sync_lab_extension(runner, &source, &id, &revision, !no_replace);
-        }
-    };
+        } => sync_lab_extension(runner, &source, &id, &revision, !no_replace),
+    }
 }
 
 fn selected_lab_runner_status(
