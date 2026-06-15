@@ -1,6 +1,6 @@
 {
   "name": "WordPress",
-  "version": "2.121.46",
+  "version": "2.121.47",
   "icon": "w.circle.fill",
   "description": "WordPress project type with WP-CLI integration",
   "author": "Extra Chill",

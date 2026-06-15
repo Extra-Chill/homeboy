@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.121.47] - 2026-06-15
+
+### Changed
+- remove brittle Codebox profile smoke
+
 ## [2.121.46] - 2026-06-15
 
 ### Fixed
