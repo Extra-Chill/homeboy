@@ -9,6 +9,7 @@ use crate::core::agent_task::{
     AgentTaskOutcomeStatus, AgentTaskRequest, AGENT_TASK_ARTIFACT_SCHEMA,
     AGENT_TASK_OUTCOME_SCHEMA,
 };
+use crate::core::agent_task_provider::{role_aliases_for_executor, AgentTaskProviderRoleAliases};
 
 const EXPECTED_RUNTIME_EVIDENCE_FILES: &[&str] = &[
     "transcript.json",
@@ -31,9 +32,20 @@ pub(crate) struct TimeoutArtifactDiscovery {
 
 impl TimeoutArtifactDiscovery {
     pub(crate) fn discover(request: &AgentTaskRequest) -> Self {
+        let role_aliases = role_aliases_for_executor(
+            &request.executor.backend,
+            request.executor.selector.as_deref(),
+        );
+        Self::discover_with_role_aliases(request, &role_aliases)
+    }
+
+    fn discover_with_role_aliases(
+        request: &AgentTaskRequest,
+        role_aliases: &AgentTaskProviderRoleAliases,
+    ) -> Self {
         let mut discovery = Self::default();
         for path in artifact_discovery_paths(request) {
-            discovery.scan_path(&path, request);
+            discovery.scan_path(&path, request, &role_aliases);
         }
         discovery
     }
@@ -42,13 +54,18 @@ impl TimeoutArtifactDiscovery {
         self.runtime_evidence_count() > 0
     }
 
-    fn scan_path(&mut self, path: &Path, request: &AgentTaskRequest) {
+    fn scan_path(
+        &mut self,
+        path: &Path,
+        request: &AgentTaskRequest,
+        role_aliases: &AgentTaskProviderRoleAliases,
+    ) {
         let Ok(metadata) = fs::metadata(path) else {
             return;
         };
 
         if metadata.is_file() {
-            self.record_file(path, request);
+            self.record_file(path, request, role_aliases);
             return;
         }
 
@@ -57,7 +74,7 @@ impl TimeoutArtifactDiscovery {
         }
 
         let runtime_evidence_count_before = self.runtime_evidence_count();
-        self.scan_directory_files(path, request, 0, &mut 0);
+        self.scan_directory_files(path, request, role_aliases, 0, &mut 0);
         self.record_directory_if_useful(
             path,
             self.runtime_evidence_count() > runtime_evidence_count_before,
@@ -112,7 +129,12 @@ impl TimeoutArtifactDiscovery {
         });
     }
 
-    fn record_file(&mut self, path: &Path, request: &AgentTaskRequest) {
+    fn record_file(
+        &mut self,
+        path: &Path,
+        request: &AgentTaskRequest,
+        role_aliases: &AgentTaskProviderRoleAliases,
+    ) {
         if let Some(outcome) = read_discovered_outcome(path, request) {
             append_unique_artifacts(&mut self.artifacts, outcome.artifacts.clone());
             append_unique_evidence_refs(&mut self.evidence_refs, outcome.evidence_refs.clone());
@@ -125,7 +147,7 @@ impl TimeoutArtifactDiscovery {
             return;
         }
 
-        let Some(kind) = artifact_kind_from_path(path) else {
+        let Some(kind) = artifact_kind_from_path(path, role_aliases) else {
             return;
         };
         let Some(id) = artifact_id_from_path(path) else {
@@ -152,6 +174,7 @@ impl TimeoutArtifactDiscovery {
         &mut self,
         path: &Path,
         request: &AgentTaskRequest,
+        role_aliases: &AgentTaskProviderRoleAliases,
         depth: usize,
         visited: &mut usize,
     ) {
@@ -172,10 +195,10 @@ impl TimeoutArtifactDiscovery {
                 continue;
             };
             if child_metadata.is_file() {
-                self.record_file(&child, request);
+                self.record_file(&child, request, role_aliases);
             } else if child_metadata.is_dir() {
                 let runtime_evidence_count_before = self.runtime_evidence_count();
-                self.scan_directory_files(&child, request, depth + 1, visited);
+                self.scan_directory_files(&child, request, role_aliases, depth + 1, visited);
                 self.record_directory_if_useful(
                     &child,
                     self.runtime_evidence_count() > runtime_evidence_count_before,
@@ -253,7 +276,6 @@ pub(crate) fn is_empty_patch_artifact(artifact: &AgentTaskArtifact) -> bool {
 fn artifact_has_patch_shape(artifact: &AgentTaskArtifact) -> bool {
     artifact.kind == "patch"
         || artifact.kind == "diff"
-        || artifact.kind == "codebox-patch"
         || artifact.mime.as_deref() == Some("text/x-patch")
         || artifact.mime.as_deref() == Some("text/x-diff")
         || artifact.metadata.get("role").and_then(Value::as_str) == Some("patch")
@@ -341,7 +363,10 @@ fn merge_outcome_metadata_actionable(metadata: Value, actionable: bool) -> Value
     }
 }
 
-fn artifact_kind_from_path(path: &Path) -> Option<String> {
+fn artifact_kind_from_path(
+    path: &Path,
+    role_aliases: &AgentTaskProviderRoleAliases,
+) -> Option<String> {
     let file_name = path.file_name()?.to_string_lossy().to_ascii_lowercase();
     let extension = path
         .extension()
@@ -361,8 +386,18 @@ fn artifact_kind_from_path(path: &Path) -> Option<String> {
     if file_name.contains("agent-result") || file_name.contains("agent_result") {
         return Some("agent_result".to_string());
     }
-    if file_name == "homeboy-codebox-task-runner.json" {
-        return Some("preflight_evidence".to_string());
+
+    for role in [
+        "patch",
+        "preflight_evidence",
+        "runtime_bundle",
+        "agent_result",
+    ] {
+        if role_aliases.artifact_filename_matches_role(role, &file_name)
+            || role_aliases.artifact_kind_matches_role(role, &file_name)
+        {
+            return Some(role.to_string());
+        }
     }
 
     None
@@ -433,9 +468,16 @@ mod tests {
         let preflight_path = artifact_root.join("homeboy-codebox-task-runner.json");
         fs::write(&preflight_path, r#"{"runner":"codebox"}"#).expect("preflight evidence");
 
-        let discovery = TimeoutArtifactDiscovery::discover(&test_request(json!({
-            "artifact_root": artifact_root,
-        })));
+        let discovery = TimeoutArtifactDiscovery::discover_with_role_aliases(
+            &test_request(json!({
+                "artifact_root": artifact_root,
+            })),
+            &role_aliases(json!({
+                "artifact_filenames": {
+                    "preflight_evidence": ["homeboy-codebox-task-runner.json"]
+                }
+            })),
+        );
 
         assert!(!discovery.has_runtime_evidence());
         assert!(discovery.artifacts.iter().any(|artifact| {
@@ -446,6 +488,31 @@ mod tests {
             diagnostic.class == "empty_runtime_bundle"
                 && diagnostic.data.get("path").and_then(Value::as_str)
                     == Some(&empty_runtime.to_string_lossy())
+        }));
+    }
+
+    #[test]
+    fn provider_declared_filename_pattern_maps_to_generic_role() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let artifact_root = temp.path().join("task-1-artifacts");
+        fs::create_dir_all(&artifact_root).expect("artifact root");
+        let evidence_path = artifact_root.join("provider-preflight-evidence.json");
+        fs::write(&evidence_path, r#"{"provider":"custom"}"#).expect("preflight evidence");
+
+        let discovery = TimeoutArtifactDiscovery::discover_with_role_aliases(
+            &test_request(json!({
+                "artifact_root": artifact_root,
+            })),
+            &role_aliases(json!({
+                "artifact_filenames": {
+                    "preflight_evidence": ["*-preflight-evidence.json"]
+                }
+            })),
+        );
+
+        assert!(discovery.artifacts.iter().any(|artifact| {
+            artifact.kind == "preflight_evidence"
+                && artifact.path.as_deref() == Some(&evidence_path.to_string_lossy())
         }));
     }
 
@@ -472,5 +539,9 @@ mod tests {
             expected_artifacts: Vec::new(),
             metadata,
         }
+    }
+
+    fn role_aliases(value: Value) -> AgentTaskProviderRoleAliases {
+        serde_json::from_value(value).expect("role aliases")
     }
 }

@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -32,10 +32,98 @@ pub struct AgentTaskExecutorProvider {
     pub capabilities: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_materialization: Option<AgentTaskProviderWorkspaceMaterialization>,
+    #[serde(
+        default,
+        skip_serializing_if = "AgentTaskProviderRoleAliases::is_empty"
+    )]
+    pub role_aliases: AgentTaskProviderRoleAliases,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extension_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extension_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct AgentTaskProviderRoleAliases {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub artifact_kinds: BTreeMap<String, Vec<String>>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub artifact_filenames: BTreeMap<String, Vec<String>>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub outputs: BTreeMap<String, Vec<String>>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metadata: BTreeMap<String, Vec<String>>,
+}
+
+impl AgentTaskProviderRoleAliases {
+    pub fn is_empty(&self) -> bool {
+        self.artifact_kinds.is_empty()
+            && self.artifact_filenames.is_empty()
+            && self.outputs.is_empty()
+            && self.metadata.is_empty()
+    }
+
+    pub fn artifact_kind_matches_role(&self, role: &str, kind: &str) -> bool {
+        alias_matches(self.artifact_kinds.get(role), kind)
+    }
+
+    pub fn artifact_filename_matches_role(&self, role: &str, filename: &str) -> bool {
+        alias_matches(self.artifact_filenames.get(role), filename)
+    }
+
+    pub fn role_for_artifact_kind(&self, kind: &str) -> Option<&str> {
+        self.artifact_kinds
+            .iter()
+            .find_map(|(role, aliases)| alias_matches(Some(aliases), kind).then_some(role.as_str()))
+    }
+
+    pub fn output_aliases_for_role(&self, role: &str) -> Vec<&str> {
+        aliases_for_role(&self.outputs, role)
+    }
+
+    pub fn metadata_aliases_for_role(&self, role: &str) -> Vec<&str> {
+        aliases_for_role(&self.metadata, role)
+    }
+}
+
+fn aliases_for_role<'a>(map: &'a BTreeMap<String, Vec<String>>, role: &str) -> Vec<&'a str> {
+    map.get(role)
+        .into_iter()
+        .flatten()
+        .map(String::as_str)
+        .collect()
+}
+
+fn alias_matches(aliases: Option<&Vec<String>>, value: &str) -> bool {
+    let value = value.to_ascii_lowercase();
+    aliases.into_iter().flatten().any(|alias| {
+        let alias = alias.to_ascii_lowercase();
+        alias == value || wildcard_match(&alias, &value)
+    })
+}
+
+fn wildcard_match(pattern: &str, value: &str) -> bool {
+    if !pattern.contains('*') {
+        return pattern == value;
+    }
+
+    let mut remainder = value;
+    let anchored_start = !pattern.starts_with('*');
+    let anchored_end = !pattern.ends_with('*');
+    let parts: Vec<&str> = pattern.split('*').filter(|part| !part.is_empty()).collect();
+    if parts.is_empty() {
+        return true;
+    }
+    if anchored_start && !value.starts_with(parts[0]) {
+        return false;
+    }
+    for part in &parts {
+        let Some(index) = remainder.find(part) else {
+            return false;
+        };
+        remainder = &remainder[index + part.len()..];
+    }
+    !anchored_end || value.ends_with(parts[parts.len() - 1])
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -79,6 +167,29 @@ pub fn provider_requires_cwd_git_checkout(backend: &str, selector: Option<&str>)
     provider_requires_cwd_git_checkout_with_providers(&providers, backend, selector)
 }
 
+pub(crate) fn role_aliases_for_executor(
+    backend: &str,
+    selector: Option<&str>,
+) -> AgentTaskProviderRoleAliases {
+    let providers = discover_agent_task_executor_providers();
+    select_provider_by_backend(&providers, backend, selector)
+        .map(|provider| provider.role_aliases.clone())
+        .unwrap_or_default()
+}
+
+pub(crate) fn role_aliases_for_provider(
+    provider_id_or_backend: &str,
+) -> AgentTaskProviderRoleAliases {
+    let providers = discover_agent_task_executor_providers();
+    providers
+        .iter()
+        .find(|provider| {
+            provider.id == provider_id_or_backend || provider.backend == provider_id_or_backend
+        })
+        .map(|provider| provider.role_aliases.clone())
+        .unwrap_or_default()
+}
+
 fn provider_requires_cwd_git_checkout_with_providers(
     providers: &[AgentTaskExecutorProvider],
     backend: &str,
@@ -86,9 +197,7 @@ fn provider_requires_cwd_git_checkout_with_providers(
 ) -> bool {
     providers
         .iter()
-        .find(|provider| {
-            provider.backend == backend && selector.is_none_or(|selector| provider.id == selector)
-        })
+        .find(|provider| provider_matches_backend(provider, backend, selector))
         .and_then(|provider| provider.workspace_materialization.as_ref())
         .and_then(|materialization| materialization.cwd.as_deref())
         == Some("git_checkout")
@@ -343,14 +452,29 @@ fn select_provider<'a>(
     providers: &'a [AgentTaskExecutorProvider],
     request: &AgentTaskRequest,
 ) -> Option<&'a AgentTaskExecutorProvider> {
-    providers.iter().find(|provider| {
-        provider.backend == request.executor.backend
-            && request
-                .executor
-                .selector
-                .as_ref()
-                .is_none_or(|selector| provider.id == *selector)
-    })
+    select_provider_by_backend(
+        providers,
+        &request.executor.backend,
+        request.executor.selector.as_deref(),
+    )
+}
+
+fn select_provider_by_backend<'a>(
+    providers: &'a [AgentTaskExecutorProvider],
+    backend: &str,
+    selector: Option<&str>,
+) -> Option<&'a AgentTaskExecutorProvider> {
+    providers
+        .iter()
+        .find(|provider| provider_matches_backend(provider, backend, selector))
+}
+
+fn provider_matches_backend(
+    provider: &AgentTaskExecutorProvider,
+    backend: &str,
+    selector: Option<&str>,
+) -> bool {
+    provider.backend == backend && selector.is_none_or(|selector| provider.id == selector)
 }
 
 fn required_extension_ids_for_plan_with_providers(
@@ -502,6 +626,7 @@ fn run_provider_command(
             if outcome.schema != AGENT_TASK_OUTCOME_SCHEMA {
                 outcome.schema = AGENT_TASK_OUTCOME_SCHEMA.to_string();
             }
+            normalize_provider_outcome_roles(&mut outcome, provider);
             outcome
         }
         Err(error) => failure_outcome(
@@ -516,6 +641,66 @@ fn run_provider_command(
             json!({ "provider": provider.id, "command": command, "exit_code": output.status.code(), "stderr": stderr, "stdout": stdout }),
         ),
     }
+}
+
+fn normalize_provider_outcome_roles(
+    outcome: &mut AgentTaskOutcome,
+    provider: &AgentTaskExecutorProvider,
+) {
+    normalize_provider_artifact_roles(&mut outcome.artifacts, &provider.role_aliases);
+    normalize_provider_run_result_output(outcome, &provider.role_aliases);
+}
+
+fn normalize_provider_artifact_roles(
+    artifacts: &mut [AgentTaskArtifact],
+    role_aliases: &AgentTaskProviderRoleAliases,
+) {
+    for artifact in artifacts {
+        let Some(role) = role_aliases.role_for_artifact_kind(&artifact.kind) else {
+            continue;
+        };
+        let original_kind = artifact.kind.clone();
+        artifact.kind = role.to_string();
+        if !artifact.metadata.is_object() {
+            artifact.metadata = json!({});
+        }
+        if let Some(metadata) = artifact.metadata.as_object_mut() {
+            metadata.entry("role".to_string()).or_insert(json!(role));
+            metadata
+                .entry("provider_kind".to_string())
+                .or_insert(json!(original_kind));
+        }
+    }
+}
+
+fn normalize_provider_run_result_output(
+    outcome: &mut AgentTaskOutcome,
+    role_aliases: &AgentTaskProviderRoleAliases,
+) {
+    if output_value(&outcome.outputs, "provider_run_result").is_some() {
+        return;
+    }
+
+    let value = role_aliases
+        .output_aliases_for_role("provider_run_result")
+        .into_iter()
+        .find_map(|alias| output_value(&outcome.outputs, alias))
+        .or_else(|| {
+            role_aliases
+                .metadata_aliases_for_role("provider_run_result")
+                .into_iter()
+                .find_map(|alias| output_value(&outcome.metadata, alias))
+        });
+
+    if let Some(value) = value.cloned() {
+        let mut outputs = outcome.outputs.as_object().cloned().unwrap_or_default();
+        outputs.insert("provider_run_result".to_string(), value);
+        outcome.outputs = Value::Object(outputs);
+    }
+}
+
+fn output_value<'a>(value: &'a Value, key: &str) -> Option<&'a Value> {
+    value.get(key).filter(|value| !value.is_null())
 }
 
 fn render_provider_command(provider: &AgentTaskExecutorProvider) -> String {
@@ -620,6 +805,7 @@ mod tests {
             outcome_schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
             capabilities: vec!["structured_outcome".to_string()],
             workspace_materialization: None,
+            role_aliases: AgentTaskProviderRoleAliases::default(),
             extension_id: None,
             extension_path: None,
         };
@@ -666,6 +852,101 @@ mod tests {
         ));
 
         assert_eq!(extension_ids, vec!["extension-a", "extension-b"]);
+    }
+
+    #[test]
+    fn provider_manifest_parses_role_aliases() {
+        let provider: AgentTaskExecutorProvider = serde_json::from_value(json!({
+            "schema": "homeboy/agent-task-executor-provider/v1",
+            "id": "custom.provider",
+            "backend": "custom",
+            "command": "custom-agent-task",
+            "request_schema": AGENT_TASK_REQUEST_SCHEMA,
+            "outcome_schema": AGENT_TASK_OUTCOME_SCHEMA,
+            "role_aliases": {
+                "artifact_kinds": {
+                    "patch": ["custom-patch"]
+                },
+                "artifact_filenames": {
+                    "preflight_evidence": ["*-preflight.json"]
+                },
+                "outputs": {
+                    "provider_run_result": ["custom_run_result"]
+                },
+                "metadata": {
+                    "provider_run_result": ["customRunResult"]
+                }
+            }
+        }))
+        .expect("provider manifest");
+
+        assert!(provider
+            .role_aliases
+            .artifact_kind_matches_role("patch", "custom-patch"));
+        assert!(provider
+            .role_aliases
+            .artifact_filename_matches_role("preflight_evidence", "runner-preflight.json"));
+        assert_eq!(
+            provider
+                .role_aliases
+                .output_aliases_for_role("provider_run_result"),
+            vec!["custom_run_result"]
+        );
+    }
+
+    #[test]
+    fn provider_outcome_roles_normalize_from_declared_aliases() {
+        let (_, mut provider) = request("task-a", "node provider.js".to_string());
+        provider.role_aliases = serde_json::from_value(json!({
+            "artifact_kinds": {
+                "patch": ["custom-patch"]
+            },
+            "outputs": {
+                "provider_run_result": ["custom_run_result"]
+            }
+        }))
+        .expect("role aliases");
+        let patch_path = std::env::temp_dir().join("custom.patch");
+        fs::write(&patch_path, "diff --git a/a b/a\n").expect("patch");
+        let mut outcome = AgentTaskOutcome {
+            schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+            task_id: "task-a".to_string(),
+            status: AgentTaskOutcomeStatus::Succeeded,
+            summary: None,
+            failure_classification: None,
+            artifacts: vec![fixture_artifact(
+                "patch",
+                "custom-patch",
+                &patch_path,
+                Some("text/x-patch"),
+            )],
+            evidence_refs: Vec::new(),
+            diagnostics: Vec::new(),
+            outputs: json!({
+                "custom_run_result": {
+                    "run_id": "custom-run-1"
+                }
+            }),
+            workflow: None,
+            follow_up: None,
+            metadata: Value::Null,
+        };
+
+        normalize_provider_outcome_roles(&mut outcome, &provider);
+
+        assert_eq!(outcome.artifacts[0].kind, "patch");
+        assert_eq!(
+            outcome.artifacts[0].metadata["provider_kind"],
+            "custom-patch"
+        );
+        assert_eq!(
+            outcome.outputs["provider_run_result"]["run_id"],
+            "custom-run-1"
+        );
+        assert_eq!(
+            outcome.outputs["custom_run_result"]["run_id"],
+            "custom-run-1"
+        );
     }
 
     #[test]
@@ -811,10 +1092,10 @@ mod tests {
     fn provider_can_return_timeout_payload_during_wrapper_grace() {
         let command = format!(
             "node {}",
-            script("let fs=require('fs'); let req=JSON.parse(fs.readFileSync(0,'utf8')); setTimeout(()=>process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'timeout',summary:'provider serialized timeout',failure_classification:'timeout',artifacts:[{schema:'homeboy/agent-task-artifact/v1',id:'timeout-evidence',kind:'codebox-task-runner-preflight',path:'/tmp/timeout-evidence.json'}]})), 2050);")
+            script("let fs=require('fs'); let req=JSON.parse(fs.readFileSync(0,'utf8')); setTimeout(()=>process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'timeout',summary:'provider serialized timeout',failure_classification:'timeout',artifacts:[{schema:'homeboy/agent-task-artifact/v1',id:'timeout-evidence',kind:'codebox-task-runner-preflight',path:'/tmp/timeout-evidence.json'}]})), 3050);")
         );
         let (mut request, provider) = request("task-timeout-payload", command);
-        request.limits.timeout_ms = Some(2000);
+        request.limits.timeout_ms = Some(3000);
 
         let outcome = run_provider_command(&request, &provider);
 

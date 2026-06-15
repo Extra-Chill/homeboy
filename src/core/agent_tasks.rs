@@ -208,8 +208,8 @@ pub mod promotion {
 pub mod provider {
     pub use super::super::agent_task_provider::{
         provider_requires_cwd_git_checkout, required_extension_ids_for_plan,
-        AgentTaskExecutorProvider, AgentTaskProviderWorkspaceMaterialization,
-        ExtensionProviderAgentTaskExecutor,
+        AgentTaskExecutorProvider, AgentTaskProviderRoleAliases,
+        AgentTaskProviderWorkspaceMaterialization, ExtensionProviderAgentTaskExecutor,
     };
 }
 
