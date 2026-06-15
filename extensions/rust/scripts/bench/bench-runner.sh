@@ -58,12 +58,15 @@ homeboy_require_bash_version 4
 RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${SCRIPT_DIR}/../lib/resolve-context.sh}"
 FAILURE_TRAP_HELPER="${HOMEBOY_RUNTIME_FAILURE_TRAP:-}"
 SETTINGS_HELPER="${HOMEBOY_RUNTIME_SETTINGS_HELPER:-${SCRIPT_DIR}/../lib/settings.sh}"
+TOOLCHAIN_ENV_HELPER="${HOMEBOY_RUST_TOOLCHAIN_ENV_HELPER:-${SCRIPT_DIR}/../lib/toolchain-env.sh}"
 BENCH_HELPER_SH="${HOMEBOY_RUNTIME_BENCH_HELPER_SH:-${HOME}/.homeboy/runtime/bench-helper.sh}"
 # shellcheck source=/dev/null
 source "$RESOLVE_CONTEXT_HELPER"
 homeboy_resolve_context
 # shellcheck source=/dev/null
 source "$SETTINGS_HELPER"
+# shellcheck source=../lib/toolchain-env.sh
+source "$TOOLCHAIN_ENV_HELPER"
 # shellcheck source=/dev/null
 if [ -n "$FAILURE_TRAP_HELPER" ] && [ -f "$FAILURE_TRAP_HELPER" ]; then
     source "$FAILURE_TRAP_HELPER"
@@ -87,6 +90,8 @@ SELECTED_SCENARIOS="${HOMEBOY_BENCH_SCENARIOS:-}"
 CRITERION_REQUEST="${HOMEBOY_RUST_BENCH_CRITERION:-0}"
 PROFILE_REQUEST="${HOMEBOY_RUST_BENCH_PROFILES:-0}"
 ARTIFACT_DIR="${HOMEBOY_BENCH_RESULTS_ARTIFACT_DIR:-$(dirname "$RESULTS_FILE")}"
+TOOLCHAIN_METADATA_JSON="$(homeboy_rust_toolchain_metadata_json)"
+export HOMEBOY_RUST_TOOLCHAIN_METADATA_JSON="$TOOLCHAIN_METADATA_JSON"
 
 now_ms() {
     python3 - <<'PYTHON_NOW' 2>/dev/null || printf '%s000\n' "$(date +%s)"
@@ -492,6 +497,7 @@ import json, os, subprocess, sys, time
 payload_file = sys.argv[1]
 iterations = int(sys.argv[2])
 metadata = json.loads(sys.argv[3])
+toolchain_metadata = json.loads(os.environ.get('HOMEBOY_RUST_TOOLCHAIN_METADATA_JSON', '{}'))
 command = sys.argv[4:]
 
 timings = []
@@ -507,6 +513,8 @@ for _ in range(iterations):
     timings.append(elapsed)
 
 with open(payload_file, 'w', encoding='utf-8') as fh:
+    if toolchain_metadata:
+        metadata.setdefault('rust_toolchain', toolchain_metadata)
     json.dump({
         'timings_ns': timings,
         'metadata': metadata,
@@ -722,15 +730,16 @@ fi
 
 PARSE_START_MS="$(now_ms)"
 BENCH_EXTRAS_FILE="${SCENARIOS_JSON_TMPDIR}/bench-extras.json"
-python3 - <<PYTHON_EXTRAS "$BENCH_EXTRAS_FILE" "$CARGO_TIMING_STATUS" "$CARGO_TIMING_NOTE" "$CARGO_TIMING_ARTIFACT" --phases "${PHASE_RECORDS[@]:-}"
+python3 - <<PYTHON_EXTRAS "$BENCH_EXTRAS_FILE" "$CARGO_TIMING_STATUS" "$CARGO_TIMING_NOTE" "$CARGO_TIMING_ARTIFACT" "$TOOLCHAIN_METADATA_JSON" --phases "${PHASE_RECORDS[@]:-}"
 import json, os, sys
 
 extras_file = sys.argv[1]
 cargo_timing_status = sys.argv[2]
 cargo_timing_note = sys.argv[3]
 cargo_timing_artifact = sys.argv[4]
+toolchain_metadata = json.loads(sys.argv[5])
 
-args = sys.argv[5:]
+args = sys.argv[6:]
 phase_records = []
 mode = None
 for arg in args:
@@ -764,7 +773,8 @@ for record in phase_records:
 metadata = {
     "rust_runner": {
         "cargo_timing_status": cargo_timing_status,
-    }
+    },
+    "rust_toolchain": toolchain_metadata,
 }
 artifacts = {}
 if cargo_timing_note:

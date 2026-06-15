@@ -2,6 +2,10 @@
 set -euo pipefail
 
 project_path="${HOMEBOY_COMPONENT_PATH:-${PWD}}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# shellcheck source=./lib/toolchain-env.sh
+source "${SCRIPT_DIR}/lib/toolchain-env.sh"
 
 if [ -n "${CARGO_TARGET_DIR:-}" ] || [ ! -f "${project_path}/Cargo.toml" ]; then
     printf '{}\n'
@@ -42,14 +46,18 @@ fi
 hash="$(hash_identity "$identity")"
 data_dir="${HOMEBOY_DATA_DIR:-${XDG_DATA_HOME:-${HOME}/.local/share}/homeboy}"
 target_dir="${data_dir}/cargo-targets/${label}-${hash:0:12}"
+toolchain_env_json="$(homeboy_rust_toolchain_env_json)"
 
-python3 - "$target_dir" <<'PY'
+python3 - "$target_dir" "$toolchain_env_json" <<'PY'
 import json
 import sys
 
 target_dir = sys.argv[1]
-print(json.dumps({
+toolchain_env = json.loads(sys.argv[2])
+env = {
     "CARGO_TARGET_DIR": target_dir,
     "HOMEBOY_CARGO_TARGET_DIR": target_dir,
-}))
+}
+env.update(toolchain_env)
+print(json.dumps(env))
 PY

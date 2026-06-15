@@ -83,6 +83,20 @@
       "type": "string",
       "default": "",
       "description": "Optional changed-file profile target relative to the Cargo project root. When omitted, the runner uses src/lib.rs or src/main.rs if present."
+    },
+    {
+      "id": "rust_sccache",
+      "label": "Rust sccache wrapper",
+      "type": "boolean",
+      "default": false,
+      "description": "Opt into sccache through the Rust extension env provider. Set HOMEBOY_RUST_SCCACHE=1 or rust_sccache=true; the provider sets RUSTC_WRAPPER=sccache only when sccache is on PATH and RUSTC_WRAPPER is not already set."
+    },
+    {
+      "id": "rust_linker",
+      "label": "Rust linker acceleration",
+      "type": "string",
+      "default": "",
+      "description": "Optional Rust linker acceleration knob owned by the Rust extension. Set HOMEBOY_RUST_LINKER=mold or lld, or rust_linker to the same value; the provider appends the matching -C link-arg=-fuse-ld flag only when the requested linker binary is on PATH."
     }
   ],
   "audit": {

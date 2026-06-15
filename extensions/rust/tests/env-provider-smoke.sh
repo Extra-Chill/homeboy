@@ -28,6 +28,18 @@ target_dir_for() {
         | python3 -c 'import json,sys; print(json.load(sys.stdin).get("CARGO_TARGET_DIR", ""))'
 }
 
+env_for() {
+    local project="$1"
+    shift
+    env \
+        HOMEBOY_COMPONENT_ID=fixture \
+        HOMEBOY_COMPONENT_PATH="$project" \
+        HOMEBOY_EXTENSION_PATH="$EXTENSION_DIR" \
+        XDG_DATA_HOME="$WORK_DIR/data" \
+        "$@" \
+        "$EXTENSION_DIR/scripts/env-provider.sh"
+}
+
 primary="$WORK_DIR/primary"
 worktree="$WORK_DIR/worktree"
 explicit="$WORK_DIR/explicit-target"
@@ -62,6 +74,26 @@ explicit_output="$(
 )"
 if [ "$explicit_output" != '{}' ]; then
     printf 'Expected explicit CARGO_TARGET_DIR to suppress provider output, got %s\n' "$explicit_output" >&2
+    exit 1
+fi
+
+accel_output="$(
+    bin_dir="$WORK_DIR/bin"
+    mkdir -p "$bin_dir"
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$bin_dir/sccache"
+    chmod +x "$bin_dir/sccache"
+    PATH="$bin_dir:$PATH" \
+        HOMEBOY_RUST_SCCACHE=1 \
+        env_for "$primary"
+)"
+
+if [ "$(printf '%s' "$accel_output" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("RUSTC_WRAPPER", ""))')" != "sccache" ]; then
+    printf 'Expected env provider to set RUSTC_WRAPPER=sccache, got %s\n' "$accel_output" >&2
+    exit 1
+fi
+
+if [ "$(printf '%s' "$accel_output" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("HOMEBOY_RUST_SCCACHE_STATUS", ""))')" != "enabled" ]; then
+    printf 'Expected sccache status enabled, got %s\n' "$accel_output" >&2
     exit 1
 fi
 

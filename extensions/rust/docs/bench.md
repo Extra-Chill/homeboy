@@ -55,9 +55,10 @@ The first slice emits these normalized scenarios:
 - `rust-test` — prebuilds test binaries, then measures `cargo test --no-run`.
 
 Each profile scenario includes metadata identifying `cache_mode`, `change_mode`,
-the command, and the changed file when applicable. This keeps cache/change
-semantics in the Rust extension while Homeboy core compares ordinary scenario
-metrics.
+the command, the changed file when applicable, and active Rust toolchain
+acceleration under `metadata.rust_toolchain`. This keeps cache/change and
+toolchain semantics in the Rust extension while Homeboy core compares ordinary
+scenario metrics.
 
 Set `HOMEBOY_RUST_BENCH_CHANGED_FILE=path/to/file.rs` to choose the changed-file
 profile target. When omitted, the runner uses `src/lib.rs` or `src/main.rs`.
@@ -75,3 +76,6 @@ HOMEBOY_RUST_BENCH_PROFILES=1 homeboy bench my-rust-component --iterations 5
 HOMEBOY_RUST_BENCH_PROFILES=1 homeboy bench my-rust-component --scenario rust-warm-build --iterations 10
 HOMEBOY_RUST_BENCH_CRITERION=1 homeboy bench my-rust-component --scenario criterion-my-bench
 ```
+
+For the fast local development loop and cache/linker acceleration knobs, see
+[`dev-loop.md`](dev-loop.md).

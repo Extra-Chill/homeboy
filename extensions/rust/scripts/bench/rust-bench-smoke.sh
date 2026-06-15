@@ -247,6 +247,8 @@ done
 assert "clean cache mode" "$(jq -r '.scenarios[] | select(.id == "rust-clean-build") | .metadata.cache_mode' "$PROFILES_TMPFILE")" "clean"
 assert "warm cache mode" "$(jq -r '.scenarios[] | select(.id == "rust-warm-build") | .metadata.cache_mode' "$PROFILES_TMPFILE")" "warm"
 assert "changed-file mode" "$(jq -r '.scenarios[] | select(.id == "rust-changed-file-check") | .metadata.change_mode' "$PROFILES_TMPFILE")" "changed_file"
+assert "profile toolchain metadata" "$(jq -r '.scenarios[] | select(.id == "rust-warm-build") | .metadata.rust_toolchain.sccache_status' "$PROFILES_TMPFILE")" "off"
+assert "envelope toolchain metadata" "$(jq -r '.metadata.rust_toolchain.sccache_status' "$PROFILES_TMPFILE")" "off"
 
 echo
 echo "── Validating Criterion adapter ──"
