@@ -8,16 +8,17 @@
 //! Reports keep their existing JSON shapes via `serde` so the CLI continues to
 //! emit the same envelopes after the move.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::core::agent_task_lifecycle as lifecycle;
 use crate::core::agent_task_loop_controller::{
-    self as controller, AgentTaskLoopActionStatus, AgentTaskLoopArtifactRef,
+    self as controller, AgentTaskGateBundle, AgentTaskLoopActionStatus, AgentTaskLoopArtifactRef,
     AgentTaskLoopControllerRecord, AgentTaskLoopControllerState, AgentTaskLoopExternalEvent,
-    AgentTaskLoopHistoryEvent, AgentTaskLoopPolicyAction, AgentTaskLoopPolicyActionRecord,
-    AgentTaskLoopRunRef, AgentTaskLoopTaskLineage, AgentTaskPrOwnershipRequest,
-    AgentTaskPrOwnershipState, AgentTaskPrOwnershipStatusUpdate,
+    AgentTaskLoopHistoryEvent, AgentTaskLoopPolicy, AgentTaskLoopPolicyAction,
+    AgentTaskLoopPolicyActionRecord, AgentTaskLoopRunRef, AgentTaskLoopTaskLineage,
+    AgentTaskLoopTransition, AgentTaskPrOwnershipRequest, AgentTaskPrOwnershipState,
+    AgentTaskPrOwnershipStatusUpdate,
 };
 use crate::core::agent_task_scheduler::{AgentTaskExecutorAdapter, AgentTaskPlan};
 use crate::core::agent_task_service::{self, AgentTaskRunResult};
@@ -32,6 +33,8 @@ pub const ACTION_RESULT_SCHEMA: &str = "homeboy/agent-task-loop-controller-actio
 pub const RESUME_RESULT_SCHEMA: &str = "homeboy/agent-task-loop-controller-resume-result/v1";
 /// Schema for the list-controllers report envelope.
 pub const LIST_RESULT_SCHEMA: &str = "homeboy/agent-task-loop-controller-list/v1";
+/// Schema for repo-authored loop-spec initialization reports.
+pub const FROM_SPEC_RESULT_SCHEMA: &str = "homeboy/agent-task-loop-controller-from-spec-result/v1";
 
 /// Request to create a new durable controller record.
 #[derive(Debug, Clone)]
@@ -39,6 +42,78 @@ pub struct ControllerInitRequest {
     pub loop_id: String,
     pub phase: String,
     pub config_version: String,
+}
+
+/// Request to initialize or resume a durable controller from a repo-authored loop spec.
+#[derive(Debug, Clone)]
+pub struct ControllerFromSpecRequest {
+    pub spec: AgentTaskRepoLoopSpec,
+}
+
+/// Generic repo-authored loop spec compiled into Homeboy controller state/actions.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentTaskRepoLoopSpec {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+    pub loop_id: String,
+    #[serde(default = "default_loop_spec_phase")]
+    pub phase: String,
+    #[serde(default = "default_loop_spec_config_version")]
+    pub config_version: String,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub metadata: Value,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub entities: Vec<AgentTaskRepoLoopSpecEntity>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gate_bundles: Vec<AgentTaskGateBundle>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<AgentTaskLoopPolicy>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub phases: Vec<AgentTaskRepoLoopSpecPhase>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<AgentTaskLoopPolicyAction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_event: Option<AgentTaskRepoLoopSpecEvent>,
+}
+
+/// Entity seed declared by a repo loop spec.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentTaskRepoLoopSpecEntity {
+    pub entity_type: String,
+    pub key: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parent_entity_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub metadata: Value,
+}
+
+/// Phase shorthand compiled into an [`AgentTaskLoopTransition`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentTaskRepoLoopSpecPhase {
+    pub phase: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transition_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_event_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when_json_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<AgentTaskLoopPolicyAction>,
+}
+
+/// Optional event used to evaluate event-gated policy transitions while compiling a spec.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentTaskRepoLoopSpecEvent {
+    #[serde(default = "default_loop_spec_event_type")]
+    pub event_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entity_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub payload: Value,
 }
 
 /// Request to apply an external event to a controller.
@@ -68,6 +143,16 @@ pub struct ControllerEventReport {
     pub schema: &'static str,
     pub controller: AgentTaskLoopControllerRecord,
     pub actions: Vec<AgentTaskLoopPolicyActionRecord>,
+}
+
+/// Typed report returned by `init_from_spec`.
+#[derive(Debug, Clone, Serialize)]
+pub struct ControllerFromSpecReport {
+    pub schema: &'static str,
+    pub loop_id: String,
+    pub initialized: bool,
+    pub actions: Vec<AgentTaskLoopPolicyActionRecord>,
+    pub controller: AgentTaskLoopControllerRecord,
 }
 
 /// Typed report returned by `run_next` and `run_action`.
@@ -132,6 +217,89 @@ pub fn init(request: ControllerInitRequest) -> Result<AgentTaskLoopControllerRec
     controller::create_controller(&request.loop_id, &request.phase, &request.config_version)
 }
 
+/// Initialize or resume a controller from a repo-owned loop spec and queue executable actions.
+pub fn init_from_spec(request: ControllerFromSpecRequest) -> Result<ControllerFromSpecReport> {
+    let spec = request.spec;
+    validate_loop_spec(&spec)?;
+    let mut initialized = false;
+    let mut record = match existing_controller(&spec.loop_id)? {
+        Some(record) => record,
+        None => {
+            initialized = true;
+            AgentTaskLoopControllerRecord::new(
+                spec.loop_id.clone(),
+                spec.phase.clone(),
+                spec.config_version.clone(),
+            )
+        }
+    };
+
+    record.phase = spec.phase.clone();
+    record.config_version = spec.config_version.clone();
+    if !spec.metadata.is_null() {
+        record.metadata = spec.metadata.clone();
+    }
+    for entity in &spec.entities {
+        record.upsert_entity(
+            entity.entity_type.clone(),
+            entity.key.clone(),
+            entity.parent_entity_ids.clone(),
+            entity.metadata.clone(),
+        );
+    }
+    for bundle in &spec.gate_bundles {
+        if let Some(existing) = record
+            .gate_bundles
+            .iter_mut()
+            .find(|existing| existing.bundle_id == bundle.bundle_id)
+        {
+            *existing = bundle.clone();
+        } else {
+            record.gate_bundles.push(bundle.clone());
+        }
+    }
+
+    let mut actions = Vec::new();
+    for action in &spec.actions {
+        actions.push(record.record_action(action.clone(), "repo loop spec action"));
+    }
+    if let Some(policy) = compile_loop_spec_policy(&spec) {
+        if let Some(event) = spec.initial_event.clone() {
+            let event_id = event
+                .event_id
+                .unwrap_or_else(|| format!("loop-spec-event-{}", record.history.len() + 1));
+            let payload = merge_policy_into_event_payload(event.payload, policy);
+            actions.extend(record.apply_event(AgentTaskLoopExternalEvent {
+                event_id,
+                event_type: event.event_type,
+                event_key: event.event_key,
+                entity_id: event.entity_id,
+                payload,
+            }));
+        } else {
+            actions.extend(record.evaluate_policy(&policy, None));
+        }
+    }
+    push_controller_history(
+        &mut record,
+        "controller.loop_spec.applied",
+        None,
+        serde_json::json!({
+            "schema": spec.schema,
+            "initialized": initialized,
+            "queued_action_count": actions.iter().filter(|action| action.status == AgentTaskLoopActionStatus::Pending).count(),
+        }),
+    );
+    controller::write_controller(&record)?;
+    Ok(ControllerFromSpecReport {
+        schema: FROM_SPEC_RESULT_SCHEMA,
+        loop_id: record.loop_id.clone(),
+        initialized,
+        actions,
+        controller: record,
+    })
+}
+
 /// Read a durable controller record.
 pub fn status(loop_id: &str) -> Result<AgentTaskLoopControllerRecord> {
     controller::load_controller(loop_id)
@@ -143,6 +311,89 @@ pub fn list() -> Result<ControllerListReport> {
         schema: LIST_RESULT_SCHEMA,
         controllers: controller::list_controllers()?,
     })
+}
+
+fn existing_controller(loop_id: &str) -> Result<Option<AgentTaskLoopControllerRecord>> {
+    let requested = AgentTaskLoopControllerRecord::new(loop_id, "init", "v1").loop_id;
+    Ok(controller::list_controllers()?
+        .into_iter()
+        .find(|record| record.loop_id == requested))
+}
+
+fn validate_loop_spec(spec: &AgentTaskRepoLoopSpec) -> Result<()> {
+    if spec.loop_id.trim().is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "loop_id",
+            "repo loop spec requires a non-empty loop_id",
+            None,
+            None,
+        ));
+    }
+    for (index, phase) in spec.phases.iter().enumerate() {
+        if phase.phase.trim().is_empty() {
+            return Err(Error::validation_invalid_argument(
+                format!("phases[{index}].phase"),
+                "repo loop spec phase requires a non-empty phase name",
+                None,
+                None,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn compile_loop_spec_policy(spec: &AgentTaskRepoLoopSpec) -> Option<AgentTaskLoopPolicy> {
+    let mut transitions = Vec::new();
+    if let Some(policy) = &spec.policy {
+        transitions.extend(policy.transitions.clone());
+    }
+    transitions.extend(spec.phases.iter().enumerate().map(|(index, phase)| {
+        AgentTaskLoopTransition {
+            transition_id: phase
+                .transition_id
+                .clone()
+                .unwrap_or_else(|| format!("{}-{}", phase.phase, index + 1)),
+            from_phase: Some(phase.phase.clone()),
+            on_event_type: phase.on_event_type.clone(),
+            when_json_path: phase.when_json_path.clone(),
+            actions: phase.actions.clone(),
+        }
+    }));
+    if transitions.is_empty() {
+        None
+    } else {
+        Some(AgentTaskLoopPolicy {
+            policy_id: spec
+                .schema
+                .clone()
+                .unwrap_or_else(|| "repo-loop-spec".to_string()),
+            transitions,
+        })
+    }
+}
+
+fn merge_policy_into_event_payload(payload: Value, policy: AgentTaskLoopPolicy) -> Value {
+    let policy = serde_json::to_value(policy).unwrap_or(Value::Null);
+    match payload {
+        Value::Object(mut object) => {
+            object.insert("policy".to_string(), policy);
+            Value::Object(object)
+        }
+        Value::Null => serde_json::json!({ "policy": policy }),
+        other => serde_json::json!({ "value": other, "policy": policy }),
+    }
+}
+
+fn default_loop_spec_phase() -> String {
+    "init".to_string()
+}
+
+fn default_loop_spec_config_version() -> String {
+    "v1".to_string()
+}
+
+fn default_loop_spec_event_type() -> String {
+    "loop_spec.applied".to_string()
 }
 
 /// Mark a tracked entity as human-ready work and persist the controller.
@@ -1337,6 +1588,113 @@ mod tests {
             let report = list().expect("controllers listed");
             assert_eq!(report.schema, LIST_RESULT_SCHEMA);
             assert_eq!(report.controllers.len(), 2);
+        });
+    }
+
+    #[test]
+    fn init_from_spec_compiles_repo_phases_into_deduped_controller_actions() {
+        with_isolated_home(|_| {
+            let spec = AgentTaskRepoLoopSpec {
+                schema: Some("example/repo-loop/v1".to_string()),
+                loop_id: "repo-loop-spec".to_string(),
+                phase: "init".to_string(),
+                config_version: "repo-v1".to_string(),
+                metadata: json!({ "domain": "example" }),
+                entities: vec![AgentTaskRepoLoopSpecEntity {
+                    entity_type: "finding".to_string(),
+                    key: "abc".to_string(),
+                    parent_entity_ids: Vec::new(),
+                    metadata: json!({ "severity": "high" }),
+                }],
+                gate_bundles: vec![
+                    crate::core::agent_task_loop_controller::AgentTaskGateBundle {
+                        bundle_id: "quality".to_string(),
+                        description: "repo-owned quality gates".to_string(),
+                        checks: Vec::new(),
+                    },
+                ],
+                policy: None,
+                phases: vec![AgentTaskRepoLoopSpecPhase {
+                    phase: "init".to_string(),
+                    transition_id: Some("fanout-findings".to_string()),
+                    on_event_type: None,
+                    when_json_path: None,
+                    actions: vec![AgentTaskLoopPolicyAction::FanOut {
+                        dedupe_key: "fanout:findings".to_string(),
+                        entity_ids: vec!["finding:abc".to_string()],
+                        request_template: json!({
+                            "mode": "submit",
+                            "plan": test_plan(),
+                        }),
+                    }],
+                }],
+                actions: Vec::new(),
+                initial_event: None,
+            };
+
+            let report = init_from_spec(ControllerFromSpecRequest { spec: spec.clone() })
+                .expect("spec initialized");
+
+            assert_eq!(report.schema, FROM_SPEC_RESULT_SCHEMA);
+            assert!(report.initialized);
+            assert_eq!(report.controller.config_version, "repo-v1");
+            assert!(report.controller.entities.contains_key("finding:abc"));
+            assert_eq!(report.controller.gate_bundles[0].bundle_id, "quality");
+            assert_eq!(report.actions.len(), 1);
+            assert_eq!(report.actions[0].status, AgentTaskLoopActionStatus::Pending);
+
+            let resumed =
+                init_from_spec(ControllerFromSpecRequest { spec }).expect("spec reapplied");
+
+            assert!(!resumed.initialized);
+            assert_eq!(
+                resumed.actions[0].status,
+                AgentTaskLoopActionStatus::AlreadySatisfied
+            );
+        });
+    }
+
+    #[test]
+    fn init_from_spec_applies_event_gated_policy() {
+        with_isolated_home(|_| {
+            let spec = AgentTaskRepoLoopSpec {
+                schema: None,
+                loop_id: "repo-loop-event".to_string(),
+                phase: "collect".to_string(),
+                config_version: "v1".to_string(),
+                metadata: Value::Null,
+                entities: Vec::new(),
+                gate_bundles: Vec::new(),
+                policy: None,
+                phases: vec![AgentTaskRepoLoopSpecPhase {
+                    phase: "collect".to_string(),
+                    transition_id: None,
+                    on_event_type: Some("artifact.ready".to_string()),
+                    when_json_path: None,
+                    actions: vec![AgentTaskLoopPolicyAction::RunGates {
+                        bundle_id: "quality".to_string(),
+                        entity_id: None,
+                    }],
+                }],
+                actions: Vec::new(),
+                initial_event: Some(AgentTaskRepoLoopSpecEvent {
+                    event_type: "artifact.ready".to_string(),
+                    event_id: Some("artifact-ready-1".to_string()),
+                    event_key: None,
+                    entity_id: None,
+                    payload: Value::Null,
+                }),
+            };
+
+            let report = init_from_spec(ControllerFromSpecRequest { spec })
+                .expect("event-gated spec applied");
+
+            assert_eq!(report.actions.len(), 1);
+            assert!(report
+                .controller
+                .history
+                .iter()
+                .any(|event| event.event_id == "artifact-ready-1"));
         });
     }
 
