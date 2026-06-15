@@ -546,7 +546,7 @@ mod tests {
             fs::create_dir_all(&extensions_dir).expect("extensions dir");
             let stale_legacy = extensions_dir.join(".replace-clone-tmp-swift");
             let stale_unique = extensions_dir.join(".replace-clone-tmp-swift-123-456-0");
-            let unrelated = extensions_dir.join(".replace-clone-tmp-rust");
+            let unrelated = extensions_dir.join(".replace-clone-tmp-unrelated");
             let similarly_prefixed = extensions_dir.join(".replace-clone-tmp-swiftly");
             fs::create_dir_all(stale_legacy.join(".git/objects/pack")).expect("stale legacy temp");
             fs::write(

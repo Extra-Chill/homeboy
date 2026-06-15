@@ -727,6 +727,13 @@ pub fn serve(spec: PreviewIngressServeSpec) -> Result<PreviewIngressStatus> {
     validate_serve_spec(&spec)?;
     let listener = TcpListener::bind(&spec.bind)
         .map_err(|e| Error::internal_io(e.to_string(), Some(spec.bind.clone())))?;
+    serve_listener(spec, listener)
+}
+
+pub(crate) fn serve_listener(
+    spec: PreviewIngressServeSpec,
+    listener: TcpListener,
+) -> Result<PreviewIngressStatus> {
     let sessions = Arc::new(PreviewClientSessions::default());
     let auth = Arc::new(PreviewIngressAuth {
         token_sha256_env: spec.token_sha256_env.clone(),

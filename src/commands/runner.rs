@@ -7,11 +7,10 @@ use serde_json::Value;
 
 use homeboy::core::api_jobs::{Job, JobEvent, JobStatus};
 use homeboy::core::redaction::RedactionPolicy;
-use homeboy::core::runner::runner_job_log_snapshot;
 use homeboy::core::runners::{
-    self as runner, ReverseRunnerConnectOptions, ReverseRunnerWorkerOptions,
-    ReverseRunnerWorkerOutput, Runner, RunnerConnectReport, RunnerDisconnectReport,
-    RunnerExecOutput, RunnerKind, RunnerStatusReport,
+    self as runner, runner_job_log_snapshot, ReverseRunnerConnectOptions,
+    ReverseRunnerWorkerOptions, ReverseRunnerWorkerOutput, Runner, RunnerConnectReport,
+    RunnerDisconnectReport, RunnerExecOutput, RunnerKind, RunnerStatusReport,
 };
 use homeboy::core::server::{RunnerPolicy, RunnerSecretEnvRef, RunnerSettings};
 use homeboy::core::{EntityCrudOutput, MergeOutput};

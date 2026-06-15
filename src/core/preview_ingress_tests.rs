@@ -123,14 +123,16 @@ fn reverse_channel_client_serves_public_request() {
         );
         let listener = TcpListener::bind("127.0.0.1:0").expect("reserve port");
         let port = listener.local_addr().expect("local addr").port();
-        drop(listener);
         thread::spawn(move || {
-            serve(PreviewIngressServeSpec {
-                bind: format!("127.0.0.1:{port}"),
-                domain: "example.com".to_string(),
-                public_host_pattern: "*-tunnel.example.com".to_string(),
-                token_sha256_env: "HOMEBOY_TEST_PREVIEW_TOKEN_SHA256".to_string(),
-            })
+            serve_listener(
+                PreviewIngressServeSpec {
+                    bind: format!("127.0.0.1:{port}"),
+                    domain: "example.com".to_string(),
+                    public_host_pattern: "*-tunnel.example.com".to_string(),
+                    token_sha256_env: "HOMEBOY_TEST_PREVIEW_TOKEN_SHA256".to_string(),
+                },
+                listener,
+            )
             .expect("serve ingress");
         });
         thread::sleep(Duration::from_millis(100));
@@ -223,14 +225,16 @@ fn route_proxy_serves_artifact_json_with_cors_headers() {
 
         let ingress = TcpListener::bind("127.0.0.1:0").expect("reserve port");
         let ingress_port = ingress.local_addr().expect("ingress addr").port();
-        drop(ingress);
         thread::spawn(move || {
-            serve(PreviewIngressServeSpec {
-                bind: format!("127.0.0.1:{ingress_port}"),
-                domain: "example.com".to_string(),
-                public_host_pattern: "*-tunnel.example.com".to_string(),
-                token_sha256_env: "HOMEBOY_TEST_UNUSED_TOKEN_SHA256".to_string(),
-            })
+            serve_listener(
+                PreviewIngressServeSpec {
+                    bind: format!("127.0.0.1:{ingress_port}"),
+                    domain: "example.com".to_string(),
+                    public_host_pattern: "*-tunnel.example.com".to_string(),
+                    token_sha256_env: "HOMEBOY_TEST_UNUSED_TOKEN_SHA256".to_string(),
+                },
+                ingress,
+            )
             .expect("serve ingress");
         });
         thread::sleep(Duration::from_millis(100));
@@ -267,14 +271,16 @@ fn route_proxy_answers_artifact_preflight_without_upstream() {
     test_support::with_isolated_home(|_| {
         let listener = TcpListener::bind("127.0.0.1:0").expect("reserve port");
         let port = listener.local_addr().expect("local addr").port();
-        drop(listener);
         thread::spawn(move || {
-            serve(PreviewIngressServeSpec {
-                bind: format!("127.0.0.1:{port}"),
-                domain: "example.com".to_string(),
-                public_host_pattern: "*-tunnel.example.com".to_string(),
-                token_sha256_env: "HOMEBOY_TEST_UNUSED_TOKEN_SHA256".to_string(),
-            })
+            serve_listener(
+                PreviewIngressServeSpec {
+                    bind: format!("127.0.0.1:{port}"),
+                    domain: "example.com".to_string(),
+                    public_host_pattern: "*-tunnel.example.com".to_string(),
+                    token_sha256_env: "HOMEBOY_TEST_UNUSED_TOKEN_SHA256".to_string(),
+                },
+                listener,
+            )
             .expect("serve ingress");
         });
         thread::sleep(Duration::from_millis(100));

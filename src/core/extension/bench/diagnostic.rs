@@ -179,7 +179,10 @@ mod tests {
         .expect("diagnostic with code alias parses");
 
         assert_eq!(diagnostic.class, "wordpress.bench.stdout_noise");
-        assert_eq!(diagnostic.message.as_deref(), Some("captured non-JSON stdout"));
+        assert_eq!(
+            diagnostic.message.as_deref(),
+            Some("captured non-JSON stdout")
+        );
         assert_eq!(diagnostic.severity.as_deref(), Some("warning"));
         assert_eq!(diagnostic.metadata["line_count"], 3);
 
