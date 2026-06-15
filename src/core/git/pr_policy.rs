@@ -74,6 +74,10 @@ pub struct PrPolicyDecision {
     pub changed_file_count: usize,
     pub files: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub ci_state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ci_summary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub merged: Option<bool>,
 }
 
@@ -214,6 +218,7 @@ pub fn evaluate_merge_policy(options: PrPolicyMergeOptions) -> Result<PrPolicyDe
             ..Default::default()
         },
     );
+    apply_ci_gate(&mut decision, &pr.ci_state, &pr.ci_summary);
 
     if options.merge && decision.allowed {
         pr_merge(
@@ -232,6 +237,33 @@ pub fn evaluate_merge_policy(options: PrPolicyMergeOptions) -> Result<PrPolicyDe
     }
 
     Ok(decision)
+}
+
+fn apply_ci_gate(decision: &mut PrPolicyDecision, ci_state: &str, ci_summary: &str) {
+    decision.ci_state = Some(ci_state.to_string());
+    decision.ci_summary = Some(ci_summary.to_string());
+    decision.report = format!(
+        "{}\n\nCI status: `{}` - {}.",
+        decision.report, ci_state, ci_summary
+    );
+
+    let failure = match ci_state {
+        "terminal_green" | "no_checks" => None,
+        "terminal_failed" => Some("CI checks are terminal-failed"),
+        "pending" => Some("CI checks are still pending"),
+        "stale" => Some("CI check rollup is stale or eventually consistent after merge"),
+        _ => Some("CI check state is unknown"),
+    };
+
+    if let Some(failure) = failure {
+        decision.allowed = false;
+        decision.safe = false;
+        decision.reason = if decision.reason == "safe" {
+            failure.to_string()
+        } else {
+            format!("{}; {}", decision.reason, failure)
+        };
+    }
 }
 
 fn non_empty(value: Option<String>) -> Option<String> {
@@ -376,6 +408,8 @@ fn evaluate_rules(rules: &PrPolicyRules, context: PrPolicyContext) -> PrPolicyDe
         report,
         changed_file_count: context.files.len(),
         files: context.files,
+        ci_state: None,
+        ci_summary: None,
         merged: None,
     }
 }
@@ -539,5 +573,58 @@ mod tests {
         });
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn ci_gate_allows_terminal_green() {
+        let mut decision = PrPolicyDecision {
+            mode: "merge".into(),
+            allowed: true,
+            safe: true,
+            reason: "safe".into(),
+            report: "## Policy\n\nSafe".into(),
+            changed_file_count: 0,
+            files: Vec::new(),
+            ci_state: None,
+            ci_summary: None,
+            merged: None,
+        };
+
+        apply_ci_gate(
+            &mut decision,
+            "terminal_green",
+            "1 check(s): 1 terminal-green, 0 failed/unknown, 0 pending",
+        );
+
+        assert!(decision.allowed);
+        assert_eq!(decision.ci_state.as_deref(), Some("terminal_green"));
+        assert!(decision.report.contains("CI status: `terminal_green`"));
+    }
+
+    #[test]
+    fn ci_gate_blocks_stale_or_pending_checks_before_merge() {
+        let mut decision = PrPolicyDecision {
+            mode: "merge".into(),
+            allowed: true,
+            safe: true,
+            reason: "safe".into(),
+            report: "## Policy\n\nSafe".into(),
+            changed_file_count: 0,
+            files: Vec::new(),
+            ci_state: None,
+            ci_summary: None,
+            merged: None,
+        };
+
+        apply_ci_gate(
+            &mut decision,
+            "stale",
+            "1 check(s): 0 terminal-green, 0 failed/unknown, 1 pending",
+        );
+
+        assert!(!decision.allowed);
+        assert!(!decision.safe);
+        assert!(decision.reason.contains("stale"));
+        assert_eq!(decision.ci_state.as_deref(), Some("stale"));
     }
 }
