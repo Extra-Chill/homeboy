@@ -90,7 +90,7 @@ pub struct LabSelectedRunnerOutput {
 #[derive(Serialize)]
 #[serde(untagged)]
 pub enum LabCommandOutput {
-    Status(LabOutput),
+    Status(Box<LabOutput>),
     ExtensionSync(Box<LabExtensionSyncOutput>),
 }
 
@@ -121,7 +121,7 @@ pub fn run(args: LabArgs, _global: &GlobalArgs) -> CmdResult<LabCommandOutput> {
             let selected_runner = selected_lab_runner_status(followup_runner)?;
             let managed_followups = lab_followups(followup_runner, current_workspace.as_deref());
             Ok((
-                LabCommandOutput::Status(LabOutput {
+                LabCommandOutput::Status(Box::new(LabOutput {
                     command: "lab.status",
                     preferred_runner,
                     selected_runner,
@@ -137,7 +137,7 @@ pub fn run(args: LabArgs, _global: &GlobalArgs) -> CmdResult<LabCommandOutput> {
                         "Use `homeboy config set /bench/local_execution '\"denied\"'` to make local benchmark execution fail closed.".to_string(),
                         "Use `--runner <runner-id>` only when multiple Lab runners are available and no default should be inferred.".to_string(),
                     ],
-                }),
+                })),
                 0,
             ))
         }
@@ -150,7 +150,7 @@ pub fn run(args: LabArgs, _global: &GlobalArgs) -> CmdResult<LabCommandOutput> {
                 bench_command.push_str(&args.join(" "));
             }
             Ok((
-                LabCommandOutput::Status(LabOutput {
+                LabCommandOutput::Status(Box::new(LabOutput {
                     command: "lab.bench",
                     preferred_runner,
                     selected_runner: None,
@@ -163,7 +163,7 @@ pub fn run(args: LabArgs, _global: &GlobalArgs) -> CmdResult<LabCommandOutput> {
                         "Homeboy auto-routes portable benchmarks to `lab.preferred_runner`, or to the only configured SSH Lab runner when there is exactly one.".to_string(),
                         "Use `--runner <runner-id>` only to override an ambiguous or non-default Lab selection.".to_string(),
                     ],
-                }),
+                })),
                 0,
             ))
         }
