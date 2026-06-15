@@ -54,3 +54,15 @@ assert_true(manifest.get("test", {}).get("extension_script") == "scripts/test-ru
 
 print("swift manifest smoke passed")
 PY
+
+TMP_DIR="$(mktemp -d)"
+trap 'rm -rf "$TMP_DIR"' EXIT
+
+PATH="$TMP_DIR" /bin/bash "$ROOT_DIR/swift/scripts/setup.sh" > "$TMP_DIR/setup.out"
+if ! grep -Fq "Swift unavailable; Swift extension installed but not ready on this runner" "$TMP_DIR/setup.out"; then
+    echo "Expected Swift setup to explain unsupported runner capability" >&2
+    sed 's/^/  /' "$TMP_DIR/setup.out" >&2
+    exit 1
+fi
+
+echo "swift setup capability smoke passed"
