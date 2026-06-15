@@ -7,9 +7,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::commands::escape_markdown_table_cell;
-use homeboy::core::extension::{
-    load_all_extensions, TraceBrowserEvidenceAdapterConfig, TraceBrowserSummaryAliasConfig,
+use homeboy::core::extension::trace::{
+    trace_browser_artifact_map_fields, trace_browser_evidence_adapters,
+    trace_browser_summary_extract, trace_browser_summary_has_signal,
 };
+use homeboy::core::extension::TraceBrowserEvidenceAdapterConfig;
 
 #[derive(Args, Debug, Clone)]
 pub struct BrowserEvidenceCompareArgs {
@@ -230,7 +232,7 @@ pub fn browser_evidence_compare_from_dirs_with_visual(
     include_local_paths: bool,
     visual_options: Option<VisualCompareOptions>,
 ) -> homeboy::core::Result<BrowserEvidenceCompareReport> {
-    let adapters = implementation::browser_evidence_adapters();
+    let adapters = trace_browser_evidence_adapters();
     browser_evidence_compare_from_dirs_with_visual_and_adapters(
         baseline_dirs,
         candidate_dirs,
@@ -611,23 +613,16 @@ mod implementation {
             || object
                 .get("summary")
                 .and_then(Value::as_object)
-                .is_some_and(|summary| summary_has_browser_signal(summary, adapters))
-    }
-
-    fn summary_has_browser_signal(
-        summary: &Map<String, Value>,
-        adapters: &[TraceBrowserEvidenceAdapterConfig],
-    ) -> bool {
-        summary.contains_key("assertions")
-            || browser_summary_adapters(adapters)
-                .iter()
-                .any(|adapter| adapter.has_signal(summary))
-            || summary
-                .get("metrics")
-                .and_then(Value::as_object)
-                .is_some_and(|metrics| {
-                    has_metric_object_signal(metrics, &browser_metric_names())
-                        || has_metric_object_signal(metrics, &lifecycle_metric_names())
+                .is_some_and(|summary| {
+                    summary.contains_key("assertions")
+                        || trace_browser_summary_has_signal(summary, adapters)
+                        || summary
+                            .get("metrics")
+                            .and_then(Value::as_object)
+                            .is_some_and(|metrics| {
+                                has_metric_object_signal(metrics, &browser_metric_names())
+                                    || has_metric_object_signal(metrics, &lifecycle_metric_names())
+                            })
                 })
     }
 
@@ -1451,64 +1446,17 @@ mod implementation {
         }
     }
 
-    impl TraceBrowserSummaryAliasConfig {
-        fn has_signal(&self, summary: &Map<String, Value>) -> bool {
-            first_number_from_strings(summary, &self.request_total_keys).is_some()
-                || first_number_from_strings(summary, &self.page_error_keys).is_some()
-                || self
-                    .metrics
-                    .iter()
-                    .any(|metric| first_number_from_strings(summary, &metric.keys).is_some())
-        }
-    }
-
-    pub(super) fn browser_evidence_adapters() -> Vec<TraceBrowserEvidenceAdapterConfig> {
-        load_all_extensions()
-            .unwrap_or_default()
-            .into_iter()
-            .flat_map(|extension| extension.trace_browser_evidence().to_vec())
-            .collect::<Vec<_>>()
-    }
-
-    fn browser_summary_adapters(
-        adapters: &[TraceBrowserEvidenceAdapterConfig],
-    ) -> Vec<TraceBrowserSummaryAliasConfig> {
-        adapters
-            .iter()
-            .cloned()
-            .flat_map(|adapter| adapter.summary_aliases)
-            .collect()
-    }
-
     fn collect_declared_browser_summary_adapters(
         summary: &Map<String, Value>,
         sample: &mut BrowserEvidenceSample,
         adapters: &[TraceBrowserEvidenceAdapterConfig],
     ) {
-        for adapter in browser_summary_adapters(adapters) {
-            if sample.request_total.is_none() {
-                sample.request_total =
-                    first_number_from_strings(summary, &adapter.request_total_keys);
-            }
-            sample.page_errors = sample
-                .page_errors
-                .or_else(|| first_number_from_strings(summary, &adapter.page_error_keys));
-            for metric in adapter.metrics {
-                if let Some(value) = first_number_from_strings(summary, &metric.keys) {
-                    sample.browser_metrics.insert(metric.metric, value);
-                }
-            }
+        let extraction = trace_browser_summary_extract(summary, adapters);
+        if sample.request_total.is_none() {
+            sample.request_total = extraction.request_total;
         }
-    }
-
-    fn artifact_map_adapters(
-        adapters: &[TraceBrowserEvidenceAdapterConfig],
-    ) -> Vec<TraceBrowserArtifactMapConfig> {
-        adapters
-            .iter()
-            .cloned()
-            .flat_map(|adapter| adapter.artifact_maps)
-            .collect()
+        sample.page_errors = sample.page_errors.or(extraction.page_errors);
+        sample.browser_metrics.extend(extraction.browser_metrics);
     }
 
     fn collect_declared_artifact_map_adapters(
@@ -1516,29 +1464,9 @@ mod implementation {
         artifacts: &mut BTreeSet<ArtifactRef>,
         adapters: &[TraceBrowserEvidenceAdapterConfig],
     ) {
-        for adapter in artifact_map_adapters(adapters) {
-            collect_artifact_map(object.get(&adapter.field), artifacts);
+        for field in trace_browser_artifact_map_fields(adapters) {
+            collect_artifact_map(object.get(&field), artifacts);
         }
-    }
-
-    fn first_number_from_strings(object: &Map<String, Value>, keys: &[String]) -> Option<f64> {
-        keys.iter().find_map(|key| {
-            object
-                .get(key)
-                .and_then(Value::as_f64)
-                .or_else(|| {
-                    object
-                        .get(key)
-                        .and_then(Value::as_u64)
-                        .map(|value| value as f64)
-                })
-                .or_else(|| {
-                    object
-                        .get(key)
-                        .and_then(Value::as_i64)
-                        .map(|value| value as f64)
-                })
-        })
     }
 
     fn collect_artifacts(object: &Map<String, Value>, artifacts: &mut BTreeSet<ArtifactRef>) {
