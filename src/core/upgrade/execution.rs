@@ -3,6 +3,7 @@ use crate::core::error::{Error, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use super::constants::{VERIFY_READBACK_ATTEMPTS, VERIFY_READBACK_DELAY};
 use super::helpers::{current_version, version_is_newer};
 use super::planning::resolve_binary_on_path;
 use super::types::InstallMethod;
@@ -76,19 +77,93 @@ pub(crate) fn execute_upgrade(
         return Err(upgrade_failure_error(method, &error_detail));
     }
 
-    let active_binary = active_binary_info().ok().flatten();
-    let new_version = active_binary.as_ref().and_then(|info| info.version.clone());
-    let new_build_identity = active_binary.and_then(|info| info.build_identity);
-    let success = upgrade_verification_result(
+    // The upgrade command above succeeded, so the new binary is already on
+    // disk. Reading the version back can race the just-replaced binary (atomic
+    // rename not yet observable on PATH, stale resolution, the process failing
+    // for a moment right after the swap), which previously produced a
+    // false-negative `upgraded: false` / `new_version: null` on a successful
+    // upgrade. Retry the read-back until it reports a verifiable version before
+    // giving up. See issue #3463.
+    let (success, active_binary) = verify_upgrade_with_retry(
         method,
         force,
         current_version(),
-        new_version.as_deref(),
         previous_build_identity,
-        new_build_identity.as_deref(),
+        VERIFY_READBACK_ATTEMPTS,
+        VERIFY_READBACK_DELAY,
+        || active_binary_info().ok().flatten(),
+        |delay| std::thread::sleep(delay),
     );
 
+    let new_version = active_binary.as_ref().and_then(|info| info.version.clone());
+    let new_build_identity = active_binary.and_then(|info| info.build_identity);
+
     Ok((success, new_version, new_build_identity))
+}
+
+/// Read back the active binary version after a successful swap, retrying while
+/// the read-back races the just-replaced binary. Returns the verification
+/// result alongside the last observed binary info.
+///
+/// `read_active` reads the current active binary info (e.g. by exec'ing
+/// `homeboy --version`); `sleep` waits between attempts. Both are injected so
+/// this can be exercised without spawning processes or real delays in tests.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn verify_upgrade_with_retry<R, S>(
+    method: InstallMethod,
+    force: bool,
+    previous_version: &str,
+    previous_build_identity: Option<&str>,
+    attempts: u32,
+    delay: std::time::Duration,
+    mut read_active: R,
+    mut sleep: S,
+) -> (bool, Option<ActiveBinaryInfo>)
+where
+    R: FnMut() -> Option<ActiveBinaryInfo>,
+    S: FnMut(std::time::Duration),
+{
+    let attempts = attempts.max(1);
+    let mut last_seen: Option<ActiveBinaryInfo> = None;
+
+    for attempt in 0..attempts {
+        let active_binary = read_active();
+        let new_version = active_binary.as_ref().and_then(|info| info.version.clone());
+        let new_build_identity = active_binary
+            .as_ref()
+            .and_then(|info| info.build_identity.clone());
+
+        let success = upgrade_verification_result(
+            method,
+            force,
+            previous_version,
+            new_version.as_deref(),
+            previous_build_identity,
+            new_build_identity.as_deref(),
+        );
+
+        if success {
+            return (true, active_binary);
+        }
+
+        // Hold onto the most informative read so the caller can still report a
+        // version even if verification never flips to success.
+        if active_binary
+            .as_ref()
+            .and_then(|info| info.version.as_deref())
+            .is_some()
+        {
+            last_seen = active_binary;
+        } else if last_seen.is_none() {
+            last_seen = active_binary;
+        }
+
+        if attempt + 1 < attempts {
+            sleep(delay);
+        }
+    }
+
+    (false, last_seen)
 }
 
 fn upgrade_failure_error(method: InstallMethod, error_detail: &str) -> Error {
@@ -424,6 +499,181 @@ mod tests {
         assert_eq!(
             info.build_identity.as_deref(),
             Some("homeboy 0.158.0+abc123-dirty")
+        );
+    }
+
+    #[test]
+    fn verify_retry_succeeds_after_transient_unreadable_binary() {
+        // Issue #3463: the swap succeeded but the first read-back of the new
+        // binary returns nothing (racing the just-replaced binary). A later
+        // attempt reports the upgraded version and verification must succeed.
+        let reads = std::cell::RefCell::new(vec![
+            None,
+            Some(ActiveBinaryInfo {
+                version: Some("0.220.3".to_string()),
+                build_identity: None,
+            }),
+        ]);
+        let mut sleeps = 0u32;
+
+        let (success, active) = verify_upgrade_with_retry(
+            InstallMethod::Binary,
+            false,
+            "0.220.0",
+            None,
+            5,
+            std::time::Duration::from_millis(0),
+            || reads.borrow_mut().remove(0),
+            |_| sleeps += 1,
+        );
+
+        assert!(success, "transient read-back failure should be retried");
+        assert_eq!(
+            active.and_then(|info| info.version).as_deref(),
+            Some("0.220.3")
+        );
+        assert_eq!(sleeps, 1, "should sleep once between the two attempts");
+    }
+
+    #[test]
+    fn verify_retry_succeeds_after_stale_old_version() {
+        // The read-back briefly reports the old version before the new binary
+        // is observable; the retry should pick up the upgraded version.
+        let reads = std::cell::RefCell::new(vec![
+            Some(ActiveBinaryInfo {
+                version: Some("0.220.0".to_string()),
+                build_identity: None,
+            }),
+            Some(ActiveBinaryInfo {
+                version: Some("0.220.3".to_string()),
+                build_identity: None,
+            }),
+        ]);
+
+        let (success, active) = verify_upgrade_with_retry(
+            InstallMethod::Binary,
+            false,
+            "0.220.0",
+            None,
+            5,
+            std::time::Duration::from_millis(0),
+            || reads.borrow_mut().remove(0),
+            |_| {},
+        );
+
+        assert!(success);
+        assert_eq!(
+            active.and_then(|info| info.version).as_deref(),
+            Some("0.220.3")
+        );
+    }
+
+    #[test]
+    fn verify_retry_first_attempt_success_does_not_sleep() {
+        let mut sleeps = 0u32;
+
+        let (success, active) = verify_upgrade_with_retry(
+            InstallMethod::Binary,
+            false,
+            "0.220.0",
+            None,
+            5,
+            std::time::Duration::from_millis(0),
+            || {
+                Some(ActiveBinaryInfo {
+                    version: Some("0.220.3".to_string()),
+                    build_identity: None,
+                })
+            },
+            |_| sleeps += 1,
+        );
+
+        assert!(success);
+        assert_eq!(
+            active.and_then(|info| info.version).as_deref(),
+            Some("0.220.3")
+        );
+        assert_eq!(sleeps, 0, "no retries needed when first read verifies");
+    }
+
+    #[test]
+    fn verify_retry_exhausts_attempts_when_never_readable() {
+        let mut reads = 0u32;
+        let mut sleeps = 0u32;
+
+        let (success, active) = verify_upgrade_with_retry(
+            InstallMethod::Binary,
+            false,
+            "0.220.0",
+            None,
+            3,
+            std::time::Duration::from_millis(0),
+            || {
+                reads += 1;
+                None
+            },
+            |_| sleeps += 1,
+        );
+
+        assert!(
+            !success,
+            "genuinely unverifiable upgrade still reports false"
+        );
+        assert!(active.is_none());
+        assert_eq!(reads, 3, "all attempts consumed");
+        assert_eq!(sleeps, 2, "sleeps between attempts but not after the last");
+    }
+
+    #[test]
+    fn verify_retry_reports_last_seen_version_on_exhaustion() {
+        // The new version never becomes observable, but a stale old-version
+        // read is retained so the caller can still surface a version string.
+        let (success, active) = verify_upgrade_with_retry(
+            InstallMethod::Binary,
+            false,
+            "0.220.0",
+            None,
+            2,
+            std::time::Duration::from_millis(0),
+            || {
+                Some(ActiveBinaryInfo {
+                    version: Some("0.220.0".to_string()),
+                    build_identity: None,
+                })
+            },
+            |_| {},
+        );
+
+        assert!(!success);
+        assert_eq!(
+            active.and_then(|info| info.version).as_deref(),
+            Some("0.220.0")
+        );
+    }
+
+    #[test]
+    fn test_verify_upgrade_with_retry() {
+        // Smoke test covering the happy path with a single immediate read.
+        let (success, active) = verify_upgrade_with_retry(
+            InstallMethod::Secondary,
+            false,
+            "0.157.1",
+            None,
+            1,
+            std::time::Duration::from_millis(0),
+            || {
+                Some(ActiveBinaryInfo {
+                    version: Some("0.158.0".to_string()),
+                    build_identity: None,
+                })
+            },
+            |_| {},
+        );
+
+        assert!(success);
+        assert_eq!(
+            active.and_then(|info| info.version).as_deref(),
+            Some("0.158.0")
         );
     }
 
