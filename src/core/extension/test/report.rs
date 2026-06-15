@@ -371,6 +371,8 @@ mod tests {
         result.extension_phase_timings = vec![crate::core::extension::ExtensionPhaseTiming {
             name: "opaque-provider-phase".to_string(),
             duration_ms: 4321,
+            status: Some("waiting".to_string()),
+            message: Some("provider is waiting for a shared resource".to_string()),
             artifacts: vec![serde_json::json!({ "url": "runner-artifact://phase.json" })],
             metadata: std::collections::BTreeMap::new(),
         }];
@@ -383,6 +385,11 @@ mod tests {
             "opaque-provider-phase"
         );
         assert_eq!(json["extension_phase_timings"][0]["duration_ms"], 4321);
+        assert_eq!(json["extension_phase_timings"][0]["status"], "waiting");
+        assert_eq!(
+            json["extension_phase_timings"][0]["message"],
+            "provider is waiting for a shared resource"
+        );
         assert_eq!(
             json["extension_phase_timings"][0]["artifacts"][0]["url"],
             "runner-artifact://phase.json"

@@ -412,6 +412,8 @@ mod tests {
                         {
                             "name": "opaque-provider-phase",
                             "duration_ms": 1234,
+                            "status": "waiting",
+                            "message": "provider is waiting for a shared resource",
                             "artifacts": [{ "kind": "opaque", "path": "artifacts/timing.json" }],
                             "metadata": { "extension": "fixture" }
                         }
@@ -427,6 +429,11 @@ mod tests {
             assert_eq!(timings.len(), 1);
             assert_eq!(timings[0].name, "opaque-provider-phase");
             assert_eq!(timings[0].duration_ms, 1234);
+            assert_eq!(timings[0].status.as_deref(), Some("waiting"));
+            assert_eq!(
+                timings[0].message.as_deref(),
+                Some("provider is waiting for a shared resource")
+            );
             assert_eq!(timings[0].artifacts[0]["path"], "artifacts/timing.json");
             assert_eq!(timings[0].metadata["extension"], "fixture");
 
