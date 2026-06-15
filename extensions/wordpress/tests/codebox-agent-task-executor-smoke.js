@@ -256,6 +256,20 @@ assert.deepEqual(provider.outcome_statuses, ['succeeded', 'failed', 'no_op', 'un
 assert.deepEqual(provider.failure_classifications, ['provider', 'timeout', 'execution_failed']);
 assert.deepEqual(provider.redacted_metadata_keys, ['secret_env_values', 'secretEnvValues', 'secrets']);
 assert.deepEqual(provider.workspace_materialization, { cwd: 'git_checkout' });
+assert.deepEqual(provider.role_aliases, {
+  artifact_kinds: {
+    patch: ['codebox-patch'],
+  },
+  artifact_filenames: {
+    preflight_evidence: ['homeboy-codebox-task-runner.json'],
+  },
+  outputs: {
+    provider_run_result: ['codebox_run_result'],
+  },
+  metadata: {
+    provider_run_result: ['codebox_run_result'],
+  },
+});
 assert.equal(provider.status, 'active');
 assert.equal(provider.integration_contract, 'wp-codebox-cli/agent-task-run');
 assert.equal(provider.capabilities.includes('browser_runtime'), true);

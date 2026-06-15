@@ -120,6 +120,21 @@ const LEGACY_BUNDLE_KEYS = [
 
 const WP_CODEBOX_RUNTIME_GAP_TRACKERS = [];
 
+const WP_CODEBOX_ROLE_ALIASES = {
+  artifact_kinds: {
+    patch: ['codebox-patch'],
+  },
+  artifact_filenames: {
+    preflight_evidence: ['homeboy-codebox-task-runner.json'],
+  },
+  outputs: {
+    provider_run_result: ['codebox_run_result'],
+  },
+  metadata: {
+    provider_run_result: ['codebox_run_result'],
+  },
+};
+
 const AGENT_TASK_OUTCOME_STATUSES = [
   'succeeded',
   'failed',
@@ -170,6 +185,7 @@ function providerContract(options = {}) {
     workspace_materialization: {
       cwd: 'git_checkout',
     },
+    role_aliases: WP_CODEBOX_ROLE_ALIASES,
     status: 'active',
     integration_contract: 'wp-codebox-cli/agent-task-run',
     runtime_gap_trackers: WP_CODEBOX_RUNTIME_GAP_TRACKERS,

@@ -68,6 +68,20 @@
       "workspace_materialization": {
         "cwd": "git_checkout"
       },
+      "role_aliases": {
+        "artifact_kinds": {
+          "patch": ["codebox-patch"]
+        },
+        "artifact_filenames": {
+          "preflight_evidence": ["homeboy-codebox-task-runner.json"]
+        },
+        "outputs": {
+          "provider_run_result": ["codebox_run_result"]
+        },
+        "metadata": {
+          "provider_run_result": ["codebox_run_result"]
+        }
+      },
       "status": "active",
       "integration_contract": "wp-codebox-cli/agent-task-run",
       "runtime_gap_trackers": []
