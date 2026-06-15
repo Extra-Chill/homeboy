@@ -659,6 +659,8 @@ fn materialize_git_from_controller_bundle(
     git_fetch_refs: &[String],
     allow_dirty_lab_workspace: bool,
 ) -> Result<()> {
+    validate_controller_git_bundle_source(local_path)?;
+
     let bundle_dir = tempfile::tempdir().map_err(|err| {
         Error::internal_io(
             err.to_string(),
@@ -733,6 +735,29 @@ fn materialize_git_from_controller_bundle(
     };
 
     result
+}
+
+fn validate_controller_git_bundle_source(local_path: &Path) -> Result<()> {
+    let is_shallow = git_output(local_path, &["rev-parse", "--is-shallow-repository"])?;
+    if is_shallow.trim() != "true" {
+        return Ok(());
+    }
+
+    Err(Error::validation_invalid_argument(
+        "path",
+        "controller-routed git workspace sync requires a full source checkout before creating a runner git bundle; the selected source checkout is shallow",
+        Some(local_path.display().to_string()),
+        Some(vec![
+            format!(
+                "Deepen the source checkout with `git -C {} fetch --unshallow` before retrying.",
+                shell::quote_arg(&local_path.display().to_string())
+            ),
+            "Use a full clone for --source-path when upgrading runners with --method source."
+                .to_string(),
+            "Use snapshot workspace sync only when the remote command does not need Git history."
+                .to_string(),
+        ]),
+    ))
 }
 
 fn materialize_git_bundle_piped(
@@ -1313,6 +1338,80 @@ mod tests {
                 fs::read_to_string(remote.join("file.txt")).expect("read synced file"),
                 "source-upgrade\n"
             );
+        });
+    }
+
+    #[test]
+    fn controller_routed_git_sync_rejects_shallow_source_checkout() {
+        crate::test_support::with_isolated_home(|_| {
+            let origin = tempfile::tempdir().expect("origin tempdir");
+            let clone_parent = tempfile::tempdir().expect("clone parent tempdir");
+            let runner_root = tempfile::tempdir().expect("runner root tempdir");
+
+            git(origin.path(), &["init"]);
+            git(origin.path(), &["config", "user.email", "test@example.com"]);
+            git(origin.path(), &["config", "user.name", "Test User"]);
+            fs::write(origin.path().join("file.txt"), "base\n").expect("write base file");
+            git(origin.path(), &["add", "."]);
+            git(origin.path(), &["commit", "-m", "base"]);
+            fs::write(origin.path().join("file.txt"), "tip\n").expect("write tip file");
+            git(origin.path(), &["commit", "-am", "tip"]);
+
+            let source = clone_parent.path().join("source");
+            let remote_url = format!("file://{}", origin.path().display());
+            let clone_output = Command::new("git")
+                .arg("clone")
+                .arg("--depth")
+                .arg("1")
+                .arg(&remote_url)
+                .arg(&source)
+                .output()
+                .expect("run shallow clone");
+            assert!(
+                clone_output.status.success(),
+                "git clone failed: {}",
+                String::from_utf8_lossy(&clone_output.stderr)
+            );
+            assert_eq!(
+                git_output(&source, &["rev-parse", "--is-shallow-repository"]).unwrap(),
+                "true"
+            );
+
+            super::super::create(
+                &format!(
+                    r#"{{"id":"lab-local-shallow-git","kind":"local","workspace_root":"{}"}}"#,
+                    runner_root.path().display()
+                ),
+                false,
+            )
+            .expect("create runner");
+
+            let err = sync_workspace(
+                "lab-local-shallow-git",
+                RunnerWorkspaceSyncOptions {
+                    path: source.display().to_string(),
+                    mode: RunnerWorkspaceSyncMode::Git,
+                    controller_routed_git: true,
+                    changed_since_base: None,
+                    git_fetch_refs: Vec::new(),
+                    snapshot_includes: Vec::new(),
+                    allow_dirty_lab_workspace: false,
+                },
+            )
+            .expect_err("shallow source checkout should fail before bundle creation");
+
+            assert!(err.message.contains("source checkout is shallow"));
+            assert!(!err.message.contains("missing"));
+            assert!(!err.message.contains("object"));
+            let hint_text = err.details["tried"]
+                .as_array()
+                .expect("shallow checkout error includes recovery options")
+                .iter()
+                .filter_map(|value| value.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(hint_text.contains("fetch --unshallow"));
+            assert!(hint_text.contains("--method source"));
         });
     }
 
