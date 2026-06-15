@@ -37,11 +37,11 @@ pub use github::{
 pub use github_pr_comments::{pr_comment, PrCommentMode, PrCommentOptions};
 pub use operation_output::GitOutput;
 pub use operations::{
-    cherry_pick, cherry_pick_at, execute_git_for_release, fetch_and_fast_forward,
-    fetch_and_get_behind_count, get_head_commit, get_repo_snapshot, get_tag_commit, pull, pull_at,
-    pull_bulk, rebase, rebase_at, remote_tag_commit, short_head_revision_at, status, status_at,
-    status_bulk, tag, tag_at, tag_exists_locally, tag_exists_on_remote, CherryPickOptions,
-    RebaseOptions, RepoSnapshot,
+    cherry_pick, cherry_pick_at, delete_local_tag, delete_remote_tag, execute_git_for_release,
+    fetch_and_fast_forward, fetch_and_get_behind_count, get_head_commit, get_repo_snapshot,
+    get_tag_commit, is_ancestor, pull, pull_at, pull_bulk, rebase, rebase_at, remote_tag_commit,
+    short_head_revision_at, status, status_at, status_bulk, tag, tag_at, tag_exists_locally,
+    tag_exists_on_remote, CherryPickOptions, RebaseOptions, RepoSnapshot,
 };
 pub use operations_changes::{
     build_repo_baseline_snapshot, changes, changes_at, changes_bulk, changes_project,

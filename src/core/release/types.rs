@@ -306,6 +306,13 @@ pub struct ReleaseCommandInput {
     pub dry_run: bool,
     #[serde(default)]
     pub recover: bool,
+    /// During `--recover`, when the release tag exists but points at a commit
+    /// strictly behind HEAD (e.g. config-only commits landed after tagging),
+    /// move the tag to HEAD instead of refusing. Guarded: the tagged commit
+    /// must be an ancestor of HEAD, HEAD must satisfy the version targets, and
+    /// no GitHub Release may exist for the tag.
+    #[serde(default)]
+    pub retag: bool,
     #[serde(default)]
     pub skip_checks: bool,
     /// Explicit bump override: "major", "minor", "patch", or a version string like "2.0.0".
