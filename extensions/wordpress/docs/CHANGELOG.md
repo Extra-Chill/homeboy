@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.121.43] - 2026-06-15
+
+### Fixed
+- prepare wp codebox trace dependencies
+
 ## [2.121.42] - 2026-06-15
 
 ### Fixed
