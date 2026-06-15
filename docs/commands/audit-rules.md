@@ -135,19 +135,23 @@ Use source policies for architecture boundaries such as core-layer purity,
 detector implementation neutrality, or product/domain terms that belong in
 component-owned config rather than generic core code.
 
-Homeboy's own `homeboy.json` also uses this primitive for the
-`thin-command-adapters` rule. The expected boundary is:
+Adapter/service layer boundaries are a natural use for this generic surface:
+a component can configure adapter paths and the responsibility markers that
+belong in its service layer. Homeboy's own `homeboy.json` uses this primitive
+for the `thin-command-adapters` rule. The configured Homeboy boundary is:
 
 ```text
 src/commands/* = clap args + typed request construction + output adaptation
 src/core/* = domain policy, orchestration, persistence, execution, artifacts
 ```
 
-That rule scans command modules for direct process execution, filesystem
-mutation, run-artifact persistence, and runner orchestration markers. Existing
-orchestration-heavy command modules are allowlisted as transitional extraction
-targets; new command modules should delegate those responsibilities to `core`
-services instead of adding local exceptions.
+That Homeboy-owned config scans command modules for direct process execution,
+filesystem mutation, run-artifact persistence, and runner orchestration markers.
+Existing orchestration-heavy command modules are allowlisted as transitional
+extraction targets; new command modules should delegate those responsibilities
+to `core` services instead of adding local exceptions. Other repositories can
+define their own adapter paths, service-layer markers, and transitional
+allowlists without changing Homeboy audit code.
 
 Example:
 

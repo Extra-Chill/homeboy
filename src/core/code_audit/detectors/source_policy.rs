@@ -446,48 +446,47 @@ mod tests { const PACKAGE: &str = "widget-package.json"; }
     }
 
     #[test]
-    fn can_express_thin_command_adapter_policy() {
+    fn can_express_configured_adapter_layer_thinness_policy() {
         let mut rule = rule();
-        rule.id = "thin-command-adapters".to_string();
-        rule.convention = "thin_command_adapters".to_string();
-        rule.include_path_contains = vec!["src/commands/".to_string()];
-        rule.exclude_path_contains = vec!["src/commands/legacy.rs".to_string()];
+        rule.id = "adapter-layer-thinness".to_string();
+        rule.convention = "adapter_layer_thinness".to_string();
+        rule.include_path_contains = vec!["src/adapters/".to_string()];
+        rule.exclude_path_contains = vec!["src/adapters/transitional.rs".to_string()];
         rule.ignore_line_prefixes = vec!["//".to_string(), "///".to_string(), "//!".to_string()];
-        rule.description =
-            "Command adapter boundary violation: `{term}` at line {line}".to_string();
-        rule.suggestion = "Move orchestration into src/core/ services.".to_string();
+        rule.description = "Adapter layer boundary violation: `{term}` at line {line}".to_string();
+        rule.suggestion = "Move orchestration into the configured service layer.".to_string();
         rule.rule = SourcePolicyRuleBody::ForbiddenTerms {
             terms: vec![SourcePolicyTerm {
-                value: r#"\bstd::process::Command\b|\bCommand::new\s*\("#.to_string(),
-                label: Some("direct process execution".to_string()),
+                value: r#"\b(orchestrate_workflow|persist_artifact)\s*\("#.to_string(),
+                label: Some("service responsibility".to_string()),
                 match_mode: Some(SourcePolicyMatchMode::Regex),
             }],
             default_match: SourcePolicyMatchMode::Regex,
             case_insensitive: false,
         };
         let violation = rust_fp(
-            "src/commands/new_feature.rs",
+            "src/adapters/new_feature.rs",
             r#"fn run() {
-    let _child = std::process::Command::new("tool");
+    orchestrate_workflow();
 }
 "#,
         );
         let allowed_transition = rust_fp(
-            "src/commands/legacy.rs",
+            "src/adapters/transitional.rs",
             r#"fn run() {
-    let _child = std::process::Command::new("tool");
+    persist_artifact();
 }
 "#,
         );
         let comment_only = rust_fp(
-            "src/commands/comment.rs",
-            "// std::process::Command remains documented here",
+            "src/adapters/comment.rs",
+            "// orchestrate_workflow remains documented here",
         );
 
         let findings = run(&[&violation, &allowed_transition, &comment_only], &[rule]);
 
         assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].file, "src/commands/new_feature.rs");
-        assert!(findings[0].description.contains("direct process execution"));
+        assert_eq!(findings[0].file, "src/adapters/new_feature.rs");
+        assert!(findings[0].description.contains("service responsibility"));
     }
 }
