@@ -1524,6 +1524,35 @@ assert(!serializedCodexOutcome.includes('codex-refresh-token-value'));
 assert(!serializedCodexOutcome.includes('artifact-access-token-value'));
 assert(!serializedCodexOutcome.includes('diagnostic-access-token-value'));
 
+const codexProviderNotRegisteredOutcome = agentTaskOutcomeFromCodeboxResult({
+  ...request,
+  task_id: 'codex-provider-not-registered-task-123',
+  executor: {
+    backend: 'codebox',
+    config: {
+      provider: 'codex',
+      provider_plugin_paths: ['/components/ai-provider-for-openai'],
+    },
+  },
+}, {
+  success: false,
+  status: 'failed',
+  summary: 'Requested provider "codex" is not registered in wp-ai-client after sandbox provider plugins were loaded.',
+  diagnostics: [{
+    class: 'wp_codebox_provider_not_registered',
+    message: 'Requested provider "codex" is not registered in wp-ai-client after sandbox provider plugins were loaded.',
+  }],
+  task_input: {
+    provider: 'codex',
+    provider_plugin_paths: ['/components/ai-provider-for-openai'],
+  },
+});
+const codexGuidanceDiagnostic = codexProviderNotRegisteredOutcome.diagnostics.find((diagnostic) => diagnostic.class === 'codebox.codex_provider_plugin_guidance');
+assert(codexGuidanceDiagnostic);
+assert.match(codexGuidanceDiagnostic.message, /Codex-capable provider plugin checkout/);
+assert.match(codexGuidanceDiagnostic.message, /Released ai-provider-for-openai trunk registers openai, not codex/);
+assert.deepEqual(codexGuidanceDiagnostic.data.provider_plugin_paths, ['/components/ai-provider-for-openai']);
+
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-codebox-agent-task-executor-'));
 try {
   const { fixture, capture } = writeFixtureTaskRunner(root);
@@ -1673,6 +1702,117 @@ try {
   assert.deepEqual(capturedCodex.env_presence, Object.fromEntries(codexSecretEnv.map((name) => [name, true])));
   assert(!JSON.stringify(capturedCodex).includes('wp-ai-gateway'));
   assert(!JSON.stringify(capturedCodex).includes('fixture-codex-access-token'));
+
+  const missingCodexProviderPathResult = spawnSync(process.execPath, [
+    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs'),
+    '--task-runner',
+    fixture,
+  ], {
+    encoding: 'utf8',
+    env: fixtureEnv({ HOME: fakeCodexHome }),
+    input: JSON.stringify({
+      ...codexAgentRequest,
+      task_id: 'codex-missing-provider-path-cli-task-123',
+      executor: {
+        backend: 'codebox',
+        model: 'gpt-5.5',
+        config: {
+          provider: 'codex',
+          secret_env: codexSecretEnv,
+        },
+      },
+    }),
+  });
+  assert.equal(missingCodexProviderPathResult.status, 1, missingCodexProviderPathResult.stderr || missingCodexProviderPathResult.stdout);
+  const missingCodexProviderPathOutcome = JSON.parse(missingCodexProviderPathResult.stdout);
+  assert.equal(missingCodexProviderPathOutcome.status, 'failed');
+  assert.equal(missingCodexProviderPathOutcome.failure_classification, 'provider');
+  assert.equal(missingCodexProviderPathOutcome.diagnostics[0].class, 'codebox.preflight.codex_provider_plugin_path');
+  assert.deepEqual(missingCodexProviderPathOutcome.diagnostics[0].data.provider_plugin_paths, []);
+  assert.match(missingCodexProviderPathOutcome.summary, /Codex-capable provider plugin checkout/);
+
+  const wrongCodexProviderPathResult = spawnSync(process.execPath, [
+    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs'),
+    '--task-runner',
+    fixture,
+  ], {
+    encoding: 'utf8',
+    env: fixtureEnv({ HOME: fakeCodexHome }),
+    input: JSON.stringify({
+      ...codexAgentRequest,
+      task_id: 'codex-wrong-provider-path-cli-task-123',
+      executor: {
+        backend: 'codebox',
+        model: 'gpt-5.5',
+        config: {
+          provider: 'codex',
+          provider_plugin_paths: ['/components/ai-provider-for-opencode'],
+          secret_env: codexSecretEnv,
+        },
+      },
+    }),
+  });
+  assert.equal(wrongCodexProviderPathResult.status, 1, wrongCodexProviderPathResult.stderr || wrongCodexProviderPathResult.stdout);
+  const wrongCodexProviderPathOutcome = JSON.parse(wrongCodexProviderPathResult.stdout);
+  assert.equal(wrongCodexProviderPathOutcome.diagnostics[0].class, 'codebox.preflight.codex_provider_plugin_path');
+  assert.equal(wrongCodexProviderPathOutcome.diagnostics[0].data.inspections[0].reason, 'opencode_provider_plugin');
+
+  const releasedOpenAiProviderPath = path.join(root, 'ai-provider-for-openai');
+  fs.mkdirSync(releasedOpenAiProviderPath, { recursive: true });
+  fs.writeFileSync(path.join(releasedOpenAiProviderPath, 'plugin.php'), '<?php\n// Registers openai provider only.\n');
+  const releasedOpenAiProviderPathResult = spawnSync(process.execPath, [
+    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs'),
+    '--task-runner',
+    fixture,
+  ], {
+    encoding: 'utf8',
+    env: fixtureEnv({ HOME: fakeCodexHome }),
+    input: JSON.stringify({
+      ...codexAgentRequest,
+      task_id: 'codex-released-openai-provider-path-cli-task-123',
+      executor: {
+        backend: 'codebox',
+        model: 'gpt-5.5',
+        config: {
+          provider: 'codex',
+          provider_plugin_paths: [releasedOpenAiProviderPath],
+          secret_env: codexSecretEnv,
+        },
+      },
+    }),
+  });
+  assert.equal(releasedOpenAiProviderPathResult.status, 1, releasedOpenAiProviderPathResult.stderr || releasedOpenAiProviderPathResult.stdout);
+  const releasedOpenAiProviderPathOutcome = JSON.parse(releasedOpenAiProviderPathResult.stdout);
+  assert.equal(releasedOpenAiProviderPathOutcome.diagnostics[0].data.inspections[0].reason, 'no_codex_marker_found');
+  assert.match(releasedOpenAiProviderPathOutcome.summary, /Released ai-provider-for-openai trunk registers openai, not codex/);
+
+  const codexCapableProviderPath = path.join(root, 'ai-provider-for-openai-codex');
+  fs.mkdirSync(codexCapableProviderPath, { recursive: true });
+  fs.writeFileSync(path.join(codexCapableProviderPath, 'plugin.php'), '<?php\n// Registers the codex provider.\n');
+  const codexCapableProviderPathResult = spawnSync(process.execPath, [
+    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs'),
+    '--task-runner',
+    fixture,
+  ], {
+    encoding: 'utf8',
+    env: fixtureEnv({ HOME: fakeCodexHome }),
+    input: JSON.stringify({
+      ...codexAgentRequest,
+      task_id: 'codex-capable-provider-path-cli-task-123',
+      executor: {
+        backend: 'codebox',
+        model: 'gpt-5.5',
+        config: {
+          provider: 'codex',
+          provider_plugin_paths: [codexCapableProviderPath],
+          secret_env: codexSecretEnv,
+        },
+      },
+    }),
+  });
+  assert.equal(codexCapableProviderPathResult.status, 0, codexCapableProviderPathResult.stderr || codexCapableProviderPathResult.stdout);
+  const capturedCodexCapableProvider = JSON.parse(fs.readFileSync(capture, 'utf8'));
+  assert.deepEqual(capturedCodexCapableProvider.request.provider_plugin_paths, [codexCapableProviderPath]);
 
   const agentBundleRoot = fs.mkdtempSync(path.join(root, 'agent-bundle-'));
   const bundle = writeBundleFixture(agentBundleRoot);
