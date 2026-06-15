@@ -584,6 +584,7 @@ mod tests {
                     test_scope: None,
                     summary: None,
                     raw_output: None,
+                    extension_phase_timings: Vec::new(),
                 },
             );
 

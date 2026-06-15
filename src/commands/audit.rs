@@ -536,6 +536,7 @@ mod tests {
                     duplicate_groups: vec![],
                 },
                 fixability: None,
+                extension_phase_timings: Vec::new(),
             },
             exit_code: 1,
             findings: vec![finding],

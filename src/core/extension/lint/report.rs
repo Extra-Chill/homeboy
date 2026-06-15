@@ -46,6 +46,8 @@ pub struct LintCommandOutput {
     pub self_check_capture: Option<SelfCheckCaptureMetadata>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ci_context: Option<CiContext>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extension_phase_timings: Vec<crate::core::extension::ExtensionPhaseTiming>,
 }
 
 /// Build output from a main lint workflow result.
@@ -99,6 +101,7 @@ pub fn from_main_workflow_with_ci_context(
             summary: result.summary,
             self_check_capture: result.self_check_capture,
             ci_context,
+            extension_phase_timings: result.extension_phase_timings,
         },
         exit_code,
     )
@@ -208,6 +211,7 @@ pub fn from_lint_fix(component_label: String, run: RefactorSourceRun) -> (LintCo
             summary: None,
             self_check_capture: None,
             ci_context: None,
+            extension_phase_timings: Vec::new(),
         },
         exit_code,
     )
@@ -257,6 +261,7 @@ mod tests {
             ],
             summary: None,
             self_check_capture: None,
+            extension_phase_timings: Vec::new(),
         };
 
         let (output, exit_code) = from_main_workflow(result);

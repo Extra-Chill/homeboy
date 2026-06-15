@@ -1293,6 +1293,7 @@ mod tests {
                     warnings: Vec::new(),
                 },
             ),
+            extension_phase_timings: Vec::new(),
         };
         let results = TraceResults {
             component_id: "example".to_string(),

@@ -11,6 +11,7 @@ use crate::core::code_audit::{
     baseline, AuditFinding, CodeAuditResult, ConventionReport, DirectoryConvention,
     FindingConfidence, Severity,
 };
+use crate::core::extension::ExtensionPhaseTiming;
 use crate::core::finding::HomeboyFinding;
 use serde::Serialize;
 
@@ -34,6 +35,8 @@ pub struct AuditSummaryOutput {
     pub changed_since: Option<AuditChangedSinceSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub baseline_filtering: Option<AuditBaselineFilteringSummary>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extension_phase_timings: Vec<ExtensionPhaseTiming>,
     pub exit_code: i32,
 }
 
@@ -104,6 +107,8 @@ pub enum AuditCommandOutput {
         result: CodeAuditResult,
         #[serde(skip_serializing_if = "Option::is_none")]
         fixability: Option<AuditFixability>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        extension_phase_timings: Vec<ExtensionPhaseTiming>,
     },
 
     #[serde(rename = "audit.conventions")]
@@ -136,6 +141,8 @@ pub enum AuditCommandOutput {
         summary: Option<AuditSummaryOutput>,
         #[serde(skip_serializing_if = "Option::is_none")]
         fixability: Option<AuditFixability>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        extension_phase_timings: Vec<ExtensionPhaseTiming>,
     },
 
     #[serde(rename = "audit.summary")]
@@ -207,6 +214,7 @@ pub fn build_audit_summary(result: &CodeAuditResult, exit_code: i32) -> AuditSum
         fixability: None,
         changed_since: None,
         baseline_filtering: None,
+        extension_phase_timings: Vec::new(),
         exit_code,
     }
 }

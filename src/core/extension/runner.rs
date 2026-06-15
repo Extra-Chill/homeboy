@@ -3,7 +3,9 @@ use std::path::{Path, PathBuf};
 use crate::core::component::Component;
 use crate::core::engine::invocation::{InvocationGuard, InvocationRequirements};
 use crate::core::engine::resource::{self, ExtensionChildResourceSummary};
+use crate::core::engine::run_dir::{self, RunDir};
 use crate::core::error::{Error, Result};
+use crate::core::extension::ExtensionPhaseTiming;
 use crate::core::server::CommandOutput;
 
 const STRICT_VALIDATION_DEPENDENCIES_ENV: &str = "HOMEBOY_STRICT_VALIDATION_DEPENDENCIES";
@@ -16,6 +18,7 @@ pub struct RunnerOutput {
     pub stdout: String,
     pub stderr: String,
     pub child_resource: Option<ExtensionChildResourceSummary>,
+    pub extension_phase_timings: Vec<ExtensionPhaseTiming>,
 }
 
 use super::ExtensionExecutionContext;
@@ -244,6 +247,12 @@ impl ExtensionRunner {
             stdout: output.stdout,
             stderr: output.stderr,
             child_resource: output.child_resource,
+            extension_phase_timings: self
+                .run_dir_path
+                .as_ref()
+                .map(read_extension_phase_timings)
+                .transpose()?
+                .unwrap_or_default(),
         })
     }
 
@@ -297,6 +306,31 @@ impl ExtensionRunner {
             },
         )
     }
+}
+
+pub(crate) fn read_extension_phase_timings(
+    run_dir_path: &PathBuf,
+) -> Result<Vec<ExtensionPhaseTiming>> {
+    let run_dir = RunDir::from_existing(run_dir_path.clone())?;
+    let Some(value) = run_dir.read_step_output(run_dir::files::PHASE_TIMINGS) else {
+        return Ok(Vec::new());
+    };
+
+    if let Some(timings) = value.get("phase_timings") {
+        return serde_json::from_value(timings.clone()).map_err(|e| {
+            Error::internal_json(
+                e.to_string(),
+                Some("parse extension phase timings".to_string()),
+            )
+        });
+    }
+
+    serde_json::from_value(value).map_err(|e| {
+        Error::internal_json(
+            e.to_string(),
+            Some("parse extension phase timings".to_string()),
+        )
+    })
 }
 
 fn stale_validation_dependency_message(stdout: &str, stderr: &str) -> Option<String> {
@@ -364,6 +398,39 @@ mod tests {
                 .env_vars
                 .iter()
                 .any(|(key, _)| key.starts_with("HOMEBOY_INVOCATION_")));
+        });
+    }
+
+    #[test]
+    fn reads_extension_phase_timings_from_run_dir() {
+        with_isolated_home(|_| {
+            let run_dir = RunDir::create().expect("run dir");
+            std::fs::write(
+                run_dir.step_file(run_dir::files::PHASE_TIMINGS),
+                serde_json::json!({
+                    "phase_timings": [
+                        {
+                            "name": "opaque-provider-phase",
+                            "duration_ms": 1234,
+                            "artifacts": [{ "kind": "opaque", "path": "artifacts/timing.json" }],
+                            "metadata": { "extension": "fixture" }
+                        }
+                    ]
+                })
+                .to_string(),
+            )
+            .expect("write phase timings");
+
+            let timings =
+                read_extension_phase_timings(&run_dir.path().to_path_buf()).expect("phase timings");
+
+            assert_eq!(timings.len(), 1);
+            assert_eq!(timings[0].name, "opaque-provider-phase");
+            assert_eq!(timings[0].duration_ms, 1234);
+            assert_eq!(timings[0].artifacts[0]["path"], "artifacts/timing.json");
+            assert_eq!(timings[0].metadata["extension"], "fixture");
+
+            run_dir.cleanup();
         });
     }
 

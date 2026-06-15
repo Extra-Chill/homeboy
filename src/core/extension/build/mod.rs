@@ -6,9 +6,12 @@ use crate::core::component::{self, Component};
 use crate::core::config::{is_json_input, parse_bulk_ids};
 use crate::core::deploy::permissions;
 use crate::core::engine::command::CapturedOutput;
+use crate::core::engine::run_dir::RunDir;
 use crate::core::engine::shell;
 use crate::core::error::{Error, Result};
-use crate::core::extension::{self, exec_context, ExtensionCapability, ExtensionExecutionContext};
+use crate::core::extension::{
+    self, exec_context, ExtensionCapability, ExtensionExecutionContext, ExtensionPhaseTiming,
+};
 use crate::core::output::{BulkResult, BulkResultBuilder};
 use crate::core::paths;
 use crate::core::server::execute_local_command_in_dir;
@@ -155,6 +158,8 @@ pub struct BuildOutput {
     pub output: CapturedOutput,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifact_inputs: Vec<ResolvedArtifactInput>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extension_phase_timings: Vec<ExtensionPhaseTiming>,
     pub success: bool,
 }
 
@@ -371,6 +376,7 @@ fn execute_build_component(comp: &Component) -> Result<(BuildOutput, i32)> {
                     build_command: build_cmd,
                     output: CapturedOutput::new(String::new(), stderr),
                     artifact_inputs: Vec::new(),
+                    extension_phase_timings: Vec::new(),
                     success: false,
                 },
                 exit_code,
@@ -383,12 +389,16 @@ fn execute_build_component(comp: &Component) -> Result<(BuildOutput, i32)> {
 
     // Execute via ExtensionRunner — uses the full exec context protocol (settings,
     // project info, context version) instead of the minimal env var set.
+    let run_dir = RunDir::create()?;
     let runner_output = if let ResolvedBuildCommand::ComponentScript { .. } = &resolved {
-        crate::core::extension::component_script::run_component_scripts(
+        crate::core::extension::component_script::run_component_scripts_with_run_dir(
             comp,
             extension::ExtensionCapability::Build,
             &validated_path,
+            &run_dir,
             true,
+            &[],
+            &[],
         )?
         .into()
     } else if let Some(context) = build_context {
@@ -396,6 +406,7 @@ fn execute_build_component(comp: &Component) -> Result<(BuildOutput, i32)> {
             .component(comp.clone())
             .working_dir(&local_path_str)
             .command_override(build_cmd.clone())
+            .with_run_dir(&run_dir)
             // Legacy env var for backward compat with existing build scripts
             .env("HOMEBOY_PLUGIN_PATH", &comp.local_path)
             .run()?
@@ -407,6 +418,7 @@ fn execute_build_component(comp: &Component) -> Result<(BuildOutput, i32)> {
             .component(comp.clone())
             .working_dir(&local_path_str)
             .command_override(build_cmd.clone())
+            .with_run_dir(&run_dir)
             .env("HOMEBOY_PLUGIN_PATH", &comp.local_path)
             .run()?
     };
@@ -425,6 +437,7 @@ fn execute_build_component(comp: &Component) -> Result<(BuildOutput, i32)> {
             build_command: build_cmd,
             output: CapturedOutput::new(runner_output.stdout, runner_output.stderr),
             artifact_inputs,
+            extension_phase_timings: runner_output.extension_phase_timings,
             success,
         },
         runner_output.exit_code,

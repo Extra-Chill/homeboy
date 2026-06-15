@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -47,6 +47,16 @@ pub struct PhaseFailure {
     pub phase: VerificationPhase,
     pub category: PhaseFailureCategory,
     pub summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExtensionPhaseTiming {
+    pub name: String,
+    pub duration_ms: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metadata: BTreeMap<String, serde_json::Value>,
 }
 
 pub fn phase_status_from_exit_code(exit_code: i32) -> PhaseStatus {

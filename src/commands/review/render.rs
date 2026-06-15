@@ -21,6 +21,7 @@ use homeboy::core::ci_profile::CiRunOutput;
 use homeboy::core::code_audit::{AuditCommandOutput, AuditFinding, Finding, Severity};
 use homeboy::core::extension::lint::LintCommandOutput;
 use homeboy::core::extension::test::TestCommandOutput;
+use homeboy::core::extension::ExtensionPhaseTiming;
 use homeboy::core::finding::HomeboyFinding;
 use homeboy::core::top_n::top_n_by;
 
@@ -158,6 +159,7 @@ fn render_audit_stage(out: &mut String, stage: &ReviewStage<AuditCommandOutput>)
     render_stage_header(out, stage);
     if let Some(ref output) = stage.output {
         render_audit_body(out, output);
+        render_extension_phase_timings(out, audit_extension_phase_timings(output));
     }
     render_stage_hint(out, stage);
 }
@@ -166,6 +168,7 @@ fn render_lint_stage(out: &mut String, stage: &ReviewStage<LintCommandOutput>) {
     render_stage_header(out, stage);
     if let Some(ref output) = stage.output {
         render_lint_body(out, output);
+        render_extension_phase_timings(out, &output.extension_phase_timings);
     }
     render_stage_hint(out, stage);
 }
@@ -174,6 +177,7 @@ fn render_test_stage(out: &mut String, stage: &ReviewStage<TestCommandOutput>) {
     render_stage_header(out, stage);
     if let Some(ref output) = stage.output {
         render_test_body(out, output);
+        render_extension_phase_timings(out, &output.extension_phase_timings);
     }
     render_stage_hint(out, stage);
 }
@@ -384,6 +388,48 @@ fn render_test_findings(out: &mut String, findings: &[HomeboyFinding]) {
     }
 }
 
+fn audit_extension_phase_timings(output: &AuditCommandOutput) -> &[ExtensionPhaseTiming] {
+    match output {
+        AuditCommandOutput::Full {
+            extension_phase_timings,
+            ..
+        }
+        | AuditCommandOutput::Compared {
+            extension_phase_timings,
+            ..
+        } => extension_phase_timings,
+        AuditCommandOutput::Summary(summary) => &summary.extension_phase_timings,
+        AuditCommandOutput::BaselineSaved { .. } | AuditCommandOutput::Conventions { .. } => &[],
+    }
+}
+
+fn render_extension_phase_timings(out: &mut String, timings: &[ExtensionPhaseTiming]) {
+    if timings.is_empty() {
+        return;
+    }
+
+    let mut timings = timings.iter().collect::<Vec<_>>();
+    timings.sort_by(|a, b| {
+        b.duration_ms
+            .cmp(&a.duration_ms)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+
+    let _ = writeln!(out, "- _Slowest extension phases:_");
+    for timing in timings.into_iter().take(3) {
+        let artifacts = if timing.artifacts.is_empty() {
+            String::new()
+        } else {
+            format!("; {} artifact ref(s)", timing.artifacts.len())
+        };
+        let _ = writeln!(
+            out,
+            "  - `{}` — {} ms{}",
+            timing.name, timing.duration_ms, artifacts
+        );
+    }
+}
+
 fn render_ci_body(out: &mut String, output: &CiRunOutput) {
     for job in &output.jobs {
         let marker = if job.success { "passed" } else { "failed" };
@@ -555,6 +601,7 @@ mod tests {
             passed: result.findings.is_empty(),
             result,
             fixability: None,
+            extension_phase_timings: Vec::new(),
         }
     }
 
@@ -596,6 +643,7 @@ mod tests {
             summary: None,
             self_check_capture: None,
             ci_context: None,
+            extension_phase_timings: Vec::new(),
         }
     }
 
@@ -627,6 +675,7 @@ mod tests {
             summary: None,
             raw_output: None,
             ci_context: None,
+            extension_phase_timings: Vec::new(),
         }
     }
 
@@ -682,6 +731,36 @@ mod tests {
             "should not render bullets on a clean run:\n{}",
             md
         );
+    }
+
+    #[test]
+    fn renders_slowest_extension_phases_generically() {
+        let mut env = passing_envelope();
+        let lint = env.lint.output.as_mut().expect("lint output");
+        lint.extension_phase_timings = vec![
+            ExtensionPhaseTiming {
+                name: "provider-cache".to_string(),
+                duration_ms: 25,
+                artifacts: Vec::new(),
+                metadata: std::collections::BTreeMap::new(),
+            },
+            ExtensionPhaseTiming {
+                name: "opaque-slow-phase".to_string(),
+                duration_ms: 1200,
+                artifacts: vec![serde_json::json!({ "path": "artifacts/phase.json" })],
+                metadata: std::collections::BTreeMap::new(),
+            },
+        ];
+
+        let md = render_pr_comment(&env);
+
+        assert!(md.contains("- _Slowest extension phases:_"), "{}", md);
+        assert!(
+            md.contains("  - `opaque-slow-phase` — 1200 ms; 1 artifact ref(s)"),
+            "{}",
+            md
+        );
+        assert!(md.contains("  - `provider-cache` — 25 ms"), "{}", md);
     }
 
     #[test]

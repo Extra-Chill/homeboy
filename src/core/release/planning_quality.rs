@@ -246,6 +246,7 @@ mod tests {
             stdout: stdout.to_string(),
             stderr: stderr.to_string(),
             child_resource: None,
+            extension_phase_timings: Vec::new(),
         }
     }
 

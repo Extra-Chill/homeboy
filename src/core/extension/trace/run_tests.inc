@@ -285,6 +285,7 @@ JSON
                 .collect::<Vec<_>>()
                 .join("\n"),
             child_resource: None,
+            extension_phase_timings: Vec::new(),
         };
 
         let failure = failure_from_output(&args, &output, None, None);
