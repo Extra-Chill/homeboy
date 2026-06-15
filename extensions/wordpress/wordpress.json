@@ -919,7 +919,15 @@
     "extension_script": "scripts/bench/bench-runner.sh"
   },
   "trace": {
-    "extension_script": "scripts/trace/trace-runner.sh"
+    "extension_script": "scripts/trace/trace-runner.sh",
+    "toolchain_provenance": [
+      {
+        "id": "wp-codebox",
+        "label": "WP Codebox",
+        "legacy_field": "wp_codebox",
+        "env_keys": ["HOMEBOY_WP_CODEBOX_BIN", "HOMEBOY_SETTINGS_WP_CODEBOX_BIN"]
+      }
+    ]
   },
   "testing": {
     "backend": "wp-codebox",
