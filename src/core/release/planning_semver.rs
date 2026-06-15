@@ -22,6 +22,10 @@ pub(super) fn build_semver_recommendation(
 
     let recommended = git::recommended_bump_from_commits(&commits);
 
+    if requested_bump == "none" && recommended.is_none() {
+        return Ok(None);
+    }
+
     if is_explicit_version {
         return Ok(Some(ReleaseSemverRecommendation {
             latest_tag: latest_tag.clone(),
@@ -332,6 +336,32 @@ mod tests {
         assert_eq!(recommendation.requested_bump, "2.0.0");
         assert!(!recommendation.is_underbump);
         assert!(recommendation.reasons.is_empty());
+    }
+
+    #[test]
+    fn none_request_with_only_non_releasable_commits_returns_no_recommendation() {
+        let temp = git_repo();
+        let dir = temp.path();
+        commit_file(dir, "README.md", "initial", "chore: initial");
+        run_git(dir, &["tag", "v1.0.0"]);
+        commit_file(
+            dir,
+            "baseline.txt",
+            "baseline",
+            "chore: refresh lint baseline",
+        );
+        let component = Component {
+            local_path: dir.to_string_lossy().to_string(),
+            ..Default::default()
+        };
+
+        let recommendation = build_semver_recommendation(&component, "none", None)
+            .expect("no-op recommendation should be valid");
+
+        assert!(
+            recommendation.is_none(),
+            "internal no-op bump sentinel should let the planner build a skip plan"
+        );
     }
 
     #[test]
