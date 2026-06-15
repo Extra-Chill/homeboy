@@ -132,6 +132,23 @@ fn runner_job_logs_command_parses() {
 }
 
 #[test]
+fn runner_exec_raw_command_parses_before_trailing_command() {
+    Cli::try_parse_from([
+        "homeboy",
+        "runner",
+        "exec",
+        "homeboy-lab",
+        "--raw",
+        "--cwd",
+        "/home/chubes/Developer",
+        "python3",
+        "-c",
+        "print('hello')",
+    ])
+    .expect("runner exec --raw should parse before the trailing remote command");
+}
+
+#[test]
 fn agent_task_auth_status_accepts_global_runner_and_secret_env() {
     Cli::try_parse_from([
         "homeboy",

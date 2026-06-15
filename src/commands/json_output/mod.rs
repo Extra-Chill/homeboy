@@ -5,7 +5,7 @@ use crate::command_contract::CommandJsonFamily;
 
 use super::agent_task_summary::{agent_task_summary_kind, render_agent_task_summary};
 use super::output_runtime::JsonCommandRun;
-use super::GlobalArgs;
+use super::{runner, GlobalArgs};
 
 mod ops;
 mod quality;
@@ -36,8 +36,10 @@ pub fn run_command_output(command: Commands, global: &GlobalArgs) -> JsonCommand
                 exit_code,
                 output_file_result: None,
                 human_stdout,
+                human_stderr: None,
             }
         }
+        Commands::Runner(args) => runner::run_command_output(args, global),
         command => {
             let (stdout_result, exit_code) = dispatch(command, global);
             JsonCommandRun::from_stdout_result(stdout_result, exit_code)
