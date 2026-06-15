@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.121.36] - 2026-06-15
+
+### Fixed
+- declare Codebox agent task role aliases
+- declare WordPress test result parser adapter
+
 ## [2.121.35] - 2026-06-15
 
 ### Fixed
