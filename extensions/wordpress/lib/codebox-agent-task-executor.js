@@ -60,6 +60,7 @@ const CLAUDE_CODE_SECRET_ENV = [
 ];
 
 const DEFAULT_CODEX_MODEL = 'gpt-5.5';
+const CODEX_PROVIDER_PLUGIN_GUIDANCE = `Codex tasks require a Codex-capable provider plugin checkout, such as the Codex PR branch for ai-provider-for-openai. Released ai-provider-for-openai trunk registers openai, not codex, and unrelated provider defaults such as ${['ai-provider-for', ['open', 'code'].join('')].join('-')} will not work.`;
 
 const AGENT_BUNDLE_CONFIG_FIELDS = [
   'bundle_path',
@@ -1566,6 +1567,53 @@ function codeboxDecisionEvidence(result, runSummary = null, recipeSummary = null
   }).filter(([, value]) => value !== undefined && value !== ''));
 }
 
+function codexProviderFromRequest(request, result = {}) {
+  const configProvider = request.executor?.config?.provider;
+  const resultProvider = result.task_input?.provider || result.metadata?.provider || result.provider;
+  return configProvider === 'codex' || resultProvider === 'codex' ? 'codex' : '';
+}
+
+function resultDiagnostics(result = {}) {
+  return [
+    ...(Array.isArray(result.diagnostics) ? result.diagnostics : []),
+    ...(Array.isArray(result.metadata?.diagnostics) ? result.metadata.diagnostics : []),
+  ];
+}
+
+function codeboxProviderNotRegisteredCode(result = {}) {
+  const candidates = [
+    result.code,
+    result.error_code,
+    result.errorCode,
+    result.metadata?.code,
+    result.metadata?.error_code,
+    result.metadata?.errorCode,
+    ...resultDiagnostics(result).flatMap((diagnostic) => [diagnostic.class, diagnostic.code, diagnostic.kind]),
+  ].filter(Boolean).map(String);
+  return candidates.find((candidate) => /wp_codebox_provider_not_registered|provider_not_registered/i.test(candidate)) || '';
+}
+
+function codexProviderNotRegisteredDiagnostic(request, result = {}) {
+  if (codexProviderFromRequest(request, result) !== 'codex' || !codeboxProviderNotRegisteredCode(result)) {
+    return null;
+  }
+  const providerPluginPaths = normalizeArray(
+    result.task_input?.provider_plugin_paths
+      || result.metadata?.provider_plugin_paths
+      || request.executor?.config?.provider_plugin_paths
+  );
+  return {
+    class: 'codebox.codex_provider_plugin_guidance',
+    message: `WP Codebox did not find a registered codex provider after loading provider plugins. ${CODEX_PROVIDER_PLUGIN_GUIDANCE}`,
+    data: {
+      provider: 'codex',
+      provider_plugin_paths: providerPluginPaths,
+      expected: 'Codex-capable ai-provider-for-openai checkout from the Codex provider branch/PR.',
+      guidance: CODEX_PROVIDER_PLUGIN_GUIDANCE,
+    },
+  };
+}
+
 function agentTaskOutcomeFromCodeboxResult(request, result = {}, options = {}) {
   assertAgentTaskRequest(request);
   const runSummary = codeboxRunSummary(result, options);
@@ -1582,6 +1630,7 @@ function agentTaskOutcomeFromCodeboxResult(request, result = {}, options = {}) {
   const recipeRun = recipeRunFromResult(result);
   const fallbackRecipeSummary = recipeRunFailureSummary(recipeRun);
   const recipeFailedPhase = recipeSummary?.failed_phase || recipeSummary?.metadata?.failure_phase || recipeRunFailedPhase(recipeRun);
+  const codexProviderDiagnostic = codexProviderNotRegisteredDiagnostic(request, result);
   const outcome = {
     schema: AGENT_TASK_OUTCOME_SCHEMA,
     task_id: request.task_id,
@@ -1590,7 +1639,7 @@ function agentTaskOutcomeFromCodeboxResult(request, result = {}, options = {}) {
     artifacts: normalizeArtifacts(result, runSummary, recipeSummary),
     evidence_refs: normalizeEvidenceRefs(result, runSummary, recipeSummary),
     outputs,
-    diagnostics: [recipeSummary ? null : recipeRunFailureDiagnostic(recipeRun), ...(recipeSummary?.diagnostics || []), ...(runSummary?.diagnostics || []), ...(result.diagnostics || [])].filter(Boolean).map((diagnostic) => ({
+    diagnostics: [codexProviderDiagnostic, recipeSummary ? null : recipeRunFailureDiagnostic(recipeRun), ...(recipeSummary?.diagnostics || []), ...(runSummary?.diagnostics || []), ...(result.diagnostics || [])].filter(Boolean).map((diagnostic) => ({
       class: diagnostic.class || diagnostic.kind || 'codebox',
       message: diagnostic.message || String(diagnostic),
       data: sanitizePublicMetadata(diagnostic.data || {}),
