@@ -15,7 +15,8 @@ set -euo pipefail
 #   HOMEBOY_CHANGED_SINCE   — git ref to scope fmt check to changed files only
 #   HOMEBOY_LINT_GLOB       — file glob (currently unused for Rust — cargo operates on crates)
 #   HOMEBOY_LINT_FILE       — single file (currently unused for Rust)
-#   HOMEBOY_ERRORS_ONLY     — if "1", only show errors (suppresses warnings in clippy)
+#   HOMEBOY_ERRORS_ONLY     — if "1", treat warnings as errors with `-D warnings`
+#   HOMEBOY_CLIPPY_ALL      — if "1", opt into `-W clippy::all` warning expansion
 #   HOMEBOY_STEP            — comma-separated steps to run (fmt, clippy)
 #   HOMEBOY_SKIP            — comma-separated steps to skip
 #   HOMEBOY_DEBUG           — if "1", show debug output
@@ -47,6 +48,26 @@ write_fix_results_sidecar() {
     if [ "${HOMEBOY_FIX_ONLY:-}" = "1" ] && [ -n "${HOMEBOY_FIX_RESULTS_FILE:-}" ]; then
         homeboy_fix_results_write
     fi
+}
+
+clippy_all_enabled() {
+    if [ "${HOMEBOY_CLIPPY_ALL:-}" = "1" ]; then
+        return 0
+    fi
+
+    python3 - <<'PY'
+import json
+import os
+import sys
+
+try:
+    settings = json.loads(os.environ.get("HOMEBOY_SETTINGS_JSON", "{}"))
+except json.JSONDecodeError:
+    settings = {}
+
+enabled = settings.get("clippy_all") is True
+sys.exit(0 if enabled else 1)
+PY
 }
 
 write_lint_findings_from_output() {
@@ -316,8 +337,10 @@ if should_run_step "clippy"; then
 
     if [ "${HOMEBOY_ERRORS_ONLY:-}" = "1" ]; then
         CLIPPY_ARGS+=(-D warnings)
-    else
+    elif clippy_all_enabled; then
         CLIPPY_ARGS+=(-W clippy::all)
+    else
+        :
     fi
 
     if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then

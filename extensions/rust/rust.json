@@ -97,6 +97,20 @@
       "type": "string",
       "default": "",
       "description": "Optional Rust linker acceleration knob owned by the Rust extension. Set HOMEBOY_RUST_LINKER=mold or lld, or rust_linker to the same value; the provider appends the matching -C link-arg=-fuse-ld flag only when the requested linker binary is on PATH."
+    },
+    {
+      "id": "rust_cargo_test_threads",
+      "label": "Cargo test threads",
+      "type": "integer",
+      "default": 0,
+      "description": "Optional Cargo libtest thread count. Set to 1 for suites that mutate process-global environment and need deterministic serial execution. Zero preserves Cargo's default parallelism."
+    },
+    {
+      "id": "clippy_all",
+      "label": "Enable clippy::all",
+      "type": "boolean",
+      "default": false,
+      "description": "Opt into passing -W clippy::all during Rust lint. By default the Rust extension runs cargo clippy with the toolchain's default lint set so warning-only toolchain drift does not block release gates."
     }
   ],
   "audit": {
