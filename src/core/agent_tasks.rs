@@ -129,6 +129,15 @@ pub mod cook_loop {
     };
 }
 
+/// Durable dispatch request, plan construction, and execution service.
+pub mod dispatch_service {
+    pub use super::super::agent_task_dispatch_service::{
+        build_dispatch_plan, build_dispatch_plan_with_provider_requirements, dispatch,
+        dispatch_with_provider_requirements, AgentTaskDispatchReport, AgentTaskDispatchRequest,
+        DISPATCH_RESULT_SCHEMA,
+    };
+}
+
 /// PR finalization contracts and backends.
 pub mod finalization {
     pub use super::super::agent_task_finalization::{
