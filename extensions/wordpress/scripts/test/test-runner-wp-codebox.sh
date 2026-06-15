@@ -400,7 +400,7 @@ append_phpunit_component_composer_prepare_step() {
         --argjson steps "$WP_CODEBOX_PREPARE_STEPS_JSON" \
         '$steps + [{
             command: "composer",
-            args: ["install", "--no-interaction", "--no-progress", "--prefer-dist"]
+            args: ["install", "--no-dev", "--no-interaction", "--no-progress", "--prefer-dist"]
         }]')
 }
 

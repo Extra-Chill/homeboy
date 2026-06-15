@@ -230,7 +230,7 @@ if [ ! -s "$ARGS_FILE" ]; then
     exit 1
 fi
 
-if ! grep -q -- 'install --no-interaction --no-progress --prefer-dist' "$COMPOSER_LOG"; then
+if ! grep -q -- 'install --no-dev --no-interaction --no-progress --prefer-dist' "$COMPOSER_LOG"; then
     echo "Expected WP Codebox runner to prepare missing component Composer autoload" >&2
     cat "$COMPOSER_LOG" >&2 || true
     exit 1
