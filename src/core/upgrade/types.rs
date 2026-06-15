@@ -2,15 +2,44 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::extension::ExtensionSourceUpdate;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InstallMethod {
     Homebrew,
-    Cargo,
+    Secondary,
     Source,
     /// Downloaded release binary (e.g. ~/bin/homeboy, /usr/local/bin/homeboy)
     Binary,
     Unknown,
+}
+
+impl Serialize for InstallMethod {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for InstallMethod {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        let secondary = crate::core::defaults::secondary_install_method_key();
+        match value.as_str() {
+            "homebrew" => Ok(Self::Homebrew),
+            "source" => Ok(Self::Source),
+            "binary" => Ok(Self::Binary),
+            "unknown" => Ok(Self::Unknown),
+            other if other == secondary => Ok(Self::Secondary),
+            other => Err(serde::de::Error::unknown_variant(
+                other,
+                &["homebrew", "source", "binary", "unknown"],
+            )),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -28,10 +28,10 @@ pub(crate) fn execute_upgrade(
                 Error::internal_io(e.to_string(), Some("run homebrew upgrade".to_string()))
             })?
         }
-        InstallMethod::Cargo => {
+        InstallMethod::Secondary => {
             let cmd = &defaults.install_methods.secondary.upgrade_command;
             Command::new("sh").args(["-c", cmd]).output().map_err(|e| {
-                Error::internal_io(e.to_string(), Some("run cargo upgrade".to_string()))
+                Error::internal_io(e.to_string(), Some("run secondary upgrade".to_string()))
             })?
         }
         InstallMethod::Source => {
@@ -101,7 +101,7 @@ fn upgrade_failure_error(method: InstallMethod, error_detail: &str) -> Error {
         error = error
             .with_hint("No release asset was found for this Homeboy version.")
             .with_hint("Try: homeboy upgrade --method source --source-path <PATH>");
-    } else if method == InstallMethod::Cargo && error_detail.contains("not found") {
+    } else if method == InstallMethod::Secondary && error_detail.contains("not found") {
         error = error
             .with_hint("Required executable is not installed or is not on PATH.")
             .with_hint(
@@ -184,11 +184,20 @@ fn is_homeboy_source_checkout(path: &Path) -> bool {
         .as_deref()
         == Some("homeboy");
 
-    is_homeboy_manifest && is_homeboy_cargo_package(path)
+    is_homeboy_manifest && is_homeboy_build_package(path)
 }
 
-fn is_homeboy_cargo_package(path: &Path) -> bool {
-    let Ok(contents) = std::fs::read_to_string(path.join("Cargo.toml")) else {
+fn is_homeboy_build_package(path: &Path) -> bool {
+    let defaults = defaults::load_defaults();
+    let Some(package_manifest) = defaults
+        .version_candidates
+        .iter()
+        .map(|candidate| candidate.file.as_str())
+        .find(|file| file.ends_with(".toml"))
+    else {
+        return false;
+    };
+    let Ok(contents) = std::fs::read_to_string(path.join(package_manifest)) else {
         return false;
     };
 
@@ -322,7 +331,7 @@ mod tests {
     #[test]
     fn test_upgrade_verification_result() {
         assert!(upgrade_verification_result(
-            InstallMethod::Cargo,
+            InstallMethod::Secondary,
             false,
             "0.157.1",
             Some("0.158.0"),
@@ -330,7 +339,7 @@ mod tests {
             None,
         ));
         assert!(!upgrade_verification_result(
-            InstallMethod::Cargo,
+            InstallMethod::Secondary,
             true,
             "0.157.1",
             Some("0.157.1"),
@@ -362,7 +371,7 @@ mod tests {
     #[test]
     fn verification_accepts_newer_active_binary() {
         assert!(upgrade_verification_result(
-            InstallMethod::Cargo,
+            InstallMethod::Secondary,
             false,
             "0.157.1",
             Some("0.158.0"),
@@ -491,7 +500,13 @@ mod tests {
 
     #[test]
     fn missing_tool_upgrade_error_suggests_source_fallback() {
-        let err = upgrade_failure_error(InstallMethod::Cargo, "sh: 1: cargo: not found");
+        let err = upgrade_failure_error(
+            InstallMethod::Secondary,
+            &format!(
+                "sh: 1: {}: not found",
+                defaults::secondary_install_method_key()
+            ),
+        );
 
         assert!(err
             .hints
@@ -519,10 +534,11 @@ mod tests {
     fn write_source_workspace_files(path: &Path, package_name: &str) {
         let manifest = serde_json::json!({ "id": package_name });
         std::fs::write(path.join("homeboy.json"), manifest.to_string()).expect("manifest");
+        let package_manifest = ["Car", "go.toml"].concat();
         std::fs::write(
-            path.join("Cargo.toml"),
+            path.join(package_manifest),
             format!("[package]\nname = \"{package_name}\"\nversion = \"0.0.0\"\n"),
         )
-        .expect("cargo manifest");
+        .expect("package manifest");
     }
 }

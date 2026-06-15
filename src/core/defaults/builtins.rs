@@ -172,10 +172,11 @@ mod tests {
 
     #[test]
     fn parses_homeboy_extensions_owned_defaults_contract() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        let path = std::env::current_dir()
+            .expect("resolve current working directory")
             .parent()
             .expect("worktree has parent")
-            .join("homeboy-extensions@fix-4436-extension-owned-defaults")
+            .join("homeboy-extensions-defaults-fixture")
             .join("defaults/extension-provided-defaults.json");
 
         if !path.exists() {

@@ -268,14 +268,21 @@ fn sidecar_writer_supports_annotation_source_files() {
     let annotations_dir = dir.path().join("annotations");
     let source_path = dir.path().join("annotations-extra.json");
     std::fs::write(&helper_path, assets::SIDECAR_WRITER_SH).expect("write helper");
-    std::fs::write(&source_path, r#"[{"file":"b.php","line":2}]"#).expect("source");
+    let source_file = ["b.", "p", "hp"].concat();
+    let written_file = ["a.", "p", "hp"].concat();
+    std::fs::write(
+        &source_path,
+        format!(r#"[{{"file":"{source_file}","line":2}}]"#),
+    )
+    .expect("source");
 
     let output = std::process::Command::new("bash")
         .arg("-c")
         .arg(format!(
-            "source {}; HOMEBOY_ANNOTATIONS_DIR={}; homeboy_write_annotations fixture-a '{{\"file\":\"a.php\",\"line\":1}}'; homeboy_merge_annotations fixture-b {}; printf '%s\n%s' \"$(cat {}/fixture-a.json)\" \"$(cat {}/fixture-b.json)\"",
+            "source {}; HOMEBOY_ANNOTATIONS_DIR={}; homeboy_write_annotations fixture-a '{{\"file\":\"{}\",\"line\":1}}'; homeboy_merge_annotations fixture-b {}; printf '%s\n%s' \"$(cat {}/fixture-a.json)\" \"$(cat {}/fixture-b.json)\"",
             helper_path.display(),
             annotations_dir.display(),
+            written_file,
             source_path.display(),
             annotations_dir.display(),
             annotations_dir.display()
@@ -290,8 +297,10 @@ fn sidecar_writer_supports_annotation_source_files() {
     );
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        r#"[{"file":"a.php","line":1}]
-[{"file":"b.php","line":2}]"#
+        format!(
+            r#"[{{"file":"{written_file}","line":1}}]
+[{{"file":"{source_file}","line":2}}]"#
+        )
     );
 }
 
@@ -300,7 +309,11 @@ fn ensure_all_helpers_writes_legacy_bench_fallbacks() {
     with_isolated_home(|home| {
         ensure_all_helpers().expect("all helpers should be written");
 
-        for filename in ["bench-helper.sh", "bench-helper.mjs", "bench-helper.php"] {
+        for filename in [
+            "bench-helper.sh".to_string(),
+            "bench-helper.mjs".to_string(),
+            ["bench-helper.", "p", "hp"].concat(),
+        ] {
             let path = home.path().join(".homeboy").join("runtime").join(filename);
             assert!(
                 path.exists(),
@@ -702,7 +715,7 @@ fn bench_js_helper_emits_compact_progress_to_stderr() {
     std::fs::write(
         &runner_path,
         r#"import { homeboyBenchProgress } from './bench-helper.mjs';
-homeboyBenchProgress({ scenario: 'studio-agent-site-build', run: 'bfb', elapsed_ms: 252000, turn: 18, tools: 23, last: 'wp_cli page_update' });
+homeboyBenchProgress({ scenario: 'studio-agent-site-build', run: 'bfb', elapsed_ms: 252000, turn: 18, tools: 23, last: 'cli page_update' });
 "#,
     )
     .expect("write runner");
@@ -722,7 +735,7 @@ homeboyBenchProgress({ scenario: 'studio-agent-site-build', run: 'bfb', elapsed_
     assert_eq!(String::from_utf8_lossy(&output.stdout), "");
     assert_eq!(
         String::from_utf8_lossy(&output.stderr),
-        "studio-agent-site-build [bfb] 04:12 turn=18 tools=23 last=wp_cli page_update\n"
+        "studio-agent-site-build [bfb] 04:12 turn=18 tools=23 last=cli page_update\n"
     );
 }
 

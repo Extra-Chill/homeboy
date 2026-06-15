@@ -559,6 +559,14 @@ fn run_declared_result_parser(
         results_file
     } else {
         let stdout_file = run_dir.path().join("test-output.txt");
+        if let Some(parent) = stdout_file.parent() {
+            std::fs::create_dir_all(parent).map_err(|err| {
+                Error::internal_io(
+                    err.to_string(),
+                    Some("create parser stdout source directory".to_string()),
+                )
+            })?;
+        }
         local_files::write_file_atomic(&stdout_file, stdout, "write test runner stdout")?;
         stdout_file
     };
@@ -574,6 +582,23 @@ fn run_declared_result_parser(
         settings_json,
         &run_dir.legacy_env_vars(),
     )?;
+    let write_results_helper = run_dir.path().join("write-test-results.sh");
+    local_files::write_file_atomic(
+        &write_results_helper,
+        include_str!("../runtime/write-test-results.sh"),
+        "write parser runtime helper",
+    )?;
+    env_vars.push((
+        "HOMEBOY_RUNTIME_WRITE_TEST_RESULTS".to_string(),
+        write_results_helper.to_string_lossy().to_string(),
+    ));
+    env_vars.push((
+        "HOMEBOY_TEST_RESULTS_FILE".to_string(),
+        run_dir
+            .step_file(run_dir::files::TEST_RESULTS)
+            .to_string_lossy()
+            .to_string(),
+    ));
     env_vars.push((
         "HOMEBOY_RESULT_PARSE_ADAPTERS".to_string(),
         spec.adapters.join(" "),
@@ -620,8 +645,17 @@ fn run_declared_result_parser(
                 "failed": counts.failed,
                 "skipped": counts.skipped,
             });
+            let results_path = run_dir.step_file(run_dir::files::TEST_RESULTS);
+            if let Some(parent) = results_path.parent() {
+                std::fs::create_dir_all(parent).map_err(|err| {
+                    Error::internal_io(
+                        err.to_string(),
+                        Some("create parser stdout test results directory".to_string()),
+                    )
+                })?;
+            }
             local_files::write_file_atomic(
-                &run_dir.step_file(run_dir::files::TEST_RESULTS),
+                &results_path,
                 &serde_json::to_string_pretty(&payload).map_err(|err| {
                     Error::internal_json(
                         err.to_string(),
@@ -945,7 +979,7 @@ IFS=$'\t' read -r total passed failed skipped <<EOF
 $parsed
 EOF
 homeboy_write_test_results "$total" "$passed" "$failed" "$skipped"
-printf 'provider parser log line\n'
+printf '{"total":%s,"passed":%s,"failed":%s,"skipped":%s}\n' "$total" "$passed" "$failed" "$skipped"
 "#,
             )
             .expect("parser script");

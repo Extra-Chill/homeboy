@@ -165,7 +165,7 @@ pub struct InstallMethodsConfig {
     pub binary: InstallMethodConfig,
 }
 
-pub(crate) fn secondary_install_method_key() -> String {
+pub fn secondary_install_method_key() -> String {
     ["car", "go"].concat()
 }
 

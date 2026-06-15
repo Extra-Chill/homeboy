@@ -39,7 +39,7 @@ pub(super) fn release_skip_plan(
             "no-releasable-commits",
             "No releasable commits since last tag",
             &format!(
-                "No release was created. No tag created, no release commit created, no GitHub Release created. \
+                "No release was created. no tag was created, no release commit created, no GitHub Release created. \
                  Force a release when intentional with: {}",
                 force_command
             ),
@@ -162,7 +162,7 @@ mod tests {
             "skip hint should explicitly state no release artifacts were produced: {hint}"
         );
         assert!(
-            hint.contains("No tag created"),
+            hint.contains("no tag was created"),
             "skip hint should explicitly say no tag was created: {hint}"
         );
         assert!(

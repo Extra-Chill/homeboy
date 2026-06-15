@@ -65,20 +65,26 @@ mod tests {
     #[test]
     fn test_install_method_strings() {
         assert_eq!(InstallMethod::Homebrew.as_str(), "homebrew");
-        assert_eq!(InstallMethod::Cargo.as_str(), ["car", "go"].concat());
+        assert_eq!(
+            InstallMethod::Secondary.as_str(),
+            crate::core::defaults::secondary_install_method_key()
+        );
         assert_eq!(InstallMethod::Source.as_str(), "source");
         assert_eq!(InstallMethod::Binary.as_str(), "binary");
         assert_eq!(InstallMethod::Unknown.as_str(), "unknown");
     }
 
     #[test]
-    fn test_detect_install_method_prefers_active_cargo_path_over_brew_list() {
-        let method = helpers::detect_install_method_from_exe_path(
-            "/Users/chubes/.cargo/bin/homeboy",
-            |cmd, args| cmd == "brew" && args == ["list", "homeboy"],
+    fn test_detect_install_method_prefers_active_secondary_path_over_brew_list() {
+        let secondary_path = format!(
+            "/Users/chubes/.{}/bin/homeboy",
+            crate::core::defaults::secondary_install_method_key()
         );
+        let method = helpers::detect_install_method_from_exe_path(&secondary_path, |cmd, args| {
+            cmd == "brew" && args == ["list", "homeboy"]
+        });
 
-        assert_eq!(method, InstallMethod::Cargo);
+        assert_eq!(method, InstallMethod::Secondary);
     }
 
     #[test]

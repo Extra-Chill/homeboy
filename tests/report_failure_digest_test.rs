@@ -130,7 +130,9 @@ fn trace_json_with_toolchain() -> &'static str {
                 "mode": "development",
                 "reasons": ["HOMEBOY_WP_CODEBOX_BIN selected a local WP Codebox runner path"],
                 "homeboy": {"path":"/repo/homeboy","sha":"abc123","branch":"main","dirty":false},
-                "wp_codebox": {"path":"/repo/wp-codebox","sha":"def456","branch":"main","dirty":true},
+                "toolchains": {
+                    "WP Codebox": {"path":"/repo/wp-codebox","sha":"def456","branch":"main","dirty":true}
+                },
                 "node": "v24.0.0"
             },
             "components": {
@@ -158,7 +160,7 @@ fn trace_json_with_wp_codebox_partial_manifest() -> &'static str {
             "status": "error",
             "component": "studio",
             "exit_code": 2,
-            "wp_codebox": {
+            "runtime_diagnostics": {
                 "manifest_path": "wp-codebox-artifacts/runtime-123/manifest.json",
                 "runtime_metadata_path": "wp-codebox-artifacts/runtime-123/runtime.json",
                 "commands_log_path": "wp-codebox-artifacts/runtime-123/commands.jsonl",
@@ -532,13 +534,13 @@ fn renders_wp_codebox_partial_manifest_and_failure_phase() {
 
     let markdown = render(&dir, r#"{"trace":"error"}"#, false, false);
 
-    assert!(markdown.contains("**WP Codebox runtime diagnostics**"));
+    assert!(markdown.contains("**Runtime diagnostics**"));
     assert!(markdown.contains("- Failure phase: **browser probe hang/failure**"));
     assert!(markdown.contains("- Current/last phase: `browser.probe.wait_for_ready`"));
     assert!(markdown.contains("- Current command: `browser probe /wp-admin/`"));
     assert!(markdown.contains("- Last command: `runtime setup`"));
     assert!(
-        markdown.contains("- WP Codebox manifest: wp-codebox-artifacts/runtime-123/manifest.json")
+        markdown.contains("- Artifact manifest: wp-codebox-artifacts/runtime-123/manifest.json")
     );
     assert!(markdown.contains("- Runtime metadata: wp-codebox-artifacts/runtime-123/runtime.json"));
     assert!(markdown.contains("- Commands log: wp-codebox-artifacts/runtime-123/commands.jsonl"));
