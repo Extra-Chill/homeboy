@@ -19,9 +19,19 @@ replay. For normal benchmark runs, prefer `homeboy bench <component>`: Homeboy
 automatically selects a Lab runner when the component declares
 `lab.preferred_runner` or when exactly one Lab runner is configured.
 
-`homeboy lab status` returns `managed_followups` when Homeboy can select a Lab
-runner. Use those commands instead of raw SSH for routine lifecycle work:
+`homeboy lab status` resolves the default or inferred Lab runner and includes its
+readiness report in `selected_runner`. Pass `--runner <runner-id>` only when you
+need to inspect a specific non-default runner.
 
+`homeboy lab status` always returns run/artifact discovery commands in
+`managed_followups`, and adds runner diagnostics when Homeboy can select a Lab
+runner. Use those commands instead of raw SSH or runner path spelunking for
+routine lifecycle work:
+
+- `homeboy runs list --limit 5` finds recent persisted run records.
+- `homeboy runs latest-run --kind bench` resolves the latest benchmark run id.
+- `homeboy runs artifacts <run-id>` lists recorded run artifacts through
+  Homeboy.
 - `homeboy runner doctor <runner>` probes runner tools, workspace writability,
   artifact storage, and browser readiness.
 - `homeboy runner env <runner>` prints the redacted runner job environment.
