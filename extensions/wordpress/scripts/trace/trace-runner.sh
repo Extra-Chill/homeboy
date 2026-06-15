@@ -127,7 +127,7 @@ homeboy_trace_run_php_scenario_wp_codebox() {
     local scenario_rel="$1"
     local stdout_file="$2"
     local stderr_file="$3"
-    local codebox_bin wp_version plugin_slug run_mount_host runtime_run_dir runtime_results runtime_artifacts runtime_scenario wrapper_file recipe_file output_file codebox_artifacts_dir status
+    local codebox_bin wp_version plugin_slug run_mount_host runtime_run_dir runtime_results runtime_artifacts runtime_scenario wrapper_file recipe_file output_file codebox_artifacts_dir status mounts_json dep_path dep_slug dep_source
 
     codebox_bin="$(homeboy_wordpress_resolve_wp_codebox_bin)" || return 1
     wp_version="$(homeboy_wordpress_trace_wp_version)"
@@ -160,20 +160,38 @@ homeboy_trace_run_php_scenario_wp_codebox() {
     codebox_artifacts_dir="$(mktemp -d "${TMPDIR:-/tmp}/homeboy-wp-codebox-trace-artifacts.XXXXXX")"
     PLUGIN_SLUG="$plugin_slug" homeboy_wordpress_trace_php_wrapper "$runtime_scenario" "$runtime_results" "$runtime_artifacts" "$runtime_run_dir" > "$wrapper_file"
 
-    jq -n \
-        --arg wp "$wp_version" \
+    mounts_json=$(jq -nc \
         --arg componentSource "$(homeboy_wp_codebox_resolve_mount_path "$HOMEBOY_COMPONENT_PATH")" \
         --arg componentTarget "/wordpress/wp-content/plugins/${plugin_slug}" \
         --arg runSource "$run_mount_host" \
         --arg runTarget "$runtime_run_dir" \
+        '[
+            {source: $componentSource, target: $componentTarget, mode: "readwrite"},
+            {source: $runSource, target: $runTarget, mode: "readwrite"}
+        ]')
+
+    if [ -n "${HOMEBOY_WORDPRESS_DEPENDENCY_PATHS:-}" ]; then
+        while IFS= read -r dep_path; do
+            [ -n "$dep_path" ] || continue
+            [ -d "$dep_path" ] || continue
+            dep_slug="$(homeboy_get_validation_dependency_slug "$dep_path" || basename "$dep_path")"
+            dep_source="$(homeboy_wp_codebox_resolve_mount_path "$dep_path")"
+            mounts_json=$(jq -nc \
+                --argjson mounts "$mounts_json" \
+                --arg source "$dep_source" \
+                --arg target "/wordpress/wp-content/plugins/${dep_slug}" \
+                '$mounts + [{source: $source, target: $target, mode: "readwrite"}]')
+        done <<< "$HOMEBOY_WORDPRESS_DEPENDENCY_PATHS"
+    fi
+
+    jq -n \
+        --arg wp "$wp_version" \
+        --argjson mounts "$mounts_json" \
         --arg codeFile "$wrapper_file" \
         '{
             schema: "wp-codebox/workspace-recipe/v1",
             runtime: ({blueprint: {steps: []}} + (if $wp == "" then {} else {wp: $wp} end)),
-            inputs: {mounts: [
-                {source: $componentSource, target: $componentTarget, mode: "readwrite"},
-                {source: $runSource, target: $runTarget, mode: "readwrite"}
-            ]},
+            inputs: {mounts: $mounts},
             workflow: {steps: [{command: "wordpress.run-php", args: ["code-file=" + $codeFile]}]}
         }' > "$recipe_file"
 
@@ -355,6 +373,13 @@ if type homeboy_preflight_declared_validation_dependency_paths &>/dev/null; then
 fi
 if type homeboy_export_validation_dependency_paths &>/dev/null; then
     homeboy_export_validation_dependency_paths "$HOMEBOY_COMPONENT_PATH"
+fi
+if [ -n "${HOMEBOY_WORDPRESS_DEPENDENCY_PATHS:-}" ] && type homeboy_prepare_validation_dependency_paths_for_wp_codebox_runtime &>/dev/null; then
+    if ! HOMEBOY_WORDPRESS_DEPENDENCY_PATHS=$(homeboy_prepare_validation_dependency_paths_for_wp_codebox_runtime "$HOMEBOY_WORDPRESS_DEPENDENCY_PATHS" "$HOMEBOY_TRACE_ARTIFACT_DIR" "trace"); then
+        homeboy_trace_write_failure "fail" "WordPress dependency plugin preparation failed before WP Codebox dispatch"
+        exit 1
+    fi
+    export HOMEBOY_WORDPRESS_DEPENDENCY_PATHS
 fi
 if [ -n "${HOMEBOY_WORDPRESS_DEPENDENCY_PATHS:-}" ] && type homeboy_preflight_wordpress_dependency_plugins &>/dev/null; then
     if ! homeboy_preflight_wordpress_dependency_plugins "$HOMEBOY_WORDPRESS_DEPENDENCY_PATHS" "$HOMEBOY_TRACE_ARTIFACT_DIR" "trace"; then

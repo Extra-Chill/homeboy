@@ -309,7 +309,7 @@ homeboy_get_validation_dependency_slug() {
     dir_slug="$(basename "$plugin_path")"
 
     local canonical_dir_slug="${dir_slug%%@*}"
-    if [ "$canonical_dir_slug" = "$dir_slug" ]; then
+    if [ "$canonical_dir_slug" = "$dir_slug" ] && [ "$dir_slug" != "root" ]; then
         printf '%s\n' "$dir_slug"
         return 0
     fi
@@ -325,6 +325,10 @@ homeboy_get_validation_dependency_slug() {
         local main_slug
         main_slug="$(basename "$main_file" .php)"
         if [ "$main_slug" = "$canonical_dir_slug" ]; then
+            printf '%s\n' "$main_slug"
+            return 0
+        fi
+        if [ "$dir_slug" = "root" ]; then
             printf '%s\n' "$main_slug"
             return 0
         fi
@@ -1837,6 +1841,34 @@ homeboy_prepare_validation_dependency_paths_for_wp_codebox_bench() {
             echo "Warning: WordPress bench dependency provider skipped failed dependency: ${dependency_path}" >&2
         fi
     done <<< "$dependency_paths"
+}
+
+homeboy_prepare_validation_dependency_for_wp_codebox_runtime() {
+    homeboy_prepare_validation_dependency_for_wp_codebox_bench "$@"
+}
+
+homeboy_prepare_validation_dependency_paths_for_wp_codebox_runtime() {
+    local dependency_paths="${1:-}"
+    local artifacts_dir="${2:-}"
+    local context="${3:-wordpress}"
+
+    [ -n "$dependency_paths" ] || return 0
+    [ -n "$artifacts_dir" ] || return 1
+
+    local dependency_path prepared_path failed
+    failed=0
+    while IFS= read -r dependency_path; do
+        [ -n "$dependency_path" ] || continue
+        [ -d "$dependency_path" ] || continue
+        if prepared_path=$(homeboy_prepare_validation_dependency_for_wp_codebox_runtime "$dependency_path" "$artifacts_dir"); then
+            [ -n "$prepared_path" ] && printf '%s\n' "$prepared_path"
+        else
+            echo "Error: WordPress ${context} dependency provider could not prepare runtime-complete plugin input: ${dependency_path}" >&2
+            failed=1
+        fi
+    done <<< "$dependency_paths"
+
+    [ "$failed" -eq 0 ]
 }
 
 homeboy_export_validation_dependency_paths() {
