@@ -132,6 +132,42 @@ Programmatic runner execution can use the same generic boundary through
 remote execution starts, alongside existing required tools, components, and
 environment variables.
 
+#### Runner-managed dependency sources
+
+Portable Lab/evidence runs should declare runner dependency sources instead of
+smuggling local checkout paths through workflow-specific environment variables.
+Homeboy's generic contract is the extension/component setting
+`validation_dependencies`: each entry is a component id or explicit checkout
+path that the runner workspace sync treats as managed source input.
+
+For each declared dependency, `homeboy runner workspace sync`:
+
+- resolves a sibling checkout, registered component, or deterministic clone;
+- rejects dirty, stale, divergent, missing-upstream, or ambiguous Git state;
+- runs the dependency install/build lifecycle in a prepared copy;
+- materializes the prepared dependency beside the primary runner workspace; and
+- records source evidence in `.homeboy/lab-source-evidence.json`.
+
+The JSON output includes `validation_dependencies`, with each dependency's
+`id`, `role`, controller `local_path`, runner `remote_path`, and
+`evidence_path`. Bench, trace, eval, and provider layers can consume that
+generic output to populate their own path settings without knowing Lab
+filesystem layouts or dependency-specific environment variable names.
+
+Example manifest fragment:
+
+```json
+{
+  "extensions": {
+    "provider-id": {
+      "settings": {
+        "validation_dependencies": ["runtime-component"]
+      }
+    }
+  }
+}
+```
+
 Pass one or more `--extension <id>` values to validate extension parity before
 Lab offload. Doctor runs the same `homeboy extension show <id>` contract on the
 target runner that test offload uses at execution time. `--path` sets the probe

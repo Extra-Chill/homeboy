@@ -800,6 +800,7 @@ mod tests {
             excludes: Vec::new(),
             includes: Vec::new(),
             workspace_cleanliness: "clean".to_string(),
+            validation_dependencies: Vec::new(),
         };
         (
             remote_spec.to_string(),

@@ -1,6 +1,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use serde::Serialize;
+
 use crate::core::component::{self, Component};
 use crate::core::error::{Error, Result};
 use crate::core::{git::clone_repo, paths};
@@ -10,12 +12,22 @@ use super::Runner;
 
 const PORTABLE_CONFIG_FILE: &str = concat!("homeboy", ".json");
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RunnerValidationDependencySyncOutput {
+    pub id: String,
+    pub role: String,
+    pub local_path: String,
+    pub remote_path: String,
+    pub evidence_path: String,
+}
+
 pub(super) fn sync_validation_dependency_workspaces(
     runner: &Runner,
     local_path: &Path,
     remote_path: &str,
     excludes: &[String],
-) -> Result<()> {
+) -> Result<Vec<RunnerValidationDependencySyncOutput>> {
+    let mut synced = Vec::new();
     for dependency in validation_dependency_workspaces(local_path, excludes)? {
         let remote_dependency_path = format!(
             "{}/{}",
@@ -28,13 +40,24 @@ pub(super) fn sync_validation_dependency_workspaces(
             &remote_dependency_path,
             excludes,
         )?;
+        synced.push(RunnerValidationDependencySyncOutput {
+            id: dependency.remote_name,
+            role: "validation_dependency".to_string(),
+            local_path: dependency.local_path.display().to_string(),
+            evidence_path: format!(
+                "{}/.homeboy/lab-source-evidence.json",
+                remote_dependency_path.trim_end_matches('/')
+            ),
+            remote_path: remote_dependency_path,
+        });
     }
-    Ok(())
+    Ok(synced)
 }
 
 #[derive(Debug)]
 struct PreparedValidationDependencyWorkspace {
     remote_name: String,
+    local_path: PathBuf,
     prepared_path: PathBuf,
     _tempdir: tempfile::TempDir,
 }
@@ -197,6 +220,7 @@ fn prepare_validation_dependency_workspace(
 
     Ok(PreparedValidationDependencyWorkspace {
         remote_name: component.id,
+        local_path: path,
         prepared_path,
         _tempdir: tempdir,
     })
@@ -488,9 +512,30 @@ mod tests {
             .expect("sync workspace");
 
             assert_eq!(exit_code, 0);
+            assert_eq!(output.validation_dependencies.len(), 1);
+            assert_eq!(output.validation_dependencies[0].id, "agents-api");
+            assert_eq!(
+                output.validation_dependencies[0].role,
+                "validation_dependency"
+            );
+            assert_eq!(
+                output.validation_dependencies[0].local_path,
+                dependency.canonicalize().unwrap().display().to_string()
+            );
             let remote_parent = parent_remote_path(&output.remote_path);
             assert!(Path::new(&output.remote_path).join("src/main.php").exists());
             let remote_dependency = Path::new(&remote_parent).join("agents-api");
+            assert_eq!(
+                output.validation_dependencies[0].remote_path,
+                remote_dependency.display().to_string()
+            );
+            assert_eq!(
+                output.validation_dependencies[0].evidence_path,
+                remote_dependency
+                    .join(".homeboy/lab-source-evidence.json")
+                    .display()
+                    .to_string()
+            );
             assert!(remote_dependency.join("lib/agents.php").exists());
             assert!(!remote_dependency.join(".git").exists());
             assert!(remote_dependency
