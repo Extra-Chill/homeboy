@@ -5,6 +5,8 @@
 use homeboy::core::error::Hint;
 use homeboy::core::{Error, ErrorCode, Result};
 use serde::Serialize;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Serialize)]
 pub struct CliResponse<T: Serialize> {
@@ -199,9 +201,37 @@ pub fn write_json_to_file(result: &Result<serde_json::Value>, path: &str, exit_c
         }
     };
 
-    if let Err(e) = std::fs::write(path, json) {
+    if let Err(e) = write_json_to_file_atomically(path, &json) {
         eprintln!("Warning: failed to write --output file '{}': {}", path, e);
     }
+}
+
+fn write_json_to_file_atomically(path: &str, json: &str) -> std::io::Result<()> {
+    let target = Path::new(path);
+    let temp = atomic_output_temp_path(target);
+    let mut file = std::fs::File::create(&temp)?;
+
+    file.write_all(json.as_bytes())?;
+    file.write_all(b"\n")?;
+    file.sync_all()?;
+    drop(file);
+
+    match std::fs::rename(&temp, target) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            let _ = std::fs::remove_file(&temp);
+            Err(err)
+        }
+    }
+}
+
+fn atomic_output_temp_path(target: &Path) -> PathBuf {
+    let file_name = target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("output.json");
+    let temp_name = format!(".{file_name}.{}.tmp", std::process::id());
+    target.with_file_name(temp_name)
 }
 
 #[cfg(test)]
@@ -226,6 +256,36 @@ mod tests {
         assert_eq!(
             payload.expect_err("error payload").code,
             ErrorCode::ValidationMissingArgument
+        );
+    }
+
+    #[test]
+    fn output_file_write_is_atomic_and_final_json_only() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let output_path = dir.path().join("run-plan-output.json");
+        std::fs::write(&output_path, r#"{"success":false,"data":{"old":true}}"#)
+            .expect("write existing output");
+
+        write_json_to_file(
+            &Ok(json!({ "run_id": "run-plan-atomic", "complete": true })),
+            output_path.to_str().expect("utf8 path"),
+            0,
+        );
+
+        let raw = std::fs::read_to_string(&output_path).expect("read output");
+        let parsed: serde_json::Value = serde_json::from_str(&raw).expect("final output json");
+        assert_eq!(parsed["success"], true);
+        assert_eq!(parsed["data"]["run_id"], "run-plan-atomic");
+        assert_eq!(parsed["data"]["complete"], true);
+        assert!(
+            std::fs::read_dir(dir.path())
+                .expect("read dir")
+                .all(|entry| !entry
+                    .expect("dir entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .ends_with(".tmp")),
+            "temporary output file should not remain after successful rename"
         );
     }
 }
