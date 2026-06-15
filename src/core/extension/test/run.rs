@@ -3,6 +3,7 @@ use crate::core::engine::baseline::BaselineFlags;
 use crate::core::engine::local_files;
 use crate::core::engine::output_parse::ParseSpec;
 use crate::core::engine::run_dir::{self, RunDir};
+use crate::core::error::{Error, ErrorCode};
 use crate::core::extension::test::analyze::{analyze, TestAnalysis, TestAnalysisInput};
 use crate::core::extension::test::baseline::{self, TestBaselineComparison, TestCounts};
 use crate::core::extension::test::{
@@ -504,7 +505,36 @@ fn run_declared_result_parser(
     };
     let resolved_script = context.extension_path.join(script_path);
     if !resolved_script.is_file() {
-        return Ok(());
+        return Err(declared_result_parser_error(
+            component,
+            script_path,
+            &resolved_script,
+            "Declared test result parser script does not exist or is not a file".to_string(),
+            None,
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let metadata = resolved_script.metadata().map_err(|err| {
+            declared_result_parser_error(
+                component,
+                script_path,
+                &resolved_script,
+                format!("Could not inspect declared test result parser script: {err}"),
+                None,
+            )
+        })?;
+        if metadata.permissions().mode() & 0o111 == 0 {
+            return Err(declared_result_parser_error(
+                component,
+                script_path,
+                &resolved_script,
+                "Declared test result parser script is not executable".to_string(),
+                None,
+            ));
+        }
     }
 
     let results_file = run_dir.step_file(run_dir::files::TEST_RESULTS);
@@ -532,7 +562,7 @@ fn run_declared_result_parser(
         spec.adapters.join(" "),
     ));
 
-    let _ = crate::core::extension::execution::execute_capability_script(
+    let output = crate::core::extension::execution::execute_capability_script(
         &context.extension_path,
         script_path,
         &args,
@@ -544,8 +574,63 @@ fn run_declared_result_parser(
             stderr_passthrough: false,
         },
     )?;
+    if !output.success {
+        let mut command =
+            crate::core::engine::shell::quote_path(&resolved_script.to_string_lossy());
+        if !args.is_empty() {
+            command.push(' ');
+            command.push_str(&crate::core::engine::shell::quote_args(&args));
+        }
+        return Err(declared_result_parser_error(
+            component,
+            script_path,
+            &resolved_script,
+            format!(
+                "Declared test result parser script failed with exit code {}",
+                output.exit_code
+            ),
+            Some((command, output.exit_code, &output.stdout, &output.stderr)),
+        ));
+    }
 
     Ok(())
+}
+
+fn declared_result_parser_error(
+    component: &Component,
+    script_path: &str,
+    resolved_script: &Path,
+    problem: String,
+    command_output: Option<(String, i32, &str, &str)>,
+) -> Error {
+    let (command, exit_code, stdout_tail, stderr_tail) =
+        if let Some((command, exit_code, stdout, stderr)) = command_output {
+            let (stdout_tail, _) = tail_lines(stdout, RAW_OUTPUT_TAIL_LINES);
+            let (stderr_tail, _) = tail_lines(stderr, RAW_OUTPUT_TAIL_LINES);
+            (Some(command), Some(exit_code), stdout_tail, stderr_tail)
+        } else {
+            (None, None, String::new(), String::new())
+        };
+
+    Error::new(
+        ErrorCode::ConfigInvalidValue,
+        format!(
+            "{} for component '{}' at {}",
+            problem,
+            component.id,
+            resolved_script.display()
+        ),
+        serde_json::json!({
+            "component": component.id,
+            "script_path": script_path,
+            "resolved_script": resolved_script.to_string_lossy(),
+            "problem": problem,
+            "command": command,
+            "exit_code": exit_code,
+            "stdout_tail": stdout_tail,
+            "stderr_tail": stderr_tail,
+        }),
+    )
 }
 
 pub fn run_self_check_test_workflow(
@@ -812,6 +897,122 @@ homeboy_write_test_results "$total" "$passed" "$failed" "$skipped"
         assert_eq!(counts.passed, 3);
         assert_eq!(counts.failed, 1);
         assert_eq!(counts.skipped, 1);
+    }
+
+    #[test]
+    fn declared_result_parser_errors_when_script_is_missing() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let extension_dir = temp_dir.path().join("extension");
+        std::fs::create_dir_all(&extension_dir).expect("extension dir");
+        let component = Component::new(
+            "fixture".to_string(),
+            temp_dir.path().to_string_lossy().to_string(),
+            "fixture-extension".to_string(),
+            None,
+        );
+        let context = crate::core::extension::ExtensionExecutionContext {
+            component: component.clone(),
+            capability: ExtensionCapability::Test,
+            extension_id: "fixture-extension".to_string(),
+            extension_path: extension_dir.clone(),
+            script_path: "test.sh".to_string(),
+            settings: Vec::new(),
+        };
+        let spec = ParseSpec {
+            extension_script: Some("missing-parser.sh".to_string()),
+            adapters: vec!["fixture-json".to_string()],
+            rules: Vec::new(),
+            defaults: std::collections::HashMap::new(),
+            derive: Vec::new(),
+        };
+        let run_dir = RunDir::create().expect("run dir");
+
+        let err = run_declared_result_parser(&component, &context, &spec, "{}", &run_dir)
+            .expect_err("declared missing parser should fail");
+        run_dir.cleanup();
+
+        assert_eq!(err.code, ErrorCode::ConfigInvalidValue);
+        assert!(err
+            .message
+            .contains("Declared test result parser script does not exist"));
+        assert!(err.message.contains("missing-parser.sh"));
+        assert_eq!(err.details["script_path"], "missing-parser.sh");
+        assert_eq!(
+            err.details["resolved_script"].as_str(),
+            Some(
+                extension_dir
+                    .join("missing-parser.sh")
+                    .to_string_lossy()
+                    .as_ref()
+            )
+        );
+    }
+
+    #[test]
+    fn declared_result_parser_errors_with_context_on_non_zero_exit() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let extension_dir = temp_dir.path().join("extension");
+        std::fs::create_dir_all(&extension_dir).expect("extension dir");
+        let parser_script = extension_dir.join("parse-results.sh");
+        std::fs::write(
+            &parser_script,
+            r#"#!/usr/bin/env bash
+printf 'parser stdout detail\n'
+printf 'parser stderr detail\n' >&2
+exit 23
+"#,
+        )
+        .expect("parser script");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&parser_script, std::fs::Permissions::from_mode(0o755))
+                .expect("parser script permissions");
+        }
+
+        let component = Component::new(
+            "fixture".to_string(),
+            temp_dir.path().to_string_lossy().to_string(),
+            "fixture-extension".to_string(),
+            None,
+        );
+        let context = crate::core::extension::ExtensionExecutionContext {
+            component: component.clone(),
+            capability: ExtensionCapability::Test,
+            extension_id: "fixture-extension".to_string(),
+            extension_path: extension_dir,
+            script_path: "test.sh".to_string(),
+            settings: Vec::new(),
+        };
+        let spec = ParseSpec {
+            extension_script: Some("parse-results.sh".to_string()),
+            adapters: vec!["fixture-json".to_string()],
+            rules: Vec::new(),
+            defaults: std::collections::HashMap::new(),
+            derive: Vec::new(),
+        };
+        let run_dir = RunDir::create().expect("run dir");
+
+        let err = run_declared_result_parser(&component, &context, &spec, "{}", &run_dir)
+            .expect_err("declared parser non-zero exit should fail");
+        run_dir.cleanup();
+
+        assert_eq!(err.code, ErrorCode::ConfigInvalidValue);
+        assert!(err.message.contains("exit code 23"));
+        assert_eq!(err.details["script_path"], "parse-results.sh");
+        assert_eq!(err.details["exit_code"], 23);
+        assert!(err.details["command"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("parse-results.sh"));
+        assert!(err.details["stdout_tail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("parser stdout detail"));
+        assert!(err.details["stderr_tail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("parser stderr detail"));
     }
 
     #[test]
