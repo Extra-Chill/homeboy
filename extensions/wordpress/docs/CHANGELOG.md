@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.121.44] - 2026-06-15
+
+### Changed
+- cover wp codebox extra plugin autoload prep
+
 ## [2.121.43] - 2026-06-15
 
 ### Fixed
