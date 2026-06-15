@@ -587,8 +587,13 @@ fn daemon_job_wait_timeout(
         "{label} {job_id} on runner {} did not finish before timeout; the remote job is still in flight and was not cancelled",
         runner.id
     ));
+    error.details["runner_id"] = Value::String(runner.id.clone());
+    error.details["job_id"] = Value::String(job_id.clone());
+    error.details["remote_cwd"] = Value::String(cwd.to_string());
+    error.details["command"] = json!(command);
     match mirrored {
         Ok(run) => {
+            error.details["active_run_id"] = Value::String(run.id.clone());
             error = error
                 .with_hint(format!(
                     "Mirrored controller timeout state as run `{}`; inspect it with `homeboy runs show {}`.",
@@ -616,7 +621,8 @@ fn daemon_job_wait_timeout(
             runner.id
         ))
         .with_hint(format!(
-            "Runner daemon job id `{job_id}` was already dispatched; wait for it to finish or cancel it explicitly through the runner daemon if needed."
+            "Runner daemon job id `{job_id}` was already dispatched; wait for it to finish or cancel it with `homeboy runner job cancel {} {job_id}` if needed.",
+            runner.id
         ))
         .with_hint(timeout_hint)
 }
@@ -654,6 +660,14 @@ fn daemon_get(client: &Client, local_url: &str, path: &str) -> Result<Value> {
 }
 
 pub(crate) fn daemon_api_get(runner_id: &str, path: &str) -> Result<Value> {
+    daemon_api_request(runner_id, path, "GET")
+}
+
+pub fn daemon_api_post(runner_id: &str, path: &str) -> Result<Value> {
+    daemon_api_request(runner_id, path, "POST")
+}
+
+fn daemon_api_request(runner_id: &str, path: &str, method: &str) -> Result<Value> {
     let runner = load(runner_id)?;
     let connected = status(runner_id)?;
     let Some(session) = connected.session.filter(|_| connected.connected) else {
@@ -680,7 +694,32 @@ pub(crate) fn daemon_api_get(runner_id: &str, path: &str) -> Result<Value> {
             ]),
         ));
     };
-    daemon_get(&client, local_url, path)
+    match method {
+        "GET" => daemon_get(&client, local_url, path),
+        "POST" => daemon_post(&client, local_url, path),
+        _ => Err(Error::internal_unexpected(format!(
+            "unsupported daemon API method {method}"
+        ))),
+    }
+}
+
+fn daemon_post(client: &Client, local_url: &str, path: &str) -> Result<Value> {
+    let response = client
+        .post(format!("{}{}", local_url.trim_end_matches('/'), path))
+        .send()
+        .map_err(|err| Error::internal_unexpected(format!("query runner daemon: {err}")))?;
+    let envelope: DaemonEnvelope = response.json().map_err(|err| {
+        Error::internal_json(err.to_string(), Some("parse daemon response".to_string()))
+    })?;
+    if !envelope.success {
+        return Err(Error::internal_unexpected(format!(
+            "daemon request failed: {}",
+            envelope.error.unwrap_or(Value::Null)
+        )));
+    }
+    envelope
+        .data
+        .ok_or_else(|| Error::internal_unexpected("daemon response missing data"))
 }
 
 fn result_event_data(events: &[JobEvent]) -> Option<Value> {

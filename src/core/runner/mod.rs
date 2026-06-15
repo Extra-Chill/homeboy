@@ -66,7 +66,8 @@ pub(crate) use execution::{
     RunnerProcessRequest,
 };
 pub use execution::{
-    exec, runner_exec_failure_error, RunnerExecMode, RunnerExecOptions, RunnerExecOutput,
+    daemon_api_post, exec, runner_exec_failure_error, RunnerExecMode, RunnerExecOptions,
+    RunnerExecOutput,
 };
 pub(crate) use git_dependency_materialization::{
     materialize_git_dependency, RunnerGitDependencyMaterializationOptions,
