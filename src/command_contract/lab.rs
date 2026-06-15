@@ -466,6 +466,15 @@ mod tests {
         assert!(parsed_command(&[
             "homeboy",
             "agent-task",
+            "auth",
+            "status",
+            "--secret-env",
+            "OPENAI_API_KEY",
+        ])
+        .supports_lab_runner());
+        assert!(parsed_command(&[
+            "homeboy",
+            "agent-task",
             "loop",
             "--to-worktree",
             "homeboy@smoke",
@@ -657,6 +666,20 @@ mod tests {
             assert!(!agent_task_inspection.infer_source_path_tools);
         }
 
+        let auth_status = parsed_command(&[
+            "homeboy",
+            "agent-task",
+            "auth",
+            "status",
+            "--secret-env",
+            "OPENAI_API_KEY",
+        ])
+        .lab_contract()
+        .expect("agent-task auth status contract");
+        assert!(!auth_status.default_lab_offload);
+        assert!(!auth_status.requires_extension_parity);
+        assert!(!auth_status.infer_source_path_tools);
+
         let rig = parsed_command(&["homeboy", "rig", "up", "studio"])
             .lab_contract()
             .expect("rig up contract");
@@ -706,7 +729,7 @@ mod tests {
             "map-env",
             "OPENAI_API_KEY",
             "--from",
-            "OPENAI_API_KEY",
+            "OPENAI_SOURCE_API_KEY",
         ])
         .lab_contract()
         .is_none());
