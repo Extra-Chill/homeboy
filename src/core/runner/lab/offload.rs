@@ -26,7 +26,7 @@ use crate::core::source_snapshot::SourceSnapshot;
 use crate::core::{Error, ErrorCode, Result};
 
 use super::super::daemon_health::runner_daemon_health_failure;
-use super::super::execution::lab_offload_handoff_hints;
+use super::super::execution::{lab_offload_handoff_hints, DaemonJobHandoffState};
 use super::super::lab_apply::apply_lab_offload_patch;
 use super::super::lab_args::{
     inline_agent_task_prompt_files_in_args, lab_offload_source_path, remap_agent_task_plan_in_args,
@@ -1139,7 +1139,13 @@ fn in_flight_daemon_disconnect_error(
             "source": err.details,
         }),
     );
-    for hint in lab_offload_handoff_hints(runner_id, None, job_id, None) {
+    for hint in lab_offload_handoff_hints(
+        runner_id,
+        None,
+        job_id,
+        None,
+        DaemonJobHandoffState::InFlight,
+    ) {
         disconnected = disconnected.with_hint(hint);
     }
     disconnected.retryable = Some(false);
