@@ -239,6 +239,34 @@ pub fn refresh_mirrored_daemon_evidence(run_id: &str) -> Result<Option<Vec<RunRe
     Ok(Some(mirror_remote_observation_runs(&store, &runner, &job)?))
 }
 
+pub fn mirror_connected_runner_run(run_id: &str) -> Result<Option<RunRecord>> {
+    let store = ObservationStore::open_initialized()?;
+    for report in super::connection::statuses()? {
+        if !report.connected {
+            continue;
+        }
+        let runner_id = report.runner_id;
+        let runner = load(&runner_id)?;
+        let Ok(data) = daemon_api_get(
+            &runner_id,
+            &format!("/runs/{}", encode_uri_component(run_id)),
+        ) else {
+            continue;
+        };
+        let body = canonical_daemon_body(&data, "runner run detail response")?;
+        let Some(detail) = body.get("run") else {
+            continue;
+        };
+        let run = remote_detail_to_run_record(detail, &runner, None)?;
+        import_run_if_absent(&store, &run)?;
+        for artifact in remote_detail_artifacts(detail, &runner, &run.id)? {
+            import_artifact_if_absent(&store, &artifact)?;
+        }
+        return Ok(Some(run));
+    }
+    Ok(None)
+}
+
 pub fn runner_job_log_snapshot(runner_id: &str, job_id: &str) -> Result<RunnerJobLogSnapshot> {
     Ok(RunnerJobLogSnapshot {
         job: fetch_daemon_job(runner_id, job_id)?,
@@ -395,7 +423,7 @@ fn mirror_remote_observation_runs(
         let Some(detail) = detail_body.get("run") else {
             continue;
         };
-        let run = remote_detail_to_run_record(detail, runner, job)?;
+        let run = remote_detail_to_run_record(detail, runner, Some(job))?;
         import_run_if_absent(store, &run)?;
         for artifact in remote_detail_artifacts(detail, runner, &run.id)? {
             import_artifact_if_absent(store, &artifact)?;
@@ -416,7 +444,11 @@ fn import_artifact_if_absent(store: &ObservationStore, artifact: &ArtifactRecord
     store.import_artifact(artifact)
 }
 
-fn remote_detail_to_run_record(detail: &Value, runner: &Runner, job: &Job) -> Result<RunRecord> {
+fn remote_detail_to_run_record(
+    detail: &Value,
+    runner: &Runner,
+    job: Option<&Job>,
+) -> Result<RunRecord> {
     let id = required_str(detail, "id")?.to_string();
     let metadata = detail.get("metadata").cloned().unwrap_or_else(|| json!({}));
     Ok(RunRecord {
@@ -536,20 +568,20 @@ fn required_str<'a>(value: &'a Value, field: &str) -> Result<&'a str> {
 fn merge_lab_metadata(
     metadata: Value,
     runner: &Runner,
-    job: &Job,
+    job: Option<&Job>,
     artifact_manifest: Option<Value>,
 ) -> Value {
     let mut object = metadata.as_object().cloned().unwrap_or_default();
-    object.insert(
-        "lab".to_string(),
-        json!({
-            "runner": runner_metadata(runner),
-            "remote_job_id": job.id.to_string(),
-            "remote_job_status": job.status,
-            "source_snapshot": source_snapshot_from_result(&metadata),
-            "remote_artifact_manifest": artifact_manifest,
-        }),
-    );
+    let mut lab = json!({
+        "runner": runner_metadata(runner),
+        "source_snapshot": source_snapshot_from_result(&metadata),
+        "remote_artifact_manifest": artifact_manifest,
+    });
+    if let Some(job) = job {
+        lab["remote_job_id"] = Value::String(job.id.to_string());
+        lab["remote_job_status"] = json!(job.status);
+    }
+    object.insert("lab".to_string(), lab);
     Value::Object(object)
 }
 
