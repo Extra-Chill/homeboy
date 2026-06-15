@@ -1,0 +1,63 @@
+{
+  "install_methods": {
+    "homebrew": {
+      "path_patterns": ["/Cellar/", "/homebrew/"],
+      "upgrade_command": "brew update && brew upgrade homeboy",
+      "list_command": "brew list homeboy"
+    },
+    "cargo": {
+      "path_patterns": ["/.cargo/bin/"],
+      "upgrade_command": "cargo install homeboy",
+      "list_command": null
+    },
+    "source": {
+      "path_patterns": ["/target/release/", "/target/debug/"],
+      "upgrade_command": "git pull && . \"$HOME/.cargo/env\" && cargo install --path . --force",
+      "list_command": null
+    },
+    "binary": {
+      "path_patterns": ["/bin/homeboy", "homeboy.exe"],
+      "upgrade_command": "set -e\n\nBIN_PATH=\"$(command -v homeboy)\"\nOS=\"$(uname -s | tr '[:upper:]' '[:lower:]')\"\nARCH=\"$(uname -m)\"\n\ncase \"${OS}-${ARCH}\" in\n  linux-x86_64)  ASSET=\"homeboy-x86_64-unknown-linux-gnu.tar.xz\" ;;\n  linux-aarch64|linux-arm64) ASSET=\"homeboy-aarch64-unknown-linux-gnu.tar.xz\" ;;\n  darwin-x86_64) ASSET=\"homeboy-x86_64-apple-darwin.tar.xz\" ;;\n  darwin-aarch64|darwin-arm64) ASSET=\"homeboy-aarch64-apple-darwin.tar.xz\" ;;\n  *) echo \"Unsupported platform for binary upgrade: ${OS}-${ARCH}\" >&2; exit 1 ;;\nesac\n\nBASE_URL=\"https://github.com/Extra-Chill/homeboy/releases/latest/download\"\nTMP_DIR=\"$(mktemp -d)\"\n\ncleanup() { rm -rf \"$TMP_DIR\"; }\ntrap cleanup EXIT\n\ncurl -fsSL \"${BASE_URL}/${ASSET}\" -o \"${TMP_DIR}/${ASSET}\"\ncurl -fsSL \"${BASE_URL}/${ASSET}.sha256\" -o \"${TMP_DIR}/${ASSET}.sha256\"\n\ncd \"$TMP_DIR\"\n\nif command -v sha256sum >/dev/null 2>&1; then\n  sha256sum -c \"${ASSET}.sha256\"\nelif command -v shasum >/dev/null 2>&1; then\n  SHASUM_EXPECTED=\"$(cut -d\" \" -f1 \"${ASSET}.sha256\")\"\n  SHASUM_ACTUAL=\"$(shasum -a 256 \"${ASSET}\" | cut -d\" \" -f1)\"\n  [ \"$SHASUM_EXPECTED\" = \"$SHASUM_ACTUAL\" ]\nelse\n  echo \"No sha256 tool found (sha256sum or shasum).\" >&2\n  exit 1\nfi\n\nif tar -xJf \"${ASSET}\" 2>/dev/null; then\n  true\nelse\n  tar -xf \"${ASSET}\"\nfi\n\nif [ ! -f \"homeboy\" ]; then\n  FOUND=$(find . -maxdepth 2 -name \"homeboy\" -type f ! -name \"*.sha256\" | head -1)\n  if [ -n \"$FOUND\" ]; then\n    cp \"$FOUND\" ./homeboy\n  else\n    echo \"Expected extracted binary named 'homeboy'\" >&2\n    ls -laR\n    exit 1\n  fi\nfi\n\nif [ -w \"$BIN_PATH\" ] || [ -w \"$(dirname \"$BIN_PATH\")\" ]; then\n  install -m 0755 homeboy \"$BIN_PATH\"\nelse\n  if command -v sudo >/dev/null 2>&1; then\n    if sudo -n true >/dev/null 2>&1; then\n      sudo install -m 0755 homeboy \"$BIN_PATH\"\n    else\n      echo \"Insufficient permissions to write to $BIN_PATH. Re-run with sudo:\" >&2\n      echo \"  sudo homeboy upgrade --method binary\" >&2\n      exit 1\n    fi\n  else\n    echo \"Insufficient permissions to write to $BIN_PATH (and sudo not found).\" >&2\n    exit 1\n  fi\nfi\n",
+      "list_command": null
+    }
+  },
+  "version_candidates": [
+    {
+      "file": "Cargo.toml",
+      "pattern": "version\\s*=\\s*\"(\\d+\\.\\d+\\.\\d+)\""
+    },
+    {
+      "file": "package.json",
+      "pattern": "\"version\"\\s*:\\s*\"(\\d+\\.\\d+\\.\\d+)\""
+    },
+    {
+      "file": "composer.json",
+      "pattern": "\"version\"\\s*:\\s*\"(\\d+\\.\\d+\\.\\d+)\""
+    },
+    {
+      "file": "style.css",
+      "pattern": "Version:\\s*(\\d+\\.\\d+\\.\\d+)"
+    }
+  ],
+  "test_drift": {
+    "source_dirs": ["src", "inc", "lib"],
+    "test_dirs": ["tests"],
+    "file_extensions": ["php"],
+    "inline_tests": false
+  },
+  "direct_test_file_suffixes": [
+    "_test.rs",
+    "_tests.rs",
+    "Test.php",
+    ".test.js",
+    ".test.jsx",
+    ".test.ts",
+    ".test.tsx",
+    ".test.mjs",
+    ".spec.js",
+    ".spec.jsx",
+    ".spec.ts",
+    ".spec.tsx",
+    ".spec.mjs"
+  ]
+}
