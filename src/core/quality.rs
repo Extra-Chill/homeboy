@@ -7,6 +7,14 @@ pub struct QualityPlanOptions {
     pub step_prefix: String,
     pub skip_checks: bool,
     pub skip_reason: String,
+    /// Granular per-check skips. When set, only the listed checks are disabled
+    /// while the rest still run. Honored independently of `skip_checks` (which
+    /// skips everything). Used by `--skip-checks=lint` to bypass only the broken
+    /// gate without disabling working_tree/remote_sync/test.
+    pub skip_audit: bool,
+    pub skip_lint: bool,
+    pub skip_test: bool,
+    pub granular_skip_reason: String,
     pub lint_needs: Vec<String>,
     pub test_needs: Vec<String>,
     pub audit_policy_available: bool,
@@ -23,6 +31,10 @@ impl QualityPlanOptions {
             step_prefix: "preflight".to_string(),
             skip_checks,
             skip_reason: "--skip-checks".to_string(),
+            skip_audit: false,
+            skip_lint: false,
+            skip_test: false,
+            granular_skip_reason: "--skip-checks=<check>".to_string(),
             lint_needs: vec!["preflight.bump_policy".to_string()],
             test_needs: vec!["preflight.lint".to_string()],
             audit_policy_available: false,
@@ -32,6 +44,22 @@ impl QualityPlanOptions {
         }
     }
 
+    /// Apply granular per-check skips from a list of check names.
+    ///
+    /// Recognized names: `audit`, `lint`, `test`. Unknown names are ignored by
+    /// this method (validation happens at the CLI boundary).
+    pub fn with_granular_skips(mut self, checks: &[String]) -> Self {
+        for check in checks {
+            match check.to_ascii_lowercase().as_str() {
+                "audit" => self.skip_audit = true,
+                "lint" => self.skip_lint = true,
+                "test" | "tests" => self.skip_test = true,
+                _ => {}
+            }
+        }
+        self
+    }
+
     pub fn review(component_id: impl Into<String>) -> Self {
         Self {
             component_id: component_id.into(),
@@ -39,6 +67,10 @@ impl QualityPlanOptions {
             step_prefix: "review".to_string(),
             skip_checks: false,
             skip_reason: "skipped".to_string(),
+            skip_audit: false,
+            skip_lint: false,
+            skip_test: false,
+            granular_skip_reason: "--skip-checks=<check>".to_string(),
             lint_needs: vec!["review.audit".to_string()],
             test_needs: vec!["review.lint".to_string()],
             audit_policy_available: true,
@@ -91,7 +123,14 @@ pub fn build_quality_steps(options: &QualityPlanOptions) -> Vec<PlanStep> {
         ];
     }
 
-    let audit = if options.audit_policy_available {
+    let audit = if options.skip_audit {
+        disabled_step(
+            &options.step_prefix,
+            "audit",
+            &options.audit_label,
+            &options.granular_skip_reason,
+        )
+    } else if options.audit_policy_available {
         ready_step(
             &options.step_prefix,
             "audit",
@@ -107,21 +146,39 @@ pub fn build_quality_steps(options: &QualityPlanOptions) -> Vec<PlanStep> {
         )
     };
 
-    vec![
-        audit,
+    let lint = if options.skip_lint {
+        disabled_step(
+            &options.step_prefix,
+            "lint",
+            &options.lint_label,
+            &options.granular_skip_reason,
+        )
+    } else {
         ready_step(
             &options.step_prefix,
             "lint",
             &options.lint_label,
             options.lint_needs.clone(),
-        ),
+        )
+    };
+
+    let test = if options.skip_test {
+        disabled_step(
+            &options.step_prefix,
+            "test",
+            &options.test_label,
+            &options.granular_skip_reason,
+        )
+    } else {
         ready_step(
             &options.step_prefix,
             "test",
             &options.test_label,
             options.test_needs.clone(),
-        ),
-    ]
+        )
+    };
+
+    vec![audit, lint, test]
 }
 
 fn ready_step(prefix: &str, name: &str, label: &str, needs: Vec<String>) -> PlanStep {
@@ -225,5 +282,47 @@ mod tests {
             .get("reason")
             .and_then(|value| value.as_str())
             == Some("--skip-checks")));
+    }
+
+    #[test]
+    fn granular_skip_disables_only_named_checks() {
+        // --skip-checks=lint disables only lint; audit and test stay active.
+        let options = QualityPlanOptions::release_preflight("fixture", false)
+            .with_granular_skips(&["lint".to_string()]);
+        let steps = build_quality_steps(&options);
+
+        let lint = steps
+            .iter()
+            .find(|s| s.id == "preflight.lint")
+            .expect("lint step");
+        assert_eq!(lint.status, PlanStepStatus::Disabled);
+
+        let test = steps
+            .iter()
+            .find(|s| s.id == "preflight.test")
+            .expect("test step");
+        assert_ne!(test.status, PlanStepStatus::Disabled);
+    }
+
+    #[test]
+    fn granular_skip_accepts_multiple_checks_case_insensitively() {
+        let options = QualityPlanOptions::release_preflight("fixture", false)
+            .with_granular_skips(&["LINT".to_string(), "Tests".to_string()]);
+        assert!(options.skip_lint);
+        assert!(options.skip_test);
+        assert!(!options.skip_audit);
+    }
+
+    #[test]
+    fn granular_skip_does_not_affect_skip_checks_all() {
+        // When skip_checks (all) is true, granular flags are irrelevant — every
+        // gate is disabled by the blanket skip.
+        let options = QualityPlanOptions::release_preflight("fixture", true)
+            .with_granular_skips(&["lint".to_string()]);
+        let steps = build_quality_steps(&options);
+
+        assert!(steps
+            .iter()
+            .all(|step| step.status == PlanStepStatus::Disabled));
     }
 }

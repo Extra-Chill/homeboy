@@ -4,28 +4,65 @@ use crate::core::error::{Error, Result};
 use crate::core::extension::{self, ExtensionCapability};
 use std::path::Path;
 
+/// Outcome of a release lint preflight.
+///
+/// Distinguishes a genuine lint failure (real findings exist) from a harness /
+/// infrastructure failure (the lint wrapper exited non-zero while reporting
+/// zero findings). The latter must not hard-block a release — the underlying
+/// linter is clean and a broken runner harness should surface as a warning.
+#[derive(Debug)]
+pub(super) enum LintQualityOutcome {
+    /// Lint ran and passed, or no lint runner is configured (`ran == false`).
+    Passed { ran: bool },
+    /// Lint produced real findings — this is a genuine, hard-blocking failure.
+    Failed(Error),
+    /// The lint harness exited non-zero while reporting zero findings.
+    ///
+    /// This is a harness/infra error, not a code-quality failure. The release
+    /// continues with a warning instead of aborting.
+    HarnessError { message: String },
+}
+
 /// Run release lint via the component's extension.
 ///
-/// Returns whether a lint command was available and executed. Missing lint
-/// support is not a release blocker because not every extension provides it.
-pub(super) fn validate_lint_quality(component: &Component) -> Result<bool> {
+/// Returns a [`LintQualityOutcome`] distinguishing real lint findings from a
+/// harness/infrastructure failure. Missing lint support is not a release
+/// blocker because not every extension provides it.
+pub(super) fn validate_lint_quality(component: &Component) -> LintQualityOutcome {
     if component.has_script(ExtensionCapability::Lint) {
         log_status!("release", "Running lint (scripts.lint)...");
 
-        let workflow = extension::lint::run_self_check_lint_workflow(
+        let workflow = match extension::lint::run_self_check_lint_workflow(
             component,
             Path::new(&component.local_path),
             component.id.clone(),
             false,
-        )
-        .map_err(|e| quality_error("lint", format!("Lint runner error: {}", e)))?;
+        ) {
+            Ok(workflow) => workflow,
+            Err(e) => {
+                return LintQualityOutcome::Failed(quality_error(
+                    "lint",
+                    format!("Lint runner error: {}", e),
+                ));
+            }
+        };
 
         if workflow.status == "passed" {
             log_status!("release", "Lint passed");
-            return Ok(true);
+            return LintQualityOutcome::Passed { ran: true };
         }
 
-        return Err(quality_error(
+        // The lint harness exited non-zero. When the underlying linter is clean
+        // and the wrapper/harness itself failed (e.g. the long-standing missing
+        // `runner-steps.sh` environmental issue), surface a non-blocking warning
+        // rather than aborting the release.
+        if workflow.harness_error {
+            return LintQualityOutcome::HarnessError {
+                message: harness_failure_message("Lint", workflow.exit_code),
+            };
+        }
+
+        return LintQualityOutcome::Failed(quality_error(
             "lint",
             format!("Lint failed (exit code {})", workflow.exit_code),
         ));
@@ -34,15 +71,18 @@ pub(super) fn validate_lint_quality(component: &Component) -> Result<bool> {
     let lint_context = extension::lint::resolve_lint_command(component);
 
     let Ok(lint_context) = lint_context else {
-        return Ok(false);
+        return LintQualityOutcome::Passed { ran: false };
     };
 
     log_status!("release", "Running lint ({})...", lint_context.extension_id);
 
-    let release_run_dir = RunDir::create()?;
+    let release_run_dir = match RunDir::create() {
+        Ok(dir) => dir,
+        Err(e) => return LintQualityOutcome::Failed(e),
+    };
     let lint_findings_file = release_run_dir.step_file(run_dir::files::LINT_FINDINGS);
 
-    let output = extension::lint::build_lint_runner(
+    let output = match extension::lint::build_lint_runner(
         component,
         None,
         &[],
@@ -57,46 +97,56 @@ pub(super) fn validate_lint_quality(component: &Component) -> Result<bool> {
         &release_run_dir,
     )
     .and_then(|runner| runner.run())
-    .map_err(|e| quality_error("lint", format!("Lint runner error: {}", e)))?;
-
-    let lint_passed = if output.success {
-        true
-    } else {
-        let source_path = std::path::Path::new(&component.local_path);
-        let findings =
-            crate::core::extension::lint::baseline::parse_findings_file(&lint_findings_file)
-                .unwrap_or_default();
-
-        if let Some(baseline) = crate::core::extension::lint::baseline::load_baseline(source_path) {
-            let comparison = crate::core::extension::lint::baseline::compare(&findings, &baseline);
-            if comparison.drift_increased {
-                log_status!(
-                    "release",
-                    "Lint baseline drift increased: {} new finding(s)",
-                    comparison.new_items.len()
-                );
-                false
-            } else {
-                log_status!(
-                    "release",
-                    "Lint has known findings but no new drift (baseline honored)"
-                );
-                true
-            }
-        } else {
-            false
+    {
+        Ok(output) => output,
+        Err(e) => {
+            return LintQualityOutcome::Failed(quality_error(
+                "lint",
+                format!("Lint runner error: {}", e),
+            ));
         }
     };
 
-    if lint_passed {
+    if output.success {
         log_status!("release", "Lint passed");
-        Ok(true)
-    } else {
-        Err(quality_error(
-            "lint",
-            code_quality_failure_message("Lint", &output),
-        ))
+        return LintQualityOutcome::Passed { ran: true };
     }
+
+    let source_path = std::path::Path::new(&component.local_path);
+    let findings = crate::core::extension::lint::baseline::parse_findings_file(&lint_findings_file)
+        .unwrap_or_default();
+
+    // A non-zero exit with zero parsed findings is a harness/infra failure, not
+    // a real lint failure — the linter found nothing to report. The underlying
+    // linter is clean, so this must not hard-block the release.
+    if findings.is_empty() {
+        return LintQualityOutcome::HarnessError {
+            message: harness_failure_message("Lint", output.exit_code),
+        };
+    }
+
+    if let Some(baseline) = crate::core::extension::lint::baseline::load_baseline(source_path) {
+        let comparison = crate::core::extension::lint::baseline::compare(&findings, &baseline);
+        if comparison.drift_increased {
+            log_status!(
+                "release",
+                "Lint baseline drift increased: {} new finding(s)",
+                comparison.new_items.len()
+            );
+        } else {
+            log_status!(
+                "release",
+                "Lint has known findings but no new drift (baseline honored)"
+            );
+            log_status!("release", "Lint passed");
+            return LintQualityOutcome::Passed { ran: true };
+        }
+    }
+
+    LintQualityOutcome::Failed(quality_error(
+        "lint",
+        code_quality_failure_message("Lint", &output),
+    ))
 }
 
 /// Run release tests via the component's extension.
@@ -162,6 +212,20 @@ pub(super) fn validate_test_quality(component: &Component) -> Result<bool> {
     }
 }
 
+/// Message for a lint/test harness failure (non-zero exit, zero findings).
+///
+/// This is distinct from a real code-quality failure: the underlying tool is
+/// clean and the wrapper/harness itself failed. The release continues with a
+/// warning carrying this message.
+fn harness_failure_message(check: &str, exit_code: i32) -> String {
+    format!(
+        "{} harness exited {} with zero findings — treating as a harness/infra error, not a code-quality failure. \
+Release continues; the underlying linter is clean. To re-run lint in isolation: homeboy lint <component>. \
+To skip only this gate: homeboy release <component> --skip-checks=lint",
+        check, exit_code
+    )
+}
+
 fn quality_error(field: &str, message: String) -> Error {
     log_status!("release", "Code quality check failed: {}", message);
 
@@ -208,13 +272,39 @@ fn is_runner_infrastructure_failure(output: &extension::RunnerOutput) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        code_quality_failure_message, is_runner_infrastructure_failure, validate_lint_quality,
-        validate_test_quality,
+        code_quality_failure_message, harness_failure_message, is_runner_infrastructure_failure,
+        validate_lint_quality, validate_test_quality, LintQualityOutcome,
     };
     use crate::core::component::{Component, ComponentScriptsConfig};
     use crate::core::extension::RunnerOutput;
     use std::fs;
     use std::path::Path;
+
+    impl LintQualityOutcome {
+        fn expect_passed_with_value(self, expected_ran: bool) -> bool {
+            match self {
+                LintQualityOutcome::Passed { ran } => {
+                    assert_eq!(ran, expected_ran, "Passed.ran mismatch");
+                    ran
+                }
+                other => panic!("expected Passed, got {:?}", other),
+            }
+        }
+
+        fn expect_harness_error(self) -> String {
+            match self {
+                LintQualityOutcome::HarnessError { message } => message,
+                other => panic!("expected HarnessError, got {:?}", other),
+            }
+        }
+
+        fn expect_failed(self) -> crate::core::error::Error {
+            match self {
+                LintQualityOutcome::Failed(err) => err,
+                other => panic!("expected Failed, got {:?}", other),
+            }
+        }
+    }
 
     fn component_without_quality_runners() -> Component {
         Component {
@@ -274,7 +364,7 @@ mod tests {
     #[test]
     fn test_validate_lint_quality() {
         assert!(!validate_lint_quality(&component_without_quality_runners())
-            .expect("missing lint runner should not block release"));
+            .expect_passed_with_value(false));
     }
 
     #[test]
@@ -300,7 +390,7 @@ mod tests {
             },
         );
 
-        assert!(validate_lint_quality(&component).expect("lint script should pass"));
+        assert!(validate_lint_quality(&component).expect_passed_with_value(true));
     }
 
     #[test]
@@ -325,11 +415,13 @@ mod tests {
 
     #[test]
     fn validate_lint_quality_fails_failing_component_script() {
+        // A self-check lint that exits 1 with a plain failure message (no infra
+        // markers) is a genuine lint failure — the release hard-blocks.
         let dir = tempfile::tempdir().expect("temp dir");
         write_script(
             dir.path(),
             "lint.sh",
-            "printf 'lint failed\\n' >&2\nexit 7\n",
+            "printf 'lint failed\\n' >&2\nexit 1\n",
         );
 
         let component = script_component(
@@ -340,9 +432,70 @@ mod tests {
             },
         );
 
-        let err = validate_lint_quality(&component).expect_err("lint script should fail release");
+        let err = validate_lint_quality(&component).expect_failed();
         assert_eq!(err.code.as_str(), "validation.invalid_argument");
-        assert!(err.to_string().contains("Lint failed (exit code 7)"));
+        assert!(err.to_string().contains("Lint failed (exit code 1)"));
+    }
+
+    #[test]
+    fn validate_lint_quality_warns_on_missing_runner_steps_harness() {
+        // Reproduces issue #4586: the lint harness exits non-zero (1) while the
+        // underlying linter is clean. The missing runner-steps.sh marker in the
+        // output identifies this as a harness/infra failure that must NOT
+        // hard-block the release.
+        let dir = tempfile::tempdir().expect("temp dir");
+        write_script(
+            dir.path(),
+            "lint.sh",
+            "printf 'runner-steps.sh: No such file or directory\\n' >&2\nexit 1\n",
+        );
+
+        let component = script_component(
+            dir.path(),
+            ComponentScriptsConfig {
+                lint: vec!["sh scripts/lint.sh".to_string()],
+                ..Default::default()
+            },
+        );
+
+        let message = validate_lint_quality(&component).expect_harness_error();
+        assert!(
+            message.contains("harness exited 1 with zero findings"),
+            "harness error message should mention zero findings: {}",
+            message
+        );
+        assert!(
+            message.contains("--skip-checks=lint"),
+            "harness error message should mention granular skip: {}",
+            message
+        );
+    }
+
+    #[test]
+    fn validate_lint_quality_warns_on_high_exit_code() {
+        // Exit codes >= 2 conventionally indicate tooling/internal errors, not
+        // real lint findings — treated as a harness failure (warning).
+        let dir = tempfile::tempdir().expect("temp dir");
+        write_script(dir.path(), "lint.sh", "exit 7\n");
+
+        let component = script_component(
+            dir.path(),
+            ComponentScriptsConfig {
+                lint: vec!["sh scripts/lint.sh".to_string()],
+                ..Default::default()
+            },
+        );
+
+        let message = validate_lint_quality(&component).expect_harness_error();
+        assert!(message.contains("harness exited 7"));
+    }
+
+    #[test]
+    fn harness_failure_message_mentions_granular_skip() {
+        let message = harness_failure_message("Lint", 1);
+        assert!(message.contains("harness exited 1 with zero findings"));
+        assert!(message.contains("homeboy lint <component>"));
+        assert!(message.contains("--skip-checks=lint"));
     }
 
     #[test]

@@ -247,6 +247,7 @@ mod tests {
             status: "failed".to_string(),
             component: "fixture".to_string(),
             exit_code: 1,
+            harness_error: false,
             autofix: None,
             hints: None,
             baseline_comparison: None,

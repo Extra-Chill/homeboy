@@ -264,6 +264,11 @@ pub struct ReleaseOptions {
     /// Skip lint/test code quality checks before release.
     #[serde(default)]
     pub skip_checks: bool,
+    /// Granular per-check skips (e.g. `["lint"]`). Disables only the listed
+    /// preflight quality checks while leaving working_tree/remote_sync and the
+    /// other checks active. Honored independently of `skip_checks`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skip_checks_granular: Vec<String>,
     #[serde(default, flatten)]
     pub pipeline: ReleasePipelineOptions,
     /// Skip the GitHub Release creation step (tag + notes on github.com).
@@ -315,6 +320,10 @@ pub struct ReleaseCommandInput {
     pub retag: bool,
     #[serde(default)]
     pub skip_checks: bool,
+    /// Granular per-check skips (e.g. `["lint"]`). Disables only the listed
+    /// preflight quality checks while leaving the other gates active.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skip_checks_granular: Vec<String>,
     /// Explicit bump override: "major", "minor", "patch", or a version string like "2.0.0".
     /// When set, overrides auto-detection from commit history.
     #[serde(skip_serializing_if = "Option::is_none")]
