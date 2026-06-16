@@ -47,6 +47,8 @@ pub struct AgentTaskExecutorProvider {
     pub extension_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extension_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_path: Option<String>,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -837,9 +839,11 @@ fn output_value<'a>(value: &'a Value, key: &str) -> Option<&'a Value> {
 
 fn render_provider_command(provider: &AgentTaskExecutorProvider) -> String {
     let extension_path = provider.extension_path.as_deref().unwrap_or_default();
+    let runtime_path = provider.runtime_path.as_deref().unwrap_or(extension_path);
     provider
         .command
         .replace("{{extension_path}}", extension_path)
+        .replace("{{runtime_path}}", runtime_path)
 }
 
 fn provider_command_parts(command: &str) -> Option<(String, Vec<String>)> {
@@ -868,6 +872,14 @@ fn provider_command_env(
         (
             "HOMEBOY_EXTENSION_PATH".to_string(),
             provider.extension_path.clone().unwrap_or_default(),
+        ),
+        (
+            "HOMEBOY_RUNTIME_PATH".to_string(),
+            provider
+                .runtime_path
+                .clone()
+                .or_else(|| provider.extension_path.clone())
+                .unwrap_or_default(),
         ),
     ];
     env.extend(resolve_secret_env(&request.executor.secret_env)?);
@@ -943,6 +955,7 @@ mod tests {
             role_aliases: AgentTaskProviderRoleAliases::default(),
             extension_id: None,
             extension_path: None,
+            runtime_path: None,
         };
         let request = AgentTaskRequest {
             schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
@@ -1153,6 +1166,21 @@ mod tests {
             ExtensionProviderAgentTaskExecutor::with_providers(vec![provider_a, provider_b]);
 
         assert_eq!(executor.default_backend().as_deref(), Some("preferred"));
+    }
+
+    #[test]
+    fn provider_command_interpolates_runtime_path_separately_from_extension_path() {
+        let (_, mut provider) = request(
+            "task-a",
+            "{{runtime_path}}/bin/provider --extension {{extension_path}}".to_string(),
+        );
+        provider.extension_path = Some("/extensions/project-type".to_string());
+        provider.runtime_path = Some("/agent-runtimes/codex".to_string());
+
+        assert_eq!(
+            render_provider_command(&provider),
+            "/agent-runtimes/codex/bin/provider --extension /extensions/project-type"
+        );
     }
 
     #[test]

@@ -176,6 +176,11 @@ pub fn extensions() -> Result<PathBuf> {
     Ok(homeboy()?.join("extensions"))
 }
 
+/// Agent runtimes directory
+pub fn agent_runtimes() -> Result<PathBuf> {
+    Ok(homeboy()?.join("agent-runtimes"))
+}
+
 /// Keys directory
 pub fn keys() -> Result<PathBuf> {
     Ok(homeboy()?.join("keys"))
@@ -241,6 +246,11 @@ pub fn extension(id: &str) -> Result<PathBuf> {
 /// Extension manifest file path
 pub fn extension_manifest(id: &str) -> Result<PathBuf> {
     Ok(extensions()?.join(id).join(format!("{}.json", id)))
+}
+
+/// Agent runtime manifest file path
+pub fn agent_runtime_manifest(id: &str) -> Result<PathBuf> {
+    Ok(agent_runtimes()?.join(id).join(format!("{}.json", id)))
 }
 
 /// Key file path
