@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::cli_surface::Commands;
 use crate::command_contract::LabCommandPortability;
+use crate::commands::agent_task;
 
 use crate::commands::doctor::resources::{DoctorOutput, ResourceRecommendation};
 
@@ -194,6 +195,10 @@ pub fn reset_captured_context_for_test() {
 }
 
 pub fn hot_command(command: &Commands) -> Option<HotCommand> {
+    if is_read_only_agent_task(command) {
+        return None;
+    }
+
     let contract = command.lab_contract()?;
 
     match contract.portability {
@@ -202,6 +207,18 @@ pub fn hot_command(command: &Commands) -> Option<HotCommand> {
             Some(HotCommand::local_only(contract.hot_label, Some(reason)))
         }
     }
+}
+
+fn is_read_only_agent_task(command: &Commands) -> bool {
+    matches!(
+        command,
+        Commands::AgentTask(agent_task::AgentTaskArgs {
+            command: agent_task::AgentTaskCommand::Status(_)
+                | agent_task::AgentTaskCommand::Logs(_)
+                | agent_task::AgentTaskCommand::Artifacts(_)
+                | agent_task::AgentTaskCommand::Review(_),
+        })
+    )
 }
 
 pub fn evaluate(command: HotCommand, resources: &DoctorOutput) -> Option<ResourcePolicyWarning> {

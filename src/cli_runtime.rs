@@ -304,7 +304,7 @@ fn preflight_hot_command(cli: &Cli, output_file: Option<&str>) -> Option<i32> {
             if let Some(warning) = warning.as_ref() {
                 if let Some(err) = resource_policy::non_interactive_preflight_error(
                     warning,
-                    cli.force_hot,
+                    cli.force_hot || runner_hosted,
                     is_interactive_shell(),
                 ) {
                     output_runtime::emit_json_result(Err(err), output_file, 2);
