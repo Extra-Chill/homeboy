@@ -136,6 +136,14 @@ name: Data Machine Agent CI (reusable)
         description: JSON map of output_name to jq path, collected into engine_data_json.
         type: string
         default: "{}"
+      expected_artifacts:
+        description: JSON array of generic expected artifact names forwarded to WP Codebox.
+        type: string
+        default: "[]"
+      artifact_declarations:
+        description: JSON array of typed artifact declarations forwarded to WP Codebox. Required declarations are enforced in the normalized Homeboy outcome.
+        type: string
+        default: "[]"
       transcript_artifact_name:
         description: Empty string disables transcript artifact upload.
         type: string
@@ -686,6 +694,8 @@ jobs:
           MAX_TURNS: ${{ inputs.max_turns }}
           STEP_BUDGET: ${{ inputs.step_budget }}
           TIME_BUDGET_MS: ${{ inputs.time_budget_ms }}
+          EXPECTED_ARTIFACTS: ${{ inputs.expected_artifacts }}
+          ARTIFACT_DECLARATIONS: ${{ inputs.artifact_declarations }}
           ARTIFACT_EXPORT_CONFIG: ${{ inputs.artifact_export_config }}
           RULES: ${{ inputs.rules }}
           GENERAL_RULES: ${{ inputs.general_rules }}
@@ -846,6 +856,8 @@ jobs:
           workload_run_after_json="$(validate_json_input workload_run_after array "$WORKLOAD_RUN_AFTER")"
           extra_required_abilities_json="$(validate_json_input extra_required_abilities array "$EXTRA_REQUIRED_ABILITIES")"
           success_completion_outcomes_json="$(validate_json_input success_completion_outcomes array "$SUCCESS_COMPLETION_OUTCOMES")"
+          expected_artifacts_json="$(validate_json_input expected_artifacts array "$EXPECTED_ARTIFACTS")"
+          artifact_declarations_json="$(validate_json_input artifact_declarations array "$ARTIFACT_DECLARATIONS")"
           allowed_repos_json="$(validate_json_input allowed_repos array "$ALLOWED_REPOS")"
           app_token_repos_json="$(jq -Rsc 'split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(. != ""))' <<< "${APP_TOKEN_REPOS:-$TARGET_REPO}")"
           effective_allowed_repos_json="$(jq -nc --arg target "$TARGET_REPO" --argjson allowed "$allowed_repos_json" --argjson appTokenRepos "$app_token_repos_json" 'if ($allowed | length) > 0 then $allowed elif ($appTokenRepos | length) > 0 then $appTokenRepos else [$target] end')"
@@ -924,6 +936,8 @@ jobs:
             --argjson maxTurns "$MAX_TURNS" \
             --argjson stepBudget "$STEP_BUDGET" \
             --argjson timeBudgetMs "$TIME_BUDGET_MS" \
+            --argjson expectedArtifacts "$expected_artifacts_json" \
+            --argjson artifactDeclarations "$artifact_declarations_json" \
             --argjson dryRun "$DRY_RUN" \
             --argjson extraWpConfigDefines "$extra_wp_config_defines_json" \
             --argjson extraWpCodeboxMounts "$extra_wp_codebox_mounts_json" \
@@ -1013,6 +1027,8 @@ jobs:
               prompt: $prompt,
               step_budget: $stepBudget,
               time_budget_ms: $timeBudgetMs,
+              expected_artifacts: $expectedArtifacts,
+              artifact_declarations: $artifactDeclarations,
               ability_tools: $abilityTools,
               tool_recorders: $toolRecorders,
               pipeline_step_patches: $pipelineStepPatches,

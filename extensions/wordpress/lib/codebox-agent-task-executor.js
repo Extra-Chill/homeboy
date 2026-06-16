@@ -219,6 +219,7 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
   const components = runtimeComponentPaths(config, { ...defaults, ...options, componentContracts });
   const agentBundles = firstDefined(inputs.agent_bundles, inputs.agentBundles, config.agent_bundles, config.agentBundles, options.agentBundles, []);
   const structuredArtifacts = firstDefined(inputs.structured_artifacts, inputs.structuredArtifacts, config.structured_artifacts, config.structuredArtifacts, options.structuredArtifacts, []);
+  const artifactDeclarations = artifactDeclarationsFromAgentTaskRequest(request, config, inputs, options);
   const allowedTools = allowedToolsFromAgentTaskRequest(request, config, inputs, options, defaults);
   const sandboxToolPolicy = sandboxToolPolicyFromAgentTaskRequest(config, inputs, options, defaults, allowedTools);
   const provider = config.provider || options.provider || defaults.provider || '';
@@ -252,6 +253,7 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     target: inputs.target || request.workspace || {},
     allowed_tools: allowedTools || [],
     expected_artifacts: request.expected_artifacts || [],
+    artifact_declarations: artifactDeclarations,
     policy: request.policy || {},
     context,
     recipe,
@@ -298,6 +300,20 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     agent_bundle: agentBundle,
     parent_request: request,
   };
+}
+
+function artifactDeclarationsFromAgentTaskRequest(request, config = {}, inputs = {}, options = {}) {
+  const declarations = firstDefined(
+    request.artifact_declarations,
+    request.artifactDeclarations,
+    inputs.artifact_declarations,
+    inputs.artifactDeclarations,
+    config.artifact_declarations,
+    config.artifactDeclarations,
+    options.artifactDeclarations,
+    []
+  );
+  return Array.isArray(declarations) ? declarations : [];
 }
 
 class RuntimeOverlayConfigError extends Error {
@@ -1384,6 +1400,52 @@ function typedArtifactFileRefs(typedArtifact) {
   ];
 }
 
+function typedArtifactNameFromDeclaration(declaration) {
+  if (typeof declaration === 'string') {
+    return declaration;
+  }
+  if (!declaration || typeof declaration !== 'object' || Array.isArray(declaration)) {
+    return '';
+  }
+  return declaration.name || declaration.id || '';
+}
+
+function requiredArtifactDeclarationsFromRequest(request) {
+  const config = request.executor?.config || {};
+  return artifactDeclarationsFromAgentTaskRequest(request, config, request.inputs || {})
+    .filter((declaration) => declaration && typeof declaration === 'object' && declaration.required === true && typedArtifactNameFromDeclaration(declaration));
+}
+
+function artifactDeclarationsMetadataFromRequest(request) {
+  const config = request.executor?.config || {};
+  return artifactDeclarationsFromAgentTaskRequest(request, config, request.inputs || {});
+}
+
+function missingRequiredTypedArtifactDiagnostic(request, outputs) {
+  const required = requiredArtifactDeclarationsFromRequest(request);
+  if (required.length === 0) {
+    return null;
+  }
+  const typedArtifacts = outputs?.typed_artifacts && typeof outputs.typed_artifacts === 'object' && !Array.isArray(outputs.typed_artifacts)
+    ? outputs.typed_artifacts
+    : {};
+  const missing = required
+    .map((declaration) => ({
+      name: typedArtifactNameFromDeclaration(declaration),
+      type: declaration.type || declaration.kind || declaration.artifact_type || declaration.artifactType || '',
+      artifact_schema: declaration.artifact_schema || declaration.artifactSchema || declaration.schema || '',
+    }))
+    .filter((declaration) => !typedArtifacts[declaration.name]);
+  if (missing.length === 0) {
+    return null;
+  }
+  return {
+    class: 'codebox.required_typed_artifacts_missing',
+    message: `WP Codebox agent task did not produce required typed artifacts: ${missing.map((declaration) => declaration.name).join(', ')}.`,
+    data: { reason: 'missing_required_typed_artifacts', missing },
+  };
+}
+
 function typedBundleOutputArtifacts(result) {
   return Object.values(typedArtifactsFromResult(result)).flatMap((typedArtifact) => typedArtifactFileRefs(typedArtifact).map((ref, index) => {
     const fileRef = typeof ref === 'string' ? { path: ref } : ref;
@@ -1914,6 +1976,10 @@ function agentTaskOutcomeFromCodeboxResult(request, result = {}, options = {}) {
   }
   const failureClassification = homeboyFailureClassification(result.failure_classification || recipeSummary?.metadata?.failure_classification || runSummary?.failure_classification, status);
   const outputs = normalizeOutputs(result);
+  const missingRequiredTypedArtifacts = missingRequiredTypedArtifactDiagnostic(request, outputs);
+  if (status === 'succeeded' && missingRequiredTypedArtifacts) {
+    status = 'failed';
+  }
   const recipeRun = recipeRunFromResult(result);
   const fallbackRecipeSummary = recipeRunFailureSummary(recipeRun);
   const recipeFailedPhase = recipeSummary?.failed_phase || recipeSummary?.metadata?.failure_phase || recipeRunFailedPhase(recipeRun);
@@ -1924,11 +1990,11 @@ function agentTaskOutcomeFromCodeboxResult(request, result = {}, options = {}) {
     schema: AGENT_TASK_OUTCOME_SCHEMA,
     task_id: request.task_id,
     status,
-    summary: recipeSummary?.failure_summary || fallbackRecipeSummary || runSummary?.summary || result.summary || result.message || (status === 'succeeded' ? 'WP Codebox agent task succeeded.' : 'WP Codebox agent task failed.'),
+    summary: missingRequiredTypedArtifacts?.message || recipeSummary?.failure_summary || fallbackRecipeSummary || runSummary?.summary || result.summary || result.message || (status === 'succeeded' ? 'WP Codebox agent task succeeded.' : 'WP Codebox agent task failed.'),
     artifacts: normalizeArtifacts(result, runSummary, recipeSummary),
     evidence_refs: normalizeEvidenceRefs(result, runSummary, recipeSummary),
     outputs,
-    diagnostics: [codexProviderDiagnostic, codexBearerTokenDiagnostic, codexVendorDiagnostic, recipeSummary ? null : recipeRunFailureDiagnostic(recipeRun), ...(recipeSummary?.diagnostics || []), ...(runSummary?.diagnostics || []), ...(result.diagnostics || [])].filter(Boolean).map((diagnostic) => ({
+    diagnostics: [codexProviderDiagnostic, codexBearerTokenDiagnostic, codexVendorDiagnostic, missingRequiredTypedArtifacts, recipeSummary ? null : recipeRunFailureDiagnostic(recipeRun), ...(recipeSummary?.diagnostics || []), ...(runSummary?.diagnostics || []), ...(result.diagnostics || [])].filter(Boolean).map((diagnostic) => ({
       class: diagnostic.class || diagnostic.kind || 'codebox',
       message: diagnostic.message || String(diagnostic),
       data: sanitizePublicMetadata(diagnostic.data || {}),
@@ -1940,6 +2006,8 @@ function agentTaskOutcomeFromCodeboxResult(request, result = {}, options = {}) {
       codebox_recipe_run_summary: recipeSummary ? sanitizePublicMetadata(recipeSummary) : undefined,
       integration_contract: 'wp-codebox-cli/agent-task-run',
       decision_evidence: sanitizePublicMetadata(codeboxDecisionEvidence(result, runSummary, recipeSummary)),
+      artifact_declarations: sanitizePublicMetadata(artifactDeclarationsMetadataFromRequest(request)),
+      typed_artifacts: sanitizePublicMetadata(outputs.typed_artifacts || {}),
       sandbox_policy: sanitizePublicMetadata({
         policy: result.task_input?.policy,
         sandbox_tool_policy: result.task_input?.sandbox_tool_policy,
@@ -1949,6 +2017,8 @@ function agentTaskOutcomeFromCodeboxResult(request, result = {}, options = {}) {
   };
   if (failureClassification) {
     outcome.failure_classification = failureClassification;
+  } else if (missingRequiredTypedArtifacts) {
+    outcome.failure_classification = 'execution_failed';
   }
   return outcome;
 }

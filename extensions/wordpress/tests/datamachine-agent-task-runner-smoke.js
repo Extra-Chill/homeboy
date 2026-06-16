@@ -50,7 +50,19 @@ process.stdout.write(JSON.stringify({
           id: 'agent-task-smoke',
           metrics: { config_present_mean: 1 },
           metadata: { success_status: 'no_changes' }
-        }]
+        }],
+        outputs: {
+          typed_artifacts: {
+            smoke_report: {
+              schema: 'homeboy/agent-task-typed-artifact/v1',
+              name: 'smoke_report',
+              type: 'SmokeReport',
+              artifact_schema: 'example/smoke-report/v1',
+              payload: { status: 'passed' },
+              file_refs: [{ path: input.artifacts_path + '/smoke-report.json', mime: 'application/json' }]
+            }
+          }
+        }
       }
     }
   },
@@ -71,6 +83,14 @@ process.stdout.write(JSON.stringify({
     prompt: 'Run the generic agent task smoke.',
     provider: 'example-provider',
     model: 'example-model',
+    expected_artifacts: ['smoke_report'],
+    artifact_declarations: [{
+      schema: 'wp-codebox/artifact-declaration/v1',
+      name: 'smoke_report',
+      type: 'SmokeReport',
+      artifact_schema: 'example/smoke-report/v1',
+      required: true,
+    }],
     wp_codebox_bin: binPath,
     wp_codebox_components: {
       agents_api: agentsApiPath,
@@ -103,13 +123,17 @@ process.stdout.write(JSON.stringify({
   assert.equal(captured.input.agent_bundle.flow_slug, 'example-flow');
   assert.equal(captured.input.provider, 'example-provider');
   assert.equal(captured.input.model, 'example-model');
-  assert.equal(captured.input.agents_api_path, agentsApiPath);
+  assert.deepEqual(captured.input.expected_artifacts, ['smoke_report']);
+  assert.equal(captured.input.artifact_declarations[0].name, 'smoke_report');
+  assert.equal(captured.input.artifact_declarations[0].required, true);
+  assert.equal(captured.input.runtime_component_paths.agents_api, agentsApiPath);
   assert.equal(captured.input.runtime_component_paths.agent_runtime, dataMachinePath);
   assert.equal(captured.input.runtime_component_paths.agent_runtime_tools, dataMachineCodePath);
 
   const outcome = JSON.parse(fs.readFileSync(outcomePath, 'utf8'));
   assert.equal(outcome.schema, 'homeboy/agent-task-outcome/v1');
   assert.equal(outcome.status, 'succeeded');
+  assert.equal(outcome.outputs.typed_artifacts.smoke_report.type, 'SmokeReport');
 
   const results = JSON.parse(fs.readFileSync(resultsPath, 'utf8'));
   assert.equal(results.scenarios[0].id, 'agent-task-smoke');

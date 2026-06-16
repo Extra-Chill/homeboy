@@ -34,6 +34,31 @@ function optionalObject(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
 }
 
+function normalizeArray(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+function artifactDeclarationName(declaration) {
+  if (typeof declaration === 'string') {
+    return declaration;
+  }
+  if (!declaration || typeof declaration !== 'object' || Array.isArray(declaration)) {
+    return '';
+  }
+  return declaration.name || declaration.id || '';
+}
+
+function expectedArtifactsFromConfig(config) {
+  const expected = normalizeArray(config.expected_artifacts);
+  if (expected.length > 0) {
+    return expected;
+  }
+  return normalizeArray(config.artifact_declarations)
+    .filter((declaration) => declaration && typeof declaration === 'object' && declaration.required === true)
+    .map(artifactDeclarationName)
+    .filter(Boolean);
+}
+
 function buildAgentTaskRequest(config, configPath) {
   const taskId = config.task_id || config.workload_id || config.flow_slug || 'datamachine-agent-ci';
   const timeoutMs = Number.parseInt(config.time_budget_ms || '', 10);
@@ -66,7 +91,8 @@ function buildAgentTaskRequest(config, configPath) {
       repository: config.target_repo,
       path: config.component_path,
     }).filter(([, value]) => nonEmpty(value))),
-    expected_artifacts: config.expected_artifacts || [],
+    expected_artifacts: expectedArtifactsFromConfig(config),
+    artifact_declarations: normalizeArray(config.artifact_declarations),
     policy: optionalObject(config.policy),
     limits: Object.fromEntries(Object.entries({
       timeout_ms: Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : undefined,

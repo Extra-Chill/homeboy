@@ -627,6 +627,7 @@ function runnerInput(request, artifacts) {
     recipe: request.recipe || {},
     runtime_task: request.runtime_task || request.runtimeTask,
     structured_artifacts: request.structured_artifacts || request.structuredArtifacts || [],
+    artifact_declarations: request.artifact_declarations || request.artifactDeclarations || [],
     agent_bundles: request.agent_bundles || request.agentBundles || [],
     artifacts_path: artifacts,
     wp_codebox_bin: argValue('--wp-codebox-bin') || request.wp_codebox_bin || '',
@@ -712,6 +713,7 @@ function stableTaskInput(input) {
     target: input.parent_request?.target || input.parent_request?.task?.target || {},
     allowed_tools: allowedTools,
     expected_artifacts: input.parent_request?.expected_artifacts || input.parent_request?.task?.expected_artifacts || [],
+    artifact_declarations: input.artifact_declarations || input.parent_request?.artifact_declarations || input.parent_request?.artifactDeclarations || input.parent_request?.task?.artifact_declarations || [],
     structured_artifacts: input.structured_artifacts || [],
     agent_bundles: input.agent_bundles || [],
     sandbox_tool_policy: sandboxToolPolicy(input, allowedTools),
@@ -791,6 +793,51 @@ function typedArtifactFileRefs(artifact) {
     return artifact.fileRefs;
   }
   return [];
+}
+
+function artifactDeclarationName(declaration) {
+  if (typeof declaration === 'string') {
+    return declaration;
+  }
+  if (!plainObject(declaration)) {
+    return '';
+  }
+  return declaration.name || declaration.id || '';
+}
+
+function requiredArtifactDeclarations(input, config = {}) {
+  const declarations = [
+    input.artifact_declarations,
+    input.parent_request?.artifact_declarations,
+    input.parent_request?.artifactDeclarations,
+    input.parent_request?.task?.artifact_declarations,
+    config.artifact_declarations,
+    config.artifactDeclarations,
+  ].find((candidate) => Array.isArray(candidate) && candidate.length > 0) || [];
+  return declarations.filter((declaration) => plainObject(declaration) && declaration.required === true && artifactDeclarationName(declaration));
+}
+
+function missingRequiredTypedArtifactDiagnostic(input, workload, config = {}) {
+  const required = requiredArtifactDeclarations(input, config);
+  if (required.length === 0) {
+    return null;
+  }
+  const typedArtifacts = plainObject(workload?.outputs?.typed_artifacts) ? workload.outputs.typed_artifacts : {};
+  const missing = required
+    .map((declaration) => ({
+      name: artifactDeclarationName(declaration),
+      type: declaration.type || declaration.kind || declaration.artifact_type || declaration.artifactType || '',
+      artifact_schema: declaration.artifact_schema || declaration.artifactSchema || declaration.schema || '',
+    }))
+    .filter((declaration) => !typedArtifacts[declaration.name]);
+  if (missing.length === 0) {
+    return null;
+  }
+  return {
+    class: 'wp-codebox.required_typed_artifacts_missing',
+    message: `WP Codebox agent task did not produce required typed artifacts: ${missing.map((declaration) => declaration.name).join(', ')}.`,
+    data: { reason: 'missing_required_typed_artifacts', missing },
+  };
 }
 
 function normalizeTypedArtifacts(value) {
@@ -934,10 +981,12 @@ function normalizeAgentTaskRun(input, result) {
   const fallbackAgentResult = result.metadata?.agent_runtime?.workload || execution?.agentResult || result.run?.agentResult || result.agentResult || result.agent_result || {};
   const agentResult = hasSemanticWorkload(stdoutWorkload) ? stdoutWorkload : fallbackAgentResult;
   const bundleValidation = isAgentBundle(input) ? validateAgentRuntimeWorkload(agentResult, config) : validateRuntimeTaskWorkload(agentResult, config);
-  const success = !bundleValidation;
+  const artifactValidation = missingRequiredTypedArtifactDiagnostic(input, agentResult, config);
+  const success = !bundleValidation && !artifactValidation;
   const diagnostics = [
     ...(result.diagnostics || []),
     ...(bundleValidation ? [bundleValidation] : []),
+    ...(artifactValidation ? [artifactValidation] : []),
     ...(agentRuntimeDiagnostics(agentResult) || []),
   ];
 
@@ -946,7 +995,7 @@ function normalizeAgentTaskRun(input, result) {
     success,
     status: success ? 'completed' : result.status,
     outputs: plainObject(agentResult.outputs) ? agentResult.outputs : result.outputs,
-    summary: success ? 'WP Codebox agent task succeeded.' : (bundleValidation?.message || result.summary || 'WP Codebox agent task failed.'),
+    summary: success ? 'WP Codebox agent task succeeded.' : (artifactValidation?.message || bundleValidation?.message || result.summary || 'WP Codebox agent task failed.'),
     session: result.session ? {
       ...result.session,
       status: success ? 'completed' : 'failed',

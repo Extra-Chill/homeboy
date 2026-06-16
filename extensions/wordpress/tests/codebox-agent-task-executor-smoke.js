@@ -350,6 +350,20 @@ assert.equal(codeboxRequest.orchestrator.agent_task_id, 'task-123');
 assert.equal(codeboxRequest.context.audit_findings[0].id, 'finding-1');
 assert.deepEqual(codeboxRequest.agent_bundle, {});
 
+const artifactDeclarationRequest = codeboxTaskRequestFromAgentTaskRequest({
+  ...request,
+  task_id: 'artifact-declaration-task-123',
+  artifact_declarations: [{
+    schema: 'wp-codebox/artifact-declaration/v1',
+    name: 'analysis_report',
+    type: 'AnalysisReport',
+    artifact_schema: 'example/analysis-report/v1',
+    required: true,
+  }],
+});
+assert.equal(artifactDeclarationRequest.artifact_declarations[0].name, 'analysis_report');
+assert.equal(artifactDeclarationRequest.artifact_declarations[0].required, true);
+
 const codeboxRequestWithAbilityTools = codeboxTaskRequestFromAgentTaskRequest({
   ...request,
   task_id: 'ability-tools-task-123',
@@ -1429,6 +1443,35 @@ assert.equal(agentBundleOutcome.metadata.sandbox_policy.sandbox_tool_policy.tool
 assert.equal(upstreamRunnerOutcome.artifacts[1].kind, 'codebox-session-artifacts');
 assert.equal(upstreamRunnerOutcome.evidence_refs[0].uri, 'https://preview.example.test/sandbox-session-1');
 assert.equal(upstreamRunnerOutcome.evidence_refs[1].uri, '/tmp/wp-codebox-artifacts');
+
+const missingRequiredTypedArtifactOutcome = agentTaskOutcomeFromCodeboxResult({
+  ...request,
+  task_id: 'missing-required-typed-artifact-task-123',
+  artifact_declarations: [{
+    schema: 'wp-codebox/artifact-declaration/v1',
+    name: 'required_report',
+    type: 'RequiredReport',
+    artifact_schema: 'example/required-report/v1',
+    required: true,
+  }],
+  executor: { backend: 'codebox' },
+}, {
+  success: true,
+  schema: 'wp-codebox/agent-task-run/v1',
+  status: 'completed',
+  metadata: {
+    agent_runtime: {
+      workload: {
+        outputs: {},
+        scenarios: [{ id: 'agent-bundle', metadata: {} }],
+      },
+    },
+  },
+});
+assert.equal(missingRequiredTypedArtifactOutcome.status, 'failed');
+assert.equal(missingRequiredTypedArtifactOutcome.failure_classification, 'execution_failed');
+assert.equal(missingRequiredTypedArtifactOutcome.diagnostics[0].class, 'codebox.required_typed_artifacts_missing');
+assert.equal(missingRequiredTypedArtifactOutcome.diagnostics[0].data.missing[0].name, 'required_report');
 
 const canonicalTopLevelAgentBundleOutcome = agentTaskOutcomeFromCodeboxResult({
   ...request,

@@ -364,6 +364,13 @@ try {
         metadata: {},
         provenance: { source: 'test' },
       }],
+      artifact_declarations: [{
+        schema: 'wp-codebox/artifact-declaration/v1',
+        name: 'import_validation_result',
+        type: 'ImportValidationResult',
+        artifact_schema: 'example/import-validation-result/v1',
+        required: false,
+      }],
       workspaces: [{ target: '/workspace/codebox-canary', mode: 'readwrite' }],
     }),
     env: { ...process.env, FIXTURE_WP_CODEBOX_CAPTURE: runtimeTaskCapturePath, OPENCODE_API_KEY: 'redacted-test-key' },
@@ -374,6 +381,8 @@ try {
   assert.equal(runtimeTaskCaptured.input.runtime_task.ability, 'homeboy-canary/write-file');
   assert.deepEqual(runtimeTaskCaptured.input.agent_bundles, [{ source: '/workspace/bundles/canary-agent', slug: 'canary-agent' }]);
   assert.equal(runtimeTaskCaptured.input.structured_artifacts[0].name, 'concept_packet');
+  assert.equal(runtimeTaskCaptured.input.artifact_declarations[0].name, 'import_validation_result');
+  assert.equal(runtimeTaskCaptured.input.artifact_declarations[0].required, false);
   assert.equal(runtimeTaskCaptured.input.workspaces[0].target, '/workspace/codebox-canary');
 
   const abilityBridgeResult = spawnSync(process.execPath, [
@@ -444,6 +453,33 @@ try {
   const missingRuntimeOutput = JSON.parse(missingRuntimeOutputResult.stdout);
   assert.equal(missingRuntimeOutput.success, false);
   assert.equal(missingRuntimeOutput.diagnostics[0].class, 'runtime_task.outputs_missing');
+
+  const missingRequiredArtifactResult = spawnSync(process.execPath, [
+    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-wp-codebox-task-runner.cjs'),
+    '--wp-codebox-bin', fixtureWpCodebox,
+  ], {
+    encoding: 'utf8',
+    input: JSON.stringify({
+      ...request,
+      runtime_task: {
+        ability: 'example/validate-artifact',
+        input: { artifact: { slug: 'example-site' } },
+      },
+      artifact_declarations: [{
+        schema: 'wp-codebox/artifact-declaration/v1',
+        name: 'missing_required_report',
+        type: 'MissingRequiredReport',
+        artifact_schema: 'example/missing-required-report/v1',
+        required: true,
+      }],
+    }),
+    env: { ...process.env, FIXTURE_WP_CODEBOX_CAPTURE: path.join(root, 'capture-missing-required-artifact.json'), OPENCODE_API_KEY: 'redacted-test-key' },
+  });
+  assert.equal(missingRequiredArtifactResult.status, 1, missingRequiredArtifactResult.stderr || missingRequiredArtifactResult.stdout);
+  const missingRequiredArtifactOutput = JSON.parse(missingRequiredArtifactResult.stdout);
+  assert.equal(missingRequiredArtifactOutput.success, false);
+  assert.equal(missingRequiredArtifactOutput.diagnostics[0].class, 'wp-codebox.required_typed_artifacts_missing');
+  assert.equal(missingRequiredArtifactOutput.diagnostics[0].data.missing[0].name, 'missing_required_report');
 
   const codexCapturePath = path.join(root, 'capture-codex.json');
   const codexSecretEnv = [
