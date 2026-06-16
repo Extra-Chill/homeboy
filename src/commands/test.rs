@@ -105,6 +105,7 @@ impl TestArgs {
     pub(crate) fn lab_contract(&self) -> LabCommandContract {
         if self.changed_since.is_none() {
             LabCommandContract::portable("test", self.write.then_some("--write"), true, &[])
+                .release_gate()
         } else {
             LabCommandContract::local_only("test", TEST_CHANGED_SINCE_LAB_UNSUPPORTED_REASON)
         }

@@ -46,8 +46,9 @@ use super::super::lab_env::{
 };
 use super::super::lab_plan::{base_lab_plan, disabled_select_runner_plan, with_step};
 use super::super::lab_selection::{
-    prepare_lab_runner_for_offload, resolve_lab_runner_selection, status_tunnel_mode,
-    LabRunnerPreparation, LabRunnerSelection, LabRunnerSelectionSource,
+    prepare_lab_runner_for_offload, release_gate_local_hot_denied_error,
+    resolve_lab_runner_selection, status_tunnel_mode, LabRunnerPreparation, LabRunnerSelection,
+    LabRunnerSelectionSource,
 };
 use super::super::lab_workspaces::{
     agent_task_plan_extra_workspaces, lab_extra_workspaces, lab_workspace_mapping_metadata,
@@ -104,6 +105,9 @@ pub struct LabOffloadCommand {
     pub required_extensions: Vec<String>,
     pub requires_playwright: bool,
     pub infer_source_path_tools: bool,
+    /// Whether this is a release-gate command (lint/test/audit) subject to the
+    /// `/release_gate/local_hot` fail-closed routing policy.
+    pub release_gate: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -388,6 +392,26 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
                 .skip_reason(reason.clone())
                 .build(),
             );
+            // Release-gate routing safety (#4603): when a release gate's
+            // default runner cannot be prepared for remote execution (e.g. a
+            // stale daemon / version skew or a failed connection), silently
+            // falling back to local execution produces a gate result that is
+            // not faithful to the routing policy. Fail closed with a clear
+            // diagnostic that surfaces the underlying runner reason, rather
+            // than letting a stale launcher route the gate to the controller.
+            // The operator-only override is `/release_gate/local_hot: allowed`.
+            if contract.release_gate
+                && matches!(selection.source, LabRunnerSelectionSource::Default)
+                && !crate::core::defaults::resolve_release_gate_local_hot_policy().is_allowed()
+            {
+                return Err(release_gate_local_hot_denied_error(
+                    format!(
+                        "Release gate `{}` selected default Lab runner `{}` but could not prepare it for remote execution ({}); `/release_gate/local_hot` is `fail_closed`, so the gate will not silently fall back to local execution",
+                        contract.hot_label, selection.runner_id, reason
+                    ),
+                    "release_gate",
+                ));
+            }
             if !request.allow_local_fallback {
                 return Err(selected_runner_fallback_error(
                     &selection,
@@ -2229,6 +2253,7 @@ mod tests {
             required_extensions: Vec::new(),
             requires_playwright: false,
             infer_source_path_tools: true,
+            release_gate: false,
         }
     }
 
@@ -2244,6 +2269,7 @@ mod tests {
             required_extensions: Vec::new(),
             requires_playwright: false,
             infer_source_path_tools: false,
+            release_gate: false,
         }
     }
 
@@ -3042,6 +3068,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             Some("lab-default".to_string()),
         )
         .expect("selection")
@@ -3060,6 +3087,7 @@ mod tests {
             true,
             false,
             false,
+            false,
             Some("lab-default".to_string()),
         )
         .expect("selection")
@@ -3075,6 +3103,7 @@ mod tests {
         let selection = resolve_lab_runner_selection_from_default(
             &command,
             None,
+            false,
             false,
             false,
             false,
@@ -3098,6 +3127,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             Some("lab-default".to_string()),
         )
         .expect("selection");
@@ -3116,6 +3146,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             Some("lab-default".to_string()),
         )
         .expect("selection")
@@ -3130,7 +3161,7 @@ mod tests {
         let command = portable_lab_command("test");
 
         assert!(resolve_lab_runner_selection_from_default(
-            &command, None, false, false, false, None
+            &command, None, false, false, false, false, None
         )
         .expect("selection")
         .is_none());
@@ -3144,6 +3175,7 @@ mod tests {
             &command,
             None,
             true,
+            false,
             false,
             false,
             Some("lab-default".to_string()),
@@ -3166,7 +3198,7 @@ mod tests {
         let command = portable_lab_command("test");
 
         assert!(resolve_lab_runner_selection_from_default(
-            &command, None, true, false, false, None
+            &command, None, true, false, false, false, None
         )
         .expect("selection")
         .is_none());
@@ -3181,6 +3213,7 @@ mod tests {
             None,
             false,
             true,
+            false,
             false,
             Some("lab-default".to_string()),
         )
@@ -3206,6 +3239,7 @@ mod tests {
             true,
             true,
             false,
+            false,
             Some("lab-default".to_string()),
         )
         .expect("selection")
@@ -3217,6 +3251,7 @@ mod tests {
         let err = resolve_lab_runner_selection_from_default(
             &local_only_lab_command("current single-workspace Lab snapshot cannot safely mirror"),
             Some("lab-explicit"),
+            false,
             false,
             false,
             false,
@@ -3232,8 +3267,10 @@ mod tests {
     fn lab_runner_selection_denies_local_bench_when_host_policy_requires_lab() {
         let command = portable_lab_command("bench");
 
-        let err = resolve_lab_runner_selection_from_default(&command, None, true, true, true, None)
-            .expect_err("bench local execution should be denied by config policy");
+        let err = resolve_lab_runner_selection_from_default(
+            &command, None, true, true, true, false, None,
+        )
+        .expect_err("bench local execution should be denied by config policy");
 
         assert_eq!(err.code.as_str(), "validation.invalid_argument");
         assert!(err.message.contains("/bench/local_execution"));
@@ -3242,6 +3279,94 @@ mod tests {
         assert!(tried.iter().any(|hint| hint
             .as_str()
             .is_some_and(|hint| hint.contains("--runner <runner-id>"))));
+    }
+
+    fn release_gate_lab_command(label: &'static str) -> LabOffloadCommand {
+        let mut command = portable_lab_command(label);
+        command.release_gate = true;
+        command
+    }
+
+    #[test]
+    fn release_gate_force_hot_allow_local_hot_fails_closed_with_default_runner() {
+        // #4605: --force-hot --allow-local-hot must not silently bypass Lab
+        // routing for a release gate when a default runner is configured.
+        let command = release_gate_lab_command("lint");
+
+        let err = resolve_lab_runner_selection_from_default(
+            &command,
+            None,
+            true,
+            true,
+            false,
+            false,
+            Some("lab-default".to_string()),
+        )
+        .expect_err("release gate force-local bypass must fail closed");
+
+        assert_eq!(err.code.as_str(), "validation.invalid_argument");
+        assert!(err.message.contains("Release gate `lint`"));
+        assert!(err.message.contains("--force-hot --allow-local-hot"));
+        assert!(err.message.contains("lab-default"));
+        assert!(err.message.contains("/release_gate/local_hot"));
+        let tried = err.details["tried"].as_array().expect("tried");
+        assert!(tried.iter().any(|hint| hint
+            .as_str()
+            .is_some_and(|hint| hint.contains("/release_gate/local_hot"))));
+        assert!(tried.iter().any(|hint| hint
+            .as_str()
+            .is_some_and(|hint| hint.contains("HOMEBOY_RELEASE_GATE_LOCAL_HOT"))));
+    }
+
+    #[test]
+    fn release_gate_force_hot_allow_local_hot_allowed_by_policy() {
+        // When the operator opts in via /release_gate/local_hot=allowed, the
+        // bypass runs locally and is recorded (None selection → local run).
+        let command = release_gate_lab_command("test");
+
+        assert!(resolve_lab_runner_selection_from_default(
+            &command,
+            None,
+            true,
+            true,
+            false,
+            true,
+            Some("lab-default".to_string()),
+        )
+        .expect("selection")
+        .is_none());
+    }
+
+    #[test]
+    fn release_gate_force_hot_allow_local_hot_runs_local_without_default_runner() {
+        // No default runner configured → nothing to route to, so the gate runs
+        // locally even under fail_closed.
+        let command = release_gate_lab_command("audit");
+
+        assert!(resolve_lab_runner_selection_from_default(
+            &command, None, true, true, false, false, None
+        )
+        .expect("selection")
+        .is_none());
+    }
+
+    #[test]
+    fn non_release_gate_command_keeps_allow_local_hot_bypass() {
+        // Non-gate portable commands (e.g. agent-task) keep the existing
+        // --force-hot --allow-local-hot bypass behavior.
+        let command = portable_lab_command("agent-task dispatch/cook/loop/run-plan");
+
+        assert!(resolve_lab_runner_selection_from_default(
+            &command,
+            None,
+            true,
+            true,
+            false,
+            false,
+            Some("lab-default".to_string()),
+        )
+        .expect("selection")
+        .is_none());
     }
 
     #[test]

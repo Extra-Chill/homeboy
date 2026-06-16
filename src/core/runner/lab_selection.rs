@@ -316,10 +316,10 @@ pub(super) fn resolve_lab_runner_selection(
     force_hot: bool,
     allow_local_hot: bool,
 ) -> Result<Option<LabRunnerSelection>> {
-    let deny_local_bench = crate::core::defaults::load_config()
-        .bench
-        .local_execution
-        .is_denied();
+    let config = crate::core::defaults::load_config();
+    let deny_local_bench = config.bench.local_execution.is_denied();
+    let release_gate_local_hot_allowed =
+        crate::core::defaults::resolve_release_gate_local_hot_policy_from(&config).is_allowed();
     let default_runner =
         if explicit_runner.is_none() && command.portable && command.default_lab_offload {
             super::resolve_default_lab_runner()?
@@ -333,16 +333,19 @@ pub(super) fn resolve_lab_runner_selection(
         force_hot,
         allow_local_hot,
         deny_local_bench,
+        release_gate_local_hot_allowed,
         default_runner,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn resolve_lab_runner_selection_from_default(
     command: &LabOffloadCommand,
     explicit_runner: Option<&str>,
     force_hot: bool,
     allow_local_hot: bool,
     deny_local_bench: bool,
+    release_gate_local_hot_allowed: bool,
     default_runner: Option<String>,
 ) -> Result<Option<LabRunnerSelection>> {
     if let Some(runner_id) = explicit_runner {
@@ -406,6 +409,27 @@ pub(super) fn resolve_lab_runner_selection_from_default(
         ));
     }
 
+    // Release-gate routing safety (#4603 / #4605): a force-local bypass
+    // (`--force-hot --allow-local-hot`) for a release gate silently routes the
+    // gate to the controller machine instead of the configured Lab runner,
+    // producing a gate result that is not faithful to the routing policy. Fail
+    // closed with a clear diagnostic unless the operator explicitly opts back
+    // into local-hot via config/env, in which case the override is recorded by
+    // the offload metadata (`force_hot_local_override`).
+    if command.release_gate && force_hot && allow_local_hot {
+        if let Some(runner_id) = default_runner.as_ref() {
+            if !release_gate_local_hot_allowed {
+                return Err(release_gate_local_hot_denied_error(
+                    format!(
+                        "Release gate `{}` cannot bypass Lab routing with --force-hot --allow-local-hot while default Lab runner `{}` is configured and `/release_gate/local_hot` is `fail_closed`",
+                        command.hot_label, runner_id
+                    ),
+                    "force_hot",
+                ));
+            }
+        }
+    }
+
     if force_hot || !command.portable {
         fail_if_local_bench_denied(command, deny_local_bench)?;
         return Ok(None);
@@ -443,6 +467,29 @@ fn fail_if_local_bench_denied(command: &LabOffloadCommand, denied: bool) -> Resu
             format!("Change `/bench/local_execution` in {config_path} to `allowed` before intentionally re-enabling local benchmark execution."),
         ]),
     ))
+}
+
+/// Build the fail-closed error for a release-gate routing-policy violation.
+///
+/// `message` is the already-formatted diagnostic. The remediation always
+/// points the operator at the config/env override (the explicit operator-only
+/// escape hatch) rather than a convenience CLI flag, so the bypass cannot
+/// become a habit.
+pub(super) fn release_gate_local_hot_denied_error(message: String, field: &str) -> Error {
+    let config_path = crate::core::defaults::config_path()
+        .unwrap_or_else(|_| "the global Homeboy config".to_string());
+    let env_var = crate::core::defaults::RELEASE_GATE_LOCAL_HOT_ENV;
+    Error::validation_invalid_argument(
+        field,
+        message,
+        Some("fail_closed".to_string()),
+        Some(vec![
+            "Run the gate without local-hot flags so the configured Lab runner routing applies.".to_string(),
+            format!("Reconnect or upgrade a stale runner with `homeboy runner doctor <runner-id>` before retrying the gate."),
+            format!("To intentionally run a release gate locally, set `/release_gate/local_hot` to `allowed` in {config_path} (the override is recorded in offload metadata)."),
+            format!("For a single invocation, export {env_var}=allowed instead of editing config."),
+        ]),
+    )
 }
 
 fn runner_status_tunnel_mode(runner_id: &str) -> RunnerTunnelMode {

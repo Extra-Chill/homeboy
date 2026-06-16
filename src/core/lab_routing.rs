@@ -80,6 +80,7 @@ pub fn lab_offload_command_from_contract(
             .iter()
             .any(|tool| matches!(tool, LabCommandRequiredTool::Playwright)),
         infer_source_path_tools: contract.infer_source_path_tools,
+        release_gate: contract.release_gate,
     }
 }
 
@@ -201,6 +202,7 @@ mod tests {
             requires_extension_parity: true,
             extra_required_tools: LAB_TRACE_EXTRA_TOOLS,
             infer_source_path_tools: false,
+            release_gate: false,
         }
     }
 

@@ -27,6 +27,12 @@ pub struct LabCommandContract {
     pub requires_extension_parity: bool,
     pub extra_required_tools: &'static [LabCommandRequiredTool],
     pub infer_source_path_tools: bool,
+    /// Whether this command is a release gate whose routing fidelity matters
+    /// for validating a release (lint/test/audit). When true, force-local
+    /// bypass and stale-runner local fallback fail closed under the
+    /// `/release_gate/local_hot` policy if a default Lab runner is configured.
+    /// See issues #4603 / #4605.
+    pub release_gate: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -230,6 +236,7 @@ impl LabCommandContract {
             requires_extension_parity,
             extra_required_tools,
             infer_source_path_tools: true,
+            release_gate: false,
         }
     }
 
@@ -278,7 +285,16 @@ impl LabCommandContract {
             requires_extension_parity: false,
             extra_required_tools: LAB_NO_EXTRA_TOOLS,
             infer_source_path_tools: false,
+            release_gate: false,
         }
+    }
+
+    /// Mark this contract as a release gate (lint/test/audit) so that the
+    /// `/release_gate/local_hot` policy applies to force-local bypass and
+    /// stale-runner local fallback when a default Lab runner is configured.
+    pub(crate) const fn release_gate(mut self) -> Self {
+        self.release_gate = true;
+        self
     }
 }
 
@@ -642,6 +658,44 @@ mod tests {
             .expect("lint contract");
         assert!(lint.requires_extension_parity);
         assert!(lint.infer_source_path_tools);
+        assert!(lint.release_gate);
+
+        let test_full = parsed_command(&["homeboy", "test"])
+            .lab_contract()
+            .expect("test contract");
+        assert!(test_full.release_gate);
+
+        let audit_full = parsed_command(&["homeboy", "audit"])
+            .lab_contract()
+            .expect("audit contract");
+        assert!(audit_full.release_gate);
+
+        // Changed-scope/local-only variants and non-gate commands are NOT
+        // release gates.
+        assert!(
+            !parsed_command(&["homeboy", "lint", "--changed-since", "origin/main"])
+                .lab_contract()
+                .expect("changed-scope lint contract")
+                .release_gate
+        );
+        assert!(
+            !parsed_command(&["homeboy", "bench"])
+                .lab_contract()
+                .expect("bench contract")
+                .release_gate
+        );
+        assert!(
+            !parsed_command(&["homeboy", "trace"])
+                .lab_contract()
+                .expect("trace contract")
+                .release_gate
+        );
+        assert!(
+            !parsed_command(&["homeboy", "agent-task", "dispatch", "--prompt", "cook"])
+                .lab_contract()
+                .expect("agent-task contract")
+                .release_gate
+        );
 
         for args in [
             ["homeboy", "agent-task", "status", "agent-task-123"].as_slice(),

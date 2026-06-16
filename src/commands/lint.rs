@@ -111,12 +111,10 @@ impl LintArgs {
 
     pub(crate) fn lab_contract(&self) -> Option<LabCommandContract> {
         if self.is_full_workspace_run() {
-            return Some(LabCommandContract::portable(
-                "lint",
-                self.fix.then_some("--fix"),
-                true,
-                &[],
-            ));
+            return Some(
+                LabCommandContract::portable("lint", self.fix.then_some("--fix"), true, &[])
+                    .release_gate(),
+            );
         }
 
         (self.changed_since.is_some() || self.changed_only).then(|| {
