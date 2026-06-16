@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## Unreleased
+
+### Fixed
+- resolve rig component paths to the runner-side materialized checkout during Lab offload so remote `${components.<id>.path}` checks no longer fail against the controller path (#3766)
+- expand portable `~`/`~/...` rig dependency checkout roots to an absolute runner home path so the materialized remote path is never a literal `~` directory (#3767)
+- snapshot a dirty/untracked Lab rig dependency working tree as an explicit overlay under `--allow-dirty-lab-workspace` instead of refusing it, with dirty-vs-clean provenance recorded in workspace metadata (#3765)
+- surface declared-vs-resolved paths and actionable hints on remote rig check-file failures so unexpanded component-path tokens and unresolved `~` are diagnosable
+
 ## [0.233.0] - 2026-06-16
 
 ### Added

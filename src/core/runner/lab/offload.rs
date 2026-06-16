@@ -1040,12 +1040,16 @@ fn run_lab_offload_inner(
         );
     }
 
-    let synced_rig_dependencies = rig_materialization::sync_lab_offload_rig_component_dependencies(
+    let rig_component_sync = rig_materialization::sync_lab_offload_rig_component_dependencies(
         runner_id,
         &changed_since_preflight.args,
         &synced.local_path,
         &remote_cwd,
+        runner.workspace_root.as_deref(),
+        request.allow_dirty_lab_workspace,
     )?;
+    let synced_rig_dependencies = rig_component_sync.materializations;
+    let rig_component_path_overrides = rig_component_sync.component_path_env;
     if !synced_rig_dependencies.is_empty() {
         for dependency in &synced_rig_dependencies {
             workspace_mapping.extend(workspace_mapping_entries_for_git_dependency(
@@ -1169,6 +1173,7 @@ fn run_lab_offload_inner(
     forward_env_if_present(&mut env, PREVIEW_PUBLIC_URL_ENV);
     forward_release_ci_env(&mut env);
     let rig_component_path_env = forward_rig_component_path_env(&mut env, &workspace_mapping)?;
+    apply_rig_component_path_overrides(&mut env, &rig_component_path_overrides);
     let agent_task_secret_env =
         hydrate_agent_task_secret_env(&changed_since_preflight.args, &mut env)?;
     let trace_secret_env = hydrate_trace_secret_env(&changed_since_preflight.args, &mut env)?;
@@ -1177,6 +1182,8 @@ fn run_lab_offload_inner(
     lab_metadata["trace_secret_env"] = trace_secret_env;
     lab_metadata["tunnel_secret_env"] = tunnel_secret_env;
     lab_metadata["rig_component_path_env"] = rig_component_path_env;
+    lab_metadata["rig_component_path_overrides"] =
+        rig_component_path_overrides_metadata(&rig_component_path_overrides);
     lab_metadata["settings_env"] = settings_env_diagnostics(&remapped_args, &env);
     lab_metadata["runner_homeboy"] = runner_homeboy.clone();
     lab_metadata["source_checkout"] = source_checkout.clone();
@@ -1199,6 +1206,7 @@ fn run_lab_offload_inner(
     forward_env_if_present(&mut env, PREVIEW_PUBLIC_URL_ENV);
     forward_release_ci_env(&mut env);
     forward_rig_component_path_env(&mut env, &workspace_mapping)?;
+    apply_rig_component_path_overrides(&mut env, &rig_component_path_overrides);
     hydrate_agent_task_secret_env(&changed_since_preflight.args, &mut env)?;
     hydrate_trace_secret_env(&changed_since_preflight.args, &mut env)?;
     hydrate_tunnel_secret_env(&changed_since_preflight.args, &mut env)?;
@@ -1391,6 +1399,39 @@ fn run_lab_offload_inner(
         stdout: exec_output.stdout,
         stderr,
         exit_code,
+    })
+}
+
+/// Insert generic `${components.<id>.path}` override env vars so a remote rig
+/// check resolves component paths to the runner-side materialized checkout
+/// instead of the controller path the rig spec declares (issue #3766/#3767).
+fn apply_rig_component_path_overrides(
+    env: &mut std::collections::HashMap<String, String>,
+    overrides: &[(String, String)],
+) {
+    for (name, value) in overrides {
+        if !value.trim().is_empty() {
+            env.insert(name.clone(), value.clone());
+        }
+    }
+}
+
+/// Build diagnostics describing each rig component path override forwarded to
+/// the runner, so bench artifacts show how `${components.<id>.path}` resolved.
+fn rig_component_path_overrides_metadata(overrides: &[(String, String)]) -> serde_json::Value {
+    let forwarded = overrides
+        .iter()
+        .map(|(name, runner_path)| {
+            serde_json::json!({
+                "env_name": name,
+                "runner_path": runner_path,
+                "forwarded_to_runner": true,
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "schema": "homeboy/lab-offload-rig-component-path-override/v1",
+        "overrides": forwarded,
     })
 }
 

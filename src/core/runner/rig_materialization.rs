@@ -342,24 +342,57 @@ fn has_path_arg(args: &[String]) -> bool {
     false
 }
 
+/// Result of materializing a rig's component dependencies on the runner.
+pub(super) struct LabOffloadRigComponentSync {
+    /// Per-dependency materialization outputs (remote paths, freshness, etc.).
+    pub materializations: Vec<RunnerGitDependencyMaterializationOutput>,
+    /// Generic `${components.<id>.path}` override env vars mapping each rig
+    /// component to its runner-side materialized path, so checks that execute
+    /// on the runner resolve component paths to the runner workspace instead of
+    /// the controller path the rig spec declares.
+    pub component_path_env: Vec<(String, String)>,
+}
+
 pub(super) fn sync_lab_offload_rig_component_dependencies(
     runner_id: &str,
     args: &[String],
     primary_local_path: &str,
     primary_remote_path: &str,
-) -> Result<Vec<RunnerGitDependencyMaterializationOutput>> {
+    runner_workspace_root: Option<&str>,
+    allow_dirty_lab_workspace: bool,
+) -> Result<LabOffloadRigComponentSync> {
     let dependencies = lab_offload_rig_component_dependencies(
         args,
         Some((primary_local_path, primary_remote_path)),
+        runner_workspace_root,
     )?;
     if dependencies.is_empty() {
-        return Ok(Vec::new());
+        return Ok(LabOffloadRigComponentSync {
+            materializations: Vec::new(),
+            component_path_env: Vec::new(),
+        });
     }
 
     let runner = load(runner_id)?;
     let mut synced = Vec::new();
+    let mut component_path_env = Vec::new();
     let mut seen = HashSet::new();
     for dependency in dependencies {
+        // Always record the runner-side effective component path so a remote
+        // rig check resolves `${components.<id>.path}` to the materialized path,
+        // even when the checkout root is the already-synced primary workspace
+        // (which is not re-materialized below).
+        component_path_env.push((
+            crate::core::rig::expand::rig_component_path_override_env_name(
+                &dependency.rig_id,
+                &dependency.component_id,
+            ),
+            remote_component_path(
+                &dependency.remote_checkout_root,
+                dependency.required_subpath.as_deref(),
+            ),
+        ));
+
         if !should_materialize_dependency(&dependency, primary_remote_path) {
             continue;
         }
@@ -374,11 +407,26 @@ pub(super) fn sync_lab_offload_rig_component_dependencies(
                 remote_url: dependency.remote_url,
                 required_subpath: dependency.required_subpath,
                 pinned_ref: dependency.pinned_ref,
+                allow_dirty: allow_dirty_lab_workspace,
             },
         )?);
     }
 
-    Ok(synced)
+    Ok(LabOffloadRigComponentSync {
+        materializations: synced,
+        component_path_env,
+    })
+}
+
+/// Join a runner-side checkout root with the component's required subpath.
+fn remote_component_path(remote_checkout_root: &str, required_subpath: Option<&str>) -> String {
+    match required_subpath.filter(|value| !value.trim().is_empty()) {
+        Some(subpath) => Path::new(remote_checkout_root)
+            .join(subpath)
+            .display()
+            .to_string(),
+        None => remote_checkout_root.to_string(),
+    }
 }
 
 pub(super) fn lab_offload_rig_component_checkout_root(args: &[String]) -> Result<Option<PathBuf>> {
@@ -417,6 +465,7 @@ pub(super) fn lab_offload_rig_component_checkout_root(args: &[String]) -> Result
 pub(super) fn lab_offload_rig_component_dependencies(
     args: &[String],
     primary_workspace: Option<(&str, &str)>,
+    runner_workspace_root: Option<&str>,
 ) -> Result<Vec<RigComponentDependency>> {
     let mut dependencies = Vec::new();
     let component_path_override = component_path_override(args);
@@ -475,6 +524,7 @@ pub(super) fn lab_offload_rig_component_dependencies(
                     &checkout_root,
                     &local_checkout_root,
                     primary_workspace,
+                    runner_workspace_root,
                 ),
                 local_checkout_root,
                 declared_checkout_root: checkout_root.to_string(),
@@ -524,6 +574,7 @@ fn remote_checkout_root_for_local(
     declared_checkout_root: &str,
     local_checkout_root: &str,
     primary_workspace: Option<(&str, &str)>,
+    runner_workspace_root: Option<&str>,
 ) -> String {
     let Some((primary_local_path, primary_remote_path)) = primary_workspace else {
         return local_checkout_root.to_string();
@@ -533,8 +584,14 @@ fn remote_checkout_root_for_local(
     {
         return primary_remote_path.to_string();
     }
-    if is_portable_runner_path(declared_checkout_root) {
-        return declared_checkout_root.to_string();
+    // A declared `~/...` checkout root is portable: it should land at the same
+    // home-relative location on the runner. Expand `~` against the runner home
+    // (derived from the runner workspace root) so the materialized remote path
+    // is a real absolute path instead of a literal `~` subdirectory.
+    if let Some(portable) =
+        expand_portable_runner_path(declared_checkout_root, runner_workspace_root)
+    {
+        return portable;
     }
     let name = Path::new(local_checkout_root)
         .file_name()
@@ -549,6 +606,63 @@ fn remote_checkout_root_for_local(
 
 fn is_portable_runner_path(path: &str) -> bool {
     path == "~" || path.starts_with("~/")
+}
+
+/// Resolve a portable `~`/`~/...` checkout root to an absolute runner path.
+///
+/// Returns `None` for non-portable paths so callers fall back to deriving a
+/// materialized `_lab_workspaces` path. When the runner home cannot be derived
+/// the portable tail is left unresolved (still `None`) so we never emit a
+/// literal `~` directory on the runner.
+fn expand_portable_runner_path(path: &str, runner_workspace_root: Option<&str>) -> Option<String> {
+    if !is_portable_runner_path(path) {
+        return None;
+    }
+    let runner_home = runner_home_from_workspace_root(runner_workspace_root?)?;
+    let tail = path.strip_prefix('~').unwrap_or(path);
+    let tail = tail.strip_prefix('/').unwrap_or(tail);
+    if tail.is_empty() {
+        return Some(runner_home);
+    }
+    Some(format!("{}/{}", runner_home.trim_end_matches('/'), tail))
+}
+
+/// Derive the runner home directory from the runner workspace root.
+///
+/// Runner workspace roots are absolute (validated elsewhere). The runner home
+/// is the deepest ancestor that looks like a user home root (`/home/<user>` or
+/// `/Users/<user>`), falling back to the workspace root's parent. This stays
+/// generic: it makes no assumption about any specific runtime or component.
+fn runner_home_from_workspace_root(workspace_root: &str) -> Option<String> {
+    let root = Path::new(workspace_root);
+    if !root.is_absolute() {
+        return None;
+    }
+    let mut components: Vec<&std::ffi::OsStr> = Vec::new();
+    for component in root.components() {
+        if let std::path::Component::Normal(value) = component {
+            components.push(value);
+        }
+    }
+    // Match the common `/home/<user>` and `/Users/<user>` home roots when the
+    // workspace root nests beneath them, so `~` resolves to the user home even
+    // when the workspace root is e.g. `/home/<user>/Developer`.
+    for marker in ["home", "Users"] {
+        if let Some(position) = components.iter().position(|value| {
+            value
+                .to_str()
+                .is_some_and(|value| value.eq_ignore_ascii_case(marker))
+        }) {
+            if position + 1 < components.len() {
+                let user = components[position + 1].to_str()?;
+                return Some(format!("/{}/{}", components[position].to_str()?, user));
+            }
+        }
+    }
+    // Fall back to the workspace root's parent directory.
+    root.parent()
+        .map(|parent| parent.display().to_string())
+        .filter(|parent| !parent.is_empty())
 }
 
 fn should_materialize_dependency(
@@ -751,6 +865,7 @@ mod tests {
                     "woocommerce-performance".to_string(),
                 ],
                 None,
+                None,
             )
             .expect("dependencies");
 
@@ -810,6 +925,7 @@ mod tests {
                     "--path".to_string(),
                     override_component.display().to_string(),
                 ],
+                None,
                 None,
             )
             .expect("dependencies");
@@ -927,6 +1043,7 @@ mod tests {
                     &checkout.display().to_string(),
                     "/home/chubes/Developer/_lab_workspaces/studio-web-snapshot",
                 )),
+                None,
             )
             .expect("dependencies");
 
@@ -1055,6 +1172,7 @@ mod tests {
                 "/Users/chubes/Developer/homeboy-rigs/Automattic/studio",
                 "/home/chubes/Developer/_lab_workspaces/studio-rigs-snapshot",
             )),
+            Some("/home/chubes/Developer"),
         );
 
         assert_eq!(
@@ -1065,7 +1183,10 @@ mod tests {
     }
 
     #[test]
-    fn preserves_portable_declared_rig_dependency_path_for_runner() {
+    fn portable_declared_rig_dependency_path_expands_to_runner_home() {
+        // Regression for #3767: a portable `~/...` declared checkout root must
+        // resolve to an absolute runner path (under the runner home derived from
+        // the workspace root), never a literal `~` subdirectory.
         let remote = remote_checkout_root_for_local(
             "~/Developer/studio@fix-many-sites-memory",
             "/Users/chubes/Developer/studio@fix-many-sites-memory",
@@ -1073,9 +1194,68 @@ mod tests {
                 "/Users/chubes/Developer/homeboy-rigs/Automattic/studio",
                 "/home/chubes/Developer/_lab_workspaces/studio-rigs-snapshot",
             )),
+            Some("/home/chubes/Developer"),
         );
 
-        assert_eq!(remote, "~/Developer/studio@fix-many-sites-memory");
+        assert_eq!(
+            remote,
+            "/home/chubes/Developer/studio@fix-many-sites-memory"
+        );
+        assert!(!remote.contains('~'));
+    }
+
+    #[test]
+    fn portable_rig_dependency_without_runner_home_falls_back_to_materialized_path() {
+        // When the runner home cannot be derived we must still avoid emitting a
+        // literal `~`; fall back to the materialized `_lab_workspaces` path.
+        let remote = remote_checkout_root_for_local(
+            "~/Developer/studio@fix-many-sites-memory",
+            "/Users/chubes/Developer/studio@fix-many-sites-memory",
+            Some((
+                "/Users/chubes/Developer/homeboy-rigs/Automattic/studio",
+                "/home/chubes/Developer/_lab_workspaces/studio-rigs-snapshot",
+            )),
+            None,
+        );
+
+        assert!(!remote.contains('~'));
+        assert_eq!(
+            remote,
+            "/home/chubes/Developer/_lab_workspaces/studio-fix-many-sites-memory"
+        );
+    }
+
+    #[test]
+    fn runner_home_resolves_from_nested_workspace_root() {
+        assert_eq!(
+            runner_home_from_workspace_root("/home/chubes/Developer"),
+            Some("/home/chubes".to_string())
+        );
+        assert_eq!(
+            runner_home_from_workspace_root("/Users/chubes/Developer/lab"),
+            Some("/Users/chubes".to_string())
+        );
+        // Workspace root that is itself a home falls back to its parent.
+        assert_eq!(
+            runner_home_from_workspace_root("/srv/homeboy"),
+            Some("/srv".to_string())
+        );
+    }
+
+    #[test]
+    fn expand_portable_runner_path_joins_tail_to_runner_home() {
+        assert_eq!(
+            expand_portable_runner_path("~/Developer/x", Some("/home/chubes/Developer")),
+            Some("/home/chubes/Developer/x".to_string())
+        );
+        assert_eq!(
+            expand_portable_runner_path("~", Some("/home/chubes/Developer")),
+            Some("/home/chubes".to_string())
+        );
+        assert_eq!(
+            expand_portable_runner_path("/abs/path", Some("/home/chubes/Developer")),
+            None
+        );
     }
 
     #[test]
