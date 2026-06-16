@@ -10,7 +10,9 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::core::preview_client::{PreviewIngressRequest, PreviewIngressResponse};
+use crate::core::preview_client::{
+    PreviewIngressRequest, PreviewIngressResponse, PreviewIngressResponseChunk,
+};
 
 use crate::core::error::{Error, Result};
 use crate::core::paths;
@@ -191,6 +193,7 @@ struct PreviewClientSession {
     local_origin: String,
     pending: VecDeque<PreviewIngressRequest>,
     responses: HashMap<String, PreviewIngressResponse>,
+    response_chunks: HashMap<String, VecDeque<PreviewIngressResponseChunk>>,
     active: bool,
 }
 
@@ -225,6 +228,12 @@ struct PreviewNextRequest {
 struct PreviewRespondRequest {
     public_host: String,
     response: PreviewIngressResponse,
+}
+
+#[derive(Debug, Deserialize)]
+struct PreviewRespondChunkRequest {
+    public_host: String,
+    chunk: PreviewIngressResponseChunk,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1022,6 +1031,7 @@ fn handle_client_api(
                     local_origin: body.local_origin,
                     pending: VecDeque::new(),
                     responses: HashMap::new(),
+                    response_chunks: HashMap::new(),
                     active: true,
                 },
             );
@@ -1081,6 +1091,24 @@ fn handle_client_api(
             session
                 .responses
                 .insert(body.response.request_id.clone(), body.response);
+            sessions.changed.notify_all();
+            write_json_response(stream, 200, json!({ "accepted": true }))
+        }
+        "/preview/client/respond-chunk" => {
+            let body: PreviewRespondChunkRequest = parse_json_body(&request.body, "respond-chunk")?;
+            let public_host = normalize_public_host(&body.public_host);
+            let mut sessions_guard = sessions
+                .sessions
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let Some(session) = sessions_guard.get_mut(&public_host) else {
+                return write_json_response(stream, 404, json!({ "error": "missing_session" }));
+            };
+            session
+                .response_chunks
+                .entry(body.chunk.request_id.clone())
+                .or_default()
+                .push_back(body.chunk);
             sessions.changed.notify_all();
             write_json_response(stream, 200, json!({ "accepted": true }))
         }
@@ -1162,6 +1190,18 @@ fn proxy_reverse_channel_request(
         if let Some(session) = sessions_guard.get_mut(&public_host) {
             if let Some(response) = session.responses.remove(&request_id) {
                 drop(sessions_guard);
+                if response.body_stream {
+                    return write_streaming_preview_response(
+                        stream,
+                        response,
+                        &public_host,
+                        &host,
+                        &path,
+                        started,
+                        sessions,
+                        recent_failures,
+                    );
+                }
                 return write_preview_response(stream, response, &host, &path, started);
             }
         }
@@ -1507,6 +1547,113 @@ fn write_preview_response(
         classification: "reverse_channel".to_string(),
     });
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_streaming_preview_response(
+    stream: &mut TcpStream,
+    response: PreviewIngressResponse,
+    public_host: &str,
+    host: &str,
+    path: &str,
+    started: Instant,
+    sessions: Arc<PreviewClientSessions>,
+    recent_failures: Arc<Mutex<Vec<PreviewIngressFailure>>>,
+) -> Result<()> {
+    let request_id = response.request_id.clone();
+    let status = response.status;
+    let headers = response.headers.into_iter().collect::<Vec<_>>();
+    write_status_and_headers(stream, status, reason_for_status(status), &headers)?;
+
+    let idle_timeout = Duration::from_secs(60);
+    let mut bytes = 0_usize;
+    loop {
+        let started_waiting = Instant::now();
+        let mut sessions_guard = sessions
+            .sessions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        loop {
+            let Some(session) = sessions_guard.get_mut(public_host) else {
+                let failure = PreviewIngressFailure {
+                    request_id: request_id.clone(),
+                    host: host.to_string(),
+                    path: path.to_string(),
+                    status: 410,
+                    classification: "disconnected_session".to_string(),
+                    message: "Homeboy preview client session disconnected while streaming"
+                        .to_string(),
+                };
+                record_failure(&recent_failures, failure);
+                return Ok(());
+            };
+            if let Some(queue) = session.response_chunks.get_mut(&request_id) {
+                if let Some(chunk) = queue.pop_front() {
+                    if queue.is_empty() && chunk.complete {
+                        session.response_chunks.remove(&request_id);
+                    }
+                    drop(sessions_guard);
+                    let body = base64::engine::general_purpose::STANDARD
+                        .decode(chunk.body_base64.as_bytes())
+                        .map_err(|e| {
+                            Error::internal_json(e.to_string(), Some(request_id.clone()))
+                        })?;
+                    if !body.is_empty() {
+                        stream.write_all(&body).map_err(|e| {
+                            Error::internal_io(
+                                e.to_string(),
+                                Some("write preview client response chunk".to_string()),
+                            )
+                        })?;
+                        bytes += body.len();
+                    }
+                    if chunk.complete {
+                        log_request(&PreviewIngressLogLine {
+                            request_id,
+                            host: host.to_string(),
+                            path: path.to_string(),
+                            status,
+                            bytes,
+                            duration_ms: started.elapsed().as_millis(),
+                            classification: "reverse_channel_stream".to_string(),
+                        });
+                        return Ok(());
+                    }
+                    break;
+                }
+            }
+            let elapsed = started_waiting.elapsed();
+            if elapsed >= idle_timeout {
+                let failure = PreviewIngressFailure {
+                    request_id: request_id.clone(),
+                    host: host.to_string(),
+                    path: path.to_string(),
+                    status: 504,
+                    classification: "client_stream_timeout".to_string(),
+                    message: "Homeboy preview client stopped sending response chunks".to_string(),
+                };
+                record_failure(&recent_failures, failure);
+                return Ok(());
+            }
+            let (guard, wait) = sessions
+                .changed
+                .wait_timeout(sessions_guard, idle_timeout - elapsed)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            sessions_guard = guard;
+            if wait.timed_out() {
+                let failure = PreviewIngressFailure {
+                    request_id: request_id.clone(),
+                    host: host.to_string(),
+                    path: path.to_string(),
+                    status: 504,
+                    classification: "client_stream_timeout".to_string(),
+                    message: "Homeboy preview client stopped sending response chunks".to_string(),
+                };
+                record_failure(&recent_failures, failure);
+                return Ok(());
+            }
+        }
+    }
 }
 
 fn validate_route(route: &PreviewIngressRoute) -> Result<()> {

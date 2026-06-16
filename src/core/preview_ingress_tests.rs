@@ -304,6 +304,144 @@ fn reverse_channel_client_forwards_bootstrap_redirect_and_repeated_cookies() {
 }
 
 #[test]
+fn reverse_channel_streams_multi_megabyte_public_body() {
+    test_support::with_isolated_home(|_| {
+        let token = "test-preview-token-stream";
+        std::env::set_var(
+            "HOMEBOY_TEST_PREVIEW_TOKEN_SHA256",
+            native_preview_token_sha256(token),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").expect("reserve port");
+        let port = listener.local_addr().expect("local addr").port();
+        thread::spawn(move || {
+            serve_listener(
+                PreviewIngressServeSpec {
+                    bind: format!("127.0.0.1:{port}"),
+                    domain: "example.com".to_string(),
+                    public_host_pattern: "*-tunnel.example.com".to_string(),
+                    token_sha256_env: "HOMEBOY_TEST_PREVIEW_TOKEN_SHA256".to_string(),
+                },
+                listener,
+            )
+            .expect("serve ingress");
+        });
+        thread::sleep(Duration::from_millis(100));
+
+        let register = http_request(
+            port,
+            "POST",
+            "/preview/client/register",
+            "homeboy-health-tunnel.example.com",
+            Some(token),
+            json!({
+                "public_host": "run-stream-tunnel.example.com",
+                "local_origin": "http://127.0.0.1:49999",
+                "session_id": "run-stream"
+            })
+            .to_string(),
+        );
+        assert!(register.contains("200 OK"), "{register}");
+
+        let browser = thread::spawn(move || {
+            raw_http_request_bytes(
+                port,
+                "GET /homeboy/workflow-bench/runs/run/artifacts/blueprint.zip HTTP/1.1\r\nHost: run-stream-tunnel.example.com\r\n\r\n",
+            )
+        });
+        thread::sleep(Duration::from_millis(100));
+
+        let next = http_request(
+            port,
+            "POST",
+            "/preview/client/next",
+            "homeboy-health-tunnel.example.com",
+            Some(token),
+            json!({ "public_host": "run-stream-tunnel.example.com", "timeout_secs": 2 })
+                .to_string(),
+        );
+        assert!(next.contains("blueprint.zip"), "{next}");
+        let request_id = response_json(&next)["request"]["request_id"]
+            .as_str()
+            .expect("request id")
+            .to_string();
+
+        let payload = vec![b'x'; (2 * 1024 * 1024) + 123];
+        let respond = http_request(
+            port,
+            "POST",
+            "/preview/client/respond",
+            "homeboy-health-tunnel.example.com",
+            Some(token),
+            json!({
+                "public_host": "run-stream-tunnel.example.com",
+                "response": {
+                    "request_id": request_id,
+                    "status": 200,
+                    "headers": [
+                        ["content-type", "application/zip"],
+                        ["content-length", payload.len().to_string()],
+                        ["access-control-allow-origin", "*"]
+                    ],
+                    "body_stream": true
+                }
+            })
+            .to_string(),
+        );
+        assert!(respond.contains("200 OK"), "{respond}");
+
+        for (sequence, chunk) in payload.chunks(64 * 1024).enumerate() {
+            let response = http_request(
+                port,
+                "POST",
+                "/preview/client/respond-chunk",
+                "homeboy-health-tunnel.example.com",
+                Some(token),
+                json!({
+                    "public_host": "run-stream-tunnel.example.com",
+                    "chunk": {
+                        "request_id": request_id,
+                        "sequence": sequence,
+                        "body_base64": base64::engine::general_purpose::STANDARD.encode(chunk),
+                        "complete": false
+                    }
+                })
+                .to_string(),
+            );
+            assert!(response.contains("200 OK"), "{response}");
+        }
+        let complete = http_request(
+            port,
+            "POST",
+            "/preview/client/respond-chunk",
+            "homeboy-health-tunnel.example.com",
+            Some(token),
+            json!({
+                "public_host": "run-stream-tunnel.example.com",
+                "chunk": {
+                    "request_id": request_id,
+                    "sequence": payload.len() / (64 * 1024) + 1,
+                    "body_base64": "",
+                    "complete": true
+                }
+            })
+            .to_string(),
+        );
+        assert!(complete.contains("200 OK"), "{complete}");
+
+        let browser_response = browser.join().expect("browser response");
+        assert!(
+            String::from_utf8_lossy(&browser_response).contains("200 OK"),
+            "{}",
+            String::from_utf8_lossy(&browser_response[..browser_response.len().min(256)])
+        );
+        assert!(
+            String::from_utf8_lossy(&browser_response).contains("access-control-allow-origin: *")
+        );
+        assert_eq!(response_body_bytes(&browser_response), payload.as_slice());
+    });
+}
+
+#[test]
 fn route_proxy_serves_artifact_json_with_cors_headers() {
     test_support::with_isolated_home(|_| {
         let upstream = TcpListener::bind("127.0.0.1:0").expect("upstream bind");
@@ -437,11 +575,23 @@ fn http_request(
 }
 
 fn raw_http_request(port: u16, request: &str) -> String {
+    String::from_utf8(raw_http_request_bytes(port, request)).expect("utf8 response")
+}
+
+fn raw_http_request_bytes(port: u16, request: &str) -> Vec<u8> {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
     stream.write_all(request.as_bytes()).expect("write request");
-    let mut response = String::new();
-    stream.read_to_string(&mut response).expect("read response");
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).expect("read response");
     response
+}
+
+fn response_body_bytes(response: &[u8]) -> &[u8] {
+    response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|index| &response[index + 4..])
+        .expect("response body")
 }
 
 fn response_json(response: &str) -> serde_json::Value {
