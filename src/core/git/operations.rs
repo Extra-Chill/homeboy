@@ -407,6 +407,35 @@ pub fn get_head_commit(path: &str) -> Result<String> {
     crate::core::engine::command::run_in(path, "git", &["rev-parse", "HEAD"], "get HEAD commit")
 }
 
+/// Get the commit SHA the `origin` remote currently has for a branch, without
+/// fetching. Returns `Ok(None)` when the branch does not exist on the remote.
+///
+/// Used to detect that the remote branch advanced after a release commit/tag
+/// were created — the partial-release state in issue #3611, where the tag push
+/// succeeded but the branch push was rejected as non-fast-forward.
+pub fn remote_branch_commit(path: &str, branch: &str) -> Result<Option<String>> {
+    let ref_name = format!("refs/heads/{}", branch);
+    Ok(crate::core::engine::command::run_in_optional(
+        path,
+        "git",
+        &["ls-remote", "--heads", "origin", &ref_name],
+    )
+    .and_then(|output| {
+        output
+            .lines()
+            .find_map(|line| line.split_whitespace().next().map(str::to_string))
+    }))
+}
+
+/// Fetch `origin` so remote-tracking refs reflect the current remote state.
+///
+/// A thin wrapper used by release recovery before it inspects how far the local
+/// branch has diverged from the advanced remote (issue #3611).
+pub fn fetch_origin(path: &str) -> Result<()> {
+    crate::core::engine::command::run_in(path, "git", &["fetch", "origin"], "git fetch origin")?;
+    Ok(())
+}
+
 /// Return true when `ancestor` is an ancestor of (i.e. reachable from)
 /// `descendant`. Used to confirm a stale tag's commit is strictly behind HEAD
 /// before moving it, so a tag is never relocated onto an unrelated/divergent
@@ -597,5 +626,50 @@ mod is_ancestor_tests {
         assert!(!is_ancestor(path, &second, &first).unwrap());
         // a commit is its own ancestor (git treats reflexive as true)
         assert!(is_ancestor(path, &second, &second).unwrap());
+    }
+
+    /// Set up a bare remote + a clone with one pushed commit on `main`.
+    /// Returns (remote_dir, clone_dir, pushed_commit_sha).
+    fn remote_and_clone() -> (tempfile::TempDir, tempfile::TempDir, String) {
+        let remote = tempfile::tempdir().expect("remote tempdir");
+        let clone = tempfile::tempdir().expect("clone tempdir");
+        run_in(
+            remote.path(),
+            &["git", "init", "--bare", "-b", "main", "-q"],
+        );
+        run_in(
+            clone.path(),
+            &["git", "clone", "-q", remote.path().to_str().unwrap(), "."],
+        );
+        run_in(clone.path(), &["git", "config", "user.email", "t@x.test"]);
+        run_in(clone.path(), &["git", "config", "user.name", "T"]);
+        run_in(clone.path(), &["git", "config", "commit.gpgsign", "false"]);
+        std::fs::write(clone.path().join("f.txt"), "one").unwrap();
+        run_in(clone.path(), &["git", "add", "."]);
+        run_in(clone.path(), &["git", "commit", "-q", "-m", "first"]);
+        run_in(clone.path(), &["git", "push", "-q", "origin", "main"]);
+        let sha = rev(clone.path(), "HEAD");
+        (remote, clone, sha)
+    }
+
+    #[test]
+    fn test_remote_branch_commit() {
+        let (_remote, clone, pushed) = remote_and_clone();
+        let path = clone.path().to_str().unwrap();
+
+        // Existing branch resolves to the pushed commit.
+        assert_eq!(
+            remote_branch_commit(path, "main").unwrap().as_deref(),
+            Some(pushed.as_str())
+        );
+        // A branch that does not exist on the remote returns None.
+        assert_eq!(remote_branch_commit(path, "does-not-exist").unwrap(), None);
+    }
+
+    #[test]
+    fn test_fetch_origin() {
+        let (_remote, clone, _pushed) = remote_and_clone();
+        // A plain fetch against a healthy remote must succeed.
+        fetch_origin(clone.path().to_str().unwrap()).expect("fetch origin should succeed");
     }
 }

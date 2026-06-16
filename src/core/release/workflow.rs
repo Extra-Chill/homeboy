@@ -916,6 +916,17 @@ fn run_recover(input: &ReleaseCommandInput) -> Result<(ReleaseCommandResult, i32
         actions.push("pushed commits and tags".to_string());
     }
 
+    // Issue #3611: the partial state where the TAG was pushed but the branch
+    // push was rejected because the remote advanced. Here the tag points at
+    // HEAD (not stale) and there are no uncommitted changes, so the checks
+    // above are all satisfied — yet the release commit is still missing from
+    // the remote branch. Detect that the local release commit is not on the
+    // remote branch and reconcile it (rebase onto the advanced remote, push)
+    // without re-tagging or force-pushing.
+    if let Some(reconcile_action) = reconcile_release_branch(&component, &input.component_id)? {
+        actions.push(reconcile_action);
+    }
+
     if actions.is_empty() {
         log_status!(
             "recover",
@@ -964,6 +975,129 @@ fn run_recover(input: &ReleaseCommandInput) -> Result<(ReleaseCommandResult, i32
         },
         0,
     ))
+}
+
+/// Reconcile the release branch with an advanced remote during `--recover`
+/// (issue #3611).
+///
+/// Handles the partial state where the release tag was pushed but the branch
+/// push was rejected because `origin/<branch>` advanced. When the local release
+/// commit (HEAD) is not contained in the remote branch, this fetches, rebases
+/// HEAD onto the advanced remote head (only when histories share an ancestor —
+/// never a force-push over divergent history), and re-pushes the branch.
+///
+/// Returns `Ok(Some(description))` when it reconciled the branch, `Ok(None)`
+/// when nothing needed doing (or no remote branch / detached HEAD), and `Err`
+/// when reconciliation was attempted but failed (e.g. rebase conflict) so the
+/// operator gets a clear, non-guessing failure.
+fn reconcile_release_branch(
+    component: &crate::core::component::Component,
+    component_id: &str,
+) -> Result<Option<String>> {
+    let path = &component.local_path;
+    let Some(branch) = git::current_branch(std::path::Path::new(path)) else {
+        // Detached HEAD — no branch to reconcile.
+        return Ok(None);
+    };
+
+    git::fetch_origin(path)?;
+    let Some(remote_commit) = git::remote_branch_commit(path, &branch)? else {
+        // Branch not on remote yet; the tag-push block above already pushes the
+        // branch when it pushes tags, so there is nothing to reconcile here.
+        return Ok(None);
+    };
+    let head_commit = git::get_head_commit(path)?;
+
+    // The release commit is already on the remote branch — nothing to do.
+    if git::is_ancestor(path, &head_commit, &remote_commit)? {
+        return Ok(None);
+    }
+
+    // Remote head already contained in HEAD (a plain non-pushed branch): push.
+    if git::is_ancestor(path, &remote_commit, &head_commit)? {
+        log_status!(
+            "recover",
+            "Pushing release commit to remote {} (remote did not advance)...",
+            branch
+        );
+        let push = git::push_at(
+            Some(component_id),
+            git::PushOptions {
+                tags: true,
+                refspec: Some(format!("HEAD:refs/heads/{branch}")),
+                ..Default::default()
+            },
+            Some(path),
+        )?;
+        if !push.success {
+            return Err(Error::git_command_failed(format!(
+                "Failed to push release branch {}: {}",
+                branch, push.stderr
+            )));
+        }
+        return Ok(Some(format!("pushed release commit to {}", branch)));
+    }
+
+    // Histories diverged: the remote advanced after the release commit. Rebase
+    // the release commit onto the advanced remote head, then push. Never force.
+    log_status!(
+        "recover",
+        "Remote {} advanced — rebasing release commit onto the new head and re-pushing...",
+        branch
+    );
+    let rebase = git::rebase_at(
+        Some(component_id),
+        git::RebaseOptions {
+            onto: Some(remote_commit.clone()),
+            ..Default::default()
+        },
+        Some(path),
+    )?;
+    if !rebase.success {
+        let _ = git::rebase_at(
+            Some(component_id),
+            git::RebaseOptions {
+                abort: true,
+                ..Default::default()
+            },
+            Some(path),
+        );
+        return Err(Error::validation_invalid_argument(
+            "recover",
+            format!(
+                "Rebasing the release commit onto the advanced remote {} hit a conflict",
+                branch
+            ),
+            None,
+            Some(vec![
+                format!(
+                    "Resolve manually: git fetch origin && git rebase origin/{branch}, fix conflicts, then: homeboy release {} --recover",
+                    component_id
+                ),
+            ]),
+        ));
+    }
+
+    let push = git::push_at(
+        Some(component_id),
+        git::PushOptions {
+            tags: true,
+            refspec: Some(format!("HEAD:refs/heads/{branch}")),
+            ..Default::default()
+        },
+        Some(path),
+    )?;
+    if !push.success {
+        return Err(Error::git_command_failed(format!(
+            "Failed to push rebased release branch {}: {}",
+            branch, push.stderr
+        )));
+    }
+
+    Ok(Some(format!(
+        "rebased release commit onto advanced remote and pushed {}",
+        branch
+    )))
 }
 
 fn recovery_release_plan(
@@ -1264,6 +1398,116 @@ mod tests {
             .steps
             .iter()
             .all(|step| step.status == PlanStepStatus::Disabled));
+    }
+
+    fn git_in(dir: &std::path::Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn identity(dir: &std::path::Path) {
+        git_in(dir, &["config", "user.name", "Homeboy Test"]);
+        git_in(dir, &["config", "user.email", "homeboy@example.test"]);
+        git_in(dir, &["config", "commit.gpgsign", "false"]);
+    }
+
+    /// Issue #3611: the recover path must reconcile a release commit that is
+    /// missing from an advanced remote branch (tag pushed, branch rejected) by
+    /// rebasing onto the new remote head and pushing — no force, no re-tag.
+    #[test]
+    fn reconcile_release_branch_rebases_onto_advanced_remote() {
+        let remote = tempfile::tempdir().expect("remote");
+        let other = tempfile::tempdir().expect("other");
+        let local = tempfile::tempdir().expect("local");
+        git_in(remote.path(), &["init", "--bare", "-b", "main"]);
+
+        git_in(
+            other.path(),
+            &["clone", remote.path().to_str().unwrap(), "."],
+        );
+        identity(other.path());
+        std::fs::write(other.path().join("base.txt"), "base").unwrap();
+        git_in(other.path(), &["add", "."]);
+        git_in(other.path(), &["commit", "-m", "base"]);
+        git_in(other.path(), &["push", "origin", "main"]);
+
+        git_in(
+            local.path(),
+            &["clone", remote.path().to_str().unwrap(), "."],
+        );
+        identity(local.path());
+
+        // Remote advances after the release clone.
+        std::fs::write(other.path().join("advance.txt"), "advance").unwrap();
+        git_in(other.path(), &["add", "."]);
+        git_in(other.path(), &["commit", "-m", "remote advance"]);
+        git_in(other.path(), &["push", "origin", "main"]);
+
+        // Local release commit (branch NOT yet on remote; tag would already be).
+        std::fs::write(local.path().join("release.txt"), "release").unwrap();
+        git_in(local.path(), &["add", "."]);
+        git_in(local.path(), &["commit", "-m", "release: v1.0.0"]);
+
+        let component = crate::core::component::Component {
+            id: "fixture".to_string(),
+            local_path: local.path().to_string_lossy().to_string(),
+            ..crate::core::component::Component::default()
+        };
+
+        let action = reconcile_release_branch(&component, "fixture")
+            .expect("reconcile should succeed")
+            .expect("reconcile should report an action");
+        assert!(
+            action.contains("rebased release commit onto advanced remote"),
+            "unexpected action: {}",
+            action
+        );
+
+        git_in(local.path(), &["fetch", "origin"]);
+        let log = std::process::Command::new("git")
+            .args(["log", "--format=%s", "origin/main"])
+            .current_dir(local.path())
+            .output()
+            .expect("git log");
+        let subjects = String::from_utf8_lossy(&log.stdout);
+        assert!(subjects.contains("release: v1.0.0"), "got: {}", subjects);
+        assert!(subjects.contains("remote advance"), "got: {}", subjects);
+    }
+
+    /// When the release commit is already on the remote branch, reconcile is a
+    /// no-op (nothing to recover).
+    #[test]
+    fn reconcile_release_branch_noop_when_already_pushed() {
+        let remote = tempfile::tempdir().expect("remote");
+        let local = tempfile::tempdir().expect("local");
+        git_in(remote.path(), &["init", "--bare", "-b", "main"]);
+        git_in(
+            local.path(),
+            &["clone", remote.path().to_str().unwrap(), "."],
+        );
+        identity(local.path());
+        std::fs::write(local.path().join("release.txt"), "release").unwrap();
+        git_in(local.path(), &["add", "."]);
+        git_in(local.path(), &["commit", "-m", "release: v1.0.0"]);
+        git_in(local.path(), &["push", "origin", "main"]);
+
+        let component = crate::core::component::Component {
+            id: "fixture".to_string(),
+            local_path: local.path().to_string_lossy().to_string(),
+            ..crate::core::component::Component::default()
+        };
+
+        let action = reconcile_release_branch(&component, "fixture").expect("reconcile ok");
+        assert!(action.is_none(), "expected no-op, got: {:?}", action);
     }
 
     #[test]

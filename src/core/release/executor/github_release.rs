@@ -17,6 +17,10 @@ pub(super) struct GitHubReleaseRepairCommands {
     pub create_command: String,
     pub view_command: String,
     pub env_hint: Option<String>,
+    /// True when `notes_file` is the persisted exact Homeboy release body
+    /// (issue #3508), so recovery reproduces the identical body rather than
+    /// regenerating notes that could diverge.
+    pub exact_body_available: bool,
 }
 
 /// Create a GitHub Release for the just-pushed tag.
@@ -94,6 +98,10 @@ pub(crate) fn run_github_release(
         .map(|artifact| artifact.path.clone())
         .collect();
     let has_artifacts = !artifact_paths.is_empty();
+    // Repair commands available before the exact body is built/persisted (gh
+    // missing / unauthenticated / upload paths). These regenerate notes since
+    // no persisted exact-body file exists yet. The create path below rebuilds a
+    // persisted-aware closure once the body is written to disk (issue #3508).
     let repair_commands = |notes_start_tag: Option<&str>| {
         github_release_repair_commands(
             &tag,
@@ -101,6 +109,7 @@ pub(crate) fn run_github_release(
             &component.github,
             &artifact_paths,
             notes_start_tag,
+            None,
         )
     };
 
@@ -204,37 +213,35 @@ pub(crate) fn run_github_release(
     let notes_start_tag = github_generated_notes_start_tag(component, &tag)?;
     let changelog_url = github_changelog_url(component, &github, &tag);
 
-    // When GitHub-generated notes fail, do NOT skip the release: a skipped
-    // release that reports success leaves downstream publish/upload steps
-    // uploading assets to a release object that does not exist (issue #3541).
-    // Fall back to creating the release with the changelog notes (or a minimal
-    // body) so the release object is still created from the pushed tag and
-    // built artifacts without a second tag. If even that fails, the step is
-    // marked Failed below.
-    let (release_notes, generated_notes_ok) = match github_generated_notes(
+    // Build the EXACT body Homeboy will post (issue #3508). This is the single
+    // source of truth for the release body — generated notes + changelog footer,
+    // or the changelog-section fallback + footer. Persisting it (below) lets the
+    // repair commands reproduce the identical body via `--notes-file` instead of
+    // re-deriving it from source and risking a divergent body.
+    let body = build_github_release_body(
+        component,
         &github,
-        &component.github,
         &tag,
+        state,
+        changelog_url.as_deref(),
         notes_start_tag.as_deref(),
-    ) {
-        Ok(generated_notes) => {
-            let notes = changelog_url
-                .as_deref()
-                .map(|url| replace_full_changelog_footer(&generated_notes, url))
-                .unwrap_or(generated_notes);
-            (notes, true)
-        }
-        Err(err) => {
-            log_status!(
-                "release",
-                "⚠ GitHub generated release notes failed: {} — falling back to changelog notes",
-                err
-            );
-            (
-                fallback_release_notes(state, changelog_url.as_deref(), &tag),
-                false,
-            )
-        }
+    );
+    let generated_notes_ok = body.generated_notes_ok;
+    let release_notes = body.body.clone();
+
+    // Persist the exact body so it is inspectable after the fact and so the
+    // repair `--notes-file` reproduces it byte-for-byte. A failure to write the
+    // artifact is non-fatal: fall back to commands that regenerate notes.
+    let persisted_notes_path = persist_release_body(component, &tag, &release_notes);
+    let repair_commands = |notes_start_tag: Option<&str>| {
+        github_release_repair_commands(
+            &tag,
+            &github,
+            &component.github,
+            &artifact_paths,
+            notes_start_tag,
+            persisted_notes_path.as_deref(),
+        )
     };
 
     log_status!(
@@ -295,7 +302,14 @@ pub(crate) fn run_github_release(
         log_status!("release", "✗ `gh release create` failed: {}", stderr.trim());
         log_repair_commands(&repair);
         return Ok(create_failed_result(
-            &tag, &github, reason, stdout, stderr, repair,
+            &tag,
+            &github,
+            reason,
+            stdout,
+            stderr,
+            repair,
+            &body,
+            persisted_notes_path.as_deref(),
         ));
     }
 
@@ -313,11 +327,121 @@ pub(crate) fn run_github_release(
             "url": url,
             "artifact_count": artifact_paths.len(),
             "generated_notes": generated_notes_ok,
-            "changelog_url": changelog_url,
+            // The changelog URL embedded in the release body footer, read back
+            // from the single body builder so step metadata and the posted body
+            // can never disagree (issue #3508).
+            "changelog_url": body.changelog_url,
             "notes_start_tag": notes_start_tag,
+            // The exact GitHub Release body Homeboy posted, plus a persisted
+            // copy on disk, so manual recovery reproduces the identical body
+            // without reconstructing it from source (issue #3508).
+            "release_body": release_notes,
+            "release_body_source": body.source_label(),
+            "release_body_file": persisted_notes_path,
         })),
         Vec::new(),
     ))
+}
+
+/// The exact GitHub Release body Homeboy posts, with provenance.
+///
+/// This is the single source of truth for the release body (issue #3508). Every
+/// path that needs the body — the live `gh release create`, the persisted notes
+/// artifact, the JSON step data, and the repair/recovery commands — reads it
+/// from here so an operator never reconstructs a divergent "equivalent" body.
+///
+/// The body is one of:
+/// - GitHub-generated notes with the `**Full Changelog**` footer rewritten to
+///   point at the component's changelog URL (`source = GeneratedNotes`), or
+/// - the changelog section text from [`ReleaseState::notes`] (or a minimal
+///   `Release <tag>` body) with the same changelog footer appended
+///   (`source = ChangelogFallback`) when generated notes are unavailable.
+#[derive(Debug, Clone)]
+pub(crate) struct GitHubReleaseBody {
+    /// The exact markdown body passed to `gh release create --notes`.
+    pub body: String,
+    /// Whether GitHub-generated notes succeeded. `false` means the changelog
+    /// fallback body was used.
+    pub generated_notes_ok: bool,
+    /// The changelog URL embedded in the footer, when one was resolved.
+    pub changelog_url: Option<String>,
+}
+
+impl GitHubReleaseBody {
+    /// Human/JSON-readable label distinguishing the body's provenance so
+    /// operators can tell generated notes from the changelog fallback.
+    pub(crate) fn source_label(&self) -> &'static str {
+        if self.generated_notes_ok {
+            "generated-notes"
+        } else {
+            "changelog-fallback"
+        }
+    }
+}
+
+/// Build the exact GitHub Release body Homeboy will post (issue #3508).
+///
+/// Distinguishing the four concepts the issue calls out:
+/// - *changelog section text* lives in [`ReleaseState::notes`],
+/// - *changelog URL* is the `changelog_url` link,
+/// - *final GitHub Release body* is what this function returns,
+/// - *structured step metadata* is the JSON emitted by the step.
+pub(crate) fn build_github_release_body(
+    component: &Component,
+    github: &GitHubRepo,
+    tag: &str,
+    state: &ReleaseState,
+    changelog_url: Option<&str>,
+    notes_start_tag: Option<&str>,
+) -> GitHubReleaseBody {
+    match github_generated_notes(github, &component.github, tag, notes_start_tag) {
+        Ok(generated_notes) => {
+            let body = changelog_url
+                .map(|url| replace_full_changelog_footer(&generated_notes, url))
+                .unwrap_or(generated_notes);
+            GitHubReleaseBody {
+                body,
+                generated_notes_ok: true,
+                changelog_url: changelog_url.map(str::to_string),
+            }
+        }
+        Err(err) => {
+            log_status!(
+                "release",
+                "⚠ GitHub generated release notes failed: {} — falling back to changelog notes",
+                err
+            );
+            GitHubReleaseBody {
+                body: fallback_release_notes(state, changelog_url, tag),
+                generated_notes_ok: false,
+                changelog_url: changelog_url.map(str::to_string),
+            }
+        }
+    }
+}
+
+/// Persist the exact release body to `build/<tag>-release-notes.md` so it is
+/// inspectable after the run and so the repair `--notes-file` reproduces the
+/// identical body. Returns the path on success; a write failure is non-fatal
+/// (the repair commands fall back to regenerating notes).
+fn persist_release_body(component: &Component, tag: &str, body: &str) -> Option<String> {
+    let build_dir = std::path::Path::new(&component.local_path).join("build");
+    if let Err(err) = std::fs::create_dir_all(&build_dir) {
+        log_status!(
+            "release",
+            "⚠ Could not create build/ to persist release body: {}",
+            err
+        );
+        return None;
+    }
+    let file = build_dir.join(format!("{}-release-notes.md", safe_filename(tag)));
+    match std::fs::write(&file, body) {
+        Ok(()) => Some(file.to_string_lossy().replace('\\', "/")),
+        Err(err) => {
+            log_status!("release", "⚠ Could not persist release body: {}", err);
+            None
+        }
+    }
 }
 
 fn github_generated_notes(
@@ -484,6 +608,8 @@ pub(super) fn create_failed_result(
     stdout: String,
     stderr: String,
     repair: GitHubReleaseRepairCommands,
+    body: &GitHubReleaseBody,
+    persisted_notes_path: Option<&str>,
 ) -> ReleaseStepResult {
     let data = serde_json::json!({
         "skipped": false,
@@ -497,6 +623,11 @@ pub(super) fn create_failed_result(
         "stderr": stderr.clone(),
         "fallback_command": repair.create_command.clone(),
         "repair": repair_data(&repair),
+        // Expose the EXACT body Homeboy attempted to post + its persisted copy
+        // so manual recovery reproduces the identical release body (issue #3508).
+        "release_body": body.body,
+        "release_body_source": body.source_label(),
+        "release_body_file": persisted_notes_path,
     });
 
     let detail = stderr.trim();
@@ -604,12 +735,14 @@ pub(super) fn github_release_repair_commands(
     config: &GithubConfig,
     artifact_paths: &[String],
     previous_tag: Option<&str>,
+    persisted_notes_path: Option<&str>,
 ) -> GitHubReleaseRepairCommands {
     github_release_repair_commands_with_env(
         tag,
         github,
         artifact_paths,
         previous_tag,
+        persisted_notes_path,
         github_cli_env(github, config),
     )
 }
@@ -639,7 +772,7 @@ pub(super) fn github_release_repair_commands_with_proxy(
                 Vec::new()
             }
         });
-    github_release_repair_commands_with_env(tag, github, artifact_paths, previous_tag, env)
+    github_release_repair_commands_with_env(tag, github, artifact_paths, previous_tag, None, env)
 }
 
 fn github_release_repair_commands_with_env(
@@ -647,11 +780,19 @@ fn github_release_repair_commands_with_env(
     github: &GitHubRepo,
     artifact_paths: &[String],
     previous_tag: Option<&str>,
+    persisted_notes_path: Option<&str>,
     env: Vec<(String, String)>,
 ) -> GitHubReleaseRepairCommands {
     let env_prefix = gh_env_prefix(&env);
     let repo_flag = format!("{}/{}", github.owner, github.repo);
-    let notes_file = format!("build/{}-release-notes.md", safe_filename(tag));
+    // When the exact Homeboy release body was persisted to disk (issue #3508),
+    // point recovery at THAT file so a manual `gh release create` reproduces the
+    // identical body. Only fall back to regenerating notes into a fresh file
+    // when no persisted body exists (gh missing/unauth paths, write failure).
+    let exact_body_available = persisted_notes_path.is_some();
+    let notes_file = persisted_notes_path
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("build/{}-release-notes.md", safe_filename(tag)));
     let endpoint = format!(
         "repos/{}/{}/releases/generate-notes",
         github.owner, github.repo
@@ -669,11 +810,22 @@ fn github_release_repair_commands_with_env(
     }
     generate_notes.push("--jq".to_string());
     generate_notes.push(shell_quote(".body"));
-    let generate_notes_command = format!(
+    let regenerate_command = format!(
         "{} > {}",
         generate_notes.join(" "),
         shell_quote(&notes_file)
     );
+    // The notes-generation step is only meaningful when there is no persisted
+    // exact body. With a persisted body, regenerating would risk a divergent
+    // result, so the "generate" step becomes a no-op note that reuses the file.
+    let generate_notes_command = if exact_body_available {
+        format!(
+            "# Exact Homeboy release body already saved at {} — use it as-is",
+            notes_file
+        )
+    } else {
+        regenerate_command
+    };
 
     let mut create = vec![
         format!("{}gh", env_prefix),
@@ -699,13 +851,23 @@ fn github_release_repair_commands_with_env(
     );
     let env_hint = gh_env_hint(github, &env);
 
+    let notes_guidance = if exact_body_available {
+        format!(
+            "The exact GitHub Release body Homeboy generated is saved at {}. Create the release straight from it (no regeneration) so the body matches byte-for-byte.",
+            notes_file
+        )
+    } else {
+        "Review the generated markdown body in the notes file before creating the release; keep it as the content passed to --notes-file.".to_string()
+    };
+
     GitHubReleaseRepairCommands {
         notes_file,
-        notes_guidance: "Review the generated markdown body in the notes file before creating the release; keep it as the content passed to --notes-file.".to_string(),
+        notes_guidance,
         generate_notes_command,
         create_command: create.join(" "),
         view_command,
         env_hint,
+        exact_body_available,
     }
 }
 
@@ -742,6 +904,7 @@ fn repair_data(repair: &GitHubReleaseRepairCommands) -> serde_json::Value {
         "create_command": repair.create_command,
         "view_command": repair.view_command,
         "env_hint": repair.env_hint,
+        "exact_body_available": repair.exact_body_available,
     })
 }
 
@@ -884,6 +1047,7 @@ mod tests {
     use super::{
         create_failed_result, fallback_release_notes, github_cli_env,
         github_release_repair_commands, not_created_result, upload_failed_result,
+        GitHubReleaseBody,
     };
 
     fn test_repo() -> GitHubRepo {
@@ -901,7 +1065,17 @@ mod tests {
             &GithubConfig::default(),
             &["build/studio-web.zip".to_string()],
             None,
+            None,
         )
+    }
+
+    fn test_body() -> GitHubReleaseBody {
+        GitHubReleaseBody {
+            body: "## What's Changed\n\n**Full Changelog**: https://example/CHANGELOG.md"
+                .to_string(),
+            generated_notes_ok: true,
+            changelog_url: Some("https://example/CHANGELOG.md".to_string()),
+        }
     }
 
     fn data_str<'a>(result: &'a super::ReleaseStepResult, key: &str) -> Option<&'a str> {
@@ -961,6 +1135,8 @@ mod tests {
             String::new(),
             "HTTP 502: bad gateway".to_string(),
             test_repair(),
+            &test_body(),
+            Some("build/v0.10.6-release-notes.md"),
         );
 
         assert_eq!(result.status, ReleaseStepStatus::Failed);
@@ -989,6 +1165,8 @@ mod tests {
             String::new(),
             "release v0.10.6 already exists".to_string(),
             test_repair(),
+            &test_body(),
+            Some("build/v0.10.6-release-notes.md"),
         );
 
         assert_eq!(result.status, ReleaseStepStatus::Failed);
@@ -1048,6 +1226,99 @@ mod tests {
         let notes = fallback_release_notes(&state, None, "v0.10.6");
 
         assert_eq!(notes, "Release v0.10.6");
+    }
+
+    // ---- Issue #3508: the exact GitHub Release body must be discoverable ----
+
+    #[test]
+    fn release_body_source_label_distinguishes_generated_from_fallback() {
+        let generated = GitHubReleaseBody {
+            body: "x".to_string(),
+            generated_notes_ok: true,
+            changelog_url: None,
+        };
+        let fallback = GitHubReleaseBody {
+            body: "x".to_string(),
+            generated_notes_ok: false,
+            changelog_url: None,
+        };
+        assert_eq!(generated.source_label(), "generated-notes");
+        assert_eq!(fallback.source_label(), "changelog-fallback");
+    }
+
+    #[test]
+    fn create_failed_result_exposes_exact_release_body_and_persisted_file() {
+        // Regression for #3508: a failed create must surface the EXACT body
+        // Homeboy attempted to post plus its persisted-file path so manual
+        // recovery reproduces the identical body instead of reconstructing it.
+        let body = test_body();
+        let result = create_failed_result(
+            "v0.10.6",
+            &test_repo(),
+            "generated-notes-failed",
+            String::new(),
+            "HTTP 502".to_string(),
+            test_repair(),
+            &body,
+            Some("build/v0.10.6-release-notes.md"),
+        );
+
+        assert_eq!(data_str(&result, "release_body"), Some(body.body.as_str()));
+        assert_eq!(
+            data_str(&result, "release_body_source"),
+            Some("generated-notes")
+        );
+        assert_eq!(
+            data_str(&result, "release_body_file"),
+            Some("build/v0.10.6-release-notes.md")
+        );
+        // The exact body must carry the changelog link footer.
+        assert!(data_str(&result, "release_body")
+            .unwrap()
+            .contains("**Full Changelog**:"));
+    }
+
+    #[test]
+    fn repair_commands_reuse_persisted_exact_body_when_available() {
+        // With the persisted exact body, recovery must `--notes-file` THAT file
+        // and must NOT regenerate notes (which could diverge) — issue #3508.
+        let repair = github_release_repair_commands(
+            "v0.10.6",
+            &test_repo(),
+            &GithubConfig::default(),
+            &["build/studio-web.zip".to_string()],
+            None,
+            Some("build/v0.10.6-release-notes.md"),
+        );
+
+        assert!(repair.exact_body_available);
+        assert_eq!(repair.notes_file, "build/v0.10.6-release-notes.md");
+        assert!(repair
+            .create_command
+            .contains("--notes-file build/v0.10.6-release-notes.md"));
+        // The generate step must not re-run note generation against the API.
+        assert!(!repair.generate_notes_command.contains("generate-notes"));
+        assert!(repair.notes_guidance.contains("byte-for-byte"));
+    }
+
+    #[test]
+    fn repair_commands_regenerate_notes_when_no_persisted_body() {
+        // Without a persisted body (gh missing / unauth), recovery falls back to
+        // regenerating notes into a fresh file.
+        let repair = github_release_repair_commands(
+            "v0.10.6",
+            &test_repo(),
+            &GithubConfig::default(),
+            &["build/studio-web.zip".to_string()],
+            None,
+            None,
+        );
+
+        assert!(!repair.exact_body_available);
+        assert!(repair.generate_notes_command.contains("generate-notes"));
+        assert!(repair
+            .create_command
+            .contains("--notes-file build/v0.10.6-release-notes.md"));
     }
 
     #[test]
