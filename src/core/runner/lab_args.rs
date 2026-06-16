@@ -600,6 +600,46 @@ pub(super) fn rewrite_lab_offload_args(
     stripped
 }
 
+pub(super) fn rewrite_runner_resident_lab_offload_args(args: &[String]) -> Vec<String> {
+    let mut stripped = Vec::with_capacity(args.len());
+    let mut iter = args.iter().peekable();
+    let mut passthrough = false;
+    let has_force_hot = args.iter().any(|arg| arg == "--force-hot");
+    while let Some(arg) = iter.next() {
+        if arg == EXPLICIT_PASSTHROUGH_SENTINEL {
+            continue;
+        }
+        if passthrough {
+            stripped.push(arg.clone());
+            continue;
+        }
+        if arg == "--" {
+            passthrough = true;
+            stripped.push(arg.clone());
+            continue;
+        }
+        if arg == "--runner" {
+            let _ = iter.next();
+            continue;
+        }
+        if arg.starts_with("--runner=") {
+            continue;
+        }
+        if arg == "--output" {
+            let _ = iter.next();
+            continue;
+        }
+        if arg.starts_with("--output=") {
+            continue;
+        }
+        stripped.push(arg.clone());
+    }
+    if !has_force_hot {
+        stripped.insert(1, "--force-hot".to_string());
+    }
+    stripped
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -619,6 +659,39 @@ mod tests {
         assert_eq!(
             lab_offload_source_path(&args).expect("source path"),
             PathBuf::from("/Users/chubes/Developer/wp-site-generator")
+        );
+    }
+
+    #[test]
+    fn runner_resident_rewrite_preserves_runner_side_cwd() {
+        let args = vec![
+            "homeboy".to_string(),
+            "--runner".to_string(),
+            "homeboy-lab".to_string(),
+            "tunnel".to_string(),
+            "service".to_string(),
+            "start".to_string(),
+            "preview".to_string(),
+            "--cwd".to_string(),
+            "/home/chubes/Developer/_lab_workspaces/site".to_string(),
+            "--command".to_string(),
+            "npm run dev".to_string(),
+        ];
+
+        assert_eq!(
+            rewrite_runner_resident_lab_offload_args(&args),
+            vec![
+                "homeboy".to_string(),
+                "--force-hot".to_string(),
+                "tunnel".to_string(),
+                "service".to_string(),
+                "start".to_string(),
+                "preview".to_string(),
+                "--cwd".to_string(),
+                "/home/chubes/Developer/_lab_workspaces/site".to_string(),
+                "--command".to_string(),
+                "npm run dev".to_string(),
+            ]
         );
     }
 

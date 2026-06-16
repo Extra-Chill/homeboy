@@ -814,6 +814,10 @@ mod tests {
         assert_eq!(command.hot_label, "tunnel service start");
         assert!(command.portable);
         assert!(!command.default_lab_offload);
+        assert_eq!(
+            command.workspace_mode_policy,
+            runners::LabOffloadWorkspaceModePolicy::RunnerResident
+        );
         assert!(!command.requires_extension_parity);
         assert!(command.required_extensions.is_empty());
         assert!(!command.infer_source_path_tools);

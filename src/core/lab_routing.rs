@@ -64,6 +64,9 @@ pub fn lab_offload_command_from_contract(
             LabWorkspaceModePolicy::GitCheckoutRequired => {
                 runners::LabOffloadWorkspaceModePolicy::GitCheckoutRequired
             }
+            LabWorkspaceModePolicy::RunnerResident => {
+                runners::LabOffloadWorkspaceModePolicy::RunnerResident
+            }
         },
         requires_extension_parity: contract.requires_extension_parity,
         required_extensions,

@@ -35,7 +35,7 @@ use super::super::lab_apply::apply_lab_offload_patch;
 use super::super::lab_args::{
     inline_agent_task_prompt_files_in_args, lab_offload_source_path, remap_agent_task_plan_in_args,
     remap_path_settings_in_args, remap_provider_config_in_args, rewrite_lab_offload_args,
-    LabPathRemap,
+    rewrite_runner_resident_lab_offload_args, LabPathRemap,
 };
 use super::super::lab_capabilities::lab_runner_capability_contract;
 use super::super::lab_command::lab_offload_command_prefix;
@@ -110,6 +110,7 @@ pub enum LabOffloadWorkspaceModePolicy {
     ChangedSinceGitElseSnapshot,
     Git,
     GitCheckoutRequired,
+    RunnerResident,
 }
 
 pub enum LabOffloadOutcome {
@@ -141,6 +142,7 @@ fn requested_lab_workspace_sync_mode(
                 RunnerWorkspaceSyncMode::Snapshot
             }
         }
+        LabOffloadWorkspaceModePolicy::RunnerResident => RunnerWorkspaceSyncMode::Snapshot,
     }
 }
 
@@ -184,7 +186,7 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
         if let Some(runner_id) = request.explicit_runner {
             return Err(unsupported_runner_error(
                 runner_id,
-                "--runner is only supported for commands with portable Lab offload support: agent-task dispatch/cook/loop/run-plan/status/logs/artifacts/review/providers, agent-task auth status, lint, test, audit, bench, trace, refactor source runs, and tunnel preview-consumer run".to_string(),
+                "--runner is only supported for commands with portable Lab offload support: agent-task dispatch/cook/loop/run-plan/status/logs/artifacts/review/providers, agent-task auth status, lint, test, audit, bench, trace, refactor source runs, tunnel preview-consumer run, and tunnel service start".to_string(),
             ));
         }
         return Ok(LabOffloadOutcome::RunLocal {
@@ -197,7 +199,7 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
     if !contract.portable {
         if let Some(runner_id) = request.explicit_runner {
             let message = contract.unsupported_reason.map_or_else(
-                || "--runner is only supported for commands with portable Lab offload support: agent-task dispatch/cook/loop/run-plan/status/logs/artifacts/review/providers, agent-task auth status, lint, test, audit, bench, trace, refactor source runs, and tunnel preview-consumer run".to_string(),
+                || "--runner is only supported for commands with portable Lab offload support: agent-task dispatch/cook/loop/run-plan/status/logs/artifacts/review/providers, agent-task auth status, lint, test, audit, bench, trace, refactor source runs, tunnel preview-consumer run, and tunnel service start".to_string(),
                 |reason| format!("--runner is unavailable for this local-only resource-pressure command. {reason}"),
             );
             return Err(unsupported_runner_error(runner_id, message));
@@ -367,6 +369,122 @@ fn tunnel_service_command(normalized_args: &[String]) -> Option<&str> {
     })
 }
 
+fn run_runner_resident_lab_offload(
+    request: LabOffloadRequest<'_>,
+    selection: LabRunnerSelection,
+    contract: LabOffloadCommand,
+    mut plan: HomeboyPlan,
+    mut messages: Vec<String>,
+    runner_workspace_root: &str,
+    homeboy_path: &str,
+    runner_status: &RunnerStatusReport,
+) -> Result<LabOffloadOutcome> {
+    let runner_id = &selection.runner_id;
+    let runner_homeboy = lab_runner_homeboy_metadata(runner_id, homeboy_path, runner_status);
+    plan = with_step(
+        plan,
+        PlanStep::ready("lab.runner_homeboy", "lab.runner_homeboy")
+            .inputs(PlanValues::new().json("runner_homeboy", &runner_homeboy))
+            .build(),
+    );
+
+    let remapped_args = rewrite_runner_resident_lab_offload_args(request.normalized_args);
+    let mut command = vec![homeboy_path.to_string()];
+    command.extend(remapped_args.iter().skip(1).cloned());
+    plan = with_step(
+        plan,
+        PlanStep::ready("lab.rewrite_args", "lab.rewrite_args")
+            .inputs(PlanValues::new().json("argv", &command))
+            .build(),
+    );
+
+    eprintln!(
+        "Lab offload: running runner-resident `{}` on runner `{}` in `{}`.",
+        command.join(" "),
+        runner_id,
+        runner_workspace_root
+    );
+    let mut lab_metadata = lab_offload_metadata(
+        &plan,
+        selection.source.metadata_value(),
+        Some(runner_id),
+        Some(status_tunnel_mode(runner_status).metadata_value()),
+        "offloaded",
+        Some(runner_workspace_root),
+        None,
+    );
+    lab_metadata["runner_homeboy"] = runner_homeboy;
+    lab_metadata["workspace"] = serde_json::json!({
+        "schema": "homeboy/lab-runner-resident-workspace/v1",
+        "mode": "runner_resident",
+        "runner_cwd": runner_workspace_root,
+        "command_paths": "runner_side",
+    });
+    let mut env = build_lab_offload_env(&lab_metadata);
+    forward_env_if_present(&mut env, PREVIEW_METADATA_ENV);
+    forward_env_if_present(&mut env, PREVIEW_PUBLIC_URL_ENV);
+    forward_release_ci_env(&mut env);
+    let tunnel_secret_env = hydrate_tunnel_secret_env(&remapped_args, &mut env)?;
+    lab_metadata["tunnel_secret_env"] = tunnel_secret_env;
+    env = build_lab_offload_env(&lab_metadata);
+    forward_env_if_present(&mut env, PREVIEW_METADATA_ENV);
+    forward_env_if_present(&mut env, PREVIEW_PUBLIC_URL_ENV);
+    forward_release_ci_env(&mut env);
+    hydrate_tunnel_secret_env(&remapped_args, &mut env)?;
+
+    let (exec_output, exit_code) = exec(
+        runner_id,
+        RunnerExecOptions {
+            cwd: Some(runner_workspace_root.to_string()),
+            project_id: None,
+            allow_diagnostic_ssh: false,
+            command,
+            env,
+            secret_env_names: Vec::new(),
+            capture_patch: request.capture_patch,
+            raw_exec: false,
+            source_snapshot: None,
+            capability_preflight: None,
+            required_extensions: contract.required_extensions,
+            require_paths: Vec::new(),
+        },
+    )?;
+    plan = with_step(
+        plan,
+        PlanStep::builder(
+            "lab.exec",
+            "lab.exec",
+            if exit_code == 0 {
+                PlanStepStatus::Success
+            } else {
+                PlanStepStatus::Failed
+            },
+        )
+        .inputs(PlanValues::new().json("exit_code", exit_code))
+        .build(),
+    );
+    if !exec_output.stderr.is_empty() {
+        messages.push(format!(
+            "Lab offload: runner-resident command wrote {} stderr bytes.",
+            exec_output.stderr.len()
+        ));
+    }
+
+    let mut stderr = String::new();
+    for message in messages {
+        stderr.push_str(&message);
+        stderr.push('\n');
+    }
+    stderr.push_str(&exec_output.stderr);
+
+    Ok(LabOffloadOutcome::Offloaded {
+        plan,
+        stdout: exec_output.stdout,
+        stderr,
+        exit_code,
+    })
+}
+
 fn run_lab_offload_inner(
     request: LabOffloadRequest<'_>,
     selection: LabRunnerSelection,
@@ -419,7 +537,7 @@ fn run_lab_offload_inner(
         return mutation_return_unavailable_outcome(plan, &selection, &runner_status, reason);
     }
 
-    runner.workspace_root.as_deref().ok_or_else(|| {
+    let runner_workspace_root = runner.workspace_root.as_deref().ok_or_else(|| {
         Error::validation_invalid_argument(
             "workspace_root",
             "Lab offload requires runner.workspace_root so the local checkout can be mapped remotely",
@@ -429,6 +547,19 @@ fn run_lab_offload_inner(
             ]),
         )
     })?;
+
+    if contract.workspace_mode_policy == LabOffloadWorkspaceModePolicy::RunnerResident {
+        return run_runner_resident_lab_offload(
+            request,
+            selection,
+            contract,
+            plan,
+            messages,
+            runner_workspace_root,
+            runner.settings.homeboy_path.as_deref().unwrap_or("homeboy"),
+            &runner_status,
+        );
+    }
 
     let source_path =
         rig_materialization::lab_offload_rig_component_checkout_root(request.normalized_args)?
