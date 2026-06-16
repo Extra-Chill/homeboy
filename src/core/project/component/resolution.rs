@@ -9,10 +9,11 @@ pub fn resolve_project_component(
     project: &Project,
     component_id: &str,
 ) -> Result<crate::core::component::Component> {
-    let (mut component, attachment_remote_path) = if let Some(attachment) = project
-        .components
-        .iter()
-        .find(|component| component.id == component_id)
+    let (mut component, attachment_local_path, attachment_remote_path) = if let Some(attachment) =
+        project
+            .components
+            .iter()
+            .find(|component| component.id == component_id)
     {
         (
             discover_attached_component(Path::new(&attachment.local_path)).ok_or_else(|| {
@@ -26,6 +27,7 @@ pub fn resolve_project_component(
                     None,
                 )
             })?,
+            attachment.local_path.clone(),
             attachment.remote_path.clone(),
         )
     } else {
@@ -49,6 +51,7 @@ pub fn resolve_project_component(
     apply_standalone_component_fallbacks(&mut component);
 
     let mut resolved = apply_component_overrides(&component, project);
+    resolved.local_path = attachment_local_path;
 
     // Inherit project-level extensions when the component's homeboy.json doesn't
     // declare any. This handles clean tag clones from older releases where
@@ -186,6 +189,7 @@ mod tests {
     fn project_resolution_uses_standalone_extract_command_as_fallback() {
         with_isolated_home(|home| {
             let repo = repo_with_portable_remote_path("wp-content/plugins/fixture");
+            let registered_repo = repo_with_portable_remote_path("wp-content/plugins/fixture");
             let components_dir = home
                 .path()
                 .join(".config")
@@ -195,7 +199,7 @@ mod tests {
             std::fs::write(
                 components_dir.join("fixture.json"),
                 serde_json::json!({
-                    "local_path": repo.path(),
+                    "local_path": registered_repo.path(),
                     "extract_command": "unzip -o {{artifact}} && rm {{artifact}}",
                     "remote_url": "https://github.com/example/fixture.git"
                 })
@@ -207,6 +211,7 @@ mod tests {
 
             let component = resolve_project_component(&project, "fixture").expect("component");
 
+            assert_eq!(component.local_path, repo.path().to_string_lossy());
             assert_eq!(
                 component.extract_command.as_deref(),
                 Some("unzip -o {{artifact}} && rm {{artifact}}")
