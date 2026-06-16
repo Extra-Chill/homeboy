@@ -182,6 +182,8 @@ pub struct ServiceTunnelStatus {
     pub declared: bool,
     pub running: bool,
     pub lifecycle: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub degraded_reason: Option<String>,
     pub local_url: String,
     pub remote_target: String,
     pub policy: ServiceTunnelPolicy,
@@ -339,6 +341,8 @@ pub struct ServiceTunnelEvidence {
 pub struct ServiceTunnelBackendStatus {
     pub backend: ServiceTunnelTunnelBackend,
     pub active: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub process: Option<ServiceTunnelProcessStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -763,6 +767,12 @@ pub fn local_url(id: &str) -> Result<String> {
 fn service_tunnel_status(tunnel: &ServiceTunnel) -> Result<ServiceTunnelStatus> {
     let state = refresh_runtime_state(&tunnel.id)?;
     let running = state.as_ref().is_some_and(runtime_state_is_running);
+    let backend_running = state.as_ref().is_some_and(backend_state_is_running);
+    let degraded_reason = if !running && backend_running {
+        Some("local-origin-process-exited".to_string())
+    } else {
+        None
+    };
     let health = state.as_ref().map(check_runtime_health);
     let readiness = state.as_ref().map(check_runtime_readiness);
     let evidence = state.as_ref().map(runtime_evidence);
@@ -774,7 +784,16 @@ fn service_tunnel_status(tunnel: &ServiceTunnel) -> Result<ServiceTunnelStatus> 
     });
     let backend = state.as_ref().map(|state| ServiceTunnelBackendStatus {
         backend: state.backend.clone(),
-        active: backend_state_is_running(state) || state.preview_identity.public_url.is_some(),
+        active: backend_running || state.preview_identity.public_url.is_some(),
+        active_reason: if backend_running && !running {
+            Some("backend-process-running-after-local-origin-exit".to_string())
+        } else if backend_running {
+            Some("backend-process-running".to_string())
+        } else if state.preview_identity.public_url.is_some() {
+            Some("public-url-declared".to_string())
+        } else {
+            None
+        },
         process: state.backend_process.as_ref().map(|backend| {
             let running = backend_process_is_running(backend);
             ServiceTunnelProcessStatus {
@@ -802,7 +821,15 @@ fn service_tunnel_status(tunnel: &ServiceTunnel) -> Result<ServiceTunnelStatus> 
         },
         declared: true,
         running,
-        lifecycle: if running { "running" } else { "declared" }.to_string(),
+        lifecycle: if degraded_reason.is_some() {
+            "degraded"
+        } else if running {
+            "running"
+        } else {
+            "declared"
+        }
+        .to_string(),
+        degraded_reason,
         local_url: local_url_for(tunnel),
         remote_target: format!("{}:{}", tunnel.target.host, tunnel.target.port),
         policy: tunnel.policy.clone(),
@@ -1427,6 +1454,10 @@ fn refresh_runtime_state(id: &str) -> Result<Option<ServiceTunnelRuntimeState>> 
         return Ok(None);
     };
     if runtime_state_is_running(&state) {
+        return Ok(Some(state));
+    }
+
+    if backend_state_is_running(&state) {
         return Ok(Some(state));
     }
 
