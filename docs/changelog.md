@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.232.3] - 2026-06-16
+
+### Fixed
+- forward source path to runner upgrades
+- allow write when checkout is dirty only with Homeboy CI artifacts
+- diagnose stale lab provider binaries
+- refresh lab runner on provider drift
+
 ## [0.232.2] - 2026-06-16
 
 ### Changed
