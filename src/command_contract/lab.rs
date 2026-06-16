@@ -38,6 +38,7 @@ pub enum LabCommandPortability {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LabSourcePathMode {
     CwdOrPathFlag,
+    RunnerResident,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -160,6 +161,7 @@ impl Commands {
                     false,
                     LAB_NO_EXTRA_TOOLS,
                 );
+                contract.source_path_mode = LabSourcePathMode::RunnerResident;
                 contract.workspace_mode_policy = LabWorkspaceModePolicy::RunnerResident;
                 contract
             }
@@ -663,6 +665,30 @@ mod tests {
         assert!(!auth_status.default_lab_offload);
         assert!(!auth_status.requires_extension_parity);
         assert!(!auth_status.infer_source_path_tools);
+
+        let tunnel_service_start = parsed_command(&[
+            "homeboy",
+            "tunnel",
+            "service",
+            "start",
+            "preview",
+            "--cwd",
+            "/home/chubes/Developer/_lab_workspaces/site",
+            "--command",
+            "npm run dev",
+        ])
+        .lab_contract()
+        .expect("tunnel service start contract");
+        assert_eq!(
+            tunnel_service_start.source_path_mode,
+            LabSourcePathMode::RunnerResident
+        );
+        assert_eq!(
+            tunnel_service_start.workspace_mode_policy,
+            LabWorkspaceModePolicy::RunnerResident
+        );
+        assert!(!tunnel_service_start.default_lab_offload);
+        assert!(!tunnel_service_start.infer_source_path_tools);
 
         let rig = parsed_command(&["homeboy", "rig", "up", "studio"])
             .lab_contract()

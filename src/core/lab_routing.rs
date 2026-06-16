@@ -3,7 +3,8 @@
 use std::time::Duration;
 
 use crate::command_contract::{
-    LabCommandContract, LabCommandPortability, LabCommandRequiredTool, LabWorkspaceModePolicy,
+    LabCommandContract, LabCommandPortability, LabCommandRequiredTool, LabSourcePathMode,
+    LabWorkspaceModePolicy,
 };
 use crate::core::runners;
 use crate::core::Result;
@@ -55,6 +56,10 @@ pub fn lab_offload_command_from_contract(
         unsupported_reason: match contract.portability {
             LabCommandPortability::Portable => None,
             LabCommandPortability::LocalOnly(reason) => Some(reason),
+        },
+        source_path_mode: match contract.source_path_mode {
+            LabSourcePathMode::CwdOrPathFlag => runners::LabOffloadSourcePathMode::CwdOrPathFlag,
+            LabSourcePathMode::RunnerResident => runners::LabOffloadSourcePathMode::RunnerResident,
         },
         workspace_mode_policy: match contract.workspace_mode_policy {
             LabWorkspaceModePolicy::ChangedSinceGitElseSnapshot => {

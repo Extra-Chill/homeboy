@@ -29,7 +29,7 @@ mod trace_fetch_refs;
 pub use super::lab_selection::LabRunnerSelectionSource;
 pub use offload::{
     execute_lab_offload, LabOffloadCommand, LabOffloadOutcome, LabOffloadRequest,
-    LabOffloadWorkspaceModePolicy,
+    LabOffloadSourcePathMode, LabOffloadWorkspaceModePolicy,
 };
 
 #[cfg(test)]

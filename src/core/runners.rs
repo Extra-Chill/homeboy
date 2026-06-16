@@ -36,16 +36,16 @@ pub use super::runner::{
     refresh_mirrored_daemon_evidence, reportable_artifact_evidence_path,
     resolve_default_lab_runner, run_reverse_worker, runner_artifact_store_token,
     runner_exec_failure_error, runner_job_log_snapshot, status, statuses, sync_workspace,
-    LabOffloadCommand, LabOffloadOutcome, LabOffloadRequest, LabOffloadWorkspaceModePolicy,
-    LabRunnerCapabilityContract, LabRunnerGateDecision, LabRunnerGateMode,
-    LabRunnerSelectionSource, PreparedLabRunnerCapability, RemoteArtifactDownload,
-    ReverseRunnerConnectOptions, ReverseRunnerWorkerOptions, ReverseRunnerWorkerOutput, Runner,
-    RunnerCapabilityPreflight, RunnerConnectReport, RunnerDisconnectReport, RunnerExecMode,
-    RunnerExecOptions, RunnerExecOutput, RunnerFailureKind, RunnerKind, RunnerRequiredTool,
-    RunnerResourceMetrics, RunnerSession, RunnerSessionRole, RunnerSessionState,
-    RunnerStaleDaemonWarning, RunnerStatusReport, RunnerTunnelMode, RunnerWorkspaceApplyOptions,
-    RunnerWorkspaceApplyOutput, RunnerWorkspaceApplyStatus, RunnerWorkspaceSyncMode,
-    RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
+    LabOffloadCommand, LabOffloadOutcome, LabOffloadRequest, LabOffloadSourcePathMode,
+    LabOffloadWorkspaceModePolicy, LabRunnerCapabilityContract, LabRunnerGateDecision,
+    LabRunnerGateMode, LabRunnerSelectionSource, PreparedLabRunnerCapability,
+    RemoteArtifactDownload, ReverseRunnerConnectOptions, ReverseRunnerWorkerOptions,
+    ReverseRunnerWorkerOutput, Runner, RunnerCapabilityPreflight, RunnerConnectReport,
+    RunnerDisconnectReport, RunnerExecMode, RunnerExecOptions, RunnerExecOutput, RunnerFailureKind,
+    RunnerKind, RunnerRequiredTool, RunnerResourceMetrics, RunnerSession, RunnerSessionRole,
+    RunnerSessionState, RunnerStaleDaemonWarning, RunnerStatusReport, RunnerTunnelMode,
+    RunnerWorkspaceApplyOptions, RunnerWorkspaceApplyOutput, RunnerWorkspaceApplyStatus,
+    RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
 };
 
 // Registry CRUD entry points (re-exported at the root for ergonomics; also
@@ -128,6 +128,7 @@ pub mod lab_offload {
         lab_offload_changed_since_ref, lab_offload_metadata,
         lab_offload_metadata_with_workspace_mapping, preflight_lab_offload_changed_since,
         prepare_git_lab_offload_changed_since, LabOffloadCommand, LabOffloadOutcome,
-        LabOffloadRequest, LabOffloadWorkspaceModePolicy, LabRunnerSelectionSource,
+        LabOffloadRequest, LabOffloadSourcePathMode, LabOffloadWorkspaceModePolicy,
+        LabRunnerSelectionSource,
     };
 }

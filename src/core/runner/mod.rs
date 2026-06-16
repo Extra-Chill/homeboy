@@ -77,7 +77,7 @@ pub(crate) use git_dependency_materialization::{
 };
 pub use lab::{
     execute_lab_offload, LabOffloadCommand, LabOffloadOutcome, LabOffloadRequest,
-    LabOffloadWorkspaceModePolicy, LabRunnerSelectionSource,
+    LabOffloadSourcePathMode, LabOffloadWorkspaceModePolicy, LabRunnerSelectionSource,
 };
 pub use offload_changed_since::{
     lab_offload_changed_since_ref, preflight_lab_offload_changed_since,
