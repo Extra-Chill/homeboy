@@ -10,6 +10,7 @@ use crate::core::api_jobs::{Job, JobEvent, JobStatus, RemoteRunnerJobRequest};
 use crate::core::engine::command::CommandCaptureMetadata;
 use crate::core::engine::shell;
 use crate::core::error::{Error, ErrorCode, Result};
+use crate::core::redaction::RedactionPolicy;
 use crate::core::server::{self, SshClient};
 use crate::core::source_snapshot::SourceSnapshot;
 
@@ -336,6 +337,8 @@ fn exec_via_reverse_broker(
     let source_snapshot = source_snapshot_override.unwrap_or_else(|| {
         SourceSnapshot::existing_remote(&runner.id, &cwd, runner.workspace_root.as_deref())
     });
+    let redaction_env = env.clone();
+    let redaction_secret_env_names = secret_env_names.clone();
     let request = RemoteRunnerJobRequest {
         runner_id: runner.id.clone(),
         project_id,
@@ -380,8 +383,11 @@ fn exec_via_reverse_broker(
         JobStatus::Succeeded | JobStatus::Failed | JobStatus::Cancelled
     ) {
         if Instant::now() >= deadline {
-            let events =
-                fetch_daemon_events(&client, broker_url, &job.id.to_string()).unwrap_or_default();
+            let events = fetch_daemon_events(&client, broker_url, &job.id.to_string())
+                .map(|events| {
+                    redact_runner_job_events(&events, &redaction_env, &redaction_secret_env_names)
+                })
+                .unwrap_or_default();
             return Err(daemon_job_wait_timeout(
                 runner,
                 &cwd,
@@ -394,11 +400,19 @@ fn exec_via_reverse_broker(
         std::thread::sleep(Duration::from_millis(200));
         job = fetch_daemon_job(&client, broker_url, &job.id.to_string())?;
     }
-    let events = fetch_daemon_events(&client, broker_url, &job.id.to_string())?;
+    let events = redact_runner_job_events(
+        &fetch_daemon_events(&client, broker_url, &job.id.to_string())?,
+        &redaction_env,
+        &redaction_secret_env_names,
+    );
 
     let result = result_event_data(&events).unwrap_or_else(|| json!({}));
-    let stdout = string_field(&result, "stdout");
-    let stderr = string_field(&result, "stderr");
+    let (stdout, stderr) = redact_runner_exec_streams(
+        string_field(&result, "stdout"),
+        string_field(&result, "stderr"),
+        &redaction_env,
+        &redaction_secret_env_names,
+    );
     let metrics = result
         .get("metrics")
         .and_then(|value| serde_json::from_value(value.clone()).ok());
@@ -516,8 +530,9 @@ fn exec_via_daemon(
         JobStatus::Succeeded | JobStatus::Failed | JobStatus::Cancelled
     ) {
         if Instant::now() >= deadline {
-            let events =
-                fetch_daemon_events(&client, local_url, &job.id.to_string()).unwrap_or_default();
+            let events = fetch_daemon_events(&client, local_url, &job.id.to_string())
+                .map(|events| redact_runner_job_events(&events, &env, &secret_env_names))
+                .unwrap_or_default();
             return Err(daemon_job_wait_timeout(
                 runner,
                 &cwd,
@@ -533,12 +548,20 @@ fn exec_via_daemon(
             .map_err(|err| daemon_job_context_error(&runner.id, &job_id, err))?;
     }
     let job_id = job.id.to_string();
-    let events = fetch_daemon_events(&client, local_url, &job_id)
-        .map_err(|err| daemon_job_context_error(&runner.id, &job_id, err))?;
+    let events = redact_runner_job_events(
+        &fetch_daemon_events(&client, local_url, &job_id)
+            .map_err(|err| daemon_job_context_error(&runner.id, &job_id, err))?,
+        &env,
+        &secret_env_names,
+    );
 
     let result = result_event_data(&events).unwrap_or_else(|| json!({}));
-    let stdout = string_field(&result, "stdout");
-    let stderr = string_field(&result, "stderr");
+    let (stdout, stderr) = redact_runner_exec_streams(
+        string_field(&result, "stdout"),
+        string_field(&result, "stderr"),
+        &env,
+        &secret_env_names,
+    );
     let metrics = result
         .get("metrics")
         .and_then(|value| serde_json::from_value(value.clone()).ok());
@@ -909,6 +932,8 @@ fn exec_local(plan: PreparedRunnerProcess) -> Result<(RunnerExecOutput, i32)> {
         output,
         Some(plan.source_snapshot),
         plan.require_paths,
+        &plan.env,
+        &[],
     ))
 }
 
@@ -931,6 +956,7 @@ fn exec_diagnostic_ssh(
     let mut client = SshClient::from_server(&server, server_id)?;
     client.env.extend(runner.env.clone());
     client.env.extend(env);
+    let redaction_env = client.env.clone();
     validate_remote_required_paths(&mut client, &require_paths)?;
     let command_line = format!(
         "cd {} && {}",
@@ -958,6 +984,8 @@ fn exec_diagnostic_ssh(
         },
         Some(source_snapshot),
         require_paths,
+        &redaction_env,
+        &[],
     ))
 }
 
@@ -1360,8 +1388,16 @@ fn exec_output(
     output: ProcessOutput,
     source_snapshot: Option<SourceSnapshot>,
     require_paths: Vec<String>,
+    redaction_env: &HashMap<String, String>,
+    secret_env_names: &[String],
 ) -> (RunnerExecOutput, i32) {
     let exit_code = output.exit_code;
+    let (stdout, stderr) = redact_runner_exec_streams(
+        output.stdout,
+        output.stderr,
+        redaction_env,
+        secret_env_names,
+    );
     (
         RunnerExecOutput {
             command: "runner.exec",
@@ -1370,8 +1406,8 @@ fn exec_output(
             argv: command,
             remote_cwd: cwd,
             exit_code,
-            stdout: output.stdout,
-            stderr: output.stderr,
+            stdout,
+            stderr,
             source_snapshot: source_snapshot.clone(),
             job: None,
             job_id: None,
@@ -1384,6 +1420,107 @@ fn exec_output(
         },
         exit_code,
     )
+}
+
+fn redact_runner_exec_streams(
+    stdout: String,
+    stderr: String,
+    env: &HashMap<String, String>,
+    secret_env_names: &[String],
+) -> (String, String) {
+    let policy = RedactionPolicy::default();
+    let secrets = runner_exec_secret_values(env, secret_env_names, &policy);
+    (
+        redact_runner_exec_text(&stdout, &policy, &secrets),
+        redact_runner_exec_text(&stderr, &policy, &secrets),
+    )
+}
+
+fn runner_exec_secret_values(
+    env: &HashMap<String, String>,
+    secret_env_names: &[String],
+    policy: &RedactionPolicy,
+) -> Vec<String> {
+    let mut values = env
+        .iter()
+        .filter_map(|(key, value)| {
+            if value.is_empty() {
+                return None;
+            }
+            if policy.is_sensitive_key(key) || secret_env_names.iter().any(|name| name == key) {
+                Some(value.clone())
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    values.sort_by_key(|value| std::cmp::Reverse(value.len()));
+    values.dedup();
+    values
+}
+
+fn redact_runner_exec_text(
+    text: &str,
+    policy: &RedactionPolicy,
+    secret_values: &[String],
+) -> String {
+    let mut redacted = policy.redact_string(text);
+    for value in secret_values {
+        redacted = redacted.replace(value, policy.replacement());
+    }
+    redacted
+}
+
+fn redact_runner_job_events(
+    events: &[JobEvent],
+    env: &HashMap<String, String>,
+    secret_env_names: &[String],
+) -> Vec<JobEvent> {
+    let policy = RedactionPolicy::default();
+    let secrets = runner_exec_secret_values(env, secret_env_names, &policy);
+    events
+        .iter()
+        .map(|event| {
+            let mut redacted = event.clone();
+            redacted.message = redacted
+                .message
+                .as_deref()
+                .map(|message| redact_runner_exec_text(message, &policy, &secrets));
+            redacted.data = redacted
+                .data
+                .as_ref()
+                .map(|data| redact_runner_exec_json(data, &policy, &secrets));
+            redacted
+        })
+        .collect()
+}
+
+fn redact_runner_exec_json(
+    value: &Value,
+    policy: &RedactionPolicy,
+    secret_values: &[String],
+) -> Value {
+    match policy.redact_json(value) {
+        Value::String(text) => Value::String(redact_runner_exec_text(&text, policy, secret_values)),
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(|item| redact_runner_exec_json(item, policy, secret_values))
+                .collect(),
+        ),
+        Value::Object(object) => Value::Object(
+            object
+                .iter()
+                .map(|(key, value)| {
+                    (
+                        key.clone(),
+                        redact_runner_exec_json(value, policy, secret_values),
+                    )
+                })
+                .collect(),
+        ),
+        redacted => redacted,
+    }
 }
 
 fn runner_exec_diagnostics(
@@ -1604,6 +1741,76 @@ mod tests {
             capture: None,
             diagnostics: None,
         }
+    }
+
+    #[test]
+    fn runner_exec_redacts_env_diagnostic_assignments() {
+        let env = HashMap::from([(
+            "HOMEBOY_PREVIEW_TUNNEL_TOKEN".to_string(),
+            "preview-token-secret".to_string(),
+        )]);
+
+        let (stdout, stderr) = redact_runner_exec_streams(
+            "HOMEBOY_PREVIEW_TUNNEL_TOKEN=preview-token-secret\nSAFE=value\n".to_string(),
+            "token=preview-token-secret\n".to_string(),
+            &env,
+            &[],
+        );
+
+        assert_eq!(
+            stdout,
+            "HOMEBOY_PREVIEW_TUNNEL_TOKEN=[REDACTED]\nSAFE=value\n"
+        );
+        assert_eq!(stderr, "token=[REDACTED]\n");
+    }
+
+    #[test]
+    fn runner_exec_redacts_bare_secret_values() {
+        let env = HashMap::from([(
+            "OPENAI_API_KEY".to_string(),
+            "sk-test-secret-value".to_string(),
+        )]);
+
+        let (stdout, stderr) = redact_runner_exec_streams(
+            "sk-test-secret-value\n".to_string(),
+            "failed with sk-test-secret-value".to_string(),
+            &env,
+            &[],
+        );
+
+        assert_eq!(stdout, "[REDACTED]\n");
+        assert_eq!(stderr, "failed with [REDACTED]");
+    }
+
+    #[test]
+    fn runner_exec_redacts_daemon_job_events() {
+        let env = HashMap::from([(
+            "HOMEBOY_PREVIEW_TUNNEL_TOKEN".to_string(),
+            "preview-token-secret".to_string(),
+        )]);
+        let events = vec![crate::core::api_jobs::JobEvent {
+            sequence: 1,
+            job_id: uuid::Uuid::new_v4(),
+            kind: crate::core::api_jobs::JobEventKind::Result,
+            timestamp_ms: 1,
+            message: Some("HOMEBOY_PREVIEW_TUNNEL_TOKEN=preview-token-secret".to_string()),
+            data: Some(json!({
+                "stdout": "preview-token-secret",
+                "stderr": "token=preview-token-secret",
+            })),
+        }];
+
+        let redacted = redact_runner_job_events(&events, &env, &[]);
+
+        assert_eq!(
+            redacted[0].message.as_deref(),
+            Some("HOMEBOY_PREVIEW_TUNNEL_TOKEN=[REDACTED]")
+        );
+        assert_eq!(redacted[0].data.as_ref().unwrap()["stdout"], "[REDACTED]");
+        assert_eq!(
+            redacted[0].data.as_ref().unwrap()["stderr"],
+            "token=[REDACTED]"
+        );
     }
 
     #[test]

@@ -149,6 +149,14 @@ fn runner_exec_raw_command_parses_before_trailing_command() {
 }
 
 #[test]
+fn runner_env_rejects_legacy_show_values_flag() {
+    assert!(
+        Cli::try_parse_from(["homeboy", "runner", "env", "homeboy-lab", "--show-values"]).is_err(),
+        "runner env must not expose raw environment values"
+    );
+}
+
+#[test]
 fn agent_task_auth_status_accepts_global_runner_and_secret_env() {
     Cli::try_parse_from([
         "homeboy",
