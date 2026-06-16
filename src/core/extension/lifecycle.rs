@@ -314,7 +314,7 @@ pub(crate) fn resolve_cloned_extension(
 fn install_shared_scripts_from_root(source_root: &Path, extension_dir: &Path) -> Result<()> {
     let shared_scripts = source_root.join("scripts");
     if !shared_scripts.is_dir() {
-        return Ok(());
+        return install_shared_ai_runtimes_from_root(source_root);
     }
 
     let Some(extensions_dir) = extension_dir.parent() else {
@@ -330,7 +330,26 @@ fn install_shared_scripts_from_root(source_root: &Path, extension_dir: &Path) ->
             )
         })?;
     }
-    copy_dir_recursive(&shared_scripts, &target)
+    copy_dir_recursive(&shared_scripts, &target)?;
+    install_shared_ai_runtimes_from_root(source_root)
+}
+
+fn install_shared_ai_runtimes_from_root(source_root: &Path) -> Result<()> {
+    let shared_ai_runtimes = source_root.join("ai-runtimes");
+    if !shared_ai_runtimes.is_dir() {
+        return Ok(());
+    }
+
+    let target = paths::ai_runtimes()?;
+    if target.exists() {
+        std::fs::remove_dir_all(&target).map_err(|e| {
+            Error::internal_io(
+                e.to_string(),
+                Some("replace shared AI runtimes".to_string()),
+            )
+        })?;
+    }
+    copy_dir_recursive(&shared_ai_runtimes, &target)
 }
 
 fn install_linked_shared_scripts(

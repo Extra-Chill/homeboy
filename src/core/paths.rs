@@ -176,6 +176,11 @@ pub fn extensions() -> Result<PathBuf> {
     Ok(homeboy()?.join("extensions"))
 }
 
+/// First-class AI runtime directory.
+pub fn ai_runtimes() -> Result<PathBuf> {
+    Ok(homeboy()?.join("ai-runtimes"))
+}
+
 /// Keys directory
 pub fn keys() -> Result<PathBuf> {
     Ok(homeboy()?.join("keys"))

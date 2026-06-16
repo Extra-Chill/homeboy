@@ -17,6 +17,7 @@ use crate::core::agent_task_scheduler::{
 use crate::core::agent_task_secrets::{resolve_secret_env, AgentTaskSecretResolutionError};
 use crate::core::agent_task_timeout::timeout_with_grace;
 use crate::core::extension::load_all_extensions;
+use crate::core::paths;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskExecutorProvider {
@@ -47,6 +48,10 @@ pub struct AgentTaskExecutorProvider {
     pub extension_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extension_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_path: Option<String>,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -513,6 +518,49 @@ fn discover_agent_task_executor_providers() -> Vec<AgentTaskExecutorProvider> {
         }
         providers.extend(extension_providers);
     }
+    providers.extend(discover_ai_runtime_agent_task_executor_providers());
+    providers
+}
+
+fn discover_ai_runtime_agent_task_executor_providers() -> Vec<AgentTaskExecutorProvider> {
+    let Ok(runtimes_dir) = paths::ai_runtimes() else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(runtimes_dir) else {
+        return Vec::new();
+    };
+
+    let mut providers = Vec::new();
+    for entry in entries.flatten() {
+        let runtime_path = entry.path();
+        if !runtime_path.is_dir() {
+            continue;
+        }
+        let Some(runtime_id) = runtime_path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let manifest_path = runtime_path.join(format!("{}.json", runtime_id));
+        let Ok(content) = std::fs::read_to_string(&manifest_path) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<Value>(&content) else {
+            continue;
+        };
+        let Some(executors) = value.get("agent_task_executors") else {
+            continue;
+        };
+        let Ok(mut runtime_providers) =
+            serde_json::from_value::<Vec<AgentTaskExecutorProvider>>(executors.clone())
+        else {
+            continue;
+        };
+        let runtime_path = runtime_path.to_string_lossy().to_string();
+        for provider in &mut runtime_providers {
+            provider.runtime_id = Some(runtime_id.to_string());
+            provider.runtime_path = Some(runtime_path.clone());
+        }
+        providers.extend(runtime_providers);
+    }
     providers
 }
 
@@ -773,9 +821,11 @@ fn output_value<'a>(value: &'a Value, key: &str) -> Option<&'a Value> {
 
 fn render_provider_command(provider: &AgentTaskExecutorProvider) -> String {
     let extension_path = provider.extension_path.as_deref().unwrap_or_default();
+    let runtime_path = provider.runtime_path.as_deref().unwrap_or(extension_path);
     provider
         .command
         .replace("{{extension_path}}", extension_path)
+        .replace("{{runtime_path}}", runtime_path)
 }
 
 fn provider_command_parts(command: &str) -> Option<(String, Vec<String>)> {
@@ -804,6 +854,14 @@ fn provider_command_env(
         (
             "HOMEBOY_EXTENSION_PATH".to_string(),
             provider.extension_path.clone().unwrap_or_default(),
+        ),
+        (
+            "HOMEBOY_AI_RUNTIME_ID".to_string(),
+            provider.runtime_id.clone().unwrap_or_default(),
+        ),
+        (
+            "HOMEBOY_AI_RUNTIME_PATH".to_string(),
+            provider.runtime_path.clone().unwrap_or_default(),
         ),
     ];
     env.extend(resolve_secret_env(&request.executor.secret_env)?);
@@ -879,6 +937,8 @@ mod tests {
             role_aliases: AgentTaskProviderRoleAliases::default(),
             extension_id: None,
             extension_path: None,
+            runtime_id: None,
+            runtime_path: None,
         };
         let request = AgentTaskRequest {
             schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
@@ -1016,6 +1076,70 @@ mod tests {
             ExtensionProviderAgentTaskExecutor::with_providers(vec![provider_a, provider_b]);
 
         assert_eq!(executor.default_backend().as_deref(), Some("preferred"));
+    }
+
+    #[test]
+    fn discovers_agent_task_providers_from_ai_runtime_manifests() {
+        crate::test_support::with_isolated_home(|home| {
+            let runtime_dir = home
+                .path()
+                .join(".config/homeboy/ai-runtimes/custom-runtime");
+            fs::create_dir_all(&runtime_dir).expect("runtime dir");
+            fs::write(
+                runtime_dir.join("custom-runtime.json"),
+                serde_json::to_string(&json!({
+                    "name": "Custom Runtime",
+                    "version": "1.0.0",
+                    "agent_task_executors": [{
+                        "schema": "homeboy/agent-task-executor-provider/v1",
+                        "id": "custom.runtime.executor",
+                        "backend": "custom",
+                        "command": "node {{runtime_path}}/runner.cjs",
+                        "request_schema": AGENT_TASK_REQUEST_SCHEMA,
+                        "outcome_schema": AGENT_TASK_OUTCOME_SCHEMA
+                    }]
+                }))
+                .unwrap(),
+            )
+            .expect("runtime manifest");
+
+            let providers = discover_agent_task_executor_providers();
+
+            assert_eq!(providers.len(), 1);
+            assert_eq!(providers[0].id, "custom.runtime.executor");
+            assert_eq!(providers[0].runtime_id.as_deref(), Some("custom-runtime"));
+            assert_eq!(
+                providers[0].runtime_path.as_deref(),
+                Some(runtime_dir.to_string_lossy().as_ref())
+            );
+            assert_eq!(
+                render_provider_command(&providers[0]),
+                format!("node {}/runner.cjs", runtime_dir.display())
+            );
+        });
+    }
+
+    #[test]
+    fn provider_command_env_includes_ai_runtime_identity() {
+        let (request, mut provider) =
+            request("task-a", "node {{runtime_path}}/provider.js".to_string());
+        provider.runtime_id = Some("custom-runtime".to_string());
+        provider.runtime_path = Some("/tmp/custom-runtime".to_string());
+
+        let env = provider_command_env(&request, &provider).expect("provider env");
+
+        assert!(env.contains(&(
+            "HOMEBOY_AI_RUNTIME_ID".to_string(),
+            "custom-runtime".to_string()
+        )));
+        assert!(env.contains(&(
+            "HOMEBOY_AI_RUNTIME_PATH".to_string(),
+            "/tmp/custom-runtime".to_string()
+        )));
+        assert_eq!(
+            render_provider_command(&provider),
+            "node /tmp/custom-runtime/provider.js"
+        );
     }
 
     #[test]
