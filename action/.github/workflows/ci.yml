@@ -314,7 +314,14 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh run download "${GITHUB_RUN_ID}" --name homeboy-binary --dir .homeboy-bin
+          BUILD_ARTIFACT_FILE: ${{ inputs.build-artifact-file }}
+        run: |
+          gh run download "${GITHUB_RUN_ID}" --name homeboy-binary --dir .homeboy-bin
+          if [ ! -f ".homeboy-bin/${BUILD_ARTIFACT_FILE}" ]; then
+            echo "::error::Build artifact 'homeboy-binary/${BUILD_ARTIFACT_FILE}' was not downloaded from run ${GITHUB_RUN_ID}. The upstream Build job may have failed, been skipped, or not uploaded the artifact. This is a CI plumbing issue, not a code finding. Verify the Build job succeeded and that this workflow grants the 'actions: read' permission."
+            exit 1
+          fi
+          echo "Downloaded homeboy binary to .homeboy-bin/${BUILD_ARTIFACT_FILE}"
 
       - name: Resolve Homeboy binary path
         id: binary-path
