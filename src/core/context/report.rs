@@ -580,12 +580,12 @@ fn build_actionable_next_steps(
         let count = status.ready_to_deploy.len();
         if count == 1 {
             next_steps.push(format!(
-                "1 component ready to deploy: `{}`. Deploy with `homeboy deploy {}`.",
+                "1 component has a clean release tag: `{}`. This is git state only — run `homeboy status <project>` to confirm the deploy target is actually behind before `homeboy deploy {}`.",
                 status.ready_to_deploy[0], status.ready_to_deploy[0]
             ));
         } else {
             next_steps.push(format!(
-                "{} components ready to deploy. Run `homeboy deploy <id>`.",
+                "{} components have a clean release tag (git state only — does not mean the deploy target is behind). Run `homeboy status <project>` for a target-accurate diff before deploying.",
                 count
             ));
         }

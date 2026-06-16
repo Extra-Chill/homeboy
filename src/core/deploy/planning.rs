@@ -548,10 +548,22 @@ where
     buckets
 }
 
+/// A component skipped during loading because a required extension is not installed.
+///
+/// Carries the human-readable reason so check-mode output can report
+/// `skipped: missing extension <id>` per component instead of aborting.
+pub(super) struct ExtensionSkippedComponent {
+    pub id: String,
+    pub reason: String,
+}
+
 /// Result of loading project components, including skipped (non-deployable) component IDs.
 pub(super) struct LoadedComponents {
     pub deployable: Vec<Component>,
     pub skipped: Vec<String>,
+    /// Components skipped because a required extension is missing. Only populated
+    /// in check mode; otherwise a missing extension is a hard error.
+    pub extension_skipped: Vec<ExtensionSkippedComponent>,
 }
 
 /// Load effective project components, resolve artifact paths via extension patterns,
@@ -561,14 +573,20 @@ pub(super) struct LoadedComponents {
 /// Returns an actionable error with install instructions when extensions are missing,
 /// rather than silently skipping the component.
 ///
+/// In `check` mode (read-only diff), a component requiring an uninstalled extension is
+/// *not* a hard error: it is skipped, recorded in `extension_skipped`, and reported so
+/// operators can see the project-wide diff without installing every build toolchain.
+///
 /// Returns both the deployable components and the IDs of skipped (non-deployable) ones,
 /// so callers can produce accurate error messages.
 pub(super) fn load_project_components(
     project: &Project,
     requested_ids: &[String],
+    check: bool,
 ) -> Result<LoadedComponents> {
     let mut deployable = Vec::new();
     let mut skipped = Vec::new();
+    let mut extension_skipped = Vec::new();
 
     for attachment in project
         .components
@@ -585,9 +603,29 @@ pub(super) fn load_project_components(
         // Validate required extensions are installed before attempting artifact resolution.
         // Without this check, missing extensions cause resolve_artifact() to silently
         // return None, and the component gets skipped with a vague "no artifact" message.
-        if is_requested {
-            extension::validate_required_extensions(&loaded)?;
-        } else if extension::validate_required_extensions(&loaded).is_err() {
+        if let Err(err) = extension::validate_required_extensions(&loaded) {
+            if check {
+                // Read-only diff: a missing extension must not poison the whole pass.
+                // Skip-and-warn so operators still see the diff for the components they
+                // actually care about (see issue #4587).
+                let reason = missing_extension_reason(&err);
+                log_status!(
+                    "deploy",
+                    "Skipping '{}' in check mode: {}",
+                    loaded.id,
+                    reason
+                );
+                extension_skipped.push(ExtensionSkippedComponent {
+                    id: loaded.id.clone(),
+                    reason,
+                });
+                continue;
+            }
+
+            if is_requested {
+                return Err(err);
+            }
+
             log_status!(
                 "deploy",
                 "Skipping '{}': missing required extension (not requested for deploy)",
@@ -635,7 +673,34 @@ pub(super) fn load_project_components(
     Ok(LoadedComponents {
         deployable,
         skipped,
+        extension_skipped,
     })
+}
+
+/// Build a concise, operator-facing reason string from a missing-extension error.
+///
+/// Prefers the list of missing extension IDs from the error details
+/// (`skipped: missing extension <id>`), falling back to the full error message.
+fn missing_extension_reason(err: &crate::core::error::Error) -> String {
+    if let Some(missing) = err
+        .details
+        .get("missing_extensions")
+        .and_then(|v| v.as_array())
+    {
+        let ids: Vec<String> = missing
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect();
+        if !ids.is_empty() {
+            let label = if ids.len() == 1 {
+                "extension"
+            } else {
+                "extensions"
+            };
+            return format!("missing {} {}", label, ids.join(", "));
+        }
+    }
+    format!("missing required extension ({})", err.message)
 }
 
 #[cfg(test)]

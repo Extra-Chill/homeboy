@@ -163,6 +163,50 @@ fn agent_task_auth_status_accepts_global_runner_and_secret_env() {
     .expect("agent-task auth status should accept global --runner with auth --secret-env");
 }
 
+#[test]
+fn rig_install_documents_reinstall_semantics() {
+    let mut root = Cli::command();
+    let help = root
+        .find_subcommand_mut("rig")
+        .expect("rig command")
+        .find_subcommand_mut("install")
+        .expect("rig install command")
+        .render_long_help()
+        .to_string();
+
+    assert!(help.contains("--reinstall"));
+    assert!(help.contains("refresh an existing matching rig install"));
+    assert!(help.contains("Refuses user-owned conflicts"));
+    assert!(!help.contains("--force-hot"));
+}
+
+#[test]
+fn rig_install_accepts_reinstall_and_force_alias() {
+    Cli::try_parse_from([
+        "homeboy",
+        "rig",
+        "install",
+        "./packages/studio",
+        "--reinstall",
+    ])
+    .expect("rig install --reinstall should parse");
+    Cli::try_parse_from(["homeboy", "rig", "install", "./packages/studio", "--force"])
+        .expect("rig install --force should parse as reinstall intent");
+}
+
+#[test]
+fn rig_install_unknown_force_like_flag_does_not_suggest_force_hot() {
+    let error =
+        match Cli::try_parse_from(["homeboy", "rig", "install", "./packages/studio", "--forc"]) {
+            Ok(_) => panic!("mistyped force flag should error"),
+            Err(error) => error,
+        };
+    let message = error.to_string();
+
+    assert!(message.contains("--force") || message.contains("--reinstall"));
+    assert!(!message.contains("--force-hot"));
+}
+
 fn documented_command_index_entries() -> BTreeSet<String> {
     let index = include_str!("../docs/commands/commands-index.md");
     let command_section = index.split("Related:").next().unwrap_or(index);

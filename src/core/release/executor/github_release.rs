@@ -7,7 +7,7 @@ use crate::core::error::{Error, Result};
 use crate::core::release::changelog;
 use crate::core::release::types::{ReleaseState, ReleaseStepResult};
 
-use super::step_success;
+use super::{step_failed, step_success};
 
 #[derive(Debug, Clone)]
 pub(super) struct GitHubReleaseRepairCommands {
@@ -19,11 +19,23 @@ pub(super) struct GitHubReleaseRepairCommands {
     pub env_hint: Option<String>,
 }
 
-/// Create a GitHub Release for the just-pushed tag. Fails soft in every
-/// plausible failure mode (no `gh` binary, not authenticated, release already
-/// exists, `gh release create` errors) — the tag is already pushed by the
-/// time this runs and we don't want to mark an otherwise-successful release
-/// as failed.
+/// Create a GitHub Release for the just-pushed tag.
+///
+/// The step result must faithfully represent whether a GitHub Release object
+/// now exists, because downstream `publish.<target>` / upload steps assume the
+/// release is present (see issue #3541). The rules are:
+///
+/// - Release object created (or already exists) → `Success`.
+/// - Release object NOT created and not recoverable here (no `gh` binary, not
+///   authenticated, `gh release create` failed) → `Failed`, carrying the exact
+///   recovery commands so the operator can resume from the pushed tag + built
+///   artifacts without making a second tag.
+/// - Generated release notes failed → we retry the create with fallback notes
+///   (the changelog section, or a minimal body) and verify the release exists.
+///   Only if that fallback create also fails do we mark the step `Failed`.
+///
+/// `github.release` is a release-pipeline show-stopper, so a `Failed` result
+/// halts the plan before publish/upload runs against a non-existent release.
 pub(crate) fn run_github_release(
     component: &Component,
     state: &ReleaseState,
@@ -96,14 +108,15 @@ pub(crate) fn run_github_release(
         let repair = repair_commands(None);
         log_status!(
             "release",
-            "⚠ `gh` CLI not found on PATH — skipping GitHub Release creation"
+            "✗ `gh` CLI not found on PATH — GitHub Release was NOT created"
         );
         log_repair_commands(&repair);
-        return Ok(skipped_result(
+        return Ok(not_created_result(
             &tag,
             &github,
             "gh-not-available",
-            Some(repair),
+            "`gh` CLI not found on PATH; GitHub Release was not created.",
+            repair,
         ));
     }
 
@@ -111,15 +124,16 @@ pub(crate) fn run_github_release(
         let repair = repair_commands(None);
         log_status!(
             "release",
-            "⚠ `gh` is not authenticated — skipping GitHub Release creation"
+            "✗ `gh` is not authenticated — GitHub Release was NOT created"
         );
         log_status!("release", "Authenticate with `gh auth login`, then run:");
         log_repair_commands(&repair);
-        return Ok(skipped_result(
+        return Ok(not_created_result(
             &tag,
             &github,
             "gh-not-authenticated",
-            Some(repair),
+            "`gh` is not authenticated; GitHub Release was not created.",
+            repair,
         ));
     }
 
@@ -171,13 +185,16 @@ pub(crate) fn run_github_release(
         if !upload_output.status.success() {
             let stderr = String::from_utf8_lossy(&upload_output.stderr).to_string();
             let stdout = String::from_utf8_lossy(&upload_output.stdout).to_string();
-            log_status!("release", "⚠ `gh release upload` failed: {}", stderr.trim());
+            let repair = repair_commands(None);
+            log_status!("release", "✗ `gh release upload` failed: {}", stderr.trim());
+            log_repair_commands(&repair);
             return Ok(upload_failed_result(
                 &tag,
                 &github,
                 stdout,
                 stderr,
                 artifact_paths.len(),
+                repair,
             ));
         }
 
@@ -185,34 +202,40 @@ pub(crate) fn run_github_release(
     }
 
     let notes_start_tag = github_generated_notes_start_tag(component, &tag)?;
-    let generated_notes = match github_generated_notes(
+    let changelog_url = github_changelog_url(component, &github, &tag);
+
+    // When GitHub-generated notes fail, do NOT skip the release: a skipped
+    // release that reports success leaves downstream publish/upload steps
+    // uploading assets to a release object that does not exist (issue #3541).
+    // Fall back to creating the release with the changelog notes (or a minimal
+    // body) so the release object is still created from the pushed tag and
+    // built artifacts without a second tag. If even that fails, the step is
+    // marked Failed below.
+    let (release_notes, generated_notes_ok) = match github_generated_notes(
         &github,
         &component.github,
         &tag,
         notes_start_tag.as_deref(),
     ) {
-        Ok(notes) => notes,
+        Ok(generated_notes) => {
+            let notes = changelog_url
+                .as_deref()
+                .map(|url| replace_full_changelog_footer(&generated_notes, url))
+                .unwrap_or(generated_notes);
+            (notes, true)
+        }
         Err(err) => {
-            let repair = repair_commands(None);
             log_status!(
                 "release",
-                "⚠ GitHub generated release notes failed: {}",
+                "⚠ GitHub generated release notes failed: {} — falling back to changelog notes",
                 err
             );
-            log_repair_commands(&repair);
-            return Ok(skipped_result(
-                &tag,
-                &github,
-                "generated-notes-failed",
-                Some(repair),
-            ));
+            (
+                fallback_release_notes(state, changelog_url.as_deref(), &tag),
+                false,
+            )
         }
     };
-    let changelog_url = github_changelog_url(component, &github, &tag);
-    let release_notes = changelog_url
-        .as_deref()
-        .map(|url| replace_full_changelog_footer(&generated_notes, url))
-        .unwrap_or(generated_notes);
 
     log_status!(
         "release",
@@ -236,8 +259,13 @@ pub(crate) fn run_github_release(
         "-R",
         &repo_flag,
     ];
-    if let Some(previous_tag) = notes_start_tag.as_deref() {
-        create_args.extend_from_slice(&["--notes-start-tag", previous_tag]);
+    // Only pass --notes-start-tag when generated notes succeeded. With explicit
+    // fallback `--notes`, re-triggering the note generation that just failed
+    // would be pointless and could fail the create for the same reason.
+    if generated_notes_ok {
+        if let Some(previous_tag) = notes_start_tag.as_deref() {
+            create_args.extend_from_slice(&["--notes-start-tag", previous_tag]);
+        }
     }
     for path in &artifact_paths {
         create_args.push(path);
@@ -256,23 +284,18 @@ pub(crate) fn run_github_release(
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let repair = repair_commands(notes_start_tag.as_deref());
-        log_status!("release", "⚠ `gh release create` failed: {}", stderr.trim());
+        // Distinguish the path that brought us here so operators (and tests)
+        // can see whether the fallback-after-generated-notes-failure also
+        // failed, versus a plain create failure with working notes.
+        let reason = if generated_notes_ok {
+            "gh-command-failed"
+        } else {
+            "generated-notes-failed"
+        };
+        log_status!("release", "✗ `gh release create` failed: {}", stderr.trim());
         log_repair_commands(&repair);
-        return Ok(step_success(
-            "github.release",
-            "github.release",
-            Some(serde_json::json!({
-                "skipped": true,
-                "reason": "gh-command-failed",
-                "tag": tag,
-                "owner": github.owner,
-                "repo": github.repo,
-                "stdout": stdout,
-                "stderr": stderr,
-                "fallback_command": repair.create_command.clone(),
-                "repair": repair_data(&repair),
-            })),
-            Vec::new(),
+        return Ok(create_failed_result(
+            &tag, &github, reason, stdout, stderr, repair,
         ));
     }
 
@@ -289,7 +312,7 @@ pub(crate) fn run_github_release(
             "repo": github.repo,
             "url": url,
             "artifact_count": artifact_paths.len(),
-            "generated_notes": true,
+            "generated_notes": generated_notes_ok,
             "changelog_url": changelog_url,
             "notes_start_tag": notes_start_tag,
         })),
@@ -374,6 +397,29 @@ fn github_generated_notes_start_tag(component: &Component, tag: &str) -> Result<
     crate::core::git::get_previous_tag_before_with_prefix(git_root, tag, tag_prefix)
 }
 
+/// Build the release body used when GitHub-generated notes are unavailable.
+///
+/// Prefer the changelog section captured in [`ReleaseState::notes`]; fall back
+/// to a minimal `Release <tag>` body. Either way, append the changelog link
+/// footer when we have one so the fallback release still points back at the
+/// full changelog.
+fn fallback_release_notes(state: &ReleaseState, changelog_url: Option<&str>, tag: &str) -> String {
+    let base = state
+        .notes
+        .as_deref()
+        .map(str::trim)
+        .filter(|notes| !notes.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("Release {}", tag));
+
+    match changelog_url {
+        Some(url) => replace_full_changelog_footer(&base, url),
+        None => base,
+    }
+}
+
+/// A successful but no-op result for an idempotent retry where the GitHub
+/// Release object already exists. The release exists, so this is `Success`.
 pub(super) fn skipped_result(
     tag: &str,
     github: &GitHubRepo,
@@ -396,28 +442,118 @@ pub(super) fn skipped_result(
     step_success("github.release", "github.release", Some(data), Vec::new())
 }
 
+/// The GitHub Release object was NOT created and cannot be recovered in this
+/// run (no `gh` binary / not authenticated). This must be `Failed`, not a
+/// success-with-`skipped`, so the release pipeline halts before publish/upload
+/// steps run against a release that does not exist (issue #3541).
+pub(super) fn not_created_result(
+    tag: &str,
+    github: &GitHubRepo,
+    reason: &str,
+    error: &str,
+    repair: GitHubReleaseRepairCommands,
+) -> ReleaseStepResult {
+    let data = serde_json::json!({
+        "skipped": false,
+        "release_created": false,
+        "reason": reason,
+        "tag": tag,
+        "host": github.host,
+        "owner": github.owner,
+        "repo": github.repo,
+        "fallback_command": repair.create_command.clone(),
+        "repair": repair_data(&repair),
+    });
+
+    step_failed(
+        "github.release",
+        "github.release",
+        Some(data),
+        Some(error.to_string()),
+        repair_hints(&repair),
+    )
+}
+
+/// `gh release create` failed, so no GitHub Release object exists. `Failed`,
+/// carrying the recovery commands so the operator can finish the release from
+/// the already-pushed tag + built artifacts without making a second tag.
+pub(super) fn create_failed_result(
+    tag: &str,
+    github: &GitHubRepo,
+    reason: &str,
+    stdout: String,
+    stderr: String,
+    repair: GitHubReleaseRepairCommands,
+) -> ReleaseStepResult {
+    let data = serde_json::json!({
+        "skipped": false,
+        "release_created": false,
+        "reason": reason,
+        "tag": tag,
+        "host": github.host,
+        "owner": github.owner,
+        "repo": github.repo,
+        "stdout": stdout,
+        "stderr": stderr.clone(),
+        "fallback_command": repair.create_command.clone(),
+        "repair": repair_data(&repair),
+    });
+
+    let detail = stderr.trim();
+    let error = if detail.is_empty() {
+        format!("`gh release create` failed for {}", tag)
+    } else {
+        format!("`gh release create` failed for {}: {}", tag, detail)
+    };
+
+    step_failed(
+        "github.release",
+        "github.release",
+        Some(data),
+        Some(error),
+        repair_hints(&repair),
+    )
+}
+
+/// The GitHub Release exists but attaching the build artifacts failed. The
+/// step is responsible for the full release lifecycle (entry + assets), so a
+/// failed asset upload is a `Failed` step: downstream consumers would
+/// otherwise assume the assets are present.
 pub(super) fn upload_failed_result(
     tag: &str,
     github: &GitHubRepo,
     stdout: String,
     stderr: String,
     artifact_count: usize,
+    repair: GitHubReleaseRepairCommands,
 ) -> ReleaseStepResult {
-    step_success(
+    let data = serde_json::json!({
+        "skipped": false,
+        "release_created": true,
+        "reason": "gh-upload-failed",
+        "tag": tag,
+        "host": github.host,
+        "owner": github.owner,
+        "repo": github.repo,
+        "stdout": stdout,
+        "stderr": stderr.clone(),
+        "artifact_count": artifact_count,
+        "repair": repair_data(&repair),
+    });
+
+    let detail = stderr.trim();
+    let error = if detail.is_empty() {
+        format!("`gh release upload` failed for {}", tag)
+    } else {
+        format!("`gh release upload` failed for {}: {}", tag, detail)
+    };
+
+    step_failed(
         "github.release",
         "github.release",
-        Some(serde_json::json!({
-            "skipped": true,
-            "reason": "gh-upload-failed",
-            "tag": tag,
-            "host": github.host,
-            "owner": github.owner,
-            "repo": github.repo,
-            "stdout": stdout,
-            "stderr": stderr,
-            "artifact_count": artifact_count,
-        })),
-        Vec::new(),
+        Some(data),
+        Some(error),
+        repair_hints(&repair),
     )
 }
 
@@ -573,6 +709,31 @@ fn github_release_repair_commands_with_env(
     }
 }
 
+/// Surface the manual recovery commands as step hints so a failed
+/// `github.release` step tells the operator exactly how to finish the release
+/// from the already-pushed tag + built artifacts without re-tagging.
+fn repair_hints(repair: &GitHubReleaseRepairCommands) -> Vec<crate::core::error::Hint> {
+    let mut hints = Vec::new();
+    if let Some(env_hint) = repair.env_hint.as_deref() {
+        hints.push(crate::core::error::Hint {
+            message: env_hint.to_string(),
+        });
+    }
+    hints.push(crate::core::error::Hint {
+        message: format!("Generate release notes: {}", repair.generate_notes_command),
+    });
+    hints.push(crate::core::error::Hint {
+        message: format!(
+            "Create the GitHub Release from the pushed tag and built artifacts (no new tag): {}",
+            repair.create_command
+        ),
+    });
+    hints.push(crate::core::error::Hint {
+        message: format!("Verify the release exists: {}", repair.view_command),
+    });
+    hints
+}
+
 fn repair_data(repair: &GitHubReleaseRepairCommands) -> serde_json::Value {
     serde_json::json!({
         "notes_file": repair.notes_file,
@@ -718,8 +879,176 @@ mod tests {
 
     use crate::core::component::{GithubConfig, GithubHostConfig};
     use crate::core::deploy::release_download::GitHubRepo;
+    use crate::core::release::types::{ReleaseState, ReleaseStepStatus};
 
-    use super::github_cli_env;
+    use super::{
+        create_failed_result, fallback_release_notes, github_cli_env,
+        github_release_repair_commands, not_created_result, upload_failed_result,
+    };
+
+    fn test_repo() -> GitHubRepo {
+        GitHubRepo {
+            host: "github.com".to_string(),
+            owner: "chubes4".to_string(),
+            repo: "studio-web".to_string(),
+        }
+    }
+
+    fn test_repair() -> super::GitHubReleaseRepairCommands {
+        github_release_repair_commands(
+            "v0.10.6",
+            &test_repo(),
+            &GithubConfig::default(),
+            &["build/studio-web.zip".to_string()],
+            None,
+        )
+    }
+
+    fn data_str<'a>(result: &'a super::ReleaseStepResult, key: &str) -> Option<&'a str> {
+        result
+            .data
+            .as_ref()
+            .and_then(|data| data.get(key))
+            .and_then(|value| value.as_str())
+    }
+
+    fn data_bool(result: &super::ReleaseStepResult, key: &str) -> Option<bool> {
+        result
+            .data
+            .as_ref()
+            .and_then(|data| data.get(key))
+            .and_then(|value| value.as_bool())
+    }
+
+    #[test]
+    fn not_created_result_is_failed_and_not_marked_skipped_success() {
+        // Regression for #3541: a release that was never created must NOT be a
+        // success-with-skipped step — that lets publish/upload run against a
+        // missing release. It must be Failed.
+        let result = not_created_result(
+            "v0.10.6",
+            &test_repo(),
+            "gh-not-authenticated",
+            "`gh` is not authenticated; GitHub Release was not created.",
+            test_repair(),
+        );
+
+        assert_eq!(result.status, ReleaseStepStatus::Failed);
+        assert_eq!(data_bool(&result, "skipped"), Some(false));
+        assert_eq!(data_bool(&result, "release_created"), Some(false));
+        assert_eq!(data_str(&result, "reason"), Some("gh-not-authenticated"));
+        assert!(result
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("not authenticated"));
+        assert!(data_str(&result, "fallback_command").is_some());
+        assert!(result
+            .hints
+            .iter()
+            .any(|hint| hint.message.contains("no new tag")));
+    }
+
+    #[test]
+    fn create_failed_result_reports_generated_notes_failed_as_failure() {
+        // The exact scenario from #3541: generated notes failed, the fallback
+        // create also failed, so no release object exists. Must be Failed and
+        // must carry the generated-notes-failed reason — not success/skipped.
+        let result = create_failed_result(
+            "v0.10.6",
+            &test_repo(),
+            "generated-notes-failed",
+            String::new(),
+            "HTTP 502: bad gateway".to_string(),
+            test_repair(),
+        );
+
+        assert_eq!(result.status, ReleaseStepStatus::Failed);
+        assert_eq!(data_bool(&result, "skipped"), Some(false));
+        assert_eq!(data_bool(&result, "release_created"), Some(false));
+        assert_eq!(data_str(&result, "reason"), Some("generated-notes-failed"));
+        assert!(result
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("`gh release create` failed for v0.10.6"));
+        assert!(result
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("HTTP 502: bad gateway"));
+        assert!(data_str(&result, "fallback_command").is_some());
+    }
+
+    #[test]
+    fn create_failed_result_reports_plain_create_failure() {
+        let result = create_failed_result(
+            "v0.10.6",
+            &test_repo(),
+            "gh-command-failed",
+            String::new(),
+            "release v0.10.6 already exists".to_string(),
+            test_repair(),
+        );
+
+        assert_eq!(result.status, ReleaseStepStatus::Failed);
+        assert_eq!(data_str(&result, "reason"), Some("gh-command-failed"));
+    }
+
+    #[test]
+    fn upload_failed_result_is_failed_but_records_release_exists() {
+        // The release object exists but assets did not attach. Still Failed so
+        // nothing assumes the assets are present, but release_created stays true.
+        let result = upload_failed_result(
+            "v0.10.6",
+            &test_repo(),
+            String::new(),
+            "could not upload asset".to_string(),
+            1,
+            test_repair(),
+        );
+
+        assert_eq!(result.status, ReleaseStepStatus::Failed);
+        assert_eq!(data_bool(&result, "skipped"), Some(false));
+        assert_eq!(data_bool(&result, "release_created"), Some(true));
+        assert_eq!(data_str(&result, "reason"), Some("gh-upload-failed"));
+        assert!(result
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("could not upload asset"));
+    }
+
+    #[test]
+    fn fallback_release_notes_uses_changelog_notes_when_present() {
+        let state = ReleaseState {
+            notes: Some("## v0.10.6\n\n- Fixed a thing".to_string()),
+            ..Default::default()
+        };
+
+        let notes = fallback_release_notes(
+            &state,
+            Some("https://github.com/chubes4/studio-web/blob/v0.10.6/CHANGELOG.md"),
+            "v0.10.6",
+        );
+
+        assert!(notes.contains("- Fixed a thing"));
+        assert!(notes.contains(
+            "**Full Changelog**: https://github.com/chubes4/studio-web/blob/v0.10.6/CHANGELOG.md"
+        ));
+    }
+
+    #[test]
+    fn fallback_release_notes_falls_back_to_minimal_body_when_empty() {
+        let state = ReleaseState {
+            notes: Some("   ".to_string()),
+            ..Default::default()
+        };
+
+        let notes = fallback_release_notes(&state, None, "v0.10.6");
+
+        assert_eq!(notes, "Release v0.10.6");
+    }
 
     #[test]
     fn github_cli_env_sets_enterprise_host_and_proxy() {
