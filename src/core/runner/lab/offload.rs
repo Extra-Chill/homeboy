@@ -16,16 +16,21 @@
 //! Trace-target git-fetch calculation lives in `trace_fetch_refs`; this module
 //! only decides when those refs participate in workspace sync.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use crate::core::agent_task_lifecycle;
+use crate::core::agent_tasks::provider::{
+    AgentTaskExecutorProvider, ExtensionProviderAgentTaskExecutor,
+};
+use crate::core::engine::shell;
 use crate::core::observation::{PREVIEW_METADATA_ENV, PREVIEW_PUBLIC_URL_ENV};
 use crate::core::plan::{HomeboyPlan, PlanStep, PlanStepStatus, PlanValues};
 use crate::core::source_snapshot::SourceSnapshot;
 use crate::core::{Error, ErrorCode, Result};
 
 use super::super::daemon_health::runner_daemon_health_failure;
-use super::super::execution::lab_offload_handoff_hints;
+use super::super::execution::{lab_offload_handoff_hints, DaemonJobHandoffState};
 use super::super::lab_apply::apply_lab_offload_patch;
 use super::super::lab_args::{
     inline_agent_task_prompt_files_in_args, lab_offload_source_path, remap_agent_task_plan_in_args,
@@ -457,6 +462,31 @@ fn run_lab_offload_inner(
         messages.push(warning);
     }
     let homeboy_path = runner.settings.homeboy_path.as_deref().unwrap_or("homeboy");
+    let runner_homeboy = lab_runner_homeboy_metadata(runner_id, homeboy_path, &runner_status);
+    plan = with_step(
+        plan,
+        PlanStep::ready("lab.runner_homeboy", "lab.runner_homeboy")
+            .inputs(PlanValues::new().json("runner_homeboy", &runner_homeboy))
+            .build(),
+    );
+    eprintln!(
+        "Lab offload: runner `{}` Homeboy binary `{}`; active daemon {}; refresh with `{}`.",
+        runner_id,
+        homeboy_path,
+        runner_homeboy_daemon_display(&runner_homeboy),
+        runner_homeboy["refresh_commands"]
+            .as_array()
+            .map(|commands| commands
+                .iter()
+                .filter_map(|command| command.as_str())
+                .collect::<Vec<_>>()
+                .join(" && "))
+            .unwrap_or_else(|| format!(
+                "homeboy runner disconnect {} && homeboy runner connect {}",
+                shell::quote_arg(runner_id),
+                shell::quote_arg(runner_id)
+            ))
+    );
     let command_prefix = lab_offload_command_prefix(&source_path, homeboy_path);
     let capability_contract =
         lab_runner_capability_contract(&contract, &source_path, &command_prefix.required_tools);
@@ -772,7 +802,7 @@ fn run_lab_offload_inner(
     let (remapped_args, agent_task_run_id) = ensure_agent_task_dispatch_run_id(&remapped_args)
         .map_or((remapped_args, None), |(args, run_id)| (args, Some(run_id)));
 
-    let mut command = command_prefix.argv;
+    let mut command = command_prefix.argv.clone();
     command.extend(
         rewrite_lab_offload_args(&remapped_args, &remote_cwd, &path_remaps)
             .into_iter()
@@ -825,6 +855,7 @@ fn run_lab_offload_inner(
     lab_metadata["tunnel_secret_env"] = tunnel_secret_env;
     lab_metadata["rig_component_path_env"] = rig_component_path_env;
     lab_metadata["settings_env"] = settings_env_diagnostics(&remapped_args, &env);
+    lab_metadata["runner_homeboy"] = runner_homeboy.clone();
     lab_metadata["rig_sync"] = serde_json::json!({
         "step": "lab.sync_rigs",
         "synced_count": synced_rigs.len(),
@@ -847,6 +878,15 @@ fn run_lab_offload_inner(
     hydrate_agent_task_secret_env(&changed_since_preflight.args, &mut env)?;
     hydrate_trace_secret_env(&changed_since_preflight.args, &mut env)?;
     hydrate_tunnel_secret_env(&changed_since_preflight.args, &mut env)?;
+    if is_agent_task_offload_command(&remapped_args) {
+        preflight_agent_task_provider_registry(
+            runner_id,
+            &remote_cwd,
+            &command_prefix.argv,
+            &env,
+            &runner_homeboy,
+        )?;
+    }
     let exec_result = exec(
         runner_id,
         RunnerExecOptions {
@@ -1027,6 +1067,40 @@ fn run_lab_offload_inner(
     })
 }
 
+fn lab_runner_homeboy_metadata(
+    runner_id: &str,
+    configured_executable: &str,
+    status: &RunnerStatusReport,
+) -> serde_json::Value {
+    let refresh_commands = vec![
+        format!("homeboy runner disconnect {}", shell::quote_arg(runner_id)),
+        format!("homeboy runner connect {}", shell::quote_arg(runner_id)),
+    ];
+    serde_json::json!({
+        "schema": "homeboy/lab-runner-homeboy/v1",
+        "runner_id": runner_id,
+        "configured_executable": configured_executable,
+        "active_daemon_version": status.session.as_ref().map(|session| session.homeboy_version.clone()),
+        "active_daemon_build_identity": status.session.as_ref().and_then(|session| session.homeboy_build_identity.clone()),
+        "stale_daemon": status.stale_daemon,
+        "refresh_commands": refresh_commands,
+        "upgrade_command": format!("homeboy upgrade --force --upgrade-runner {}", shell::quote_arg(runner_id)),
+    })
+}
+
+fn runner_homeboy_daemon_display(metadata: &serde_json::Value) -> String {
+    metadata
+        .get("active_daemon_build_identity")
+        .and_then(|value| value.as_str())
+        .or_else(|| {
+            metadata
+                .get("active_daemon_version")
+                .and_then(|value| value.as_str())
+        })
+        .unwrap_or("<not connected>")
+        .to_string()
+}
+
 fn with_lab_apply_patch_step(
     plan: HomeboyPlan,
     apply_output: Option<RunnerWorkspaceApplyOutput>,
@@ -1078,7 +1152,13 @@ fn in_flight_daemon_disconnect_error(
             "source": err.details,
         }),
     );
-    for hint in lab_offload_handoff_hints(runner_id, None, job_id, None) {
+    for hint in lab_offload_handoff_hints(
+        runner_id,
+        None,
+        job_id,
+        None,
+        DaemonJobHandoffState::InFlight,
+    ) {
         disconnected = disconnected.with_hint(hint);
     }
     disconnected.retryable = Some(false);
@@ -1299,6 +1379,191 @@ fn mutation_return_unavailable_outcome(
             ]),
         )),
     }
+}
+
+fn is_agent_task_offload_command(args: &[String]) -> bool {
+    args.windows(2).any(|window| {
+        window[0] == "agent-task" && matches!(window[1].as_str(), "cook" | "dispatch" | "run-plan")
+    })
+}
+
+fn preflight_agent_task_provider_registry(
+    runner_id: &str,
+    remote_cwd: &str,
+    command_prefix: &[String],
+    env: &std::collections::HashMap<String, String>,
+    runner_homeboy: &serde_json::Value,
+) -> Result<()> {
+    let local_executor = ExtensionProviderAgentTaskExecutor::discover();
+    let local_providers = provider_fingerprints(local_executor.providers());
+    let mut command = command_prefix.to_vec();
+    command.extend(["agent-task".to_string(), "providers".to_string()]);
+    let (output, exit_code) = exec(
+        runner_id,
+        RunnerExecOptions {
+            cwd: Some(remote_cwd.to_string()),
+            project_id: None,
+            allow_diagnostic_ssh: false,
+            command: command.clone(),
+            env: env.clone(),
+            secret_env_names: Vec::new(),
+            capture_patch: false,
+            raw_exec: false,
+            source_snapshot: None,
+            capability_preflight: None,
+            required_extensions: Vec::new(),
+            require_paths: Vec::new(),
+        },
+    )?;
+    if exit_code != 0 {
+        return Err(agent_task_provider_preflight_error(
+            runner_id,
+            remote_cwd,
+            &command,
+            runner_homeboy,
+            format!("runner provider registry probe exited with {exit_code}"),
+            local_providers,
+            BTreeSet::new(),
+            BTreeSet::new(),
+            BTreeSet::new(),
+            Some(output.stderr),
+        ));
+    }
+    let remote_providers =
+        parse_agent_task_provider_fingerprints(&output.stdout).map_err(|err| {
+            agent_task_provider_preflight_error(
+                runner_id,
+                remote_cwd,
+                &command,
+                runner_homeboy,
+                err,
+                local_providers.clone(),
+                BTreeSet::new(),
+                BTreeSet::new(),
+                BTreeSet::new(),
+                Some(output.stdout.clone()),
+            )
+        })?;
+    if local_providers != remote_providers {
+        let missing_on_runner = local_providers
+            .difference(&remote_providers)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let extra_on_runner = remote_providers
+            .difference(&local_providers)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        return Err(agent_task_provider_preflight_error(
+            runner_id,
+            remote_cwd,
+            &command,
+            runner_homeboy,
+            "Lab runner agent-task provider registry differs from the controller".to_string(),
+            local_providers,
+            remote_providers,
+            missing_on_runner,
+            extra_on_runner,
+            None,
+        ));
+    }
+    Ok(())
+}
+
+fn parse_agent_task_provider_fingerprints(
+    stdout: &str,
+) -> std::result::Result<BTreeSet<String>, String> {
+    let response: serde_json::Value = serde_json::from_str(stdout)
+        .map_err(|err| format!("parse runner agent-task providers response: {err}"))?;
+    let providers = response
+        .get("data")
+        .and_then(|data| data.get("providers"))
+        .and_then(|providers| providers.as_array())
+        .ok_or_else(|| {
+            "runner agent-task providers response did not include data.providers".to_string()
+        })?;
+    let mut fingerprints = BTreeSet::new();
+    for provider in providers {
+        let id = provider
+            .get("id")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| "runner agent-task provider entry is missing id".to_string())?;
+        let backend = provider
+            .get("backend")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| "runner agent-task provider entry is missing backend".to_string())?;
+        let command = provider
+            .get("command")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        let default_backend = provider
+            .get("default_backend")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+        fingerprints.insert(format!(
+            "{id}|backend={backend}|command={command}|default={default_backend}"
+        ));
+    }
+    Ok(fingerprints)
+}
+
+fn provider_fingerprints(providers: &[AgentTaskExecutorProvider]) -> BTreeSet<String> {
+    providers
+        .iter()
+        .map(|provider| {
+            format!(
+                "{}|backend={}|command={}|default={}",
+                provider.id, provider.backend, provider.command, provider.default_backend
+            )
+        })
+        .collect()
+}
+
+fn agent_task_provider_preflight_error(
+    runner_id: &str,
+    remote_cwd: &str,
+    command: &[String],
+    runner_homeboy: &serde_json::Value,
+    message: String,
+    local_providers: BTreeSet<String>,
+    remote_providers: BTreeSet<String>,
+    missing_on_runner: BTreeSet<String>,
+    extra_on_runner: BTreeSet<String>,
+    raw_output: Option<String>,
+) -> Error {
+    let mut details = serde_json::json!({
+        "field": "runner_provider_registry",
+        "problem": message,
+        "id": runner_id,
+        "runner_id": runner_id,
+        "remote_workspace": remote_cwd,
+        "probe_command": command,
+        "runner_homeboy": runner_homeboy,
+        "local_providers": local_providers,
+        "remote_providers": remote_providers,
+        "missing_on_runner": missing_on_runner,
+        "extra_on_runner": extra_on_runner,
+    });
+    if let Some(raw_output) = raw_output {
+        details["raw_output"] = serde_json::json!(raw_output);
+    }
+
+    Error::new(
+        ErrorCode::ValidationInvalidArgument,
+        format!("Invalid argument 'runner_provider_registry': {message}"),
+        details,
+    )
+    .with_hint(format!(
+        "Refresh runner `{runner_id}` so its Homeboy/runtime provider registry matches the controller before retrying Lab agent-task offload."
+    ))
+    .with_hint(format!(
+        "Inspect the runner registry with `homeboy runner exec {} -- {}`.",
+        shell::quote_arg(runner_id),
+        command
+            .iter()
+            .map(|arg| shell::quote_arg(arg))
+            .collect::<Vec<_>>()
+            .join(" ")
+    ))
 }
 
 #[cfg(test)]
@@ -1685,6 +1950,151 @@ mod tests {
         .expect("parse lab offload metadata");
 
         assert_eq!(parsed["workspace_mapping"], mapping);
+    }
+
+    #[test]
+    fn agent_task_provider_registry_probe_only_targets_dispatch_commands() {
+        assert!(is_agent_task_offload_command(&[
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+        ]));
+        assert!(is_agent_task_offload_command(&[
+            "cargo".to_string(),
+            "run".to_string(),
+            "--".to_string(),
+            "agent-task".to_string(),
+            "run-plan".to_string(),
+        ]));
+        assert!(!is_agent_task_offload_command(&[
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "providers".to_string(),
+        ]));
+    }
+
+    #[test]
+    fn parses_agent_task_provider_registry_fingerprints_from_cli_envelope() {
+        let stdout = serde_json::json!({
+            "success": true,
+            "data": {
+                "schema": "homeboy/agent-task-providers/v1",
+                "providers": [
+                    {
+                        "id": "claude-code",
+                        "backend": "claude-code",
+                        "command": "homeboy agent-task provider claude-code",
+                        "default_backend": true
+                    },
+                    {
+                        "id": "codebox",
+                        "backend": "codebox",
+                        "command": "homeboy agent-task provider codebox"
+                    }
+                ]
+            }
+        })
+        .to_string();
+
+        let fingerprints =
+            parse_agent_task_provider_fingerprints(&stdout).expect("provider fingerprints");
+
+        assert!(fingerprints.contains(
+            "claude-code|backend=claude-code|command=homeboy agent-task provider claude-code|default=true"
+        ));
+        assert!(fingerprints.contains(
+            "codebox|backend=codebox|command=homeboy agent-task provider codebox|default=false"
+        ));
+    }
+
+    #[test]
+    fn provider_registry_drift_error_reports_missing_and_extra_entries() {
+        let command = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "providers".to_string(),
+        ];
+        let local =
+            BTreeSet::from(["local|backend=local|command=local run|default=true".to_string()]);
+        let remote =
+            BTreeSet::from(["remote|backend=remote|command=remote run|default=true".to_string()]);
+        let missing = local.clone();
+        let extra = remote.clone();
+
+        let err = agent_task_provider_preflight_error(
+            "lab-1",
+            "/srv/homeboy/app",
+            &command,
+            &serde_json::json!({ "binary": "homeboy" }),
+            "Lab runner agent-task provider registry differs from the controller".to_string(),
+            local,
+            remote,
+            missing,
+            extra,
+            None,
+        );
+
+        assert_eq!(err.code, ErrorCode::ValidationInvalidArgument);
+        assert_eq!(err.details["field"], "runner_provider_registry");
+        assert_eq!(err.details["runner_id"], "lab-1");
+        assert_eq!(
+            err.details["missing_on_runner"][0],
+            "local|backend=local|command=local run|default=true"
+        );
+        assert_eq!(
+            err.details["extra_on_runner"][0],
+            "remote|backend=remote|command=remote run|default=true"
+        );
+        assert!(err
+            .hints
+            .iter()
+            .any(|hint| hint.message.contains("Refresh runner `lab-1`")));
+    }
+
+    #[test]
+    fn lab_runner_homeboy_metadata_names_binary_and_refresh_path() {
+        let status = reverse_status("homeboy lab");
+        let metadata = lab_runner_homeboy_metadata(
+            "homeboy lab",
+            "/tmp/_lab_workspaces/homeboy/target/debug/homeboy",
+            &status,
+        );
+
+        assert_eq!(metadata["schema"], "homeboy/lab-runner-homeboy/v1");
+        assert_eq!(metadata["runner_id"], "homeboy lab");
+        assert_eq!(
+            metadata["configured_executable"],
+            "/tmp/_lab_workspaces/homeboy/target/debug/homeboy"
+        );
+        assert_eq!(metadata["active_daemon_version"], "homeboy 0.0.0");
+        assert_eq!(
+            metadata["active_daemon_build_identity"],
+            "homeboy 0.0.0+test"
+        );
+        assert_eq!(
+            metadata["refresh_commands"],
+            serde_json::json!([
+                "homeboy runner disconnect 'homeboy lab'",
+                "homeboy runner connect 'homeboy lab'"
+            ])
+        );
+        assert_eq!(
+            metadata["upgrade_command"],
+            "homeboy upgrade --force --upgrade-runner 'homeboy lab'"
+        );
+    }
+
+    #[test]
+    fn runner_homeboy_daemon_display_prefers_build_identity() {
+        let metadata = serde_json::json!({
+            "active_daemon_version": "homeboy 0.1.0",
+            "active_daemon_build_identity": "homeboy 0.1.0+abc123",
+        });
+
+        assert_eq!(
+            runner_homeboy_daemon_display(&metadata),
+            "homeboy 0.1.0+abc123"
+        );
     }
 
     #[test]

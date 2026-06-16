@@ -352,13 +352,7 @@ fn exec_via_reverse_broker(
             Some("parse reverse broker job".to_string()),
         )
     })?;
-    let handoff_run_id = persist_lab_offload_handoff_run(runner, &cwd, &command, &job);
-    print_lab_offload_handoff(
-        &runner.id,
-        Some(&cwd),
-        &job.id.to_string(),
-        handoff_run_id.as_deref(),
-    );
+    persist_lab_offload_handoff_run(runner, &cwd, &command, &job);
 
     let deadline = Instant::now() + runner_exec_wait_timeout();
     while !matches!(
@@ -399,6 +393,14 @@ fn exec_via_reverse_broker(
                 1
             }
         });
+
+    print_lab_offload_handoff(
+        &runner.id,
+        Some(&cwd),
+        &job.id.to_string(),
+        None,
+        DaemonJobHandoffState::Terminal(job.status),
+    );
 
     Ok((
         RunnerExecOutput {
@@ -486,13 +488,7 @@ fn exec_via_daemon(
     let mut job: Job = serde_json::from_value(job_value.clone()).map_err(|err| {
         Error::internal_json(err.to_string(), Some("parse daemon exec job".to_string()))
     })?;
-    let handoff_run_id = persist_lab_offload_handoff_run(runner, &cwd, &command, &job);
-    print_lab_offload_handoff(
-        &runner.id,
-        Some(&cwd),
-        &job.id.to_string(),
-        handoff_run_id.as_deref(),
-    );
+    persist_lab_offload_handoff_run(runner, &cwd, &command, &job);
 
     let deadline = Instant::now() + runner_exec_wait_timeout();
     while !matches!(
@@ -540,6 +536,14 @@ fn exec_via_daemon(
 
     let mirror = mirror_daemon_evidence(runner, &cwd, &command, &job, &events, &result)?;
     let patch = mirror.as_ref().and_then(|evidence| evidence.patch.clone());
+    let mirror_run_id = mirror.as_ref().map(|evidence| evidence.run.id.as_str());
+    print_lab_offload_handoff(
+        &runner.id,
+        Some(&cwd),
+        &job.id.to_string(),
+        mirror_run_id,
+        DaemonJobHandoffState::Terminal(job.status),
+    );
 
     Ok((
         RunnerExecOutput {
@@ -653,12 +657,32 @@ fn daemon_job_wait_timeout(
             ));
         }
     }
-    for hint in
-        lab_offload_handoff_hints(&runner.id, Some(cwd), &job_id, mirrored_run_id.as_deref())
-    {
+    for hint in lab_offload_handoff_hints(
+        &runner.id,
+        Some(cwd),
+        &job_id,
+        mirrored_run_id.as_deref(),
+        DaemonJobHandoffState::InFlight,
+    ) {
         error = error.with_hint(hint);
     }
     error.with_hint(timeout_hint)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DaemonJobHandoffState {
+    InFlight,
+    Terminal(JobStatus),
+}
+
+fn daemon_job_status_label(status: JobStatus) -> &'static str {
+    match status {
+        JobStatus::Queued => "queued",
+        JobStatus::Running => "running",
+        JobStatus::Succeeded => "succeeded",
+        JobStatus::Failed => "failed",
+        JobStatus::Cancelled => "cancelled",
+    }
 }
 
 pub(crate) fn lab_offload_handoff_hints(
@@ -666,6 +690,7 @@ pub(crate) fn lab_offload_handoff_hints(
     remote_cwd: Option<&str>,
     job_id: &str,
     persisted_run_id: Option<&str>,
+    state: DaemonJobHandoffState,
 ) -> Vec<String> {
     let runner_exec_prefix = match remote_cwd.filter(|cwd| !cwd.trim().is_empty()) {
         Some(cwd) => format!(
@@ -676,29 +701,47 @@ pub(crate) fn lab_offload_handoff_hints(
     };
     let remote_run_filter =
         format!("{runner_exec_prefix} homeboy runs list --status running --limit 20");
-    let mut hints = vec![format!(
-        "Lab offload handoff: runner `{runner_id}` has daemon job `{job_id}` still in flight; the runner-side Homeboy command may continue after this controller exits."
-    )];
+    let mut hints = match state {
+        DaemonJobHandoffState::InFlight => vec![format!(
+            "Lab offload handoff: runner `{runner_id}` has daemon job `{job_id}` still in flight; the runner-side Homeboy command may continue after this controller exits."
+        )],
+        DaemonJobHandoffState::Terminal(status) => vec![format!(
+            "Lab offload handoff: runner `{runner_id}` daemon job `{job_id}` finished with status `{}`.",
+            daemon_job_status_label(status)
+        )],
+    };
 
     if let Some(run_id) = persisted_run_id.filter(|run_id| !run_id.trim().is_empty()) {
         hints.push(format!(
             "Persisted run id: `{run_id}`. Status: `homeboy runs show {run_id}`; evidence: `homeboy runs evidence {run_id}`; artifacts: `homeboy runs artifacts {run_id}`."
         ));
-    } else {
+    } else if state == DaemonJobHandoffState::InFlight {
         hints.push(format!(
             "Persisted runner-side run id is not known yet; list active runner runs with `{remote_run_filter}`."
         ));
+    } else {
+        hints.push(
+            "Persisted runner-side run id is not known; inspect daemon job events for final result details."
+                .to_string(),
+        );
     }
 
-    hints.push(format!(
-        "Runner-side status/evidence/artifacts: `{remote_run_filter}` then `{runner_exec_prefix} homeboy runs show <run-id>`, `{runner_exec_prefix} homeboy runs evidence <run-id>`, and `{runner_exec_prefix} homeboy runs artifacts <run-id>`."
-    ));
+    match state {
+        DaemonJobHandoffState::InFlight => hints.push(format!(
+            "Runner-side status/evidence/artifacts: `{remote_run_filter}` then `{runner_exec_prefix} homeboy runs show <run-id>`, `{runner_exec_prefix} homeboy runs evidence <run-id>`, and `{runner_exec_prefix} homeboy runs artifacts <run-id>`."
+        )),
+        DaemonJobHandoffState::Terminal(_) => hints.push(format!(
+            "Final daemon job events/result: `homeboy runner job logs {runner_id} {job_id}`."
+        )),
+    }
     hints.push(format!(
         "Daemon job logs: `homeboy runner job logs {runner_id} {job_id} --follow`."
     ));
-    hints.push(format!(
-        "Cancel if supported: `homeboy runner job cancel {runner_id} {job_id}`."
-    ));
+    if state == DaemonJobHandoffState::InFlight {
+        hints.push(format!(
+            "Cancel if supported: `homeboy runner job cancel {runner_id} {job_id}`."
+        ));
+    }
     hints
 }
 
@@ -707,9 +750,10 @@ fn print_lab_offload_handoff(
     remote_cwd: Option<&str>,
     job_id: &str,
     persisted_run_id: Option<&str>,
+    state: DaemonJobHandoffState,
 ) {
     eprintln!("Lab offload handoff:");
-    for hint in lab_offload_handoff_hints(runner_id, remote_cwd, job_id, persisted_run_id) {
+    for hint in lab_offload_handoff_hints(runner_id, remote_cwd, job_id, persisted_run_id, state) {
         eprintln!("- {hint}");
     }
 }
@@ -2526,11 +2570,13 @@ mod tests {
             Some("/home/chubes/Developer/project with spaces"),
             "job-123",
             Some("run-456"),
+            DaemonJobHandoffState::InFlight,
         );
         let joined = hints.join("\n");
 
         assert!(joined.contains("runner `homeboy-lab`"));
         assert!(joined.contains("daemon job `job-123`"));
+        assert!(joined.contains("still in flight"));
         assert!(joined.contains("Persisted run id: `run-456`"));
         assert!(joined.contains("homeboy runs show run-456"));
         assert!(joined.contains("homeboy runs evidence run-456"));
@@ -2540,6 +2586,61 @@ mod tests {
         ));
         assert!(joined.contains("homeboy runner job logs homeboy-lab job-123 --follow"));
         assert!(joined.contains("homeboy runner job cancel homeboy-lab job-123"));
+    }
+
+    #[test]
+    fn terminal_handoff_hints_reflect_succeeded_job_state() {
+        let hints = lab_offload_handoff_hints(
+            "homeboy-lab",
+            Some("/srv/homeboy/project"),
+            "job-123",
+            Some("run-456"),
+            DaemonJobHandoffState::Terminal(JobStatus::Succeeded),
+        );
+        let joined = hints.join("\n");
+
+        assert!(joined.contains("finished with status `succeeded`"));
+        assert!(joined.contains("homeboy runs show run-456"));
+        assert!(joined.contains("homeboy runs evidence run-456"));
+        assert!(joined.contains("homeboy runs artifacts run-456"));
+        assert!(joined.contains("Final daemon job events/result"));
+        assert!(joined.contains("homeboy runner job logs homeboy-lab job-123"));
+        assert!(!joined.contains("still in flight"));
+        assert!(!joined.contains("homeboy runner job cancel homeboy-lab job-123"));
+    }
+
+    #[test]
+    fn terminal_handoff_hints_reflect_failed_job_state() {
+        let hints = lab_offload_handoff_hints(
+            "homeboy-lab",
+            Some("/srv/homeboy/project"),
+            "job-123",
+            Some("run-456"),
+            DaemonJobHandoffState::Terminal(JobStatus::Failed),
+        );
+        let joined = hints.join("\n");
+
+        assert!(joined.contains("finished with status `failed`"));
+        assert!(joined.contains("Final daemon job events/result"));
+        assert!(!joined.contains("still in flight"));
+    }
+
+    #[test]
+    fn terminal_handoff_hints_reflect_cancelled_job_state() {
+        let hints = lab_offload_handoff_hints(
+            "homeboy-lab",
+            Some("/srv/homeboy/project"),
+            "job-123",
+            None,
+            DaemonJobHandoffState::Terminal(JobStatus::Cancelled),
+        );
+        let joined = hints.join("\n");
+
+        assert!(joined.contains("finished with status `cancelled`"));
+        assert!(joined.contains("Persisted runner-side run id is not known"));
+        assert!(joined.contains("Final daemon job events/result"));
+        assert!(!joined.contains("still in flight"));
+        assert!(!joined.contains("--status running"));
     }
 
     #[test]

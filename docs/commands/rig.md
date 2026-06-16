@@ -128,10 +128,13 @@ Reports service PIDs, stale service state, and last recorded `up` / `check` time
 ```sh
 homeboy rig install https://github.com/chubes4/homeboy-rigs.git//packages/studio --id studio
 homeboy rig install ./packages/studio
+homeboy rig install ./packages/studio --reinstall
 homeboy rig install https://github.com/chubes4/homeboy-rigs.git//packages --all
 ```
 
 Installs rigs from a local directory or git-backed package. Package discovery accepts either a single `rig.json` or a package layout with `rigs/<id>/rig.json`. If the selected package also contains `stacks/*.json`, those stack specs are installed alongside the rig. Existing stack specs with different content are treated as user-owned config and are left in place instead of being overwritten.
+
+Use `--reinstall` when the intent is to explicitly refresh an existing matching rig install from the same package source. `rig install` still refuses user-owned conflicts, such as an existing rig config that declares a different ID or an existing stack spec with different content. `--force` is accepted as a reinstall alias for users who reach for overwrite wording; `--force-hot` remains a separate global resource-policy flag and does not control install replacement behavior.
 
 Git sources may include a Terraform-style `repo.git//subpath` selector. Homeboy clones the package root, records source metadata, and discovers rigs from the selected subpath. Local package sources are linked in place and are updated outside Homeboy.
 
