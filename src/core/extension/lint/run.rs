@@ -49,6 +49,13 @@ pub struct LintRunWorkflowResult {
     pub status: String,
     pub component: String,
     pub exit_code: i32,
+    /// True when the lint harness/wrapper itself failed (non-zero exit) while
+    /// the underlying linter produced no findings — e.g. the missing
+    /// `runner-steps.sh` environmental issue. Distinct from a real lint failure
+    /// where findings exist. Callers (e.g. release preflight) treat this as a
+    /// non-blocking warning rather than a hard failure.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub harness_error: bool,
     pub autofix: Option<AppliedRefactor>,
     pub hints: Option<Vec<String>>,
     pub baseline_comparison: Option<lint_baseline::BaselineComparison>,
@@ -101,6 +108,7 @@ pub fn run_main_lint_workflow(
                 status: "passed".to_string(),
                 component: args.component_label,
                 exit_code: 0,
+                harness_error: false,
                 autofix: None,
                 hints: None,
                 baseline_comparison: None,
@@ -238,10 +246,17 @@ pub fn run_main_lint_workflow(
 
     let hints = if hints.is_empty() { None } else { Some(hints) };
 
+    // A non-zero exit with zero findings whose runner output shows infra
+    // markers is a harness failure, not a real lint failure.
+    let harness_error = exit_code != 0
+        && lint_findings.is_empty()
+        && self_check_output_is_harness_failure(output.exit_code, &output.stdout, &output.stderr);
+
     Ok(LintRunWorkflowResult {
         status,
         component: args.component_label,
         exit_code,
+        harness_error,
         autofix: None,
         hints,
         baseline_comparison,
@@ -712,11 +727,25 @@ pub fn run_self_check_lint_workflow_with_progress(
         observation,
     )?;
     let status = if output.success { "passed" } else { "failed" }.to_string();
+    // A self-check that exits non-zero while the underlying linter reported
+    // nothing is a harness/wrapper failure, not a real lint failure (e.g. the
+    // missing `runner-steps.sh` environmental issue). Flag it so release
+    // preflight can warn instead of hard-blocking.
+    let harness_error = !output.success
+        && self_check_output_is_harness_failure(output.exit_code, &output.stdout, &output.stderr);
     let hints = (!output.success).then(|| {
-        vec![format!(
-            "Fix the failing self-check command declared in {}'s homeboy.json scripts.lint",
-            component.id
-        )]
+        if harness_error {
+            vec![format!(
+                "Lint self-check harness for {} exited {} with no findings — the wrapper failed, not the linter. \
+Re-run `homeboy lint {}` or skip only this gate with `--skip-checks=lint`.",
+                component.id, output.exit_code, component.id
+            )]
+        } else {
+            vec![format!(
+                "Fix the failing self-check command declared in {}'s homeboy.json scripts.lint",
+                component.id
+            )]
+        }
     });
 
     let producer_summaries = build_lint_producer_summaries(
@@ -733,6 +762,7 @@ pub fn run_self_check_lint_workflow_with_progress(
         status,
         component: component_label,
         exit_code: output.exit_code,
+        harness_error,
         autofix: None,
         hints,
         baseline_comparison: None,
@@ -750,6 +780,45 @@ pub fn run_self_check_lint_workflow_with_progress(
         self_check_capture: Some(output.capture),
         extension_phase_timings: Vec::new(),
     })
+}
+
+/// Decide whether a non-zero lint exit with zero findings is a harness/infra
+/// failure rather than a genuine lint failure.
+///
+/// Treated as harness failure when:
+/// - the exit code is `>= 2` (linters conventionally use 1 for "findings
+///   exist" and `>= 2` for tooling/internal errors), or
+/// - the captured output contains a known infra marker (missing harness
+///   wrapper, bootstrap fatals, etc.).
+///
+/// Exit code 1 with no infra markers is intentionally NOT treated as a harness
+/// failure here, so that a self-check tool that legitimately exits 1 on real
+/// problems still surfaces. The release self-check path additionally treats a
+/// clean linter (zero findings) as a harness signal because its findings are
+/// always reported explicitly.
+pub(crate) fn self_check_output_is_harness_failure(
+    exit_code: i32,
+    stdout: &str,
+    stderr: &str,
+) -> bool {
+    if !(0..2).contains(&exit_code) {
+        return true;
+    }
+
+    let combined = format!("{}\n{}", stdout, stderr).to_lowercase();
+    [
+        "runner-steps.sh",
+        "no such file or directory",
+        "command not found",
+        "playground bootstrap helper not found",
+        "playground php crash",
+        "bootstrap failure:",
+        "test harness infrastructure failure",
+        "lint runner infrastructure failure",
+        "failed opening required '/homeboy-extension/scripts/lib/playground-bootstrap.php'",
+    ]
+    .iter()
+    .any(|needle| combined.contains(needle))
 }
 
 /// Resolve runner-compatible scopes from --changed-only or --changed-since flags.
@@ -1402,5 +1471,48 @@ mod tests {
             .rule(rule)
             .fingerprint(id)
             .build()
+    }
+
+    #[test]
+    fn self_check_output_is_harness_failure_detects_missing_runner_steps() {
+        // The runner-steps.sh missing-harness environmental issue (#4586).
+        assert!(self_check_output_is_harness_failure(
+            1,
+            "",
+            "sh: runner-steps.sh: No such file or directory"
+        ));
+    }
+
+    #[test]
+    fn self_check_output_is_harness_failure_detects_high_exit_code() {
+        // Exit codes >= 2 conventionally indicate tooling/internal errors.
+        assert!(self_check_output_is_harness_failure(2, "boom", ""));
+        assert!(self_check_output_is_harness_failure(7, "", ""));
+        assert!(self_check_output_is_harness_failure(127, "", ""));
+    }
+
+    #[test]
+    fn self_check_output_is_harness_failure_detects_playground_bootstrap_fatal() {
+        assert!(self_check_output_is_harness_failure(
+            1,
+            "Fatal error: Failed opening required '/homeboy-extension/scripts/lib/playground-bootstrap.php'",
+            ""
+        ));
+    }
+
+    #[test]
+    fn self_check_output_is_harness_failure_rejects_plain_lint_failure() {
+        // Exit 1 with no infra markers is a genuine lint failure, not a harness
+        // failure — it must hard-block the release.
+        assert!(!self_check_output_is_harness_failure(
+            1,
+            "FOUND 2 ERRORS AFFECTING 2 LINES",
+            ""
+        ));
+    }
+
+    #[test]
+    fn self_check_output_is_harness_failure_accepts_clean_pass() {
+        assert!(!self_check_output_is_harness_failure(0, "", ""));
     }
 }

@@ -171,10 +171,10 @@ fn build_extension_release_preflight_steps(extensions: &[ExtensionManifest]) -> 
 }
 
 fn build_quality_steps(options: &ReleaseOptions) -> Vec<PlanStep> {
-    build_shared_quality_steps(&QualityPlanOptions::release_preflight(
-        "release",
-        options.skip_checks,
-    ))
+    build_shared_quality_steps(
+        &QualityPlanOptions::release_preflight("release", options.skip_checks)
+            .with_granular_skips(&options.skip_checks_granular),
+    )
 }
 
 fn build_bump_policy_step(

@@ -323,9 +323,24 @@ fn run_bump_policy_preflight(step: &PlanStep) -> ReleaseStepResult {
 }
 
 fn run_lint_preflight(step: &PlanStep, context: &ReleaseExecutionContext) -> ReleaseStepResult {
+    use super::planning_quality::LintQualityOutcome;
+
     match super::planning_quality::validate_lint_quality(context.component) {
-        Ok(ran) => successful_quality_result(step, ran),
-        Err(err) => failed_result(&step.id, &step.kind, err),
+        LintQualityOutcome::Passed { ran } => successful_quality_result(step, ran),
+        LintQualityOutcome::Failed(err) => failed_result(&step.id, &step.kind, err),
+        LintQualityOutcome::HarnessError { message } => {
+            log_status!("release", "Lint harness warning: {}", message);
+            ReleaseStepResult {
+                id: step.id.clone(),
+                step_type: step.kind.clone(),
+                status: ReleaseStepStatus::Success,
+                missing: Vec::new(),
+                warnings: vec![message],
+                hints: Vec::new(),
+                data: Some(serde_json::json!({ "ran": true, "harness_error": true })),
+                error: None,
+            }
+        }
     }
 }
 

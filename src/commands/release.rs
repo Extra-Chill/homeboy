@@ -58,9 +58,14 @@ pub struct ReleaseArgs {
     #[arg(long, value_name = "DIR")]
     from_artifacts: Option<String>,
 
-    /// Skip pre-release lint and test checks
-    #[arg(long)]
-    skip_checks: bool,
+    /// Skip pre-release quality checks.
+    ///
+    /// Bare `--skip-checks` skips ALL quality gates (audit, lint, test).
+    /// `--skip-checks=lint` (or `audit`/`test`, comma- or space-separated)
+    /// skips only the named checks while leaving working_tree, remote_sync,
+    /// and the remaining quality checks active.
+    #[arg(long, num_args = 0.., value_name = "CHECK", value_delimiter = ',')]
+    skip_checks: Option<Vec<String>>,
 
     /// Force a specific version bump: major, minor, patch, or an explicit version (e.g. 2.0.0).
     /// Overrides auto-detection from commit history.
@@ -116,6 +121,53 @@ impl ReleaseArgs {
             from_artifacts: self.from_artifacts.clone(),
         }
     }
+
+    /// Resolve `--skip-checks` into (skip-all, granular-check-list).
+    ///
+    /// - Flag absent → `(false, [])`: run every quality gate.
+    /// - Bare `--skip-checks` → `(true, [])`: skip all quality gates.
+    /// - `--skip-checks=lint` (or `audit`/`test`, repeatable/comma-separated) →
+    ///   `(false, ["lint"])`: skip only the named gates.
+    ///
+    /// Unknown check names are rejected so a typo never silently runs the gate.
+    fn resolve_skip_checks(&self) -> homeboy::core::Result<(bool, Vec<String>)> {
+        const SKIPPABLE_CHECKS: [&str; 3] = ["audit", "lint", "test"];
+        match &self.skip_checks {
+            None => Ok((false, Vec::new())),
+            Some(values) if values.is_empty() => Ok((true, Vec::new())),
+            Some(values) => {
+                let mut granular = Vec::new();
+                for value in values {
+                    let check = value.trim().to_ascii_lowercase();
+                    let normalized = if check == "tests" {
+                        "test"
+                    } else {
+                        check.as_str()
+                    };
+                    if !SKIPPABLE_CHECKS.contains(&normalized) {
+                        return Err(homeboy::core::Error::validation_invalid_argument(
+                            "skip-checks",
+                            format!(
+                                "Unknown check '{}' for --skip-checks. Valid checks: {}",
+                                value,
+                                SKIPPABLE_CHECKS.join(", ")
+                            ),
+                            Some(value.clone()),
+                            Some(vec![
+                                "Use --skip-checks (no value) to skip all quality checks"
+                                    .to_string(),
+                                "Use --skip-checks=lint to skip only the lint gate".to_string(),
+                            ]),
+                        ));
+                    }
+                    if !granular.iter().any(|c: &String| c == normalized) {
+                        granular.push(normalized.to_string());
+                    }
+                }
+                Ok((false, granular))
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -146,7 +198,7 @@ impl ReleaseArgs {
             retag: false,
             head,
             from_artifacts,
-            skip_checks,
+            skip_checks: if skip_checks { Some(Vec::new()) } else { None },
             bump,
             force_lower_bump: false,
             skip_publish,
@@ -162,6 +214,7 @@ pub fn run(
 ) -> CmdResult<ReleaseCommandOutput> {
     let component_ids = resolve_component_ids(&args, &args.components)?;
     let bump_override = args.bump.clone();
+    let (skip_checks, skip_checks_granular) = args.resolve_skip_checks()?;
 
     // Single component: use the original single-release flow
     if component_ids.len() == 1 {
@@ -172,7 +225,8 @@ pub fn run(
             dry_run: args.dry_run_args.dry_run,
             recover: args.recover,
             retag: args.retag,
-            skip_checks: args.skip_checks,
+            skip_checks,
+            skip_checks_granular: skip_checks_granular.clone(),
             bump_override: bump_override.clone(),
             force_lower_bump: args.force_lower_bump,
             pipeline: args.pipeline_options(),
@@ -226,7 +280,8 @@ pub fn run(
         dry_run: args.dry_run_args.dry_run,
         recover: false,
         retag: false,
-        skip_checks: args.skip_checks,
+        skip_checks,
+        skip_checks_granular,
         bump_override,
         force_lower_bump: args.force_lower_bump,
         pipeline: ReleasePipelineOptions {
@@ -386,5 +441,61 @@ mod tests {
 
         assert_eq!(components, vec!["api"]);
         assert_eq!(release_args.bump.as_deref(), Some("minor"));
+    }
+
+    fn skip_args(skip_checks: Option<Vec<&str>>) -> ReleaseArgs {
+        ReleaseArgs {
+            components: vec!["fixture".to_string()],
+            project: None,
+            outdated: false,
+            path: None,
+            dry_run_args: DryRunArgs { dry_run: true },
+            deploy: false,
+            recover: false,
+            retag: false,
+            head: false,
+            from_artifacts: None,
+            skip_checks: skip_checks
+                .map(|values| values.iter().map(|value| value.to_string()).collect()),
+            bump: None,
+            force_lower_bump: false,
+            skip_publish: false,
+            no_github_release: false,
+            git_identity: None,
+        }
+    }
+
+    #[test]
+    fn resolve_skip_checks_absent_runs_all_gates() {
+        let args = skip_args(None);
+        let (skip_all, granular) = args.resolve_skip_checks().expect("absent is valid");
+        assert!(!skip_all);
+        assert!(granular.is_empty());
+    }
+
+    #[test]
+    fn resolve_skip_checks_bare_skips_all() {
+        let args = skip_args(Some(Vec::new()));
+        let (skip_all, granular) = args.resolve_skip_checks().expect("bare is valid");
+        assert!(skip_all);
+        assert!(granular.is_empty());
+    }
+
+    #[test]
+    fn resolve_skip_checks_granular_lint_only() {
+        let args = skip_args(Some(vec!["lint"]));
+        let (skip_all, granular) = args.resolve_skip_checks().expect("lint is valid");
+        assert!(!skip_all);
+        assert_eq!(granular, vec!["lint"]);
+    }
+
+    #[test]
+    fn resolve_skip_checks_unknown_name_is_rejected() {
+        let args = skip_args(Some(vec!["bogus"]));
+        let err = args
+            .resolve_skip_checks()
+            .expect_err("unknown check rejected");
+        assert_eq!(err.code.as_str(), "validation.invalid_argument");
+        assert!(err.to_string().contains("Unknown check 'bogus'"));
     }
 }
