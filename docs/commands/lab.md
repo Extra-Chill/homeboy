@@ -62,6 +62,14 @@ the Lab runner has picked up a merged CLI fix. If the daemon identity is stale,
 run the refresh command pair; if the configured executable is old, run the
 upgrade command first and reconnect the runner.
 
+Lab offload always re-enters Homeboy through the runner's configured executable.
+Synced source checkouts are task workspaces, not active Homeboy binaries. Preflight
+metadata includes `source_checkout` with the local path, Git branch, SHA, remote,
+and dirty state, and stderr prints the source checkout ref/path beside the active
+runner Homeboy command before remote execution starts. Legacy
+`lab.self_command_prefix` values in `homeboy.json` are ignored and are not
+preserved by portable config rewrites.
+
 `homeboy lab bench` delegates to the same benchmark path while making the Lab
 intent explicit at the command surface. Its output includes the same managed
 follow-up hints so the operator can keep a failed bench inside the Homeboy

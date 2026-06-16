@@ -189,17 +189,6 @@ pub struct ArtifactInput {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
-pub struct ComponentLabConfig {
-    /// Repo-owned argv prefix used when Lab offload re-enters Homeboy from this checkout.
-    ///
-    /// By default Lab uses the runner's configured Homeboy binary. Repos that need to
-    /// verify the synced checkout itself can declare the command argv needed
-    /// to re-enter the project-local binary.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub self_command_prefix: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct GithubConfig {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub hosts: HashMap<String, GithubHostConfig>,
@@ -270,9 +259,6 @@ pub struct Component {
     pub scripts: Option<ComponentScriptsConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audit: Option<AuditConfig>,
-    /// Component-owned Lab runner behavior.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lab: Option<ComponentLabConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dependency_stack: Vec<DependencyStackEdge>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -361,8 +347,6 @@ struct RawComponent {
     scripts: Option<ComponentScriptsConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     audit: Option<AuditConfig>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    lab: Option<ComponentLabConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     dependency_stack: Vec<DependencyStackEdge>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -408,7 +392,6 @@ impl From<RawComponent> for Component {
             scopes: raw.scopes,
             scripts: raw.scripts,
             audit: raw.audit,
-            lab: raw.lab,
             dependency_stack: raw.dependency_stack,
             artifact_inputs: raw.artifact_inputs,
             cli_path: raw.cli_path,
@@ -449,7 +432,6 @@ impl From<Component> for RawComponent {
             scopes: c.scopes,
             scripts: c.scripts,
             audit: c.audit,
-            lab: c.lab,
             dependency_stack: c.dependency_stack,
             artifact_inputs: c.artifact_inputs,
             cli_path: c.cli_path,
@@ -533,7 +515,6 @@ impl Component {
             scopes: None,
             scripts: None,
             audit: None,
-            lab: None,
             dependency_stack: Vec::new(),
             artifact_inputs: Vec::new(),
             cli_path: None,

@@ -299,7 +299,6 @@ pub fn try_discover_from_portable(dir: &Path) -> Result<Option<Component>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::component::ComponentLabConfig;
     use std::fs;
     use tempfile::TempDir;
 
@@ -361,39 +360,29 @@ mod tests {
     }
 
     #[test]
-    fn write_preserves_component_lab_config() {
+    fn write_drops_legacy_component_lab_config() {
         let dir = TempDir::new().expect("temp dir");
-        let mut component = Component::new(
+        fs::write(
+            dir.path().join("homeboy.json"),
+            r#"{
+                "id":"test-comp",
+                "lab":{"self_command_prefix":["cargo","run","--quiet","--bin","homeboy","--"]}
+            }"#,
+        )
+        .expect("write legacy homeboy.json");
+        let component = Component::new(
             "test-comp".to_string(),
             dir.path().to_string_lossy().to_string(),
             "wp-content/plugins/test".to_string(),
             None,
         );
-        component.lab = Some(ComponentLabConfig {
-            self_command_prefix: vec![
-                "cargo".to_string(),
-                "run".to_string(),
-                "--quiet".to_string(),
-                "--bin".to_string(),
-                "homeboy".to_string(),
-                "--".to_string(),
-            ],
-        });
 
         write_portable_config(dir.path(), &component).expect("write should succeed");
 
         let content = fs::read_to_string(dir.path().join("homeboy.json")).unwrap();
         let result: Value = serde_json::from_str(&content).unwrap();
 
-        assert_eq!(
-            result
-                .get("lab")
-                .and_then(|value| value.get("self_command_prefix"))
-                .and_then(Value::as_array)
-                .and_then(|prefix| prefix.first())
-                .and_then(Value::as_str),
-            Some("cargo")
-        );
+        assert!(result.get("lab").is_none());
     }
 
     #[test]
