@@ -665,14 +665,6 @@ try {
   const staleStandaloneAgentsApiPath = path.join(defaultsRoot, 'agents-api');
   const providerPath = path.join(defaultsRoot, 'ai-provider-for-openai');
   const phpAiClientPath = path.join(defaultsRoot, 'php-ai-client');
-  const defaultPhpAiClientOverlay = [{
-    kind: 'bundled-library',
-    library: 'php-ai-client',
-    source: phpAiClientPath,
-    target: '/wordpress/wp-includes/php-ai-client',
-    strategy: 'wordpress-scoped-bundle',
-    metadata: { component: 'php-ai-client', source: 'homeboy-extensions-default' },
-  }];
   for (const directory of [workspaceRoot, bundledAgentsApiPath, dataMachineCodePath, staleStandaloneAgentsApiPath, providerPath, phpAiClientPath]) {
     fs.mkdirSync(directory, { recursive: true });
   }
@@ -695,7 +687,7 @@ try {
   assert.equal(defaultedRequest.runtime_component_paths.agent_runtime_tools, dataMachineCodePath);
   assert.deepEqual(defaultedRequest.provider_plugin_paths, []);
   assert.deepEqual(defaultedRequest.runtime_overlay_profiles, []);
-  assert.deepEqual(defaultedRequest.runtime_overlays, defaultPhpAiClientOverlay);
+  assert.deepEqual(defaultedRequest.runtime_overlays, []);
   assert.deepEqual(defaultedRequest.secret_env, [
     'AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN',
     'AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN',
@@ -708,6 +700,8 @@ try {
   assert.equal(defaultedRequest.mounts[0].mode, 'readwrite');
   assert.equal(defaultedRequest.mounts[0].metadata.workspace_slug, 'target-repo');
   assert.deepEqual(defaultedRequest.workspaces, []);
+  assert(!JSON.stringify(defaultedRequest).includes(providerPath));
+  assert(!JSON.stringify(defaultedRequest).includes(phpAiClientPath));
   assert(!JSON.stringify(defaultedRequest).includes(staleStandaloneAgentsApiPath));
   assert(!JSON.stringify(defaultedRequest).includes(alternateBundledAgentsApiPath));
 
@@ -738,7 +732,7 @@ try {
   assert.equal(codexSubscriptionDefaultedRequest.model, 'gpt-5.5');
   assert.deepEqual(codexSubscriptionDefaultedRequest.provider_plugin_paths, []);
   assert.deepEqual(codexSubscriptionDefaultedRequest.runtime_overlay_profiles, []);
-  assert.deepEqual(codexSubscriptionDefaultedRequest.runtime_overlays, defaultPhpAiClientOverlay);
+  assert.deepEqual(codexSubscriptionDefaultedRequest.runtime_overlays, []);
   assert.deepEqual(codexSubscriptionDefaultedRequest.secret_env, codexSecretEnv);
 
   const openAiDefaultedRequest = codeboxTaskRequestFromAgentTaskRequest({
@@ -755,9 +749,9 @@ try {
   }, {
     settings: { wp_codebox_codex_enabled: false },
   });
-  assert.equal(openAiDefaultedRequest.provider, 'openai');
+  assert.equal(openAiDefaultedRequest.provider, '');
   assert.equal(openAiDefaultedRequest.model, 'gpt-5.5');
-  assert.deepEqual(openAiDefaultedRequest.secret_env, ['OPENAI_API_KEY']);
+  assert.deepEqual(openAiDefaultedRequest.secret_env, []);
 
   const bareOpenAiDefaultedRequest = codeboxTaskRequestFromAgentTaskRequest({
     ...request,
@@ -772,9 +766,9 @@ try {
   }, {
     settings: { wp_codebox_codex_enabled: false },
   });
-  assert.equal(bareOpenAiDefaultedRequest.provider, 'openai');
+  assert.equal(bareOpenAiDefaultedRequest.provider, '');
   assert.equal(bareOpenAiDefaultedRequest.model, '');
-  assert.deepEqual(bareOpenAiDefaultedRequest.secret_env, ['OPENAI_API_KEY']);
+  assert.deepEqual(bareOpenAiDefaultedRequest.secret_env, []);
   // A bare repo workspace defaults to a read-write mount, so coding-capable
   // workspace tools must be exposed alongside the read-only inspection tools.
   const writableWorkspaceTools = [
@@ -909,25 +903,23 @@ try {
   assert.deepEqual(configuredGenericStackRequest.runtime_overlays, configuredRuntimeOverlays);
   assert.deepEqual(configuredGenericStackRequest.secret_env, ['CONFIGURED_SECRET']);
 
-  const labWorkspaceRoot = path.join(defaultsRoot, '_lab_workspaces', 'target-repo@issue-1161');
-  const labPhpAiClientPath = path.join(defaultsRoot, 'php-ai-client@custom-provider-auth');
-  fs.mkdirSync(labWorkspaceRoot, { recursive: true });
-  fs.mkdirSync(labPhpAiClientPath, { recursive: true });
-  const labDefaultedRequest = codeboxTaskRequestFromAgentTaskRequest({
+  const explicitPhpAiClientPath = path.join(defaultsRoot, 'explicit-php-ai-client');
+  fs.mkdirSync(explicitPhpAiClientPath, { recursive: true });
+  const explicitPhpAiClientRequest = codeboxTaskRequestFromAgentTaskRequest({
     ...request,
-    task_id: 'lab-default-runtime-stack-task-123',
+    task_id: 'explicit-php-ai-client-runtime-stack-task-123',
     executor: {
       backend: 'codebox',
       config: { provider: 'codex' },
     },
     inputs: {
-      target: { root: labWorkspaceRoot },
+      target: { root: workspaceRoot },
     },
   }, {
-    settings: {},
+    settings: { wp_codebox_php_ai_client_path: explicitPhpAiClientPath },
   });
-  assert.equal(fs.realpathSync(labDefaultedRequest.runtime_overlays[0].source), fs.realpathSync(labPhpAiClientPath));
-  assert.equal(labDefaultedRequest.runtime_overlays[0].strategy, 'wordpress-scoped-bundle');
+  assert.equal(fs.realpathSync(explicitPhpAiClientRequest.runtime_overlays[0].source), fs.realpathSync(explicitPhpAiClientPath));
+  assert.equal(explicitPhpAiClientRequest.runtime_overlays[0].strategy, 'wordpress-scoped-bundle');
 
   const originalCwd = process.cwd();
   const labOffloadCwd = path.join(defaultsRoot, '_lab_workspaces', 'wp-site-generator-pilot-homeboy-ssi-loop');
@@ -945,8 +937,8 @@ try {
     }, {
       settings: {},
     });
-    assert.equal(fs.realpathSync(labNoTargetDefaultedRequest.runtime_overlays[0].source), fs.realpathSync(labPhpAiClientPath));
-    assert.equal(labNoTargetDefaultedRequest.runtime_overlays[0].strategy, 'wordpress-scoped-bundle');
+    assert.deepEqual(labNoTargetDefaultedRequest.runtime_overlays, []);
+    assert(!JSON.stringify(labNoTargetDefaultedRequest).includes('php-ai-client@custom-provider-auth'));
   } finally {
     process.chdir(originalCwd);
   }
@@ -1600,6 +1592,65 @@ assert(codexGuidanceDiagnostic);
 assert.match(codexGuidanceDiagnostic.message, /Codex-capable provider plugin checkout/);
 assert.match(codexGuidanceDiagnostic.message, /Released ai-provider-for-openai trunk registers openai, not codex/);
 assert.deepEqual(codexGuidanceDiagnostic.data.provider_plugin_paths, ['/components/ai-provider-for-openai']);
+
+const codexMissingProviderPluginOutcome = agentTaskOutcomeFromCodeboxResult({
+  ...request,
+  task_id: 'codex-missing-provider-plugin-task-123',
+  executor: {
+    backend: 'codebox',
+    config: { provider: 'codex' },
+  },
+}, {
+  success: false,
+  status: 'failed',
+  summary: 'Requested provider "codex" is not registered in wp-ai-client after sandbox provider plugins were loaded.',
+  diagnostics: [{ class: 'wp_codebox_provider_not_registered' }],
+  task_input: {
+    provider: 'codex',
+    provider_plugin_paths: [],
+  },
+});
+const codexMissingProviderPluginDiagnostic = codexMissingProviderPluginOutcome.diagnostics.find((diagnostic) => diagnostic.class === 'codebox.codex_provider_plugin_guidance');
+assert(codexMissingProviderPluginDiagnostic);
+assert.equal(codexMissingProviderPluginDiagnostic.data.missing_provider_plugin_path, true);
+assert.deepEqual(codexMissingProviderPluginDiagnostic.data.provider_plugin_paths, []);
+
+const codexBearerTokenOutcome = agentTaskOutcomeFromCodeboxResult({
+  ...request,
+  task_id: 'codex-bearer-token-task-123',
+  executor: {
+    backend: 'codebox',
+    config: { provider: 'codex' },
+  },
+}, {
+  success: false,
+  status: 'failed',
+  summary: 'Fatal error: Call to undefined method WordPress\\AiClient\\Authentication\\RequestAuthenticationMethod::bearerToken()',
+  task_input: { provider: 'codex' },
+});
+const codexBearerTokenDiagnostic = codexBearerTokenOutcome.diagnostics.find((diagnostic) => diagnostic.class === 'codebox.codex_php_ai_client_missing_bearer_token_auth');
+assert(codexBearerTokenDiagnostic);
+assert.match(codexBearerTokenDiagnostic.message, /bearer-token auth/);
+
+const codexVendorOutcome = agentTaskOutcomeFromCodeboxResult({
+  ...request,
+  task_id: 'codex-vendor-task-123',
+  executor: {
+    backend: 'codebox',
+    config: { provider: 'codex' },
+  },
+}, {
+  success: false,
+  status: 'failed',
+  diagnostics: [{
+    class: 'wp_codebox_overlay_prepare_failed',
+    message: 'Unable to prepare php-ai-client overlay: vendor/autoload.php missing; run composer install before dispatch.',
+  }],
+  task_input: { provider: 'codex' },
+});
+const codexVendorDiagnostic = codexVendorOutcome.diagnostics.find((diagnostic) => diagnostic.class === 'codebox.codex_php_ai_client_vendor_missing');
+assert(codexVendorDiagnostic);
+assert.match(codexVendorDiagnostic.message, /Composer vendor dependencies are missing/);
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-codebox-agent-task-executor-'));
 try {

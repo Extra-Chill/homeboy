@@ -11,6 +11,17 @@ Homeboy core may pass `HOMEBOY_COMPONENT_SHAPE=core-dev` for registered componen
 
 The core-dev runner expects WordPress core's own dependencies and config. It installs missing npm/composer dependencies, builds `src/` into `build/`, and runs PHPUnit through core's `vendor/bin/phpunit`. If `wp-tests-config.php` is missing, set `HOMEBOY_WP_TESTS_DB_NAME`, `HOMEBOY_WP_TESTS_DB_USER`, `HOMEBOY_WP_TESTS_DB_PASSWORD`, and optionally `HOMEBOY_WP_TESTS_DB_HOST` so the runner can write it from the sample config.
 
+## Codex WP Codebox Stack
+
+Codex WP Codebox tasks require an explicit provider/runtime stack. Homeboy does not infer these paths from local worktree names, and it does not fetch provider PR branches itself before dispatch.
+
+Configure the Codex pair with task config, global settings, or environment variables:
+
+- `provider_plugin_paths` / `wp_codebox_provider_plugin_paths` / `HOMEBOY_WP_CODEBOX_PROVIDER_PLUGIN_PATH`: a Codex-capable provider plugin checkout, such as the Codex provider branch of `ai-provider-for-openai`.
+- `runtime_overlays` / `wp_codebox_runtime_overlays`, or `wp_codebox_php_ai_client_path` / `HOMEBOY_WP_CODEBOX_PHP_AI_CLIENT_PATH`: a prepared `php-ai-client` checkout mounted to `/wordpress/wp-includes/php-ai-client`.
+
+The `php-ai-client` checkout must include bearer-token auth support (`RequestAuthenticationMethod::bearerToken`) and Composer vendor dependencies (`vendor/autoload.php`). If the stack is incomplete, the executor emits diagnostics for the missing Codex provider plugin, missing bearer-token auth, or missing Composer vendor preparation.
+
 ## Test failure sidecar
 
 When Homeboy sets `HOMEBOY_TEST_FAILURES_FILE`, the WordPress PHPUnit runners write a JSON sidecar with parsed failure details. Existing Homeboy analysis fields are preserved, and each failure also includes normalized sidecar fields for cross-runner consumers:

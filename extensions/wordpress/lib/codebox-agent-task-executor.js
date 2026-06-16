@@ -73,6 +73,7 @@ const CLAUDE_CODE_SECRET_ENV = [
 
 const DEFAULT_CODEX_MODEL = 'gpt-5.5';
 const CODEX_PROVIDER_PLUGIN_GUIDANCE = `Codex tasks require a Codex-capable provider plugin checkout, such as the Codex PR branch for ai-provider-for-openai. Released ai-provider-for-openai trunk registers openai, not codex, and unrelated provider defaults such as ${['ai-provider-for', ['open', 'code'].join('')].join('-')} will not work.`;
+const CODEX_PHP_AI_CLIENT_GUIDANCE = 'Codex tasks require a php-ai-client checkout that supports RequestAuthenticationMethod::bearerToken and has Composer vendor dependencies installed before WP Codebox prepares the runtime overlay.';
 
 const AGENT_BUNDLE_CONFIG_FIELDS = [
   'bundle_path',
@@ -530,8 +531,6 @@ function defaultCodeboxRuntimeConfig(request, config, inputs, options = {}) {
   const providerPluginPath = firstExistingPath(
     settings.wp_codebox_provider_plugin_path,
     process.env.HOMEBOY_WP_CODEBOX_PROVIDER_PLUGIN_PATH,
-    siblingPath(workspaceBase, 'ai-provider-for-openai'),
-    siblingPath(workspaceBase, 'ai-provider-for-openai-main'),
   );
   const provider = config.provider || options.provider || defaultProvider(settings, providerPluginPath);
   const model = config.model || options.model || defaultModelForProvider(provider, settings);
@@ -542,7 +541,7 @@ function defaultCodeboxRuntimeConfig(request, config, inputs, options = {}) {
     process.env.HOMEBOY_WP_CODEBOX_AGENTS_API_PATH,
     bundledAgentsApiPath(dataMachinePath),
   );
-  const phpAiClientPath = defaultPhpAiClientPath(settings, workspaceBase, options);
+  const phpAiClientPath = defaultPhpAiClientPath(settings, options);
 
   return {
     agentsApi: agentsApiPath,
@@ -596,20 +595,13 @@ function defaultRuntimeOverlays(settings, phpAiClientPath = '') {
   }] : [];
 }
 
-function defaultPhpAiClientPath(settings, workspaceBase, options = {}) {
+function defaultPhpAiClientPath(settings, options = {}) {
   return firstExistingPath(
     options.phpAiClient,
     settings.wp_codebox_php_ai_client_path,
     settings.php_ai_client_path,
     process.env.HOMEBOY_WP_CODEBOX_PHP_AI_CLIENT_PATH,
     process.env.PHP_AI_CLIENT_PATH,
-    siblingPath(workspaceBase, 'php-ai-client'),
-    siblingPath(path.dirname(workspaceBase), 'php-ai-client@custom-provider-auth-live'),
-    siblingPath(path.dirname(workspaceBase), 'php-ai-client@custom-provider-auth'),
-    siblingPath(path.dirname(workspaceBase), 'php-ai-client'),
-    siblingPath(path.dirname(path.dirname(workspaceBase)), 'php-ai-client@custom-provider-auth-live'),
-    siblingPath(path.dirname(path.dirname(workspaceBase)), 'php-ai-client@custom-provider-auth'),
-    siblingPath(path.dirname(path.dirname(workspaceBase)), 'php-ai-client'),
   );
 }
 
@@ -1776,7 +1768,74 @@ function codexProviderNotRegisteredDiagnostic(request, result = {}) {
       provider: 'codex',
       provider_plugin_paths: providerPluginPaths,
       expected: 'Codex-capable ai-provider-for-openai checkout from the Codex provider branch/PR.',
+      missing_provider_plugin_path: providerPluginPaths.length === 0,
       guidance: CODEX_PROVIDER_PLUGIN_GUIDANCE,
+    },
+  };
+}
+
+function codexDiagnosticText(result = {}) {
+  const diagnostics = resultDiagnostics(result).flatMap((diagnostic) => [
+    diagnostic.message,
+    diagnostic.code,
+    diagnostic.class,
+    diagnostic.kind,
+    diagnostic.data?.stderr,
+    diagnostic.data?.stdout,
+    diagnostic.data?.message,
+  ]);
+  return [
+    result.summary,
+    result.message,
+    result.error,
+    result.stderr,
+    result.stdout,
+    result.code,
+    result.error_code,
+    result.errorCode,
+    result.metadata?.summary,
+    result.metadata?.message,
+    result.metadata?.error,
+    result.metadata?.stderr,
+    result.metadata?.stdout,
+    ...diagnostics,
+  ].filter(Boolean).map(String).join('\n');
+}
+
+function codexPhpAiClientBearerTokenDiagnostic(request, result = {}) {
+  if (codexProviderFromRequest(request, result) !== 'codex') {
+    return null;
+  }
+  const text = codexDiagnosticText(result);
+  if (!/RequestAuthenticationMethod::bearerToken|bearerToken\(\).*does not exist|undefined method .*bearerToken/i.test(text)) {
+    return null;
+  }
+  return {
+    class: 'codebox.codex_php_ai_client_missing_bearer_token_auth',
+    message: `Codex provider loaded, but php-ai-client does not expose bearer-token auth. ${CODEX_PHP_AI_CLIENT_GUIDANCE}`,
+    data: {
+      provider: 'codex',
+      expected: 'php-ai-client with RequestAuthenticationMethod::bearerToken support.',
+      guidance: CODEX_PHP_AI_CLIENT_GUIDANCE,
+    },
+  };
+}
+
+function codexPhpAiClientVendorDiagnostic(request, result = {}) {
+  if (codexProviderFromRequest(request, result) !== 'codex') {
+    return null;
+  }
+  const text = codexDiagnosticText(result);
+  if (!/php-ai-client[\s\S]*(vendor\/autoload\.php|vendor(?:\/|\\\\)|composer install|Composer vendor|vendor.*missing)|vendor(?:\/|\\\\).*php-ai-client/i.test(text)) {
+    return null;
+  }
+  return {
+    class: 'codebox.codex_php_ai_client_vendor_missing',
+    message: `WP Codebox could not prepare the php-ai-client runtime overlay because Composer vendor dependencies are missing. ${CODEX_PHP_AI_CLIENT_GUIDANCE}`,
+    data: {
+      provider: 'codex',
+      expected: 'Prepared php-ai-client checkout with vendor/autoload.php present.',
+      guidance: CODEX_PHP_AI_CLIENT_GUIDANCE,
     },
   };
 }
@@ -1798,6 +1857,8 @@ function agentTaskOutcomeFromCodeboxResult(request, result = {}, options = {}) {
   const fallbackRecipeSummary = recipeRunFailureSummary(recipeRun);
   const recipeFailedPhase = recipeSummary?.failed_phase || recipeSummary?.metadata?.failure_phase || recipeRunFailedPhase(recipeRun);
   const codexProviderDiagnostic = codexProviderNotRegisteredDiagnostic(request, result);
+  const codexBearerTokenDiagnostic = codexPhpAiClientBearerTokenDiagnostic(request, result);
+  const codexVendorDiagnostic = codexPhpAiClientVendorDiagnostic(request, result);
   const outcome = {
     schema: AGENT_TASK_OUTCOME_SCHEMA,
     task_id: request.task_id,
@@ -1806,7 +1867,7 @@ function agentTaskOutcomeFromCodeboxResult(request, result = {}, options = {}) {
     artifacts: normalizeArtifacts(result, runSummary, recipeSummary),
     evidence_refs: normalizeEvidenceRefs(result, runSummary, recipeSummary),
     outputs,
-    diagnostics: [codexProviderDiagnostic, recipeSummary ? null : recipeRunFailureDiagnostic(recipeRun), ...(recipeSummary?.diagnostics || []), ...(runSummary?.diagnostics || []), ...(result.diagnostics || [])].filter(Boolean).map((diagnostic) => ({
+    diagnostics: [codexProviderDiagnostic, codexBearerTokenDiagnostic, codexVendorDiagnostic, recipeSummary ? null : recipeRunFailureDiagnostic(recipeRun), ...(recipeSummary?.diagnostics || []), ...(runSummary?.diagnostics || []), ...(result.diagnostics || [])].filter(Boolean).map((diagnostic) => ({
       class: diagnostic.class || diagnostic.kind || 'codebox',
       message: diagnostic.message || String(diagnostic),
       data: sanitizePublicMetadata(diagnostic.data || {}),
