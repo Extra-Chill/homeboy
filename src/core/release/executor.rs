@@ -633,6 +633,14 @@ pub(crate) fn run_git_push(component: &Component, component_id: &str) -> Result<
     Ok(step_success("git.push", "git.push", Some(data), Vec::new()))
 }
 
+/// Maximum number of attempts for a transient package-command failure.
+///
+/// npm install (and similar dependency resolvers) can fail intermittently due
+/// to registry hiccups, lock contention, or output-pipe timing.  A warm-cache
+/// retry usually succeeds, so we retry once before surfacing the error.
+/// Issue #3238.
+const PACKAGE_ACTION_MAX_ATTEMPTS: usize = 2;
+
 /// Invoke the `release.package` action on every extension that provides it,
 /// parse the emitted artifacts, and stash them in [`ReleaseState::artifacts`]
 /// for downstream publish targets and for the GitHub Release step.
@@ -661,9 +669,8 @@ pub(crate) fn run_package(
     let mut responses = Vec::new();
     for extension in package_extensions {
         let payload = build_release_payload(state, component_id, component_local_path, None);
-        let response =
-            extension::execute_action(&extension.id, "release.package", None, None, Some(&payload))
-                .map_err(|err| package_provider_error(&extension.id, err))?;
+        let response = run_package_action_with_retry(&extension.id, &payload)
+            .map_err(|err| package_provider_error(&extension.id, err))?;
 
         store_artifacts_from_output(state, &response)
             .map_err(|err| package_provider_error(&extension.id, err))?;
@@ -689,6 +696,71 @@ pub(crate) fn run_package(
     };
 
     Ok(step_success("package", "package", Some(data), Vec::new()))
+}
+
+/// Execute a `release.package` action with a bounded retry for transient
+/// failures.
+///
+/// Returns the action response (which may carry `success: false` on the final
+/// attempt) so the caller can surface the full captured stdout/stderr via
+/// [`store_artifacts_from_output`].
+fn run_package_action_with_retry(
+    extension_id: &str,
+    payload: &serde_json::Value,
+) -> Result<serde_json::Value> {
+    for attempt in 1..=PACKAGE_ACTION_MAX_ATTEMPTS {
+        match extension::execute_action(extension_id, "release.package", None, None, Some(payload))
+        {
+            Ok(response) => {
+                let success = response
+                    .get("success")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+                let exit_code = response
+                    .get("exitCode")
+                    .or_else(|| response.get("exit_code"))
+                    .and_then(serde_json::Value::as_i64)
+                    .unwrap_or(-1);
+
+                if success || exit_code == 0 {
+                    return Ok(response);
+                }
+
+                // Transient failure — retry once before surfacing the error.
+                if attempt < PACKAGE_ACTION_MAX_ATTEMPTS {
+                    log_status!(
+                        "package",
+                        "Package command exited {} (attempt {}/{}); retrying…",
+                        exit_code,
+                        attempt,
+                        PACKAGE_ACTION_MAX_ATTEMPTS
+                    );
+                    continue;
+                }
+
+                // Final attempt — return the response so the caller can
+                // surface the full captured output in the error.
+                return Ok(response);
+            }
+            Err(err) => {
+                if attempt < PACKAGE_ACTION_MAX_ATTEMPTS {
+                    log_status!(
+                        "package",
+                        "Package action error (attempt {}/{}); retrying…",
+                        attempt,
+                        PACKAGE_ACTION_MAX_ATTEMPTS
+                    );
+                    continue;
+                }
+                return Err(err);
+            }
+        }
+    }
+
+    // Unreachable when PACKAGE_ACTION_MAX_ATTEMPTS >= 1.
+    Err(Error::internal_unexpected(
+        "Package command did not produce a result",
+    ))
 }
 
 /// Invoke an extension-declared release preflight action.
@@ -1011,25 +1083,25 @@ fn store_artifacts_from_output(
         .and_then(|v| v.as_i64())
         .unwrap_or(-1);
 
+    let success = response
+        .get("success")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(exit_code == 0);
+
+    // Surface the full captured output when the package command itself failed,
+    // rather than trying to parse partial stdout as JSON (which swallowed
+    // stderr behind a generic "Failed to parse" error).  Issue #3238: npm
+    // install inside the build script can fail intermittently, and the real
+    // npm error must be visible in the structured error payload.
+    if !success {
+        return Err(package_command_failure_error(exit_code, stdout, stderr));
+    }
+
     if stdout.trim().is_empty() {
-        let detail = if !stderr.is_empty() {
-            format!(
-                "Package command failed (exit {}): {}",
-                exit_code,
-                stderr.trim()
-            )
-        } else if exit_code != 0 {
-            format!(
-                "Package command failed (exit {}) with no output. \
-                 Check that the required packaging tool is installed and configured.",
-                exit_code
-            )
-        } else {
+        return Err(Error::internal_unexpected(
             "Package command produced no artifact output. \
-             The packaging tool may not be installed or configured correctly."
-                .to_string()
-        };
-        return Err(Error::internal_unexpected(detail));
+             The packaging tool may not be installed or configured correctly.",
+        ));
     }
 
     let raw_artifacts: serde_json::Value = serde_json::from_str(stdout).map_err(|e| {
@@ -1041,6 +1113,42 @@ fn store_artifacts_from_output(
     let artifacts: Vec<ReleaseArtifact> = parse_release_artifacts(&raw_artifacts)?;
     state.artifacts.extend(artifacts);
     Ok(())
+}
+
+/// Build an [`Error`] that surfaces *all* captured output from a failed
+/// package command — stdout, stderr, and exit code.
+///
+/// npm and similar build tools write progress to stdout and errors to stderr.
+/// Including both streams ensures the operator can diagnose the real failure
+/// instead of seeing truncated output.  Issue #3238.
+fn package_command_failure_error(exit_code: i64, stdout: &str, stderr: &str) -> Error {
+    let stderr_trimmed = stderr.trim();
+    let stdout_trimmed = stdout.trim();
+    let has_stderr = !stderr_trimmed.is_empty();
+    let has_stdout = !stdout_trimmed.is_empty();
+
+    let mut detail = format!("Package command failed (exit {})", exit_code);
+
+    if has_stderr {
+        detail.push_str(": ");
+        detail.push_str(stderr_trimmed);
+    } else if has_stdout {
+        detail.push_str(": ");
+        detail.push_str(stdout_trimmed);
+    } else {
+        detail.push_str(". Check that the required packaging tool is installed and configured.");
+    }
+
+    // When both streams have content, append stdout as additional context.
+    // npm install failures often write progress lines to stdout and the
+    // actual error to stderr; the operator needs both to see what happened
+    // before the crash.
+    if has_stderr && has_stdout {
+        detail.push_str("\n\n--- stdout ---\n");
+        detail.push_str(stdout_trimmed);
+    }
+
+    Error::internal_unexpected(detail)
 }
 
 #[cfg(test)]
@@ -1302,6 +1410,101 @@ mod tests {
         assert!(!err.message.contains("example-package-manager"));
     }
 
+    #[test]
+    fn package_failure_surfaces_both_stdout_and_stderr() {
+        // Issue #3238: when the build command fails mid-stream, stdout
+        // contains partial progress (e.g. "Installing npm dependencies...")
+        // and stderr contains the real error.  Both must appear in the
+        // structured error payload so the operator can diagnose the failure.
+        let response = serde_json::json!({
+            "success": false,
+            "exitCode": 1,
+            "stdout": "[BUILD] Installing npm dependencies...\n",
+            "stderr": "npm error: ERESOLVE unable to resolve dependency tree\n",
+        });
+        let mut state = crate::core::release::types::ReleaseState::default();
+
+        let err = store_artifacts_from_output(&mut state, &response)
+            .expect_err("failing package output should fail");
+
+        // stderr (the npm error) is the primary message
+        assert!(
+            err.message.contains("npm error: ERESOLVE"),
+            "error should surface npm stderr, got: {}",
+            err.message
+        );
+        // stdout (the build progress) is appended as additional context
+        assert!(
+            err.message.contains("Installing npm dependencies"),
+            "error should also include stdout context, got: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("--- stdout ---"),
+            "error should label the stdout section"
+        );
+        assert!(err.message.contains("exit 1"));
+    }
+
+    #[test]
+    fn package_failure_with_stdout_only_still_surfaces_output() {
+        // When the build writes everything to stdout and then dies, the
+        // error should include that stdout rather than a generic JSON-parse
+        // failure.
+        let response = serde_json::json!({
+            "success": false,
+            "exitCode": 42,
+            "stdout": "[BUILD] Installing npm dependencies...\nnpm error: ENOTFOUND registry\n",
+            "stderr": "",
+        });
+        let mut state = crate::core::release::types::ReleaseState::default();
+
+        let err = store_artifacts_from_output(&mut state, &response)
+            .expect_err("failing package with stdout-only should fail");
+
+        assert!(
+            err.message.contains("npm error: ENOTFOUND registry"),
+            "error should surface stdout content, got: {}",
+            err.message
+        );
+        assert!(err.message.contains("exit 42"));
+    }
+
+    #[test]
+    fn package_failure_detects_nonzero_exit_without_success_field() {
+        // Some extension responses omit the "success" field.  In that case
+        // the exit code alone must trigger the failure path.
+        let response = serde_json::json!({
+            "exitCode": 1,
+            "stdout": "[BUILD] Installing npm dependencies...\n",
+            "stderr": "some build error\n",
+        });
+        let mut state = crate::core::release::types::ReleaseState::default();
+
+        let err = store_artifacts_from_output(&mut state, &response)
+            .expect_err("nonzero exit without success field should fail");
+
+        assert!(err.message.contains("some build error"));
+    }
+
+    #[test]
+    fn package_success_with_valid_json_still_works() {
+        // Regression guard: the new success-first check must not break the
+        // happy path.
+        let response = serde_json::json!({
+            "success": true,
+            "exitCode": 0,
+            "stdout": "[{\"path\":\"build/artifact.zip\",\"type\":\"archive\"}]",
+            "stderr": "",
+        });
+        let mut state = crate::core::release::types::ReleaseState::default();
+
+        store_artifacts_from_output(&mut state, &response).expect("valid artifacts should parse");
+
+        assert_eq!(state.artifacts.len(), 1);
+        assert_eq!(state.artifacts[0].path, "build/artifact.zip");
+    }
+
     fn release_package_extension(id: &str, command: &str) -> ExtensionManifest {
         let mut manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
             "name": id,
@@ -1429,6 +1632,87 @@ mod tests {
             assert!(err.message.contains("archive command failed"));
             assert_eq!(state.artifacts.len(), 1);
             assert_eq!(state.artifacts[0].path, "target/package-a.tgz");
+        });
+    }
+
+    #[test]
+    fn run_package_retries_transient_failure_then_surfaces_full_output() {
+        // Issue #3238: the package command (npm install inside build.sh) can
+        // fail intermittently.  A bounded retry gives the warm-cache path a
+        // chance; when both attempts fail, the error must surface the full
+        // captured stdout AND stderr so the operator can diagnose it.
+        crate::test_support::with_isolated_home(|_| {
+            let component = tempfile::tempdir().expect("component tempdir");
+            // Simulates a build.sh that prints progress to stdout, writes
+            // the npm error to stderr, and exits non-zero on every attempt.
+            let package = release_package_extension(
+                "wordpress",
+                "printf '[BUILD] Installing npm dependencies...\\n'; \
+                 printf 'npm error: ERESOLVE\\n' >&2; exit 1",
+            );
+            crate::core::extension::save_manifest(&package).expect("save package extension");
+
+            let mut state = crate::core::release::types::ReleaseState::default();
+            let err = run_package(
+                &[package],
+                &mut state,
+                "fixture",
+                &component.path().to_string_lossy(),
+            )
+            .expect_err("persistently failing package should fail after retry");
+
+            // stderr (npm error) must be surfaced — this is the core bug.
+            assert!(
+                err.message.contains("npm error: ERESOLVE"),
+                "error should surface npm stderr, got: {}",
+                err.message
+            );
+            // stdout (build progress) should also be visible.
+            assert!(
+                err.message.contains("Installing npm dependencies"),
+                "error should include build progress stdout, got: {}",
+                err.message
+            );
+            // No artifacts stored from the failed build.
+            assert!(state.artifacts.is_empty());
+        });
+    }
+
+    #[test]
+    fn run_package_retries_transient_failure_then_recovers() {
+        // When the first attempt fails but the retry succeeds, the step
+        // should complete normally with the artifacts from the successful
+        // attempt.
+        crate::test_support::with_isolated_home(|_| {
+            let component = tempfile::tempdir().expect("component tempdir");
+            let marker = component.path().join("attempt-counter");
+            // Script that fails on the first invocation but succeeds on the
+            // second (warm-cache retry).
+            let script = format!(
+                "n=$(cat '{marker}' 2>/dev/null || echo 0); \
+                 echo $((n + 1)) > '{marker}'; \
+                 if [ \"$n\" = \"0\" ]; then \
+                   printf 'npm error: transient registry failure\\n' >&2; exit 1; \
+                 else \
+                   printf '[{{\"path\":\"build/artifact.zip\",\"type\":\"archive\"}}]'; \
+                 fi",
+                marker = marker.display()
+            );
+            let package = release_package_extension("wordpress", &script);
+            crate::core::extension::save_manifest(&package).expect("save package extension");
+
+            let mut state = crate::core::release::types::ReleaseState::default();
+            let result = run_package(
+                &[package],
+                &mut state,
+                "fixture",
+                &component.path().to_string_lossy(),
+            )
+            .expect("retry after transient failure should succeed");
+
+            assert_eq!(result.status, ReleaseStepStatus::Success);
+            assert_eq!(state.artifacts.len(), 1);
+            assert_eq!(state.artifacts[0].path, "build/artifact.zip");
         });
     }
 
