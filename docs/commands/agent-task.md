@@ -213,6 +213,15 @@ homeboy agent-task dispatch \
 External workspace managers should resolve their own handles to local paths and
 call dispatch with `--cwd <resolved-path>`.
 
+When `agent-task cook` or `agent-task dispatch` is Lab-offloaded with a
+patch-producing provider, `--cwd` must point at a clean git checkout with
+`remote.origin.url` configured. Homeboy uses that contract to materialize a real
+runner-side git checkout/worktree before provider dispatch so generated files can
+come back as patch artifacts. Non-git directories, dirty worktrees, and checkouts
+without `origin` fail on the controller before offload with a supported-path
+diagnostic; use a Homeboy/Data Machine Code worktree or another clean checkout
+for write-capable agent tasks.
+
 ## Durable Loop Controllers
 
 `agent-task controller` stores domain-agnostic controller state for multi-day
