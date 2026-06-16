@@ -2432,7 +2432,7 @@ mod tests {
 
         assert_eq!(err.code, ErrorCode::ValidationInvalidArgument);
         assert_eq!(err.details["field"], "runner");
-        assert_eq!(err.details["value"], "homeboy lab");
+        assert_eq!(err.details["id"], "homeboy lab");
         assert!(err
             .message
             .contains("Lab offload refused runner `homeboy lab`"));
@@ -2446,12 +2446,15 @@ mod tests {
         assert!(err
             .message
             .contains("malformed or misleading provider output"));
-        assert!(err.hints.iter().any(|hint| hint.message.contains(
-            "homeboy runner disconnect 'homeboy lab' && homeboy runner connect 'homeboy lab'"
+        let tried = err.details["tried"].as_array().expect("tried hints");
+        assert!(tried
+            .iter()
+            .any(|hint| hint.as_str().is_some_and(|hint| hint.contains(
+                "homeboy runner disconnect 'homeboy lab' && homeboy runner connect 'homeboy lab'"
+            ))));
+        assert!(tried.iter().any(|hint| hint.as_str().is_some_and(
+            |hint| hint.contains("homeboy upgrade --force --upgrade-runner 'homeboy lab'")
         )));
-        assert!(err.hints.iter().any(|hint| hint
-            .message
-            .contains("homeboy upgrade --force --upgrade-runner 'homeboy lab'")));
     }
 
     #[test]
