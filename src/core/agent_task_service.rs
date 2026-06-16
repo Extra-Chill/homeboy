@@ -900,6 +900,60 @@ mod tests {
     }
 
     #[test]
+    fn discovery_accepts_active_legacy_totals_without_skipped() {
+        with_isolated_home(|_| {
+            let record = agent_task_lifecycle::submit_plan(
+                &discovery_plan(),
+                Some("run-active-legacy-totals"),
+            )
+            .expect("submitted");
+            agent_task_lifecycle::mark_running(&record.run_id).expect("marked running");
+            let status_path = crate::core::paths::homeboy_data()
+                .expect("homeboy data")
+                .join("agent-task-runs")
+                .join(&record.run_id)
+                .join("status.json");
+            let mut raw = serde_json::to_value(
+                agent_task_lifecycle::status(&record.run_id).expect("status loaded"),
+            )
+            .expect("record json");
+            raw["totals"] = serde_json::json!({
+                "queued": 0,
+                "running": 1,
+                "blocked": 0,
+                "succeeded": 0,
+                "failed": 0,
+                "cancelled": 0,
+                "timed_out": 0
+            });
+            std::fs::write(
+                &status_path,
+                format!(
+                    "{}\n",
+                    serde_json::to_string_pretty(&raw).expect("pretty json")
+                ),
+            )
+            .expect("write legacy status");
+
+            let active = discover_runs(AgentTaskDiscoveryFilter::Active).expect("active listed");
+            let all = discover_runs(AgentTaskDiscoveryFilter::All).expect("all listed");
+
+            assert_eq!(active.count, 1);
+            assert_eq!(active.runs[0].run_id, "run-active-legacy-totals");
+            assert_eq!(all.count, 1);
+            assert_eq!(all.runs[0].run_id, "run-active-legacy-totals");
+            assert_eq!(
+                agent_task_lifecycle::status(&record.run_id)
+                    .expect("legacy status loaded")
+                    .totals
+                    .expect("totals")
+                    .skipped,
+                0
+            );
+        });
+    }
+
+    #[test]
     fn discovery_latest_returns_only_newest_run() {
         with_isolated_home(|_| {
             agent_task_lifecycle::submit_plan(&discovery_plan(), Some("run-latest-a"))
