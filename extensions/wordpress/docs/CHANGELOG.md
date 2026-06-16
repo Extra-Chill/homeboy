@@ -2,6 +2,30 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.123.0] - 2026-06-16
+
+### Added
+- add experimental OpenCode agent runtime contract
+
+### Changed
+- move wp-codebox runtime adapter
+- Stage WP Codebox as an agent runtime package
+
+### Fixed
+- mount provider plugin paths for Codebox tasks
+- declare WordPress agent backend policy
+- package Codebox executor with WordPress extension
+- fail Codebox tasks on embedded runtime failure
+- surface provider secret env requirements
+- avoid default Codebox sandbox agent
+- preserve embedded runtime failures
+- expose Codebox provider secret defaults
+- honor codex provider plugin config
+- map repo loop workspace for Codebox
+- ignore global provider plugin paths for codex
+- keep WordPress Codebox provider relink-safe
+- map repo-loop artifacts to Codebox declarations
+
 ## [2.122.2] - 2026-06-16
 
 ### Fixed
