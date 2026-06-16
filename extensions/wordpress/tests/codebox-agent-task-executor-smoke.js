@@ -732,7 +732,7 @@ const codexAgentRequest = {
   },
 };
 const codexRequest = codeboxTaskRequestFromAgentTaskRequest(codexAgentRequest);
-assert.equal(codexRequest.agent, 'wp-codebox-sandbox');
+assert.equal(Object.hasOwn(codexRequest, 'agent'), false);
 assert.equal(codexRequest.mode, 'sandbox');
 assert.equal(codexRequest.provider, 'codex');
 assert.equal(codexRequest.model, 'gpt-5.5');
@@ -2284,6 +2284,8 @@ try {
   const capturedAgentBundleRun = JSON.parse(fs.readFileSync(fakeWpCodeboxCapture, 'utf8'));
   assert.equal(capturedAgentBundleRun.argv[0], 'agent-task-run');
   assert.equal(capturedAgentBundleRun.input.schema, 'wp-codebox/task-input/v1');
+  assert.equal(Object.hasOwn(capturedAgentBundleRun.input, 'agent'), false);
+  assert.equal(Object.hasOwn(capturedAgentBundleRun.input.parent_request, 'agent'), false);
   assert.deepEqual(capturedAgentBundleRun.input.runtime_env, fullRunnerRuntimeEnv);
   assert.deepEqual(capturedAgentBundleRun.input.runtime_state_mounts, fullRunnerRuntimeStateMounts);
   assert.deepEqual(capturedAgentBundleRun.input.runtime_config_mounts, fullRunnerRuntimeConfigMounts);
@@ -2318,6 +2320,7 @@ try {
   assert.equal(recipeWpCodeboxResult.status, 0, recipeWpCodeboxResult.stderr || recipeWpCodeboxResult.stdout);
   const capturedRecipeWpCodeboxRun = JSON.parse(fs.readFileSync(recipeFakeWpCodeboxCapture, 'utf8'));
   assert.equal(capturedRecipeWpCodeboxRun.argv[0], 'agent-task-run');
+  assert.equal(Object.hasOwn(capturedRecipeWpCodeboxRun.input, 'agent'), false);
   assert.equal(capturedRecipeWpCodeboxRun.input.recipe.pack, 'example-codebox-recipes');
   assert.equal(capturedRecipeWpCodeboxRun.input.recipe.name, 'minimal-runtime');
   assert.equal(capturedRecipeWpCodeboxRun.input.recipe.target_ref, 'Extra-Chill/example#42');

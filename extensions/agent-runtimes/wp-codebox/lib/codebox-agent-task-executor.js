@@ -246,6 +246,7 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
   const sandboxToolPolicy = sandboxToolPolicyFromAgentTaskRequest(config, inputs, options, defaults, allowedTools);
   const provider = config.provider || options.provider || defaults.provider || '';
   const model = request.executor.model || config.model || options.model || defaults.model || '';
+  const agent = firstValue(config.agent, options.agent, '');
   const runtimeTask = runtimeTaskWithExecutionDefaults(
     inputs.runtime_task || inputs.runtimeTask || config.runtime_task || config.runtimeTask || abilityRuntimeTaskFromAgentTaskRequest(request, config, inputs) || options.runtimeTask,
     { provider, model, agentBundles }
@@ -286,7 +287,7 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     structured_artifacts: structuredArtifacts,
     sandbox_session_id: config.sandbox_session_id || request.task_id,
     session_id: config.session_id || config.sessionId || '',
-    agent: config.agent || options.agent || 'wp-codebox-sandbox',
+    ...(agent ? { agent } : {}),
     mode: config.mode || options.mode || 'sandbox',
     provider,
     model,
