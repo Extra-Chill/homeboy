@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.121.53] - 2026-06-16
+
+### Fixed
+- keep codex provider stack explicit
+
 ## [2.121.52] - 2026-06-15
 
 ### Fixed
