@@ -19,6 +19,7 @@ pub(super) fn connect_remote_daemon(
     homeboy: &str,
     daemon: RemoteDaemon,
     expected_version: &str,
+    expected_identity: &str,
     runner_id: &str,
     session_path: &PathBuf,
 ) -> std::result::Result<(u16, Option<u32>, String, RemoteDaemon), (RunnerConnectReport, i32)> {
@@ -35,11 +36,9 @@ pub(super) fn connect_remote_daemon(
     };
     let (local_port, tunnel_pid, local_url) =
         open_daemon_tunnel(server, &daemon, runner_id, session_path)?;
-    match daemon_http_version(&local_url) {
-        Ok(running_version) if versions_match(&running_version, expected_version) => {
-            Ok((local_port, tunnel_pid, local_url, daemon))
-        }
-        Ok(_) => {
+    match daemon_freshness_mismatch(&local_url, expected_version, expected_identity) {
+        Ok(None) => Ok((local_port, tunnel_pid, local_url, daemon)),
+        Ok(Some(_)) => {
             if let Some(pid) = tunnel_pid {
                 terminate_pid(pid);
             }
@@ -64,14 +63,13 @@ pub(super) fn connect_remote_daemon(
             };
             let (local_port, tunnel_pid, local_url) =
                 open_daemon_tunnel(server, &daemon, runner_id, session_path)?;
-            match daemon_http_version(&local_url) {
-                Ok(running_version) if versions_match(&running_version, expected_version) => {}
-                Ok(running_version) => {
+            match daemon_freshness_mismatch(&local_url, expected_version, expected_identity) {
+                Ok(None) => {}
+                Ok(Some(reason)) => {
                     return Err(failed_after_tunnel(
                         tunnel_pid,
                         format!(
-                            "remote daemon restarted but still reports stale Homeboy version {} instead of {}",
-                            running_version, expected_version
+                            "remote daemon restarted but still reports stale Homeboy build: {reason}"
                         ),
                     ));
                 }
@@ -214,7 +212,31 @@ pub(super) fn daemon_identity_from_body(body: &Value) -> Option<&str> {
             body.pointer("/data/build_identity/display")
                 .and_then(Value::as_str)
         })
-        .or_else(|| daemon_version_from_body(body))
+}
+
+fn daemon_freshness_mismatch(
+    local_url: &str,
+    expected_version: &str,
+    expected_identity: &str,
+) -> std::result::Result<Option<String>, String> {
+    let running_version = daemon_http_version(local_url)?;
+    if !versions_match(&running_version, expected_version) {
+        return Ok(Some(format!(
+            "version {running_version} != configured runner version {expected_version}"
+        )));
+    }
+
+    let running_identity = match daemon_http_identity(local_url) {
+        Ok(identity) => identity,
+        Err(message) => return Ok(Some(message)),
+    };
+    if !versions_match(&running_identity, expected_identity) {
+        return Ok(Some(format!(
+            "identity {running_identity} != configured runner identity {expected_identity}"
+        )));
+    }
+
+    Ok(None)
 }
 
 fn remote_daemon_stop(client: &SshClient, homeboy: &str) -> std::result::Result<(), String> {
