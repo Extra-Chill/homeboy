@@ -452,7 +452,10 @@ mod tests {
             config.settings["provider_plugin_paths"][0],
             Value::String("/providers/openai".to_string())
         );
-        assert_eq!(config.settings["runtime_overlays"][0]["repo"], "owner/runtime");
+        assert_eq!(
+            config.settings["runtime_overlays"][0]["repo"],
+            "owner/runtime"
+        );
     }
 
     #[test]
@@ -477,7 +480,10 @@ mod tests {
             let loaded = load_config();
 
             assert_eq!(loaded.settings["provider"], "example");
-            assert_eq!(loaded.settings["provider_plugin_paths"][0], "/providers/openai");
+            assert_eq!(
+                loaded.settings["provider_plugin_paths"][0],
+                "/providers/openai"
+            );
             assert_eq!(loaded.settings["runtime_overlays"][0]["ref"], "main");
         });
     }

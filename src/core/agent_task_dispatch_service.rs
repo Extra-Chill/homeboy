@@ -967,9 +967,7 @@ mod tests {
 
             let plan = build_dispatch_plan(&dispatch_request(DispatchRequestOverrides {
                 prompt: Some("Cook with configured provider defaults.".to_string()),
-                provider_config: Some(
-                    serde_json::json!({ "provider": "override" }).to_string(),
-                ),
+                provider_config: Some(serde_json::json!({ "provider": "override" }).to_string()),
                 ..DispatchRequestOverrides::default()
             }))
             .expect("dispatch plan");
@@ -982,10 +980,7 @@ mod tests {
                 plan.tasks[0].executor.config["runtime_overlays"][0]["repo"],
                 "owner/runtime"
             );
-            assert_eq!(
-                plan.tasks[0].executor.config["provider"],
-                "override"
-            );
+            assert_eq!(plan.tasks[0].executor.config["provider"], "override");
         });
     }
 
