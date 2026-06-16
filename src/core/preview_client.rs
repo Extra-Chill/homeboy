@@ -4,6 +4,7 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::BTreeMap;
+use std::io::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -68,9 +69,21 @@ pub struct PreviewIngressResponse {
     pub status: u16,
     #[serde(default)]
     pub headers: BTreeMap<String, String>,
+    #[serde(default)]
     pub body_base64: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub body_stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<PreviewClientForwardError>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PreviewIngressResponseChunk {
+    pub request_id: String,
+    pub sequence: u64,
+    pub body_base64: String,
+    #[serde(default)]
+    pub complete: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -125,18 +138,19 @@ pub fn start(spec: PreviewClientStartSpec) -> Result<PreviewClientReport> {
                 let worker_spec = spec.clone();
                 let worker_token = token.clone();
                 thread::spawn(move || {
-                    let response =
-                        forward_to_local_origin(&local_client, &worker_spec.local_origin, request);
-                    if let Err(err) =
-                        send_response(&response_client, &worker_spec, &worker_token, &response)
-                    {
+                    if let Err(err) = forward_to_local_origin_streaming(
+                        &local_client,
+                        &response_client,
+                        &worker_spec,
+                        &worker_token,
+                        request,
+                    ) {
                         eprintln!(
                             "{}",
                             json!({
                                 "command": "tunnel.preview_client.start",
                                 "event": "response_failed",
                                 "public_host": worker_spec.public_host,
-                                "request_id": response.request_id,
                                 "error": err.message,
                             })
                         );
@@ -218,8 +232,96 @@ pub fn forward_to_local_origin(
                 })
                 .to_string(),
             ),
+            body_stream: false,
             error: Some(error),
         },
+    }
+}
+
+fn forward_to_local_origin_streaming(
+    local_client: &Client,
+    response_client: &Client,
+    spec: &PreviewClientStartSpec,
+    token: &str,
+    request: PreviewIngressRequest,
+) -> Result<()> {
+    if request.method.eq_ignore_ascii_case("OPTIONS") {
+        let response = forward_to_local_origin(local_client, &spec.local_origin, request);
+        return send_response(response_client, spec, token, &response);
+    }
+
+    match open_local_origin_response(local_client, &spec.local_origin, &request) {
+        Ok((status, headers, mut response)) => {
+            send_response(
+                response_client,
+                spec,
+                token,
+                &PreviewIngressResponse {
+                    request_id: request.request_id.clone(),
+                    status,
+                    headers,
+                    body_base64: String::new(),
+                    body_stream: true,
+                    error: None,
+                },
+            )?;
+
+            let mut sequence = 0_u64;
+            let mut buffer = vec![0_u8; 64 * 1024];
+            loop {
+                let read = response.read(&mut buffer).map_err(|err| {
+                    Error::internal_unexpected(format!("read local-origin response body: {err}"))
+                })?;
+                if read == 0 {
+                    return send_response_chunk(
+                        response_client,
+                        spec,
+                        token,
+                        &PreviewIngressResponseChunk {
+                            request_id: request.request_id,
+                            sequence,
+                            body_base64: String::new(),
+                            complete: true,
+                        },
+                    );
+                }
+                send_response_chunk(
+                    response_client,
+                    spec,
+                    token,
+                    &PreviewIngressResponseChunk {
+                        request_id: request.request_id.clone(),
+                        sequence,
+                        body_base64: base64::engine::general_purpose::STANDARD
+                            .encode(&buffer[..read]),
+                        complete: false,
+                    },
+                )?;
+                sequence += 1;
+            }
+        }
+        Err(error) => send_response(
+            response_client,
+            spec,
+            token,
+            &PreviewIngressResponse {
+                request_id: request.request_id,
+                status: 502,
+                headers: BTreeMap::from([(
+                    "content-type".to_string(),
+                    "application/json".to_string(),
+                )]),
+                body_base64: base64::engine::general_purpose::STANDARD.encode(
+                    json!({
+                        "error": error.kind,
+                        "message": error.message,
+                    })
+                    .to_string(),
+                ),
+                body_stream: false,
+                error: Some(error),
+            },
+        ),
     }
 }
 
@@ -234,9 +336,33 @@ fn forward_to_local_origin_result(
             status: 204,
             headers: cors_headers(BTreeMap::new(), &request.path),
             body_base64: base64::engine::general_purpose::STANDARD.encode([]),
+            body_stream: false,
             error: None,
         });
     }
+    let (status, headers, response) = open_local_origin_response(client, local_origin, request)?;
+    let body = response.bytes().map_err(|err| PreviewClientForwardError {
+        kind: "local_origin_response_failed".to_string(),
+        message: err.to_string(),
+    })?;
+    Ok(PreviewIngressResponse {
+        request_id: request.request_id.clone(),
+        status,
+        headers,
+        body_base64: base64::engine::general_purpose::STANDARD.encode(body),
+        body_stream: false,
+        error: None,
+    })
+}
+
+fn open_local_origin_response(
+    client: &Client,
+    local_origin: &str,
+    request: &PreviewIngressRequest,
+) -> std::result::Result<
+    (u16, BTreeMap<String, String>, reqwest::blocking::Response),
+    PreviewClientForwardError,
+> {
     let method = request
         .method
         .parse()
@@ -260,17 +386,7 @@ fn forward_to_local_origin_result(
         })?;
     let status = response.status().as_u16();
     let headers = cors_headers(response_headers(response.headers()), &request.path);
-    let body = response.bytes().map_err(|err| PreviewClientForwardError {
-        kind: "local_origin_response_failed".to_string(),
-        message: err.to_string(),
-    })?;
-    Ok(PreviewIngressResponse {
-        request_id: request.request_id.clone(),
-        status,
-        headers,
-        body_base64: base64::engine::general_purpose::STANDARD.encode(body),
-        error: None,
-    })
+    Ok((status, headers, response))
 }
 
 fn register_session(client: &Client, spec: &PreviewClientStartSpec, token: &str) -> Result<()> {
@@ -330,6 +446,26 @@ fn send_response(
             "response": response,
         }),
         "send preview client response",
+    )
+    .map(|_| ())
+}
+
+fn send_response_chunk(
+    client: &Client,
+    spec: &PreviewClientStartSpec,
+    token: &str,
+    chunk: &PreviewIngressResponseChunk,
+) -> Result<()> {
+    post_json(
+        client,
+        spec,
+        token,
+        "/preview/client/respond-chunk",
+        json!({
+            "public_host": spec.public_host,
+            "chunk": chunk,
+        }),
+        "send preview client response chunk",
     )
     .map(|_| ())
 }
