@@ -65,11 +65,24 @@ PHP
 component="${TMPDIR}/component"
 make_component "$component"
 
+# --- Default backend run: no implicit discovery of ad hoc smoke files.
+HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
+HOMEBOY_COMPONENT_ID="component" \
+HOMEBOY_COMPONENT_PATH="$component" \
+HOMEBOY_WP_CODEBOX_BIN="$FAKE_CODEBOX" \
+FAKE_CODEBOX_CAPTURE_DIR="$CAPTURE_DIR" \
+    bash "${EXTENSION_PATH}/scripts/test/test-runner-host-smoke-wp.sh" > "${TMPDIR}/default.out"
+
+assert_contains "${TMPDIR}/default.out" "Backend: host-smoke-wp"
+assert_contains "${TMPDIR}/default.out" "Skipping real-WordPress smoke tests: no smoke files requested."
+assert_not_contains "${TMPDIR}/default.out" "HOST_SMOKE_BEGIN:tests/alpha-smoke.php"
+
 # --- Direct backend run: builds a wordpress.run-php recipe mounting the plugin.
 HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
 HOMEBOY_COMPONENT_ID="component" \
 HOMEBOY_COMPONENT_PATH="$component" \
 HOMEBOY_WP_CODEBOX_BIN="$FAKE_CODEBOX" \
+HOMEBOY_WORDPRESS_HOST_SMOKE_FILE="tests/alpha-smoke.php" \
 FAKE_CODEBOX_CAPTURE_DIR="$CAPTURE_DIR" \
     bash "${EXTENSION_PATH}/scripts/test/test-runner-host-smoke-wp.sh" > "${TMPDIR}/direct.out"
 
@@ -105,6 +118,7 @@ HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
 HOMEBOY_COMPONENT_ID="component" \
 HOMEBOY_COMPONENT_PATH="$component" \
 HOMEBOY_WP_CODEBOX_BIN="$FAKE_CODEBOX_FAIL" \
+HOMEBOY_WORDPRESS_HOST_SMOKE_FILE="tests/alpha-smoke.php" \
 FAKE_CODEBOX_CAPTURE_DIR="$CAPTURE_DIR" \
     bash "${EXTENSION_PATH}/scripts/test/test-runner-host-smoke-wp.sh" > "${TMPDIR}/direct-fail.out" 2>&1
 fail_exit=$?
@@ -134,6 +148,7 @@ HOMEBOY_COMPONENT_ID="component" \
 HOMEBOY_COMPONENT_PATH="$component" \
 HOMEBOY_WP_CODEBOX_BIN="$FAKE_CODEBOX_HANG" \
 HOMEBOY_WORDPRESS_HOST_SMOKE_TIMEOUT_SECONDS=1 \
+HOMEBOY_WORDPRESS_HOST_SMOKE_FILE="tests/alpha-smoke.php" \
 FAKE_CODEBOX_CAPTURE_DIR="$CAPTURE_DIR" \
     bash "${EXTENSION_PATH}/scripts/test/test-runner-host-smoke-wp.sh" > "${TMPDIR}/direct-timeout.out" 2>&1
 timeout_exit=$?
