@@ -624,7 +624,7 @@ fi
 DEPENDENCY_PATHS="${HOMEBOY_WORDPRESS_DEPENDENCY_PATHS:-}"
 
 WP_CONFIG_DEFINES_JSON="{}"
-BENCH_ENV_JSON="{}"
+PHPUNIT_ENV_JSON="{}"
 WP_CODEBOX_FILE_MOUNTS_JSON="[]"
 PHPUNIT_NO_TESTS="skipped"
 WP_CODEBOX_WORDPRESS_VERSION=""
@@ -632,9 +632,6 @@ WP_CODEBOX_MULTISITE=""
 if [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]; then
     extracted=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -c '.wp_config_defines // {}' 2>/dev/null || echo "{}")
     [ -n "$extracted" ] && WP_CONFIG_DEFINES_JSON="$extracted"
-
-    extracted=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -c '.bench_env // {}' 2>/dev/null || echo "{}")
-    [ -n "$extracted" ] && BENCH_ENV_JSON="$extracted"
 
     extracted=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -c '.wp_codebox_file_mounts // []' 2>/dev/null || echo "[]")
     [ -n "$extracted" ] && [ "$extracted" != "null" ] && WP_CODEBOX_FILE_MOUNTS_JSON="$extracted"
@@ -820,7 +817,7 @@ jq -n \
     --arg selectedTestFile "$SELECTED_TEST_FILE_REL" \
     --argjson changedTests "$CHANGED_TEST_FILES_JSON" \
     --argjson phpunitArgs "$PHPUNIT_ARGS_JSON" \
-    --argjson env "$BENCH_ENV_JSON" \
+    --argjson env "$PHPUNIT_ENV_JSON" \
     --argjson defines "$WP_CONFIG_DEFINES_JSON" \
     --argjson bootstrapFiles "$WP_CODEBOX_BOOTSTRAP_FILES_JSON" \
     --arg bootstrapMode "$WP_CODEBOX_PHPUNIT_BOOTSTRAP_MODE" \
