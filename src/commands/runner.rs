@@ -335,10 +335,6 @@ enum RunnerCommand {
     Env {
         /// Runner ID
         id: String,
-
-        /// Print actual values instead of redacting them
-        #[arg(long)]
-        show_values: bool,
     },
     /// Inspect or follow a runner daemon job stream
     Job {
@@ -581,7 +577,7 @@ pub fn run(
             require_paths,
             command,
         )),
-        RunnerCommand::Env { id, show_values } => map_env(env(&id, show_values)),
+        RunnerCommand::Env { id } => map_env(env(&id)),
         RunnerCommand::Job { command } => map_job(job(command)),
         RunnerCommand::Work {
             runner_id,
@@ -1046,21 +1042,12 @@ fn exec(
     )
 }
 
-fn env(runner_id: &str, show_values: bool) -> CmdResult<RunnerEnvOutput> {
+fn env(runner_id: &str) -> CmdResult<RunnerEnvOutput> {
     let runner = runner::load(runner_id)?;
     let effective_env = runner::effective_env(runner_id)?;
     let env = effective_env
         .into_iter()
-        .map(|(key, value)| {
-            (
-                key,
-                if show_values {
-                    value
-                } else {
-                    REDACTED_ENV_VALUE.to_string()
-                },
-            )
-        })
+        .map(|(key, _value)| (key, REDACTED_ENV_VALUE.to_string()))
         .collect();
     let secret_env = runner
         .secret_env
@@ -1073,7 +1060,7 @@ fn env(runner_id: &str, show_values: bool) -> CmdResult<RunnerEnvOutput> {
             command: "runner.env".to_string(),
             runner_id: runner_id.to_string(),
             source: "runner_job_env".to_string(),
-            values_redacted: !show_values,
+            values_redacted: true,
             env,
             secret_env,
             diagnostics: RunnerEnvDiagnostics {
@@ -1359,10 +1346,10 @@ mod tests {
             command: "runner.env".to_string(),
             runner_id: "lab".to_string(),
             source: "runner_job_env".to_string(),
-            values_redacted: false,
+            values_redacted: true,
             env: BTreeMap::from([(
                 "HOMEBOY_PUBLIC_ARTIFACT_BASE_URL".to_string(),
-                "https://artifacts.example.test".to_string(),
+                REDACTED_ENV_VALUE.to_string(),
             )]),
             secret_env: BTreeMap::from([(
                 "OPENAI_API_KEY".to_string(),
@@ -1383,7 +1370,7 @@ mod tests {
 
         assert_eq!(
             value["env"]["HOMEBOY_PUBLIC_ARTIFACT_BASE_URL"],
-            "https://artifacts.example.test"
+            REDACTED_ENV_VALUE
         );
         assert_eq!(
             value["secret_env"]["OPENAI_API_KEY"]["env"],
@@ -1402,7 +1389,7 @@ mod tests {
             command: "runner.env".to_string(),
             runner_id: "lab".to_string(),
             source: "runner_job_env".to_string(),
-            values_redacted: false,
+            values_redacted: true,
             env: BTreeMap::new(),
             secret_env: BTreeMap::from([(
                 "HOMEBOY_PREVIEW_TUNNEL_TOKEN".to_string(),
