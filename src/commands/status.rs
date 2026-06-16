@@ -67,6 +67,16 @@ impl UpstreamDrift {
     }
 }
 
+/// Clarifying note emitted alongside the git-state-only `ready_to_deploy` list.
+///
+/// `ready_to_deploy` reflects local git/workspace state ("has a clean release
+/// tag that *could* be deployed"), NOT whether the deploy target is actually
+/// behind. Acting on it blindly re-deploys components that may already be live.
+/// For a target-accurate diff (installed version vs latest release tag) run
+/// `homeboy status <project>`, which reports `current` / `outdated` per
+/// component. See issue #4588.
+const READY_TO_DEPLOY_NOTE: &str = "ready_to_deploy is git-state-only (components with a clean release tag that *could* be deployed); it does NOT mean the deploy target is behind. Run `homeboy status <project>` for a target-accurate diff (installed version vs latest release tag).";
+
 #[derive(Debug, Serialize)]
 pub struct StatusOutput {
     pub command: &'static str,
@@ -75,8 +85,20 @@ pub struct StatusOutput {
     pub uncommitted: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub needs_release: Vec<String>,
+    /// Components in a clean release state (no uncommitted changes, no commits
+    /// since the last version tag).
+    ///
+    /// IMPORTANT: this is git/workspace state only. It means "has a release tag
+    /// that *could* be deployed", NOT "the deployed target is behind the latest
+    /// release". For a target-accurate deploy diff, use `homeboy status
+    /// <project>` (compares installed-on-target versions against release tags).
+    /// See `ready_to_deploy_note` and issue #4588.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub ready_to_deploy: Vec<String>,
+    /// Clarifying note, emitted only when `ready_to_deploy` is non-empty, so
+    /// operators don't mistake the git-state list for a real deploy backlog.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ready_to_deploy_note: Option<&'static str>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub docs_only: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -265,6 +287,12 @@ fn summarize_components(
         }
     }
 
+    let ready_to_deploy_note = if ready_to_deploy.is_empty() {
+        None
+    } else {
+        Some(READY_TO_DEPLOY_NOTE)
+    };
+
     Ok((
         StatusResult::Summary(StatusOutput {
             command: "status",
@@ -272,6 +300,7 @@ fn summarize_components(
             uncommitted,
             needs_release,
             ready_to_deploy,
+            ready_to_deploy_note,
             docs_only,
             behind_upstream,
             upstream_drift,
@@ -724,6 +753,61 @@ mod tests {
             .status()
             .expect("git init");
         (dir, repo)
+    }
+
+    fn empty_status_output() -> StatusOutput {
+        StatusOutput {
+            command: "status",
+            total: 0,
+            uncommitted: Vec::new(),
+            needs_release: Vec::new(),
+            ready_to_deploy: Vec::new(),
+            ready_to_deploy_note: None,
+            docs_only: Vec::new(),
+            behind_upstream: Vec::new(),
+            upstream_drift: Vec::new(),
+            clean: 0,
+        }
+    }
+
+    #[test]
+    fn ready_to_deploy_note_is_omitted_when_no_components_are_clean() {
+        let output = empty_status_output();
+        let json = serde_json::to_value(&output).expect("serialize status output");
+
+        // ready_to_deploy is empty -> note must not leak into the JSON contract.
+        assert!(json.get("ready_to_deploy").is_none());
+        assert!(
+            json.get("ready_to_deploy_note").is_none(),
+            "note should be omitted when ready_to_deploy is empty"
+        );
+    }
+
+    #[test]
+    fn ready_to_deploy_note_clarifies_git_state_only_when_components_are_clean() {
+        let output = StatusOutput {
+            total: 1,
+            ready_to_deploy: vec!["data-machine".to_string()],
+            ready_to_deploy_note: Some(READY_TO_DEPLOY_NOTE),
+            ..empty_status_output()
+        };
+        let json = serde_json::to_value(&output).expect("serialize status output");
+
+        let note = json
+            .get("ready_to_deploy_note")
+            .and_then(|v| v.as_str())
+            .expect("note present when ready_to_deploy is non-empty");
+
+        // The note must steer operators away from treating git state as a
+        // target-accurate deploy backlog (issue #4588).
+        assert!(
+            note.contains("git-state-only"),
+            "note should flag the list as git-state-only"
+        );
+        assert!(
+            note.contains("homeboy status <project>"),
+            "note should point at the target-accurate project dashboard"
+        );
     }
 
     #[test]
