@@ -583,6 +583,12 @@ failure classifications, capability list, and metadata redaction keys so Lab
 offload and runner transport consumers can select providers without importing
 Codebox-specific request or recipe details.
 
+Discovery also exposes `secret_env_requirements`: generic env-name requirements
+activated by request/config selectors. Codex-backed requests declare the required
+`AI_PROVIDER_OPENAI_CODEX_*` names there, which lets Homeboy preflight runner
+readiness before dispatch while keeping provider and runtime semantics in the
+extension and WP Codebox.
+
 Provider stacks stay generic at the Homeboy boundary. Executor config, options,
 or `HOMEBOY_SETTINGS_JSON` may provide `runtime_env`, `runtime_state_mounts`,
 and `runtime_config_mounts` (or the settings names `wp_codebox_runtime_env`,

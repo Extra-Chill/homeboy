@@ -30,6 +30,12 @@ const repoLoopCapabilities = [
   'ability:github_pull_request_publish',
 ];
 
+function secretEnvRequirementForProvider(contract, provider) {
+  return contract.secret_env_requirements.find((requirement) => (
+    requirement.when.any.some((selector) => selector.path === 'executor.config.provider' && selector.equals === provider)
+  ));
+}
+
 function fixtureEnv(overrides = {}) {
   const env = { ...process.env, ...overrides };
   if (!Object.hasOwn(overrides, 'HOMEBOY_WP_CODEBOX_CORE_MODULE')) {
@@ -266,6 +272,16 @@ assert.deepEqual(provider.request_required_fields, ['schema', 'task_id', 'execut
 assert.deepEqual(provider.outcome_statuses, ['succeeded', 'failed', 'no_op', 'unable_to_remediate', 'timeout', 'provider_error']);
 assert.deepEqual(provider.failure_classifications, ['provider', 'timeout', 'execution_failed']);
 assert.deepEqual(provider.redacted_metadata_keys, ['secret_env_values', 'secretEnvValues', 'secrets']);
+assert.deepEqual(secretEnvRequirementForProvider(provider, 'codex').env, codexSecretEnv);
+assert.deepEqual(secretEnvRequirementForProvider(provider, 'codex').when, {
+  any: [
+    { path: 'executor.config.provider', equals: 'codex' },
+    { path: 'executor.provider', equals: 'codex' },
+    { path: 'provider', equals: 'codex' },
+  ],
+});
+assert.deepEqual(secretEnvRequirementForProvider(provider, 'openai').env, ['OPENAI_API_KEY']);
+assert.deepEqual(secretEnvRequirementForProvider(provider, 'claude-code').env, [claudeCodeRefreshTokenEnv]);
 assert.deepEqual(provider.workspace_materialization, { cwd: 'git_checkout' });
 assert.deepEqual(provider.role_aliases, {
   artifact_kinds: {
@@ -302,6 +318,7 @@ const manifestProvider = manifestRuntime.agent_task_executors.find((executor) =>
 assert.deepEqual(manifestProvider, providerContract({
   command: 'node {{extension_path}}/scripts/agent/homeboy-codebox-agent-task-executor.cjs',
 }));
+assert.deepEqual(secretEnvRequirementForProvider(manifestProvider, 'codex').env, codexSecretEnv);
 for (const capability of repoLoopCapabilities) {
   assert.equal(manifestProvider.capabilities.includes(capability), true);
 }

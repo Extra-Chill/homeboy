@@ -184,6 +184,14 @@ Provider discovery uses `homeboy/agent-task-executor-provider/v1`:
   "outcome_statuses": ["succeeded", "failed", "no_op", "unable_to_remediate", "timeout", "provider_error"],
   "failure_classifications": ["provider", "timeout", "execution_failed"],
   "redacted_metadata_keys": ["secret_env_values", "secretEnvValues", "secrets"],
+  "secret_env_requirements": [
+    {
+      "schema": "homeboy/secret-env-requirement/v1",
+      "source": "provider_default",
+      "env": ["AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN", "AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN"],
+      "when": { "any": [{ "path": "executor.config.provider", "equals": "codex" }] }
+    }
+  ],
   "capabilities": ["browser_runtime", "wordpress_sandbox", "workspace_mounts", "workspace_tools", "artifact_materialization", "patch_artifacts", "verification_artifacts", "run_registry", "cleanup_observability", "screenshots", "structured_outcome", "agent_bundle_execution"],
   "status": "active",
   "integration_contract": "wp-codebox-cli/agent-task-run",
@@ -207,6 +215,10 @@ Discovery fields mean:
   corresponding outcome evidence.
 - `outcome_statuses`, `failure_classifications`, and `redacted_metadata_keys`
   document the stable vocabulary consumers can use without knowing the backend.
+- `secret_env_requirements` declares provider-derived env names that must be
+  available before dispatch. Each requirement uses generic `when` selectors over
+  request/config paths, so Homeboy can preflight the selected runner without
+  learning provider, WordPress, or Codebox semantics.
 - `status` marks maturity. `active` means the provider uses the stable backend
   contract advertised by `integration_contract`.
 - `runtime_gap_trackers` lists active upstream runtime blockers. Closed blockers
@@ -268,6 +280,13 @@ Backends may include secret env names for traceability, but values and secret
 bags must be redacted recursively. The current public redaction keys are
 `secret_env_values`, `secretEnvValues`, and `secrets`; adapters should extend the
 provider discovery list if they add another secret-bearing metadata key.
+
+`secret_env_requirements` carries only environment variable names and generic
+selectors. It must not include secret values. For example, a Codex-backed task
+advertises the required `AI_PROVIDER_OPENAI_CODEX_*` names when the request
+selects `executor.config.provider: "codex"`; Homeboy core can consume those names
+for runner readiness while the WordPress extension and WP Codebox still own the
+provider/runtime details.
 
 Artifacts and evidence refs are Homeboy-owned shapes even when their content is
 backend-specific. Artifacts should include `kind`, and where available `id`,

@@ -71,6 +71,12 @@ const CLAUDE_CODE_SECRET_ENV = [
   'AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN',
 ];
 
+const PROVIDER_SECRET_ENV_REQUIREMENTS = [
+  providerSecretEnvRequirement('openai', ['OPENAI_API_KEY']),
+  providerSecretEnvRequirement('codex', CODEX_SECRET_ENV),
+  providerSecretEnvRequirement('claude-code', CLAUDE_CODE_SECRET_ENV),
+];
+
 const DEFAULT_CODEX_MODEL = 'gpt-5.5';
 const CODEX_PROVIDER_PLUGIN_GUIDANCE = `Codex tasks require a Codex-capable provider plugin checkout, such as the Codex PR branch for ai-provider-for-openai. Released ai-provider-for-openai trunk registers openai, not codex, and unrelated provider defaults such as ${['ai-provider-for', ['open', 'code'].join('')].join('-')} will not work.`;
 const CODEX_PHP_AI_CLIENT_GUIDANCE = 'Codex tasks require a php-ai-client checkout that supports RequestAuthenticationMethod::bearerToken and has Composer vendor dependencies installed before WP Codebox prepares the runtime overlay.';
@@ -196,6 +202,7 @@ function providerContract(options = {}) {
     outcome_statuses: AGENT_TASK_OUTCOME_STATUSES,
     failure_classifications: AGENT_TASK_FAILURE_CLASSIFICATIONS,
     redacted_metadata_keys: AGENT_TASK_REDACTED_METADATA_KEYS,
+    secret_env_requirements: PROVIDER_SECRET_ENV_REQUIREMENTS,
     capabilities: PROVIDER_CAPABILITIES,
     workspace_materialization: {
       cwd: 'git_checkout',
@@ -204,6 +211,21 @@ function providerContract(options = {}) {
     status: 'active',
     integration_contract: 'homeboy-wordpress-agent-task/v1',
     runtime_gap_trackers: WP_CODEBOX_RUNTIME_GAP_TRACKERS,
+  };
+}
+
+function providerSecretEnvRequirement(provider, env) {
+  return {
+    schema: 'homeboy/secret-env-requirement/v1',
+    source: 'provider_default',
+    env,
+    when: {
+      any: [
+        { path: 'executor.config.provider', equals: provider },
+        { path: 'executor.provider', equals: provider },
+        { path: 'provider', equals: provider },
+      ],
+    },
   };
 }
 
