@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.121.56] - 2026-06-16
+
+### Fixed
+- make sidecar writer available to standalone lint runs
+
 ## [2.121.55] - 2026-06-16
 
 ### Fixed
