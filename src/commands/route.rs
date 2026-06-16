@@ -755,7 +755,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_task_inspection_commands_are_read_only_lab_portable() {
+    fn agent_task_inspection_commands_are_read_only_local_recovery() {
         for args in [
             ["homeboy", "agent-task", "status", "agent-task-123"].as_slice(),
             ["homeboy", "agent-task", "logs", "agent-task-123"].as_slice(),
@@ -763,13 +763,7 @@ mod tests {
             ["homeboy", "agent-task", "review", "agent-task-123"].as_slice(),
         ] {
             let cli = Cli::parse_from(args);
-            let command = lab_offload_command(&cli.command).unwrap().unwrap();
-
-            assert_eq!(command.hot_label, "agent-task status/logs/artifacts/review");
-            assert!(command.portable);
-            assert!(!command.requires_extension_parity);
-            assert!(command.required_extensions.is_empty());
-            assert!(!command.infer_source_path_tools);
+            assert!(lab_offload_command(&cli.command).unwrap().is_none());
         }
     }
 

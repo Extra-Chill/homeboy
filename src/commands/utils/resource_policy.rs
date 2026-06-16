@@ -413,6 +413,19 @@ mod tests {
     }
 
     #[test]
+    fn agent_task_inspection_commands_do_not_start_hot_workloads() {
+        for args in [
+            ["homeboy", "agent-task", "status", "agent-task-123"].as_slice(),
+            ["homeboy", "agent-task", "logs", "agent-task-123"].as_slice(),
+            ["homeboy", "agent-task", "artifacts", "agent-task-123"].as_slice(),
+            ["homeboy", "agent-task", "review", "agent-task-123"].as_slice(),
+        ] {
+            let cli = Cli::parse_from(args);
+            assert!(hot_command(&cli.command).is_none());
+        }
+    }
+
+    #[test]
     fn does_not_warn_when_machine_is_ok() {
         assert!(evaluate(
             lab_supported_hot("bench"),
