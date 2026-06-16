@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.121.54] - 2026-06-16
+
+### Fixed
+- forward ability tools to codebox tasks
+
 ## [2.121.53] - 2026-06-16
 
 ### Fixed
