@@ -85,6 +85,7 @@ where
         provider_requires_cwd_git_checkout,
     )?;
     preflight_dispatch_provider_secrets(&plan)?;
+    preflight_dispatch_provider_runtime_overlays(&plan)?;
     let submitted = lifecycle::submit_plan(&plan, request.run_id.as_deref())?;
     let run_id = submitted.run_id.clone();
 
@@ -345,6 +346,99 @@ fn preflight_dispatch_provider_secrets(plan: &AgentTaskPlan) -> Result<()> {
             ]),
         )
     })
+}
+
+/// Detect runtime overlay checkouts referenced by the provider config that the
+/// Codebox executor would scope with php-scoper but which lack a populated
+/// `vendor/` directory. The scoping step fails with an opaque Finder.php error
+/// when `vendor/` is absent, so surface a direct remediation hint before
+/// dispatch consumes any task attempts. See issue #4609.
+fn preflight_dispatch_provider_runtime_overlays(plan: &AgentTaskPlan) -> Result<()> {
+    let mut missing: Vec<(String, std::path::PathBuf)> = Vec::new();
+    let mut seen: std::collections::BTreeSet<std::path::PathBuf> =
+        std::collections::BTreeSet::new();
+    for task in &plan.tasks {
+        for (library, source) in runtime_overlay_sources(&task.executor.config) {
+            if !seen.insert(source.clone()) {
+                continue;
+            }
+            if runtime_overlay_php_vendor_missing(&source) {
+                missing.push((library, source));
+            }
+        }
+    }
+
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    let descriptions = missing
+        .iter()
+        .map(|(library, source)| {
+            format!(
+                "{library} overlay at {} is missing vendor/ — run `composer install` in that checkout before dispatching",
+                source.display()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+
+    let offending = missing
+        .iter()
+        .map(|(library, source)| format!("{library}: {}", source.display()))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    Err(Error::validation_invalid_argument(
+        "provider-config",
+        format!(
+            "agent-task dispatch provider config references runtime overlay checkout(s) missing vendor/, which fails Codebox runtime overlay preparation (php-scoper): {descriptions}"
+        ),
+        Some(offending),
+        Some(vec![
+            "The Codebox executor scopes each bundled PHP library overlay with php-scoper, which requires vendor/ to exist; a missing vendor/ surfaces as an opaque Finder.php error mid-execution.".to_string(),
+            "Alternatively, remove the runtime overlay from the provider config if it is not needed for this dispatch.".to_string(),
+        ]),
+    ))
+}
+
+/// Collect `(library, source_path)` pairs declared under `runtime_overlays`
+/// (or `runtimeOverlays`) in a provider config. These are controller-local
+/// checkout paths the Codebox executor scopes into the runtime recipe.
+fn runtime_overlay_sources(config: &Value) -> Vec<(String, std::path::PathBuf)> {
+    let mut out = Vec::new();
+    let Some(obj) = config.as_object() else {
+        return out;
+    };
+    for key in ["runtime_overlays", "runtimeOverlays"] {
+        let Some(Value::Array(items)) = obj.get(key) else {
+            continue;
+        };
+        for item in items {
+            let Some(item_obj) = item.as_object() else {
+                continue;
+            };
+            let source = match item_obj.get("source").and_then(Value::as_str) {
+                Some(source) if !source.is_empty() => source,
+                _ => continue,
+            };
+            let library = item_obj
+                .get("library")
+                .and_then(Value::as_str)
+                .or_else(|| item_obj.get("name").and_then(Value::as_str))
+                .unwrap_or("runtime");
+            let path = std::path::PathBuf::from(shellexpand::tilde(source).to_string());
+            out.push((library.to_string(), path));
+        }
+    }
+    out
+}
+
+/// A PHP runtime overlay (one declaring `composer.json`) is scoped by php-scoper
+/// and therefore requires `vendor/` to exist. Returns true when that requirement
+/// is unmet so dispatch can fail early instead of mid-execution.
+fn runtime_overlay_php_vendor_missing(source: &std::path::Path) -> bool {
+    source.join("composer.json").is_file() && !source.join("vendor").is_dir()
 }
 
 fn dispatch_instructions(instructions: String, task_url: Option<&str>) -> String {
@@ -849,6 +943,150 @@ mod tests {
             assert!(err.to_string().contains(&missing));
             assert!(lifecycle::status("dispatch-missing-secret").is_err());
         });
+    }
+
+    #[test]
+    fn dispatch_preflights_runtime_overlay_missing_vendor_before_submitting() {
+        with_isolated_home(|_| {
+            let overlay = tempfile::tempdir().expect("overlay checkout");
+            std::fs::write(
+                overlay.path().join("composer.json"),
+                r#"{"name":"automattic/php-ai-client"}"#,
+            )
+            .expect("write composer.json");
+
+            let config = serde_json::json!({
+                "runtime_overlays": [
+                    { "kind": "bundled-library", "library": "php-ai-client", "source": overlay.path().to_str().expect("utf8 overlay path"), "target": "/runtime/includes/php-ai-client" }
+                ]
+            })
+            .to_string();
+
+            let err = dispatch(
+                dispatch_request(DispatchRequestOverrides {
+                    prompt: Some("Cook with an unbuilt php-ai-client overlay.".to_string()),
+                    provider_config: Some(config),
+                    run_id: Some("dispatch-missing-overlay-vendor".to_string()),
+                    ..DispatchRequestOverrides::default()
+                }),
+                NoopExecutor,
+            )
+            .expect_err("missing vendor/ should fail before submit");
+
+            let message = err.to_string();
+            assert!(message.contains("php-ai-client"), "message: {message}");
+            assert!(message.contains("vendor/"), "message: {message}");
+            assert!(message.contains("composer install"), "message: {message}");
+            assert!(lifecycle::status("dispatch-missing-overlay-vendor").is_err());
+        });
+    }
+
+    #[test]
+    fn dispatch_accepts_runtime_overlay_with_populated_vendor() {
+        with_isolated_home(|_| {
+            let overlay = tempfile::tempdir().expect("overlay checkout");
+            std::fs::write(
+                overlay.path().join("composer.json"),
+                r#"{"name":"automattic/php-ai-client"}"#,
+            )
+            .expect("write composer.json");
+            std::fs::create_dir_all(overlay.path().join("vendor")).expect("vendor dir");
+
+            let config = serde_json::json!({
+                "runtime_overlays": [
+                    { "kind": "bundled-library", "library": "php-ai-client", "source": overlay.path().to_str().expect("utf8 overlay path"), "target": "/runtime/includes/php-ai-client" }
+                ]
+            })
+            .to_string();
+
+            let result = dispatch(
+                dispatch_request(DispatchRequestOverrides {
+                    prompt: Some("Cook with a built php-ai-client overlay.".to_string()),
+                    provider_config: Some(config),
+                    queue_only: true,
+                    run_id: Some("dispatch-overlay-vendor-present".to_string()),
+                    ..DispatchRequestOverrides::default()
+                }),
+                NoopExecutor,
+            )
+            .expect("populated vendor/ should pass preflight");
+
+            assert!(result.value.queued);
+        });
+    }
+
+    #[test]
+    fn dispatch_ignores_non_php_runtime_overlay_without_vendor() {
+        with_isolated_home(|_| {
+            let overlay = tempfile::tempdir().expect("overlay checkout");
+            std::fs::write(
+                overlay.path().join("package.json"),
+                r#"{"name":"portable-ai-client"}"#,
+            )
+            .expect("write package.json");
+
+            let config = serde_json::json!({
+                "runtime_overlays": [
+                    { "kind": "bundled-library", "library": "portable-ai-client", "source": overlay.path().to_str().expect("utf8 overlay path"), "target": "/runtime/includes/portable-ai-client" }
+                ]
+            })
+            .to_string();
+
+            let result = dispatch(
+                dispatch_request(DispatchRequestOverrides {
+                    prompt: Some("Cook with a node overlay.".to_string()),
+                    provider_config: Some(config),
+                    queue_only: true,
+                    run_id: Some("dispatch-node-overlay".to_string()),
+                    ..DispatchRequestOverrides::default()
+                }),
+                NoopExecutor,
+            )
+            .expect("non-PHP overlays should not trip the vendor preflight");
+
+            assert!(result.value.queued);
+        });
+    }
+
+    #[test]
+    fn runtime_overlay_sources_extracts_libraries_and_paths() {
+        let config = serde_json::json!({
+            "runtime_overlays": [
+                { "kind": "bundled-library", "library": "php-ai-client", "source": "/local/php-ai-client@cook", "target": "/runtime/includes/php-ai-client" }
+            ],
+            "runtimeOverlays": [
+                { "library": "second", "source": "/local/second", "target": "/runtime/includes/second" }
+            ]
+        });
+        let sources = runtime_overlay_sources(&config);
+        assert_eq!(sources.len(), 2);
+        assert_eq!(sources[0].0, "php-ai-client");
+        assert_eq!(
+            sources[0].1,
+            std::path::PathBuf::from("/local/php-ai-client@cook")
+        );
+        assert_eq!(sources[1].0, "second");
+
+        assert!(runtime_overlay_sources(&serde_json::json!({})).is_empty());
+        assert!(runtime_overlay_sources(
+            &serde_json::json!({ "runtime_overlays": "not-an-array" })
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn runtime_overlay_php_vendor_missing_only_flags_php_projects() {
+        let dir = tempfile::tempdir().expect("dir");
+        // No composer.json -> not a PHP project -> not flagged.
+        assert!(!runtime_overlay_php_vendor_missing(dir.path()));
+
+        std::fs::write(dir.path().join("composer.json"), "{}").expect("composer.json");
+        // composer.json but no vendor/ -> flagged.
+        assert!(runtime_overlay_php_vendor_missing(dir.path()));
+
+        std::fs::create_dir_all(dir.path().join("vendor")).expect("vendor dir");
+        // composer.json and vendor/ -> not flagged.
+        assert!(!runtime_overlay_php_vendor_missing(dir.path()));
     }
 
     #[test]
