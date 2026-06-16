@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.122.2] - 2026-06-16
+
+### Fixed
+- propagate failed agent runtime outcomes
+- align Codebox agent task provider contract
+
 ## [2.122.1] - 2026-06-16
 
 ### Fixed
