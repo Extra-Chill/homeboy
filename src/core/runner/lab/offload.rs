@@ -16,7 +16,6 @@
 //! Trace-target git-fetch calculation lives in `trace_fetch_refs`; this module
 //! only decides when those refs participate in workspace sync.
 
-use std::collections::BTreeSet;
 use std::path::Path;
 
 use crate::core::agent_task_lifecycle;
@@ -58,12 +57,12 @@ use super::super::lab_workspaces::{
     workspace_mapping_entry,
 };
 use super::super::{
-    evaluate_lab_runner_capabilities_for_runner, exec, lab_offload_changed_since_ref,
-    lab_offload_metadata, lab_offload_metadata_with_workspace_mapping, load,
-    preflight_lab_offload_changed_since, prepare_git_lab_offload_changed_since,
-    prepare_lab_runner_capability, rig_materialization, status, sync_workspace,
-    LabRunnerGateDecision, RunnerCapabilityPreflight, RunnerExecOptions, RunnerStatusReport,
-    RunnerTunnelMode, RunnerWorkspaceApplyOutput, RunnerWorkspaceSyncMode,
+    connect, disconnect, evaluate_lab_runner_capabilities_for_runner, exec,
+    lab_offload_changed_since_ref, lab_offload_metadata,
+    lab_offload_metadata_with_workspace_mapping, load, preflight_lab_offload_changed_since,
+    prepare_git_lab_offload_changed_since, prepare_lab_runner_capability, rig_materialization,
+    status, sync_workspace, LabRunnerGateDecision, RunnerCapabilityPreflight, RunnerExecOptions,
+    RunnerStatusReport, RunnerTunnelMode, RunnerWorkspaceApplyOutput, RunnerWorkspaceSyncMode,
     RunnerWorkspaceSyncOptions,
 };
 
@@ -1212,16 +1211,8 @@ fn run_lab_offload_inner(
         contract.required_extensions.clone(),
         capability_preflight.clone(),
         &runner_homeboy,
+        &runner_status,
     )?;
-    if is_agent_task_offload_command(&remapped_args) {
-        preflight_agent_task_provider_registry(
-            runner_id,
-            &remote_cwd,
-            &command_prefix.argv,
-            &env,
-            &runner_homeboy,
-        )?;
-    }
     let exec_result = exec(
         runner_id,
         RunnerExecOptions {
@@ -1577,6 +1568,7 @@ fn preflight_agent_task_provider_on_runner(
     required_extensions: Vec<String>,
     capability_preflight: Option<RunnerCapabilityPreflight>,
     runner_homeboy: &serde_json::Value,
+    runner_status: &RunnerStatusReport,
 ) -> Result<()> {
     let Some(selection) = agent_task_provider_selection_from_args(args) else {
         return Ok(());
@@ -1584,22 +1576,14 @@ fn preflight_agent_task_provider_on_runner(
 
     let mut command = command_prefix.to_vec();
     command.extend(["agent-task".to_string(), "providers".to_string()]);
-    let (output, exit_code) = exec(
+    let probe = probe_agent_task_providers_on_runner(
         runner_id,
-        RunnerExecOptions {
-            cwd: Some(remote_cwd.to_string()),
-            project_id: None,
-            allow_diagnostic_ssh: false,
-            command: command.clone(),
-            env,
-            secret_env_names: Vec::new(),
-            capture_patch: false,
-            raw_exec: false,
-            source_snapshot: Some(source_snapshot),
-            capability_preflight,
-            required_extensions,
-            require_paths: Vec::new(),
-        },
+        remote_cwd,
+        &command,
+        env.clone(),
+        source_snapshot.clone(),
+        required_extensions.clone(),
+        capability_preflight.clone(),
     )?;
 
     let local_providers = ExtensionProviderAgentTaskExecutor::discover()
@@ -1611,7 +1595,7 @@ fn preflight_agent_task_provider_on_runner(
         selection.selector.as_deref(),
     );
 
-    if exit_code != 0 {
+    if probe.exit_code != 0 {
         return Err(agent_task_provider_selection_preflight_error(
             runner_id,
             &selection,
@@ -1619,32 +1603,59 @@ fn preflight_agent_task_provider_on_runner(
             None,
             runner_homeboy,
             Some(format!(
-                "runner provider preflight command exited with {exit_code}: {}",
-                first_non_empty_line(&output.stderr)
-                    .or_else(|| first_non_empty_line(&output.stdout))
+                "runner provider preflight command exited with {}: {}",
+                probe.exit_code,
+                first_non_empty_line(&probe.stderr)
+                    .or_else(|| first_non_empty_line(&probe.stdout))
                     .unwrap_or_else(|| "no output".to_string())
             )),
             &command,
+            None,
         ));
     }
 
-    let runner_providers =
-        parse_agent_task_providers_output(&output.stdout).map_err(|message| {
-            agent_task_provider_selection_preflight_error(
-                runner_id,
-                &selection,
-                local_available,
-                None,
-                runner_homeboy,
-                Some(message),
-                &command,
-            )
-        })?;
-    let runner_available = provider_available(
+    let runner_providers = parse_agent_task_providers_output(&probe.stdout).map_err(|message| {
+        agent_task_provider_selection_preflight_error(
+            runner_id,
+            &selection,
+            local_available,
+            None,
+            runner_homeboy,
+            Some(message),
+            &command,
+            None,
+        )
+    })?;
+    let mut runner_available = provider_available(
         &runner_providers,
         &selection.backend,
         selection.selector.as_deref(),
     );
+    let mut refresh_result = None;
+
+    if local_available && !runner_available && runner_provider_refresh_is_safe(runner_status) {
+        refresh_result = Some(refresh_runner_provider_session_if_still_safe(runner_id));
+        if refresh_result.as_ref().is_some_and(|result| result.is_ok()) {
+            let probe = probe_agent_task_providers_on_runner(
+                runner_id,
+                remote_cwd,
+                &command,
+                env,
+                source_snapshot,
+                required_extensions,
+                capability_preflight,
+            )?;
+            if probe.exit_code == 0 {
+                if let Ok(providers) = parse_agent_task_providers_output(&probe.stdout) {
+                    runner_available = provider_available(
+                        &providers,
+                        &selection.backend,
+                        selection.selector.as_deref(),
+                    );
+                }
+            }
+        }
+    }
 
     if !runner_available {
         return Err(agent_task_provider_selection_preflight_error(
@@ -1655,10 +1666,80 @@ fn preflight_agent_task_provider_on_runner(
             runner_homeboy,
             None,
             &command,
+            refresh_result,
         ));
     }
 
     Ok(())
+}
+
+struct AgentTaskProviderProbeOutput {
+    stdout: String,
+    stderr: String,
+    exit_code: i32,
+}
+
+fn probe_agent_task_providers_on_runner(
+    runner_id: &str,
+    remote_cwd: &str,
+    command: &[String],
+    env: std::collections::HashMap<String, String>,
+    source_snapshot: SourceSnapshot,
+    required_extensions: Vec<String>,
+    capability_preflight: Option<RunnerCapabilityPreflight>,
+) -> Result<AgentTaskProviderProbeOutput> {
+    let (output, exit_code) = exec(
+        runner_id,
+        RunnerExecOptions {
+            cwd: Some(remote_cwd.to_string()),
+            project_id: None,
+            allow_diagnostic_ssh: false,
+            command: command.to_vec(),
+            env,
+            secret_env_names: Vec::new(),
+            capture_patch: false,
+            raw_exec: false,
+            source_snapshot: Some(source_snapshot),
+            capability_preflight,
+            required_extensions,
+            require_paths: Vec::new(),
+        },
+    )?;
+
+    Ok(AgentTaskProviderProbeOutput {
+        stdout: output.stdout,
+        stderr: output.stderr,
+        exit_code,
+    })
+}
+
+fn runner_provider_refresh_is_safe(status: &RunnerStatusReport) -> bool {
+    status.active_jobs.is_empty()
+        && status
+            .session
+            .as_ref()
+            .is_some_and(|session| session.mode == RunnerTunnelMode::DirectSsh)
+}
+
+fn refresh_runner_provider_session_if_still_safe(
+    runner_id: &str,
+) -> std::result::Result<(), String> {
+    let current_status = status(runner_id).map_err(|err| err.message)?;
+    if !runner_provider_refresh_is_safe(&current_status) {
+        return Err(
+            "runner session is no longer safe to refresh automatically; active jobs may be running or the session is not direct SSH"
+                .to_string(),
+        );
+    }
+    disconnect(runner_id).map_err(|err| err.message)?;
+    let (report, exit_code) = connect(runner_id).map_err(|err| err.message)?;
+    if exit_code == 0 && report.connected {
+        Ok(())
+    } else {
+        Err(report.failure_message.unwrap_or_else(|| {
+            format!("runner reconnect exited with {exit_code} without establishing a session")
+        }))
+    }
 }
 
 fn agent_task_provider_selection_from_args(args: &[String]) -> Option<AgentTaskProviderSelection> {
@@ -1741,6 +1822,7 @@ fn agent_task_provider_selection_preflight_error(
     runner_homeboy: &serde_json::Value,
     reason: Option<String>,
     command: &[String],
+    refresh_result: Option<std::result::Result<(), String>>,
 ) -> Error {
     let selector = selection.selector.as_deref().unwrap_or("<default>");
     let runner_available = runner_available.unwrap_or(false);
@@ -1749,6 +1831,21 @@ fn agent_task_provider_selection_preflight_error(
             "runner provider availability is {runner_available} while local provider availability is {local_available}"
         )
     });
+    let mut hints = vec![
+        format!(
+            "Local provider availability: {local_available}; runner provider availability: {runner_available}."
+        ),
+        refresh_hint(runner_id, runner_homeboy, refresh_result),
+        format!(
+            "Upgrade or sync the runner runtime/extensions with `{}`.",
+            runner_homeboy["upgrade_command"]
+                .as_str()
+                .unwrap_or("homeboy upgrade --force --upgrade-runner <runner>")
+        ),
+        format!("Preflight command: `{}`.", command.join(" ")),
+    ];
+    hints.retain(|hint| !hint.is_empty());
+
     Error::validation_invalid_argument(
         "backend",
         format!(
@@ -1756,31 +1853,46 @@ fn agent_task_provider_selection_preflight_error(
             selection.backend
         ),
         Some(selection.backend.clone()),
-        Some(vec![
-            format!(
-                "Local provider availability: {local_available}; runner provider availability: {runner_available}."
-            ),
-            format!(
-                "Refresh runner `{runner_id}` with `{}`.",
-                runner_homeboy["refresh_commands"]
-                    .as_array()
-                    .map(|commands| commands
-                        .iter()
-                        .filter_map(|command| command.as_str())
-                        .collect::<Vec<_>>()
-                        .join(" && "))
-                    .filter(|command| !command.is_empty())
-                    .unwrap_or_else(|| format!("homeboy runner disconnect {runner_id} && homeboy runner connect {runner_id}"))
-            ),
-            format!(
-                "Upgrade or sync the runner runtime/extensions with `{}`.",
-                runner_homeboy["upgrade_command"]
-                    .as_str()
-                    .unwrap_or("homeboy upgrade --force --upgrade-runner <runner>")
-            ),
-            format!("Preflight command: `{}`.", command.join(" ")),
-        ]),
+        Some(hints),
     )
+}
+
+fn refresh_hint(
+    runner_id: &str,
+    runner_homeboy: &serde_json::Value,
+    refresh_result: Option<std::result::Result<(), String>>,
+) -> String {
+    match refresh_result {
+        Some(Ok(())) => "Homeboy refreshed the runner session automatically, but the selected provider was still unavailable after reconnect.".to_string(),
+        Some(Err(message)) => format!(
+            "Homeboy tried to refresh runner `{runner_id}` automatically, but reconnect failed: {message}. Refresh manually with `{}`.",
+            refresh_command(runner_id, runner_homeboy)
+        ),
+        None => format!(
+            "Refresh runner `{runner_id}` with `{}`.",
+            refresh_command(runner_id, runner_homeboy)
+        ),
+    }
+}
+
+fn refresh_command(runner_id: &str, runner_homeboy: &serde_json::Value) -> String {
+    runner_homeboy["refresh_commands"]
+        .as_array()
+        .map(|commands| {
+            commands
+                .iter()
+                .filter_map(|command| command.as_str())
+                .collect::<Vec<_>>()
+                .join(" && ")
+        })
+        .filter(|command| !command.is_empty())
+        .unwrap_or_else(|| {
+            format!(
+                "homeboy runner disconnect {} && homeboy runner connect {}",
+                shell::quote_arg(runner_id),
+                shell::quote_arg(runner_id)
+            )
+        })
 }
 
 fn first_non_empty_line(output: &str) -> Option<String> {
@@ -2069,191 +2181,6 @@ fn mutation_return_unavailable_outcome(
             ]),
         )),
     }
-}
-
-fn is_agent_task_offload_command(args: &[String]) -> bool {
-    args.windows(2).any(|window| {
-        window[0] == "agent-task" && matches!(window[1].as_str(), "cook" | "dispatch" | "run-plan")
-    })
-}
-
-fn preflight_agent_task_provider_registry(
-    runner_id: &str,
-    remote_cwd: &str,
-    command_prefix: &[String],
-    env: &std::collections::HashMap<String, String>,
-    runner_homeboy: &serde_json::Value,
-) -> Result<()> {
-    let local_executor = ExtensionProviderAgentTaskExecutor::discover();
-    let local_providers = provider_fingerprints(local_executor.providers());
-    let mut command = command_prefix.to_vec();
-    command.extend(["agent-task".to_string(), "providers".to_string()]);
-    let (output, exit_code) = exec(
-        runner_id,
-        RunnerExecOptions {
-            cwd: Some(remote_cwd.to_string()),
-            project_id: None,
-            allow_diagnostic_ssh: false,
-            command: command.clone(),
-            env: env.clone(),
-            secret_env_names: Vec::new(),
-            capture_patch: false,
-            raw_exec: false,
-            source_snapshot: None,
-            capability_preflight: None,
-            required_extensions: Vec::new(),
-            require_paths: Vec::new(),
-        },
-    )?;
-    if exit_code != 0 {
-        return Err(agent_task_provider_preflight_error(
-            runner_id,
-            remote_cwd,
-            &command,
-            runner_homeboy,
-            format!("runner provider registry probe exited with {exit_code}"),
-            local_providers,
-            BTreeSet::new(),
-            BTreeSet::new(),
-            BTreeSet::new(),
-            Some(output.stderr),
-        ));
-    }
-    let remote_providers =
-        parse_agent_task_provider_fingerprints(&output.stdout).map_err(|err| {
-            agent_task_provider_preflight_error(
-                runner_id,
-                remote_cwd,
-                &command,
-                runner_homeboy,
-                err,
-                local_providers.clone(),
-                BTreeSet::new(),
-                BTreeSet::new(),
-                BTreeSet::new(),
-                Some(output.stdout.clone()),
-            )
-        })?;
-    if local_providers != remote_providers {
-        let missing_on_runner = local_providers
-            .difference(&remote_providers)
-            .cloned()
-            .collect::<BTreeSet<_>>();
-        let extra_on_runner = remote_providers
-            .difference(&local_providers)
-            .cloned()
-            .collect::<BTreeSet<_>>();
-        return Err(agent_task_provider_preflight_error(
-            runner_id,
-            remote_cwd,
-            &command,
-            runner_homeboy,
-            "Lab runner agent-task provider registry differs from the controller".to_string(),
-            local_providers,
-            remote_providers,
-            missing_on_runner,
-            extra_on_runner,
-            None,
-        ));
-    }
-    Ok(())
-}
-
-fn parse_agent_task_provider_fingerprints(
-    stdout: &str,
-) -> std::result::Result<BTreeSet<String>, String> {
-    let response: serde_json::Value = serde_json::from_str(stdout)
-        .map_err(|err| format!("parse runner agent-task providers response: {err}"))?;
-    let providers = response
-        .get("data")
-        .and_then(|data| data.get("providers"))
-        .and_then(|providers| providers.as_array())
-        .ok_or_else(|| {
-            "runner agent-task providers response did not include data.providers".to_string()
-        })?;
-    let mut fingerprints = BTreeSet::new();
-    for provider in providers {
-        let id = provider
-            .get("id")
-            .and_then(|value| value.as_str())
-            .ok_or_else(|| "runner agent-task provider entry is missing id".to_string())?;
-        let backend = provider
-            .get("backend")
-            .and_then(|value| value.as_str())
-            .ok_or_else(|| "runner agent-task provider entry is missing backend".to_string())?;
-        let command = provider
-            .get("command")
-            .and_then(|value| value.as_str())
-            .unwrap_or_default();
-        let default_backend = provider
-            .get("default_backend")
-            .and_then(|value| value.as_bool())
-            .unwrap_or(false);
-        fingerprints.insert(format!(
-            "{id}|backend={backend}|command={command}|default={default_backend}"
-        ));
-    }
-    Ok(fingerprints)
-}
-
-fn provider_fingerprints(providers: &[AgentTaskExecutorProvider]) -> BTreeSet<String> {
-    providers
-        .iter()
-        .map(|provider| {
-            format!(
-                "{}|backend={}|command={}|default={}",
-                provider.id, provider.backend, provider.command, provider.default_backend
-            )
-        })
-        .collect()
-}
-
-fn agent_task_provider_preflight_error(
-    runner_id: &str,
-    remote_cwd: &str,
-    command: &[String],
-    runner_homeboy: &serde_json::Value,
-    message: String,
-    local_providers: BTreeSet<String>,
-    remote_providers: BTreeSet<String>,
-    missing_on_runner: BTreeSet<String>,
-    extra_on_runner: BTreeSet<String>,
-    raw_output: Option<String>,
-) -> Error {
-    let mut details = serde_json::json!({
-        "field": "runner_provider_registry",
-        "problem": message,
-        "id": runner_id,
-        "runner_id": runner_id,
-        "remote_workspace": remote_cwd,
-        "probe_command": command,
-        "runner_homeboy": runner_homeboy,
-        "local_providers": local_providers,
-        "remote_providers": remote_providers,
-        "missing_on_runner": missing_on_runner,
-        "extra_on_runner": extra_on_runner,
-    });
-    if let Some(raw_output) = raw_output {
-        details["raw_output"] = serde_json::json!(raw_output);
-    }
-
-    Error::new(
-        ErrorCode::ValidationInvalidArgument,
-        format!("Invalid argument 'runner_provider_registry': {message}"),
-        details,
-    )
-    .with_hint(format!(
-        "Refresh runner `{runner_id}` so its Homeboy/runtime provider registry matches the controller before retrying Lab agent-task offload."
-    ))
-    .with_hint(format!(
-        "Inspect the runner registry with `homeboy runner exec {} -- {}`.",
-        shell::quote_arg(runner_id),
-        command
-            .iter()
-            .map(|arg| shell::quote_arg(arg))
-            .collect::<Vec<_>>()
-            .join(" ")
-    ))
 }
 
 #[cfg(test)]
@@ -2762,105 +2689,6 @@ mod tests {
     }
 
     #[test]
-    fn agent_task_provider_registry_probe_only_targets_dispatch_commands() {
-        assert!(is_agent_task_offload_command(&[
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "cook".to_string(),
-        ]));
-        assert!(is_agent_task_offload_command(&[
-            "cargo".to_string(),
-            "run".to_string(),
-            "--".to_string(),
-            "agent-task".to_string(),
-            "run-plan".to_string(),
-        ]));
-        assert!(!is_agent_task_offload_command(&[
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "providers".to_string(),
-        ]));
-    }
-
-    #[test]
-    fn parses_agent_task_provider_registry_fingerprints_from_cli_envelope() {
-        let stdout = serde_json::json!({
-            "success": true,
-            "data": {
-                "schema": "homeboy/agent-task-providers/v1",
-                "providers": [
-                    {
-                        "id": "claude-code",
-                        "backend": "claude-code",
-                        "command": "homeboy agent-task provider claude-code",
-                        "default_backend": true
-                    },
-                    {
-                        "id": "codebox",
-                        "backend": "codebox",
-                        "command": "homeboy agent-task provider codebox"
-                    }
-                ]
-            }
-        })
-        .to_string();
-
-        let fingerprints =
-            parse_agent_task_provider_fingerprints(&stdout).expect("provider fingerprints");
-
-        assert!(fingerprints.contains(
-            "claude-code|backend=claude-code|command=homeboy agent-task provider claude-code|default=true"
-        ));
-        assert!(fingerprints.contains(
-            "codebox|backend=codebox|command=homeboy agent-task provider codebox|default=false"
-        ));
-    }
-
-    #[test]
-    fn provider_registry_drift_error_reports_missing_and_extra_entries() {
-        let command = vec![
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "providers".to_string(),
-        ];
-        let local =
-            BTreeSet::from(["local|backend=local|command=local run|default=true".to_string()]);
-        let remote =
-            BTreeSet::from(["remote|backend=remote|command=remote run|default=true".to_string()]);
-        let missing = local.clone();
-        let extra = remote.clone();
-
-        let err = agent_task_provider_preflight_error(
-            "lab-1",
-            "/srv/homeboy/app",
-            &command,
-            &serde_json::json!({ "binary": "homeboy" }),
-            "Lab runner agent-task provider registry differs from the controller".to_string(),
-            local,
-            remote,
-            missing,
-            extra,
-            None,
-        );
-
-        assert_eq!(err.code, ErrorCode::ValidationInvalidArgument);
-        assert_eq!(err.details["field"], "runner_provider_registry");
-        assert_eq!(err.details["runner_id"], "lab-1");
-        assert_eq!(
-            err.details["missing_on_runner"][0],
-            "local|backend=local|command=local run|default=true"
-        );
-        assert_eq!(
-            err.details["extra_on_runner"][0],
-            "remote|backend=remote|command=remote run|default=true"
-        );
-        assert!(err
-            .hints
-            .iter()
-            .any(|hint| hint.message.contains("Refresh runner `lab-1`")));
-    }
-
-    #[test]
     fn lab_runner_homeboy_metadata_names_binary_and_refresh_path() {
         let status = reverse_status("homeboy lab");
         let metadata = lab_runner_homeboy_metadata(
@@ -3005,16 +2833,16 @@ mod tests {
             "agent-task".to_string(),
             "cook".to_string(),
             "--backend".to_string(),
-            "wordpress".to_string(),
-            "--selector=wp-codebox".to_string(),
+            "primary".to_string(),
+            "--selector=variant-a".to_string(),
             "--prompt".to_string(),
             "fix it".to_string(),
         ];
 
         let selection = agent_task_provider_selection_from_args(&args).expect("selection");
 
-        assert_eq!(selection.backend, "wordpress");
-        assert_eq!(selection.selector.as_deref(), Some("wp-codebox"));
+        assert_eq!(selection.backend, "primary");
+        assert_eq!(selection.selector.as_deref(), Some("variant-a"));
     }
 
     #[test]
@@ -3024,7 +2852,7 @@ mod tests {
             "agent-task".to_string(),
             "providers".to_string(),
             "--backend".to_string(),
-            "wordpress".to_string(),
+            "primary".to_string(),
         ];
 
         assert!(agent_task_provider_selection_from_args(&args).is_none());
@@ -3034,28 +2862,20 @@ mod tests {
     fn runner_provider_output_parser_accepts_cli_envelope_with_chatter() {
         let stdout = concat!(
             "Preparing runtime...\n",
-            "{\"success\":true,\"data\":{\"providers\":[{\"schema\":\"homeboy/agent-task-executor-provider/v1\",\"id\":\"wp-codebox\",\"backend\":\"wordpress\",\"default_backend\":true,\"command\":\"wp-codebox agent\",\"request_schema\":\"homeboy/agent-task-request/v1\",\"outcome_schema\":\"homeboy/agent-task-outcome/v1\"}]}}\n"
+            "{\"success\":true,\"data\":{\"providers\":[{\"schema\":\"homeboy/agent-task-executor-provider/v1\",\"id\":\"variant-a\",\"backend\":\"primary\",\"default_backend\":true,\"command\":\"provider-a agent\",\"request_schema\":\"homeboy/agent-task-request/v1\",\"outcome_schema\":\"homeboy/agent-task-outcome/v1\"}]}}\n"
         );
 
         let providers = parse_agent_task_providers_output(stdout).expect("providers parse");
 
-        assert!(provider_available(&providers, "wordpress", None));
-        assert!(provider_available(
-            &providers,
-            "wordpress",
-            Some("wp-codebox")
-        ));
-        assert!(!provider_available(
-            &providers,
-            "wordpress",
-            Some("missing")
-        ));
+        assert!(provider_available(&providers, "primary", None));
+        assert!(provider_available(&providers, "primary", Some("variant-a")));
+        assert!(!provider_available(&providers, "primary", Some("missing")));
     }
 
     #[test]
     fn provider_preflight_error_reports_local_runner_drift_and_no_cells_queued() {
         let selection = AgentTaskProviderSelection {
-            backend: "wordpress".to_string(),
+            backend: "primary".to_string(),
             selector: None,
         };
         let runner_homeboy = serde_json::json!({
@@ -3078,11 +2898,12 @@ mod tests {
                 "agent-task".to_string(),
                 "providers".to_string(),
             ],
+            None,
         );
 
         assert_eq!(err.code.as_str(), "validation.invalid_argument");
         assert!(err.message.contains("homeboy-lab"));
-        assert!(err.message.contains("backend `wordpress`"));
+        assert!(err.message.contains("backend `primary`"));
         assert!(err.message.contains("No task cells were queued"));
         assert!(err.message.contains("extension/runtime sync drift"));
         let tried = err.details["tried"].as_array().expect("tried hints");
