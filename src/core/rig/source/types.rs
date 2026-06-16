@@ -9,6 +9,7 @@ pub struct RigSourceListResult {
 #[derive(Debug, Clone, Serialize)]
 pub struct RigSourceGroup {
     pub source: String,
+    pub source_root: String,
     pub package_path: String,
     pub package_present: bool,
     pub discovery_path: String,

@@ -74,10 +74,14 @@ pub(super) fn sync_lab_offload_rigs(
                     ]),
                 )
             })?;
+            let source_root = metadata
+                .source_root
+                .clone()
+                .unwrap_or_else(|| metadata.package_path.clone());
             let synced = sync_workspace(
                 runner_id,
                 RunnerWorkspaceSyncOptions {
-                    path: metadata.package_path,
+                    path: source_root.clone(),
                     mode: RunnerWorkspaceSyncMode::Snapshot,
                     controller_routed_git: false,
                     changed_since_base: None,
@@ -87,10 +91,9 @@ pub(super) fn sync_lab_offload_rigs(
                 },
             )?
             .0;
-            (
-                synced.remote_path,
-                LabOffloadRigSyncSource::InstalledMetadata,
-            )
+            let install_source =
+                remote_package_path(&source_root, &metadata.package_path, &synced.remote_path);
+            (install_source, LabOffloadRigSyncSource::InstalledMetadata)
         };
 
         let removed_source =
@@ -144,6 +147,18 @@ pub(super) fn sync_lab_offload_rigs(
     }
 
     Ok(synced_rigs)
+}
+
+fn remote_package_path(source_root: &str, package_path: &str, remote_source_root: &str) -> String {
+    let source_root = Path::new(source_root);
+    let package_path = Path::new(package_path);
+    match package_path.strip_prefix(source_root) {
+        Ok(relative) if !relative.as_os_str().is_empty() => Path::new(remote_source_root)
+            .join(relative)
+            .to_string_lossy()
+            .to_string(),
+        _ => remote_source_root.to_string(),
+    }
 }
 
 fn remove_runner_installed_rig_source(
@@ -888,6 +903,7 @@ mod tests {
                 "studio-web-product-matrix",
                 &crate::core::rig::install::RigSourceMetadata {
                     source: checkout.display().to_string(),
+                    source_root: Some(checkout.display().to_string()),
                     package_path: checkout.display().to_string(),
                     rig_path: checkout
                         .join("rigs/studio-web-product-matrix/rig.json")

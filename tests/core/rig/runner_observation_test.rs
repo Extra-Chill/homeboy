@@ -298,6 +298,7 @@ fn write_rig_source_metadata(rig_id: &str) {
         path,
         serde_json::to_string(&RigSourceMetadata {
             source: "https://example.com/rigs.git".to_string(),
+            source_root: Some("/tmp/rigs".to_string()),
             package_path: "/tmp/rigs".to_string(),
             rig_path: "/tmp/rigs/rig.json".to_string(),
             discovery_path: Some("/tmp/rigs".to_string()),
