@@ -11,12 +11,26 @@ const {
 } = require('../../agent-runtimes/wp-codebox');
 
 const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-wordpress-agent-boundary-'));
+const codexSecretEnv = [
+  'AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN',
+  'AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN',
+  'AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT',
+  'AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID',
+  'AI_PROVIDER_OPENAI_CODEX_FEDRAMP',
+];
+
+function secretEnvRequirementForProvider(contract, provider) {
+  return contract.secret_env_requirements.find((requirement) => (
+    requirement.when.any.some((selector) => selector.path === 'executor.config.provider' && selector.equals === provider)
+  ));
+}
 
 const provider = providerContract();
 assert.equal(provider.id, 'wordpress.codebox-agent-task-executor');
 assert.equal(provider.label, 'WP Codebox agent task executor');
 assert.equal(provider.backend, 'codebox');
 assert.equal(provider.integration_contract, 'homeboy-wordpress-agent-task/v1');
+assert.deepEqual(secretEnvRequirementForProvider(provider, 'codex').env, codexSecretEnv);
 
 const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'wordpress.json'), 'utf8'));
 assert.equal(manifest.agent_task_executors, undefined);
@@ -26,6 +40,7 @@ assert.equal(runtime.agent_task_executors.length, 1);
 assert.deepEqual(runtime.agent_task_executors[0], providerContract({
   command: 'node {{extension_path}}/scripts/agent/homeboy-codebox-agent-task-executor.cjs',
 }));
+assert.deepEqual(secretEnvRequirementForProvider(runtime.agent_task_executors[0], 'codex').env, codexSecretEnv);
 assert.equal(provider.capabilities.includes('tool:wpsg_materialize_packet'), false);
 assert.equal(provider.capabilities.includes('ability:wpsg_materialize_packet'), false);
 assert.deepEqual(provider.provider_defaults.openai.secret_env, ['OPENAI_API_KEY']);
