@@ -146,8 +146,6 @@ For each declared dependency, `homeboy runner workspace sync`:
 - rejects dirty, stale, divergent, missing-upstream, or ambiguous Git state;
 - runs the dependency install/build lifecycle in a prepared copy;
 - materializes the prepared dependency beside the primary runner workspace; and
-- records source evidence in `.homeboy/lab-source-evidence.json`.
-
 The JSON output includes `validation_dependencies`, with each dependency's
 `id`, `role`, controller `local_path`, runner `remote_path`, and
 `evidence_path`. Bench, trace, eval, and provider layers can consume that
