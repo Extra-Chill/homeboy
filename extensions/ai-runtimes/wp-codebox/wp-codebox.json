@@ -1,0 +1,146 @@
+{
+  "name": "WP Codebox",
+  "version": "1.0.0",
+  "description": "WP Codebox AI runtime for Homeboy agent tasks.",
+  "agent_task_executors": [
+    {
+      "schema": "homeboy/agent-task-executor-provider/v1",
+      "id": "wordpress.codebox-agent-task-executor",
+      "label": "WP Codebox agent task executor",
+      "backend": "codebox",
+      "command": "node {{runtime_path}}/scripts/agent/homeboy-codebox-agent-task-executor.cjs",
+      "request_schema": "homeboy/agent-task-request/v1",
+      "outcome_schema": "homeboy/agent-task-outcome/v1",
+      "request_required_fields": [
+        "schema",
+        "task_id",
+        "executor.backend",
+        "instructions"
+      ],
+      "outcome_statuses": [
+        "succeeded",
+        "failed",
+        "no_op",
+        "unable_to_remediate",
+        "timeout",
+        "provider_error"
+      ],
+      "failure_classifications": [
+        "provider",
+        "timeout",
+        "execution_failed"
+      ],
+      "redacted_metadata_keys": [
+        "secret_env_values",
+        "secretEnvValues",
+        "secrets"
+      ],
+      "secret_env_requirements": [
+        {
+          "schema": "homeboy/secret-env-requirement/v1",
+          "source": "provider_default",
+          "env": ["OPENAI_API_KEY"],
+          "when": {
+            "any": [
+              { "path": "executor.config.provider", "equals": "openai" },
+              { "path": "executor.provider", "equals": "openai" },
+              { "path": "provider", "equals": "openai" }
+            ]
+          }
+        },
+        {
+          "schema": "homeboy/secret-env-requirement/v1",
+          "source": "provider_default",
+          "env": [
+            "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN",
+            "AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN",
+            "AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT",
+            "AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID",
+            "AI_PROVIDER_OPENAI_CODEX_FEDRAMP"
+          ],
+          "when": {
+            "any": [
+              { "path": "executor.config.provider", "equals": "codex" },
+              { "path": "executor.provider", "equals": "codex" },
+              { "path": "provider", "equals": "codex" }
+            ]
+          }
+        },
+        {
+          "schema": "homeboy/secret-env-requirement/v1",
+          "source": "provider_default",
+          "env": ["AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN"],
+          "when": {
+            "any": [
+              { "path": "executor.config.provider", "equals": "claude-code" },
+              { "path": "executor.provider", "equals": "claude-code" },
+              { "path": "provider", "equals": "claude-code" }
+            ]
+          }
+        }
+      ],
+      "capabilities": [
+        "browser_runtime",
+        "wordpress_sandbox",
+        "workspace_mounts",
+        "workspace_tools",
+        "artifact_materialization",
+        "patch_artifacts",
+        "verification_artifacts",
+        "run_registry",
+        "cleanup_observability",
+        "screenshots",
+        "structured_outcome",
+        "agent_bundle_execution",
+        "typed_bundle_outputs",
+        "external_recipe_packs",
+        "recipe_probe_artifacts",
+        "tool:datamachine/run-agent-bundle",
+        "tool:github_issue_publish",
+        "tool:github_pull_request_publish",
+        "tool:comment_github_pull_request",
+        "ability:datamachine/run-agent-bundle",
+        "ability:github_issue_publish",
+        "ability:github_pull_request_publish",
+        "ability:comment_github_pull_request"
+      ],
+      "workspace_materialization": {
+        "cwd": "git_checkout"
+      },
+      "provider_defaults": {
+        "openai": {
+          "secret_env": ["OPENAI_API_KEY"]
+        },
+        "codex": {
+          "secret_env": [
+            "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN",
+            "AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN",
+            "AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT",
+            "AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID",
+            "AI_PROVIDER_OPENAI_CODEX_FEDRAMP"
+          ]
+        },
+        "claude-code": {
+          "secret_env": ["AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN"]
+        }
+      },
+      "role_aliases": {
+        "artifact_kinds": {
+          "patch": ["codebox-patch"]
+        },
+        "artifact_filenames": {
+          "preflight_evidence": ["homeboy-codebox-task-runner.json"]
+        },
+        "outputs": {
+          "provider_run_result": ["codebox_run_result"]
+        },
+        "metadata": {
+          "provider_run_result": ["codebox_run_result"]
+        }
+      },
+      "status": "active",
+      "integration_contract": "homeboy-wordpress-agent-task/v1",
+      "runtime_gap_trackers": []
+    }
+  ]
+}

@@ -631,7 +631,7 @@ and environment policy checks, and the `forbidden_mutations` /
 
 - `.github/workflows/datamachine-agent-ci.yml` is the reusable workflow.
 - `.github/workflows/README.md` documents workflow inputs and examples.
-- `agent-runtimes/wp-codebox/scripts/agent/homeboy-codebox-agent-task-executor.cjs`
+- `ai-runtimes/wp-codebox/scripts/agent/homeboy-codebox-agent-task-executor.cjs`
   is the generic Homeboy agent-task provider entry point.
 - `wordpress/scripts/agent/homeboy-wp-codebox-task-runner.cjs` dispatches the
   stable `wp-codebox agent-task-run` command.

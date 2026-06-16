@@ -10,10 +10,10 @@ const {
   agentTaskOutcomeFromCodeboxResult,
   codeboxTaskRequestFromAgentTaskRequest,
   providerContract,
-} = require('../../agent-runtimes/wp-codebox');
+} = require('../../ai-runtimes/wp-codebox');
 
 const fixtureCodeboxCoreModule = path.join(__dirname, 'fixtures', 'wp-codebox-core-agent-task-normalizer.mjs');
-const wpCodeboxRuntimeRoot = path.join(__dirname, '..', '..', 'agent-runtimes', 'wp-codebox');
+const wpCodeboxRuntimeRoot = path.join(__dirname, '..', '..', 'ai-runtimes', 'wp-codebox');
 const wpCodeboxRuntimeExecutor = path.join(wpCodeboxRuntimeRoot, 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs');
 const codexSecretEnv = [
   'AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN',
@@ -329,12 +329,11 @@ for (const capability of repoLoopCapabilities) {
 }
 const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'wordpress.json'), 'utf8'));
 assert.equal(manifest.agent_task_executors, undefined);
-const manifestRuntime = manifest.agent_runtimes.find((runtime) => runtime.id === 'wp-codebox');
-assert(manifestRuntime, 'WordPress manifest declares the WP Codebox agent runtime');
-const manifestProvider = manifestRuntime.agent_task_executors.find((executor) => executor.id === provider.id);
-assert.deepEqual(manifestProvider, providerContract({
-  command: 'node {{extension_path}}/scripts/agent/homeboy-codebox-agent-task-executor.cjs',
-}));
+assert.equal(manifest.agent_runtimes, undefined);
+assert.equal(manifest.agent_task.runtime_requirements.integration_contract, 'homeboy-wordpress-agent-task/v1');
+const runtimeManifest = JSON.parse(fs.readFileSync(path.join(wpCodeboxRuntimeRoot, 'wp-codebox.json'), 'utf8'));
+const manifestProvider = runtimeManifest.agent_task_executors.find((executor) => executor.id === provider.id);
+assert.deepEqual(manifestProvider, providerContract());
 assert.deepEqual(secretEnvRequirementForProvider(manifestProvider, 'codex').env, codexSecretEnv);
 for (const capability of repoLoopCapabilities) {
   assert.equal(manifestProvider.capabilities.includes(capability), true);

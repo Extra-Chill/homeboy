@@ -6,31 +6,33 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
-const manifestPath = path.join(__dirname, '..', 'wordpress.json');
+const manifestPath = path.join(__dirname, '..', '..', 'ai-runtimes', 'wp-codebox', 'wp-codebox.json');
 const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-const provider = manifest.agent_runtimes
-  .find((runtime) => runtime.id === 'wp-codebox')
-  .agent_task_executors.find((executor) => executor.id === 'wordpress.codebox-agent-task-executor');
+const provider = manifest.agent_task_executors.find((executor) => executor.id === 'wordpress.codebox-agent-task-executor');
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-wordpress-relink-layout-'));
 
 try {
   const extensionsRoot = path.join(root, 'extensions');
+  const runtimesRoot = path.join(root, 'ai-runtimes');
   const extensionPath = path.join(extensionsRoot, 'wordpress');
+  const runtimePath = path.join(runtimesRoot, 'wp-codebox');
   fs.mkdirSync(extensionsRoot, { recursive: true });
+  fs.mkdirSync(runtimesRoot, { recursive: true });
   fs.symlinkSync(path.join(__dirname, '..'), extensionPath, 'dir');
+  fs.symlinkSync(path.join(__dirname, '..', '..', 'ai-runtimes', 'wp-codebox'), runtimePath, 'dir');
 
-  const command = provider.command.replaceAll('{{extension_path}}', extensionPath);
+  const command = provider.command.replaceAll('{{runtime_path}}', runtimePath);
   assert(
     !command.includes('../agent-runtimes/'),
-    'relinked wordpress provider command must not require a sibling agent-runtimes install'
+    'runtime provider command must not require a sibling agent-runtimes install'
   );
 
   const [, scriptPath] = command.match(/^node\s+(.+)$/) || [];
   assert(scriptPath, 'provider command should be a node script command');
   assert.equal(
     path.normalize(scriptPath),
-    path.join(extensionPath, 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs')
+    path.join(runtimePath, 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs')
   );
   assert.equal(fs.existsSync(scriptPath), true, `provider command target should exist: ${scriptPath}`);
   assert.equal(
