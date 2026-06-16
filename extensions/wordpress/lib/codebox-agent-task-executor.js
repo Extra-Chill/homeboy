@@ -74,6 +74,7 @@ const CLAUDE_CODE_SECRET_ENV = [
 const DEFAULT_CODEX_MODEL = 'gpt-5.5';
 const CODEX_PROVIDER_PLUGIN_GUIDANCE = `Codex tasks require a Codex-capable provider plugin checkout, such as the Codex PR branch for ai-provider-for-openai. Released ai-provider-for-openai trunk registers openai, not codex, and unrelated provider defaults such as ${['ai-provider-for', ['open', 'code'].join('')].join('-')} will not work.`;
 const CODEX_PHP_AI_CLIENT_GUIDANCE = 'Codex tasks require a php-ai-client checkout that supports RequestAuthenticationMethod::bearerToken and has Composer vendor dependencies installed before WP Codebox prepares the runtime overlay.';
+const RUNTIME_OVERLAY_CANONICAL_SHAPE = 'runtime_overlays entries must be objects with a non-empty string kind, for example { "kind": "bundled-library", "library": "php-ai-client", "source": "/path/to/php-ai-client" }. The legacy type field is not accepted.';
 
 const AGENT_BUNDLE_CONFIG_FIELDS = [
   'bundle_path',
@@ -234,6 +235,7 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
   const timeoutSeconds = request.limits?.task_timeout_seconds || request.limits?.taskTimeoutSeconds;
   const timeoutMs = request.limits?.timeout_ms || request.limits?.max_runtime_ms;
   const timeoutFromMs = timeoutMs ? Math.ceil(timeoutMs / 1000) : undefined;
+  const runtimeOverlays = runtimeOverlaysFromConfig(config, options, defaults);
   const context = {
     ...(inputs.context || {}),
     agent_task_id: request.task_id,
@@ -267,7 +269,7 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     agent_bundles: agentBundles,
     runtime_stack_mounts: config.runtime_stack_mounts || options.runtimeStackMounts || [],
     runtime_overlay_profiles: config.runtime_overlay_profiles || config.runtimeOverlayProfiles || options.runtimeOverlayProfiles || defaults.runtimeOverlayProfiles || [],
-    runtime_overlays: config.runtime_overlays || options.runtimeOverlays || defaults.runtimeOverlays || [],
+    runtime_overlays: runtimeOverlays,
     runtime_env: firstDefined(config.runtime_env, config.runtimeEnv, config.wp_codebox_runtime_env, options.runtimeEnv, defaults.runtimeEnv, {}),
     runtime_state_mounts: firstDefined(config.runtime_state_mounts, config.runtimeStateMounts, config.wp_codebox_runtime_state_mounts, options.runtimeStateMounts, defaults.runtimeStateMounts, []),
     runtime_config_mounts: firstDefined(config.runtime_config_mounts, config.runtimeConfigMounts, config.wp_codebox_runtime_config_mounts, options.runtimeConfigMounts, defaults.runtimeConfigMounts, []),
@@ -295,6 +297,64 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     },
     agent_bundle: agentBundle,
     parent_request: request,
+  };
+}
+
+class RuntimeOverlayConfigError extends Error {
+  constructor(diagnostics) {
+    super(diagnostics[0]?.message || 'Invalid WordPress executor runtime overlay config.');
+    this.name = 'RuntimeOverlayConfigError';
+    this.diagnostics = diagnostics;
+  }
+}
+
+function runtimeOverlaysFromConfig(config, options = {}, defaults = {}) {
+  return validateRuntimeOverlays(firstDefined(
+    config.runtime_overlays,
+    options.runtimeOverlays,
+    defaults.runtimeOverlays,
+    []
+  ));
+}
+
+function validateRuntimeOverlays(value) {
+  const overlays = normalizeArray(value);
+  const diagnostics = [];
+
+  overlays.forEach((overlay, index) => {
+    const pathPrefix = `runtime_overlays[${index}]`;
+    if (!overlay || typeof overlay !== 'object' || Array.isArray(overlay)) {
+      diagnostics.push(runtimeOverlayDiagnostic(index, pathPrefix, 'entry', overlay, 'Runtime overlay entries must be objects.'));
+      return;
+    }
+
+    if (Object.hasOwn(overlay, 'type')) {
+      diagnostics.push(runtimeOverlayDiagnostic(index, `${pathPrefix}.type`, 'type', overlay.type, 'Runtime overlay config uses legacy field "type"; use canonical field "kind" instead.'));
+    }
+
+    if (typeof overlay.kind !== 'string' || overlay.kind.trim() === '') {
+      diagnostics.push(runtimeOverlayDiagnostic(index, `${pathPrefix}.kind`, 'kind', overlay.kind, 'Runtime overlay config requires canonical field "kind" as a non-empty string.'));
+    }
+  });
+
+  if (diagnostics.length > 0) {
+    throw new RuntimeOverlayConfigError(diagnostics);
+  }
+
+  return overlays;
+}
+
+function runtimeOverlayDiagnostic(index, field, offendingField, value, message) {
+  return {
+    class: 'codebox.runtime_overlay_config_invalid',
+    message: `Invalid WordPress executor runtime overlay config at runtime_overlays[${index}]: ${message} ${RUNTIME_OVERLAY_CANONICAL_SHAPE}`,
+    data: {
+      overlay_index: index,
+      field,
+      offending_field: offendingField,
+      offending_value: value,
+      expected: RUNTIME_OVERLAY_CANONICAL_SHAPE,
+    },
   };
 }
 

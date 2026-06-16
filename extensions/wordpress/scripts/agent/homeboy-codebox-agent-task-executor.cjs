@@ -591,11 +591,36 @@ function importModule(specifier) {
   return import(specifier);
 }
 
+function runtimeOverlayConfigFailurePayload(error) {
+  if (!Array.isArray(error?.diagnostics) || error.diagnostics.length === 0) {
+    return null;
+  }
+  return {
+    success: false,
+    status: 'failed',
+    summary: error.message || 'Invalid WordPress executor runtime overlay config.',
+    failure_classification: 'provider',
+    diagnostics: error.diagnostics,
+    metadata: {
+      phase: 'homeboy.wordpress.runtime_overlay_validation',
+    },
+  };
+}
+
 async function runTaskRunner(request) {
   const coreNormalizers = await loadCodeboxCoreNormalizers();
   const runner = argValue('--task-runner') || `${__dirname}/homeboy-wp-codebox-task-runner.cjs`;
   const config = request.executor?.config || {};
-  const taskInput = codeboxTaskRequestFromAgentTaskRequest(request);
+  let taskInput;
+  try {
+    taskInput = codeboxTaskRequestFromAgentTaskRequest(request);
+  } catch (error) {
+    const validationPayload = runtimeOverlayConfigFailurePayload(error);
+    if (validationPayload) {
+      return agentTaskOutcomeFromCodeboxResult(request, validationPayload, { exitStatus: 1, ...coreNormalizers });
+    }
+    throw error;
+  }
   const missingModelPayload = missingModelPreflightPayload(taskInput);
   if (missingModelPayload) {
     return agentTaskOutcomeFromCodeboxResult(request, missingModelPayload, { exitStatus: 1, ...coreNormalizers });

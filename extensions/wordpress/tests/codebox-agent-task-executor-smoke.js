@@ -232,7 +232,7 @@ const request = {
         metadata: { component: 'php-ai-client', ref: 'custom-provider-auth' },
       }],
       runtime_overlays: [{
-        type: 'bundled-library',
+        kind: 'bundled-library',
         library: 'php-ai-client',
         source: '/components/php-ai-client',
         target: '/wordpress/wp-includes/php-ai-client',
@@ -313,12 +313,32 @@ assert.deepEqual(codeboxRequest.runtime_stack_mounts, [{
   metadata: { component: 'php-ai-client', ref: 'custom-provider-auth' },
 }]);
 assert.deepEqual(codeboxRequest.runtime_overlays, [{
-  type: 'bundled-library',
+  kind: 'bundled-library',
   library: 'php-ai-client',
   source: '/components/php-ai-client',
   target: '/wordpress/wp-includes/php-ai-client',
   metadata: { component: 'php-ai-client', ref: 'custom-provider-auth' },
 }]);
+assert.throws(() => codeboxTaskRequestFromAgentTaskRequest({
+  ...request,
+  task_id: 'invalid-runtime-overlay-type-task-123',
+  executor: {
+    ...request.executor,
+    config: {
+      ...request.executor.config,
+      runtime_overlays: [{ type: 'bundled-library', library: 'php-ai-client', source: '/components/php-ai-client' }],
+    },
+  },
+}), (error) => {
+  assert.equal(error.name, 'RuntimeOverlayConfigError');
+  assert.equal(error.diagnostics[0].class, 'codebox.runtime_overlay_config_invalid');
+  assert.equal(error.diagnostics[0].data.overlay_index, 0);
+  assert.equal(error.diagnostics[0].data.field, 'runtime_overlays[0].type');
+  assert.equal(error.diagnostics[0].data.offending_field, 'type');
+  assert.match(error.diagnostics[0].message, /use canonical field "kind"/);
+  assert.match(error.diagnostics[0].data.expected, /"kind": "bundled-library"/);
+  return true;
+});
 assert.deepEqual(codeboxRequest.runtime_env, {});
 assert.deepEqual(codeboxRequest.runtime_state_mounts, []);
 assert.deepEqual(codeboxRequest.runtime_config_mounts, []);
@@ -527,7 +547,7 @@ const genericProviderRuntimeRequest = codeboxTaskRequestFromAgentTaskRequest({
       runtime_state_mounts: genericRuntimeStateMounts,
       runtime_config_mounts: genericRuntimeConfigMounts,
       provider_plugin_paths: ['/providers/fixture-provider'],
-      runtime_overlays: [{ type: 'fixture-overlay', source: '/overlays/fixture' }],
+      runtime_overlays: [{ kind: 'fixture-overlay', source: '/overlays/fixture' }],
       runtime_overlay_profiles: ['fixture-profile'],
       secret_env: ['FIXTURE_PROVIDER_SECRET'],
     },
@@ -538,7 +558,7 @@ assert.deepEqual(genericProviderRuntimeRequest.runtime_env, genericRuntimeEnv);
 assert.deepEqual(genericProviderRuntimeRequest.runtime_state_mounts, genericRuntimeStateMounts);
 assert.deepEqual(genericProviderRuntimeRequest.runtime_config_mounts, genericRuntimeConfigMounts);
 assert.deepEqual(genericProviderRuntimeRequest.provider_plugin_paths, ['/providers/fixture-provider']);
-assert.deepEqual(genericProviderRuntimeRequest.runtime_overlays, [{ type: 'fixture-overlay', source: '/overlays/fixture' }]);
+assert.deepEqual(genericProviderRuntimeRequest.runtime_overlays, [{ kind: 'fixture-overlay', source: '/overlays/fixture' }]);
 assert.deepEqual(genericProviderRuntimeRequest.runtime_overlay_profiles, ['fixture-profile']);
 assert.deepEqual(genericProviderRuntimeRequest.secret_env, ['FIXTURE_PROVIDER_SECRET']);
 
@@ -888,7 +908,7 @@ try {
   const configuredProviderPath = path.join(defaultsRoot, 'configured-provider');
   const configuredLibraryPath = path.join(defaultsRoot, 'configured-library');
   const configuredRuntimeOverlays = [{
-    type: 'bundled-library',
+    kind: 'bundled-library',
     library: 'php-ai-client',
     source: configuredLibraryPath,
     target: '/wordpress/wp-includes/php-ai-client',
@@ -970,7 +990,7 @@ try {
         },
         provider_plugin_paths: ['/explicit/provider'],
         runtime_overlay_profiles: ['explicit-profile'],
-        runtime_overlays: [{ type: 'bundled-library', library: 'php-ai-client', source: '/explicit/php-ai-client' }],
+        runtime_overlays: [{ kind: 'bundled-library', library: 'php-ai-client', source: '/explicit/php-ai-client' }],
         secret_env: ['EXPLICIT_SECRET'],
         mounts: [{ source: '/explicit/worktree', target: '/workspace', mode: 'readonly' }],
         workspaces: [{ target: '/explicit-workspace', mode: 'readonly' }],
@@ -985,7 +1005,7 @@ try {
   assert.equal(explicitOverrideRequest.runtime_component_paths.agent_runtime_tools, '/explicit/data-machine-code');
   assert.deepEqual(explicitOverrideRequest.provider_plugin_paths, ['/explicit/provider']);
   assert.deepEqual(explicitOverrideRequest.runtime_overlay_profiles, ['explicit-profile']);
-  assert.deepEqual(explicitOverrideRequest.runtime_overlays, [{ type: 'bundled-library', library: 'php-ai-client', source: '/explicit/php-ai-client' }]);
+  assert.deepEqual(explicitOverrideRequest.runtime_overlays, [{ kind: 'bundled-library', library: 'php-ai-client', source: '/explicit/php-ai-client' }]);
   assert.deepEqual(explicitOverrideRequest.secret_env, ['EXPLICIT_SECRET']);
   assert.deepEqual(explicitOverrideRequest.mounts, [{ source: '/explicit/worktree', target: '/workspace', mode: 'readonly' }]);
   assert.deepEqual(explicitOverrideRequest.workspaces, [{ target: '/explicit-workspace', mode: 'readonly' }]);
@@ -1696,6 +1716,36 @@ try {
   assert.match(missingModelOutcome.summary, /provider-config\.model/);
   assert.equal(fs.existsSync(capture), false);
 
+  const invalidOverlayResult = spawnSync(process.execPath, [
+    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs'),
+    '--task-runner',
+    fixture,
+  ], {
+    encoding: 'utf8',
+    env: fixtureEnv(),
+    input: JSON.stringify({
+      ...request,
+      task_id: 'invalid-runtime-overlay-cli-task-123',
+      executor: {
+        ...request.executor,
+        config: {
+          ...request.executor.config,
+          runtime_overlays: [{ type: 'bundled-library', library: 'php-ai-client', source: '/components/php-ai-client' }],
+        },
+      },
+    }),
+  });
+  assert.equal(invalidOverlayResult.status, 1, invalidOverlayResult.stderr || invalidOverlayResult.stdout);
+  const invalidOverlayOutcome = JSON.parse(invalidOverlayResult.stdout);
+  assert.equal(invalidOverlayOutcome.status, 'failed');
+  assert.equal(invalidOverlayOutcome.failure_classification, 'provider');
+  assert.equal(invalidOverlayOutcome.diagnostics[0].class, 'codebox.runtime_overlay_config_invalid');
+  assert.equal(invalidOverlayOutcome.diagnostics[0].data.overlay_index, 0);
+  assert.equal(invalidOverlayOutcome.diagnostics[0].data.field, 'runtime_overlays[0].type');
+  assert.match(invalidOverlayOutcome.diagnostics[0].message, /legacy field "type"/);
+  assert.match(invalidOverlayOutcome.diagnostics[0].data.expected, /"kind": "bundled-library"/);
+  assert.equal(fs.existsSync(capture), false);
+
   const result = spawnSync(process.execPath, [
     path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs'),
     '--task-runner',
@@ -1737,7 +1787,7 @@ try {
   const captured = JSON.parse(fs.readFileSync(capture, 'utf8'));
   assert.equal(captured.request.schema, 'wp-codebox/task-input/v1');
   assert.equal(captured.request.orchestrator.agent_task_id, 'task-123');
-  assert.equal(captured.request.runtime_overlays[0].type, 'bundled-library');
+  assert.equal(captured.request.runtime_overlays[0].kind, 'bundled-library');
 
   const recipeCliResult = spawnSync(process.execPath, [
     path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs'),

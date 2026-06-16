@@ -18,7 +18,7 @@ Codex WP Codebox tasks require an explicit provider/runtime stack. Homeboy does 
 Configure the Codex pair with task config, global settings, or environment variables:
 
 - `provider_plugin_paths` / `wp_codebox_provider_plugin_paths` / `HOMEBOY_WP_CODEBOX_PROVIDER_PLUGIN_PATH`: a Codex-capable provider plugin checkout, such as the Codex provider branch of `ai-provider-for-openai`.
-- `runtime_overlays` / `wp_codebox_runtime_overlays`, or `wp_codebox_php_ai_client_path` / `HOMEBOY_WP_CODEBOX_PHP_AI_CLIENT_PATH`: a prepared `php-ai-client` checkout mounted to `/wordpress/wp-includes/php-ai-client`.
+- `runtime_overlays` / `wp_codebox_runtime_overlays`, or `wp_codebox_php_ai_client_path` / `HOMEBOY_WP_CODEBOX_PHP_AI_CLIENT_PATH`: a prepared `php-ai-client` checkout mounted to `/wordpress/wp-includes/php-ai-client`. Explicit runtime overlay entries must use the canonical `kind` field, for example `{ "kind": "bundled-library", "library": "php-ai-client", "source": "/abs/path/to/php-ai-client" }`; legacy `type` entries are rejected before WP Codebox dispatch.
 
 The `php-ai-client` checkout must include bearer-token auth support (`RequestAuthenticationMethod::bearerToken`) and Composer vendor dependencies (`vendor/autoload.php`). If the stack is incomplete, the executor emits diagnostics for the missing Codex provider plugin, missing bearer-token auth, or missing Composer vendor preparation.
 
