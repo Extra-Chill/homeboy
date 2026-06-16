@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.121.55] - 2026-06-16
+
+### Fixed
+- validate wordpress runtime overlays
+
 ## [2.121.54] - 2026-06-16
 
 ### Fixed
