@@ -1519,10 +1519,26 @@ fn render_value_templates(value: &mut Value, bindings: &HashMap<String, Value>) 
 }
 
 fn provider_run_result_is_empty_incomplete(result: &Value) -> bool {
-    result.get("completed").and_then(Value::as_bool) == Some(false)
-        && value_text_is_empty(result.get("reply"))
-        && !has_assistant_message(result)
-        && !has_tool_calls(result)
+    // The provider run state may live at the top level of the result object or
+    // nested under an `outputs` key (the shape Codebox reports today, e.g.
+    // `{ "success": true, "status": "completed", "outputs": { "completed": false, ... } }`).
+    // Detect an incomplete, no-output run at either level so cook does not treat
+    // a cell that never produced an assistant/tool interaction as successful.
+    if empty_incomplete_run_state(result) {
+        return true;
+    }
+    result
+        .get("outputs")
+        .filter(|value| value.is_object())
+        .map(empty_incomplete_run_state)
+        .unwrap_or(false)
+}
+
+fn empty_incomplete_run_state(state: &Value) -> bool {
+    state.get("completed").and_then(Value::as_bool) == Some(false)
+        && value_text_is_empty(state.get("reply"))
+        && !has_assistant_message(state)
+        && !has_tool_calls(state)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2400,6 +2416,76 @@ mod tests {
     }
 
     #[test]
+    fn incomplete_nested_outputs_provider_result_is_detected() {
+        // Mirrors the Codebox wrapper shape reported in #4613: the provider claims
+        // top-level success/completed, but `outputs.completed` is false, the reply
+        // is empty, and `messages` only contains the initial user prompt.
+        let result = json!({
+            "success": true,
+            "status": "completed",
+            "outputs": {
+                "reply": "",
+                "messages": [{ "role": "user", "content": "cook the issue" }],
+                "completed": false,
+                "run_id": "run_abc"
+            },
+            "structured_artifacts": [],
+            "diagnostics": {}
+        });
+
+        assert!(provider_run_result_is_empty_incomplete(&result));
+    }
+
+    #[test]
+    fn completed_provider_result_with_assistant_message_is_not_flagged() {
+        let result = json!({
+            "success": true,
+            "status": "completed",
+            "outputs": {
+                "reply": "patched src/lib.rs",
+                "messages": [
+                    { "role": "user", "content": "cook the issue" },
+                    { "role": "assistant", "content": "applied the fix" }
+                ],
+                "completed": true,
+                "run_id": "run_abc"
+            }
+        });
+
+        assert!(!provider_run_result_is_empty_incomplete(&result));
+    }
+
+    #[test]
+    fn flat_incomplete_provider_result_is_still_detected() {
+        let result = json!({
+            "completed": false,
+            "reply": "",
+            "messages": [],
+            "tool_calls": []
+        });
+
+        assert!(provider_run_result_is_empty_incomplete(&result));
+    }
+
+    #[test]
+    fn incomplete_nested_outputs_executor_result_fails_when_retries_are_unavailable() {
+        let scheduler = AgentTaskScheduler::new(NestedOutputsIncompleteExecutor);
+
+        let aggregate = scheduler.run(plan_with_tasks(1));
+
+        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Failed);
+        assert_eq!(aggregate.totals.failed, 1);
+        assert_eq!(
+            aggregate.outcomes[0].status,
+            AgentTaskOutcomeStatus::ProviderError
+        );
+        assert_eq!(
+            aggregate.outcomes[0].diagnostics[0].class,
+            "agent_task.executor_incomplete_empty_result"
+        );
+    }
+
+    #[test]
     fn templates_prior_output_into_downstream_task_request() {
         let observed = Arc::new(Mutex::new(Vec::new()));
         let scheduler = AgentTaskScheduler::new(OutputTemplateExecutor {
@@ -2920,6 +3006,18 @@ mod tests {
         }
     }
 
+    struct NestedOutputsIncompleteExecutor;
+
+    impl AgentTaskExecutorAdapter for NestedOutputsIncompleteExecutor {
+        fn execute(
+            &self,
+            request: AgentTaskRequest,
+            _context: AgentTaskExecutionContext,
+        ) -> AgentTaskOutcome {
+            nested_outputs_incomplete_outcome(request.task_id)
+        }
+    }
+
     impl AgentTaskExecutorAdapter for NestedFailedStatusExecutor {
         fn execute(
             &self,
@@ -3121,6 +3219,28 @@ mod tests {
                 "reply": "",
                 "messages": [],
                 "tool_calls": []
+            }
+        });
+        outcome
+    }
+
+    fn nested_outputs_incomplete_outcome(task_id: String) -> AgentTaskOutcome {
+        let mut outcome = outcome(task_id, AgentTaskOutcomeStatus::Succeeded);
+        outcome.summary = Some(
+            "Agent sandbox completed successfully without actionable file changes.".to_string(),
+        );
+        outcome.outputs = json!({
+            "provider_run_result": {
+                "success": true,
+                "status": "completed",
+                "outputs": {
+                    "reply": "",
+                    "messages": [{ "role": "user", "content": "cook the issue" }],
+                    "completed": false,
+                    "run_id": "run_abc"
+                },
+                "structured_artifacts": [],
+                "diagnostics": {}
             }
         });
         outcome

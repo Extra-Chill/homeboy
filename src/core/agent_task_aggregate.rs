@@ -357,9 +357,8 @@ fn reconcile_outcome(
             }
             AgentTaskOutcomeStatus::Cancelled => "cancelled task needs review".to_string(),
             AgentTaskOutcomeStatus::Failed => "failed task needs review".to_string(),
-            AgentTaskOutcomeStatus::Succeeded => {
-                "succeeded without apply-back artifact".to_string()
-            }
+            AgentTaskOutcomeStatus::Succeeded => empty_or_unknown_patch_reason(outcome)
+                .unwrap_or_else(|| "succeeded without apply-back artifact".to_string()),
             AgentTaskOutcomeStatus::ProviderError
             | AgentTaskOutcomeStatus::Timeout
             | AgentTaskOutcomeStatus::FollowUpIssue => unreachable!("handled above"),
@@ -389,11 +388,52 @@ fn inventory_item(task_id: &str, artifact: &AgentTaskArtifact) -> AgentTaskArtif
 }
 
 fn is_apply_artifact(artifact: &AgentTaskArtifact) -> bool {
-    let apply_kind = matches!(
+    is_apply_kind_artifact(artifact) && artifact_has_nonzero_size(artifact)
+}
+
+fn is_apply_kind_artifact(artifact: &AgentTaskArtifact) -> bool {
+    matches!(
         artifact.kind.as_str(),
         "patch" | "diff" | "change_artifact" | "workspace_patch" | "artifact"
-    ) || artifact_flag(artifact, "approved");
-    apply_kind && artifact.size_bytes != Some(0)
+    ) || artifact_flag(artifact, "approved")
+}
+
+fn artifact_has_nonzero_size(artifact: &AgentTaskArtifact) -> bool {
+    // A patch counts as a promotion candidate only when there is positive
+    // evidence of non-empty content. An unknown (`None`) size is treated as
+    // empty/uncertain rather than as a valid candidate, so cook runs whose
+    // provider only wrote 0-byte patches (or omitted size entirely) are not
+    // reported as successful fixes (#4610).
+    matches!(artifact.size_bytes, Some(size) if size > 0)
+}
+
+/// When a `Succeeded` outcome produced patch-shaped artifacts that were all
+/// empty or unknown-size, surface a per-cell reason explaining why no apply
+/// candidate was promoted. Returns `None` when there were no patch artifacts or
+/// when at least one had non-empty content.
+fn empty_or_unknown_patch_reason(outcome: &AgentTaskOutcome) -> Option<String> {
+    let patch_artifacts: Vec<&AgentTaskArtifact> = outcome
+        .artifacts
+        .iter()
+        .filter(|artifact| is_apply_kind_artifact(artifact))
+        .collect();
+    if patch_artifacts.is_empty() {
+        return None;
+    }
+    if patch_artifacts
+        .iter()
+        .any(|artifact| artifact_has_nonzero_size(artifact))
+    {
+        return None;
+    }
+    if patch_artifacts
+        .iter()
+        .any(|artifact| artifact.size_bytes == Some(0))
+    {
+        Some("patch artifact was empty (0 bytes); provider produced no file changes".to_string())
+    } else {
+        Some("patch artifact size unknown; cannot confirm changes were produced".to_string())
+    }
 }
 
 fn artifact_flag(artifact: &AgentTaskArtifact, key: &str) -> bool {
@@ -549,7 +589,7 @@ mod tests {
         assert_eq!(report.review_candidates[0].task_id, "empty-patch");
         assert_eq!(
             report.review_candidates[0].reason,
-            "succeeded without apply-back artifact"
+            "patch artifact was empty (0 bytes); provider produced no file changes"
         );
     }
 
@@ -573,7 +613,10 @@ mod tests {
     }
 
     #[test]
-    fn aggregate_outcomes_keeps_unknown_size_patch_apply_candidate() {
+    fn aggregate_outcomes_routes_unknown_size_patch_to_review() {
+        // An unknown-size patch cannot be confirmed non-empty, so it must not be
+        // auto-promoted as an apply candidate (#4610). It routes to review with a
+        // reason that explains the uncertainty.
         let mut unknown_size_patch = artifact("legacy-patch", "patch", json!({}));
         unknown_size_patch.size_bytes = None;
 
@@ -583,8 +626,53 @@ mod tests {
             vec![unknown_size_patch],
         )]);
 
-        assert_eq!(report.summary.apply_candidates, 1);
-        assert_eq!(report.apply_candidates[0].task_id, "legacy-patch");
+        assert!(report.apply_candidates.is_empty());
+        assert_eq!(report.summary.apply_candidates, 0);
+        assert_eq!(report.summary.review_candidates, 1);
+        assert_eq!(report.review_candidates[0].task_id, "legacy-patch");
+        assert_eq!(
+            report.review_candidates[0].reason,
+            "patch artifact size unknown; cannot confirm changes were produced"
+        );
+    }
+
+    #[test]
+    fn aggregate_outcomes_reports_no_patch_produced_when_all_cells_empty() {
+        // Reproduces the #4610 scenario: 3 succeeded cells, each with a 0-byte
+        // patch artifact. The cook run should report zero apply candidates and no
+        // succeeded apply-candidate cells.
+        let mut empty_patch_a = artifact("patch-a", "patch", json!({}));
+        empty_patch_a.size_bytes = Some(0);
+        let mut empty_patch_b = artifact("patch-b", "patch", json!({}));
+        empty_patch_b.size_bytes = Some(0);
+        let mut empty_patch_c = artifact("patch-c", "patch", json!({}));
+        empty_patch_c.size_bytes = Some(0);
+
+        let report = aggregate_agent_task_outcomes(&[
+            outcome(
+                "cell-1",
+                AgentTaskOutcomeStatus::Succeeded,
+                vec![empty_patch_a],
+            ),
+            outcome(
+                "cell-2",
+                AgentTaskOutcomeStatus::Succeeded,
+                vec![empty_patch_b],
+            ),
+            outcome(
+                "cell-3",
+                AgentTaskOutcomeStatus::Succeeded,
+                vec![empty_patch_c],
+            ),
+        ]);
+
+        assert_eq!(report.summary.total, 3);
+        assert_eq!(report.summary.apply_candidates, 0);
+        assert_eq!(report.apply_candidates.len(), 0);
+        assert_eq!(report.summary.review_candidates, 3);
+        assert!(report.review_candidates.iter().all(|candidate| candidate
+            .reason
+            .starts_with("patch artifact was empty (0 bytes)")));
     }
 
     #[test]
