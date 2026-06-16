@@ -225,7 +225,7 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
   const provider = config.provider || options.provider || defaults.provider || '';
   const model = request.executor.model || config.model || options.model || defaults.model || '';
   const runtimeTask = runtimeTaskWithExecutionDefaults(
-    inputs.runtime_task || inputs.runtimeTask || config.runtime_task || config.runtimeTask || abilityRuntimeTaskFromAgentTaskRequest(config, inputs) || options.runtimeTask,
+    inputs.runtime_task || inputs.runtimeTask || config.runtime_task || config.runtimeTask || abilityRuntimeTaskFromAgentTaskRequest(request, config, inputs) || options.runtimeTask,
     { provider, model, agentBundles }
   );
   const explicitSecretEnv = [
@@ -397,8 +397,8 @@ function uniqueComponentContracts(contracts) {
   });
 }
 
-function abilityRuntimeTaskFromAgentTaskRequest(config, inputs) {
-  const genericAbilityTask = genericAbilityRuntimeTask(config, inputs);
+function abilityRuntimeTaskFromAgentTaskRequest(request, config, inputs) {
+  const genericAbilityTask = genericAbilityRuntimeTask(request, config, inputs);
   if (genericAbilityTask) {
     return genericAbilityTask;
   }
@@ -411,11 +411,11 @@ function abilityRuntimeTaskFromAgentTaskRequest(config, inputs) {
   if (!ability || typeof ability !== 'string') {
     return null;
   }
-  const input = firstObject(inputs.ability_input, inputs.abilityInput, inputs.input, config.ability_input, config.abilityInput, config.input) || {};
+  const input = runtimeTaskInputFromAgentTaskRequest(request, config, inputs);
   return { ability, input };
 }
 
-function genericAbilityRuntimeTask(config, inputs) {
+function genericAbilityRuntimeTask(request, config, inputs) {
   const rawAbility = firstValue(inputs.ability, config.ability);
   const abilityRequest = firstObject(
     inputs.ability_request,
@@ -430,8 +430,25 @@ function genericAbilityRuntimeTask(config, inputs) {
   if (!ability || typeof ability !== 'string') {
     return null;
   }
-  const input = firstObject(declared?.input, declared?.args, inputs.ability_input, inputs.abilityInput, inputs.input, config.ability_input, config.abilityInput, config.input) || {};
+  const input = runtimeTaskInputFromAgentTaskRequest(request, config, inputs, declared);
   return { ability, input };
+}
+
+function runtimeTaskInputFromAgentTaskRequest(request, config, inputs, declared = {}) {
+  const workflowInputs = workflowInputsFromAgentTaskRequest(request, config, inputs);
+  const explicitInput = firstObject(declared?.input, declared?.args, inputs.ability_input, inputs.abilityInput, inputs.input, config.ability_input, config.abilityInput, config.input) || {};
+  return { ...workflowInputs, ...explicitInput };
+}
+
+function workflowInputsFromAgentTaskRequest(request, config, inputs) {
+  return firstObject(
+    inputs.client_context?.inputs,
+    inputs.clientContext?.inputs,
+    request.client_context?.inputs,
+    request.clientContext?.inputs,
+    config.client_context?.inputs,
+    config.clientContext?.inputs,
+  ) || {};
 }
 
 function allowedToolsFromAgentTaskRequest(request, config, inputs, options, defaults) {

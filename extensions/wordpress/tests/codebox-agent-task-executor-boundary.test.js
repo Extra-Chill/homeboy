@@ -60,6 +60,58 @@ assert.equal(
   true
 );
 
+const repoLoopBundleTaskInput = codeboxTaskRequestFromAgentTaskRequest({
+  schema: 'homeboy/agent-task-request/v1',
+  task_id: 'repo-loop-agent-bundle-task-1',
+  executor: { backend: 'wordpress', config: { provider: 'openai' } },
+  instructions: 'Run a repo-loop bundle workflow.',
+  inputs: {
+    ability_request: { name: 'datamachine/run-agent-bundle' },
+    client_context: {
+      inputs: {
+        source: 'bundles/store-idea-agent',
+        flow: 'store-idea-artifact-flow',
+        wait_for_completion: true,
+      },
+    },
+  },
+});
+
+assert.equal(repoLoopBundleTaskInput.runtime_task.ability, 'datamachine/run-agent-bundle');
+assert.deepEqual(repoLoopBundleTaskInput.runtime_task.input, {
+  source: 'bundles/store-idea-agent',
+  flow: 'store-idea-artifact-flow',
+  wait_for_completion: true,
+});
+
+const genericRepoLoopTaskInput = codeboxTaskRequestFromAgentTaskRequest({
+  schema: 'homeboy/agent-task-request/v1',
+  task_id: 'repo-loop-generic-ability-task-1',
+  executor: { backend: 'wordpress', config: { provider: 'openai' } },
+  instructions: 'Run a generic declared ability with workflow inputs.',
+  client_context: {
+    inputs: {
+      packet: 'artifact-42',
+      dry_run: true,
+    },
+  },
+  inputs: {
+    ability_request: {
+      name: 'example/materialize-artifact',
+      input: { dry_run: false },
+    },
+    context: {
+      inputs: { secret: 'not-forwarded-from-ambient-context' },
+    },
+  },
+});
+
+assert.equal(genericRepoLoopTaskInput.runtime_task.ability, 'example/materialize-artifact');
+assert.deepEqual(genericRepoLoopTaskInput.runtime_task.input, {
+  packet: 'artifact-42',
+  dry_run: false,
+});
+
 const legacyTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',
   task_id: 'legacy-codebox-task-1',
