@@ -292,6 +292,7 @@ function nestedPreparedPath(source, preparedItems) {
 function runtimePreparationSources(taskInput) {
   return [
     ...(Array.isArray(taskInput.extra_plugins) ? taskInput.extra_plugins.map((plugin) => [plugin?.source, plugin?.slug]) : []),
+    ...(Array.isArray(taskInput.provider_plugin_paths) ? taskInput.provider_plugin_paths.map((source) => [source, pluginSlugFromPath(source)]) : []),
     ...(Array.isArray(taskInput.component_contracts) ? taskInput.component_contracts.map((contract) => [contract?.path || contract?.source, contract?.slug]) : []),
     ...(plainObject(taskInput.runtime_component_paths) ? Object.entries(taskInput.runtime_component_paths).map(([, source]) => [source, '']) : []),
   ]
@@ -336,10 +337,18 @@ function prepareStableTaskInput(taskInput, artifacts) {
       }))
     : taskInput.runtime_component_paths;
 
+  const providerPluginPaths = Array.isArray(taskInput.provider_plugin_paths)
+    ? taskInput.provider_plugin_paths.map((source) => {
+        const prepared = preparedBySource.get(source);
+        return prepared?.prepared ? prepared.source : source;
+      })
+    : taskInput.provider_plugin_paths;
+
   return {
     input: {
       ...taskInput,
       extra_plugins: preparedExtraPlugins,
+      provider_plugin_paths: providerPluginPaths,
       component_contracts: preparedComponentContracts,
       runtime_component_paths: runtimeComponentPaths,
     },
@@ -652,6 +661,33 @@ function runtimeComponentExtraPlugins(input) {
   });
 }
 
+function pluginSlugFromPath(pluginPath) {
+  const source = String(pluginPath || '');
+  try {
+    const composer = JSON.parse(fs.readFileSync(path.join(source, 'composer.json'), 'utf8'));
+    const packageName = typeof composer.name === 'string' ? composer.name.split('/').pop() : '';
+    if (packageName) {
+      return packageName.replace(/[^A-Za-z0-9_-]/g, '-').replace(/^-+|-+$/g, '');
+    }
+  } catch {
+    // Composer metadata is optional for provider plugin directories.
+  }
+  return path.basename(source).split('@')[0].replace(/[^A-Za-z0-9_-]/g, '-').replace(/^-+|-+$/g, '');
+}
+
+function providerPluginEntries(input) {
+  return (input.provider_plugin_paths || []).flatMap((source) => {
+    const slug = pluginSlugFromPath(source);
+    return source && slug ? [{
+      source,
+      slug,
+      loadAs: 'plugin',
+      activate: true,
+      metadata: { kind: 'provider-plugin-path', provider: input.provider || '' },
+    }] : [];
+  });
+}
+
 function componentContracts(input) {
   // Translate normalized runtime component paths into the WP Codebox 0.8.0
   // `component_contracts` shape:
@@ -691,7 +727,11 @@ function verifySteps(input) {
 
 function extraPlugins(input) {
   const explicit = input.parent_request?.extra_plugins || input.parent_request?.extraPlugins || [];
-  const plugins = [...runtimeComponentExtraPlugins(input), ...(Array.isArray(explicit) ? explicit : [])];
+  const plugins = [
+    ...runtimeComponentExtraPlugins(input),
+    ...providerPluginEntries(input),
+    ...(Array.isArray(explicit) ? explicit : []),
+  ];
   const seen = new Set();
   return plugins.filter((plugin) => {
     const key = `${plugin.slug || ''}:${plugin.source || ''}`;

@@ -202,11 +202,14 @@ try {
   const capturePath = path.join(root, 'capture.json');
   const fixtureWpCodebox = createFixtureWpCodebox(root);
   const providerPluginPath = path.join(root, 'example-provider@feature-branch');
+  const preparedProviderPluginPath = path.join(root, 'artifacts', 'prepared-plugins', 'example-provider');
   const workspaceRoot = path.join(root, 'wp-coding-agents@proof-homeboy-fanout-a');
   const defaultDataMachinePath = path.join(root, 'data-machine');
   const defaultAgentsApiPath = path.join(defaultDataMachinePath, 'vendor', 'wordpress', 'agents-api');
   const defaultDataMachineCodePath = path.join(root, 'data-machine-code');
   fs.mkdirSync(providerPluginPath, { recursive: true });
+  fs.writeFileSync(path.join(providerPluginPath, 'example-provider.php'), '<?php\n/* Plugin Name: Example Provider */\n');
+  fs.writeFileSync(path.join(providerPluginPath, 'composer.json'), JSON.stringify({ name: 'extra-chill/example-provider' }));
   fs.mkdirSync(workspaceRoot, { recursive: true });
   fs.mkdirSync(defaultAgentsApiPath, { recursive: true });
   fs.mkdirSync(defaultDataMachineCodePath, { recursive: true });
@@ -291,7 +294,9 @@ try {
   assert.equal(captured.input.provider, 'opencode');
   assert.equal(captured.input.model, 'opencode-go/kimi-k2.6');
   assert.deepEqual(captured.input.secret_env, ['OPENCODE_API_KEY']);
-  assert.equal(captured.input.provider_plugin_paths[0], providerPluginPath);
+  assert.equal(captured.input.provider_plugin_paths[0], preparedProviderPluginPath);
+  assert.equal(captured.input.extra_plugins.find((plugin) => plugin.slug === 'example-provider').source, preparedProviderPluginPath);
+  assert.equal(captured.input.extra_plugins.find((plugin) => plugin.slug === 'example-provider').activate, true);
   assert.deepEqual(captured.input.runtime_env, request.runtime_env);
   assert.deepEqual(captured.input.ability_tools, request.ability_tools);
   assert.deepEqual(captured.input.runtime_state_mounts, request.runtime_state_mounts);
