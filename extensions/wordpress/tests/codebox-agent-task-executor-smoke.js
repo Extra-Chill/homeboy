@@ -267,6 +267,23 @@ assert.deepEqual(provider.outcome_statuses, ['succeeded', 'failed', 'no_op', 'un
 assert.deepEqual(provider.failure_classifications, ['provider', 'timeout', 'execution_failed']);
 assert.deepEqual(provider.redacted_metadata_keys, ['secret_env_values', 'secretEnvValues', 'secrets']);
 assert.deepEqual(provider.workspace_materialization, { cwd: 'git_checkout' });
+assert.deepEqual(provider.provider_defaults, {
+  openai: {
+    secret_env: ['OPENAI_API_KEY'],
+  },
+  codex: {
+    secret_env: [
+      'AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN',
+      'AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN',
+      'AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT',
+      'AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID',
+      'AI_PROVIDER_OPENAI_CODEX_FEDRAMP',
+    ],
+  },
+  'claude-code': {
+    secret_env: ['AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN'],
+  },
+});
 assert.deepEqual(provider.role_aliases, {
   artifact_kinds: {
     patch: ['codebox-patch'],
@@ -354,6 +371,32 @@ assert.deepEqual(codeboxRequest.runtime_env, {});
 assert.deepEqual(codeboxRequest.runtime_state_mounts, []);
 assert.deepEqual(codeboxRequest.runtime_config_mounts, []);
 assert.deepEqual(codeboxRequest.secret_env, ['OPENAI_API_KEY']);
+
+const providerDefaultSecretRequest = codeboxTaskRequestFromAgentTaskRequest({
+  ...request,
+  task_id: 'provider-default-secret-task-123',
+  executor: {
+    backend: 'wordpress',
+    config: {
+      provider: 'claude-code',
+      model: 'opus-4.7',
+    },
+  },
+});
+assert.deepEqual(providerDefaultSecretRequest.secret_env, provider.provider_defaults['claude-code'].secret_env);
+
+const codexDefaultSecretRequest = codeboxTaskRequestFromAgentTaskRequest({
+  ...request,
+  task_id: 'codex-default-secret-task-123',
+  executor: {
+    backend: 'wordpress',
+    config: {
+      provider: 'codex',
+      model: 'gpt-5.5',
+    },
+  },
+});
+assert.deepEqual(codexDefaultSecretRequest.secret_env, provider.provider_defaults.codex.secret_env);
 assert.equal(codeboxRequest.max_turns, 8);
 assert.equal(codeboxRequest.task_timeout_seconds, 120);
 assert.equal(codeboxRequest.expected_artifacts[0], 'screenshot');
