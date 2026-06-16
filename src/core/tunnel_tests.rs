@@ -20,6 +20,20 @@ fn create_server() {
     .expect("save server");
 }
 
+fn reserve_loopback_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("reserve loopback port")
+        .local_addr()
+        .expect("reserved port address")
+        .port()
+}
+
+fn python_listener_command(port: u16, body: &str) -> String {
+    format!(
+        "python3 -c 'import socket,time; s=socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind((\"127.0.0.1\", {port})); s.listen(1); {body}; s.close()'"
+    )
+}
+
 #[test]
 fn expose_records_private_loopback_declaration_without_running_tunnel() {
     test_support::with_isolated_home(|_| {
@@ -397,6 +411,133 @@ fn preview_readiness_can_require_artifact_status() {
         assert_eq!(readiness.checks[0].check, "artifact_json_pointer");
 
         stop("artifact-preview").expect("stop service");
+    });
+}
+
+#[test]
+fn preview_start_fails_when_listener_process_exits_after_readiness() {
+    test_support::with_isolated_home(|_| {
+        create_server();
+        let port = reserve_loopback_port();
+        expose(ExposeServiceTunnelSpec {
+            id: "flapping-preview".to_string(),
+            server_id: "private-host".to_string(),
+            target: ServiceTunnelTarget {
+                host: "127.0.0.1".to_string(),
+                port,
+            },
+            scheme: "http".to_string(),
+            local_port: Some(port),
+            auth: ServiceTunnelAuth {
+                mode: ServiceTunnelAuthMode::BearerEnv,
+                env_var: Some("FLAPPING_PREVIEW_TOKEN".to_string()),
+                header: Some("Authorization".to_string()),
+            },
+            policy: ServiceTunnelPolicy {
+                exposure: ServiceTunnelExposure::PrivateLoopback,
+                require_auth: true,
+                allowed_clients: Vec::new(),
+                preview: ServiceTunnelPreviewPolicy::default(),
+                native_preview_auth: ServiceTunnelNativePreviewAuthPolicy::default(),
+            },
+            description: None,
+        })
+        .expect("expose service");
+
+        let err = start(StartServiceTunnelSpec {
+            id: "flapping-preview".to_string(),
+            command: python_listener_command(port, "conn,_=s.accept(); conn.close()"),
+            cwd: None,
+            env: BTreeMap::new(),
+            host: Some("127.0.0.1".to_string()),
+            port: Some(port),
+            scheme: Some("http".to_string()),
+            health_url: None,
+            health_path: None,
+            readiness_timeout_secs: 2,
+            backend: ServiceTunnelTunnelBackend::Command,
+            backend_command: Some("while true; do sleep 1; done".to_string()),
+            backend_public_url: Some("https://flapping-preview.example.test".to_string()),
+            source_run_id: None,
+            source_workflow_id: None,
+            readiness_kind: ServiceTunnelReadinessKind::Preview,
+            readiness_checks: vec![ServiceTunnelReadinessCheck::TcpListener],
+        })
+        .expect_err("exited listener must not start successfully");
+
+        assert_eq!(err.code, crate::core::ErrorCode::ValidationInvalidArgument);
+        assert!(err.message.contains("exited after becoming ready"));
+        let refreshed = status("flapping-preview").expect("status refresh");
+        assert!(!refreshed.running);
+        assert!(refreshed.preview_identity.public_url.is_none());
+        assert!(refreshed.readiness.is_none());
+        assert!(refreshed.tunnel_backend.is_none());
+    });
+}
+
+#[test]
+fn status_refresh_clears_exited_process_readiness() {
+    test_support::with_isolated_home(|_| {
+        create_server();
+        let port = reserve_loopback_port();
+        expose(ExposeServiceTunnelSpec {
+            id: "short-lived-preview".to_string(),
+            server_id: "private-host".to_string(),
+            target: ServiceTunnelTarget {
+                host: "127.0.0.1".to_string(),
+                port,
+            },
+            scheme: "http".to_string(),
+            local_port: Some(port),
+            auth: ServiceTunnelAuth {
+                mode: ServiceTunnelAuthMode::BearerEnv,
+                env_var: Some("SHORT_PREVIEW_TOKEN".to_string()),
+                header: Some("Authorization".to_string()),
+            },
+            policy: ServiceTunnelPolicy {
+                exposure: ServiceTunnelExposure::PrivateLoopback,
+                require_auth: true,
+                allowed_clients: Vec::new(),
+                preview: ServiceTunnelPreviewPolicy::default(),
+                native_preview_auth: ServiceTunnelNativePreviewAuthPolicy::default(),
+            },
+            description: None,
+        })
+        .expect("expose service");
+
+        let started = start(StartServiceTunnelSpec {
+            id: "short-lived-preview".to_string(),
+            command: python_listener_command(
+                port,
+                "end=time.time()+1.0\nwhile time.time()<end:\n s.settimeout(max(0.01,end-time.time()))\n try:\n  conn,_=s.accept(); conn.close()\n except Exception:\n  pass",
+            ),
+            cwd: None,
+            env: BTreeMap::new(),
+            host: Some("127.0.0.1".to_string()),
+            port: Some(port),
+            scheme: Some("http".to_string()),
+            health_url: None,
+            health_path: None,
+            readiness_timeout_secs: 2,
+            backend: ServiceTunnelTunnelBackend::None,
+            backend_command: None,
+            backend_public_url: Some("https://short-lived-preview.example.test".to_string()),
+            source_run_id: None,
+            source_workflow_id: None,
+            readiness_kind: ServiceTunnelReadinessKind::Preview,
+            readiness_checks: vec![ServiceTunnelReadinessCheck::TcpListener],
+        })
+        .expect("start short-lived service");
+
+        assert!(started.running);
+        assert!(started.readiness.expect("readiness").preview_ready);
+        std::thread::sleep(std::time::Duration::from_millis(1200));
+
+        let refreshed = status("short-lived-preview").expect("status refresh");
+        assert!(!refreshed.running);
+        assert_eq!(refreshed.lifecycle, "declared");
+        assert!(refreshed.readiness.is_none());
+        assert!(refreshed.preview_identity.public_url.is_none());
     });
 }
 
