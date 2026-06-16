@@ -1477,6 +1477,44 @@ assert.equal(metadataAgentRuntimeTerminalFailureOutcome.status, 'failed');
 assert.equal(metadataAgentRuntimeTerminalFailureOutcome.diagnostics[0].class, 'agent_runtime.failed');
 assert.equal(metadataAgentRuntimeTerminalFailureOutcome.diagnostics[0].data.reason, 'provider_auth_failed');
 
+const workloadScenarioRuntimeFailureOutcome = agentTaskOutcomeFromCodeboxResult(request, {
+  success: true,
+  schema: 'wp-codebox/agent-task-run/v1',
+  status: 'completed',
+  metadata: {
+    agent_runtime: {
+      workload: {
+        outputs: {},
+        scenarios: [{
+          id: 'agent-bundle',
+          metadata: {
+            error_step_id: 'ephemeral_step_0',
+            error_reason: 'ai_processing_failed',
+            terminal_status: 'failed - ai_processing_failed',
+          },
+        }],
+      },
+    },
+  },
+});
+assert.equal(workloadScenarioRuntimeFailureOutcome.status, 'failed');
+assert.equal(workloadScenarioRuntimeFailureOutcome.diagnostics[0].class, 'agent_runtime.failed');
+assert.equal(workloadScenarioRuntimeFailureOutcome.diagnostics[0].data.reason, 'ai_processing_failed');
+assert.equal(workloadScenarioRuntimeFailureOutcome.diagnostics[0].data.error_step_id, 'ephemeral_step_0');
+
+const outputRuntimeFailureMetadataOutcome = agentTaskOutcomeFromCodeboxResult(request, {
+  success: true,
+  schema: 'wp-codebox/agent-task-run/v1',
+  status: 'completed',
+  outputs: {
+    error_step_id: 'ephemeral_step_1',
+    error_reason: 'provider_auth_failed',
+  },
+});
+assert.equal(outputRuntimeFailureMetadataOutcome.status, 'failed');
+assert.equal(outputRuntimeFailureMetadataOutcome.diagnostics[0].class, 'agent_runtime.failed');
+assert.equal(outputRuntimeFailureMetadataOutcome.diagnostics[0].data.reason, 'provider_auth_failed');
+
 const agentBundleOutcome = agentTaskOutcomeFromCodeboxResult({
   ...request,
   task_id: 'agent-bundle-task-123',

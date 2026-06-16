@@ -131,6 +131,19 @@ const agentResult = isRuntimeTask
   ? runtimeTaskResult
   : (isAgentBundle && process.env.FIXTURE_WP_CODEBOX_FAILED_AGENT_BUNDLE
   ? { scenarios: [{ id: 'agent-bundle', metadata: { error: 'Agent bundle child job 456 did not reach a terminal state after drain; current status is pending.' } }] }
+  : (isAgentBundle && process.env.FIXTURE_WP_CODEBOX_FAILED_RUNTIME_METADATA
+  ? {
+      outputs: {},
+      scenarios: [{
+        id: 'agent-bundle',
+        metadata: {
+          error_step_id: 'ephemeral_step_0',
+          error_reason: 'ai_processing_failed',
+          terminal_status: 'failed - ai_processing_failed',
+          message: 'Codex OAuth refresh failed.'
+        }
+      }]
+    }
   : (isAgentBundle && process.env.FIXTURE_WP_CODEBOX_BUNDLE_RUN
       ? {
           agent_runtime: {
@@ -150,7 +163,7 @@ const agentResult = isRuntimeTask
         }
   : (isAgentBundle && !process.env.FIXTURE_WP_CODEBOX_INCOMPLETE_AGENT_BUNDLE
       ? { metrics: { config_present: 1 }, metadata: { engine_data: { store_idea_agent: { issue_number: 123 } } } }
-      : { status: 'completed' }))));
+      : { status: 'completed' })))));
 fs.writeFileSync(out, JSON.stringify({ argv: process.argv.slice(2), input }, null, 2));
 const execution = { recipeCommand: 'wp-codebox.agent-sandbox-run', exitCode: 0, stdout: JSON.stringify({ status: 'completed', output: JSON.stringify(agentResult) }) };
 const executions = [execution];
@@ -480,6 +493,39 @@ try {
   assert.equal(missingRequiredArtifactOutput.success, false);
   assert.equal(missingRequiredArtifactOutput.diagnostics[0].class, 'wp-codebox.required_typed_artifacts_missing');
   assert.equal(missingRequiredArtifactOutput.diagnostics[0].data.missing[0].name, 'missing_required_report');
+
+  const failedRuntimeMetadataResult = spawnSync(process.execPath, [
+    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-wp-codebox-task-runner.cjs'),
+    '--wp-codebox-bin', fixtureWpCodebox,
+  ], {
+    encoding: 'utf8',
+    input: JSON.stringify({
+      ...request,
+      agent_bundle: {
+        source: 'bundles/store-idea-agent',
+        flow_slug: 'store-idea-artifact-flow',
+      },
+      artifact_declarations: [{
+        schema: 'wp-codebox/artifact-declaration/v1',
+        name: 'concept_packet',
+        type: 'ConceptPacket',
+        artifact_schema: 'static-site-generator/concept-packet/v1',
+        required: true,
+      }],
+    }),
+    env: {
+      ...process.env,
+      FIXTURE_WP_CODEBOX_CAPTURE: path.join(root, 'capture-failed-runtime-metadata.json'),
+      FIXTURE_WP_CODEBOX_FAILED_RUNTIME_METADATA: '1',
+      OPENCODE_API_KEY: 'redacted-test-key',
+    },
+  });
+  assert.equal(failedRuntimeMetadataResult.status, 1, failedRuntimeMetadataResult.stderr || failedRuntimeMetadataResult.stdout);
+  const failedRuntimeMetadataOutput = JSON.parse(failedRuntimeMetadataResult.stdout);
+  assert.equal(failedRuntimeMetadataOutput.success, false);
+  assert.equal(failedRuntimeMetadataOutput.diagnostics.some((diagnostic) => diagnostic.class === 'agent_runtime.failed'), true);
+  assert.equal(failedRuntimeMetadataOutput.diagnostics.some((diagnostic) => diagnostic.class === 'wp-codebox.required_typed_artifacts_missing'), true);
+  assert.equal(failedRuntimeMetadataOutput.session.status, 'failed');
 
   const codexCapturePath = path.join(root, 'capture-codex.json');
   const codexSecretEnv = [

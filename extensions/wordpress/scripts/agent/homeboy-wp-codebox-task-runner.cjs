@@ -982,11 +982,13 @@ function normalizeAgentTaskRun(input, result) {
   const agentResult = hasSemanticWorkload(stdoutWorkload) ? stdoutWorkload : fallbackAgentResult;
   const bundleValidation = isAgentBundle(input) ? validateAgentRuntimeWorkload(agentResult, config) : validateRuntimeTaskWorkload(agentResult, config);
   const artifactValidation = missingRequiredTypedArtifactDiagnostic(input, agentResult, config);
-  const success = !bundleValidation && !artifactValidation;
+  const runtimeFailure = agentRuntimeFailureDiagnostic(agentResult);
+  const success = !bundleValidation && !artifactValidation && !runtimeFailure;
   const diagnostics = [
     ...(result.diagnostics || []),
     ...(bundleValidation ? [bundleValidation] : []),
     ...(artifactValidation ? [artifactValidation] : []),
+    ...(runtimeFailure ? [runtimeFailure] : []),
     ...(agentRuntimeDiagnostics(agentResult) || []),
   ];
 
@@ -995,7 +997,7 @@ function normalizeAgentTaskRun(input, result) {
     success,
     status: success ? 'completed' : result.status,
     outputs: plainObject(agentResult.outputs) ? agentResult.outputs : result.outputs,
-    summary: success ? 'WP Codebox agent task succeeded.' : (artifactValidation?.message || bundleValidation?.message || result.summary || 'WP Codebox agent task failed.'),
+    summary: success ? 'WP Codebox agent task succeeded.' : (artifactValidation?.message || bundleValidation?.message || runtimeFailure?.message || result.summary || 'WP Codebox agent task failed.'),
     session: result.session ? {
       ...result.session,
       status: success ? 'completed' : 'failed',
@@ -1278,6 +1280,68 @@ function validateAgentRuntimeWorkload(workload, config) {
   }
 
   return null;
+}
+
+function agentRuntimeFailureCandidates(workload) {
+  const scenarios = Array.isArray(workload?.scenarios) ? workload.scenarios : [];
+  return [
+    workload,
+    workload?.outputs,
+    workload?.metadata,
+    ...scenarios,
+    ...scenarios.map((scenario) => scenario?.metadata),
+    ...scenarios.map((scenario) => scenario?.outputs),
+  ].filter(plainObject);
+}
+
+function agentRuntimeCandidateFailed(candidate) {
+  const terminalStatus = String(candidate.terminal_status || candidate.terminalStatus || '').toLowerCase();
+  const status = String(candidate.status || candidate.outcome || '').toLowerCase();
+  const completionStatus = String(candidate.completion_outcome?.status || candidate.completionOutcome?.status || '').toLowerCase();
+  return candidate.success === false
+    || candidate.completion_outcome?.success === false
+    || candidate.completionOutcome?.success === false
+    || terminalStatus === 'failed'
+    || terminalStatus.startsWith('failed ')
+    || status === 'failed'
+    || completionStatus === 'failed'
+    || Boolean(candidate.error_reason || candidate.errorReason || candidate.error_step_id || candidate.errorStepId);
+}
+
+function agentRuntimeFailureReason(candidate) {
+  const terminalStatus = String(candidate.terminal_status || candidate.terminalStatus || '');
+  return candidate.error_reason
+    || candidate.errorReason
+    || candidate.reason
+    || candidate.completion_outcome?.reason
+    || candidate.completionOutcome?.reason
+    || (terminalStatus.startsWith('failed - ') ? terminalStatus.slice('failed - '.length).trim() : '')
+    || candidate.status
+    || '';
+}
+
+function agentRuntimeFailureDiagnostic(workload) {
+  const failure = agentRuntimeFailureCandidates(workload).find(agentRuntimeCandidateFailed);
+  if (!failure) {
+    return null;
+  }
+  const reason = agentRuntimeFailureReason(failure);
+  const message = failure.error_message
+    || failure.errorMessage
+    || failure.message
+    || failure.summary
+    || (reason ? `Embedded agent runtime failed: ${reason}.` : 'Embedded agent runtime failed.');
+  return {
+    class: 'agent_runtime.failed',
+    message,
+    data: {
+      reason,
+      status: failure.status,
+      terminal_status: failure.terminal_status || failure.terminalStatus,
+      error_reason: failure.error_reason || failure.errorReason,
+      error_step_id: failure.error_step_id || failure.errorStepId,
+    },
+  };
 }
 
 function validateRuntimeTaskWorkload(workload, config) {
