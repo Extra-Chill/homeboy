@@ -465,9 +465,17 @@ fn run_lab_offload_inner(
     let runner_homeboy = lab_runner_homeboy_metadata(runner_id, homeboy_path, &runner_status);
     plan = with_step(
         plan,
-        PlanStep::ready("lab.runner_homeboy", "lab.runner_homeboy")
-            .inputs(PlanValues::new().json("runner_homeboy", &runner_homeboy))
-            .build(),
+        PlanStep::builder(
+            "lab.runner_homeboy",
+            "lab.runner_homeboy",
+            if runner_status.stale_daemon.is_some() {
+                PlanStepStatus::Failed
+            } else {
+                PlanStepStatus::Ready
+            },
+        )
+        .inputs(PlanValues::new().json("runner_homeboy", &runner_homeboy))
+        .build(),
     );
     eprintln!(
         "Lab offload: runner `{}` Homeboy binary `{}`; active daemon {}; refresh with `{}`.",
@@ -487,6 +495,13 @@ fn run_lab_offload_inner(
                 shell::quote_arg(runner_id)
             ))
     );
+    if runner_status.stale_daemon.is_some() {
+        return Err(stale_runner_homeboy_error(
+            runner_id,
+            homeboy_path,
+            &runner_status,
+        ));
+    }
     let command_prefix = lab_offload_command_prefix(&source_path, homeboy_path);
     let capability_contract =
         lab_runner_capability_contract(&contract, &source_path, &command_prefix.required_tools);
@@ -1088,6 +1103,74 @@ fn lab_runner_homeboy_metadata(
     })
 }
 
+fn stale_runner_homeboy_error(
+    runner_id: &str,
+    configured_executable: &str,
+    status: &RunnerStatusReport,
+) -> Error {
+    let refresh_commands = runner_homeboy_refresh_commands(runner_id, status);
+    let active_daemon = status
+        .session
+        .as_ref()
+        .map(runner_session_homeboy_display)
+        .unwrap_or_else(|| "<not connected>".to_string());
+    let current_homeboy = status.stale_daemon.as_ref().map_or_else(
+        || "configured runner executable".to_string(),
+        runner_stale_daemon_current_display,
+    );
+    let drift_message = status
+        .stale_daemon
+        .as_ref()
+        .map(|warning| warning.message.clone())
+        .unwrap_or_else(|| {
+            "connected runner daemon was started by a different Homeboy runtime".to_string()
+        });
+    let refresh = refresh_commands.join(" && ");
+    Error::validation_invalid_argument(
+        "runner",
+        format!(
+            "Lab offload refused runner `{runner_id}` because its active daemon Homeboy/runtime differs from the configured runner executable `{configured_executable}`. Active daemon: {active_daemon}; configured runtime: {current_homeboy}. {drift_message} Stale runner runtimes can return malformed or misleading provider output; reconnect the runner before retrying."
+        ),
+        Some(runner_id.to_string()),
+        Some(vec![
+            format!("Reconnect runner `{runner_id}` before retrying Lab offload: {refresh}"),
+            format!("If the runner binary itself is stale, upgrade it with `homeboy upgrade --force --upgrade-runner {}`.", shell::quote_arg(runner_id)),
+            "Use --force-hot --allow-local-hot only if you intentionally want to bypass Lab offload and run locally.".to_string(),
+        ]),
+    )
+}
+
+fn runner_homeboy_refresh_commands(runner_id: &str, status: &RunnerStatusReport) -> Vec<String> {
+    let commands = status
+        .stale_daemon
+        .as_ref()
+        .map(|warning| warning.recovery_commands.clone())
+        .unwrap_or_default();
+    if !commands.is_empty() && !runner_id.contains(char::is_whitespace) {
+        return commands;
+    }
+    vec![
+        format!("homeboy runner disconnect {}", shell::quote_arg(runner_id)),
+        format!("homeboy runner connect {}", shell::quote_arg(runner_id)),
+    ]
+}
+
+fn runner_session_homeboy_display(session: &super::super::RunnerSession) -> String {
+    session
+        .homeboy_build_identity
+        .as_deref()
+        .unwrap_or(&session.homeboy_version)
+        .to_string()
+}
+
+fn runner_stale_daemon_current_display(warning: &super::super::RunnerStaleDaemonWarning) -> String {
+    warning
+        .current_homeboy_build_identity
+        .as_deref()
+        .unwrap_or(&warning.current_homeboy_version)
+        .to_string()
+}
+
 fn runner_homeboy_daemon_display(metadata: &serde_json::Value) -> String {
     metadata
         .get("active_daemon_build_identity")
@@ -1580,7 +1663,7 @@ mod tests {
     use crate::core::plan::PlanKind;
     use crate::core::runner::{
         RunnerExecMode, RunnerExecOutput, RunnerRequiredTool, RunnerSession, RunnerSessionState,
-        RunnerTunnelMode, RunnerWorkspaceSyncOutput,
+        RunnerStaleDaemonWarning, RunnerTunnelMode, RunnerWorkspaceSyncOutput,
     };
 
     pub(super) fn portable_lab_command(label: &'static str) -> LabOffloadCommand {
@@ -1817,6 +1900,18 @@ mod tests {
             active_jobs: Vec::new(),
             session_path: "/tmp/lab.json".to_string(),
         }
+    }
+
+    fn stale_reverse_status(runner_id: &str) -> RunnerStatusReport {
+        let mut status = reverse_status(runner_id);
+        status.stale_daemon = Some(RunnerStaleDaemonWarning::new(
+            runner_id,
+            "homeboy 0.228.0".to_string(),
+            "homeboy 0.229.11".to_string(),
+            Some("homeboy 0.228.0+old".to_string()),
+            Some("homeboy 0.229.11+new".to_string()),
+        ));
+        status
     }
 
     #[test]
@@ -2081,6 +2176,71 @@ mod tests {
         assert_eq!(
             metadata["upgrade_command"],
             "homeboy upgrade --force --upgrade-runner 'homeboy lab'"
+        );
+    }
+
+    #[test]
+    fn stale_runner_homeboy_error_blocks_offload_with_reconnect_guidance() {
+        let status = stale_reverse_status("homeboy lab");
+
+        let err = stale_runner_homeboy_error(
+            "homeboy lab",
+            "/home/chubes/Developer/_lab_workspaces/homeboy-post-4583-proof/target/debug/homeboy",
+            &status,
+        );
+
+        assert_eq!(err.code, ErrorCode::ValidationInvalidArgument);
+        assert_eq!(err.details["field"], "runner");
+        assert_eq!(err.details["value"], "homeboy lab");
+        assert!(err
+            .message
+            .contains("Lab offload refused runner `homeboy lab`"));
+        assert!(err
+            .message
+            .contains("/home/chubes/Developer/_lab_workspaces/homeboy-post-4583-proof"));
+        assert!(err.message.contains("Active daemon: homeboy 0.0.0+test"));
+        assert!(err
+            .message
+            .contains("configured runtime: homeboy 0.229.11+new"));
+        assert!(err
+            .message
+            .contains("malformed or misleading provider output"));
+        assert!(err.hints.iter().any(|hint| hint.message.contains(
+            "homeboy runner disconnect 'homeboy lab' && homeboy runner connect 'homeboy lab'"
+        )));
+        assert!(err.hints.iter().any(|hint| hint
+            .message
+            .contains("homeboy upgrade --force --upgrade-runner 'homeboy lab'")));
+    }
+
+    #[test]
+    fn runner_homeboy_metadata_carries_stale_daemon_details() {
+        let status = stale_reverse_status("lab");
+
+        let metadata = lab_runner_homeboy_metadata("lab", "homeboy", &status);
+
+        assert_eq!(
+            metadata["stale_daemon"]["session_homeboy_version"],
+            "homeboy 0.228.0"
+        );
+        assert_eq!(
+            metadata["stale_daemon"]["current_homeboy_version"],
+            "homeboy 0.229.11"
+        );
+        assert_eq!(
+            metadata["stale_daemon"]["session_homeboy_build_identity"],
+            "homeboy 0.228.0+old"
+        );
+        assert_eq!(
+            metadata["stale_daemon"]["current_homeboy_build_identity"],
+            "homeboy 0.229.11+new"
+        );
+        assert_eq!(
+            metadata["refresh_commands"],
+            serde_json::json!([
+                "homeboy runner disconnect lab",
+                "homeboy runner connect lab"
+            ])
         );
     }
 

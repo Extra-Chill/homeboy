@@ -289,7 +289,7 @@ fn connected_runner_not_ready_reason(
             restart
         };
         return Some(format!(
-            "connected runner `{runner_id}` daemon is stale: connected daemon reports {}, but the configured runner executable reports {}; restart the active daemon with `{restart}`",
+            "connected runner `{runner_id}` daemon is stale: connected daemon reports {}, but the configured runner executable reports {}; stale runner runtimes can return malformed or misleading provider output; restart the active daemon with `{restart}`",
             warning.session_homeboy_version, warning.current_homeboy_version
         ));
     }

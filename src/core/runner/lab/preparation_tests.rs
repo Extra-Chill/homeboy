@@ -123,7 +123,7 @@ fn lab_runner_preparation_falls_back_for_stale_default_daemon_version() {
     assert_eq!(
         prepared,
         LabRunnerPreparation::FallBackLocal {
-            reason: "connected runner `lab` daemon is stale: connected daemon reports homeboy 0.218.0, but the configured runner executable reports homeboy 0.219.0; restart the active daemon with `homeboy runner disconnect lab && homeboy runner connect lab`".to_string()
+            reason: "connected runner `lab` daemon is stale: connected daemon reports homeboy 0.218.0, but the configured runner executable reports homeboy 0.219.0; stale runner runtimes can return malformed or misleading provider output; restart the active daemon with `homeboy runner disconnect lab && homeboy runner connect lab`".to_string()
         }
     );
 }
@@ -163,6 +163,9 @@ fn lab_runner_preparation_errors_for_explicit_stale_daemon_version() {
     assert!(err
         .message
         .contains("homeboy runner disconnect lab && homeboy runner connect lab"));
+    assert!(err
+        .message
+        .contains("malformed or misleading provider output"));
     assert!(err
         .details
         .get("tried")
