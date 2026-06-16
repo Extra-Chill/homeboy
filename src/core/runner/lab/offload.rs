@@ -1835,6 +1835,7 @@ fn agent_task_provider_selection_preflight_error(
         format!(
             "Local provider availability: {local_available}; runner provider availability: {runner_available}."
         ),
+        provider_preflight_homeboy_identity_hint(runner_id, runner_homeboy),
         refresh_hint(runner_id, runner_homeboy, refresh_result),
         format!(
             "Upgrade or sync the runner runtime/extensions with `{}`.",
@@ -1854,6 +1855,32 @@ fn agent_task_provider_selection_preflight_error(
         ),
         Some(selection.backend.clone()),
         Some(hints),
+    )
+}
+
+fn provider_preflight_homeboy_identity_hint(
+    runner_id: &str,
+    runner_homeboy: &serde_json::Value,
+) -> String {
+    let controller = crate::core::build_identity::current().display;
+    let runner = runner_homeboy_daemon_display(runner_homeboy);
+    if runner == "<not connected>" {
+        return format!(
+            "Controller Homeboy is `{controller}`; runner `{runner_id}` has no active daemon identity in Lab status."
+        );
+    }
+
+    if runner == controller {
+        return format!(
+            "Controller and runner `{runner_id}` are both using Homeboy `{controller}`."
+        );
+    }
+
+    format!(
+        "Controller Homeboy is `{controller}`, but runner `{runner_id}` active daemon is `{runner}`. Refresh the active binaries/session before treating this as provider drift: {}.",
+        runner_homeboy["upgrade_command"]
+            .as_str()
+            .unwrap_or("homeboy upgrade --force --upgrade-runner <runner>")
     )
 }
 
@@ -2913,6 +2940,48 @@ mod tests {
         assert!(tried.iter().any(|hint| hint
             .as_str()
             .is_some_and(|hint| hint.contains("runner provider availability: false"))));
+        assert!(tried.iter().any(|hint| hint.as_str().is_some_and(
+            |hint| hint.contains("homeboy upgrade --force --upgrade-runner homeboy-lab")
+        )));
+    }
+
+    #[test]
+    fn provider_preflight_error_prioritizes_homeboy_identity_mismatch() {
+        let selection = AgentTaskProviderSelection {
+            backend: "primary".to_string(),
+            selector: None,
+        };
+        let runner_homeboy = serde_json::json!({
+            "active_daemon_build_identity": "homeboy 0.0.0+old",
+            "refresh_commands": [
+                "homeboy runner disconnect homeboy-lab",
+                "homeboy runner connect homeboy-lab"
+            ],
+            "upgrade_command": "homeboy upgrade --force --upgrade-runner homeboy-lab"
+        });
+
+        let err = agent_task_provider_selection_preflight_error(
+            "homeboy-lab",
+            &selection,
+            true,
+            Some(false),
+            &runner_homeboy,
+            None,
+            &[
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "providers".to_string(),
+            ],
+            None,
+        );
+
+        let tried = err.details["tried"].as_array().expect("tried hints");
+        assert!(tried.iter().any(|hint| hint
+            .as_str()
+            .is_some_and(|hint| hint.contains("Controller Homeboy is `homeboy"))));
+        assert!(tried.iter().any(|hint| hint
+            .as_str()
+            .is_some_and(|hint| hint.contains("active daemon is `homeboy 0.0.0+old`"))));
         assert!(tried.iter().any(|hint| hint.as_str().is_some_and(
             |hint| hint.contains("homeboy upgrade --force --upgrade-runner homeboy-lab")
         )));
