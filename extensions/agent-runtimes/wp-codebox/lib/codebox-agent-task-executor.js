@@ -1274,6 +1274,8 @@ function normalizeStatus(result) {
 }
 
 function agentRuntimeResultCandidates(result) {
+  const workload = agentRuntimeWorkload(result) || {};
+  const scenarios = Array.isArray(workload.scenarios) ? workload.scenarios : [];
   return [
     result?.outputs?.agent_runtime?.result,
     result?.outputs?.agent_runtime?.workload,
@@ -1287,6 +1289,12 @@ function agentRuntimeResultCandidates(result) {
     result?.run?.agentResult,
     result?.agentResult,
     result?.agent_result,
+    result?.outputs,
+    workload,
+    workload.outputs,
+    ...scenarios,
+    ...scenarios.map((scenario) => scenario?.metadata),
+    ...scenarios.map((scenario) => scenario?.outputs),
   ].filter((candidate) => candidate && typeof candidate === 'object' && !Array.isArray(candidate));
 }
 
@@ -1305,18 +1313,21 @@ function agentRuntimeWorkload(result) {
 }
 
 function agentRuntimeFailure(result) {
-  return agentRuntimeResultCandidates(result).find((candidate) => {
-    const terminalStatus = String(candidate.terminal_status || candidate.terminalStatus || '').toLowerCase();
-    const status = String(candidate.status || candidate.outcome || '').toLowerCase();
-    const completionStatus = String(candidate.completion_outcome?.status || candidate.completionOutcome?.status || '').toLowerCase();
-    return candidate.success === false
-      || candidate.completion_outcome?.success === false
-      || candidate.completionOutcome?.success === false
-      || terminalStatus === 'failed'
-      || terminalStatus.startsWith('failed ')
-      || status === 'failed'
-      || completionStatus === 'failed';
-  }) || null;
+  return agentRuntimeResultCandidates(result).find(agentRuntimeCandidateFailed) || null;
+}
+
+function agentRuntimeCandidateFailed(candidate) {
+  const terminalStatus = String(candidate.terminal_status || candidate.terminalStatus || '').toLowerCase();
+  const status = String(candidate.status || candidate.outcome || '').toLowerCase();
+  const completionStatus = String(candidate.completion_outcome?.status || candidate.completionOutcome?.status || '').toLowerCase();
+  return candidate.success === false
+    || candidate.completion_outcome?.success === false
+    || candidate.completionOutcome?.success === false
+    || terminalStatus === 'failed'
+    || terminalStatus.startsWith('failed ')
+    || status === 'failed'
+    || completionStatus === 'failed'
+    || Boolean(candidate.error_reason || candidate.errorReason || candidate.error_step_id || candidate.errorStepId);
 }
 
 function agentRuntimeFailureReason(runtimeFailure) {
@@ -1354,6 +1365,7 @@ function agentRuntimeFailureDiagnostic(result) {
       status: runtimeFailure.status,
       terminal_status: runtimeFailure.terminal_status || runtimeFailure.terminalStatus,
       error_reason: runtimeFailure.error_reason || runtimeFailure.errorReason,
+      error_step_id: runtimeFailure.error_step_id || runtimeFailure.errorStepId,
     }),
   };
 }
