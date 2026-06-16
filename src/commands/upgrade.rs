@@ -184,6 +184,7 @@ mod tests {
             extensions_skipped: Vec::new(),
             runners_updated: Vec::new(),
             runners_skipped: Vec::new(),
+            extensions_unrefreshed: Vec::new(),
         }
     }
 }
