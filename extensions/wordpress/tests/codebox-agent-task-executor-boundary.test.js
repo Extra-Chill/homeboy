@@ -24,7 +24,7 @@ const runtime = manifest.agent_runtimes.find((candidate) => candidate.id === 'wp
 assert(runtime, 'WordPress manifest declares the WP Codebox agent runtime');
 assert.equal(runtime.agent_task_executors.length, 1);
 assert.deepEqual(runtime.agent_task_executors[0], providerContract({
-  command: 'node {{extension_path}}/../agent-runtimes/wp-codebox/scripts/agent/homeboy-codebox-agent-task-executor.cjs',
+  command: 'node {{extension_path}}/scripts/agent/homeboy-codebox-agent-task-executor.cjs',
 }));
 assert.equal(provider.capabilities.includes('tool:wpsg_materialize_packet'), false);
 assert.equal(provider.capabilities.includes('ability:wpsg_materialize_packet'), false);
@@ -173,5 +173,27 @@ const legacyTaskInput = codeboxTaskRequestFromAgentTaskRequest({
 });
 
 assert.equal(legacyTaskInput.schema, 'wp-codebox/task-input/v1');
+
+const previousHomeboySettingsJson = process.env.HOMEBOY_SETTINGS_JSON;
+process.env.HOMEBOY_SETTINGS_JSON = JSON.stringify({
+  provider_plugin_paths: ['/missing/stale-openai-provider'],
+});
+let codexTaskInput;
+try {
+  codexTaskInput = codeboxTaskRequestFromAgentTaskRequest({
+    schema: 'homeboy/agent-task-request/v1',
+    task_id: 'codex-codebox-task-1',
+    executor: { backend: 'wordpress', config: { provider: 'codex' } },
+    instructions: 'Run a Codex-backed Codebox task.',
+    inputs: {},
+  });
+} finally {
+  if (previousHomeboySettingsJson === undefined) {
+    delete process.env.HOMEBOY_SETTINGS_JSON;
+  } else {
+    process.env.HOMEBOY_SETTINGS_JSON = previousHomeboySettingsJson;
+  }
+}
+assert.deepEqual(codexTaskInput.provider_plugin_paths, []);
 
 console.log('Codebox agent-task executor boundary contract passed');

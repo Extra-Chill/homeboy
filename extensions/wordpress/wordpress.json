@@ -28,7 +28,7 @@
       "id": "wordpress.codebox-agent-task-executor",
       "label": "WP Codebox agent task executor",
       "backend": "codebox",
-      "command": "node {{extension_path}}/../agent-runtimes/wp-codebox/scripts/agent/homeboy-codebox-agent-task-executor.cjs",
+      "command": "node {{extension_path}}/scripts/agent/homeboy-codebox-agent-task-executor.cjs",
       "request_schema": "homeboy/agent-task-request/v1",
       "outcome_schema": "homeboy/agent-task-outcome/v1",
       "request_required_fields": [

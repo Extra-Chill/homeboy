@@ -748,12 +748,16 @@ function defaultCodeboxRuntimeConfig(request, config, inputs, options = {}) {
 }
 
 function defaultProviderPluginPaths(provider, settings, fallbackProviderPluginPath) {
-  const explicit = normalizeArray(settings.wp_codebox_provider_plugin_paths || settings.provider_plugin_paths);
-  if (explicit.length > 0) {
-    return explicit;
+  const explicitCodebox = normalizeArray(settings.wp_codebox_provider_plugin_paths);
+  if (explicitCodebox.length > 0) {
+    return explicitCodebox;
   }
   if (provider === 'codex') {
     return [];
+  }
+  const explicit = normalizeArray(settings.provider_plugin_paths);
+  if (explicit.length > 0) {
+    return explicit;
   }
   return fallbackProviderPluginPath ? [fallbackProviderPluginPath] : [];
 }

@@ -300,7 +300,7 @@ const manifestRuntime = manifest.agent_runtimes.find((runtime) => runtime.id ===
 assert(manifestRuntime, 'WordPress manifest declares the WP Codebox agent runtime');
 const manifestProvider = manifestRuntime.agent_task_executors.find((executor) => executor.id === provider.id);
 assert.deepEqual(manifestProvider, providerContract({
-  command: 'node {{extension_path}}/../agent-runtimes/wp-codebox/scripts/agent/homeboy-codebox-agent-task-executor.cjs',
+  command: 'node {{extension_path}}/scripts/agent/homeboy-codebox-agent-task-executor.cjs',
 }));
 for (const capability of repoLoopCapabilities) {
   assert.equal(manifestProvider.capabilities.includes(capability), true);
