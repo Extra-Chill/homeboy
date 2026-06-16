@@ -28,6 +28,10 @@ jobs:
       component: homeboy
       commands: audit,lint,test
       differential-gating: true
+      # Autofix is explicitly disabled on PRs: an on-failure autofix push
+      # lands a bot commit mid-review and supersedes in-flight CI runs,
+      # which reads as a spurious failure (see #3819). Require manual fixes.
+      autofix: 'false'
       build-command: cargo build --release
       build-artifact-path: target/release/homeboy
     secrets: inherit
