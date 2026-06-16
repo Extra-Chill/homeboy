@@ -19,6 +19,7 @@
 use std::path::Path;
 
 use crate::core::agent_task_lifecycle;
+use crate::core::agent_task_provider::provider_available_for_backend;
 use crate::core::agent_tasks::provider::{
     AgentTaskExecutorProvider, ExtensionProviderAgentTaskExecutor,
 };
@@ -1809,9 +1810,7 @@ fn provider_available(
     backend: &str,
     selector: Option<&str>,
 ) -> bool {
-    providers.iter().any(|provider| {
-        provider.backend == backend && selector.is_none_or(|selector| provider.id == selector)
-    })
+    provider_available_for_backend(providers, backend, selector)
 }
 
 fn agent_task_provider_selection_preflight_error(
@@ -2897,6 +2896,28 @@ mod tests {
         assert!(provider_available(&providers, "primary", None));
         assert!(provider_available(&providers, "primary", Some("variant-a")));
         assert!(!provider_available(&providers, "primary", Some("missing")));
+    }
+
+    #[test]
+    fn parsed_provider_availability_accepts_unique_extension_alias() {
+        let stdout = concat!(
+            "Preparing runtime...\n",
+            "{\"success\":true,\"data\":{\"providers\":[{\"schema\":\"homeboy/agent-task-executor-provider/v1\",\"id\":\"extension-a.agent-task-executor\",\"backend\":\"renamed-backend\",\"default_backend\":true,\"command\":\"extension-a agent\",\"request_schema\":\"homeboy/agent-task-request/v1\",\"outcome_schema\":\"homeboy/agent-task-outcome/v1\",\"extension_id\":\"extension-a\"}]}}\n"
+        );
+
+        let providers = parse_agent_task_providers_output(stdout).expect("providers parse");
+
+        assert!(provider_available(&providers, "extension-a", None));
+        assert!(provider_available(
+            &providers,
+            "extension-a",
+            Some("extension-a.agent-task-executor")
+        ));
+        assert!(!provider_available(
+            &providers,
+            "extension-a",
+            Some("missing")
+        ));
     }
 
     #[test]

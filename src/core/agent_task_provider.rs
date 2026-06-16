@@ -267,9 +267,7 @@ fn provider_requires_cwd_git_checkout_with_providers(
     backend: &str,
     selector: Option<&str>,
 ) -> bool {
-    providers
-        .iter()
-        .find(|provider| provider_matches_backend(provider, backend, selector))
+    select_provider_by_backend(providers, backend, selector)
         .and_then(|provider| provider.workspace_materialization.as_ref())
         .and_then(|materialization| materialization.cwd.as_deref())
         == Some("git_checkout")
@@ -581,6 +579,14 @@ fn select_provider<'a>(
     )
 }
 
+pub(crate) fn provider_available_for_backend(
+    providers: &[AgentTaskExecutorProvider],
+    backend: &str,
+    selector: Option<&str>,
+) -> bool {
+    select_provider_by_backend(providers, backend, selector).is_some()
+}
+
 fn select_provider_by_backend<'a>(
     providers: &'a [AgentTaskExecutorProvider],
     backend: &str,
@@ -588,15 +594,35 @@ fn select_provider_by_backend<'a>(
 ) -> Option<&'a AgentTaskExecutorProvider> {
     providers
         .iter()
-        .find(|provider| provider_matches_backend(provider, backend, selector))
+        .find(|provider| provider_matches_exact_backend(provider, backend, selector))
+        .or_else(|| select_provider_by_extension_alias(providers, backend, selector))
 }
 
-fn provider_matches_backend(
+fn provider_matches_exact_backend(
     provider: &AgentTaskExecutorProvider,
     backend: &str,
     selector: Option<&str>,
 ) -> bool {
     provider.backend == backend && selector.is_none_or(|selector| provider.id == selector)
+}
+
+fn select_provider_by_extension_alias<'a>(
+    providers: &'a [AgentTaskExecutorProvider],
+    backend: &str,
+    selector: Option<&str>,
+) -> Option<&'a AgentTaskExecutorProvider> {
+    let mut matches = providers
+        .iter()
+        .filter(|provider| provider.extension_id.as_deref() == Some(backend));
+    let provider = matches.next()?;
+    if matches.next().is_some() {
+        return None;
+    }
+    if selector.is_none_or(|selector| provider.id == selector) {
+        Some(provider)
+    } else {
+        None
+    }
 }
 
 fn required_extension_ids_for_plan_with_providers(
@@ -978,6 +1004,74 @@ mod tests {
         ));
 
         assert_eq!(extension_ids, vec!["extension-a", "extension-b"]);
+    }
+
+    #[test]
+    fn provider_selection_matches_exact_backend_first() {
+        let (_, mut exact_provider) = request("task-a", "node exact-provider.js".to_string());
+        exact_provider.id = "exact-provider".to_string();
+        exact_provider.backend = "requested-backend".to_string();
+        exact_provider.extension_id = Some("other-extension".to_string());
+        let (_, mut extension_provider) =
+            request("task-b", "node extension-provider.js".to_string());
+        extension_provider.id = "extension-provider".to_string();
+        extension_provider.backend = "renamed-backend".to_string();
+        extension_provider.extension_id = Some("requested-backend".to_string());
+
+        let providers = [extension_provider, exact_provider];
+        let selected = select_provider_by_backend(&providers, "requested-backend", None)
+            .expect("provider selected");
+
+        assert_eq!(selected.id, "exact-provider");
+    }
+
+    #[test]
+    fn provider_selection_matches_unique_extension_alias() {
+        let (_, mut provider) = request("task-a", "node provider.js".to_string());
+        provider.id = "extension-a.provider".to_string();
+        provider.backend = "renamed-backend".to_string();
+        provider.extension_id = Some("extension-a".to_string());
+
+        let providers = [provider];
+        let selected =
+            select_provider_by_backend(&providers, "extension-a", None).expect("provider selected");
+
+        assert_eq!(selected.backend, "renamed-backend");
+    }
+
+    #[test]
+    fn provider_selection_rejects_ambiguous_extension_alias() {
+        let (_, mut provider_a) = request("task-a", "node provider-a.js".to_string());
+        provider_a.id = "provider-a".to_string();
+        provider_a.backend = "renamed-backend".to_string();
+        provider_a.extension_id = Some("extension-a".to_string());
+        let (_, mut provider_b) = request("task-b", "node provider-b.js".to_string());
+        provider_b.id = "provider-b".to_string();
+        provider_b.backend = "fixture".to_string();
+        provider_b.extension_id = Some("extension-a".to_string());
+
+        assert!(
+            select_provider_by_backend(&[provider_a, provider_b], "extension-a", None).is_none()
+        );
+    }
+
+    #[test]
+    fn provider_selection_applies_selector_to_unique_extension_alias() {
+        let (_, mut provider) = request("task-a", "node provider.js".to_string());
+        provider.id = "selected-provider".to_string();
+        provider.backend = "renamed-backend".to_string();
+        provider.extension_id = Some("extension-a".to_string());
+
+        assert!(
+            select_provider_by_backend(&[provider.clone()], "extension-a", Some("missing"))
+                .is_none()
+        );
+        assert_eq!(
+            select_provider_by_backend(&[provider], "extension-a", Some("selected-provider"))
+                .expect("provider selected")
+                .id,
+            "selected-provider"
+        );
     }
 
     #[test]
