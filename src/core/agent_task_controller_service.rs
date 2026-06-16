@@ -523,11 +523,10 @@ fn validate_loop_spec(spec: &AgentTaskRepoLoopSpec) -> Result<()> {
             &spec.artifacts,
             |artifact| &artifact.artifact_id,
         )?;
-        validate_declared_ids(
+        validate_workflow_dependencies(
             format!("workflows[{index}].dependencies"),
             &workflow.dependencies,
-            &spec.dependencies,
-            |dependency| &dependency.dependency_id,
+            spec,
         )?;
         validate_declared_ids(
             format!("workflows[{index}].gates"),
@@ -587,6 +586,45 @@ where
         Some(requested.to_string()),
         None,
     ))
+}
+
+fn validate_workflow_dependencies(
+    field: String,
+    requested: &[String],
+    spec: &AgentTaskRepoLoopSpec,
+) -> Result<()> {
+    for value in requested {
+        if spec
+            .dependencies
+            .iter()
+            .any(|dependency| dependency.dependency_id == value.as_str())
+            || spec
+                .artifacts
+                .iter()
+                .any(|artifact| artifact.artifact_id == value.as_str())
+        {
+            continue;
+        }
+
+        let mut known_ids: Vec<String> = spec
+            .dependencies
+            .iter()
+            .map(|dependency| format!("dependency:{}", dependency.dependency_id))
+            .chain(
+                spec.artifacts
+                    .iter()
+                    .map(|artifact| format!("artifact:{}", artifact.artifact_id)),
+            )
+            .collect();
+        known_ids.sort();
+        return Err(Error::validation_invalid_argument(
+            field,
+            "repo loop spec workflow dependency must reference a declared dependency_id or artifact_id",
+            Some(value.clone()),
+            Some(known_ids),
+        ));
+    }
+    Ok(())
 }
 
 fn compile_loop_spec_workflows(
@@ -697,6 +735,7 @@ fn workflow_client_context(
         "tools": select_by_id(&spec.tools, &workflow.tools, |tool| &tool.tool_id),
         "abilities": select_by_id(&spec.abilities, &workflow.abilities, |ability| &ability.ability_id),
         "artifacts": select_by_id(&spec.artifacts, &workflow.artifacts, |artifact| &artifact.artifact_id),
+        "artifact_dependencies": select_by_id(&spec.artifacts, &workflow.dependencies, |artifact| &artifact.artifact_id),
         "dependencies": select_by_id(&spec.dependencies, &workflow.dependencies, |dependency| &dependency.dependency_id),
         "gates": select_by_id(&spec.gates, &workflow.gates, |gate| &gate.gate_id),
         "metrics": select_by_id(&spec.metrics, &workflow.metrics, |metric| &metric.metric_id),
@@ -793,6 +832,7 @@ fn workflow_declaration_context(
         "tools": select_by_id(&spec.tools, &workflow.tools, |tool| &tool.tool_id),
         "abilities": select_by_id(&spec.abilities, &workflow.abilities, |ability| &ability.ability_id),
         "artifacts": select_by_id(&spec.artifacts, &workflow.artifacts, |artifact| &artifact.artifact_id),
+        "artifact_dependencies": select_by_id(&spec.artifacts, &workflow.dependencies, |artifact| &artifact.artifact_id),
         "dependencies": select_by_id(&spec.dependencies, &workflow.dependencies, |dependency| &dependency.dependency_id),
         "gates": select_by_id(&spec.gates, &workflow.gates, |gate| &gate.gate_id),
         "metrics": select_by_id(&spec.metrics, &workflow.metrics, |metric| &metric.metric_id),
@@ -2456,17 +2496,28 @@ mod tests {
                     tools: vec!["repo-inspector".to_string()],
                     abilities: vec!["apply_patch".to_string()],
                     artifacts: vec!["patch".to_string()],
-                    dependencies: vec!["source-tree".to_string()],
+                    dependencies: vec![
+                        "source-tree".to_string(),
+                        "static_site_pull_request".to_string(),
+                    ],
                     gates: vec!["quality".to_string()],
                     metrics: vec!["visual-parity".to_string()],
                     inputs: json!({ "finding_key": "abc" }),
                 }],
-                artifacts: vec![AgentTaskRepoLoopSpecArtifact {
-                    artifact_id: "patch".to_string(),
-                    kind: "diff".to_string(),
-                    description: Some("candidate patch".to_string()),
-                    required: true,
-                }],
+                artifacts: vec![
+                    AgentTaskRepoLoopSpecArtifact {
+                        artifact_id: "patch".to_string(),
+                        kind: "diff".to_string(),
+                        description: Some("candidate patch".to_string()),
+                        required: true,
+                    },
+                    AgentTaskRepoLoopSpecArtifact {
+                        artifact_id: "static_site_pull_request".to_string(),
+                        kind: "pull_request".to_string(),
+                        description: Some("upstream pull request artifact".to_string()),
+                        required: true,
+                    },
+                ],
                 dependencies: vec![AgentTaskRepoLoopSpecDependency {
                     dependency_id: "source-tree".to_string(),
                     kind: "repo".to_string(),
@@ -2548,7 +2599,15 @@ mod tests {
                         json!(["tool:repo-inspector", "ability:apply_patch"])
                     );
                     assert_eq!(context["plan"]["steps"][0]["kind"], "agent_task_dispatch");
+                    assert_eq!(
+                        context["plan"]["steps"][0]["needs"],
+                        json!(["source-tree", "static_site_pull_request"])
+                    );
                     assert_eq!(context["plan"]["artifacts"][0]["id"], "patch");
+                    assert_eq!(
+                        context["artifact_dependencies"][0]["artifact_id"],
+                        "static_site_pull_request"
+                    );
                     assert_eq!(context["gates"][0]["gate_id"], "quality");
                     assert_eq!(context["metrics"][0]["metric_id"], "visual-parity");
                 }
