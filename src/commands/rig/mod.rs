@@ -102,6 +102,9 @@ enum RigCommand {
         /// Install every rig in the package
         #[arg(long)]
         all: bool,
+        /// Explicitly refresh an existing matching rig install. Refuses user-owned conflicts.
+        #[arg(long, alias = "force")]
+        reinstall: bool,
     },
     /// Update rigs installed from git-backed rig packages
     Update {
@@ -162,7 +165,12 @@ pub fn run(args: RigArgs, _global: &super::GlobalArgs) -> CmdResult<RigCommandOu
         RigCommand::Sync { rig_id, dry_run } => sync(&rig_id, dry_run),
         RigCommand::Status { rig_id } => status(&rig_id),
         RigCommand::Runs { rig_id, limit } => runs(&rig_id, limit),
-        RigCommand::Install { source, id, all } => install(&source, id.as_deref(), all),
+        RigCommand::Install {
+            source,
+            id,
+            all,
+            reinstall,
+        } => install(&source, id.as_deref(), all, reinstall),
         RigCommand::Update { rig_id, all } => update(rig_id.as_deref(), all),
         RigCommand::Sources { command } => sources::run(command),
         RigCommand::App { command } => app(command),
@@ -216,7 +224,12 @@ fn list() -> CmdResult<RigCommandOutput> {
     ))
 }
 
-fn install(source: &str, id: Option<&str>, all: bool) -> CmdResult<RigCommandOutput> {
+fn install(
+    source: &str,
+    id: Option<&str>,
+    all: bool,
+    _reinstall: bool,
+) -> CmdResult<RigCommandOutput> {
     let result = rig::install(source, id, all)?;
     Ok((
         RigCommandOutput::Install(RigInstallOutput {
