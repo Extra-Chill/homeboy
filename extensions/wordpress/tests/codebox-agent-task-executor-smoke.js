@@ -1518,6 +1518,37 @@ assert.equal(missingRequiredTypedArtifactOutcome.failure_classification, 'execut
 assert.equal(missingRequiredTypedArtifactOutcome.diagnostics[0].class, 'codebox.required_typed_artifacts_missing');
 assert.equal(missingRequiredTypedArtifactOutcome.diagnostics[0].data.missing[0].name, 'required_report');
 
+const missingGenericRepoLoopArtifactOutcome = agentTaskOutcomeFromCodeboxResult({
+  ...request,
+  task_id: 'missing-generic-repo-loop-artifact-task-123',
+  artifacts: {
+    outputs: {
+      concept_packet: {
+        type: 'ConceptPacket',
+        schema: 'static-site-generator/concept-packet/v1',
+      },
+    },
+  },
+  executor: { backend: 'codebox' },
+}, {
+  success: true,
+  schema: 'wp-codebox/agent-task-run/v1',
+  status: 'completed',
+  metadata: {
+    agent_runtime: {
+      workload: {
+        outputs: {},
+        scenarios: [{ id: 'agent-bundle', metadata: {} }],
+      },
+    },
+  },
+});
+assert.equal(missingGenericRepoLoopArtifactOutcome.status, 'failed');
+assert.equal(missingGenericRepoLoopArtifactOutcome.failure_classification, 'execution_failed');
+assert.equal(missingGenericRepoLoopArtifactOutcome.diagnostics[0].class, 'codebox.required_typed_artifacts_missing');
+assert.equal(missingGenericRepoLoopArtifactOutcome.diagnostics[0].data.missing[0].name, 'concept_packet');
+assert.equal(missingGenericRepoLoopArtifactOutcome.diagnostics[0].data.missing[0].artifact_schema, 'static-site-generator/concept-packet/v1');
+
 const canonicalTopLevelAgentBundleOutcome = agentTaskOutcomeFromCodeboxResult({
   ...request,
   task_id: 'canonical-top-level-agent-bundle-task-123',

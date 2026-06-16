@@ -71,6 +71,15 @@ const repoLoopBundleTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   task_id: 'repo-loop-agent-bundle-task-1',
   executor: { backend: 'wordpress', config: { provider: 'openai' } },
   instructions: 'Run a repo-loop bundle workflow.',
+  artifacts: {
+    outputs: {
+      concept_packet: {
+        type: 'ConceptPacket',
+        schema: 'static-site-generator/concept-packet/v1',
+        required: true,
+      },
+    },
+  },
   inputs: {
     ability_request: { name: 'datamachine/run-agent-bundle' },
     client_context: {
@@ -89,6 +98,13 @@ assert.deepEqual(repoLoopBundleTaskInput.runtime_task.input, {
   flow: 'store-idea-artifact-flow',
   wait_for_completion: true,
 });
+assert.deepEqual(repoLoopBundleTaskInput.artifact_declarations, [{
+  schema: 'wp-codebox/artifact-declaration/v1',
+  name: 'concept_packet',
+  type: 'ConceptPacket',
+  artifact_schema: 'static-site-generator/concept-packet/v1',
+  required: true,
+}]);
 
 const genericRepoLoopTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',
@@ -117,6 +133,31 @@ assert.deepEqual(genericRepoLoopTaskInput.runtime_task.input, {
   packet: 'artifact-42',
   dry_run: false,
 });
+
+const repoLoopTypedOutputsTaskInput = codeboxTaskRequestFromAgentTaskRequest({
+  schema: 'homeboy/agent-task-request/v1',
+  task_id: 'repo-loop-typed-outputs-task-1',
+  executor: { backend: 'wordpress', config: { provider: 'openai' } },
+  instructions: 'Run a repo-loop step that declares typed outputs generically.',
+  outputs: {
+    typed_artifacts: [{
+      name: 'concept_packet',
+      type: 'ConceptPacket',
+      artifact_schema: 'static-site-generator/concept-packet/v1',
+    }],
+  },
+  inputs: {
+    ability_request: { name: 'datamachine/run-agent-bundle' },
+  },
+});
+
+assert.deepEqual(repoLoopTypedOutputsTaskInput.artifact_declarations, [{
+  schema: 'wp-codebox/artifact-declaration/v1',
+  name: 'concept_packet',
+  type: 'ConceptPacket',
+  artifact_schema: 'static-site-generator/concept-packet/v1',
+  required: true,
+}]);
 
 const legacyTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',

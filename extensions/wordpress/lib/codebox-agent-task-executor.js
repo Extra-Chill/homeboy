@@ -313,7 +313,92 @@ function artifactDeclarationsFromAgentTaskRequest(request, config = {}, inputs =
     options.artifactDeclarations,
     []
   );
-  return Array.isArray(declarations) ? declarations : [];
+  if (Array.isArray(declarations) && declarations.length > 0) {
+    return declarations;
+  }
+  return genericArtifactDeclarationsFromAgentTaskRequest(request, config, inputs, options);
+}
+
+function genericArtifactDeclarationsFromAgentTaskRequest(request, config = {}, inputs = {}, options = {}) {
+  const declarations = [
+    request.artifact_outputs,
+    request.artifactOutputs,
+    request.output_artifacts,
+    request.outputArtifacts,
+    request.artifacts?.outputs,
+    request.artifacts?.output_artifacts,
+    request.artifacts?.outputArtifacts,
+    request.outputs?.artifacts,
+    request.outputs?.artifact_outputs,
+    request.outputs?.artifactOutputs,
+    request.outputs?.typed_artifacts,
+    request.outputs?.typedArtifacts,
+    inputs.artifact_outputs,
+    inputs.artifactOutputs,
+    inputs.output_artifacts,
+    inputs.outputArtifacts,
+    inputs.artifacts?.outputs,
+    inputs.artifacts?.output_artifacts,
+    inputs.artifacts?.outputArtifacts,
+    inputs.outputs?.artifacts,
+    inputs.outputs?.artifact_outputs,
+    inputs.outputs?.artifactOutputs,
+    inputs.outputs?.typed_artifacts,
+    inputs.outputs?.typedArtifacts,
+    config.artifact_outputs,
+    config.artifactOutputs,
+    config.output_artifacts,
+    config.outputArtifacts,
+    config.artifacts?.outputs,
+    config.artifacts?.output_artifacts,
+    config.artifacts?.outputArtifacts,
+    options.artifactOutputs,
+    options.outputArtifacts,
+  ].flatMap(genericArtifactDeclarationEntries);
+  return declarations
+    .map(([name, declaration]) => wpCodeboxArtifactDeclarationFromGeneric(name, declaration))
+    .filter(Boolean);
+}
+
+function genericArtifactDeclarationEntries(value) {
+  if (Array.isArray(value)) {
+    return value.map((declaration) => ['', declaration]);
+  }
+  if (!value || typeof value !== 'object') {
+    return [];
+  }
+  return Object.entries(value);
+}
+
+function wpCodeboxArtifactDeclarationFromGeneric(defaultName, declaration) {
+  if (typeof declaration === 'string') {
+    return {
+      schema: 'wp-codebox/artifact-declaration/v1',
+      name: declaration,
+      required: true,
+    };
+  }
+  if (!declaration || typeof declaration !== 'object' || Array.isArray(declaration)) {
+    return null;
+  }
+  const name = declaration.name || declaration.id || declaration.output || declaration.artifact || defaultName;
+  if (!name || typeof name !== 'string') {
+    return null;
+  }
+  const artifactSchema = declaration.artifact_schema
+    || declaration.artifactSchema
+    || declaration.content_schema
+    || declaration.contentSchema
+    || (declaration.schema && declaration.schema !== 'wp-codebox/artifact-declaration/v1' ? declaration.schema : undefined);
+  return Object.fromEntries(Object.entries({
+    schema: 'wp-codebox/artifact-declaration/v1',
+    name,
+    type: declaration.type || declaration.kind || declaration.artifact_type || declaration.artifactType,
+    artifact_schema: artifactSchema,
+    required: declaration.required === undefined ? true : declaration.required === true,
+    description: declaration.description,
+    metadata: declaration.metadata,
+  }).filter(([, value]) => value !== undefined));
 }
 
 class RuntimeOverlayConfigError extends Error {
