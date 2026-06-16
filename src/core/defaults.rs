@@ -35,6 +35,15 @@ pub struct HomeboyConfig {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub settings: HashMap<String, Value>,
 
+    /// Release-gate routing safety policy.
+    ///
+    /// Controls whether release-gate hot commands (lint/test/audit) may be
+    /// bypassed to local execution via `--force-hot --allow-local-hot` or a
+    /// stale-runner local fallback when a default Lab runner is configured.
+    /// See issues #4603 / #4605.
+    #[serde(default)]
+    pub release_gate: ReleaseGateConfig,
+
     /// Directory where persisted run artifacts are copied.
     ///
     /// Defaults to the machine-local product data directory under
@@ -58,6 +67,7 @@ impl Default for HomeboyConfig {
             triage: TriageConfig::default(),
             agent_task: AgentTaskConfig::default(),
             settings: HashMap::new(),
+            release_gate: ReleaseGateConfig::default(),
             artifact_root: None,
             update_check: true,
         }
@@ -95,6 +105,74 @@ impl BenchLocalExecutionPolicy {
     pub fn is_denied(self) -> bool {
         matches!(self, Self::Denied)
     }
+}
+
+/// Release-gate routing safety policy.
+///
+/// Release gates are the quality-check hot commands (lint/test/audit) whose
+/// routing fidelity matters for validating a release. When a default Lab
+/// runner is configured, silently bypassing Lab routing to run these gates
+/// locally (via `--force-hot --allow-local-hot` or a stale-runner fallback)
+/// produces a gate result that is not faithful to the configured runner
+/// policy. This config makes such bypasses fail closed with a clear
+/// diagnostic instead of silently executing locally. See issues #4603 / #4605.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct ReleaseGateConfig {
+    /// Whether release-gate hot commands may be bypassed to local execution
+    /// when a default Lab runner is configured.
+    ///
+    /// - `fail_closed` (default): the bypass is rejected with a diagnostic.
+    /// - `allowed`: the bypass runs locally and is recorded in the offload
+    ///   metadata (the operator-only override).
+    #[serde(default)]
+    pub local_hot: ReleaseGateLocalHotPolicy,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+#[derive(Default)]
+pub enum ReleaseGateLocalHotPolicy {
+    /// Reject force-local bypass and stale-runner local fallback for release
+    /// gates when a default Lab runner is configured.
+    #[default]
+    FailClosed,
+    /// Allow release gates to run locally; recorded in offload metadata.
+    Allowed,
+}
+
+impl ReleaseGateLocalHotPolicy {
+    pub fn is_allowed(self) -> bool {
+        matches!(self, Self::Allowed)
+    }
+}
+
+/// Environment variable override for `/release_gate/local_hot`.
+///
+/// Takes precedence over the config file so operators can re-enable a
+/// local-hot bypass for a single invocation without editing config. This is
+/// the explicit operator-only override: it must be set in the environment, not
+/// via a convenience CLI flag, so it cannot become a habit bypass.
+pub const RELEASE_GATE_LOCAL_HOT_ENV: &str = "HOMEBOY_RELEASE_GATE_LOCAL_HOT";
+
+/// Resolve the effective release-gate local-hot policy from the environment
+/// override (precedence) then the config file, falling back to the default.
+pub fn resolve_release_gate_local_hot_policy() -> ReleaseGateLocalHotPolicy {
+    resolve_release_gate_local_hot_policy_from(&load_config())
+}
+
+pub(crate) fn resolve_release_gate_local_hot_policy_from(
+    config: &HomeboyConfig,
+) -> ReleaseGateLocalHotPolicy {
+    if let Ok(raw) = std::env::var(RELEASE_GATE_LOCAL_HOT_ENV) {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "allowed" | "allow" | "true" | "1" => return ReleaseGateLocalHotPolicy::Allowed,
+            "fail_closed" | "fail-closed" | "denied" | "false" | "0" => {
+                return ReleaseGateLocalHotPolicy::FailClosed;
+            }
+            _ => {}
+        }
+    }
+    config.release_gate.local_hot
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -500,5 +578,60 @@ mod tests {
         let config = HomeboyConfig::default();
 
         assert!(config.lab.preferred_runner.is_none());
+    }
+
+    #[test]
+    fn release_gate_local_hot_defaults_to_fail_closed() {
+        let config = HomeboyConfig::default();
+
+        assert_eq!(
+            config.release_gate.local_hot,
+            ReleaseGateLocalHotPolicy::FailClosed
+        );
+    }
+
+    #[test]
+    fn release_gate_local_hot_parses_allowed_from_config() {
+        let config: HomeboyConfig =
+            serde_json::from_str(r#"{"release_gate":{"local_hot":"allowed"}}"#).unwrap();
+
+        assert_eq!(
+            config.release_gate.local_hot,
+            ReleaseGateLocalHotPolicy::Allowed
+        );
+    }
+
+    #[test]
+    fn resolve_release_gate_policy_env_overrides_config() {
+        struct EnvGuard {
+            previous: Option<String>,
+        }
+        impl EnvGuard {
+            fn set(value: &str) -> Self {
+                let previous = std::env::var(RELEASE_GATE_LOCAL_HOT_ENV).ok();
+                std::env::set_var(RELEASE_GATE_LOCAL_HOT_ENV, value);
+                Self { previous }
+            }
+        }
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                match &self.previous {
+                    Some(value) => std::env::set_var(RELEASE_GATE_LOCAL_HOT_ENV, value),
+                    None => std::env::remove_var(RELEASE_GATE_LOCAL_HOT_ENV),
+                }
+            }
+        }
+
+        let _env = EnvGuard::set("allowed");
+        assert_eq!(
+            resolve_release_gate_local_hot_policy_from(&HomeboyConfig::default()),
+            ReleaseGateLocalHotPolicy::Allowed
+        );
+
+        let _env = EnvGuard::set("fail-closed");
+        assert_eq!(
+            resolve_release_gate_local_hot_policy_from(&HomeboyConfig::default()),
+            ReleaseGateLocalHotPolicy::FailClosed
+        );
     }
 }

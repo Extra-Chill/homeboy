@@ -85,13 +85,16 @@ impl AuditArgs {
             return None;
         }
 
-        Some(LabCommandContract::portable(
-            "audit",
-            (self.baseline_args.baseline || self.baseline_args.ratchet)
-                .then_some("--baseline/--ratchet"),
-            true,
-            &[],
-        ))
+        Some(
+            LabCommandContract::portable(
+                "audit",
+                (self.baseline_args.baseline || self.baseline_args.ratchet)
+                    .then_some("--baseline/--ratchet"),
+                true,
+                &[],
+            )
+            .release_gate(),
+        )
     }
 }
 
