@@ -202,6 +202,10 @@ pub struct AgentTaskRepoLoopSpecWorkflow {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifacts: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub consumes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub emits: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dependencies: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gates: Vec<String>,
@@ -815,6 +819,18 @@ fn validate_loop_spec(spec: &AgentTaskRepoLoopSpec) -> Result<()> {
             &spec.artifacts,
             |artifact| &artifact.artifact_id,
         )?;
+        validate_declared_ids(
+            format!("workflows[{index}].consumes"),
+            &workflow.consumes,
+            &spec.artifacts,
+            |artifact| &artifact.artifact_id,
+        )?;
+        validate_declared_ids(
+            format!("workflows[{index}].emits"),
+            &workflow.emits,
+            &spec.artifacts,
+            |artifact| &artifact.artifact_id,
+        )?;
         validate_workflow_dependencies(
             format!("workflows[{index}].dependencies"),
             &workflow.dependencies,
@@ -1027,7 +1043,7 @@ fn workflow_client_context(
         "tools": select_by_id(&spec.tools, &workflow.tools, |tool| &tool.tool_id),
         "abilities": select_by_id(&spec.abilities, &workflow.abilities, |ability| &ability.ability_id),
         "artifacts": select_by_id(&spec.artifacts, &workflow.artifacts, |artifact| &artifact.artifact_id),
-        "artifact_dependencies": select_by_id(&spec.artifacts, &workflow.dependencies, |artifact| &artifact.artifact_id),
+        "artifact_dependencies": workflow_artifact_dependencies(spec, workflow),
         "dependencies": select_by_id(&spec.dependencies, &workflow.dependencies, |dependency| &dependency.dependency_id),
         "gates": select_by_id(&spec.gates, &workflow.gates, |gate| &gate.gate_id),
         "metrics": select_by_id(&spec.metrics, &workflow.metrics, |metric| &metric.metric_id),
@@ -1124,7 +1140,7 @@ fn workflow_declaration_context(
         "tools": select_by_id(&spec.tools, &workflow.tools, |tool| &tool.tool_id),
         "abilities": select_by_id(&spec.abilities, &workflow.abilities, |ability| &ability.ability_id),
         "artifacts": select_by_id(&spec.artifacts, &workflow.artifacts, |artifact| &artifact.artifact_id),
-        "artifact_dependencies": select_by_id(&spec.artifacts, &workflow.dependencies, |artifact| &artifact.artifact_id),
+        "artifact_dependencies": workflow_artifact_dependencies(spec, workflow),
         "dependencies": select_by_id(&spec.dependencies, &workflow.dependencies, |dependency| &dependency.dependency_id),
         "gates": select_by_id(&spec.gates, &workflow.gates, |gate| &gate.gate_id),
         "metrics": select_by_id(&spec.metrics, &workflow.metrics, |metric| &metric.metric_id),
@@ -1172,6 +1188,51 @@ where
     }
     ids.iter()
         .filter_map(|requested| items.iter().find(|item| id(item) == requested))
+        .collect()
+}
+
+fn workflow_artifact_dependencies(
+    spec: &AgentTaskRepoLoopSpec,
+    workflow: &AgentTaskRepoLoopSpecWorkflow,
+) -> Vec<Value> {
+    let mut ids = workflow.consumes.clone();
+    for dependency in &workflow.dependencies {
+        if spec
+            .artifacts
+            .iter()
+            .any(|artifact| artifact.artifact_id == dependency.as_str())
+            && !ids.contains(dependency)
+        {
+            ids.push(dependency.clone());
+        }
+    }
+
+    ids.iter()
+        .filter_map(|id| {
+            let artifact = spec
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.artifact_id == id.as_str())?;
+            let mut value = serde_json::to_value(artifact).ok()?;
+            if let Some(object) = value.as_object_mut() {
+                let producer_workflow_ids: Vec<Value> = spec
+                    .workflows
+                    .iter()
+                    .filter(|producer| producer.workflow_id != workflow.workflow_id)
+                    .filter(|producer| {
+                        producer.artifacts.contains(id) || producer.emits.contains(id)
+                    })
+                    .map(|producer| Value::String(producer.workflow_id.clone()))
+                    .collect();
+                if !producer_workflow_ids.is_empty() {
+                    object.insert(
+                        "producer_workflow_ids".to_string(),
+                        Value::Array(producer_workflow_ids),
+                    );
+                }
+            }
+            Some(value)
+        })
         .collect()
 }
 
@@ -3027,6 +3088,8 @@ mod tests {
                     tools: Vec::new(),
                     abilities: vec!["github_pull_request_publish".to_string()],
                     artifacts: vec!["static_site_pull_request".to_string()],
+                    consumes: Vec::new(),
+                    emits: Vec::new(),
                     dependencies: Vec::new(),
                     gates: Vec::new(),
                     metrics: Vec::new(),
@@ -3041,6 +3104,8 @@ mod tests {
                     tools: Vec::new(),
                     abilities: vec!["static_validation".to_string()],
                     artifacts: Vec::new(),
+                    consumes: Vec::new(),
+                    emits: Vec::new(),
                     dependencies: vec!["static_site_pull_request".to_string()],
                     gates: Vec::new(),
                     metrics: Vec::new(),
@@ -3292,6 +3357,8 @@ mod tests {
                     tools: vec!["repo-inspector".to_string()],
                     abilities: vec!["apply_patch".to_string()],
                     artifacts: vec!["patch".to_string()],
+                    consumes: Vec::new(),
+                    emits: Vec::new(),
                     dependencies: vec![
                         "source-tree".to_string(),
                         "static_site_pull_request".to_string(),
@@ -3446,6 +3513,37 @@ mod tests {
     }
 
     #[test]
+    fn init_from_spec_maps_workflow_consumes_to_artifact_dependencies() {
+        with_isolated_home(|_| {
+            let mut spec = repo_loop_reconcile_spec("repo-loop-consumes-artifacts");
+            spec.workflows
+                .iter_mut()
+                .find(|workflow| workflow.workflow_id == "generation")
+                .expect("generation workflow")
+                .emits = vec!["static_site_pull_request".to_string()];
+            spec.workflows
+                .iter_mut()
+                .find(|workflow| workflow.workflow_id == "static_validation")
+                .expect("static validation workflow")
+                .consumes = vec!["static_site_pull_request".to_string()];
+
+            let report =
+                init_from_spec(ControllerFromSpecRequest { spec }).expect("spec initialized");
+            let context = workflow_action_context(&report, "static_validation");
+
+            assert_eq!(
+                context["artifact_dependencies"],
+                json!([{
+                    "artifact_id": "static_site_pull_request",
+                    "kind": "pull_request",
+                    "required": true,
+                    "producer_workflow_ids": ["generation"]
+                }])
+            );
+        });
+    }
+
+    #[test]
     fn init_from_spec_reconciles_changed_emitted_artifacts() {
         with_isolated_home(|_| {
             let report = reapply_base_then_mutated("repo-loop-reconcile-artifacts", |spec| {
@@ -3484,6 +3582,8 @@ mod tests {
                     tools: Vec::new(),
                     abilities: vec!["static_publication".to_string()],
                     artifacts: vec!["static_site_pull_request".to_string()],
+                    consumes: Vec::new(),
+                    emits: Vec::new(),
                     dependencies: vec!["static_site_candidate".to_string()],
                     gates: Vec::new(),
                     metrics: Vec::new(),
@@ -3562,6 +3662,8 @@ mod tests {
                     tools: vec!["missing-tool".to_string()],
                     abilities: Vec::new(),
                     artifacts: Vec::new(),
+                    consumes: Vec::new(),
+                    emits: Vec::new(),
                     dependencies: Vec::new(),
                     gates: Vec::new(),
                     metrics: Vec::new(),
@@ -4177,6 +4279,8 @@ mod tests {
                     tools: vec!["repo-inspector".to_string()],
                     abilities: vec!["patch-writer".to_string()],
                     artifacts: vec!["candidate-patch".to_string()],
+                    consumes: Vec::new(),
+                    emits: Vec::new(),
                     dependencies: vec!["source-tree".to_string()],
                     gates: vec!["quality".to_string()],
                     metrics: vec!["coverage".to_string()],
