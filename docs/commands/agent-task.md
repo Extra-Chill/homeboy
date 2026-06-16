@@ -70,6 +70,11 @@ This is the terminal/daemon-owned review surface for fleet cooking. Kimaki or an
 other chat UI should submit, poll, render, and call these commands rather than
 owning scheduling, state, artifacts, reconciliation, or promotion.
 
+`agent-task status`, `logs`, `artifacts`, and `review` are read-only durable
+lifecycle inspection commands. They do not start workloads and are not gated by
+warm-machine resource policy; use `homeboy runner exec <runner> -- homeboy
+agent-task status <run-id>` when the durable state lives on a Lab runner host.
+
 ## Deterministic Smoke Gate
 
 Issue #3392 is covered by a no-secret fixture plan at
