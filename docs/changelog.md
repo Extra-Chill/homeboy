@@ -14,6 +14,7 @@ All notable changes to Homeboy CLI are documented in this file.
 - surface npm stderr in package failure + retry transient failures (#3238)
 - propagate nested executor terminal_state failures in run-plan (#4683)
 - omit empty-URI artifact refs from agent-task status (#4400)
+- allow write-mode refactor/lint-fix when the checkout is dirty only with Homeboy-owned CI artifacts so autofix-on-failure is not blocked by its own generated output (#4684)
 
 ## [0.232.1] - 2026-06-16
 
