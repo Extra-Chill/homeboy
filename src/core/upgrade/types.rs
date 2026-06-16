@@ -74,6 +74,31 @@ pub struct UpgradeResult {
     pub runners_updated: Vec<RunnerUpgradeEntry>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub runners_skipped: Vec<RunnerUpgradeEntry>,
+    /// Symlinked extension clones owned by the invoking (sudo) user that this
+    /// upgrade could not refresh because it ran under a different `$HOME`.
+    /// Each entry carries the exact recovery command to bring the clone current.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub extensions_unrefreshed: Vec<UnrefreshedExtensionWarning>,
+}
+
+/// A symlinked extension in the invoking user's config dir that a privileged
+/// (sudo) upgrade left stale, because extension resolution is `$HOME`-scoped
+/// and the privileged run only ever sees root's own extension copies.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UnrefreshedExtensionWarning {
+    /// Extension id (e.g. `wordpress`).
+    pub extension_id: String,
+    /// The invoking user (value of `SUDO_USER`).
+    pub invoking_user: String,
+    /// The symlink path in the invoking user's config dir.
+    pub symlink_path: String,
+    /// The resolved git working tree the symlink points at.
+    pub source_path: String,
+    /// How many commits the clone is behind its upstream, if determinable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub behind: Option<u32>,
+    /// The exact command the user should run to refresh the clone.
+    pub recovery_command: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
