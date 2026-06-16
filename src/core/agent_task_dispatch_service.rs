@@ -580,6 +580,10 @@ fn dispatch_provider_config(
     });
     map.entry("client_context".to_string())
         .or_insert_with(|| client_context.clone());
+    if let Some(artifact_dependencies) = client_context.get("artifact_dependencies") {
+        map.entry("artifact_dependencies".to_string())
+            .or_insert_with(|| artifact_dependencies.clone());
+    }
     map.entry("task_url".to_string())
         .or_insert_with(|| serde_json::json!(request.task_url));
 
@@ -827,6 +831,37 @@ mod tests {
         assert_eq!(
             plan.tasks[0].metadata["required_capabilities"],
             serde_json::json!(["tool:repo-inspector"])
+        );
+    }
+
+    #[test]
+    fn dispatch_plan_promotes_client_context_artifact_dependencies_to_provider_config() {
+        let plan = build_dispatch_plan(&dispatch_request(DispatchRequestOverrides {
+            prompt: Some("Run the declared workflow.".to_string()),
+            client_context: Some(
+                serde_json::json!({
+                    "schema": "homeboy/repo-loop-workflow-context/v1",
+                    "artifact_dependencies": [{
+                        "artifact_id": "concept_packet",
+                        "kind": "typed_packet",
+                        "required": true,
+                        "producer_workflow_ids": ["store-idea"]
+                    }]
+                })
+                .to_string(),
+            ),
+            ..DispatchRequestOverrides::default()
+        }))
+        .expect("dispatch plan");
+
+        assert_eq!(
+            plan.tasks[0].executor.config["artifact_dependencies"],
+            serde_json::json!([{
+                "artifact_id": "concept_packet",
+                "kind": "typed_packet",
+                "required": true,
+                "producer_workflow_ids": ["store-idea"]
+            }])
         );
     }
 
