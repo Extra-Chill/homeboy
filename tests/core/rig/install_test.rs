@@ -135,6 +135,81 @@ fn install_package_with_sibling_stacks_installs_stack_specs() {
 }
 
 #[test]
+fn install_git_source_subpath_records_nested_package_root() {
+    let _home = HomeGuard::new();
+    let repo = tempfile::tempdir().expect("repo");
+    let nested = repo.path().join("woocommerce/woocommerce-gateway-stripe");
+    fs::create_dir_all(nested.join("bench")).expect("bench dir");
+    fs::write(
+        nested.join("bench/stripe.trace.mjs"),
+        "export default {};\n",
+    )
+    .expect("trace workload");
+    write_rig(
+        &nested,
+        "woocommerce-stripe-ece-product-page",
+        r#"{
+            "id": "woocommerce-stripe-ece-product-page",
+            "trace_workloads": {
+                "woocommerce-gateway-stripe": [
+                    { "path": "${package.root}/bench/stripe.trace.mjs" }
+                ]
+            }
+        }"#,
+    );
+    let bare = bare_package(repo.path());
+    let source = format!(
+        "{}//woocommerce/woocommerce-gateway-stripe",
+        bare.path().join("rig-package.git").display()
+    );
+
+    let result = install(&source, Some("woocommerce-stripe-ece-product-page"), false)
+        .expect("install nested git package");
+    let metadata = read_source_metadata("woocommerce-stripe-ece-product-page").expect("metadata");
+    let source_root = result.source_root;
+    let package_root = source_root.join("woocommerce/woocommerce-gateway-stripe");
+
+    assert_eq!(result.package_path, package_root);
+    assert_eq!(
+        metadata.source_root.as_deref(),
+        Some(source_root.to_str().unwrap())
+    );
+    assert_eq!(metadata.package_path, package_root.to_string_lossy());
+    assert_eq!(
+        metadata.discovery_path.as_deref(),
+        Some(metadata.package_path.as_str())
+    );
+
+    let rig = load("woocommerce-stripe-ece-product-page").expect("load rig");
+    assert_eq!(
+        crate::core::rig::expand::expand_vars(&rig, "${package.root}/bench/stripe.trace.mjs"),
+        package_root
+            .join("bench/stripe.trace.mjs")
+            .to_string_lossy()
+    );
+}
+
+#[test]
+fn install_git_source_missing_subpath_reports_source_and_package_roots() {
+    let _home = HomeGuard::new();
+    let repo = tempfile::tempdir().expect("repo");
+    write_rig(repo.path(), "alpha", &minimal_rig("alpha"));
+    let bare = bare_package(repo.path());
+    let source = format!(
+        "{}//woocommerce/woocommerce-gateway-stripe",
+        bare.path().join("rig-package.git").display()
+    );
+
+    let err = install(&source, Some("alpha"), false).expect_err("missing nested package");
+
+    assert!(err.message.contains("source root:"));
+    assert!(err.message.contains("resolved package root:"));
+    assert!(err
+        .message
+        .contains("woocommerce/woocommerce-gateway-stripe"));
+}
+
+#[test]
 fn installed_rig_check_reports_package_lint_failures() {
     let _home = HomeGuard::new();
     let package = tempfile::tempdir().expect("package");

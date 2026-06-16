@@ -108,12 +108,12 @@ pub fn remove_source(selector: &str) -> Result<RigSourceRemoveResult> {
     }
 
     let removed_package_path = if !source.linked {
-        let package_path = PathBuf::from(&source.package_path);
-        if package_path.exists() {
-            fs::remove_dir_all(&package_path).map_err(|e| {
+        let source_root = PathBuf::from(&source.source_root);
+        if source_root.exists() {
+            fs::remove_dir_all(&source_root).map_err(|e| {
                 Error::internal_io(e.to_string(), Some("remove rig package".into()))
             })?;
-            Some(source.package_path.clone())
+            Some(source.source_root.clone())
         } else {
             None
         }
@@ -276,19 +276,25 @@ pub fn update_source(selector: Option<&str>) -> Result<RigSourceUpdateResult> {
 }
 
 fn update_group(source: RigSourceGroup) -> Result<RigSourceUpdateResult> {
-    let package_path = PathBuf::from(&source.package_path);
-    if !package_path.exists() {
+    let source_root = PathBuf::from(&source.source_root);
+    if !source_root.exists() {
         return Err(Error::validation_invalid_argument(
             "source",
-            format!("Installed rig package is missing: {}", source.package_path),
+            format!(
+                "Installed rig source root is missing: {}",
+                source.source_root
+            ),
             Some(source.source),
-            None,
+            Some(vec![
+                format!("source root: {}", source.source_root),
+                format!("resolved package root: {}", source.package_path),
+            ]),
         ));
     }
 
-    let previous_revision = git::short_head_revision(&package_path);
-    git::pull_repo(&package_path)?;
-    let source_revision = git::short_head_revision(&package_path);
+    let previous_revision = git::short_head_revision(&source_root);
+    git::pull_repo(&source_root)?;
+    let source_revision = git::short_head_revision(&source_root);
 
     let mut updated = Vec::new();
     let mut updated_stacks = Vec::new();
@@ -322,6 +328,7 @@ fn update_group(source: RigSourceGroup) -> Result<RigSourceUpdateResult> {
 
         let metadata = RigSourceMetadata {
             source: source.source.clone(),
+            source_root: Some(source.source_root.clone()),
             package_path: source.package_path.clone(),
             rig_path: rig.rig_path.clone(),
             discovery_path: Some(source.discovery_path.clone()),
@@ -361,6 +368,7 @@ fn update_group(source: RigSourceGroup) -> Result<RigSourceUpdateResult> {
 
         let metadata = StackSourceMetadata {
             source: source.source.clone(),
+            source_root: Some(source.source_root.clone()),
             package_path: source.package_path.clone(),
             stack_path: stack.stack_path.to_string_lossy().to_string(),
             discovery_path: source.discovery_path.clone(),
@@ -548,6 +556,7 @@ fn infer_discovery_path(rig_path: &str) -> String {
 
 fn new_source_group(
     source: &str,
+    source_root: &str,
     package_path: &str,
     discovery_path: String,
     linked: bool,
@@ -556,6 +565,7 @@ fn new_source_group(
     let package_present = Path::new(package_path).exists();
     RigSourceGroup {
         source: source.to_string(),
+        source_root: source_root.to_string(),
         package_id: package_id_from_path(package_path),
         package_path: package_path.to_string(),
         package_present,
@@ -569,8 +579,13 @@ fn new_source_group(
 }
 
 fn new_rig_source_group(metadata: &RigSourceMetadata) -> RigSourceGroup {
+    let source_root = metadata
+        .source_root
+        .as_deref()
+        .unwrap_or(&metadata.package_path);
     new_source_group(
         &metadata.source,
+        source_root,
         &metadata.package_path,
         metadata
             .discovery_path
@@ -582,8 +597,13 @@ fn new_rig_source_group(metadata: &RigSourceMetadata) -> RigSourceGroup {
 }
 
 fn new_stack_source_group(metadata: &StackSourceMetadata) -> RigSourceGroup {
+    let source_root = metadata
+        .source_root
+        .as_deref()
+        .unwrap_or(&metadata.package_path);
     new_source_group(
         &metadata.source,
+        source_root,
         &metadata.package_path,
         metadata.discovery_path.clone(),
         metadata.linked,
@@ -655,7 +675,10 @@ fn source_config_path(config_path: Option<PathBuf>) -> String {
 }
 
 fn source_matches(source: &RigSourceGroup, selector: &str) -> bool {
-    source.source == selector || source.package_path == selector || source.package_id == selector
+    source.source == selector
+        || source.source_root == selector
+        || source.package_path == selector
+        || source.package_id == selector
 }
 
 fn package_id_from_path(path: &str) -> String {

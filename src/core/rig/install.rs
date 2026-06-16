@@ -29,6 +29,7 @@ pub struct DiscoveredStack {
 #[derive(Debug, Clone, Serialize)]
 pub struct RigInstallResult {
     pub source: String,
+    pub source_root: PathBuf,
     pub package_path: PathBuf,
     pub linked: bool,
     pub installed: Vec<InstalledRig>,
@@ -38,6 +39,7 @@ pub struct RigInstallResult {
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedSource {
     pub source: String,
+    pub source_root: PathBuf,
     pub package_path: PathBuf,
     pub discovery_path: PathBuf,
     pub linked: bool,
@@ -65,6 +67,8 @@ pub struct InstalledStack {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RigSourceMetadata {
     pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_root: Option<String>,
     pub package_path: String,
     pub rig_path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -77,6 +81,8 @@ pub struct RigSourceMetadata {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StackSourceMetadata {
     pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_root: Option<String>,
     pub package_path: String,
     pub stack_path: String,
     pub discovery_path: String,
@@ -119,6 +125,7 @@ pub fn install(source: &str, id: Option<&str>, all: bool) -> Result<RigInstallRe
 
         let metadata = RigSourceMetadata {
             source: prepared.source.clone(),
+            source_root: Some(prepared.source_root.to_string_lossy().to_string()),
             package_path: prepared.package_path.to_string_lossy().to_string(),
             rig_path: rig.rig_path.to_string_lossy().to_string(),
             discovery_path: Some(prepared.discovery_path.to_string_lossy().to_string()),
@@ -146,6 +153,7 @@ pub fn install(source: &str, id: Option<&str>, all: bool) -> Result<RigInstallRe
 
         let metadata = StackSourceMetadata {
             source: prepared.source.clone(),
+            source_root: Some(prepared.source_root.to_string_lossy().to_string()),
             package_path: prepared.package_path.to_string_lossy().to_string(),
             stack_path: stack.stack_path.to_string_lossy().to_string(),
             discovery_path: prepared.discovery_path.to_string_lossy().to_string(),
@@ -165,6 +173,7 @@ pub fn install(source: &str, id: Option<&str>, all: bool) -> Result<RigInstallRe
 
     Ok(RigInstallResult {
         source: prepared.source,
+        source_root: prepared.source_root,
         package_path: prepared.package_path,
         linked: prepared.linked,
         installed,
@@ -321,9 +330,25 @@ fn prepare_git_source(source: &str) -> Result<PreparedSource> {
         Some(subpath) => package_path.join(subpath),
         None => package_path.clone(),
     };
+    if !discovery_path.exists() {
+        return Err(Error::validation_invalid_argument(
+            "source",
+            format!(
+                "Rig package path does not exist (source root: {}; resolved package root: {})",
+                package_path.display(),
+                discovery_path.display()
+            ),
+            Some(source.to_string()),
+            Some(vec![
+                format!("source root: {}", package_path.display()),
+                format!("resolved package root: {}", discovery_path.display()),
+            ]),
+        ));
+    }
     Ok(PreparedSource {
         source: root_source.to_string(),
-        package_path,
+        source_root: package_path.clone(),
+        package_path: discovery_path.clone(),
         discovery_path,
         linked: false,
         source_revision,
@@ -367,6 +392,7 @@ fn prepare_local_source(source: &str) -> Result<PreparedSource> {
     }
     Ok(PreparedSource {
         source: package_path.to_string_lossy().to_string(),
+        source_root: package_path.clone(),
         discovery_path: package_path.clone(),
         package_path,
         linked: true,
