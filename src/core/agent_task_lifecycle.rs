@@ -126,7 +126,7 @@ pub struct AgentTaskRunTask {
     pub provider_ref: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct AgentTaskArtifactRef {
     pub task_id: String,
     pub kind: String,
@@ -1100,37 +1100,63 @@ fn queued_events(tasks: &[AgentTaskRunTask]) -> Vec<AgentTaskProgressEvent> {
 }
 
 fn artifact_refs_for_outcomes(outcomes: &[AgentTaskOutcome]) -> Vec<AgentTaskArtifactRef> {
-    outcomes
+    let mut refs: Vec<AgentTaskArtifactRef> = outcomes
         .iter()
         .flat_map(|outcome| {
             let artifact_refs = outcome.artifacts.iter().filter_map(|artifact| {
-                artifact
-                    .url
-                    .clone()
-                    .or_else(|| artifact.path.clone())
-                    .map(|uri| AgentTaskArtifactRef {
+                first_non_empty_uri([artifact.url.as_deref(), artifact.path.as_deref()]).map(
+                    |uri| AgentTaskArtifactRef {
                         task_id: outcome.task_id.clone(),
                         kind: artifact.kind.clone(),
-                        uri,
+                        uri: uri.to_string(),
                         label: artifact.name.clone(),
                         size_bytes: artifact.size_bytes,
-                    })
+                    },
+                )
             });
             let evidence_refs = outcome
                 .evidence_refs
                 .iter()
                 .cloned()
                 .chain(workflow_evidence_refs(outcome.workflow.as_ref()))
-                .map(|evidence| AgentTaskArtifactRef {
-                    task_id: outcome.task_id.clone(),
-                    kind: evidence.kind.clone(),
-                    uri: evidence.uri.clone(),
-                    label: evidence.label.clone(),
-                    size_bytes: None,
+                .filter_map(|evidence| {
+                    first_non_empty_uri([Some(evidence.uri.as_str())]).map(|uri| {
+                        AgentTaskArtifactRef {
+                            task_id: outcome.task_id.clone(),
+                            kind: evidence.kind.clone(),
+                            uri: uri.to_string(),
+                            label: evidence.label.clone(),
+                            size_bytes: None,
+                        }
+                    })
                 });
             artifact_refs.chain(evidence_refs).collect::<Vec<_>>()
         })
-        .collect()
+        .collect();
+    dedup_preserve_order(&mut refs);
+    refs
+}
+
+/// Returns the first URI candidate that is non-empty after trimming, mirroring
+/// the `url` → `path` precedence used for agent-task artifacts. Empty or
+/// whitespace-only URIs are treated as unavailable so status output never
+/// surfaces refs with a blank `uri`.
+fn first_non_empty_uri<'a>(
+    candidates: impl IntoIterator<Item = Option<&'a str>>,
+) -> Option<&'a str> {
+    candidates
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|uri| !uri.is_empty())
+}
+
+/// Drops exact-duplicate refs, keeping the first occurrence of each so status
+/// output is not noisy when an artifact surfaces through both `artifacts` and
+/// `evidence_refs` (or workflow evidence).
+fn dedup_preserve_order(refs: &mut Vec<AgentTaskArtifactRef>) {
+    let mut seen = std::collections::HashSet::new();
+    refs.retain(|item| seen.insert(item.clone()));
 }
 
 fn provider_handles_for_outcomes(outcomes: &[AgentTaskOutcome]) -> Vec<AgentTaskRunProviderHandle> {
@@ -2192,6 +2218,216 @@ mod tests {
 
             assert_eq!(records.len(), 1);
             assert_eq!(records[0].run_id, "good-run");
+        });
+    }
+
+    fn outcome_with_refs(
+        task_id: &str,
+        artifacts: Vec<AgentTaskArtifact>,
+        evidence_refs: Vec<AgentTaskEvidenceRef>,
+    ) -> AgentTaskOutcome {
+        AgentTaskOutcome {
+            schema: crate::core::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+            task_id: task_id.to_string(),
+            status: crate::core::agent_task::AgentTaskOutcomeStatus::Succeeded,
+            summary: Some("ok".to_string()),
+            failure_classification: None,
+            artifacts,
+            evidence_refs,
+            diagnostics: Vec::new(),
+            outputs: Value::Null,
+            workflow: None,
+            follow_up: None,
+            metadata: Value::Null,
+        }
+    }
+
+    fn artifact_ref_artifact(
+        id: &str,
+        kind: &str,
+        url: Option<&str>,
+        path: Option<&str>,
+    ) -> AgentTaskArtifact {
+        AgentTaskArtifact {
+            schema: crate::core::agent_task::AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+            id: id.to_string(),
+            kind: kind.to_string(),
+            name: Some(format!("{kind} artifact")),
+            path: path.map(str::to_string),
+            url: url.map(str::to_string),
+            mime: None,
+            size_bytes: None,
+            sha256: None,
+            metadata: Value::Null,
+        }
+    }
+
+    #[test]
+    fn artifact_refs_omit_evidence_refs_with_empty_uri() {
+        let outcomes = vec![outcome_with_refs(
+            "task-a",
+            Vec::new(),
+            vec![
+                AgentTaskEvidenceRef {
+                    kind: "codebox-command-log".to_string(),
+                    uri: "".to_string(),
+                    label: Some("command log".to_string()),
+                },
+                AgentTaskEvidenceRef {
+                    kind: "codebox-command-evidence".to_string(),
+                    uri: "   ".to_string(),
+                    label: None,
+                },
+                AgentTaskEvidenceRef {
+                    kind: "transcript".to_string(),
+                    uri: "file:///tmp/transcript.json".to_string(),
+                    label: Some("provider transcript".to_string()),
+                },
+            ],
+        )];
+
+        let refs = artifact_refs_for_outcomes(&outcomes);
+
+        assert_eq!(refs.len(), 1, "empty/whitespace evidence URIs are dropped");
+        assert_eq!(refs[0].kind, "transcript");
+        assert_eq!(refs[0].uri, "file:///tmp/transcript.json");
+    }
+
+    #[test]
+    fn artifact_refs_omit_artifacts_with_empty_url_and_path() {
+        let outcomes = vec![outcome_with_refs(
+            "task-a",
+            vec![
+                artifact_ref_artifact(
+                    "dir-empty",
+                    "codebox-artifact-directory",
+                    Some(""),
+                    Some(""),
+                ),
+                artifact_ref_artifact("dir-none", "codebox-agent-task-input", None, None),
+                artifact_ref_artifact("patch", "patch", None, Some("/tmp/patch.diff")),
+            ],
+            Vec::new(),
+        )];
+
+        let refs = artifact_refs_for_outcomes(&outcomes);
+
+        assert_eq!(refs.len(), 1, "artifacts lacking a usable uri are dropped");
+        assert_eq!(refs[0].kind, "patch");
+        assert_eq!(refs[0].uri, "/tmp/patch.diff");
+    }
+
+    #[test]
+    fn artifact_refs_treat_empty_url_as_missing_and_fall_back_to_path() {
+        let outcomes = vec![outcome_with_refs(
+            "task-a",
+            vec![artifact_ref_artifact(
+                "dir",
+                "codebox-artifact-directory",
+                Some("   "),
+                Some("/tmp/artifacts/dir"),
+            )],
+            Vec::new(),
+        )];
+
+        let refs = artifact_refs_for_outcomes(&outcomes);
+
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].uri, "/tmp/artifacts/dir");
+    }
+
+    #[test]
+    fn artifact_refs_dedup_identical_refs_across_artifacts_and_evidence() {
+        let outcomes = vec![outcome_with_refs(
+            "task-a",
+            vec![artifact_ref_artifact(
+                "transcript",
+                "transcript",
+                Some("file:///tmp/transcript.json"),
+                None,
+            )],
+            vec![AgentTaskEvidenceRef {
+                kind: "transcript".to_string(),
+                uri: "file:///tmp/transcript.json".to_string(),
+                label: Some("transcript artifact".to_string()),
+            }],
+        )];
+
+        let refs = artifact_refs_for_outcomes(&outcomes);
+
+        assert_eq!(
+            refs.len(),
+            1,
+            "exact-duplicate refs collapse to a single entry"
+        );
+    }
+
+    #[test]
+    fn status_filters_empty_uri_artifact_refs() {
+        with_isolated_home(|_| {
+            let plan = test_plan();
+            let aggregate = AgentTaskAggregate {
+                schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
+                plan_id: plan.plan_id.clone(),
+                status: AgentTaskAggregateStatus::Succeeded,
+                totals: AgentTaskAggregateTotals {
+                    queued: 1,
+                    succeeded: 1,
+                    ..AgentTaskAggregateTotals::default()
+                },
+                outcomes: vec![outcome_with_refs(
+                    "task-a",
+                    vec![
+                        artifact_ref_artifact(
+                            "dir-empty",
+                            "codebox-artifact-directory",
+                            Some(""),
+                            None,
+                        ),
+                        artifact_ref_artifact("patch", "patch", None, Some("/tmp/patch.diff")),
+                    ],
+                    vec![
+                        AgentTaskEvidenceRef {
+                            kind: "codebox-command-log".to_string(),
+                            uri: "".to_string(),
+                            label: Some("command log".to_string()),
+                        },
+                        AgentTaskEvidenceRef {
+                            kind: "transcript".to_string(),
+                            uri: "file:///tmp/transcript.json".to_string(),
+                            label: Some("provider transcript".to_string()),
+                        },
+                    ],
+                )],
+                events: vec![AgentTaskProgressEvent {
+                    task_id: "task-a".to_string(),
+                    state: AgentTaskState::Succeeded,
+                    attempt: 1,
+                    message: Some("ok".to_string()),
+                }],
+                artifact_lineage: Vec::new(),
+                queue: Default::default(),
+            };
+
+            let record =
+                record_completed_run(&plan, &aggregate, Some("run-empty-refs")).expect("recorded");
+            let durable_status = status(&record.run_id).expect("status");
+
+            let uris: Vec<&str> = durable_status
+                .artifact_refs
+                .iter()
+                .map(|r| r.uri.as_str())
+                .collect();
+            assert!(
+                uris.iter().all(|uri| !uri.is_empty()),
+                "no empty-URI refs leak into status output: {uris:?}"
+            );
+            let kinds: Vec<&str> = durable_status
+                .artifact_refs
+                .iter()
+                .map(|r| r.kind.as_str())
+                .collect();
+            assert_eq!(kinds, vec!["patch", "transcript"]);
         });
     }
 
