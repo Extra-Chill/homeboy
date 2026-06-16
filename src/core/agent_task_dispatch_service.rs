@@ -14,7 +14,9 @@ use crate::core::agent_task::{
 use crate::core::agent_task_config_materialization::materialize_provider_config_refs;
 use crate::core::agent_task_lifecycle as lifecycle;
 use crate::core::agent_task_lifecycle::{AgentTaskRunRecord, AgentTaskRunState};
-use crate::core::agent_task_provider::provider_requires_cwd_git_checkout;
+use crate::core::agent_task_provider::{
+    apply_provider_runner_secret_env_contracts, provider_requires_cwd_git_checkout,
+};
 use crate::core::agent_task_scheduler::{
     AgentTaskAggregate, AgentTaskExecutorAdapter, AgentTaskPlan, AgentTaskRetryPolicy,
     AgentTaskScheduler,
@@ -81,10 +83,11 @@ pub fn dispatch_with_provider_requirements<E>(
 where
     E: AgentTaskExecutorAdapter,
 {
-    let plan = build_dispatch_plan_with_provider_requirements(
+    let mut plan = build_dispatch_plan_with_provider_requirements(
         &request,
         provider_requires_cwd_git_checkout,
     )?;
+    apply_provider_runner_secret_env_contracts(&mut plan);
     preflight_dispatch_provider_secrets(&plan)?;
     let submitted = lifecycle::submit_plan(&plan, request.run_id.as_deref())?;
     let run_id = submitted.run_id.clone();

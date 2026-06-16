@@ -1382,6 +1382,37 @@ mod tests {
     }
 
     #[test]
+    fn run_plan_fails_fast_when_required_secret_env_is_missing() {
+        with_temp_home(|| {
+            let missing_secret = "HOMEBOY_AGENT_TASK_MISSING_PROVIDER_SECRET_TEST";
+            std::env::remove_var(missing_secret);
+            let mut plan = test_plan();
+            plan.tasks[0].executor.secret_env = vec![missing_secret.to_string()];
+            let executor = CapturingExecutor::default();
+            let observed_request = Arc::clone(&executor.observed_request);
+
+            let error = run_loaded_plan(plan, Some("run-plan-missing-secret"), executor)
+                .expect_err("missing secret should fail before executor dispatch");
+
+            assert!(observed_request
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_none());
+            assert_eq!(error.details["field"], "secret_env");
+            assert!(error.to_string().contains(missing_secret));
+            assert!(error.details["tried"]
+                .as_array()
+                .expect("remediation hints")
+                .iter()
+                .any(|hint| hint
+                    .as_str()
+                    .is_some_and(|hint| hint.contains("runner-required secret env contracts"))));
+            assert!(!error.to_string().contains("secret-value"));
+            assert!(lifecycle_status("run-plan-missing-secret").is_err());
+        });
+    }
+
+    #[test]
     fn run_next_claims_oldest_queued_run_and_leaves_later_runs_queued() {
         with_temp_home(|| {
             agent_task_lifecycle::submit_plan(&test_plan(), Some("run-next-a"))

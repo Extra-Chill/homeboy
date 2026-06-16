@@ -57,6 +57,8 @@ fn is_false(value: &bool) -> bool {
 pub struct AgentTaskProviderRunnerReadiness {
     pub id: String,
     pub label: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secret_env: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env_path: Option<AgentTaskProviderEnvPathReadiness>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -227,6 +229,16 @@ pub fn provider_requires_cwd_git_checkout(backend: &str, selector: Option<&str>)
     provider_requires_cwd_git_checkout_with_providers(&providers, backend, selector)
 }
 
+pub fn apply_provider_runner_secret_env_contracts(plan: &mut AgentTaskPlan) {
+    let providers = discover_agent_task_executor_providers();
+    apply_provider_runner_secret_env_contracts_with_providers(plan, &providers);
+}
+
+pub fn provider_runner_secret_env_for_plan(plan: &AgentTaskPlan) -> Vec<String> {
+    let providers = discover_agent_task_executor_providers();
+    provider_runner_secret_env_for_plan_with_providers(plan, &providers)
+}
+
 pub(crate) fn role_aliases_for_executor(
     backend: &str,
     selector: Option<&str>,
@@ -261,6 +273,48 @@ fn provider_requires_cwd_git_checkout_with_providers(
         .and_then(|provider| provider.workspace_materialization.as_ref())
         .and_then(|materialization| materialization.cwd.as_deref())
         == Some("git_checkout")
+}
+
+fn apply_provider_runner_secret_env_contracts_with_providers(
+    plan: &mut AgentTaskPlan,
+    providers: &[AgentTaskExecutorProvider],
+) {
+    for request in &mut plan.tasks {
+        let Some(provider) = select_provider(providers, request) else {
+            continue;
+        };
+        for name in provider_runner_secret_env(provider) {
+            if !request.executor.secret_env.contains(&name) {
+                request.executor.secret_env.push(name);
+            }
+        }
+    }
+}
+
+fn provider_runner_secret_env_for_plan_with_providers(
+    plan: &AgentTaskPlan,
+    providers: &[AgentTaskExecutorProvider],
+) -> Vec<String> {
+    let mut names = Vec::new();
+    for request in &plan.tasks {
+        let Some(provider) = select_provider(providers, request) else {
+            continue;
+        };
+        names.extend(provider_runner_secret_env(provider));
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn provider_runner_secret_env(provider: &AgentTaskExecutorProvider) -> Vec<String> {
+    let mut names = Vec::new();
+    for readiness in &provider.runner_readiness {
+        names.extend(readiness.secret_env.iter().cloned());
+    }
+    names.sort();
+    names.dedup();
+    names
 }
 
 fn default_backend_from_providers(providers: &[AgentTaskExecutorProvider]) -> Option<String> {
@@ -980,6 +1034,7 @@ mod tests {
             "runner_readiness": [{
                 "id": "custom.runtime_cache",
                 "label": "Custom runtime cache",
+                "secret_env": ["CUSTOM_RUNTIME_TOKEN"],
                 "env_path": { "env": ["CUSTOM_RUNTIME_BIN"], "revision": true },
                 "remediation": "Refresh the custom runtime cache."
             }],
@@ -994,6 +1049,10 @@ mod tests {
         .expect("provider manifest");
 
         assert_eq!(provider.runner_readiness[0].id, "custom.runtime_cache");
+        assert_eq!(
+            provider.runner_readiness[0].secret_env,
+            vec!["CUSTOM_RUNTIME_TOKEN"]
+        );
         assert_eq!(
             provider.runner_readiness[0].env_path.as_ref().unwrap().env,
             vec!["CUSTOM_RUNTIME_BIN"]
@@ -1016,6 +1075,52 @@ mod tests {
             ExtensionProviderAgentTaskExecutor::with_providers(vec![provider_a, provider_b]);
 
         assert_eq!(executor.default_backend().as_deref(), Some("preferred"));
+    }
+
+    #[test]
+    fn provider_runner_secret_env_contracts_are_applied_to_selected_plan_tasks() {
+        let (mut request_a, mut provider_a) = request("task-a", "node provider-a.js".to_string());
+        request_a.executor.backend = "provider-a".to_string();
+        provider_a.backend = "provider-a".to_string();
+        provider_a.runner_readiness = vec![AgentTaskProviderRunnerReadiness {
+            id: "provider-a.auth".to_string(),
+            label: "Provider A auth".to_string(),
+            secret_env: vec!["PROVIDER_A_TOKEN".to_string()],
+            env_path: None,
+            remediation: Some("Configure provider A auth.".to_string()),
+        }];
+        let (mut request_b, mut provider_b) = request("task-b", "node provider-b.js".to_string());
+        request_b.executor.backend = "provider-b".to_string();
+        request_b.executor.secret_env = vec!["EXPLICIT_SECRET".to_string()];
+        provider_b.backend = "provider-b".to_string();
+        provider_b.runner_readiness = vec![AgentTaskProviderRunnerReadiness {
+            id: "provider-b.auth".to_string(),
+            label: "Provider B auth".to_string(),
+            secret_env: vec![
+                "PROVIDER_B_TOKEN".to_string(),
+                "EXPLICIT_SECRET".to_string(),
+            ],
+            env_path: None,
+            remediation: None,
+        }];
+        let mut plan = AgentTaskPlan::new("plan-a", vec![request_a, request_b]);
+
+        apply_provider_runner_secret_env_contracts_with_providers(
+            &mut plan,
+            &[provider_a, provider_b],
+        );
+
+        assert_eq!(
+            plan.tasks[0].executor.secret_env,
+            vec!["PROVIDER_A_TOKEN".to_string()]
+        );
+        assert_eq!(
+            plan.tasks[1].executor.secret_env,
+            vec![
+                "EXPLICIT_SECRET".to_string(),
+                "PROVIDER_B_TOKEN".to_string()
+            ]
+        );
     }
 
     #[test]

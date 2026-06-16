@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 
+use crate::core::agent_tasks::provider::provider_runner_secret_env_for_plan;
 use crate::core::agent_tasks::scheduler::AgentTaskPlan;
 use crate::core::agent_tasks::secrets as agent_task_secrets;
 use crate::core::{config, Error, Result};
@@ -306,6 +307,7 @@ fn declared_agent_task_run_plan_secret_env(args: &[String]) -> Vec<String> {
     };
 
     let mut names = Vec::new();
+    names.extend(provider_runner_secret_env_for_plan(&plan));
     for request in plan.tasks {
         names.extend(request.executor.secret_env);
         names.extend(

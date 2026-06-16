@@ -188,6 +188,7 @@ fn provider_readiness_renderer_uses_fake_provider_contract() {
     let contract = AgentTaskProviderRunnerReadiness {
         id: "lab.fake_runtime.cache".to_string(),
         label: "Fake runtime cache".to_string(),
+        secret_env: Vec::new(),
         env_path: Some(AgentTaskProviderEnvPathReadiness {
             env: vec!["FAKE_RUNTIME_BIN".to_string()],
             revision: Some(true),
