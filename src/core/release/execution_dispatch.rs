@@ -424,6 +424,10 @@ pub(super) fn release_step_is_show_stopper(result: &ReleaseStepResult) -> bool {
             | "package"
             | "git.tag"
             | "git.push"
+            // A failed github.release means the GitHub Release object was not
+            // created (or its assets were not attached). Halt before
+            // publish/upload steps run against a non-existent release (#3541).
+            | "github.release"
     )
 }
 
@@ -1193,9 +1197,13 @@ mod tests {
         let bootstrap_failure = failed_step_result("preflight.changelog_bootstrap");
         let package_preflight_failure = failed_step_result("preflight.package");
         let changelog_failure = failed_step_result("changelog.finalize");
+        let github_release_failure = failed_step_result("github.release");
         let publish_failure = failed_step_result("publish.crates");
 
         assert!(release_step_is_show_stopper(&version_failure));
+        // #3541: a failed github.release must halt the plan before
+        // publish/upload steps run against a non-existent release.
+        assert!(release_step_is_show_stopper(&github_release_failure));
         assert!(release_step_is_show_stopper(&default_branch_failure));
         assert!(release_step_is_show_stopper(&working_tree_failure));
         assert!(release_step_is_show_stopper(&remote_sync_failure));

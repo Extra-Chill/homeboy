@@ -54,7 +54,7 @@ pub(crate) fn step_success(
 }
 
 /// Build a failed step result carrying error text and optional data.
-fn step_failed(
+pub(crate) fn step_failed(
     id: &str,
     step_type: &str,
     data: Option<serde_json::Value>,
