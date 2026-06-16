@@ -21,7 +21,9 @@ use super::evidence::{mirror_daemon_evidence, mirror_daemon_job_progress};
 use super::resource_metrics::{
     measured_command_output, measured_command_output_until_cancelled, RunnerResourceMetrics,
 };
-use super::{load, status, Runner, RunnerCapabilityPreflight, RunnerKind, RunnerTunnelMode};
+use super::{
+    connect, load, status, Runner, RunnerCapabilityPreflight, RunnerKind, RunnerTunnelMode,
+};
 use super::{normalize_runner_command_env, resolve_runner_secret_env};
 
 const DEFAULT_RUNNER_EXEC_WAIT_TIMEOUT_SECS: u64 = 20 * 60;
@@ -184,7 +186,25 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
         );
     }
 
-    let connected = status(runner_id)?;
+    let mut connected = status(runner_id)?;
+    if connected.connected && connected.stale_daemon.is_some() {
+        let (refresh, refresh_exit_code) = connect(runner_id)?;
+        if refresh_exit_code != 0 || !refresh.connected {
+            return Err(Error::internal_unexpected(
+                format!(
+                    "runner `{runner_id}` has a stale daemon session and automatic refresh failed: {}",
+                    refresh
+                        .failure_message
+                        .as_deref()
+                        .unwrap_or("runner connect did not establish a fresh daemon session")
+                )
+            )
+            .with_hint(format!(
+                "Refresh the runner session with `homeboy runner disconnect {runner_id} && homeboy runner connect {runner_id}`."
+            )));
+        }
+        connected = status(runner_id)?;
+    }
     if connected.connected {
         if let Some(session) = connected.session {
             preflight_runner_capability_plan(

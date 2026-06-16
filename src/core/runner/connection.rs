@@ -83,6 +83,7 @@ pub fn connect(runner_id: &str) -> Result<(RunnerConnectReport, i32)> {
         homeboy,
         daemon,
         &version,
+        &identity.display,
         runner_id,
         &session_path,
     ) {
@@ -274,11 +275,12 @@ fn stale_daemon_warning(
         .as_deref()
         .and_then(|local_url| daemon_http_version(local_url).ok())
         .unwrap_or_else(|| session.homeboy_version.clone());
-    let session_identity = session
+    let daemon_identity = session
         .local_url
         .as_deref()
         .and_then(|local_url| daemon_http_identity(local_url).ok())
-        .or_else(|| session.homeboy_build_identity.clone());
+        .filter(|identity| !identity.trim().is_empty());
+    let session_identity = daemon_identity.or_else(|| session.homeboy_build_identity.clone());
     if versions_match(&observed_session_version, &current_version)
         && versions_match(&session.homeboy_version, &current_version)
         && identities_match(session_identity.as_deref(), Some(&current_identity.display))
@@ -411,7 +413,7 @@ fn parse_self_identity_output(output: &str) -> Option<RemoteHomeboyIdentity> {
 fn identities_match(left: Option<&str>, right: Option<&str>) -> bool {
     match (left, right) {
         (Some(left), Some(right)) => versions_match(left, right),
-        _ => true,
+        _ => false,
     }
 }
 
@@ -852,7 +854,9 @@ pub(super) fn terminate_pid(pid: u32) {
 mod tests {
     use std::collections::HashMap;
 
-    use super::connection_daemon::{daemon_version_from_body, versions_match};
+    use super::connection_daemon::{
+        daemon_identity_from_body, daemon_version_from_body, versions_match,
+    };
     use super::*;
     use crate::test_support;
 
@@ -906,10 +910,14 @@ mod tests {
             Some("0.199.4")
         );
         assert_eq!(
-            super::connection_daemon::daemon_identity_from_body(
+            daemon_identity_from_body(
                 &serde_json::json!({"version":"0.228.13","build_identity":{"display":"homeboy 0.228.13+f7569a5e"}})
             ),
             Some("homeboy 0.228.13+f7569a5e")
+        );
+        assert_eq!(
+            daemon_identity_from_body(&serde_json::json!({"version":"0.228.13"})),
+            None
         );
     }
 
@@ -940,7 +948,7 @@ mod tests {
             warning.session_homeboy_build_identity.as_deref(),
             Some("homeboy 0.201.3+old")
         );
-        assert!(warning.message.contains("different Homeboy version"));
+        assert!(warning.message.contains("different Homeboy build"));
         assert!(warning.message.contains("run recovery_commands in order"));
         assert_eq!(
             warning.recovery_commands,
