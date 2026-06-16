@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.122.1] - 2026-06-16
+
+### Fixed
+- forward repo-loop inputs to runtime tasks
+
 ## [2.122.0] - 2026-06-16
 
 ### Added
