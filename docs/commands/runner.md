@@ -65,6 +65,8 @@ Commands that are both resource-policy hot and portable for Lab offload (`audit`
 
 Observation metadata records the routing decision under `metadata.lab_offload` when an observed run is created. The stable contract is `schema: "homeboy/lab-offload/v1"` and keeps the existing top-level compatibility fields: `source` is `automatic` or `explicit`; `status` is `offloaded`, `skipped`, or `fallback`; successful offloads include `runner_id` plus `remote_workspace`; local fallback records the runner and `fallback_reason`; skipped local execution records why no automatic offload was used, such as `force_hot`, `force_hot_local_override`, or `no_default_runner`. The same object also carries `plan_id` and plan-derived phase fields including `sync_mode`, `capability_preflight`, `extension_parity`, and `patch_captured`.
 
+Commands launched through non-local `homeboy runner exec` run with `HOMEBOY_RUNNER_HOSTED_EXEC=1`. That marker is Homeboy's first-class runner-side dispatch signal: nested runner commands such as `homeboy agent-task cook` are allowed to pass the non-interactive resource preflight without adding `--force-hot`, because the work is already intentionally hosted on the selected runner.
+
 Lab offload support is intentionally command-specific:
 
 | Command | Auto offload | Explicit `--runner` | Decision |

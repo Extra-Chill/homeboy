@@ -29,6 +29,7 @@ use super::{normalize_runner_command_env, resolve_runner_secret_env};
 
 const DEFAULT_RUNNER_EXEC_WAIT_TIMEOUT_SECS: u64 = 20 * 60;
 pub(crate) const RUNNER_EXEC_WAIT_TIMEOUT_ENV: &str = "HOMEBOY_RUNNER_EXEC_WAIT_TIMEOUT_SECS";
+pub(crate) const RUNNER_HOSTED_EXEC_ENV: &str = "HOMEBOY_RUNNER_HOSTED_EXEC";
 
 mod extension_parity;
 mod policy;
@@ -1040,6 +1041,9 @@ pub(crate) fn prepare_runner_process(
 
     let mut env = runner.env.clone();
     env.extend(request.env);
+    if runner.kind != RunnerKind::Local {
+        env.insert(RUNNER_HOSTED_EXEC_ENV.to_string(), "1".to_string());
+    }
     if runner.kind == RunnerKind::Local {
         env.extend(resolve_runner_secret_env_for_command(
             &runner.secret_env,
@@ -1717,6 +1721,20 @@ mod tests {
         }
     }
 
+    fn local_runner(workspace_root: String) -> Runner {
+        Runner {
+            id: "local".to_string(),
+            kind: RunnerKind::Local,
+            server_id: None,
+            workspace_root: Some(workspace_root),
+            settings: RunnerSettings::default(),
+            env: Default::default(),
+            secret_env: Default::default(),
+            resources: Default::default(),
+            policy: RunnerPolicy::default(),
+        }
+    }
+
     fn failed_runner_exec_output(stdout: &str, stderr: &str) -> RunnerExecOutput {
         RunnerExecOutput {
             command: "runner.exec",
@@ -2005,6 +2023,67 @@ mod tests {
                 plan.env.get("PATH").map(String::as_str),
                 Some("$HOME/custom/bin:$PATH")
             );
+        });
+    }
+
+    #[test]
+    fn ssh_runner_prep_marks_commands_as_runner_hosted() {
+        crate::test_support::with_isolated_home(|_| {
+            let plan = prepare_runner_process(RunnerProcessRequest {
+                runner_id: "lab".to_string(),
+                runner: Some(ssh_runner()),
+                cwd: Some("/srv/homeboy/project".to_string()),
+                project_id: None,
+                command: vec![
+                    "homeboy".to_string(),
+                    "agent-task".to_string(),
+                    "cook".to_string(),
+                ],
+                env: Default::default(),
+                secret_env_names: Vec::new(),
+                capture_patch: false,
+                raw_exec: false,
+                source_snapshot: None,
+                require_paths: Vec::new(),
+                validate_require_paths_on_host: false,
+            })
+            .expect("prepare ssh runner process");
+
+            assert_eq!(
+                plan.env.get(RUNNER_HOSTED_EXEC_ENV).map(String::as_str),
+                Some("1")
+            );
+        });
+    }
+
+    #[test]
+    fn local_runner_prep_does_not_mark_commands_as_runner_hosted() {
+        crate::test_support::with_isolated_home(|_| {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let workspace = temp.path().join("project");
+            std::fs::create_dir_all(&workspace).expect("workspace");
+
+            let plan = prepare_runner_process(RunnerProcessRequest {
+                runner_id: "local".to_string(),
+                runner: Some(local_runner(workspace.display().to_string())),
+                cwd: Some(workspace.display().to_string()),
+                project_id: None,
+                command: vec![
+                    "homeboy".to_string(),
+                    "agent-task".to_string(),
+                    "cook".to_string(),
+                ],
+                env: Default::default(),
+                secret_env_names: Vec::new(),
+                capture_patch: false,
+                raw_exec: false,
+                source_snapshot: None,
+                require_paths: Vec::new(),
+                validate_require_paths_on_host: false,
+            })
+            .expect("prepare local runner process");
+
+            assert!(!plan.env.contains_key(RUNNER_HOSTED_EXEC_ENV));
         });
     }
 

@@ -220,7 +220,7 @@ pub fn non_interactive_preflight_error(
     force_hot: bool,
     interactive: bool,
 ) -> Option<crate::core::Error> {
-    if force_hot || interactive {
+    if force_hot || interactive || is_runner_hosted_exec() {
         return None;
     }
 
@@ -235,6 +235,16 @@ pub fn non_interactive_preflight_error(
         None,
         None,
     ))
+}
+
+pub fn is_runner_hosted_exec() -> bool {
+    std::env::var(crate::core::runner::RUNNER_HOSTED_EXEC_ENV)
+        .ok()
+        .is_some_and(|value| value == "1")
+}
+
+pub fn clear_runner_hosted_exec() {
+    std::env::remove_var(crate::core::runner::RUNNER_HOSTED_EXEC_ENV);
 }
 
 fn primary_action(warning: &ResourcePolicyWarning) -> &'static str {
@@ -453,6 +463,18 @@ mod tests {
     }
 
     #[test]
+    fn runner_hosted_exec_does_not_fail_non_interactive_preflight() {
+        let _guard = EnvVarGuard::set(crate::core::runner::RUNNER_HOSTED_EXEC_ENV, "1");
+        let warning = evaluate(
+            lab_supported_hot("agent-task dispatch/cook/loop/run-plan"),
+            &resources(ResourceRecommendation::Hot),
+        )
+        .expect("hot machines warn");
+
+        assert!(non_interactive_preflight_error(&warning, false, false).is_none());
+    }
+
+    #[test]
     fn interactive_or_forced_hot_warning_does_not_fail_preflight() {
         let warning = evaluate(
             lab_supported_hot("audit"),
@@ -568,5 +590,27 @@ mod tests {
         assert!(value["message"].is_string());
         assert_eq!(value["host"]["load_severity"], "hot");
         assert_eq!(value["host"]["cpu_count"], 4);
+    }
+
+    struct EnvVarGuard {
+        name: &'static str,
+        prior: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(name: &'static str, value: &str) -> Self {
+            let prior = std::env::var(name).ok();
+            std::env::set_var(name, value);
+            Self { name, prior }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.prior {
+                Some(value) => std::env::set_var(self.name, value),
+                None => std::env::remove_var(self.name),
+            }
+        }
     }
 }

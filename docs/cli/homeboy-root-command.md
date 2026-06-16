@@ -34,11 +34,12 @@ homeboy --output /tmp/homeboy-results/review.json review my-component --changed-
 Resource policy warnings are stderr-only preflight notices. They currently apply
 to hot commands such as `bench`, `rig up`, `fleet exec`, full-workspace
 `audit` / `lint` / `test` runs, and changed-scope `audit` / `lint` / `test`
-runs when `homeboy doctor resources` sees a warm or hot machine. They do not
-block execution; pass `--force-hot` when the extra load is intentional. For
-portable hot commands with a default Lab runner, `--force-hot` does not
-implicitly keep execution local; pass `--runner <id>` to offload or add
-`--allow-local-hot` only when local controller-machine execution is intentional.
+runs when `homeboy doctor resources` sees a warm or hot machine. Non-interactive
+hot commands fail fast unless the work is routed through Lab/runner-hosted
+execution or the caller explicitly accepts local pressure. For portable hot
+commands with a default Lab runner, `--force-hot` does not implicitly keep
+execution local; pass `--runner <id>` to offload or add `--allow-local-hot` only
+when local controller-machine execution is intentional.
 
 Not every hot command is offloadable. Lab offload only applies to commands with
 a portable runner contract; local-only hot commands keep running locally and
