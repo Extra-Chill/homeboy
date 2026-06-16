@@ -92,7 +92,7 @@ pub(crate) fn execute_upgrade(
         VERIFY_READBACK_ATTEMPTS,
         VERIFY_READBACK_DELAY,
         || active_binary_info().ok().flatten(),
-        |delay| std::thread::sleep(delay),
+        std::thread::sleep,
     );
 
     let new_version = active_binary.as_ref().and_then(|info| info.version.clone());
