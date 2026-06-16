@@ -531,13 +531,21 @@ pub enum AgentTaskAggregateStatus {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskAggregateTotals {
+    #[serde(default)]
     pub queued: usize,
+    #[serde(default)]
     pub running: usize,
+    #[serde(default)]
     pub blocked: usize,
+    #[serde(default)]
     pub skipped: usize,
+    #[serde(default)]
     pub succeeded: usize,
+    #[serde(default)]
     pub failed: usize,
+    #[serde(default)]
     pub cancelled: usize,
+    #[serde(default)]
     pub timed_out: usize,
 }
 
