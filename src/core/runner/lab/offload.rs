@@ -176,7 +176,7 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
             "runner",
             message,
             Some(runner_id.to_string()),
-            Some(vec!["Current Lab offload support: agent-task dispatch/cook/loop/run-plan/status/logs/artifacts/review/providers, agent-task auth status, audit, bench run, full lint, full test, trace, refactor source runs, and tunnel preview-consumer run.".to_string()]),
+            Some(unsupported_runner_hints(runner_id, request.normalized_args)),
         )
     };
     let mut plan = base_lab_plan(request.command.as_ref());
@@ -335,6 +335,36 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
     }
 
     run_lab_offload_inner(request, selection, contract, plan, messages)
+}
+
+fn unsupported_runner_hints(runner_id: &str, normalized_args: &[String]) -> Vec<String> {
+    let mut hints = vec!["Current Lab offload support: agent-task dispatch/cook/loop/run-plan/status/logs/artifacts/review/providers, agent-task auth status, audit, bench run, full lint, full test, trace, refactor source runs, tunnel preview-consumer run, and tunnel service start.".to_string()];
+
+    if let Some(service_command) = tunnel_service_command(normalized_args) {
+        hints.push(format!(
+            "`tunnel service {service_command} --runner {runner_id}` is not routed directly; inspect runner-side tunnel state with `homeboy runner exec {runner_id} --ssh --raw -- homeboy tunnel service {service_command} ...` until service inspection supports native --runner routing."
+        ));
+    }
+
+    hints
+}
+
+fn tunnel_service_command(normalized_args: &[String]) -> Option<&str> {
+    normalized_args.windows(3).find_map(|window| {
+        let [first, second, third] = window else {
+            return None;
+        };
+        if first == "tunnel" && second == "service" {
+            match third.as_str() {
+                "list" | "show" | "status" | "url" | "expose" | "set" | "remove" => {
+                    Some(third.as_str())
+                }
+                _ => None,
+            }
+        } else {
+            None
+        }
+    })
 }
 
 fn run_lab_offload_inner(
@@ -3037,5 +3067,38 @@ mod tests {
         assert_eq!(plan.steps[0].id, "lab.select_runner");
         assert_eq!(plan.steps[0].status, PlanStepStatus::Skipped);
         assert_eq!(metadata.expect("metadata")["status"], "skipped");
+    }
+
+    #[test]
+    fn unsupported_runner_error_guides_tunnel_service_inspection() {
+        let outcome = execute_lab_offload(LabOffloadRequest {
+            command: None,
+            normalized_args: &[
+                "homeboy".to_string(),
+                "tunnel".to_string(),
+                "service".to_string(),
+                "status".to_string(),
+                "wpcom-ai-manual-held".to_string(),
+            ],
+            explicit_runner: Some("homeboy-lab"),
+            force_hot: false,
+            allow_local_hot: false,
+            allow_local_fallback: false,
+            allow_dirty_lab_workspace: false,
+            capture_patch: false,
+            mutation_flag: None,
+        });
+
+        let Err(err) = outcome else {
+            panic!("unsupported --runner command should fail");
+        };
+        assert_eq!(err.code.as_str(), "validation.invalid_argument");
+        let tried = err.details["tried"].as_array().expect("tried hints");
+        assert!(tried.iter().any(|hint| hint
+            .as_str()
+            .is_some_and(|hint| hint.contains("homeboy runner exec homeboy-lab"))));
+        assert!(tried.iter().any(|hint| hint
+            .as_str()
+            .is_some_and(|hint| hint.contains("tunnel service status"))));
     }
 }

@@ -620,6 +620,83 @@ fn command_backend_records_public_url_and_cleans_up_backend_process() {
 }
 
 #[test]
+fn status_reports_degraded_when_backend_outlives_service_process() {
+    test_support::with_isolated_home(|_| {
+        create_server();
+        let port = reserve_loopback_port();
+        expose(ExposeServiceTunnelSpec {
+            id: "orphaned-backend-preview".to_string(),
+            server_id: "private-host".to_string(),
+            target: ServiceTunnelTarget {
+                host: "127.0.0.1".to_string(),
+                port,
+            },
+            scheme: "http".to_string(),
+            local_port: Some(port),
+            auth: ServiceTunnelAuth {
+                mode: ServiceTunnelAuthMode::BearerEnv,
+                env_var: Some("ORPHANED_BACKEND_PREVIEW_TOKEN".to_string()),
+                header: Some("Authorization".to_string()),
+            },
+            policy: ServiceTunnelPolicy {
+                exposure: ServiceTunnelExposure::PrivateLoopback,
+                require_auth: true,
+                allowed_clients: Vec::new(),
+                preview: ServiceTunnelPreviewPolicy::default(),
+                native_preview_auth: ServiceTunnelNativePreviewAuthPolicy::default(),
+            },
+            description: None,
+        })
+        .expect("expose service");
+
+        let started = start(StartServiceTunnelSpec {
+            id: "orphaned-backend-preview".to_string(),
+            command: python_listener_command(
+                port,
+                "end=time.time()+1.0\nwhile time.time()<end:\n s.settimeout(max(0.01,end-time.time()))\n try:\n  conn,_=s.accept(); conn.close()\n except Exception:\n  pass",
+            ),
+            cwd: None,
+            env: BTreeMap::new(),
+            host: Some("127.0.0.1".to_string()),
+            port: Some(port),
+            scheme: Some("http".to_string()),
+            health_url: None,
+            health_path: None,
+            readiness_timeout_secs: 2,
+            backend: ServiceTunnelTunnelBackend::Command,
+            backend_command: Some("while true; do sleep 1; done".to_string()),
+            backend_public_url: Some("https://orphaned-backend.example.test".to_string()),
+            source_run_id: None,
+            source_workflow_id: None,
+            readiness_kind: ServiceTunnelReadinessKind::Preview,
+            readiness_checks: vec![ServiceTunnelReadinessCheck::TcpListener],
+        })
+        .expect("start preview service");
+
+        assert!(started.running);
+        std::thread::sleep(std::time::Duration::from_millis(1200));
+
+        let refreshed = status("orphaned-backend-preview").expect("status refresh");
+        assert!(!refreshed.running);
+        assert_eq!(refreshed.lifecycle, "degraded");
+        assert_eq!(
+            refreshed.degraded_reason.as_deref(),
+            Some("local-origin-process-exited")
+        );
+        let backend = refreshed.tunnel_backend.expect("backend status");
+        assert!(backend.active);
+        assert_eq!(
+            backend.active_reason.as_deref(),
+            Some("backend-process-running-after-local-origin-exit")
+        );
+
+        let stopped = stop("orphaned-backend-preview").expect("stop degraded service");
+        assert!(!stopped.running);
+        assert!(stopped.tunnel_backend.is_none());
+    });
+}
+
+#[test]
 fn preview_policy_decisions_match_workflow_outcomes() {
     let now = chrono::DateTime::parse_from_rfc3339("2026-06-07T12:00:00Z")
         .expect("timestamp")
