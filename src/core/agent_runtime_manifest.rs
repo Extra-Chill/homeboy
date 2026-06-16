@@ -1,8 +1,10 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::path::Path;
 
 use crate::core::agent_task_provider::AgentTaskExecutorProvider;
 use crate::core::extension::{load_all_extensions, ExtensionManifest};
+use crate::core::{config, paths};
 
 pub const AGENT_RUNTIME_MANIFEST_SCHEMA: &str = "homeboy/agent-runtime-manifest/v1";
 
@@ -18,10 +20,50 @@ pub struct AgentRuntimeManifest {
     pub extension_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extension_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_path: Option<String>,
 }
 
 pub fn discover_agent_runtime_manifests() -> Vec<AgentRuntimeManifest> {
-    discover_agent_runtime_manifests_from_extensions(&load_all_extensions().unwrap_or_default())
+    let mut manifests = discover_standalone_agent_runtime_manifests();
+    manifests.extend(discover_agent_runtime_manifests_from_extensions(
+        &load_all_extensions().unwrap_or_default(),
+    ));
+    manifests
+}
+
+fn discover_standalone_agent_runtime_manifests() -> Vec<AgentRuntimeManifest> {
+    let Ok(runtime_dir) = paths::agent_runtimes() else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(runtime_dir) else {
+        return Vec::new();
+    };
+
+    let mut manifests: Vec<AgentRuntimeManifest> = entries
+        .flatten()
+        .filter_map(|entry| load_standalone_agent_runtime_manifest(&entry.path()))
+        .collect();
+    manifests.sort_by(|a, b| a.id.cmp(&b.id));
+    manifests
+}
+
+fn load_standalone_agent_runtime_manifest(path: &Path) -> Option<AgentRuntimeManifest> {
+    if !path.is_dir() {
+        return None;
+    }
+    let id = path.file_name()?.to_string_lossy().to_string();
+    let manifest_path = paths::agent_runtime_manifest(&id).ok()?;
+    if !manifest_path.exists() {
+        return None;
+    }
+    let content = std::fs::read_to_string(manifest_path).ok()?;
+    let mut manifest: AgentRuntimeManifest = config::from_str(&content).ok()?;
+    manifest.id = id;
+    manifest.extension_id = None;
+    manifest.extension_path = None;
+    manifest.runtime_path = Some(path.to_string_lossy().to_string());
+    Some(manifest)
 }
 
 pub(crate) fn discover_agent_runtime_manifests_from_extensions(
@@ -41,6 +83,7 @@ pub(crate) fn discover_agent_runtime_manifests_from_extensions(
                 agent_task_executors: providers,
                 extension_id: Some(extension.id.clone()),
                 extension_path: extension.extension_path.clone(),
+                runtime_path: extension.extension_path.clone(),
             });
         }
 
@@ -62,6 +105,7 @@ pub(crate) fn discover_agent_runtime_manifests_from_extensions(
             agent_task_executors: providers,
             extension_id: Some(extension.id.clone()),
             extension_path: extension.extension_path.clone(),
+            runtime_path: extension.extension_path.clone(),
         });
     }
     runtime_manifests
@@ -73,6 +117,7 @@ pub(crate) fn discover_agent_task_executor_providers() -> Vec<AgentTaskExecutorP
         for mut provider in runtime_manifest.agent_task_executors {
             provider.extension_id = runtime_manifest.extension_id.clone();
             provider.extension_path = runtime_manifest.extension_path.clone();
+            provider.runtime_path = runtime_manifest.runtime_path.clone();
             providers.push(provider);
         }
     }
@@ -168,6 +213,10 @@ mod tests {
             Some("runtime-extension")
         );
         assert_eq!(manifests[0].agent_task_executors[0].backend, "codex");
+        assert_eq!(
+            manifests[0].runtime_path.as_deref(),
+            Some("/extensions/runtime-extension")
+        );
     }
 
     #[test]
@@ -186,5 +235,39 @@ mod tests {
             "legacy-extension.legacy-agent-task-executors"
         );
         assert_eq!(manifests[0].agent_task_executors[0].backend, "legacy");
+    }
+
+    #[test]
+    fn discovers_standalone_agent_runtime_manifests() {
+        crate::test_support::with_isolated_home(|home| {
+            let runtime_dir = home
+                .path()
+                .join(".config/homeboy/agent-runtimes")
+                .join("standalone-codex");
+            std::fs::create_dir_all(&runtime_dir).expect("runtime dir");
+            std::fs::write(
+                runtime_dir.join("standalone-codex.json"),
+                json!({
+                    "schema": AGENT_RUNTIME_MANIFEST_SCHEMA,
+                    "id": "ignored-on-disk",
+                    "label": "Standalone Codex",
+                    "agent_task_executors": [provider_json("standalone-codex.default", "codex")]
+                })
+                .to_string(),
+            )
+            .expect("runtime manifest");
+
+            let manifests = discover_standalone_agent_runtime_manifests();
+
+            assert_eq!(manifests.len(), 1);
+            assert_eq!(manifests[0].id, "standalone-codex");
+            assert_eq!(manifests[0].extension_id, None);
+            assert_eq!(manifests[0].extension_path, None);
+            assert_eq!(
+                manifests[0].runtime_path.as_deref(),
+                Some(runtime_dir.to_str().expect("runtime dir utf-8"))
+            );
+            assert_eq!(manifests[0].agent_task_executors[0].backend, "codex");
+        });
     }
 }
