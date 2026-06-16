@@ -18,13 +18,17 @@
     "trace.results": true,
     "annotations": false
   },
-  "agent_task_executors": [
+  "agent_runtimes": [
     {
+      "id": "wp-codebox",
+      "label": "WP Codebox",
+      "agent_task_executors": [
+        {
       "schema": "homeboy/agent-task-executor-provider/v1",
       "id": "wordpress.codebox-agent-task-executor",
       "label": "WP Codebox agent task executor",
       "backend": "codebox",
-      "command": "node {{extension_path}}/scripts/agent/homeboy-codebox-agent-task-executor.cjs",
+      "command": "node {{extension_path}}/../agent-runtimes/wp-codebox/scripts/agent/homeboy-codebox-agent-task-executor.cjs",
       "request_schema": "homeboy/agent-task-request/v1",
       "outcome_schema": "homeboy/agent-task-outcome/v1",
       "request_required_fields": [
@@ -96,6 +100,8 @@
       "status": "active",
       "integration_contract": "homeboy-wordpress-agent-task/v1",
       "runtime_gap_trackers": []
+        }
+      ]
     }
   ],
   "scripts": {

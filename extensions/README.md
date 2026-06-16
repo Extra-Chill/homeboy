@@ -4,6 +4,10 @@ Official extension directory for [Homeboy](https://github.com/Extra-Chill/homebo
 
 This is a **monorepo** — each subdirectory is a standalone extension. Install individual extensions, not the whole repo.
 
+Agent runtimes live under `agent-runtimes/`. The WP Codebox runtime is staged at
+`agent-runtimes/wp-codebox`; it delegates to the existing WordPress executor
+paths so pinned WordPress extension installs remain self-contained.
+
 ## Available Extensions
 
 | Extension | Description |

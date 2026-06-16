@@ -19,8 +19,14 @@ assert.equal(provider.backend, 'codebox');
 assert.equal(provider.integration_contract, 'homeboy-wordpress-agent-task/v1');
 
 const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'wordpress.json'), 'utf8'));
-assert.equal(manifest.agent_task_executors.length, 1);
-assert.deepEqual(manifest.agent_task_executors[0], provider);
+assert.equal(manifest.agent_task_executors, undefined);
+const runtime = manifest.agent_runtimes.find((candidate) => candidate.id === 'wp-codebox');
+assert(runtime, 'WordPress manifest declares the WP Codebox agent runtime');
+assert.equal(runtime.agent_task_executors.length, 1);
+assert.deepEqual(runtime.agent_task_executors[0], {
+  ...provider,
+  command: 'node {{extension_path}}/../agent-runtimes/wp-codebox/scripts/agent/homeboy-codebox-agent-task-executor.cjs',
+});
 assert.equal(provider.capabilities.includes('tool:wpsg_materialize_packet'), false);
 assert.equal(provider.capabilities.includes('ability:wpsg_materialize_packet'), false);
 

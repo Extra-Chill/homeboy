@@ -1,0 +1,16 @@
+{
+  "name": "homeboy-agent-runtime-wp-codebox",
+  "version": "1.0.0",
+  "private": true,
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./codebox-agent-task-executor": "./lib/codebox-agent-task-executor.js"
+  },
+  "bin": {
+    "homeboy-codebox-agent-task-executor": "./scripts/agent/homeboy-codebox-agent-task-executor.cjs"
+  },
+  "engines": {
+    "node": ">=18.12.0"
+  }
+}

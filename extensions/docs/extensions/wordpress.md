@@ -15,6 +15,12 @@ The core-dev runner expects WordPress core's own dependencies and config. It ins
 
 Codex WP Codebox tasks require an explicit provider/runtime stack. Homeboy does not infer these paths from local worktree names, and it does not fetch provider PR branches itself before dispatch.
 
+A first-class WP Codebox runtime staging area exists at
+`agent-runtimes/wp-codebox`. For compatibility with pinned WordPress extension
+installs, the existing `homeboy-extension-wordpress/codebox-agent-task-executor`
+export and `wordpress/scripts/agent/homeboy-codebox-agent-task-executor.cjs`
+command remain the canonical implementation paths for now.
+
 Configure the Codex pair with task config, global settings, or environment variables:
 
 - `provider_plugin_paths` / `wp_codebox_provider_plugin_paths` / `HOMEBOY_WP_CODEBOX_PROVIDER_PLUGIN_PATH`: a Codex-capable provider plugin checkout, such as the Codex provider branch of `ai-provider-for-openai`.
