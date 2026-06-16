@@ -240,14 +240,46 @@ fn preflight_patch_provider_git_checkout(source_path: &Path) -> Result<()> {
     if !status.trim().is_empty() {
         return Err(unsupported(
             "Lab offload for patch-producing agent-task providers requires --cwd to be a clean git checkout before runner-side patch capture",
-            vec![
-                "Commit or stash local changes before offloading the patch-producing agent task.".to_string(),
-                "Run with --force-hot to execute locally while the worktree is dirty.".to_string(),
-            ],
+            dirty_patch_provider_checkout_hints(source_path, &status),
         ));
     }
 
     Ok(())
+}
+
+fn dirty_patch_provider_checkout_hints(source_path: &Path, status: &str) -> Vec<String> {
+    let dirty_entries: Vec<&str> = status
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    let dirty_count = dirty_entries.len();
+    let dirty_sample = dirty_entries
+        .iter()
+        .take(5)
+        .map(|line| line.trim())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut hints = vec![
+        "Create or select a clean task worktree, then rerun the Lab command with --cwd <worktree>.".to_string(),
+        "Leave unrelated local changes in this checkout; Lab patch capture should run from a separate clean worktree.".to_string(),
+        format!(
+            "Inspect the dirty checkout with: git -C {} status --short",
+            source_path.display()
+        ),
+    ];
+
+    if dirty_count > 0 {
+        let suffix = if dirty_count > 5 {
+            format!(" and {} more", dirty_count - 5)
+        } else {
+            String::new()
+        };
+        hints.push(format!(
+            "Dirty checkout summary ({dirty_count}): {dirty_sample}{suffix}"
+        ));
+    }
+
+    hints
 }
 
 pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadOutcome> {
@@ -2405,13 +2437,19 @@ mod tests {
 
         assert_eq!(err.code, ErrorCode::ValidationInvalidArgument);
         assert!(err.message.contains("clean git checkout"));
-        assert!(err.details["tried"]
-            .as_array()
-            .expect("tried hints")
+        let tried = err.details["tried"].as_array().expect("tried hints");
+        assert!(tried.iter().any(|hint| hint
+            .as_str()
+            .is_some_and(|hint| hint.contains("clean task worktree"))));
+        assert!(tried
             .iter()
-            .any(|hint| hint
-                .as_str()
-                .is_some_and(|hint| hint.contains("Commit or stash"))));
+            .any(|hint| hint.as_str().is_some_and(|hint| hint.contains("dirty.txt"))));
+        assert!(!tried.iter().any(|hint| hint
+            .as_str()
+            .is_some_and(|hint| hint.contains("Commit or stash"))));
+        assert!(!tried.iter().any(|hint| hint
+            .as_str()
+            .is_some_and(|hint| hint.contains("--force-hot"))));
     }
 
     #[test]
