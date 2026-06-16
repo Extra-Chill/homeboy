@@ -34,7 +34,7 @@ assert.deepEqual(secretEnvRequirementForProvider(provider, 'codex').env, codexSe
 
 const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'wordpress.json'), 'utf8'));
 assert.equal(manifest.agent_task_executors, undefined);
-assert.equal(manifest.agent_runtimes, undefined);
+assert.equal(manifest.agent_runtimes?.some((candidate) => candidate.id === 'wp-codebox'), false);
 assert.equal(manifest.agent_task.runtime_requirements.integration_contract, 'homeboy-wordpress-agent-task/v1');
 const runtime = JSON.parse(fs.readFileSync(path.join(__dirname, '..', '..', 'ai-runtimes', 'wp-codebox', 'wp-codebox.json'), 'utf8'));
 assert.equal(runtime.agent_task_executors.length, 1);

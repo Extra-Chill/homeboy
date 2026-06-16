@@ -329,7 +329,7 @@ for (const capability of repoLoopCapabilities) {
 }
 const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'wordpress.json'), 'utf8'));
 assert.equal(manifest.agent_task_executors, undefined);
-assert.equal(manifest.agent_runtimes, undefined);
+assert.equal(manifest.agent_runtimes?.some((runtime) => runtime.id === 'wp-codebox'), false);
 assert.equal(manifest.agent_task.runtime_requirements.integration_contract, 'homeboy-wordpress-agent-task/v1');
 const runtimeManifest = JSON.parse(fs.readFileSync(path.join(wpCodeboxRuntimeRoot, 'wp-codebox.json'), 'utf8'));
 const manifestProvider = runtimeManifest.agent_task_executors.find((executor) => executor.id === provider.id);
