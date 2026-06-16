@@ -6,6 +6,7 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::PathBuf;
 
+use crate::core::agent_task_lifecycle::AgentTaskRunState;
 use crate::core::{agent_task_lifecycle, paths, Error, Result};
 
 pub const AGENT_TASK_LOOP_CONTROLLER_SCHEMA: &str = "homeboy/agent-task-loop-controller/v1";
@@ -1611,7 +1612,9 @@ pub fn load_controller(loop_id: &str) -> Result<AgentTaskLoopControllerRecord> {
 
 pub fn controller_status(loop_id: &str) -> Result<AgentTaskLoopControllerRecord> {
     let mut record = load_controller(loop_id)?;
-    if refresh_subcontroller_statuses(&mut record)? {
+    let refreshed_child_runs = refresh_stale_running_child_actions(&mut record)?;
+    let refreshed_subcontrollers = refresh_subcontroller_statuses(&mut record)?;
+    if refreshed_child_runs || refreshed_subcontrollers {
         write_controller(&record)?;
     }
     Ok(record)
@@ -1984,6 +1987,77 @@ fn refresh_subcontroller_statuses(record: &mut AgentTaskLoopControllerRecord) ->
     if record.open_wait_count() == 0 && record.state == AgentTaskLoopControllerState::Waiting {
         record.state = AgentTaskLoopControllerState::Running;
         changed = true;
+    }
+
+    if changed {
+        record.touch();
+    }
+    Ok(changed)
+}
+
+fn refresh_stale_running_child_actions(record: &mut AgentTaskLoopControllerRecord) -> Result<bool> {
+    let mut changed = false;
+    let mut history_events = Vec::new();
+
+    for index in 0..record.next_actions.len() {
+        let action = &record.next_actions[index];
+        if action.status != AgentTaskLoopActionStatus::Running
+            || !matches!(action.action, AgentTaskLoopPolicyAction::SpawnTask { .. })
+        {
+            continue;
+        }
+
+        let Some(run_id) = action_referenced_run_id(action, record) else {
+            continue;
+        };
+        let run = agent_task_lifecycle::status(&run_id)?;
+        if run.state != AgentTaskRunState::Running
+            || run.metadata.get("stale_running").and_then(Value::as_bool) != Some(true)
+        {
+            continue;
+        }
+
+        let reason = run
+            .metadata
+            .get("stale_running_reason")
+            .and_then(Value::as_str)
+            .unwrap_or("stale_running");
+        let action = &mut record.next_actions[index];
+        action.status = AgentTaskLoopActionStatus::Pending;
+        action.reason = format!(
+            "child agent-task run '{run_id}' is stale ({reason}); action reset for recovery"
+        );
+        action.diagnostics.push(AgentTaskLoopActionDiagnostic {
+            code: "stale_child_run_recovery".to_string(),
+            message: action.reason.clone(),
+            runner: None,
+            details: json!({
+                "run_id": run_id,
+                "stale_running_reason": reason,
+            }),
+        });
+        history_events.push((
+            action.action_id.clone(),
+            action.dedupe_key.clone(),
+            run_id,
+            reason.to_string(),
+        ));
+        changed = true;
+    }
+
+    for (action_id, dedupe_key, run_id, reason) in history_events {
+        record.history.push(AgentTaskLoopHistoryEvent {
+            event_id: format!("stale-child-recovery-{}", record.history.len() + 1),
+            event_type: "controller.action.stale_child_recovery".to_string(),
+            recorded_at: now_timestamp(),
+            entity_id: None,
+            payload: json!({
+                "action_id": action_id,
+                "dedupe_key": dedupe_key,
+                "run_id": run_id,
+                "stale_running_reason": reason,
+            }),
+        });
     }
 
     if changed {

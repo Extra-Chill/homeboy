@@ -1435,7 +1435,11 @@ where
         "run_plan" => {
             let plan = plan_from_controller_request(request)?;
             let run_id = controller_request_run_id(request, dedupe_key, &action.action_id);
-            let submitted = lifecycle::submit_plan(&plan, Some(&run_id))?;
+            let submitted = if lifecycle::run_record_exists(&run_id)? {
+                lifecycle::status(&run_id)?
+            } else {
+                lifecycle::submit_plan(&plan, Some(&run_id))?
+            };
             record_controller_spawn(
                 record,
                 action,
@@ -2473,6 +2477,7 @@ mod tests {
     use crate::core::agent_task_scheduler::AgentTaskExecutionContext;
     use crate::test_support::with_isolated_home;
     use serde_json::json;
+    use std::fs;
     use std::sync::{Arc, Mutex};
 
     #[derive(Clone, Default)]
@@ -3037,6 +3042,92 @@ mod tests {
                 .clone()
                 .expect("provider saw request");
             assert_eq!(observed.task_id, "controller-service-task");
+        });
+    }
+
+    #[test]
+    fn resume_recovers_running_action_with_stale_child_run() {
+        with_isolated_home(|_| {
+            let mut record = init(ControllerInitRequest {
+                loop_id: "loop-service-stale-child".to_string(),
+                phase: "repair".to_string(),
+                config_version: "v1".to_string(),
+            })
+            .expect("controller initialized");
+
+            let plan = test_plan();
+            crate::core::agent_task_lifecycle::submit_plan(
+                &plan,
+                Some("controller-service-stale-child-a"),
+            )
+            .expect("child submitted");
+            crate::core::agent_task_lifecycle::mark_running("controller-service-stale-child-a")
+                .expect("child marked running");
+            let status_path = crate::core::paths::homeboy_data()
+                .expect("homeboy data")
+                .join("agent-task-runs")
+                .join("controller-service-stale-child-a")
+                .join("status.json");
+            let mut status_json: Value =
+                serde_json::from_str(&fs::read_to_string(&status_path).expect("child status json"))
+                    .expect("parsed child status");
+            status_json["metadata"]["runner_pid"] = json!(999999u32);
+            fs::write(
+                &status_path,
+                format!(
+                    "{}\n",
+                    serde_json::to_string_pretty(&status_json).expect("serialized child status")
+                ),
+            )
+            .expect("stale child status written");
+
+            record.record_action(
+                AgentTaskLoopPolicyAction::SpawnTask {
+                    dedupe_key: "finding:abc:repair".to_string(),
+                    entity_id: None,
+                    request: json!({
+                        "mode": "run_plan",
+                        "run_id": "controller-service-stale-child-a",
+                        "plan": plan,
+                    }),
+                },
+                "finding emitted",
+            );
+            record.next_actions[0].status = AgentTaskLoopActionStatus::Running;
+            record
+                .dedupe_keys
+                .get_mut("finding:abc:repair")
+                .expect("dedupe record")
+                .run_id = Some("controller-service-stale-child-a".to_string());
+            controller::write_controller(&record).expect("controller written");
+
+            let result = resume(
+                "loop-service-stale-child",
+                CapturingExecutor::default(),
+                &NoopDispatchHook,
+            )
+            .expect("controller resumed");
+
+            assert_eq!(result.exit_code, 0);
+            assert_eq!(result.value.results.len(), 1);
+            let loaded =
+                controller::load_controller("loop-service-stale-child").expect("controller");
+            assert_eq!(
+                loaded.next_actions[0].status,
+                AgentTaskLoopActionStatus::Completed
+            );
+            assert_eq!(
+                loaded.next_actions[0].diagnostics[0].code,
+                "stale_child_run_recovery"
+            );
+            assert!(loaded.history.iter().any(|event| {
+                event.event_type == "controller.action.stale_child_recovery"
+                    && event.payload["run_id"] == json!("controller-service-stale-child-a")
+            }));
+            let child =
+                crate::core::agent_task_lifecycle::status("controller-service-stale-child-a")
+                    .expect("child status");
+            assert_eq!(child.metadata["reclaimed_stale_running"], json!(true));
         });
     }
 
