@@ -1373,16 +1373,46 @@ mod tests {
 
             let loaded = status("cook-lab-predispatch").expect("status loaded");
             let log = logs("cook-lab-predispatch").expect("logs loaded");
+            let artifact_report = artifacts("cook-lab-predispatch").expect("artifacts loaded");
+            let legacy_status_path = crate::core::paths::homeboy_data()
+                .expect("homeboy data")
+                .join("agent-task-runs")
+                .join("cook-lab-predispatch")
+                .join("status.json");
+            std::fs::remove_file(
+                crate::core::paths::homeboy_data()
+                    .expect("homeboy data")
+                    .join("agent-task-runs")
+                    .join("cook-lab-predispatch")
+                    .join("aggregate.json"),
+            )
+            .expect("aggregate file removed");
+            let mirrored_log = logs("cook-lab-predispatch").expect("mirrored logs loaded");
+            let mirrored_artifacts =
+                artifacts("cook-lab-predispatch").expect("mirrored artifacts loaded");
 
             assert_eq!(record.state, AgentTaskRunState::Failed);
             assert_eq!(loaded.state, AgentTaskRunState::Failed);
             assert_eq!(loaded.tasks[0].state, AgentTaskState::Failed);
             assert!(loaded.provider_handles.is_empty());
             assert_eq!(log.events[1].state, AgentTaskState::Failed);
+            assert_eq!(mirrored_log.events[1].state, AgentTaskState::Failed);
             assert_eq!(loaded.metadata["provider_run_ids"], serde_json::json!([]));
             assert_eq!(
                 loaded.artifact_refs[0].kind,
                 "lab-offload-pre-dispatch-failure"
+            );
+            assert_eq!(
+                artifact_report.evidence_refs[0].kind,
+                "lab-offload-pre-dispatch-failure"
+            );
+            assert_eq!(
+                mirrored_artifacts.evidence_refs[0].kind,
+                "lab-offload-pre-dispatch-failure"
+            );
+            assert!(
+                !legacy_status_path.exists(),
+                "agent-task status.json is no longer the primary durable run record"
             );
         });
     }
@@ -2115,41 +2145,28 @@ mod tests {
     }
 
     #[test]
-    fn list_records_skips_malformed_status_files() {
+    fn list_records_skips_malformed_observation_records() {
         with_isolated_home(|_| {
             let plan = test_plan();
             submit_plan(&plan, Some("good-run")).expect("submitted");
-            let invalid_shape = submit_plan(&plan, Some("missing-skipped-run")).expect("submitted");
-            let invalid_shape_path = paths::homeboy_data()
-                .expect("homeboy data")
-                .join("agent-task-runs")
-                .join(&invalid_shape.run_id)
-                .join("status.json");
-            let mut raw = serde_json::to_value(&invalid_shape).expect("record json");
-            raw["totals"] = json!({
-                "queued": 1,
-                "running": 0,
-                "blocked": 0,
-                "succeeded": 0,
-                "failed": 0,
-                "cancelled": 0,
-                "timed_out": 0
-            });
-            std::fs::write(
-                &invalid_shape_path,
-                format!(
-                    "{}\n",
-                    serde_json::to_string_pretty(&raw).expect("pretty json")
-                ),
-            )
-            .expect("write invalid-shape status");
-            let bad_dir = paths::homeboy_data()
-                .expect("homeboy data")
-                .join("agent-task-runs")
-                .join("bad-run");
-            std::fs::create_dir_all(&bad_dir).expect("create bad run dir");
-            std::fs::write(bad_dir.join("status.json"), "{ definitely not json\n")
-                .expect("write bad status");
+            let store = crate::core::observation::ObservationStore::open_initialized()
+                .expect("observation store");
+            store
+                .upsert_imported_run(&crate::core::observation::RunRecord {
+                    id: "bad-run".to_string(),
+                    kind: "agent-task".to_string(),
+                    component_id: None,
+                    started_at: "2026-01-01T00:00:00Z".to_string(),
+                    finished_at: None,
+                    status: "running".to_string(),
+                    command: None,
+                    cwd: None,
+                    homeboy_version: None,
+                    git_sha: None,
+                    rig_id: None,
+                    metadata_json: json!({ "schema": "homeboy/agent-task-observation-record/v1" }),
+                })
+                .expect("bad record inserted");
 
             let records = list_records().expect("records listed");
 

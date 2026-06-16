@@ -292,6 +292,8 @@ mod tests {
                 .keep()
                 .display()
                 .to_string();
+            let patch_path = std::path::Path::new(&workspace).join("changes.patch");
+            std::fs::write(&patch_path, "diff --git a/file b/file\n").expect("patch fixture");
             let (value, exit_code) = cook_with_executor(
                 dispatch_args(DispatchArgOverrides {
                     prompt: Some("Cook a patch.".to_string()),
@@ -299,7 +301,7 @@ mod tests {
                     run_id: Some("cook-handoff".to_string()),
                     ..DispatchArgOverrides::default()
                 }),
-                PatchExecutor,
+                PatchExecutor { patch_path },
             )
             .expect("cook run");
 
@@ -340,7 +342,9 @@ mod tests {
                     run_id: Some("cook-queued".to_string()),
                     ..DispatchArgOverrides::default()
                 }),
-                PatchExecutor,
+                PatchExecutor {
+                    patch_path: std::path::PathBuf::new(),
+                },
             )
             .expect("queued cook");
 
@@ -440,7 +444,9 @@ mod tests {
         }
     }
 
-    struct PatchExecutor;
+    struct PatchExecutor {
+        patch_path: std::path::PathBuf,
+    }
 
     impl AgentTaskExecutorAdapter for PatchExecutor {
         fn execute(
@@ -459,10 +465,12 @@ mod tests {
                     id: "patch-1".to_string(),
                     kind: "patch".to_string(),
                     name: Some("changes.patch".to_string()),
-                    path: Some("/tmp/changes.patch".to_string()),
+                    path: Some(self.patch_path.display().to_string()),
                     url: None,
                     mime: None,
-                    size_bytes: None,
+                    size_bytes: std::fs::metadata(&self.patch_path)
+                        .ok()
+                        .map(|metadata| metadata.len()),
                     sha256: None,
                     metadata: Value::Null,
                 }],
