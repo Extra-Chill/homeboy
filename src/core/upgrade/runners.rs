@@ -8,7 +8,7 @@ use crate::core::upgrade::ExtensionUpgradeEntry;
 use crate::core::Result;
 use std::path::Path;
 
-use super::helpers::version_is_newer;
+use super::helpers::{current_version, version_is_newer};
 use super::types::{
     InstallMethod, RunnerDaemonDriftEntry, RunnerExtensionSyncEntry, RunnerUpgradeEntry,
 };
@@ -458,23 +458,46 @@ fn upgrade_runner_with_executor(
         }
     };
 
-    let configured_new_version = runner_homeboy_version(runner, &upgrade_homeboy_path, exec)
+    let mut homeboy_path = upgrade_homeboy_path.clone();
+    let mut new_version = runner_homeboy_version(runner, &upgrade_homeboy_path, exec)
         .ok()
         .flatten();
+    let mut source_path_realigned = false;
+    if let Some(realignment) = source_upgrade_homeboy_path_realignment(
+        runner,
+        &original_homeboy_path,
+        method_override,
+        command_source_path.as_deref(),
+        new_version.as_deref(),
+        exec,
+    ) {
+        match update_homeboy_path(&runner.id, &realignment.homeboy_path) {
+            Ok(()) => {
+                homeboy_path = realignment.homeboy_path;
+                new_version = Some(realignment.version);
+                source_path_realigned = true;
+                path_update_detail = Some(realignment.detail);
+            }
+            Err(err) => {
+                path_update_detail = Some(format!(
+                    "source-built runner homeboy_path realignment failed: {}",
+                    err.message
+                ));
+            }
+        }
+    }
     let mut bare_homeboy_version = None;
-    let alignment = if is_auto_realignable_homeboy_path(&upgrade_homeboy_path) {
+    let alignment = if !source_path_realigned && is_auto_realignable_homeboy_path(&homeboy_path) {
         bare_homeboy_version = runner_bare_homeboy_version(runner, &upgrade_homeboy_path, exec);
         runner_homeboy_path_alignment(
             &runner.id,
-            &upgrade_homeboy_path,
-            configured_new_version.as_deref(),
+            &homeboy_path,
+            new_version.as_deref(),
             bare_homeboy_version.as_deref(),
         )
     } else {
         None
     };
-    let mut homeboy_path = upgrade_homeboy_path.clone();
-    let mut new_version = configured_new_version.clone();
     let mut path_drift = alignment
         .as_ref()
         .and_then(|alignment| alignment.drift.clone());
@@ -558,10 +581,10 @@ fn upgrade_runner_with_executor(
             }
         }
     }
-    if bare_homeboy_version.is_none() {
+    if bare_homeboy_version.is_none() && !source_path_realigned {
         bare_homeboy_version = runner_bare_homeboy_version(runner, &homeboy_path, exec);
     }
-    if path_drift.is_none() {
+    if path_drift.is_none() && !source_path_realigned {
         if let Some(alignment) = runner_homeboy_path_alignment(
             &runner.id,
             &homeboy_path,
@@ -646,6 +669,50 @@ fn upgrade_runner_with_executor(
         exit_code,
         detail,
     }
+}
+
+struct SourceUpgradeHomeboyPathRealignment {
+    homeboy_path: String,
+    version: String,
+    detail: String,
+}
+
+fn source_upgrade_homeboy_path_realignment(
+    runner: &Runner,
+    original_homeboy_path: &str,
+    method_override: Option<InstallMethod>,
+    command_source_path: Option<&str>,
+    configured_version: Option<&str>,
+    exec: &mut impl FnMut(&str, RunnerExecOptions) -> Result<(runner::RunnerExecOutput, i32)>,
+) -> Option<SourceUpgradeHomeboyPathRealignment> {
+    if method_override != Some(InstallMethod::Source) {
+        return None;
+    }
+    if configured_version == Some(current_version()) {
+        return None;
+    }
+    let source_path = command_source_path?.trim_end_matches('/');
+    for build_dir in ["release", "debug"] {
+        let candidate = format!("{source_path}/target/{build_dir}/homeboy");
+        let Some(version) = runner_homeboy_version(runner, &candidate, exec)
+            .ok()
+            .flatten()
+        else {
+            continue;
+        };
+        if version != current_version() {
+            continue;
+        }
+        return Some(SourceUpgradeHomeboyPathRealignment {
+            homeboy_path: candidate.clone(),
+            version: version.clone(),
+            detail: format!(
+                "runner homeboy_path updated from `{original_homeboy_path}` to source-built `{candidate}` because it reports {version}"
+            ),
+        });
+    }
+
+    None
 }
 
 fn sync_runner_extensions(
@@ -2011,6 +2078,70 @@ mod tests {
             .detail
             .contains("after configured runner executable failed to upgrade"));
         assert!(updated[0].detail.contains(stale_path));
+    }
+
+    #[test]
+    fn source_runner_upgrade_realigns_to_materialized_source_build_when_path_shadows_old_homeboy() {
+        let stale_path = "/home/chubes/Developer/_lab_workspaces/homeboy-old/target/debug/homeboy";
+        let source_path = Path::new("/Users/chubes/Developer/homeboy@current-main");
+        let remote_source = "/home/chubes/Developer/_lab_workspaces/homeboy-current-main";
+        let source_binary = format!("{remote_source}/target/release/homeboy");
+        let runner = ssh_runner("lab", Some(stale_path));
+        let mut commands = Vec::new();
+        let mut path_updates = Vec::new();
+
+        let (updated, skipped) = upgrade_runners_with_executor_source_materializer_and_path_updater(
+            &[runner],
+            true,
+            Some(InstallMethod::Source),
+            Some(source_path),
+            &[],
+            |runner_id, options| {
+                commands.push(options.command.clone());
+                let (stdout, stderr, exit_code) = match commands.len() {
+                    1 => ("homeboy 0.232.0\n".to_string(), String::new(), 0),
+                    2 => ("{\"success\":true}\n".to_string(), String::new(), 0),
+                    3 => ("homeboy 0.232.0\n".to_string(), String::new(), 0),
+                    4 if options.command[0] == source_binary => {
+                        (format!("homeboy {}\n", current_version()), String::new(), 0)
+                    }
+                    other => (
+                        String::new(),
+                        format!("unexpected command {other}: {:?}", options.command),
+                        1,
+                    ),
+                };
+                Ok((
+                    exec_output(runner_id, options.command, &stdout, &stderr, exit_code),
+                    exit_code,
+                ))
+            },
+            runner_status,
+            |runner, path| {
+                assert_eq!(runner.id, "lab");
+                assert_eq!(path, source_path);
+                Ok(remote_source.to_string())
+            },
+            |runner_id, homeboy_path| {
+                path_updates.push((runner_id.to_string(), homeboy_path.to_string()));
+                Ok(())
+            },
+        );
+
+        assert!(skipped.is_empty());
+        assert_eq!(updated.len(), 1);
+        assert!(updated[0].success);
+        assert!(updated[0].upgraded);
+        assert_eq!(updated[0].homeboy_path, source_binary);
+        assert_eq!(updated[0].previous_version.as_deref(), Some("0.232.0"));
+        assert_eq!(updated[0].new_version.as_deref(), Some(current_version()));
+        assert_eq!(updated[0].bare_homeboy_version, None);
+        assert_eq!(updated[0].path_drift, None);
+        assert_eq!(path_updates, vec![("lab".to_string(), source_binary)]);
+        assert_eq!(commands[1][0], stale_path);
+        assert_eq!(commands[1][commands[1].len() - 2], "--source-path");
+        assert_eq!(commands[1][commands[1].len() - 1], remote_source);
+        assert!(updated[0].detail.contains("to source-built"));
     }
 
     #[test]
