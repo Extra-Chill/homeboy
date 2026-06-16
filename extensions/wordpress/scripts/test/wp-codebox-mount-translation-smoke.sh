@@ -115,7 +115,7 @@ for (const expected of [
   'plugin-slug=example',
   'test-file=tests/OnlyTest.php',
   'changed-tests-json=["tests/OnlyTest.php"]',
-  'env-json={"HOMEBOY_FLAG":"yes"}',
+  'env-json={}',
   'wp-config-defines-json={"WP_DEBUG":true,"CUSTOM_NUMBER":7}',
   'autoload-file=/wp-codebox-vendor/autoload.php',
   'tests-dir=/wp-codebox-vendor/wp-phpunit/wp-phpunit',
