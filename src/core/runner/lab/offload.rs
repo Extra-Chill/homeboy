@@ -75,6 +75,7 @@ use super::agent_task_bridge::{
 use super::evidence::terminal_lab_run_evidence;
 use super::secrets::{
     hydrate_agent_task_secret_env, hydrate_trace_secret_env, hydrate_tunnel_secret_env,
+    preflight_agent_task_runner_secret_env,
 };
 use super::trace_fetch_refs::lab_offload_git_fetch_refs;
 
@@ -1210,6 +1211,12 @@ fn run_lab_offload_inner(
     hydrate_agent_task_secret_env(&changed_since_preflight.args, &mut env)?;
     hydrate_trace_secret_env(&changed_since_preflight.args, &mut env)?;
     hydrate_tunnel_secret_env(&changed_since_preflight.args, &mut env)?;
+    preflight_agent_task_runner_secret_env(
+        runner_id,
+        &runner,
+        &changed_since_preflight.args,
+        &env,
+    )?;
     preflight_agent_task_provider_on_runner(
         runner_id,
         &command_prefix.argv,
