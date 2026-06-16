@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.235.0] - 2026-06-16
+
+### Added
+- generic managed runner-source primitive + drift doctor checks
+
+### Fixed
+- preflight Lab agent-task runner secrets
+- fix(agent-task): preserve controller dispatch workspace context
+- inline provider-config @file before offload and accept --runner on lab commands
+
 ## [0.234.0] - 2026-06-16
 
 ### Added
