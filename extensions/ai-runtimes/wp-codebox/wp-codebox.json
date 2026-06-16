@@ -1,4 +1,6 @@
 {
+  "schema": "homeboy/agent-runtime-manifest/v1",
+  "id": "wp-codebox",
   "name": "WP Codebox",
   "version": "1.0.0",
   "description": "WP Codebox AI runtime for Homeboy agent tasks.",
