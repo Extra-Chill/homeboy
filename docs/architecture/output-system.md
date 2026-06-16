@@ -154,8 +154,11 @@ The `next_steps` array contains context-aware actionable guidance based on the c
 | 1 | internal errors (`internal.*`) |
 | 2 | config/validation errors (`config.*`, `validation.*`) |
 | 4 | not found / missing state (`project.not_found`, `server.not_found`, `component.not_found`, `extension.not_found`, `project.no_active`) |
+| 5 | release skipped — no tag/package/GitHub Release produced (`release` when the plan reports `status: "skipped"`; the data payload still carries `skipped_reason` + an actionable force hint) |
 | 10 | SSH errors (`ssh.*`) |
 | 20 | remote/deploy/git errors (`remote.*`, `deploy.*`, `git.*`) |
+
+Note: `0` means success and `3` means a release completed with post-release warnings. A non-zero exit code makes the JSON envelope report `success: false`, even when `data` is present (e.g. a skipped release returns its full result payload alongside `success: false`).
 
 ## Success payload
 

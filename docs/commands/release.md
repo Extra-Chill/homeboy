@@ -232,6 +232,12 @@ Without `--dry-run`:
 - `skipped` - Pipeline disabled or all steps skipped due to failed dependencies
 - `missing` - Required extension actions not found
 
+### Skipped releases
+
+When Homeboy classifies the commit range as having no releasable commits (e.g. docs-only or guidance-only changes), the release is skipped: no tag, no release commit, and no GitHub Release are produced. The command result reports `status: "skipped"` with a `skipped_reason` (`no-releasable-commits`, `major-requires-flag`, or `release-already-at-head`) and an actionable force hint.
+
+A skipped release is **not** reported as success: the process exits with code `5` and the JSON envelope reports `success: false`, even though `data` still carries the full result payload. This lets operators and CI distinguish a no-op release from a real one. To force a release when the skip is intentional, re-run with `--bump` (the hint echoes the exact command, including flags like `--skip-checks`).
+
 ### Idempotent retry
 
 Publish steps are designed to be idempotent:

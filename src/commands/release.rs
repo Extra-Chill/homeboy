@@ -295,8 +295,14 @@ pub fn run(
     };
 
     let batch_result = release::run_batch(&component_ids, &input_template);
+    // A batch that produced zero releases (all components skipped, none failed)
+    // exits with the dedicated skip code so the envelope reports success:false —
+    // matching single-release behavior (issue #4316). A batch with at least one
+    // real release exits 0; any failure exits 1.
     let exit_code = if batch_result.summary.failed > 0 {
         1
+    } else if batch_result.summary.released == 0 && batch_result.summary.skipped > 0 {
+        release::SKIPPED_RELEASE_EXIT_CODE
     } else {
         0
     };
