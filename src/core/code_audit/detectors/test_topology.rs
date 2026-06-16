@@ -389,6 +389,7 @@ JSON
             trace: None,
             structured_sidecars: std::collections::BTreeMap::new(),
             release_preflights: vec![],
+            agent_runtimes: vec![],
             actions: vec![],
             hooks: std::collections::HashMap::new(),
             settings: vec![],
