@@ -262,18 +262,65 @@ pub(super) fn find_deploy_override(
 
 fn archive_install_override(policy: &DeployArchiveInstallPolicy) -> DeployOverride {
     let root_check = if policy.root_must_match_target_basename {
-        " && target_slug=$(basename \"{{targetDir}}\") && if [ \"$zip_root\" != \"$target_slug\" ]; then echo \"ERROR: archive root $zip_root does not match target basename $target_slug\" && exit 1; fi"
+        " && target_slug=$(basename \"$target\") && if [ \"$zip_root\" != \"$target_slug\" ]; then echo \"ERROR: archive root $zip_root does not match target basename $target_slug\" && exit 1; fi"
     } else {
         ""
     };
 
+    // Robust, filesystem-portable install/replace flow.
+    //
+    // Why not `mv` from the staging dir (e.g. /tmp) into the target? On some
+    // sandboxed/managed filesystems (notably WP Cloud) `/tmp` lives on a
+    // different filesystem than the deploy target. A cross-device `mv` falls
+    // back to a recursive copy that tries to preserve permissions/metadata for
+    // every file. For plugins containing deep nested Node package trees
+    // (node_modules, vendor sub-packages with thousands of small files and
+    // symlinks) that copy fails with "Operation not permitted" or even a
+    // seccomp "Bad system call" abort. See issue #3027.
+    //
+    // Instead we stage extraction into a temp dir that sits *adjacent* to the
+    // target (same parent directory => same filesystem). Every subsequent
+    // `mv` (extracted tree -> target, existing target -> backup, restore on
+    // failure) is then a single intra-filesystem rename(2): O(1), no recursion,
+    // no per-file metadata copies, regardless of how deep the directory tree is.
+    //
+    // Flow:
+    //   1. Resolve + validate the archive root directory name.
+    //   2. Create an adjacent temp dir and extract the artifact into it.
+    //   3. Locate the extracted root inside the temp dir.
+    //   4. Back up the existing target via same-filesystem rename.
+    //   5. Atomically rename the extracted tree into place.
+    //   6. On any failure, restore the backup; always clean up the temp dir.
+    //   7. On success, remove the backup.
     DeployOverride {
         path_pattern: policy.path_pattern.clone(),
         staging_path: policy.staging_path.clone(),
         install_command: format!(
-            "zip_root=$(unzip -Z1 \"{{{{stagingArtifact}}}}\" | awk -F/ 'NF && $1 != \"\" {{ print $1; exit }}') && if [ -z \"$zip_root\" ]; then echo 'ERROR: Could not determine archive root directory' && exit 1; fi{root_check} && rm -rf \"{{{{targetDir}}}}\" && mkdir -p \"{{{{targetParentDir}}}}\" && unzip -oq \"{{{{stagingArtifact}}}}\" -d \"{{{{targetParentDir}}}}\" && test -d \"{{{{targetDir}}}}\" || (echo 'ERROR: archive install failed' && exit 1)"
+            "target=\"{{{{targetDir}}}}\" \
+&& parent=\"{{{{targetParentDir}}}}\" \
+&& backup=\"$target.homeboy-bak.$$\" \
+&& zip_root=$(unzip -Z1 \"{{{{stagingArtifact}}}}\" | awk -F/ 'NF && $1 != \"\" {{ print $1; exit }}') \
+&& if [ -z \"$zip_root\" ]; then echo 'ERROR: Could not determine archive root directory' && exit 1; fi{root_check} \
+&& mkdir -p \"$parent\" \
+&& staged=$(mktemp -d \"{{{{targetAdjacentTempPattern}}}}\") || {{ echo 'ERROR: could not create adjacent staging dir' && exit 1; }} \
+&& trap 'rm -rf \"$staged\"' EXIT \
+&& if ! unzip -oq \"{{{{stagingArtifact}}}}\" -d \"$staged\"; then echo 'ERROR: archive extraction failed' && exit 1; fi \
+&& extracted=\"$staged/$zip_root\" \
+&& if [ ! -d \"$extracted\" ]; then echo \"ERROR: expected directory $zip_root not found in archive\" && exit 1; fi \
+&& rm -rf \"$backup\" \
+&& if [ -e \"$target\" ]; then echo \"Backing up existing target to $backup\" && mv \"$target\" \"$backup\" || {{ echo 'ERROR: could not back up existing target' && exit 1; }}; fi \
+&& if ! mv \"$extracted\" \"$target\"; then \
+echo 'ERROR: archive install failed — restoring backup' \
+&& rm -rf \"$target\" \
+&& if [ -e \"$backup\" ]; then mv \"$backup\" \"$target\" || true; fi \
+&& exit 1; \
+fi \
+&& rm -rf \"$backup\" \
+&& test -d \"$target\" || {{ echo 'ERROR: target missing after install' && exit 1; }}"
         ),
-        cleanup_command: Some("rm -f \"{{stagingArtifact}}\"".to_string()),
+        cleanup_command: Some(
+            "rm -f \"{{stagingArtifact}}\" && rm -rf \"{{targetDir}}.homeboy-bak.\"*".to_string(),
+        ),
         skip_permissions_fix: policy.skip_permissions_fix,
     }
 }
@@ -950,6 +997,191 @@ mod tests {
                 .contains("does not match target basename"),
             "unexpected error: {:?}",
             result.error
+        );
+    }
+
+    fn plugin_archive_policy(staging_path: String) -> DeployArchiveInstallPolicy {
+        DeployArchiveInstallPolicy {
+            path_pattern: "/wp-content/plugins/".to_string(),
+            staging_path,
+            root_must_match_target_basename: false,
+            required_header: None,
+            skip_permissions_fix: true,
+        }
+    }
+
+    fn list_adjacent_install_temp_dirs(parent: &Path, basename: &str) -> Vec<std::path::PathBuf> {
+        let mut leaked = Vec::new();
+        let entries = match fs::read_dir(parent) {
+            Ok(entries) => entries,
+            Err(_) => return leaked,
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            // Adjacent extraction temp dirs (.homeboy-install.*) and any
+            // leftover backup dirs (<basename>.homeboy-bak.*) must not survive
+            // a deploy. Both would indicate the same-filesystem swap leaked.
+            if name.starts_with(".homeboy-install.")
+                || name.starts_with(&format!("{basename}.homeboy-bak."))
+            {
+                leaked.push(entry.path());
+            }
+        }
+        leaked
+    }
+
+    // Issue #3027: replacing an existing plugin directory that contains a deep
+    // nested Node package tree (node_modules-style) must succeed without
+    // relying on cross-device `mv` that preserves permissions per file.
+    #[test]
+    fn test_archive_install_replaces_target_with_deep_nested_tree() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let artifact = temp.path().join("wp-codebox.zip");
+        let staging = temp.path().join("staging");
+        let plugins = temp.path().join("wp-content/plugins");
+        let target = plugins.join("wp-codebox");
+
+        // Existing install with a deep nested package tree, mirroring the
+        // vendor/<pkg>/packages/<sub>/node_modules layout from the bug report.
+        let deep = target.join("vendor/wp-codebox-cli/packages/runtime-core/node_modules/dep/lib");
+        fs::create_dir_all(&deep).expect("deep nested tree");
+        fs::write(deep.join("index.js"), "module.exports = {};").expect("nested file");
+        fs::write(target.join("stale.php"), "stale").expect("stale file");
+
+        write_zip(
+            &artifact,
+            &[
+                ("wp-codebox/wp-codebox.php", "Plugin Name: WP Codebox\n"),
+                ("wp-codebox/vendor/pkg/node_modules/x/y.js", "ok"),
+            ],
+        );
+
+        let policy = plugin_archive_policy(staging.to_string_lossy().to_string());
+        let override_config = archive_install_override(&policy);
+
+        let result = deploy_with_override(
+            &local_client(),
+            &artifact,
+            target.to_str().expect("target path"),
+            &override_config,
+            &extension(),
+            None,
+            Some(temp.path().to_str().expect("site root")),
+            None,
+            None,
+            None,
+        )
+        .expect("deploy result");
+
+        assert!(result.success, "deploy failed: {:?}", result.error);
+        assert!(target.join("wp-codebox.php").exists());
+        assert!(target.join("vendor/pkg/node_modules/x/y.js").exists());
+        // The old nested tree and stale files must be gone after replace.
+        assert!(!target.join("stale.php").exists());
+        assert!(!deep.join("index.js").exists());
+        // No adjacent extraction temp dir or backup dir may leak.
+        assert!(
+            list_adjacent_install_temp_dirs(&plugins, "wp-codebox").is_empty(),
+            "adjacent install/backup dirs leaked: {:?}",
+            list_adjacent_install_temp_dirs(&plugins, "wp-codebox")
+        );
+    }
+
+    // A symlink inside the existing tree must not break the same-filesystem
+    // backup rename — rename(2) moves the link itself, never dereferences it.
+    #[cfg(unix)]
+    #[test]
+    fn test_archive_install_replaces_target_containing_symlink() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let artifact = temp.path().join("plugin.zip");
+        let staging = temp.path().join("staging");
+        let plugins = temp.path().join("wp-content/plugins");
+        let target = plugins.join("plugin");
+
+        let nested = target.join("node_modules/.bin");
+        fs::create_dir_all(&nested).expect("nested dir");
+        fs::write(target.join("node_modules/real.js"), "real").expect("real file");
+        std::os::unix::fs::symlink("../real.js", nested.join("link.js")).expect("symlink");
+
+        write_zip(&artifact, &[("plugin/plugin.php", "Plugin Name: Plugin\n")]);
+
+        let policy = plugin_archive_policy(staging.to_string_lossy().to_string());
+        let override_config = archive_install_override(&policy);
+
+        let result = deploy_with_override(
+            &local_client(),
+            &artifact,
+            target.to_str().expect("target path"),
+            &override_config,
+            &extension(),
+            None,
+            Some(temp.path().to_str().expect("site root")),
+            None,
+            None,
+            None,
+        )
+        .expect("deploy result");
+
+        assert!(result.success, "deploy failed: {:?}", result.error);
+        assert!(target.join("plugin.php").exists());
+        assert!(!target.join("node_modules").exists());
+        assert!(list_adjacent_install_temp_dirs(&plugins, "plugin").is_empty());
+    }
+
+    // If the install step fails after the existing target was moved aside, the
+    // original directory (including its nested tree) must be restored so a
+    // failed deploy never leaves the site without its plugin.
+    #[test]
+    fn test_archive_install_restores_backup_on_failure() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let artifact = temp.path().join("plugin.zip");
+        let staging = temp.path().join("staging");
+        let plugins = temp.path().join("wp-content/plugins");
+        let target = plugins.join("plugin");
+
+        let nested = target.join("vendor/pkg/node_modules/dep");
+        fs::create_dir_all(&nested).expect("nested dir");
+        fs::write(nested.join("keep.js"), "keep").expect("keep file");
+        fs::write(target.join("plugin.php"), "Plugin Name: Plugin v1\n").expect("existing header");
+
+        // Ship a malformed archive whose only top-level entry is a *file*, not
+        // a directory. `zip_root` resolves to that file name, so the extracted
+        // path "$staged/$zip_root" is not a directory and the install aborts at
+        // the "expected directory ... not found in archive" guard. This guard
+        // intentionally fires *before* the existing target is touched, so the
+        // original install (including its deep nested tree) must remain fully
+        // intact and no staging/backup dirs may leak.
+        write_zip(&artifact, &[("plugin.php", "Plugin Name: Plugin v2\n")]);
+
+        let policy = plugin_archive_policy(staging.to_string_lossy().to_string());
+        let override_config = archive_install_override(&policy);
+
+        let result = deploy_with_override(
+            &local_client(),
+            &artifact,
+            target.to_str().expect("target path"),
+            &override_config,
+            &extension(),
+            None,
+            Some(temp.path().to_str().expect("site root")),
+            None,
+            None,
+            None,
+        )
+        .expect("deploy result");
+
+        assert!(!result.success, "expected install to fail and roll back");
+        // Original install fully restored, nested tree intact.
+        assert_eq!(
+            fs::read_to_string(target.join("plugin.php")).expect("restored header"),
+            "Plugin Name: Plugin v1\n"
+        );
+        assert!(nested.join("keep.js").exists(), "nested tree not restored");
+        // No backup or extraction temp dir may survive the rollback.
+        assert!(
+            list_adjacent_install_temp_dirs(&plugins, "plugin").is_empty(),
+            "backup/temp dirs leaked after rollback: {:?}",
+            list_adjacent_install_temp_dirs(&plugins, "plugin")
         );
     }
 
