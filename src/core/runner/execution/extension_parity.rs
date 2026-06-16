@@ -4,6 +4,7 @@ use crate::core::extension;
 use crate::core::server::{self, SshClient};
 
 use serde_json::Value;
+use std::path::{Path, PathBuf};
 
 use super::{Runner, RunnerKind};
 
@@ -166,8 +167,19 @@ fn sync_runner_extension_revision(
 ) -> Result<()> {
     let local_revision = extension::read_source_revision(extension_id)
         .filter(|revision| !revision.trim().is_empty())
-        .ok_or(parity_error)?;
+        .ok_or_else(|| parity_error.clone())?;
     let source = extension::resolve_source_url(extension_id)?;
+    if let Some(local_source_path) = controller_local_source_path(&source.url) {
+        return Err(local_source_runner_sync_error(
+            runner_id,
+            homeboy_path,
+            extension_id,
+            &source.url,
+            &local_source_path,
+            &local_revision,
+            parity_error,
+        ));
+    }
     let command = runner_extension_sync_command(
         cwd,
         homeboy_path,
@@ -192,6 +204,54 @@ fn sync_runner_extension_revision(
             extension_parity_diagnostic_tail(&output.stderr, &output.stdout),
         ]),
     ))
+}
+
+fn local_source_runner_sync_error(
+    runner_id: &str,
+    homeboy_path: &str,
+    extension_id: &str,
+    source_url: &str,
+    local_source_path: &Path,
+    local_revision: &str,
+    parity_error: Error,
+) -> Error {
+    Error::validation_invalid_argument(
+        "runner_extension",
+        format!(
+            "Runner '{runner_id}' cannot auto-sync stale extension parity for '{extension_id}' from a controller-local source before command execution"
+        ),
+        Some(extension_id.to_string()),
+        Some(vec![
+            format!("Local extension source_revision: {local_revision}"),
+            format!("Local extension source: {source_url}"),
+            format!(
+                "Resolved controller-local source path: {}",
+                local_source_path.display()
+            ),
+            "Controller-local extension sources are not runner-resolvable by source URL/ref during automatic parity sync.".to_string(),
+            format!(
+                "Install, relink, or explicitly sync the extension from a runner-resolvable source before dispatch: {homeboy_path} extension install <source> --id {extension_id} --ref {local_revision} --replace"
+            ),
+            format!("Original parity error: {}", parity_error.message),
+        ]),
+    )
+}
+
+fn controller_local_source_path(source: &str) -> Option<PathBuf> {
+    if looks_like_remote_source(source) {
+        return None;
+    }
+
+    let expanded = shellexpand::tilde(source).to_string();
+    let path = Path::new(&expanded);
+    path.is_dir().then(|| path.canonicalize().ok()).flatten()
+}
+
+fn looks_like_remote_source(source: &str) -> bool {
+    let lower = source.to_ascii_lowercase();
+    lower.contains("://")
+        || lower.starts_with("git@")
+        || source.contains('@') && source.contains(':')
 }
 
 fn execute_runner_command(runner: &Runner, command: &str) -> Result<server::CommandOutput> {
@@ -384,6 +444,7 @@ fn extension_parity_diagnostic_tail(stderr: &str, stdout: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
+        controller_local_source_path, local_source_runner_sync_error,
         remote_extension_ready_status, remote_extension_source_revision,
         runner_extension_sync_command, validate_runner_extension_ready,
         validate_runner_extension_revision,
@@ -496,5 +557,47 @@ mod tests {
             command,
             "cd '/tmp/project path' && '/usr/local/bin/homeboy' extension install https://github.com/Extra-Chill/homeboy-extensions.git --id rust --ref abc1234 --replace"
         );
+    }
+
+    #[test]
+    fn parity_auto_sync_rejects_controller_local_source_paths() {
+        let tempdir = tempfile::tempdir().expect("creates temp extension source");
+        let local_source = tempdir.path().canonicalize().expect("canonical tempdir");
+        let parity_error = crate::core::error::Error::validation_invalid_argument(
+            "runner_extension",
+            "Runner 'homeboy-lab' has stale extension parity for 'rust' before command execution",
+            Some("rust".to_string()),
+            None,
+        );
+
+        let err = local_source_runner_sync_error(
+            "homeboy-lab",
+            "homeboy",
+            "rust",
+            tempdir.path().to_str().unwrap(),
+            &local_source,
+            "abc1234",
+            parity_error,
+        );
+
+        assert!(err.to_string().contains("controller-local source"));
+        let tried = err.details["tried"].to_string();
+        assert!(tried.contains(tempdir.path().to_str().unwrap()));
+        assert!(tried.contains("not runner-resolvable"));
+        assert!(tried.contains("abc1234"));
+    }
+
+    #[test]
+    fn parity_auto_sync_classifies_only_controller_local_directories_as_local() {
+        let tempdir = tempfile::tempdir().expect("creates temp extension source");
+        let expected = tempdir.path().canonicalize().expect("canonical tempdir");
+
+        assert_eq!(
+            controller_local_source_path(tempdir.path().to_str().unwrap()).as_deref(),
+            Some(expected.as_path())
+        );
+        assert!(controller_local_source_path("https://example.com/extensions.git").is_none());
+        assert!(controller_local_source_path("git@example.com:org/extensions.git").is_none());
+        assert!(controller_local_source_path("/runner/only/extensions/rust").is_none());
     }
 }
