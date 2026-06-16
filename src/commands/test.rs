@@ -13,7 +13,7 @@ use homeboy::core::observation::{
     finding_records_from_failure_clusters, finding_records_from_test_analysis_input,
     merge_metadata, ActiveObservation, NewRunRecord, RunStatus,
 };
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::source_command::{resolve_ci_job_for_command, resolve_source_context};
 use super::utils::args::{
@@ -154,7 +154,7 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestCommandOutput>
             source_ctx.component_id.clone(),
             args.json_summary,
             Some(runner.run_dir()),
-            observation.as_ref().map(|observation| &observation.0),
+            observation.as_ref().map(|observation| &observation.active),
         );
 
         let workflow = runner.finish(
@@ -259,7 +259,10 @@ fn test_runner_ci_env(job: Option<&CiResolvedJob>) -> Vec<(String, String)> {
     env
 }
 
-struct TestObservation(ActiveObservation);
+struct TestObservation {
+    active: ActiveObservation,
+    run_dir: Option<PathBuf>,
+}
 
 fn start_test_observation(
     component_id: &str,
@@ -268,7 +271,7 @@ fn start_test_observation(
     mode: &str,
     run_dir: Option<&RunDir>,
 ) -> Option<TestObservation> {
-    let metadata = test_observation_initial_metadata(source_path, args, mode, run_dir);
+    let metadata = test_observation_initial_metadata(source_path, args, mode);
     ActiveObservation::start_best_effort(
         NewRunRecord::builder("test")
             .component_id(component_id)
@@ -279,7 +282,10 @@ fn start_test_observation(
             .metadata(metadata.clone())
             .build(),
     )
-    .map(TestObservation)
+    .map(|active| TestObservation {
+        active,
+        run_dir: run_dir.map(|run_dir| run_dir.path().to_path_buf()),
+    })
 }
 
 fn finish_test_observation(
@@ -292,7 +298,7 @@ fn finish_test_observation(
 
     let metadata = merge_metadata(
         merge_metadata(
-            observation.0.initial_metadata().clone(),
+            observation.active.initial_metadata().clone(),
             serde_json::json!({
             "observation_status": workflow.status,
             "exit_code": workflow.exit_code,
@@ -313,7 +319,7 @@ fn finish_test_observation(
         RunStatus::Fail
     };
     persist_test_findings(&observation, workflow);
-    observation.0.finish(status, Some(metadata));
+    observation.active.finish(status, Some(metadata));
 }
 
 fn persist_test_findings(
@@ -323,17 +329,17 @@ fn persist_test_findings(
     let mut records = Vec::new();
     if let Some(input) = &workflow.failure_analysis_input {
         records.extend(finding_records_from_test_analysis_input(
-            observation.0.run_id(),
+            observation.active.run_id(),
             input,
         ));
     }
     if let Some(analysis) = &workflow.analysis {
         records.extend(finding_records_from_failure_clusters(
-            observation.0.run_id(),
+            observation.active.run_id(),
             &analysis.clusters,
         ));
     }
-    observation.0.record_findings(&records);
+    observation.active.record_findings(&records);
 }
 
 fn finish_test_drift_observation(
@@ -345,7 +351,7 @@ fn finish_test_drift_observation(
     };
 
     let metadata = merge_metadata(
-        observation.0.initial_metadata().clone(),
+        observation.active.initial_metadata().clone(),
         serde_json::json!({
             "observation_status": if workflow.exit_code == 0 { "pass" } else { "fail" },
             "exit_code": workflow.exit_code,
@@ -357,7 +363,7 @@ fn finish_test_drift_observation(
     } else {
         RunStatus::Fail
     };
-    observation.0.finish(status, Some(metadata));
+    observation.active.finish(status, Some(metadata));
 }
 
 fn finish_test_observation_error(
@@ -370,7 +376,7 @@ fn finish_test_observation_error(
 
     let metadata = merge_metadata(
         merge_metadata(
-            observation.0.initial_metadata().clone(),
+            observation.active.initial_metadata().clone(),
             serde_json::json!({
             "observation_status": "error",
             "error": error.to_string(),
@@ -378,18 +384,16 @@ fn finish_test_observation_error(
         ),
         validation_progress_metadata_from_observation(&observation),
     );
-    observation.0.finish_error(Some(metadata));
+    observation.active.finish_error(Some(metadata));
 }
 
 fn validation_progress_metadata_from_observation(
     observation: &TestObservation,
 ) -> serde_json::Value {
     observation
-        .0
-        .initial_metadata()
-        .get("run_dir")
-        .and_then(|value| value.as_str())
-        .and_then(|path| RunDir::from_existing(std::path::PathBuf::from(path)).ok())
+        .run_dir
+        .as_ref()
+        .and_then(|path| RunDir::from_existing(path.clone()).ok())
         .map(|run_dir| validation_progress_metadata(&run_dir))
         .unwrap_or_else(|| serde_json::json!({}))
 }
@@ -433,7 +437,6 @@ fn test_observation_initial_metadata(
     source_path: &Path,
     args: &TestArgs,
     mode: &str,
-    run_dir: Option<&RunDir>,
 ) -> serde_json::Value {
     serde_json::json!({
         "source_path": source_path.to_string_lossy(),
@@ -452,7 +455,6 @@ fn test_observation_initial_metadata(
         "since": args.since,
         "json_summary": args.json_summary,
         "passthrough_args": filter_homeboy_flags(&args.args),
-        "run_dir": run_dir.map(|run_dir| run_dir.path().to_string_lossy().to_string()),
     })
 }
 
@@ -532,7 +534,7 @@ mod tests {
 
             let observation = start_test_observation("homeboy", home.path(), &args, "test", None)
                 .expect("observation should start");
-            let run_id = observation.0.run_id().to_string();
+            let run_id = observation.active.run_id().to_string();
 
             finish_test_observation_error(
                 Some(observation),
@@ -559,6 +561,32 @@ mod tests {
                 "--filter=SmokeTest"
             );
             assert_eq!(run.metadata_json["observation_status"], "error");
+            assert!(
+                run.metadata_json.get("run_dir").is_none(),
+                "temporary run_dir paths must not be persisted in observation metadata"
+            );
+        });
+    }
+
+    #[test]
+    fn test_observation_keeps_run_dir_out_of_initial_metadata() {
+        with_isolated_home(|home| {
+            let _xdg = XdgGuard::unset();
+            let args = sample_args();
+            let run_dir = RunDir::create().expect("run dir");
+
+            let observation =
+                start_test_observation("homeboy", home.path(), &args, "test", Some(&run_dir))
+                    .expect("observation should start");
+            let run_id = observation.active.run_id().to_string();
+
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .get_run(&run_id)
+                .expect("read run")
+                .expect("run exists");
+
+            assert!(run.metadata_json.get("run_dir").is_none());
         });
     }
 
@@ -569,7 +597,7 @@ mod tests {
             let args = sample_args();
             let observation = start_test_observation("homeboy", home.path(), &args, "test", None)
                 .expect("observation should start");
-            let run_id = observation.0.run_id().to_string();
+            let run_id = observation.active.run_id().to_string();
             let input = TestAnalysisInput {
                 failures: vec![TestFailure {
                     test_name: "tests::fails".to_string(),

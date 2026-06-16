@@ -3,6 +3,7 @@ use crate::core::paths;
 use crate::core::server::Server;
 use crate::test_support;
 use std::collections::{BTreeMap, HashMap};
+use std::time::{Duration, Instant};
 
 fn create_server() {
     crate::core::server::save(&Server {
@@ -32,6 +33,21 @@ fn python_listener_command(port: u16, body: &str) -> String {
     format!(
         "python3 -c 'import socket,time; s=socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind((\"127.0.0.1\", {port})); s.listen(1); {body}; s.close()'"
     )
+}
+
+fn wait_for_stopped_status(id: &str) -> ServiceTunnelStatus {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let refreshed = status(id).expect("status refresh");
+        if !refreshed.running {
+            return refreshed;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "service {id} did not stop before timeout"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 #[test]
@@ -531,9 +547,7 @@ fn status_refresh_clears_exited_process_readiness() {
 
         assert!(started.running);
         assert!(started.readiness.expect("readiness").preview_ready);
-        std::thread::sleep(std::time::Duration::from_millis(1200));
-
-        let refreshed = status("short-lived-preview").expect("status refresh");
+        let refreshed = wait_for_stopped_status("short-lived-preview");
         assert!(!refreshed.running);
         assert_eq!(refreshed.lifecycle, "declared");
         assert!(refreshed.readiness.is_none());
@@ -674,9 +688,7 @@ fn status_reports_degraded_when_backend_outlives_service_process() {
         .expect("start preview service");
 
         assert!(started.running);
-        std::thread::sleep(std::time::Duration::from_millis(1200));
-
-        let refreshed = status("orphaned-backend-preview").expect("status refresh");
+        let refreshed = wait_for_stopped_status("orphaned-backend-preview");
         assert!(!refreshed.running);
         assert_eq!(refreshed.lifecycle, "degraded");
         assert_eq!(

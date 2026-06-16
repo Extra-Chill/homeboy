@@ -112,6 +112,7 @@ mod tests {
             fixability: None,
             changed_since: None,
             baseline_filtering: None,
+            unbaselined_findings: Vec::new(),
             extension_phase_timings: Vec::new(),
             exit_code: 1,
         });

@@ -428,6 +428,7 @@ fn build_comparison_output(
             &comparison,
             &existing_baseline,
         ));
+        summary.unbaselined_findings = report::build_unbaselined_finding_summary(&comparison);
         Ok(AuditRunWorkflowResult {
             output: AuditCommandOutput::Summary(summary),
             exit_code,

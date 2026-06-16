@@ -80,12 +80,6 @@ pub fn prepare_lab_runner_capability(
     }
 }
 
-pub fn lab_runner_capability_preflight(
-    contract: LabRunnerCapabilityContract,
-) -> RunnerCapabilityPreflight {
-    prepare_lab_runner_capability(contract).into()
-}
-
 pub fn evaluate_lab_runner_capabilities_for_runner(
     runner: &Runner,
     plan: &PreparedLabRunnerCapability,
@@ -588,12 +582,14 @@ mod tests {
     }
 
     #[test]
-    fn lab_runner_capability_preflight_uses_core_required_tools() {
-        let preflight = lab_runner_capability_preflight(LabRunnerCapabilityContract {
-            command: "test",
-            required_tools: vec![RunnerRequiredTool::Node, RunnerRequiredTool::Pnpm],
-            requires_playwright: false,
-        });
+    fn prepared_lab_runner_capability_converts_to_preflight() {
+        let preflight: RunnerCapabilityPreflight =
+            prepare_lab_runner_capability(LabRunnerCapabilityContract {
+                command: "test",
+                required_tools: vec![RunnerRequiredTool::Node, RunnerRequiredTool::Pnpm],
+                requires_playwright: false,
+            })
+            .into();
 
         assert_eq!(preflight.command, "test");
         assert_eq!(

@@ -807,6 +807,11 @@ pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
     Ok(record)
 }
 
+#[cfg(test)]
+pub(crate) fn write_run_record_for_test(record: &AgentTaskRunRecord) -> Result<()> {
+    store::write_record(record)
+}
+
 pub fn list_records() -> Result<Vec<AgentTaskRunRecord>> {
     let mut records = Vec::new();
     for record in store::read_records()? {

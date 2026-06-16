@@ -351,7 +351,7 @@ mod tests {
 
             let config = serde_json::json!({
                 "runtime_overlays": [{
-                    "name": "php-ai-client",
+                    "name": "runtime-client",
                     "repo": repo.path().display().to_string(),
                     "ref": head,
                     "path_in_repo": "runtime"
@@ -360,7 +360,7 @@ mod tests {
 
             let materialized = materialize_provider_config_refs(config).expect("materialized");
             let overlay = &materialized["runtime_overlays"][0];
-            assert_eq!(overlay["name"], "php-ai-client");
+            assert_eq!(overlay["name"], "runtime-client");
             let path = overlay["path"].as_str().expect("path");
             assert_eq!(overlay["materialized_path"], path);
             assert!(Path::new(path).join("bootstrap.php").is_file());

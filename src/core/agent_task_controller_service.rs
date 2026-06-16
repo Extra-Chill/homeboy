@@ -2477,7 +2477,6 @@ mod tests {
     use crate::core::agent_task_scheduler::AgentTaskExecutionContext;
     use crate::test_support::with_isolated_home;
     use serde_json::json;
-    use std::fs;
     use std::sync::{Arc, Mutex};
 
     #[derive(Clone, Default)]
@@ -3063,23 +3062,12 @@ mod tests {
             .expect("child submitted");
             crate::core::agent_task_lifecycle::mark_running("controller-service-stale-child-a")
                 .expect("child marked running");
-            let status_path = crate::core::paths::homeboy_data()
-                .expect("homeboy data")
-                .join("agent-task-runs")
-                .join("controller-service-stale-child-a")
-                .join("status.json");
-            let mut status_json: Value =
-                serde_json::from_str(&fs::read_to_string(&status_path).expect("child status json"))
-                    .expect("parsed child status");
-            status_json["metadata"]["runner_pid"] = json!(999999u32);
-            fs::write(
-                &status_path,
-                format!(
-                    "{}\n",
-                    serde_json::to_string_pretty(&status_json).expect("serialized child status")
-                ),
-            )
-            .expect("stale child status written");
+            let mut child =
+                crate::core::agent_task_lifecycle::status("controller-service-stale-child-a")
+                    .expect("child status");
+            child.metadata["runner_pid"] = json!(999999u32);
+            crate::core::agent_task_lifecycle::write_run_record_for_test(&child)
+                .expect("stale child status written");
 
             record.record_action(
                 AgentTaskLoopPolicyAction::SpawnTask {

@@ -155,7 +155,9 @@ fn metadata_path_findings(
             continue;
         }
 
-        if !field_expects_portable_artifact_ref(&field.path) {
+        if !field_expects_portable_artifact_ref(&field.path)
+            || field_is_remote_artifact_manifest_path(&field.path)
+        {
             continue;
         }
         scan.fields_scanned += 1;
@@ -251,12 +253,15 @@ fn field_expects_portable_artifact_ref(path: &str) -> bool {
         "output_path",
         "local_output",
         "temp_dir",
-        "run_dir",
         "run_path",
         "patch_artifact_path",
     ]
     .iter()
     .any(|marker| path.contains(marker))
+}
+
+fn field_is_remote_artifact_manifest_path(path: &str) -> bool {
+    path.starts_with("$.lab.remote_artifact_manifest[") && path.ends_with("].path")
 }
 
 fn looks_like_local_absolute_path(
@@ -500,6 +505,44 @@ mod tests {
     }
 
     #[test]
+    fn accepts_lab_remote_artifact_manifest_paths_as_remote_payload() {
+        with_isolated_home(|_| {
+            let store = ObservationStore::open_initialized().expect("store");
+            let cwd = std::env::current_dir().expect("cwd");
+            let run_record = store
+                .start_run(
+                    NewRunRecord::builder("runner-exec")
+                        .component_id("demo")
+                        .command("homeboy test demo --runner lab")
+                        .cwd_path(&cwd)
+                        .metadata(serde_json::json!({
+                            "lab": {
+                                "remote_artifact_manifest": [
+                                    {
+                                        "kind": "summary",
+                                        "path": "/home/chubes/.local/share/homeboy/artifacts/run/summary.json"
+                                    }
+                                ]
+                            }
+                        }))
+                        .build(),
+                )
+                .expect("run");
+            store
+                .finish_run(
+                    &run_record.id,
+                    crate::core::observation::RunStatus::Pass,
+                    None,
+                )
+                .expect("finish");
+
+            let findings = super::run("demo");
+
+            assert!(findings.is_empty());
+        });
+    }
+
+    #[test]
     fn flags_cleanup_promised_temp_dirs_that_still_exist() {
         with_isolated_home(|home| {
             let temp_dir = home.path().join("homeboy-run-left-behind");
@@ -541,6 +584,43 @@ mod tests {
             assert!(findings[0]
                 .description
                 .contains("still exists after cleanup metadata promised cleanup"));
+        });
+    }
+
+    #[test]
+    fn accepts_bare_run_dir_as_internal_scratch_metadata() {
+        with_isolated_home(|home| {
+            let store = ObservationStore::open_initialized().expect("store");
+            let cwd = std::env::current_dir().expect("cwd");
+            let run_record = store
+                .start_run(
+                    NewRunRecord::builder("test")
+                        .component_id("demo")
+                        .command("homeboy test demo")
+                        .cwd_path(&cwd)
+                        .metadata(serde_json::json!({
+                            "run_dir": home.path().join("homeboy-run-scratch").to_string_lossy()
+                        }))
+                        .build(),
+                )
+                .expect("run");
+            store
+                .finish_run(
+                    &run_record.id,
+                    crate::core::observation::RunStatus::Pass,
+                    None,
+                )
+                .expect("finish");
+
+            let findings = super::run_with_config(
+                "demo",
+                &ArtifactPortabilityConfig {
+                    non_portable_path_contains: vec!["homeboy-run-".to_string()],
+                    ..Default::default()
+                },
+            );
+
+            assert!(findings.is_empty());
         });
     }
 

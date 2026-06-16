@@ -734,6 +734,7 @@ fn audit_summary_output() -> AuditCommandOutput {
             contextual_findings: 1,
         }),
         baseline_filtering: None,
+        unbaselined_findings: Vec::new(),
         extension_phase_timings: Vec::new(),
         exit_code: 1,
     })

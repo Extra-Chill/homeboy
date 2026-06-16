@@ -31,7 +31,7 @@ use homeboy::core::observation::runs_service;
 use homeboy::core::observation::{ArtifactRecord, ObservationStore, RunListFilter, RunRecord};
 use homeboy::core::validation_progress::{ValidationCommandSummary, ValidationProgressLedger};
 use homeboy::core::Error;
-use homeboy::core::{api_jobs::ActiveRunnerJobSummary, api_jobs::JobStatus, runners as runner};
+use homeboy::core::{api_jobs::ActiveRunnerJobSummary, runners as runner};
 
 use super::{CmdResult, GlobalArgs};
 pub use bench::{bench_compare, bench_history, BenchCompareOutput, BenchHistoryOutput};
@@ -470,7 +470,7 @@ fn active_runner_job_summaries(status: Option<&str>) -> Vec<RunSummary> {
         .filter(|report| report.connected)
         .flat_map(|report| active_runner_jobs(&report.runner_id))
         .filter(|job| match status {
-            Some(status) => status == active_job_status_label(job.status),
+            Some(status) => status == job.status.run_status_label(),
             None => true,
         })
         .map(active_runner_job_run_summary)
@@ -493,7 +493,7 @@ fn active_runner_job_run_summary(job: ActiveRunnerJobSummary) -> RunSummary {
             .clone()
             .unwrap_or_else(|| format!("runner-job-{}", job.job_id)),
         kind: job.kind.clone(),
-        status: active_job_status_label(job.status).to_string(),
+        status: job.status.run_status_label().to_string(),
         started_at: ms_to_rfc3339(job.started_at_ms),
         finished_at: None,
         component_id: None,
@@ -524,16 +524,6 @@ fn active_runner_job_run_summary(job: ActiveRunnerJobSummary) -> RunSummary {
             optional_count(job.active_cell_count)
         )),
         artifact_index: None,
-    }
-}
-
-fn active_job_status_label(status: JobStatus) -> &'static str {
-    match status {
-        JobStatus::Queued => "queued",
-        JobStatus::Running => "running",
-        JobStatus::Succeeded => "pass",
-        JobStatus::Failed => "fail",
-        JobStatus::Cancelled => "cancelled",
     }
 }
 

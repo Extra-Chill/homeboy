@@ -1,4 +1,5 @@
 use super::{CodeAuditResult, Finding, Severity};
+use crate::core::code_audit::findings::normalized_finding_description_for_fingerprint;
 
 #[derive(Debug, Clone, Copy)]
 pub struct AuditConvergenceScoring {
@@ -51,7 +52,10 @@ pub fn score_delta(
 pub fn finding_fingerprint(finding: &Finding) -> String {
     format!(
         "{}::{:?}::{}::{}",
-        finding.file, finding.kind, finding.convention, finding.description
+        finding.file,
+        finding.kind,
+        finding.convention,
+        normalized_finding_description_for_fingerprint(&finding.description)
     )
 }
 
@@ -112,6 +116,24 @@ mod tests {
             kind: AuditFinding::DuplicateFunction,
         };
         assert_ne!(finding_fingerprint(&f1), finding_fingerprint(&f2));
+    }
+
+    #[test]
+    fn finding_fingerprint_ignores_source_line_churn() {
+        let f1 = Finding {
+            convention: "core_boundary_leak:core-agnostic-source".to_string(),
+            severity: Severity::Warning,
+            file: "src/core/tooling.rs".to_string(),
+            description: "Core boundary leak (core-agnostic-source) configured ecosystem term `php` appears at line 248 in behavioral context `detect_patterns`".to_string(),
+            suggestion: String::new(),
+            kind: AuditFinding::CoreBoundaryLeak,
+        };
+        let f2 = Finding {
+            description: "Core boundary leak (core-agnostic-source) configured ecosystem term `php` appears at line 275 in behavioral context `detect_patterns`".to_string(),
+            ..f1.clone()
+        };
+
+        assert_eq!(finding_fingerprint(&f1), finding_fingerprint(&f2));
     }
 
     #[test]

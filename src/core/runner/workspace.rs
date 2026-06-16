@@ -861,7 +861,7 @@ fn materialize_git_command(
 
 fn dirty_lab_workspace_guard(dest: &str, allow_dirty_lab_workspace: bool) -> String {
     let status = format!(
-        "git -C {dest} status --porcelain=v1 2>/dev/null | while IFS= read -r line; do path=${{line#???}}; case \"$path\" in .homeboy|.homeboy/*) ;; *) printf '%s\\n' \"$line\";; esac; done || true",
+        "git -C {dest} status --porcelain=v1 2>/dev/null | while IFS= read -r line; do path=${{line#???}}; if [ \"$path\" = .homeboy ] || [ \"${{path#.homeboy/}}\" != \"$path\" ]; then :; else printf '%s\\n' \"$line\"; fi; done || true",
         dest = dest,
     );
     if allow_dirty_lab_workspace {
@@ -1728,6 +1728,7 @@ mod tests {
         assert!(command.contains("Homeboy Lab refused to overwrite a dirty runner workspace"));
         assert!(command.contains("exit 97"));
         assert!(command.contains("Pass --allow-dirty-lab-workspace"));
+        assert!(command.contains("${path#.homeboy/}"));
         assert!(command.contains("git -C \"$dest\" reset --hard"));
     }
 

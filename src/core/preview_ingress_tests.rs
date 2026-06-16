@@ -283,7 +283,7 @@ fn reverse_channel_client_forwards_bootstrap_redirect_and_repeated_cookies() {
                     "headers": [
                         ["location", expected_location],
                         ["set-cookie", "reviewer_auth=fake; Path=/; HttpOnly"],
-                        ["set-cookie", "wordpress_test_cookie=fake; Path=/"]
+                        ["set-cookie", "reviewer_test_cookie=fake; Path=/"]
                     ],
                     "body_base64": base64::engine::general_purpose::STANDARD.encode("")
                 }
