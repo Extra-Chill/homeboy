@@ -31,21 +31,23 @@ pub use super::runner::{
     is_remote_runner_artifact_path, is_reportable_artifact_evidence_path,
     is_retrievable_runner_artifact, lab_offload_changed_since_ref, lab_offload_metadata,
     lab_offload_metadata_with_workspace_mapping, mirror_connected_runner_run,
-    mirrored_runner_job_identity, preflight_lab_offload_changed_since,
+    mirrored_runner_job_identity, plan_managed_runner_source_sync,
+    plan_managed_runner_source_syncs, preflight_lab_offload_changed_since,
     prepare_git_lab_offload_changed_since, prepare_lab_runner_capability,
     refresh_mirrored_daemon_evidence, reportable_artifact_evidence_path,
     resolve_default_lab_runner, run_reverse_worker, runner_artifact_store_token,
     runner_exec_failure_error, runner_job_log_snapshot, status, statuses, sync_workspace,
     LabOffloadCommand, LabOffloadOutcome, LabOffloadRequest, LabOffloadSourcePathMode,
     LabOffloadWorkspaceModePolicy, LabRunnerCapabilityContract, LabRunnerGateDecision,
-    LabRunnerGateMode, LabRunnerSelectionSource, PreparedLabRunnerCapability,
-    RemoteArtifactDownload, ReverseRunnerConnectOptions, ReverseRunnerWorkerOptions,
-    ReverseRunnerWorkerOutput, Runner, RunnerCapabilityPreflight, RunnerConnectReport,
-    RunnerDisconnectReport, RunnerExecMode, RunnerExecOptions, RunnerExecOutput, RunnerFailureKind,
-    RunnerKind, RunnerRequiredTool, RunnerResourceMetrics, RunnerSession, RunnerSessionRole,
-    RunnerSessionState, RunnerStaleDaemonWarning, RunnerStatusReport, RunnerTunnelMode,
-    RunnerWorkspaceApplyOptions, RunnerWorkspaceApplyOutput, RunnerWorkspaceApplyStatus,
-    RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
+    LabRunnerGateMode, LabRunnerSelectionSource, ManagedRunnerSourceSyncPlan,
+    PreparedLabRunnerCapability, RemoteArtifactDownload, ReverseRunnerConnectOptions,
+    ReverseRunnerWorkerOptions, ReverseRunnerWorkerOutput, Runner, RunnerCapabilityPreflight,
+    RunnerConnectReport, RunnerDisconnectReport, RunnerExecMode, RunnerExecOptions,
+    RunnerExecOutput, RunnerFailureKind, RunnerKind, RunnerRequiredTool, RunnerResourceMetrics,
+    RunnerSession, RunnerSessionRole, RunnerSessionState, RunnerStaleDaemonWarning,
+    RunnerStatusReport, RunnerTunnelMode, RunnerWorkspaceApplyOptions, RunnerWorkspaceApplyOutput,
+    RunnerWorkspaceApplyStatus, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
+    RunnerWorkspaceSyncOutput,
 };
 
 // Registry CRUD entry points (re-exported at the root for ergonomics; also
@@ -94,9 +96,10 @@ pub mod execution {
 /// Workspace sync and patch application contracts.
 pub mod workspace {
     pub use super::super::runner::{
-        apply_change_artifact, apply_workspace_patch, sync_workspace, RunnerWorkspaceApplyOptions,
-        RunnerWorkspaceApplyOutput, RunnerWorkspaceApplyStatus, RunnerWorkspaceSyncMode,
-        RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
+        apply_change_artifact, apply_workspace_patch, plan_managed_runner_source_sync,
+        plan_managed_runner_source_syncs, sync_workspace, ManagedRunnerSourceSyncPlan,
+        RunnerWorkspaceApplyOptions, RunnerWorkspaceApplyOutput, RunnerWorkspaceApplyStatus,
+        RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
     };
 }
 
