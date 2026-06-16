@@ -1,6 +1,7 @@
 //! Layer ownership rules for architecture-level audit constraints.
 //!
-//! Rules are optional and loaded from `homeboy.json` under `audit_rules`.
+//! Rules are optional and loaded from the component config file under
+//! `audit_rules`.
 
 use std::path::Path;
 

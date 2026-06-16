@@ -1,7 +1,7 @@
 //! Unbounded command-output capture detector.
 //!
-//! This is a conservative first slice for command hygiene: it flags Rust code
-//! that accumulates stdout/stderr-style stream chunks into memory without nearby
+//! This is a conservative first slice for command hygiene: it flags code that
+//! accumulates stdout/stderr-style stream chunks into memory without nearby
 //! evidence of a retention bound and truncation metadata.
 
 use super::conventions::AuditFinding;

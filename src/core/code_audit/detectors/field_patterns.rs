@@ -65,10 +65,14 @@ struct StructDef {
     fields: Vec<FieldSignature>,
 }
 
+/// Syntactic family a file's field declarations follow. Core distinguishes
+/// only the shape, not the ecosystem: `NameBeforeType` covers `name: Type`
+/// declarations; `TypeBeforeName` covers `Type $name` / `Type name`
+/// declarations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FieldSyntax {
-    RustLike,
-    Php,
+    NameBeforeType,
+    TypeBeforeName,
 }
 
 fn detect_repeated_field_patterns(root: &Path) -> Vec<Finding> {
@@ -228,10 +232,12 @@ fn detect_repeated_field_patterns(root: &Path) -> Vec<Finding> {
 
 /// Extract struct definitions and their fields from file content.
 ///
-/// Language-agnostic: looks for patterns like:
-/// - Rust: `struct Name {` ... `field: Type,` ... `}`
-/// - PHP: `class Name {` ... `type $field;` or `public type $field;`
-/// - TS/JS: `interface Name {` or `type Name = {`
+/// Language-agnostic: looks for aggregate/record declarations and their
+/// member fields across the two supported syntactic families:
+/// - name-before-type: `struct Name {` ... `field: Type,` ... `}` and
+///   `interface Name {` / `type Name = {`
+/// - type-before-name: `class Name {` ... `Type $field;` /
+///   `public Type $field;`
 fn extract_structs(content: &str, file: &str, syntax: FieldSyntax) -> Vec<StructDef> {
     let mut result = Vec::new();
     let lines: Vec<&str> = content.lines().collect();
@@ -302,9 +308,9 @@ fn extract_structs(content: &str, file: &str, syntax: FieldSyntax) -> Vec<Struct
 
 fn field_syntax_for_path(path: &str) -> FieldSyntax {
     if path.ends_with(".php") {
-        FieldSyntax::Php
+        FieldSyntax::TypeBeforeName
     } else {
-        FieldSyntax::RustLike
+        FieldSyntax::NameBeforeType
     }
 }
 
@@ -331,12 +337,12 @@ fn extract_type_name(line: &str) -> Option<String> {
         trimmed = stripped.trim_start();
     }
 
-    // Rust: pub struct Foo, struct Foo, pub(crate) struct Foo.
+    // Record keyword forms: `[pub] struct Foo`.
     if let Some(after) = trimmed.strip_prefix("struct ") {
         return parse_identifier(after);
     }
 
-    // PHP/TS: class Foo, interface Foo
+    // Class/interface keyword forms: `class Foo`, `interface Foo`.
     for keyword in &["class ", "interface "] {
         if let Some(after) = trimmed.strip_prefix(keyword) {
             return parse_identifier(after);
@@ -356,10 +362,10 @@ fn parse_identifier(input: &str) -> Option<String> {
 /// Try to parse a field declaration from a single line.
 ///
 /// Returns `Some(FieldSignature)` for lines that look like field declarations.
-/// Handles multiple syntax styles:
-/// - Rust: `field_name: Type,` or `pub field_name: Type,`
-/// - PHP: `public Type $field_name;` or `$field_name;`
-/// - TS: `field_name: type;` or `readonly field_name: type;`
+/// Handles both syntactic families:
+/// - name-before-type: `field_name: Type,` or `pub field_name: Type,` and
+///   `field_name: type;` / `readonly field_name: type;`
+/// - type-before-name: `public Type $field_name;` or `$field_name;`
 fn parse_field_line(line: &str, _syntax: FieldSyntax) -> Option<FieldSignature> {
     let trimmed = line.trim();
 
@@ -382,8 +388,8 @@ fn parse_field_line(line: &str, _syntax: FieldSyntax) -> Option<FieldSignature> 
     }
 
     match _syntax {
-        FieldSyntax::Php => return parse_php_property_line(trimmed),
-        FieldSyntax::RustLike => {}
+        FieldSyntax::TypeBeforeName => return parse_type_before_name_field(trimmed),
+        FieldSyntax::NameBeforeType => {}
     }
 
     // Rust-style: `[pub] name: Type[,]`
@@ -415,7 +421,7 @@ fn parse_field_line(line: &str, _syntax: FieldSyntax) -> Option<FieldSignature> 
     None
 }
 
-fn parse_php_property_line(line: &str) -> Option<FieldSignature> {
+fn parse_type_before_name_field(line: &str) -> Option<FieldSignature> {
     let mut content = line.trim().trim_end_matches(';').trim();
 
     loop {
@@ -741,7 +747,7 @@ pub struct Config {
     pub output: Option<String>,
 }
 "#;
-        let structs = extract_structs(content, "test.rs", FieldSyntax::RustLike);
+        let structs = extract_structs(content, "test.rs", FieldSyntax::NameBeforeType);
         assert_eq!(structs.len(), 1);
         assert_eq!(structs[0].name, "Config");
         assert_eq!(structs[0].fields.len(), 3);
@@ -765,7 +771,7 @@ struct Beta {
     z: i32,
 }
 "#;
-        let structs = extract_structs(content, "test.rs", FieldSyntax::RustLike);
+        let structs = extract_structs(content, "test.rs", FieldSyntax::NameBeforeType);
         assert_eq!(structs.len(), 2);
         assert_eq!(structs[0].name, "Alpha");
         assert_eq!(structs[1].name, "Beta");
@@ -784,7 +790,7 @@ impl Foo {
     }
 }
 "#;
-        let structs = extract_structs(content, "test.rs", FieldSyntax::RustLike);
+        let structs = extract_structs(content, "test.rs", FieldSyntax::NameBeforeType);
         assert_eq!(structs.len(), 1);
         assert_eq!(structs[0].fields.len(), 1);
         assert_eq!(structs[0].fields[0].name, "name");
@@ -804,7 +810,7 @@ class AIStep {
 }
 "#;
 
-        let structs = extract_structs(content, "test.php", FieldSyntax::Php);
+        let structs = extract_structs(content, "test.php", FieldSyntax::TypeBeforeName);
         assert!(
             structs.is_empty(),
             "call-site named arguments inside methods should not create field-bearing structs"
@@ -827,7 +833,7 @@ class Config {
 }
 "#;
 
-        let structs = extract_structs(content, "test.php", FieldSyntax::Php);
+        let structs = extract_structs(content, "test.php", FieldSyntax::TypeBeforeName);
         assert_eq!(structs.len(), 1);
         assert_eq!(structs[0].fields.len(), 2);
         assert_eq!(structs[0].fields[0].name, "label");
@@ -888,7 +894,7 @@ impl Foo {
 }
 "#;
 
-        let structs = extract_structs(content, "test.rs", FieldSyntax::RustLike);
+        let structs = extract_structs(content, "test.rs", FieldSyntax::NameBeforeType);
         assert_eq!(structs.len(), 1);
         assert_eq!(structs[0].fields.len(), 1);
         assert_eq!(structs[0].fields[0].name, "name");
@@ -910,7 +916,7 @@ class Widget {
 }
 "#;
 
-        let structs = extract_structs(content, "test.ts", FieldSyntax::RustLike);
+        let structs = extract_structs(content, "test.ts", FieldSyntax::NameBeforeType);
         assert_eq!(structs.len(), 1);
         assert_eq!(structs[0].fields.len(), 1);
         assert_eq!(structs[0].fields[0].name, "name");
@@ -1046,7 +1052,7 @@ struct Foo {
 
     #[test]
     fn parse_field_line_rust() {
-        let field = parse_field_line("    pub verbose: bool,", FieldSyntax::RustLike);
+        let field = parse_field_line("    pub verbose: bool,", FieldSyntax::NameBeforeType);
         assert!(field.is_some());
         let f = field.unwrap();
         assert_eq!(f.name, "verbose");
@@ -1055,7 +1061,7 @@ struct Foo {
 
     #[test]
     fn parse_field_line_with_option() {
-        let field = parse_field_line("    output: Option<PathBuf>,", FieldSyntax::RustLike);
+        let field = parse_field_line("    output: Option<PathBuf>,", FieldSyntax::NameBeforeType);
         assert!(field.is_some());
         let f = field.unwrap();
         assert_eq!(f.name, "output");
@@ -1064,15 +1070,17 @@ struct Foo {
 
     #[test]
     fn parse_field_line_skips_comments() {
-        assert!(parse_field_line("    // a comment", FieldSyntax::RustLike).is_none());
-        assert!(parse_field_line("    #[derive(Debug)]", FieldSyntax::RustLike).is_none());
-        assert!(parse_field_line("", FieldSyntax::RustLike).is_none());
+        assert!(parse_field_line("    // a comment", FieldSyntax::NameBeforeType).is_none());
+        assert!(parse_field_line("    #[derive(Debug)]", FieldSyntax::NameBeforeType).is_none());
+        assert!(parse_field_line("", FieldSyntax::NameBeforeType).is_none());
     }
 
     #[test]
     fn parse_field_line_skips_functions() {
-        assert!(parse_field_line("    fn new() -> Self {", FieldSyntax::RustLike).is_none());
-        assert!(parse_field_line("    pub function run() {", FieldSyntax::RustLike).is_none());
+        assert!(parse_field_line("    fn new() -> Self {", FieldSyntax::NameBeforeType).is_none());
+        assert!(
+            parse_field_line("    pub function run() {", FieldSyntax::NameBeforeType).is_none()
+        );
     }
 
     #[test]

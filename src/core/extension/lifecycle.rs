@@ -508,8 +508,8 @@ pub fn update(extension_id: &str, force: bool) -> Result<UpdateResult> {
     }
 
     // Linked extensions: resolve the symlink target and pull the source repo.
-    // The target may be a subdirectory of a larger repo (e.g. homeboy-extensions/wordpress),
-    // so we find the git root and pull from there.
+    // The target may be a subdirectory of a larger repo (e.g. an extensions
+    // monorepo/<extension-id>), so we find the git root and pull from there.
     if is_extension_linked(extension_id) {
         return update_linked_extension(extension_id, &extension_dir, force);
     }

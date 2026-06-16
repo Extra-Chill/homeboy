@@ -1,7 +1,7 @@
 //! Direct aggregate construction detector.
 //!
 //! Core consumes language-neutral fingerprint facts emitted by extensions. It
-//! does not parse language syntax here; the Rust/PHP/JS/etc. extension owns
+//! does not parse language syntax here; each language extension owns
 //! recognizing its own aggregate literal and construction seam syntax.
 
 use std::collections::{BTreeMap, BTreeSet};

@@ -32,7 +32,7 @@ pub struct WrapperRule {
     /// Human-readable rule name (e.g., "tool_ability_link").
     pub name: String,
 
-    /// Glob pattern for wrapper files (e.g., "inc/Engine/AI/Tools/**/*.php").
+    /// Glob pattern for wrapper files (e.g., "src/tools/**/*.ext").
     pub wrapper_glob: String,
 
     /// The field/declaration expected in the wrapper (e.g., "ability").
@@ -155,11 +155,9 @@ pub(in crate::core::code_audit) fn run(
 
 /// Check if the file content already contains the expected field.
 fn has_field(content: &str, field_name: &str) -> bool {
-    // Check for common declaration patterns:
-    // PHP: 'field' => 'value'  or  "field" => "value"
-    // JS/TS: field: 'value'  or  field: "value"
-    // Rust: field: value
-    // YAML: field: value
+    // Check for common declaration patterns across syntaxes:
+    // - map/array entries: 'field' => 'value' or "field" => "value"
+    // - key/value bindings: field: 'value' / field: "value" / field: value
     content.contains(&format!("'{}' =>", field_name))
         || content.contains(&format!("\"{}\" =>", field_name))
         || content.contains(&format!("{}: ", field_name))
@@ -217,8 +215,8 @@ fn build_suggestion(rule: &WrapperRule, inferred_targets: &[String]) -> String {
 // ============================================================================
 
 fn load_config(root: &Path) -> Option<WrapperInferenceConfig> {
-    let homeboy_json = root.join("homeboy.json");
-    let content = std::fs::read_to_string(homeboy_json).ok()?;
+    let config_path = root.join(crate::core::product_identity::PRODUCT_IDENTITY.config_filename);
+    let content = std::fs::read_to_string(config_path).ok()?;
     let value: serde_json::Value = serde_json::from_str(&content).ok()?;
     let audit_rules = value.get("audit_rules")?.clone();
     serde_json::from_value::<WrapperInferenceConfig>(audit_rules).ok()

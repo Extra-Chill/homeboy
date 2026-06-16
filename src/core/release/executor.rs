@@ -635,10 +635,9 @@ pub(crate) fn run_git_push(component: &Component, component_id: &str) -> Result<
 
 /// Maximum number of attempts for a transient package-command failure.
 ///
-/// npm install (and similar dependency resolvers) can fail intermittently due
-/// to registry hiccups, lock contention, or output-pipe timing.  A warm-cache
-/// retry usually succeeds, so we retry once before surfacing the error.
-/// Issue #3238.
+/// Dependency-install commands can fail intermittently due to registry
+/// hiccups, lock contention, or output-pipe timing. A warm-cache retry usually
+/// succeeds, so we retry once before surfacing the error. Issue #3238.
 const PACKAGE_ACTION_MAX_ATTEMPTS: usize = 2;
 
 /// Invoke the `release.package` action on every extension that provides it,
@@ -1090,9 +1089,9 @@ fn store_artifacts_from_output(
 
     // Surface the full captured output when the package command itself failed,
     // rather than trying to parse partial stdout as JSON (which swallowed
-    // stderr behind a generic "Failed to parse" error).  Issue #3238: npm
-    // install inside the build script can fail intermittently, and the real
-    // npm error must be visible in the structured error payload.
+    // stderr behind a generic "Failed to parse" error).  Issue #3238: a
+    // dependency install inside the build script can fail intermittently, and
+    // the real error must be visible in the structured error payload.
     if !success {
         return Err(package_command_failure_error(exit_code, stdout, stderr));
     }
@@ -1118,7 +1117,7 @@ fn store_artifacts_from_output(
 /// Build an [`Error`] that surfaces *all* captured output from a failed
 /// package command — stdout, stderr, and exit code.
 ///
-/// npm and similar build tools write progress to stdout and errors to stderr.
+/// Package/build tools commonly write progress to stdout and errors to stderr.
 /// Including both streams ensures the operator can diagnose the real failure
 /// instead of seeing truncated output.  Issue #3238.
 fn package_command_failure_error(exit_code: i64, stdout: &str, stderr: &str) -> Error {
@@ -1140,7 +1139,7 @@ fn package_command_failure_error(exit_code: i64, stdout: &str, stderr: &str) -> 
     }
 
     // When both streams have content, append stdout as additional context.
-    // npm install failures often write progress lines to stdout and the
+    // Dependency-install failures often write progress lines to stdout and the
     // actual error to stderr; the operator needs both to see what happened
     // before the crash.
     if has_stderr && has_stdout {
