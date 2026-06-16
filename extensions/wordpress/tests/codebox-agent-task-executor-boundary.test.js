@@ -43,6 +43,17 @@ assert.deepEqual(runtime.agent_task_executors[0], providerContract({
 assert.deepEqual(secretEnvRequirementForProvider(runtime.agent_task_executors[0], 'codex').env, codexSecretEnv);
 assert.equal(provider.capabilities.includes('tool:wpsg_materialize_packet'), false);
 assert.equal(provider.capabilities.includes('ability:wpsg_materialize_packet'), false);
+assert.deepEqual(provider.provider_defaults.openai.secret_env, ['OPENAI_API_KEY']);
+assert.deepEqual(provider.provider_defaults.codex.secret_env, [
+  'AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN',
+  'AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN',
+  'AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT',
+  'AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID',
+  'AI_PROVIDER_OPENAI_CODEX_FEDRAMP',
+]);
+assert.deepEqual(provider.provider_defaults['claude-code'].secret_env, [
+  'AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN',
+]);
 
 const taskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',
@@ -70,6 +81,7 @@ const taskInput = codeboxTaskRequestFromAgentTaskRequest({
 
 assert.equal(taskInput.schema, 'wp-codebox/task-input/v1');
 assert.equal(taskInput.parent_request.executor.backend, 'wordpress');
+assert.equal(Object.hasOwn(taskInput, 'agent'), false);
 assert.deepEqual(taskInput.runtime_task, {
   ability: 'wordpress/site-health',
   input: { include_debug: false },
@@ -225,6 +237,19 @@ const legacyTaskInput = codeboxTaskRequestFromAgentTaskRequest({
 
 assert.equal(legacyTaskInput.schema, 'wp-codebox/task-input/v1');
 
+const explicitAgentTaskInput = codeboxTaskRequestFromAgentTaskRequest({
+  schema: 'homeboy/agent-task-request/v1',
+  task_id: 'explicit-agent-codebox-task-1',
+  executor: {
+    backend: 'codebox',
+    config: { provider: 'openai', agent: 'custom-sandbox-agent' },
+  },
+  instructions: 'Run with an explicitly selected sandbox agent.',
+  inputs: {},
+});
+
+assert.equal(explicitAgentTaskInput.agent, 'custom-sandbox-agent');
+
 const previousHomeboySettingsJson = process.env.HOMEBOY_SETTINGS_JSON;
 process.env.HOMEBOY_SETTINGS_JSON = JSON.stringify({
   provider_plugin_paths: ['/missing/stale-openai-provider'],
@@ -246,5 +271,49 @@ try {
   }
 }
 assert.deepEqual(codexTaskInput.provider_plugin_paths, []);
+assert.deepEqual(codexTaskInput.secret_env, provider.provider_defaults.codex.secret_env);
+
+const claudeCodeTaskInput = codeboxTaskRequestFromAgentTaskRequest({
+  schema: 'homeboy/agent-task-request/v1',
+  task_id: 'claude-code-codebox-task-1',
+  executor: {
+    backend: 'wordpress',
+    config: {
+      provider: 'claude-code',
+      model: 'opus-4.7',
+    },
+  },
+  instructions: 'Run a Claude Code backed Codebox task.',
+  inputs: {},
+});
+assert.deepEqual(claudeCodeTaskInput.secret_env, provider.provider_defaults['claude-code'].secret_env);
+
+const codexProviderRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-codex-provider-'));
+const codexProviderPath = path.join(codexProviderRoot, 'ai-provider-for-openai');
+fs.mkdirSync(path.join(codexProviderPath, 'src', 'Codex'), { recursive: true });
+fs.writeFileSync(
+  path.join(codexProviderPath, 'src', 'Codex', 'CodexProvider.php'),
+  '<?php\n// Registers the codex provider.\n'
+);
+process.env.HOMEBOY_SETTINGS_JSON = JSON.stringify({
+  provider_plugin_paths: [codexProviderPath],
+});
+let configuredCodexTaskInput;
+try {
+  configuredCodexTaskInput = codeboxTaskRequestFromAgentTaskRequest({
+    schema: 'homeboy/agent-task-request/v1',
+    task_id: 'configured-codex-codebox-task-1',
+    executor: { backend: 'wordpress', config: { provider: 'codex' } },
+    instructions: 'Run a Codex-backed Codebox task with the configured provider checkout.',
+    inputs: {},
+  });
+} finally {
+  if (previousHomeboySettingsJson === undefined) {
+    delete process.env.HOMEBOY_SETTINGS_JSON;
+  } else {
+    process.env.HOMEBOY_SETTINGS_JSON = previousHomeboySettingsJson;
+  }
+}
+assert.deepEqual(configuredCodexTaskInput.provider_plugin_paths, [codexProviderPath]);
 
 console.log('Codebox agent-task executor boundary contract passed');

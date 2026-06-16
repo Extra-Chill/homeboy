@@ -606,7 +606,7 @@ function runnerInput(request, artifacts) {
   };
   return Object.fromEntries(Object.entries({
     parent_request: request,
-    agent: argValue('--agent') || request.agent || 'wp-codebox-sandbox',
+    agent: argValue('--agent') || request.agent || '',
     mode: argValue('--mode') || request.mode || 'sandbox',
     provider: argValue('--provider') || request.provider || '',
     model: argValue('--model') || request.model || '',
@@ -720,6 +720,7 @@ function stableTaskInput(input) {
     policy: input.parent_request?.policy || input.parent_request?.task?.policy || {},
     context: input.parent_request?.context || input.parent_request?.task?.context || {},
     recipe: input.recipe || input.parent_request?.recipe || {},
+    agent: input.agent,
     provider: input.provider,
     model: input.model,
     provider_plugin_paths: input.provider_plugin_paths || [],
