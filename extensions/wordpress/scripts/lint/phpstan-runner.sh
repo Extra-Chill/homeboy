@@ -5,7 +5,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEPENDENCY_HELPER="${HOMEBOY_WORDPRESS_DEPENDENCY_HELPER:-${SCRIPT_DIR}/../lib/validation-dependencies.sh}"
 # shellcheck source=../lib/validation-dependencies.sh
 source "${DEPENDENCY_HELPER}"
-SIDECAR_WRITER_HELPER="${HOMEBOY_RUNTIME_SIDECAR_WRITER:-}"
+# Standalone `homeboy lint` runs do not export HOMEBOY_RUNTIME_SIDECAR_WRITER;
+# fall back to the co-located direct-invocation copy so the sidecar writer is
+# available outside a release run (homeboy-extensions#1415).
+SIDECAR_WRITER_HELPER="${HOMEBOY_RUNTIME_SIDECAR_WRITER:-${SCRIPT_DIR}/../lib/sidecar-writer.sh}"
 # shellcheck source=/dev/null
 if [ -n "$SIDECAR_WRITER_HELPER" ] && [ -f "$SIDECAR_WRITER_HELPER" ]; then
     source "$SIDECAR_WRITER_HELPER"
