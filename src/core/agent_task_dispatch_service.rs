@@ -11,6 +11,7 @@ use crate::core::agent_task::{
     AgentTaskExecutor, AgentTaskLimits, AgentTaskPolicy, AgentTaskRequest, AgentTaskSourceRef,
     AgentTaskWorkspace, AgentTaskWorkspaceMode, AGENT_TASK_REQUEST_SCHEMA,
 };
+use crate::core::agent_task_config_materialization::materialize_provider_config_refs;
 use crate::core::agent_task_lifecycle as lifecycle;
 use crate::core::agent_task_lifecycle::{AgentTaskRunRecord, AgentTaskRunState};
 use crate::core::agent_task_provider::provider_requires_cwd_git_checkout;
@@ -539,6 +540,15 @@ fn dispatch_provider_config(
         ));
     }
 
+    let mut config = materialize_provider_config_refs(config)?;
+    if !config.is_object() {
+        return Err(Error::validation_invalid_argument(
+            "provider-config",
+            "agent-task dispatch --provider-config root must remain a JSON object after materializing configured refs",
+            None,
+            None,
+        ));
+    }
     let map = config.as_object_mut().expect("provider config object");
     map.entry("task_kind".to_string())
         .or_insert_with(|| serde_json::json!("repo-cooking"));
