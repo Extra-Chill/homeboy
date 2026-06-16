@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.121.57] - 2026-06-16
+
+### Fixed
+- stop auto-running PHP smoke scripts
+
 ## [2.121.56] - 2026-06-16
 
 ### Fixed
