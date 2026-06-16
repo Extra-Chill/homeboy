@@ -1036,8 +1036,7 @@ function normalizeStatus(result) {
   if (result?.outputs && typeof result.outputs === 'object' && result.outputs.success === false) {
     return 'failed';
   }
-  const workload = agentRuntimeWorkload(result);
-  if (workload && workload.success === false) {
+  if (agentRuntimeFailure(result)) {
     return 'failed';
   }
   if (AGENT_TASK_OUTCOME_STATUSES.includes(result?.status)) {
@@ -1067,8 +1066,84 @@ function normalizeStatus(result) {
   return result?.success === true ? 'succeeded' : 'failed';
 }
 
+function agentRuntimeResultCandidates(result) {
+  return [
+    result?.raw?.agent_runtime,
+    result?.raw?.agent_runtime?.result,
+    result?.raw?.agent_runtime?.workload,
+    result?.metadata?.agent_runtime,
+    result?.metadata?.agent_runtime?.result,
+    result?.metadata?.agent_runtime?.workload,
+    result?.run?.agentResult,
+    result?.agentResult,
+    result?.agent_result,
+  ].filter((candidate) => candidate && typeof candidate === 'object' && !Array.isArray(candidate));
+}
+
 function agentRuntimeWorkload(result) {
-  return result?.raw?.agent_runtime?.result || result?.metadata?.agent_runtime?.workload || result?.run?.agentResult || result?.agentResult || result?.agent_result || null;
+  return firstObject(
+    result?.raw?.agent_runtime?.result,
+    result?.raw?.agent_runtime?.workload,
+    result?.metadata?.agent_runtime?.result,
+    result?.metadata?.agent_runtime?.workload,
+    result?.run?.agentResult,
+    result?.agentResult,
+    result?.agent_result,
+  );
+}
+
+function agentRuntimeFailure(result) {
+  return agentRuntimeResultCandidates(result).find((candidate) => {
+    const terminalStatus = String(candidate.terminal_status || candidate.terminalStatus || '').toLowerCase();
+    const status = String(candidate.status || candidate.outcome || '').toLowerCase();
+    const completionStatus = String(candidate.completion_outcome?.status || candidate.completionOutcome?.status || '').toLowerCase();
+    return candidate.success === false
+      || candidate.completion_outcome?.success === false
+      || candidate.completionOutcome?.success === false
+      || terminalStatus === 'failed'
+      || terminalStatus.startsWith('failed ')
+      || status === 'failed'
+      || completionStatus === 'failed';
+  }) || null;
+}
+
+function agentRuntimeFailureReason(runtimeFailure) {
+  if (!runtimeFailure) {
+    return '';
+  }
+  const terminalStatus = String(runtimeFailure.terminal_status || runtimeFailure.terminalStatus || '');
+  return firstValue(
+    runtimeFailure.error_reason,
+    runtimeFailure.errorReason,
+    runtimeFailure.reason,
+    runtimeFailure.completion_outcome?.reason,
+    runtimeFailure.completionOutcome?.reason,
+    terminalStatus.startsWith('failed - ') ? terminalStatus.slice('failed - '.length).trim() : '',
+    runtimeFailure.status,
+  );
+}
+
+function agentRuntimeFailureDiagnostic(result) {
+  const runtimeFailure = agentRuntimeFailure(result);
+  if (!runtimeFailure) {
+    return null;
+  }
+  const reason = agentRuntimeFailureReason(runtimeFailure);
+  const message = runtimeFailure.error_message
+    || runtimeFailure.errorMessage
+    || runtimeFailure.message
+    || runtimeFailure.summary
+    || (reason ? `Embedded agent runtime failed: ${reason}.` : 'Embedded agent runtime failed.');
+  return {
+    class: 'agent_runtime.failed',
+    message,
+    data: sanitizePublicMetadata({
+      reason,
+      status: runtimeFailure.status,
+      terminal_status: runtimeFailure.terminal_status || runtimeFailure.terminalStatus,
+      error_reason: runtimeFailure.error_reason || runtimeFailure.errorReason,
+    }),
+  };
 }
 
 function appendUniqueArtifact(artifacts, artifact) {
@@ -1863,6 +1938,7 @@ function codeboxDecisionEvidence(result, runSummary = null, recipeSummary = null
     recipe_ref: recipeRun.ref,
     recipe_target_ref: recipeRun.target_ref || recipeRun.targetRef,
     recipe_failed_phase: recipeFailedPhase,
+    agent_runtime_failure_reason: agentRuntimeFailureReason(agentRuntimeFailure(result)),
   }).filter(([, value]) => value !== undefined && value !== ''));
 }
 
@@ -2000,6 +2076,7 @@ function agentTaskOutcomeFromCodeboxResult(request, result = {}, options = {}) {
   const recipeRun = recipeRunFromResult(result);
   const fallbackRecipeSummary = recipeRunFailureSummary(recipeRun);
   const recipeFailedPhase = recipeSummary?.failed_phase || recipeSummary?.metadata?.failure_phase || recipeRunFailedPhase(recipeRun);
+  const runtimeFailureDiagnostic = agentRuntimeFailureDiagnostic(result);
   const codexProviderDiagnostic = codexProviderNotRegisteredDiagnostic(request, result);
   const codexBearerTokenDiagnostic = codexPhpAiClientBearerTokenDiagnostic(request, result);
   const codexVendorDiagnostic = codexPhpAiClientVendorDiagnostic(request, result);
@@ -2007,11 +2084,11 @@ function agentTaskOutcomeFromCodeboxResult(request, result = {}, options = {}) {
     schema: AGENT_TASK_OUTCOME_SCHEMA,
     task_id: request.task_id,
     status,
-    summary: missingRequiredTypedArtifacts?.message || recipeSummary?.failure_summary || fallbackRecipeSummary || runSummary?.summary || result.summary || result.message || (status === 'succeeded' ? 'WP Codebox agent task succeeded.' : 'WP Codebox agent task failed.'),
+    summary: missingRequiredTypedArtifacts?.message || runtimeFailureDiagnostic?.message || recipeSummary?.failure_summary || fallbackRecipeSummary || runSummary?.summary || result.summary || result.message || (status === 'succeeded' ? 'WP Codebox agent task succeeded.' : 'WP Codebox agent task failed.'),
     artifacts: normalizeArtifacts(result, runSummary, recipeSummary),
     evidence_refs: normalizeEvidenceRefs(result, runSummary, recipeSummary),
     outputs,
-    diagnostics: [codexProviderDiagnostic, codexBearerTokenDiagnostic, codexVendorDiagnostic, missingRequiredTypedArtifacts, recipeSummary ? null : recipeRunFailureDiagnostic(recipeRun), ...(recipeSummary?.diagnostics || []), ...(runSummary?.diagnostics || []), ...(result.diagnostics || [])].filter(Boolean).map((diagnostic) => ({
+    diagnostics: [codexProviderDiagnostic, codexBearerTokenDiagnostic, codexVendorDiagnostic, missingRequiredTypedArtifacts, runtimeFailureDiagnostic, recipeSummary ? null : recipeRunFailureDiagnostic(recipeRun), ...(recipeSummary?.diagnostics || []), ...(runSummary?.diagnostics || []), ...(result.diagnostics || [])].filter(Boolean).map((diagnostic) => ({
       class: diagnostic.class || diagnostic.kind || 'codebox',
       message: diagnostic.message || String(diagnostic),
       data: sanitizePublicMetadata(diagnostic.data || {}),

@@ -1387,6 +1387,48 @@ const rawNestedAgentRuntimeFailureOutcome = agentTaskOutcomeFromCodeboxResult(re
 assert.equal(rawNestedAgentRuntimeFailureOutcome.status, 'failed');
 assert.equal(rawNestedAgentRuntimeFailureOutcome.failure_classification, 'execution_failed');
 
+const metadataAgentRuntimeFailureOutcome = agentTaskOutcomeFromCodeboxResult(request, {
+  success: true,
+  schema: 'wp-codebox/agent-task-run/v1',
+  status: 'completed',
+  summary: 'WP Codebox agent task succeeded.',
+  metadata: {
+    agent_runtime: {
+      result: {
+        error_message: 'Codex OAuth refresh failed.',
+        error_reason: 'ai_processing_failed',
+        terminal_status: 'failed - ai_processing_failed',
+        reason: 'empty_data_packet_returned',
+        outputs: {
+          error_step_id: 'ephemeral_step_0',
+        },
+      },
+    },
+  },
+});
+assert.equal(metadataAgentRuntimeFailureOutcome.status, 'failed');
+assert.equal(metadataAgentRuntimeFailureOutcome.summary, 'Codex OAuth refresh failed.');
+assert.equal(metadataAgentRuntimeFailureOutcome.failure_classification, 'execution_failed');
+assert.equal(metadataAgentRuntimeFailureOutcome.diagnostics[0].class, 'agent_runtime.failed');
+assert.equal(metadataAgentRuntimeFailureOutcome.diagnostics[0].data.reason, 'ai_processing_failed');
+assert.equal(metadataAgentRuntimeFailureOutcome.metadata.decision_evidence.agent_runtime_failure_reason, 'ai_processing_failed');
+
+const metadataAgentRuntimeTerminalFailureOutcome = agentTaskOutcomeFromCodeboxResult(request, {
+  success: true,
+  schema: 'wp-codebox/agent-task-run/v1',
+  status: 'completed',
+  metadata: {
+    agent_runtime: {
+      result: {
+        terminalStatus: 'failed - provider_auth_failed',
+      },
+    },
+  },
+});
+assert.equal(metadataAgentRuntimeTerminalFailureOutcome.status, 'failed');
+assert.equal(metadataAgentRuntimeTerminalFailureOutcome.diagnostics[0].class, 'agent_runtime.failed');
+assert.equal(metadataAgentRuntimeTerminalFailureOutcome.diagnostics[0].data.reason, 'provider_auth_failed');
+
 const agentBundleOutcome = agentTaskOutcomeFromCodeboxResult({
   ...request,
   task_id: 'agent-bundle-task-123',
