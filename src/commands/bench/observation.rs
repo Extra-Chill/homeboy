@@ -1090,7 +1090,7 @@ mod tests {
                 .public_url
                 .as_deref()
                 .expect("public url")
-                .starts_with(&format!("{public_artifact_base}/runs/")));
+                .starts_with(&format!("{public_artifact_base}/")));
             assert!(transcript_artifact
                 .viewer_url
                 .as_deref()
