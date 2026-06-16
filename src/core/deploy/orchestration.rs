@@ -14,6 +14,7 @@ use super::generated_artifacts::unexpected_uncommitted_files_excluding_generated
 use super::path_roots::{project_with_detected_path_roots, resolve_effective_remote_path};
 use super::planning::{
     calculate_component_status, calculate_release_state, load_project_components, plan_components,
+    ExtensionSkippedComponent,
 };
 use super::types::{
     ComponentDeployResult, ComponentStatus, DeployConfig, DeployOrchestrationResult, DeploySummary,
@@ -28,8 +29,27 @@ pub(super) fn deploy_components(
     ctx: &RemoteProjectContext,
     base_path: &str,
 ) -> Result<DeployOrchestrationResult> {
-    let loaded = load_project_components(project, &config.component_ids)?;
+    let loaded = load_project_components(project, &config.component_ids, config.check)?;
     validate_supported_build_configs(&loaded.deployable)?;
+
+    // In check mode, components whose required extensions are missing are skipped
+    // (not hard-failed) so the read-only diff still reports everything else.
+    // If nothing is deployable but components were extension-skipped, surface those
+    // as skipped check results instead of erroring with "no deployable components".
+    if config.check && loaded.deployable.is_empty() && !loaded.extension_skipped.is_empty() {
+        let results = extension_skipped_results(&loaded.extension_skipped, &project, base_path);
+        let skipped = results.len() as u32;
+        return Ok(DeployOrchestrationResult {
+            results,
+            summary: DeploySummary {
+                total: skipped,
+                succeeded: 0,
+                failed: 0,
+                skipped,
+            },
+        });
+    }
+
     if loaded.deployable.is_empty() {
         let message = if loaded.skipped.is_empty() {
             "No components configured for project".to_string()
@@ -97,6 +117,7 @@ pub(super) fn deploy_components(
             &components,
             &local_versions,
             &remote_versions,
+            &loaded.extension_skipped,
             &project,
             base_path,
             config,
@@ -292,11 +313,12 @@ fn run_check_mode(
     components: &[Component],
     local_versions: &HashMap<String, String>,
     remote_versions: &HashMap<String, String>,
+    extension_skipped: &[ExtensionSkippedComponent],
     project: &Project,
     base_path: &str,
     config: &DeployConfig,
 ) -> DeployOrchestrationResult {
-    let results: Vec<ComponentDeployResult> = components
+    let mut results: Vec<ComponentDeployResult> = components
         .iter()
         .map(|c| {
             let status = calculate_component_status(c, remote_versions);
@@ -316,6 +338,12 @@ fn run_check_mode(
         })
         .collect();
 
+    // Append components skipped because a required extension is not installed, so the
+    // check-mode diff reports per-component status for the whole project (issue #4587).
+    let skipped_results = extension_skipped_results(extension_skipped, project, base_path);
+    let skipped = skipped_results.len() as u32;
+    results.extend(skipped_results);
+
     let total = results.len() as u32;
     DeployOrchestrationResult {
         results,
@@ -323,9 +351,33 @@ fn run_check_mode(
             total,
             succeeded: 0,
             failed: 0,
-            skipped: 0,
+            skipped,
         },
     }
+}
+
+/// Build check-mode result rows for components skipped due to missing extensions.
+///
+/// Each row is `status: "skipped"` with a warning explaining the missing extension,
+/// so operators see `skipped: missing extension <id>` instead of the whole pass aborting.
+fn extension_skipped_results(
+    extension_skipped: &[ExtensionSkippedComponent],
+    project: &Project,
+    base_path: &str,
+) -> Vec<ComponentDeployResult> {
+    extension_skipped
+        .iter()
+        .map(|skip| {
+            let component = Component {
+                id: skip.id.clone(),
+                ..Default::default()
+            };
+            let mut result = ComponentDeployResult::new_for_project(&component, project, base_path)
+                .with_status("skipped");
+            result.warnings.push(format!("skipped: {}", skip.reason));
+            result
+        })
+        .collect()
 }
 
 /// Dry-run mode: return planned results without building or deploying.
@@ -1089,7 +1141,7 @@ mod tests {
             ("selected", selected.path()),
             ("unrelated", unrelated.path()),
         ]);
-        let loaded = load_project_components(&project, &["selected".to_string()])
+        let loaded = load_project_components(&project, &["selected".to_string()], false)
             .expect("targeted component load should ignore unrelated invalid config");
 
         assert_eq!(
@@ -1115,7 +1167,7 @@ mod tests {
             ("selected", selected.path()),
             ("unrelated", unrelated.path()),
         ]);
-        let loaded = load_project_components(&project, &["selected".to_string()])
+        let loaded = load_project_components(&project, &["selected".to_string()], false)
             .expect("targeted component load should include selected component");
 
         let err = validate_supported_build_configs(&loaded.deployable)
@@ -1123,6 +1175,105 @@ mod tests {
 
         assert!(err.message.contains("unsupported legacy build_command"));
         assert_eq!(err.details["field"].as_str(), Some("build_command"));
+    }
+
+    /// Write a component manifest that declares a (missing) required extension.
+    fn write_component_manifest_with_extension(dir: &Path, id: &str, extension_id: &str) {
+        let manifest = serde_json::json!({
+            "id": id,
+            "remote_path": format!("wp-content/plugins/{id}"),
+            "build_artifact": "dist/plugin.zip",
+            "extensions": { extension_id: {} },
+        });
+        std::fs::write(dir.join("homeboy.json"), manifest.to_string()).expect("write manifest");
+    }
+
+    #[test]
+    fn check_mode_skips_component_with_missing_extension_instead_of_aborting() {
+        with_isolated_home(|_| {
+            let gated = TempDir::new().expect("gated dir");
+            let wp = TempDir::new().expect("wp dir");
+            // One component requires an uninstalled extension; the other is a plain
+            // deployable WP component the operator actually cares about.
+            write_component_manifest_with_extension(
+                gated.path(),
+                "gated",
+                "nonexistent-extension-xyz789",
+            );
+            write_component_manifest(wp.path(), "wp", None);
+
+            let project =
+                project_with_component_dirs(&[("gated", gated.path()), ("wp", wp.path())]);
+
+            // --all --check: requested_ids empty, check = true.
+            let loaded = load_project_components(&project, &[], true)
+                .expect("check mode must not hard-fail on missing extension");
+
+            // The WP component is still deployable/inspectable.
+            assert_eq!(
+                loaded
+                    .deployable
+                    .iter()
+                    .map(|c| c.id.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["wp"]
+            );
+
+            // The extension-gated component is recorded with a reason, not dropped silently.
+            assert_eq!(loaded.extension_skipped.len(), 1);
+            let skip = &loaded.extension_skipped[0];
+            assert_eq!(skip.id, "gated");
+            assert!(
+                skip.reason.contains("nonexistent-extension-xyz789"),
+                "reason should name the missing extension, got: {}",
+                skip.reason
+            );
+        });
+    }
+
+    #[test]
+    fn non_check_mode_still_hard_fails_on_missing_extension() {
+        with_isolated_home(|_| {
+            let gated = TempDir::new().expect("gated dir");
+            write_component_manifest_with_extension(
+                gated.path(),
+                "gated",
+                "nonexistent-extension-xyz789",
+            );
+
+            let project = project_with_component_dirs(&[("gated", gated.path())]);
+
+            // --all (deploy, not check): a missing extension must still abort.
+            let err = match load_project_components(&project, &[], false) {
+                Ok(_) => panic!("non-check mode must hard-fail on missing extension"),
+                Err(err) => err,
+            };
+
+            assert_eq!(err.code, crate::core::error::ErrorCode::ExtensionNotFound);
+            assert!(err.message.contains("nonexistent-extension-xyz789"));
+        });
+    }
+
+    #[test]
+    fn extension_skipped_results_report_skipped_status_with_reason() {
+        let project = Project {
+            id: "site".to_string(),
+            ..Default::default()
+        };
+        let skipped = vec![ExtensionSkippedComponent {
+            id: "gated".to_string(),
+            reason: "missing extension rust".to_string(),
+        }];
+
+        let results = extension_skipped_results(&skipped, &project, "/var/www/site");
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "gated");
+        assert_eq!(results[0].status, "skipped");
+        assert!(results[0]
+            .warnings
+            .iter()
+            .any(|w| w.contains("missing extension rust")));
     }
 
     #[test]
