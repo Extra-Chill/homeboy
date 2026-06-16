@@ -267,6 +267,23 @@ assert.deepEqual(provider.outcome_statuses, ['succeeded', 'failed', 'no_op', 'un
 assert.deepEqual(provider.failure_classifications, ['provider', 'timeout', 'execution_failed']);
 assert.deepEqual(provider.redacted_metadata_keys, ['secret_env_values', 'secretEnvValues', 'secrets']);
 assert.deepEqual(provider.workspace_materialization, { cwd: 'git_checkout' });
+assert.deepEqual(provider.provider_defaults, {
+  openai: {
+    secret_env: ['OPENAI_API_KEY'],
+  },
+  codex: {
+    secret_env: [
+      'AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN',
+      'AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN',
+      'AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT',
+      'AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID',
+      'AI_PROVIDER_OPENAI_CODEX_FEDRAMP',
+    ],
+  },
+  'claude-code': {
+    secret_env: ['AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN'],
+  },
+});
 assert.deepEqual(provider.role_aliases, {
   artifact_kinds: {
     patch: ['codebox-patch'],
@@ -354,6 +371,32 @@ assert.deepEqual(codeboxRequest.runtime_env, {});
 assert.deepEqual(codeboxRequest.runtime_state_mounts, []);
 assert.deepEqual(codeboxRequest.runtime_config_mounts, []);
 assert.deepEqual(codeboxRequest.secret_env, ['OPENAI_API_KEY']);
+
+const providerDefaultSecretRequest = codeboxTaskRequestFromAgentTaskRequest({
+  ...request,
+  task_id: 'provider-default-secret-task-123',
+  executor: {
+    backend: 'wordpress',
+    config: {
+      provider: 'claude-code',
+      model: 'opus-4.7',
+    },
+  },
+});
+assert.deepEqual(providerDefaultSecretRequest.secret_env, provider.provider_defaults['claude-code'].secret_env);
+
+const codexDefaultSecretRequest = codeboxTaskRequestFromAgentTaskRequest({
+  ...request,
+  task_id: 'codex-default-secret-task-123',
+  executor: {
+    backend: 'wordpress',
+    config: {
+      provider: 'codex',
+      model: 'gpt-5.5',
+    },
+  },
+});
+assert.deepEqual(codexDefaultSecretRequest.secret_env, provider.provider_defaults.codex.secret_env);
 assert.equal(codeboxRequest.max_turns, 8);
 assert.equal(codeboxRequest.task_timeout_seconds, 120);
 assert.equal(codeboxRequest.expected_artifacts[0], 'screenshot');
@@ -689,7 +732,7 @@ const codexAgentRequest = {
   },
 };
 const codexRequest = codeboxTaskRequestFromAgentTaskRequest(codexAgentRequest);
-assert.equal(codexRequest.agent, 'wp-codebox-sandbox');
+assert.equal(Object.hasOwn(codexRequest, 'agent'), false);
 assert.equal(codexRequest.mode, 'sandbox');
 assert.equal(codexRequest.provider, 'codex');
 assert.equal(codexRequest.model, 'gpt-5.5');
@@ -970,7 +1013,9 @@ try {
   });
   assert.equal(alternateDefaultedRequest.runtime_component_paths.agents_api, alternateBundledAgentsApiPath);
 
-  const configuredProviderPath = path.join(defaultsRoot, 'configured-provider');
+  const configuredProviderPath = path.join(defaultsRoot, 'ai-provider-for-openai');
+  fs.mkdirSync(path.join(configuredProviderPath, 'src', 'Codex'), { recursive: true });
+  fs.writeFileSync(path.join(configuredProviderPath, 'src', 'Codex', 'CodexProvider.php'), '<?php\n// Registers the codex provider.\n');
   const configuredLibraryPath = path.join(defaultsRoot, 'configured-library');
   const configuredRuntimeOverlays = [{
     kind: 'bundled-library',
@@ -1514,6 +1559,40 @@ const outputRuntimeFailureMetadataOutcome = agentTaskOutcomeFromCodeboxResult(re
 assert.equal(outputRuntimeFailureMetadataOutcome.status, 'failed');
 assert.equal(outputRuntimeFailureMetadataOutcome.diagnostics[0].class, 'agent_runtime.failed');
 assert.equal(outputRuntimeFailureMetadataOutcome.diagnostics[0].data.reason, 'provider_auth_failed');
+
+const outputAgentRuntimeFailureWithoutTypedArtifactsOutcome = agentTaskOutcomeFromCodeboxResult(request, {
+  success: true,
+  schema: 'wp-codebox/agent-task-run/v1',
+  status: 'completed',
+  summary: 'WP Codebox agent task succeeded.',
+  outputs: {
+    agent_runtime: {
+      success: false,
+      result: {
+        success: false,
+        error_reason: 'ai_processing_failed',
+        error_message: 'Embedded runtime failed before emitting typed artifacts.',
+        terminal_status: 'failed - ai_processing_failed',
+        outputs: {},
+      },
+    },
+  },
+}, {
+  normalizeAgentTaskRunResult: () => ({
+    schema: 'wp-codebox/agent-task-run-result/v1',
+    status: 'succeeded',
+    artifacts: [],
+    diagnostics: [],
+    metadata: {},
+    refs: {},
+  }),
+});
+assert.equal(outputAgentRuntimeFailureWithoutTypedArtifactsOutcome.status, 'failed');
+assert.equal(outputAgentRuntimeFailureWithoutTypedArtifactsOutcome.summary, 'Embedded runtime failed before emitting typed artifacts.');
+assert.equal(outputAgentRuntimeFailureWithoutTypedArtifactsOutcome.failure_classification, 'execution_failed');
+assert.equal(outputAgentRuntimeFailureWithoutTypedArtifactsOutcome.diagnostics[0].class, 'agent_runtime.failed');
+assert.equal(outputAgentRuntimeFailureWithoutTypedArtifactsOutcome.diagnostics.some((diagnostic) => diagnostic.class === 'codebox.required_typed_artifacts_missing'), false);
+assert.deepEqual(outputAgentRuntimeFailureWithoutTypedArtifactsOutcome.metadata.typed_artifacts, {});
 
 const agentBundleOutcome = agentTaskOutcomeFromCodeboxResult({
   ...request,
@@ -2243,6 +2322,8 @@ try {
   const capturedAgentBundleRun = JSON.parse(fs.readFileSync(fakeWpCodeboxCapture, 'utf8'));
   assert.equal(capturedAgentBundleRun.argv[0], 'agent-task-run');
   assert.equal(capturedAgentBundleRun.input.schema, 'wp-codebox/task-input/v1');
+  assert.equal(Object.hasOwn(capturedAgentBundleRun.input, 'agent'), false);
+  assert.equal(Object.hasOwn(capturedAgentBundleRun.input.parent_request, 'agent'), false);
   assert.deepEqual(capturedAgentBundleRun.input.runtime_env, fullRunnerRuntimeEnv);
   assert.deepEqual(capturedAgentBundleRun.input.runtime_state_mounts, fullRunnerRuntimeStateMounts);
   assert.deepEqual(capturedAgentBundleRun.input.runtime_config_mounts, fullRunnerRuntimeConfigMounts);
@@ -2277,6 +2358,7 @@ try {
   assert.equal(recipeWpCodeboxResult.status, 0, recipeWpCodeboxResult.stderr || recipeWpCodeboxResult.stdout);
   const capturedRecipeWpCodeboxRun = JSON.parse(fs.readFileSync(recipeFakeWpCodeboxCapture, 'utf8'));
   assert.equal(capturedRecipeWpCodeboxRun.argv[0], 'agent-task-run');
+  assert.equal(Object.hasOwn(capturedRecipeWpCodeboxRun.input, 'agent'), false);
   assert.equal(capturedRecipeWpCodeboxRun.input.recipe.pack, 'example-codebox-recipes');
   assert.equal(capturedRecipeWpCodeboxRun.input.recipe.name, 'minimal-runtime');
   assert.equal(capturedRecipeWpCodeboxRun.input.recipe.target_ref, 'Extra-Chill/example#42');

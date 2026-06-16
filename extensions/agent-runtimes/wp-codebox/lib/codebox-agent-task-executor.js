@@ -71,6 +71,18 @@ const CLAUDE_CODE_SECRET_ENV = [
   'AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN',
 ];
 
+const PROVIDER_DEFAULTS = {
+  openai: {
+    secret_env: ['OPENAI_API_KEY'],
+  },
+  codex: {
+    secret_env: CODEX_SECRET_ENV,
+  },
+  'claude-code': {
+    secret_env: CLAUDE_CODE_SECRET_ENV,
+  },
+};
+
 const DEFAULT_CODEX_MODEL = 'gpt-5.5';
 const CODEX_PROVIDER_PLUGIN_GUIDANCE = `Codex tasks require a Codex-capable provider plugin checkout, such as the Codex PR branch for ai-provider-for-openai. Released ai-provider-for-openai trunk registers openai, not codex, and unrelated provider defaults such as ${['ai-provider-for', ['open', 'code'].join('')].join('-')} will not work.`;
 const CODEX_PHP_AI_CLIENT_GUIDANCE = 'Codex tasks require a php-ai-client checkout that supports RequestAuthenticationMethod::bearerToken and has Composer vendor dependencies installed before WP Codebox prepares the runtime overlay.';
@@ -200,11 +212,19 @@ function providerContract(options = {}) {
     workspace_materialization: {
       cwd: 'git_checkout',
     },
+    provider_defaults: providerDefaultsContract(),
     role_aliases: WP_CODEBOX_ROLE_ALIASES,
     status: 'active',
     integration_contract: 'homeboy-wordpress-agent-task/v1',
     runtime_gap_trackers: WP_CODEBOX_RUNTIME_GAP_TRACKERS,
   };
+}
+
+function providerDefaultsContract() {
+  return Object.fromEntries(Object.entries(PROVIDER_DEFAULTS).map(([provider, defaults]) => [provider, {
+    ...defaults,
+    secret_env: normalizeArray(defaults.secret_env),
+  }]));
 }
 
 function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
@@ -226,6 +246,7 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
   const sandboxToolPolicy = sandboxToolPolicyFromAgentTaskRequest(config, inputs, options, defaults, allowedTools);
   const provider = config.provider || options.provider || defaults.provider || '';
   const model = request.executor.model || config.model || options.model || defaults.model || '';
+  const agent = firstValue(config.agent, options.agent, '');
   const runtimeTask = runtimeTaskWithExecutionDefaults(
     inputs.runtime_task || inputs.runtimeTask || config.runtime_task || config.runtimeTask || abilityRuntimeTaskFromAgentTaskRequest(request, config, inputs) || options.runtimeTask,
     { provider, model, agentBundles }
@@ -266,7 +287,7 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     structured_artifacts: structuredArtifacts,
     sandbox_session_id: config.sandbox_session_id || request.task_id,
     session_id: config.session_id || config.sessionId || '',
-    agent: config.agent || options.agent || 'wp-codebox-sandbox',
+    ...(agent ? { agent } : {}),
     mode: config.mode || options.mode || 'sandbox',
     provider,
     model,
@@ -754,16 +775,25 @@ function defaultCodeboxRuntimeConfig(request, config, inputs, options = {}) {
 function defaultProviderPluginPaths(provider, settings, fallbackProviderPluginPath) {
   const explicitCodebox = normalizeArray(settings.wp_codebox_provider_plugin_paths);
   if (explicitCodebox.length > 0) {
-    return explicitCodebox;
-  }
-  if (provider === 'codex') {
-    return [];
+    return provider === 'codex'
+      ? explicitCodebox.filter(codexProviderPluginPathLooksUsable)
+      : explicitCodebox;
   }
   const explicit = normalizeArray(settings.provider_plugin_paths);
+  if (provider === 'codex') {
+    return explicit.filter(codexProviderPluginPathLooksUsable);
+  }
   if (explicit.length > 0) {
     return explicit;
   }
   return fallbackProviderPluginPath ? [fallbackProviderPluginPath] : [];
+}
+
+function codexProviderPluginPathLooksUsable(providerPath) {
+  if (!providerPath || !fs.existsSync(providerPath)) {
+    return false;
+  }
+  return fs.existsSync(path.join(providerPath, 'src', 'Codex', 'CodexProvider.php'));
 }
 
 function defaultRuntimeOverlayProfiles(settings) {
@@ -867,7 +897,7 @@ function defaultSecretEnv(provider, settings) {
   if (provider === 'claude-code') {
     return CLAUDE_CODE_SECRET_ENV;
   }
-  return provider === 'openai' ? ['OPENAI_API_KEY'] : [];
+  return normalizeArray(PROVIDER_DEFAULTS[provider]?.secret_env);
 }
 
 function defaultProvider(settings, providerPluginPath) {
@@ -1247,6 +1277,9 @@ function agentRuntimeResultCandidates(result) {
   const workload = agentRuntimeWorkload(result) || {};
   const scenarios = Array.isArray(workload.scenarios) ? workload.scenarios : [];
   return [
+    result?.outputs?.agent_runtime?.result,
+    result?.outputs?.agent_runtime?.workload,
+    result?.outputs?.agent_runtime,
     result?.raw?.agent_runtime,
     result?.raw?.agent_runtime?.result,
     result?.raw?.agent_runtime?.workload,
@@ -1267,6 +1300,8 @@ function agentRuntimeResultCandidates(result) {
 
 function agentRuntimeWorkload(result) {
   return firstObject(
+    result?.outputs?.agent_runtime?.result,
+    result?.outputs?.agent_runtime?.workload,
     result?.raw?.agent_runtime?.result,
     result?.raw?.agent_runtime?.workload,
     result?.metadata?.agent_runtime?.result,
