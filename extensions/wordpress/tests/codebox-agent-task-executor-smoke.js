@@ -24,10 +24,8 @@ const claudeCodeRefreshTokenEnv = 'AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN';
 const repoLoopCapabilities = [
   'tool:datamachine/run-agent-bundle',
   'tool:github_pull_request_publish',
-  'tool:wpsg_materialize_packet',
   'ability:datamachine/run-agent-bundle',
   'ability:github_pull_request_publish',
-  'ability:wpsg_materialize_packet',
 ];
 
 function fixtureEnv(overrides = {}) {
@@ -256,7 +254,9 @@ const request = {
 };
 
 const provider = providerContract();
-assert.equal(provider.backend, 'wordpress');
+assert.equal(provider.id, 'wordpress.codebox-agent-task-executor');
+assert.equal(provider.label, 'WP Codebox agent task executor');
+assert.equal(provider.backend, 'codebox');
 assert.equal(provider.request_schema, 'homeboy/agent-task-request/v1');
 assert.equal(provider.outcome_schema, 'homeboy/agent-task-outcome/v1');
 assert.deepEqual(provider.request_required_fields, ['schema', 'task_id', 'executor.backend', 'instructions']);
@@ -293,9 +293,12 @@ for (const capability of repoLoopCapabilities) {
 }
 const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'wordpress.json'), 'utf8'));
 const manifestProvider = manifest.agent_task_executors.find((executor) => executor.id === provider.id);
+assert.deepEqual(manifestProvider, provider);
 for (const capability of repoLoopCapabilities) {
   assert.equal(manifestProvider.capabilities.includes(capability), true);
 }
+assert.equal(provider.capabilities.includes('tool:wpsg_materialize_packet'), false);
+assert.equal(provider.capabilities.includes('ability:wpsg_materialize_packet'), false);
 assert.deepEqual(provider.runtime_gap_trackers, []);
 
 const codeboxRequest = codeboxTaskRequestFromAgentTaskRequest(request);

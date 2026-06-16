@@ -13,10 +13,16 @@ const {
 const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-wordpress-agent-boundary-'));
 
 const provider = providerContract();
-assert.equal(provider.id, 'wordpress.agent-task-executor');
-assert.equal(provider.label, 'WordPress agent task executor');
-assert.equal(provider.backend, 'wordpress');
+assert.equal(provider.id, 'wordpress.codebox-agent-task-executor');
+assert.equal(provider.label, 'WP Codebox agent task executor');
+assert.equal(provider.backend, 'codebox');
 assert.equal(provider.integration_contract, 'homeboy-wordpress-agent-task/v1');
+
+const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'wordpress.json'), 'utf8'));
+assert.equal(manifest.agent_task_executors.length, 1);
+assert.deepEqual(manifest.agent_task_executors[0], provider);
+assert.equal(provider.capabilities.includes('tool:wpsg_materialize_packet'), false);
+assert.equal(provider.capabilities.includes('ability:wpsg_materialize_packet'), false);
 
 const taskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',

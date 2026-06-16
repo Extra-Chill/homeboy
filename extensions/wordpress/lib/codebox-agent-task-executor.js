@@ -10,6 +10,8 @@ const AGENT_TASK_REQUEST_SCHEMA = 'homeboy/agent-task-request/v1';
 const AGENT_TASK_OUTCOME_SCHEMA = 'homeboy/agent-task-outcome/v1';
 const AGENT_TASK_ARTIFACT_SCHEMA = 'homeboy/agent-task-artifact/v1';
 const WP_CODEBOX_TASK_REQUEST_SCHEMA = 'wp-codebox/task-input/v1';
+const WP_CODEBOX_PROVIDER_ID = 'wordpress.codebox-agent-task-executor';
+const WP_CODEBOX_PROVIDER_LABEL = 'WP Codebox agent task executor';
 const HOMEBOY_WORDPRESS_BACKEND = 'wordpress';
 const LEGACY_CODEBOX_BACKEND = 'codebox';
 
@@ -33,12 +35,10 @@ const PROVIDER_CAPABILITIES = [
   'tool:github_issue_publish',
   'tool:github_pull_request_publish',
   'tool:comment_github_pull_request',
-  'tool:wpsg_materialize_packet',
   'ability:datamachine/run-agent-bundle',
   'ability:github_issue_publish',
   'ability:github_pull_request_publish',
   'ability:comment_github_pull_request',
-  'ability:wpsg_materialize_packet',
 ];
 
 const DEFAULT_WORKSPACE_READONLY_TOOLS = [
@@ -186,9 +186,9 @@ function assertAgentTaskRequest(request) {
 function providerContract(options = {}) {
   return {
     schema: 'homeboy/agent-task-executor-provider/v1',
-    id: options.id || 'wordpress.agent-task-executor',
-    label: options.label || 'WordPress agent task executor',
-    backend: HOMEBOY_WORDPRESS_BACKEND,
+    id: options.id || WP_CODEBOX_PROVIDER_ID,
+    label: options.label || WP_CODEBOX_PROVIDER_LABEL,
+    backend: LEGACY_CODEBOX_BACKEND,
     command: options.command || 'node {{extension_path}}/scripts/agent/homeboy-codebox-agent-task-executor.cjs',
     request_schema: AGENT_TASK_REQUEST_SCHEMA,
     outcome_schema: AGENT_TASK_OUTCOME_SCHEMA,
