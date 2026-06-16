@@ -301,6 +301,7 @@ jobs:
 
   gate-refactor:
     name: Auto-refactor
+    continue-on-error: true
     needs:
       - check
       - gate-build
@@ -359,7 +360,6 @@ jobs:
       - gate-audit
       - gate-lint
       - gate-test
-      - gate-refactor
     if: ${{ always() && needs.check.outputs.should-release == 'true' && needs.gate-build.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
@@ -369,7 +369,6 @@ jobs:
           AUDIT_RESULT: ${{ needs.gate-audit.outputs.audit-result || needs.gate-audit.result }}
           LINT_RESULT: ${{ needs.gate-lint.result }}
           TEST_RESULT: ${{ needs.gate-test.result }}
-          REFACTOR_RESULT: ${{ needs.gate-refactor.result }}
         run: |
           set -euo pipefail
 
@@ -396,10 +395,6 @@ jobs:
           check_command audit "${AUDIT_RESULT}"
           check_command lint "${LINT_RESULT}"
           check_command test "${TEST_RESULT}"
-
-          if [ "${REFACTOR_RESULT}" != "success" ]; then
-            echo "::notice::Advisory auto-refactor finished with result: ${REFACTOR_RESULT}"
-          fi
 
           if [ "${failed}" -ne 0 ]; then
             exit 1
