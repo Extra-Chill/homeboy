@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::core::agent_runtime_manifest;
 use crate::core::agent_task::{
     AgentTaskArtifact, AgentTaskDiagnostic, AgentTaskEvidenceRef, AgentTaskFailureClassification,
     AgentTaskOutcome, AgentTaskOutcomeStatus, AgentTaskRequest, AGENT_TASK_ARTIFACT_SCHEMA,
@@ -16,7 +17,6 @@ use crate::core::agent_task_scheduler::{
 };
 use crate::core::agent_task_secrets::{resolve_secret_env, AgentTaskSecretResolutionError};
 use crate::core::agent_task_timeout::timeout_with_grace;
-use crate::core::extension::load_all_extensions;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskExecutorProvider {
@@ -549,23 +549,7 @@ fn fixture_artifact(id: &str, kind: &str, path: &PathBuf, mime: Option<&str>) ->
 }
 
 fn discover_agent_task_executor_providers() -> Vec<AgentTaskExecutorProvider> {
-    let mut providers = Vec::new();
-    for manifest in load_all_extensions().unwrap_or_default() {
-        let Some(value) = manifest.extra.get("agent_task_executors") else {
-            continue;
-        };
-        let Ok(mut extension_providers) =
-            serde_json::from_value::<Vec<AgentTaskExecutorProvider>>(value.clone())
-        else {
-            continue;
-        };
-        for provider in &mut extension_providers {
-            provider.extension_id = Some(manifest.id.clone());
-            provider.extension_path = manifest.extension_path.clone();
-        }
-        providers.extend(extension_providers);
-    }
-    providers
+    agent_runtime_manifest::discover_agent_task_executor_providers()
 }
 
 fn select_provider<'a>(

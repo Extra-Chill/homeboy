@@ -65,9 +65,9 @@ pub use lifecycle::{
 };
 pub use maintenance::{exec_tool, update_all};
 pub use manifest::{
-    ActionConfig, ActionType, AuditCapability, AutofixVerifyConfig, BenchConfig, BuildConfig,
-    CiCapability, CiJobFidelity, CiJobMapping, CiJobSpec, CiLocalContext, CiProfileSpec,
-    CliAutoFlag, CliAutoFlagCondition, CliConfig, CliHelpConfig, ComponentEnvConfig,
+    ActionConfig, ActionType, AgentRuntimeManifestConfig, AuditCapability, AutofixVerifyConfig,
+    BenchConfig, BuildConfig, CiCapability, CiJobFidelity, CiJobMapping, CiJobSpec, CiLocalContext,
+    CiProfileSpec, CliAutoFlag, CliAutoFlagCondition, CliConfig, CliHelpConfig, ComponentEnvConfig,
     DatabaseCliConfig, DatabaseConfig, DeployCapability, DeployOverride, DeployOwnerHint,
     DeployVerification, DepsConfig, DiscoveryConfig, DiscoveryMarkerConfig, DocTarget,
     ExecutableCapability, ExtensionManifest, FeatureContextRule, FileContainsCondition, HttpMethod,

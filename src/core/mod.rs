@@ -10,6 +10,7 @@ pub mod config;
 // Compatibility exports for existing `homeboy::core::<module>` consumers. Prefer the
 // facade modules above for new code so implementation files can move without
 // becoming accidental public API.
+pub mod agent_runtime_manifest;
 pub mod agent_task;
 pub mod agent_task_aggregate;
 pub(crate) mod agent_task_config_materialization;

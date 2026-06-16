@@ -395,6 +395,19 @@ pub struct ReleasePreflightConfig {
     pub needs: Vec<String>,
 }
 
+/// Agent runtime package declarations supplied by an extension manifest.
+///
+/// These are intentionally provider-agnostic at the extension layer. Consumers
+/// such as agent-task parse the provider-specific payloads they understand.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct AgentRuntimeManifestConfig {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agent_task_executors: Vec<serde_json::Value>,
+}
+
 /// Unified extension manifest decomposed into capability groups.
 ///
 /// Extension JSON files use nested capability groups that map directly to these fields.
@@ -477,6 +490,10 @@ pub struct ExtensionManifest {
     /// Release preflights supplied by this extension.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub release_preflights: Vec<ReleasePreflightConfig>,
+
+    /// First-class agent runtime package manifests supplied by this extension.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agent_runtimes: Vec<AgentRuntimeManifestConfig>,
 
     // Actions (cross-cutting: used by both platform and executable extensions)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
