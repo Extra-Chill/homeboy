@@ -784,9 +784,12 @@ fn dispatch_args_from_controller_request(request: &Value) -> homeboy::core::Resu
         prompt: optional_string(dispatch, "prompt"),
         tasks: optional_string_array(dispatch, "tasks")?,
         tasks_json: optional_string(dispatch, "tasks_json"),
-        cwd: optional_string(dispatch, "cwd"),
-        workspace: optional_string(dispatch, "workspace"),
-        repo: optional_string(dispatch, "repo"),
+        cwd: optional_string(dispatch, "cwd")
+            .or_else(|| optional_string(request, "cwd"))
+            .or_else(|| optional_string(request, "workspace_root")),
+        workspace: optional_string(dispatch, "workspace")
+            .or_else(|| optional_string(request, "workspace")),
+        repo: optional_string(dispatch, "repo").or_else(|| optional_string(request, "repo")),
         task_url: optional_string(dispatch, "task_url"),
         backend: optional_string(dispatch, "backend"),
         selector: optional_string(dispatch, "selector"),
@@ -1287,6 +1290,68 @@ mod tests {
                 .unwrap()
                 .to_string_lossy()
                 .to_string()
+        );
+    }
+
+    #[test]
+    fn controller_dispatch_args_preserve_top_level_workspace_context_in_plan() {
+        let repo = tempfile::tempdir().expect("repo dir");
+        let repo_path = repo.path().display().to_string();
+        let request = json!({
+            "mode": "dispatch",
+            "cwd": repo_path.clone(),
+            "repo": "wp-site-generator@canonical-loop-main-20260616",
+            "dispatch": {
+                "prompt": "cook the next workflow",
+                "backend": "codebox"
+            }
+        });
+
+        let args = dispatch_args_from_controller_request(&request).expect("dispatch args");
+        let dispatch_request =
+            homeboy::core::agent_tasks::dispatch_service::AgentTaskDispatchRequest {
+                prompt: args.prompt,
+                tasks: args.tasks,
+                tasks_json: args.tasks_json,
+                cwd: args.cwd,
+                workspace: args.workspace,
+                repo: args.repo,
+                task_url: args.task_url,
+                backend: args.backend.expect("backend"),
+                selector: args.selector,
+                model: args.model,
+                required_capabilities: args.required_capabilities,
+                secret_env: args.secret_env,
+                provider_config: args.provider_config,
+                client_context: args.client_context,
+                concurrency: args.concurrency,
+                attempts: args.attempts,
+                run_id: args.run_id,
+                queue_only: args.queue_only,
+            };
+        let plan = homeboy::core::agent_tasks::dispatch_service::build_dispatch_plan_with_provider_requirements(
+            &dispatch_request,
+            |_backend, _selector| false,
+        )
+        .expect("dispatch plan");
+        let task = plan.tasks.first().expect("plan task");
+
+        assert_eq!(task.workspace.root.as_deref(), Some(repo_path.as_str()));
+        assert_eq!(
+            task.workspace.slug.as_deref(),
+            Some("wp-site-generator@canonical-loop-main-20260616")
+        );
+        assert_eq!(
+            task.executor.config["workspace_root"].as_str(),
+            Some(repo_path.as_str())
+        );
+        assert_eq!(
+            task.executor.config["repo"].as_str(),
+            Some("wp-site-generator@canonical-loop-main-20260616")
+        );
+        assert_eq!(
+            plan.metadata["workspace_root"].as_str(),
+            Some(repo_path.as_str())
         );
     }
 
