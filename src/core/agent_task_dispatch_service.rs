@@ -518,7 +518,7 @@ fn dispatch_provider_config(
     workspace: Option<&DispatchWorkspaceTarget>,
     client_context: &Value,
 ) -> Result<Value> {
-    let mut config = if let Some(spec) = &request.provider_config {
+    let config = if let Some(spec) = &request.provider_config {
         let raw = read_text_spec(spec, "provider-config")?;
         serde_json::from_str::<Value>(&raw).map_err(|error| {
             Error::validation_invalid_json(

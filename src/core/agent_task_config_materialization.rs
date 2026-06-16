@@ -83,7 +83,8 @@ fn configured_ref_from_map(map: &Map<String, Value>) -> Result<Option<Configured
         .or_else(|| map.get("pathInRepo"))
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())
-        .map(validate_relative_path)?;
+        .map(validate_relative_path)
+        .transpose()?;
 
     Ok(Some(ConfiguredRef {
         repo: non_empty(repo, "repo")?,
