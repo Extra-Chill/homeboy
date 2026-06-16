@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
 
@@ -30,6 +31,10 @@ pub struct HomeboyConfig {
     #[serde(default)]
     pub agent_task: AgentTaskConfig,
 
+    /// Extension and executor settings addressed through `/settings/...`.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub settings: HashMap<String, Value>,
+
     /// Directory where persisted run artifacts are copied.
     ///
     /// Defaults to the machine-local product data directory under
@@ -52,6 +57,7 @@ impl Default for HomeboyConfig {
             lab: LabConfig::default(),
             triage: TriageConfig::default(),
             agent_task: AgentTaskConfig::default(),
+            settings: HashMap::new(),
             artifact_root: None,
             update_check: true,
         }
@@ -422,6 +428,28 @@ mod tests {
         let secret = config.agent_task.secrets.get("TOKEN").unwrap();
         assert_eq!(secret.source, "config");
         assert_eq!(secret.value.as_deref(), Some("redacted-test-token"));
+    }
+
+    #[test]
+    fn homeboy_config_preserves_extension_settings() {
+        let config: HomeboyConfig = serde_json::from_str(
+            r#"{
+                "settings": {
+                    "wp_codebox_provider": "codex",
+                    "provider_plugin_paths": ["/providers/openai"]
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.settings.get("wp_codebox_provider"),
+            Some(&Value::String("codex".to_string()))
+        );
+        assert_eq!(
+            config.settings["provider_plugin_paths"][0],
+            Value::String("/providers/openai".to_string())
+        );
     }
 
     #[test]

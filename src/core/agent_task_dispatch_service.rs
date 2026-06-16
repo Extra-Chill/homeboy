@@ -21,7 +21,7 @@ use crate::core::agent_task_scheduler::{
 };
 use crate::core::agent_task_secrets::validate_secret_env;
 use crate::core::agent_task_service::{aggregate_exit_code, AgentTaskRunResult};
-use crate::core::{config, worktree, Error, Result};
+use crate::core::{config, defaults, worktree, Error, Result};
 
 pub const DISPATCH_RESULT_SCHEMA: &str = "homeboy/agent-task-dispatch/v1";
 
@@ -518,18 +518,34 @@ fn dispatch_provider_config(
     workspace: Option<&DispatchWorkspaceTarget>,
     client_context: &Value,
 ) -> Result<Value> {
-    let config = if let Some(spec) = &request.provider_config {
+    let mut config = Value::Object(defaults::load_config().settings.into_iter().collect());
+    if let Some(spec) = &request.provider_config {
         let raw = read_text_spec(spec, "provider-config")?;
-        serde_json::from_str::<Value>(&raw).map_err(|error| {
+        let explicit = serde_json::from_str::<Value>(&raw).map_err(|error| {
             Error::validation_invalid_json(
                 error,
                 Some("agent-task dispatch provider config".to_string()),
                 Some(raw),
             )
-        })?
-    } else {
-        serde_json::json!({})
-    };
+        })?;
+
+        if !explicit.is_object() {
+            return Err(Error::validation_invalid_argument(
+                "provider-config",
+                "agent-task dispatch --provider-config must resolve to a JSON object",
+                None,
+                None,
+            ));
+        }
+
+        let map = config.as_object_mut().expect("global settings object");
+        map.extend(
+            explicit
+                .as_object()
+                .expect("explicit provider config object")
+                .clone(),
+        );
+    }
 
     if !config.is_object() {
         return Err(Error::validation_invalid_argument(
@@ -718,6 +734,7 @@ mod tests {
     };
     use crate::core::agent_task_scheduler::AgentTaskExecutionContext;
     use crate::test_support::with_isolated_home;
+    use std::collections::HashMap;
 
     #[test]
     fn builds_repo_cooking_plan_from_prompt_file_and_client_context() {
@@ -927,6 +944,44 @@ mod tests {
                 "OPENAI_API_KEY".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn dispatch_merges_global_settings_into_executor_config() {
+        with_isolated_home(|_| {
+            defaults::save_config(&defaults::HomeboyConfig {
+                settings: HashMap::from([
+                    (
+                        "provider_plugin_paths".to_string(),
+                        serde_json::json!(["/providers/openai"]),
+                    ),
+                    (
+                        "wp_codebox_provider".to_string(),
+                        serde_json::json!("codex"),
+                    ),
+                ]),
+                ..defaults::HomeboyConfig::default()
+            })
+            .expect("save config");
+
+            let plan = build_dispatch_plan(&dispatch_request(DispatchRequestOverrides {
+                prompt: Some("Cook with configured provider defaults.".to_string()),
+                provider_config: Some(
+                    serde_json::json!({ "wp_codebox_provider": "opencode" }).to_string(),
+                ),
+                ..DispatchRequestOverrides::default()
+            }))
+            .expect("dispatch plan");
+
+            assert_eq!(
+                plan.tasks[0].executor.config["provider_plugin_paths"],
+                serde_json::json!(["/providers/openai"])
+            );
+            assert_eq!(
+                plan.tasks[0].executor.config["wp_codebox_provider"],
+                "opencode"
+            );
+        });
     }
 
     #[test]
