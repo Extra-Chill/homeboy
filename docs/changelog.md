@@ -4,6 +4,63 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.232.1] - 2026-06-16
+
+### Changed
+- keep release auto-refactor advisory
+- align post-merge failure expectations
+- harden preview bootstrap forwarding regression
+
+### Fixed
+- enforce required controller artifacts
+- reject parent-relative remote_path escapes at preflight (#3488)
+- fail closed when release gates bypass Lab routing (#4603, #4605)
+- report success:false when a release is skipped (#4316)
+- surface code-production metrics in agent-task review/status
+- restore main quality gates
+- allow runner-hosted agent task recovery
+- mark tunnel service cwd runner-resident
+- mark runner-hosted agent-task execution
+- keep agent-task inspection read-only
+- stop lab offload using source self command
+- require git checkout for offloaded patch agents
+- store agent-task run status durably
+- recover stale controller child runs
+- preserve runner-side tunnel service paths
+- redact runner exec environment output
+- refresh stale runner daemon sessions
+- keep agent task settings contract generic
+- warn on stale symlinked extension clones after sudo upgrade
+- forward agent task global settings
+- surface degraded tunnel service status
+- do not report cook success when all patch artifacts are empty (#4610, #4613)
+- reject empty/incomplete agent-task cook results
+- materialize agent task provider refs
+- reject malformed agent-task totals in listings
+- improve config set string UX
+- accept artifact workflow dependencies
+- accept keyed controller spec maps
+- release lint preflight treats harness errors as warnings (#4586)
+- preserve nested rig package roots
+- refresh tunnel liveness after readiness
+- fail agent task on nested executor failure
+- stream preview client artifact bodies
+- tolerate malformed agent task status records
+- preflight lab agent-task providers
+- block lab offload on stale runner drift
+- distinguish agent task patch candidates
+- detect lab agent-task provider drift
+- skip extension-gated components in --check instead of aborting the whole pass
+- reflect terminal runner exec handoff state
+- clarify rig install reinstall flags
+- clarify ready_to_deploy as git-state-only, not a target diff (#4588)
+- github.release must fail when no release object is created (#3541)
+- fail loudly when an artifact deploy can't be verified to land (#3608)
+- infer controller spec workspace
+- skip npm publish for private packages instead of failing on EPRIVATE
+- retry version read-back to avoid false-negative on binary swap
+- map workflow bench artifacts from origin
+
 ## [0.232.0] - 2026-06-15
 
 ### Added
