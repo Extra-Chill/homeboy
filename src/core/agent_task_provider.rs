@@ -321,7 +321,6 @@ fn default_backend_from_providers(providers: &[AgentTaskExecutorProvider]) -> Op
     providers
         .iter()
         .find(|provider| provider.default_backend)
-        .or_else(|| providers.first())
         .map(|provider| provider.backend.clone())
 }
 
@@ -1166,6 +1165,19 @@ mod tests {
             ExtensionProviderAgentTaskExecutor::with_providers(vec![provider_a, provider_b]);
 
         assert_eq!(executor.default_backend().as_deref(), Some("preferred"));
+    }
+
+    #[test]
+    fn default_backend_is_absent_without_provider_declaration() {
+        let (_request, mut provider_a) = request("task-a", "node provider-a.js".to_string());
+        provider_a.backend = "first".to_string();
+        let (_request, mut provider_b) = request("task-b", "node provider-b.js".to_string());
+        provider_b.backend = "second".to_string();
+
+        let executor =
+            ExtensionProviderAgentTaskExecutor::with_providers(vec![provider_a, provider_b]);
+
+        assert_eq!(executor.default_backend(), None);
     }
 
     #[test]

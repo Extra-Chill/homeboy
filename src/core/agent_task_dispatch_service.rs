@@ -15,7 +15,7 @@ use crate::core::agent_task_config_materialization::materialize_provider_config_
 use crate::core::agent_task_lifecycle as lifecycle;
 use crate::core::agent_task_lifecycle::{AgentTaskRunRecord, AgentTaskRunState};
 use crate::core::agent_task_provider::{
-    apply_provider_runner_secret_env_contracts, provider_requires_cwd_git_checkout,
+    apply_provider_runner_secret_env_contracts, default_backend, provider_requires_cwd_git_checkout,
 };
 use crate::core::agent_task_scheduler::{
     AgentTaskAggregate, AgentTaskExecutorAdapter, AgentTaskPlan, AgentTaskRetryPolicy,
@@ -36,7 +36,7 @@ pub struct AgentTaskDispatchRequest {
     pub workspace: Option<String>,
     pub repo: Option<String>,
     pub task_url: Option<String>,
-    pub backend: String,
+    pub backend: Option<String>,
     pub selector: Option<String>,
     pub model: Option<String>,
     pub required_capabilities: Vec<String>,
@@ -149,9 +149,21 @@ pub fn build_dispatch_plan_with_provider_requirements(
         ));
     }
 
+    let backend = request.backend.clone().or_else(default_backend).ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "backend",
+            "agent-task dispatch requires --backend because no default backend provider is declared",
+            None,
+            Some(vec![
+                "Declare an agent_task_executors entry with default_backend=true in an agent runtime or extension manifest, or pass --backend explicitly.".to_string(),
+            ]),
+        )
+    })?;
+
     let workspace_target = resolve_dispatch_workspace(request)?;
     validate_dispatch_workspace_target(
-        request,
+        &backend,
+        request.selector.as_deref(),
         workspace_target.as_ref(),
         &provider_requires_cwd_git_checkout,
     )?;
@@ -209,7 +221,7 @@ pub fn build_dispatch_plan_with_provider_requirements(
             group_key: repo.clone(),
             parent_plan_id: None,
             executor: AgentTaskExecutor {
-                backend: request.backend.clone(),
+                backend: backend.clone(),
                 selector: request.selector.clone(),
                 required_capabilities: request.required_capabilities.clone(),
                 secret_env: secret_env.clone(),
@@ -291,7 +303,8 @@ pub fn build_dispatch_plan_with_provider_requirements(
 }
 
 fn validate_dispatch_workspace_target(
-    request: &AgentTaskDispatchRequest,
+    backend: &str,
+    selector: Option<&str>,
     workspace: Option<&DispatchWorkspaceTarget>,
     provider_requires_cwd_git_checkout: &impl Fn(&str, Option<&str>) -> bool,
 ) -> Result<()> {
@@ -299,7 +312,7 @@ fn validate_dispatch_workspace_target(
         return Ok(());
     };
     if workspace.kind.as_deref() != Some("cwd")
-        || !provider_requires_cwd_git_checkout(&request.backend, request.selector.as_deref())
+        || !provider_requires_cwd_git_checkout(backend, selector)
     {
         return Ok(());
     }
@@ -737,7 +750,7 @@ mod tests {
     use super::*;
     use crate::core::agent_task::{
         AgentTaskArtifact, AgentTaskOutcome, AgentTaskOutcomeStatus, AGENT_TASK_ARTIFACT_SCHEMA,
-        AGENT_TASK_OUTCOME_SCHEMA,
+        AGENT_TASK_OUTCOME_SCHEMA, AGENT_TASK_REQUEST_SCHEMA,
     };
     use crate::core::agent_task_scheduler::AgentTaskExecutionContext;
     use crate::test_support::with_isolated_home;
@@ -786,6 +799,68 @@ mod tests {
         assert!(!serialized.contains("kimaki"));
         assert!(!serialized.contains("channel"));
         assert!(!serialized.contains("thread"));
+    }
+
+    #[test]
+    fn build_dispatch_plan_uses_runtime_declared_fake_default_backend() {
+        with_isolated_home(|home| {
+            let runtime_dir = home
+                .path()
+                .join(".config/homeboy/agent-runtimes/fake-runtime");
+            std::fs::create_dir_all(&runtime_dir).expect("runtime dir");
+            std::fs::write(
+                runtime_dir.join("fake-runtime.json"),
+                serde_json::json!({
+                    "schema": "homeboy/agent-runtime-manifest/v1",
+                    "id": "fake-runtime",
+                    "agent_task_executors": [{
+                        "schema": "homeboy/agent-task-executor-provider/v1",
+                        "id": "fake.default",
+                        "backend": "fake-default",
+                        "default_backend": true,
+                        "command": "fake-agent-task",
+                        "request_schema": AGENT_TASK_REQUEST_SCHEMA,
+                        "outcome_schema": AGENT_TASK_OUTCOME_SCHEMA
+                    }]
+                })
+                .to_string(),
+            )
+            .expect("runtime manifest");
+
+            let plan = build_dispatch_plan(&AgentTaskDispatchRequest {
+                backend: None,
+                ..dispatch_request(DispatchRequestOverrides {
+                    prompt: Some("run with runtime default".to_string()),
+                    ..DispatchRequestOverrides::default()
+                })
+            })
+            .expect("dispatch plan");
+
+            assert_eq!(plan.tasks[0].executor.backend, "fake-default");
+        });
+    }
+
+    #[test]
+    fn build_dispatch_plan_errors_when_backend_and_runtime_default_are_absent() {
+        with_isolated_home(|_| {
+            let error = build_dispatch_plan(&AgentTaskDispatchRequest {
+                backend: None,
+                ..dispatch_request(DispatchRequestOverrides {
+                    prompt: Some("run without runtime default".to_string()),
+                    ..DispatchRequestOverrides::default()
+                })
+            })
+            .expect_err("missing backend should fail");
+
+            assert!(error.message.contains("requires --backend"));
+            assert!(error
+                .details
+                .get("tried")
+                .and_then(Value::as_array)
+                .is_some_and(|tried| tried.iter().any(|hint| hint
+                    .as_str()
+                    .is_some_and(|hint| hint.contains("default_backend=true")))));
+        });
     }
 
     #[test]
@@ -1158,7 +1233,7 @@ mod tests {
             workspace: overrides.workspace,
             repo: overrides.repo,
             task_url: overrides.task_url,
-            backend: overrides.backend.unwrap_or_else(|| "fixture".to_string()),
+            backend: Some(overrides.backend.unwrap_or_else(|| "fixture".to_string())),
             selector: None,
             model: None,
             required_capabilities: overrides.required_capabilities,
