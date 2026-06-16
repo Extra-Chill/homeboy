@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 
 use super::execution::run_setup;
 use super::lifecycle::{
-    derive_id_from_url, is_git_url, rename_dir, resolve_cloned_extension, slugify_id,
-    write_source_metadata,
+    derive_id_from_url, install_linked_shared_assets, is_git_url, rename_dir,
+    resolve_cloned_extension, slugify_id, write_source_metadata,
 };
 use super::manifest::ExtensionManifest;
 
@@ -135,6 +135,7 @@ fn replace_from_path(
     }
 
     local_files::ensure_app_dirs()?;
+    install_linked_shared_assets(&source, &extension_dir, None)?;
 
     let old_path = installed_source_path(&extension_dir);
     let source_revision = git::short_head_revision(&source);
@@ -433,6 +434,15 @@ mod tests {
         .expect("extension manifest");
     }
 
+    fn write_shared_runtime_fixture(root: &Path) {
+        let runtime_script = root.join(
+            "agent-runtimes/wp-codebox/scripts/agent/homeboy-codebox-agent-task-executor.cjs",
+        );
+        fs::create_dir_all(runtime_script.parent().expect("runtime script parent"))
+            .expect("runtime script dir");
+        fs::write(&runtime_script, "console.log('wp-codebox runtime');\n").expect("runtime script");
+    }
+
     fn run_git(dir: &Path, args: &[&str]) -> bool {
         Command::new("git")
             .args(args)
@@ -596,6 +606,31 @@ mod tests {
 
             let extension = load_extension("swift").expect("load relinked extension");
             assert_eq!(extension.version, "2.0.0");
+        });
+    }
+
+    #[test]
+    fn relink_materializes_shared_agent_runtimes() {
+        with_isolated_home(|home| {
+            let home = home.path();
+            let old_source = home.join("old-source");
+            let new_source = home.join("new-source");
+            write_extension_fixture(&old_source, "wordpress");
+            write_extension_fixture_with_version(&new_source, "wordpress", "2.0.0");
+            write_shared_runtime_fixture(&new_source);
+
+            install(
+                &old_source.join("wordpress").to_string_lossy(),
+                Some("wordpress"),
+            )
+            .expect("install linked extension");
+
+            relink("wordpress", &new_source.join("wordpress").to_string_lossy())
+                .expect("relink should materialize shared runtime");
+
+            assert!(home
+                .join(".config/homeboy/extensions/agent-runtimes/wp-codebox/scripts/agent/homeboy-codebox-agent-task-executor.cjs")
+                .exists());
         });
     }
 
