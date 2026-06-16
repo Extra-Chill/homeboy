@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 #[cfg(unix)]
@@ -537,7 +537,7 @@ pub fn expose(spec: ExposeServiceTunnelSpec) -> Result<ServiceTunnel> {
 
 pub fn status(id: &str) -> Result<ServiceTunnelStatus> {
     let tunnel = load(id)?;
-    Ok(service_tunnel_status(&tunnel))
+    service_tunnel_status(&tunnel)
 }
 
 pub fn start(spec: StartServiceTunnelSpec) -> Result<ServiceTunnelStatus> {
@@ -606,7 +606,7 @@ pub fn start(spec: StartServiceTunnelSpec) -> Result<ServiceTunnelStatus> {
         });
     }
 
-    let child = command.spawn().map_err(|e| {
+    let mut child = command.spawn().map_err(|e| {
         Error::internal_io(
             e.to_string(),
             Some(format!("start service tunnel {}", tunnel.id)),
@@ -649,6 +649,13 @@ pub fn start(spec: StartServiceTunnelSpec) -> Result<ServiceTunnelStatus> {
         remove_runtime_state(&state.preview_identity.service_id)?;
         return Err(error);
     }
+
+    if let Err(error) = ensure_supervised_process_still_running(&state, &mut child) {
+        terminate_runtime_state(&state)?;
+        remove_runtime_state(&state.preview_identity.service_id)?;
+        return Err(error);
+    }
+
     let state = match start_backend_if_needed(state, &tunnel, spec.backend_command) {
         Ok(state) => state,
         Err(error) => {
@@ -659,6 +666,14 @@ pub fn start(spec: StartServiceTunnelSpec) -> Result<ServiceTunnelStatus> {
             return Err(error);
         }
     };
+
+    if let Err(error) = ensure_supervised_process_still_running(&state, &mut child) {
+        terminate_backend_state(&state)?;
+        terminate_runtime_state(&state)?;
+        remove_runtime_state(&state.preview_identity.service_id)?;
+        return Err(error);
+    }
+
     save_runtime_state(&state)?;
     status(&tunnel.id)
 }
@@ -737,7 +752,7 @@ pub fn stop(id: &str) -> Result<ServiceTunnelStatus> {
         terminate_runtime_state(&state)?;
         remove_runtime_state(id)?;
     }
-    Ok(service_tunnel_status(&tunnel))
+    service_tunnel_status(&tunnel)
 }
 
 pub fn local_url(id: &str) -> Result<String> {
@@ -745,8 +760,8 @@ pub fn local_url(id: &str) -> Result<String> {
     Ok(local_url_for(&tunnel))
 }
 
-fn service_tunnel_status(tunnel: &ServiceTunnel) -> ServiceTunnelStatus {
-    let state = load_runtime_state(&tunnel.id).ok().flatten();
+fn service_tunnel_status(tunnel: &ServiceTunnel) -> Result<ServiceTunnelStatus> {
+    let state = refresh_runtime_state(&tunnel.id)?;
     let running = state.as_ref().is_some_and(runtime_state_is_running);
     let health = state.as_ref().map(check_runtime_health);
     let readiness = state.as_ref().map(check_runtime_readiness);
@@ -780,7 +795,7 @@ fn service_tunnel_status(tunnel: &ServiceTunnel) -> ServiceTunnelStatus {
     let preview = state
         .as_ref()
         .and_then(|state| preview_artifact_for_status(tunnel, state));
-    ServiceTunnelStatus {
+    Ok(ServiceTunnelStatus {
         preview_identity: ServiceTunnelPreviewIdentity {
             service_id: tunnel.id.clone(),
             public_url,
@@ -797,7 +812,7 @@ fn service_tunnel_status(tunnel: &ServiceTunnel) -> ServiceTunnelStatus {
         evidence,
         tunnel_backend: backend,
         preview,
-    }
+    })
 }
 
 pub(super) fn preview_policy_allows(
@@ -1405,6 +1420,42 @@ fn remove_runtime_state(id: &str) -> Result<()> {
             .map_err(|e| Error::internal_io(e.to_string(), Some(path.display().to_string())))?;
     }
     Ok(())
+}
+
+fn refresh_runtime_state(id: &str) -> Result<Option<ServiceTunnelRuntimeState>> {
+    let Some(state) = load_runtime_state(id)? else {
+        return Ok(None);
+    };
+    if runtime_state_is_running(&state) {
+        return Ok(Some(state));
+    }
+
+    terminate_backend_state(&state)?;
+    remove_runtime_state(id)?;
+    Ok(None)
+}
+
+fn ensure_supervised_process_still_running(
+    state: &ServiceTunnelRuntimeState,
+    child: &mut Child,
+) -> Result<()> {
+    std::thread::sleep(Duration::from_millis(100));
+    match child.try_wait() {
+        Ok(Some(status)) => Err(Error::validation_invalid_argument(
+            "service",
+            "service process exited after becoming ready",
+            Some(state.preview_identity.service_id.clone()),
+            Some(vec![format!("exit status: {status}")]),
+        )),
+        Ok(None) => Ok(()),
+        Err(error) => Err(Error::internal_io(
+            error.to_string(),
+            Some(format!(
+                "check service tunnel process {}",
+                state.preview_identity.service_id
+            )),
+        )),
+    }
 }
 
 fn runtime_state_is_running(state: &ServiceTunnelRuntimeState) -> bool {
