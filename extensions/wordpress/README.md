@@ -564,17 +564,21 @@ stable `wp-codebox agent-task-run` parent contract.
 ### WP Codebox agent-task executor
 
 The WordPress extension declares the `wp-codebox` runtime in `wordpress.json`
-under `agent_runtimes`. The runtime package owns the
+under `agent_runtimes`. The installed extension carries the
 `wordpress.codebox-agent-task-executor` provider contract and advertises a
 Codebox backend with browser runtime, WordPress sandbox, artifact materialization,
 screenshots, and structured outcome capabilities without adding Codebox imports or
 WordPress assumptions to Homeboy core.
 
-`../agent-runtimes/wp-codebox/scripts/agent/homeboy-codebox-agent-task-executor.cjs` accepts a generic
+`scripts/agent/homeboy-codebox-agent-task-executor.cjs` accepts a generic
 `homeboy/agent-task-request/v1` request, maps it into WP Codebox's stable
 `wp-codebox/task-input/v1` request, invokes `wp-codebox agent-task-run`, and emits a
 `homeboy/agent-task-outcome/v1` outcome with normalized status, artifacts,
 evidence refs, diagnostics, and failure classification.
+
+`../agent-runtimes/wp-codebox` remains the runtime package surface for imports
+and runtime-path dispatch; it forwards to the WordPress payload so both monorepo
+and installed extension layouts use the same implementation.
 
 The generic provider boundary is documented in
 [`docs/AGENT_CI_WP_CODEBOX.md`](docs/AGENT_CI_WP_CODEBOX.md#agent-task-executor-provider).

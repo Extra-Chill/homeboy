@@ -15,10 +15,10 @@ The core-dev runner expects WordPress core's own dependencies and config. It ins
 
 Codex WP Codebox tasks require an explicit provider/runtime stack. Homeboy does not infer these paths from local worktree names, and it does not fetch provider PR branches itself before dispatch.
 
-The WP Codebox agent runtime lives at `agent-runtimes/wp-codebox`. The
-WordPress extension declares and consumes that runtime; the runtime package owns
-the provider contract, task request mapping, runtime CLI, and normalized outcome
-conversion.
+The WP Codebox agent runtime is exposed at `agent-runtimes/wp-codebox`. The
+installed WordPress extension also carries the provider contract, task request
+mapping, runtime CLI, and normalized outcome conversion so the declared provider
+command is runnable without a sibling checkout.
 
 Configure the Codex pair with task config, global settings, or environment variables:
 

@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { spawnSync } = require('node:child_process');
 
 const manifestPath = path.join(__dirname, '..', 'wordpress.json');
 const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
@@ -19,7 +20,7 @@ try {
   fs.mkdirSync(extensionsRoot, { recursive: true });
   fs.symlinkSync(path.join(__dirname, '..'), extensionPath, 'dir');
 
-const command = provider.command.replaceAll('{{extension_path}}', extensionPath);
+  const command = provider.command.replaceAll('{{extension_path}}', extensionPath);
   assert(
     !command.includes('../agent-runtimes/'),
     'relinked wordpress provider command must not require a sibling agent-runtimes install'
@@ -36,6 +37,23 @@ const command = provider.command.replaceAll('{{extension_path}}', extensionPath)
     fs.existsSync(path.join(extensionsRoot, 'agent-runtimes')),
     false,
     'smoke layout should not install sibling agent-runtimes'
+  );
+
+  const result = spawnSync(process.execPath, [scriptPath], {
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      HOMEBOY_AGENT_TASK_REQUEST: '',
+    },
+  });
+  assert.notEqual(result.status, 0, 'provider command without a request should fail validation');
+  assert(
+    !`${result.stderr}\n${result.stdout}`.includes('MODULE_NOT_FOUND'),
+    `provider command should resolve its runtime dependencies, got:\n${result.stderr}\n${result.stdout}`
+  );
+  assert(
+    `${result.stderr}\n${result.stdout}`.includes('AgentTaskRequest JSON is required'),
+    `provider command should reach request validation, got:\n${result.stderr}\n${result.stdout}`
   );
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
