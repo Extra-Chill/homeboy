@@ -31,7 +31,7 @@ pub(crate) fn render_agent_task_summary(
 
 fn render_cook_summary(payload: &Value) -> Option<String> {
     let run_id = string_value(payload, &["run_id"])?;
-    let state = string_value(payload, &["state"])
+    let raw_state = string_value(payload, &["state"])
         .or_else(|| string_value(payload, &["record", "state"]))
         .unwrap_or("unknown");
     let tasks_planned = usize_value(payload, &["task_count"])
@@ -41,6 +41,7 @@ fn render_cook_summary(payload: &Value) -> Option<String> {
     let aggregate_path = string_value(payload, &["aggregate_path"])
         .or_else(|| string_value(payload, &["record", "aggregate_path"]));
     let patch_candidates = patch_candidate_count(payload);
+    let state = effective_run_state(raw_state, tasks_attempted, patch_candidates);
     let artifact_count = aggregate_artifact_count(payload);
     let first_artifact = string_value(
         payload,
@@ -78,10 +79,11 @@ fn render_cook_summary(payload: &Value) -> Option<String> {
 
 fn render_status_summary(payload: &Value) -> Option<String> {
     let run_id = string_value(payload, &["run_id"])?;
-    let state = string_value(payload, &["state"]).unwrap_or("unknown");
+    let raw_state = string_value(payload, &["state"]).unwrap_or("unknown");
     let tasks_planned = array_len(payload, &["tasks"]).unwrap_or(0);
     let tasks_attempted = status_attempted_task_count(payload);
     let patch_candidates = patch_candidate_count(payload);
+    let state = effective_run_state(raw_state, tasks_attempted, patch_candidates);
     let artifact_count = array_len(payload, &["artifact_refs"]).unwrap_or(0);
     let aggregate_path = string_value(payload, &["aggregate_path"]);
 
@@ -233,10 +235,24 @@ fn is_apply_artifact(artifact: &Value) -> bool {
     let Some(kind) = string_value(artifact, &["kind"]) else {
         return false;
     };
-    matches!(
+    let apply_kind = matches!(
         kind,
         "patch" | "diff" | "change_artifact" | "workspace_patch" | "artifact"
-    ) && usize_value(artifact, &["size_bytes"]) != Some(0)
+    );
+    // Require positive evidence of content: an unknown or zero size must not be
+    // counted as a patch candidate (#4610).
+    apply_kind && matches!(usize_value(artifact, &["size_bytes"]), Some(size) if size > 0)
+}
+
+/// A run whose lifecycle state is `succeeded` but that produced zero promotion
+/// candidates did not actually patch anything. Surface that honestly as
+/// `no_patch_produced` instead of advertising success (#4610).
+fn effective_run_state(raw_state: &str, tasks_attempted: usize, patch_candidates: usize) -> &str {
+    if raw_state == "succeeded" && tasks_attempted > 0 && patch_candidates == 0 {
+        "no_patch_produced"
+    } else {
+        raw_state
+    }
 }
 
 fn status_attempted_task_count(payload: &Value) -> usize {
@@ -295,7 +311,7 @@ mod tests {
             "aggregate": {
                 "outcomes": [{
                     "task_id": "homeboy-4345",
-                    "artifacts": [{ "id": "patch", "kind": "patch", "path": "/tmp/patch.diff" }]
+                    "artifacts": [{ "id": "patch", "kind": "patch", "path": "/tmp/patch.diff", "size_bytes": 128 }]
                 }]
             }
         });
@@ -309,6 +325,56 @@ mod tests {
         assert!(summary.contains("First artifact: /tmp/patch.diff\n"));
         assert!(summary.contains("Next: homeboy agent-task review homeboy-4345\n"));
         assert!(!summary.contains("{\n"));
+    }
+
+    #[test]
+    fn cook_summary_reports_no_patch_produced_when_all_cells_are_empty() {
+        // Reproduces the #4610 cook summary: 3 succeeded cells, but every patch
+        // artifact is 0 bytes. The summary must not advertise success.
+        let payload = json!({
+            "run_id": "agent-task-abe47e4d",
+            "state": "succeeded",
+            "task_count": 3,
+            "aggregate_path": "/tmp/aggregate.json",
+            "aggregate_review": {
+                "summary": { "apply_candidates": 0 }
+            },
+            "aggregate": {
+                "outcomes": [
+                    { "task_id": "cell-1", "artifacts": [{ "id": "patch", "kind": "patch", "path": "/tmp/patch.diff", "size_bytes": 0 }] },
+                    { "task_id": "cell-2", "artifacts": [{ "id": "patch", "kind": "patch", "path": "/tmp/patch.diff", "size_bytes": 0 }] },
+                    { "task_id": "cell-3", "artifacts": [{ "id": "patch", "kind": "patch", "path": "/tmp/patch.diff", "size_bytes": 0 }] }
+                ]
+            }
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Cook, &payload).unwrap();
+
+        assert!(summary.contains("Status: no_patch_produced\n"));
+        assert!(summary.contains("Patch candidates: 0\n"));
+        assert!(summary.contains("Next: homeboy agent-task logs agent-task-abe47e4d\n"));
+        assert!(!summary.contains("Next: homeboy agent-task review"));
+    }
+
+    #[test]
+    fn cook_summary_treats_unknown_size_patch_as_zero_candidates() {
+        let payload = json!({
+            "run_id": "homeboy-4345",
+            "state": "succeeded",
+            "task_count": 1,
+            "aggregate": {
+                "outcomes": [{
+                    "task_id": "homeboy-4345",
+                    "artifacts": [{ "id": "patch", "kind": "patch", "path": "/tmp/patch.diff" }]
+                }]
+            }
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Cook, &payload).unwrap();
+
+        assert!(summary.contains("Status: no_patch_produced\n"));
+        assert!(summary.contains("Patch candidates: 0\n"));
+        assert!(summary.contains("Next: homeboy agent-task logs homeboy-4345\n"));
     }
 
     #[test]
