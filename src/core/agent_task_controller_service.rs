@@ -8,7 +8,8 @@
 //! Reports keep their existing JSON shapes via `serde` so the CLI continues to
 //! emit the same envelopes after the move.
 
-use serde::{Deserialize, Serialize};
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
 use crate::core::agent_task_lifecycle as lifecycle;
@@ -60,6 +61,7 @@ pub struct ControllerFromSpecRequest {
 pub struct AgentTaskRepoLoopSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema: Option<String>,
+    #[serde(alias = "controller_id")]
     pub loop_id: String,
     #[serde(default = "default_loop_spec_phase")]
     pub phase: String,
@@ -69,21 +71,53 @@ pub struct AgentTaskRepoLoopSpec {
     pub metadata: Value,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub entities: Vec<AgentTaskRepoLoopSpecEntity>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_agents",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub agents: Vec<AgentTaskRepoLoopSpecAgent>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_tools",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub tools: Vec<AgentTaskRepoLoopSpecTool>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_abilities",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub abilities: Vec<AgentTaskRepoLoopSpecAbility>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_workflows",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub workflows: Vec<AgentTaskRepoLoopSpecWorkflow>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_artifacts",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub artifacts: Vec<AgentTaskRepoLoopSpecArtifact>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_dependencies",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub dependencies: Vec<AgentTaskRepoLoopSpecDependency>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_gates",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub gates: Vec<AgentTaskRepoLoopSpecGate>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_metrics",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub metrics: Vec<AgentTaskRepoLoopSpecMetric>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gate_bundles: Vec<AgentTaskGateBundle>,
@@ -245,6 +279,125 @@ pub struct AgentTaskRepoLoopSpecEvent {
     pub entity_id: Option<String>,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub payload: Value,
+}
+
+fn deserialize_agents<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Vec<AgentTaskRepoLoopSpecAgent>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_vec_or_keyed_map(deserializer, "agent_id")
+}
+
+fn deserialize_tools<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Vec<AgentTaskRepoLoopSpecTool>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_vec_or_keyed_map(deserializer, "tool_id")
+}
+
+fn deserialize_abilities<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Vec<AgentTaskRepoLoopSpecAbility>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_vec_or_keyed_map(deserializer, "ability_id")
+}
+
+fn deserialize_workflows<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Vec<AgentTaskRepoLoopSpecWorkflow>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_vec_or_keyed_map(deserializer, "workflow_id")
+}
+
+fn deserialize_artifacts<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Vec<AgentTaskRepoLoopSpecArtifact>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_vec_or_keyed_map(deserializer, "artifact_id")
+}
+
+fn deserialize_dependencies<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Vec<AgentTaskRepoLoopSpecDependency>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_vec_or_keyed_map(deserializer, "dependency_id")
+}
+
+fn deserialize_gates<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Vec<AgentTaskRepoLoopSpecGate>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_vec_or_keyed_map(deserializer, "gate_id")
+}
+
+fn deserialize_metrics<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Vec<AgentTaskRepoLoopSpecMetric>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_vec_or_keyed_map(deserializer, "metric_id")
+}
+
+fn deserialize_vec_or_keyed_map<'de, D, T>(
+    deserializer: D,
+    id_field: &'static str,
+) -> std::result::Result<Vec<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: DeserializeOwned,
+{
+    let value = Value::deserialize(deserializer)?;
+    let normalized = match value {
+        Value::Array(items) => Value::Array(items),
+        Value::Object(items) => {
+            let mut normalized = Vec::with_capacity(items.len());
+            for (key, item) in items {
+                let Value::Object(mut item) = item else {
+                    return Err(serde::de::Error::custom(format!(
+                        "keyed map values must be objects with optional {id_field}"
+                    )));
+                };
+                item.entry(id_field.to_string())
+                    .or_insert_with(|| Value::String(key));
+                normalized.push(Value::Object(item));
+            }
+            Value::Array(normalized)
+        }
+        other => {
+            return Err(serde::de::Error::custom(format!(
+                "expected array or keyed object map for {id_field} items, got {}",
+                json_type_name(&other)
+            )));
+        }
+    };
+
+    serde_json::from_value(normalized).map_err(serde::de::Error::custom)
+}
+
+fn json_type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
 }
 
 /// Request to apply an external event to a controller.
@@ -2406,6 +2559,81 @@ mod tests {
             assert_eq!(report.schema, LIST_RESULT_SCHEMA);
             assert_eq!(report.controllers.len(), 2);
         });
+    }
+
+    #[test]
+    fn repo_loop_spec_accepts_controller_id_and_keyed_contract_maps() {
+        let spec: AgentTaskRepoLoopSpec = serde_json::from_value(json!({
+            "schema": "homeboy/controller-spec/v1",
+            "controller_id": "repo-loop-keyed-spec",
+            "agents": {
+                "repair-agent": {
+                    "role": "repair",
+                    "tools": ["repo-inspector"]
+                }
+            },
+            "tools": {
+                "repo-inspector": {
+                    "description": "inspect repo files"
+                }
+            },
+            "workflows": {
+                "repair-findings": {
+                    "agent_id": "repair-agent",
+                    "prompt": "Repair this finding.",
+                    "tools": ["repo-inspector"],
+                    "artifacts": ["patch"]
+                }
+            },
+            "artifacts": {
+                "patch": {
+                    "kind": "diff",
+                    "required": true
+                }
+            }
+        }))
+        .expect("keyed controller spec deserializes");
+
+        assert_eq!(spec.loop_id, "repo-loop-keyed-spec");
+        assert_eq!(spec.agents[0].agent_id, "repair-agent");
+        assert_eq!(spec.tools[0].tool_id, "repo-inspector");
+        assert_eq!(spec.workflows[0].workflow_id, "repair-findings");
+        assert_eq!(spec.artifacts[0].artifact_id, "patch");
+    }
+
+    #[test]
+    fn repo_loop_spec_preserves_explicit_ids_inside_keyed_contract_maps() {
+        let spec: AgentTaskRepoLoopSpec = serde_json::from_value(json!({
+            "loop_id": "repo-loop-explicit-ids",
+            "agents": {
+                "repair": {
+                    "agent_id": "repair-agent"
+                }
+            },
+            "tools": {
+                "inspect": {
+                    "tool_id": "repo-inspector"
+                }
+            },
+            "workflows": {
+                "repair": {
+                    "workflow_id": "repair-findings",
+                    "prompt": "Repair this finding."
+                }
+            },
+            "artifacts": {
+                "patch-output": {
+                    "artifact_id": "patch",
+                    "kind": "diff"
+                }
+            }
+        }))
+        .expect("keyed controller spec deserializes");
+
+        assert_eq!(spec.agents[0].agent_id, "repair-agent");
+        assert_eq!(spec.tools[0].tool_id, "repo-inspector");
+        assert_eq!(spec.workflows[0].workflow_id, "repair-findings");
+        assert_eq!(spec.artifacts[0].artifact_id, "patch");
     }
 
     #[test]
