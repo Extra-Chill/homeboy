@@ -16,12 +16,12 @@ use crate::core::agent_task_lifecycle as lifecycle;
 use crate::core::agent_task_loop_controller::{
     self as controller, AgentTaskGateBundle, AgentTaskGateBundleCheckKind,
     AgentTaskGateBundleResult, AgentTaskGateBundleStatus, AgentTaskGateCheckResult,
-    AgentTaskLoopActionStatus, AgentTaskLoopArtifactRef, AgentTaskLoopControllerRecord,
-    AgentTaskLoopControllerState, AgentTaskLoopEntity, AgentTaskLoopExternalEvent,
-    AgentTaskLoopHistoryEvent, AgentTaskLoopPolicy, AgentTaskLoopPolicyAction,
-    AgentTaskLoopPolicyActionRecord, AgentTaskLoopProvenanceRef, AgentTaskLoopRunRef,
-    AgentTaskLoopTaskLineage, AgentTaskLoopTransition, AgentTaskPrOwnershipRequest,
-    AgentTaskPrOwnershipState, AgentTaskPrOwnershipStatusUpdate,
+    AgentTaskLoopActionDiagnostic, AgentTaskLoopActionStatus, AgentTaskLoopArtifactRef,
+    AgentTaskLoopControllerRecord, AgentTaskLoopControllerState, AgentTaskLoopEntity,
+    AgentTaskLoopExternalEvent, AgentTaskLoopHistoryEvent, AgentTaskLoopPolicy,
+    AgentTaskLoopPolicyAction, AgentTaskLoopPolicyActionRecord, AgentTaskLoopProvenanceRef,
+    AgentTaskLoopRunRef, AgentTaskLoopTaskLineage, AgentTaskLoopTransition,
+    AgentTaskPrOwnershipRequest, AgentTaskPrOwnershipState, AgentTaskPrOwnershipStatusUpdate,
 };
 use crate::core::agent_task_scheduler::{AgentTaskExecutorAdapter, AgentTaskPlan};
 use crate::core::agent_task_service::{self, AgentTaskRunResult};
@@ -1224,7 +1224,23 @@ where
 
     match execute_claimed_controller_action(record, &action, executor, dispatch) {
         Ok((execution, exit_code)) => {
-            complete_controller_action(record, action_id, &execution, exit_code)?;
+            let mut exit_code = exit_code;
+            let missing_required_artifacts = if exit_code == 0 {
+                validate_required_action_artifacts(&action, &execution)
+            } else {
+                Vec::new()
+            };
+            if missing_required_artifacts.is_empty() {
+                complete_controller_action(record, action_id, &execution, exit_code)?;
+            } else {
+                exit_code = 1;
+                fail_controller_action_with_diagnostics(
+                    record,
+                    action_id,
+                    required_artifact_diagnostics(&missing_required_artifacts),
+                    &execution,
+                )?;
+            }
             controller::write_controller(record)?;
             Ok(AgentTaskRunResult {
                 value: ControllerActionReport {
@@ -2230,6 +2246,45 @@ fn fail_controller_action(
     Ok(())
 }
 
+fn fail_controller_action_with_diagnostics(
+    record: &mut AgentTaskLoopControllerRecord,
+    action_id: &str,
+    diagnostics: Vec<AgentTaskLoopActionDiagnostic>,
+    execution: &Value,
+) -> Result<()> {
+    let message = diagnostics
+        .first()
+        .map(|diagnostic| diagnostic.message.clone())
+        .unwrap_or_else(|| "controller action failed".to_string());
+    let action = record
+        .next_actions
+        .iter_mut()
+        .find(|action| action.action_id == action_id)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "action_id",
+                format!("controller action '{action_id}' does not exist"),
+                Some(action_id.to_string()),
+                None,
+            )
+        })?;
+    action.status = AgentTaskLoopActionStatus::Failed;
+    action.reason = message.clone();
+    action.diagnostics.extend(diagnostics.clone());
+    push_controller_history(
+        record,
+        "controller.action.failed",
+        None,
+        serde_json::json!({
+            "action_id": action_id,
+            "error": message,
+            "diagnostics": diagnostics,
+            "execution": execution,
+        }),
+    );
+    Ok(())
+}
+
 fn set_controller_action_status(
     record: &mut AgentTaskLoopControllerRecord,
     action_id: &str,
@@ -2249,6 +2304,203 @@ fn set_controller_action_status(
         })?;
     action.status = status;
     Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct RequiredWorkflowArtifact {
+    artifact_id: String,
+    kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scope: Option<String>,
+}
+
+fn validate_required_action_artifacts(
+    action: &AgentTaskLoopPolicyActionRecord,
+    execution: &Value,
+) -> Vec<RequiredWorkflowArtifact> {
+    match &action.action {
+        AgentTaskLoopPolicyAction::SpawnTask { request, .. }
+        | AgentTaskLoopPolicyAction::RouteFinding {
+            request_template: request,
+            ..
+        } => missing_required_artifacts_for_execution(request, execution, None),
+        AgentTaskLoopPolicyAction::FanOut {
+            request_template, ..
+        } => execution
+            .get("results")
+            .and_then(Value::as_array)
+            .map(|results| {
+                results
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(index, result)| {
+                        missing_required_artifacts_for_execution(
+                            request_template,
+                            result,
+                            Some(format!("results[{index}]")),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_else(|| {
+                required_workflow_artifacts(request_template)
+                    .into_iter()
+                    .map(|mut artifact| {
+                        artifact.scope = Some("results".to_string());
+                        artifact
+                    })
+                    .collect()
+            }),
+        _ => Vec::new(),
+    }
+}
+
+fn missing_required_artifacts_for_execution(
+    request: &Value,
+    execution: &Value,
+    scope: Option<String>,
+) -> Vec<RequiredWorkflowArtifact> {
+    required_workflow_artifacts(request)
+        .into_iter()
+        .filter_map(|mut artifact| {
+            if execution_contains_artifact(execution, &artifact.artifact_id, &artifact.kind) {
+                None
+            } else {
+                artifact.scope = scope.clone();
+                Some(artifact)
+            }
+        })
+        .collect()
+}
+
+fn required_workflow_artifacts(request: &Value) -> Vec<RequiredWorkflowArtifact> {
+    let mut artifacts = Vec::new();
+    collect_required_artifacts_from_plan(request.get("plan").unwrap_or(request), &mut artifacts);
+    if let Some(dispatch) = request.get("dispatch") {
+        collect_required_artifacts_from_client_context(dispatch, &mut artifacts);
+    }
+    collect_required_artifacts_from_client_context(request, &mut artifacts);
+    artifacts
+}
+
+fn collect_required_artifacts_from_client_context(
+    value: &Value,
+    artifacts: &mut Vec<RequiredWorkflowArtifact>,
+) {
+    let Some(context) = value.get("client_context") else {
+        return;
+    };
+    let context = match context {
+        Value::String(raw) => serde_json::from_str(raw).unwrap_or(Value::Null),
+        other => other.clone(),
+    };
+    collect_required_artifacts_from_plan(&context["plan"], artifacts);
+    collect_required_artifacts_from_declarations(&context["artifacts"], artifacts);
+}
+
+fn collect_required_artifacts_from_plan(
+    value: &Value,
+    artifacts: &mut Vec<RequiredWorkflowArtifact>,
+) {
+    collect_required_artifacts_from_declarations(&value["artifacts"], artifacts);
+}
+
+fn collect_required_artifacts_from_declarations(
+    value: &Value,
+    artifacts: &mut Vec<RequiredWorkflowArtifact>,
+) {
+    let Some(declarations) = value.as_array() else {
+        return;
+    };
+    for declaration in declarations {
+        let required = declaration
+            .get("required")
+            .and_then(Value::as_bool)
+            .or_else(|| {
+                declaration
+                    .get("data")
+                    .and_then(|data| data.get("required"))
+                    .and_then(Value::as_bool)
+            })
+            .unwrap_or(false);
+        if !required {
+            continue;
+        }
+        let Some(artifact_id) = declaration
+            .get("artifact_id")
+            .or_else(|| declaration.get("id"))
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        let Some(kind) = declaration
+            .get("kind")
+            .or_else(|| declaration.get("artifact_type"))
+            .or_else(|| declaration.get("data").and_then(|data| data.get("kind")))
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        if artifacts
+            .iter()
+            .any(|artifact| artifact.artifact_id == artifact_id && artifact.kind == kind)
+        {
+            continue;
+        }
+        artifacts.push(RequiredWorkflowArtifact {
+            artifact_id: artifact_id.to_string(),
+            kind: kind.to_string(),
+            scope: None,
+        });
+    }
+}
+
+fn execution_contains_artifact(value: &Value, artifact_id: &str, kind: &str) -> bool {
+    match value {
+        Value::Object(object) => {
+            let id_matches = object
+                .get("id")
+                .or_else(|| object.get("artifact_id"))
+                .and_then(Value::as_str)
+                == Some(artifact_id);
+            let kind_matches = object
+                .get("kind")
+                .or_else(|| object.get("artifact_type"))
+                .and_then(Value::as_str)
+                == Some(kind);
+            (id_matches && kind_matches)
+                || object
+                    .values()
+                    .any(|value| execution_contains_artifact(value, artifact_id, kind))
+        }
+        Value::Array(values) => values
+            .iter()
+            .any(|value| execution_contains_artifact(value, artifact_id, kind)),
+        _ => false,
+    }
+}
+
+fn required_artifact_diagnostics(
+    missing: &[RequiredWorkflowArtifact],
+) -> Vec<AgentTaskLoopActionDiagnostic> {
+    let labels = missing
+        .iter()
+        .map(|artifact| match &artifact.scope {
+            Some(scope) => format!("{}:{} at {scope}", artifact.artifact_id, artifact.kind),
+            None => format!("{}:{}", artifact.artifact_id, artifact.kind),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    vec![AgentTaskLoopActionDiagnostic {
+        code: "required_workflow_artifacts_missing".to_string(),
+        message: format!(
+            "controller action missing required workflow artifact handoff(s): {labels}"
+        ),
+        runner: None,
+        details: serde_json::json!({ "missing_artifacts": missing }),
+    }]
 }
 
 fn record_controller_spawn(
@@ -2489,6 +2741,11 @@ mod tests {
         observed_requests: Arc<Mutex<Vec<Value>>>,
     }
 
+    #[derive(Clone, Default)]
+    struct ArtifactDispatchHook {
+        observed_requests: Arc<Mutex<Vec<Value>>>,
+    }
+
     impl ControllerDispatchHook for CapturingDispatchHook {
         fn dispatch(&self, request: &Value) -> Result<(Value, i32)> {
             self.observed_requests
@@ -2503,6 +2760,35 @@ mod tests {
                 json!({
                     "schema": "homeboy/test-generic-dispatch-result/v1",
                     "run_id": format!("generic-run-{}", entity_id.replace([':', '/', '#', ' '], "_")),
+                }),
+                0,
+            ))
+        }
+    }
+
+    impl ControllerDispatchHook for ArtifactDispatchHook {
+        fn dispatch(&self, request: &Value) -> Result<(Value, i32)> {
+            self.observed_requests
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(request.clone());
+            let entity_id = request
+                .get("entity_id")
+                .and_then(Value::as_str)
+                .unwrap_or("workflow");
+            Ok((
+                json!({
+                    "schema": "homeboy/test-generic-dispatch-result/v1",
+                    "run_id": format!("generic-run-{}", entity_id.replace([':', '/', '#', ' '], "_")),
+                    "artifacts": [{
+                        "id": "candidate-patch",
+                        "kind": "diff",
+                        "metadata": {
+                            "payload": {
+                                "entity_id": entity_id
+                            }
+                        }
+                    }]
                 }),
                 0,
             ))
@@ -3045,6 +3331,98 @@ mod tests {
     }
 
     #[test]
+    fn resume_fails_required_workflow_artifact_handoff_before_downstream_action() {
+        with_isolated_home(|_| {
+            let mut record = init(ControllerInitRequest {
+                loop_id: "loop-service-required-handoff".to_string(),
+                phase: "collect".to_string(),
+                config_version: "v1".to_string(),
+            })
+            .expect("controller initialized");
+
+            let workflow_context = json!({
+                "schema": "homeboy/repo-loop-workflow-context/v1",
+                "workflow_id": "finding-packets",
+                "plan": {
+                    "schema": "homeboy/repo-loop-workflow-plan/v1",
+                    "artifacts": [{
+                        "id": "finding_groups",
+                        "artifact_type": "finding-packets",
+                        "data": {
+                            "kind": "finding-packets",
+                            "required": true
+                        }
+                    }]
+                }
+            });
+            record.record_action(
+                AgentTaskLoopPolicyAction::SpawnTask {
+                    dedupe_key: "workflow:finding-packets".to_string(),
+                    entity_id: None,
+                    request: json!({
+                        "mode": "dispatch",
+                        "run_id": "controller-service-required-handoff-a",
+                        "dispatch": {
+                            "client_context": workflow_context.to_string()
+                        }
+                    }),
+                },
+                "produce finding packets",
+            );
+            record.record_action(
+                AgentTaskLoopPolicyAction::SpawnTask {
+                    dedupe_key: "workflow:iterator".to_string(),
+                    entity_id: None,
+                    request: json!({
+                        "mode": "dispatch",
+                        "run_id": "controller-service-required-handoff-b",
+                    }),
+                },
+                "consume finding packets",
+            );
+            controller::write_controller(&record).expect("controller written");
+
+            let result = resume(
+                "loop-service-required-handoff",
+                CapturingExecutor::default(),
+                &CapturingDispatchHook::default(),
+            )
+            .expect("controller resumed");
+
+            assert_eq!(result.exit_code, 1);
+            assert_eq!(result.value.results.len(), 1);
+            let loaded = controller::load_controller("loop-service-required-handoff")
+                .expect("controller loaded");
+            assert_eq!(
+                loaded.next_actions[0].status,
+                AgentTaskLoopActionStatus::Failed
+            );
+            assert_eq!(
+                loaded.next_actions[1].status,
+                AgentTaskLoopActionStatus::Pending
+            );
+            assert_eq!(
+                loaded.next_actions[0].diagnostics[0].code,
+                "required_workflow_artifacts_missing"
+            );
+            assert_eq!(
+                loaded.next_actions[0].diagnostics[0].details["missing_artifacts"][0]
+                    ["artifact_id"],
+                json!("finding_groups")
+            );
+            assert_eq!(
+                loaded.next_actions[0].diagnostics[0].details["missing_artifacts"][0]["kind"],
+                json!("finding-packets")
+            );
+            assert!(loaded.history.iter().any(|event| {
+                event.event_type == "controller.action.failed"
+                    && event.payload["diagnostics"][0]["code"]
+                        == json!("required_workflow_artifacts_missing")
+            }));
+        });
+    }
+
+    #[test]
     fn resume_recovers_running_action_with_stale_child_run() {
         with_isolated_home(|_| {
             let mut record = init(ControllerInitRequest {
@@ -3062,12 +3440,13 @@ mod tests {
             .expect("child submitted");
             crate::core::agent_task_lifecycle::mark_running("controller-service-stale-child-a")
                 .expect("child marked running");
-            let mut child =
-                crate::core::agent_task_lifecycle::status("controller-service-stale-child-a")
-                    .expect("child status");
-            child.metadata["runner_pid"] = json!(999999u32);
-            crate::core::agent_task_lifecycle::write_run_record_for_test(&child)
-                .expect("stale child status written");
+            crate::core::agent_task_lifecycle::rewrite_record_for_test(
+                "controller-service-stale-child-a",
+                |record| {
+                    record.metadata["runner_pid"] = json!(999999u32);
+                },
+            )
+            .expect("stale child status written");
 
             record.record_action(
                 AgentTaskLoopPolicyAction::SpawnTask {
@@ -3477,7 +3856,7 @@ mod tests {
                 other => panic!("expected compiled workflow fan-out, got {other:?}"),
             }
 
-            let dispatch = CapturingDispatchHook::default();
+            let dispatch = ArtifactDispatchHook::default();
             let result = resume(
                 "repo-loop-generic-execution",
                 CapturingExecutor::default(),

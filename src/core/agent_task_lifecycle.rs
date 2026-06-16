@@ -257,6 +257,17 @@ pub fn mark_running(run_id: &str) -> Result<AgentTaskRunRecord> {
     Ok(record)
 }
 
+#[cfg(test)]
+pub(crate) fn rewrite_record_for_test<F>(run_id: &str, mut rewrite: F) -> Result<AgentTaskRunRecord>
+where
+    F: FnMut(&mut AgentTaskRunRecord),
+{
+    let mut record = store::read_record(&sanitize_run_id(run_id))?;
+    rewrite(&mut record);
+    store::write_record(&record)?;
+    Ok(record)
+}
+
 pub fn claim_next_queued_run() -> Result<Option<AgentTaskRunRecord>> {
     let mut queued: Vec<AgentTaskRunRecord> = store::read_records()?
         .into_iter()
