@@ -4,6 +4,17 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.232.2] - 2026-06-16
+
+### Changed
+- disable PR autofix explicitly
+
+### Fixed
+- guide dirty lab cook checkouts to worktrees
+- surface npm stderr in package failure + retry transient failures (#3238)
+- propagate nested executor terminal_state failures in run-plan (#4683)
+- omit empty-URI artifact refs from agent-task status (#4400)
+
 ## [0.232.1] - 2026-06-16
 
 ### Changed
