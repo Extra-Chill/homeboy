@@ -1245,6 +1245,9 @@ function normalizeStatus(result) {
 
 function agentRuntimeResultCandidates(result) {
   return [
+    result?.outputs?.agent_runtime?.result,
+    result?.outputs?.agent_runtime?.workload,
+    result?.outputs?.agent_runtime,
     result?.raw?.agent_runtime,
     result?.raw?.agent_runtime?.result,
     result?.raw?.agent_runtime?.workload,
@@ -1259,6 +1262,8 @@ function agentRuntimeResultCandidates(result) {
 
 function agentRuntimeWorkload(result) {
   return firstObject(
+    result?.outputs?.agent_runtime?.result,
+    result?.outputs?.agent_runtime?.workload,
     result?.raw?.agent_runtime?.result,
     result?.raw?.agent_runtime?.workload,
     result?.metadata?.agent_runtime?.result,

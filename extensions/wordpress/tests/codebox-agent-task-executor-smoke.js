@@ -1477,6 +1477,40 @@ assert.equal(metadataAgentRuntimeTerminalFailureOutcome.status, 'failed');
 assert.equal(metadataAgentRuntimeTerminalFailureOutcome.diagnostics[0].class, 'agent_runtime.failed');
 assert.equal(metadataAgentRuntimeTerminalFailureOutcome.diagnostics[0].data.reason, 'provider_auth_failed');
 
+const outputAgentRuntimeFailureWithoutTypedArtifactsOutcome = agentTaskOutcomeFromCodeboxResult(request, {
+  success: true,
+  schema: 'wp-codebox/agent-task-run/v1',
+  status: 'completed',
+  summary: 'WP Codebox agent task succeeded.',
+  outputs: {
+    agent_runtime: {
+      success: false,
+      result: {
+        success: false,
+        error_reason: 'ai_processing_failed',
+        error_message: 'Embedded runtime failed before emitting typed artifacts.',
+        terminal_status: 'failed - ai_processing_failed',
+        outputs: {},
+      },
+    },
+  },
+}, {
+  normalizeAgentTaskRunResult: () => ({
+    schema: 'wp-codebox/agent-task-run-result/v1',
+    status: 'succeeded',
+    artifacts: [],
+    diagnostics: [],
+    metadata: {},
+    refs: {},
+  }),
+});
+assert.equal(outputAgentRuntimeFailureWithoutTypedArtifactsOutcome.status, 'failed');
+assert.equal(outputAgentRuntimeFailureWithoutTypedArtifactsOutcome.summary, 'Embedded runtime failed before emitting typed artifacts.');
+assert.equal(outputAgentRuntimeFailureWithoutTypedArtifactsOutcome.failure_classification, 'execution_failed');
+assert.equal(outputAgentRuntimeFailureWithoutTypedArtifactsOutcome.diagnostics[0].class, 'agent_runtime.failed');
+assert.equal(outputAgentRuntimeFailureWithoutTypedArtifactsOutcome.diagnostics.some((diagnostic) => diagnostic.class === 'codebox.required_typed_artifacts_missing'), false);
+assert.deepEqual(outputAgentRuntimeFailureWithoutTypedArtifactsOutcome.metadata.typed_artifacts, {});
+
 const agentBundleOutcome = agentTaskOutcomeFromCodeboxResult({
   ...request,
   task_id: 'agent-bundle-task-123',
