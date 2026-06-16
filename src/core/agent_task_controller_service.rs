@@ -11,6 +11,7 @@
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::core::agent_task_lifecycle as lifecycle;
 use crate::core::agent_task_loop_controller::{
@@ -30,6 +31,10 @@ use crate::core::plan::{HomeboyPlan, PlanArtifact, PlanKind, PlanStep, PlanStepS
 use crate::core::{Error, Result};
 use std::collections::HashMap;
 use std::process::Command;
+
+const REPO_LOOP_SPEC_METADATA_KEY: &str = "repo_loop_spec";
+const REPO_LOOP_SPEC_WORKFLOW_REASON: &str = "repo loop spec workflow";
+const REPO_LOOP_SPEC_ACTION_REASON: &str = "repo loop spec action";
 
 /// Schema for the apply-event report envelope.
 pub const APPLY_EVENT_RESULT_SCHEMA: &str = "homeboy/agent-task-loop-controller-event-result/v1";
@@ -505,6 +510,7 @@ pub fn init(request: ControllerInitRequest) -> Result<AgentTaskLoopControllerRec
 pub fn init_from_spec(request: ControllerFromSpecRequest) -> Result<ControllerFromSpecReport> {
     let spec = request.spec;
     validate_loop_spec(&spec)?;
+    let spec_fingerprint = repo_loop_spec_fingerprint(&spec)?;
     let mut initialized = false;
     let mut record = match existing_controller(&spec.loop_id)? {
         Some(record) => record,
@@ -516,6 +522,16 @@ pub fn init_from_spec(request: ControllerFromSpecRequest) -> Result<ControllerFr
                 spec.config_version.clone(),
             )
         }
+    };
+    let previous_spec_fingerprint = repo_loop_spec_fingerprint_from_metadata(&record);
+    let reconciliation = if initialized {
+        RepoLoopSpecReconciliation::default()
+    } else {
+        reconcile_repo_loop_spec_actions(
+            &mut record,
+            previous_spec_fingerprint.as_deref(),
+            &spec_fingerprint,
+        )?
     };
 
     record.phase = spec.phase.clone();
@@ -545,10 +561,10 @@ pub fn init_from_spec(request: ControllerFromSpecRequest) -> Result<ControllerFr
 
     let mut actions = Vec::new();
     for action in compile_loop_spec_workflows(&spec)? {
-        actions.push(record.record_action(action, "repo loop spec workflow"));
+        actions.push(record.record_action(action, REPO_LOOP_SPEC_WORKFLOW_REASON));
     }
     for action in &spec.actions {
-        actions.push(record.record_action(action.clone(), "repo loop spec action"));
+        actions.push(record.record_action(action.clone(), REPO_LOOP_SPEC_ACTION_REASON));
     }
     if let Some(policy) = compile_loop_spec_policy(&spec) {
         if let Some(event) = spec.initial_event.clone() {
@@ -567,6 +583,7 @@ pub fn init_from_spec(request: ControllerFromSpecRequest) -> Result<ControllerFr
             actions.extend(record.evaluate_policy(&policy, None));
         }
     }
+    set_repo_loop_spec_metadata(&mut record, &spec, &spec_fingerprint);
     push_controller_history(
         &mut record,
         "controller.loop_spec.applied",
@@ -574,6 +591,10 @@ pub fn init_from_spec(request: ControllerFromSpecRequest) -> Result<ControllerFr
         serde_json::json!({
             "schema": spec.schema,
             "initialized": initialized,
+            "spec_fingerprint": spec_fingerprint,
+            "previous_spec_fingerprint": previous_spec_fingerprint,
+            "reconciled_action_count": reconciliation.removed_action_count,
+            "reconciled_dedupe_key_count": reconciliation.removed_dedupe_key_count,
             "queued_action_count": actions.iter().filter(|action| action.status == AgentTaskLoopActionStatus::Pending).count(),
         }),
     );
@@ -605,6 +626,124 @@ fn existing_controller(loop_id: &str) -> Result<Option<AgentTaskLoopControllerRe
     Ok(controller::list_controllers()?
         .into_iter()
         .find(|record| record.loop_id == requested))
+}
+
+#[derive(Debug, Default)]
+struct RepoLoopSpecReconciliation {
+    removed_action_count: usize,
+    removed_dedupe_key_count: usize,
+}
+
+fn repo_loop_spec_fingerprint(spec: &AgentTaskRepoLoopSpec) -> Result<String> {
+    let bytes = serde_json::to_vec(spec).map_err(|error| {
+        Error::internal_json(
+            format!("repo loop spec fingerprint serialization failed: {error}"),
+            Some("agent-task controller from-spec".to_string()),
+        )
+    })?;
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    Ok(format!("sha256:{:x}", hasher.finalize()))
+}
+
+fn repo_loop_spec_fingerprint_from_metadata(
+    record: &AgentTaskLoopControllerRecord,
+) -> Option<String> {
+    record
+        .metadata
+        .get(REPO_LOOP_SPEC_METADATA_KEY)
+        .and_then(|value| value.get("fingerprint"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+fn set_repo_loop_spec_metadata(
+    record: &mut AgentTaskLoopControllerRecord,
+    spec: &AgentTaskRepoLoopSpec,
+    fingerprint: &str,
+) {
+    let mut metadata = match std::mem::take(&mut record.metadata) {
+        Value::Object(map) => map,
+        Value::Null => serde_json::Map::new(),
+        other => {
+            let mut map = serde_json::Map::new();
+            map.insert("repo_loop_metadata".to_string(), other);
+            map
+        }
+    };
+    metadata.insert(
+        REPO_LOOP_SPEC_METADATA_KEY.to_string(),
+        serde_json::json!({
+            "schema": spec.schema,
+            "fingerprint": fingerprint,
+            "config_version": spec.config_version,
+        }),
+    );
+    record.metadata = Value::Object(metadata);
+}
+
+fn reconcile_repo_loop_spec_actions(
+    record: &mut AgentTaskLoopControllerRecord,
+    previous_fingerprint: Option<&str>,
+    current_fingerprint: &str,
+) -> Result<RepoLoopSpecReconciliation> {
+    if previous_fingerprint == Some(current_fingerprint) {
+        return Ok(RepoLoopSpecReconciliation::default());
+    }
+
+    let managed_action_ids: Vec<String> = record
+        .next_actions
+        .iter()
+        .filter(|action| is_repo_loop_spec_action(action))
+        .map(|action| action.action_id.clone())
+        .collect();
+    if managed_action_ids.is_empty() {
+        return Ok(RepoLoopSpecReconciliation::default());
+    }
+
+    if let Some(running) = record.next_actions.iter().find(|action| {
+        is_repo_loop_spec_action(action) && action.status == AgentTaskLoopActionStatus::Running
+    }) {
+        return Err(Error::validation_invalid_argument(
+            "spec_fingerprint",
+            format!(
+                "repo loop spec changed for '{}' while repo-spec action '{}' is running; wait for it to finish before reapplying the spec",
+                record.loop_id, running.action_id
+            ),
+            previous_fingerprint.map(ToString::to_string),
+            Some(vec![current_fingerprint.to_string()]),
+        ));
+    }
+
+    let mut dedupe_keys = record
+        .next_actions
+        .iter()
+        .filter(|action| is_repo_loop_spec_action(action))
+        .filter_map(|action| action.dedupe_key.clone())
+        .collect::<Vec<_>>();
+    dedupe_keys.sort();
+    dedupe_keys.dedup();
+
+    let removed_action_count = managed_action_ids.len();
+    record
+        .next_actions
+        .retain(|action| !is_repo_loop_spec_action(action));
+    let mut removed_dedupe_key_count = 0;
+    for dedupe_key in dedupe_keys {
+        if record.dedupe_keys.remove(&dedupe_key).is_some() {
+            removed_dedupe_key_count += 1;
+        }
+    }
+
+    Ok(RepoLoopSpecReconciliation {
+        removed_action_count,
+        removed_dedupe_key_count,
+    })
+}
+
+fn is_repo_loop_spec_action(action: &AgentTaskLoopPolicyActionRecord) -> bool {
+    action.reason == REPO_LOOP_SPEC_WORKFLOW_REASON || action.reason == REPO_LOOP_SPEC_ACTION_REASON
 }
 
 fn validate_loop_spec(spec: &AgentTaskRepoLoopSpec) -> Result<()> {
@@ -2851,6 +2990,145 @@ mod tests {
         )
     }
 
+    fn repo_loop_reconcile_spec(loop_id: &str) -> AgentTaskRepoLoopSpec {
+        AgentTaskRepoLoopSpec {
+            schema: Some("example/repo-loop/v1".to_string()),
+            loop_id: loop_id.to_string(),
+            phase: "init".to_string(),
+            config_version: "repo-v1".to_string(),
+            metadata: Value::Null,
+            entities: Vec::new(),
+            agents: Vec::new(),
+            tools: Vec::new(),
+            abilities: vec![
+                AgentTaskRepoLoopSpecAbility {
+                    ability_id: "github_pull_request_publish".to_string(),
+                    description: None,
+                    input: Value::Null,
+                },
+                AgentTaskRepoLoopSpecAbility {
+                    ability_id: "static_validation".to_string(),
+                    description: None,
+                    input: Value::Null,
+                },
+                AgentTaskRepoLoopSpecAbility {
+                    ability_id: "static_publication".to_string(),
+                    description: None,
+                    input: Value::Null,
+                },
+            ],
+            workflows: vec![
+                AgentTaskRepoLoopSpecWorkflow {
+                    workflow_id: "generation".to_string(),
+                    agent_id: None,
+                    prompt: Some("Generate a static site candidate.".to_string()),
+                    tasks: Vec::new(),
+                    entity_ids: Vec::new(),
+                    tools: Vec::new(),
+                    abilities: vec!["github_pull_request_publish".to_string()],
+                    artifacts: vec!["static_site_pull_request".to_string()],
+                    dependencies: Vec::new(),
+                    gates: Vec::new(),
+                    metrics: Vec::new(),
+                    inputs: Value::Null,
+                },
+                AgentTaskRepoLoopSpecWorkflow {
+                    workflow_id: "static_validation".to_string(),
+                    agent_id: None,
+                    prompt: Some("Validate the generated static site.".to_string()),
+                    tasks: Vec::new(),
+                    entity_ids: Vec::new(),
+                    tools: Vec::new(),
+                    abilities: vec!["static_validation".to_string()],
+                    artifacts: Vec::new(),
+                    dependencies: vec!["static_site_pull_request".to_string()],
+                    gates: Vec::new(),
+                    metrics: Vec::new(),
+                    inputs: Value::Null,
+                },
+            ],
+            artifacts: vec![
+                AgentTaskRepoLoopSpecArtifact {
+                    artifact_id: "static_site_pull_request".to_string(),
+                    kind: "pull_request".to_string(),
+                    description: None,
+                    required: true,
+                },
+                AgentTaskRepoLoopSpecArtifact {
+                    artifact_id: "static_site_candidate".to_string(),
+                    kind: "static_site".to_string(),
+                    description: None,
+                    required: true,
+                },
+            ],
+            dependencies: Vec::new(),
+            gates: Vec::new(),
+            metrics: Vec::new(),
+            gate_bundles: Vec::new(),
+            policy: None,
+            phases: Vec::new(),
+            actions: Vec::new(),
+            initial_event: None,
+        }
+    }
+
+    fn reapply_base_then_mutated(
+        loop_id: &str,
+        mutate: impl FnOnce(&mut AgentTaskRepoLoopSpec),
+    ) -> ControllerFromSpecReport {
+        let base = repo_loop_reconcile_spec(loop_id);
+        init_from_spec(ControllerFromSpecRequest { spec: base.clone() })
+            .expect("base spec initialized");
+        let reapplied = init_from_spec(ControllerFromSpecRequest { spec: base.clone() })
+            .expect("base spec reapplied");
+        assert!(reapplied
+            .actions
+            .iter()
+            .any(|action| action.status == AgentTaskLoopActionStatus::AlreadySatisfied));
+
+        let mut changed = base;
+        mutate(&mut changed);
+        init_from_spec(ControllerFromSpecRequest { spec: changed }).expect("changed spec applied")
+    }
+
+    fn workflow_action_context(report: &ControllerFromSpecReport, workflow_id: &str) -> Value {
+        let action = report
+            .actions
+            .iter()
+            .find(|action| action.dedupe_key.as_deref() == Some(&format!("workflow:{workflow_id}")))
+            .expect("workflow action exists");
+        let request = match &action.action {
+            AgentTaskLoopPolicyAction::SpawnTask { request, .. } => request,
+            AgentTaskLoopPolicyAction::FanOut {
+                request_template, ..
+            } => request_template,
+            other => panic!("expected workflow dispatch action, got {other:?}"),
+        };
+        serde_json::from_str(
+            request["dispatch"]["client_context"]
+                .as_str()
+                .expect("client_context string"),
+        )
+        .expect("client_context json")
+    }
+
+    fn assert_reconciled_to_pending(report: &ControllerFromSpecReport, expected_actions: usize) {
+        assert_eq!(report.actions.len(), expected_actions);
+        assert!(report
+            .actions
+            .iter()
+            .all(|action| action.status == AgentTaskLoopActionStatus::Pending));
+        assert_eq!(report.controller.next_actions.len(), expected_actions);
+        assert!(report
+            .controller
+            .next_actions
+            .iter()
+            .all(|action| action.status == AgentTaskLoopActionStatus::Pending));
+        let history = report.controller.history.last().expect("history event");
+        assert_eq!(history.payload["reconciled_action_count"], json!(4));
+        assert_eq!(history.payload["reconciled_dedupe_key_count"], json!(2));
+    }
+
     #[test]
     fn init_and_status_round_trip_controller_record() {
         with_isolated_home(|_| {
@@ -3139,6 +3417,125 @@ mod tests {
             assert_eq!(
                 resumed.actions[0].status,
                 AgentTaskLoopActionStatus::AlreadySatisfied
+            );
+        });
+    }
+
+    #[test]
+    fn init_from_spec_reconciles_changed_workflow_dependencies() {
+        with_isolated_home(|_| {
+            let report = reapply_base_then_mutated("repo-loop-reconcile-dependencies", |spec| {
+                spec.workflows
+                    .iter_mut()
+                    .find(|workflow| workflow.workflow_id == "static_validation")
+                    .expect("static validation workflow")
+                    .dependencies = vec!["static_site_candidate".to_string()];
+            });
+
+            assert_reconciled_to_pending(&report, 2);
+            let context = workflow_action_context(&report, "static_validation");
+            assert_eq!(
+                context["plan"]["steps"][0]["needs"],
+                json!(["static_site_candidate"])
+            );
+            assert_eq!(
+                context["artifact_dependencies"][0]["artifact_id"],
+                "static_site_candidate"
+            );
+        });
+    }
+
+    #[test]
+    fn init_from_spec_reconciles_changed_emitted_artifacts() {
+        with_isolated_home(|_| {
+            let report = reapply_base_then_mutated("repo-loop-reconcile-artifacts", |spec| {
+                spec.workflows
+                    .iter_mut()
+                    .find(|workflow| workflow.workflow_id == "generation")
+                    .expect("generation workflow")
+                    .artifacts = vec!["static_site_candidate".to_string()];
+            });
+
+            assert_reconciled_to_pending(&report, 2);
+            let context = workflow_action_context(&report, "generation");
+            assert_eq!(
+                context["plan"]["artifacts"][0]["id"],
+                "static_site_candidate"
+            );
+            assert_eq!(
+                context["artifacts"][0]["artifact_id"],
+                "static_site_candidate"
+            );
+        });
+    }
+
+    #[test]
+    fn init_from_spec_reconciles_removed_and_added_workflows() {
+        with_isolated_home(|_| {
+            let report = reapply_base_then_mutated("repo-loop-reconcile-workflows", |spec| {
+                spec.workflows
+                    .retain(|workflow| workflow.workflow_id != "static_validation");
+                spec.workflows.push(AgentTaskRepoLoopSpecWorkflow {
+                    workflow_id: "static_publication".to_string(),
+                    agent_id: None,
+                    prompt: Some("Publish the validated static site.".to_string()),
+                    tasks: Vec::new(),
+                    entity_ids: Vec::new(),
+                    tools: Vec::new(),
+                    abilities: vec!["static_publication".to_string()],
+                    artifacts: vec!["static_site_pull_request".to_string()],
+                    dependencies: vec!["static_site_candidate".to_string()],
+                    gates: Vec::new(),
+                    metrics: Vec::new(),
+                    inputs: Value::Null,
+                });
+            });
+
+            assert_reconciled_to_pending(&report, 2);
+            let dedupe_keys = report
+                .controller
+                .next_actions
+                .iter()
+                .filter_map(|action| action.dedupe_key.as_deref())
+                .collect::<Vec<_>>();
+            assert!(dedupe_keys.contains(&"workflow:generation"));
+            assert!(dedupe_keys.contains(&"workflow:static_publication"));
+            assert!(!dedupe_keys.contains(&"workflow:static_validation"));
+        });
+    }
+
+    #[test]
+    fn init_from_spec_reconciles_changed_required_capabilities() {
+        with_isolated_home(|_| {
+            let report = reapply_base_then_mutated("repo-loop-reconcile-capabilities", |spec| {
+                spec.workflows
+                    .iter_mut()
+                    .find(|workflow| workflow.workflow_id == "generation")
+                    .expect("generation workflow")
+                    .abilities = vec!["static_publication".to_string()];
+            });
+
+            assert_reconciled_to_pending(&report, 2);
+            let generation = report
+                .actions
+                .iter()
+                .find(|action| action.dedupe_key.as_deref() == Some("workflow:generation"))
+                .expect("generation action");
+            let request = match &generation.action {
+                AgentTaskLoopPolicyAction::SpawnTask { request, .. } => request,
+                AgentTaskLoopPolicyAction::FanOut {
+                    request_template, ..
+                } => request_template,
+                other => panic!("expected workflow dispatch action, got {other:?}"),
+            };
+            assert_eq!(
+                request["dispatch"]["required_capabilities"],
+                json!(["ability:static_publication"])
+            );
+            let context = workflow_action_context(&report, "generation");
+            assert_eq!(
+                context["plan"]["policy"]["required_capabilities"],
+                json!(["ability:static_publication"])
             );
         });
     }
