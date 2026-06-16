@@ -34,13 +34,14 @@ fn render_cook_summary(payload: &Value) -> Option<String> {
     let state = string_value(payload, &["state"])
         .or_else(|| string_value(payload, &["record", "state"]))
         .unwrap_or("unknown");
-    let task_count = usize_value(payload, &["task_count"])
+    let tasks_planned = usize_value(payload, &["task_count"])
         .or_else(|| array_len(payload, &["record", "tasks"]))
         .unwrap_or(0);
+    let tasks_attempted = aggregate_outcome_count(payload).unwrap_or(0);
     let aggregate_path = string_value(payload, &["aggregate_path"])
         .or_else(|| string_value(payload, &["record", "aggregate_path"]));
-    let apply_candidates = usize_value(payload, &["aggregate", "totals", "apply_candidates"]);
-    let artifact_count = array_len(payload, &["aggregate", "outcomes", "0", "artifacts"]);
+    let patch_candidates = patch_candidate_count(payload);
+    let artifact_count = aggregate_artifact_count(payload);
     let first_artifact = string_value(
         payload,
         &["aggregate", "outcomes", "0", "artifacts", "0", "path"],
@@ -56,28 +57,31 @@ fn render_cook_summary(payload: &Value) -> Option<String> {
         "Agent task cook".to_string(),
         format!("Run: {run_id}"),
         format!("Status: {state}"),
-        format!("Tasks: {task_count}"),
+        format!("Tasks planned: {tasks_planned}"),
+        format!("Tasks attempted: {tasks_attempted}"),
+        format!("Patch candidates: {patch_candidates}"),
     ];
     if let Some(path) = aggregate_path {
         lines.push(format!("Aggregate: {path}"));
     }
-    if let Some(count) = apply_candidates {
-        lines.push(format!("Patch candidates: {count}"));
-    }
-    if let Some(count) = artifact_count {
-        lines.push(format!("Artifacts: {count}"));
-    }
+    lines.push(format!("Artifacts: {artifact_count}"));
     if let Some(artifact) = first_artifact {
         lines.push(format!("First artifact: {artifact}"));
     }
-    lines.push(format!("Next: homeboy agent-task review {run_id}"));
+    if patch_candidates > 0 {
+        lines.push(format!("Next: homeboy agent-task review {run_id}"));
+    } else {
+        lines.push(format!("Next: homeboy agent-task logs {run_id}"));
+    }
     Some(finish(lines))
 }
 
 fn render_status_summary(payload: &Value) -> Option<String> {
     let run_id = string_value(payload, &["run_id"])?;
     let state = string_value(payload, &["state"]).unwrap_or("unknown");
-    let task_count = array_len(payload, &["tasks"]).unwrap_or(0);
+    let tasks_planned = array_len(payload, &["tasks"]).unwrap_or(0);
+    let tasks_attempted = status_attempted_task_count(payload);
+    let patch_candidates = patch_candidate_count(payload);
     let artifact_count = array_len(payload, &["artifact_refs"]).unwrap_or(0);
     let aggregate_path = string_value(payload, &["aggregate_path"]);
 
@@ -85,10 +89,12 @@ fn render_status_summary(payload: &Value) -> Option<String> {
         "Agent task status".to_string(),
         format!("Run: {run_id}"),
         format!("Status: {state}"),
-        format!("Tasks: {task_count}"),
+        format!("Tasks planned: {tasks_planned}"),
+        format!("Tasks attempted: {tasks_attempted}"),
+        format!("Patch candidates: {patch_candidates}"),
         format!("Artifacts: {artifact_count}"),
     ];
-    if let Some(path) = aggregate_path {
+    if let Some(path) = aggregate_path.filter(|_| patch_candidates > 0) {
         lines.push(format!("Aggregate: {path}"));
         lines.push(format!("Next: homeboy agent-task review {run_id}"));
     } else if state == "queued" {
@@ -175,6 +181,81 @@ fn array_len(payload: &Value, path: &[&str]) -> Option<usize> {
     Some(value_at(payload, path)?.as_array()?.len())
 }
 
+fn aggregate_outcome_count(payload: &Value) -> Option<usize> {
+    array_len(payload, &["aggregate", "outcomes"])
+}
+
+fn aggregate_artifact_count(payload: &Value) -> usize {
+    value_at(payload, &["aggregate", "outcomes"])
+        .and_then(Value::as_array)
+        .map(|outcomes| {
+            outcomes
+                .iter()
+                .map(|outcome| array_len(outcome, &["artifacts"]).unwrap_or(0))
+                .sum()
+        })
+        .unwrap_or_else(|| array_len(payload, &["artifact_refs"]).unwrap_or(0))
+}
+
+fn patch_candidate_count(payload: &Value) -> usize {
+    usize_value(
+        payload,
+        &["aggregate_review", "summary", "apply_candidates"],
+    )
+    .or_else(|| usize_value(payload, &["aggregate", "summary", "apply_candidates"]))
+    .or_else(|| usize_value(payload, &["aggregate", "totals", "apply_candidates"]))
+    .unwrap_or_else(|| count_apply_artifacts(payload))
+}
+
+fn count_apply_artifacts(payload: &Value) -> usize {
+    let aggregate_artifacts = value_at(payload, &["aggregate", "outcomes"])
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .flat_map(|outcome| {
+            value_at(outcome, &["artifacts"])
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+        });
+    let status_artifacts = value_at(payload, &["artifact_refs"])
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten();
+
+    aggregate_artifacts
+        .chain(status_artifacts)
+        .filter(|artifact| is_apply_artifact(artifact))
+        .count()
+}
+
+fn is_apply_artifact(artifact: &Value) -> bool {
+    let Some(kind) = string_value(artifact, &["kind"]) else {
+        return false;
+    };
+    matches!(
+        kind,
+        "patch" | "diff" | "change_artifact" | "workspace_patch" | "artifact"
+    ) && usize_value(artifact, &["size_bytes"]) != Some(0)
+}
+
+fn status_attempted_task_count(payload: &Value) -> usize {
+    value_at(payload, &["tasks"])
+        .and_then(Value::as_array)
+        .map(|tasks| {
+            tasks
+                .iter()
+                .filter(|task| {
+                    matches!(
+                        string_value(task, &["state"]),
+                        Some("running" | "succeeded" | "failed" | "cancelled" | "timed_out")
+                    )
+                })
+                .count()
+        })
+        .unwrap_or(0)
+}
+
 fn first_string<'a>(payload: &'a Value, path: &[&str]) -> Option<&'a str> {
     value_at(payload, path)?.as_array()?.first()?.as_str()
 }
@@ -214,7 +295,7 @@ mod tests {
             "aggregate": {
                 "outcomes": [{
                     "task_id": "homeboy-4345",
-                    "artifacts": [{ "id": "patch", "path": "/tmp/patch.diff" }]
+                    "artifacts": [{ "id": "patch", "kind": "patch", "path": "/tmp/patch.diff" }]
                 }]
             }
         });
@@ -222,21 +303,24 @@ mod tests {
         let summary = render_agent_task_summary(AgentTaskSummaryKind::Cook, &payload).unwrap();
 
         assert!(summary.starts_with("Agent task cook\nRun: homeboy-4345\nStatus: succeeded"));
-        assert!(summary.contains("Tasks: 1\n"));
-        assert!(!summary.contains("Patch candidates:"));
+        assert!(summary.contains("Tasks planned: 1\n"));
+        assert!(summary.contains("Tasks attempted: 1\n"));
+        assert!(summary.contains("Patch candidates: 1\n"));
         assert!(summary.contains("First artifact: /tmp/patch.diff\n"));
         assert!(summary.contains("Next: homeboy agent-task review homeboy-4345\n"));
         assert!(!summary.contains("{\n"));
     }
 
     #[test]
-    fn cook_summary_uses_aggregate_totals_for_patch_candidates() {
+    fn cook_summary_uses_review_totals_for_patch_candidates() {
         let payload = json!({
             "run_id": "homeboy-4345",
             "state": "succeeded",
             "task_count": 1,
+            "aggregate_review": {
+                "summary": { "apply_candidates": 0 }
+            },
             "aggregate": {
-                "totals": { "apply_candidates": 0 },
                 "outcomes": [{
                     "task_id": "homeboy-4345",
                     "artifacts": [{ "id": "empty-patch", "path": "/tmp/patch.diff" }]
@@ -247,6 +331,33 @@ mod tests {
         let summary = render_agent_task_summary(AgentTaskSummaryKind::Cook, &payload).unwrap();
 
         assert!(summary.contains("Patch candidates: 0\n"));
+    }
+
+    #[test]
+    fn cook_summary_does_not_count_provider_failures_as_patch_candidates() {
+        let payload = json!({
+            "run_id": "agent-task-22bb7835",
+            "state": "failed",
+            "task_count": 4,
+            "aggregate_path": "/tmp/aggregate.json",
+            "aggregate": {
+                "outcomes": [
+                    { "task_id": "cell-1", "status": "provider_error", "summary": "no extension agent-task provider found for backend wordpress", "artifacts": [] },
+                    { "task_id": "cell-2", "status": "provider_error", "summary": "no extension agent-task provider found for backend wordpress", "artifacts": [] },
+                    { "task_id": "cell-3", "status": "provider_error", "summary": "no extension agent-task provider found for backend wordpress", "artifacts": [] },
+                    { "task_id": "cell-4", "status": "provider_error", "summary": "no extension agent-task provider found for backend wordpress", "artifacts": [] }
+                ]
+            }
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Cook, &payload).unwrap();
+
+        assert!(summary.contains("Tasks planned: 4\n"));
+        assert!(summary.contains("Tasks attempted: 4\n"));
+        assert!(summary.contains("Patch candidates: 0\n"));
+        assert!(summary.contains("Artifacts: 0\n"));
+        assert!(summary.contains("Next: homeboy agent-task logs agent-task-22bb7835\n"));
+        assert!(!summary.contains("Next: homeboy agent-task review"));
     }
 
     #[test]
@@ -326,8 +437,34 @@ mod tests {
         let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
 
         assert!(summary.starts_with("Agent task status\nRun: homeboy-4345\nStatus: queued"));
-        assert!(summary.contains("Tasks: 1\n"));
+        assert!(summary.contains("Tasks planned: 1\n"));
+        assert!(summary.contains("Tasks attempted: 0\n"));
+        assert!(summary.contains("Patch candidates: 0\n"));
         assert!(summary.contains("Artifacts: 0\n"));
         assert!(summary.contains("Next: homeboy agent-task run homeboy-4345\n"));
+    }
+
+    #[test]
+    fn status_summary_agrees_no_patch_candidates_means_logs_next_step() {
+        let payload = json!({
+            "run_id": "agent-task-22bb7835",
+            "state": "failed",
+            "aggregate_path": "/tmp/aggregate.json",
+            "tasks": [
+                { "task_id": "cell-1", "state": "failed" },
+                { "task_id": "cell-2", "state": "failed" },
+                { "task_id": "cell-3", "state": "failed" },
+                { "task_id": "cell-4", "state": "failed" }
+            ],
+            "artifact_refs": []
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
+
+        assert!(summary.contains("Tasks planned: 4\n"));
+        assert!(summary.contains("Tasks attempted: 4\n"));
+        assert!(summary.contains("Patch candidates: 0\n"));
+        assert!(summary.contains("Next: homeboy agent-task logs agent-task-22bb7835\n"));
+        assert!(!summary.contains("Next: homeboy agent-task review"));
     }
 }
