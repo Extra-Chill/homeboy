@@ -215,9 +215,10 @@ pub mod provider {
     pub use super::super::agent_task_provider::{
         default_backend, dependency_failure_patterns, provider_requires_cwd_git_checkout,
         provider_runner_readiness_contracts, provider_runner_secret_env_for_plan,
-        required_extension_ids_for_plan, AgentTaskExecutorProvider,
-        AgentTaskProviderDependencyFailurePattern, AgentTaskProviderEnvPathReadiness,
-        AgentTaskProviderRoleAliases, AgentTaskProviderRunnerReadiness,
+        provider_runner_source_contracts, required_extension_ids_for_plan,
+        AgentTaskExecutorProvider, AgentTaskProviderDependencyFailurePattern,
+        AgentTaskProviderEnvPathReadiness, AgentTaskProviderRoleAliases,
+        AgentTaskProviderRunnerReadiness, AgentTaskProviderRunnerSource,
         AgentTaskProviderWorkspaceMaterialization, ExtensionProviderAgentTaskExecutor,
     };
 }

@@ -9,6 +9,9 @@ All notable changes to Homeboy CLI are documented in this file.
 ### Added
 - discover standalone agent runtimes
 
+### Added
+- generic, runtime-agnostic managed runner-source primitive that keeps an extension-declared git checkout synced on the Lab runner, plus a runner doctor check that warns when a managed source is missing, tracks the wrong remote, or resolves to a non-canonical checkout outside its declared root (#3818, #4140)
+
 ### Fixed
 - resolve rig component paths to the runner-side materialized checkout during Lab offload so remote `${components.<id>.path}` checks no longer fail against the controller path (#3766)
 - expand portable `~`/`~/...` rig dependency checkout roots to an absolute runner home path so the materialized remote path is never a literal `~` directory (#3767)
