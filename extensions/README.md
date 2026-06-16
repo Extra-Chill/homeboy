@@ -4,9 +4,9 @@ Official extension directory for [Homeboy](https://github.com/Extra-Chill/homebo
 
 This is a **monorepo** — each subdirectory is a standalone extension. Install individual extensions, not the whole repo.
 
-Agent runtimes live under `agent-runtimes/`. The WP Codebox runtime is exposed at
-`agent-runtimes/wp-codebox`, while the WordPress extension also carries the
-runtime payload needed by its installed provider command.
+AI runtimes live under `ai-runtimes/`. The WP Codebox runtime is exposed at
+`ai-runtimes/wp-codebox` as a first-class runtime package; project extensions can
+depend on runtime capabilities without embedding the provider contract.
 
 Generic runtime package requirements are documented in
 [`docs/agent-runtime-package-contract.md`](docs/agent-runtime-package-contract.md).

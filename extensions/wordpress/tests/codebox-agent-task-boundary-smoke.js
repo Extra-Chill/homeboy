@@ -10,8 +10,8 @@ const scannedFiles = [
   'wordpress/lib/codebox-agent-task-executor.js',
   'wordpress/scripts/agent/homeboy-codebox-agent-task-executor.cjs',
   'wordpress/scripts/agent/homeboy-wp-codebox-task-runner.cjs',
-  'agent-runtimes/wp-codebox/lib/codebox-agent-task-executor.js',
-  'agent-runtimes/wp-codebox/scripts/agent/homeboy-codebox-agent-task-executor.cjs',
+  'ai-runtimes/wp-codebox/lib/codebox-agent-task-executor.js',
+  'ai-runtimes/wp-codebox/scripts/agent/homeboy-codebox-agent-task-executor.cjs',
 ];
 
 const runtimeName = ['data', 'machine'].join('');
