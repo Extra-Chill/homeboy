@@ -694,6 +694,7 @@ fn run_lab_offload_inner(
     if let Some(warning) = misplaced_runner_exec_wait_timeout_warning(request.normalized_args) {
         messages.push(warning);
     }
+    let source_checkout = lab_source_checkout_metadata(&source_path);
     let homeboy_path = runner.settings.homeboy_path.as_deref().unwrap_or("homeboy");
     let runner_homeboy = lab_runner_homeboy_metadata(runner_id, homeboy_path, &runner_status);
     plan = with_step(
@@ -707,7 +708,11 @@ fn run_lab_offload_inner(
                 PlanStepStatus::Ready
             },
         )
-        .inputs(PlanValues::new().json("runner_homeboy", &runner_homeboy))
+        .inputs(
+            PlanValues::new()
+                .json("runner_homeboy", &runner_homeboy)
+                .json("source_checkout", &source_checkout),
+        )
         .build(),
     );
     eprintln!(
@@ -736,6 +741,13 @@ fn run_lab_offload_inner(
         ));
     }
     let command_prefix = lab_offload_command_prefix(&source_path, homeboy_path);
+    eprintln!(
+        "Lab offload preflight: source checkout `{}` at {}; active Homeboy command `{}` from runner `{}`.",
+        source_path.display(),
+        source_checkout_ref_display(&source_checkout),
+        command_prefix.argv.join(" "),
+        runner_id,
+    );
     let capability_contract =
         lab_runner_capability_contract(&contract, &source_path, &command_prefix.required_tools);
     let capability_plan = capability_contract
@@ -1104,6 +1116,7 @@ fn run_lab_offload_inner(
     lab_metadata["rig_component_path_env"] = rig_component_path_env;
     lab_metadata["settings_env"] = settings_env_diagnostics(&remapped_args, &env);
     lab_metadata["runner_homeboy"] = runner_homeboy.clone();
+    lab_metadata["source_checkout"] = source_checkout.clone();
     lab_metadata["rig_sync"] = serde_json::json!({
         "step": "lab.sync_rigs",
         "synced_count": synced_rigs.len(),
@@ -1345,6 +1358,63 @@ fn lab_runner_homeboy_metadata(
         "refresh_commands": refresh_commands,
         "upgrade_command": format!("homeboy upgrade --force --upgrade-runner {}", shell::quote_arg(runner_id)),
     })
+}
+
+fn lab_source_checkout_metadata(source_path: &Path) -> serde_json::Value {
+    let git_branch =
+        super::super::workspace::git_output(source_path, &["branch", "--show-current"])
+            .ok()
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                super::super::workspace::git_output(
+                    source_path,
+                    &["rev-parse", "--abbrev-ref", "HEAD"],
+                )
+                .ok()
+            });
+    let git_sha = super::super::workspace::git_output(source_path, &["rev-parse", "HEAD"])
+        .ok()
+        .filter(|value| !value.is_empty());
+    let git_remote =
+        super::super::workspace::git_output(source_path, &["config", "--get", "remote.origin.url"])
+            .ok()
+            .filter(|value| !value.is_empty());
+    let dirty = super::super::workspace::git_output(source_path, &["status", "--porcelain=v1"])
+        .ok()
+        .map(|status| !status.is_empty());
+
+    serde_json::json!({
+        "schema": "homeboy/lab-source-checkout/v1",
+        "local_path": source_path.display().to_string(),
+        "git_branch": git_branch,
+        "git_sha": git_sha,
+        "git_remote": git_remote,
+        "dirty": dirty,
+    })
+}
+
+fn source_checkout_ref_display(metadata: &serde_json::Value) -> String {
+    let branch = metadata
+        .get("git_branch")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty());
+    let sha = metadata
+        .get("git_sha")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .map(|value| value.chars().take(12).collect::<String>());
+    let dirty = metadata
+        .get("dirty")
+        .and_then(|value| value.as_bool())
+        .map(|value| if value { " dirty" } else { " clean" })
+        .unwrap_or("");
+
+    match (branch, sha) {
+        (Some(branch), Some(sha)) => format!("{branch}@{sha}{dirty}"),
+        (Some(branch), None) => format!("{branch}{dirty}"),
+        (None, Some(sha)) => format!("{sha}{dirty}"),
+        (None, None) => format!("unknown ref{dirty}"),
+    }
 }
 
 fn stale_runner_homeboy_error(
@@ -2748,6 +2818,30 @@ mod tests {
             metadata["upgrade_command"],
             "homeboy upgrade --force --upgrade-runner 'homeboy lab'"
         );
+    }
+
+    #[test]
+    fn source_checkout_ref_display_includes_branch_sha_and_dirty_state() {
+        let metadata = serde_json::json!({
+            "git_branch": "fix/lab-source-ref-preflight",
+            "git_sha": "1234567890abcdef",
+            "dirty": true,
+        });
+
+        assert_eq!(
+            source_checkout_ref_display(&metadata),
+            "fix/lab-source-ref-preflight@1234567890ab dirty"
+        );
+    }
+
+    #[test]
+    fn source_checkout_ref_display_handles_missing_git_ref() {
+        let metadata = serde_json::json!({
+            "local_path": "/tmp/source",
+            "dirty": null,
+        });
+
+        assert_eq!(source_checkout_ref_display(&metadata), "unknown ref");
     }
 
     #[test]

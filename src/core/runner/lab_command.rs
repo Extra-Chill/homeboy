@@ -1,7 +1,5 @@
 use std::path::Path;
 
-use crate::core::component;
-
 use super::RunnerRequiredTool;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -11,15 +9,10 @@ pub(crate) struct LabOffloadCommandPrefix {
 }
 
 pub(crate) fn lab_offload_command_prefix(
-    source_path: &Path,
+    _source_path: &Path,
     homeboy_path: &str,
 ) -> LabOffloadCommandPrefix {
-    let configured_prefix = component::discover_from_portable(source_path)
-        .and_then(|component| component.lab)
-        .map(|lab| lab.self_command_prefix)
-        .filter(|prefix| !prefix.is_empty());
-
-    let argv = configured_prefix.unwrap_or_else(|| vec![homeboy_path.to_string()]);
+    let argv = vec![homeboy_path.to_string()];
     let required_tools = required_tools_for_command_prefix(&argv);
 
     LabOffloadCommandPrefix {
@@ -49,7 +42,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn configured_self_command_prefix_overrides_runner_homeboy_path() {
+    fn ignores_legacy_self_command_prefix() {
         let dir = tempfile::tempdir().expect("temp dir");
         std::fs::write(
             dir.path().join("homeboy.json"),
@@ -59,18 +52,8 @@ mod tests {
 
         let prefix = lab_offload_command_prefix(dir.path(), "/usr/local/bin/homeboy");
 
-        assert_eq!(
-            prefix.argv,
-            vec![
-                "cargo".to_string(),
-                "run".to_string(),
-                "--quiet".to_string(),
-                "--bin".to_string(),
-                "homeboy".to_string(),
-                "--".to_string(),
-            ]
-        );
-        assert_eq!(prefix.required_tools, vec![RunnerRequiredTool::Cargo]);
+        assert_eq!(prefix.argv, vec!["/usr/local/bin/homeboy".to_string()]);
+        assert_eq!(prefix.required_tools, vec![RunnerRequiredTool::Homeboy]);
     }
 
     #[test]
