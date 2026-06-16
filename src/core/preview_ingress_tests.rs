@@ -206,6 +206,9 @@ fn reverse_channel_client_serves_public_request() {
 fn reverse_channel_client_forwards_bootstrap_redirect_and_repeated_cookies() {
     test_support::with_isolated_home(|_| {
         let token = "test-preview-token";
+        let expected_status_line = "HTTP/1.1 302 Found";
+        let expected_location = "/wp-admin/";
+        let expected_cookie_count = 2;
         std::env::set_var(
             "HOMEBOY_TEST_PREVIEW_TOKEN_SHA256",
             native_preview_token_sha256(token),
@@ -278,7 +281,7 @@ fn reverse_channel_client_forwards_bootstrap_redirect_and_repeated_cookies() {
                     "request_id": request_id,
                     "status": 302,
                     "headers": [
-                        ["location", "/wp-admin/"],
+                        ["location", expected_location],
                         ["set-cookie", "reviewer_auth=fake; Path=/; HttpOnly"],
                         ["set-cookie", "wordpress_test_cookie=fake; Path=/"]
                     ],
@@ -290,12 +293,18 @@ fn reverse_channel_client_forwards_bootstrap_redirect_and_repeated_cookies() {
         assert!(respond.contains("200 OK"), "{respond}");
 
         let browser_response = browser.join().expect("browser response");
-        assert!(browser_response.contains("302 Found"), "{browser_response}");
         assert!(
-            browser_response.contains("location: /wp-admin/"),
+            browser_response.starts_with(expected_status_line),
             "{browser_response}"
         );
-        assert_eq!(browser_response.matches("set-cookie:").count(), 2);
+        assert_eq!(
+            response_header_values(&browser_response, "location"),
+            vec![expected_location.to_string()]
+        );
+        assert_eq!(
+            response_header_values(&browser_response, "set-cookie").len(),
+            expected_cookie_count
+        );
         assert!(
             browser_response.contains("content-length: 0"),
             "{browser_response}"
@@ -580,6 +589,9 @@ fn raw_http_request(port: u16, request: &str) -> String {
 
 fn raw_http_request_bytes(port: u16, request: &str) -> Vec<u8> {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("set read timeout");
     stream.write_all(request.as_bytes()).expect("write request");
     let mut response = Vec::new();
     stream.read_to_end(&mut response).expect("read response");
@@ -592,6 +604,18 @@ fn response_body_bytes(response: &[u8]) -> &[u8] {
         .position(|window| window == b"\r\n\r\n")
         .map(|index| &response[index + 4..])
         .expect("response body")
+}
+
+fn response_header_values(response: &str, header_name: &str) -> Vec<String> {
+    response
+        .split("\r\n\r\n")
+        .next()
+        .unwrap_or(response)
+        .lines()
+        .filter_map(|line| line.split_once(':'))
+        .filter(|(name, _)| name.eq_ignore_ascii_case(header_name))
+        .map(|(_, value)| value.trim().to_string())
+        .collect()
 }
 
 fn response_json(response: &str) -> serde_json::Value {
