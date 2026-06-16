@@ -970,7 +970,9 @@ try {
   });
   assert.equal(alternateDefaultedRequest.runtime_component_paths.agents_api, alternateBundledAgentsApiPath);
 
-  const configuredProviderPath = path.join(defaultsRoot, 'configured-provider');
+  const configuredProviderPath = path.join(defaultsRoot, 'ai-provider-for-openai');
+  fs.mkdirSync(path.join(configuredProviderPath, 'src', 'Codex'), { recursive: true });
+  fs.writeFileSync(path.join(configuredProviderPath, 'src', 'Codex', 'CodexProvider.php'), '<?php\n// Registers the codex provider.\n');
   const configuredLibraryPath = path.join(defaultsRoot, 'configured-library');
   const configuredRuntimeOverlays = [{
     kind: 'bundled-library',

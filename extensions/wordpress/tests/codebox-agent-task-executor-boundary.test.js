@@ -232,4 +232,32 @@ try {
 }
 assert.deepEqual(codexTaskInput.provider_plugin_paths, []);
 
+const codexProviderRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-codex-provider-'));
+const codexProviderPath = path.join(codexProviderRoot, 'ai-provider-for-openai');
+fs.mkdirSync(path.join(codexProviderPath, 'src', 'Codex'), { recursive: true });
+fs.writeFileSync(
+  path.join(codexProviderPath, 'src', 'Codex', 'CodexProvider.php'),
+  '<?php\n// Registers the codex provider.\n'
+);
+process.env.HOMEBOY_SETTINGS_JSON = JSON.stringify({
+  provider_plugin_paths: [codexProviderPath],
+});
+let configuredCodexTaskInput;
+try {
+  configuredCodexTaskInput = codeboxTaskRequestFromAgentTaskRequest({
+    schema: 'homeboy/agent-task-request/v1',
+    task_id: 'configured-codex-codebox-task-1',
+    executor: { backend: 'wordpress', config: { provider: 'codex' } },
+    instructions: 'Run a Codex-backed Codebox task with the configured provider checkout.',
+    inputs: {},
+  });
+} finally {
+  if (previousHomeboySettingsJson === undefined) {
+    delete process.env.HOMEBOY_SETTINGS_JSON;
+  } else {
+    process.env.HOMEBOY_SETTINGS_JSON = previousHomeboySettingsJson;
+  }
+}
+assert.deepEqual(configuredCodexTaskInput.provider_plugin_paths, [codexProviderPath]);
+
 console.log('Codebox agent-task executor boundary contract passed');

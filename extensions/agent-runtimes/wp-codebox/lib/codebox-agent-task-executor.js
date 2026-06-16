@@ -754,16 +754,25 @@ function defaultCodeboxRuntimeConfig(request, config, inputs, options = {}) {
 function defaultProviderPluginPaths(provider, settings, fallbackProviderPluginPath) {
   const explicitCodebox = normalizeArray(settings.wp_codebox_provider_plugin_paths);
   if (explicitCodebox.length > 0) {
-    return explicitCodebox;
-  }
-  if (provider === 'codex') {
-    return [];
+    return provider === 'codex'
+      ? explicitCodebox.filter(codexProviderPluginPathLooksUsable)
+      : explicitCodebox;
   }
   const explicit = normalizeArray(settings.provider_plugin_paths);
+  if (provider === 'codex') {
+    return explicit.filter(codexProviderPluginPathLooksUsable);
+  }
   if (explicit.length > 0) {
     return explicit;
   }
   return fallbackProviderPluginPath ? [fallbackProviderPluginPath] : [];
+}
+
+function codexProviderPluginPathLooksUsable(providerPath) {
+  if (!providerPath || !fs.existsSync(providerPath)) {
+    return false;
+  }
+  return fs.existsSync(path.join(providerPath, 'src', 'Codex', 'CodexProvider.php'));
 }
 
 function defaultRuntimeOverlayProfiles(settings) {
