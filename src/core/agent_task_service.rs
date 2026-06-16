@@ -16,9 +16,11 @@ use crate::core::agent_task_lifecycle::{
 use crate::core::agent_task_promotion::{
     promote, AgentTaskPromotionOptions, AgentTaskPromotionReport, AgentTaskPromotionStatus,
 };
+use crate::core::agent_task_provider::apply_provider_runner_secret_env_contracts;
 use crate::core::agent_task_scheduler::{
     AgentTaskAggregate, AgentTaskExecutorAdapter, AgentTaskPlan, AgentTaskScheduler, AgentTaskState,
 };
+use crate::core::agent_task_secrets::validate_secret_env;
 use crate::core::{config, Error, Result};
 
 #[derive(Debug, Clone)]
@@ -479,7 +481,7 @@ pub fn run_loaded_plan<E>(
 where
     E: AgentTaskExecutorAdapter,
 {
-    normalize_plan_workspaces(&mut plan)?;
+    prepare_plan_for_execution(&mut plan)?;
 
     if let Some(run_id) = record_run_id {
         agent_task_lifecycle::submit_plan(&plan, Some(run_id))?;
@@ -508,8 +510,10 @@ pub fn run_submitted<E>(
 where
     E: AgentTaskExecutorAdapter,
 {
+    let mut plan = agent_task_lifecycle::load_plan(&run_id)?;
+    prepare_plan_for_execution(&mut plan)?;
     agent_task_lifecycle::mark_running(&run_id)?;
-    run_claimed(run_id, executor)
+    run_prepared_claimed(run_id, plan, executor)
 }
 
 pub fn run_next<E>(executor: E) -> Result<AgentTaskRunResult<Option<AgentTaskAggregate>>>
@@ -581,12 +585,54 @@ fn run_claimed<E>(run_id: String, executor: E) -> Result<AgentTaskRunResult<Agen
 where
     E: AgentTaskExecutorAdapter,
 {
-    let plan = agent_task_lifecycle::load_plan(&run_id)?;
+    let mut plan = agent_task_lifecycle::load_plan(&run_id)?;
+    prepare_plan_for_execution(&mut plan)?;
+    run_prepared_claimed(run_id, plan, executor)
+}
+
+fn run_prepared_claimed<E>(
+    run_id: String,
+    plan: AgentTaskPlan,
+    executor: E,
+) -> Result<AgentTaskRunResult<AgentTaskAggregate>>
+where
+    E: AgentTaskExecutorAdapter,
+{
     let aggregate = run_plan_with_scheduler(plan.clone(), executor);
     agent_task_lifecycle::record_run_aggregate(&run_id, &plan, &aggregate)?;
     Ok(AgentTaskRunResult {
         exit_code: aggregate_exit_code(&aggregate),
         value: aggregate,
+    })
+}
+
+fn prepare_plan_for_execution(plan: &mut AgentTaskPlan) -> Result<()> {
+    normalize_plan_workspaces(plan)?;
+    apply_provider_runner_secret_env_contracts(plan);
+    preflight_plan_secret_env(plan)
+}
+
+fn preflight_plan_secret_env(plan: &AgentTaskPlan) -> Result<()> {
+    let mut names = Vec::new();
+    for task in &plan.tasks {
+        for name in &task.executor.secret_env {
+            if !names.contains(name) {
+                names.push(name.clone());
+            }
+        }
+    }
+
+    validate_secret_env(&names).map_err(|error| {
+        Error::validation_invalid_argument(
+            "secret_env",
+            error.message,
+            None,
+            Some(vec![
+                "Agent-task executor provider manifests can declare runner-required secret env contracts; Homeboy validates those contracts before task execution.".to_string(),
+                "For local execution, configure provider credentials with `homeboy agent-task auth map-env`, `set-keychain`, or `set-keychain-bundle`.".to_string(),
+                "For delegated runner execution, configure the selected runner's secret_env references so the runner receives these names without printing values.".to_string(),
+            ]),
+        )
     })
 }
 
