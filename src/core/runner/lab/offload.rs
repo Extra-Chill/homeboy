@@ -98,11 +98,18 @@ pub struct LabOffloadCommand {
     pub portable: bool,
     pub default_lab_offload: bool,
     pub unsupported_reason: Option<&'static str>,
+    pub source_path_mode: LabOffloadSourcePathMode,
     pub workspace_mode_policy: LabOffloadWorkspaceModePolicy,
     pub requires_extension_parity: bool,
     pub required_extensions: Vec<String>,
     pub requires_playwright: bool,
     pub infer_source_path_tools: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LabOffloadSourcePathMode {
+    CwdOrPathFlag,
+    RunnerResident,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2216,6 +2223,7 @@ mod tests {
             portable: true,
             default_lab_offload: true,
             unsupported_reason: None,
+            source_path_mode: LabOffloadSourcePathMode::CwdOrPathFlag,
             workspace_mode_policy: LabOffloadWorkspaceModePolicy::ChangedSinceGitElseSnapshot,
             requires_extension_parity: true,
             required_extensions: Vec::new(),
@@ -2230,6 +2238,7 @@ mod tests {
             portable: false,
             default_lab_offload: false,
             unsupported_reason: Some(reason),
+            source_path_mode: LabOffloadSourcePathMode::CwdOrPathFlag,
             workspace_mode_policy: LabOffloadWorkspaceModePolicy::ChangedSinceGitElseSnapshot,
             requires_extension_parity: false,
             required_extensions: Vec::new(),
