@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::core::agent_task_provider::AgentTaskExecutorProvider;
 use crate::core::extension::{load_all_extensions, ExtensionManifest};
@@ -33,27 +33,48 @@ pub fn discover_agent_runtime_manifests() -> Vec<AgentRuntimeManifest> {
 }
 
 fn discover_standalone_agent_runtime_manifests() -> Vec<AgentRuntimeManifest> {
-    let Ok(runtime_dir) = paths::agent_runtimes() else {
-        return Vec::new();
-    };
-    let Ok(entries) = std::fs::read_dir(runtime_dir) else {
-        return Vec::new();
-    };
-
-    let mut manifests: Vec<AgentRuntimeManifest> = entries
-        .flatten()
-        .filter_map(|entry| load_standalone_agent_runtime_manifest(&entry.path()))
-        .collect();
+    let mut manifests = Vec::new();
+    if let Ok(runtime_dir) = paths::agent_runtimes() {
+        manifests.extend(discover_standalone_agent_runtime_manifests_in(
+            runtime_dir,
+            paths::agent_runtime_manifest,
+        ));
+    }
+    if let Ok(runtime_dir) = paths::ai_runtimes() {
+        manifests.extend(discover_standalone_agent_runtime_manifests_in(
+            runtime_dir,
+            paths::ai_runtime_manifest,
+        ));
+    }
     manifests.sort_by(|a, b| a.id.cmp(&b.id));
     manifests
 }
 
-fn load_standalone_agent_runtime_manifest(path: &Path) -> Option<AgentRuntimeManifest> {
+fn discover_standalone_agent_runtime_manifests_in(
+    runtime_dir: PathBuf,
+    manifest_path_for: fn(&str) -> crate::core::Result<PathBuf>,
+) -> Vec<AgentRuntimeManifest> {
+    let Ok(entries) = std::fs::read_dir(runtime_dir) else {
+        return Vec::new();
+    };
+
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            load_standalone_agent_runtime_manifest(&entry.path(), manifest_path_for)
+        })
+        .collect()
+}
+
+fn load_standalone_agent_runtime_manifest(
+    path: &Path,
+    manifest_path_for: fn(&str) -> crate::core::Result<PathBuf>,
+) -> Option<AgentRuntimeManifest> {
     if !path.is_dir() {
         return None;
     }
     let id = path.file_name()?.to_string_lossy().to_string();
-    let manifest_path = paths::agent_runtime_manifest(&id).ok()?;
+    let manifest_path = manifest_path_for(&id).ok()?;
     if !manifest_path.exists() {
         return None;
     }
@@ -117,6 +138,7 @@ pub(crate) fn discover_agent_task_executor_providers() -> Vec<AgentTaskExecutorP
         for mut provider in runtime_manifest.agent_task_executors {
             provider.extension_id = runtime_manifest.extension_id.clone();
             provider.extension_path = runtime_manifest.extension_path.clone();
+            provider.runtime_id = Some(runtime_manifest.id.clone());
             provider.runtime_path = runtime_manifest.runtime_path.clone();
             providers.push(provider);
         }

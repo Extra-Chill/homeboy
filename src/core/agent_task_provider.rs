@@ -50,6 +50,8 @@ pub struct AgentTaskExecutorProvider {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extension_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_path: Option<String>,
 }
 
@@ -984,6 +986,18 @@ fn provider_command_env(
                 .or_else(|| provider.extension_path.clone())
                 .unwrap_or_default(),
         ),
+        (
+            "HOMEBOY_AI_RUNTIME_ID".to_string(),
+            provider.runtime_id.clone().unwrap_or_default(),
+        ),
+        (
+            "HOMEBOY_AI_RUNTIME_PATH".to_string(),
+            provider
+                .runtime_path
+                .clone()
+                .or_else(|| provider.extension_path.clone())
+                .unwrap_or_default(),
+        ),
     ];
     env.extend(resolve_secret_env(&request.executor.secret_env)?);
     Ok(env)
@@ -1059,6 +1073,7 @@ mod tests {
             role_aliases: AgentTaskProviderRoleAliases::default(),
             extension_id: None,
             extension_path: None,
+            runtime_id: None,
             runtime_path: None,
         };
         let request = AgentTaskRequest {
@@ -1472,6 +1487,72 @@ mod tests {
                 "EXPLICIT_SECRET".to_string(),
                 "PROVIDER_B_TOKEN".to_string()
             ]
+        );
+    }
+
+    #[test]
+    fn discovers_agent_task_providers_from_ai_runtime_manifests() {
+        crate::test_support::with_isolated_home(|home| {
+            let runtime_dir = home
+                .path()
+                .join(".config/homeboy/ai-runtimes/custom-runtime");
+            fs::create_dir_all(&runtime_dir).expect("runtime dir");
+            fs::write(
+                runtime_dir.join("custom-runtime.json"),
+                serde_json::to_string(&json!({
+                    "schema": agent_runtime_manifest::AGENT_RUNTIME_MANIFEST_SCHEMA,
+                    "id": "custom-runtime",
+                    "name": "Custom Runtime",
+                    "version": "1.0.0",
+                    "agent_task_executors": [{
+                        "schema": "homeboy/agent-task-executor-provider/v1",
+                        "id": "custom.runtime.executor",
+                        "backend": "custom",
+                        "command": "node {{runtime_path}}/runner.cjs",
+                        "request_schema": AGENT_TASK_REQUEST_SCHEMA,
+                        "outcome_schema": AGENT_TASK_OUTCOME_SCHEMA
+                    }]
+                }))
+                .unwrap(),
+            )
+            .expect("runtime manifest");
+
+            let providers = discover_agent_task_executor_providers();
+
+            assert_eq!(providers.len(), 1);
+            assert_eq!(providers[0].id, "custom.runtime.executor");
+            assert_eq!(providers[0].runtime_id.as_deref(), Some("custom-runtime"));
+            assert_eq!(
+                providers[0].runtime_path.as_deref(),
+                Some(runtime_dir.to_string_lossy().as_ref())
+            );
+            assert_eq!(
+                render_provider_command(&providers[0]),
+                format!("node {}/runner.cjs", runtime_dir.display())
+            );
+        });
+    }
+
+    #[test]
+    fn provider_command_env_includes_ai_runtime_identity() {
+        let (request, mut provider) =
+            request("task-a", "node {{runtime_path}}/provider.js".to_string());
+        provider.runtime_id = Some("custom-runtime".to_string());
+        provider.runtime_path = Some("/tmp/custom-runtime".to_string());
+
+        let env = provider_command_env(&request, &provider).expect("provider env");
+
+        assert!(env.contains(&(
+            "HOMEBOY_AI_RUNTIME_ID".to_string(),
+            "custom-runtime".to_string()
+        )));
+        assert!(env.contains(&(
+            "HOMEBOY_AI_RUNTIME_PATH".to_string(),
+            "/tmp/custom-runtime".to_string()
+        )));
+        assert_eq!(
+            render_provider_command(&provider),
+            "node /tmp/custom-runtime/provider.js"
         );
     }
 
