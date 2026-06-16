@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::constants::{CRATES_IO_API, GITHUB_RELEASES_API, VERSION};
-use super::execution::execute_upgrade;
+use super::execution::{execute_upgrade, resolve_source_workspace};
 use super::planning::resolve_binary_on_path;
 use super::runners;
 use super::types::*;
@@ -180,6 +180,8 @@ pub fn run_upgrade_with_method(
             defaults::secondary_install_method_key()
         )));
     }
+    let source_upgrade_path = source_upgrade_path_for_method(install_method, source_path)?;
+    let runner_method_override = runner_method_override_for_method(method_override, install_method);
 
     // Check if update is available (unless forcing)
     if !force {
@@ -196,8 +198,8 @@ pub fn run_upgrade_with_method(
             } else {
                 runners::upgrade_configured_runners(
                     force,
-                    method_override,
-                    source_path,
+                    runner_method_override,
+                    source_upgrade_path.as_deref(),
                     runner_targets,
                     &extensions_updated,
                 )?
@@ -224,7 +226,7 @@ pub fn run_upgrade_with_method(
     // Execute the upgrade
     let (success, new_version, new_build_identity) = execute_upgrade(
         install_method,
-        source_path,
+        source_upgrade_path.as_deref(),
         force,
         previous_build_identity.as_deref(),
     )?;
@@ -242,8 +244,8 @@ pub fn run_upgrade_with_method(
     let (runners_updated, runners_skipped) = if upgrade_completed && !skip_runners {
         runners::upgrade_configured_runners(
             force,
-            method_override,
-            source_path,
+            runner_method_override,
+            source_upgrade_path.as_deref(),
             runner_targets,
             &extensions_updated,
         )?
@@ -284,6 +286,25 @@ pub fn run_upgrade_with_method(
         runners_updated,
         runners_skipped,
     })
+}
+
+fn source_upgrade_path_for_method(
+    install_method: InstallMethod,
+    source_path: Option<&Path>,
+) -> Result<Option<PathBuf>> {
+    if install_method == InstallMethod::Source {
+        return resolve_source_workspace(source_path).map(Some);
+    }
+
+    Ok(source_path.map(Path::to_path_buf))
+}
+
+fn runner_method_override_for_method(
+    method_override: Option<InstallMethod>,
+    install_method: InstallMethod,
+) -> Option<InstallMethod> {
+    method_override
+        .or_else(|| (install_method == InstallMethod::Source).then_some(InstallMethod::Source))
 }
 
 pub(crate) fn should_sync_after_upgrade(new_version: Option<&str>) -> bool {
@@ -582,6 +603,50 @@ pub fn restart_with_new_binary() -> ! {
         err
     );
     std::process::exit(0);
+}
+
+#[cfg(test)]
+mod runner_source_upgrade_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn detected_source_install_forwards_source_method_to_runners() {
+        assert_eq!(
+            runner_method_override_for_method(None, InstallMethod::Source),
+            Some(InstallMethod::Source)
+        );
+        assert_eq!(
+            runner_method_override_for_method(None, InstallMethod::Secondary),
+            None
+        );
+        assert_eq!(
+            runner_method_override_for_method(Some(InstallMethod::Binary), InstallMethod::Source),
+            Some(InstallMethod::Binary)
+        );
+    }
+
+    #[test]
+    fn source_upgrade_path_resolves_explicit_checkout_for_runners() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("homeboy.json"), r#"{"id":"homeboy"}"#).unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            r#"[package]
+name = "homeboy"
+version = "0.0.0"
+"#,
+        )
+        .unwrap();
+        let nested = dir.path().join("target/debug");
+        std::fs::create_dir_all(&nested).unwrap();
+
+        let resolved = source_upgrade_path_for_method(InstallMethod::Source, Some(&nested))
+            .expect("source path")
+            .expect("resolved checkout");
+
+        assert_eq!(resolved, dir.path());
+    }
 }
 
 #[cfg(test)]
