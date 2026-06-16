@@ -37,6 +37,8 @@ pub struct AgentTaskExecutorProvider {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub runner_readiness: Vec<AgentTaskProviderRunnerReadiness>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runner_sources: Vec<AgentTaskProviderRunnerSource>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dependency_failure_patterns: Vec<AgentTaskProviderDependencyFailurePattern>,
     #[serde(
         default,
@@ -72,6 +74,40 @@ pub struct AgentTaskProviderEnvPathReadiness {
     pub env: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revision: Option<bool>,
+    /// Optional extension-declared canonical root (e.g. a managed source clone
+    /// kept under the runner's homeboy cache). When set, doctor WARNS if the
+    /// env-resolved path does not live under this canonical root, catching
+    /// stale / non-canonical checkout drift before it corrupts results.
+    ///
+    /// Core is runtime-agnostic: it does not know what the canonical path
+    /// represents (wp-codebox, a toolchain, etc.) — the value is supplied
+    /// entirely by the declaring extension.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canonical_path: Option<String>,
+}
+
+/// A named, extension-declared source checkout that homeboy keeps synced on the
+/// runner. Core treats this generically: it materializes/refreshes a git
+/// checkout to the intended ref/remote. It has no knowledge of what the source
+/// is (wp-codebox, a CLI, a toolchain) — extensions declare the path/remote/ref.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskProviderRunnerSource {
+    pub id: String,
+    pub label: String,
+    /// Absolute path (or `$HOME`/`~`-prefixed path) of the managed checkout on
+    /// the runner, e.g. a path under the runner's homeboy cache directory.
+    pub path: String,
+    /// Optional canonical remote URL the checkout must track. When set, homeboy
+    /// re-points `origin` if the checkout tracks a different remote (fixing the
+    /// "tracks wrong remote" drift), then fetches and fast-forwards.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_url: Option<String>,
+    /// Optional explicit ref (branch, tag, or sha) to check out and sync to.
+    /// When omitted, homeboy fast-forwards the current branch to its upstream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remediation: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -218,6 +254,13 @@ pub fn provider_runner_readiness_contracts() -> Vec<AgentTaskProviderRunnerReadi
     discover_agent_task_executor_providers()
         .into_iter()
         .flat_map(|provider| provider.runner_readiness)
+        .collect()
+}
+
+pub fn provider_runner_source_contracts() -> Vec<AgentTaskProviderRunnerSource> {
+    discover_agent_task_executor_providers()
+        .into_iter()
+        .flat_map(|provider| provider.runner_sources)
         .collect()
 }
 
@@ -1011,6 +1054,7 @@ mod tests {
             capabilities: vec!["structured_outcome".to_string()],
             workspace_materialization: None,
             runner_readiness: Vec::new(),
+            runner_sources: Vec::new(),
             dependency_failure_patterns: Vec::new(),
             role_aliases: AgentTaskProviderRoleAliases::default(),
             extension_id: None,

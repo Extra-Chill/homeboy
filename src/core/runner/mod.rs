@@ -28,6 +28,10 @@ mod lab_env;
 mod lab_plan;
 mod lab_selection;
 mod lab_workspaces;
+mod managed_source;
+pub use managed_source::{
+    plan_managed_runner_source_sync, plan_managed_runner_source_syncs, ManagedRunnerSourceSyncPlan,
+};
 mod offload_changed_since;
 mod offload_metadata;
 mod origin_refs;

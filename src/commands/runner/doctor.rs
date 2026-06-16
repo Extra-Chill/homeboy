@@ -4,7 +4,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use homeboy::core::agent_tasks::provider::AgentTaskProviderRunnerReadiness;
+use homeboy::core::agent_tasks::provider::{
+    AgentTaskProviderRunnerReadiness, AgentTaskProviderRunnerSource,
+};
 use homeboy::core::runners::{self as runner, Runner, RunnerKind, RunnerTunnelMode};
 use homeboy::core::server::{self, Server, SshClient};
 use serde::Serialize;
@@ -611,6 +613,10 @@ mod remote {
                 client,
                 &homeboy::core::agent_tasks::provider::provider_runner_readiness_contracts(),
             ));
+            checks.extend(probes::managed_runner_source_checks(
+                client,
+                &homeboy::core::agent_tasks::provider::provider_runner_source_contracts(),
+            ));
         }
 
         checks.extend(probes::connected_daemon_exec_checks(
@@ -1083,6 +1089,106 @@ mod probes {
             .collect()
     }
 
+    /// #3818: report the state of every extension-declared managed runner
+    /// source checkout. Surfaces a missing checkout (error) or a checkout that
+    /// tracks a different remote than the declared canonical remote (warning)
+    /// so operators see drift before a cook runs against a stale source.
+    pub fn managed_runner_source_checks(
+        client: &SshClient,
+        contracts: &[AgentTaskProviderRunnerSource],
+    ) -> Vec<RunnerCheck> {
+        contracts
+            .iter()
+            .map(|contract| managed_runner_source_check(client, contract))
+            .collect()
+    }
+
+    fn managed_runner_source_check(
+        client: &SshClient,
+        contract: &AgentTaskProviderRunnerSource,
+    ) -> RunnerCheck {
+        let id = format!("lab.managed_source.{}", contract.id);
+        let mut details = BTreeMap::new();
+        // Resolve the declared path through the runner shell so `~`/`$HOME`
+        // expand to the runner user's real home.
+        let resolved_path = common::remote_line(
+            client,
+            &format!("printf '%s\n' {}", common::shell_word(&contract.path)),
+        )
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| contract.path.clone());
+        details.insert("path".to_string(), resolved_path.clone());
+        if let Some(remote_url) = contract.remote_url.as_deref() {
+            details.insert("declared_remote".to_string(), remote_url.to_string());
+        }
+        if let Some(git_ref) = contract.git_ref.as_deref() {
+            details.insert("declared_ref".to_string(), git_ref.to_string());
+        }
+
+        let is_git = client
+            .execute(&format!(
+                "test -d {}/.git",
+                common::shell_word(&resolved_path)
+            ))
+            .success;
+        if !is_git {
+            return checks::error(
+                id,
+                format!(
+                    "Managed runner source `{}` is not present as a git checkout on the Lab runner",
+                    contract.label
+                ),
+                contract.remediation.clone(),
+                details,
+            );
+        }
+
+        let actual_remote = common::remote_line(
+            client,
+            &format!(
+                "git -C {} config --get remote.origin.url 2>/dev/null",
+                common::shell_word(&resolved_path)
+            ),
+        );
+        if let Some(actual_remote) = actual_remote.as_deref() {
+            details.insert("origin_remote".to_string(), actual_remote.to_string());
+        }
+        if let Some(head) = common::remote_line(
+            client,
+            &format!(
+                "git -C {} rev-parse --short HEAD 2>/dev/null",
+                common::shell_word(&resolved_path)
+            ),
+        ) {
+            details.insert("head".to_string(), head);
+        }
+
+        if let (Some(declared_remote), Some(actual_remote)) =
+            (contract.remote_url.as_deref(), actual_remote.as_deref())
+        {
+            if declared_remote != actual_remote {
+                return checks::warning_with_details(
+                    id,
+                    format!(
+                        "Managed runner source `{}` tracks a different remote than declared on the Lab runner",
+                        contract.label
+                    ),
+                    contract.remediation.clone(),
+                    details,
+                );
+            }
+        }
+
+        checks::ok_with_details(
+            id,
+            format!(
+                "Managed runner source `{}` is present on the Lab runner",
+                contract.label
+            ),
+            details,
+        )
+    }
+
     fn provider_readiness_check(
         client: &SshClient,
         contract: &AgentTaskProviderRunnerReadiness,
@@ -1103,7 +1209,7 @@ mod probes {
         .filter(|value| !value.trim().is_empty());
         let Some(path) = path else {
             return Some(provider_env_path_readiness_check_from_probe(
-                contract, None, false, None,
+                contract, None, false, None, None,
             ));
         };
 
@@ -1118,6 +1224,7 @@ mod probes {
                 contract,
                 Some(path),
                 false,
+                None,
                 None,
             ));
         }
@@ -1134,12 +1241,47 @@ mod probes {
             }
         }
 
+        // #4140: resolve the extension-declared canonical root on the runner
+        // (expanding `~`/`$HOME` etc. via the runner shell) so we can warn when
+        // the env-resolved tool path lives outside the managed checkout.
+        let resolved_canonical = env_path
+            .canonical_path
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .and_then(|canonical| {
+                common::remote_line(
+                    client,
+                    &format!("printf '%s\n' {}", common::shell_word(canonical)),
+                )
+                .filter(|value| !value.trim().is_empty())
+            });
+
         Some(provider_env_path_readiness_check_from_probe(
             contract,
             Some(path),
             true,
             details.get("revision").cloned(),
+            resolved_canonical,
         ))
+    }
+
+    /// Returns true when `path` is the canonical root itself or lives beneath
+    /// it. Comparison is path-segment aware so `/a/source` is not treated as a
+    /// child of `/a/sour`.
+    pub(super) fn path_within_canonical_root(path: &str, canonical_root: &str) -> bool {
+        let normalize = |value: &str| {
+            let trimmed = value.trim().trim_end_matches('/');
+            trimmed.to_string()
+        };
+        let path = normalize(path);
+        let root = normalize(canonical_root);
+        if root.is_empty() {
+            return true;
+        }
+        if path == root {
+            return true;
+        }
+        path.starts_with(&format!("{root}/"))
     }
 
     pub(super) fn provider_env_path_readiness_check_from_probe(
@@ -1147,6 +1289,7 @@ mod probes {
         path: Option<String>,
         exists: bool,
         revision: Option<String>,
+        canonical_path: Option<String>,
     ) -> RunnerCheck {
         let env = contract
             .env_path
@@ -1157,11 +1300,15 @@ mod probes {
         if !env.is_empty() {
             details.insert("env".to_string(), env);
         }
+        let resolved_path = path.clone();
         if let Some(path) = path {
             details.insert("path".to_string(), path);
         }
         if let Some(revision) = revision {
             details.insert("revision".to_string(), revision);
+        }
+        if let Some(canonical_path) = canonical_path.as_deref() {
+            details.insert("canonical_path".to_string(), canonical_path.to_string());
         }
 
         if !details.contains_key("path") {
@@ -1186,6 +1333,26 @@ mod probes {
                 contract.remediation.clone(),
                 details,
             );
+        }
+
+        // #4140: the path resolves to a real checkout, but if the declaring
+        // extension pinned a canonical managed root and the resolved path lives
+        // outside it, the runner is using a stale / non-canonical checkout that
+        // can corrupt results. Surface this as a warning before it does.
+        if let (Some(resolved_path), Some(canonical_root)) =
+            (resolved_path.as_deref(), canonical_path.as_deref())
+        {
+            if !path_within_canonical_root(resolved_path, canonical_root) {
+                return checks::warning_with_details(
+                    contract.id.clone(),
+                    format!(
+                        "{} resolves to a non-canonical checkout outside the managed source root on the Lab runner",
+                        contract.label
+                    ),
+                    contract.remediation.clone(),
+                    details,
+                );
+            }
         }
 
         checks::ok_with_details(

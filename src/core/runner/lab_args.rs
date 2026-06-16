@@ -34,10 +34,13 @@ pub(super) fn remap_provider_config_in_args(
     args: &[String],
     mappings: &[LabPathRemap],
 ) -> Vec<String> {
-    if mappings.is_empty() {
-        return args.to_vec();
-    }
-
+    // NOTE: do not early-return on empty mappings. A `--provider-config @file`
+    // (or `-` stdin) spec must always be inlined to JSON before offload, because
+    // the controller-local file path is meaningless on the remote runner and the
+    // remote dispatch would fail with "failed to read agent-task dispatch
+    // provider-config input: IO error". Path remapping is a no-op without
+    // mappings, but inlining still has to happen.
+    //
     // Longest local prefix first so nested paths remap against the most specific
     // workspace (e.g. a dependency under the primary checkout).
     let mut ordered: Vec<&LabPathRemap> = mappings.iter().collect();
@@ -402,9 +405,23 @@ fn remap_path_json_setting_pair(raw: &str, mappings: &[&LabPathRemap]) -> String
 }
 
 /// Resolve a provider-config spec (inline JSON / `@file` / `-`), remap its
-/// embedded local paths, and return inline JSON. Falls back to the original spec
-/// if it cannot be read or parsed so behavior is never worse than today.
+/// embedded local paths, and return inline JSON.
+///
+/// A `@file` or `-` (stdin) spec is ALWAYS inlined to JSON, even when there are
+/// no path mappings, because the controller-local path cannot be read by the
+/// remote runner. A plain inline-JSON spec is only rewritten when there are
+/// mappings to apply; otherwise it is returned verbatim so behavior is never
+/// worse than passing the original argument through.
+///
+/// If a `@file`/`-` spec cannot be read or parsed, the original spec is returned
+/// (the remote read will then surface the original, actionable error).
 fn remap_provider_config_spec(spec: &str, mappings: &[&LabPathRemap]) -> String {
+    let needs_inlining = is_provider_config_file_spec(spec);
+
+    if !needs_inlining && mappings.is_empty() {
+        return spec.to_string();
+    }
+
     let raw = match read_json_spec_to_string(spec) {
         Ok(raw) => raw,
         Err(_) => return spec.to_string(),
@@ -415,6 +432,14 @@ fn remap_provider_config_spec(spec: &str, mappings: &[&LabPathRemap]) -> String 
     };
     remap_paths_in_value(&mut value, mappings);
     serde_json::to_string(&value).unwrap_or_else(|_| spec.to_string())
+}
+
+/// A provider-config spec that points at a controller-local file (`@path`) or
+/// stdin (`-`). These must be inlined before offload so the remote runner never
+/// tries to read a path that only exists on the controller.
+fn is_provider_config_file_spec(spec: &str) -> bool {
+    let trimmed = spec.trim();
+    trimmed == "-" || trimmed.starts_with('@')
 }
 
 fn remap_paths_in_value(value: &mut Value, mappings: &[&LabPathRemap]) {
@@ -816,9 +841,101 @@ mod tests {
         assert!(val.contains("/remote/repo"));
         assert!(!val.contains("/local/repo"));
 
-        // No mappings -> untouched
+        // No mappings -> inline JSON spec untouched (nothing to remap, no @file).
         let unchanged = remap_provider_config_in_args(&args, &[]);
         assert_eq!(unchanged, args);
+    }
+
+    #[test]
+    fn remap_inlines_provider_config_at_file_without_mappings() {
+        // Regression for #3770: a `--provider-config @file` spec must be inlined
+        // to JSON before Lab offload even when there are no path mappings, so the
+        // remote runner never tries to read a controller-local path and fail with
+        // "failed to read agent-task dispatch provider-config input: IO error".
+        let temp = tempfile::tempdir().expect("tempdir");
+        let cfg = temp.path().join("cfg.json");
+        std::fs::write(&cfg, r#"{"model":"claude-opus-4-8","backend":"codebox"}"#)
+            .expect("write provider config");
+
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--provider-config".to_string(),
+            format!("@{}", cfg.display()),
+            "--prompt".to_string(),
+            "fix it".to_string(),
+        ];
+
+        // No mappings on purpose: inlining must still happen.
+        let out = remap_provider_config_in_args(&args, &[]);
+        let cfg_idx = out.iter().position(|a| a == "--provider-config").unwrap() + 1;
+        let spec = &out[cfg_idx];
+
+        // The @file reference must be gone; the value must be inline JSON.
+        assert!(
+            !spec.starts_with('@'),
+            "provider-config @file should be inlined, got: {spec}"
+        );
+        let inlined: serde_json::Value = serde_json::from_str(spec).expect("inline json");
+        assert_eq!(inlined["model"], "claude-opus-4-8");
+        assert_eq!(inlined["backend"], "codebox");
+        // Unrelated args preserved.
+        assert!(out.iter().any(|a| a == "--prompt"));
+        assert!(out.iter().any(|a| a == "fix it"));
+    }
+
+    #[test]
+    fn remap_inlines_and_rewrites_provider_config_at_file_with_mappings() {
+        // #3770: a `--provider-config @file` is inlined AND its controller-local
+        // paths are remapped to the synced remote workspace in one pass.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let cfg = temp.path().join("cfg.json");
+        std::fs::write(
+            &cfg,
+            r#"{"workspace_root":"/local/repo","model":"claude-opus-4-8"}"#,
+        )
+        .expect("write provider config");
+
+        let mappings = vec![LabPathRemap {
+            local: "/local/repo".to_string(),
+            remote: "/remote/repo".to_string(),
+        }];
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            format!("--provider-config=@{}", cfg.display()),
+        ];
+
+        let out = remap_provider_config_in_args(&args, &mappings);
+        let val = out
+            .iter()
+            .find(|a| a.starts_with("--provider-config="))
+            .unwrap();
+        let spec = val.strip_prefix("--provider-config=").unwrap();
+        assert!(
+            !spec.starts_with('@'),
+            "provider-config @file should be inlined, got: {spec}"
+        );
+        let inlined: serde_json::Value = serde_json::from_str(spec).expect("inline json");
+        assert_eq!(inlined["workspace_root"], "/remote/repo");
+        assert_eq!(inlined["model"], "claude-opus-4-8");
+    }
+
+    #[test]
+    fn remap_provider_config_inline_json_without_mappings_is_untouched() {
+        // Plain inline JSON (no @file, no mappings) must pass through verbatim so
+        // behavior is never worse than passing the original argument through.
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--provider-config".to_string(),
+            r#"{"model":"claude-opus-4-8"}"#.to_string(),
+        ];
+        let out = remap_provider_config_in_args(&args, &[]);
+        assert_eq!(out, args);
     }
 
     #[test]

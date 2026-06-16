@@ -4,13 +4,31 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
-## Unreleased
+## [0.235.0] - 2026-06-16
+
+### Added
+- generic managed runner-source primitive + drift doctor checks
+
+### Fixed
+- preflight Lab agent-task runner secrets
+- fix(agent-task): preserve controller dispatch workspace context
+- inline provider-config @file before offload and accept --runner on lab commands
+
+## [0.234.0] - 2026-06-16
+
+### Added
+- discover standalone agent runtimes
+
+### Added
+- generic, runtime-agnostic managed runner-source primitive that keeps an extension-declared git checkout synced on the Lab runner, plus a runner doctor check that warns when a managed source is missing, tracks the wrong remote, or resolves to a non-canonical checkout outside its declared root (#3818, #4140)
 
 ### Fixed
 - resolve rig component paths to the runner-side materialized checkout during Lab offload so remote `${components.<id>.path}` checks no longer fail against the controller path (#3766)
 - expand portable `~`/`~/...` rig dependency checkout roots to an absolute runner home path so the materialized remote path is never a literal `~` directory (#3767)
 - snapshot a dirty/untracked Lab rig dependency working tree as an explicit overlay under `--allow-dirty-lab-workspace` instead of refusing it, with dirty-vs-clean provenance recorded in workspace metadata (#3765)
 - surface declared-vs-resolved paths and actionable hints on remote rig check-file failures so unexpanded component-path tokens and unresolved `~` are diagnosable
+- materialize rig component paths on the runner for offload (#3766, #3767, #3765)
+- preserve job terminal status across daemon restarts
 
 ## [0.233.0] - 2026-06-16
 
