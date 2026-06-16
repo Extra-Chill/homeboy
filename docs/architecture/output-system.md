@@ -74,7 +74,14 @@ The `status` object surfaces what needs attention:
 ```
 
 Fields (all arrays/counts skip serialization when empty/zero):
-- `ready_to_deploy`: Components with no uncommitted changes and no commits since version
+- `ready_to_deploy`: Components in a clean release state — no uncommitted changes
+  and no commits since the last version tag. **Git/workspace state only**: it
+  means "has a release tag that *could* be deployed", NOT "the deploy target is
+  behind the latest release". For a target-accurate diff, run
+  `homeboy status <project>` and inspect the `outdated` components. See #4588.
+- `ready_to_deploy_note`: Present only when `ready_to_deploy` is non-empty.
+  A clarifying string warning that the list is git-state-only and pointing at
+  `homeboy status <project>` for the target-accurate deploy diff.
 - `needs_release`: Components with releasable code commits since the current version baseline
 - `has_uncommitted`: Components with uncommitted changes in working directory
 - `config_gaps`: Total count of configuration gaps across all components
