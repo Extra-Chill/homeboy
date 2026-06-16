@@ -18,6 +18,9 @@
     "trace.results": true,
     "annotations": false
   },
+  "agent_task": {
+    "default_backend": "codebox"
+  },
   "agent_runtimes": [
     {
       "id": "wp-codebox",
