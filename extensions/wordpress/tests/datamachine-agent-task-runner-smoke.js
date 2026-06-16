@@ -91,8 +91,9 @@ process.stdout.write(JSON.stringify({
       artifact_schema: 'example/smoke-report/v1',
       required: true,
     }],
-    wp_codebox_bin: binPath,
-    wp_codebox_components: {
+    runtime_bin: binPath,
+    runtime_components: {
+      runtime: path.join(runtime, 'wp-codebox'),
       agents_api: agentsApiPath,
       data_machine: dataMachinePath,
       data_machine_code: dataMachineCodePath,

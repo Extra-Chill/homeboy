@@ -10,6 +10,11 @@
   "bin": {
     "homeboy-codebox-agent-task-executor": "./scripts/agent/homeboy-codebox-agent-task-executor.cjs"
   },
+  "scripts": {
+    "test:codebox-agent-task-boundary": "node ../../wordpress/tests/codebox-agent-task-boundary-smoke.js",
+    "test:codebox-agent-task-executor-boundary": "node ../../wordpress/tests/codebox-agent-task-executor-boundary.test.js",
+    "test:codebox-agent-task-executor": "node ../../wordpress/tests/codebox-agent-task-executor-smoke.js"
+  },
   "engines": {
     "node": ">=18.12.0"
   }

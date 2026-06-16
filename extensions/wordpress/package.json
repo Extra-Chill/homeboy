@@ -26,8 +26,7 @@
     "./wp-codebox-visual-compare": "./lib/wp-codebox-visual-compare.js",
     "./webperf-evidence-summary": "./lib/webperf-evidence-summary.js",
     "./benchmark-matrix-report": "./lib/benchmark-matrix-report.js",
-    "./audit-wp-codebox-fanout": "./lib/audit-wp-codebox-fanout.js",
-    "./codebox-agent-task-executor": "./lib/codebox-agent-task-executor.js"
+    "./audit-wp-codebox-fanout": "./lib/audit-wp-codebox-fanout.js"
   },
   "scripts": {
     "lint:js": "eslint",

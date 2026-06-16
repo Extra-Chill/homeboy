@@ -63,21 +63,21 @@ function buildAgentTaskRequest(config, configPath) {
   const taskId = config.task_id || config.workload_id || config.flow_slug || 'datamachine-agent-ci';
   const timeoutMs = Number.parseInt(config.time_budget_ms || '', 10);
   const timeoutSeconds = Number.parseInt(config.task_timeout_seconds || config.taskTimeoutSeconds || '', 10);
-  const wpCodeboxComponents = optionalObject(config.wp_codebox_components);
+  const runtimeComponents = optionalObject(config.runtime_components);
   const runtimeComponentPaths = Object.fromEntries(Object.entries({
     ...optionalObject(config.runtime_component_paths),
-    agents_api: config.agents_api || config.agents_api_path || wpCodeboxComponents.agents_api,
-    agent_runtime: config.agent_runtime || config.agent_runtime_path || wpCodeboxComponents.data_machine,
-    agent_runtime_tools: config.agent_runtime_tools || config.agent_runtime_tools_path || wpCodeboxComponents.data_machine_code,
-    wp_codebox: wpCodeboxComponents.wp_codebox,
+    agents_api: config.agents_api || config.agents_api_path || runtimeComponents.agents_api,
+    agent_runtime: config.agent_runtime || config.agent_runtime_path || runtimeComponents.data_machine,
+    agent_runtime_tools: config.agent_runtime_tools || config.agent_runtime_tools_path || runtimeComponents.data_machine_code,
+    runtime: runtimeComponents.runtime,
   }).filter(([, value]) => nonEmpty(value)));
   const executorConfig = Object.fromEntries(Object.entries({
     ...config,
     execution_kind: config.execution_kind || 'agent_bundle',
-    agents_api: config.agents_api || config.agents_api_path || wpCodeboxComponents.agents_api,
+    agents_api: config.agents_api || config.agents_api_path || runtimeComponents.agents_api,
     runtime_component_paths: runtimeComponentPaths,
     homeboy_extensions: config.homeboy_extensions || config.homeboy_extensions_path || EXTENSION_PATH,
-    artifacts: config.wp_codebox_artifacts_dir || config.artifacts_path || config.artifacts,
+    artifacts: config.artifacts_path || config.artifacts,
     replay_bundle_dir: config.replay_bundle_dir || process.env.HOMEBOY_DATAMACHINE_AGENT_REPLAY_BUNDLE_DIR,
   }).filter(([, value]) => nonEmpty(value)));
 
