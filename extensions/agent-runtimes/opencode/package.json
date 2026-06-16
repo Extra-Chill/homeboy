@@ -1,0 +1,19 @@
+{
+  "name": "homeboy-agent-runtime-opencode",
+  "version": "1.0.0",
+  "private": true,
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./opencode-agent-task-executor": "./lib/opencode-agent-task-executor.js"
+  },
+  "bin": {
+    "homeboy-opencode-agent-task-executor": "./scripts/agent/homeboy-opencode-agent-task-executor.cjs"
+  },
+  "scripts": {
+    "test:opencode-agent-task-executor-boundary": "node ../../wordpress/tests/opencode-agent-task-executor-boundary.test.js"
+  },
+  "engines": {
+    "node": ">=18.12.0"
+  }
+}
