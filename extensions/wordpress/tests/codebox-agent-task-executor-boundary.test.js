@@ -28,6 +28,17 @@ assert.deepEqual(runtime.agent_task_executors[0], providerContract({
 }));
 assert.equal(provider.capabilities.includes('tool:wpsg_materialize_packet'), false);
 assert.equal(provider.capabilities.includes('ability:wpsg_materialize_packet'), false);
+assert.deepEqual(provider.provider_defaults.openai.secret_env, ['OPENAI_API_KEY']);
+assert.deepEqual(provider.provider_defaults.codex.secret_env, [
+  'AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN',
+  'AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN',
+  'AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT',
+  'AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID',
+  'AI_PROVIDER_OPENAI_CODEX_FEDRAMP',
+]);
+assert.deepEqual(provider.provider_defaults['claude-code'].secret_env, [
+  'AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN',
+]);
 
 const taskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',
@@ -231,5 +242,21 @@ try {
   }
 }
 assert.deepEqual(codexTaskInput.provider_plugin_paths, []);
+assert.deepEqual(codexTaskInput.secret_env, provider.provider_defaults.codex.secret_env);
+
+const claudeCodeTaskInput = codeboxTaskRequestFromAgentTaskRequest({
+  schema: 'homeboy/agent-task-request/v1',
+  task_id: 'claude-code-codebox-task-1',
+  executor: {
+    backend: 'wordpress',
+    config: {
+      provider: 'claude-code',
+      model: 'opus-4.7',
+    },
+  },
+  instructions: 'Run a Claude Code backed Codebox task.',
+  inputs: {},
+});
+assert.deepEqual(claudeCodeTaskInput.secret_env, provider.provider_defaults['claude-code'].secret_env);
 
 console.log('Codebox agent-task executor boundary contract passed');

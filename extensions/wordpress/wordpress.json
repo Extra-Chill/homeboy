@@ -83,6 +83,23 @@
       "workspace_materialization": {
         "cwd": "git_checkout"
       },
+      "provider_defaults": {
+        "openai": {
+          "secret_env": ["OPENAI_API_KEY"]
+        },
+        "codex": {
+          "secret_env": [
+            "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN",
+            "AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN",
+            "AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT",
+            "AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID",
+            "AI_PROVIDER_OPENAI_CODEX_FEDRAMP"
+          ]
+        },
+        "claude-code": {
+          "secret_env": ["AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN"]
+        }
+      },
       "role_aliases": {
         "artifact_kinds": {
           "patch": ["codebox-patch"]
