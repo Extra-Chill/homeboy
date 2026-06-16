@@ -273,7 +273,7 @@ pub(crate) fn resolve_cloned_extension(
         let content = local_files::local().read(&manifest_in_subdir)?;
         let _manifest: ExtensionManifest = from_str(&content)?;
 
-        install_shared_scripts_from_root(temp_dir, extension_dir)?;
+        install_shared_assets_from_root(temp_dir, extension_dir)?;
 
         // Move just the subdirectory to the final extension location.
         rename_dir(&subdir, extension_dir)?;
@@ -311,39 +311,43 @@ pub(crate) fn resolve_cloned_extension(
     )))
 }
 
-fn install_shared_scripts_from_root(source_root: &Path, extension_dir: &Path) -> Result<()> {
-    let shared_scripts = source_root.join("scripts");
-    if !shared_scripts.is_dir() {
-        return Ok(());
-    }
-
+fn install_shared_assets_from_root(source_root: &Path, extension_dir: &Path) -> Result<()> {
     let Some(extensions_dir) = extension_dir.parent() else {
         return Ok(());
     };
 
-    let target = extensions_dir.join("scripts");
-    if target.exists() {
-        std::fs::remove_dir_all(&target).map_err(|e| {
-            Error::internal_io(
-                e.to_string(),
-                Some("replace shared extension scripts".to_string()),
-            )
-        })?;
+    for shared_dir in ["scripts", "agent-runtimes"] {
+        let source = source_root.join(shared_dir);
+        if !source.is_dir() {
+            continue;
+        }
+
+        let target = extensions_dir.join(shared_dir);
+        if target.exists() {
+            std::fs::remove_dir_all(&target).map_err(|e| {
+                Error::internal_io(
+                    e.to_string(),
+                    Some(format!("replace shared extension {shared_dir}")),
+                )
+            })?;
+        }
+        copy_dir_recursive(&source, &target)?;
     }
-    copy_dir_recursive(&shared_scripts, &target)
+
+    Ok(())
 }
 
-fn install_linked_shared_scripts(
+pub(crate) fn install_linked_shared_assets(
     source: &Path,
     extension_dir: &Path,
     source_root: Option<&Path>,
 ) -> Result<()> {
     if let Some(source_root) = source_root {
-        return install_shared_scripts_from_root(source_root, extension_dir);
+        return install_shared_assets_from_root(source_root, extension_dir);
     }
 
     if let Some(parent) = source.parent() {
-        install_shared_scripts_from_root(parent, extension_dir)?;
+        install_shared_assets_from_root(parent, extension_dir)?;
     }
     Ok(())
 }
@@ -474,7 +478,7 @@ fn install_from_path(
 
     local_files::ensure_app_dirs()?;
 
-    install_linked_shared_scripts(&source, &extension_dir, source_root)?;
+    install_linked_shared_assets(&source, &extension_dir, source_root)?;
 
     // Create symlink
     #[cfg(unix)]
@@ -700,6 +704,7 @@ fn update_linked_extension(
             result?;
         }
     };
+    install_linked_shared_assets(&source_dir, extension_dir, None)?;
     run_setup_if_configured(extension_id);
     let url = format!("linked:{}", source_dir.display());
     let new_branch = git::current_branch(&git_root);
@@ -898,6 +903,15 @@ mod tests {
             ),
         )
         .expect("component config");
+    }
+
+    fn write_shared_runtime_fixture(root: &Path) {
+        let runtime_script = root.join(
+            "agent-runtimes/wp-codebox/scripts/agent/homeboy-codebox-agent-task-executor.cjs",
+        );
+        fs::create_dir_all(runtime_script.parent().expect("runtime script parent"))
+            .expect("runtime script dir");
+        fs::write(&runtime_script, "console.log('wp-codebox runtime');\n").expect("runtime script");
     }
 
     fn run_git(dir: &Path, args: &[&str]) -> bool {
@@ -1209,6 +1223,62 @@ exec '{}' "$@"
     }
 
     #[test]
+    fn cloned_monorepo_install_materializes_shared_agent_runtimes() {
+        with_isolated_home(|home| {
+            let home = home.path();
+            let source = home.join("source-repo");
+            fs::create_dir_all(&source).expect("source repo");
+            write_extension_fixture(&source, "wordpress");
+            write_shared_runtime_fixture(&source);
+            let remote = match prepare_git_repo(&source) {
+                Some(remote) => remote,
+                None => return,
+            };
+            let remote_url = remote.path().join("extension.git");
+
+            install(&remote_url.to_string_lossy(), Some("wordpress"))
+                .expect("install cloned extension");
+
+            assert!(home
+                .join(".config/homeboy/extensions/wordpress/wordpress.json")
+                .exists());
+            assert!(home
+                .join(".config/homeboy/extensions/agent-runtimes/wp-codebox/scripts/agent/homeboy-codebox-agent-task-executor.cjs")
+                .exists());
+        });
+    }
+
+    #[test]
+    fn extracted_monorepo_update_materializes_shared_agent_runtimes() {
+        with_isolated_home(|home| {
+            let home = home.path();
+            let source = home.join("source-repo");
+            fs::create_dir_all(&source).expect("source repo");
+            let remote = match prepare_git_extension_repo(&source, "wordpress") {
+                Some(remote) => remote,
+                None => return,
+            };
+            let remote_url = remote.path().join("extension.git");
+
+            install(&remote_url.to_string_lossy(), Some("wordpress"))
+                .expect("install cloned extension");
+            assert!(!home
+                .join(".config/homeboy/extensions/agent-runtimes/wp-codebox/scripts/agent/homeboy-codebox-agent-task-executor.cjs")
+                .exists());
+
+            write_shared_runtime_fixture(&source);
+            assert!(commit_all(&source, "add runtime package"));
+            assert!(run_git(&source, &["push", "origin", "HEAD"]));
+
+            update("wordpress", false).expect("update cloned extension");
+
+            assert!(home
+                .join(".config/homeboy/extensions/agent-runtimes/wp-codebox/scripts/agent/homeboy-codebox-agent-task-executor.cjs")
+                .exists());
+        });
+    }
+
+    #[test]
     fn linked_monorepo_install_materializes_shared_scripts() {
         with_isolated_home(|home| {
             let home = home.path();
@@ -1235,6 +1305,30 @@ exec '{}' "$@"
                 .exists());
             assert!(home
                 .join(".config/homeboy/extensions/scripts/lib/test-result-adapters.sh")
+                .exists());
+        });
+    }
+
+    #[test]
+    fn linked_monorepo_install_materializes_shared_agent_runtimes() {
+        with_isolated_home(|home| {
+            let home = home.path();
+            let source = home.join("source-repo");
+            fs::create_dir_all(&source).expect("source repo");
+            write_extension_fixture(&source, "wordpress");
+            write_shared_runtime_fixture(&source);
+
+            install(
+                &source.join("wordpress").to_string_lossy(),
+                Some("wordpress"),
+            )
+            .expect("install linked extension");
+
+            assert!(home
+                .join(".config/homeboy/extensions/wordpress/wordpress.json")
+                .exists());
+            assert!(home
+                .join(".config/homeboy/extensions/agent-runtimes/wp-codebox/scripts/agent/homeboy-codebox-agent-task-executor.cjs")
                 .exists());
         });
     }
