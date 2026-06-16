@@ -8,6 +8,11 @@ Agent runtimes live under `agent-runtimes/`. The WP Codebox runtime is exposed a
 `agent-runtimes/wp-codebox`, while the WordPress extension also carries the
 runtime payload needed by its installed provider command.
 
+Generic runtime package requirements are documented in
+[`docs/agent-runtime-package-contract.md`](docs/agent-runtime-package-contract.md).
+Use the `agent-runtimes/fake-runtime` fixture as the minimal contract example;
+WP Codebox is a concrete backend, not the generic template.
+
 ## Available Extensions
 
 | Extension | Description |
