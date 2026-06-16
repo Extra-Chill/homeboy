@@ -68,6 +68,7 @@
     "test:wp-codebox-phpunit-recipe-builder": "node tests/wp-codebox-phpunit-recipe-builder-smoke.js",
     "test:build-package-artifacts": "bash scripts/build/build-package-artifacts-smoke.sh",
     "test:codebox-agent-task-boundary": "node tests/codebox-agent-task-boundary-smoke.js",
+    "test:agent-runtime-command-path": "node tests/agent-runtime-command-path-smoke.js",
     "test:codebox-agent-task-executor-boundary": "node tests/codebox-agent-task-executor-boundary.test.js",
     "test:codebox-agent-task-executor": "node tests/codebox-agent-task-executor-smoke.js",
     "test:codebox-agent-task-matrix": "node tests/codebox-agent-task-matrix-smoke.js",
