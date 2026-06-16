@@ -810,7 +810,13 @@ pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
 pub fn list_records() -> Result<Vec<AgentTaskRunRecord>> {
     let mut records = Vec::new();
     for record in store::read_records()? {
-        records.push(status(&record.run_id)?);
+        match status(&record.run_id) {
+            Ok(record) => records.push(record),
+            Err(error) => eprintln!(
+                "Warning: skipping malformed agent-task run status for {}: {}",
+                record.run_id, error.message
+            ),
+        }
     }
     records.sort_by(|left, right| {
         right
@@ -2105,6 +2111,61 @@ mod tests {
 
             assert!(error.message.contains("running under pid"));
             assert!(error.message.contains("provider live cancellation"));
+        });
+    }
+
+    #[test]
+    fn status_accepts_legacy_totals_without_skipped() {
+        with_isolated_home(|_| {
+            let plan = test_plan();
+            let record = submit_plan(&plan, Some("legacy-run")).expect("submitted");
+            let status_path = paths::homeboy_data()
+                .expect("homeboy data")
+                .join("agent-task-runs")
+                .join(&record.run_id)
+                .join("status.json");
+            let mut raw = serde_json::to_value(&record).expect("record json");
+            raw["totals"] = json!({
+                "queued": 1,
+                "running": 0,
+                "blocked": 0,
+                "succeeded": 0,
+                "failed": 0,
+                "cancelled": 0,
+                "timed_out": 0
+            });
+            std::fs::write(
+                &status_path,
+                format!(
+                    "{}\n",
+                    serde_json::to_string_pretty(&raw).expect("pretty json")
+                ),
+            )
+            .expect("write legacy status");
+
+            let loaded = status("legacy-run").expect("legacy status loaded");
+
+            assert_eq!(loaded.totals.expect("totals").skipped, 0);
+        });
+    }
+
+    #[test]
+    fn list_records_skips_malformed_status_files() {
+        with_isolated_home(|_| {
+            let plan = test_plan();
+            submit_plan(&plan, Some("good-run")).expect("submitted");
+            let bad_dir = paths::homeboy_data()
+                .expect("homeboy data")
+                .join("agent-task-runs")
+                .join("bad-run");
+            std::fs::create_dir_all(&bad_dir).expect("create bad run dir");
+            std::fs::write(bad_dir.join("status.json"), "{ definitely not json\n")
+                .expect("write bad status");
+
+            let records = list_records().expect("records listed");
+
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].run_id, "good-run");
         });
     }
 

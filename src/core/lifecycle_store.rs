@@ -73,7 +73,14 @@ pub(super) fn read_records() -> Result<Vec<AgentTaskRunRecord>> {
         if !path.exists() {
             continue;
         }
-        records.push(read_json(&path)?);
+        match read_json(&path) {
+            Ok(record) => records.push(record),
+            Err(error) => eprintln!(
+                "Warning: skipping malformed agent-task run status {}: {}",
+                path.display(),
+                error.message
+            ),
+        }
     }
 
     Ok(records)
