@@ -1560,7 +1560,7 @@ fn find_failed_status_value(value: &Value, path: &str) -> Option<NestedFailedExe
         Value::Object(object) => {
             for (key, child) in object {
                 let child_path = format!("{path}.{key}");
-                if is_status_key(key) {
+                if is_terminal_status_key(key) {
                     if let Some(raw) = child.as_str().map(str::trim).filter(|raw| !raw.is_empty()) {
                         if status_value_is_failed(raw) {
                             return Some(NestedFailedExecutorStatus {
@@ -1585,8 +1585,24 @@ fn find_failed_status_value(value: &Value, path: &str) -> Option<NestedFailedExe
     }
 }
 
-fn is_status_key(key: &str) -> bool {
-    key.eq_ignore_ascii_case("status") || key.to_ascii_lowercase().ends_with("_status")
+/// Recognizes keys that carry a nested executor's terminal status/state.
+///
+/// Matches the `status`/`*_status` family (e.g. `status`, `job_status`,
+/// `completion_status`) and the `state`/`*_state` family (e.g. `state`,
+/// `terminal_state`, `run_state`) so that a failed bundle reported through
+/// either family of typed-output fields propagates as a task failure. A nested
+/// executor may report its terminal failure only through a `terminal_state`
+/// field (e.g. `wait_result.terminal_state = "failed - ..."`); without
+/// recognizing `*_state` keys, a wrapper outcome of `Succeeded` would mask that
+/// failure. Whether a matched key's value is actually a failure is decided
+/// separately by [`status_value_is_failed`], so non-failure values such as
+/// `completed`, `succeeded`, or `partial` never trip this on their own.
+fn is_terminal_status_key(key: &str) -> bool {
+    let normalized = key.to_ascii_lowercase();
+    normalized == "status"
+        || normalized == "state"
+        || normalized.ends_with("_status")
+        || normalized.ends_with("_state")
 }
 
 fn status_value_is_failed(value: &str) -> bool {
@@ -1848,6 +1864,95 @@ mod tests {
         assert_eq!(
             aggregate.outcomes[0].diagnostics[0].data["path"],
             json!("outputs.provider_run_result.job_status")
+        );
+    }
+
+    #[test]
+    fn nested_terminal_state_failure_fails_succeeded_wrapper_outcome() {
+        let scheduler = AgentTaskScheduler::new(NestedTerminalStateFailedExecutor);
+
+        let aggregate = scheduler.run(plan_with_tasks(1));
+
+        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Failed);
+        assert_eq!(aggregate.totals.failed, 1);
+        assert_eq!(aggregate.totals.succeeded, 0);
+        assert_eq!(aggregate.outcomes[0].status, AgentTaskOutcomeStatus::Failed);
+        assert_eq!(
+            aggregate.outcomes[0].failure_classification,
+            Some(AgentTaskFailureClassification::ExecutionFailed)
+        );
+        assert_eq!(
+            aggregate.outcomes[0].diagnostics[0].class,
+            "agent_task.nested_executor_failed_status"
+        );
+        assert_eq!(
+            aggregate.outcomes[0].diagnostics[0].data["path"],
+            json!("outputs.provider_run_result.wait_result.terminal_state")
+        );
+        assert_eq!(
+            aggregate.outcomes[0].diagnostics[0].data["key"],
+            json!("terminal_state")
+        );
+        assert_eq!(
+            aggregate.outcomes[0].diagnostics[0].data["value"],
+            json!("failed - completion_required_tool_unavailable")
+        );
+    }
+
+    #[test]
+    fn nested_terminal_status_detection_is_terminal_status_key_contract() {
+        // Status family keys.
+        assert!(is_terminal_status_key("status"));
+        assert!(is_terminal_status_key("job_status"));
+        assert!(is_terminal_status_key("completion_status"));
+        assert!(is_terminal_status_key("STATUS"));
+        // State family keys (regression for #4683: terminal_state).
+        assert!(is_terminal_status_key("state"));
+        assert!(is_terminal_status_key("terminal_state"));
+        assert!(is_terminal_status_key("run_state"));
+        assert!(is_terminal_status_key("Terminal_State"));
+        // Non-status-bearing keys are ignored.
+        assert!(!is_terminal_status_key("message"));
+        assert!(!is_terminal_status_key("estate"));
+        assert!(!is_terminal_status_key("status_code"));
+    }
+
+    #[test]
+    fn nested_terminal_status_detection_only_flags_failure_values() {
+        // A terminal_state that is not a failure value does not trip detection.
+        let succeeded_state = AgentTaskOutcome {
+            outputs: json!({
+                "provider_run_result": {
+                    "wait_result": { "terminal_state": "succeeded" },
+                    "completion_status": "complete"
+                }
+            }),
+            ..outcome("task-1".to_string(), AgentTaskOutcomeStatus::Succeeded)
+        };
+        assert!(nested_failed_executor_status(&succeeded_state).is_none());
+
+        // A failed terminal_state nested under wait_result is detected and
+        // reported with its full dotted path.
+        let failed_state = AgentTaskOutcome {
+            outputs: json!({
+                "provider_run_result": {
+                    "completion_status": "partial",
+                    "wait_result": {
+                        "terminal_state": "failed - completion_required_tool_unavailable"
+                    }
+                }
+            }),
+            ..outcome("task-1".to_string(), AgentTaskOutcomeStatus::Succeeded)
+        };
+        let detected = nested_failed_executor_status(&failed_state).expect("detect failed state");
+        assert_eq!(detected.key, "terminal_state");
+        assert_eq!(
+            detected.path,
+            "outputs.provider_run_result.wait_result.terminal_state"
+        );
+        assert_eq!(
+            detected.value,
+            "failed - completion_required_tool_unavailable"
         );
     }
 
@@ -2964,6 +3069,8 @@ mod tests {
 
     struct NestedFailedStatusExecutor;
 
+    struct NestedTerminalStateFailedExecutor;
+
     impl AgentTaskExecutorAdapter for RetryOnceExecutor {
         fn execute(
             &self,
@@ -3029,6 +3136,25 @@ mod tests {
                 "provider_run_result": {
                     "job_status": "failed - completion_required_tool_unavailable",
                     "completion_status": "partial"
+                }
+            });
+            outcome
+        }
+    }
+
+    impl AgentTaskExecutorAdapter for NestedTerminalStateFailedExecutor {
+        fn execute(
+            &self,
+            request: AgentTaskRequest,
+            _context: AgentTaskExecutionContext,
+        ) -> AgentTaskOutcome {
+            let mut outcome = outcome(request.task_id, AgentTaskOutcomeStatus::Succeeded);
+            outcome.outputs = json!({
+                "provider_run_result": {
+                    "completion_status": "partial",
+                    "wait_result": {
+                        "terminal_state": "failed - completion_required_tool_unavailable"
+                    }
                 }
             });
             outcome
