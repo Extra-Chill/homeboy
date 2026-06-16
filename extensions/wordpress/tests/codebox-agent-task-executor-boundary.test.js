@@ -55,6 +55,7 @@ const taskInput = codeboxTaskRequestFromAgentTaskRequest({
 
 assert.equal(taskInput.schema, 'wp-codebox/task-input/v1');
 assert.equal(taskInput.parent_request.executor.backend, 'wordpress');
+assert.equal(Object.hasOwn(taskInput, 'agent'), false);
 assert.deepEqual(taskInput.runtime_task, {
   ability: 'wordpress/site-health',
   input: { include_debug: false },
@@ -209,6 +210,19 @@ const legacyTaskInput = codeboxTaskRequestFromAgentTaskRequest({
 });
 
 assert.equal(legacyTaskInput.schema, 'wp-codebox/task-input/v1');
+
+const explicitAgentTaskInput = codeboxTaskRequestFromAgentTaskRequest({
+  schema: 'homeboy/agent-task-request/v1',
+  task_id: 'explicit-agent-codebox-task-1',
+  executor: {
+    backend: 'codebox',
+    config: { provider: 'openai', agent: 'custom-sandbox-agent' },
+  },
+  instructions: 'Run with an explicitly selected sandbox agent.',
+  inputs: {},
+});
+
+assert.equal(explicitAgentTaskInput.agent, 'custom-sandbox-agent');
 
 const previousHomeboySettingsJson = process.env.HOMEBOY_SETTINGS_JSON;
 process.env.HOMEBOY_SETTINGS_JSON = JSON.stringify({

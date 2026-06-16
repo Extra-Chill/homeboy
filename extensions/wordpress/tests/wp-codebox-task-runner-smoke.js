@@ -268,6 +268,7 @@ try {
   assert.equal(captured.input.schema, 'wp-codebox/task-input/v1');
   assert.equal(captured.input.version, 1);
   assert.equal(captured.input.goal, 'Fix the finding.');
+  assert.equal(Object.hasOwn(captured.input, 'agent'), false);
   assert.equal(captured.input.sandbox_tool_policy.schema, 'wp-codebox/sandbox-tool-policy/v1');
   assert.equal(captured.input.sandbox_tool_policy.version, 1);
   assert.equal(captured.input.sandbox_tool_policy.tools[0].id, 'homeboy/no-runtime-tools');
@@ -330,6 +331,21 @@ try {
   assert.equal(nestedOnlyInput.component_contracts.find((contract) => contract.slug === 'nested-only-domain-component').path, '/workspace/nested-only-domain-component');
   assert.equal(nestedOnlyInput.component_contracts.find((contract) => contract.slug === 'nested-only-domain-component').activate, true);
   assert.equal(nestedOnlyInput.component_contracts.filter((contract) => contract.slug === 'nested-only-domain-component').length, 1);
+
+  const explicitAgentCapturePath = path.join(root, 'capture-explicit-agent.json');
+  const explicitAgentResult = spawnSync(process.execPath, [
+    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-wp-codebox-task-runner.cjs'),
+    '--wp-codebox-bin', fixtureWpCodebox,
+  ], {
+    encoding: 'utf8',
+    input: JSON.stringify({
+      ...request,
+      agent: 'custom-sandbox-agent',
+    }),
+    env: { ...process.env, FIXTURE_WP_CODEBOX_CAPTURE: explicitAgentCapturePath, OPENCODE_API_KEY: 'redacted-test-key' },
+  });
+  assert.equal(explicitAgentResult.status, 0, explicitAgentResult.stderr || explicitAgentResult.stdout);
+  assert.equal(readJson(explicitAgentCapturePath).input.agent, 'custom-sandbox-agent');
 
   // Verification gate flows through to the agent-task-run input so WP Codebox
   // can emit it as a recipe workflow.after step and fail the run if it is red.
