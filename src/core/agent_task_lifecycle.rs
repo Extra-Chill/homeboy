@@ -133,6 +133,8 @@ pub struct AgentTaskArtifactRef {
     pub uri: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1095,6 +1097,7 @@ fn artifact_refs_for_outcomes(outcomes: &[AgentTaskOutcome]) -> Vec<AgentTaskArt
                         kind: artifact.kind.clone(),
                         uri,
                         label: artifact.name.clone(),
+                        size_bytes: artifact.size_bytes,
                     })
             });
             let evidence_refs = outcome
@@ -1107,6 +1110,7 @@ fn artifact_refs_for_outcomes(outcomes: &[AgentTaskOutcome]) -> Vec<AgentTaskArt
                     kind: evidence.kind.clone(),
                     uri: evidence.uri.clone(),
                     label: evidence.label.clone(),
+                    size_bytes: None,
                 });
             artifact_refs.chain(evidence_refs).collect::<Vec<_>>()
         })

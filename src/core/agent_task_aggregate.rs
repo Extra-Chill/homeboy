@@ -86,6 +86,8 @@ pub struct AgentTaskArtifactInventoryItem {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sha256: Option<String>,
 }
 
@@ -383,6 +385,7 @@ fn inventory_item(task_id: &str, artifact: &AgentTaskArtifact) -> AgentTaskArtif
         name: artifact.name.clone(),
         path: artifact.path.clone(),
         url: artifact.url.clone(),
+        size_bytes: artifact.size_bytes,
         sha256: artifact.sha256.clone(),
     }
 }
