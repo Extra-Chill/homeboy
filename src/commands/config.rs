@@ -323,15 +323,15 @@ mod tests {
 
     #[test]
     fn config_set_string_mode_stores_literal_string() {
-        let value = parse_config_set_value("/settings/wp_codebox_provider", "codex", true)
+        let value = parse_config_set_value("/settings/provider", "example", true)
             .expect("literal string value");
 
-        assert_eq!(value, Value::String("codex".to_string()));
+        assert_eq!(value, Value::String("example".to_string()));
     }
 
     #[test]
     fn config_set_unquoted_string_error_includes_string_hints() {
-        let err = parse_config_set_value("/settings/wp_codebox_provider", "codex", false)
+        let err = parse_config_set_value("/settings/provider", "example", false)
             .expect_err("bare string should not parse as JSON");
 
         let hints = err
@@ -341,7 +341,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
 
-        assert!(hints.contains("'\"codex\"'"));
+        assert!(hints.contains("'\"example\"'"));
         assert!(hints.contains("--string"));
     }
 

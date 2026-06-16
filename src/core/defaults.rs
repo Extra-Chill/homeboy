@@ -377,6 +377,7 @@ pub fn builtin_defaults() -> Defaults {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::with_isolated_home;
 
     #[test]
     fn homeboy_config_parses_triage_priority_labels() {
@@ -431,25 +432,54 @@ mod tests {
     }
 
     #[test]
-    fn homeboy_config_preserves_extension_settings() {
+    fn homeboy_config_preserves_global_settings() {
         let config: HomeboyConfig = serde_json::from_str(
             r#"{
                 "settings": {
-                    "wp_codebox_provider": "codex",
-                    "provider_plugin_paths": ["/providers/openai"]
+                    "provider": "example",
+                    "provider_plugin_paths": ["/providers/openai"],
+                    "runtime_overlays": [{"repo":"owner/runtime","ref":"main"}]
                 }
             }"#,
         )
         .unwrap();
 
         assert_eq!(
-            config.settings.get("wp_codebox_provider"),
-            Some(&Value::String("codex".to_string()))
+            config.settings.get("provider"),
+            Some(&Value::String("example".to_string()))
         );
         assert_eq!(
             config.settings["provider_plugin_paths"][0],
             Value::String("/providers/openai".to_string())
         );
+        assert_eq!(config.settings["runtime_overlays"][0]["repo"], "owner/runtime");
+    }
+
+    #[test]
+    fn homeboy_config_save_load_preserves_global_settings() {
+        with_isolated_home(|_| {
+            save_config(&HomeboyConfig {
+                settings: HashMap::from([
+                    ("provider".to_string(), serde_json::json!("example")),
+                    (
+                        "provider_plugin_paths".to_string(),
+                        serde_json::json!(["/providers/openai"]),
+                    ),
+                    (
+                        "runtime_overlays".to_string(),
+                        serde_json::json!([{ "repo": "owner/runtime", "ref": "main" }]),
+                    ),
+                ]),
+                ..HomeboyConfig::default()
+            })
+            .expect("save config");
+
+            let loaded = load_config();
+
+            assert_eq!(loaded.settings["provider"], "example");
+            assert_eq!(loaded.settings["provider_plugin_paths"][0], "/providers/openai");
+            assert_eq!(loaded.settings["runtime_overlays"][0]["ref"], "main");
+        });
     }
 
     #[test]
