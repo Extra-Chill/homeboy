@@ -35,6 +35,10 @@ pub(crate) struct RunnerGitDependencyMaterializationOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub required_subpath: Option<String>,
     pub used_pinned_ref: bool,
+    /// True when the snapshot includes dirty tracked and/or untracked working
+    /// tree changes (explicit `--allow-dirty-lab-workspace` overlay) rather than
+    /// a clean checkout at HEAD. Makes bench artifact provenance explicit.
+    pub dirty_overlay: bool,
     pub sync_mode: RunnerWorkspaceSyncMode,
     pub files: usize,
     pub bytes: u64,
@@ -47,6 +51,10 @@ pub(crate) struct RunnerGitDependencyMaterializationOptions {
     pub remote_url: Option<String>,
     pub required_subpath: Option<String>,
     pub pinned_ref: Option<String>,
+    /// When true, a dirty/untracked working tree is snapshotted as-is (overlay)
+    /// instead of being refused. The snapshot already tars the working tree, so
+    /// the dirty overlay travels to the runner. Defaults to false (clean-HEAD).
+    pub allow_dirty: bool,
 }
 
 pub(crate) fn materialize_git_dependency(
@@ -74,7 +82,12 @@ pub(crate) fn materialize_git_dependency(
         Some(remote_url) if !remote_url.trim().is_empty() => remote_url,
         _ => git_output(&local_path, &["config", "--get", "remote.origin.url"]).unwrap_or_default(),
     };
-    let freshness = ensure_git_dependency_fresh(&local_path, options.pinned_ref.as_deref())?;
+    let freshness = ensure_git_dependency_fresh(
+        &local_path,
+        options.pinned_ref.as_deref(),
+        options.allow_dirty,
+    )?;
+    let dirty_overlay = freshness.status == DependencyUpdateStatus::DirtyOverlayAllowed;
     let mut excludes = DEFAULT_EXCLUDES
         .iter()
         .map(|value| value.to_string())
@@ -103,6 +116,7 @@ pub(crate) fn materialize_git_dependency(
         pinned_ref: freshness.pinned_ref,
         required_subpath: options.required_subpath,
         used_pinned_ref: freshness.used_pinned_ref,
+        dirty_overlay,
         sync_mode: RunnerWorkspaceSyncMode::Snapshot,
         files: stats.files,
         bytes: stats.bytes,
@@ -113,6 +127,7 @@ pub(crate) fn materialize_git_dependency(
 enum DependencyUpdateStatus {
     NotGit,
     DirtyNotUpdated,
+    DirtyOverlayAllowed,
     NoUpstream,
     DetachedUnpinned,
     UpToDate,
@@ -128,6 +143,7 @@ impl DependencyUpdateStatus {
         match self {
             Self::NotGit => "snapshotted",
             Self::DirtyNotUpdated => "dirty_not_updated",
+            Self::DirtyOverlayAllowed => "snapshotted_dirty_overlay",
             Self::NoUpstream => "no_upstream",
             Self::DetachedUnpinned => "detached_unpinned",
             Self::UpToDate => "snapshotted_up_to_date",
@@ -166,6 +182,7 @@ struct DependencyFreshness {
 fn ensure_git_dependency_fresh(
     local_path: &Path,
     pinned_ref: Option<&str>,
+    allow_dirty: bool,
 ) -> Result<DependencyFreshness> {
     if !local_path.join(".git").exists() {
         return Ok(DependencyFreshness {
@@ -247,6 +264,23 @@ fn ensure_git_dependency_fresh(
     let upstream_head = git_output(local_path, &["rev-parse", "@{u}"]).ok();
     let status = git_output(local_path, &["status", "--porcelain=v1"])?;
     if !status.trim().is_empty() {
+        // A dirty working tree (tracked changes and/or untracked files) is
+        // refused by default so bench results are reproducible from clean git.
+        // With an explicit override the dirty working tree is snapshotted as an
+        // overlay: `materialize_snapshot` tars the working directory, so the
+        // dirty files travel to the runner verbatim.
+        if allow_dirty {
+            return Ok(DependencyFreshness {
+                status: DependencyUpdateStatus::DirtyOverlayAllowed,
+                branch,
+                before_sha: Some(before.clone()),
+                after_sha: Some(before),
+                upstream_sha: upstream_head,
+                upstream: Some(upstream),
+                pinned_ref: None,
+                used_pinned_ref: false,
+            });
+        }
         let freshness = DependencyFreshness {
             status: DependencyUpdateStatus::DirtyNotUpdated,
             branch,
@@ -334,6 +368,14 @@ fn terminal_dependency_error(
         "Update, rebase, or clean the dependency checkout before rerunning the Lab proof.".to_string(),
         "Use an explicit pinned ref in the rig/component dependency only when the stale checkout is intentional.".to_string(),
     ];
+    if freshness.status == DependencyUpdateStatus::DirtyNotUpdated {
+        hints.push(
+            "Pass --allow-dirty-lab-workspace to snapshot the dirty working tree (tracked changes and untracked files) as an explicit overlay.".to_string(),
+        );
+        hints.push(
+            "Or make the dirty checkout the primary bench workspace with --path so its working tree is snapshotted directly instead of as a clean git-only rig dependency.".to_string(),
+        );
+    }
     if let Some(error) = &source_error {
         hints.push(format!("Fetch failure: {}", error.message));
     }
@@ -407,7 +449,8 @@ mod tests {
         fixture.push();
         let expected = fixture.head();
 
-        let freshness = ensure_git_dependency_fresh(checkout.path(), None).expect("auto update");
+        let freshness =
+            ensure_git_dependency_fresh(checkout.path(), None, false).expect("auto update");
 
         assert_eq!(freshness.status, DependencyUpdateStatus::FastForwarded);
         assert_ne!(before, expected);
@@ -432,7 +475,8 @@ mod tests {
         fixture.commit_file("next.txt", "next");
         fixture.push();
 
-        let err = ensure_git_dependency_fresh(checkout.path(), None).expect_err("dirty fails");
+        let err =
+            ensure_git_dependency_fresh(checkout.path(), None, false).expect_err("dirty fails");
 
         assert!(err.message.contains("dirty_not_updated"));
         assert_eq!(git_output(checkout.path(), &["rev-parse", "HEAD"]), before);
@@ -448,7 +492,8 @@ mod tests {
         let head = git_output(checkout.path(), &["rev-parse", "HEAD"]);
         run_git(checkout.path(), &["checkout", "--detach", &head]);
 
-        let err = ensure_git_dependency_fresh(checkout.path(), None).expect_err("detached fails");
+        let err =
+            ensure_git_dependency_fresh(checkout.path(), None, false).expect_err("detached fails");
 
         assert!(err.message.contains("detached_unpinned"));
         assert_eq!(git_output(checkout.path(), &["rev-parse", "HEAD"]), head);
@@ -467,7 +512,8 @@ mod tests {
         run_git(repo.path(), &["add", "initial.txt"]);
         run_git(repo.path(), &["commit", "-m", "initial"]);
 
-        let err = ensure_git_dependency_fresh(repo.path(), None).expect_err("no upstream fails");
+        let err =
+            ensure_git_dependency_fresh(repo.path(), None, false).expect_err("no upstream fails");
 
         assert!(err.message.contains("no_upstream"));
     }
@@ -482,7 +528,8 @@ mod tests {
         let head = git_output(checkout.path(), &["rev-parse", "HEAD"]);
         run_git(checkout.path(), &["checkout", "--detach", &head]);
 
-        let freshness = ensure_git_dependency_fresh(checkout.path(), Some(&head)).expect("pinned");
+        let freshness =
+            ensure_git_dependency_fresh(checkout.path(), Some(&head), false).expect("pinned");
 
         assert_eq!(freshness.status, DependencyUpdateStatus::PinnedRef);
         assert!(freshness.used_pinned_ref);
@@ -509,7 +556,7 @@ mod tests {
         );
 
         let freshness =
-            ensure_git_dependency_fresh(checkout.path(), None).expect("cached fallback");
+            ensure_git_dependency_fresh(checkout.path(), None, false).expect("cached fallback");
 
         assert_eq!(
             freshness.status,
@@ -544,7 +591,8 @@ mod tests {
             ],
         );
 
-        let err = ensure_git_dependency_fresh(checkout.path(), None).expect_err("fetch fails");
+        let err =
+            ensure_git_dependency_fresh(checkout.path(), None, false).expect_err("fetch fails");
 
         assert_ne!(before, upstream);
         assert!(err.message.contains("fetch_failed_cached"));

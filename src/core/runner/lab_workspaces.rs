@@ -119,6 +119,12 @@ pub(super) fn workspace_mapping_entry_for_git_dependency(
             "status": dependency.status.as_str(),
             "pinned_ref": dependency.pinned_ref.as_deref(),
             "used_pinned_ref": dependency.used_pinned_ref,
+            "dirty_overlay": dependency.dirty_overlay,
+            "source_provenance": if dependency.dirty_overlay {
+                "dirty_snapshot"
+            } else {
+                "clean_git"
+            },
         })),
     }
 }
@@ -1405,6 +1411,7 @@ mod provider_config_candidate_paths_tests {
             pinned_ref: None,
             required_subpath: Some("packages/component".to_string()),
             used_pinned_ref: false,
+            dirty_overlay: false,
             sync_mode: RunnerWorkspaceSyncMode::Snapshot,
             files: 7,
             bytes: 42,

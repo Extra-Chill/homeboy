@@ -107,6 +107,15 @@ fn resolve_token(rig: &RigSpec, token: &str) -> Option<String> {
             return None;
         }
         let component = rig.components.get(id)?;
+        // A caller may pin a component to an effective filesystem path via a
+        // generic per-component override env var. Lab offload uses this to point
+        // `${components.<id>.path}` at the runner-side materialized checkout
+        // instead of the controller path the rig spec declares. This is generic:
+        // it works for any rig/component and is a no-op when the override is
+        // unset, so local checks keep their declared-path behavior.
+        if let Some(override_path) = component_path_override_from_env(&rig.id, id) {
+            return Some(override_path);
+        }
         let expanded = expand::expand_with_tilde(&component.path, |token| match token {
             "package.root" => resolve_token(rig, token),
             token if token.starts_with("env.") => resolve_token(rig, token),
@@ -118,6 +127,49 @@ fn resolve_token(rig: &RigSpec, token: &str) -> Option<String> {
         return Some(std::env::var(name).unwrap_or_default());
     }
     None
+}
+
+/// Read a per-component effective-path override from the environment.
+///
+/// The override env var name is derived generically from the rig and component
+/// ids (see [`rig_component_path_override_env_name`]). When present and
+/// non-empty, it pins `${components.<id>.path}` to that filesystem path. Tilde
+/// is expanded against the local home of the process reading it (the runner,
+/// when the check executes on the runner), so a portable value still resolves.
+fn component_path_override_from_env(rig_id: &str, component_id: &str) -> Option<String> {
+    let name = rig_component_path_override_env_name(rig_id, component_id);
+    let value = std::env::var(name).ok()?;
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(expand::expand_with_tilde(trimmed, |_| None))
+}
+
+/// Build the generic override env var name for a rig component's effective path.
+///
+/// Non-alphanumeric characters in the rig/component ids are normalized to `_`
+/// and uppercased so the name is a valid shell identifier. Example:
+/// rig `studio-web`, component `studio` -> `HOMEBOY_RIG_COMPONENT_PATH__STUDIO_WEB__STUDIO`.
+pub fn rig_component_path_override_env_name(rig_id: &str, component_id: &str) -> String {
+    format!(
+        "HOMEBOY_RIG_COMPONENT_PATH__{}__{}",
+        sanitize_env_segment(rig_id),
+        sanitize_env_segment(component_id),
+    )
+}
+
+fn sanitize_env_segment(value: &str) -> String {
+    value
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]

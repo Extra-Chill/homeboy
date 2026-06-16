@@ -137,9 +137,9 @@ fn file_check(rig: &RigSpec, path: &str, contains: Option<&str>) -> Result<()> {
     if !p.exists() {
         return Err(Error::validation_invalid_argument(
             "check.file",
-            format!("File does not exist: {}", resolved),
-            None,
-            None,
+            file_check_missing_message("File does not exist", path, &resolved),
+            Some(resolved.clone()),
+            file_check_path_hints(path, &resolved),
         ));
     }
 
@@ -167,6 +167,39 @@ fn file_check(rig: &RigSpec, path: &str, contains: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// Build a check-file failure message that surfaces both the declared path
+/// (e.g. `${components.<id>.path}/...`) and the resolved filesystem path, so a
+/// remote rig check failure is diagnosable without guessing how it expanded.
+fn file_check_missing_message(prefix: &str, declared: &str, resolved: &str) -> String {
+    if declared == resolved {
+        format!("{prefix}: {resolved}")
+    } else {
+        format!("{prefix}: {resolved} (declared: {declared})")
+    }
+}
+
+/// Hints for a missing check-file, calling out unexpanded component-path tokens
+/// or a literal `~` that did not resolve against the runner home.
+fn file_check_path_hints(declared: &str, resolved: &str) -> Option<Vec<String>> {
+    let mut hints = Vec::new();
+    if declared != resolved {
+        hints.push(format!(
+            "Declared path `{declared}` resolved to `{resolved}`."
+        ));
+    }
+    if resolved.contains("${components.") {
+        hints.push(
+            "An unresolved `${components.<id>.path}` token means the rig component is not declared or not materialized; ensure the component is part of the rig and synced to the runner.".to_string(),
+        );
+    }
+    if resolved.contains("/~/") || resolved.starts_with("~/") || resolved == "~" {
+        hints.push(
+            "A literal `~` in the resolved path did not expand to a home directory; declare an absolute path or rely on Lab offload runner-path resolution.".to_string(),
+        );
+    }
+    (!hints.is_empty()).then_some(hints)
+}
+
 fn any_file_exists_check(rig: &RigSpec, paths: &[String]) -> Result<()> {
     let resolved = paths
         .iter()
@@ -177,9 +210,24 @@ fn any_file_exists_check(rig: &RigSpec, paths: &[String]) -> Result<()> {
         return Ok(());
     }
 
+    let declared_vs_resolved = paths
+        .iter()
+        .zip(resolved.iter())
+        .map(|(declared, resolved)| {
+            if declared == resolved {
+                resolved.clone()
+            } else {
+                format!("{resolved} (declared: {declared})")
+            }
+        })
+        .collect::<Vec<_>>();
+
     Err(Error::validation_invalid_argument(
         "check.any_file_exists",
-        format!("None of the candidate files exist: {}", resolved.join(", ")),
+        format!(
+            "None of the candidate files exist: {}",
+            declared_vs_resolved.join(", ")
+        ),
         None,
         None,
     ))
