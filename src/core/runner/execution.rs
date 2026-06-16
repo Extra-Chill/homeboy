@@ -399,7 +399,9 @@ fn exec_via_reverse_broker(
             ));
         }
         std::thread::sleep(Duration::from_millis(200));
-        job = fetch_daemon_job(&client, broker_url, &job.id.to_string())?;
+        let job_id = job.id.to_string();
+        job = fetch_daemon_job_resilient(&client, broker_url, &job_id)
+            .map_err(|err| daemon_job_context_error(&runner.id, &job_id, err))?;
     }
     let events = redact_runner_job_events(
         &fetch_daemon_events(&client, broker_url, &job.id.to_string())?,
@@ -496,21 +498,20 @@ fn exec_via_daemon(
             "require_paths": require_paths.clone(),
         }))
         .send()
-        .map_err(|err| {
-            Error::internal_unexpected(format!("submit runner daemon exec job: {err}"))
-        })?;
+        .map_err(|err| daemon_exec_transport_error(&runner.id, err))?;
     let status_code = response.status().as_u16();
     let envelope: DaemonEnvelope = response.json().map_err(|err| {
-        Error::internal_json(
-            err.to_string(),
-            Some("parse daemon exec response".to_string()),
-        )
+        // A stale/restarting daemon can answer the tunnel with a non-JSON or
+        // empty body. Surface a clear, actionable error instead of a bare parse
+        // failure so the caller knows to reconnect (#3631, #3624).
+        daemon_exec_stale_response_error(&runner.id, status_code, &err.to_string())
     })?;
     if status_code >= 400 || !envelope.success {
-        return Err(Error::internal_unexpected(format!(
-            "daemon exec request failed: {}",
-            daemon_failure_message(status_code, &envelope)
-        )));
+        return Err(daemon_exec_request_failed_error(
+            &runner.id,
+            status_code,
+            &envelope,
+        ));
     }
 
     let data = envelope
@@ -545,7 +546,7 @@ fn exec_via_daemon(
         }
         std::thread::sleep(Duration::from_millis(200));
         let job_id = job.id.to_string();
-        job = fetch_daemon_job(&client, local_url, &job_id)
+        job = fetch_daemon_job_resilient(&client, local_url, &job_id)
             .map_err(|err| daemon_job_context_error(&runner.id, &job_id, err))?;
     }
     let job_id = job.id.to_string();
@@ -634,6 +635,42 @@ fn fetch_daemon_job(client: &Client, local_url: &str, job_id: &str) -> Result<Jo
     let body = canonical_daemon_body(&data, "daemon job response")?;
     serde_json::from_value(body["job"].clone())
         .map_err(|err| Error::internal_json(err.to_string(), Some("parse daemon job".to_string())))
+}
+
+/// Grace window during which a transient daemon polling failure (connection
+/// refused while the daemon restarts, a stale tunnel returning `null`, etc.) is
+/// retried instead of aborting the wait. A daemon-managed exec job persists its
+/// status across restarts, so a brief reconnection gap should not cost the
+/// caller the real terminal result of in-flight work (#4770, #3631, #3624).
+const DAEMON_POLL_TRANSIENT_GRACE: Duration = Duration::from_secs(30);
+const DAEMON_POLL_RETRY_BACKOFF: Duration = Duration::from_millis(500);
+
+/// Poll a daemon job, tolerating transient failures within the grace window.
+///
+/// The job store is durable across daemon restarts, so a connection error or a
+/// `null` envelope during the restart window is recoverable: the daemon comes
+/// back and serves the persisted (and possibly already-terminal) job. Only after
+/// the grace window elapses without a successful read do we surface the error,
+/// and we annotate it so the caller knows the remote job may still be in flight
+/// rather than reporting a misleading hard failure.
+fn fetch_daemon_job_resilient(client: &Client, local_url: &str, job_id: &str) -> Result<Job> {
+    let transient_deadline = Instant::now() + DAEMON_POLL_TRANSIENT_GRACE;
+    loop {
+        match fetch_daemon_job(client, local_url, job_id) {
+            Ok(job) => return Ok(job),
+            Err(err) => {
+                if Instant::now() >= transient_deadline {
+                    let mut surfaced = err;
+                    surfaced.retryable = surfaced.retryable.or(Some(true));
+                    return Err(surfaced.with_hint(format!(
+                        "Lost contact with the runner daemon while polling job `{job_id}` for longer than {}s; the remote job may still be in flight. Reconnect with `homeboy runner connect <runner-id>` and inspect `homeboy runner job logs <runner-id> {job_id}`.",
+                        DAEMON_POLL_TRANSIENT_GRACE.as_secs()
+                    )));
+                }
+                std::thread::sleep(DAEMON_POLL_RETRY_BACKOFF);
+            }
+        }
+    }
 }
 
 fn fetch_daemon_events(client: &Client, local_url: &str, job_id: &str) -> Result<Vec<JobEvent>> {
@@ -1668,24 +1705,76 @@ fn homeboy_error_from_envelope(value: &Value) -> Option<Value> {
     Some(json!({ "message": error }))
 }
 
-fn daemon_failure_message(status_code: u16, envelope: &DaemonEnvelope) -> String {
+/// Returns the structured failure detail for a daemon exec response, or `None`
+/// when the daemon answered without any usable error/data payload (the classic
+/// stale-or-restarting daemon signature behind the historical
+/// `daemon exec request failed: null` symptom in #3631 / #3624).
+fn daemon_failure_payload_message(envelope: &DaemonEnvelope) -> Option<String> {
     let payload = envelope
         .error
         .as_ref()
         .or(envelope.data.as_ref())
-        .filter(|value| !value.is_null());
-    let Some(payload) = payload else {
-        return format!("HTTP {status_code} without error payload");
-    };
+        .filter(|value| !value.is_null())?;
 
     let code = payload.get("error").and_then(Value::as_str);
     let message = payload.get("message").and_then(Value::as_str);
-    match (code, message) {
+    Some(match (code, message) {
         (Some(code), Some(message)) => format!("{code}: {message}"),
         (Some(code), None) => code.to_string(),
         (None, Some(message)) => message.to_string(),
         (None, None) => payload.to_string(),
+    })
+}
+
+/// Build the controller-facing error for a daemon exec submission that came back
+/// with a failure envelope. When the daemon returned no usable error payload we
+/// treat it as a stale/restarting daemon and surface reconnect guidance instead
+/// of the historical opaque `null` (#3631, #3624).
+fn daemon_exec_request_failed_error(
+    runner_id: &str,
+    status_code: u16,
+    envelope: &DaemonEnvelope,
+) -> Error {
+    match daemon_failure_payload_message(envelope) {
+        Some(detail) => Error::internal_unexpected(format!(
+            "daemon exec request failed: {detail}"
+        ))
+        .with_hint(format!(
+            "Runner `{runner_id}` daemon rejected the exec request (HTTP {status_code})."
+        )),
+        None => Error::internal_unexpected(format!(
+            "runner `{runner_id}` daemon returned no result for the exec request (HTTP {status_code} with an empty error payload); the daemon is likely stale or was restarted"
+        ))
+        .with_hint(format!(
+            "Reconnect the runner with `homeboy runner disconnect {runner_id} && homeboy runner connect {runner_id}`, then retry. If it persists, kill any stale daemon with `homeboy runner doctor {runner_id}`."
+        ))
+        .with_hint(
+            "A daemon that reports SSH-healthy can still serve a stale process; reconnecting rebinds the tunnel to the live daemon.".to_string(),
+        ),
     }
+}
+
+/// The exec POST itself failed at the transport layer (connection refused /
+/// reset while the daemon restarts, tunnel torn down, etc.). Surface a clear
+/// reconnect path rather than a bare reqwest error string (#3631, #3624).
+fn daemon_exec_transport_error(runner_id: &str, err: reqwest::Error) -> Error {
+    Error::internal_unexpected(format!(
+        "could not reach runner `{runner_id}` daemon to submit the exec request: {err}"
+    ))
+    .with_hint(format!(
+        "The daemon tunnel may be stale or the daemon may have restarted. Reconnect with `homeboy runner disconnect {runner_id} && homeboy runner connect {runner_id}` and retry."
+    ))
+}
+
+/// The exec response body could not be parsed as a daemon envelope — typically a
+/// stale daemon answering with an empty or non-JSON body (#3631, #3624).
+fn daemon_exec_stale_response_error(runner_id: &str, status_code: u16, parse_err: &str) -> Error {
+    Error::internal_unexpected(format!(
+        "runner `{runner_id}` daemon returned an unreadable exec response (HTTP {status_code}): {parse_err}; the daemon is likely stale or was restarted mid-request"
+    ))
+    .with_hint(format!(
+        "Reconnect with `homeboy runner disconnect {runner_id} && homeboy runner connect {runner_id}` and retry; if a stale daemon PID lingers, run `homeboy runner doctor {runner_id}`."
+    ))
 }
 
 #[cfg(test)]
@@ -3114,5 +3203,91 @@ mod tests {
         assert!(err.message.contains("validation.invalid_argument"));
         assert!(err.message.contains("runner exec requires an absolute cwd"));
         assert!(!err.message.contains(": null"));
+    }
+
+    #[test]
+    fn daemon_exec_request_failed_error_surfaces_payload_detail() {
+        let envelope = DaemonEnvelope {
+            success: false,
+            data: Some(serde_json::json!({
+                "error": "validation.invalid_argument",
+                "message": "bad cwd"
+            })),
+            error: None,
+        };
+        let err = daemon_exec_request_failed_error("lab", 400, &envelope);
+        assert!(err.message.contains("daemon exec request failed"));
+        assert!(err.message.contains("validation.invalid_argument"));
+        assert!(err.message.contains("bad cwd"));
+        assert!(!err.message.contains("null"));
+    }
+
+    #[test]
+    fn daemon_exec_request_failed_error_handles_null_payload_with_reconnect_hint() {
+        // The historical #3631/#3624 symptom: a stale/restarting daemon answers
+        // with an empty/null error payload. We must never surface a bare `null`,
+        // and we must point the operator at reconnecting.
+        let envelope = DaemonEnvelope {
+            success: false,
+            data: None,
+            error: Some(Value::Null),
+        };
+        let err = daemon_exec_request_failed_error("lab", 502, &envelope);
+        assert!(!err.message.contains("null"));
+        assert!(err.message.contains("stale") || err.message.contains("restarted"));
+        assert!(err
+            .hints
+            .iter()
+            .any(|hint| hint.message.contains("homeboy runner connect lab")));
+    }
+
+    #[test]
+    fn daemon_exec_stale_response_error_is_actionable() {
+        let err = daemon_exec_stale_response_error("lab", 200, "expected value at line 1 column 1");
+        assert!(err.message.contains("unreadable exec response"));
+        assert!(err
+            .hints
+            .iter()
+            .any(|hint| hint.message.contains("homeboy runner connect lab")));
+    }
+
+    #[test]
+    fn daemon_exec_empty_envelope_over_http_is_actionable_not_null() {
+        // A stale daemon that answers `{"success": false}` with no error/data.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let addr = listener.local_addr().expect("addr");
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut buffer = [0; 4096];
+            let _ = std::io::Read::read(&mut stream, &mut buffer).expect("read request");
+            let body = serde_json::json!({ "success": false }).to_string();
+            let response = format!(
+                "HTTP/1.1 502 Bad Gateway\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            std::io::Write::write_all(&mut stream, response.as_bytes()).expect("write response");
+        });
+
+        let err = exec_via_daemon(
+            &ssh_runner(),
+            &format!("http://{addr}"),
+            "/srv/homeboy/project".to_string(),
+            None,
+            vec!["homeboy".to_string(), "--version".to_string()],
+            Default::default(),
+            Vec::new(),
+            false,
+            None,
+            Vec::new(),
+        )
+        .expect_err("daemon exec failure");
+
+        assert!(!err.message.contains(": null"));
+        assert!(err.message.contains("no result") || err.message.contains("stale"));
+        assert!(err
+            .hints
+            .iter()
+            .any(|hint| hint.message.contains("homeboy runner connect")));
     }
 }

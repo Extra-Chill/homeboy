@@ -596,42 +596,109 @@ fn reconcile_stale_jobs(durable: &mut DurableJobStore, event_retention_limit: us
         .unwrap_or(0);
 
     for stored in &mut durable.jobs {
-        if matches!(stored.job.status, JobStatus::Queued | JobStatus::Running)
-            && !(stored.remote_runner.is_some() && stored.job.status == JobStatus::Queued)
+        if !matches!(stored.job.status, JobStatus::Queued | JobStatus::Running) {
+            continue;
+        }
+        // Remote-runner jobs that are still Queued are waiting for a runner to
+        // claim them; a daemon restart does not invalidate that work, so leave
+        // them enqueued for re-claim.
+        if stored.remote_runner.is_some() && stored.job.status == JobStatus::Queued {
+            continue;
+        }
+
+        // Recover the real terminal status when the underlying command already
+        // recorded a terminal Result event before the daemon restarted. Without
+        // this, a job that actually succeeded (or that recorded its own
+        // non-zero exit code) is blindly reported as a daemon-restart failure,
+        // leaving the caller without the real result for in-flight work (#4770).
+        if let Some((recovered_status, exit_code)) = recovered_terminal_from_result(&stored.events)
         {
-            let reason = "daemon restarted before the job reached a terminal status".to_string();
-            stored.job.status = JobStatus::Failed;
+            stored.job.status = recovered_status;
             stored.job.updated_at_ms = now;
             stored.job.finished_at_ms = Some(now);
-            stored.job.stale_reason = Some(reason.clone());
+            stored.job.stale_reason = None;
 
-            next_sequence += 1;
-            stored.events.push(JobEvent {
-                sequence: next_sequence,
-                job_id: stored.job.id,
-                kind: JobEventKind::Error,
-                timestamp_ms: now,
-                message: Some(reason.clone()),
-                data: Some(serde_json::json!({ "reason": "stale_after_daemon_restart" })),
-            });
             next_sequence += 1;
             stored.events.push(JobEvent {
                 sequence: next_sequence,
                 job_id: stored.job.id,
                 kind: JobEventKind::Status,
                 timestamp_ms: now,
-                message: Some("job marked failed after daemon restart".to_string()),
+                message: Some(
+                    "job terminal status recovered from recorded result after daemon restart"
+                        .to_string(),
+                ),
                 data: Some(serde_json::json!({
-                    "status": JobStatus::Failed,
-                    "reason": "stale_after_daemon_restart"
+                    "status": recovered_status,
+                    "reason": "recovered_after_daemon_restart",
+                    "exit_code": exit_code,
                 })),
             });
             apply_event_retention(&mut stored.events, event_retention_limit);
             stored.job.event_count = stored.events.len();
+            continue;
         }
+
+        let reason = "daemon restarted before the job reached a terminal status".to_string();
+        stored.job.status = JobStatus::Failed;
+        stored.job.updated_at_ms = now;
+        stored.job.finished_at_ms = Some(now);
+        stored.job.stale_reason = Some(reason.clone());
+
+        next_sequence += 1;
+        stored.events.push(JobEvent {
+            sequence: next_sequence,
+            job_id: stored.job.id,
+            kind: JobEventKind::Error,
+            timestamp_ms: now,
+            message: Some(reason.clone()),
+            data: Some(serde_json::json!({ "reason": "stale_after_daemon_restart" })),
+        });
+        next_sequence += 1;
+        stored.events.push(JobEvent {
+            sequence: next_sequence,
+            job_id: stored.job.id,
+            kind: JobEventKind::Status,
+            timestamp_ms: now,
+            message: Some("job marked failed after daemon restart".to_string()),
+            data: Some(serde_json::json!({
+                "status": JobStatus::Failed,
+                "reason": "stale_after_daemon_restart"
+            })),
+        });
+        apply_event_retention(&mut stored.events, event_retention_limit);
+        stored.job.event_count = stored.events.len();
     }
 
     next_sequence
+}
+
+/// Recover a terminal job status from a recorded `Result` event when a job was
+/// left non-terminal by a daemon restart. The daemon worker records the command
+/// result (including its `exit_code`) before transitioning the job to its
+/// terminal status; if the restart lands in that window the stored result is the
+/// authoritative outcome. Returns the recovered status and the exit code that
+/// justified it, or `None` when no terminal result was recorded.
+fn recovered_terminal_from_result(events: &[JobEvent]) -> Option<(JobStatus, i64)> {
+    let result = events
+        .iter()
+        .rev()
+        .find(|event| event.kind == JobEventKind::Result)?;
+    let data = result.data.as_ref()?;
+    // A recorded cancellation outcome is honored as Cancelled regardless of exit code.
+    if data.get("status").and_then(Value::as_str) == Some("cancelled") {
+        return Some((
+            JobStatus::Cancelled,
+            data.get("exit_code").and_then(Value::as_i64).unwrap_or(0),
+        ));
+    }
+    let exit_code = data.get("exit_code").and_then(Value::as_i64)?;
+    let status = if exit_code == 0 {
+        JobStatus::Succeeded
+    } else {
+        JobStatus::Failed
+    };
+    Some((status, exit_code))
 }
 
 fn apply_event_retention(events: &mut Vec<JobEvent>, limit: usize) {
@@ -1117,6 +1184,148 @@ mod tests {
                     .as_ref()
                     .is_some_and(|data| data["reason"] == json!("stale_after_daemon_restart"))
         }));
+    }
+
+    #[test]
+    fn durable_store_recovers_succeeded_job_from_result_event_after_restart() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("jobs.json");
+        let store = JobStore::open(&path).expect("durable store opens");
+        let job = store.create("runner.exec");
+        store.start(job.id).expect("job starts");
+        // Simulate the daemon worker recording its terminal result *before* the
+        // status transition, then the daemon process dying in that window.
+        store
+            .append_event(
+                job.id,
+                JobEventKind::Result,
+                None,
+                Some(json!({ "exit_code": 0, "stdout": "ok" })),
+            )
+            .expect("result event records");
+
+        let reopened = JobStore::open(&path).expect("durable store reopens");
+        let recovered = reopened.get(job.id).expect("job persists");
+        assert_eq!(
+            recovered.status,
+            JobStatus::Succeeded,
+            "a job with a successful recorded result must not be reported as a daemon-restart failure"
+        );
+        assert!(recovered.stale_reason.is_none());
+        assert!(recovered.finished_at_ms.is_some());
+
+        let events = reopened.events(job.id).expect("events persist");
+        assert!(events.iter().any(|event| {
+            event.kind == JobEventKind::Status
+                && event
+                    .data
+                    .as_ref()
+                    .is_some_and(|data| data["reason"] == json!("recovered_after_daemon_restart"))
+        }));
+    }
+
+    #[test]
+    fn durable_store_recovers_failed_job_from_nonzero_result_after_restart() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("jobs.json");
+        let store = JobStore::open(&path).expect("durable store opens");
+        let job = store.create("runner.exec");
+        store.start(job.id).expect("job starts");
+        store
+            .append_event(
+                job.id,
+                JobEventKind::Result,
+                None,
+                Some(json!({ "exit_code": 2, "stderr": "boom" })),
+            )
+            .expect("result event records");
+
+        let reopened = JobStore::open(&path).expect("durable store reopens");
+        let recovered = reopened.get(job.id).expect("job persists");
+        assert_eq!(recovered.status, JobStatus::Failed);
+        // Recovered (real) failure must not be mislabeled as a daemon-restart stale failure.
+        assert!(recovered.stale_reason.is_none());
+
+        let events = reopened.events(job.id).expect("events persist");
+        assert!(events.iter().any(|event| {
+            event.kind == JobEventKind::Status
+                && event.data.as_ref().is_some_and(|data| {
+                    data["reason"] == json!("recovered_after_daemon_restart")
+                        && data["exit_code"] == json!(2)
+                })
+        }));
+        // It must NOT carry the synthetic stale-after-restart error event.
+        assert!(!events.iter().any(|event| {
+            event
+                .data
+                .as_ref()
+                .is_some_and(|data| data["reason"] == json!("stale_after_daemon_restart"))
+        }));
+    }
+
+    #[test]
+    fn durable_store_recovers_cancelled_job_from_result_after_restart() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("jobs.json");
+        let store = JobStore::open(&path).expect("durable store opens");
+        let job = store.create("runner.exec");
+        store.start(job.id).expect("job starts");
+        store
+            .append_event(
+                job.id,
+                JobEventKind::Result,
+                None,
+                Some(json!({ "exit_code": 130, "status": "cancelled" })),
+            )
+            .expect("result event records");
+
+        let reopened = JobStore::open(&path).expect("durable store reopens");
+        let recovered = reopened.get(job.id).expect("job persists");
+        assert_eq!(recovered.status, JobStatus::Cancelled);
+        assert!(recovered.stale_reason.is_none());
+    }
+
+    #[test]
+    fn recovered_terminal_from_result_handles_missing_and_present_results() {
+        // No result event -> None (falls through to stale failure).
+        assert!(recovered_terminal_from_result(&[]).is_none());
+
+        let zero = vec![JobEvent {
+            sequence: 1,
+            job_id: Uuid::new_v4(),
+            kind: JobEventKind::Result,
+            timestamp_ms: 0,
+            message: None,
+            data: Some(json!({ "exit_code": 0 })),
+        }];
+        assert_eq!(
+            recovered_terminal_from_result(&zero),
+            Some((JobStatus::Succeeded, 0))
+        );
+
+        let nonzero = vec![JobEvent {
+            sequence: 1,
+            job_id: Uuid::new_v4(),
+            kind: JobEventKind::Result,
+            timestamp_ms: 0,
+            message: None,
+            data: Some(json!({ "exit_code": 7 })),
+        }];
+        assert_eq!(
+            recovered_terminal_from_result(&nonzero),
+            Some((JobStatus::Failed, 7))
+        );
+
+        // Result event without an exit_code is not authoritative -> None.
+        let no_code = vec![JobEvent {
+            sequence: 1,
+            job_id: Uuid::new_v4(),
+            kind: JobEventKind::Result,
+            timestamp_ms: 0,
+            message: None,
+            data: Some(json!({ "stdout": "partial" })),
+        }];
+        assert!(recovered_terminal_from_result(&no_code).is_none());
     }
 
     #[test]
