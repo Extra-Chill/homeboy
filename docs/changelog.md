@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.236.0] - 2026-06-16
+
+### Added
+- discover AI runtime providers
+
 ## [0.235.1] - 2026-06-16
 
 ### Fixed
