@@ -8,7 +8,7 @@ const path = require('node:path');
 const {
   codeboxTaskRequestFromAgentTaskRequest,
   providerContract,
-} = require('../lib/codebox-agent-task-executor');
+} = require('../../agent-runtimes/wp-codebox');
 
 const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-wordpress-agent-boundary-'));
 
@@ -23,10 +23,9 @@ assert.equal(manifest.agent_task_executors, undefined);
 const runtime = manifest.agent_runtimes.find((candidate) => candidate.id === 'wp-codebox');
 assert(runtime, 'WordPress manifest declares the WP Codebox agent runtime');
 assert.equal(runtime.agent_task_executors.length, 1);
-assert.deepEqual(runtime.agent_task_executors[0], {
-  ...provider,
+assert.deepEqual(runtime.agent_task_executors[0], providerContract({
   command: 'node {{extension_path}}/scripts/agent/homeboy-codebox-agent-task-executor.cjs',
-});
+}));
 assert.equal(provider.capabilities.includes('tool:wpsg_materialize_packet'), false);
 assert.equal(provider.capabilities.includes('ability:wpsg_materialize_packet'), false);
 

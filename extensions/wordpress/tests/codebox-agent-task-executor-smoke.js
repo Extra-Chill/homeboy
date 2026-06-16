@@ -10,9 +10,11 @@ const {
   agentTaskOutcomeFromCodeboxResult,
   codeboxTaskRequestFromAgentTaskRequest,
   providerContract,
-} = require('../lib/codebox-agent-task-executor');
+} = require('../../agent-runtimes/wp-codebox');
 
 const fixtureCodeboxCoreModule = path.join(__dirname, 'fixtures', 'wp-codebox-core-agent-task-normalizer.mjs');
+const wpCodeboxRuntimeRoot = path.join(__dirname, '..', '..', 'agent-runtimes', 'wp-codebox');
+const wpCodeboxRuntimeExecutor = path.join(wpCodeboxRuntimeRoot, 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs');
 const codexSecretEnv = [
   'AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN',
   'AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN',
@@ -257,6 +259,7 @@ const provider = providerContract();
 assert.equal(provider.id, 'wordpress.codebox-agent-task-executor');
 assert.equal(provider.label, 'WP Codebox agent task executor');
 assert.equal(provider.backend, 'codebox');
+assert.equal(provider.command, 'node {{runtime_path}}/scripts/agent/homeboy-codebox-agent-task-executor.cjs');
 assert.equal(provider.request_schema, 'homeboy/agent-task-request/v1');
 assert.equal(provider.outcome_schema, 'homeboy/agent-task-outcome/v1');
 assert.deepEqual(provider.request_required_fields, ['schema', 'task_id', 'executor.backend', 'instructions']);
@@ -296,10 +299,9 @@ assert.equal(manifest.agent_task_executors, undefined);
 const manifestRuntime = manifest.agent_runtimes.find((runtime) => runtime.id === 'wp-codebox');
 assert(manifestRuntime, 'WordPress manifest declares the WP Codebox agent runtime');
 const manifestProvider = manifestRuntime.agent_task_executors.find((executor) => executor.id === provider.id);
-assert.deepEqual(manifestProvider, {
-  ...provider,
+assert.deepEqual(manifestProvider, providerContract({
   command: 'node {{extension_path}}/scripts/agent/homeboy-codebox-agent-task-executor.cjs',
-});
+}));
 for (const capability of repoLoopCapabilities) {
   assert.equal(manifestProvider.capabilities.includes(capability), true);
 }
@@ -630,7 +632,7 @@ try {
   }
 }
 
-assert.equal(fs.readFileSync(path.join(__dirname, '..', 'lib', 'codebox-agent-task-executor.js'), 'utf8').includes('opencode'), false);
+assert.equal(fs.readFileSync(path.join(wpCodeboxRuntimeRoot, 'lib', 'codebox-agent-task-executor.js'), 'utf8').includes('opencode'), false);
 
 const recipePackRequest = codeboxTaskRequestFromAgentTaskRequest({
   ...request,
@@ -710,6 +712,46 @@ assert.deepEqual(codexRequest.secret_env, [
 ]);
 assert.deepEqual(codexRequest.agent_bundle, {});
 assert(!JSON.stringify(codexRequest).includes('wp-ai-gateway'));
+
+const workflowStyleConfigRequest = codeboxTaskRequestFromAgentTaskRequest({
+  ...request,
+  task_id: 'runtime-contract-task-123',
+  executor: {
+    backend: 'codebox',
+    model: 'gpt-5.5',
+    config: {
+      provider: 'codex',
+      runtime_bin: '/bin/wp-codebox-runtime',
+      runtime_wordpress_version: 'beta',
+      runtime_mounts: [{
+        type: 'file',
+        source: '/host/driver.php',
+        target: '/wordpress/wp-content/plugins/driver/driver.php',
+        mode: 'readonly',
+      }],
+      runtime_components: {
+        runtime: '/components/wp-codebox/packages/wordpress-plugin',
+        agents_api: '/components/agents-api',
+        data_machine: '/components/data-machine',
+        data_machine_code: '/components/data-machine-code',
+      },
+    },
+  },
+});
+assert.equal(workflowStyleConfigRequest.wp_codebox_bin, '/bin/wp-codebox-runtime');
+assert.equal(workflowStyleConfigRequest.wp, 'beta');
+assert.deepEqual(workflowStyleConfigRequest.mounts, [{
+  type: 'file',
+  source: '/host/driver.php',
+  target: '/wordpress/wp-content/plugins/driver/driver.php',
+  mode: 'readonly',
+}]);
+assert.equal(workflowStyleConfigRequest.runtime_component_paths.runtime, '/components/wp-codebox/packages/wordpress-plugin');
+assert.equal(workflowStyleConfigRequest.runtime_component_paths.agents_api, '/components/agents-api');
+assert.equal(workflowStyleConfigRequest.runtime_component_paths.agent_runtime, '/components/data-machine');
+assert.equal(workflowStyleConfigRequest.runtime_component_paths.agent_runtime_tools, '/components/data-machine-code');
+assert.equal(Object.hasOwn(workflowStyleConfigRequest.runtime_component_paths, 'data_machine'), false);
+assert.equal(Object.hasOwn(workflowStyleConfigRequest.runtime_component_paths, 'data_machine_code'), false);
 
 const defaultsRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-codebox-agent-task-defaults-'));
 try {
@@ -1814,7 +1856,7 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-codebox-agent-task-e
 try {
   const { fixture, capture } = writeFixtureTaskRunner(root);
   const missingModelResult = spawnSync(process.execPath, [
-    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs'),
+    wpCodeboxRuntimeExecutor,
     '--task-runner',
     fixture,
   ], {
@@ -1842,7 +1884,7 @@ try {
   assert.equal(fs.existsSync(capture), false);
 
   const invalidOverlayResult = spawnSync(process.execPath, [
-    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs'),
+    wpCodeboxRuntimeExecutor,
     '--task-runner',
     fixture,
   ], {
@@ -1872,7 +1914,7 @@ try {
   assert.equal(fs.existsSync(capture), false);
 
   const result = spawnSync(process.execPath, [
-    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs'),
+    wpCodeboxRuntimeExecutor,
     '--task-runner',
     fixture,
     '--agents-api',
@@ -1889,7 +1931,7 @@ try {
   assert.equal(cliOutcome.evidence_refs[0].uri, 'https://example.test/preview');
 
   const normalizedResult = spawnSync(process.execPath, [
-    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs'),
+    wpCodeboxRuntimeExecutor,
     '--task-runner',
     fixture,
   ], {
@@ -1915,7 +1957,7 @@ try {
   assert.equal(captured.request.runtime_overlays[0].kind, 'bundled-library');
 
   const recipeCliResult = spawnSync(process.execPath, [
-    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs'),
+    wpCodeboxRuntimeExecutor,
     '--task-runner',
     fixture,
   ], {
@@ -1955,7 +1997,7 @@ try {
   }));
 
   const codexResult = spawnSync(process.execPath, [
-    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs'),
+    wpCodeboxRuntimeExecutor,
     '--task-runner',
     fixture,
   ], {
@@ -1991,7 +2033,7 @@ try {
   assert(!JSON.stringify(capturedCodex).includes('fixture-codex-access-token'));
 
   const missingCodexProviderPathResult = spawnSync(process.execPath, [
-    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs'),
+    wpCodeboxRuntimeExecutor,
     '--task-runner',
     fixture,
   ], {
@@ -2019,7 +2061,7 @@ try {
   assert.match(missingCodexProviderPathOutcome.summary, /Codex-capable provider plugin checkout/);
 
   const wrongCodexProviderPathResult = spawnSync(process.execPath, [
-    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs'),
+    wpCodeboxRuntimeExecutor,
     '--task-runner',
     fixture,
   ], {
@@ -2048,7 +2090,7 @@ try {
   fs.mkdirSync(releasedOpenAiProviderPath, { recursive: true });
   fs.writeFileSync(path.join(releasedOpenAiProviderPath, 'plugin.php'), '<?php\n// Registers openai provider only.\n');
   const releasedOpenAiProviderPathResult = spawnSync(process.execPath, [
-    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs'),
+    wpCodeboxRuntimeExecutor,
     '--task-runner',
     fixture,
   ], {
@@ -2077,7 +2119,7 @@ try {
   fs.mkdirSync(codexCapableProviderPath, { recursive: true });
   fs.writeFileSync(path.join(codexCapableProviderPath, 'plugin.php'), '<?php\n// Registers the codex provider.\n');
   const codexCapableProviderPathResult = spawnSync(process.execPath, [
-    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs'),
+    wpCodeboxRuntimeExecutor,
     '--task-runner',
     fixture,
   ], {
@@ -2149,7 +2191,7 @@ try {
     },
   };
   const agentBundleCliResult = spawnSync(process.execPath, [
-    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs'),
+    wpCodeboxRuntimeExecutor,
   ], {
     encoding: 'utf8',
     env: fixtureEnv(),
@@ -2174,7 +2216,7 @@ try {
   const recipeWpCodeboxRoot = fs.mkdtempSync(path.join(root, 'recipe-wp-codebox-'));
   const { fixture: recipeFakeWpCodebox, capture: recipeFakeWpCodeboxCapture } = writeFakeWpCodebox(recipeWpCodeboxRoot);
   const recipeWpCodeboxResult = spawnSync(process.execPath, [
-    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs'),
+    wpCodeboxRuntimeExecutor,
   ], {
     encoding: 'utf8',
     env: fixtureEnv(),
@@ -2204,7 +2246,7 @@ try {
   const failedWpCodeboxRoot = fs.mkdtempSync(path.join(root, 'failed-wp-codebox-'));
   const { fixture: failedFakeWpCodebox } = writeFakeWpCodebox(failedWpCodeboxRoot);
   const failedWpCodeboxResult = spawnSync(process.execPath, [
-    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs'),
+    wpCodeboxRuntimeExecutor,
   ], {
     encoding: 'utf8',
     env: fixtureEnv({ FIXTURE_WP_CODEBOX_AGENT_TASK_FAILURE: '1' }),
@@ -2233,7 +2275,7 @@ try {
   const settingsWpCodeboxRoot = fs.mkdtempSync(path.join(root, 'settings-wp-codebox-'));
   const { fixture: settingsFakeWpCodebox } = writeFakeWpCodebox(settingsWpCodeboxRoot);
   const settingsWpCodeboxResult = spawnSync(process.execPath, [
-    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs'),
+    wpCodeboxRuntimeExecutor,
   ], {
     encoding: 'utf8',
     env: fixtureEnv({
@@ -2258,7 +2300,7 @@ try {
 
   const missingConfiguredBinary = path.join(root, 'missing-wp-codebox.cjs');
   const missingConfiguredBinaryResult = spawnSync(process.execPath, [
-    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs'),
+    wpCodeboxRuntimeExecutor,
   ], {
     encoding: 'utf8',
     env: fixtureEnv({ HOMEBOY_SETTINGS_JSON: JSON.stringify({ wp_codebox_bin: missingConfiguredBinary }) }),
@@ -2280,7 +2322,7 @@ try {
   assert.equal(missingConfiguredBinaryOutcome.diagnostics[0].data.wp_codebox_bin, missingConfiguredBinary);
 
   const emptyJsonWpCodeboxResult = spawnSync(process.execPath, [
-    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs'),
+    wpCodeboxRuntimeExecutor,
   ], {
     encoding: 'utf8',
     env: fixtureEnv(),
@@ -2304,7 +2346,7 @@ try {
   assert.equal(emptyJsonWpCodeboxOutcome.evidence_refs.some((ref) => ref.kind === 'codebox-command-evidence'), true);
 
   const emptyStdoutWpCodeboxResult = spawnSync(process.execPath, [
-    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs'),
+    wpCodeboxRuntimeExecutor,
   ], {
     encoding: 'utf8',
     env: fixtureEnv(),
@@ -2328,7 +2370,7 @@ try {
   assert.equal(emptyStdoutWpCodeboxOutcome.evidence_refs.some((ref) => ref.kind === 'codebox-command-evidence'), true);
 
   const contractResult = spawnSync(process.execPath, [
-    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs'),
+    wpCodeboxRuntimeExecutor,
     '--print-contract',
   ], { encoding: 'utf8' });
   assert.equal(contractResult.status, 0, contractResult.stderr || contractResult.stdout);
@@ -2345,7 +2387,7 @@ try {
     limits: { task_timeout_seconds: 1 },
   };
   const timeoutResult = spawnSync(process.execPath, [
-    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs'),
+    wpCodeboxRuntimeExecutor,
     '--task-runner',
     writeHangingTaskRunner(root),
     '--artifacts',
@@ -2389,7 +2431,7 @@ try {
     },
   };
   const configArtifactTimeoutResult = spawnSync(process.execPath, [
-    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs'),
+    wpCodeboxRuntimeExecutor,
     '--task-runner',
     writeHangingTaskRunner(root),
   ], {
@@ -2410,7 +2452,7 @@ try {
   assert.equal(configArtifactTimeoutOutcome.evidence_refs.some((ref) => ref.kind === 'codebox-transcript'), true);
 
   const missingSecretResult = spawnSync(process.execPath, [
-    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs'),
+    wpCodeboxRuntimeExecutor,
     '--task-runner',
     writeMissingSecretTaskRunner(root),
   ], {
@@ -2452,7 +2494,7 @@ try {
   };
   fs.rmSync(missingWorkspace.capture, { force: true });
   const missingWorkspaceResult = spawnSync(process.execPath, [
-    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs'),
+    wpCodeboxRuntimeExecutor,
     '--task-runner',
     missingWorkspace.fixture,
   ], {
@@ -2485,7 +2527,7 @@ try {
     },
   };
   const claudeMissingValueResult = spawnSync(process.execPath, [
-    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs'),
+    wpCodeboxRuntimeExecutor,
   ], {
     encoding: 'utf8',
     input: JSON.stringify(claudeCodeBaseRequest),
@@ -2502,7 +2544,7 @@ try {
   assert(!JSON.stringify(claudeMissingValueOutcome).includes('claude-refresh-token-value'));
 
   const claudeMissingMappingResult = spawnSync(process.execPath, [
-    path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs'),
+    wpCodeboxRuntimeExecutor,
   ], {
     encoding: 'utf8',
     input: JSON.stringify({

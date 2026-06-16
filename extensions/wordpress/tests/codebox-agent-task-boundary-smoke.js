@@ -4,12 +4,14 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const root = path.join(__dirname, '..');
+const root = path.join(__dirname, '..', '..');
 const scannedFiles = [
-  'wordpress.json',
-  'lib/codebox-agent-task-executor.js',
-  'scripts/agent/homeboy-codebox-agent-task-executor.cjs',
-  'scripts/agent/homeboy-wp-codebox-task-runner.cjs',
+  'wordpress/wordpress.json',
+  'wordpress/lib/codebox-agent-task-executor.js',
+  'wordpress/scripts/agent/homeboy-codebox-agent-task-executor.cjs',
+  'wordpress/scripts/agent/homeboy-wp-codebox-task-runner.cjs',
+  'agent-runtimes/wp-codebox/lib/codebox-agent-task-executor.js',
+  'agent-runtimes/wp-codebox/scripts/agent/homeboy-codebox-agent-task-executor.cjs',
 ];
 
 const runtimeName = ['data', 'machine'].join('');

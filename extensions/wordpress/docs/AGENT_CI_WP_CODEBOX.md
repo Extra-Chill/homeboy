@@ -162,12 +162,12 @@ request/outcome adaptation around WP Codebox's runtime command boundary.
 
 ## Agent-task executor provider
 
-The WordPress extension also exposes a Homeboy-native executor provider contract
-for generic agent tasks. This is the stable boundary between Homeboy orchestration
+The WP Codebox runtime exposes a Homeboy-native executor provider contract for
+generic agent tasks. This is the stable boundary between Homeboy orchestration
 and extension-owned execution backends. Homeboy selects a provider, passes a
 generic request, and consumes a generic outcome; backend-specific transport,
 runtime boot, sandbox recipes, browser control, and cleanup stay inside the
-provider extension.
+runtime package.
 
 Provider discovery uses `homeboy/agent-task-executor-provider/v1`:
 
@@ -177,7 +177,7 @@ Provider discovery uses `homeboy/agent-task-executor-provider/v1`:
   "id": "wordpress.codebox-agent-task-executor",
   "label": "WP Codebox agent task executor",
   "backend": "codebox",
-  "command": "node {{extension_path}}/scripts/agent/homeboy-codebox-agent-task-executor.cjs",
+  "command": "node {{runtime_path}}/scripts/agent/homeboy-codebox-agent-task-executor.cjs",
   "request_schema": "homeboy/agent-task-request/v1",
   "outcome_schema": "homeboy/agent-task-outcome/v1",
   "request_required_fields": ["schema", "task_id", "executor.backend", "instructions"],
@@ -612,8 +612,8 @@ and environment policy checks, and the `forbidden_mutations` /
 
 - `.github/workflows/datamachine-agent-ci.yml` is the reusable workflow.
 - `.github/workflows/README.md` documents workflow inputs and examples.
-- `wordpress/scripts/agent/homeboy-codebox-agent-task-executor.cjs` is the
-  generic Homeboy agent-task provider entry point.
+- `agent-runtimes/wp-codebox/scripts/agent/homeboy-codebox-agent-task-executor.cjs`
+  is the generic Homeboy agent-task provider entry point.
 - `wordpress/scripts/agent/homeboy-wp-codebox-task-runner.cjs` dispatches the
   stable `wp-codebox agent-task-run` command.
 - `wordpress/scripts/agent/run-datamachine-agent-task.cjs` is a quarantined

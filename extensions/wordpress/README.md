@@ -563,13 +563,14 @@ stable `wp-codebox agent-task-run` parent contract.
 
 ### WP Codebox agent-task executor
 
-The WordPress extension declares `wordpress.codebox-agent-task-executor` in
-`wordpress.json` under `agent_task_executors`. The provider contract advertises a
+The WordPress extension declares the `wp-codebox` runtime in `wordpress.json`
+under `agent_runtimes`. The runtime package owns the
+`wordpress.codebox-agent-task-executor` provider contract and advertises a
 Codebox backend with browser runtime, WordPress sandbox, artifact materialization,
 screenshots, and structured outcome capabilities without adding Codebox imports or
 WordPress assumptions to Homeboy core.
 
-`scripts/agent/homeboy-codebox-agent-task-executor.cjs` accepts a generic
+`../agent-runtimes/wp-codebox/scripts/agent/homeboy-codebox-agent-task-executor.cjs` accepts a generic
 `homeboy/agent-task-request/v1` request, maps it into WP Codebox's stable
 `wp-codebox/task-input/v1` request, invokes `wp-codebox agent-task-run`, and emits a
 `homeboy/agent-task-outcome/v1` outcome with normalized status, artifacts,
