@@ -277,8 +277,12 @@ fn preflight_hot_command(cli: &Cli, output_file: Option<&str>) -> Option<i32> {
             crate::commands::doctor::resources::ResourcesArgs {},
         ) {
             let warning = resource_policy::evaluate(hot_command, &resources);
+            let runner_hosted = resource_policy::is_runner_hosted_exec();
+            if runner_hosted {
+                resource_policy::clear_runner_hosted_exec();
+            }
             if let Some(warning) = warning.as_ref() {
-                if !cli.force_hot {
+                if !cli.force_hot && !runner_hosted {
                     eprintln!("{}", warning.message);
                 }
             }
@@ -289,7 +293,11 @@ fn preflight_hot_command(cli: &Cli, output_file: Option<&str>) -> Option<i32> {
                 resource_policy::ResourcePolicyContext::from_evaluation(
                     hot_command,
                     &resources,
-                    warning.as_ref(),
+                    if runner_hosted {
+                        None
+                    } else {
+                        warning.as_ref()
+                    },
                     cli.force_hot,
                 ),
             );

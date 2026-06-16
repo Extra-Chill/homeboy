@@ -191,6 +191,22 @@ plugin paths, workspace roots, and path-valued settings. Lab offload evidence
 records the original and remapped paths in `workspace_mapping.workspaces` using
 the `component_contract` role.
 
+When the intended checkout already exists on a Lab runner, dispatch from that
+runner-side checkout through `runner exec` instead of forcing a controller-local
+hot run:
+
+```bash
+homeboy runner exec homeboy-lab \
+  --cwd /srv/homeboy/checkouts/homeboy \
+  -- homeboy agent-task cook \
+    --repo homeboy \
+    --cwd /srv/homeboy/checkouts/homeboy \
+    --prompt @task.txt
+```
+
+`runner exec` marks non-local jobs as runner-hosted, so nested `agent-task cook`
+commands pass the non-interactive resource preflight without `--force-hot`.
+
 ## Dispatch Workspaces
 
 `agent-task dispatch` accepts generic Homeboy workspace inputs and does not
