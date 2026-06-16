@@ -9,6 +9,16 @@ use super::types::{
     ReleaseRunResult, ReleaseStepResult, ReleaseStepStatus,
 };
 
+/// Process exit code returned when a release is intentionally skipped (no tag,
+/// no package, no GitHub Release produced).
+///
+/// This is distinct from `0` (released) and `1` (failure) so operators and CI
+/// can tell a no-op release from a real one. The generic JSON envelope derives
+/// `success` from the exit code (`success: exit_code == 0`), so a skipped
+/// release reports `success: false` while the data payload still carries
+/// `status: "skipped"` + `skipped_reason` + an actionable force hint (issue #4316).
+pub const SKIPPED_RELEASE_EXIT_CODE: i32 = 5;
+
 pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, i32)> {
     if input.recover {
         return run_recover(&input);
@@ -186,27 +196,25 @@ pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, 
             .as_ref()
             .map(|v| format_tag(v, monorepo.as_ref()));
         let deployment = dry_run_deployment_plan(&input.component_id, input.pipeline.deploy, &plan);
+        let skipped_reason = skipped_reason_from_plan(&plan);
+        let dry_run_exit_code = release_command_exit_code(skipped_reason.as_deref(), 0, 0, 0);
 
         return Ok((
             ReleaseCommandResult {
                 component_id: input.component_id,
-                status: release_command_status(
-                    true,
-                    skipped_reason_from_plan(&plan).as_deref(),
-                    None,
-                ),
+                status: release_command_status(true, skipped_reason.as_deref(), None),
                 bump_type,
                 dry_run: true,
                 releasable_commits: releasable_count,
                 new_version,
                 tag,
-                skipped_reason: skipped_reason_from_plan(&plan),
+                skipped_reason,
                 plan: Some(plan),
                 run: None,
                 deployment,
                 release_summary: release_summary_for_skipped_plan(),
             },
-            0,
+            dry_run_exit_code,
         ));
     }
 
@@ -236,11 +244,10 @@ pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, 
         .filter(|deployment| deployment.summary.failed > 0)
         .map(|_| 1)
         .unwrap_or(0);
-    let exit_code = if release_step_exit != 0 {
-        release_step_exit
-    } else if deploy_exit_code != 0 {
-        // Deploy failed after the release was already tagged and pushed.
-        // The tag cannot be rolled back safely, so warn the user to retry.
+    // Warn when a deploy failed after the tag was already pushed (the tag cannot
+    // be rolled back safely). Skipped releases never reach a deploy, so this only
+    // fires for a real release whose deploy step failed.
+    if skipped_reason.is_none() && deploy_exit_code != 0 {
         if let Some(ref t) = tag {
             eprintln!();
             log_status!(
@@ -254,10 +261,14 @@ pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, 
                 input.component_id
             );
         }
-        deploy_exit_code
-    } else {
-        post_release_exit
-    };
+    }
+
+    let exit_code = release_command_exit_code(
+        skipped_reason.as_deref(),
+        release_step_exit,
+        deploy_exit_code,
+        post_release_exit,
+    );
 
     Ok((
         ReleaseCommandResult {
@@ -565,6 +576,31 @@ fn release_run_failure_exit(run: &ReleaseRun) -> i32 {
         ReleaseStepStatus::PartialSuccess
         | ReleaseStepStatus::Failed
         | ReleaseStepStatus::Missing => 1,
+    }
+}
+
+/// Decide the process exit code for a release command run.
+///
+/// A skipped release (no tag/package/GitHub Release produced) returns a
+/// dedicated non-zero code so the JSON envelope reports `success: false` and CI
+/// can tell a no-op release from a real one (issue #4316). The data payload
+/// still carries `status: "skipped"` + `skipped_reason` + an actionable force
+/// hint for full detail. Skipped takes precedence because a skipped run never
+/// reaches deploy/post-release steps (those exit inputs are `0`).
+fn release_command_exit_code(
+    skipped_reason: Option<&str>,
+    release_step_exit: i32,
+    deploy_exit_code: i32,
+    post_release_exit: i32,
+) -> i32 {
+    if skipped_reason.is_some() {
+        SKIPPED_RELEASE_EXIT_CODE
+    } else if release_step_exit != 0 {
+        release_step_exit
+    } else if deploy_exit_code != 0 {
+        deploy_exit_code
+    } else {
+        post_release_exit
     }
 }
 
@@ -1278,6 +1314,48 @@ mod tests {
         };
 
         assert_eq!(release_run_failure_exit(&run), 1);
+    }
+
+    #[test]
+    fn skipped_release_exit_code_is_distinct_from_success_and_failure() {
+        assert_ne!(SKIPPED_RELEASE_EXIT_CODE, 0);
+        assert_ne!(SKIPPED_RELEASE_EXIT_CODE, 1);
+        assert_ne!(SKIPPED_RELEASE_EXIT_CODE, 3); // post-release warnings
+    }
+
+    #[test]
+    fn skipped_release_exit_code_takes_precedence() {
+        // A skipped release produced no artifacts, so it reports the dedicated
+        // skip code even if downstream exit inputs were hypothetically non-zero
+        // (in practice they are 0 because deploy/post-release never run).
+        assert_eq!(
+            release_command_exit_code(Some("no-releasable-commits"), 0, 0, 0),
+            SKIPPED_RELEASE_EXIT_CODE
+        );
+        assert_eq!(
+            release_command_exit_code(Some("release-already-at-head"), 0, 0, 3),
+            SKIPPED_RELEASE_EXIT_CODE
+        );
+    }
+
+    #[test]
+    fn completed_release_exit_code_is_zero() {
+        assert_eq!(release_command_exit_code(None, 0, 0, 0), 0);
+    }
+
+    #[test]
+    fn failed_release_exit_code_surfaces_when_not_skipped() {
+        assert_eq!(release_command_exit_code(None, 1, 0, 0), 1);
+    }
+
+    #[test]
+    fn deploy_failure_exit_code_surfaces_when_not_skipped() {
+        assert_eq!(release_command_exit_code(None, 0, 1, 0), 1);
+    }
+
+    #[test]
+    fn post_release_warning_exit_code_surfaces_when_not_skipped() {
+        assert_eq!(release_command_exit_code(None, 0, 0, 3), 3);
     }
 
     #[test]

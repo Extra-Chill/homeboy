@@ -32,4 +32,4 @@ pub use types::{
     ReleaseStepResult, ReleaseStepStatus,
 };
 pub use utils::{extract_latest_notes, parse_release_artifacts};
-pub use workflow::{run_batch, run_command};
+pub use workflow::{run_batch, run_command, SKIPPED_RELEASE_EXIT_CODE};
