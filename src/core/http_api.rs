@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-use crate::core::api_jobs::{ActiveRunnerJobSummary, JobStatus, JobStore};
+use crate::core::api_jobs::{ActiveRunnerJobSummary, JobStore};
 use crate::core::error::{Error, Result};
 use crate::core::observation::{
     running_status_note, FindingListFilter, ObservationStore, RunListFilter, RunRecord,
@@ -616,7 +616,7 @@ fn active_runner_jobs_for_path(path: &str, job_store: &JobStore) -> Vec<ActiveRu
         .active_runner_jobs()
         .into_iter()
         .filter(|job| match status.as_deref() {
-            Some(status) => status == active_job_status_label(job.status),
+            Some(status) => status == job.status.run_status_label(),
             None => true,
         })
         .collect();
@@ -633,7 +633,7 @@ fn active_runner_job_run_summary(job: ActiveRunnerJobSummary) -> RunSummary {
             .clone()
             .unwrap_or_else(|| format!("runner-job-{}", job.job_id)),
         kind: job.kind.clone(),
-        status: active_job_status_label(job.status).to_string(),
+        status: job.status.run_status_label().to_string(),
         started_at: ms_to_rfc3339(job.started_at_ms),
         finished_at: None,
         component_id: None,
@@ -671,16 +671,6 @@ fn active_runner_job_run_summary(job: ActiveRunnerJobSummary) -> RunSummary {
                 .map(|count| count.to_string())
                 .unwrap_or_else(|| "unknown".to_string())
         )),
-    }
-}
-
-fn active_job_status_label(status: JobStatus) -> &'static str {
-    match status {
-        JobStatus::Queued => "queued",
-        JobStatus::Running => "running",
-        JobStatus::Succeeded => "pass",
-        JobStatus::Failed => "fail",
-        JobStatus::Cancelled => "cancelled",
     }
 }
 

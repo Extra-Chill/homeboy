@@ -36,6 +36,8 @@ pub struct AuditSummaryOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub baseline_filtering: Option<AuditBaselineFilteringSummary>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unbaselined_findings: Vec<baseline::NewFinding>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extension_phase_timings: Vec<ExtensionPhaseTiming>,
     pub exit_code: i32,
 }
@@ -214,9 +216,16 @@ pub fn build_audit_summary(result: &CodeAuditResult, exit_code: i32) -> AuditSum
         fixability: None,
         changed_since: None,
         baseline_filtering: None,
+        unbaselined_findings: Vec::new(),
         extension_phase_timings: Vec::new(),
         exit_code,
     }
+}
+
+pub fn build_unbaselined_finding_summary(
+    comparison: &baseline::BaselineComparison,
+) -> Vec<baseline::NewFinding> {
+    comparison.new_items.iter().take(20).cloned().collect()
 }
 
 pub fn build_baseline_filtering_summary(

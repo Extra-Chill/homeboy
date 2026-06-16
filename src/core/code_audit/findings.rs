@@ -3,6 +3,7 @@
 use super::checks::{CheckResult, CheckStatus};
 use super::conventions::AuditFinding;
 use crate::core::finding::{FindingSource, HomeboyFinding};
+use regex::Regex;
 use serde::{Deserializer, Serializer};
 use serde_json::Value;
 use std::str::FromStr;
@@ -113,8 +114,17 @@ fn audit_finding_fingerprint(finding: &Finding) -> String {
         finding.file,
         finding_kind_key(&finding.kind),
         finding.convention,
-        finding.description
+        normalized_finding_description_for_fingerprint(&finding.description)
     )
+}
+
+pub(in crate::core::code_audit) fn normalized_finding_description_for_fingerprint(
+    description: &str,
+) -> String {
+    let line_number = Regex::new(r" at line \d+").expect("line-number fingerprint regex compiles");
+    line_number
+        .replace_all(description, " at line <line>")
+        .to_string()
 }
 
 fn audit_severity_key(severity: &Severity) -> String {

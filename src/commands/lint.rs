@@ -277,7 +277,6 @@ impl WorkflowObservationAdapter<homeboy::core::extension::lint::LintRunWorkflowR
             .current_homeboy_version()
             .metadata(serde_json::json!({
                 "source": "homeboy lint",
-                "run_dir": self.run_dir.as_ref().map(|path| path.to_string_lossy().to_string()),
             }))
             .build()
     }
@@ -446,9 +445,11 @@ fn settings_to_legacy_strings(settings: Vec<(String, serde_json::Value)>) -> Vec
 
 #[cfg(test)]
 mod tests {
-    use super::LintArgs;
+    use super::{LintArgs, LintObservationAdapter};
+    use crate::commands::utils::observed_workflow::WorkflowObservationAdapter;
     use clap::{CommandFactory, Parser};
     use homeboy::core::component::Component;
+    use homeboy::core::engine::run_dir::RunDir;
     use homeboy::core::extension::lint as extension_lint;
     use homeboy::core::extension::lint::baseline as lint_baseline;
     use homeboy::core::extension::lint::report;
@@ -516,6 +517,24 @@ mod tests {
             !help.contains("--from lint --write"),
             "lint --help should not describe --changed-since or --fix as a refactor --write alias: {help}"
         );
+    }
+
+    #[test]
+    fn lint_observation_keeps_run_dir_out_of_initial_metadata() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let run_dir = RunDir::create().expect("run dir");
+        let adapter = LintObservationAdapter::new(
+            "homeboy".to_string(),
+            dir.path(),
+            "homeboy lint homeboy".to_string(),
+            Some(&run_dir),
+        );
+
+        let record = <LintObservationAdapter as WorkflowObservationAdapter<
+            extension_lint::LintRunWorkflowResult,
+        >>::start_record(&adapter);
+
+        assert!(record.metadata_json.get("run_dir").is_none());
     }
 
     #[test]

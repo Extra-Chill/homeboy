@@ -10,6 +10,7 @@ use std::collections::{HashMap, HashSet};
 use super::conventions::AuditFinding;
 use super::findings::{Finding, Severity};
 use super::fingerprint::FileFingerprint;
+use super::import_matching::contains_word;
 use super::walker::is_test_path;
 use crate::core::component::AuditConfig;
 
@@ -158,6 +159,9 @@ pub(crate) fn analyze_dead_code_with_config(
                     }
                     // Check if the other file calls this function
                     if other.internal_calls.contains(export) {
+                        return true;
+                    }
+                    if contains_word(&other.content, export) {
                         return true;
                     }
                     // Check if the other file imports something that matches
@@ -639,6 +643,27 @@ mod tests {
         // Only "transform" is unreferenced (nobody calls it), "compute" is called by bar
         assert_eq!(unreferenced.len(), 1);
         assert!(unreferenced[0].description.contains("transform"));
+    }
+
+    #[test]
+    fn function_pointer_reference_suppresses_unreferenced_export() {
+        let exported = make_fingerprint(
+            "src/foo.rs",
+            vec!["prepare_plan"],
+            vec!["prepare_plan"],
+            vec![],
+            vec![],
+        );
+        let mut caller = make_fingerprint("src/bar.rs", vec![], vec![], vec![], vec![]);
+        caller.content = "let plan = contract.map(prepare_plan);".to_string();
+
+        let findings = analyze_dead_code(&[&exported, &caller], &[]);
+        let unreferenced: Vec<&Finding> = findings
+            .iter()
+            .filter(|f| f.kind == AuditFinding::UnreferencedExport)
+            .collect();
+
+        assert!(unreferenced.is_empty(), "got: {unreferenced:?}");
     }
 
     #[test]

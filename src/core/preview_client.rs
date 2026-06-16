@@ -856,11 +856,10 @@ mod tests {
             let mut buffer = [0_u8; 4096];
             let read = stream.read(&mut buffer).expect("read request");
             let request = String::from_utf8_lossy(&buffer[..read]);
-            assert!(request
-                .starts_with("GET /__wp-codebox/reviewer-auth-bootstrap?token=redacted HTTP/1.1"));
+            assert!(request.starts_with("GET /__reviewer/auth-bootstrap?token=redacted HTTP/1.1"));
             stream
                 .write_all(
-                    b"HTTP/1.1 302 Found\r\nLocation: /wp-admin/\r\nSet-Cookie: reviewer_auth=one; Path=/; HttpOnly\r\nSet-Cookie: wordpress_test_cookie=WP%20Cookie%20check; Path=/\r\nContent-Length: 0\r\n\r\n",
+                    b"HTTP/1.1 302 Found\r\nLocation: /admin/\r\nSet-Cookie: reviewer_auth=one; Path=/; HttpOnly\r\nSet-Cookie: reviewer_test_cookie=Cookie%20check; Path=/\r\nContent-Length: 0\r\n\r\n",
                 )
                 .expect("write response");
         });
@@ -876,7 +875,7 @@ mod tests {
             PreviewIngressRequest {
                 request_id: "req-bootstrap".to_string(),
                 method: "GET".to_string(),
-                path: "/__wp-codebox/reviewer-auth-bootstrap?token=redacted".to_string(),
+                path: "/__reviewer/auth-bootstrap?token=redacted".to_string(),
                 headers: BTreeMap::new(),
                 body_base64: None,
             },
@@ -884,14 +883,11 @@ mod tests {
 
         server.join().expect("server finished");
         assert_eq!(response.status, 302);
-        assert_eq!(
-            header_value(&response.headers, "location"),
-            Some("/wp-admin/")
-        );
+        assert_eq!(header_value(&response.headers, "location"), Some("/admin/"));
         let cookies = header_values(&response.headers, "set-cookie");
         assert_eq!(cookies.len(), 2);
         assert!(cookies[0].starts_with("reviewer_auth="));
-        assert!(cookies[1].starts_with("wordpress_test_cookie="));
+        assert!(cookies[1].starts_with("reviewer_test_cookie="));
         assert!(response.error.is_none());
     }
 

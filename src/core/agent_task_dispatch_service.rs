@@ -735,6 +735,7 @@ mod tests {
     use crate::core::agent_task_scheduler::AgentTaskExecutionContext;
     use crate::test_support::with_isolated_home;
     use std::collections::HashMap;
+    use std::process::Command;
 
     #[test]
     fn builds_repo_cooking_plan_from_prompt_file_and_client_context() {
@@ -949,6 +950,9 @@ mod tests {
     #[test]
     fn dispatch_merges_global_settings_into_executor_config() {
         with_isolated_home(|_| {
+            let runtime = tempfile::tempdir().expect("runtime repo");
+            init_git_repo(runtime.path());
+
             defaults::save_config(&defaults::HomeboyConfig {
                 settings: HashMap::from([
                     ("provider".to_string(), serde_json::json!("example")),
@@ -958,7 +962,7 @@ mod tests {
                     ),
                     (
                         "runtime_overlays".to_string(),
-                        serde_json::json!([{ "repo": "owner/runtime", "ref": "main" }]),
+                        serde_json::json!([{ "repo": runtime.path().display().to_string(), "ref": "HEAD" }]),
                     ),
                 ]),
                 ..defaults::HomeboyConfig::default()
@@ -976,12 +980,29 @@ mod tests {
                 plan.tasks[0].executor.config["provider_plugin_paths"],
                 serde_json::json!(["/providers/openai"])
             );
-            assert_eq!(
-                plan.tasks[0].executor.config["runtime_overlays"][0]["repo"],
-                "owner/runtime"
-            );
+            assert!(plan.tasks[0].executor.config["runtime_overlays"][0]
+                .as_str()
+                .is_some_and(|path| std::path::Path::new(path).exists()));
             assert_eq!(plan.tasks[0].executor.config["provider"], "override");
         });
+    }
+
+    fn init_git_repo(path: &std::path::Path) {
+        std::fs::write(path.join("README.md"), "runtime\n").expect("write runtime file");
+        run_git(path, &["init", "-b", "main"]);
+        run_git(path, &["config", "user.email", "test@example.com"]);
+        run_git(path, &["config", "user.name", "Homeboy Test"]);
+        run_git(path, &["add", "README.md"]);
+        run_git(path, &["commit", "-m", "init"]);
+    }
+
+    fn run_git(path: &std::path::Path, args: &[&str]) {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .status()
+            .expect("git command runs");
+        assert!(status.success(), "git {:?} failed", args);
     }
 
     #[test]

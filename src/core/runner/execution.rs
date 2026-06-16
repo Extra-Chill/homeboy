@@ -718,16 +718,6 @@ pub(crate) enum DaemonJobHandoffState {
     Terminal(JobStatus),
 }
 
-fn daemon_job_status_label(status: JobStatus) -> &'static str {
-    match status {
-        JobStatus::Queued => "queued",
-        JobStatus::Running => "running",
-        JobStatus::Succeeded => "succeeded",
-        JobStatus::Failed => "failed",
-        JobStatus::Cancelled => "cancelled",
-    }
-}
-
 pub(crate) fn lab_offload_handoff_hints(
     runner_id: &str,
     remote_cwd: Option<&str>,
@@ -750,7 +740,7 @@ pub(crate) fn lab_offload_handoff_hints(
         )],
         DaemonJobHandoffState::Terminal(status) => vec![format!(
             "Lab offload handoff: runner `{runner_id}` daemon job `{job_id}` finished with status `{}`.",
-            daemon_job_status_label(status)
+            status.daemon_status_label()
         )],
     };
 

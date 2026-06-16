@@ -10,7 +10,7 @@ use std::path::Path;
 use crate::core::engine::baseline::{self as generic, BaselineConfig, Fingerprintable};
 
 use super::conventions::AuditFinding as AuditFindingKind;
-use super::findings::Finding;
+use super::findings::{normalized_finding_description_for_fingerprint, Finding};
 use super::CodeAuditResult;
 
 // ============================================================================
@@ -80,8 +80,9 @@ pub const SOURCE_POLICY_CORE_BOUNDARY_SCOPE: &str = "core-boundary";
 /// Uses `convention::file::kind` as the core identity. The description is
 /// excluded for most findings because structural findings embed volatile values
 /// (e.g. exact line counts) that change when a file grows by even one line.
-/// Core-boundary leaks include the configured policy, term, and line in their
-/// description so each configured source-policy finding can ratchet normally.
+/// Core-boundary leaks include the configured policy, term, and context in their
+/// description so each configured source-policy finding can ratchet normally
+/// without failing on unrelated source-line churn.
 struct AuditFinding<'a>(&'a Finding);
 
 impl Fingerprintable for AuditFinding<'_> {
@@ -95,7 +96,10 @@ impl Fingerprintable for AuditFinding<'_> {
         if self.0.kind == AuditFindingKind::CoreBoundaryLeak {
             return format!(
                 "{}::{}::{}::{:?}",
-                self.0.convention, file, self.0.description, self.0.kind
+                self.0.convention,
+                file,
+                normalized_finding_description_for_fingerprint(&self.0.description),
+                self.0.kind
             );
         }
 
@@ -353,6 +357,20 @@ fn scoped_policy_fingerprints(
 }
 
 fn normalize_loaded_baseline(mut baseline: AuditBaseline) -> AuditBaseline {
+    baseline.known_fingerprints = baseline
+        .known_fingerprints
+        .into_iter()
+        .map(normalize_audit_fingerprint)
+        .collect();
+
+    for section in &mut baseline.metadata.policy_sections {
+        section.known_fingerprints = section
+            .known_fingerprints
+            .drain(..)
+            .map(normalize_audit_fingerprint)
+            .collect();
+    }
+
     let section_fingerprints = baseline
         .metadata
         .policy_sections
@@ -366,6 +384,10 @@ fn normalize_loaded_baseline(mut baseline: AuditBaseline) -> AuditBaseline {
         baseline.item_count = baseline.known_fingerprints.len();
     }
     baseline
+}
+
+fn normalize_audit_fingerprint(fingerprint: String) -> String {
+    normalized_finding_description_for_fingerprint(&fingerprint)
 }
 
 fn policy_sections_from_fingerprints(fingerprints: &[String]) -> Vec<AuditBaselinePolicySection> {

@@ -86,7 +86,7 @@ pub struct UpgradeResult {
 /// and the privileged run only ever sees root's own extension copies.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UnrefreshedExtensionWarning {
-    /// Extension id (e.g. `wordpress`).
+    /// Extension id (e.g. `example-extension`).
     pub extension_id: String,
     /// The invoking user (value of `SUDO_USER`).
     pub invoking_user: String,

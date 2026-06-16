@@ -30,8 +30,8 @@ pub use super::runner::{
     evaluate_lab_runner_capabilities_for_runner, exec, execute_lab_offload,
     is_remote_runner_artifact_path, is_reportable_artifact_evidence_path,
     is_retrievable_runner_artifact, lab_offload_changed_since_ref, lab_offload_metadata,
-    lab_offload_metadata_with_workspace_mapping, lab_runner_capability_preflight,
-    mirror_connected_runner_run, mirrored_runner_job_identity, preflight_lab_offload_changed_since,
+    lab_offload_metadata_with_workspace_mapping, mirror_connected_runner_run,
+    mirrored_runner_job_identity, preflight_lab_offload_changed_since,
     prepare_git_lab_offload_changed_since, prepare_lab_runner_capability,
     refresh_mirrored_daemon_evidence, reportable_artifact_evidence_path,
     resolve_default_lab_runner, run_reverse_worker, runner_artifact_store_token,
@@ -114,10 +114,9 @@ pub mod evidence {
 /// Lab runner capability evaluation contracts.
 pub mod capabilities {
     pub use super::super::runner::{
-        evaluate_lab_runner_capabilities_for_runner, lab_runner_capability_preflight,
-        prepare_lab_runner_capability, LabRunnerCapabilityContract, LabRunnerGateDecision,
-        LabRunnerGateMode, PreparedLabRunnerCapability, RunnerCapabilityPreflight,
-        RunnerRequiredTool,
+        evaluate_lab_runner_capabilities_for_runner, prepare_lab_runner_capability,
+        LabRunnerCapabilityContract, LabRunnerGateDecision, LabRunnerGateMode,
+        PreparedLabRunnerCapability, RunnerCapabilityPreflight, RunnerRequiredTool,
     };
 }
 
