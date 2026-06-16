@@ -212,6 +212,8 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
   const config = request.executor.config || {};
   const inputs = request.inputs || {};
   const defaults = defaultCodeboxRuntimeConfig(request, config, inputs, options);
+  const workspaceMaterialization = defaultWorkspaceMaterialization(defaults.workspaceRoot, request, config, inputs, options);
+  const target = defaultWorkspaceTargetPayload(inputs.target || request.workspace || {}, workspaceMaterialization);
   const agentBundle = agentBundleConfigFromAgentTaskRequest(request, config, inputs);
   const recipe = recipeConfigFromAgentTaskRequest(request, config, inputs);
   const mounts = agentBundleMounts(agentBundle, config.runtime_mounts || config.mounts || defaults.mounts || options.mounts || []);
@@ -250,7 +252,8 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
   return {
     schema: WP_CODEBOX_TASK_REQUEST_SCHEMA,
     goal: request.instructions,
-    target: inputs.target || request.workspace || {},
+    target,
+    workspace_materialization: workspaceMaterialization,
     allowed_tools: allowedTools || [],
     expected_artifacts: request.expected_artifacts || [],
     artifact_declarations: artifactDeclarations,
@@ -740,6 +743,7 @@ function defaultCodeboxRuntimeConfig(request, config, inputs, options = {}) {
     runtimeEnv: defaultRuntimeEnv(settings),
     runtimeStateMounts: defaultRuntimeStateMounts(settings),
     runtimeConfigMounts: defaultRuntimeConfigMounts(settings),
+    workspaceRoot,
     mounts: defaultWorkspaceMounts(workspaceRoot, request, config, inputs, options),
     workspaces: defaultWorkspaces(config, inputs, options),
     allowedTools: defaultWorkspaceAllowedTools(workspaceRoot, workspaceMode(request, config, inputs)),
@@ -959,18 +963,98 @@ function defaultWorkspaceSandboxToolPolicy(workspaceRoot, workspaceModeValue) {
 }
 
 function resolveWorkspaceRoot(request, config, inputs, settings, options) {
+  const workspaceContext = genericWorkspaceContext(request, config, inputs, options);
   const candidates = [
     options.workspaceRoot,
+    workspaceContext.cwd,
     inputs.target?.root,
     inputs.target?.path,
     request.workspace?.root,
     request.workspace?.path,
     config.workspace_root,
     config.workspaceRoot,
+    config.cwd,
     settings.wp_codebox_workspace_root,
     process.env.HOMEBOY_COMPONENT_PATH,
   ];
   return firstExistingPath(...candidates) || '';
+}
+
+function defaultWorkspaceMaterialization(workspaceRoot, request, config, inputs, options) {
+  const context = genericWorkspaceContext(request, config, inputs, options);
+  const repo = firstValue(
+    context.repo,
+    request.workspace?.materialization?.repo,
+    request.workspace?.repo,
+    request.workspace?.slug,
+    config.repo,
+    config.repository,
+  );
+  const cwd = firstValue(context.cwd, workspaceRoot);
+  return Object.fromEntries(Object.entries({
+    ...request.workspace?.materialization,
+    repo,
+    cwd,
+    root: workspaceRoot || undefined,
+  }).filter(([, value]) => value !== undefined && value !== ''));
+}
+
+function defaultWorkspaceTargetPayload(target, workspaceMaterialization) {
+  if (!workspaceMaterialization || Object.keys(workspaceMaterialization).length === 0) {
+    return target;
+  }
+  return {
+    ...target,
+    materialization: {
+      ...(target.materialization || {}),
+      ...workspaceMaterialization,
+    },
+  };
+}
+
+function genericWorkspaceContext(request, config, inputs, options) {
+  const clientContext = firstObject(
+    inputs.client_context,
+    inputs.clientContext,
+    request.client_context,
+    request.clientContext,
+    config.client_context,
+    config.clientContext,
+    options.clientContext,
+  ) || {};
+  const context = firstObject(inputs.context, request.context, config.context, options.context) || {};
+  const workspace = firstObject(request.workspace, inputs.workspace, config.workspace, options.workspace) || {};
+  const clientInputs = firstObject(clientContext.inputs) || {};
+
+  return {
+    cwd: firstValue(
+      options.cwd,
+      inputs.cwd,
+      inputs.workspace_cwd,
+      inputs.workspaceCwd,
+      request.cwd,
+      request.working_directory,
+      request.workingDirectory,
+      context.cwd,
+      clientContext.cwd,
+      clientInputs.cwd,
+      workspace.cwd,
+      config.cwd,
+    ),
+    repo: firstValue(
+      options.repo,
+      inputs.repo,
+      inputs.repository,
+      request.repo,
+      request.repository,
+      context.repo,
+      clientContext.repo,
+      clientInputs.repo,
+      workspace.repo,
+      config.repo,
+      config.repository,
+    ),
+  };
 }
 
 function workspaceMode(request, config, inputs) {

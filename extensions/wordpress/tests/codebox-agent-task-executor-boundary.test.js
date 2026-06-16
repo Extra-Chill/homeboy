@@ -139,6 +139,42 @@ assert.deepEqual(genericRepoLoopTaskInput.runtime_task.input, {
   dry_run: false,
 });
 
+const repoLoopWorkspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-wordpress-repo-loop-workspace-'));
+const repoLoopWorkspaceTaskInput = codeboxTaskRequestFromAgentTaskRequest({
+  schema: 'homeboy/agent-task-request/v1',
+  task_id: 'repo-loop-workspace-task-1',
+  cwd: repoLoopWorkspaceRoot,
+  repo: 'wp-site-generator@canonical-loop-main-20260616',
+  executor: {
+    backend: 'wordpress',
+    config: {
+      provider: 'openai',
+      task_kind: 'repo-cooking',
+    },
+  },
+  instructions: 'Run a repo-loop workflow against the current checkout.',
+  inputs: {
+    ability_request: { name: 'datamachine/run-agent-bundle' },
+  },
+});
+
+const repoLoopWorkspaceMount = repoLoopWorkspaceTaskInput.mounts.find(
+  (mount) => mount.metadata?.kind === 'homeboy-dmc-workspace'
+);
+assert(repoLoopWorkspaceMount, 'repo-loop cwd is translated into a Codebox workspace mount');
+assert.equal(repoLoopWorkspaceMount.source, repoLoopWorkspaceRoot);
+assert.equal(repoLoopWorkspaceMount.target, `/workspace/${path.basename(repoLoopWorkspaceRoot)}`);
+assert.equal(repoLoopWorkspaceMount.mode, 'readwrite');
+assert.deepEqual(repoLoopWorkspaceTaskInput.workspace_materialization, {
+  repo: 'wp-site-generator@canonical-loop-main-20260616',
+  cwd: repoLoopWorkspaceRoot,
+  root: repoLoopWorkspaceRoot,
+});
+assert.deepEqual(
+  repoLoopWorkspaceTaskInput.target.materialization,
+  repoLoopWorkspaceTaskInput.workspace_materialization
+);
+
 const repoLoopTypedOutputsTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',
   task_id: 'repo-loop-typed-outputs-task-1',
