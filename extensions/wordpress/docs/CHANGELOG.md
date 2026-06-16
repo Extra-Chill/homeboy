@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.122.0] - 2026-06-16
+
+### Added
+- support Codebox typed artifact declarations
+
 ## [2.121.58] - 2026-06-16
 
 ### Fixed
