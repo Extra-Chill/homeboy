@@ -744,12 +744,12 @@ function defaultCodeboxRuntimeConfig(request, config, inputs, options = {}) {
 }
 
 function defaultProviderPluginPaths(provider, settings, fallbackProviderPluginPath) {
+  if (provider === 'codex') {
+    return [];
+  }
   const explicit = normalizeArray(settings.wp_codebox_provider_plugin_paths || settings.provider_plugin_paths);
   if (explicit.length > 0) {
     return explicit;
-  }
-  if (provider === 'codex') {
-    return [];
   }
   return fallbackProviderPluginPath ? [fallbackProviderPluginPath] : [];
 }

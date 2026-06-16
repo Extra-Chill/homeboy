@@ -175,4 +175,26 @@ const legacyTaskInput = codeboxTaskRequestFromAgentTaskRequest({
 
 assert.equal(legacyTaskInput.schema, 'wp-codebox/task-input/v1');
 
+const previousHomeboySettingsJson = process.env.HOMEBOY_SETTINGS_JSON;
+process.env.HOMEBOY_SETTINGS_JSON = JSON.stringify({
+  provider_plugin_paths: ['/missing/stale-openai-provider'],
+});
+let codexTaskInput;
+try {
+  codexTaskInput = codeboxTaskRequestFromAgentTaskRequest({
+    schema: 'homeboy/agent-task-request/v1',
+    task_id: 'codex-codebox-task-1',
+    executor: { backend: 'wordpress', config: { provider: 'codex' } },
+    instructions: 'Run a Codex-backed Codebox task.',
+    inputs: {},
+  });
+} finally {
+  if (previousHomeboySettingsJson === undefined) {
+    delete process.env.HOMEBOY_SETTINGS_JSON;
+  } else {
+    process.env.HOMEBOY_SETTINGS_JSON = previousHomeboySettingsJson;
+  }
+}
+assert.deepEqual(codexTaskInput.provider_plugin_paths, []);
+
 console.log('Codebox agent-task executor boundary contract passed');
