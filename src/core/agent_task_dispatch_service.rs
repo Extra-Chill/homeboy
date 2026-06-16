@@ -879,26 +879,26 @@ mod tests {
     }
 
     #[test]
-    fn codebox_dispatch_rejects_non_git_cwd() {
+    fn git_checkout_provider_rejects_non_git_cwd() {
         let workspace = tempfile::tempdir().expect("workspace");
 
         let error = build_dispatch_plan_with_provider_requirements(
             &dispatch_request(DispatchRequestOverrides {
                 prompt: Some("Generate files here.".to_string()),
                 cwd: Some(workspace.path().display().to_string()),
-                backend: Some("codebox".to_string()),
+                backend: Some("git-required".to_string()),
                 ..DispatchRequestOverrides::default()
             }),
-            |backend, _selector| backend == "codebox",
+            |backend, _selector| backend == "git-required",
         )
-        .expect_err("non-git Codebox cwd should be rejected");
+        .expect_err("non-git cwd should be rejected");
 
         assert!(error.to_string().contains("git checkout"));
         assert!(error.to_string().contains("patch artifact"));
     }
 
     #[test]
-    fn codebox_dispatch_accepts_git_cwd() {
+    fn git_checkout_provider_accepts_git_cwd() {
         let workspace = tempfile::tempdir().expect("workspace");
         git(workspace.path(), &["init"]);
 
@@ -906,12 +906,12 @@ mod tests {
             &dispatch_request(DispatchRequestOverrides {
                 prompt: Some("Generate files here.".to_string()),
                 cwd: Some(workspace.path().display().to_string()),
-                backend: Some("codebox".to_string()),
+                backend: Some("git-required".to_string()),
                 ..DispatchRequestOverrides::default()
             }),
-            |backend, _selector| backend == "codebox",
+            |backend, _selector| backend == "git-required",
         )
-        .expect("git Codebox cwd should be accepted");
+        .expect("git cwd should be accepted");
 
         assert_eq!(
             plan.tasks[0].workspace.root.as_deref(),
@@ -951,13 +951,14 @@ mod tests {
         with_isolated_home(|_| {
             defaults::save_config(&defaults::HomeboyConfig {
                 settings: HashMap::from([
+                    ("provider".to_string(), serde_json::json!("example")),
                     (
                         "provider_plugin_paths".to_string(),
                         serde_json::json!(["/providers/openai"]),
                     ),
                     (
-                        "wp_codebox_provider".to_string(),
-                        serde_json::json!("codex"),
+                        "runtime_overlays".to_string(),
+                        serde_json::json!([{ "repo": "owner/runtime", "ref": "main" }]),
                     ),
                 ]),
                 ..defaults::HomeboyConfig::default()
@@ -967,7 +968,7 @@ mod tests {
             let plan = build_dispatch_plan(&dispatch_request(DispatchRequestOverrides {
                 prompt: Some("Cook with configured provider defaults.".to_string()),
                 provider_config: Some(
-                    serde_json::json!({ "wp_codebox_provider": "opencode" }).to_string(),
+                    serde_json::json!({ "provider": "override" }).to_string(),
                 ),
                 ..DispatchRequestOverrides::default()
             }))
@@ -978,8 +979,12 @@ mod tests {
                 serde_json::json!(["/providers/openai"])
             );
             assert_eq!(
-                plan.tasks[0].executor.config["wp_codebox_provider"],
-                "opencode"
+                plan.tasks[0].executor.config["runtime_overlays"][0]["repo"],
+                "owner/runtime"
+            );
+            assert_eq!(
+                plan.tasks[0].executor.config["provider"],
+                "override"
             );
         });
     }
