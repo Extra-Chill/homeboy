@@ -2,6 +2,14 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.122.3] - 2026-06-16
+
+### Changed
+- Stage WP Codebox as an agent runtime package
+
+### Fixed
+- map repo-loop artifacts to Codebox declarations
+
 ## [2.122.2] - 2026-06-16
 
 ### Fixed
