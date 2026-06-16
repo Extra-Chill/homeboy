@@ -37,7 +37,7 @@ pub(super) fn deploy_components(
     // If nothing is deployable but components were extension-skipped, surface those
     // as skipped check results instead of erroring with "no deployable components".
     if config.check && loaded.deployable.is_empty() && !loaded.extension_skipped.is_empty() {
-        let results = extension_skipped_results(&loaded.extension_skipped, &project, base_path);
+        let results = extension_skipped_results(&loaded.extension_skipped, project, base_path);
         let skipped = results.len() as u32;
         return Ok(DeployOrchestrationResult {
             results,
