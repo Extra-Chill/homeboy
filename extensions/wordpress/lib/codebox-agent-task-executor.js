@@ -255,6 +255,7 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     recipe,
     sandbox_tool_policy: sandboxToolPolicy,
     runtime_task: runtimeTask,
+    ability_tools: firstDefined(inputs.ability_tools, inputs.abilityTools, config.ability_tools, config.abilityTools, options.abilityTools, []),
     structured_artifacts: structuredArtifacts,
     sandbox_session_id: config.sandbox_session_id || request.task_id,
     session_id: config.session_id || config.sessionId || '',

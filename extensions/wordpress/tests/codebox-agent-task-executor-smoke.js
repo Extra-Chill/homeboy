@@ -330,6 +330,19 @@ assert.equal(codeboxRequest.orchestrator.agent_task_id, 'task-123');
 assert.equal(codeboxRequest.context.audit_findings[0].id, 'finding-1');
 assert.deepEqual(codeboxRequest.agent_bundle, {});
 
+const codeboxRequestWithAbilityTools = codeboxTaskRequestFromAgentTaskRequest({
+  ...request,
+  task_id: 'ability-tools-task-123',
+  executor: {
+    ...request.executor,
+    config: {
+      ...request.executor.config,
+      ability_tools: [{ name: 'example_materialize_packet', ability: 'example/materialize-packet' }],
+    },
+  },
+});
+assert.deepEqual(codeboxRequestWithAbilityTools.ability_tools, [{ name: 'example_materialize_packet', ability: 'example/materialize-packet' }]);
+
 const executorSecretEnvRequest = codeboxTaskRequestFromAgentTaskRequest({
   ...request,
   task_id: 'executor-secret-env-task-123',

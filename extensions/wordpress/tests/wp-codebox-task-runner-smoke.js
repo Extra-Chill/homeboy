@@ -218,6 +218,7 @@ try {
       GENERIC_PROVIDER_CONFIG: '/runtime/provider/config.json',
       XDG_DATA_HOME: '/runtime/provider/data',
     },
+    ability_tools: [{ name: 'example_materialize_packet', ability: 'example/materialize-packet' }],
     runtime_state_mounts: [{
       source: '/host/provider/state.json',
       target: '/runtime/provider/state.json',
@@ -278,6 +279,7 @@ try {
   assert.deepEqual(captured.input.secret_env, ['OPENCODE_API_KEY']);
   assert.equal(captured.input.provider_plugin_paths[0], providerPluginPath);
   assert.deepEqual(captured.input.runtime_env, request.runtime_env);
+  assert.deepEqual(captured.input.ability_tools, request.ability_tools);
   assert.deepEqual(captured.input.runtime_state_mounts, request.runtime_state_mounts);
   assert.deepEqual(captured.input.runtime_config_mounts, request.runtime_config_mounts);
   assert.equal(captured.input.runtime_stack_mounts[0].source, '/components/php-ai-client');
