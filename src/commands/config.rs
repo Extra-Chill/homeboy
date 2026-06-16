@@ -26,6 +26,9 @@ enum ConfigCommand {
         pointer: String,
         /// Value to set (JSON)
         value: String,
+        /// Treat value as a literal string instead of parsing it as JSON
+        #[arg(long)]
+        string: bool,
     },
     /// Remove a configuration value at a JSON pointer path
     Remove {
@@ -60,7 +63,11 @@ pub struct ConfigOutput {
 pub fn run(args: ConfigArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<ConfigOutput> {
     match args.command {
         ConfigCommand::Show { builtin } => show(builtin),
-        ConfigCommand::Set { pointer, value } => set(&pointer, &value),
+        ConfigCommand::Set {
+            pointer,
+            value,
+            string,
+        } => set(&pointer, &value, string),
         ConfigCommand::Remove { pointer } => remove(&pointer),
         ConfigCommand::Reset => reset(),
         ConfigCommand::Path => path(),
@@ -101,7 +108,7 @@ fn show(builtin: bool) -> CmdResult<ConfigOutput> {
     }
 }
 
-fn set(pointer: &str, value_str: &str) -> CmdResult<ConfigOutput> {
+fn set(pointer: &str, value_str: &str, string: bool) -> CmdResult<ConfigOutput> {
     // Validate pointer format
     if !pointer.starts_with('/') {
         return Err(homeboy::core::Error::validation_invalid_argument(
@@ -112,14 +119,7 @@ fn set(pointer: &str, value_str: &str) -> CmdResult<ConfigOutput> {
         ));
     }
 
-    // Parse the value as JSON
-    let value: Value = serde_json::from_str(value_str).map_err(|e| {
-        homeboy::core::Error::validation_invalid_json(
-            e,
-            Some("parse value".to_string()),
-            Some(value_str.chars().take(200).collect::<String>()),
-        )
-    })?;
+    let value = parse_config_set_value(pointer, value_str, string)?;
 
     // Load current config (or create default)
     let mut config = defaults::load_config();
@@ -158,6 +158,52 @@ fn set(pointer: &str, value_str: &str) -> CmdResult<ConfigOutput> {
         },
         0,
     ))
+}
+
+fn parse_config_set_value(
+    pointer: &str,
+    value_str: &str,
+    string: bool,
+) -> homeboy::core::Result<Value> {
+    if string {
+        return Ok(Value::String(value_str.to_string()));
+    }
+
+    serde_json::from_str(value_str).map_err(|e| {
+        let mut err = homeboy::core::Error::validation_invalid_json(
+            e,
+            Some("parse config set value".to_string()),
+            Some(value_str.chars().take(200).collect::<String>()),
+        );
+
+        if looks_like_unquoted_string(value_str) {
+            let json_string = serde_json::to_string(value_str).unwrap_or_else(|_| "\"...\"".to_string());
+            err = err
+                .with_hint(format!(
+                    "String config values must be JSON strings. Try: homeboy config set {} '{}'",
+                    pointer, json_string
+                ))
+                .with_hint(format!(
+                    "Or pass --string to store the value literally: homeboy config set {} {} --string",
+                    pointer, value_str
+                ));
+        }
+
+        err
+    })
+}
+
+fn looks_like_unquoted_string(value_str: &str) -> bool {
+    let value = value_str.trim();
+    if value.is_empty() {
+        return false;
+    }
+
+    let Some(first) = value.chars().next() else {
+        return false;
+    };
+
+    first.is_ascii_alphabetic() || first == '_' || first == '/' || first == '~'
 }
 
 fn remove(pointer: &str) -> CmdResult<ConfigOutput> {
@@ -270,3 +316,40 @@ fn path() -> CmdResult<ConfigOutput> {
 
 // JSON pointer operations (set_json_pointer, remove_json_pointer) are in
 // homeboy::core::config — no local implementations needed.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_set_string_mode_stores_literal_string() {
+        let value = parse_config_set_value("/settings/wp_codebox_provider", "codex", true)
+            .expect("literal string value");
+
+        assert_eq!(value, Value::String("codex".to_string()));
+    }
+
+    #[test]
+    fn config_set_unquoted_string_error_includes_string_hints() {
+        let err = parse_config_set_value("/settings/wp_codebox_provider", "codex", false)
+            .expect_err("bare string should not parse as JSON");
+
+        let hints = err
+            .hints
+            .iter()
+            .map(|hint| hint.message.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(hints.contains("'\"codex\"'"));
+        assert!(hints.contains("--string"));
+    }
+
+    #[test]
+    fn config_set_json_mode_keeps_json_values() {
+        let value = parse_config_set_value("/defaults/deploy/scp_flags", "[]", false)
+            .expect("json array value");
+
+        assert_eq!(value, Value::Array(Vec::new()));
+    }
+}

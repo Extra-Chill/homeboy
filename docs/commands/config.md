@@ -22,8 +22,10 @@ homeboy config show --builtin    # Show only built-in defaults
 Set a configuration value at a JSON pointer path. Creates `homeboy.json` if it doesn't exist.
 
 ```bash
-homeboy config set <pointer> <value>
+homeboy config set [--string] <pointer> <value>
 ```
+
+By default, `<value>` is parsed as JSON so arrays, objects, booleans, numbers, and `null` keep their native types. Use JSON string quoting like `'"codex"'`, or pass `--string` when you want Homeboy to store the provided value as a literal string.
 
 **Examples:**
 
@@ -35,10 +37,13 @@ homeboy config set /defaults/deploy/scp_flags '[]'
 homeboy config set /defaults/version_candidates/4 '{"file": "VERSION", "pattern": "(\\d+\\.\\d+\\.\\d+)"}'
 
 # Change local file permissions
-homeboy config set /defaults/permissions/local/file_mode 'g+r'
+homeboy config set /defaults/permissions/local/file_mode '"g+r"'
 
 # Store copied run artifacts in a repo- or agent-readable directory
 homeboy config set /artifact_root '"~/Developer/.homeboy-artifacts"'
+
+# Set an extension string setting without JSON quoting
+homeboy config set /settings/wp_codebox_provider codex --string
 ```
 
 ### `homeboy config remove`
